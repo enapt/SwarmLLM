@@ -74,8 +74,9 @@ the top track (`docs/plans/large_model_splits.md`).
    guesses (on this machine's processor: the card is full of the 70B) and keeps 78-88% of them,
    2.2-2.3 tokens a round trip of ~1.2-1.3 s. Trees and the flow need every segment and the
    drafter on a card, so the 70B never flows. The planner predicted each 70B reply at ~2.4x its
-   real time (mostly its network term) — check that a stream's recorded rounds reach the 70B's
-   price (#3 (d)). A 14B split evenly between this machine's card and the same 3060 flows at
+   real time (mostly its network term): the stream's rounds do reach the price, but only after
+   four splits since the node started — every update restarted the count (#3 (g), fixed
+   2026-10-29); the round itself is still priced ~1.7x (#3 (h)). A 14B split evenly between this machine's card and the same 3060 flows at
    29.2-29.9 tok/s on code, twice this machine's whole-14B speed (13.6-15.4), and 9.2-10.0 on
    prose; a chain that starts and finishes here flows since v0.3.261 (#369, ~1.2x its tree
    rounds, still ~1.1-1.2x behind the default shape). Prose is held by the drafter's
@@ -85,9 +86,14 @@ the top track (`docs/plans/large_model_splits.md`).
    and 6.1-7.3 for the two-card split run alongside (2026-10-29, v0.3.261, four runs each): the
    check crosses three links (~600 ms against ~480) and a chain's window of 8 forwards carried
    7-12 rows each against 18-25, so a third machine pays only where it holds what two cannot. **Next**: tokens a round past the drafter (`large_model_splits.md`
-   step 4, a drafter fed by the model's own state); for the 70B, more tokens a check where a
-   check takes a second (the stream ran 3 guesses a chunk), and whether its 1B on the card beats
-   the 3B on the processor (`faster_than_local.md` § 8, the 70B deep dive). The track's history
+   step 4, a drafter fed by the model's own state). For the 70B, two levers were read and are not
+   levers (2026-10-29): the stream's guesses a chunk (a fixed 3; a model of the stream puts 1-5 at
+   2.5-2.9 tok/s, the shape being the far side's processor layers and the restarts), and a larger
+   or smaller guesser — on 747 positions of its own replies the Llama 3.2 1B, 3.2 3B and 3.1 8B
+   match its first choice 81%, 85%, 86% (2.98, 3.07, 3.12 tokens a check at three guesses,
+   `examples/drafter_ranks.py`). What is left is where its layers sit: the far side runs ~44 of
+   its 64 layers on a processor (~70 ms a row), which also keeps trees off
+   (`faster_than_local.md` § 8, the 70B deep dive). The track's history
    (near chains #192, the far chain #346, trees #134, the stream, tensor-core MMQ #325, requester
    guesses) is in the #318 entry and § "Closed". **Holding the parts**: since #371 (closed
    2026-10-29) a full machine gives back a spare copy for its part of a chain and for a part of a
@@ -726,7 +732,17 @@ the live swarm): (e) ~~a led chain is charged a load that never happens~~ — **
 released in v0.3.244** (§ Closed); (f) ~~a led chain's peers are never measured from here~~ (a
 warm two-peer 16-token reply priced 2.3 s of compute, took 19.4 s) — **fixed 2026-10-18, released
 in v0.3.244** (§ Closed): each worker publishes its own decode time per layer, as Petals servers
-publish `inference_rps`, and a coordinator takes it as a floor under the stated speed.
+publish `inference_rps`, and a coordinator takes it as a floor under the stated speed;
+(g) ~~(b)'s and (d)'s figures lived in memory only~~ — every restart, and so every node at every
+auto-update, priced a model's first four replies at 64 passes and its first four splits at one
+round a token (the 70B's first three splits after .261's update: predicted 128.6 / 138.6 / 130.4 s,
+took 74.7 / 56.8 / 54.9 s, 2.2 tokens a round charged as one) — **fixed 2026-10-29** (§ Closed):
+kept across restarts (`daemon::state::recent_by_model`); (h) OPEN, found reading (g): the 70B's
+ROUND itself is priced ~1.95 s (net 800 + compute 1,145 ms a pass) against ~1.12 s measured (a
+least answer of 1,145 ms, ~420 ms of it the link) — every 70B plan carries it, so it moves no
+choice between them, only against a route of another shape; read which term over-charges
+(the coordinates' round trip under the stream's queued forwards, the AU processor layers' prior)
+before touching either.
 
 `scheduler/parallax.rs` charges a remote hop a flat `ASSUMED_FORWARD_PASSES = 64.0`. The error
 grows with reply length — 1.0 at 8 tokens, 2.4-3.3 at 120-239 — and biases every delegation
@@ -3677,7 +3693,22 @@ Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
 
-**Closed 2026-10-29, ships in the next release** (#368, #370, #371)
+**Closed 2026-10-29, ships in the next release** (#368, #370, #371, #3 (g))
+- #3 (g) — **A restart no longer prices a model's first replies and splits at the guesses.** The
+  mean reply length (#3 (b)) and the tokens a split's round yields (#3 (d)) were memory only and
+  trusted after four, so every restart — every node at every release's auto-update — priced the
+  next four of each at the priors: 64 passes, one round a token. The 70B's first three splits after
+  .261's update (2026-10-29 10:46-10:53Z, this node + an RTX 3060 in Australia) were priced at
+  1.7-2.4x their time. Both are kept in redb now (`daemon::state::recent_by_model`, tree
+  `measured_here` beside the load rate; written on the health tick and at shutdown by
+  `SharedState::persist_measured_here`, read back by `restore_measured_here`), as Linux's
+  `tcp_metrics` keeps a round trip and Petals its measured throughput (`server/throughput.py`,
+  `throughput_v5.json` — versioned so a change in what is measured starts afresh: here the record's
+  `counted_as`, bumped where what a round or a length counts changes). Counts only, per model id.
+  Tests `recent_by_model::{a_restart_keeps_the_figures_the_last_run_measured,
+  figures_counted_another_way_are_dropped, a_restore_keeps_only_what_it_could_have_recorded,
+  only_a_change_is_written_and_a_failed_write_is_retried}`. The 70B's round cost itself is
+  over-priced too — (h), open.
 - #371 — **A full machine makes room for its part of a chain, and for a part of a large model too
   few computers hold** (user, 2026-10-29: "it should probably have pruned if needed and downloaded
   the parts for larger (or more popular) models"; field: an RTX 4050 laptop in Europe held 14 models

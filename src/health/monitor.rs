@@ -832,9 +832,10 @@ impl HealthMonitor {
                     // written only when it changed, so an idle node writes
                     // nothing, and a crash loses at most one tick of it.
                     self.shared_state.persist_served_lifetime();
-                    // …and how fast it loads a model, so a restart does not
-                    // price its first cold load at the prior.
-                    self.shared_state.persist_load_rate();
+                    // …and what it measured to price its routes (its load
+                    // rate, reply lengths, split rounds), so a restart does not
+                    // price its first requests at the priors.
+                    self.shared_state.persist_measured_here();
 
                     // Peer speed estimates go stale the same way, with an extra
                     // twist: the estimate is only refreshed when we route to a

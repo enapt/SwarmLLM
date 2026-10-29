@@ -6961,7 +6961,7 @@ fn a_reply_allowed_sixteen_tokens_is_priced_for_sixteen_passes() {
 
     // FUTURE_WORK #3 (b): once the model's replies have run 200 tokens, a
     // reply is priced for 200 — still capped by its own budget.
-    for _ in 0..crate::daemon::state::reply_lengths::REPLIES_BEFORE_TRUSTED {
+    for _ in 0..crate::daemon::state::recent_by_model::BEFORE_TRUSTED {
         state.metrics.reply_lengths.record("split-14b", 200);
     }
     assert_eq!(
@@ -7033,7 +7033,7 @@ fn a_split_whose_rounds_carry_three_tokens_is_priced_for_a_third_of_the_rounds()
         unmeasured.assumed_tokens_per_round, None,
         "control: nothing measured, one round a token"
     );
-    for _ in 0..crate::daemon::state::split_rounds::SPLITS_BEFORE_TRUSTED {
+    for _ in 0..crate::daemon::state::recent_by_model::BEFORE_TRUSTED {
         state.metrics.split_rounds.record("split-14b", 300, 100);
     }
     let plain = priced(plan());

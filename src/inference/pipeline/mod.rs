@@ -4047,7 +4047,7 @@ mod tests {
         // would lower the figure for the requests it prices): none recorded.
         let mut with_adapter = make_test_request(&state);
         with_adapter.lora_adapter = Some("an-adapter".into());
-        for _ in 0..crate::daemon::state::split_rounds::SPLITS_BEFORE_TRUSTED {
+        for _ in 0..crate::daemon::state::recent_by_model::BEFORE_TRUSTED {
             finish(
                 &executor_for(make_test_request(&state), vec![remote_segment(&a, (0, 32))]),
                 9,
@@ -4065,7 +4065,7 @@ mod tests {
         );
 
         // 30 tokens in 9 rounds and the prompt pass: 3 a round.
-        for _ in 0..crate::daemon::state::split_rounds::SPLITS_BEFORE_TRUSTED {
+        for _ in 0..crate::daemon::state::recent_by_model::BEFORE_TRUSTED {
             finish(&executor_for(make_test_request(&state), split()), 9, 30);
         }
         assert_eq!(per_round(), Some(3.0));

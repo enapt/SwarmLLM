@@ -747,7 +747,7 @@ impl Daemon {
         // The last tick's worth of serving, which the monitor's next write would
         // have carried (#226). Every task that serves has stopped by now.
         shared_state.persist_served_lifetime();
-        shared_state.persist_load_rate();
+        shared_state.persist_measured_here();
 
         // redb writes are durable on commit — no flush needed
 

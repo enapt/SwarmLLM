@@ -23,26 +23,26 @@
 //! A reply cut off by its `max_tokens` counts at the length it was allowed —
 //! a lower bound on what the model would have written. Dropping it instead
 //! would keep only the replies short enough to finish, which is lower still.
+//!
+//! Kept across restarts (`recent_by_model`): a restart priced every reply at
+//! the prior until four had finished.
 
-use dashmap::DashMap;
-use std::collections::VecDeque;
+use super::recent_by_model::RecentByModel;
+use crate::storage::db::Database;
 
-/// Replies remembered per model: enough that one outlier moves the mean by a
-/// thirty-second of itself, few enough that a change in how the model is used
-/// shows within a session.
-pub const RECENT_REPLIES: usize = 32;
+/// What a stored length means: 1, a finished reply's completion tokens.
+const LENGTHS_COUNTED_AS: u32 = 1;
 
-/// Replies a model must have written before its mean is trusted over the
-/// prior. Below it one long or short reply would decide the next route.
-pub const REPLIES_BEFORE_TRUSTED: usize = 4;
-
-/// At most this many models are tracked — a model id reaches here only from
-/// a request that completed, but the map is bounded anyway.
-const MAX_MODELS: usize = 256;
-
-#[derive(Default)]
 pub struct ReplyLengths {
-    by_model: DashMap<String, VecDeque<u32>>,
+    recent: RecentByModel<u32>,
+}
+
+impl Default for ReplyLengths {
+    fn default() -> Self {
+        Self {
+            recent: RecentByModel::new("reply_lengths", LENGTHS_COUNTED_AS),
+        }
+    }
 }
 
 impl ReplyLengths {
@@ -50,35 +50,36 @@ impl ReplyLengths {
     /// none tells nothing about length (a refusal, an empty answer) and is
     /// not recorded.
     pub fn record(&self, model: &str, completion_tokens: u32) {
-        if completion_tokens == 0 {
-            return;
+        if completion_tokens > 0 {
+            self.recent.push(model, completion_tokens);
         }
-        if !self.by_model.contains_key(model) && self.by_model.len() >= MAX_MODELS {
-            return;
-        }
-        let mut recent = self.by_model.entry(model.to_string()).or_default();
-        if recent.len() >= RECENT_REPLIES {
-            recent.pop_front();
-        }
-        recent.push_back(completion_tokens);
     }
 
     /// The mean length of `model`'s recent replies, or `None` until it has
-    /// written [`REPLIES_BEFORE_TRUSTED`] — the caller's prior stands until
+    /// written [`BEFORE_TRUSTED`](super::recent_by_model::BEFORE_TRUSTED) — the caller's prior stands until
     /// then.
     pub fn expected(&self, model: &str) -> Option<u32> {
-        let recent = self.by_model.get(model)?;
-        if recent.len() < REPLIES_BEFORE_TRUSTED {
-            return None;
-        }
-        let sum: u64 = recent.iter().map(|&n| u64::from(n)).sum();
-        Some((sum as f64 / recent.len() as f64).round().max(1.0) as u32)
+        self.recent.with_trusted(model, |recent| {
+            let sum: u64 = recent.iter().map(|&n| u64::from(n)).sum();
+            (sum as f64 / recent.len() as f64).round().max(1.0) as u32
+        })
+    }
+
+    /// The lengths an earlier run stored (`recent_by_model`).
+    pub(super) fn restore(&self, db: &Database) {
+        self.recent.restore(db, |&n| n > 0);
+    }
+
+    /// Store the recent lengths if a reply finished since the last write.
+    pub(super) fn persist(&self, db: &Database) {
+        self.recent.persist(db);
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::daemon::state::recent_by_model::RECENT;
 
     #[test]
     fn the_expectation_is_the_mean_of_recent_replies_once_there_are_enough() {
@@ -102,10 +103,10 @@ mod tests {
     #[test]
     fn only_the_most_recent_replies_count() {
         let lengths = ReplyLengths::default();
-        for _ in 0..RECENT_REPLIES {
+        for _ in 0..RECENT {
             lengths.record("m", 500);
         }
-        for _ in 0..RECENT_REPLIES {
+        for _ in 0..RECENT {
             lengths.record("m", 20);
         }
         assert_eq!(lengths.expected("m"), Some(20));

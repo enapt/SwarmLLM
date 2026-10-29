@@ -38,20 +38,18 @@
 //!   whose far card is saturated (a lopsided split) yields fewer tokens a
 //!   round than one at an even split, and the price of either reads both;
 //! - the drafter's own time per guess, small beside a hop.
+//!
+//! Kept across restarts (`recent_by_model`): a restart priced every split at
+//! one round a token until four had finished.
 
-use dashmap::DashMap;
-use std::collections::VecDeque;
+use super::recent_by_model::RecentByModel;
+use crate::storage::db::Database;
 
-/// Splits remembered per model: as many as `reply_lengths` remembers replies,
-/// for the same reason.
-pub const RECENT_SPLITS: usize = 32;
-
-/// Splits a model must have finished before its figure is trusted over one
-/// token a round. Below it one reply would decide the next route.
-pub const SPLITS_BEFORE_TRUSTED: usize = 4;
-
-/// At most this many models are tracked.
-const MAX_MODELS: usize = 256;
+/// What a stored round means. 1: the prompt pass is a round, and a flow or a
+/// stream counts the round trips it waited (`round_trips_waited`, v0.3.261).
+/// Bump it where a round comes to be counted another way, so a figure
+/// counted the old way is never priced.
+const ROUNDS_COUNTED_AS: u32 = 1;
 
 /// The rounds a reply whose forwards overlap waited: its decode time over the
 /// least time any of its forwards took to be answered, at most the forwards it
@@ -85,58 +83,71 @@ pub fn round_trips_waited(decode_ms: f64, least_answer_ms: Option<f64>, forwards
     (waited as u32).clamp(1, forwards)
 }
 
-#[derive(Default)]
 pub struct SplitRounds {
     /// (tokens, rounds) of each recent split, oldest first.
-    by_model: DashMap<String, VecDeque<(u32, u32)>>,
+    recent: RecentByModel<(u32, u32)>,
+}
+
+impl Default for SplitRounds {
+    fn default() -> Self {
+        Self {
+            recent: RecentByModel::new("split_rounds", ROUNDS_COUNTED_AS),
+        }
+    }
 }
 
 impl SplitRounds {
     /// A split of `model` this node drove produced `tokens` in `rounds`, the
     /// prompt pass included. Either at zero tells nothing and is not recorded.
     pub fn record(&self, model: &str, tokens: u32, rounds: u32) {
-        if tokens == 0 || rounds == 0 {
-            return;
+        if usable(&(tokens, rounds)) {
+            self.recent.push(model, (tokens, rounds));
         }
-        if !self.by_model.contains_key(model) && self.by_model.len() >= MAX_MODELS {
-            return;
-        }
-        let mut recent = self.by_model.entry(model.to_string()).or_default();
-        if recent.len() >= RECENT_SPLITS {
-            recent.pop_front();
-        }
-        recent.push_back((tokens, rounds));
     }
 
     /// The tokens a round of `model`'s recent splits yielded, or `None` until
-    /// [`SPLITS_BEFORE_TRUSTED`] have finished. Never below one: a round that
+    /// [`BEFORE_TRUSTED`](super::recent_by_model::BEFORE_TRUSTED) have finished. Never below one: a round that
     /// yielded nothing (a stream's chunk sent on guesses that were then
     /// refused) overlapped another, and must not price a split above the one
     /// round a token it was priced at before.
     pub fn tokens_per_round(&self, model: &str) -> Option<f32> {
-        let recent = self.by_model.get(model)?;
-        if recent.len() < SPLITS_BEFORE_TRUSTED {
-            return None;
-        }
-        let (tokens, rounds) = recent
-            .iter()
-            .fold((0u64, 0u64), |(t, r), &(tokens, rounds)| {
-                (t + u64::from(tokens), r + u64::from(rounds))
-            });
-        Some((tokens as f64 / rounds.max(1) as f64).max(1.0) as f32)
+        self.recent.with_trusted(model, |recent| {
+            let (tokens, rounds) = recent
+                .iter()
+                .fold((0u64, 0u64), |(t, r), &(tokens, rounds)| {
+                    (t + u64::from(tokens), r + u64::from(rounds))
+                });
+            (tokens as f64 / rounds.max(1) as f64).max(1.0) as f32
+        })
     }
+
+    /// The splits an earlier run stored (`recent_by_model`).
+    pub(super) fn restore(&self, db: &Database) {
+        self.recent.restore(db, usable);
+    }
+
+    /// Store the recent splits if one finished since the last write.
+    pub(super) fn persist(&self, db: &Database) {
+        self.recent.persist(db);
+    }
+}
+
+/// A split with either count at zero tells nothing.
+fn usable(&(tokens, rounds): &(u32, u32)) -> bool {
+    tokens > 0 && rounds > 0
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::daemon::state::recent_by_model::{BEFORE_TRUSTED, RECENT};
 
     /// The figure is the recent splits' tokens over their rounds — a long
     /// reply weighs as its tokens do — once enough have finished.
     #[test]
     fn a_models_splits_yield_their_tokens_over_their_rounds() {
         let rounds = SplitRounds::default();
-        for _ in 0..SPLITS_BEFORE_TRUSTED - 1 {
+        for _ in 0..BEFORE_TRUSTED - 1 {
             rounds.record("m", 300, 100);
         }
         assert_eq!(rounds.tokens_per_round("m"), None, "too few to trust");
@@ -156,7 +167,7 @@ mod tests {
     #[test]
     fn a_round_is_never_priced_at_less_than_a_token() {
         let rounds = SplitRounds::default();
-        for _ in 0..SPLITS_BEFORE_TRUSTED {
+        for _ in 0..BEFORE_TRUSTED {
             rounds.record("plain", 40, 40);
             rounds.record("wasted", 10, 14);
         }
@@ -192,10 +203,10 @@ mod tests {
     #[test]
     fn only_the_most_recent_splits_count() {
         let rounds = SplitRounds::default();
-        for _ in 0..RECENT_SPLITS {
+        for _ in 0..RECENT {
             rounds.record("m", 400, 100);
         }
-        for _ in 0..RECENT_SPLITS {
+        for _ in 0..RECENT {
             rounds.record("m", 60, 60);
         }
         assert_eq!(rounds.tokens_per_round("m"), Some(1.0));

@@ -32,6 +32,7 @@ mod peer_outliers;
 pub(crate) mod peer_speed;
 mod perf_history;
 pub(crate) mod prompt_admission;
+pub(crate) mod recent_by_model;
 mod relay;
 mod removed_shards;
 mod repair;
@@ -1805,9 +1806,11 @@ impl SharedState {
         state
             .model_process_pool
             .set_activation_compression(state.config.inference.activation_compression);
-        // How fast this node loads a model, as an earlier run measured it, so
-        // its first cold load is not priced at the prior (`state::load_rate`).
-        load_rate::restore(&state.db, state.model_process_pool.load_rate());
+        // How fast this node loads a model, how long its replies run and how
+        // many tokens a round of its splits yields, as an earlier run measured
+        // them, so its first routes are not priced at the priors
+        // (`state::load_rate`, `state::recent_by_model`).
+        state.restore_measured_here();
         // Admission budget. Same source as the split-model eviction budget, so
         // the two cannot disagree about how much GPU memory this node may use.
         if let Some(budget) = crate::model::auto_manage::compute_vram_budget(&state) {

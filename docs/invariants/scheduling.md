@@ -1970,6 +1970,22 @@ model, and a chain its head leads, keep `forward_passes()`.
   into `PromptPlan::with_guessing_ahead`; the executor asks it before
   recording. A request it answers no for runs one round a token, and recording
   it would lower the figure for the requests it prices.
+- **Kept across restarts** (2026-10-29, `daemon::state::recent_by_model`): both
+  figures the price divides by and multiplies by — `split_rounds` and
+  `reply_lengths` — are stored in redb (tree `measured_here`, beside the load
+  rate) on the health monitor's tick and at shutdown
+  (`SharedState::persist_measured_here`) and read back as the state is built
+  (`restore_measured_here`). In memory only, every restart — every node at every
+  auto-update — priced a model's first four splits at one round a token and its
+  first four replies at 64 passes: the 70B's first three splits after .261's
+  update were priced 128.6 / 138.6 / 130.4 s and took 74.7 / 56.8 / 54.9 s, 2.2
+  tokens a round charged as one. Linux's `tcp_metrics` keeps a measured round
+  trip the same way; Petals keeps its measured throughput on disk under a
+  VERSIONED name (`server/throughput.py`, `throughput_v5.json`), so a change in
+  what is measured starts afresh — here the record's `counted_as`
+  (`ROUNDS_COUNTED_AS`, `LENGTHS_COUNTED_AS`): **bump it where what a round or a
+  length counts changes**, or a figure counted the old way is priced. Counts
+  only, per model id — nothing a reply said.
 
 **What it replaced.** Every split was charged its compute and its hops once per
 TOKEN. The guess-check paths cross once per ROUND — several tokens where the

@@ -54,11 +54,23 @@ fn persist(db: &Database, rate: &LoadRate) {
 }
 
 impl SharedState {
-    /// Store this node's load rate if it changed. Called on the health
-    /// monitor's tick and once at shutdown, beside the lifetime record; a node
-    /// that loaded nothing writes nothing.
-    pub fn persist_load_rate(&self) {
+    /// Store what this node measured to price its routes, each only if it
+    /// changed: its load rate, and each model's recent reply lengths and split
+    /// rounds (`recent_by_model`). Called on the health monitor's tick and once
+    /// at shutdown, beside the lifetime record; a node that did nothing writes
+    /// nothing.
+    pub fn persist_measured_here(&self) {
         persist(&self.db, self.model_process_pool.load_rate());
+        self.metrics.reply_lengths.persist(&self.db);
+        self.metrics.split_rounds.persist(&self.db);
+    }
+
+    /// Read back what an earlier run stored — the other half of
+    /// [`Self::persist_measured_here`], once, as the state is built.
+    pub(super) fn restore_measured_here(&self) {
+        restore(&self.db, self.model_process_pool.load_rate());
+        self.metrics.reply_lengths.restore(&self.db);
+        self.metrics.split_rounds.restore(&self.db);
     }
 }
 
