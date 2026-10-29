@@ -767,6 +767,48 @@ coder-1.5B Q8_0 drafter, AU's RTX 3060 the rest, trees and flow forced off,
   tea: AU disconnected at 02:05:05Z, and with Proxmox, the other holder of layers 28-79, excluded
   by the pin, both asks failed in under 5 s.
 
+## 9. Measured on the real link, 2026-10-29
+
+**A split across a continent ran a 14B twice as fast as this machine runs it alone, on code.**
+Qwen2.5-14B Q4_K_M; this machine (RTX 3070 Laptop 8 GB, Thailand) against a swarm peer's RTX 3060
+(Australia, ~420 ms round trip, v0.3.259); the 0.5B Q8_0 drafter on this machine's card where
+named; 160 greedy tokens, a prose prompt then a code prompt per fresh node; every run ABBA inside
+one binary (main at `4130e0a1`), the route pinned per ask and checked in the log
+(`~/swarmllm-gate/deep/fr/real_link.sh`; round log `memory/archive/round_log_1029_real_link.md`).
+
+| shape, guesser, this machine's share | code tok/s | prose tok/s |
+|---|---|---|
+| starts and finishes here, no guessing | 2.03-2.05 | 2.03-2.05 |
+| starts and finishes here, far-run guesses (#366 (4)) | 3.74-4.01 | 2.93-3.61 |
+| starts and finishes here, drafter (tree rounds), 25 of 48 | 12.38-16.34 | 5.37-7.10 |
+| default shape, drafter (the flow), 12 of 48 | 7.79-8.36 | 3.15-3.38 |
+| **default shape, drafter (the flow), 24 of 48** | **29.20-29.94** | **9.17-10.02** |
+| this machine alone, the whole 14B (card + processor, card guesses) | 13.6-15.4 | ~13 |
+
+What each figure is made of, from the runs' own lines:
+- **The flow at an even split** sent 23 rows a forward; on prose 305-315 forwards, 12-13 misses,
+  no stale answers, 4.2-5.0 s waiting of 17.5-18.8 s; on code 139-144 forwards, 0-1 misses, 22.8-23.4
+  tok/s inside the flow. The round trip is hidden: the far card answers within ~450 ms of each
+  forward and the head keeps drafting meanwhile.
+- **The tree rounds** (a chain that starts and finishes here — the flow refuses it,
+  `flow_possible` needs the tail to walk at the far end) keep 2.4-2.8 tokens a round on prose and
+  8.4-8.9 on code, and every round waits one whole round trip. Same link, same drafter, same split:
+  the flow is 1.6x (prose) to 2.2x (code) as fast → FUTURE_WORK #369.
+- **The flow at 12 of 48** saturated the far card: 36 layers plus the 152k-vocabulary output head
+  for every row of every forward, up to 2.2 s queued, 18-39 ms a row. The flow's speed is the
+  slower side's; the split must follow the machines' speeds (#356).
+- **The far-run guesses** (no drafter) are a chain of at most 4 at ~18 ms a guess, kept ~1 in 4 on
+  prose and ~1 in 3 on code. A drafter's draft step is 3.4 ms and its trees are 20-46 rows. The
+  guesses are for the models no drafter fits.
+
+What it means for the aim. On a far link with a card at each end, the per-token round trip
+is no longer the limit once a good drafter's tree flows. Code ran past local, because a code
+reply is easy to guess. Prose is held by how often the drafter's guesses land (§ 7, § 8: the flow
+is held by the drafter's first-choice rate), so the next prose gains are better guesses, not
+shorter trips. The open question for users is whether they GET this shape: a head with the even
+share, a drafter on its card, and, when the head holds both ends, a flow that the boomerang does
+not yet have.
+
 ## Sources
 
 Petals 2312.08361 · Pope et al. 2211.05102 · StagFormer 2501.15665 · Layer

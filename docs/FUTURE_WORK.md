@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #369**). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #370**). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -92,6 +92,12 @@ speed is what the swarm is for, so split speed for large models is the top track
    reply ranks on the card and rates its guesses by the shared noise — misses 35 → 24 a 400-token
    reply; next better guesses: the drafter's size on a far link and the far end's dead draws
    recycled, `faster_than_local.md` § 6).
+   **Measured 2026-10-29 on the real TH↔AU link (~420 ms), Qwen2.5-14B + the 0.5B Q8_0 drafter,
+   this machine's 8 GB card against a swarm peer's RTX 3060**: the flow with the layers split
+   evenly ran **29.2-29.9 tok/s on code and 9.2-10.0 on prose — about twice this machine's own
+   whole-14B speed on code** (13.6-15.4), 0.7x on prose. A chain that starts and finishes here
+   ran 12.4-16.3 and 5.4-7.1 (tree rounds; it cannot flow → **#369**); with this machine
+   holding a quarter of the layers the flow fell to 7.8-8.4 and 3.2-3.4 (the peer saturated).
 7. **#115** — the rest of Gemma 4: its image reader and its drafters, refused by name today,
    never loaded wrong. (Gemma 3 reads pictures as llama.cpp does since 2026-10-19; Gemma 4's
    E2B/E4B run since 2026-10-17 and fit a 4 GB / 6 GB card whole since #296.)
@@ -1515,8 +1521,13 @@ experts kept in RAM.
    guesses worse (69-78% skipped kept 0.47-0.62 a round in the probe), so a drafter stays the
    guesser there — choose between them by their measured kept-per-round, not by fraction held.
    Today a held drafter always wins: DSD runs first and the n-gram loop (where the far run
-   guesses) only without one, and a split with none asks for one (#134) — so measure the two on
-   the same link before building (a) for anything but the models no drafter fits; (d) the prior
+   guesses) only without one, and a split with none asks for one (#134). **Measured on the same
+   link (`fr/real_link.sh` TAG=dsd, 2026-10-29, ABBA, the 0.5B Q8_0 drafter on the card in the
+   dsd arms): code far 3.74 / 3.84 → drafter 15.54 / 15.61 tok/s, prose 3.60 / 3.61 → 6.63 / 7.10.**
+   The drafter's tree rounds send 20-46 rows a round and keep 2.8 (prose) to 8.4 (code) tokens
+   a round, at 3.4 ms a draft step; B's card adds ~2.4 ms a row. So (a) is for the models no
+   drafter fits AND a chain that starts and finishes here — build it after the drafter-path
+   work that reaches every split, not before (`memory/next_up.md`, 10-29); (d) the prior
    lives in the worker's memory, so every restart and update starts the first reply cold — keeping
    it would write rows derived from users' conversations to disk, which needs its own decision.
 5. **A mixture-of-experts model by use, not by layer**: Qwen3-30B-A3B reuses 44% of the previous
@@ -1567,6 +1578,37 @@ the last one — an agent's next turn — waits for it: those arms' first token 
 5.0-5.9 s against 3.1-3.6 s. **Next**: time the copy's parts (`SnapshotCost`, the host allocation,
 the card's device-to-host read) at both speeds; whether freed snapshots' host buffers are reused or
 the copy faults fresh pages (an allocation of 569 MB under WSL2 is 146K first touches).
+
+#### #369 — A chain that starts and finishes here checks its drafter's guesses one round per round trip; the default shape keeps them flowing, 1.6-2.2x as fast
+`P1` · perf-split · **OPEN** — 2026-10-29 · evidence: `docs/plans/faster_than_local.md` § "Measured on the real link, 2026-10-29"
+
+With a drafter, a chain whose head holds the first layers only runs the flowing tree
+(`pipeline::dsd_flow`), which keeps guesses in flight across the round trip; a chain that starts
+and finishes here (the boomerang — "Start and finish on this computer", and AUTOMATIC wherever
+this node holds both ends: `encrypted_pipeline_auto` defaults on) runs DSD tree rounds, one check
+per round trip. `dsd_flow::flow_possible` requires `shape.far_walks()` — no `after` segments — so a
+boomerang never flows. Measured on the same link, the same 14B, the same drafter, the load split
+the same (this machine 24-25 of 48 layers on its 8 GB card, a swarm peer's RTX 3060 in Australia
+the rest, ~420 ms; `~/swarmllm-gate/deep/fr/real_link.sh`, TAG=flowhalf, ABBA): **flow 29.20 /
+29.94 tok/s on code, 9.17 / 10.02 on prose; boomerang 12.38 / 14.86 and 5.55 / 6.45.** The tree
+rounds kept 2.4-2.8 tokens a round on prose (13-22 rows), 8.4-8.9 on code (30-48 rows), each
+round ~460-565 ms of round trip and peer; the flow sent 23 rows a forward and waited 4-5 s of
+17.5-19 s on prose.
+
+**What to build:** the flow with the tree walked HERE. The peer's answer for a flowed forward is
+the last segment's input rows (`h_b`), not a walk; this node runs its last segment over them and
+walks the tree locally — what `dsd_stream`'s `finish_here` already does for a CHAIN in a boomerang
+(run A's `after` segments as each answer is taken, in order). Map before coding: what
+`dsd_flow`'s far walker returns and where the flow consumes it (`Frontier`, misses, rebases,
+stale answers), and how its rebase/cut rules translate to a last segment that is local (its cache
+cut lazily, as tree rounds do through `pending_truncate`). Keep the privacy property: nothing new
+leaves this node — the peer still sees hidden states only (`docs/ARCHITECTURE.md` § Pipeline
+Privacy Model).
+
+**Also open here:** (b) the flow's speed depends on the load split — with this machine holding 12
+of 48 layers the peer (36 layers + the 152k-vocab head) saturated (queue up to 2.2 s, 18-39 ms a
+row) and the flow ran 7.8-8.4 / 3.2-3.4 tok/s; check what placement by speed (#356) gives a card
+head with room before trusting the default shape's figure as what users get.
 
 #### #357 — A card's first graph of a new shape, late in a worker's life, can stall one forward 10-59 s
 `P3` · perf-local · **OPEN** — 2026-10-26 · evidence: `faster_than_local.md` § 8.6; gotcha #883
