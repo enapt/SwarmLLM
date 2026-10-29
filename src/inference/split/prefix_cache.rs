@@ -121,6 +121,25 @@ impl SnapshotCost {
             slid_away,
         }
     }
+
+    /// Bytes of a snapshot taken at `pos`.
+    fn bytes_at(self, pos: usize) -> usize {
+        self.per_position
+            .saturating_mul(pos)
+            .saturating_sub(self.slid_away)
+    }
+}
+
+/// What [`PrefixCache::make_room`] let go of before a copy.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct RoomMade {
+    /// Entries the new snapshot replaces.
+    replaced: usize,
+    /// Least recently hit entries evicted so the new one fits the caps.
+    evicted: usize,
+    /// Whether a replaced entry was kept on this computer (#251 (2b)) — the
+    /// new entry inherits it.
+    replaced_kept_here: bool,
 }
 
 /// Magic bytes identifying a serialized `KvSnapshot` on the wire.
@@ -705,7 +724,8 @@ impl PrefixCache {
         // Bound insertion points by what the KV actually holds, by the room on
         // the device, and by the ceiling — which keeps the opening of a longer
         // prompt instead of refusing it.
-        let ceiling = self.positions_ceiling(SnapshotCost::of(&entry.layers));
+        let cost = SnapshotCost::of(&entry.layers);
+        let ceiling = self.positions_ceiling(cost);
         if ceiling < prompt_tokens.len() {
             tracing::info!(
                 model_key,
@@ -793,6 +813,22 @@ impl PrefixCache {
             }
         }
 
+        // Where the snapshot will answer from (`snapshot_at`'s figure): a
+        // recurrent state's serves only its whole length.
+        let serves_once_saved = if entry.ssm_states.iter().any(Option::is_some) {
+            available
+        } else {
+            serves
+        };
+        let room_made = self.make_room(
+            model_key,
+            |e| {
+                e.chain.is_empty()
+                    && snap_tokens.starts_with(&e.tokens)
+                    && e.tokens.len() >= serves_once_saved
+            },
+            cost.bytes_at(available),
+        );
         let copy_started = Instant::now();
         let snap = match snapshot_at(
             &entry.layers,
@@ -811,12 +847,15 @@ impl PrefixCache {
                 tracing::warn!(
                     model_key,
                     tokens = available,
+                    replaced = room_made.replaced,
+                    evicted = room_made.evicted,
                     error = %e,
                     "prefix-cache: snapshot failed — request continues uncached"
                 );
                 return Vec::new();
             }
         };
+        debug_assert_eq!(snap.serves_from, serves_once_saved);
         drop(entry);
         let copy_ms = copy_started.elapsed().as_millis() as u64;
         let (snap_bytes, snap_home) = (snap.bytes(), snap.home());
@@ -843,8 +882,9 @@ impl PrefixCache {
         };
         // An entry this one replaces passes its keep on: the strictest
         // instruction wins, as it does for the request (`api::keep_here`).
-        let kept_here =
-            keep == KeepAsked::OnThisComputer || bucket.iter().any(|e| covered(e) && e.kept_here);
+        let kept_here = keep == KeepAsked::OnThisComputer
+            || room_made.replaced_kept_here
+            || bucket.iter().any(|e| covered(e) && e.kept_here);
         bucket.retain(|e| !covered(e));
         bucket.push(Entry {
             tokens,
@@ -870,9 +910,75 @@ impl PrefixCache {
             mb = snap_bytes / (1024 * 1024),
             home = ?snap_home,
             copy_ms = copy_ms,
+            replaced_before_copy = room_made.replaced,
+            evicted_before_copy = room_made.evicted,
             "DIAG: prefix-cache inserted snapshot"
         );
         manifest
+    }
+
+    /// Makes room in `model_key`'s bucket for a snapshot of `incoming_bytes`
+    /// BEFORE it is copied (#367): first the entries it replaces
+    /// (`superseded`), then the least recently hit until it fits both caps —
+    /// llama.cpp's `server_prompt_cache::alloc` order ("make room before
+    /// allocating the new vectors", `tools/server/server-task.cpp` at
+    /// 4b1a27f). What it lets go is what [`Self::evict_over_caps`] would drop
+    /// after the insert; done first, the save never holds what it replaces
+    /// beside the copy (a 14B's 1,800-token prompt: 569 MB), and the copy lands
+    /// mostly in memory the allocator already holds instead of fresh pages —
+    /// under WSL2 a fresh 569 MB took 255 ms to touch with memory free and
+    /// 0.6-0.8 s under a full page cache (the kernel's huge-page compactions
+    /// failing), against 43 ms into touched memory; in a turn-by-turn model of
+    /// the worker (mimalloc v3, as the workers run it) a save took 171-274 ms
+    /// beside the old snapshot and 81-125 ms after letting it go. Each insert's
+    /// own pass after the copy stays: it catches an entry that raced in
+    /// meanwhile. The cost: a copy that then fails keeps neither — it fails
+    /// on a device with no memory left, where that room is what it lacked.
+    fn make_room(
+        &self,
+        model_key: &str,
+        superseded: impl Fn(&Entry) -> bool,
+        incoming_bytes: usize,
+    ) -> RoomMade {
+        // `SWARMLLM_SNAPSHOT_ROOM=after-copy`: the old order — each insert's
+        // own pass after the copy drops the same entries. Read once.
+        static AFTER_COPY: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        if *AFTER_COPY
+            .get_or_init(|| std::env::var("SWARMLLM_SNAPSHOT_ROOM").as_deref() == Ok("after-copy"))
+        {
+            return RoomMade::default();
+        }
+        // Dropped once the lock is released: freeing 0.5 GB is not instant.
+        let (gone, room) = {
+            let Ok(mut inner) = self.inner.write() else {
+                return RoomMade::default();
+            };
+            let Some(bucket) = inner.per_model.get_mut(model_key) else {
+                return RoomMade::default();
+            };
+            let mut gone: Vec<Entry> = bucket.extract_if(.., |e| superseded(e)).collect();
+            let replaced = gone.len();
+            let replaced_kept_here = gone.iter().any(|e| e.kept_here);
+            bucket.sort_by_key(|e| e.last_hit.load(Ordering::Relaxed));
+            let mut total: usize = bucket.iter().map(|e| e.snapshot.bytes()).sum();
+            while !bucket.is_empty()
+                && (bucket.len() >= self.max_entries
+                    || (self.max_bytes > 0
+                        && total.saturating_add(incoming_bytes) > self.max_bytes))
+            {
+                let oldest = bucket.remove(0);
+                total = total.saturating_sub(oldest.snapshot.bytes());
+                gone.push(oldest);
+            }
+            let room = RoomMade {
+                replaced,
+                evicted: gone.len() - replaced,
+                replaced_kept_here,
+            };
+            (gone, room)
+        };
+        drop(gone);
+        room
     }
 
     /// Evict LRU entries of one model until both caps hold.
@@ -988,7 +1094,8 @@ impl PrefixCache {
         };
         let dim = first_kv.k_cache().dim();
         let max_seq_len = first_kv.k_cache().max_seq_len();
-        let ceiling = self.positions_ceiling(SnapshotCost::of(&entry.layers));
+        let cost = SnapshotCost::of(&entry.layers);
+        let ceiling = self.positions_ceiling(cost);
         let available = first_kv
             .current_seq_len()
             .min(keys.len() * bt)
@@ -1030,12 +1137,25 @@ impl PrefixCache {
                 return blocks as u32;
             }
         }
+        // Room first (#367): the entry of this split that ours extends — the
+        // `retain` below, inverted — then the caps.
+        let room_made = self.make_room(
+            model_key,
+            |e| {
+                !e.chain.is_empty()
+                    && e.chain_block == block_tokens
+                    && chain.starts_with(&e.chain)
+                    && e.snapshot.token_count >= serves
+            },
+            cost.bytes_at(positions),
+        );
         // A split segment's state is refused above: a chain entry carries
         // attention layers only.
         let snap = match snapshot_at(&entry.layers, &[], positions, dim, max_seq_len, room.home) {
             Ok(s) => Arc::new(s),
             Err(e) => {
-                tracing::warn!(model_key, positions, error = %e,
+                tracing::warn!(model_key, positions, replaced = room_made.replaced,
+                    evicted = room_made.evicted, error = %e,
                     "prefix-cache: storing a split prompt failed — the next turn reads it again");
                 return 0;
             }
@@ -1077,6 +1197,8 @@ impl PrefixCache {
             stored_positions = positions,
             kept,
             home = ?room.home,
+            replaced_before_copy = room_made.replaced,
+            evicted_before_copy = room_made.evicted,
             "DIAG: prefix-cache stored a split's prompt"
         );
         if kept {
@@ -2532,6 +2654,125 @@ mod tests {
         assert_eq!(pc.entry_count("m"), 1);
         let snap = pc.lookup("m", &(1..=14).collect::<Vec<_>>()).expect("hit");
         assert_eq!(snap.token_count, 12);
+    }
+
+    /// A request's cache whose second layer holds only half the positions of
+    /// its first: `snapshot_at` refuses it, so an insert of it fails at the
+    /// copy — after anything the insert does before the copy.
+    fn make_kv_that_fails_the_copy(kv_store: &KvCacheStore, model_key: &str, request_id: &str) {
+        let device = Device::Cpu;
+        let mut entry = kv_store.get_or_create(model_key, request_id, 2);
+        for (slot, seq_len) in entry.layers.iter_mut().zip([16usize, 8]) {
+            let k = Tensor::zeros((1usize, 1, seq_len, 4), DType::F32, &device).unwrap();
+            let v = Tensor::zeros((1usize, 1, seq_len, 4), DType::F32, &device).unwrap();
+            let mut kv = LayerKv::with_capacity(2, 4096, 4096);
+            kv.append(&k, &v).unwrap();
+            *slot = Some(kv);
+        }
+    }
+
+    /// #367: the snapshot a growing conversation's next one replaces is let go
+    /// BEFORE the copy, so the save never holds the prompt twice and the copy
+    /// reuses its memory. Seen from outside through a copy that fails: the
+    /// entry it would have replaced is already gone.
+    #[test]
+    fn a_replaced_snapshot_is_let_go_before_the_copy() {
+        let pc = PrefixCache::new(true, 16, 4, 4, 8192, 0);
+        let kv_store = KvCacheStore::new(std::time::Duration::from_secs(600));
+        make_fake_kv(&kv_store, "m", "turn-1", 2, 8);
+        let turn_1: Vec<u32> = (1..=8).collect();
+        pc.insert_from_kv(
+            "m",
+            "turn-1",
+            &kv_store,
+            &turn_1,
+            ANYWHERE,
+            KeepAsked::Unasked,
+        );
+        // Another conversation's entry, which turn 2 does not replace.
+        make_fake_kv(&kv_store, "m", "other", 2, 8);
+        let other: Vec<u32> = (101..=108).collect();
+        pc.insert_from_kv(
+            "m",
+            "other",
+            &kv_store,
+            &other,
+            ANYWHERE,
+            KeepAsked::Unasked,
+        );
+        assert_eq!(pc.entry_count("m"), 2);
+
+        make_kv_that_fails_the_copy(&kv_store, "m", "turn-2");
+        let turn_2: Vec<u32> = (1..=16).collect();
+        let manifest = pc.insert_from_kv(
+            "m",
+            "turn-2",
+            &kv_store,
+            &turn_2,
+            ANYWHERE,
+            KeepAsked::Unasked,
+        );
+        assert!(manifest.is_empty(), "the copy failed");
+        assert_eq!(
+            pc.entry_count("m"),
+            1,
+            "turn 1's snapshot went before the copy"
+        );
+        assert!(pc.lookup("m", &turn_1).is_none());
+        assert!(pc.lookup("m", &[other.as_slice(), &[1]].concat()).is_some());
+    }
+
+    /// And the caps: a full bucket's least recently hit entry goes BEFORE the
+    /// copy too (llama.cpp's "make room before allocating"), not after it — the
+    /// entry the insert's own pass would have dropped once the copy was in.
+    #[test]
+    fn a_full_cache_evicts_before_the_copy() {
+        let pc = PrefixCache::new(true, 2, 4, 4, 8192, 0);
+        let kv_store = KvCacheStore::new(std::time::Duration::from_secs(600));
+        for (req, base) in [("a", 100u32), ("b", 200)] {
+            make_fake_kv(&kv_store, "m", req, 2, 8);
+            let tokens: Vec<u32> = (base..base + 8).collect();
+            pc.insert_from_kv("m", req, &kv_store, &tokens, ANYWHERE, KeepAsked::Unasked);
+        }
+        // "b" is hit, so "a" is the least recently hit.
+        assert!(pc.lookup("m", &(200..209).collect::<Vec<u32>>()).is_some());
+        make_kv_that_fails_the_copy(&kv_store, "m", "c");
+        let c: Vec<u32> = (300..316).collect();
+        assert!(pc
+            .insert_from_kv("m", "c", &kv_store, &c, ANYWHERE, KeepAsked::Unasked)
+            .is_empty());
+        assert_eq!(pc.entry_count("m"), 1, "the oldest went before the copy");
+        assert!(pc.lookup("m", &(100..109).collect::<Vec<u32>>()).is_none());
+        assert!(pc.lookup("m", &(200..209).collect::<Vec<u32>>()).is_some());
+    }
+
+    /// The same on a split's stored prompt (#10): the chain entry ours extends
+    /// goes before the copy; another block size's stays.
+    #[test]
+    fn a_replaced_split_prompt_is_let_go_before_the_copy() {
+        let pc = PrefixCache::new(true, 8, 0, 4, 0, 0);
+        let kv_store = KvCacheStore::new(std::time::Duration::from_secs(600));
+        let keys: Vec<[u8; 32]> = (0..4u8).map(|i| [i; 32]).collect();
+        make_fake_kv(&kv_store, "seg", "turn-1", 2, 8);
+        assert_eq!(
+            pc.insert_chain_from_kv("seg", "turn-1", &kv_store, 8, &keys, ANYWHERE),
+            1
+        );
+        assert_eq!(
+            pc.insert_chain_from_kv("seg", "turn-1", &kv_store, 4, &keys, ANYWHERE),
+            2
+        );
+        make_kv_that_fails_the_copy(&kv_store, "seg", "turn-2");
+        assert_eq!(
+            pc.insert_chain_from_kv("seg", "turn-2", &kv_store, 8, &keys, ANYWHERE),
+            0,
+            "the copy failed"
+        );
+        assert!(
+            pc.lookup_chain("seg", 8, &keys, 8).is_none(),
+            "gone before the copy"
+        );
+        assert!(pc.lookup_chain("seg", 4, &keys, 8).is_some());
     }
 
     #[test]

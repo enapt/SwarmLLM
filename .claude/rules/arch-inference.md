@@ -341,7 +341,11 @@ while the worker survives** — an error, a cancel landing inside a step, a fail
 batched tick (`model_worker::prompt_outlives`, asked by all three) — and sized with
 no reply reserve (`ReplyAhead::Done`, a REQUIRED argument of every sizing). A
 request that arrives back to back waits for the rest of the copy. A/B
-`SWARMLLM_PROMPT_SAVE=at-prompt-end`.
+`SWARMLLM_PROMPT_SAVE=at-prompt-end`. **Room is made BEFORE the copy** (#367,
+`PrefixCache::make_room`, both inserts; llama.cpp's `server_prompt_cache::alloc`
+order): the entries it replaces, then the least recently hit over the caps — a
+copy beside them faults fresh pages (255 ms per 569 MB with memory free, 0.6-0.8 s
+under a full page cache, 43 ms into held memory). A/B `SWARMLLM_SNAPSHOT_ROOM=after-copy`.
 
 → `docs/invariants/inference.md` § "One prefix-cache snapshot is sized by bytes"
 

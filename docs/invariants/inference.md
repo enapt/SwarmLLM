@@ -3656,6 +3656,33 @@ the reply keeps no reserve for it beside the live cache (`ReplyAhead::Done`). A/
 `a_prompt_left_for_the_replys_end_outlives_every_error_the_worker_survives`,
 `a_snapshot_taken_after_the_reply_keeps_no_room_for_it`.
 
+**Room is made BEFORE the copy** (2026-10-29, #367; `PrefixCache::make_room`, both inserts).
+Both inserts used to copy first and only then drop the entries the new snapshot covers (a growing
+conversation's previous turn) and the least recently hit ones over the count and byte caps — so the
+save held what it replaced BESIDE the copy, and the copy faulted in fresh pages. llama.cpp's server
+does the reverse (`server_prompt_cache::alloc`, `tools/server/server-task.cpp` at 4b1a27f): it
+removes cached prompts the new one fully contains, then "make[s] room before allocating the new
+vectors to avoid breaching the limit". Now the same entries go, in the same order, before the copy;
+the insert's own pass after it stays for an entry that raced in. **Why the order costs time —
+measured, not assumed** (scratchpad micro-benchmarks with mimalloc v3, as the workers link it —
+`libmimalloc-sys` 0.1.49 builds v3 unless its `v2` feature is on; WSL2, glibc 2.39, THP `madvise`):
+a 569 MB f32 copy into memory the allocator already holds took 43 ms; into fresh memory 255 ms with
+memory free (286 huge-page faults) and 624-817 ms with the page cache full, as after a build — ~820
+direct compactions, nearly all failing, ~270 huge-page faults falling back to small pages
+(`/proc/vmstat` `compact_stall`/`compact_fail`/`thp_fault_fallback` across the copy). The box had
+1.74M compaction stalls, 87% failed, at 30 h uptime. With huge pages off for the process
+(`MIMALLOC_ALLOW_THP=0`) the same copy took 409-461 ms either way. In a turn-by-turn model of an
+agent's conversation (66 f32 tensors of the 14B's 33 processor layers, each turn's prompt 300
+positions longer, 3 s between turns) a save took 171-274 ms beside the previous snapshot and
+81-125 ms once it was let go. Under a FULL page cache that model was mixed (81-676 ms), because
+the held snapshot's own pages had been swapped out by then (gotcha #993: faking the pressure
+swapped the live node). What is still open is in FUTURE_WORK #367: the next turn's live cache is
+allocated into memory mimalloc v3 returned to the system 1 s after it was freed (`purge_delay`,
+1000 ms; `MIMALLOC_PURGE_DELAY=30000` made that restore fault nothing in the model), and the
+real worker's gain is unmeasured. A/B `SWARMLLM_SNAPSHOT_ROOM=after-copy`. Tests (red with the
+room made after the copy): `a_replaced_snapshot_is_let_go_before_the_copy`,
+`a_full_cache_evicts_before_the_copy`, `a_replaced_split_prompt_is_let_go_before_the_copy`.
+
 ## A blocked GQA attention call is grouped per block, never expanded (2026-09-26)
 
 `standard_attention` groups a GQA call's query heads against the unexpanded

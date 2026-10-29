@@ -1593,7 +1593,23 @@ experts kept in RAM.
    round's average (~65-135 ms). Revisit if a check's per-position cost falls.
 
 #### #367 — A long prompt's snapshot copy costs 0.15-2.1 s where its memory traffic is ~0.1 s, and the next request waits for it
-`P2` · perf-local · **OPEN** — 2026-10-28 · evidence: `docs/invariants/inference.md` § "One prefix-cache snapshot is sized by bytes" (the deferred-copy paragraph)
+`P2` · perf-local · **NARROWED** — 2026-10-29 · evidence: `docs/invariants/inference.md` § "One prefix-cache snapshot is sized by bytes" (the deferred-copy and room-first paragraphs)
+
+**Found 2026-10-29: the cost is first-touching fresh pages, not the copy.** With mimalloc v3 (what
+the workers link), 569 MB copied into held memory took 43 ms; into fresh memory 255 ms with memory
+free and 624-817 ms with the page cache full (failed huge-page compactions, then small-page
+faults), 409-461 ms with huge pages off. **Done:** both inserts make room BEFORE the copy
+(`PrefixCache::make_room`, llama.cpp's `server_prompt_cache::alloc` order) — the entries the
+snapshot replaces, then the least recently hit over the caps — so the copy lands in memory just let
+go of (a turn-by-turn model: 171-274 → 81-125 ms a save). A/B `SWARMLLM_SNAPSHOT_ROOM=after-copy`.
+**Left:** (a) the REAL worker's gain is unmeasured — re-run `ab7.sh`'s first-token arms with the
+A/B, reading `copy_ms` and `evicted_before_copy` (the 4th unique 569 MB prompt is the first to
+evict under the 2,048 MB cap); (b) the next turn's live cache is allocated into memory mimalloc v3
+gave back 1 s after it was freed (`purge_delay` 1000 ms) — in the model `MIMALLOC_PURGE_DELAY=30000`
+took that restore from ~900 faults to 0; the workers inherit the daemon's environment, so it A/Bs
+with no code (weigh what a longer delay costs `machine_memory`'s readings first); (c)
+`model_worker::host_ram_positions` sizes the room counting the entry the snapshot will replace as
+held, so a tight host budget evicts another conversation's prompt or cuts this one first.
 
 The same 1,800-token prompt's snapshot (Qwen2.5-14B Q4_K_M, 15 of 48 on the card: 569 MB, 486 of it
 the processor layers' f32 cache, all kept in host RAM under WSL2) was copied in 155-680 ms in one pair
