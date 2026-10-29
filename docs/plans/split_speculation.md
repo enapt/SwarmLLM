@@ -975,7 +975,16 @@ stand-in fitted from all of it: on the ~1,700-2,100-token prompts a window of 2,
 tokens a round at 52-67% first-guess agreement (14B, Llama 3.1 8B, Mistral 7B) against 0.48-0.70
 at 256 (FUTURE_WORK #366 item 1 says what it costs and how to cut it).
 
-**What porting it to a chain needs** (not built; mapped 2026-10-28 evening). Corrected: the
+**Built 2026-10-29 as mapped below** (`ngram_only_spec::FarRunGuesses`, `split::guesses_through_far_run`,
+`model_worker::FarRuns`; A/B `SWARMLLM_FAR_RUN_GUESSES=0`). Measured on the 14B, A holding layers
+0-12 + 35-48 on the card and B 12-35 on the processor, two nodes on this machine: decode 1.34-1.48x
+with each of B's sends held 50 ms, 1.08-1.20x with none, 33-55% of the guesses kept — the probe's
+agreement at a similar skip was higher (70% at 44% skipped from a tenth in; here 48% skipped from
+a quarter in, short prompts). Evidence and what a change must keep: `docs/invariants/inference.md`
+§ "A chain that starts and finishes here guesses through a stand-in for its far run". Next: a tree
+of the head's top guesses a position (FUTURE_WORK #366 (4) (a)).
+
+**What porting it to a chain needed** (mapped 2026-10-28 evening, built as described). Corrected: the
 coordinator's two end segments are two `SplitModel`s in ONE worker process — the pool keeps one
 worker per model (`ModelProcessPool::workers`), and `handle_forward` picks the segment's model by
 its layer range — so both halves of every pair pass through that worker: it computes `h_a` as the

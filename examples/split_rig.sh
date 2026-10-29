@@ -17,6 +17,10 @@
 #          RIG_PROMPT asks that question alone instead (RIG_MAX_TOKENS, default
 #          128; RIG_ASKS times, default 1 — a later ask finds both nodes warm)
 #          — e.g. one the reply copies from, so A's n-gram loop guesses.
+#          RIG_PROMPT_FILE asks each line of a file in turn, one question per
+#          line (labels q1, q2, …) — a run of DIFFERENT prompts, so no reply
+#          finds the last one's text to copy. Each ask's wall time and reply
+#          length go to $OUT/timings.jsonl.
 #   reasoning  one greedy question to a reasoning model (default qwen3-1.7b-q8-0)
 #          through the split, streamed and not: the finished scratchpad must be
 #          the same in message.reasoning_content and delta.reasoning_content,
@@ -1444,6 +1448,21 @@ PY
   exit $?
 fi
 
+if [ "$MODE" = split ] && [ -n "${RIG_PROMPT_FILE:-}" ]; then
+  i=0
+  while IFS= read -r line || [ -n "$line" ]; do
+    [ -n "$line" ] || continue
+    i=$((i + 1))
+    t0=$(date +%s.%N)
+    ask "$line" "${RIG_MAX_TOKENS:-128}" "q$i" | tee -a "$OUT/replies.jsonl"
+    # Each ask's wall time and reply length, for an A/B read from the client's side.
+    python3 -c 'import json,sys
+u=json.load(open(sys.argv[1])).get("usage") or {}
+print(json.dumps({"label":sys.argv[2],"seconds":round(float(sys.argv[4])-float(sys.argv[3]),3),"prompt_tokens":u.get("prompt_tokens"),"completion_tokens":u.get("completion_tokens")}))' \
+      "$OUT/q$i.body" "q$i" "$t0" "$(date +%s.%N)" 2>/dev/null | tee -a "$OUT/timings.jsonl"
+  done < "$RIG_PROMPT_FILE"
+  exit 0
+fi
 if [ "$MODE" = split ] && [ -n "${RIG_PROMPT:-}" ]; then
   for i in $(seq 1 "${RIG_ASKS:-1}"); do
     ask "$RIG_PROMPT" "${RIG_MAX_TOKENS:-128}" "q$i" | tee -a "$OUT/replies.jsonl"

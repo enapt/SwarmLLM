@@ -1332,80 +1332,27 @@ impl SplitModel {
         kv: &KvCacheStore,
         request_id: &str,
         first: usize,
-        mut logits: candle_core::Tensor,
+        logits: candle_core::Tensor,
         gamma: usize,
         temperature: f32,
         stop_below: Option<f32>,
         skips: Option<(&[bool], Option<&super::SkipBridge>)>,
     ) -> Result<Vec<u32>, SwarmError> {
-        use candle_core::Tensor;
-        // A read-ahead (`engine_drafter::read_ahead`) asks for no guesses: the
-        // prompt is in the cache and that is the whole call. Without this,
-        // `Tensor::stack` of nothing failed every read-ahead on a card, and the
-        // first round then read the prompt a second time from scratch.
-        if gamma == 0 {
-            return Ok(Vec::new());
-        }
-        let t = if temperature > 0.0 {
-            f64::from(temperature)
-        } else {
-            1.0
-        };
-        let mut ids: Vec<Tensor> = Vec::with_capacity(gamma);
-        let mut mass: Vec<Tensor> = Vec::with_capacity(gamma);
-        for j in 0..gamma {
-            let row = logits
-                .flatten_all()
-                .and_then(|r| r.to_dtype(candle_core::DType::F32))
-                .map_err(SwarmError::internal)?;
-            let best = row.argmax(0).map_err(SwarmError::internal)?;
-            if stop_below.is_some() {
-                // Σ exp((x - max) / T): the guess's probability is its inverse.
-                let z = row
-                    .max_keepdim(0)
-                    .and_then(|m| row.broadcast_sub(&m))
-                    .and_then(|d| d / t)
-                    .and_then(|d| d.exp())
-                    .and_then(|e| e.sum(0))
-                    .map_err(SwarmError::internal)?;
-                mass.push(z);
-            }
-            ids.push(best.clone());
-            if j + 1 < gamma {
-                let next = best.reshape((1, 1)).map_err(SwarmError::internal)?;
-                logits = match skips {
-                    Some((mask, Some(bridge))) => self.forward_with_skip_bridge(
-                        &next,
-                        first + j,
-                        kv,
-                        request_id,
-                        mask,
-                        bridge,
-                    )?,
-                    Some((mask, None)) => {
-                        self.forward_with_skip_mask(&next, first + j, kv, request_id, mask)?
-                    }
-                    None => self.forward(&next, first + j, kv, request_id)?,
-                };
-            }
-        }
-        let mut guesses: Vec<u32> = Tensor::stack(&ids, 0)
-            .and_then(|v| v.to_vec1())
-            .map_err(SwarmError::internal)?;
-        if let Some(floor) = stop_below {
-            let z: Vec<f32> = Tensor::stack(&mass, 0)
-                .and_then(|v| v.to_vec1())
-                .map_err(SwarmError::internal)?;
-            // A row that was not finite (its mass NaN) cuts too, as the host's
-            // `probability_at` reads such a row as probability 0.
-            if let Some(k) = z.iter().position(|&z| {
-                let p = 1.0 / z;
-                p.is_nan() || p < floor
-            }) {
-                guesses.truncate(k + 1);
-            }
-        }
-        Ok(guesses)
+        argmax_guesses_with(
+            logits,
+            gamma,
+            temperature,
+            stop_below,
+            &mut |next, j| match skips {
+                Some((mask, Some(bridge))) => {
+                    self.forward_with_skip_bridge(next, first + j, kv, request_id, mask, bridge)
+                }
+                Some((mask, None)) => {
+                    self.forward_with_skip_mask(next, first + j, kv, request_id, mask)
+                }
+                None => self.forward(next, first + j, kv, request_id),
+            },
+        )
     }
 
     /// `gamma` guesses at what follows `token` at `index_pos`, made on the
@@ -1456,6 +1403,119 @@ impl SplitModel {
         kv.truncate_request_to(&key, request_id, index_pos)?;
         guessed
     }
+}
+
+/// The guess loop of [`SplitModel::argmax_guesses_on_card`], whatever makes
+/// each step's logits: each guess is the greedy pick of `logits` and, while
+/// more are wanted, `step(pick as [1, 1] ids, j)` reads guess `j` back in.
+/// Every pick stays where its logits are and all are read back once.
+fn argmax_guesses_with(
+    mut logits: candle_core::Tensor,
+    gamma: usize,
+    temperature: f32,
+    stop_below: Option<f32>,
+    step: &mut dyn FnMut(&candle_core::Tensor, usize) -> Result<candle_core::Tensor, SwarmError>,
+) -> Result<Vec<u32>, SwarmError> {
+    use candle_core::Tensor;
+    // A read-ahead (`engine_drafter::read_ahead`) asks for no guesses: the
+    // prompt is in the cache and that is the whole call. Without this,
+    // `Tensor::stack` of nothing failed every read-ahead on a card, and the
+    // first round then read the prompt a second time from scratch.
+    if gamma == 0 {
+        return Ok(Vec::new());
+    }
+    let t = if temperature > 0.0 {
+        f64::from(temperature)
+    } else {
+        1.0
+    };
+    let mut ids: Vec<Tensor> = Vec::with_capacity(gamma);
+    let mut mass: Vec<Tensor> = Vec::with_capacity(gamma);
+    for j in 0..gamma {
+        let row = logits
+            .flatten_all()
+            .and_then(|r| r.to_dtype(candle_core::DType::F32))
+            .map_err(SwarmError::internal)?;
+        let best = row.argmax(0).map_err(SwarmError::internal)?;
+        if stop_below.is_some() {
+            // Σ exp((x - max) / T): the guess's probability is its inverse.
+            let z = row
+                .max_keepdim(0)
+                .and_then(|m| row.broadcast_sub(&m))
+                .and_then(|d| d / t)
+                .and_then(|d| d.exp())
+                .and_then(|e| e.sum(0))
+                .map_err(SwarmError::internal)?;
+            mass.push(z);
+        }
+        ids.push(best.clone());
+        if j + 1 < gamma {
+            let next = best.reshape((1, 1)).map_err(SwarmError::internal)?;
+            logits = step(&next, j)?;
+        }
+    }
+    let mut guesses: Vec<u32> = Tensor::stack(&ids, 0)
+        .and_then(|v| v.to_vec1())
+        .map_err(SwarmError::internal)?;
+    if let Some(floor) = stop_below {
+        let z: Vec<f32> = Tensor::stack(&mass, 0)
+            .and_then(|v| v.to_vec1())
+            .map_err(SwarmError::internal)?;
+        // A row that was not finite (its mass NaN) cuts too, as the host's
+        // `probability_at` reads such a row as probability 0.
+        if let Some(k) = z.iter().position(|&z| {
+            let p = 1.0 / z;
+            p.is_nan() || p < floor
+        }) {
+            guesses.truncate(k + 1);
+        }
+    }
+    Ok(guesses)
+}
+
+/// `gamma` greedy guesses at what follows `token` at `index_pos` in a chain
+/// whose first and last segments this worker holds — the far run between
+/// them stood in for by `bridge` (`stand_in::RunStandIn::for_far_run`), so a
+/// guess crosses no network (`docs/plans/split_speculation.md` § "Guess at
+/// the head through a stand-in for the far layers"). Both segments' caches
+/// are cut back to `index_pos` before and after, whether or not the guesses
+/// came: the check starts from the cache a step would. Each runs on the
+/// request's OWN caches — the stand-in replaces layers, never the
+/// conversation they remember (gotcha #508).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn guesses_through_far_run(
+    first: &mut SplitModel,
+    last: &mut SplitModel,
+    bridge: &super::SkipBridge,
+    kv: &KvCacheStore,
+    request_id: &str,
+    index_pos: usize,
+    token: u32,
+    gamma: usize,
+) -> Result<Vec<u32>, SwarmError> {
+    let cut = |first: &SplitModel, last: &SplitModel| -> Result<(), SwarmError> {
+        kv.truncate_request_to(first.kv_model_key(), request_id, index_pos)?;
+        kv.truncate_request_to(last.kv_model_key(), request_id, index_pos)
+    };
+    cut(first, last)?;
+    if gamma == 0 {
+        return Ok(Vec::new());
+    }
+    let input = first.token_tensor(token)?;
+    let guessed = {
+        let mut through = |ids: &candle_core::Tensor, at: usize| {
+            let h = first.forward(ids, at, kv, request_id)?;
+            let h = bridge.apply(&h).map_err(SwarmError::internal)?;
+            last.forward(&h, at, kv, request_id)
+        };
+        through(&input, index_pos).and_then(|logits| {
+            argmax_guesses_with(logits, gamma, 0.0, None, &mut |next, j| {
+                through(next, index_pos + 1 + j)
+            })
+        })
+    };
+    cut(first, last)?;
+    guessed
 }
 
 /// `softmax(logits / T)[token]`, with `T` the request's temperature or 1 for a

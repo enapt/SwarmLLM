@@ -43,6 +43,7 @@ pub use super::tensor_util::{
 pub use super::tokenizer::{BpeTokenizer, SplitTokenizer, SpmTokenizer};
 
 // Re-export from submodules so that `crate::inference::split::SplitModel` etc. continue to work.
+pub(crate) use self::draft::guesses_through_far_run;
 pub use self::draft::{FlowGrowth, FlowStep, TreeGrowth};
 pub use self::entry::BatchItem;
 pub use self::entry::{trim_split_model_cache, SplitModelEntry, SplitModelKey};

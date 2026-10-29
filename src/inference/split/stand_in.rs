@@ -277,10 +277,34 @@ impl RunStandIn {
         if run_start == 0 || run_end >= skips.len() || skips[run_end..].iter().any(|&s| s) {
             return None;
         }
-        Some(Self {
+        Some(Self::new(
             run_start,
             run_end,
-            capture: [run_start - 1, run_end - 1].into_iter().collect(),
+            [run_start - 1, run_end - 1].into_iter().collect(),
+            device,
+        ))
+    }
+
+    /// A stand-in for the FAR run `[run_start, run_end)` of a chain whose two
+    /// ends this node holds — its first segment ends at `run_start`, its last
+    /// begins at `run_end` ("Start and finish on this computer"). It learns
+    /// from the hidden state the first segment hands on and the one the last
+    /// segment is handed back ([`Self::learn_pairs`]), so it needs none of the
+    /// far layers' weights (`docs/plans/split_speculation.md` § "Guess at the
+    /// head through a stand-in for the far layers"). It stands in for layers,
+    /// never for memory: a guess through it runs the last segment on the
+    /// request's OWN cache (gotcha #508). `None` for an empty run or one
+    /// starting at layer 0.
+    pub fn for_far_run(run_start: usize, run_end: usize, device: &Device) -> Option<Self> {
+        (run_start > 0 && run_end > run_start)
+            .then(|| Self::new(run_start, run_end, HashSet::new(), device))
+    }
+
+    fn new(run_start: usize, run_end: usize, capture: HashSet<usize>, device: &Device) -> Self {
+        Self {
+            run_start,
+            run_end,
+            capture,
             device: device.clone(),
             window: STAND_IN_WINDOW,
             lambda: STAND_IN_LAMBDA,
@@ -303,7 +327,7 @@ impl RunStandIn {
             carry_positions: 1,
             misses: std::collections::VecDeque::new(),
             carry: None,
-        })
+        }
     }
 
     /// Add `share` of the mean of the stand-in's misses at the last
@@ -407,11 +431,28 @@ impl RunStandIn {
         if kept == 0 {
             return Ok(());
         }
+        let rows = self.rows_of(caught, kept)?;
+        self.learn_kept(rows)
+    }
+
+    /// [`Self::learn`] from a chain's two ends ([`Self::for_far_run`]): `h_in`
+    /// the first segment's output at positions a check kept, `h_out` the last
+    /// segment's input at the same positions (`[kept, hidden]` or
+    /// `[1, kept, hidden]`, on any device).
+    pub fn learn_pairs(&mut self, h_in: &Tensor, h_out: &Tensor) -> Result<(), SwarmError> {
+        let rows = self.pair_rows(h_in, h_out)?;
+        if rows.0.dim(0).map_err(SwarmError::internal)? == 0 {
+            return Ok(());
+        }
+        self.learn_kept(rows)
+    }
+
+    /// Kept positions' `(φ, Δ)` into the window, their miss measured first.
+    fn learn_kept(&mut self, (phi, delta): (Tensor, Tensor)) -> Result<(), SwarmError> {
         let started = std::time::Instant::now();
-        let out = self.rows_of(caught, kept).and_then(|(phi, delta)| {
-            self.note_miss(&phi, &delta)?;
-            self.learn_inner(phi, delta)
-        });
+        let out = self
+            .note_miss(&phi, &delta)
+            .and_then(|()| self.learn_inner(phi, delta));
         self.ms += started.elapsed().as_secs_f64() * 1000.0;
         out
     }
@@ -491,8 +532,39 @@ impl RunStandIn {
         };
         let h_in = take(self.run_start - 1)?;
         let h_out = take(self.run_end - 1)?;
+        Self::phi_delta(&h_in, &h_out)
+    }
+
+    /// `(φ, Δ)` of a chain's paired rows ([`Self::learn_pairs`]): what
+    /// [`Self::rows_of`] makes of a captured forward, from the hidden states
+    /// the chain's two ends hold — `[rows, hidden]` or `[1, rows, hidden]`.
+    pub fn pair_rows(&self, h_in: &Tensor, h_out: &Tensor) -> Result<(Tensor, Tensor), SwarmError> {
+        let flat = |t: &Tensor| -> Result<Tensor, SwarmError> {
+            let t = if t.rank() == 3 {
+                t.squeeze(0)
+            } else {
+                Ok(t.clone())
+            };
+            t.and_then(|t| t.to_device(&self.device))
+                .and_then(|t| t.to_dtype(DType::F32))
+                .map_err(SwarmError::internal)
+        };
+        let (h_in, h_out) = (flat(h_in)?, flat(h_out)?);
+        if h_in.dims() != h_out.dims() {
+            return Err(SwarmError::Internal(format!(
+                "stand-in: paired rows {:?} and {:?} differ",
+                h_in.dims(),
+                h_out.dims()
+            )));
+        }
+        Self::phi_delta(&h_in, &h_out)
+    }
+
+    /// The normalised start and the run's effect: the ONE arithmetic of a
+    /// stand-in's rows, whichever way they were caught.
+    fn phi_delta(h_in: &Tensor, h_out: &Tensor) -> Result<(Tensor, Tensor), SwarmError> {
         (|| -> candle_core::Result<(Tensor, Tensor)> {
-            let delta = (&h_out - &h_in)?;
+            let delta = (h_out - h_in)?;
             let norm = h_in.sqr()?.sum_keepdim(1)?.sqrt()?.clamp(1e-6, f64::MAX)?;
             Ok((h_in.broadcast_div(&norm)?, delta))
         })()
@@ -1421,6 +1493,55 @@ mod tests {
         let added = (effect(&runs[1].0)? - effect(&runs[0].0)?)?;
         let gap = largest(&added.broadcast_sub(&(miss * 0.5)?)?)?;
         assert!(gap < 1e-4, "carried {gap} off half the miss");
+        Ok(())
+    }
+
+    /// A chain's far run, handed the hidden states its two ends hold, fits
+    /// the bridge a run inside one model fits from the same positions
+    /// captured — whichever rank each end hands over — and the bridge carries
+    /// a learned start most of the way to where the far layers took it.
+    #[test]
+    fn a_far_run_learns_from_pairs_what_a_run_learns_from_captures(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let dev = Device::Cpu;
+        let (h_in, h_out) = positions(40, 8, 83, |x| x.cos())?;
+        let mut inside = RunStandIn::for_run(&SKIPS, &dev).expect("one run");
+        inside.learn(&caught(&h_in, &h_out), 40)?;
+        inside.refresh()?;
+        let (start, end) = inside.run();
+        let mut far = RunStandIn::for_far_run(start, end, &dev).expect("a far run");
+        far.learn_pairs(&h_in.squeeze(0)?, &h_out)?;
+        far.refresh()?;
+        let starts = (tensor(&leaning_rows(5, 8, 89))? * 3.0)?.unsqueeze(0)?;
+        let (a, b) = (inside.bridge(), far.bridge());
+        let (a, b) = (a.expect("a bridge"), b.expect("a bridge"));
+        let gap = largest(&(a.apply(&starts)? - b.apply(&starts)?)?)?;
+        assert!(gap < 1e-5, "the two fits part by {gap}");
+        let left = largest(&(b.apply(&h_in)? - &h_out)?)?;
+        let whole = largest(&(&h_out - &h_in)?)?;
+        assert!(left < 0.25 * whole, "{left} of {whole} still to go");
+        Ok(())
+    }
+
+    /// A far run needs a first segment before it and layers in it; paired
+    /// rows of two shapes are refused, and no rows teach nothing.
+    #[test]
+    fn a_far_run_refuses_what_it_cannot_pair() -> Result<(), Box<dyn std::error::Error>> {
+        let dev = Device::Cpu;
+        assert!(
+            RunStandIn::for_far_run(0, 4, &dev).is_none(),
+            "no first segment"
+        );
+        assert!(
+            RunStandIn::for_far_run(4, 4, &dev).is_none(),
+            "no far layers"
+        );
+        let mut far = RunStandIn::for_far_run(2, 5, &dev).expect("a far run");
+        let (h_in, h_out) = positions(6, 8, 97, |x| x.sin())?;
+        assert!(far.learn_pairs(&h_in, &h_out.narrow(1, 0, 5)?).is_err());
+        far.learn_pairs(&h_in.narrow(1, 0, 0)?, &h_out.narrow(1, 0, 0)?)?;
+        far.refresh()?;
+        assert!(far.bridge().is_none(), "nothing learned, nothing to bridge");
         Ok(())
     }
 

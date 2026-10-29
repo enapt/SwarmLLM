@@ -189,7 +189,11 @@ impl SkipBridge {
         }
     }
 
-    fn apply(&self, h: &Tensor) -> candle_core::Result<Tensor> {
+    /// `h` (`[batch, rows, hidden]`) as it would leave the run: the one
+    /// arithmetic of a guess through a stand-in — a skipped run inside one
+    /// model (`forward_inner_body`) and a chain's far layers
+    /// (`model_worker`'s guess at the head) alike.
+    pub fn apply(&self, h: &Tensor) -> candle_core::Result<Tensor> {
         match self {
             Self::Shift { shift, .. } => {
                 let shift = shift.to_device(h.device())?.to_dtype(h.dtype())?;

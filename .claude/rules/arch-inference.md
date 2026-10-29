@@ -308,6 +308,12 @@ llama.cpp's op offload (`ggml_backend_sched` "1.off"): a forward of ≥ `PROMPT_
 
 → `docs/invariants/inference.md` § "A whole model's processor-held layers sit early in the middle, so the card can guess"
 
+## A chain that starts and finishes here guesses through a stand-in for its far run (2026-10-29, #366 (4))
+
+Where this node runs a chain's first segment `[0, a)` AND its last `[b, L)` with a peer between ("Start and finish on this computer"), the n-gram loop guesses where it finds nothing to copy — **`ngram_only_spec::FarRunGuesses::for_plan`** is the one answer (both ends local, a peer between, no tensor-parallel group, `speculation_can_roll_back`). The worker learns a `RunStandIn` for the PEERS' layers (`RunStandIn::for_far_run`) from what it already holds — the first segment's output and the last segment's input at the same positions (`FarRuns::keep`), paired only below where a later forward shows them kept (`kept_pairs`) — never weights of the far layers, nothing new on the wire. A guess runs on the request's OWN caches and cuts both back (`split::guesses_through_far_run`: first → `SkipBridge::apply` → last, gotcha #508), through `DaemonMsg::HeadGuess`, never spawning a worker. A request learning one is never batched (`ModelProcessPool::learn_far_run`: a batch skips `handle_forward`'s capture); its reply joins the model's prior at release. γ from `best_gamma_for_check` at the guesses' measured cost — zero is an answer. Replies part from one-at-a-time only at near-ties (a check's width moves a card's row). A/B `SWARMLLM_FAR_RUN_GUESSES=0`.
+
+→ `docs/invariants/inference.md` § "A chain that starts and finishes here guesses through a stand-in for its far run"
+
 ## One prefix-cache snapshot is sized by bytes, and keeps the opening (2026-09-26)
 
 **`PrefixCache::positions_ceiling`** caps a snapshot BEFORE the copy: the

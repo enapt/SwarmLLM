@@ -469,6 +469,8 @@ pub async fn run_worker(
         std::collections::HashSet::new();
     // The drafter's trees that flow, kept between a reply's calls (#134 (b)).
     let mut flow_sessions = FlowSessions::default();
+    // Chains whose two ends this worker holds, learning their far run.
+    let mut far_runs = FarRuns::default();
 
     loop {
         // Either block on the next IPC message (no slots are decoding) OR race
@@ -521,6 +523,7 @@ pub async fn run_worker(
                 &pending_fetches,
                 &cancelled,
                 &mut flow_sessions,
+                &mut far_runs,
             )
             .await;
 
@@ -551,6 +554,7 @@ pub async fn run_worker(
                             &pending_fetches,
                             &cancelled,
                             &mut flow_sessions,
+                            &mut far_runs,
                         )
                         .await;
                     }
@@ -649,6 +653,7 @@ pub async fn run_worker(
             // cancelled request can be running in this worker.
             release_caches_of_cancelled(&cancelled, &mut kv_released_for_cancel, &kv_store);
             flow_sessions.forget_cancelled(&cancelled);
+            far_runs.forget_cancelled(&cancelled);
             // Sweep cancels that never matched a request (the request had
             // already finished when the cancel arrived).
             cancelled.retain(|_, at| at.elapsed().as_secs() < CANCEL_RETENTION_SECS);
@@ -988,6 +993,7 @@ fn cancelled_request_id(msg: &DaemonMsg) -> Option<Uuid> {
         DaemonMsg::Forward(f) => Some(f.request_id),
         DaemonMsg::Generate(g) => Some(g.request_id),
         DaemonMsg::Draft(d) => Some(d.request_id),
+        DaemonMsg::HeadGuess(g) => Some(g.request_id),
         _ => None,
     }
 }
@@ -1382,6 +1388,9 @@ async fn handle_batch_forward(
             // (`forward_is_schedulable` refuses a prompt pass) — so there is
             // nothing to chunk.
             0,
+            // Nor does it carry a far run: a request learning one is never
+            // batched (`ModelProcessPool::far_runs`).
+            &mut FarRuns::default(),
         )
         .await
         {
@@ -1850,6 +1859,7 @@ async fn handle_forward(
     // longer than this is run in chunks so a cancel can land between them
     // (gotcha #445). 0 disables chunking.
     prefill_chunk_tokens: usize,
+    far_runs: &mut FarRuns,
 ) -> Result<(), SwarmError> {
     let request_id = fwd.request_id;
     let model_id = fwd.model_id.clone();
@@ -1897,12 +1907,35 @@ async fn handle_forward(
         shard_window,
     )?;
 
+    // A chain whose two ends this worker holds (`FarRuns`): a decode forward
+    // of its first segment starts past every position the last check kept,
+    // so what the forwards before it kept is learned now — the prompt after
+    // its first token, never before.
+    let far_run = fwd
+        .far_run
+        .map(|(a, b)| (a as usize, b as usize))
+        .filter(|_| tp_size == 1 && fwd.draft_parents.is_empty() && fwd.draft_tree_from.is_none());
+    if far_run.is_some_and(|(a, _)| layer_start == 0 && layer_end == a) && fwd.sequence_num > 0 {
+        far_runs.commit(&request_id, fwd.index_pos as usize, models);
+    }
+
     let model = models
         .get_mut(&(layer_start, layer_end, tp_rank, tp_size))
         .ok_or_else(|| SwarmError::Internal("Model vanished after load".into()))?;
 
     let is_first = model.is_first();
     let is_last = model.is_last();
+    // Which end of the far run this forward is, if either: the first
+    // segment's output is kept, or the last segment's input.
+    let far_side = far_run.and_then(|(a, b)| {
+        if is_first && !is_last && layer_end == a {
+            Some(true)
+        } else if is_last && !is_first && layer_start == b {
+            Some(false)
+        } else {
+            None
+        }
+    });
     let model_key = model.kv_model_key().to_string();
     let req_id_str = request_id.to_string();
     let pre_embedded = fwd.pre_embedded;
@@ -2086,6 +2119,8 @@ async fn handle_forward(
     } else {
         split::bytes_to_tensor(&activation_bytes)?
     };
+    // The far run's far end: what the last segment is handed.
+    let far_input = far_side.filter(|near| !near).map(|_| input_tensor.clone());
 
     // Decompress vision embeddings if present (`vision::decode_wire_embeddings`).
     // An unreadable payload fails the forward: it used to be dropped with a
@@ -2299,6 +2334,8 @@ async fn handle_forward(
         }
     }
 
+    // The far run's near end: what the first segment hands on.
+    let far_output: std::cell::RefCell<Option<candle_core::Tensor>> = Default::default();
     // Run forward pass — CPU-bound, use block_in_place. A tree of guesses
     // shapes every forward the pass makes (`SplitModel::with_draft_tree`).
     let compute = |model: &mut SplitModel| -> Result<crate::types::LayerResult, String> {
@@ -2643,6 +2680,9 @@ async fn handle_forward(
                 prompt_blocks_stored: None,
             })
         } else {
+            if far_side == Some(true) {
+                *far_output.borrow_mut() = Some(output.clone());
+            }
             let activation_bytes = if activation_compression {
                 split::tensor_to_bytes_q8_0(&output).map_err(|e| format!("Encode Q8_0: {e}"))?
             } else {
@@ -2676,6 +2716,24 @@ async fn handle_forward(
     });
 
     let mut result = compute_result.map_err(SwarmError::Internal)?;
+    if let (Some(run), Some(near)) = (far_run, far_side) {
+        let kept = if near {
+            far_output.into_inner()
+        } else {
+            far_input
+        };
+        if let Some(h) = kept {
+            let range = (layer_start, layer_end, tp_rank, tp_size);
+            far_runs.keep(
+                request_id,
+                run,
+                (near, range),
+                fwd.index_pos as usize,
+                h,
+                model.device(),
+            );
+        }
+    }
     // Keep this segment's part of a split's prompt for the next turn
     // (FUTURE_WORK #10): whole blocks of what the prompt pass left in the
     // cache, sized to the room beside the live cache as the generate path's
@@ -3632,6 +3690,17 @@ fn learn_the_prompt(
     rows: usize,
 ) -> Result<(), SwarmError> {
     let (phi, delta) = stand_in.rows_of(caught, rows)?;
+    learn_prompt_rows(model, stand_in, phi, delta)
+}
+
+/// [`learn_the_prompt`] from the prompt's `(φ, Δ)` however they were caught —
+/// a captured pass, or a chain's two ends ([`FarRuns`]).
+fn learn_prompt_rows(
+    model: &mut crate::inference::split::SplitModel,
+    stand_in: &mut crate::inference::split::RunStandIn,
+    phi: candle_core::Tensor,
+    delta: candle_core::Tensor,
+) -> Result<(), SwarmError> {
     if stand_in.collects() {
         let window = stand_in.window();
         let prior = model.stand_in_prior_for(stand_in);
@@ -6199,6 +6268,345 @@ impl FlowSessions {
     }
 }
 
+/// The far runs of chains whose first and last segments this worker both
+/// holds — one per request its coordinator guesses at the head of
+/// (`IpcForward::far_run`, `DaemonMsg::HeadGuess`; plan
+/// `docs/plans/split_speculation.md` § "Guess at the head through a stand-in
+/// for the far layers"). Each learns what the far layers did to the hidden
+/// state between this worker's two segments, from the positions the chain's
+/// checks KEPT, as a split's card learns its processor run ([`CardGuesses`]):
+/// a forward's rows wait until a later forward of the first segment (or a
+/// guess) starts past them. Gone with the request — `ReleaseRequestKv` folds
+/// it into the model's prior; a cancel or an error drops it, never the reply.
+/// At most [`MOST_FLOW_SESSIONS`], the one used longest ago going first.
+#[derive(Default)]
+struct FarRuns(HashMap<Uuid, FarRun>);
+
+type RangeKey = (usize, usize, usize, usize);
+
+struct FarRun {
+    run: (usize, usize),
+    /// The last segment, whose model keeps the run's prior.
+    last: Option<RangeKey>,
+    stand_in: crate::inference::split::RunStandIn,
+    /// The first segment's outputs and the last segment's inputs at positions
+    /// not yet known kept, each `(first position, [1, rows, hidden])`.
+    out_of_first: Vec<(usize, candle_core::Tensor)>,
+    into_last: Vec<(usize, candle_core::Tensor)>,
+    /// The prompt is learned beside the model's prior, once, at the first
+    /// commit — after the first token, never before it.
+    prompt_learned: bool,
+    used: std::time::Instant,
+    asked: u64,
+    guessed: u64,
+    guess_ms: f64,
+    rows: u64,
+}
+
+/// Rows a side of a far run holds unkept before the oldest go: a prompt
+/// read in pieces, or decode forwards no commit followed.
+const MOST_UNKEPT_BLOCKS: usize = 64;
+
+impl FarRuns {
+    /// A forward's hidden state at its request's far run: the first
+    /// segment's output (`near`) or the last segment's input, from position
+    /// `start`. A request seen for the first time gets a stand-in.
+    fn keep(
+        &mut self,
+        request_id: Uuid,
+        run: (usize, usize),
+        side: (bool, RangeKey),
+        start: usize,
+        h: candle_core::Tensor,
+        device: &candle_core::Device,
+    ) {
+        let (near, range) = side;
+        if !self.0.contains_key(&request_id) {
+            while self.0.len() >= MOST_FLOW_SESSIONS {
+                let Some(oldest) = self.0.iter().min_by_key(|(_, f)| f.used).map(|(id, _)| *id)
+                else {
+                    break;
+                };
+                self.0.remove(&oldest);
+            }
+            let Some(stand_in) =
+                crate::inference::split::RunStandIn::for_far_run(run.0, run.1, device)
+            else {
+                return;
+            };
+            let stand_in = stand_in.with_carry(
+                card_carry_share(),
+                crate::inference::split::STAND_IN_CARRY_POSITIONS,
+            );
+            let stand_in = if card_prior_on() {
+                stand_in.collecting()
+            } else {
+                stand_in
+            };
+            self.0.insert(
+                request_id,
+                FarRun {
+                    run,
+                    last: None,
+                    stand_in,
+                    out_of_first: Vec::new(),
+                    into_last: Vec::new(),
+                    prompt_learned: false,
+                    used: std::time::Instant::now(),
+                    asked: 0,
+                    guessed: 0,
+                    guess_ms: 0.0,
+                    rows: 0,
+                },
+            );
+        }
+        let Some(far) = self.0.get_mut(&request_id).filter(|f| f.run == run) else {
+            return;
+        };
+        far.used = std::time::Instant::now();
+        if !near {
+            far.last = Some(range);
+        }
+        // A prompt keeps only the positions its fit reads, COPIED: a narrowed
+        // view would hold the whole pass's output.
+        let rows = h.dim(1).unwrap_or(0);
+        let most = far.stand_in.prompt_capture();
+        let (start, h) = if rows > most {
+            match h.narrow(1, rows - most, most).and_then(|t| t.copy()) {
+                Ok(t) => (start + rows - most, t),
+                Err(_) => return,
+            }
+        } else {
+            (start, h)
+        };
+        let side = if near {
+            &mut far.out_of_first
+        } else {
+            &mut far.into_last
+        };
+        if side.len() >= MOST_UNKEPT_BLOCKS {
+            side.remove(0);
+        }
+        side.push((start, h));
+    }
+
+    /// Fold a finished request's far run into its model's prior.
+    fn release(&mut self, request_id: &Uuid, models: &mut HashMap<RangeKey, SplitModel>) {
+        let Some(far) = self.0.remove(request_id) else {
+            return;
+        };
+        // Once a reply, and only on a chain that starts and finishes here.
+        tracing::info!(
+            %request_id,
+            run = ?far.run,
+            asked = far.asked,
+            guessed = far.guessed,
+            guess_ms = far.guess_ms.round(),
+            learned_rows = far.rows,
+            learn_ms = far.stand_in.ms.round(),
+            "DIAG: head guesses complete"
+        );
+        if let Some(model) = far.last.and_then(|k| models.get_mut(&k)) {
+            absorb_the_reply(model, far.stand_in);
+        }
+    }
+
+    fn forget_cancelled(&mut self, cancelled: &CancelledSet) {
+        if !self.0.is_empty() {
+            self.0.retain(|id, _| !cancelled.contains_key(id));
+        }
+    }
+
+    /// What the request's forwards kept below `upto` into its stand-in. A
+    /// failure drops the far run — its guesses stop; the reply goes on.
+    fn commit(
+        &mut self,
+        request_id: &Uuid,
+        upto: usize,
+        models: &mut HashMap<RangeKey, SplitModel>,
+    ) {
+        let Some(far) = self.0.get_mut(request_id) else {
+            return;
+        };
+        let Some(last) = far.last.and_then(|k| models.get_mut(&k)) else {
+            return;
+        };
+        if let Err(e) = tokio::task::block_in_place(|| far.commit(upto, last)) {
+            tracing::warn!(%request_id, error = %e, "head guesses: stand-in dropped for this reply");
+            self.0.remove(request_id);
+        }
+    }
+}
+
+impl FarRun {
+    fn commit(&mut self, upto: usize, last: &mut SplitModel) -> Result<(), SwarmError> {
+        let Some((near, far)) = kept_pairs(
+            std::mem::take(&mut self.out_of_first),
+            std::mem::take(&mut self.into_last),
+            upto,
+        )?
+        else {
+            return Ok(());
+        };
+        self.rows += near.dim(1).map_err(SwarmError::internal)? as u64;
+        if self.prompt_learned {
+            return self.stand_in.learn_pairs(&near, &far);
+        }
+        self.prompt_learned = true;
+        let (phi, delta) = self.stand_in.pair_rows(&near, &far)?;
+        learn_prompt_rows(last, &mut self.stand_in, phi, delta)
+    }
+}
+
+/// A far run's two ends paired, `[1, kept, hidden]` each, in order: every
+/// first-segment block with the last-segment block of the same positions,
+/// cut to those below `upto` — the positions the reply kept. A block whose
+/// other end never came (its forward failed, or the chain was replanned) is
+/// dropped; so is everything at or past `upto`, which a check rejected.
+fn kept_pairs(
+    out_of_first: Vec<(usize, candle_core::Tensor)>,
+    into_last: Vec<(usize, candle_core::Tensor)>,
+    upto: usize,
+) -> Result<Option<(candle_core::Tensor, candle_core::Tensor)>, SwarmError> {
+    let mut near = Vec::new();
+    let mut far = Vec::new();
+    for (start, a) in out_of_first {
+        let Some((_, b)) = into_last
+            .iter()
+            .find(|(s, b)| *s == start && b.dims() == a.dims())
+        else {
+            continue;
+        };
+        let kept = upto.saturating_sub(start).min(a.dim(1).unwrap_or(0));
+        if kept == 0 {
+            continue;
+        }
+        near.push(a.narrow(1, 0, kept).map_err(SwarmError::internal)?);
+        far.push(b.narrow(1, 0, kept).map_err(SwarmError::internal)?);
+    }
+    if near.is_empty() {
+        return Ok(None);
+    }
+    let cat = |parts: &[candle_core::Tensor]| {
+        candle_core::Tensor::cat(parts, 1).map_err(SwarmError::internal)
+    };
+    Ok(Some((cat(&near)?, cat(&far)?)))
+}
+
+#[cfg(test)]
+mod far_run_tests {
+    use super::kept_pairs;
+    use candle_core::{Device, Tensor};
+
+    /// `rows` positions from `start`, position p's row `[2p, 2p + 1] + side`.
+    fn block(start: usize, rows: usize, side: f32) -> (usize, Tensor) {
+        let v: Vec<f32> = (0..rows * 2)
+            .map(|i| side + (start * 2 + i) as f32)
+            .collect();
+        (
+            start,
+            Tensor::from_vec(v, (1, rows, 2), &Device::Cpu).unwrap(),
+        )
+    }
+
+    /// A prompt of positions 4-9, then a check of four positions from 10 that
+    /// kept two, beside a step at 14 whose last segment never answered: the
+    /// pairs are positions 4-11, each end its own, in order — nothing a check
+    /// rejected, nothing with one end missing.
+    #[test]
+    fn only_kept_positions_with_both_ends_are_paired() {
+        let near = vec![block(4, 6, 0.0), block(10, 4, 0.0), block(14, 1, 0.0)];
+        let far = vec![block(4, 6, 1000.0), block(10, 4, 1000.0)];
+        let (a, b) = kept_pairs(near, far, 12).unwrap().expect("pairs");
+        assert_eq!(a.dims(), &[1, 8, 2]);
+        let a: Vec<f32> = a.flatten_all().unwrap().to_vec1().unwrap();
+        let b: Vec<f32> = b.flatten_all().unwrap().to_vec1().unwrap();
+        let want: Vec<f32> = (4..12)
+            .flat_map(|p| [(2 * p) as f32, (2 * p + 1) as f32])
+            .collect();
+        assert_eq!(a, want);
+        assert_eq!(b, want.iter().map(|x| x + 1000.0).collect::<Vec<_>>());
+        let none_kept = kept_pairs(vec![block(10, 4, 0.0)], vec![block(10, 4, 1.0)], 10);
+        assert!(none_kept.unwrap().is_none(), "nothing kept below its start");
+    }
+}
+
+/// `DaemonMsg::HeadGuess`: commit what the request's forwards kept below the
+/// guess's position, then guess through its far run's stand-in
+/// (`split::draft::guesses_through_far_run`). No guesses — never an error —
+/// where the stand-in has not learned enough or failed; an error only where
+/// the guess itself failed, which the coordinator answers by cutting the
+/// caches back with its next check.
+async fn handle_head_guess(
+    writer: &mut IpcWriter,
+    models: &mut HashMap<RangeKey, SplitModel>,
+    kv_store: &Arc<KvCacheStore>,
+    far_runs: &mut FarRuns,
+    g: crate::inference::worker_ipc::IpcHeadGuess,
+) -> Result<(), SwarmError> {
+    let key = |r: (u32, u32)| (r.0 as usize, r.1 as usize, 0usize, 1usize);
+    let (first_key, last_key) = (key(g.first_range), key(g.last_range));
+    let run = (first_key.1, last_key.0);
+    let index_pos = g.index_pos as usize;
+    far_runs.commit(&g.request_id, index_pos, models);
+    let req = g.request_id.to_string();
+    let guessed = tokio::task::block_in_place(|| -> Result<Vec<u32>, SwarmError> {
+        let refreshed = match far_runs.0.get_mut(&g.request_id).filter(|f| f.run == run) {
+            Some(far) => far.stand_in.refresh(),
+            None => return Ok(Vec::new()),
+        };
+        if let Err(e) = refreshed {
+            tracing::warn!(request_id = %g.request_id, error = %e, "head guesses: stand-in dropped for this reply");
+            far_runs.0.remove(&g.request_id);
+            return Ok(Vec::new());
+        }
+        let Some(far) = far_runs.0.get_mut(&g.request_id) else {
+            return Ok(Vec::new());
+        };
+        let Some(bridge) = far.stand_in.bridge().cloned() else {
+            return Ok(Vec::new());
+        };
+        if first_key == last_key {
+            return Err(SwarmError::Validation(
+                "a guess at the head needs two different segments".into(),
+            ));
+        }
+        let [Some(first), Some(last)] = models.get_disjoint_mut([&first_key, &last_key]) else {
+            return Err(SwarmError::ServiceUnavailable(format!(
+                "this computer no longer holds both ends of request {}",
+                g.request_id
+            )));
+        };
+        let started = std::time::Instant::now();
+        let guesses = crate::inference::split::guesses_through_far_run(
+            first,
+            last,
+            &bridge,
+            kv_store,
+            &req,
+            index_pos,
+            g.token,
+            g.gamma as usize,
+        )?;
+        far.asked += 1;
+        far.guessed += guesses.len() as u64;
+        far.guess_ms += started.elapsed().as_secs_f64() * 1000.0;
+        Ok(guesses)
+    })?;
+    send_worker(
+        writer,
+        &WorkerMsg::Drafted {
+            request_id: g.request_id,
+            tokens: guessed,
+            parents: Vec::new(),
+            scores: Vec::new(),
+        },
+        &[],
+    )
+    .await
+    .map_err(|e| SwarmError::Internal(format!("send Drafted: {e}")))
+}
+
 /// One drafting call of a tree that flows: start the session (`ask.start`,
 /// after reading the context since `keep`) or take it, grow it, and keep it
 /// again only if the call succeeded.
@@ -7482,6 +7890,7 @@ async fn handle_daemon_msg(
     pending_fetches: &PrefixFetchWaiterMap,
     cancelled: &CancelledSet,
     flow_sessions: &mut FlowSessions,
+    far_runs: &mut FarRuns,
 ) -> bool {
     let activation_compression = options.activation_compression;
     let force_standard_attn = options.force_standard_attn;
@@ -7512,9 +7921,16 @@ async fn handle_daemon_msg(
                 shard_window,
                 activation_compression,
                 options.prefill_chunk_tokens as usize,
+                far_runs,
             )
             .await
             {
+                send_worker_error(writer, request_id, e).await;
+            }
+        }
+        DaemonMsg::HeadGuess(g) => {
+            let request_id = g.request_id;
+            if let Err(e) = handle_head_guess(writer, models, kv_store, far_runs, g).await {
                 send_worker_error(writer, request_id, e).await;
             }
         }
@@ -7677,6 +8093,7 @@ async fn handle_daemon_msg(
             let before = kv_store.occupancy().allocated_bytes;
             kv_store.cleanup_request_id(&request_id.to_string());
             flow_sessions.release(&request_id);
+            far_runs.release(&request_id, models);
             let after = kv_store.occupancy().allocated_bytes;
             if after < before {
                 tracing::debug!(

@@ -1496,13 +1496,22 @@ experts kept in RAM.
    acceptances (1-6% expected), with a twin model handle and forked KV views to build.
 3. **The guess forward as a CUDA graph** — a split's forwards are not captured; the card's layers
    run op by op. Not the guess's cost on its own (item 2): its launches take 4-5 ms.
-4. **Across computers**: a node holding a model's first and last layers ("Start and finish on this
-   computer") can guess the same way, skipping the peers' layers — a check per round trip instead
-   of a token — through a stand-in fitted from the hidden states it already sends and receives,
-   so it needs no far-layer weights. Probed 2026-10-28 with the stand-in at a 69-78% skip: 25-38%
-   first-guess agreement, 0.47-0.62 tokens kept a round (nothing in the gap: 3-22% / 0.03-0.26).
-   Design and what porting it needs: `docs/plans/split_speculation.md` § "Guess at the head through
-   a stand-in for the far layers".
+4. **Across computers — shipped 2026-10-29**: a node holding a model's first and last layers
+   ("Start and finish on this computer") guesses the same way, skipping the peers' layers, through
+   a stand-in its worker fits from the hidden states it already sends and receives — no far-layer
+   weights, nothing new on the wire (`ngram_only_spec::FarRunGuesses`, `split::guesses_through_far_run`,
+   `model_worker::FarRuns`; A/B `SWARMLLM_FAR_RUN_GUESSES=0`). Qwen2.5-14B on two nodes of this
+   machine, A on the card with layers 0-12 + 35-48, B on the processor with 12-35 (`fr/round18.sh`,
+   ABBA): decode 1.34-1.48x with each of B's sends held 50 ms, 1.08-1.20x with none; 33-55% of the
+   guesses kept, γ 0-3; replies part from one-at-a-time only at near-ties (scored against
+   llama.cpp). Evidence: `docs/invariants/inference.md` § "A chain that starts and finishes here
+   guesses through a stand-in for its far run". **Left, best first:** (a) a TREE of the head's
+   guesses — its top few at each position, one forward a level on the card; B already reads trees
+   (`DRAFT_TREES`), and on a real link a round trip dominates the check's extra rows, so coverage
+   is the lever (45% of first guesses kept); (b) a guess at ~30 ms is two segments run op by op —
+   capture it as a graph (item 3's shape); (c) where the head holds less of the model the stand-in
+   guesses worse (69-78% skipped kept 0.47-0.62 a round in the probe), so a drafter stays the
+   guesser there — choose between them by their measured kept-per-round, not by fraction held.
 5. **A mixture-of-experts model by use, not by layer**: Qwen3-30B-A3B reuses 44% of the previous
    token's experts per layer (chance 6%); a card holding 46% of the experts by recency per layer
    would serve 91% of expert reads against 46% by layer (`SWARMLLM_TRACE_EXPERTS` +

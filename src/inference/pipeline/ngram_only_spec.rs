@@ -218,6 +218,138 @@ fn fixed_guess_gamma() -> bool {
     *FIXED.get_or_init(|| std::env::var("SWARMLLM_HEAD_GUESS_GAMMA").as_deref() == Ok("fixed"))
 }
 
+/// The guesses this node makes at the head of a chain it starts AND ends
+/// ("Start and finish on this computer", or any plan that shape; #366 (4),
+/// `docs/plans/split_speculation.md` § "Guess at the head through a stand-in
+/// for the far layers"). Its worker holds both ends, learns from every check
+/// what the far layers did to the hidden state between them
+/// (`ModelProcessPool::learn_far_run`) and guesses through that stand-in on
+/// its own (`ModelProcessPool::head_guess`) — no network in a guess. Asked
+/// only where neither the requester nor prompt lookup has anything to check,
+/// for as many guesses as `dsd_controller::best_gamma_for_check` finds pay at
+/// their measured time; zero is an answer.
+struct FarRunGuesses {
+    first: (u32, u32),
+    last: (u32, u32),
+    gamma: u32,
+    acceptance: crate::inference::dsd_controller::AcceptanceEstimate,
+    /// One guess's time, from the coordinator's side of the call.
+    ms_each: crate::inference::dsd_controller::RecentMedian,
+    rounds: u32,
+    guessed: u32,
+    kept: u32,
+    /// Calls the stand-in answered with nothing: it had not learned enough.
+    empty: u32,
+}
+
+impl FarRunGuesses {
+    /// Guesses asked before any is timed or checked: enough to fit the
+    /// check's line from, few enough to cost little where they miss.
+    const FIRST_GUESSES: u32 = 3;
+
+    /// The plan's two ends, where this node runs both — the first segment
+    /// from layer 0 and the last — and another computer the layers between:
+    /// one worker holds both, so it can stand in for the far run. Not for a
+    /// tensor-parallel plan, nor a model whose checks cannot be taken back
+    /// a guess at a time (recurrent state, `speculation_can_roll_back`).
+    fn for_plan(exec: &PipelineExecutor) -> Option<Self> {
+        if !far_run_guesses_on() || !exec.assignment.tp_groups.is_empty() {
+            return None;
+        }
+        let segments = &exec.assignment.segments;
+        let local = exec.shared_state.identity.node_id();
+        let (first, last) = (segments.first()?, segments.last()?);
+        let between = segments.get(1..segments.len().saturating_sub(1))?;
+        if first.node_id != *local
+            || last.node_id != *local
+            || between.iter().all(|s| s.node_id == *local)
+            || first.layer_range.0 != 0
+            || first.layer_range.1 >= last.layer_range.0
+        {
+            return None;
+        }
+        let architecture = exec
+            .shared_state
+            .gguf_meta_for(&exec.request.model_id)
+            .map(|m| m.architecture.clone());
+        if !super::distributed::speculation_can_roll_back(architecture.as_deref()) {
+            return None;
+        }
+        Some(Self {
+            first: first.layer_range,
+            last: last.layer_range,
+            gamma: Self::FIRST_GUESSES,
+            acceptance: crate::inference::dsd_controller::AcceptanceEstimate::recent(),
+            ms_each: Default::default(),
+            rounds: 0,
+            guessed: 0,
+            kept: 0,
+            empty: 0,
+        })
+    }
+
+    /// The far run between the two ends.
+    fn far_run(&self) -> (u32, u32) {
+        (self.first.1, self.last.0)
+    }
+
+    /// Up to `take` guesses at what follows `token` at `index_pos`.
+    async fn guess(
+        &mut self,
+        exec: &PipelineExecutor,
+        index_pos: usize,
+        token: u32,
+        take: u32,
+    ) -> Result<Vec<u32>, SwarmError> {
+        let started = std::time::Instant::now();
+        let guesses = exec
+            .shared_state
+            .model_process_pool
+            .head_guess(
+                crate::inference::worker_ipc::IpcHeadGuess {
+                    request_id: exec.request.id,
+                    model_id: exec.request.model_id.clone(),
+                    first_range: self.first,
+                    last_range: self.last,
+                    index_pos: index_pos as u32,
+                    token,
+                    gamma: take,
+                },
+                None,
+            )
+            .await?;
+        if guesses.is_empty() {
+            self.empty += 1;
+        } else {
+            self.ms_each
+                .record(started.elapsed().as_secs_f64() * 1000.0 / f64::from(take.max(1)));
+        }
+        Ok(guesses)
+    }
+
+    /// The next round's count, from this reply's checks and guesses.
+    fn choose_gamma(
+        &mut self,
+        check: &crate::inference::dsd_controller::CheckCost,
+        cfg: &crate::config::InferenceConfig,
+    ) {
+        self.gamma = crate::inference::dsd_controller::best_gamma_for_check(
+            self.acceptance.alpha(),
+            check,
+            self.ms_each.median().unwrap_or(0.0),
+            self.gamma,
+            cfg.guesses_per_check(),
+        );
+    }
+}
+
+/// `SWARMLLM_FAR_RUN_GUESSES=0`: a chain this node starts and ends is not guessed
+/// at its head ([`FarRunGuesses`]), for A/B inside one binary.
+fn far_run_guesses_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("SWARMLLM_FAR_RUN_GUESSES").as_deref() != Ok("0"))
+}
+
 /// `SWARMLLM_HEAD_GUESS_WAIT=0`: never wait for the requester's next window —
 /// the rule before #318 (a), for A/B inside one binary.
 fn guess_wait_switched_off() -> bool {
@@ -492,7 +624,8 @@ impl PipelineExecutor {
             "DIAG: try_ngram_only_distributed entry"
         );
         let guess_slot = requester_guess_slot(self);
-        if !eligible(self, guess_slot.is_some()) {
+        let mut far_run = FarRunGuesses::for_plan(self);
+        if !eligible(self, guess_slot.is_some() || far_run.is_some()) {
             tracing::debug!(
                 request_id = %self.request.id,
                 "DIAG: try_ngram_only_distributed ineligible — skipping"
@@ -550,6 +683,14 @@ impl PipelineExecutor {
         // Uses existing forward_through_segments which handles N-segment
         // pipelines + local-vs-remote dispatch + retries.
         let prompt_bytes = prompt.as_bytes().to_vec();
+        // From the prompt pass on, this node's worker keeps the hidden states
+        // at the far run's two ends, for the guesses below; withdrawn when the
+        // reply ends, however it ends.
+        let _far_run_learning = far_run.as_ref().map(|g| {
+            self.shared_state
+                .model_process_pool
+                .learn_far_run(request_id, g.far_run())
+        });
         let prefill_result = self
             .forward_through_segments(request_id, 0, 0, prompt_bytes, None, false, &[])
             .await?;
@@ -596,6 +737,8 @@ impl PipelineExecutor {
         });
 
         // ── Phase 2: decode loop ──
+        // From the first token on: the reply's decode time, logged at the end.
+        let decode_started = std::time::Instant::now();
         let mut generated: Vec<u32> = vec![first_token];
         // After prefill: remote KV holds `prompt_token_count` positions
         // (0..prompt_token_count-1). The first verify batch ships
@@ -741,6 +884,28 @@ impl PipelineExecutor {
             } else {
                 Vec::new()
             };
+            // Nothing else to check: guess through the far run's stand-in. A
+            // guess that failed stops them for the reply, and the next check
+            // cuts this node's caches back to where the reply is.
+            let mut from_far_run = false;
+            let drafts = match far_run.as_mut() {
+                Some(g) if drafts.is_empty() && g.gamma > 0 => {
+                    let take = g.gamma.min(remaining);
+                    match g.guess(self, current_pos, last_token, take).await {
+                        Ok(guesses) => {
+                            from_far_run = !guesses.is_empty();
+                            guesses
+                        }
+                        Err(e) => {
+                            tracing::warn!(%request_id, error = %e, "far-run guesses stopped for this reply");
+                            pending_truncate.get_or_insert(current_pos as u32);
+                            far_run = None;
+                            Vec::new()
+                        }
+                    }
+                }
+                _ => drafts,
+            };
 
             if drafts.is_empty() {
                 // ── Fallback: single-token verify (γ=0 batch = 1 position) ──
@@ -798,10 +963,13 @@ impl PipelineExecutor {
                         return Err(e);
                     }
                 };
-                if guess_slot.is_some() {
+                if guess_slot.is_some() || far_run.is_some() {
                     check_cost.record(1, checked_at.elapsed().as_secs_f64() * 1000.0);
                     guess_gamma =
                         choose_guess_gamma(&guess_acceptance, &check_cost, guess_gamma, cfg);
+                }
+                if let Some(g) = far_run.as_mut() {
+                    g.choose_gamma(&check_cost, cfg);
                 }
                 last_token = bonus;
                 if let Some(slot) = &guess_slot {
@@ -833,6 +1001,11 @@ impl PipelineExecutor {
             if from_requester {
                 guess_rounds += 1;
                 guesses_checked += drafts.len() as u32;
+            } else if from_far_run {
+                if let Some(g) = far_run.as_mut() {
+                    g.rounds += 1;
+                    g.guessed += drafts.len() as u32;
+                }
             } else {
                 ngram_rounds += 1;
                 // R137: bump lifetime hit counter (counts hit-rounds, not
@@ -889,17 +1062,26 @@ impl PipelineExecutor {
             if from_requester {
                 guesses_kept += accepted.len() as u32;
                 guess_acceptance.record(accepted.len() as u32, drafts.len() as u32);
+            } else if from_far_run {
+                if let Some(g) = far_run.as_mut() {
+                    g.kept += accepted.len() as u32;
+                    g.acceptance
+                        .record(accepted.len() as u32, drafts.len() as u32);
+                }
             } else if from_earlier {
                 earlier_rounds += 1;
                 earlier_checked += drafts.len() as u32;
                 earlier_kept += accepted.len() as u32;
             }
-            if guess_slot.is_some() {
+            if guess_slot.is_some() || far_run.is_some() {
                 check_cost.record(
                     verify_tokens.len() as u32,
                     checked_at.elapsed().as_secs_f64() * 1000.0,
                 );
                 guess_gamma = choose_guess_gamma(&guess_acceptance, &check_cost, guess_gamma, cfg);
+            }
+            if let Some(g) = far_run.as_mut() {
+                g.choose_gamma(&check_cost, cfg);
             }
             if let Some(slot) = &guess_slot {
                 slot.record(generated.len(), &emitted);
@@ -953,7 +1135,8 @@ impl PipelineExecutor {
 
         // The payoff is prompt lookup's: a reply the requester guessed for
         // says nothing about what prompt lookup earns the next one.
-        if guess_rounds == 0 {
+        let far_run_rounds = far_run.as_ref().map_or(0, |g| g.rounds);
+        if guess_rounds == 0 && far_run_rounds == 0 {
             record_payoff(generated.len() as u32, ngram_rounds + fallback_rounds);
         }
         if let Some(store) = &earlier {
@@ -966,6 +1149,7 @@ impl PipelineExecutor {
         tracing::info!(
             request_id = %request_id,
             generated_tokens = generated.len(),
+            decode_ms = decode_started.elapsed().as_millis() as u64,
             ngram_rounds,
             fallback_rounds,
             earlier = earlier.is_some(),
@@ -978,6 +1162,13 @@ impl PipelineExecutor {
             guesses_checked,
             guesses_kept,
             guess_gamma,
+            far_run_guesses = far_run.is_some(),
+            far_run_rounds,
+            far_run_guessed = far_run.as_ref().map_or(0, |g| g.guessed),
+            far_run_kept = far_run.as_ref().map_or(0, |g| g.kept),
+            far_run_empty = far_run.as_ref().map_or(0, |g| g.empty),
+            far_run_gamma = far_run.as_ref().map_or(0, |g| g.gamma),
+            far_run_ms_each = ?far_run.as_ref().and_then(|g| g.ms_each.median()).map(|m| (m * 10.0).round() / 10.0),
             guess_waits = waits.waits,
             guess_waits_paid = waits.paid,
             guess_waited_ms = waits.waited_ms.round(),

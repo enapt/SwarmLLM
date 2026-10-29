@@ -46,6 +46,10 @@ pub enum DaemonMsg {
     /// — the drafter of speculation across computers (`pipeline::dsd`) run in
     /// this engine from the model's shards. Answered with `WorkerMsg::Drafted`.
     Draft(IpcDraft),
+    /// Guess the next tokens of a chain whose first and last segments this
+    /// worker holds, through a stand-in for the far layers between them
+    /// (`IpcHeadGuess`). Answered with `WorkerMsg::Drafted`.
+    HeadGuess(IpcHeadGuess),
     /// Unload a specific layer range (free its GPU memory within the worker).
     Unload {
         layer_start: usize,
@@ -504,6 +508,33 @@ pub struct IpcForward {
     /// set it.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub for_the_owner: bool,
+    /// The far run `[a, b)` of a chain whose first and last segments this
+    /// worker both holds, which its coordinator guesses through
+    /// (`DaemonMsg::HeadGuess`): this forward's hidden state at the run's
+    /// near end (a first segment's output) or far end (a last segment's input)
+    /// is kept to learn the run's stand-in (`model_worker::FarRuns`). Set only
+    /// by the daemon, for a request it coordinates
+    /// (`ModelProcessPool::learn_far_run`), never read off the network.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub far_run: Option<(u32, u32)>,
+}
+
+/// A guess at the head of a chain whose two ends this worker holds
+/// (`DaemonMsg::HeadGuess`): commit what the request's forwards kept below
+/// `index_pos`, cut both ends' caches back to it, then guess `gamma` tokens
+/// after `token` — each through the first segment, the far run's stand-in
+/// and the last segment — and cut both back to `index_pos` again. Answered
+/// with `WorkerMsg::Drafted` (no guesses where the stand-in has not learned
+/// enough yet).
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct IpcHeadGuess {
+    pub request_id: Uuid,
+    pub model_id: ModelId,
+    pub first_range: (u32, u32),
+    pub last_range: (u32, u32),
+    pub index_pos: u32,
+    pub token: u32,
+    pub gamma: u32,
 }
 
 /// Forward-pass result header.
@@ -1415,6 +1446,7 @@ mod tests {
             truncate_kv_to: None,
             prompt_cache: None,
             for_the_owner: false,
+            far_run: None,
             prompt_span: None,
             image_spans: Vec::new(),
             draft_parents: Vec::new(),
@@ -1459,6 +1491,7 @@ mod tests {
             truncate_kv_to: None,
             prompt_cache: None,
             for_the_owner,
+            far_run: None,
             prompt_span: None,
             image_spans: Vec::new(),
             draft_parents: Vec::new(),
@@ -1505,6 +1538,7 @@ mod tests {
             truncate_kv_to: None,
             prompt_cache: None,
             for_the_owner: false,
+            far_run: None,
             prompt_span: None,
             image_spans: Vec::new(),
             draft_parents: Vec::new(),

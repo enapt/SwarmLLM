@@ -825,3 +825,94 @@ fn a_tree_that_flows_proposes_what_a_fresh_read_of_each_path_ranks_likeliest() {
         Err(crate::error::SwarmError::ServiceUnavailable(_))
     ));
 }
+
+/// A first segment of one layer, with the token table, and a last of one
+/// layer, with the output head, of a three-layer model whose middle layer
+/// runs on another computer — a chain this node starts and ends.
+fn chain_ends() -> (SplitModel, SplitModel) {
+    let hidden = 128;
+    let mut first = make_test_split_model(1, hidden);
+    let table = Tensor::randn(0f32, 1.0, (VOCAB, hidden), &Device::Cpu).unwrap();
+    first.tok_embeddings = Some(TokenEmbedding::Dense(candle_nn::Embedding::new(
+        table, hidden,
+    )));
+    first.total_layers = 3;
+    first.layer_end = 1;
+    first.kv_model_key = "0-1-3".into();
+    let mut last = make_test_split_model(1, hidden);
+    last.norm = Some(make_rms_norm_dim(hidden, &Device::Cpu));
+    let w = (Tensor::randn(0f32, 1.0, (VOCAB, hidden), &Device::Cpu).unwrap() * 0.5).unwrap();
+    last.output = Some(
+        QMatMul::from_qtensor(
+            candle_core::quantized::QTensor::quantize(&w, candle_core::quantized::GgmlDType::F32)
+                .unwrap(),
+        )
+        .unwrap(),
+    );
+    last.total_layers = 3;
+    last.layer_start = 2;
+    last.layer_end = 3;
+    last.kv_model_key = "2-3-3".into();
+    (first, last)
+}
+
+/// A guess at the head of such a chain reads exactly what its two ends read
+/// a token at a time with the stand-in between them — each guess the greedy
+/// pick, read back in for the next — and leaves both ends' caches where the
+/// reply is (`guesses_through_far_run`).
+#[test]
+fn a_guess_through_a_far_run_is_the_two_ends_read_step_by_step() {
+    let (mut first, mut last) = chain_ends();
+    let bridge = SkipBridge::Shift {
+        run_end: 2,
+        shift: (Tensor::randn(0f32, 1.0, (128,), &Device::Cpu).unwrap() * 0.3).unwrap(),
+    };
+    let step = |first: &mut SplitModel,
+                last: &mut SplitModel,
+                kv: &KvCacheStore,
+                ids: &[u32],
+                at: usize|
+     -> u32 {
+        let input = first.tensor_from_ids(ids).unwrap();
+        let h = first.forward(&input, at, kv, "r").unwrap();
+        let h = bridge.apply(&h).unwrap();
+        let logits: Vec<f32> = last
+            .forward(&h, at, kv, "r")
+            .unwrap()
+            .flatten_all()
+            .unwrap()
+            .to_vec1()
+            .unwrap();
+        crate::inference::sampling::argmax(&logits)
+    };
+    let prompt = [3u32, 17, 42, 9, 101];
+    let kv = KvCacheStore::new(std::time::Duration::from_secs(60));
+    let next = step(&mut first, &mut last, &kv, &prompt, 0);
+    let got = guesses_through_far_run(
+        &mut first,
+        &mut last,
+        &bridge,
+        &kv,
+        "r",
+        prompt.len(),
+        next,
+        4,
+    )
+    .unwrap();
+    for key in ["0-1-3", "2-3-3"] {
+        assert_eq!(
+            kv.request_positions(key, "r"),
+            prompt.len(),
+            "{key} cut back"
+        );
+    }
+    let fresh = KvCacheStore::new(std::time::Duration::from_secs(60));
+    step(&mut first, &mut last, &fresh, &prompt, 0);
+    let mut want = Vec::new();
+    let mut token = next;
+    for j in 0..4 {
+        token = step(&mut first, &mut last, &fresh, &[token], prompt.len() + j);
+        want.push(token);
+    }
+    assert_eq!(got, want);
+}

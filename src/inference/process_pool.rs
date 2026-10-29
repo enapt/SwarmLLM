@@ -3484,6 +3484,19 @@ pub enum Requester {
     Swarm,
 }
 
+/// A request's forwards keep the hidden states at its chain's far run while
+/// this lives ([`ModelProcessPool::learn_far_run`]); dropped, they stop.
+pub struct FarRunLearning {
+    pool: Arc<ModelProcessPool>,
+    request_id: Uuid,
+}
+
+impl Drop for FarRunLearning {
+    fn drop(&mut self) {
+        self.pool.far_runs.remove(&self.request_id);
+    }
+}
+
 pub struct ModelProcessPool {
     workers: DashMap<ModelId, Arc<WorkerHandle>>,
     /// Serializes worker spawning to prevent TOCTOU races where two concurrent
@@ -3670,6 +3683,12 @@ pub struct ModelProcessPool {
     /// daemon setup (where `Arc<Self>` is available). When unset, `forward()`
     /// bypasses batching entirely regardless of the `continuous_batching` flag.
     batch_scheduler: std::sync::OnceLock<mpsc::Sender<BatchSchedulerMsg>>,
+    /// Requests this node coordinates whose chain starts and ends here, by
+    /// the far run `[a, b)` between their two ends ([`Self::learn_far_run`]):
+    /// each forward of theirs carries it to the worker
+    /// (`IpcForward::far_run`) and goes direct, never through the batch
+    /// scheduler, whose fused forward keeps no hidden state.
+    far_runs: DashMap<Uuid, (u32, u32)>,
     /// Item 8 Phase 1: cross-node prefix-cache announcement sink. Set by
     /// `SharedState::new` after the daemon spawns its forwarder task; reader
     /// actors call `try_send` so a slow daemon never backpressures the worker
@@ -3913,6 +3932,7 @@ impl ModelProcessPool {
             prefill_target_ms: std::sync::atomic::AtomicU64::new(200),
             batched_prefill_forward: std::sync::atomic::AtomicBool::new(true),
             batch_scheduler: std::sync::OnceLock::new(),
+            far_runs: DashMap::new(),
             prefix_manifest_tx: std::sync::OnceLock::new(),
             progress_tx: std::sync::OnceLock::new(),
             prefix_probe_tx: std::sync::OnceLock::new(),
@@ -9912,6 +9932,7 @@ impl ModelProcessPool {
             .continuous_batching
             .load(std::sync::atomic::Ordering::Relaxed)
             && forward_is_schedulable(&forward)
+            && !self.far_runs.contains_key(&forward.request_id)
         {
             if let Some(tx) = self.batch_scheduler.get() {
                 let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
@@ -10070,6 +10091,7 @@ impl ModelProcessPool {
             draft_parents,
             draft_tree_from,
             for_the_owner: requester == Requester::Owner,
+            far_run: self.far_runs.get(&request_id).map(|r| *r.value()),
         };
 
         if handle.dead.load(Ordering::Acquire) {
@@ -10285,6 +10307,104 @@ impl ModelProcessPool {
         crate::inference::cancel::unless_cancelled(wait, cancel.as_ref()).await
     }
 
+    /// Keep, in this node's worker, the hidden states at the two ends of the
+    /// far run `[a, b)` of a chain this node starts and ends, for every
+    /// forward of `request_id` from now on (`IpcForward::far_run`), so the
+    /// worker can guess at the head through a stand-in for it
+    /// ([`Self::head_guess`]). Withdrawn when the guard drops — a task that
+    /// ends by an abort gives it back too.
+    pub fn learn_far_run(
+        self: &Arc<Self>,
+        request_id: Uuid,
+        far_run: (u32, u32),
+    ) -> FarRunLearning {
+        self.far_runs.insert(request_id, far_run);
+        FarRunLearning {
+            pool: Arc::clone(self),
+            request_id,
+        }
+    }
+
+    /// Up to `g.gamma` guesses at the head of a chain whose two ends this
+    /// node's worker holds (`DaemonMsg::HeadGuess`), from the stand-in its
+    /// forwards taught ([`Self::learn_far_run`]). Asked only of a live worker:
+    /// a guess never loads a model. Empty where the stand-in has not learned
+    /// enough yet.
+    pub async fn head_guess(
+        &self,
+        g: crate::inference::worker_ipc::IpcHeadGuess,
+        cancel: Option<Arc<std::sync::atomic::AtomicBool>>,
+    ) -> Result<Vec<u32>, SwarmError> {
+        let model_id = g.model_id.clone();
+        let request_id = g.request_id;
+        crate::inference::cancel::bail_if_cancelled(cancel.as_ref())?;
+        let Some(handle) = self.live_worker(&model_id) else {
+            return Err(SwarmError::ServiceUnavailable(format!(
+                "no worker holds {model_id} to guess with"
+            )));
+        };
+        let (resp_tx, mut resp_rx) = mpsc::channel(RESPONSE_CHANNEL_CAPACITY);
+        let (mut guard, _) = handle.register_response(request_id, resp_tx, true);
+        let attempt_token = guard.token;
+        {
+            let mut writer = handle.writer.lock().await;
+            if let Err(e) = send_daemon(&mut *writer, &DaemonMsg::HeadGuess(g), &[]).await {
+                drop(writer);
+                self.evict_this_worker(&model_id, &handle, "IPC send failed");
+                guard.disarm();
+                return Err(SwarmError::ServiceUnavailable(format!(
+                    "send HeadGuess: {e}"
+                )));
+            }
+        }
+        let wait = async {
+            loop {
+                match resp_rx.recv().await {
+                    Some((
+                        WorkerMsg::Drafted {
+                            request_id: rid,
+                            tokens,
+                            ..
+                        },
+                        _,
+                    )) if rid == request_id => {
+                        guard.disarm();
+                        return Ok(tokens);
+                    }
+                    Some((
+                        WorkerMsg::Error {
+                            request_id: rid,
+                            message,
+                            fatal,
+                            local_memory_refusal,
+                        },
+                        _,
+                    )) if rid == request_id => {
+                        guard.disarm();
+                        return Err(self.classify_worker_error(
+                            &model_id,
+                            message,
+                            fatal,
+                            local_memory_refusal,
+                        ));
+                    }
+                    Some(_) => continue,
+                    None => {
+                        guard.disarm();
+                        return Err(self.reply_channel_closed(
+                            &model_id,
+                            &handle,
+                            request_id,
+                            attempt_token,
+                            "before reply",
+                        ));
+                    }
+                }
+            }
+        };
+        crate::inference::cancel::unless_cancelled(wait, cancel.as_ref()).await
+    }
+
     /// Batched forward: send N forwards in a single `DaemonMsg::BatchForward`
     /// message. Worker runs them through the fused `SplitModel::forward_batch`
     /// when they're compatible (same model/layer_range, decode-only, no vision
@@ -10420,6 +10540,9 @@ impl ModelProcessPool {
                 // Decode steps only (see `dispatch_scheduler_group`); the
                 // owner's mark, if any, was made at the prompt pass.
                 for_the_owner: false,
+                // A request learning a far run is never batched
+                // (`ModelProcessPool::far_runs`).
+                far_run: None,
                 prompt_span: None,
                 image_spans: Vec::new(),
                 draft_parents: Vec::new(),

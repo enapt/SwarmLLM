@@ -3492,6 +3492,71 @@ map online, from the hidden states a split computes anyway, and keeps it across 
 - `test-split --gpu-layers N` on a whole model now places the run in the middle; the loader logs
   `processor_from`/`processor_to`.
 
+## A chain that starts and finishes here guesses through a stand-in for its far run (2026-10-29, #366 (4))
+
+**What it is.** A boomerang chain ("Start and finish on this computer") runs the model's first
+layers `[0, a)` and its last `[b, L)` with the output head on THIS node, a peer's layers between.
+Without a drafter the n-gram loop sends one token a round trip wherever the conversation has
+nothing to copy. The head could guess alone by skipping the peer's layers, and every round trip
+already hands it the far run's exact input and output (`h_a`, which it sent; `h_b`, which it
+received). So its worker fits the card guesses' stand-in (`RunStandIn`, the same ridge, prior
+and carry) for the far run from those pairs, and guesses first segment → stand-in → last segment,
+no network in a guess. No published method fits a stand-in for skipped layers online (searched
+2026-10-28, `docs/plans/split_speculation.md` § "Guess at the head through a stand-in for the far
+layers"); it needs no weights of the far layers, which no design may ask a user to hold
+(user, 2026-09-28).
+
+**Where it lives.** Both end segments are `SplitModel`s in ONE worker (one worker per model), so
+the whole guesser lives in the worker and nothing changes on the wire:
+- The daemon marks a request (`ModelProcessPool::learn_far_run` → `IpcForward::far_run`); the
+  worker keeps the first segment's output rows and the last segment's input rows by position
+  (`FarRuns::keep`; a prompt's last `prompt_capture()` rows), and learns a pair only once a later
+  first-segment forward starts past it — a committed position (`FarRuns::commit` → `kept_pairs`,
+  test `only_kept_positions_with_both_ends_are_paired`; it fails with the `upto` cut removed).
+  The prompt's pairs join the model's prior for this reply (`learn_prompt_rows`, shared with the
+  card guesses); the reply is absorbed into the prior at release (`FarRuns::release`).
+- A guess (`DaemonMsg::HeadGuess` → `handle_head_guess` → `split::guesses_through_far_run`) runs
+  on the request's OWN caches, cut to the round's start before and after — gotcha #508 (a stand-in
+  replaces layers, never memory). Test `a_guess_through_a_far_run_is_the_two_ends_read_step_by_step`
+  (equals a fresh store read token by token; fails with the closing cut-back removed: the caches
+  keep the guessed positions). `pair_rows` and `learn_pairs` are pinned against the captured path
+  (`a_far_run_learns_from_pairs_what_a_run_learns_from_captures`).
+- A marked request is never batched: the pool's continuous batching runs forwards outside
+  `handle_forward`, which is where the pairs are caught.
+- The loop (`ngram_only_spec`) asks `FarRunGuesses::for_plan` (both ends local, a peer between,
+  no tensor-parallel group, `speculation_can_roll_back`), treats the guesses as a requester's
+  (bypassing the n-gram payoff gate, which they would otherwise be judged by), sizes γ with
+  `best_gamma_for_check` at the guesses' measured ms each, and records the n-gram payoff only for
+  replies without them. A failed guess truncates and stops guessing for the reply.
+
+**Measured** (`~/swarmllm-gate/deep/fr/round18.sh`, 2026-10-29, one CUDA binary,
+`SWARMLLM_FAR_RUN_GUESSES=0` the control, order off on on off, two nodes on this machine through
+`examples/split_rig.sh split` with `encrypted_pipeline = true`: A = Qwen2.5-14B Q4_K_M shards
+0-3 + 11-15, layers `[0,12)` + `[35,48)` on the RTX 3070 Laptop; B = shards 4-10, layers
+`[12,35)` on the processor — 23 of 48 skipped; three different prompts, 160 greedy tokens):
+- Route `A→B→A` (3 segments) on every ask. Decode of the first reply (`decode_ms` of the loop's
+  closing line): **B's sends as they are** 26.1-26.6 s off, 22.1-24.2 s on (1.08-1.20x); **B's
+  sends held 50 ms** (`DELAY_B=50`) 38.9-39.3 s off, 26.5-29.4 s on (1.34-1.48x). Wall speed of
+  the second prompt (code, 62 prompt tokens): 6.00 → 6.22 tok/s at no delay, 4.12 → 5.40 at 50 ms
+  (1.31x). The 1,732-token summary is dominated by B's prompt pass (≈ 88 s) either way: 1.26 →
+  1.37 tok/s at 50 ms.
+- Mechanism (A's log, `SWARM-SPEC L1 ngram-only: complete` + `DIAG: head guesses complete`):
+  41-98 guessing rounds a reply, 33-55% of the guesses kept (`far_run_kept` / `far_run_guessed`),
+  γ settling at 0-3 (higher with the delay), 21-40 ms a guess (two ends of a 14B on the card, op
+  by op, plus the worker's round trip), 176-274 ms of fitting a reply. The off arm's n-gram loop
+  stands down after its first reply (the payoff gate); the on arm's keeps guessing.
+- **Replies part from the control's at near-ties only**, as a card check of several rows does:
+  scored against llama.cpp (`examples/score_against_reference.py`, the 14B GGUF in
+  `~/swarmllm-ref/q14`), every on-arm reply's tokens are rank 1 but 2-9 of 160, worst rank 2 (once
+  3), largest logit gap 0.18-0.46 — the control's own reply 3-5 not rank 1, worst rank 2, gap
+  0.26-0.33. The on arms also part from each other: a position's check width depends on the
+  round, and the card's row moves with it (a k-quant goes to MMQ from 4 rows, § "A few rows: the
+  line per type and size, inside a capture too").
+
+**What a change must keep.** The guess cuts both caches back on every exit; learning reads only
+committed positions; a request learning one is never batched; nothing here may need the far
+layers' weights or a new wire message.
+
 ## One prefix-cache snapshot is sized by bytes, and keeps the opening (2026-09-26)
 
 `PrefixCache::positions_ceiling` is the most positions one snapshot keeps: the
