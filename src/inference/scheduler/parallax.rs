@@ -350,8 +350,10 @@ pub(super) struct RingFacts {
     /// The peer's published network coordinate, kept only where usable
     /// (`NetworkCoord::is_usable`).
     pub(super) coord: Option<NetworkCoord>,
-    /// It advertises `features::DELEGATED_SPLIT`: it can be handed a split to
-    /// lead (`remote_generate::delegation_eligible` asks the same bit).
+    /// It may be handed this model's split to lead: it advertises
+    /// `features::DELEGATED_SPLIT` and has not declined the model lately
+    /// (`SharedState::peer_may_lead`, the question
+    /// `remote_generate::delegation_eligible` asks too).
     pub(super) leads_splits: bool,
     /// It advertises `features::PIPELINE_CHAIN`: it hands its activations to
     /// the next segment itself (`pipeline::plan_chain`), so a token crosses

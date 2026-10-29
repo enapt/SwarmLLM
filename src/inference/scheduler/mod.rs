@@ -5474,8 +5474,11 @@ impl PipelineScheduler {
                         .get(&node_id)
                         .and_then(|p| p.capability.as_ref().and_then(|c| c.coord))
                         .filter(swarmllm_types::netcoord::NetworkCoord::is_usable),
-                    leads_splits: self.shared_state.peer_advertises_feature(
+                    // The hand-off's own question (`delegation_eligible`):
+                    // advertising it AND not having declined this model lately.
+                    leads_splits: self.shared_state.peer_may_lead(
                         &node_id,
+                        &manifest.id,
                         crate::types::features::DELEGATED_SPLIT | prompt.head_features,
                     ),
                     chains_forwards: self.shared_state.peer_supports_pipeline_chain(&node_id),

@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #372**). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #373**). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -703,6 +703,28 @@ reported by the worker over IPC; the hand-off and the search charge prompt + rep
 against it, and price (not bar) prompt + `max_tokens` beyond it, the stale-figure argument
 Petals makes. #235 removed the way that room most often vanished (finished conversations kept
 for the worker's life), so measure how often a refusal still happens before building this.
+
+#### #372 — A head that holds a 70B whole, and advertises room for it, declines to lead it for memory
+`P2` · routing · **PARTIAL** — 2026-10-29 · history: `docs/invariants/scheduling.md` § "A split none of which is ours is LED by its head" ("A decline is remembered")
+
+Llama-3.3-70B, v0.3.261: the Australian RTX 3060 (`aa3d1e66`) holds all 80 layers, has
+`[0,70)` loaded, publishes `max_hostable_layers=80` and room for 24 more. Handed a split to lead
+(`aa3d1e66 [0,70) → 99aafc41 → 96842635`), it declined within a second: "needs about 36798 MB
+of memory: 34330 MB of weights, 2208 MB of KV cache… budget allows 32620 MB… 70% of [46663 MB
+free]". Driven from here, the same node serves `[0,70)` as a segment. The KV figure is 69 layers'
+(f32, 4096 positions), so its own plan put ~69 layers in its memory with its card holding ~11 —
+not the plan it was handed, and past its own live budget. **Shipped (requester side):** a decline
+is remembered per (head, model) and both the hand-off and the planner's led pricing ask it
+(`SharedState::peer_may_lead`) — every request no longer pays the decline and drives a plan chosen
+for being led. **Shipped (head side, the cause by arithmetic):** the planner counted the idle
+`[0,70)` worker's ~27 GB WHOLE on top of a live budget that is 70% of what is free; the spawn,
+after retiring it, read 0.7 × 46,663 = 32,620 MB — the refusal's own figure.
+`RamBudget::after_unloading` now prices the unload as the spawn reads it (`docs/invariants/memory.md`
+§ "What the unload gives back"). **Left:** (1) the field check after the release — that head leads
+a 70B within 32.6 GB or plans it elsewhere; a stale card reading (a smaller, ~2.7 GB divergence a
+code trace also found: `card_budget_for_planning` keeps the stored budget while a worker lives)
+may remain. (2) The request that meets a decline still drives the led-priced plan; a re-plan
+inside it needs a retry class the router takes on every attempt.
 
 #### #3 — The routing cost model mis-prices a split by regime: a chain its head leads priced as if driven from here, a long reply under-priced by its length, speculation unpriced
 `P2` · routing · **OPEN** — 2026-09-08 · history: archive row #3 and § "The routing cost model's network term overestimates a boomerang" (three dated measurements)

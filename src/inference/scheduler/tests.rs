@@ -554,6 +554,98 @@ fn a_card_node_offers_its_processors_room_beside_the_card() {
     );
 }
 
+/// **A head that declined to lead a model is not priced as leading it until
+/// the wait ends** (`declined_leads`, 2026-10-29). The Australian RTX 3060 held
+/// a 70B whole and advertised `DELEGATED_SPLIT`; the planner priced a chain as
+/// led by it on every request, the head declined every time, and this node
+/// drove a chain chosen only for being led. The hand-off asks the same
+/// question (`a_head_that_declined_to_lead_is_not_handed_the_model_again`).
+#[test]
+fn a_head_that_declined_to_lead_is_not_priced_as_leading_the_model() {
+    use crate::types::features::DELEGATED_SPLIT;
+    let state = make_shared_state();
+    let local_id = state.identity.node_id().clone();
+    let head = NodeId([0xaa; 32]);
+    let model = ModelId("seventy".into());
+    let manifest = make_manifest(
+        "seventy",
+        80,
+        vec![ShardInfo {
+            index: 0,
+            layer_range: (0, 80),
+            size_bytes: 1 << 30,
+            hash: [0u8; 32],
+            tensors: vec![],
+        }],
+    );
+    state.model_registry.register_manifest(manifest);
+    state.model_registry.record_shard_holder(
+        ShardId {
+            model_id: model.clone(),
+            index: 0,
+        },
+        head.clone(),
+    );
+    let mut cap = capability_with_gpu(Some(12_000));
+    cap.node_id = head.clone();
+    cap.features = DELEGATED_SPLIT;
+    state.peer_registry.insert(
+        head.clone(),
+        PeerInfo {
+            node_id: head.clone(),
+            addresses: vec![],
+            capability: Some(cap),
+            last_seen: chrono::Utc::now(),
+            latency_ms: Some(420),
+            trust_score: 0.8,
+            peer_id_bytes: None,
+            ack_srtt_ms: None,
+            active_request_count: 0,
+            first_seen: 0,
+            verified_transaction_count: 0,
+            is_lan_peer: false,
+            goodput_bytes_per_sec: None,
+            goodput_samples: 0,
+        },
+    );
+    state.connected_node_ids.insert(head.clone());
+    let manifest = state.model_registry.get_manifest(&model).unwrap();
+    let leads = || {
+        let prompt: cached_prefix::PromptPlan = None.into();
+        PipelineScheduler::new(state.clone())
+            .gather_candidates(
+                &manifest,
+                &local_id,
+                uuid::Uuid::new_v4(),
+                prompt.with_head_leading(true, 0),
+                super::Purpose::Route,
+                &|| false,
+                crate::types::KeepAsked::Unasked,
+            )
+            .into_iter()
+            .find(|c| c.node_id == head)
+            .expect("fixture: the head is a candidate")
+            .ring
+            .leads_splits
+    };
+
+    assert!(
+        leads(),
+        "fixture: a head advertising DELEGATED_SPLIT may lead"
+    );
+    state.note_head_declined_to_lead(&head, &model);
+    assert!(
+        !leads(),
+        "a head that just declined is priced as the chain it will be: driven from here"
+    );
+    assert!(
+        state.peer_may_lead(&head, &ModelId("fourteen".into()), DELEGATED_SPLIT),
+        "the decline is that model's only"
+    );
+    state.note_head_led(&head, &model);
+    assert!(leads(), "a split it leads forgets the decline");
+}
+
 /// **A warm peer's layers are the card's only as far as its card runs them**
 /// (FUTURE_WORK #361). The RTX 3060 in Australia (12 GB) held 57 of a 70B's 80
 /// layers, about 20 on its card, and read `card_layers=Some(59)`: every held

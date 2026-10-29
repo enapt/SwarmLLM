@@ -3303,6 +3303,28 @@ a node ADVERTISES (`node_model_budget_mb`, and `vram_available_mb` on a card) co
 model as spent on both devices, so a peer plans fewer layers onto it. A relaxed rung plans past
 that figure, up to the ceiling.
 
+**What the unload gives back is counted as the spawn will read it (2026-10-29, #372).** The
+count added the reclaimed memory to the LIVE headroom whole: `live_headroom + reclaimable`. The
+live headroom is 70% of what is free, and the spawn re-reads it after the unload, so it sees
+0.7 × (free + reclaimed) — the planner over-counted by 30% of everything it reclaimed. Field
+case, v0.3.261: the Australian RTX 3060 held all of Llama-3.3-70B with `[0,70)` loaded (~27 GB
+of machine memory charged, ~19.7 GB free). Handed a split to lead, its planner put the whole
+model in that worker's place — 0.7 × 19.7 + 27 = 40.8 GB of room, through
+`a_fresh_spawn_fits_in_place_of_the_worker` and `fresh_run_layers_for_planning` — `grow_worker`
+retired the worker, and the spawn refused: "needs about 36798 MB … 70% of [46663 MB free]
+(32620 MB)". 46,663 × 0.7 is exactly 32,620, the figure the refusal quotes; every request the
+requester handed it was declined that way. `RamBudget::after_unloading` is `after_loading`
+run backwards (that function's doc already said the headroom is a fraction of what is free,
+never the headroom less the load; the reclaim side did the opposite), and
+`headroom_after_reclaim` — the one reader for all three planner-side callers — takes its live
+term from it. Found by a code trace (sonnet, 2026-10-29) from the refusal's numbers, not on
+the head itself (its log is on its machine): the arithmetic fits the refusal exactly, which a
+stale card reading (the trace's second suspect, ~2.7 GB) does not. Field check after the
+release: a led 70B on that head is planned within 32.6 GB or not at all. Test
+`the_memory_an_unload_gives_back_is_counted_as_the_spawn_reads_it` (the field figures, and a
+sweep over machine sizes: the plan never offers more than the spawn then reads; red under
+`SWARMLLM_RECLAIM_HEADROOM=whole`).
+
 **A full card's budget is 1 MB, never 0 (the same day).** The pool reads a 0 card budget as
 "none configured" — `card_verdict` answers `Unjudged` and `admit_to_gpu` admits — while
 `inference_vram_budget_mb` saturated to 0 once other programs held the card past our reserve.

@@ -403,16 +403,22 @@ pub(crate) fn delegation_eligible(exec: &PipelineExecutor) -> bool {
     if head.layer_range.0 != 0 {
         return false;
     }
-    exec.shared_state
-        .peer_advertises_feature(&head.node_id, features_a_head_needs(&exec.request))
+    // Advertising what it needs AND not having declined this model lately —
+    // the planner prices a chain as led through the same question.
+    exec.shared_state.peer_may_lead(
+        &head.node_id,
+        &exec.request.model_id,
+        features_a_head_needs(&exec.request),
+    )
 }
 
 /// What a head must advertise to lead this request: `DELEGATED_SPLIT`, and
 /// `CARRIED_ROUTE` where the request carries a `swarm_route` instruction —
 /// an older head would plan without it (#318 (b)). The one answer, asked by
 /// the hand-off ([`delegation_eligible`]) and by the planner pricing a chain
-/// as led (`PromptPlan::head_features` → `RingFacts::leads_splits`), so a
-/// chain is never priced as led by a head the hand-off then passes over.
+/// as led (`PromptPlan::head_features` → `RingFacts::leads_splits`), both
+/// through `SharedState::peer_may_lead` — so a chain is never priced as led by
+/// a head the hand-off then passes over.
 pub(crate) fn features_a_head_needs(request: &crate::types::InferenceRequest) -> u64 {
     use crate::types::features::{CARRIED_ROUTE, DELEGATED_SPLIT};
     if request
@@ -707,6 +713,9 @@ impl PipelineExecutor {
     /// one of those leaves this node able to coordinate the plan it already
     /// has, and nothing has been shown to the caller twice. A failure after
     /// tokens arrived is the request's, exactly as for a whole-model hand-off.
+    /// A decline is remembered per (head, model) (`declined_leads`): later
+    /// requests neither hand that head the model nor price a chain as led by
+    /// it until the wait ends, and a split it leads forgets it.
     pub(super) async fn try_delegated_split(
         &mut self,
         token_tx: Option<StreamingTokenTx>,
@@ -752,14 +761,33 @@ impl PipelineExecutor {
                     .await;
             }
         }
+        if outcome.is_ok() || self.hand_off_emitted > 0 {
+            // It led: whatever it declined before is forgotten.
+            self.shared_state
+                .note_head_led(&head, &self.request.model_id);
+        }
         match outcome {
             Err(e) if self.hand_off_emitted == 0 => {
+                // A decline is a fact about the head: until the wait ends it is
+                // neither asked to lead this model nor priced as leading it
+                // (`SharedState::peer_may_lead`, `declined_leads`). Without it,
+                // every request priced the chain as led, waited for the same
+                // decline, and drove a plan chosen only for being led
+                // (2026-10-29, the 70B at 0.95-1.42 tok/s). A reader who left
+                // is not the head's decline.
+                let passed_over_secs = (!self.request.is_cancelled()).then(|| {
+                    self.shared_state
+                        .note_head_declined_to_lead(&head, &self.request.model_id)
+                        .as_secs()
+                });
                 tracing::warn!(
                     request_id = %self.request.id,
                     delegate = %head,
                     error = %e,
+                    passed_over_secs,
                     "delegated split: the delegate did not serve it — coordinating the \
-                     same plan from here instead"
+                     same plan from here instead; not asked to lead this model again, nor \
+                     priced as leading it, until the wait ends"
                 );
                 Ok(None)
             }

@@ -578,6 +578,54 @@ mod tests {
         );
     }
 
+    /// **A head that declined to lead a model is not handed it again until the
+    /// wait ends, and a split it leads forgets the decline** (`declined_leads`,
+    /// 2026-10-29: the 70B's head declined every request, each paying the wait
+    /// and then driving a plan chosen only for being led). The planner asks
+    /// the same question (`a_head_that_declined_to_lead_is_not_priced_as_leading_the_model`).
+    #[tokio::test]
+    async fn a_head_that_declined_to_lead_is_not_handed_the_model_again() {
+        use crate::inference::pipeline::remote_generate::delegation_eligible;
+        use crate::inference::pipeline::tests::peer_advertising;
+        use swarmllm_types::node::features::DELEGATED_SPLIT;
+        let state = crate::inference::pipeline::tests::make_test_state();
+        let (b, c) = (NodeId([0x0b; 32]), NodeId([0x0c; 32]));
+        state
+            .peer_registry
+            .insert(b.clone(), peer_advertising(&b, DELEGATED_SPLIT));
+        state
+            .peer_registry
+            .insert(c.clone(), peer_advertising(&c, DELEGATED_SPLIT));
+        let split = || vec![segment(b.clone(), (0, 16)), segment(c.clone(), (16, 32))];
+        let model = executor_for(state.clone(), split())
+            .request
+            .model_id
+            .clone();
+        assert!(
+            delegation_eligible(&executor_for(state.clone(), split())),
+            "fixture: the head leads"
+        );
+
+        state.note_head_declined_to_lead(&b, &model);
+        assert!(
+            !delegation_eligible(&executor_for(state.clone(), split())),
+            "a head that just declined is not asked again: this node drives the plan"
+        );
+        assert!(
+            delegation_eligible(&executor_for(
+                state.clone(),
+                vec![segment(c.clone(), (0, 16)), segment(b.clone(), (16, 32))]
+            )),
+            "another head may still lead"
+        );
+
+        state.note_head_led(&b, &model);
+        assert!(
+            delegation_eligible(&executor_for(state.clone(), split())),
+            "a split it leads forgets the decline"
+        );
+    }
+
     /// **A request a peer delegated to us runs as the swarm's work, never as
     /// the owner's** (`pipeline::worker_requester`). As the owner's, a peer
     /// could have this machine read its prompts on every core the owner is

@@ -729,6 +729,14 @@ fn headroom_floor_enabled() -> bool {
     })
 }
 
+/// `SWARMLLM_RECLAIM_HEADROOM=whole` counts memory an unload gives back
+/// whole on top of the live headroom, as before 2026-10-29 — the control arm
+/// of [`RamBudget::after_unloading`] (#372). Read each call, so a test can
+/// toggle it.
+fn reclaim_counted_whole() -> bool {
+    std::env::var("SWARMLLM_RECLAIM_HEADROOM").is_ok_and(|v| v.trim() == "whole")
+}
+
 impl RamBudget {
     pub fn from_machine(cap_mb: u64, configured_mb: u64, total_mb: u64, available_mb: u64) -> Self {
         let live_headroom_mb = live_headroom_mb(available_mb, total_mb, headroom_floor_enabled());
@@ -830,11 +838,47 @@ impl RamBudget {
     /// models charged `reclaimable_mb` are unloaded — the quantity behind
     /// [`Self::allows_after_reclaim`], for a planner that sizes a share rather
     /// than asking about one (`ModelProcessPool::max_local_hostable_layers` on
-    /// the processor, #276).
+    /// the processor, #276). The live term is the one the spawn reads AFTER
+    /// the unload ([`Self::after_unloading`]): 70% of what is then free, never
+    /// the headroom now plus the whole of what goes.
     pub fn headroom_after_reclaim(&self, committed_mb: u64, reclaimable_mb: u64) -> u64 {
+        let live = if reclaim_counted_whole() {
+            self.live_headroom_mb.saturating_add(reclaimable_mb)
+        } else {
+            self.after_unloading(reclaimable_mb).live_headroom_mb
+        };
         self.cap_mb
             .saturating_sub(committed_mb.saturating_sub(reclaimable_mb))
-            .min(self.live_headroom_mb.saturating_add(reclaimable_mb))
+            .min(live)
+    }
+
+    /// This budget as it will read once `unloading_mb` has been unloaded
+    /// first: that much more available, and the live headroom
+    /// ([`live_headroom_mb`]) taken of the new figure — [`Self::after_loading`]
+    /// run backwards. Adding the memory to the HEADROOM counted it whole where
+    /// the headroom is 70% of what is free: a head holding a 70B's `[0,70)`
+    /// (~27 GB charged, 19.7 GB free) planned the whole model in its worker's
+    /// place against 0.7 × 19.7 + 27 = 40.8 GB, retired the worker, and its
+    /// spawn found 0.7 × 46.7 = 32.6 GB and refused 36.8 GB (2026-10-29,
+    /// FUTURE_WORK #372). An unreadable machine stays unjudged; never more
+    /// available than the machine has.
+    pub fn after_unloading(&self, unloading_mb: u64) -> Self {
+        if unloading_mb == 0 || self.available_mb == 0 {
+            return *self;
+        }
+        let mut available_mb = self.available_mb.saturating_add(unloading_mb);
+        if self.total_mb > 0 {
+            available_mb = available_mb.min(self.total_mb);
+        }
+        Self {
+            available_mb,
+            live_headroom_mb: live_headroom_mb(
+                available_mb,
+                self.total_mb,
+                headroom_floor_enabled(),
+            ),
+            ..*self
+        }
     }
 
     /// Is the `total/4` floor the reason `live_headroom_mb` is what it is?
@@ -3055,6 +3099,53 @@ mod floor_tests {
         let idle = RamBudget::from_machine(13107, 0, 16384, 14336);
         assert_eq!(idle.live_headroom_mb, 10010); // 14336/100*70, divide truncates first
         assert!(idle.allows(0, 9000));
+    }
+
+    /// **What an unload gives back is counted as the spawn will read it**
+    /// (#372): 70% of what is then free, never the headroom now plus the whole
+    /// of it. The field case (2026-10-29): a head with a 70B's `[0,70)` loaded
+    /// (27,000 MB charged, 19,663 MB free) planned the whole model in that
+    /// worker's place, retired it, and its spawn refused 36,798 MB against
+    /// 32,620 — 70% of the 46,663 MB then free.
+    #[test]
+    fn the_memory_an_unload_gives_back_is_counted_as_the_spawn_reads_it() {
+        let now = RamBudget::from_machine(46_000, 46_000, 65_536, 19_663);
+        let after = RamBudget::from_machine(46_000, 46_000, 65_536, 19_663 + 27_000);
+        assert_eq!(after.live_headroom_mb, 32_620, "the refusal's own figure");
+        assert_eq!(
+            now.headroom_after_reclaim(27_000, 27_000),
+            32_620,
+            "the plan's room after the unload is the spawn's"
+        );
+        assert!(
+            !now.allows_after_reclaim(27_000, 36_798, 27_000),
+            "the run the spawn refused is not planned"
+        );
+        assert!(
+            after.allows(0, 32_000) && now.allows_after_reclaim(27_000, 32_000, 27_000),
+            "what the spawn admits, the plan still offers"
+        );
+        for total in [8_192u64, 16_384, 65_536] {
+            for available in (512..total).step_by(1_024) {
+                for reclaim in [512u64, 4_000, total / 2] {
+                    let planned = RamBudget::from_machine(total, 0, total, available)
+                        .headroom_after_reclaim(reclaim, reclaim);
+                    let spawn =
+                        RamBudget::from_machine(total, 0, total, (available + reclaim).min(total))
+                            .live_headroom_mb;
+                    assert!(
+                        planned <= spawn,
+                        "{total} MB machine, {available} MB free, {reclaim} MB unloaded: \
+                         planned {planned} MB, the spawn reads {spawn} MB"
+                    );
+                }
+            }
+        }
+        assert_eq!(
+            RamBudget::cap_only(8_000).headroom_after_reclaim(4_000, 4_000),
+            8_000,
+            "an unreadable machine stays unjudged"
+        );
     }
 
     /// Both behaviours, through the pure helper, so the change is visible as a

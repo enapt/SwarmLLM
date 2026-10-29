@@ -19,6 +19,7 @@ mod canonical;
 mod capacity;
 pub(crate) mod capacity_plan;
 mod credits;
+pub(crate) mod declined_leads;
 mod events;
 pub(crate) mod forward_streams;
 mod hf;
@@ -165,6 +166,12 @@ fn manifests_heard_records(
 /// Now in Unix milliseconds — the clock a stored record survives a restart on.
 fn unix_ms_now() -> u64 {
     u64::try_from(chrono::Utc::now().timestamp_millis()).unwrap_or(0)
+}
+
+/// `SWARMLLM_DECLINED_LEADS=0` forgets every head's decline to lead — the
+/// control arm of `declined_leads`.
+fn remember_declined_leads() -> bool {
+    std::env::var("SWARMLLM_DECLINED_LEADS").map_or(true, |v| v.trim() != "0")
 }
 
 #[cfg(test)]
@@ -1506,6 +1513,7 @@ impl SharedState {
                 stats_building: std::sync::atomic::AtomicBool::new(false),
                 peer_speed: DashMap::new(),
                 peer_outliers: Default::default(),
+                declined_leads: Default::default(),
                 peer_model_warm_at: DashMap::new(),
                 swarm_capacity: arc_swap::ArcSwap::from_pointee(SwarmCapacity::default()),
                 segment_latency: Arc::new(
@@ -3654,6 +3662,44 @@ impl SharedState {
         model_id: &crate::types::ModelId,
     ) {
         self.metrics.peer_outliers.note_success(node_id, model_id);
+    }
+
+    /// May `head` be handed `model`'s split to lead? It advertises `needed`
+    /// (`remote_generate::features_a_head_needs`) AND has not declined to lead
+    /// this model lately (`declined_leads`). The ONE answer, asked by the
+    /// hand-off (`remote_generate::delegation_eligible`) and by the planner
+    /// pricing a chain as led (`RingFacts::leads_splits`), so a chain is never
+    /// priced as led by a head the hand-off then passes over. A/B
+    /// `SWARMLLM_DECLINED_LEADS=0` forgets every decline.
+    pub fn peer_may_lead(
+        &self,
+        head: &crate::types::NodeId,
+        model: &crate::types::ModelId,
+        needed: u64,
+    ) -> bool {
+        self.peer_advertises_feature(head, needed)
+            && !(remember_declined_leads()
+                && self
+                    .metrics
+                    .declined_leads
+                    .declining(head, model, std::time::Instant::now()))
+    }
+
+    /// `head` declined to lead `model`'s split before a token of it arrived.
+    /// Returns how long [`Self::peer_may_lead`] now answers no for it.
+    pub fn note_head_declined_to_lead(
+        &self,
+        head: &crate::types::NodeId,
+        model: &crate::types::ModelId,
+    ) -> std::time::Duration {
+        self.metrics
+            .declined_leads
+            .note_declined(head, model, std::time::Instant::now())
+    }
+
+    /// `head` led `model`'s split: forget its declines.
+    pub fn note_head_led(&self, head: &crate::types::NodeId, model: &crate::types::ModelId) {
+        self.metrics.declined_leads.note_led(head, model);
     }
 
     /// Is `node_id` ejected from `model_id`'s plans right now?

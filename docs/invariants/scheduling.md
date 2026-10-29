@@ -4714,6 +4714,31 @@ plan's, not the delegate's — no speed sample. Before any token arrives, any
 failure falls back to running the same plan here (`try_delegated_split` returns
 `Ok(None)`); after, it is the request's failure, as for a whole-model hand-off.
 
+**A decline is remembered, and priced (2026-10-29, #372).** Since #3 (a) the
+planner prices a chain as LED by its head, so a plan may be chosen only because
+someone else would drive it. Field case, v0.3.261, Llama-3.3-70B: the planner
+chose `aa3d1e66 [0,70) → 99aafc41 [70,76) → 96842635 [76,80)` priced as led by
+the Australian RTX 3060 (it holds all 80 layers, advertised `max_hostable_layers=80`,
+70 loaded and room for 24 more). The head declined within a second, its own
+memory check refusing 36,798 MB against a 32,620 MB live budget, and this node
+drove the three far machines itself: 0.95-1.42 tok/s, where the plan through
+this node had answered at 1.97-2.29 the day before. Nothing remembered the
+decline, so all 16 requests of the 3-vs-7-guesses probe repeated it (logs
+`~/swarmllm-70b/out/ab70guesses_*`). **`SharedState::peer_may_lead`** is now the
+one question both readers ask — advertising the features AND not having
+declined this model lately (`daemon::state::declined_leads`, keyed per (head,
+model): 5 min after a decline, doubling to 60 while it keeps declining, as
+Envoy's ejection grows; forgotten when it leads a split). The request that
+meets the decline still drives the plan it has: re-planning inside it would
+need the router to retry a class it does not, and a decline on the third
+attempt would then fail a request that today completes. Tests
+`a_head_that_declined_to_lead_is_not_handed_the_model_again` (hand-off),
+`a_head_that_declined_to_lead_is_not_priced_as_leading_the_model` (planner),
+both red under `SWARMLLM_DECLINED_LEADS=0`. Why the head declined: its planner
+counted its idle `[0,70)` worker's memory whole on top of a budget that is 70% of
+what is free — `docs/invariants/memory.md` § "What the unload gives back is
+counted as the spawn will read it" (#372).
+
 **What it costs, knowingly.** Petals keeps the client in the loop precisely so it
 can replay a failed server's input history to a replacement (arXiv 2209.01188 §
 3.2; its servers also push activations straight to the next server, our

@@ -213,6 +213,12 @@ pub struct MetricsProviders {
     /// `gather_candidates`, which still admits an ejected peer for a part
     /// nobody else holds.
     pub peer_outliers: super::PeerOutliers,
+    /// Heads that declined to lead a model's split, passed over as its leader
+    /// for a wait that doubles while they keep declining (`declined_leads`).
+    /// Written ONLY by `SharedState::note_head_declined_to_lead` /
+    /// `note_head_led` (`remote_generate::try_delegated_split`), read ONLY by
+    /// `SharedState::peer_may_lead`.
+    pub declined_leads: super::declined_leads::DeclinedLeads,
     /// Last time a segment forward for `(peer, model)` completed successfully.
     ///
     /// Its only job is to answer "might this peer have to LOAD the model
