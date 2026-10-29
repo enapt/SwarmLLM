@@ -474,7 +474,8 @@ pub(super) fn led_hop_ms(from: &NodeCandidate, to: &NodeCandidate) -> Option<f32
 }
 
 /// Compute per-vertex cost for a (candidate, range) pair, as a chain this
-/// node drives — every caller but the led chain's pricing.
+/// node drives — every caller but the led chain's pricing — and as the start
+/// of that machine's run (nothing of it ahead, [`layers_ahead_in_run`]).
 pub(super) fn vertex_cost(
     c: &NodeCandidate,
     range: (u32, u32),
@@ -489,6 +490,7 @@ pub(super) fn vertex_cost(
         num_layers,
         prompt_tokens,
         ChainRole::DrivenFromHere,
+        0,
     )
 }
 
@@ -513,6 +515,9 @@ fn vertex_cost_as(
     // does not have a prompt prices requests exactly as it always did.
     prompt_tokens: Option<u32>,
     role: ChainRole,
+    // Layers of the same machine's run before `range` in the chain
+    // ([`layers_ahead_in_run`]): they take the card first.
+    ahead: u32,
 ) -> VertexCost {
     let is_local = &c.node_id == local;
     let layers = (range.1 - range.0) as f32;
@@ -633,12 +638,12 @@ fn vertex_cost_as(
         };
         // The static prior, priced as one of THIS model's layers (#250), on
         // the device each layer of the range runs on.
-        (network, DecodePrice::Prior(range).ms_per_layer(c))
+        (network, DecodePrice::Prior { range, ahead }.ms_per_layer(c))
     };
     let decode_price = if observation.is_some() {
         DecodePrice::Measured(per_layer_ms)
     } else {
-        DecodePrice::Prior(range)
+        DecodePrice::Prior { range, ahead }
     };
 
     // Compute is per forward pass, and a request is many passes. Scaling every
@@ -779,8 +784,9 @@ pub(super) enum DecodePrice {
     /// ms per layer, measured (or a neutral stand-in): one figure for every
     /// layer, whatever device it ran on.
     Measured(f32),
-    /// The static prior over this range.
-    Prior((u32, u32)),
+    /// The static prior over `range`, `ahead` layers of the same machine's
+    /// run before it ([`layers_ahead_in_run`]).
+    Prior { range: (u32, u32), ahead: u32 },
 }
 
 impl DecodePrice {
@@ -788,8 +794,31 @@ impl DecodePrice {
     pub(super) fn ms_per_layer(self, c: &NodeCandidate) -> f32 {
         match self {
             Self::Measured(ms) => ms,
-            Self::Prior(range) => c.prior_ms_per_layer_over(range),
+            Self::Prior { range, ahead } => c.prior_ms_per_layer_over(range, ahead),
         }
+    }
+}
+
+/// How many layers of the same machine's run come before a segment of a
+/// chain: the width of the segments on that machine immediately before it,
+/// back to back — `run_before` when the previous segment is the same
+/// machine's, else none. The search and [`chain_cost_terms`] both ask it, so a
+/// chain is chosen at the price it is reported at.
+///
+/// Back-to-back segments on one machine are ONE range to its loader
+/// (`PipelineScheduler::merge_contiguous`), which fills its card from that
+/// range's first layer; the search already holds such a run to its memory
+/// bound as the merged range. Priced each as if it began the run, three
+/// segments of this node's 14B — its card holds 23 of 48 layers — were priced
+/// as 48 on the card, 17.5 s against 29.5 s for the same run priced whole, and
+/// that all-local chain undercut every split (2026-10-29). A run that starts
+/// after another machine's segment begins afresh, as the loader prices it
+/// (a later run grows the worker on the card, `route_over`'s `local_fits`).
+pub(super) fn layers_ahead_in_run(same_machine_as_previous: bool, run_before: u32) -> u32 {
+    if same_machine_as_previous {
+        run_before
+    } else {
+        0
     }
 }
 
@@ -817,8 +846,8 @@ pub(super) fn prefill_ms_per_layer(c: &NodeCandidate, tokens: u32, decode: Decod
             };
             match decode {
                 DecodePrice::Measured(ms) => ms * tokens as f32 / first_speedup,
-                DecodePrice::Prior(range) => {
-                    let (first, beside) = c.layers_by_device(range);
+                DecodePrice::Prior { range, ahead } => {
+                    let (first, beside) = c.layers_by_device(range, ahead);
                     let width = (first + beside).max(1) as f32;
                     let per_token = first as f32 * c.prior_ms_per_layer() / first_speedup
                         + beside as f32 * c.processor_prior_ms_per_layer() / PREFILL_SPEEDUP_CPU;
@@ -887,10 +916,17 @@ pub(super) fn chain_cost_terms(
     } else {
         0.0
     };
+    // Each segment priced as the search priced it: what the same machine's
+    // run had before it, back to back, takes the card first.
+    let mut run_before = 0u32;
     let mut terms = segments
         .iter()
         .enumerate()
         .filter_map(|(i, seg)| {
+            let same = i > 0 && segments[i - 1].node_id == seg.node_id;
+            let ahead = layers_ahead_in_run(same, run_before);
+            let width = seg.layer_range.1.saturating_sub(seg.layer_range.0);
+            run_before = ahead + width;
             find(&seg.node_id).map(|c| {
                 vertex_cost_as(
                     c,
@@ -899,6 +935,7 @@ pub(super) fn chain_cost_terms(
                     num_layers,
                     prompt_tokens,
                     role(i),
+                    ahead,
                 )
             })
         })
@@ -1325,7 +1362,8 @@ fn route_over(
                 range,
                 cost_ms: vertex_cost(c, range, local_node_id, num_layers, prompt_tokens).total(),
                 led_cost_ms: led_role.map(|role| {
-                    vertex_cost_as(c, range, local_node_id, num_layers, prompt_tokens, role).total()
+                    vertex_cost_as(c, range, local_node_id, num_layers, prompt_tokens, role, 0)
+                        .total()
                 }),
             });
         };
@@ -1612,6 +1650,36 @@ fn route_over(
             _ => false,
         }
     };
+    // A vertex's cost with `ahead` layers of its machine's run before it in
+    // the chain ([`layers_ahead_in_run`]) — driven from here, or in a led
+    // chain (`None` where it cannot be in one). The precomputed cost is the
+    // run's start; only a machine whose card takes part of a range prices a
+    // continuation differently.
+    let cost_in_run = |w: usize, ahead: u32, led: bool| -> Option<f32> {
+        let v = &vertices[w];
+        let precomputed = if led { v.led_cost_ms } else { Some(v.cost_ms) };
+        let c = &candidates[v.cand_idx];
+        if ahead == 0 || c.card_layers.is_none() {
+            return precomputed;
+        }
+        let role = match (led, v.range.0) {
+            (false, _) => ChainRole::DrivenFromHere,
+            (true, 0) => ChainRole::LeadsTheChain,
+            (true, _) => ChainRole::InLedChain,
+        };
+        precomputed.map(|_| {
+            vertex_cost_as(
+                c,
+                v.range,
+                local_node_id,
+                num_layers,
+                prompt_tokens,
+                role,
+                ahead,
+            )
+            .total()
+        })
+    };
     // One pass of the search, seeded from the sources `apply_trust` allows.
     // Everything else — the forward relaxation, both memory bounds, the sink
     // choice — is identical, because trust is a statement about who may take
@@ -1649,6 +1717,9 @@ fn route_over(
         // width of its one run once closed — see `local_fits`.
         let mut local_runs = vec![0u8; n];
         let mut closed_width = vec![0u32; n];
+        // The width of the run of one machine's vertices the path ends in —
+        // what a next vertex of the same machine has ahead of it.
+        let mut run_width = vec![0u32; n];
 
         // Initialize sources.
         for i in 0..n {
@@ -1671,6 +1742,7 @@ fn route_over(
                 local_run[i] = run;
                 local_runs[i] = runs;
                 closed_width[i] = 0;
+                run_width[i] = vertices[i].range.1 - vertices[i].range.0;
             }
         }
 
@@ -1725,11 +1797,15 @@ fn route_over(
                     continue;
                 }
                 // Entering `w`: its own cost, or in a led chain its cost there
-                // plus the hop into it from `v`'s machine.
+                // plus the hop into it from `v`'s machine — as part of the
+                // run it continues where `v` is the same machine's.
+                let ahead = layers_ahead_in_run(
+                    vertices[w_idx].cand_idx == vertices[v_idx].cand_idx,
+                    run_width[v_idx],
+                );
                 let step = match led_by {
-                    None => Some(vertices[w_idx].cost_ms),
-                    Some(_) => vertices[w_idx]
-                        .led_cost_ms
+                    None => cost_in_run(w_idx, ahead, false),
+                    Some(_) => cost_in_run(w_idx, ahead, true)
                         .zip(led_hop_ms(
                             &candidates[vertices[v_idx].cand_idx],
                             &candidates[vertices[w_idx].cand_idx],
@@ -1748,6 +1824,7 @@ fn route_over(
                     local_run[w_idx] = run;
                     local_runs[w_idx] = runs;
                     closed_width[w_idx] = width;
+                    run_width[w_idx] = ahead + (vertices[w_idx].range.1 - vertices[w_idx].range.0);
                 }
             }
         }
@@ -2241,7 +2318,7 @@ mod tests {
         b.observed_latency_ms_per_layer = Some(4.0);
         b.observed_fixed_ms_per_visit = Some(500.0);
         let driven = vertex_cost(&b, (16, 32), &local, 32, None);
-        let led = vertex_cost_as(&b, (16, 32), &local, 32, None, ChainRole::InLedChain);
+        let led = vertex_cost_as(&b, (16, 32), &local, 32, None, ChainRole::InLedChain, 0);
         assert_eq!(driven.network_ms, 500.0 * 64.0);
         assert_eq!(led.network_ms, 100.0 * 64.0);
         assert_eq!(led.compute_ms, driven.compute_ms);
@@ -5134,18 +5211,92 @@ mod tests {
         // The price itself: 12 layers at the card's speed, 5 at the processor's.
         let c = local(true);
         let at = |tps: f32| 1000.0 / tps / BASELINE_LAYER_COUNT * WORK;
-        let per_layer = c.prior_ms_per_layer_over((0, 17));
+        let per_layer = c.prior_ms_per_layer_over((0, 17), 0);
         let expected = (12.0 * at(56.0) + 5.0 * at(6.3)) / 17.0;
         assert!(
             (per_layer - expected).abs() / expected < 1e-4,
             "{per_layer} vs {expected}"
         );
-        assert_eq!(c.prior_ms_per_layer_over((0, 12)), c.prior_ms_per_layer());
+        assert_eq!(
+            c.prior_ms_per_layer_over((0, 12), 0),
+            c.prior_ms_per_layer()
+        );
         // A prompt reads at each device's own rate.
-        let prompt = prefill_ms_per_layer(&c, 1000, DecodePrice::Prior((0, 17))) * 17.0;
+        let prompt = prefill_ms_per_layer(
+            &c,
+            1000,
+            DecodePrice::Prior {
+                range: (0, 17),
+                ahead: 0,
+            },
+        ) * 17.0;
         let expected_prompt =
             1000.0 * (12.0 * at(56.0) / PREFILL_SPEEDUP_GPU + 5.0 * at(6.3) / PREFILL_SPEEDUP_CPU);
         assert!((prompt - expected_prompt).abs() / expected_prompt < 1e-4);
+    }
+
+    /// **A machine's run cut into back-to-back segments is priced as the one
+    /// range its loader is handed** (2026-10-29). This node held a 14B's 48
+    /// layers, 23 of which its card holds; cut where a peer's range began,
+    /// each piece was priced as if it began the run — 45 layers on the card —
+    /// so an all-local chain read 17.5 s against 29.5 s for the same run
+    /// priced whole, and it undercut every split. Priced as one run, the
+    /// pieces cost what the whole does, and the split across a peer's card
+    /// that IS cheaper than the whole local run is taken.
+    #[test]
+    fn back_to_back_segments_on_one_machine_share_its_card() {
+        let here = NodeId([1; 32]);
+        let mut local = cand(1, vec![(0, 48)], 0, 0.0, true, true, 56.0);
+        local.has_gpu = true;
+        local.card_layers = Some(23);
+        local.processor_tokens_per_sec = 5.26;
+        let mut peer = cand(2, vec![(26, 48)], 50, 0.0, false, true, 45.0);
+        peer.has_gpu = true;
+        let cands = vec![local.clone(), peer.clone()];
+
+        let seg = |byte: u8, range: (u32, u32)| PipelineSegment {
+            node_id: NodeId([byte; 32]),
+            shard_id: ShardId {
+                model_id: ModelId("m".into()),
+                index: 0,
+            },
+            layer_range: range,
+        };
+        let price = |segments: &[PipelineSegment]| chain_cost_ms(segments, &cands, &here, 48, None);
+        let whole = vertex_cost(&local, (0, 48), &here, 48, None).total();
+        let cut = price(&[seg(1, (0, 26)), seg(1, (26, 48))]);
+        assert!(
+            (cut - whole).abs() / whole < 1e-4,
+            "this node's run cut at 26 is the run priced whole: {cut} vs {whole}"
+        );
+        // The split this node should take: cheaper than the whole local run,
+        // dearer than the run priced as if the card held 45 of its layers.
+        let split = price(&[seg(1, (0, 26)), seg(2, (26, 48))]);
+        let as_if_45_on_the_card = vertex_cost(&local, (0, 26), &here, 48, None).total()
+            + vertex_cost(&local, (26, 48), &here, 48, None).total();
+        assert!(
+            as_if_45_on_the_card < split && split < whole,
+            "{as_if_45_on_the_card} < {split} < {whole}"
+        );
+
+        let route = route_shortest_path(
+            48,
+            &cands,
+            &here,
+            false,
+            true,
+            CapacityBound::Everyone,
+            None,
+        )
+        .expect("a route");
+        assert!(
+            route.iter().any(|s| s.node_id == NodeId([2; 32])),
+            "the split across the peer's card is cheaper than this node's whole run: {:?}",
+            route
+                .iter()
+                .map(|s| (s.node_id.clone(), s.layer_range))
+                .collect::<Vec<_>>()
+        );
     }
 }
 

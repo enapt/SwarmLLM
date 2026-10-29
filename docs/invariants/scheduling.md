@@ -3545,6 +3545,29 @@ not a device split (research changed nothing here; our analogue is the peer's ow
 `decode_us_per_layer`, which already outranks this prior). Tests:
 `a_warm_peers_card_layers_are_the_ones_its_card_runs` (scheduler),
 `a_workers_card_layers_count_every_range_as_it_was_placed` (pool).
+**A machine's back-to-back segments share its card (2026-10-29).** The count above was applied
+per RANGE, and the search cuts a run wherever any candidate's range begins or ends — under prompt
+privacy, which is on by default for a model a node holds whole, at every split point
+(`partial = parallax_partial_ranges || encrypted`). Each piece then had the whole card to itself.
+The live node, Qwen2.5-14B held whole, its card taking 23 of 48 layers, a 22-token prompt
+(15:00Z): the gate logged `local_processor_cost_ms=29572` for the run priced whole against
+`pipeline_cost_ms=17548` for the all-local chain the search returned — three local pieces cut at
+other holders' boundaries, ~45 of the 48 layers priced at the card's speed, 11 s of compute that
+does not exist. That chain undercut every split priced between 17.5 and 29.5 s and the request
+stayed here ("the cheapest route the search found is entirely local"). Back-to-back segments on
+one machine are ONE range to its loader (`PipelineScheduler::merge_contiguous`), which fills the
+card from that range's first layer; the search already held such a run to its memory bound as the
+merged range (`local_fits`), but priced it per piece. Now **`parallax::layers_ahead_in_run`** —
+the width of the same machine's run before a segment — is passed to `vertex_cost_as` (`ahead`,
+REQUIRED) and on to `layers_by_device`, by the search's DP (`run_width`, re-pricing only a vertex
+that continues a run on a machine with `card_layers`) and by `chain_cost_terms` alike, so a chain is
+chosen at the price it is logged at. A run after another machine's segment starts afresh: a later
+run grows the worker on the card (`local_fits`), so this is not a per-machine total. Greedy never
+gives one machine two consecutive segments (its bound or its range ends the step) and passes 0.
+Research: llama.cpp's `--tensor-split` and Petals' block choice place a contiguous span per
+device or server and never price a span twice; nothing to borrow beyond "price what is loaded".
+Test `back_to_back_segments_on_one_machine_share_its_card`: the cut run equals the whole run, and a
+split across a 50 ms peer's card priced between the two is taken.
 **Why this is not `cbbed678` again**: that pass priced local layers at a
 constant 10,000 — a penalty, not a price — so the search could not see the
 LAN split that was best and sent a request abroad. Here the local figure is

@@ -515,21 +515,32 @@ impl NodeCandidate {
     /// The layers of `range` this candidate runs on its card and on its
     /// processor beside it: the first [`Self::card_layers`] on the card. Every
     /// layer on the one device it has where it splits nothing.
-    fn layers_by_device(&self, range: (u32, u32)) -> (u32, u32) {
+    ///
+    /// `ahead`: layers of the SAME run this candidate is handed before `range`
+    /// — a chain's segments on one machine back to back are one range to its
+    /// loader (`PipelineScheduler::merge_contiguous`), which fills the card
+    /// from the run's first layer, so they leave `range` only the card's rest.
+    /// Priced each as if it began the run, three local segments of a 14B
+    /// whose card holds 23 of its 48 layers read as all 48 on the card:
+    /// 17.5 s against the 29.5 s of the same run priced whole (2026-10-29).
+    fn layers_by_device(&self, range: (u32, u32), ahead: u32) -> (u32, u32) {
         let width = range.1.saturating_sub(range.0);
         match self.card_layers {
-            Some(card) => (width.min(card), width.saturating_sub(card)),
+            Some(card) => {
+                let on_card = width.min(card.saturating_sub(ahead));
+                (on_card, width - on_card)
+            }
             None => (width, 0),
         }
     }
 
     /// The static prior for one of `range`'s layers, averaged over the devices
-    /// they run on ([`Self::layers_by_device`]) — the ONE prior a router prices
-    /// an unmeasured range by (`parallax::vertex_cost`, greedy's
-    /// `estimated_cost_per_layer`). [`Self::prior_ms_per_layer`] where every
-    /// layer runs on one device.
-    fn prior_ms_per_layer_over(&self, range: (u32, u32)) -> f32 {
-        let (first, beside) = self.layers_by_device(range);
+    /// they run on ([`Self::layers_by_device`], `ahead` as there) — the ONE
+    /// prior a router prices an unmeasured range by (`parallax::vertex_cost`,
+    /// greedy's `estimated_cost_per_layer`). [`Self::prior_ms_per_layer`]
+    /// where every layer runs on one device.
+    fn prior_ms_per_layer_over(&self, range: (u32, u32), ahead: u32) -> f32 {
+        let (first, beside) = self.layers_by_device(range, ahead);
         if beside == 0 {
             return self.prior_ms_per_layer();
         }
@@ -5824,9 +5835,13 @@ impl PipelineScheduler {
         // disqualified — weighed by the model the same way.
         let decode_price = match measured {
             Some(ms) => parallax::DecodePrice::Measured(ms),
-            None if candidate.est_tokens_per_sec > 0.0 => {
-                parallax::DecodePrice::Prior((current_layer, range.1))
-            }
+            // Nothing of the same run ahead: greedy hands a node one segment
+            // per step, as far as its bound or its range goes, so the next
+            // segment is never that node's again.
+            None if candidate.est_tokens_per_sec > 0.0 => parallax::DecodePrice::Prior {
+                range: (current_layer, range.1),
+                ahead: 0,
+            },
             None => {
                 parallax::DecodePrice::Measured(DEFAULT_COMPUTE_MS_PER_LAYER * candidate.layer_work)
             }

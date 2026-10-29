@@ -745,7 +745,21 @@ round trip. OPEN: the compute half — the prior is pessimistic by design, but a
 only with guesses (the 70B streams every reply) never earns a measured figure for its peers, since
 a check of K rows records no sample (`forward_verify_through_segments`: K rows would read K times
 slow per layer); a check's time is exactly a ROUND's cost, which is what `rounds_entered`
-multiplies, so record it as a round's sample rather than a layer's.
+multiplies, so record it as a round's sample rather than a layer's — the same gap as #166's open
+half (its `WorkKind::Verify` proposal). Weighed 10-29: it changes no 70B route today (nothing
+local can run the 70B, so its price is compared only with other priors).
+(i) ~~a machine's run cut into back-to-back segments was priced with the whole card per piece~~ —
+**fixed 2026-10-29** (§ Closed). (j) OPEN, found reading (i) on the live node (14B held whole, a
+22-token prompt, 15:00Z): a split this node has never run is priced at one round a token
+(`split_tokens_per_round=None` on every candidate: (d)'s figure is learned only from splits that
+ran), so with a 438 ms peer its network term alone (~28 s at 64 passes) is the whole local run's
+price, the split is never chosen, and the figure that would price it right is never learned — the
+cold-start trap, #178's ratchet at the scale of a whole split (a bandit's "optimism under
+uncertainty" is the textbook answer, #178's unbuilt exploration ours; Petals avoids it by having
+each server benchmark itself at startup). Not obviously wrong for chat on this machine
+(prose: local ~13 tok/s against the boomerang flow's 7.4-8.3), wrong for code (13.6-15.4 against
+17-20). A candidate figure this node already measures: the drafter's acceptance on its OWN
+guessed replies (`LocalSpec`), the same drafter and target a split would use.
 
 `scheduler/parallax.rs` charges a remote hop a flat `ASSUMED_FORWARD_PASSES = 64.0`. The error
 grows with reply length — 1.0 at 8 tokens, 2.4-3.3 at 120-239 — and biases every delegation
@@ -3682,7 +3696,15 @@ Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
 
-**Closed 2026-10-29, ships in the next release** (#368, #370, #371, #312, #3 (g), #3 (h) network half)
+**Closed 2026-10-29, ships in the next release** (#368, #370, #371, #312, #3 (g), #3 (h) network half, #3 (i))
+- #3 (i) — **A machine's back-to-back segments are priced as the one run its card loads.** The
+  search cuts a node's range wherever another holder's range begins or ends — at every split point
+  under prompt privacy, on by default for a model a node holds whole — and priced each piece as if
+  its card were empty. The live node holding Qwen2.5-14B whole, its card taking 23 of 48 layers:
+  an all-local chain of three pieces priced 17.5 s against 29.5 s for the same run whole, ~45
+  layers at the card's speed, so it undercut every split priced in between. Each piece now has the
+  run before it ahead on the card (`parallax::layers_ahead_in_run`), in the search and in the
+  chain's logged price alike. Test `back_to_back_segments_on_one_machine_share_its_card`.
 - #312 — **A tool's result sent to `/v1/responses` as text and pictures is read, not refused.**
   OpenAI's Responses API lets a `function_call_output`'s `output` be a list of `input_text` /
   `input_image` / `input_file` parts as well as a string (`ResponseFunctionCallOutputItemListParam`);

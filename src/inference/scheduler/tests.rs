@@ -546,7 +546,7 @@ fn a_card_node_offers_its_processors_room_beside_the_card() {
         Some(older.max_hostable_layers_at_face_value.unwrap() + beside(1.0))
     );
     // And the layers past the card cost the processor's time.
-    let past_the_card = stating.prior_ms_per_layer_over((0, card + 10));
+    let past_the_card = stating.prior_ms_per_layer_over((0, card + 10), 0);
     assert!(
         past_the_card > 4.0 * stating.prior_ms_per_layer(),
         "{past_the_card} against the card's {}",
@@ -650,7 +650,10 @@ fn a_warm_peers_card_layers_are_the_ones_its_card_runs() {
     );
     // The first 20 of a range it holds at the card's speed, the rest at its
     // processor's.
-    assert_eq!(stating.layers_by_device((23, 80)), (on_card, 57 - on_card));
+    assert_eq!(
+        stating.layers_by_device((23, 80), 0),
+        (on_card, 57 - on_card)
+    );
 
     // An older peer says nothing of its card's share: no more than 12 GB holds.
     let older = run(None);
@@ -7967,7 +7970,7 @@ fn a_local_model_the_loader_splits_is_priced_with_the_cards_share() {
     assert_eq!(priced.est_tokens_per_sec, card_tps);
     assert_eq!(priced.processor_tokens_per_sec, PROCESSOR_TPS);
     let at = |tps: f32| 1000.0 / tps / super::parallax::BASELINE_LAYER_COUNT * priced.layer_work;
-    let whole = priced.prior_ms_per_layer_over((0, total as u32));
+    let whole = priced.prior_ms_per_layer_over((0, total as u32), 0);
     assert!(
         (whole - at(expected)).abs() / whole < 1e-4,
         "the whole model is the blend of the split the loader makes: {whole} against {}",
@@ -7983,7 +7986,7 @@ fn a_local_model_the_loader_splits_is_priced_with_the_cards_share() {
     );
     // A segment the card holds — this node's share of a split — runs at the
     // card's speed, which the whole model's blend did not say.
-    let card_part = priced.prior_ms_per_layer_over((0, on_card as u32));
+    let card_part = priced.prior_ms_per_layer_over((0, on_card as u32), 0);
     assert!((card_part - at(card_tps)).abs() / card_part < 1e-4);
     assert!(
         priced.has_gpu,

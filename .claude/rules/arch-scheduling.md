@@ -221,6 +221,10 @@ range is then priced PER DEVICE — **`NodeCandidate::layers_by_device`**: its f
 card's speed (the loader's order), the rest at `processor_tokens_per_sec`
 (`prior_ms_per_layer_over`, `parallax::DecodePrice`, `prefill_ms_per_layer`) — never at one blended
 speed, which priced this node's 17 layers of a 70B as if it ran all 80 and sent them to Italy.
+**A machine's back-to-back segments are ONE run there** (`merge_contiguous`): each is priced with the
+run before it ahead on the card, **`parallax::layers_ahead_in_run`** → `vertex_cost_as`'s REQUIRED
+`ahead`, in the search's DP and `chain_cost_terms` alike — priced per piece, a 14B cut in three read 45 of
+its 48 layers on a 23-layer card and undercut every split (2026-10-29).
 
 → `docs/invariants/scheduling.md` § "A range that runs partly on a card is priced per device"
 
