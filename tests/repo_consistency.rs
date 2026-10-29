@@ -6357,6 +6357,193 @@ fn the_readme_test_counts_agree_with_each_other_and_with_claude_md() {
     }
 }
 
+/// The versions `## [x.y.z…]` headings name in a changelog, newest first.
+fn changelog_releases(changelog: &str) -> Vec<String> {
+    changelog
+        .lines()
+        .filter_map(|l| l.strip_prefix("## ["))
+        .filter_map(|l| l.split(']').next())
+        .filter(|v| v.starts_with(|c: char| c.is_ascii_digit()))
+        .map(str::to_string)
+        .collect()
+}
+
+/// `[package] version` in a Cargo.toml.
+fn package_version(cargo_toml: &str) -> String {
+    cargo_toml
+        .split("[package]")
+        .nth(1)
+        .and_then(|pkg| {
+            pkg.lines()
+                .find_map(|l| l.trim().strip_prefix("version = \""))
+                .and_then(|v| v.split('"').next())
+        })
+        .expect("Cargo.toml must state `[package] version = \"…\"`")
+        .to_string()
+}
+
+/// Every `v<x>.<y>.<z>` a text cites, without the `v`.
+fn cited_versions(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for (i, _) in text.match_indices('v') {
+        if text[..i]
+            .chars()
+            .next_back()
+            .is_some_and(|c| c.is_ascii_alphanumeric())
+        {
+            continue;
+        }
+        let v: String = text[i + 1..]
+            .chars()
+            .take_while(|c| c.is_ascii_digit() || *c == '.')
+            .collect();
+        let v = v.trim_end_matches('.');
+        if v.split('.').count() == 3 && v.split('.').all(|p| !p.is_empty()) {
+            out.push(v.to_string());
+        }
+    }
+    out
+}
+
+/// What is wrong with the README's "How fast is it?" section for a tree at
+/// `cargo_version` whose changelog names `released` (newest first).
+fn readme_speed_problems(readme: &str, cargo_version: &str, released: &[String]) -> Vec<String> {
+    let bare = |v: &str| v.split('-').next().unwrap_or(v).to_string();
+    let released_bare: Vec<String> = released.iter().map(|v| bare(v)).collect();
+    let mut problems = Vec::new();
+    let (Some(start), Some(end)) = (
+        readme.find("<!-- speeds:begin"),
+        readme.find("<!-- speeds:end -->"),
+    ) else {
+        return vec![
+            "README.md has lost its `<!-- speeds:begin … -->` / `<!-- speeds:end -->` \
+                     markers, which this guard reads. Restore them or update the guard."
+                .into(),
+        ];
+    };
+    let section = &readme[start..end];
+    let stamp = section
+        .split("-->")
+        .next()
+        .and_then(|marker| marker.split("reviewed for ").nth(1))
+        .and_then(|s| s.split_whitespace().next())
+        .map(|s| s.trim_end_matches(['.', ',']).to_string());
+    if stamp.as_deref() != Some(cargo_version) {
+        problems.push(format!(
+            "README.md's speed section says `reviewed for {}` but Cargo.toml is {cargo_version}. \
+             A release's bump commit refreshes it (.claude/rules/completeness.md § \"README \
+             speeds\"): run `python3 -I examples/readme_speeds.py \
+             ~/swarmllm-gate/v<previous release>/out/speed.jsonl`, replace any across-computer \
+             row this release measured again, then write `reviewed for {cargo_version}`.",
+            stamp.as_deref().unwrap_or("<nothing>")
+        ));
+    }
+    let newest: Vec<&String> = released_bare.iter().take(2).collect();
+    match (
+        section.find("<!-- release-check:begin -->"),
+        section.find("<!-- release-check:end -->"),
+    ) {
+        (Some(b), Some(e)) if b < e => match cited_versions(&section[b..e]).first() {
+            Some(v) if newest.contains(&v) => {}
+            Some(v) => problems.push(format!(
+                "README.md's one-computer table is from the v{v} release check, but the newest \
+                 releases are {newest:?}: run `python3 -I examples/readme_speeds.py \
+                 ~/swarmllm-gate/v<newest checked>/out/speed.jsonl` (it writes that block)."
+            )),
+            None => problems.push(
+                "README.md's release-check block names no version; regenerate it with \
+                 examples/readme_speeds.py."
+                    .into(),
+            ),
+        },
+        _ => problems.push(
+            "README.md's speed section has lost its `<!-- release-check:begin/end -->` \
+             markers, which examples/readme_speeds.py writes between."
+                .into(),
+        ),
+    }
+    for v in cited_versions(section) {
+        if !released_bare.contains(&v) {
+            problems.push(format!(
+                "README.md's speed section cites v{v}, which no CHANGELOG heading names. The \
+                 README shows what users can download: a figure only main has waits for the \
+                 release that ships it."
+            ));
+        }
+    }
+    problems
+}
+
+/// The README's speed tables are refreshed in every release's bump commit
+/// (user, 2026-10-29: "make a rule to keep them updated").
+///
+/// A figure in a README goes stale silently — the old GPU benchmark there
+/// outlived both features it was credited to (gotcha #257). So the section
+/// carries the version it was last reviewed for, and a bump that changes
+/// `Cargo.toml`'s version without reviewing it fails here; the commit gate
+/// runs this file on any commit touching `Cargo.toml` or `README.md`. The
+/// one-computer table must come from one of the two newest release checks
+/// (`examples/readme_speeds.py` writes it from the gate's own records), and
+/// no row may cite a version that was never released.
+#[test]
+fn the_readme_speeds_are_reviewed_at_every_release() {
+    let root = repo_root();
+    let readme = std::fs::read_to_string(root.join("README.md")).expect("README.md");
+    let changelog = std::fs::read_to_string(root.join("CHANGELOG.md")).expect("CHANGELOG.md");
+    let cargo = std::fs::read_to_string(root.join("Cargo.toml")).expect("Cargo.toml");
+    let released = changelog_releases(&changelog);
+    assert!(
+        released.len() >= 2,
+        "CHANGELOG.md names fewer than two releases in `## [x.y.z]` headings: {released:?}"
+    );
+    let problems = readme_speed_problems(&readme, &package_version(&cargo), &released);
+    assert!(problems.is_empty(), "{}", problems.join("\n\n"));
+}
+
+/// The guard above fires on each thing it exists to catch.
+#[test]
+fn the_readme_speeds_guard_catches_a_release_that_did_not_refresh_them() {
+    let released = |top: u32| -> Vec<String> {
+        (top - 9..=top)
+            .rev()
+            .map(|n| format!("0.3.{n}-alpha"))
+            .collect()
+    };
+    let section = |stamp: &str, check: &str, rows: &str| {
+        format!(
+            "intro\n<!-- speeds:begin, reviewed for {stamp}. Refreshed at every release -->\n\
+             <!-- release-check:begin -->\nthe v{check} release check\n\
+             <!-- release-check:end -->\n{rows}\n<!-- speeds:end -->\nrest"
+        )
+    };
+    let fresh = section("0.3.261-alpha", "0.3.260", "| 14B | v0.3.255 |");
+    assert_eq!(
+        readme_speed_problems(&fresh, "0.3.261-alpha", &released(261)),
+        Vec::<String>::new()
+    );
+    // The next bump, nothing refreshed: the stamp and the check table are both stale.
+    let missed = readme_speed_problems(&fresh, "0.3.262-alpha", &released(262));
+    assert_eq!(missed.len(), 2, "{missed:?}");
+    assert!(missed[0].contains("reviewed for 0.3.261-alpha"));
+    assert!(missed[1].contains("v0.3.260 release check"));
+    // A row citing a build only main has.
+    let early = section("0.3.261-alpha", "0.3.260", "| 14B | v0.3.262 |");
+    let cited = readme_speed_problems(&early, "0.3.261-alpha", &released(261));
+    assert!(
+        cited.len() == 1 && cited[0].contains("v0.3.262"),
+        "{cited:?}"
+    );
+    // Markers gone.
+    assert_eq!(
+        readme_speed_problems("no section", "0.3.261-alpha", &released(261)).len(),
+        1
+    );
+    assert_eq!(
+        cited_versions("v0.3.260, (v0.3.255) dev0.1.2 v1.2"),
+        ["0.3.260", "0.3.255"]
+    );
+}
+
 /// The guard above must actually fire on the shape it forbids — including the
 /// one rustfmt produces, which is what four guards in this file could not see
 /// before 2026-08-30.

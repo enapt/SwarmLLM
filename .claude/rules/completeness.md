@@ -24,6 +24,26 @@ count-only commits since August had each been broadcast to Discord). The same
 care applies to every figure a guard cross-checks between files: the frontend
 payload budget, the i18n totals, the MSRV.
 
+## README speeds are refreshed in every release's bump commit (user, 2026-10-29)
+
+The README's "How fast is it?" section shows what users can DOWNLOAD, so it
+changes at release, never per change. In the bump commit, beside the counts:
+
+1. **One computer**: `python3 -I examples/readme_speeds.py
+   ~/swarmllm-gate/v<previous release>/out/speed.jsonl` rewrites that table from
+   the last release check's own records (the downloaded release; each run's best
+   repeat, the range across runs). Never type those figures.
+2. **Across computers**: each row names the version it was measured on. Replace
+   a row when this release's CHANGELOG entry or `faster_than_local.md` carries a
+   newer measurement of that setup; add a row for a setup newly measured. A
+   figure only main has waits for the release that ships it. A range spans every
+   run of the setup, never one run's best (gotcha #990), and names the machines.
+3. Set `reviewed for <new version>` in the section's opening marker.
+
+Guard: `the_readme_speeds_are_reviewed_at_every_release` — the bump changes
+`Cargo.toml`'s version, so the commit gate runs it there. A row's wording follows
+CLAUDE.md's privacy wording ("Start and finish on this computer" is never private).
+
 ## Error types
 
 **Never choose an error type at a call site** — `classify_error` is the single

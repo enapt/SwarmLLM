@@ -183,6 +183,8 @@ swarmllm/
 │                 (NEAR_CHAIN_AB=0 is the control: SWARMLLM_NEAR_CHAIN=0, same binary);
 │                 release_gate.sh — the release gate on the downloaded artifact, under an hour: smoke_test.sh,
 │                 release_shapes.sh, family_conformance.sh, reply_ab.sh, split_rig.sh, stream_bench.py;
+│                 readme_speeds.py — the README's one-computer speeds, written from a release
+│                 check's speed.jsonl in the next bump commit (completeness.md § "README speeds");
 │                 feature_check.py — every surface a user reaches (OpenAI, Anthropic, Responses,
 │                 MCP, dashboard + its WebSocket, admin, the error contract, a swarm split)
 │                 asserted against a RUNNING node, one request at a time)
