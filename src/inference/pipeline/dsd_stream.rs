@@ -130,6 +130,201 @@ fn chunk_guesses_with(width: u32, room: u32, positions_left: Option<u32>) -> u32
     positions_left.map_or(fitted, |left| fitted.max(width.min(left)))
 }
 
+/// The wide width [`StreamWidth`] may choose: two guesses past the narrow one
+/// ([`guesses_per_chunk`]), at most 8.
+fn wide_guesses_per_chunk() -> u32 {
+    (guesses_per_chunk() + 2).min(8)
+}
+
+/// `SWARMLLM_STREAM_WIDTH=fixed` sends every chunk at the narrow width, as
+/// the stream did before 2026-10-30 — for an A/B inside one binary.
+fn width_is_fixed() -> bool {
+    static FIXED: OnceLock<bool> = OnceLock::new();
+    *FIXED.get_or_init(|| std::env::var("SWARMLLM_STREAM_WIDTH").as_deref() == Ok("fixed"))
+}
+
+/// How many guesses each chunk carries: of two widths, the one that makes
+/// more tokens a millisecond at what this reply's chunks are being kept at and
+/// what the chain's checks cost ([`chunk_rate`]).
+///
+/// One width does not suit every chain (2026-10-30). On the 70B split — this
+/// node and an RTX 3060 in Australia running most of its 64 layers on its
+/// processor, ~420 ms apart — 5 guesses a chunk against 3, arms alternating,
+/// one binary: 25% and 13% faster on two replies the drafter guessed well,
+/// 11% SLOWER on one it guessed at 0.70 (33 of 39 chunks restarted, and each
+/// wider check cost the far end ~75 ms more). A simulation over those replies'
+/// real greedy agreement (`examples/stream_width_sim.py`, within 5% of all six
+/// measurements) put a fixed 5 at −16% on a LAN with a card at the far end and
+/// −8% where the far end's rows are dear, and this choice at −0.5% to +8%
+/// everywhere. → `docs/invariants/scheduling.md` § "A chunk is as wide as it pays".
+///
+/// What it knows, all measured on this node: the check's cost at each width
+/// (`CheckCost`, fitted from chunks sent alone, which nothing queued ahead of
+/// — the round trip, the far end and this node's own layers), this node's own
+/// layers' share of it (timed per width here), the drafter's cost a guess, the
+/// round trip ([`CheckCost::floor_ms`]) and the reply's RECENT acceptance:
+/// kept guesses come in runs, so a reply's easy stretch chooses differently
+/// from its hard one. The fit learns a row's price only from checks of two
+/// widths, so until it has (`CheckCost::slope_is_measured`), chunks sent alone
+/// alternate between them and the rest stay narrow; it is remembered for the
+/// next request on the same machines, and decays, so a width left unsent is
+/// tried again after ~10 lone chunks.
+///
+/// Research: PipeInfer (arXiv 2407.11798) keeps its runs small and fixed;
+/// SmartSpec chooses γ by goodput — tokens over a fitted step cost — which
+/// this is for a pipelined stream; PEARL (arXiv 2408.11850) lengthens drafts
+/// after an acceptance. Ending a chunk early by the drafter's confidence
+/// (SpecDec++, AdaEDL) was measured here and cost 27%: a short chunk holds the
+/// stream ([`super::engine_drafter::stream_confidence_floor`]). Two widths
+/// only — each is a shape a card captures once ([`chunk_guesses`]).
+/// `SWARMLLM_STREAM_WIDTH=fixed` keeps the narrow one.
+struct StreamWidth {
+    narrow: u32,
+    wide: u32,
+    fixed: bool,
+    acceptance: AcceptanceEstimate,
+    /// This node's own layers' time for a chunk: narrow, wide.
+    near_ms: [RecentMedian; 2],
+    /// The width of the last chunk sent alone while the fit had one width.
+    last_alone_wide: Option<bool>,
+    /// Chunks sent wide, for the reply's line.
+    sent_wide: u32,
+}
+
+impl StreamWidth {
+    fn new() -> Self {
+        Self::with(
+            guesses_per_chunk(),
+            wide_guesses_per_chunk(),
+            width_is_fixed(),
+        )
+    }
+
+    fn with(narrow: u32, wide: u32, fixed: bool) -> Self {
+        Self {
+            narrow,
+            wide,
+            fixed,
+            acceptance: AcceptanceEstimate::recent(),
+            near_ms: [RecentMedian::default(), RecentMedian::default()],
+            last_alone_wide: None,
+            sent_wide: 0,
+        }
+    }
+
+    /// The guesses the next chunk carries; `alone`: nothing else is out, so
+    /// its check is a clean sample of the cost.
+    fn next(
+        &mut self,
+        alone: bool,
+        check: &CheckCost,
+        draft_ms_each: Option<f64>,
+        window: usize,
+    ) -> u32 {
+        if self.goes_wide(alone, check, draft_ms_each, window) {
+            self.sent_wide += 1;
+            self.wide
+        } else {
+            self.narrow
+        }
+    }
+
+    fn goes_wide(
+        &mut self,
+        alone: bool,
+        check: &CheckCost,
+        draft_ms_each: Option<f64>,
+        window: usize,
+    ) -> bool {
+        if self.fixed || self.wide <= self.narrow {
+            return false;
+        }
+        if !check.slope_is_measured() {
+            if !alone {
+                return false;
+            }
+            let wide = self.last_alone_wide != Some(true);
+            self.last_alone_wide = Some(wide);
+            return wide;
+        }
+        let (Some(draft_ms_each), Some(narrow_check), Some(wide_check)) = (
+            draft_ms_each,
+            check.predict(self.narrow),
+            check.predict(self.wide),
+        ) else {
+            return false;
+        };
+        let round_trip = check.floor_ms().unwrap_or(0.0);
+        // A width not yet timed here reads as the other one: this node's own
+        // layers cost nearly the same for two more rows.
+        let near = |i: usize| {
+            self.near_ms[i]
+                .median()
+                .or_else(|| self.near_ms[1 - i].median())
+                .unwrap_or(0.0)
+        };
+        let alpha = self.acceptance.alpha();
+        let rate = |guesses, check_ms, near_ms| {
+            chunk_rate(
+                guesses,
+                alpha,
+                check_ms,
+                round_trip,
+                near_ms,
+                draft_ms_each,
+                window,
+            )
+        };
+        rate(self.wide, wide_check, near(1)) > rate(self.narrow, narrow_check, near(0))
+    }
+
+    /// This node's own layers took `ms` over a chunk of `guesses`.
+    fn note_near(&mut self, guesses: u32, ms: f64) {
+        let i = usize::from(guesses > self.narrow);
+        self.near_ms[i].record(ms);
+    }
+
+    /// A chunk was answered: `kept` of its `guessed` guesses were kept.
+    fn note_answer(&mut self, kept: u32, guessed: u32) {
+        self.acceptance.record(kept, guessed);
+    }
+}
+
+/// Tokens a millisecond a stream of `guesses`-wide chunks makes
+/// ([`StreamWidth`]), each guess kept at `alpha` given the ones before it.
+///
+/// - A chunk is BUILT here: drafting and this node's own layers.
+/// - It is CHECKED in `check_ms`: this node's layers, the round trip and the
+///   far end.
+/// - While chunks are kept, one comes back every `steady` ms: the slowest of
+///   building here, the far end's part, and a round trip shared by the window.
+/// - A refusal costs the whole trip again (drafting, then the check), plus
+///   half a build: the loop finishes the chunk it is building before it reads
+///   an answer ([`StreamRun::run_with`]).
+/// - It gains `Σ α^i, i < guesses`: the kept guesses and the far end's token
+///   where it refused, every guess where it did not.
+fn chunk_rate(
+    guesses: u32,
+    alpha: f64,
+    check_ms: f64,
+    round_trip_ms: f64,
+    near_ms: f64,
+    draft_ms_each: f64,
+    window: usize,
+) -> f64 {
+    let k = f64::from(guesses);
+    let alpha = alpha.clamp(0.0, 0.99);
+    let build = draft_ms_each * k + near_ms;
+    let far = (check_ms - near_ms - round_trip_ms).max(0.0);
+    let trip = draft_ms_each * k + check_ms;
+    let steady = build.max(far).max(trip / window.max(1) as f64);
+    let whole = alpha.powf(k);
+    let refused = 1.0 - whole;
+    let gain = refused / (1.0 - alpha);
+    let cost = steady + refused * (trip - steady + build / 2.0);
+    gain / cost.max(1.0)
+}
+
 fn full_chunks() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
     *ON.get_or_init(|| std::env::var("SWARMLLM_STREAM_FULL_CHUNKS").as_deref() != Ok("0"))
@@ -451,6 +646,8 @@ struct StreamRun<'a, 'r> {
     /// model, the drafter here included — `None` where one has not said
     /// ([`StreamRun::positions_served`]).
     positions_served: Option<u32>,
+    /// How wide each chunk is.
+    width: StreamWidth,
 }
 
 impl PipelineExecutor {
@@ -501,6 +698,7 @@ impl PipelineExecutor {
             held: 0,
             least_answer_ms: None,
             positions_served: None,
+            width: StreamWidth::new(),
         };
         run.positions_served = run.positions_served();
         let started = std::time::Instant::now();
@@ -523,7 +721,10 @@ impl PipelineExecutor {
             kept_whole = run.kept_whole,
             restarts = run.restarts,
             held = run.held,
-            guesses_per_chunk = guesses_per_chunk(),
+            guesses_per_chunk = run.width.narrow,
+            wide_guesses = run.width.wide,
+            chunks_wide = run.width.sent_wide,
+            check_slope_measured = run.reply.check.slope_is_measured(),
             window = chunks_in_flight(),
             "DSD: streamed checks complete"
         );
@@ -635,8 +836,14 @@ impl StreamRun<'_, '_> {
             .io
             .max_tokens
             .saturating_sub(self.frontier.history.len() as u32);
+        let width = self.width.next(
+            alone,
+            self.reply.check,
+            self.reply.draft_cost.median(),
+            chunks_in_flight(),
+        );
         let want = chunk_guesses(
-            guesses_per_chunk(),
+            width,
             room,
             self.positions_served
                 .map(|served| served.saturating_sub(self.frontier.index_pos)),
@@ -710,6 +917,7 @@ impl StreamRun<'_, '_> {
 
         // This node's own layers before the peer's, one segment after another.
         let mut activations = super::pack_verify_tokens_to_le_bytes(&rows);
+        let near_started = std::time::Instant::now();
         for segment in &self.shape.near {
             let forward = super::build_spec_verify_forward(
                 request_id,
@@ -730,6 +938,12 @@ impl StreamRun<'_, '_> {
                     .unwrap_or_else(|| SwarmError::Inference(format!("streamed check: {msg}"))));
             }
             activations = result.activations;
+        }
+        if !self.shape.near.is_empty() {
+            self.width.note_near(
+                rows.len() as u32,
+                near_started.elapsed().as_secs_f64() * 1000.0,
+            );
         }
 
         // The walk goes to the peer only where it samples. In the boomerang it
@@ -990,6 +1204,7 @@ impl StreamRun<'_, '_> {
             self.reply
                 .acceptance
                 .record(kept_guesses as u32, guessed as u32);
+            self.width.note_answer(kept_guesses as u32, guessed as u32);
         }
         let answered_ms = sent.started.elapsed().as_secs_f64() * 1000.0;
         self.least_answer_ms = Some(
@@ -1249,5 +1464,82 @@ mod tests {
         assert!(!stream_switch(Some("0")));
         assert!(!stream_switch(Some("off")));
         assert!(!stream_switch(Some("false")));
+    }
+
+    /// Tokens a millisecond at 3 and at 5 guesses a chunk, for checks costing
+    /// `check3` / `check5` (this node's layers `near` of it, the round trip
+    /// `rtt`), the drafter `draft` a guess, kept at `alpha`, window 3.
+    fn rates(alpha: f64, check3: f64, check5: f64, rtt: f64, near: f64, draft: f64) -> (f64, f64) {
+        (
+            chunk_rate(3, alpha, check3, rtt, near, draft, 3),
+            chunk_rate(5, alpha, check5, rtt, near, draft, 3),
+        )
+    }
+
+    /// Wide where a row is cheap beside the trip, narrow where it is dear or
+    /// where building a chunk here is what takes the time.
+    #[test]
+    fn a_chunk_is_as_wide_as_it_pays() {
+        // A far end on a card ~420 ms away: two more rows cost it ~10 ms.
+        let (narrow, wide) = rates(0.8, 1000.0, 1010.0, 420.0, 20.0, 10.0);
+        assert!(wide > narrow, "cheap rows, long trip: {narrow} vs {wide}");
+        // A far processor whose rows cost 200 ms each.
+        let (narrow, wide) = rates(0.8, 700.0, 1100.0, 270.0, 20.0, 20.0);
+        assert!(narrow > wide, "dear rows: {narrow} vs {wide}");
+        // A LAN: the round trip is nothing, and building a chunk here binds.
+        let (narrow, wide) = rates(0.8, 60.0, 66.0, 2.0, 20.0, 10.0);
+        assert!(narrow > wide, "a LAN: {narrow} vs {wide}");
+        // The 70B's measured costs (2026-10-30): the reply guessed at
+        // 0.70-0.73, where 5 lost 11%, stays narrow — a refusal costs the
+        // whole trip, which `steady` alone does not see — and one guessed
+        // well goes wide.
+        let (narrow, wide) = rates(0.72, 1250.0, 1400.0, 420.0, 250.0, 61.0);
+        assert!(narrow > wide, "guessed poorly: {narrow} vs {wide}");
+        let (narrow, wide) = rates(0.92, 1250.0, 1400.0, 420.0, 250.0, 61.0);
+        assert!(wide > narrow, "guessed well: {narrow} vs {wide}");
+    }
+
+    /// Until the check's fit has seen two widths it cannot price a row, so
+    /// the chunks sent alone — clean samples — alternate between them and the
+    /// rest stay narrow; once it has, every chunk takes the width that pays.
+    /// `SWARMLLM_STREAM_WIDTH=fixed` turns this red: every chunk narrow.
+    #[test]
+    fn the_stream_learns_a_rows_price_from_chunks_sent_alone_then_chooses() {
+        let mut width = StreamWidth::new();
+        let (narrow, wide) = (guesses_per_chunk(), wide_guesses_per_chunk());
+        let mut check = CheckCost::for_a_plan(Some(420));
+        check.record(narrow, 1000.0);
+        let alone: Vec<u32> = (0..4)
+            .map(|_| width.next(true, &check, Some(10.0), 3))
+            .collect();
+        assert_eq!(
+            alone,
+            [wide, narrow, wide, narrow],
+            "alone, one width fitted"
+        );
+        assert_eq!(
+            width.next(false, &check, Some(10.0), 3),
+            narrow,
+            "queued, unpriced"
+        );
+
+        // A far end on a card: two more rows cost it ~10 ms.
+        check.record(wide, 1010.0);
+        width.note_near(narrow, 20.0);
+        width.note_near(wide, 21.0);
+        for _ in 0..6 {
+            width.note_answer(narrow, narrow);
+        }
+        assert_eq!(
+            width.next(false, &check, Some(10.0), 3),
+            wide,
+            "cheap rows, kept"
+        );
+        // Dear rows on the same trip: narrow.
+        let mut dear = CheckCost::for_a_plan(Some(420));
+        dear.record(narrow, 1000.0);
+        dear.record(wide, 1800.0);
+        assert_eq!(width.next(false, &dear, Some(10.0), 3), narrow, "dear rows");
+        assert_eq!(width.sent_wide, 3);
     }
 }

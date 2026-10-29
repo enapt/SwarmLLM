@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #374**). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #375**). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -3756,6 +3756,23 @@ archive under the named heading. Reopen one only with the evidence its line name
 Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 19-28 were
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
+
+**Closed 2026-10-30, ships in the next release** (#374)
+- #374 — **The continuous stream chooses each chunk's width instead of always sending 3 guesses.**
+  On the 70B split (this node [0,16) + the Australian RTX 3060 [16,80), route pinned, 3B drafter,
+  six arms alternating, one binary) 5 guesses a chunk decoded three 96-token replies 5% faster than
+  3 in all — 25% and 13% on two the drafter guessed well — but 11% slower on one it guessed at 0.70,
+  where most chunks restarted and each wider check cost the far end ~75 ms a row. A simulation over
+  the replies' real greedy agreement (`examples/stream_width_sim.py`, within 5% of all six
+  measurements) put a fixed 5 at −16% on a LAN with a card at the far end. `dsd_stream::StreamWidth`
+  now sends each chunk at 3 or 5 by `chunk_rate` — tokens a millisecond at the reply's recent
+  acceptance and the check's measured cost at each width (chunks sent alone alternate until the fit
+  has priced a row, `CheckCost::slope_is_measured`); simulated −0.0% to +7.6% across seven setups,
+  +6.4% on the 70B's. A/B `SWARMLLM_STREAM_WIDTH=fixed`. Tests `a_chunk_is_as_wide_as_it_pays`,
+  `the_stream_learns_a_rows_price_from_chunks_sent_alone_then_chooses`,
+  `a_rows_price_is_measured_only_across_two_widths_and_then_forgotten`. Evidence:
+  `docs/invariants/scheduling.md` § "A chunk is as wide as it pays". The pre-draft gained nothing at
+  5 either and stays out.
 
 **Closed 2026-10-30, ships in the next release** (#373)
 - #373 — **A drafter that guesses on the processor is the small one, not the largest that fits.**

@@ -196,6 +196,19 @@ impl CheckCost {
         self.line().is_some_and(|(_, _, floored)| floored)
     }
 
+    /// Have the checks fitted read different numbers of positions — enough
+    /// that [`Self::fit`]'s slope is measured, not the 0 it reads before? A
+    /// stream that sends one width only never learns what a row costs, and
+    /// must try the other to choose between them (`dsd_stream::StreamWidth`).
+    /// The fit decays, so a width not sent for ~10 checks is forgotten and
+    /// tried again.
+    pub fn slope_is_measured(&self) -> bool {
+        self.w > 0.0 && {
+            let mx = self.x / self.w;
+            self.xx / self.w - mx * mx >= 0.25
+        }
+    }
+
     fn line(&self) -> Option<(f64, f64, bool)> {
         if self.w <= 0.0 {
             return None;
@@ -1096,6 +1109,30 @@ mod tests {
         assert!(
             (fixed - 25.0).abs() < 1.0 && (slope - 95.0).abs() < 1.0,
             "{fixed} + {slope}x"
+        );
+    }
+
+    /// A stream that sends one width learns nothing about a row's price —
+    /// the fit's 0 slope is a default, not a measurement — and a width left
+    /// unsent is forgotten, so the stream tries it again.
+    #[test]
+    fn a_rows_price_is_measured_only_across_two_widths_and_then_forgotten() {
+        let mut check = CheckCost::for_a_plan(Some(420));
+        assert!(!check.slope_is_measured(), "an empty fit");
+        for _ in 0..4 {
+            check.record_with(3, 1250.0, false);
+        }
+        assert!(!check.slope_is_measured(), "one width only");
+        check.record_with(5, 1400.0, false);
+        assert!(check.slope_is_measured(), "a check of a second width");
+        let (_, slope) = check.fit().unwrap();
+        assert!((slope - 75.0).abs() < 1.0, "{slope}");
+        for _ in 0..12 {
+            check.record_with(5, 1400.0, false);
+        }
+        assert!(
+            !check.slope_is_measured(),
+            "twelve checks of one width later, the other is forgotten"
         );
     }
 }

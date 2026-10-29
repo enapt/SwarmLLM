@@ -386,6 +386,12 @@ Each names the ONE place a decision is made; a second implementation of any is t
 
 → `docs/invariants/scheduling.md` § "A tree that flows" (On the REAL link: the knob sweep and the drafter table)
 
+## A stream's chunk is as wide as it pays (2026-10-30, #374)
+
+**`dsd_stream::StreamWidth` chooses each chunk's width** of two — `SWARMLLM_SPEC_STREAM_GUESSES` (3) or two more — by `chunk_rate`: tokens a millisecond at the reply's RECENT acceptance against the check's measured cost at each width (`CheckCost`, fed ONLY by chunks sent alone; a row is priced only once `CheckCost::slope_is_measured`, so until then lone chunks alternate), this node's own layers' share (timed per width), the drafter's cost and the round trip. Never one fixed width: on the 70B 5 beat 3 by 5% but lost 11% on a reply guessed at 0.70, and the simulation put a fixed 5 at −16% on a LAN. A new chunk shape costs a card a capture, so at most two widths. A/B `SWARMLLM_STREAM_WIDTH=fixed`; simulator `examples/stream_width_sim.py`.
+
+→ `docs/invariants/scheduling.md` § "A chunk is as wide as it pays"
+
 ## A chain its head will lead is priced as its head leading it (2026-10-18, #3 (a))
 
 **`parallax::chain_is_led_by_its_head` is the single answer to "is this chain priced as led by its head"**: `delegation_eligible`'s shape, for a request the hand-off takes (`PromptPlan::with_head_leading` ← `request_may_be_led_by_its_head`, set once in `distributed_exec`), every peer forwarding (`PIPELINE_CHAIN`) with a usable coordinate (`NodeCandidate::ring`). The search runs one led pass per head; each hop is `parallax::led_hop_ms` (half the coordinates' round trip × passes), the tail's back to the head included. `chain_cost_terms` prices a chain the same way, so every gate and the logged prediction read the price it was chosen at. Anything unknown prices it driven, as before — and the driven pass still starts from a head that may lead, or a chain the led pass cannot price has no route.

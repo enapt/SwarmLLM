@@ -684,7 +684,9 @@ the chain — so the lever exists only where a far end measures its own copy rat
    the drafter already reads the whole context at ~0.77 acceptance; a looked-up phrase saves only
    where it is right more often than the drafter, which the measurement in § 7.6 is to establish.
 
-**8.6 The stream's chunk: guessed whole, and every chunk one width — built.** The chain stream
+**8.6 The stream's chunk: guessed whole, and every chunk one width — built** (one of TWO widths since
+2026-10-30, chosen by what each pays: #374, `docs/invariants/scheduling.md` § "A chunk is as wide as it
+pays"). The chain stream
 (what a split runs where trees do not: a drafter off the card, a far end partly on a processor —
 the 70B) was swept on the real link (this PC's card holding the 7B's layers 0-13 and the
 coder-1.5B Q8_0 drafter, AU's RTX 3060 the rest, trees and flow forced off,

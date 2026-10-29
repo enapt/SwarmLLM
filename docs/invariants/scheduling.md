@@ -5649,7 +5649,8 @@ drafter growing a tree of the oldest chunk's likeliest refusals while the far en
 and ran past its time budget by up to 141 ms; the replies took 136.3 s against 137.7 (two arms
 each, within the arms' spread). Not shipped; the patch is kept (`~/swarmllm-70b/predraft_dsd_stream.patch`)
 for a wider chunk, where the simulation put its gain (5 guesses + ranks 2-3: +16-22% if the far
-end's check is flat in rows).
+end's check is flat in rows) — measured at 5 the same evening, it gained nothing (§ "A chunk is as
+wide as it pays").
 **A node already holding a smaller drafter fetches the larger one beside it** (#331, 2026-10-24):
 `drafter_to_acquire` answers the held drafter AND the next step, and prune keeps both until the
 larger one is held and chosen — `docs/invariants/memory.md` § "A split with no drafter fetches one".
@@ -5831,6 +5832,80 @@ level a call: 8 proposals for 24); `a_tree_that_flows_keeps_its_live_rows_throug
 `fault`, and `flow@NAME=v+NAME=v` for a knob; `CPU=1` the correctness pass). Security review 2026-10-22: no High or Medium; a stale
 capability reading now finishes in rounds (L1); a hop flipping draw/walk semantics only fails
 the step, as it could already (L2).
+
+## A chunk is as wide as it pays (2026-10-30, #374)
+
+**The rule**: the continuous stream sends each chunk at one of two widths — the narrow one
+(`SWARMLLM_SPEC_STREAM_GUESSES`, 3) or two guesses more — whichever makes more tokens a millisecond
+(`dsd_stream::StreamWidth`, `chunk_rate`) at the reply's RECENT acceptance
+(`AcceptanceEstimate::recent`: kept guesses come in runs) and what the chain's checks cost. The costs
+are measured here: the check at each width from the fit of chunks sent ALONE (`CheckCost`, which
+nothing queued ahead of), this node's own layers' share of it (timed per width), the drafter's cost a
+guess and the round trip (`CheckCost::floor_ms`). The fit prices a row only after checks of two widths
+(`CheckCost::slope_is_measured`), so until then chunks sent alone alternate between them and the rest
+stay narrow; the fit is remembered for the next request on the same machines and decays, so a width
+left unsent is tried again after ~10 lone chunks. A/B `SWARMLLM_STREAM_WIDTH=fixed` (every chunk narrow).
+
+**What one width did** (the 70B: this node [0,16) + the AU RTX 3060 [16,80), running ~44 of its layers
+on its processor, ~420 ms apart, route pinned, 3B drafter, binary `~/swarmllm-70b/swarmllm-pg`, window
+3, arms ABCCBA, one binary, `~/swarmllm-70b/ab70w5.out`, 20:57-21:50Z, 0 driver events). Decode s of
+three 96-token replies, both runs of each arm:
+
+| arm | lighthouse | compost | tea | sum |
+|---|---|---|---|---|
+| 3 guesses | 58.0 / 60.2 | 33.0 / 33.9 | 46.0 / 45.4 | 137.0 / 139.6 |
+| 5 guesses | 65.5 / 65.8 | 25.7 / 25.0 | 40.0 / 39.8 | 131.2 / 130.6 |
+| 5 + pre-draft | 66.8 / 65.4 | 25.6 / 23.8 | 40.2 / 40.2 | 132.5 / 129.3 |
+
+Five was 5% faster in all, 25% and 13% on the replies the drafter guessed at 0.81, but 11% SLOWER
+on the one it guessed at 0.70 (33 of 39 chunks restarted at 5, 29 of 46 at 3). Each wider check
+came back ~100-160 ms later (least answer 1118-1311 ms at 3, 1334-1451 at 5): a restart costs the
+whole trip, so on a reply that restarts most chunks, two more rows buy less than they cost. The
+pre-draft fired on 1-9 chunks of 22-39 and saved 1-4 of 33 restarts at 5 — the drafter, at 5 × 61 ms
+a chunk, has no idle time left — so it stays out.
+
+**The simulation** (`examples/stream_width_sim.py`): the three replies regenerated greedily through
+the live node and the 3B's first choice ranked at every position offline (`~/swarmllm-70b/ids70ab.sh`,
+`ranks70ab.sh` → `ranks_ab/`) give each guess's fate, and at 3 guesses the replay reproduced the
+stream's chunks kept whole and restarted exactly or within one. Fitted to the six decode times: round
+trip 420, drafter 61 ms a guess, this node 250 + 15 a row, the far end 600 + 40 a row (5% RMS).
+Over those three replies and four earlier ones (`ranks/`, 747 positions), % faster than 3 guesses:
+
+| setup | 4 | 5 | chosen |
+|---|---|---|---|
+| 70B, AU mostly processor (fitted) | +4.9 | +6.0 | +6.4 |
+| 7B, far card, drafter on card, 440 ms | +4.9 | +7.9 | +7.6 |
+| 7B, far card, drafter on processor | +1.6 | +1.5 | +2.2 |
+| 7B, far processor, 270 ms | +0.3 | −0.6 | +2.4 |
+| 7B, far processor, dear rows | −4.0 | −7.7 | +0.7 |
+| LAN, far card | −8.6 | −15.8 | −0.0 |
+| LAN, far processor | +0.3 | −1.1 | +3.3 |
+
+Only the first row is a measurement; the rest are plausible shapes, and they are why the width is
+chosen rather than raised: a fixed 5 loses where a row is dear beside the trip or where building
+a chunk here binds (a LAN). Three things the formula needed, each found by the simulation: the
+reply's RECENT acceptance (a whole-reply average chose one width for the lighthouse reply's easy and
+hard stretches alike), a refusal's wait behind the chunk being built (`run_with` finishes building
+before it reads an answer — without that term the LAN card case lost 3-4%), and this node's share of
+the check timed rather than guessed (a 30% guess cost the dear-row case 1%).
+
+**What did not pay, in the same simulation**: a third width (2-8: within 1% of two), a window of 4-6
+(slower: more stale work at a refusal), drafting the next chunk while this node's layers run the last
+(+0-3%), ending a chunk's build when a refusal arrives (+0-2.5% here; it halves a fixed 5's loss on a
+LAN, which the choice already avoids), and moving the far end's processor layers here (slower: this
+node's drafting and its layers are serial, so it becomes the bottleneck). The large levers left on
+the 70B are the far end's fixed ~600 ms a check (200 ms less: +21%) and the drafter's misses (20%
+fewer: +12%, +24% with the chosen width) — `docs/plans/large_model_splits.md`.
+
+Research: PipeInfer (arXiv 2407.11798) keeps runs small and fixed; SmartSpec chooses γ by goodput
+(tokens over a fitted step cost), which this is for a pipelined stream; PEARL (arXiv 2408.11850)
+lengthens drafts after an acceptance and shortens them after a rejection; no system found gives a
+width for a pipeline whose far stage is a long trip away. Ending a chunk by the drafter's confidence
+(SpecDec++ 2405.19715, AdaEDL 2410.18351) was measured here and cost 27% (`stream_confidence_floor`).
+
+Tests: `a_chunk_is_as_wide_as_it_pays`, `the_stream_learns_a_rows_price_from_chunks_sent_alone_then_chooses`
+(`dsd_stream`; red under `SWARMLLM_STREAM_WIDTH=fixed`), `a_rows_price_is_measured_only_across_two_widths_and_then_forgotten`
+(`dsd_controller`). The reply's line carries `wide_guesses`, `chunks_wide` and `check_slope_measured`.
 
 ## A peer that fails a model on every request is left out of its plans for a while (2026-10-02)
 
