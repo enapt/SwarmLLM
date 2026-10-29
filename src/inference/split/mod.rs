@@ -67,7 +67,10 @@ pub use self::prefix_cache::{
     PrefixCache, SnapshotHome, SnapshotRoom, KV_SNAPSHOT_MAGIC, KV_SNAPSHOT_VERSION,
 };
 pub use self::shard_reader::{resolve_sidecars, SidecarTensor};
-pub use self::stand_in::{RunStandIn, STAND_IN_WINDOW};
+pub use self::stand_in::{
+    PriorFit, RunStandIn, StandInPrior, PRIOR_ROWS, STAND_IN_CARRY, STAND_IN_CARRY_POSITIONS,
+    STAND_IN_WINDOW,
+};
 pub(crate) use self::token_embedding::table_supports_row_gather;
 
 /// Context length served by default, for a model that declares at least this

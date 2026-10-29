@@ -474,6 +474,11 @@ pub async fn run_worker(
         // Either block on the next IPC message (no slots are decoding) OR race
         // a fresh IPC arrival against an immediate decode tick (slots active).
         let next_msg: Option<(DaemonMsg, Vec<u8>)> = if slot_table.is_empty() {
+            // Nothing decoding and nothing waiting: fit what the last replies
+            // taught the card's stand-in, stopping the moment a message comes.
+            if ipc_rx.is_empty() && refit_stale_priors(&mut models, &|| ipc_rx.is_empty()) {
+                pool_may_hold_freed = true;
+            }
             if pool_may_hold_freed && crate::inference::cuda_pool::keep_enabled() {
                 match tokio::time::timeout(crate::inference::cuda_pool::IDLE_TRIM, ipc_rx.recv())
                     .await
@@ -3479,14 +3484,26 @@ struct Traced {
 /// fails is dropped for the reply, never the reply.
 /// `SWARMLLM_CARD_GUESS_STAND_IN=none` guesses without one.
 ///
+/// **It starts from what the model's earlier replies learned**
+/// ([`split::StandInPrior`], 2026-10-29): each reply's positions are kept
+/// with the model once the reply is out ([`absorb_the_reply`]), the window is
+/// fitted to what their fit leaves, and a prompt longer than the window joins
+/// that fit for its own reply ([`learn_the_prompt`]).
+/// `SWARMLLM_CARD_GUESS_PRIOR=0` fits each reply alone.
+///
 /// [`split::RunStandIn`]: crate::inference::split::RunStandIn
 /// [`split::STAND_IN_WINDOW`]: crate::inference::split::STAND_IN_WINDOW
+/// [`split::StandInPrior`]: crate::inference::split::StandInPrior
 struct CardGuesses {
     /// The layers a guess skips, over absolute layer indices.
     skips: Vec<bool>,
     /// What the skipped run did at this reply's real positions; `None` where
     /// it is off, or failed.
     stand_in: Option<crate::inference::split::RunStandIn>,
+    /// The prompt pass's positions at the run's ends, and how many — learned
+    /// on the reply's first step ([`Self::take_the_prompt`]), not before its
+    /// first token.
+    prompt: Option<(HashMap<usize, candle_core::Tensor>, usize)>,
     acceptance: crate::inference::dsd_controller::AcceptanceEstimate,
     /// One guess's time on the card, read back with the round's guesses.
     guess_ms: crate::inference::dsd_controller::RecentMedian,
@@ -3509,6 +3526,7 @@ impl CardGuesses {
         Some(Self {
             skips: model.card_guess_skips()?,
             stand_in: None,
+            prompt: None,
             acceptance: crate::inference::dsd_controller::AcceptanceEstimate::recent(),
             guess_ms: Default::default(),
             rounds: 0,
@@ -3516,6 +3534,29 @@ impl CardGuesses {
             accepted: 0,
             declined: 0,
         })
+    }
+
+    /// The prompt's positions into the stand-in, once, on the reply's first
+    /// step. A guess is the first thing that reads the stand-in and the first
+    /// token is the prompt pass's own, so the fit — the window, and for a long
+    /// prompt the model's prior refitted with it — waits for that token to be
+    /// out instead of holding it back (round 14: 1,759 tokens' first token
+    /// 2.93-3.03 s without the prior, 3.55-3.87 s with it fitted before).
+    /// A reply that ends before its first step never learns its prompt, which
+    /// only its own guesses would have read.
+    fn take_the_prompt(&mut self, model: &mut crate::inference::split::SplitModel) {
+        let Some((caught, rows)) = self.prompt.take() else {
+            return;
+        };
+        let Some(stand_in) = self.stand_in.as_mut() else {
+            return;
+        };
+        let learned =
+            tokio::task::block_in_place(|| learn_the_prompt(model, stand_in, &caught, rows));
+        if let Err(e) = learned {
+            tracing::warn!(error = %e, "card guesses: stand-in dropped for this reply");
+            self.stand_in = None;
+        }
     }
 }
 
@@ -3534,6 +3575,28 @@ fn card_stand_in_on() -> bool {
     *ON.get_or_init(|| std::env::var("SWARMLLM_CARD_GUESS_STAND_IN").as_deref() != Ok("none"))
 }
 
+/// `SWARMLLM_CARD_GUESS_PRIOR=0`: each reply's stand-in is fitted from that
+/// reply alone, as before the model's prior ([`CardGuesses`]), for A/B inside
+/// one binary.
+fn card_prior_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("SWARMLLM_CARD_GUESS_PRIOR").as_deref() != Ok("0"))
+}
+
+/// The share of the stand-in's last miss its next guesses carry
+/// (`RunStandIn::with_carry`): `SWARMLLM_CARD_GUESS_CARRY` (0 to 1; `0` is
+/// the stand-in as before), else `split::STAND_IN_CARRY`.
+fn card_carry_share() -> f64 {
+    static SHARE: std::sync::OnceLock<f64> = std::sync::OnceLock::new();
+    *SHARE.get_or_init(|| {
+        std::env::var("SWARMLLM_CARD_GUESS_CARRY")
+            .ok()
+            .and_then(|v| v.parse::<f64>().ok())
+            .filter(|s| (0.0..=1.0).contains(s))
+            .unwrap_or(crate::inference::split::STAND_IN_CARRY)
+    })
+}
+
 /// The stand-in a reply's card guesses will read, made before its prompt
 /// pass so the pass can keep what it is fitted from: where the reply will be
 /// speculated (`speculating`), its card can guess and the stand-in is on.
@@ -3544,7 +3607,106 @@ fn card_stand_in_for(
     if !speculating || local_guess_gamma_fixed() || !card_guesses_on() || !card_stand_in_on() {
         return None;
     }
-    crate::inference::split::RunStandIn::for_run(&model.card_guess_skips()?, model.device())
+    let stand_in =
+        crate::inference::split::RunStandIn::for_run(&model.card_guess_skips()?, model.device())?
+            .with_carry(
+                card_carry_share(),
+                crate::inference::split::STAND_IN_CARRY_POSITIONS,
+            );
+    Some(if card_prior_on() {
+        stand_in.collecting()
+    } else {
+        stand_in
+    })
+}
+
+/// The prompt's positions into the reply's stand-in: measured against the
+/// model's prior where the stand-in collects for one — refitted with the
+/// prompt first where it holds more positions than the window
+/// (`StandInPrior::fit_for_prompt`). A prior that cannot be fitted leaves the
+/// reply's window to itself; only the window failing drops the stand-in.
+fn learn_the_prompt(
+    model: &mut crate::inference::split::SplitModel,
+    stand_in: &mut crate::inference::split::RunStandIn,
+    caught: &HashMap<usize, candle_core::Tensor>,
+    rows: usize,
+) -> Result<(), SwarmError> {
+    let (phi, delta) = stand_in.rows_of(caught, rows)?;
+    if stand_in.collects() {
+        let window = stand_in.window();
+        let prior = model.stand_in_prior_for(stand_in);
+        let fits_before = prior.fits;
+        match prior.fit_for_prompt(&phi, &delta, window) {
+            Ok(fit) => {
+                if prior.fits > fits_before {
+                    tracing::debug!(
+                        rows = fit.as_ref().map_or(0, |f| f.rows()),
+                        fits = prior.fits,
+                        fit_ms_total = prior.ms,
+                        "card guesses: the prior fitted on the reply's first step"
+                    );
+                }
+                stand_in.set_prior(fit)?
+            }
+            Err(e) => {
+                // Dropped, as the idle refit drops one: kept stale, every
+                // later reply would pay for the same failing fit.
+                tracing::warn!(error = %e, "card guesses: no prior for this reply; it is dropped");
+                *prior = crate::inference::split::StandInPrior::for_stand_in(stand_in);
+            }
+        }
+    }
+    stand_in.learn_rows(phi, delta)
+}
+
+/// Once a reply is out, what its stand-in learned joins the model's prior
+/// (`StandInPrior::take_in`) — unfitted: the worker fits it while nothing
+/// waits ([`refit_stale_priors`]), else the next reply's first step does.
+/// A failure costs the prior, never the worker.
+fn absorb_the_reply(
+    model: &mut crate::inference::split::SplitModel,
+    mut stand_in: crate::inference::split::RunStandIn,
+) {
+    if !stand_in.collects() {
+        return;
+    }
+    let prior = model.stand_in_prior_for(&stand_in);
+    if let Err(e) = prior.take_in(&mut stand_in) {
+        tracing::warn!(error = %e, "card guesses: the model's prior is dropped");
+        *prior = crate::inference::split::StandInPrior::for_stand_in(&stand_in);
+    }
+}
+
+/// Fit every model's prior that replies have joined since its last fit, for
+/// as long as no message waits (`keep_going`): a request arriving meanwhile
+/// waits one of the inverse's steps, not the 175-280 ms fit (round 15). True
+/// where anything was fitted, so the card's pool may hold what it freed.
+fn refit_stale_priors(
+    models: &mut HashMap<(usize, usize, usize, usize), SplitModel>,
+    keep_going: &dyn Fn() -> bool,
+) -> bool {
+    let mut any = false;
+    for model in models.values_mut() {
+        if !keep_going() {
+            break;
+        }
+        match tokio::task::block_in_place(|| model.refit_stale_prior(keep_going)) {
+            Ok(true) => {
+                any = true;
+                if let Some(prior) = model.stand_in_prior() {
+                    tracing::debug!(
+                        rows = prior.rows(),
+                        fits = prior.fits,
+                        fit_ms_total = prior.ms,
+                        "card guesses: the model's prior refitted"
+                    );
+                }
+            }
+            Ok(false) => {}
+            Err(e) => tracing::warn!(error = %e, "card guesses: the model's prior is dropped"),
+        }
+    }
+    any
 }
 
 impl LocalSpec {
@@ -3598,10 +3760,17 @@ impl LocalSpec {
     const MOST_PROBE_AFTER: u32 = 64;
 
     /// Hand the card's guesses the stand-in the prompt pass fed
-    /// ([`card_stand_in_for`]); dropped where the card makes none.
-    fn with_stand_in(mut self, stand_in: Option<crate::inference::split::RunStandIn>) -> Self {
+    /// ([`card_stand_in_for`]) and what the pass kept for it, learned on the
+    /// first step ([`CardGuesses::take_the_prompt`]); dropped where the card
+    /// makes none.
+    fn with_stand_in(
+        mut self,
+        stand_in: Option<crate::inference::split::RunStandIn>,
+        prompt: Option<(HashMap<usize, candle_core::Tensor>, usize)>,
+    ) -> Self {
         if let Some(card) = self.card.as_mut() {
             card.stand_in = stand_in;
+            card.prompt = prompt;
         }
         self
     }
@@ -3671,10 +3840,12 @@ impl LocalSpec {
         let card = self.card.as_ref().map_or(String::new(), |c| {
             let stand_in = c.stand_in.as_ref().map_or(" stand-in none".to_string(), |s| {
                 format!(
-                    " stand-in rows {} rebuilds {} ms {:.1}",
+                    " stand-in rows {} prior {} rebuilds {} ms {:.1} not-finite {}",
                     s.rows(),
+                    s.prior_rows(),
                     s.rebuilds,
-                    s.ms
+                    s.ms,
+                    s.not_finite
                 )
             });
             format!(
@@ -3720,6 +3891,9 @@ impl LocalSpec {
         force_attn: bool,
     ) -> Result<u32, SwarmError> {
         self.ctx.push(next_token);
+        if let Some(card) = self.card.as_mut() {
+            card.take_the_prompt(model);
+        }
         if let Some(tok) = self.pending.pop_front() {
             return Ok(tok);
         }
@@ -5455,7 +5629,7 @@ async fn handle_generate(
             Some(s) => {
                 let capture = crate::inference::split::Capture {
                     layers: s.capture_layers(),
-                    last: s.window(),
+                    last: s.prompt_capture(),
                 };
                 model
                     .forward_keeping(&rest, from, kv_store, &req_id_str, capture, false)
@@ -5466,14 +5640,14 @@ async fn handle_generate(
                 .map(|logits| (logits, None)),
         }
     });
+    // What the pass kept for the stand-in, learned once the first token is out
+    // (`CardGuesses::take_the_prompt`).
+    let mut prompt_caught: Option<(HashMap<usize, candle_core::Tensor>, usize)> = None;
     let logits = match prefill {
         Ok((l, caught)) => {
-            if let (Some(s), Some(caught)) = (stand_in.as_mut(), caught) {
+            if let (Some(_), Some(caught)) = (stand_in.as_ref(), caught) {
                 let rows = caught.values().next().map_or(0, |t| t.dim(1).unwrap_or(0));
-                if let Err(e) = s.learn(&caught, rows) {
-                    tracing::warn!(error = %e, "card guesses: stand-in dropped for this reply");
-                    stand_in = None;
-                }
+                prompt_caught = Some((caught, rows));
             }
             l
         }
@@ -5538,6 +5712,9 @@ async fn handle_generate(
 
     // The reply, as one block: however it ends, the prompt's snapshot left
     // for its end is copied below before the error, if any, goes back.
+    // What the reply's stand-in learned, for the model's prior once the reply
+    // is out (`absorb_the_reply`).
+    let mut finished_stand_in: Option<crate::inference::split::RunStandIn> = None;
     let replied: Result<(), SwarmError> = async {
         let use_logprobs = gen.sampling.logprobs;
         let (mut next_token, mut token_logprob) =
@@ -5604,7 +5781,7 @@ async fn handle_generate(
             // Only built when it will be used — it copies the whole prompt.
             let mut spec = speculating.then(|| {
                 LocalSpec::new(*ngram_cfg, &prompt_ids, model, local_guess_gamma_fixed())
-                    .with_stand_in(stand_in.take())
+                    .with_stand_in(stand_in.take(), prompt_caught.take())
             });
 
             for _ in 0..gen.sampling.max_tokens {
@@ -5689,7 +5866,7 @@ async fn handle_generate(
                 }
             }
 
-            if let Some(spec) = spec.filter(|s| s.rounds > 0) {
+            if let Some(spec) = spec.as_ref().filter(|s| s.rounds > 0) {
                 let tokens_per_round = spec.produced as f64 / spec.rounds as f64;
                 // Steers the next admission decision — see
                 // `spec_payoff_justifies_diverting`.
@@ -5706,6 +5883,7 @@ async fn handle_generate(
                     "DIAG: local n-gram speculation complete"
                 );
             }
+            finished_stand_in = spec.and_then(|s| s.card).and_then(|c| c.stand_in);
 
             // The loop samples one token ahead: when it exits on `length`,
             // `next_token` holds a candidate that was never sent.
@@ -5798,6 +5976,9 @@ async fn handle_generate(
     replied?;
     // Free KV cache for this request to prevent VRAM leak across requests
     kv_store.clear_request(model.kv_model_key(), &req_id_str);
+    if let Some(stand_in) = finished_stand_in {
+        absorb_the_reply(model, stand_in);
+    }
 
     Ok(())
 }

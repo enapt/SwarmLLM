@@ -3051,6 +3051,7 @@ impl SplitModel {
                 stack_bytes: prompt_stack_bytes,
                 last: None,
             },
+            stand_in_prior: None,
         })
     }
 }

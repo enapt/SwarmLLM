@@ -173,6 +173,11 @@ pub enum SkipBridge {
         base: Tensor,
         features: Tensor,
         weights: Tensor,
+        /// A second kernel ridge added to the first, `φ(h)·Hᵀ·A`: the
+        /// model's earlier conversations (`stand_in::PriorFit` — features `H`
+        /// and weights `A`, `[m, hidden]` each), which `F` and `W` then
+        /// correct. `None` where this reply's positions are all it has.
+        prior: Option<(Tensor, Tensor)>,
     },
 }
 
@@ -190,28 +195,57 @@ impl SkipBridge {
                 let shift = shift.to_device(h.device())?.to_dtype(h.dtype())?;
                 h.broadcast_add(&shift)
             }
-            Self::Recall {
-                base,
-                features,
-                weights,
-                ..
-            } => {
+            Self::Recall { base, .. } => {
                 let (b, t, d) = h.dims3()?;
                 let rows = h.reshape((b * t, d))?.to_dtype(candle_core::DType::F32)?;
                 let norm = rows.sqr()?.sum_keepdim(1)?.sqrt()?.clamp(1e-6, f64::MAX)?;
                 let phi = rows.broadcast_div(&norm)?;
-                let f = features.to_device(h.device())?;
-                let w = weights.to_device(h.device())?;
-                let base = base.to_device(h.device())?;
-                // `Fᵀ` as a transposed view: the matmul reads it in place, where
-                // a copy cost the window's whole table per guess.
-                let effect = phi.matmul(&f.t()?)?.matmul(&w)?;
+                let Some(effect) = self.recalled(&phi)? else {
+                    return Ok(h.clone());
+                };
                 (rows + effect)?
-                    .broadcast_add(&base)?
+                    .broadcast_add(&base.to_device(h.device())?)?
                     .reshape((b, t, d))?
                     .to_dtype(h.dtype())
             }
         }
+    }
+
+    /// What a `Recall` bridge estimates the run adds at the normalised starts
+    /// `phi` (`[n, hidden]` f32), its base included — the arithmetic every
+    /// guess adds to the hidden state, and what the stand-in measures its
+    /// misses against. `None` for a `Shift`.
+    pub fn effect(&self, phi: &Tensor) -> candle_core::Result<Option<Tensor>> {
+        let Self::Recall { base, .. } = self else {
+            return Ok(None);
+        };
+        self.recalled(phi)?
+            .map(|e| e.broadcast_add(&base.to_device(phi.device())?))
+            .transpose()
+    }
+
+    /// [`Self::effect`] less the base.
+    fn recalled(&self, phi: &Tensor) -> candle_core::Result<Option<Tensor>> {
+        let Self::Recall {
+            features,
+            weights,
+            prior,
+            ..
+        } = self
+        else {
+            return Ok(None);
+        };
+        let f = features.to_device(phi.device())?;
+        let w = weights.to_device(phi.device())?;
+        // `Fᵀ` as a transposed view: the matmul reads it in place, where a
+        // copy cost the window's whole table per guess.
+        let mut effect = phi.matmul(&f.t()?)?.matmul(&w)?;
+        if let Some((prior_f, prior_w)) = prior {
+            let prior_f = prior_f.to_device(phi.device())?;
+            let prior_w = prior_w.to_device(phi.device())?;
+            effect = (effect + phi.matmul(&prior_f.t()?)?.matmul(&prior_w)?)?;
+        }
+        Ok(Some(effect))
     }
 }
 

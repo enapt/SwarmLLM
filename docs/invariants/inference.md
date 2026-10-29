@@ -3389,16 +3389,88 @@ switch), so which near-tie flips follows what was guessed. Scored against llama.
 (`score_against_reference.py`, the whole 14B file): all twelve replies, plain arms and stand-in
 arms alike, rank every token 1 or 2, the largest gap 0.17-0.41 logits a reply.
 
+**The stand-in starts from the model's earlier replies** (rounds 12-16, 2026-10-28/29).
+`split::StandInPrior` keeps the last 2,048 positions the model's replies taught it (`PRIOR_ROWS`, on
+the host) and fits a dual kernel ridge over them; each reply's window is fitted to what that leaves —
+one `Recall` bridge with a `prior` term. The inverse of the 2,048-row Gram matrix is found on the
+card by Newton–Schulz (`stand_in::ridge_inverse`: X₀ = I/‖A‖∞, linear for about log₂ of the
+condition number then quadratic, GEMMs only; arXiv 2212.02406), accepted at max|AX − I| ≤ 1e-2 — a
+host Cholesky in f64 at 2,048 takes seconds. Why dual and capped: the primal map (hidden²
+statistics: 210 MB at 5,120, 537 MB at a 70B's 8,192) kept 0.66 / 2.13 / 0.55 / 0.44 tokens a round
+where the last 2,048 rows kept 0.64 / 2.12 / 0.53 / 0.41 (round 13), ~84 MB on the card at 5,120. A
+prompt longer than the window joins the fit for its OWN reply only — on the ~1,800-token prompts
+1.17 / 2.61 / 1.23 / 1.11 against the window's 0.66 / 2.61 / 0.69 / 0.70 — while short prompts
+joining it cost Llama a little (round 13), hence the condition. Probe (`skip_agreement_probe`, the
+library's code as `carried`, six short conversations after the long one, round 14): 0.64 / 2.12 /
+0.53 / 0.41 against the window alone's 0.48 / 1.73 / 0.32 / 0.22 (Qwen2.5-14B 33 of 48 skipped / 21
+of 48 / Llama 3.1 8B 25 of 32 / Mistral 7B 25 of 32), equal to the exact arithmetic to rounding in
+every conversation. Decode on the live Qwen2.5-14B split (`cg/ab9.sh`, one binary,
+`SWARMLLM_CARD_GUESS_PRIOR=0` the control, ABBA, back to back, medians): default placement code
+13.64 → 15.43 tok/s (1.13x), 1,800-token summary 13.03 → 15.66 (1.20x), prose 13.32 → 13.26; 15 of
+48 on the card (card hog 1,800 MiB) 7.08 → 10.12 (1.43x), 7.37 → 10.30 (1.40x), 6.88 → 7.86 (1.14x)
+— the gain grows with the run skipped, as the probe's did.
+
+**Where its fit runs decides the first token.** Fitted on the long prompt BEFORE the first token,
+the summary's first token rose 2.93 → 3.63 s (15 of 48: 3.70 → 5.37). Fitted on the reply's first
+step (`CardGuesses::take_the_prompt`, round 15's `ab10`), the pass came back level — the node's log
+split into the wait for admission and the pass (`split_ttft.py`): the pass 2.33-2.80 s against
+2.29-2.47 without the prior (ab9's 2.92-3.03 against 2.50-2.57) — but back to back the WAIT grew,
+0.15-1.18 s against 0.16-0.47: the prior's refit at the reply's end (175-280 ms at 2,048 rows) sat in
+front of the next request. Taken in unfitted (`StandInPrior::take_in`) and fitted while the worker
+has nothing waiting (`model_worker::refit_stale_priors`, stopping between Newton–Schulz steps when a
+message arrives) — round 16, `cg/ab11.sh`, `SWARMLLM_CARD_GUESS_PRIOR=0 SWARMLLM_CARD_GUESS_CARRY=0`
+the control, ABBA, Windows up 16.5 h: with 4 s between requests (gotcha #986) the first token is
+2.99 s in both (medians of eight; waits 167-212 ms against 174-251, passes 2.70-2.98 s against
+2.65-2.90) and its 64 tokens decode 10.82 → 12.75 tok/s (1.18x). Back to back at the default
+placement decode is code 13.78 → 15.63 (1.13x), summary 13.33 → 14.21 (1.07x), prose 12.72 →
+13.40 (1.05x), the summary's first token 2.85 → 2.91 s (waits 247-523 ms against 179-717, passes
+2.40-2.66 s against 2.34-2.58 — within the block's spread). Tokens kept a card round rose 1.83 →
+2.59-2.70 and the share of guesses kept 0.69 → 0.76-0.77 (12 replies an arm, the node's `DIAG: local
+n-gram speculation complete` lines): most of the rise goes into longer rounds, each guess still
+costing ~21 ms — where #366 (2) looks next.
+
+**A check's miss is carried into the next guesses** (rounds 15-17). Error feedback: the bridge's
+base gains ρ × the mean of the stand-in's misses at the last k committed positions, each measured
+BEFORE that position is learned and without the carry already held (`RunStandIn::with_carry`,
+`note_miss`). probe11 (round 15, `carried~ρxk`, the probe's own arithmetic; tokens kept a round on
+the 14B 33 of 48 / Llama / Mistral / 14B 21 of 48): none 0.72 / 0.63 / 0.51 / 2.19; ρ 0.5 of the
+last miss 0.96 / 0.53 / 0.48 / 2.12 (one miss is too noisy a guide for Llama and Mistral); ρ 1 0.62 /
+0.31 / 0.32 / 1.90 (overshoots); ρ 0.5 of the last four 0.90 / 0.63 / 0.58 / 2.24 — never worse,
+chosen. probe12 (round 17) runs the LIBRARY's carry beside the probe's arithmetic (`carried-lib`):
+equal in every configuration (0.90 / 0.63 / 0.58 / 2.24, the same error to three places). In the
+worker (round 16, `cg/ab11.sh`'s card-hog block, 17-19 of 48 on the card, prior on in both arms,
+`SWARMLLM_CARD_GUESS_CARRY=0` the control, ABBA) it does not show beyond the arms' spread: tokens
+kept a card round 1.31 / 1.45 with it against 1.34 / 1.29 without; decode code 12.18 → 11.30,
+summary 9.57 → 10.27, prose 9.18 → 8.51 tok/s (two timed requests an arm; the control's summary
+first token read 3.44-6.41 s in the same arms). Kept on: it never lost tokens kept in either probe
+or the worker, and gains most where the card holds least. No prior art found — CLaSp (2505.24196)
+is the closest, re-picking the skipped layers from the last verification.
+
+**Not finite.** Round 13's probe once read every prior stand's error as NaN from its fifth
+conversation at 21 of 48 skipped, tokens kept unaffected, and never since (rounds 12 and 14, same
+configuration, clean) — cause unknown. The worker refuses a non-finite position
+(`RunStandIn::not_finite`, WARN once) and a non-finite fit, so one cannot poison later replies.
+
 **Prior art.** Skipping layers to self-draft is LayerSkip (arxiv 2404.16710), SWIFT (2410.06916,
 already here as `swift_decode_loop`), Draft & Verify, CLaSp (2505.24196), KNN-SSD (2505.16162);
 S3D (2405.20314) skips middle layers for low-memory cards and found the same shape — early and
 late layers matter most. None places a card/processor split so the CARD can draft while the
-processor is the bottleneck; llama.cpp, vLLM and ExLlama all offload card-first.
+processor is the bottleneck; llama.cpp, vLLM and ExLlama all offload card-first. ReplaceMe
+(2505.02819) replaces a pruned block with one linear map fitted offline — the stand-in fits its
+map online, from the hidden states a split computes anyway, and keeps it across replies.
 
 **What a change must keep.**
 - A guess never runs a processor layer: `SplitModel::card_guess_skips` refuses a model whose
   run lends its keys to another layer (Gemma 4 E2B/E4B), one with recurrent state (a guess cannot
   be taken back out of it), a run at the tail, or a model on one device.
+- No fit of the stand-in's prior runs between a request's arrival and its first token: a prompt is
+  fitted on the reply's first step (`CardGuesses::take_the_prompt`), a finished reply's rows are
+  taken in unfitted and fitted only while the worker has nothing waiting (`refit_stale_priors`
+  stops between steps when a message arrives). Test `a_refit_stops_when_a_request_arrives`.
+- A carried miss is measured on committed positions only, before they are learned, and against the
+  base WITHOUT the carry it already holds (`RunStandIn::note_miss`) — measured against the carried
+  base it would chase its own correction. Test `a_check_carries_a_share_of_its_last_miss` (the two
+  bridges differ by exactly ρ × the mean miss).
 - The guesses' cache entries are cut back before the check (`SplitModel::card_guesses` truncates
   to the round's start whether or not the guesses came), so the check reads exactly a step's
   cache — a skipped layer wrote nothing, a card layer's guessed rows are gone.

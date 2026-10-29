@@ -191,6 +191,7 @@ fn make_test_split_model_impl(
         batch_stats_reported_at: None,
         decode_graph: Default::default(),
         prompt_room: Default::default(),
+        stand_in_prior: None,
     }
 }
 
@@ -292,6 +293,7 @@ pub(super) fn make_gqa_test_model(
         batch_stats_reported_at: None,
         decode_graph: Default::default(),
         prompt_room: Default::default(),
+        stand_in_prior: None,
     }
 }
 
@@ -450,5 +452,6 @@ pub(super) fn make_deepseek_test_model(hidden_dim: usize) -> SplitModel {
         batch_stats_reported_at: None,
         decode_graph: Default::default(),
         prompt_room: Default::default(),
+        stand_in_prior: None,
     }
 }

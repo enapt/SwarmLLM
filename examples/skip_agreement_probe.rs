@@ -27,6 +27,10 @@
 //! `PROBE_PROMPTS=<file>` holds rendered prompts separated by a line `=====`
 //! (default: a code request and a prose one in ChatML); `PROBE_N` reply tokens
 //! (default 96); `PROBE_GAMMA` (4); `PROBE_SKIP` layers; `PROBE_STEP` (2).
+//! Each line also reads how often the model's token was among the first
+//! guess's best two / four choices (`top2` / `top4`), and with
+//! `PROBE_TREE2=1` what the better of two chains — from the best and the
+//! second-best first guess, a tree's first level — keeps a round (`tree2`).
 //!
 //! `PROBE_BRIDGE=1` instead fixes ONE block — `[PROBE_START, + SKIP)`, the
 //! start defaulting to a tenth of the depth as `hybrid::processor_run` places
@@ -47,6 +51,12 @@
 //! far each stand-in's estimate of the block's effect lands from the effect
 //! the next real forward measures (`err`, relative; `none` is 1).
 //!
+//! Any stand named `<stand>~ρ` or `<stand>~ρxk` in `PROBE_STANDS` runs again
+//! with its next round's guesses shifted by ρ times the mean of its last k
+//! residuals (what the real forwards measured less the stand's own estimate,
+//! k = 1 by default) — whether a stand-in's miss at one position carries to
+//! the next. A conversation starts with none.
+//!
 //! Two more ask whether a stand-in can outlive its conversation — what a node
 //! would carry from the replies it wrote before (FUTURE_WORK #366 (1)):
 //! `prior@λ` is a ridge map fitted ONLY on the earlier prompts' real
@@ -55,13 +65,24 @@
 //! conversation's positions so far added, refitted every `PROBE_REFIT`
 //! tokens. Both keep sufficient statistics (`ΦᵀΦ`, `ΦᵀΔ`, the sums), never
 //! the rows, so the carried state is two hidden × hidden matrices however
-//! long the history.
+//! long the history. `prior+recall@λ` is the form a worker could run: the
+//! prior's map, fitted once a conversation (off the reply's path), plus
+//! `recall@λ`'s window fitted to what the prior leaves of each effect.
+//! `prior<N>+recall@λ` is the same in the arithmetic a worker would keep on
+//! its card: the prior as kernel ridge over the last `N` positions of the
+//! earlier conversations (features and weights, `N × hidden` each — the
+//! dual of the map, equal to it while `N` holds every earlier position),
+//! the window fitted to its residuals, both one `Recall` bridge. `carried`
+//! is the library's own (`split::StandInPrior` beside `split::RunStandIn`, as
+//! a worker runs them): the prior refitted once a conversation is out, and
+//! with a prompt longer than the window for its own reply.
 
 use std::path::PathBuf;
 
 use candle_core::{DType, Tensor};
 use swarmllm::inference::split::{
-    GgufTensorMeta, KvCacheStore, RunStandIn, SkipBridge, SplitModel,
+    GgufTensorMeta, KvCacheStore, RunStandIn, SkipBridge, SplitModel, StandInPrior, STAND_IN_CARRY,
+    STAND_IN_CARRY_POSITIONS,
 };
 use swarmllm_types::{ModelManifest, ShardTensorEntry};
 
@@ -127,6 +148,24 @@ fn argmax(logits: &candle_core::Tensor) -> anyhow::Result<u32> {
     Ok(best as u32)
 }
 
+/// The `k` best ids, best first; equal scores go to the smaller id, as
+/// `argmax` breaks them.
+fn ranked(logits: &candle_core::Tensor, k: usize) -> anyhow::Result<Vec<u32>> {
+    let v: Vec<f32> = logits
+        .to_dtype(candle_core::DType::F32)?
+        .flatten_all()?
+        .to_vec1()?;
+    let mut best: Vec<usize> = Vec::with_capacity(k + 1);
+    for (i, &x) in v.iter().enumerate() {
+        let at = best.iter().position(|&b| x > v[b]).unwrap_or(best.len());
+        if at < k {
+            best.insert(at, i);
+            best.truncate(k);
+        }
+    }
+    Ok(best.into_iter().map(|i| i as u32).collect())
+}
+
 const DEFAULT_PROMPTS: &str = "<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\nWrite a Python function that reads a CSV file of orders with columns id, customer, amount and date, and returns the total amount per customer per month. Use type hints, a docstring, and handle malformed rows by skipping them with a warning.<|im_end|>\n<|im_start|>assistant\n
 =====
 <|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\nExplain to someone with no science background how a vaccine teaches the immune system to recognise a virus, in three short paragraphs.<|im_end|>\n<|im_start|>assistant\n";
@@ -145,12 +184,25 @@ enum Stand {
     Linear(f64),
     /// `split::RunStandIn`: `Recall(0.3)` kept current a row at a time.
     Online,
+    /// `split::RunStandIn` over `split::StandInPrior`, as a worker runs them.
+    Carried,
+    /// `Carried` with the library's own carry (`RunStandIn::with_carry` at
+    /// `STAND_IN_CARRY` × `STAND_IN_CARRY_POSITIONS`): must read as the
+    /// probe's `carried~0.5x4`, its arithmetic done here.
+    CarriedLib,
     /// A ridge map fitted only on the EARLIER prompts' real positions
     /// (`Carried`), once per prompt.
     Prior(f64),
     /// `Prior`'s statistics plus this conversation's positions so far,
     /// refitted every `PROBE_REFIT` tokens.
     Pooled(f64),
+    /// `Prior`'s map plus `Recall`'s window fitted to its residuals.
+    PriorRecall(f64),
+    /// The same with the prior as kernel ridge over the last `usize`
+    /// positions of the earlier conversations (module docs) — and, where
+    /// the `bool` says, this conversation's prompt after them, the prior
+    /// fitted once when the prompt has been read.
+    PriorRows(f64, usize, bool),
 }
 
 struct Candidate {
@@ -161,12 +213,27 @@ struct Candidate {
     /// many it made (bridge mode).
     err: f64,
     errs: usize,
+    /// Estimates that were not finite, left out of `err`.
+    nonfinite: usize,
     /// First guesses the full model agreed with.
     first: usize,
     /// Guesses accepted in a row, summed over positions.
     run: usize,
     /// Positions guessed.
     tried: usize,
+    /// Positions whose first guess had the model's token among its best two
+    /// / four choices — what a tree's first level could keep.
+    top2: usize,
+    top4: usize,
+    /// Tokens kept by the better of two chains, from the first guess's best
+    /// and second-best choices (`PROBE_TREE2=1`), summed over positions.
+    tree2: usize,
+    /// `<stand>~ρxk`: ρ times the mean of the last `k` residuals — the
+    /// effect a real forward measured less this stand's estimate of it —
+    /// added to every guess of the next round (0: off).
+    carry: f64,
+    carry_k: usize,
+    resids: std::collections::VecDeque<Tensor>,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -199,6 +266,7 @@ fn main() -> anyhow::Result<()> {
     };
     let n = env_usize("PROBE_N", 96);
     let gamma = env_usize("PROBE_GAMMA", 4).max(1);
+    let tree2 = std::env::var("PROBE_TREE2").is_ok_and(|v| v == "1");
     let skip = env_usize("PROBE_SKIP", (layers as f64 * 0.44).round() as usize).min(layers - 2);
     let step = env_usize("PROBE_STEP", 2).max(1);
     let prompts_text = match std::env::var("PROBE_PROMPTS") {
@@ -223,9 +291,16 @@ fn main() -> anyhow::Result<()> {
             stand: Stand::None,
             err: 0.0,
             errs: 0,
+            nonfinite: 0,
             first: 0,
             run: 0,
             tried: 0,
+            top2: 0,
+            top4: 0,
+            tree2: 0,
+            carry: 0.0,
+            carry_k: 1,
+            resids: std::collections::VecDeque::new(),
         }
     };
     let bridge_mode = std::env::var("PROBE_BRIDGE").is_ok_and(|v| v == "1");
@@ -233,7 +308,7 @@ fn main() -> anyhow::Result<()> {
         .clamp(1, layers - skip - 1);
     let window = env_usize("PROBE_WINDOW", 256).max(1);
     if bridge_mode {
-        for (name, stand) in [
+        let stands: Vec<(String, Stand)> = vec![
             ("none".to_string(), Stand::None),
             ("mean".to_string(), Stand::Mean),
             ("prev".to_string(), Stand::Prev),
@@ -242,15 +317,56 @@ fn main() -> anyhow::Result<()> {
             ("linear@0.3".to_string(), Stand::Linear(0.3)),
             ("linear@3".to_string(), Stand::Linear(3.0)),
             ("online".to_string(), Stand::Online),
+            ("carried".to_string(), Stand::Carried),
+            ("carried-lib".to_string(), Stand::CarriedLib),
             ("prior@0.3".to_string(), Stand::Prior(0.3)),
             ("pooled@0.3".to_string(), Stand::Pooled(0.3)),
-        ] {
-            let only = std::env::var("PROBE_STANDS").unwrap_or_default();
+            ("prior+recall@0.3".to_string(), Stand::PriorRecall(0.3)),
+            (
+                "prior512+recall@0.3".to_string(),
+                Stand::PriorRows(0.3, 512, false),
+            ),
+            (
+                "prior1024+recall@0.3".to_string(),
+                Stand::PriorRows(0.3, 1024, false),
+            ),
+            (
+                "prior2048+recall@0.3".to_string(),
+                Stand::PriorRows(0.3, 2048, false),
+            ),
+            (
+                "prior1024p+recall@0.3".to_string(),
+                Stand::PriorRows(0.3, 1024, true),
+            ),
+            (
+                "prior2048p+recall@0.3".to_string(),
+                Stand::PriorRows(0.3, 2048, true),
+            ),
+        ];
+        let only = std::env::var("PROBE_STANDS").unwrap_or_default();
+        for (name, stand) in &stands {
             if !only.is_empty() && !only.split(',').any(|s| s == name) {
                 continue;
             }
-            let mut c = mk(name, block_start..block_start + skip);
-            c.stand = stand;
+            let mut c = mk(name.clone(), block_start..block_start + skip);
+            c.stand = *stand;
+            candidates.push(c);
+        }
+        // `<stand>~ρ` / `<stand>~ρxk`: that stand, its next round's guesses
+        // shifted by ρ times the mean of its last k residuals.
+        for entry in only.split(',').filter(|s| s.contains('~')) {
+            let (base, carry) = entry.split_once('~').expect("has a ~");
+            let (rho, k) = match carry.split_once('x') {
+                Some((r, k)) => (r.parse::<f64>()?, k.parse::<usize>()?.max(1)),
+                None => (carry.parse::<f64>()?, 1),
+            };
+            let Some((_, stand)) = stands.iter().find(|(n, _)| n == base) else {
+                anyhow::bail!("no stand {base} for {entry}");
+            };
+            let mut c = mk(entry.to_string(), block_start..block_start + skip);
+            c.stand = *stand;
+            c.carry = rho;
+            c.carry_k = k;
             candidates.push(c);
         }
     } else if skip > 0 {
@@ -272,6 +388,10 @@ fn main() -> anyhow::Result<()> {
 
     let key = model.kv_model_key().to_string();
     let mut carried: Option<Carried> = None;
+    // The library's prior across conversations (`Stand::Carried`).
+    let mut model_prior: Option<StandInPrior> = None;
+    // Every earlier conversation's `(φ, Δ)` rows, oldest first.
+    let mut earlier: Vec<(Tensor, Tensor)> = Vec::new();
     for (pi, prompt) in prompts.iter().enumerate() {
         let store = KvCacheStore::new(std::time::Duration::from_secs(3600));
         let req = format!("skip-probe-{pi}");
@@ -290,6 +410,26 @@ fn main() -> anyhow::Result<()> {
                 })
                 .flatten()
                 .map(std::cell::RefCell::new),
+            carried: bridge_mode
+                .then(|| {
+                    let mut skips = vec![false; layers];
+                    skips[block_start..block_start + skip].fill(true);
+                    RunStandIn::for_run(&skips, model.device())
+                        .map(|s| s.with_window(window).collecting())
+                })
+                .flatten()
+                .map(std::cell::RefCell::new),
+            carried_lib: bridge_mode
+                .then(|| {
+                    let mut skips = vec![false; layers];
+                    skips[block_start..block_start + skip].fill(true);
+                    RunStandIn::for_run(&skips, model.device()).map(|s| {
+                        s.with_window(window)
+                            .with_carry(STAND_IN_CARRY, STAND_IN_CARRY_POSITIONS)
+                    })
+                })
+                .flatten()
+                .map(std::cell::RefCell::new),
             ..History::default()
         };
         let logits = if bridge_mode {
@@ -301,45 +441,68 @@ fn main() -> anyhow::Result<()> {
                 &capture,
             )?;
             history.push(&caught, block_start, skip)?;
+            history.start_carried(&caught, &mut model_prior)?;
             logits
         } else {
             model.forward(&model.tensor_from_ids(&ids)?, 0, &store, &req)?
         };
+        for cand in candidates.iter_mut() {
+            cand.resids.clear();
+        }
         let mut tok = argmax(&logits)?;
         // reply[i] is the token at position ids.len() + i.
         let mut reply: Vec<u32> = vec![tok];
         // Each candidate's chain guessed at each reply index.
         let mut chains: Vec<Vec<Vec<u32>>> = vec![Vec::new(); candidates.len()];
+        // Each candidate's four best first guesses, and (`PROBE_TREE2`) its
+        // chain from the second best, at each reply index.
+        let mut firsts: Vec<Vec<Vec<u32>>> = vec![Vec::new(); candidates.len()];
+        let mut seconds: Vec<Vec<Vec<u32>>> = vec![Vec::new(); candidates.len()];
         for i in 0..n {
             let p = ids.len() + i;
             let run_end = block_start + skip;
-            let bridges: Vec<Option<SkipBridge>> = candidates
+            let fitted: Vec<Option<SkipBridge>> = candidates
                 .iter()
-                .map(|c| history.bridge(c.stand, run_end, window, carried.as_ref()))
+                .map(|c| history.bridge(c.stand, run_end, window, carried.as_ref(), &earlier))
+                .collect::<anyhow::Result<_>>()?;
+            let bridges: Vec<Option<SkipBridge>> = fitted
+                .iter()
+                .zip(&candidates)
+                .map(|(b, cand)| carried_forward(b.clone(), cand))
                 .collect::<anyhow::Result<_>>()?;
             for (c, cand) in candidates.iter().enumerate() {
-                let mut chain = Vec::with_capacity(gamma);
-                let mut t = tok;
-                for g in 0..gamma {
+                // The guess's logits after feeding `t` at position `at`.
+                let mut guess_at = |t: u32, at: usize| -> anyhow::Result<Tensor> {
                     let input = model.token_tensor(t)?;
-                    let l = match &bridges[c] {
-                        Some(b) => model.forward_with_skip_bridge(
-                            &input,
-                            p + g,
-                            &store,
-                            &req,
-                            &cand.mask,
-                            b,
-                        )?,
+                    Ok(match &bridges[c] {
+                        Some(b) => model
+                            .forward_with_skip_bridge(&input, at, &store, &req, &cand.mask, b)?,
                         None => {
-                            model.forward_with_skip_mask(&input, p + g, &store, &req, &cand.mask)?
+                            model.forward_with_skip_mask(&input, at, &store, &req, &cand.mask)?
                         }
-                    };
-                    t = argmax(&l)?;
-                    chain.push(t);
+                    })
+                };
+                // Guess g follows the token at position p + g.
+                let first = ranked(&guess_at(tok, p)?, 4)?;
+                let mut chain = vec![first[0]];
+                while chain.len() < gamma {
+                    chain.push(argmax(&guess_at(chain[chain.len() - 1], p + chain.len())?)?);
+                }
+                if tree2 {
+                    // The second branch shares the first level's forward.
+                    store.truncate_request_to(&key, &req, p + 1)?;
+                    let mut second = vec![first[1]];
+                    while second.len() < gamma {
+                        second.push(argmax(&guess_at(
+                            second[second.len() - 1],
+                            p + second.len(),
+                        )?)?);
+                    }
+                    seconds[c].push(second);
                 }
                 store.truncate_request_to(&key, &req, p)?;
                 chains[c].push(chain);
+                firsts[c].push(first);
             }
             let l = if bridge_mode {
                 let (l, caught) = model.forward_capturing(
@@ -353,14 +516,32 @@ fn main() -> anyhow::Result<()> {
                 // real forward measured, before it joins the history.
                 let (h_in, delta) = History::rows(&caught, block_start, skip)?;
                 for (c, cand) in candidates.iter_mut().enumerate() {
+                    if cand.carry != 0.0 {
+                        // The fitted stand's own miss here, before any carry.
+                        if let Some(b) = &fitted[c] {
+                            let r = (&delta - History::estimate(b, &h_in)?)?;
+                            let r = r.reshape(r.elem_count())?;
+                            if r.sum_all()?.to_scalar::<f32>()?.is_finite() {
+                                cand.resids.push_back(r);
+                                while cand.resids.len() > cand.carry_k {
+                                    cand.resids.pop_front();
+                                }
+                            }
+                        }
+                    }
                     let est = match &bridges[c] {
                         Some(b) => History::estimate(b, &h_in)?,
                         None => h_in.zeros_like()?,
                     };
                     let num = (est - &delta)?.sqr()?.sum_all()?.to_scalar::<f32>()?.sqrt();
                     let den = delta.sqr()?.sum_all()?.to_scalar::<f32>()?.sqrt().max(1e-6);
-                    cand.err += f64::from(num / den);
-                    cand.errs += 1;
+                    let e = f64::from(num / den);
+                    if e.is_finite() {
+                        cand.err += e;
+                        cand.errs += 1;
+                    } else {
+                        cand.nonfinite += 1;
+                    }
                 }
                 history.push(&caught, block_start, skip)?;
                 l
@@ -376,10 +557,16 @@ fn main() -> anyhow::Result<()> {
                 Some(c) => c.merge(&this)?,
                 None => carried = Some(this),
             }
+            earlier.push((phi.clone(), delta.clone()));
+        }
+        if let (Some(si), Some(prior)) = (history.carried.take(), model_prior.as_mut()) {
+            prior.absorb(&mut si.into_inner(), model.device())?;
         }
         let mut this_prompt = String::new();
         for (c, cand) in candidates.iter_mut().enumerate() {
             let (first_before, run_before, tried_before) = (cand.first, cand.run, cand.tried);
+            let (top2_before, top4_before, tree2_before) = (cand.top2, cand.top4, cand.tree2);
+            let nonfinite = std::mem::take(&mut cand.nonfinite);
             for (i, chain) in chains[c].iter().enumerate() {
                 // The chain guessed at reply index i follows reply[i]: its
                 // guesses are reply[i+1..].
@@ -388,18 +575,46 @@ fn main() -> anyhow::Result<()> {
                 cand.tried += 1;
                 cand.first += usize::from(ok > 0);
                 cand.run += ok;
+                let rank = firsts[c][i].iter().position(|&t| Some(&t) == truth.first());
+                cand.top2 += usize::from(rank.is_some_and(|r| r < 2));
+                cand.top4 += usize::from(rank.is_some());
+                if let Some(second) = seconds[c].get(i) {
+                    let ok2 = second.iter().zip(truth).take_while(|(a, b)| a == b).count();
+                    cand.tree2 += ok.max(ok2);
+                }
             }
             let tried = (cand.tried - tried_before).max(1) as f64;
             this_prompt.push_str(&format!(
-                "  {:<10} {:>7.1}% {:>10.2}{}\n",
+                "  {:<10} {:>7.1}% {:>10.2}   top2 {:.1}% top4 {:.1}%{}{}\n",
                 cand.name,
                 100.0 * (cand.first - first_before) as f64 / tried,
                 (cand.run - run_before) as f64 / tried,
+                100.0 * (cand.top2 - top2_before) as f64 / tried,
+                100.0 * (cand.top4 - top4_before) as f64 / tried,
+                if tree2 {
+                    format!(" tree2 {:.2}", (cand.tree2 - tree2_before) as f64 / tried)
+                } else {
+                    String::new()
+                },
                 if bridge_mode {
-                    format!("   err {:.3}", cand.err / cand.errs.max(1) as f64)
+                    format!(
+                        "   err {:.3}{}",
+                        cand.err / cand.errs.max(1) as f64,
+                        if nonfinite > 0 {
+                            format!(" not-finite {nonfinite}")
+                        } else {
+                            String::new()
+                        }
+                    )
                 } else {
                     String::new()
                 }
+            ));
+        }
+        if history.not_finite > 0 {
+            this_prompt.push_str(&format!(
+                "  captured positions not finite: {}\n",
+                history.not_finite
             ));
         }
         println!(
@@ -417,11 +632,19 @@ fn main() -> anyhow::Result<()> {
     }
     println!("{:<10} {:>8} {:>10}", "skip", "first%", "run/round");
     for cand in &candidates {
+        let tried = cand.tried.max(1) as f64;
         println!(
-            "{:<10} {:>7.1}% {:>10.2}{}",
+            "{:<10} {:>7.1}% {:>10.2}   top2 {:.1}% top4 {:.1}%{}{}",
             cand.name,
-            100.0 * cand.first as f64 / cand.tried.max(1) as f64,
-            cand.run as f64 / cand.tried.max(1) as f64,
+            100.0 * cand.first as f64 / tried,
+            cand.run as f64 / tried,
+            100.0 * cand.top2 as f64 / tried,
+            100.0 * cand.top4 as f64 / tried,
+            if tree2 {
+                format!(" tree2 {:.2}", cand.tree2 as f64 / tried)
+            } else {
+                String::new()
+            },
             if bridge_mode {
                 format!("   err {:.3}", cand.err / cand.errs.max(1) as f64)
             } else {
@@ -445,10 +668,24 @@ struct History {
     eye: std::cell::RefCell<Option<Tensor>>,
     /// The library's stand-in for the same block, fed the same forwards.
     online: Option<std::cell::RefCell<RunStandIn>>,
+    /// The same over the model's prior (`Stand::Carried`); fed the prompt by
+    /// `start_carried`, every position after it by `push`.
+    carried: Option<std::cell::RefCell<RunStandIn>>,
+    /// `Stand::CarriedLib`'s: `carried`'s twin with the library's carry, fed
+    /// the same prompt and positions; never taken into the prior.
+    carried_lib: Option<std::cell::RefCell<RunStandIn>>,
+    carried_started: bool,
+    /// Captured positions whose `φ` or `Δ` was not finite.
+    not_finite: usize,
     /// `Prior` fits by λ's bits (once a prompt) and `Pooled` fits by λ's
     /// bits (the history length fitted at): the mean effect, the map.
     prior_fits: std::cell::RefCell<std::collections::HashMap<u64, (Tensor, Tensor)>>,
     pooled_fits: std::cell::RefCell<std::collections::HashMap<u64, (usize, Tensor, Tensor)>>,
+    /// `PriorRows` fits by (λ's bits, rows, prompt): the mean effect, the features
+    /// `H` and the weights `A`.
+    #[allow(clippy::type_complexity)]
+    row_fits:
+        std::cell::RefCell<std::collections::HashMap<(u64, usize, bool), (Tensor, Tensor, Tensor)>>,
 }
 
 /// What a node would carry from the conversations it served before this one
@@ -523,8 +760,20 @@ impl History {
         skip: usize,
     ) -> anyhow::Result<()> {
         let (phi, delta) = Self::rows(caught, start, skip)?;
+        let finite = |t: &Tensor| -> anyhow::Result<bool> {
+            Ok(t.sum_all()?.to_scalar::<f32>()?.is_finite())
+        };
+        if !(finite(&phi)? && finite(&delta)?) {
+            self.not_finite += phi.dim(0)?;
+        }
         if let Some(online) = &self.online {
             online.borrow_mut().learn(caught, phi.dim(0)?)?;
+        }
+        if let (true, Some(carried)) = (self.carried_started, &self.carried) {
+            carried.borrow_mut().learn(caught, phi.dim(0)?)?;
+        }
+        if let (true, Some(lib)) = (self.carried_started, &self.carried_lib) {
+            lib.borrow_mut().learn(caught, phi.dim(0)?)?;
         }
         let join = |old: Option<Tensor>, new: Tensor| -> anyhow::Result<Tensor> {
             Ok(match old {
@@ -537,6 +786,34 @@ impl History {
         Ok(())
     }
 
+    /// The prompt into `Stand::Carried`'s stand-in as a worker feeds it
+    /// (`model_worker::learn_the_prompt`): measured against the model's prior,
+    /// refitted with the prompt first where it is longer than the window.
+    fn start_carried(
+        &mut self,
+        caught: &std::collections::HashMap<usize, Tensor>,
+        prior: &mut Option<StandInPrior>,
+    ) -> anyhow::Result<()> {
+        let Some(carried) = &self.carried else {
+            return Ok(());
+        };
+        let mut si = carried.borrow_mut();
+        let rows = caught.values().next().map_or(0, |t| t.dim(1).unwrap_or(0));
+        let (phi, delta) = si.rows_of(caught, rows)?;
+        let prior = prior.get_or_insert_with(|| StandInPrior::for_stand_in(&si));
+        let window = si.window();
+        let fit = prior.fit_for_prompt(&phi, &delta, window)?;
+        if let Some(lib) = &self.carried_lib {
+            let mut lib = lib.borrow_mut();
+            lib.set_prior(fit.clone())?;
+            lib.learn_rows(phi.clone(), delta.clone())?;
+        }
+        si.set_prior(fit)?;
+        si.learn_rows(phi, delta)?;
+        self.carried_started = true;
+        Ok(())
+    }
+
     /// The bridge a stand-in makes of the history; `None` for `none`.
     fn bridge(
         &self,
@@ -544,6 +821,7 @@ impl History {
         run_end: usize,
         window: usize,
         carried: Option<&Carried>,
+        earlier: &[(Tensor, Tensor)],
     ) -> anyhow::Result<Option<SkipBridge>> {
         let (Some(phi), Some(delta)) = (&self.phi, &self.delta) else {
             return Ok(None);
@@ -571,11 +849,28 @@ impl History {
                 let inv = Tensor::from_vec(inv, (m, m), f.device())?;
                 Some(SkipBridge::Recall {
                     run_end,
+                    prior: None,
                     base,
                     features: f,
                     weights: inv.matmul(&r.contiguous()?)?,
                 })
             }
+            Stand::Carried => match &self.carried {
+                Some(carried) => {
+                    let mut carried = carried.borrow_mut();
+                    carried.refresh()?;
+                    carried.bridge().cloned()
+                }
+                None => None,
+            },
+            Stand::CarriedLib => match &self.carried_lib {
+                Some(lib) => {
+                    let mut lib = lib.borrow_mut();
+                    lib.refresh()?;
+                    lib.bridge().cloned()
+                }
+                None => None,
+            },
             Stand::Online => match &self.online {
                 Some(online) => {
                     let mut online = online.borrow_mut();
@@ -588,13 +883,63 @@ impl History {
                 let Some(carried) = carried else {
                     return Ok(None);
                 };
-                let mut fits = self.prior_fits.borrow_mut();
-                let key = lambda.to_bits();
-                if let std::collections::hash_map::Entry::Vacant(slot) = fits.entry(key) {
-                    slot.insert(carried.fit(lambda)?);
+                let (base, w) = self.prior_fit(carried, lambda)?;
+                Some(self.as_map(run_end, &base, &w)?)
+            }
+            Stand::PriorRecall(lambda) => {
+                let Some(carried) = carried else {
+                    return self.bridge(Stand::Recall(lambda), run_end, window, None, earlier);
+                };
+                let (pbase, w) = self.prior_fit(carried, lambda)?;
+                let from = n.saturating_sub(window);
+                let m = n - from;
+                let f = phi.narrow(0, from, m)?.contiguous()?;
+                // What the prior leaves of each effect in the window.
+                let left = (delta.narrow(0, from, m)? - f.matmul(&w)?.broadcast_add(&pbase)?)?;
+                let rbase = left.mean(0)?;
+                let r = left.broadcast_sub(&rbase)?;
+                let k: Vec<Vec<f32>> = f.matmul(&f.t()?.contiguous()?)?.to_vec2()?;
+                let inv = invert_with_ridge(&k, lambda);
+                let alpha = Tensor::from_vec(inv, (m, m), f.device())?.matmul(&r.contiguous()?)?;
+                let mut eye = self.eye.borrow_mut();
+                if eye.is_none() {
+                    *eye = Some(Tensor::eye(w.dim(0)?, DType::F32, w.device())?);
                 }
-                let (base, w) = &fits[&key];
-                Some(self.as_map(run_end, base, w)?)
+                // `φ·[I; F]ᵀ·[W; α] = φ·W + k(φ, F)·α`: one `Recall` bridge.
+                Some(SkipBridge::Recall {
+                    run_end,
+                    prior: None,
+                    base: (pbase + rbase)?,
+                    features: Tensor::cat(&[eye.as_ref().expect("set above"), &f], 0)?,
+                    weights: Tensor::cat(&[&w, &alpha], 0)?,
+                })
+            }
+            Stand::PriorRows(lambda, most, with_prompt) => {
+                if earlier.is_empty() && !with_prompt {
+                    return self.bridge(Stand::Recall(lambda), run_end, window, None, earlier);
+                }
+                // The first call of a prompt comes after its pass: the
+                // history is then the prompt's positions alone.
+                let this = with_prompt.then(|| (phi.clone(), delta.clone()));
+                let (pbase, h, a) = self.row_fit(earlier, this, lambda, most)?;
+                let from = n.saturating_sub(window);
+                let m = n - from;
+                let f = phi.narrow(0, from, m)?.contiguous()?;
+                let prior = f.matmul(&h.t()?)?.matmul(&a)?.broadcast_add(&pbase)?;
+                let left = (delta.narrow(0, from, m)? - prior)?;
+                let rbase = left.mean(0)?;
+                let r = left.broadcast_sub(&rbase)?;
+                let k: Vec<Vec<f32>> = f.matmul(&f.t()?.contiguous()?)?.to_vec2()?;
+                let inv = invert_with_ridge(&k, lambda);
+                let alpha = Tensor::from_vec(inv, (m, m), f.device())?.matmul(&r.contiguous()?)?;
+                // `φ·[H; F]ᵀ·[A; α]`: the prior's rows and the window's, one bridge.
+                Some(SkipBridge::Recall {
+                    run_end,
+                    prior: None,
+                    base: (pbase + rbase)?,
+                    features: Tensor::cat(&[&h, &f], 0)?,
+                    weights: Tensor::cat(&[&a, &alpha], 0)?,
+                })
             }
             Stand::Pooled(lambda) => {
                 let refit = env_usize("PROBE_REFIT", 16).max(1);
@@ -629,12 +974,57 @@ impl History {
                 // `φ·Iᵀ·W + base`: the map as `Recall`'s arithmetic.
                 Some(SkipBridge::Recall {
                     run_end,
+                    prior: None,
                     base: base.clone(),
                     features: eye.clone().expect("set above"),
                     weights: w.clone(),
                 })
             }
         })
+    }
+
+    /// `Prior`'s fit for this prompt: once, by λ's bits.
+    fn prior_fit(&self, carried: &Carried, lambda: f64) -> anyhow::Result<(Tensor, Tensor)> {
+        let mut fits = self.prior_fits.borrow_mut();
+        let key = lambda.to_bits();
+        if let std::collections::hash_map::Entry::Vacant(slot) = fits.entry(key) {
+            slot.insert(carried.fit(lambda)?);
+        }
+        Ok(fits[&key].clone())
+    }
+
+    /// `PriorRows`'s fit for this prompt, once: kernel ridge over the last
+    /// `most` earlier positions, `A = (H·Hᵀ + λI)⁻¹·(Δ − mean)`. Returns
+    /// `(mean, H, A)`.
+    fn row_fit(
+        &self,
+        earlier: &[(Tensor, Tensor)],
+        this: Option<(Tensor, Tensor)>,
+        lambda: f64,
+        most: usize,
+    ) -> anyhow::Result<(Tensor, Tensor, Tensor)> {
+        let mut fits = self.row_fits.borrow_mut();
+        let key = (lambda.to_bits(), most, this.is_some());
+        if let std::collections::hash_map::Entry::Vacant(slot) = fits.entry(key) {
+            let rows: Vec<&(Tensor, Tensor)> = earlier.iter().chain(this.as_ref()).collect();
+            let phis: Vec<&Tensor> = rows.iter().map(|(p, _)| p).collect();
+            let deltas: Vec<&Tensor> = rows.iter().map(|(_, d)| d).collect();
+            let (h, d) = (Tensor::cat(&phis, 0)?, Tensor::cat(&deltas, 0)?);
+            let all = h.dim(0)?;
+            let from = all.saturating_sub(most);
+            let (h, d) = (
+                h.narrow(0, from, all - from)?.contiguous()?,
+                d.narrow(0, from, all - from)?.contiguous()?,
+            );
+            let base = d.mean(0)?;
+            let r = d.broadcast_sub(&base)?;
+            let k: Vec<Vec<f32>> = h.matmul(&h.t()?.contiguous()?)?.to_vec2()?;
+            let inv = invert_with_ridge(&k, lambda);
+            let m = all - from;
+            let a = Tensor::from_vec(inv, (m, m), h.device())?.matmul(&r.contiguous()?)?;
+            slot.insert((base, h, a));
+        }
+        Ok(fits[&key].clone())
     }
 
     /// A hidden × hidden map `W` and mean effect as a bridge: `φ·Iᵀ·W + base`,
@@ -646,6 +1036,7 @@ impl History {
         }
         Ok(SkipBridge::Recall {
             run_end,
+            prior: None,
             base: base.clone(),
             features: eye.clone().expect("set above"),
             weights: w.clone(),
@@ -661,13 +1052,50 @@ impl History {
                 base,
                 features,
                 weights,
+                prior,
                 ..
-            } => phi
-                .matmul(&features.t()?.contiguous()?)?
-                .matmul(weights)?
-                .broadcast_add(base)?,
+            } => {
+                let mut e = phi.matmul(&features.t()?.contiguous()?)?.matmul(weights)?;
+                if let Some((h, a)) = prior {
+                    e = (e + phi.matmul(&h.t()?.contiguous()?)?.matmul(a)?)?;
+                }
+                e.broadcast_add(base)?
+            }
         })
     }
+}
+
+/// `bridge` with `cand.carry` times the mean of the candidate's last
+/// residuals added to what it adds at every position (`<stand>~ρxk`).
+fn carried_forward(
+    bridge: Option<SkipBridge>,
+    cand: &Candidate,
+) -> anyhow::Result<Option<SkipBridge>> {
+    if cand.carry == 0.0 || cand.resids.is_empty() {
+        return Ok(bridge);
+    }
+    let rows: Vec<Tensor> = cand.resids.iter().cloned().collect();
+    let shift = (Tensor::stack(&rows, 0)?.mean(0)? * cand.carry)?;
+    Ok(match bridge {
+        None => None,
+        Some(SkipBridge::Shift { run_end, shift: s }) => Some(SkipBridge::Shift {
+            run_end,
+            shift: (s + &shift)?,
+        }),
+        Some(SkipBridge::Recall {
+            run_end,
+            base,
+            features,
+            weights,
+            prior,
+        }) => Some(SkipBridge::Recall {
+            run_end,
+            base: (base + &shift)?,
+            features,
+            weights,
+            prior,
+        }),
+    })
 }
 
 /// The ridge map `W` (`[hidden, hidden]`) minimising `‖Φ·W − R‖² + λ‖W‖²`

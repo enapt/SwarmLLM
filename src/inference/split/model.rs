@@ -141,6 +141,10 @@ pub struct SplitModel {
     /// What sizes a prompt chunk when this segment's processor-held layers
     /// copy their weights to the card (#138 (1e)) — [`Self::prompt_reader`].
     pub(super) prompt_room: PromptRoom,
+    /// What this model's skipped run did in the conversations it served
+    /// before, for its card's guesses ([`super::StandInPrior`]): made by the
+    /// first reply that collects for it, gone with the model.
+    pub(super) stand_in_prior: Option<super::StandInPrior>,
 }
 
 /// What sizes a prompt chunk on a split copying its processor-held layers'

@@ -24,6 +24,18 @@
 //! Vía and Santamaría (ICASSP 2006). It is rebuilt whole once per window's
 //! worth of updates, and whenever an update's pivot says the arithmetic has
 //! drifted.
+//!
+//! **A model carries what its earlier replies learned** ([`StandInPrior`],
+//! 2026-10-29): the last [`PRIOR_ROWS`] positions of the conversations it
+//! served before, as a second kernel ridge fitted once a reply is out, which
+//! the reply's window then corrects — fitted to what the prior leaves of each
+//! effect (`examples/skip_agreement_probe.rs`, `prior2048+recall@0.3`).
+//! Tokens kept a round over six short conversations after a long one,
+//! window → window over the prior: Qwen 2.5 14B 0.48 → 0.64 with 33 of 48
+//! skipped, Llama 3.1 8B 0.32 → 0.53 with 25 of 32 (rounds 12-13; every
+//! earlier position, uncapped, 0.66 and 0.55). A prompt longer than the window
+//! joins the prior for its own reply first ([`StandInPrior::fit_for_prompt`]):
+//! the long conversation itself, 0.66 → 1.17 and 0.69 → 1.23.
 
 use std::collections::{HashMap, HashSet};
 
@@ -41,6 +53,29 @@ pub const STAND_IN_LAMBDA: f64 = 0.3;
 
 /// Positions before a stand-in is offered: fewer is a fit to noise.
 const LEAST_ROWS: usize = 8;
+
+/// Positions of a model's earlier conversations its prior is fitted from,
+/// the most recent kept. Round 13 (FUTURE_WORK #366 (1)), tokens kept a round
+/// over six short conversations by how many: Qwen 2.5 14B 0.60 at 512, 0.60
+/// at 1,024, 0.64 at 2,048, 0.66 every one; Llama 3.1 8B 0.48, 0.50, 0.53,
+/// 0.55. On the card it is `2 × PRIOR_ROWS × hidden` f32 — 84 MB for a
+/// 5,120-wide model — and each guess reads it once.
+pub const PRIOR_ROWS: usize = 2048;
+
+/// The share of the mean of a stand-in's misses at the last
+/// [`STAND_IN_CARRY_POSITIONS`] kept positions the reply's card guesses carry
+/// ([`RunStandIn::with_carry`], round 15's `carried~0.5x4`).
+pub const STAND_IN_CARRY: f64 = 0.5;
+pub const STAND_IN_CARRY_POSITIONS: usize = 4;
+
+/// The most Newton–Schulz steps [`ridge_inverse`] takes. From `I / ‖A‖∞` the
+/// residual's largest eigenvalue squares each step, so the slow first phase
+/// takes about `log₂(‖A‖∞ / λ)` steps — 13 for 2,048 unit rows at λ 0.3 —
+/// and a few more reach f32's floor.
+const RIDGE_INVERSE_MOST_STEPS: usize = 40;
+
+/// The largest entry of `A·X − I` an inverse is accepted at.
+const RIDGE_INVERSE_GOOD_ENOUGH: f32 = 1e-2;
 
 /// The most new positions added a row at a time; more (a prompt) rebuilds.
 const MOST_ROWS_ADDED_IN_STEPS: usize = 16;
@@ -191,10 +226,22 @@ pub struct RunStandIn {
     phi: Option<Tensor>,
     /// `Δ`, what the run added to them, `[n, hidden]`.
     delta: Option<Tensor>,
-    /// `Σ Δ` over every position seen, and their count: the bridge's base is
-    /// their mean, as the probe's was.
+    /// `Σ Δ` and `Σ φ` over every position seen, and their count: the
+    /// bridge's base is the mean effect, as the probe's was — less the prior's
+    /// estimate at the mean φ where there is one (affine, so the mean of its
+    /// residuals).
     delta_sum: Option<Tensor>,
+    phi_sum: Option<Tensor>,
     seen: usize,
+    /// The model's earlier conversations ([`StandInPrior`]); the window is
+    /// fitted to what it leaves of each effect. Set before anything is learned.
+    prior: Option<PriorFit>,
+    /// Every position learned, `(φ, Δ)` on the host in arrival order, the
+    /// oldest dropped past [`PRIOR_ROWS`] — what [`StandInPrior::absorb`]
+    /// takes at the reply's end; kept only where [`Self::collecting`] said.
+    collect: bool,
+    taken: std::collections::VecDeque<(Tensor, Tensor)>,
+    taken_rows: usize,
     inverse: Option<WindowInverse>,
     /// Rows added since the inverse was last rebuilt whole.
     since_rebuild: usize,
@@ -202,6 +249,21 @@ pub struct RunStandIn {
     /// Inverses rebuilt whole, and the milliseconds the stand-in has cost.
     pub rebuilds: u64,
     pub ms: f64,
+    /// Positions refused for a value that was not finite: one such row would
+    /// leave the window without an inverse until it slid out, and a model's
+    /// prior without a fit until 2,048 more had come (gotcha #828 saw a card
+    /// hand back a NaN row).
+    pub not_finite: u64,
+    /// The share of its recent misses added to the next guesses, and over
+    /// how many positions ([`Self::with_carry`]); a share of 0 adds none.
+    carry_share: f64,
+    carry_positions: usize,
+    /// Its misses at the last `carry_positions` positions checks kept,
+    /// oldest first, `[hidden]` each.
+    misses: std::collections::VecDeque<Tensor>,
+    /// `carry_share` of their mean, `[hidden]`: added to the bridge's base
+    /// at each [`Self::refresh`].
+    carry: Option<Tensor>,
 }
 
 impl RunStandIn {
@@ -225,13 +287,41 @@ impl RunStandIn {
             phi: None,
             delta: None,
             delta_sum: None,
+            phi_sum: None,
             seen: 0,
+            prior: None,
+            collect: false,
+            taken: std::collections::VecDeque::new(),
+            taken_rows: 0,
             inverse: None,
             since_rebuild: 0,
             bridge: None,
             rebuilds: 0,
             ms: 0.0,
+            not_finite: 0,
+            carry_share: 0.0,
+            carry_positions: 1,
+            misses: std::collections::VecDeque::new(),
+            carry: None,
         })
+    }
+
+    /// Add `share` of the mean of the stand-in's misses at the last
+    /// `positions` positions checks kept — what the run really added there,
+    /// less the bridge's estimate before they were learned — to the next
+    /// guesses' estimate: a miss is much like the ones before it. Round 15
+    /// (`skip_agreement_probe`'s `carried~ρxk`, tokens kept a round): half
+    /// the mean of the last four kept 0.90 where the stand-in alone kept
+    /// 0.72 (Qwen2.5-14B, 33 of 48 skipped) and 0.63 where it kept 0.63
+    /// (Llama 3.1 8B, 25 of 32); half the last one alone 0.96 and 0.53 — one
+    /// miss is too noisy a guide for some models; the whole of it
+    /// overshoots (0.62, 0.31). No prior art found (closest: CLaSp, arXiv
+    /// 2505.24196, which re-picks the skipped layers from the last check's
+    /// hidden states).
+    pub fn with_carry(mut self, share: f64, positions: usize) -> Self {
+        self.carry_share = share;
+        self.carry_positions = positions.max(1);
+        self
     }
 
     /// The same, fitted from the last `window` positions instead of
@@ -241,14 +331,62 @@ impl RunStandIn {
         self
     }
 
+    /// Keep every position learned for the model's prior
+    /// ([`StandInPrior::absorb`]), and capture a prompt's last [`PRIOR_ROWS`]
+    /// for it ([`Self::prompt_capture`]).
+    pub fn collecting(mut self) -> Self {
+        self.collect = true;
+        self
+    }
+
+    /// Fit the window to what `prior` leaves of each effect; `None` fits it
+    /// to the effects. Refused once a position has been learned: the window's
+    /// effects would be measured against two different priors.
+    pub fn set_prior(&mut self, prior: Option<PriorFit>) -> Result<(), SwarmError> {
+        if self.seen > 0 {
+            return Err(SwarmError::Internal(
+                "stand-in: a prior is set before anything is learned".into(),
+            ));
+        }
+        self.prior = prior;
+        self.bridge = None;
+        Ok(())
+    }
+
+    /// Positions of earlier conversations its prior was fitted from; 0
+    /// without one.
+    pub fn prior_rows(&self) -> usize {
+        self.prior.as_ref().map_or(0, PriorFit::rows)
+    }
+
+    /// Whether it keeps what it learns for the model's prior
+    /// ([`Self::collecting`]).
+    pub fn collects(&self) -> bool {
+        self.collect
+    }
+
+    /// The positions a prompt pass captures for it (`split::Capture::last`):
+    /// its window, or the prior's rows where it is collecting for one.
+    pub fn prompt_capture(&self) -> usize {
+        if self.collect {
+            self.window.max(PRIOR_ROWS)
+        } else {
+            self.window
+        }
+    }
+
+    /// The run it stands in for: its first layer and the layer past its last.
+    pub fn run(&self) -> (usize, usize) {
+        (self.run_start, self.run_end)
+    }
+
     /// The layers a forward captures for [`Self::learn`]: the one before the
     /// run and the run's last.
     pub fn capture_layers(&self) -> &HashSet<usize> {
         &self.capture
     }
 
-    /// The most positions it is fitted from: what a prompt pass captures
-    /// for it (`split::Capture::last`).
+    /// The most positions it is fitted from.
     pub fn window(&self) -> usize {
         self.window
     }
@@ -270,16 +408,77 @@ impl RunStandIn {
             return Ok(());
         }
         let started = std::time::Instant::now();
-        let out = self.learn_inner(caught, kept);
+        let out = self.rows_of(caught, kept).and_then(|(phi, delta)| {
+            self.note_miss(&phi, &delta)?;
+            self.learn_inner(phi, delta)
+        });
         self.ms += started.elapsed().as_secs_f64() * 1000.0;
         out
     }
 
-    fn learn_inner(
-        &mut self,
+    /// The carry for the next guesses ([`Self::with_carry`]): the bridge's
+    /// misses at the last of a check's kept positions `(phi, delta)`, before
+    /// they are learned, measured without the carry the bridge already
+    /// held, join the recent ones. Without a bridge there is no miss to
+    /// measure; misses that are not finite are left out, as their rows are.
+    fn note_miss(&mut self, phi: &Tensor, delta: &Tensor) -> Result<(), SwarmError> {
+        if self.carry_share == 0.0 {
+            return Ok(());
+        }
+        let Some(bridge) = &self.bridge else {
+            return Ok(());
+        };
+        let misses = (|| -> candle_core::Result<Option<Tensor>> {
+            let n = phi.dim(0)?;
+            let k = n.min(self.carry_positions);
+            let Some(est) = bridge.effect(&phi.narrow(0, n - k, k)?)? else {
+                return Ok(None);
+            };
+            let est = match &self.carry {
+                Some(held) => est.broadcast_sub(held)?,
+                None => est,
+            };
+            Ok(Some((delta.narrow(0, n - k, k)? - est)?))
+        })()
+        .map_err(SwarmError::internal)?;
+        let Some(misses) = misses.filter(|m| all_finite(m).unwrap_or(false)) else {
+            return Ok(());
+        };
+        (|| -> candle_core::Result<()> {
+            for i in 0..misses.dim(0)? {
+                self.misses.push_back(misses.get(i)?);
+            }
+            while self.misses.len() > self.carry_positions {
+                self.misses.pop_front();
+            }
+            let held: Vec<&Tensor> = self.misses.iter().collect();
+            self.carry = Some((Tensor::stack(&held, 0)?.mean(0)? * self.carry_share)?);
+            Ok(())
+        })()
+        .map_err(SwarmError::internal)
+    }
+
+    /// [`Self::learn`] of rows [`Self::rows_of`] made: where a prompt's rows
+    /// are wanted for the prior's fit ([`StandInPrior::fit_for_prompt`])
+    /// before [`Self::set_prior`].
+    pub fn learn_rows(&mut self, phi: Tensor, delta: Tensor) -> Result<(), SwarmError> {
+        if phi.dim(0).map_err(SwarmError::internal)? == 0 {
+            return Ok(());
+        }
+        let started = std::time::Instant::now();
+        let out = self.learn_inner(phi, delta);
+        self.ms += started.elapsed().as_secs_f64() * 1000.0;
+        out
+    }
+
+    /// `(φ, Δ)` of the first `kept` positions of a forward that captured
+    /// [`Self::capture_layers`]: the normalised hidden state where the run
+    /// starts and what the run added to it, `[kept, hidden]` f32 on its device.
+    pub fn rows_of(
+        &self,
         caught: &HashMap<usize, Tensor>,
         kept: usize,
-    ) -> Result<(), SwarmError> {
+    ) -> Result<(Tensor, Tensor), SwarmError> {
         let take = |layer: usize| -> Result<Tensor, SwarmError> {
             let t = caught.get(&layer).ok_or_else(|| {
                 SwarmError::Internal(format!("stand-in: layer {layer} was not captured"))
@@ -292,20 +491,70 @@ impl RunStandIn {
         };
         let h_in = take(self.run_start - 1)?;
         let h_out = take(self.run_end - 1)?;
-        let rows = (|| -> candle_core::Result<(Tensor, Tensor, Tensor)> {
+        (|| -> candle_core::Result<(Tensor, Tensor)> {
             let delta = (&h_out - &h_in)?;
             let norm = h_in.sqr()?.sum_keepdim(1)?.sqrt()?.clamp(1e-6, f64::MAX)?;
-            let phi = h_in.broadcast_div(&norm)?;
-            let sum = delta.sum(0)?;
-            Ok((phi, delta, sum))
+            Ok((h_in.broadcast_div(&norm)?, delta))
         })()
-        .map_err(SwarmError::internal)?;
-        let (x_phi, x_delta, x_sum) = rows;
-        self.delta_sum = Some(match self.delta_sum.take() {
-            Some(s) => (s + x_sum).map_err(SwarmError::internal)?,
-            None => x_sum,
-        });
+        .map_err(SwarmError::internal)
+    }
+
+    fn learn_inner(&mut self, x_phi: Tensor, x_delta: Tensor) -> Result<(), SwarmError> {
+        let kept = x_phi.dim(0).map_err(SwarmError::internal)?;
+        if !(all_finite(&x_phi)? && all_finite(&x_delta)?) {
+            self.not_finite += kept as u64;
+            static ONCE: std::sync::Once = std::sync::Once::new();
+            ONCE.call_once(|| {
+                tracing::warn!(
+                    positions = kept,
+                    "card guesses: a forward's hidden state was not finite; its positions are left out of the stand-in"
+                )
+            });
+            return Ok(());
+        }
+        let add = |old: Option<Tensor>, new: Tensor| -> Result<Tensor, SwarmError> {
+            match old {
+                Some(s) => (s + new).map_err(SwarmError::internal),
+                None => Ok(new),
+            }
+        };
+        let (d_sum, p_sum) = (
+            x_delta.sum(0).map_err(SwarmError::internal)?,
+            x_phi.sum(0).map_err(SwarmError::internal)?,
+        );
+        self.delta_sum = Some(add(self.delta_sum.take(), d_sum)?);
+        self.phi_sum = Some(add(self.phi_sum.take(), p_sum)?);
         self.seen += kept;
+        if self.collect {
+            let host = |t: &Tensor| t.to_device(&Device::Cpu).map_err(SwarmError::internal);
+            self.taken.push_back((host(&x_phi)?, host(&x_delta)?));
+            self.taken_rows += kept;
+            while let Some((front, _)) = self.taken.front() {
+                let rows = front.dim(0).map_err(SwarmError::internal)?;
+                if self.taken_rows - rows < PRIOR_ROWS {
+                    break;
+                }
+                self.taken_rows -= rows;
+                self.taken.pop_front();
+            }
+        }
+        // Only the window's rows go on — measured against the prior where
+        // there is one.
+        let tail = kept.min(self.window);
+        let narrow = |t: Tensor| -> Result<Tensor, SwarmError> {
+            if tail == kept {
+                return Ok(t);
+            }
+            t.narrow(0, kept - tail, tail)
+                .and_then(|t| t.contiguous())
+                .map_err(SwarmError::internal)
+        };
+        let (x_phi, x_delta) = (narrow(x_phi)?, narrow(x_delta)?);
+        let x_delta = match &self.prior {
+            Some(prior) => (x_delta - prior.estimate(&x_phi)?).map_err(SwarmError::internal)?,
+            None => x_delta,
+        };
+        let kept = tail;
 
         let held = self
             .phi
@@ -390,6 +639,11 @@ impl RunStandIn {
         if self.bridge.is_none() {
             let started = std::time::Instant::now();
             self.bridge = self.fit()?;
+            if let (Some(SkipBridge::Recall { base, .. }), Some(carry)) =
+                (self.bridge.as_mut(), &self.carry)
+            {
+                *base = (&*base + carry).map_err(SwarmError::internal)?;
+            }
             self.ms += started.elapsed().as_secs_f64() * 1000.0;
         }
         Ok(())
@@ -402,27 +656,382 @@ impl RunStandIn {
     }
 
     fn fit(&self) -> Result<Option<SkipBridge>, SwarmError> {
-        let (Some(inverse), Some(phi), Some(delta), Some(sum)) =
-            (&self.inverse, &self.phi, &self.delta, &self.delta_sum)
-        else {
+        let (Some(inverse), Some(phi), Some(delta), Some(sum), Some(phi_sum)) = (
+            &self.inverse,
+            &self.phi,
+            &self.delta,
+            &self.delta_sum,
+            &self.phi_sum,
+        ) else {
             return Ok(None);
         };
         let m = inverse.len();
         if m < LEAST_ROWS || self.seen == 0 {
             return Ok(None);
         }
+        let mean_effect = (sum / self.seen as f64).map_err(SwarmError::internal)?;
+        // The window's effects are what the prior left: their mean is the
+        // mean effect less the prior's estimate at the mean φ.
+        let (left_mean, base) = match &self.prior {
+            Some(prior) => {
+                let mean_phi = (phi_sum / self.seen as f64)
+                    .and_then(|t| t.unsqueeze(0))
+                    .map_err(SwarmError::internal)?;
+                let at_mean = prior
+                    .estimate(&mean_phi)?
+                    .squeeze(0)
+                    .map_err(SwarmError::internal)?;
+                let left = (&mean_effect - at_mean).map_err(SwarmError::internal)?;
+                let base = (&prior.base + &left).map_err(SwarmError::internal)?;
+                (left, base)
+            }
+            None => (mean_effect.clone(), mean_effect),
+        };
         (|| -> candle_core::Result<Option<SkipBridge>> {
-            let base = (sum / self.seen as f64)?;
             let inv = Tensor::from_vec(inverse.as_f32(), (m, m), &self.device)?;
-            let weights = inv.matmul(&delta.broadcast_sub(&base)?.contiguous()?)?;
+            let weights = inv.matmul(&delta.broadcast_sub(&left_mean)?.contiguous()?)?;
             Ok(Some(SkipBridge::Recall {
                 run_end: self.run_end,
                 base,
                 features: phi.contiguous()?,
                 weights,
+                prior: self
+                    .prior
+                    .as_ref()
+                    .map(|p| (p.features.clone(), p.weights.clone())),
             }))
         })()
         .map_err(SwarmError::internal)
+    }
+}
+
+/// Whether every value of `t` is finite — its sum is, as a NaN or an
+/// infinity carries through every addition.
+fn all_finite(t: &Tensor) -> Result<bool, SwarmError> {
+    t.sum_all()
+        .and_then(|s| s.to_dtype(DType::F32))
+        .and_then(|s| s.to_scalar::<f32>())
+        .map(f32::is_finite)
+        .map_err(SwarmError::internal)
+}
+
+/// A model's earlier conversations, fitted: kernel ridge over their positions,
+/// `φ·Hᵀ·A + base`, on the device the guesses run on ([`StandInPrior`]).
+#[derive(Clone)]
+pub struct PriorFit {
+    base: Tensor,
+    features: Tensor,
+    weights: Tensor,
+}
+
+impl PriorFit {
+    /// The positions it was fitted from.
+    pub fn rows(&self) -> usize {
+        self.features.dim(0).unwrap_or(0)
+    }
+
+    /// Its estimate of the run's effect at the normalised starts `phi`
+    /// (`[n, hidden]`).
+    fn estimate(&self, phi: &Tensor) -> Result<Tensor, SwarmError> {
+        phi.matmul(&self.features.t().map_err(SwarmError::internal)?)
+            .and_then(|k| k.matmul(&self.weights))
+            .and_then(|e| e.broadcast_add(&self.base))
+            .map_err(SwarmError::internal)
+    }
+}
+
+/// What a model's skipped run did in the conversations it served before this
+/// one (module docs): the last [`PRIOR_ROWS`] positions every reply's
+/// stand-in learned ([`RunStandIn::collecting`]), on the host, and the fit
+/// made of them once a reply is out ([`Self::absorb`]). One per loaded model
+/// (`SplitModel::stand_in_prior`): a model loaded again, or placed again,
+/// starts empty.
+pub struct StandInPrior {
+    run: (usize, usize),
+    most: usize,
+    lambda: f64,
+    /// `(φ, Δ)`, `[≤ most, hidden]` f32 on the host, oldest first.
+    rows: Option<(Tensor, Tensor)>,
+    fit: Option<PriorFit>,
+    /// Fits made, and the milliseconds they cost.
+    pub fits: u64,
+    pub ms: f64,
+}
+
+impl StandInPrior {
+    /// An empty prior for the run `stand_in` stands in for.
+    pub fn for_stand_in(stand_in: &RunStandIn) -> Self {
+        Self {
+            run: stand_in.run(),
+            most: PRIOR_ROWS,
+            lambda: stand_in.lambda,
+            rows: None,
+            fit: None,
+            fits: 0,
+            ms: 0.0,
+        }
+    }
+
+    /// The run it was learned for.
+    pub fn run(&self) -> (usize, usize) {
+        self.run
+    }
+
+    /// Positions held.
+    pub fn rows(&self) -> usize {
+        self.rows
+            .as_ref()
+            .and_then(|(p, _)| p.dim(0).ok())
+            .unwrap_or(0)
+    }
+
+    /// The fit for a reply whose prompt brought `phi` and `delta`
+    /// ([`RunStandIn::rows_of`]): where the prompt holds more positions than
+    /// the window (`window`), fitted again with them after the held ones —
+    /// for this reply only, never kept; otherwise the last fit made.
+    pub fn fit_for_prompt(
+        &mut self,
+        phi: &Tensor,
+        delta: &Tensor,
+        window: usize,
+    ) -> Result<Option<PriorFit>, SwarmError> {
+        let device = phi.device().clone();
+        if phi.dim(0).map_err(SwarmError::internal)? <= window
+            || !(all_finite(phi)? && all_finite(delta)?)
+        {
+            // Rows taken in since the last fit are fitted now, on the reply's
+            // first step, where the worker had no idle moment for them.
+            self.refit_while(&device, &|| true)?;
+            return Ok(self.fit.clone());
+        }
+        let host = |t: &Tensor| t.to_device(&Device::Cpu).map_err(SwarmError::internal);
+        let (all_phi, all_delta) = self.joined(&[(host(phi)?, host(delta)?)])?;
+        // The kept fit stays on the host side of the card while this one is
+        // in use: both at once is twice the memory for nothing.
+        self.fit = None;
+        self.timed_fit(&all_phi, &all_delta, &device, &|| true)?
+            .ok_or_else(|| SwarmError::Internal("stand-in prior: the fit stopped".into()))
+            .map(Some)
+    }
+
+    /// [`Self::take_in`], then fit again on `device` at once.
+    pub fn absorb(&mut self, stand_in: &mut RunStandIn, device: &Device) -> Result<(), SwarmError> {
+        self.take_in(stand_in)?;
+        self.refit_while(device, &|| true).map(|_| ())
+    }
+
+    /// Take in every position `stand_in` learned (its reply's prompt and the
+    /// positions the reply committed) after the held ones and keep the last
+    /// [`PRIOR_ROWS`] — without fitting them: the kept fit is dropped and the
+    /// prior is [`Self::stale`] until [`Self::refit_while`] (the worker, while
+    /// nothing waits for it) or [`Self::fit_for_prompt`] (the next reply's
+    /// first step) fits it. Fitted as the reply ended, 2,048 rows cost the
+    /// next request's first token 175-280 ms on an 8 GB card whenever it came
+    /// straight after (round 15). A stand-in for another run starts the prior
+    /// again.
+    pub fn take_in(&mut self, stand_in: &mut RunStandIn) -> Result<(), SwarmError> {
+        if stand_in.run() != self.run {
+            *self = Self::for_stand_in(stand_in);
+        }
+        // The reply's own fit goes first: the new one is made beside nothing.
+        stand_in.prior = None;
+        stand_in.bridge = None;
+        let taken: Vec<(Tensor, Tensor)> = stand_in.taken.drain(..).collect();
+        stand_in.taken_rows = 0;
+        if taken.is_empty() {
+            return Ok(());
+        }
+        self.rows = Some(self.joined(&taken)?);
+        self.fit = None;
+        Ok(())
+    }
+
+    /// Whether it holds rows its fit does not cover yet.
+    pub fn stale(&self) -> bool {
+        self.fit.is_none() && self.rows.is_some()
+    }
+
+    /// Fit the held rows on `device` where they are [`Self::stale`], asking
+    /// `keep_going` between the inverse's steps (each tens of milliseconds at
+    /// [`PRIOR_ROWS`]): `Ok(true)` once fitted, `Ok(false)` where there was
+    /// nothing to fit or `keep_going` said stop — the rows then stay stale and
+    /// nothing of the stopped fit is kept.
+    pub fn refit_while(
+        &mut self,
+        device: &Device,
+        keep_going: &dyn Fn() -> bool,
+    ) -> Result<bool, SwarmError> {
+        let Some((phi, delta)) = self.rows.clone().filter(|_| self.fit.is_none()) else {
+            return Ok(false);
+        };
+        let fit = self.timed_fit(&phi, &delta, device, keep_going)?;
+        let fitted = fit.is_some();
+        self.fit = fit;
+        Ok(fitted)
+    }
+
+    /// The held rows and `more` after them, the last `most`.
+    fn joined(&self, more: &[(Tensor, Tensor)]) -> Result<(Tensor, Tensor), SwarmError> {
+        let mut phis: Vec<&Tensor> = Vec::new();
+        let mut deltas: Vec<&Tensor> = Vec::new();
+        if let Some((p, d)) = &self.rows {
+            phis.push(p);
+            deltas.push(d);
+        }
+        for (p, d) in more {
+            phis.push(p);
+            deltas.push(d);
+        }
+        (|| -> candle_core::Result<(Tensor, Tensor)> {
+            let (p, d) = (Tensor::cat(&phis, 0)?, Tensor::cat(&deltas, 0)?);
+            let n = p.dim(0)?;
+            let from = n.saturating_sub(self.most);
+            Ok((
+                p.narrow(0, from, n - from)?.contiguous()?,
+                d.narrow(0, from, n - from)?.contiguous()?,
+            ))
+        })()
+        .map_err(SwarmError::internal)
+    }
+
+    fn timed_fit(
+        &mut self,
+        phi: &Tensor,
+        delta: &Tensor,
+        device: &Device,
+        keep_going: &dyn Fn() -> bool,
+    ) -> Result<Option<PriorFit>, SwarmError> {
+        let started = std::time::Instant::now();
+        let fit = fit_rows(phi, delta, self.lambda, device, keep_going);
+        if matches!(fit, Ok(Some(_))) {
+            self.fits += 1;
+            self.ms += started.elapsed().as_secs_f64() * 1000.0;
+        }
+        fit
+    }
+}
+
+impl super::SplitModel {
+    /// This model's prior for `stand_in`'s run — made empty where it has
+    /// none, or one for another run.
+    pub fn stand_in_prior_for(&mut self, stand_in: &RunStandIn) -> &mut StandInPrior {
+        if self
+            .stand_in_prior
+            .as_ref()
+            .is_none_or(|p| p.run() != stand_in.run())
+        {
+            self.stand_in_prior = Some(StandInPrior::for_stand_in(stand_in));
+        }
+        self.stand_in_prior.as_mut().expect("set above")
+    }
+
+    /// This model's prior, where a reply has made one.
+    pub fn stand_in_prior(&self) -> Option<&StandInPrior> {
+        self.stand_in_prior.as_ref()
+    }
+
+    /// Fit this model's prior where replies were taken in since its last fit
+    /// ([`StandInPrior::refit_while`]) — the worker's use for a moment with
+    /// nothing to do. `Ok(true)` once fitted; a prior that fails is dropped,
+    /// costing the guesses, never the model.
+    pub fn refit_stale_prior(&mut self, keep_going: &dyn Fn() -> bool) -> Result<bool, SwarmError> {
+        let device = self.device().clone();
+        let Some(prior) = self.stand_in_prior.as_mut().filter(|p| p.stale()) else {
+            return Ok(false);
+        };
+        let refitted = prior.refit_while(&device, keep_going);
+        if refitted.is_err() {
+            self.stand_in_prior = None;
+        }
+        refitted
+    }
+}
+
+/// Kernel ridge over `(φ, Δ)` rows on `device`: `A = (H·Hᵀ + λI)⁻¹ ·
+/// (Δ − mean Δ)` with `H = φ`, the inverse by [`ridge_inverse`] — the dual of
+/// the probe's `prior@λ` map, equal to it over the same rows. `None` where
+/// `keep_going` stopped it (see [`ridge_inverse`]).
+fn fit_rows(
+    phi: &Tensor,
+    delta: &Tensor,
+    lambda: f64,
+    device: &Device,
+    keep_going: &dyn Fn() -> bool,
+) -> Result<Option<PriorFit>, SwarmError> {
+    let fit = (|| -> candle_core::Result<Option<PriorFit>> {
+        let h = phi.to_device(device)?.contiguous()?;
+        let d = delta.to_device(device)?;
+        let base = d.mean(0)?;
+        let left = d.broadcast_sub(&base)?.contiguous()?;
+        let Some(x) = ridge_inverse(&h.matmul(&h.t()?)?, lambda, keep_going)? else {
+            return Ok(None);
+        };
+        Ok(Some(PriorFit {
+            weights: x.matmul(&left)?,
+            base,
+            features: h,
+        }))
+    })()
+    .map_err(SwarmError::internal)?;
+    match fit {
+        Some(fit) if !(all_finite(&fit.weights)? && all_finite(&fit.base)?) => Err(
+            SwarmError::Internal("stand-in prior: the fit is not finite".into()),
+        ),
+        fit => Ok(fit),
+    }
+}
+
+/// `(K + λI)⁻¹` for a symmetric positive semi-definite `K` (`m × m`, f32) by
+/// Newton–Schulz on its own device, `X ← X·(2I − A·X)` — matrix products
+/// only, so a card inverts a 2,048-row Gram matrix in tens of milliseconds
+/// where [`WindowInverse::from_gram`] on the host takes seconds. From
+/// `X₀ = I / ‖A‖∞` (no smaller than A's largest eigenvalue, so `A·X₀`'s are
+/// in (0, 1]) every `X` is a polynomial in `A`, and the residual's
+/// eigenvalues square each step: slow while the smallest is near 1 — about
+/// `log₂(‖A‖∞ / λ)` steps, the ridge bounding it — then quadratic down to
+/// f32's floor (Pan and Schreiber 1991; arXiv 2212.02406 on its GEMM-only
+/// form for GPUs). The best `X` seen is returned once `A·X` stops improving;
+/// an error where it never came within [`RIDGE_INVERSE_GOOD_ENOUGH`].
+/// `keep_going` is asked before every step (each waits for the card, through
+/// its residual's read-back): `Ok(None)` the first time it says no.
+pub(crate) fn ridge_inverse(
+    k: &Tensor,
+    lambda: f64,
+    keep_going: &dyn Fn() -> bool,
+) -> candle_core::Result<Option<Tensor>> {
+    let m = k.dim(0)?;
+    let eye = Tensor::eye(m, DType::F32, k.device())?;
+    let a = (k.to_dtype(DType::F32)? + (&eye * lambda)?)?;
+    let norm = a.abs()?.sum(1)?.max(0)?.to_scalar::<f32>()?;
+    if !(norm.is_finite() && norm > 0.0) {
+        candle_core::bail!("ridge inverse: the matrix's norm is {norm}");
+    }
+    let mut x = (&eye / f64::from(norm))?;
+    let mut best: Option<(f32, Tensor)> = None;
+    for _ in 0..RIDGE_INVERSE_MOST_STEPS {
+        if !keep_going() {
+            return Ok(None);
+        }
+        let t = a.matmul(&x)?;
+        let off = (&t - &eye)?.abs()?.max_all()?.to_scalar::<f32>()?;
+        if !off.is_finite() {
+            break;
+        }
+        let best_off = best.as_ref().map_or(f32::INFINITY, |(b, _)| *b);
+        // Past the slow phase each step squares the residual; one that does
+        // not even halve it has reached the rounding floor.
+        if best_off < 0.1 && off > 0.5 * best_off {
+            break;
+        }
+        if off < best_off {
+            best = Some((off, x.clone()));
+        }
+        x = ((&x * 2.0)? - x.matmul(&t)?)?;
+    }
+    match best {
+        Some((off, x)) if off <= RIDGE_INVERSE_GOOD_ENOUGH => Ok(Some(x)),
+        Some((off, _)) => candle_core::bail!("ridge inverse: A·X is {off} from I"),
+        None => candle_core::bail!("ridge inverse: no step was finite"),
     }
 }
 
@@ -608,6 +1217,8 @@ mod tests {
                 base,
                 features,
                 weights,
+                prior: None,
+                ..
             }) = model.bridge()
             else {
                 panic!("a recall bridge");
@@ -643,5 +1254,369 @@ mod tests {
             "no run"
         );
         assert!(RunStandIn::for_run(&[false, true, true, false], &dev).is_some());
+    }
+
+    type Rows = Result<(Tensor, Tensor), Box<dyn std::error::Error>>;
+
+    /// Skip layers 2..5 of 7: the stand-in captures 1 (before) and 4 (the
+    /// run's last).
+    const SKIPS: [bool; 7] = [false, false, true, true, true, false, false];
+
+    /// Unit rows leaning on one shared direction, as hidden states do: the
+    /// Gram matrix is far from diagonal and, past `d` rows, singular — the
+    /// ridge alone keeps it invertible.
+    fn leaning_rows(n: usize, d: usize, seed: u64) -> Vec<Vec<f64>> {
+        unit_rows(n, d, seed)
+            .into_iter()
+            .map(|r| {
+                let v: Vec<f64> = r
+                    .iter()
+                    .enumerate()
+                    .map(|(i, x)| x + if i == 0 { 1.5 } else { 0.0 })
+                    .collect();
+                let norm = v.iter().map(|a| a * a).sum::<f64>().sqrt();
+                v.into_iter().map(|a| a / norm).collect()
+            })
+            .collect()
+    }
+
+    fn tensor(rows: &[Vec<f64>]) -> candle_core::Result<Tensor> {
+        let (n, d) = (rows.len(), rows[0].len());
+        Tensor::from_vec(
+            rows.iter().flatten().map(|&v| v as f32).collect::<Vec<_>>(),
+            (n, d),
+            &Device::Cpu,
+        )
+    }
+
+    /// `n` positions as a capture brings them, `[1, n, d]` each: the hidden
+    /// state before the run (leaning rows, scaled) and after it, the run
+    /// adding `effect(φ)`.
+    fn positions(
+        n: usize,
+        d: usize,
+        seed: u64,
+        effect: impl Fn(&Tensor) -> candle_core::Result<Tensor>,
+    ) -> Rows {
+        let phi = tensor(&leaning_rows(n, d, seed))?;
+        let h_in = (&phi * 3.0)?;
+        let h_out = (&h_in + effect(&phi)?)?;
+        Ok((h_in.unsqueeze(0)?, h_out.unsqueeze(0)?))
+    }
+
+    fn caught(h_in: &Tensor, h_out: &Tensor) -> HashMap<usize, Tensor> {
+        [(1usize, h_in.clone()), (4usize, h_out.clone())]
+            .into_iter()
+            .collect()
+    }
+
+    /// `(φ, Δ)` of a capture, `[n, d]`, by the probe's arithmetic.
+    fn phi_delta(h_in: &Tensor, h_out: &Tensor) -> Rows {
+        let hi = h_in.squeeze(0)?;
+        let delta = (h_out.squeeze(0)? - &hi)?;
+        let phi = hi.broadcast_div(&hi.sqr()?.sum_keepdim(1)?.sqrt()?)?;
+        Ok((phi, delta))
+    }
+
+    /// `(F·Fᵀ + λI)⁻¹` in f64 by Cholesky, as f32.
+    fn exact_inverse(f: &Tensor) -> Result<Tensor, Box<dyn std::error::Error>> {
+        let m = f.dim(0)?;
+        let g: Vec<f64> = f
+            .matmul(&f.t()?)?
+            .flatten_all()?
+            .to_vec1::<f32>()?
+            .into_iter()
+            .map(f64::from)
+            .collect();
+        let inv = WindowInverse::from_gram(&g, m, STAND_IN_LAMBDA).expect("positive definite");
+        Ok(Tensor::from_vec(inv.as_f32(), (m, m), &Device::Cpu)?)
+    }
+
+    /// What a bridge adds at the normalised starts `x`.
+    fn bridged(bridge: &SkipBridge, x: &Tensor) -> candle_core::Result<Tensor> {
+        let SkipBridge::Recall {
+            base,
+            features,
+            weights,
+            prior,
+            ..
+        } = bridge
+        else {
+            panic!("a recall bridge");
+        };
+        let mut e = x.matmul(&features.t()?)?.matmul(weights)?;
+        if let Some((h, a)) = prior {
+            e = (e + x.matmul(&h.t()?)?.matmul(a)?)?;
+        }
+        e.broadcast_add(base)
+    }
+
+    fn largest(t: &Tensor) -> candle_core::Result<f32> {
+        t.abs()?.max_all()?.to_scalar::<f32>()
+    }
+
+    /// A model's stand-in after one reply of `n` positions, absorbed.
+    fn prior_after(
+        n: usize,
+        d: usize,
+        effect: impl Fn(&Tensor) -> candle_core::Result<Tensor>,
+    ) -> Result<(StandInPrior, Tensor, Tensor), Box<dyn std::error::Error>> {
+        let dev = Device::Cpu;
+        let (h_in, h_out) = positions(n, d, 31, effect)?;
+        let mut reply = RunStandIn::for_run(&SKIPS, &dev)
+            .expect("one run")
+            .collecting();
+        reply.learn(&caught(&h_in, &h_out), n)?;
+        let mut prior = StandInPrior::for_stand_in(&reply);
+        prior.absorb(&mut reply, &dev)?;
+        Ok((prior, h_in, h_out))
+    }
+
+    /// Newton–Schulz on the device lands where Cholesky in f64 does, on a
+    /// Gram matrix shaped like a run's: 256 leaning rows in 32 dimensions,
+    /// singular but for the ridge.
+    #[test]
+    fn the_card_inverse_is_the_cholesky_inverse() -> Result<(), Box<dyn std::error::Error>> {
+        let f = tensor(&leaning_rows(256, 32, 13))?;
+        let want = exact_inverse(&f)?;
+        let got = ridge_inverse(&f.matmul(&f.t()?)?, STAND_IN_LAMBDA, &|| true)?.expect("fitted");
+        let (gap, scale) = (largest(&(got - &want)?)?, largest(&want)?);
+        assert!(gap < 1e-3 * scale, "off by {gap} of {scale}");
+        Ok(())
+    }
+
+    /// A check's kept positions carry `share` of the mean of the bridge's
+    /// misses at the last two of them — measured before they are learned —
+    /// to the next bridge: fitted alike, it differs from one without by
+    /// exactly that, everywhere.
+    #[test]
+    fn a_check_carries_a_share_of_its_last_miss() -> Result<(), Box<dyn std::error::Error>> {
+        let (dev, d) = (Device::Cpu, 8usize);
+        let (h_in, h_out) = positions(40, d, 71, |x| x.cos())?;
+        let (c_in, c_out) = positions(3, d, 73, |x| (x * 2.0)?.sin())?;
+        let mut runs = Vec::new();
+        for share in [0.0, 0.5] {
+            let mut s = RunStandIn::for_run(&SKIPS, &dev)
+                .expect("one run")
+                .with_carry(share, 2);
+            s.learn(&caught(&h_in, &h_out), 40)?;
+            s.refresh()?;
+            let before = s.bridge().expect("a bridge").clone();
+            s.learn(&caught(&c_in, &c_out), 3)?;
+            s.refresh()?;
+            runs.push((s, before));
+        }
+        let (phi, delta) = phi_delta(&c_in, &c_out)?;
+        let last = |t: &Tensor| t.narrow(0, 1, 2);
+        let at_last = runs[1].1.effect(&last(&phi)?)?.expect("a recall bridge");
+        let miss = (last(&delta)? - at_last)?.mean_keepdim(0)?;
+        assert!(largest(&miss)? > 0.05, "a check the bridge did not foresee");
+        let queries = tensor(&leaning_rows(5, d, 79))?;
+        let effect = |s: &RunStandIn| -> candle_core::Result<Tensor> {
+            Ok(s.bridge()
+                .expect("a bridge")
+                .effect(&queries)?
+                .expect("recall"))
+        };
+        let added = (effect(&runs[1].0)? - effect(&runs[0].0)?)?;
+        let gap = largest(&added.broadcast_sub(&(miss * 0.5)?)?)?;
+        assert!(gap < 1e-4, "carried {gap} off half the miss");
+        Ok(())
+    }
+
+    /// A reply's rows are taken in without a fit, and a refit stops the
+    /// first time it is told to — between the inverse's steps, keeping
+    /// nothing — so a request that arrives meanwhile waits one step, not the
+    /// fit. The next reply's first step fits what is left.
+    #[test]
+    fn a_refit_stops_when_a_request_arrives() -> Result<(), Box<dyn std::error::Error>> {
+        let dev = Device::Cpu;
+        let (mut prior, _, _) = prior_after(40, 8, |x| x.cos())?;
+        assert!(!prior.stale(), "absorbed and fitted");
+        let (h_in, h_out) = positions(12, 8, 43, |x| x.sin())?;
+        let mut reply = RunStandIn::for_run(&SKIPS, &dev)
+            .expect("one run")
+            .collecting();
+        reply.learn(&caught(&h_in, &h_out), 12)?;
+        prior.take_in(&mut reply)?;
+        assert!(prior.stale(), "taken in, not fitted");
+        assert_eq!(prior.rows(), 52);
+
+        // Asked before every step: the third ask says stop.
+        let asked = std::cell::Cell::new(0);
+        let until_the_third = || {
+            asked.set(asked.get() + 1);
+            asked.get() < 3
+        };
+        assert!(!prior.refit_while(&dev, &until_the_third)?);
+        assert_eq!(asked.get(), 3, "stopped at the first no");
+        assert!(prior.stale() && prior.fit.is_none(), "nothing of it kept");
+        let fits = prior.fits;
+
+        // A short prompt on the next reply's first step fits what was left.
+        let (p_in, p_out) = positions(4, 8, 47, |x| x.sin())?;
+        let (phi, delta) = phi_delta(&p_in, &p_out)?;
+        let got = prior.fit_for_prompt(&phi, &delta, 16)?.expect("fitted");
+        assert!(!prior.stale());
+        assert_eq!(prior.fits, fits + 1);
+        assert_eq!(got.rows(), 52);
+        Ok(())
+    }
+
+    /// With a prior, a bridge is the probe's `prior<N>+recall` arithmetic:
+    /// kernel ridge over the earlier positions, then the window fitted to
+    /// what that leaves of each effect, its mean over every position seen.
+    #[test]
+    fn a_prior_and_the_window_add_as_the_probe_adds_them() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let (d, earlier, n) = (8usize, 30usize, 20usize);
+        let wobble = |x: &Tensor| (x.sqr()? * 0.5)?.sin();
+        let (prior, e_in, e_out) = prior_after(earlier, d, wobble)?;
+        assert_eq!(prior.rows(), earlier);
+        let mut now = RunStandIn::for_run(&SKIPS, &Device::Cpu).expect("one run");
+        now.window = 16;
+        now.set_prior(prior.fit.clone())?;
+        let (h_in, h_out) = positions(n, d, 37, |x| x.cos())?;
+        now.learn(&caught(&h_in, &h_out), n)?;
+        now.refresh()?;
+
+        let (ep, ed) = phi_delta(&e_in, &e_out)?;
+        let pbase = ed.mean(0)?;
+        let a = exact_inverse(&ep)?.matmul(&ed.broadcast_sub(&pbase)?)?;
+        let from_prior = |x: &Tensor| -> candle_core::Result<Tensor> {
+            x.matmul(&ep.t()?)?.matmul(&a)?.broadcast_add(&pbase)
+        };
+        let (p, dl) = phi_delta(&h_in, &h_out)?;
+        let left = (&dl - from_prior(&p)?)?;
+        let lbase = left.mean(0)?;
+        let f = p.narrow(0, n - 16, 16)?;
+        let w = exact_inverse(&f)?.matmul(&left.narrow(0, n - 16, 16)?.broadcast_sub(&lbase)?)?;
+        let queries = tensor(&leaning_rows(5, d, 41))?;
+        let want = (from_prior(&queries)? + queries.matmul(&f.t()?)?.matmul(&w)?)?
+            .broadcast_add(&lbase)?;
+        let got = bridged(now.bridge().expect("a bridge"), &queries)?;
+        let gap = largest(&(got - &want)?)?;
+        assert!(gap < 1e-3 * largest(&want)?, "off the probe's fit by {gap}");
+        Ok(())
+    }
+
+    /// What earlier replies learned carries to the next: a run that adds one
+    /// linear map everywhere, seen at 200 earlier positions, is estimated at
+    /// a new reply's tenth position far better than those ten can manage
+    /// alone — the window cannot see a 16-wide map in 10 rows.
+    #[test]
+    fn a_reply_starts_from_what_the_earlier_replies_learned(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let d = 16usize;
+        let map = tensor(&unit_rows(d, d, 53))?;
+        let linear = |x: &Tensor| x.matmul(&map);
+        let (prior, _, _) = prior_after(200, d, linear)?;
+        let (h_in, h_out) = positions(10, d, 59, linear)?;
+        let queries = tensor(&leaning_rows(20, d, 61))?;
+        let truth = queries.matmul(&map)?;
+        let mut errors = Vec::new();
+        for fit in [prior.fit.clone(), None] {
+            let mut now = RunStandIn::for_run(&SKIPS, &Device::Cpu).expect("one run");
+            now.set_prior(fit)?;
+            now.learn(&caught(&h_in, &h_out), 10)?;
+            now.refresh()?;
+            let est = bridged(now.bridge().expect("a bridge"), &queries)?;
+            errors.push(largest(&(est - &truth)?)?);
+        }
+        assert!(
+            errors[0] < 0.5 * errors[1],
+            "with the prior {}, without {}",
+            errors[0],
+            errors[1]
+        );
+        Ok(())
+    }
+
+    /// A prior keeps the most recent positions, oldest first, up to its
+    /// limit — across replies.
+    #[test]
+    fn a_prior_keeps_the_last_positions_it_saw() -> Result<(), Box<dyn std::error::Error>> {
+        let dev = Device::Cpu;
+        let mut prior: Option<StandInPrior> = None;
+        let mut all = Vec::new();
+        for seed in [3u64, 5, 7] {
+            let (h_in, h_out) = positions(6, 4, seed, |x| x.cos())?;
+            all.push(phi_delta(&h_in, &h_out)?.0);
+            let mut reply = RunStandIn::for_run(&SKIPS, &dev)
+                .expect("one run")
+                .collecting();
+            reply.learn(&caught(&h_in, &h_out), 6)?;
+            let p = prior.get_or_insert_with(|| {
+                let mut p = StandInPrior::for_stand_in(&reply);
+                p.most = 10;
+                p
+            });
+            p.absorb(&mut reply, &dev)?;
+            assert!(reply.taken.is_empty(), "absorbed, not copied");
+        }
+        let prior = prior.expect("made");
+        assert_eq!(prior.rows(), 10);
+        let want = Tensor::cat(&all, 0)?.narrow(0, 8, 10)?;
+        let (held, _) = prior.rows.as_ref().expect("rows");
+        assert_eq!(largest(&(held - want)?)?, 0.0);
+        Ok(())
+    }
+
+    /// A prompt longer than the window joins the prior for its own reply
+    /// only; a short one reads the kept fit.
+    #[test]
+    fn a_long_prompt_joins_the_prior_for_its_own_reply() -> Result<(), Box<dyn std::error::Error>> {
+        let (mut prior, _, _) = prior_after(30, 8, |x| x.cos())?;
+        let (h_in, h_out) = positions(20, 8, 67, |x| x.sin())?;
+        let (phi, delta) = phi_delta(&h_in, &h_out)?;
+        let short = prior
+            .fit_for_prompt(&phi, &delta, 32)?
+            .expect("the kept fit");
+        assert_eq!(short.rows(), 30);
+        let long = prior.fit_for_prompt(&phi, &delta, 16)?.expect("a fit");
+        assert_eq!(long.rows(), 50, "the held positions, then the prompt's");
+        assert_eq!(
+            prior.rows(),
+            30,
+            "the prompt is not kept until the reply is out"
+        );
+        assert!(prior.fit.is_none(), "the kept fit is not held beside it");
+        Ok(())
+    }
+
+    /// A forward whose hidden state is not finite teaches nothing: the
+    /// window keeps its inverse and the prior its fit, where one NaN row would
+    /// have cost both for thousands of positions.
+    #[test]
+    fn a_position_that_is_not_finite_is_left_out() -> Result<(), Box<dyn std::error::Error>> {
+        let dev = Device::Cpu;
+        let (h_in, h_out) = positions(20, 4, 71, |x| x.cos())?;
+        let mut reply = RunStandIn::for_run(&SKIPS, &dev)
+            .expect("one run")
+            .collecting();
+        reply.learn(&caught(&h_in, &h_out), 20)?;
+        let bad_out = (h_out.narrow(1, 0, 1)? * f64::NAN)?;
+        reply.learn(&caught(&h_in.narrow(1, 0, 1)?, &bad_out), 1)?;
+        assert_eq!((reply.not_finite, reply.rows()), (1, 20));
+        reply.refresh()?;
+        let est = bridged(
+            reply.bridge().expect("still a bridge"),
+            &tensor(&leaning_rows(3, 4, 73))?,
+        )?;
+        assert!(all_finite(&est)?);
+        let mut prior = StandInPrior::for_stand_in(&reply);
+        prior.absorb(&mut reply, &dev)?;
+        assert_eq!(prior.rows(), 20, "the refused position is not kept");
+        assert!(prior.fit.is_some());
+        Ok(())
+    }
+
+    #[test]
+    fn a_prior_is_set_before_anything_is_learned() -> Result<(), Box<dyn std::error::Error>> {
+        let (prior, h_in, h_out) = prior_after(12, 4, |x| x.cos())?;
+        let mut now = RunStandIn::for_run(&SKIPS, &Device::Cpu).expect("one run");
+        now.learn(&caught(&h_in, &h_out), 12)?;
+        assert!(now.set_prior(prior.fit.clone()).is_err());
+        Ok(())
     }
 }

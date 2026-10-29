@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+**A model split between your graphics card and processor guesses better from its second reply on.**
+The card's guesses skip the layers on the processor, bridging them with a small stand-in it learns
+while it writes. That stand-in used to start from nothing on every reply; it now also keeps what the
+model's last 2,000 or so words taught it, so its guesses land more often from the first word.
+Measured on an 8 GB laptop card with a 14B model at its usual placement, against v0.3.260's
+stand-in: 13.8 → 15.6 tokens a second writing code, 13.3 → 14.2 summarising a long text, 12.7 →
+13.4 writing prose. With less of the model on the card (15 of its 48 layers) it gains more: 7.1 →
+10.1 writing code, 7.4 → 10.3 summarising. Answers start as soon as before — the stand-in is
+refitted only while the computer has nothing else waiting. It keeps about 85 MB more on the card
+for a 14B; `SWARMLLM_CARD_GUESS_PRIOR=0` turns it off (#366).
+
 ## [0.3.260-alpha] — 2026-10-29
 
 **All together, against v0.3.259: a 14B model split between an 8 GB laptop graphics card and

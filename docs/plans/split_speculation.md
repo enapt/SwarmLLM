@@ -975,13 +975,33 @@ stand-in fitted from all of it: on the ~1,700-2,100-token prompts a window of 2,
 tokens a round at 52-67% first-guess agreement (14B, Llama 3.1 8B, Mistral 7B) against 0.48-0.70
 at 256 (FUTURE_WORK #366 item 1 says what it costs and how to cut it).
 
-**What porting it to a chain needs** (not built): the coordinator's two end segments run in
-separate workers (`ensure_split_model_entry`, keyed by range), so a guess is two local hops — the
-first segment's forward, the stand-in, the last segment's — beside a check of γ+1 positions in one
-round trip; the pairs to fit from are the hidden states `forward_through_segments` already sends
-and receives. It would join the continuous stream (`dsd_stream.rs`) as a drafter with its own
-acceptance, chosen against the small drafter by tokens per millisecond, as `CardGuesses` is beside
-the n-gram (`model_worker::LocalSpec`).
+**What porting it to a chain needs** (not built; mapped 2026-10-28 evening). Corrected: the
+coordinator's two end segments are two `SplitModel`s in ONE worker process — the pool keeps one
+worker per model (`ModelProcessPool::workers`), and `handle_forward` picks the segment's model by
+its layer range — so both halves of every pair pass through that worker: it computes `h_a` as the
+first segment's output and is handed `h_b` as the last segment's input, for the same request and
+positions. So the whole guesser can live in the worker, with nothing new on the wire:
+
+- **Learn** in the worker: keep the first segment's output rows per request (a check's ≤ 9 rows; a
+  prompt's last `prompt_capture()` rows), pair them with the last segment's input rows at the same
+  positions, and learn a pair once a later forward on the first segment shows it was kept — the
+  next forward's `truncate_kv_to` (or its `index_pos` when nothing was cut) is the commit line. A
+  per-forward flag on the LOCAL IPC message turns this on only for a request that may guess, so no
+  other split pays for it. The per-model `StandInPrior` carries across conversations as on one
+  machine; the run is `[a, b)`, the far layers.
+- **Guess** by a new worker call: γ steps of first segment (one row) → `h + bridge(φ(h))` → last
+  segment → greedy pick, then both segments' caches cut back to the round's start — the
+  two-model form of `SplitModel::card_guesses`.
+- **Where it plugs in**: the split's n-gram loop (`ngram_only_spec.rs`, the rounds), where both
+  the requester's window and the n-gram lookup come back empty, exactly as `CardGuesses` sits
+  beside the n-gram in `model_worker::LocalSpec`; priced by `best_gamma_for_check` with the
+  guess's own time per guess. Not the continuous stream: a guess for the next chunk would have to
+  run the last segment over the in-flight chunk's rows, whose `h_b` has not come back.
+- **The catch**: the coordinator holds both ends only in "Start and finish on this computer"
+  (`encrypted_pipeline`, default off). With the tail on a peer, the head would need the final hidden
+  state back (a new wire answer, gated on a feature bit) plus the output head's weights beside its
+  first segment — a few hundred MB, not the model, so within the 2026-09-28 rule — and the
+  stand-in would then bridge to the end. Decide by measuring the boomerang form first.
 
 **Second survey (2026-10-28, for the chain).** Still no online fit anywhere. The nearest are
 offline: PPSD (arXiv 2509.19368) drafts from an early-exit head on the first pipeline stages,

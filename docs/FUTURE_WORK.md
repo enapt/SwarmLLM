@@ -1425,9 +1425,49 @@ experts kept in RAM.
    0.32 / 0.14 / 0.38; Mistral 7B 0.04 / 0.22 / 0.20 / 0.31 — pooled ahead of the window on 5 of 6
    in every model, 1.10-1.39x. The first conversation (no prior) reads exactly as none and
    linear, so the mechanism is the carried statistics. Hidden-state error ranks them the other
-   way (pooled 0.83-0.94, the window 0.66-1.05 relative): judge a stand-in by tokens kept. One
-   order and six short asks — the next step is the worker's form (the prior solved off the
-   reply's path, the window fitted to what it leaves) measured in decode.
+   way (pooled 0.83-0.94, the window 0.66-1.05 relative): judge a stand-in by tokens kept.
+   **The worker's form beats it (round 12, `probe8.sh`)**: `prior+recall@0.3` — the earlier
+   conversations' map fitted once (off the reply's path in a worker), the shipped window fitted to
+   what it leaves of each effect, one `Recall` bridge — keeps 0.66 / 2.13 / 0.55 / 0.44 a round
+   on the same four (online 0.48 / 1.73 / 0.32 / 0.22, pooled 0.53 / 1.97 / 0.38 / 0.31): 1.23-1.96x
+   the shipped window, ahead of it on 22 of 24 conversations, and ahead of pooled in every model
+   though it is cheaper (no refit while the reply is written). The window fitted on top of a
+   prior does better than one fit over both. The first conversation's whole-prompt fit (pooled
+   with no prior) also beat the 256 window: 1.41 vs 0.70 Mistral, 1.11 vs 0.69 Llama.
+   **In the worker (rounds 13-14)**: `split::StandInPrior` keeps the model's last 2,048 positions
+   (`PRIOR_ROWS`, host rows) and fits them in dual form on the card after each reply
+   (`absorb_the_reply`; inverse by Newton–Schulz, `ridge_inverse`, 175-195 ms at 2,048 rows on the
+   3070); the window fits what it leaves. The library matches the probe's exact arithmetic
+   (`probe10.sh`, `carried`): 0.64 / 2.12 / 0.53 / 0.41 a round on the four (window 0.48 / 1.73 /
+   0.32 / 0.22); a long prompt, fitted with the prior for its own reply, 1.17 / 2.61 / 1.23 / 1.11
+   (window 0.66 / 2.61 / 0.69 / 0.70). Decode on the live 14B split (`ab9`, one binary,
+   `SWARMLLM_CARD_GUESS_PRIOR=0` the control, ABBA, 4 timed requests a prompt a side, back to back,
+   medians): at the default placement code 13.64 → 15.43 tok/s (1.13x), the 1,800-token summary
+   13.03 → 15.66 (1.20x), prose 13.32 → 13.26 (level); with 15 of 48 on the card (card hog 1,800 MiB)
+   7.08 → 10.12 (1.43x), 7.37 → 10.30 (1.40x), 6.88 → 7.86 (1.14x). The prompt's fit ran before the
+   first token and the summary's first token rose 2.93 → 3.63 s (15 of 48: 3.70 → 5.37), so it now
+   runs on the reply's first step (`CardGuesses::take_the_prompt`).
+   **Round 15 (`probe11.sh`, tokens kept a round on the four: 14B 33 of 48 / Llama / Mistral / 14B 21
+   of 48)**: adding ρ × the mean of the stand-in's misses at the last k positions (`carried~ρxk`,
+   each miss measured before its position is learned) — `carried` 0.72 / 0.63 / 0.51 / 2.19,
+   `~0.5x4` 0.90 / 0.63 / 0.58 / 2.24 (never worse, up to 1.25x), `~0.5` (the last miss alone)
+   0.96 / 0.53 / 0.48 / 2.12 (one miss is too noisy a guide for Llama and Mistral), `~1` 0.62 / 0.31
+   / 0.32 / 1.90 (overshoots) → `RunStandIn::with_carry(0.5, 4)`. **Kernels on Recall's dot
+   products are refuted**: `((1+s)/2)²` 0.62 / 0.52 / 0.44 / 2.22 and `exp((s−1)/0.2)` 0.52 / 0.38 /
+   0.30 / 2.49 against linear's 0.72 / 0.63 / 0.51 / 2.19 — the sharp one wins only where the
+   skipped run is shortest, so linear stays (no prior art found for either; ReplaceMe, arXiv
+   2505.02819, is linear too). Round 15's A/B (`ab10`) split the long prompt's first token into the
+   wait for admission and the pass: the first-step fit made the pass level (2.33-2.80 s vs
+   2.29-2.47; before it 2.92-3.03 vs 2.50-2.57), while back to back the WAIT grew (0.15-1.18 s vs
+   0.16-0.47) — the previous reply's refit landing on the next request — so the prior is now taken
+   in unfitted at a reply's end and fitted while the worker has nothing waiting
+   (`model_worker::refit_stale_priors`, stopping between steps when a message arrives), else on the
+   next reply's first step. **Round 16 (`ab11`)**: with 4 s between requests the first token is
+   2.99 s with and without the prior + carry; back to back at the default placement decode 1.13x /
+   1.07x / 1.05x, tokens kept a card round 1.83 → 2.59-2.70. The carry alone shows nothing beyond
+   the arms' spread in the worker (1.31-1.45 kept a round against 1.29-1.34) though round 17's
+   probe runs the library's carry equal to the probe's arithmetic — kept on (evidence:
+   `docs/invariants/inference.md` § the card guesses, "A check's miss is carried").
 2. **Guess while the processor checks** — the card is idle through the check's ~130 ms on the
    processor; it could keep guessing past the round's last guess (PEARL's post-verify), ready if the
    check keeps everything. Now the better lever than item 3: a guess costs 26-38 ms at 15 of 48 on
@@ -1440,6 +1480,20 @@ experts kept in RAM.
    suggestive, not proof at that rate.
    Measure it first (time a guess right after another guess against one after a check); a guess run
    beside the check would hide it either way.
+   **Measured 2026-10-29 (round 17, `cg/clock1.sh`, `nvidia-smi` every 50 ms through two 160-token
+   code replies, default placement): a GUESSING split keeps the card at full speed** — SM median
+   1,628 MHz, memory 6,001, P0 in 413 of 468 samples, 62 W, 15.4 tok/s — so the clock is not
+   why a guess costs ~21 ms against ~14 ms of weights to read (26 layers + the output head at
+   ~380 GB/s); the rest is most likely op-by-op launching (item 3). **A split that does not guess
+   runs its card share CLOCKED DOWN**: SM median 435 MHz, memory 5,501, P3 in 807 of 985, 33 W, 6.6
+   tok/s — every split the card cannot guess for (Qwen 3.5, Gemma 4 E2B/E4B, a tail placement, a
+   MoE with experts in RAM) pays it each step. A bounded keep-awake kernel on the ONE stream
+   through the processor's part (a host-mapped flag via cudarc's `result::malloc_host` +
+   `cuMemHostGetDevicePointer`, or a spin of the predicted processor time) could hold P0; one
+   NVIDIA report needs a kernel within ~50 µs of the last to hold the clock. Measure the card share
+   of such a step at P0 vs P3 before building it. Post-verify drafting itself is NOT worth it
+   here: a design pass (2026-10-29) found its drafts kept in ~3-15% of rounds at these
+   acceptances (1-6% expected), with a twin model handle and forked KV views to build.
 3. **The guess forward as a CUDA graph** — a split's forwards are not captured; the card's layers
    run op by op. Not the guess's cost on its own (item 2): its launches take 4-5 ms.
 4. **Across computers**: a node holding a model's first and last layers ("Start and finish on this
@@ -1460,6 +1514,28 @@ experts kept in RAM.
    kernel to write zero for it. A miss handled on the processor reads the ids back (one sync per
    layer, no CUDA graph); one read by the card straight from pinned host memory over PCIe would keep
    the step capturable. Measure the miss traffic before choosing.
+6. **Guess a tree, not a chain**: the card's guesses are one chain (`SplitModel::card_guesses`), so
+   one wrong first guess wastes the round. The tree machinery is built — a level of rows in ONE card
+   forward (`with_draft_tree`, the tree kernels, captured), the check reading each row at its own
+   depth on the processor too (`RowVisibility`'s mask) — and the stand-in is row by row, so it bridges a
+   tree's rows as it bridges a chain's. A processor check is bound by reading the weights, so 8 rows
+   cost little more than 4 (`vec_dot_rows`). Measure before building: the probe's rank of the
+   model's token among the card guess's choices — what top-2 at the first level would keep beside
+   top-1 — at 33 and 21 of 48 skipped (EAGLE-2's dynamic tree, arXiv 2406.16858, ranks a level's
+   branches by the drafter's confidence, which `tree_rank` already computes on the card). The
+   probe reads it: `top2` / `top4` on every line, `PROBE_TREE2=1` for the better of two chains.
+   The drafter path's lesson (`docs/invariants/scheduling.md` § trees): trees kept twice the tokens
+   a round and still ran 0.86x while growing them sat on the round's path — price the rows sent
+   with `draft_tree::worth_checking`, never a fixed width.
+   **Measured 2026-10-29 (round 17, `probe12.sh`, prior + carry, γ 4)**: the model's token is the
+   first guess's best / among its best two / four — 14B 33 of 48: 53.6 / 67.4 / 80.4%; Llama 25 of
+   32: 37.3 / 48.9 / 62.5%; Mistral: 37.7 / 50.0 / 61.4%; 14B 21 of 48: 81.2 / 88.8 / 94.0%. Two
+   whole chains (best and second-best first guess) keep 1.10 / 0.81 / 0.76 / 2.45 tokens a round
+   against one's 0.90 / 0.63 / 0.58 / 2.24 (+22% / +29% / +31% / +9%). **Not worth building at
+   today's check cost**: the worker's check costs 14-32 ms more per position on the processor
+   (`DIAG` lines, round 16), so the second chain's γ rows cost ~60-120 ms for +0.2 tokens, and
+   even one extra first-level row (~20-30 ms) rescues ~15% of rounds — dearer per token than a
+   round's average (~65-135 ms). Revisit if a check's per-position cost falls.
 
 #### #367 — A long prompt's snapshot copy costs 0.15-2.1 s where its memory traffic is ~0.1 s, and the next request waits for it
 `P2` · perf-local · **OPEN** — 2026-10-28 · evidence: `docs/invariants/inference.md` § "One prefix-cache snapshot is sized by bytes" (the deferred-copy paragraph)
