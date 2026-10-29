@@ -1280,7 +1280,19 @@ once peers update: about half the `find_node`, ~0.25 KB/s. Next: re-read `kad_in
 release; then the answers' SIZE — ~215 B per listed peer is several addresses each (unmeasured:
 `dial_bootstrap_peers` hands Kademlia every cached address of a peer, and a routing entry's address
 list has no cap in libp2p-kad 0.48), and the walk itself (go skips a bucket refreshed within the
-interval; libp2p-kad refreshes every bucket past the nearest neighbour's each time). **(2c) fixed 2026-10-17, released in v0.3.242**: a restart gossiped every
+interval; libp2p-kad refreshes every bucket past the nearest neighbour's each time). **Field re-read
+on v0.3.261, 2026-10-29 14:56-15:56Z** (`~/swarmllm-91/out_261/r1,r2`, 3607 s, the live node up
+1.7 h at r1, 7 peers): **(2h) held — `find_node` 210 an hour against 516** (−59%; kad `peer` row 198
+B/s on 3.5 streams a minute against 509 on 8.3), relay hop 40 B/s against 195. **But upload DOUBLED,
+4921 B/s against 2410, all of it gossip: message data 4056 B/s against 1340.** By topic (sent):
+`swarm/models` 2908 B/s on 14.7 messages a minute of which this node PUBLISHED 0.6 — the rest is
+forwarding — `swarm/regions` 546, `swarm/health` 457, `swarm/pools` 78, `swarm/credits` 69. Received
+and delivered by kind: `NodeCapabilityUpdate` 2.1 a minute at ~11.6 KB each (406 B/s), `ShardAnnounce`
+1.2 a minute at ~12.7 KB (254 B/s), `HealthPing` 14 a minute (~330 B). So the models topic's cost is
+peers' ~12 KB capability and parts messages (a peer holding 14 models / 96 parts) forwarded to the
+mesh. **Next**: what a `NodeCapabilityUpdate` carries that makes it 11.6 KB and whether each one says
+what CHANGED (`docs/invariants/network.md` § "Gossip says what CHANGED"); its cadence per peer (~one
+every 3.3 min each). **(2c) fixed 2026-10-17, released in v0.3.242**: a restart gossiped every
 manifest it holds in full, twice, a few seconds apart (§ Closed). Left: the
 mesh is still sized once at startup, from peers ever met rather than reachable now (a rig first
 before going further: a thinner mesh partitions sooner); (3) a both-direction traffic ceiling at the transport
