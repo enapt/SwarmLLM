@@ -3078,20 +3078,6 @@ JSON reaches the client. Next: constrained decoding with llguidance 1.9.1 (MIT, 
   invariant, N paths").
 Not a speed lever (§ 7.1: the forced tokens are 3.3% of the drafter's surprise).
 
-#### #312 — A Responses tool output that is a list of parts is refused
-`P3` · api · **OPEN** — 2026-10-19 · history: found closing #310
-
-OpenAI's Responses API lets a `function_call_output`'s `output` be a list of `input_text` /
-`input_image` / `input_file` parts as well as a string; `FunctionCallOutputItem::output` is a
-`String`, so such a request is refused with a 400 naming the type (never silently dropped), and a
-tool that returns a screenshot through `/v1/responses` cannot hand it over. Fix: accept both
-shapes, translate the list through `collect_content_parts` into the tool message's parts (the chat
-surface carries a tool message's pictures, the Anthropic one since #310), and the Responses →
-Anthropic bridge (`anthropic_bridge.rs`) the same. Separately, the cloud-provider translation of an
-Anthropic request (`anthropic::handlers::anthropic_messages_to_openai`) writes `[image]` for a tool
-result's picture, because OpenAI's chat API refuses images in a tool turn; a user turn carrying them
-right after the results would hand them over.
-
 #### #185 — Three API surfaces each implement streaming and non-streaming replies separately
 `P3` · api · **OPEN** — 2026-07-26 · history: archive § "Collapse the parallel response paths behind one core loop"
 
@@ -3696,7 +3682,22 @@ Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
 
-**Closed 2026-10-29, ships in the next release** (#368, #370, #371, #3 (g), #3 (h) network half)
+**Closed 2026-10-29, ships in the next release** (#368, #370, #371, #312, #3 (g), #3 (h) network half)
+- #312 — **A tool's result sent to `/v1/responses` as text and pictures is read, not refused.**
+  OpenAI's Responses API lets a `function_call_output`'s `output` be a list of `input_text` /
+  `input_image` / `input_file` parts as well as a string (`ResponseFunctionCallOutputItemListParam`);
+  `FunctionCallOutputItem::output` was a `String`, so a screenshot tool's result was a 400. It is now
+  `InputMessageContent`, a message's own type: the local path reads it through the message's
+  `collect_content_parts` into the tool turn's parts (all-text parts collapse to the text, an
+  unknown part is refused by name), the Responses → Anthropic bridge into a `tool_result`'s text and
+  image blocks. Tests `a_tool_output_of_parts_is_a_tool_output`,
+  `a_tool_output_of_parts_reaches_the_tool_turn_with_its_picture`,
+  `a_tool_output_of_parts_reaches_the_tool_result_as_blocks`. **Not done, on purpose**: the
+  cloud-provider translation of an Anthropic request still writes `[image]` for a tool result's
+  picture. OpenAI's chat API refuses images in a tool turn, and OpenAI's own Agents SDK
+  (`chatcmpl_converter.py`) keeps a tool message's text and drops its images by default too — a
+  placeholder when nothing is left, never an added user turn. Inventing that turn would hand the
+  model a conversation shape OpenAI's own converter avoids.
 - #3 (h), network half — **An unmeasured peer is charged its round trip once a pass, not twice.**
   `parallax::vertex_cost_as` priced a peer with no measured figure at `2 * latency_ms` of network a
   pass, but `latency_ms` is `PeerInfo::round_trip_ms` — already the whole round trip — and a pass

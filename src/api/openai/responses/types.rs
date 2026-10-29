@@ -261,7 +261,12 @@ pub struct FunctionCallItem {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FunctionCallOutputItem {
     pub call_id: String,
-    pub output: String,
+    /// The tool's result: a string, or a list of `input_text` / `input_image` /
+    /// `input_file` parts — OpenAI's `ResponseFunctionCallOutputItemListParam`,
+    /// the three kinds a message's content takes — as a tool that returns a
+    /// screenshot sends it. A `String` here refused that shape with a 400
+    /// (FUTURE_WORK #312).
+    pub output: InputMessageContent,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -792,6 +797,35 @@ mod tests {
             assert_eq!(r.encrypted_content.as_deref(), Some("OPAQUE_BLOB"));
         } else {
             panic!("expected typed reasoning");
+        }
+    }
+
+    /// #312: a tool output given as a list of parts parses as a typed tool
+    /// output — with a `String` field it fell through to `Raw` and was
+    /// refused — and is written back as the list it came as (a stored
+    /// response is re-read for `previous_response_id`).
+    #[test]
+    fn a_tool_output_of_parts_is_a_tool_output() {
+        let v = json!({
+            "model": "gpt-5",
+            "input": [{
+                "type": "function_call_output",
+                "call_id": "call_1",
+                "output": [
+                    {"type": "input_text", "text": "the page"},
+                    {"type": "input_image", "image_url": "data:image/png;base64,iVBORw0KGgo=", "detail": "low"},
+                ],
+            }],
+        });
+        let req: ResponsesRequest = roundtrip(v);
+        let ResponsesInput::Items(items) = req.input else {
+            panic!("expected Items")
+        };
+        match &items[0] {
+            InputItem::Typed(TypedInputItem::FunctionCallOutput(out)) => {
+                assert!(matches!(&out.output, InputMessageContent::Parts(p) if p.len() == 2));
+            }
+            other => panic!("expected a typed tool output, got {other:?}"),
         }
     }
 

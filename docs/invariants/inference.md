@@ -7154,9 +7154,10 @@ and llama.cpp's reply would not be the reference.
 gives a `tool_result` block's image blocks to its tool turn at their place (`vision::join_content`)
 — llama.cpp's server makes such a block a tool message with image parts, and the OpenAI chat
 surface already kept a tool message's image parts. It became the caption alone before. Test
-`a_tool_result_s_picture_reaches_the_tool_turn` (red with the pictures dropped). The cloud-provider
-translation still writes `[image]` (OpenAI's chat API refuses images in a tool turn) and Responses
-refuses a list-shaped tool output: FUTURE_WORK #312.
+`a_tool_result_s_picture_reaches_the_tool_turn` (red with the pictures dropped). A Responses
+`function_call_output` given as parts reaches its tool turn the same way since 2026-10-29 (#312). The
+cloud-provider translation still writes `[image]`, on purpose: OpenAI's chat API refuses images in a
+tool turn, and OpenAI's own Agents SDK converter drops them by default rather than add a user turn.
 
 ## A model that cannot write replies is refused off its header (2026-10-15)
 

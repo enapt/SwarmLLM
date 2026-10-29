@@ -304,10 +304,7 @@ fn push_input_item(item: &InputItem, messages: &mut Vec<ApiChatMessage>) -> Resu
     match item {
         InputItem::Typed(TypedInputItem::Message(m)) => {
             let role = parse_role(&m.role)?;
-            let content = match &m.content {
-                InputMessageContent::Text(s) => MessageContent::Text(s.clone()),
-                InputMessageContent::Parts(parts) => collect_content_parts(parts)?,
-            };
+            let content = input_content(&m.content)?;
             messages.push(ApiChatMessage {
                 role,
                 content,
@@ -342,9 +339,11 @@ fn push_input_item(item: &InputItem, messages: &mut Vec<ApiChatMessage>) -> Resu
             });
         }
         InputItem::Typed(TypedInputItem::FunctionCallOutput(out)) => {
+            // A tool's result as the tool sent it — a list of parts carries
+            // its pictures into the tool turn, as the chat surface does (#312).
             messages.push(ApiChatMessage {
                 role: Role::Tool,
-                content: MessageContent::Text(out.output.clone()),
+                content: input_content(&out.output)?,
                 tool_calls: None,
                 tool_call_id: Some(out.call_id.clone()),
                 name: None,
@@ -368,6 +367,15 @@ fn push_input_item(item: &InputItem, messages: &mut Vec<ApiChatMessage>) -> Resu
         }
     }
     Ok(())
+}
+
+/// A message's content or a tool's output, as the chat surface takes it: the
+/// text, or the parts (all-text parts collapse to the text).
+fn input_content(content: &InputMessageContent) -> Result<MessageContent, SwarmError> {
+    match content {
+        InputMessageContent::Text(s) => Ok(MessageContent::Text(s.clone())),
+        InputMessageContent::Parts(parts) => collect_content_parts(parts),
+    }
 }
 
 fn parse_role(role: &str) -> Result<Role, SwarmError> {
@@ -1080,6 +1088,52 @@ mod tests {
             MessageContent::Text(s) => assert_eq!(s, "{\"result\":42}"),
             _ => panic!(),
         }
+    }
+
+    /// #312: OpenAI lets a tool's output be a list of `input_text` /
+    /// `input_image` / `input_file` parts — a screenshot tool's result. It
+    /// was refused with a 400 naming `function_call_output`; it reaches the
+    /// tool turn with its picture, and all-text parts read as the text.
+    #[test]
+    fn a_tool_output_of_parts_reaches_the_tool_turn_with_its_picture() {
+        let mut req = req_text("");
+        req.input = serde_json::from_value(json!([
+            {"type": "function_call_output", "call_id": "c1", "output": [
+                {"type": "input_text", "text": "the page as it stands"},
+                {"type": "input_image", "image_url": "data:image/png;base64,iVBORw0KGgo="},
+            ]},
+            {"type": "function_call_output", "call_id": "c2", "output": [
+                {"type": "input_text", "text": "{\"ok\":true}"},
+            ]},
+        ]))
+        .unwrap();
+        let chat = request_to_chat(&req, None).unwrap();
+        assert_eq!(chat.messages.len(), 2);
+        assert!(matches!(chat.messages[0].role, Role::Tool));
+        assert_eq!(chat.messages[0].tool_call_id.as_deref(), Some("c1"));
+        match &chat.messages[0].content {
+            MessageContent::Parts(parts) => {
+                assert!(
+                    matches!(&parts[0], ContentPart::Text { text } if text == "the page as it stands")
+                );
+                assert!(matches!(&parts[1], ContentPart::ImageUrl { image_url }
+                    if image_url.url == "data:image/png;base64,iVBORw0KGgo="));
+            }
+            other => panic!("expected the text and the picture, got {other:?}"),
+        }
+        assert!(
+            matches!(&chat.messages[1].content, MessageContent::Text(s) if s == "{\"ok\":true}")
+        );
+
+        // A part kind this server cannot read is refused by name, as in a message.
+        req.input = serde_json::from_value(json!([
+            {"type": "function_call_output", "call_id": "c3", "output": [
+                {"type": "input_hologram", "data": "?"},
+            ]},
+        ]))
+        .unwrap();
+        let err = request_to_chat(&req, None).unwrap_err();
+        assert!(err.to_string().contains("input_hologram"), "{err}");
     }
 
     #[test]

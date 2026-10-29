@@ -185,14 +185,16 @@ fn input_to_anthropic_messages(input: &ResponsesInput) -> Result<Vec<Value>, Swa
                     InputItem::Typed(TypedInputItem::FunctionCallOutput(out_item)) => {
                         // Tool result — Anthropic models this as a user
                         // message with a tool_result block referencing
-                        // the tool_use id.
+                        // the tool_use id. Its content is a string or
+                        // text and image blocks, as a message's is (#312).
+                        let content = message_content_to_anthropic(&out_item.output)?;
                         out.push(json!({
                             "role": "user",
                             "content": [
                                 {
                                     "type": "tool_result",
                                     "tool_use_id": out_item.call_id,
-                                    "content": out_item.output,
+                                    "content": content,
                                 }
                             ],
                         }));
@@ -1422,6 +1424,32 @@ mod tests {
         assert_eq!(blocks[0]["type"], "tool_result");
         assert_eq!(blocks[0]["tool_use_id"], "c1");
         assert_eq!(blocks[0]["content"], "42");
+    }
+
+    /// #312: a tool's output given as parts (a screenshot tool's) reaches the
+    /// tool_result as Anthropic's text and image blocks — it was refused.
+    #[test]
+    fn a_tool_output_of_parts_reaches_the_tool_result_as_blocks() {
+        let mut req = base_req();
+        req.input = serde_json::from_value(json!([
+            {"type": "function_call", "call_id": "c1", "name": "screenshot", "arguments": "{}"},
+            {"type": "function_call_output", "call_id": "c1", "output": [
+                {"type": "input_text", "text": "the page as it stands"},
+                {"type": "input_image", "image_url": "data:image/png;base64,iVBORw0KGgo="},
+            ]},
+        ]))
+        .unwrap();
+        let body = responses_to_messages(&req, false).unwrap();
+        let result = &body["messages"][1]["content"][0];
+        assert_eq!(result["type"], "tool_result");
+        assert_eq!(result["tool_use_id"], "c1");
+        assert_eq!(
+            result["content"],
+            json!([
+                {"type": "text", "text": "the page as it stands"},
+                {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "iVBORw0KGgo="}},
+            ])
+        );
     }
 
     #[test]
