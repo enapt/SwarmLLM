@@ -16683,6 +16683,55 @@ reclaim) shipped in v0.3.227 (released 2026-10-05 23:45 UTC); #222 (a node near 
 re-fetching parts) and #223 closed in v0.3.228 (released 2026-10-06 09:42 UTC), #224 opened from its gate;
 #225, #226 and #227 opened from a tester's two reports the same day; #117 (Qwen 3.5, dense), #225 and #226 closed in v0.3.229 (released 2026-10-07 00:00 UTC), #228 opened for what Qwen 3.5 leaves out; #129's cold loads (waited for and priced), #228 (2) and (2b), #220 (2), #229, #230 and #231 shipped in v0.3.230 (released 2026-10-07 16:38 UTC), #232 parked from their report; #234, #235, #239 and #240 closed on 2026-10-08 from two tester reports and the card check after them, #236-#238 opened from the second (#236 and #238 closed the same day); #242 and #243 opened and closed the same day from reports #006 (a 1 Mbps cap stored for "Unlimited") and #007 (the narrow-screen model picker); #194 closed on 2026-10-09 (a card keeps its conversation memory as f16, and its memory guard under a context override), #237 re-ranked to P3 from what could be measured; #152 closed the same day (the guess-check stream on the boomerang), and #147 narrowed to P3 (f16 accumulation in a card's prompt pass shipped). v0.3.233 was built and never released (its gate found #247 counting active file cache as used); v0.3.234 (released 2026-10-11 00:37 UTC) carries #69, #247 and its fix, #162, #10's split half, #171's pieces, #91's capability change-gate and #3's terms DIAG; #224's trigger was caught at its gate. v0.3.235 (released 2026-10-12 01:58 UTC) carries #224, #137's main half, #138's decode, card and prompt steps and #228 (1), (3) and (4); v0.3.236 (released 2026-10-12 14:31 UTC) carries #244, #248, #249, #250's two halves, #251 (1), (2) and (4), #252 (2), #253 and #254, and #257 opened from its gate; #257 closed on 2026-10-13 (under WSL2 a card's saved prompts are kept in host RAM) and #258 opened from its measurement; #138 (1), (1b), (1c) and (1d) shipped on 2026-10-13 (a card/processor split runs a prompt's processor-held experts, then every processor-held projection, then each processor-held layer whole, on the card, copying the next weights while the card computes); #259 and #260 opened and closed the same day from a tester's report (a kept model bigger than the card was refused; a model sent to the processor while another program held the card never moved back), #261 opened from it; #138 (1e) the same day (a split reads a prompt in chunks as large as the card has room for), and #262 opened from its rig (a split's conversation budget charges the processor's caches to the card); #263 opened and closed the same day from a tester's report (a split's local segments refused a long prompt only after the peers had read it, and the retry planned the same split), then #262 (each cache charged to the memory it lives in), and #264 opened from it and closed the same day (a split's processor-held weights are charged to the memory limit), #265 opened from that; #138 (3)'s first stage the same day (a mixture-of-experts layer on the card can keep its experts in RAM, measured from `test-split`: 1.2-1.7x decode at the same card bytes); its second on 2026-10-14 (the daemon chooses it for a mixture-of-experts model that does not fit the card), #266 opened from its rig and closed the same day (the owner's own loads are weighed against the owner's memory cap, not the swarm's); #267 opened and closed the same day (a restart no longer opens a dashboard tab beside the one already reconnecting); #138 (2) the same day (a mixture-of-experts model whole on the card has its decode steps captured as CUDA graphs); #252 (1) the same day (`/v1/models` reports the context this node's memory holds while no other computer could take part). v0.3.237 (released 2026-10-14 03:01 UTC, the first on the one-script release gate) carries #138 (1)-(1e), (2) and (3)'s two stages, #252 (1), #257, #259, #260, #262-#264, #266, #267 and a fix to memory reclaim (an idle model holding only the card was unloaded to make room in RAM); #268 opened from its dependency audit. v0.3.238 (released 2026-10-14 07:31 UTC) carries #270, #271 and #272; v0.3.239 (released 2026-10-15 10:46 UTC) carries #273, #274, #137's 8-thread half, #275's first half, its reply-sized charge and its drafter judged beside the plan, #250's stale card reading (report #036), #3's cold-load share and the fixes from field report 2026-10-15; #276 and #277 opened the same day and closed the same day (a processor-only node holding an idle model is offered every layer its spawn would load; a computer on a metered connection no longer uploads model parts or takes new work for other computers, and turning relaying off takes effect without a restart). v0.3.240 (released 2026-10-16) carries #276, #277, #278, #279, #280, #281 (all five parts), #282, #283, #284, #115 (1) Gemma 3 and (3) Gemma 4 dense text, and #91's region summaries and peer-sized mesh.
 
+The PRIORITIES opening and its item 6 as they stood from the 2026-10-26 re-rank to the 2026-10-29
+one (v0.3.261), word for word.
+
+Re-ranked 2026-10-26 after v0.3.256 (released 2026-10-26). Since the 2026-10-17 ranking
+(v0.3.241), v0.3.242-v0.3.256 shipped near chains (#192 phase 1, v0.3.247), the far chain and
+max-flow carrying (#346, v0.3.254), the 70B work (#342-#345, #348, #349, #350 (1), #351, #353) and
+its unit correction (v0.3.256); item 6 is rewritten for the 70B. What
+each release carried is in § "Closed" and `CHANGELOG.md`; the running log of re-rankings from 2026-10-02 to this one
+moved word for word to the archive, § "PRIORITIES re-rank log". Only OPEN work is listed here.
+`docs/plans/` holds the multi-step designs; the entries point at them. **2026-10-20:** #318 goes
+first among P2 by the user's direction: running models too large for any one member at a usable
+speed is what the swarm is for, so split speed for large models is the top track
+(`docs/plans/large_model_splits.md`).
+
+6. **#318**. A model no single member can hold now answers:
+   Llama-3.3-70B across four machines (TH, TH, AU, IT) first ran on 2026-10-25 at 0.56-0.59 tok/s
+   warm; with its drafter (#351, v0.3.255) 1.90-1.96 tok/s on a repeated question; on v0.3.256,
+   1.29-1.47 tok/s on NEW questions, first token 9-10 s warm (a repeated question lets more of the
+   reply be copied from text already seen; #337 is the copy side). v0.3.255's field check failed 3/3 on a peer's refusal count
+   read in the wrong unit, fixed in v0.3.256 (gotcha #970). Two readers of this node's own
+   figures (#354) closed 2026-10-27; #350 (this node never offered the wider share its idle
+   worker's replacement would load) closed 2026-10-26.
+   **#318** — a large model split across machines is too slow to use: 0.35 tok/s on a 4-segment
+   intercontinental chain, 5-13 tok/s on a 7B Thailand↔Belgium with the stream. Projected
+   lossless 20-31 tok/s across continents and 50-80 inside a region on cards. The stream
+   through a chain of machines, guessing for a user who holds none of the model and trees in
+   every segment are built (2026-10-20); the head's bounded wait and a route carried to the head
+   (10-21); trees the default where every segment runs on a card (5.33-5.74 vs the stream's
+   5.01-5.05 on a real ~405 ms link, #134); a card multiplies a check's rows with llama.cpp's
+   tensor-core MMQ (#325, 10-21: 2.4-3.2× faster at 9-64 rows). The regrow after a missed seed
+   is sized by what it buys, and trees are on only past 300 ms (#134 (a), 10-21: +57% at 20 ms,
+   +4% at 300 on the rig). Near peers over far ones shipped (#192 phase 1, v0.3.247), and where
+   no near group can carry a model, a far chain (#346, v0.3.254). Next: a drafter fed by the model's
+   own state (`large_model_splits.md` build-order step 4); a tree that flows (#134 (b), built
+   10-22: +11-14% over tree rounds on the card rig; its drafter's tree levels are one kernel and
+   one CUDA graph since 10-22; on a thin uplink a guard holds its rows down — 5 Mbit 7.44-7.50 vs
+   4.73-4.80 tok/s unguarded; copied runs from the conversation give it free depth — a code edit
+   23-24 → 42-47 tok/s; on the real TH↔AU link 14-16.5 tok/s with the coder-1.5B; 10-23 a sampled
+   reply ranks on the card and rates its guesses by the shared noise — misses 35 → 24 a 400-token
+   reply; next better guesses: the drafter's size on a far link and the far end's dead draws
+   recycled, `faster_than_local.md` § 6).
+   **Measured 2026-10-29 on the real TH↔AU link (~420 ms), Qwen2.5-14B + the 0.5B Q8_0 drafter,
+   this machine's 8 GB card against a swarm peer's RTX 3060**: the flow with the layers split
+   evenly ran **29.2-29.9 tok/s on code and 9.2-10.0 on prose — about twice this machine's own
+   whole-14B speed on code** (13.6-15.4), 0.7x on prose. A chain that starts and finishes here
+   ran 12.4-16.3 and 5.4-7.1 (tree rounds; it flows since #369, ~1.2x, still ~1.1-1.2x behind
+   the default shape → **#369**); with this machine
+   holding a quarter of the layers the flow fell to 7.8-8.4 and 3.2-3.4 (the peer saturated).
+
 ### #334 — closed 2026-10-27 (the entry as it stood when closed, word for word)
 
 #### #334 — Four rules are computed in several places, and the copies already differ

@@ -33,16 +33,17 @@ residual).
 
 ## ▶ PRIORITIES — read this first
 
-Re-ranked 2026-10-26 after v0.3.256 (released 2026-10-26). Since the 2026-10-17 ranking
-(v0.3.241), v0.3.242-v0.3.256 shipped near chains (#192 phase 1, v0.3.247), the far chain and
-max-flow carrying (#346, v0.3.254), the 70B work (#342-#345, #348, #349, #350 (1), #351, #353) and
-its unit correction (v0.3.256); item 6 is rewritten for the 70B. What
-each release carried is in § "Closed" and `CHANGELOG.md`; the running log of re-rankings from 2026-10-02 to this one
-moved word for word to the archive, § "PRIORITIES re-rank log". Only OPEN work is listed here.
-`docs/plans/` holds the multi-step designs; the entries point at them. **2026-10-20:** #318 goes
-first among P2 by the user's direction: running models too large for any one member at a usable
-speed is what the swarm is for, so split speed for large models is the top track
-(`docs/plans/large_model_splits.md`).
+Re-ranked 2026-10-29 after v0.3.261 (released 2026-10-29). Since the 2026-10-26 ranking
+(v0.3.256), v0.3.257-v0.3.261 shipped the split stream without its hold (v0.3.257), card guesses
+for a card/processor split (#366, v0.3.260), the boomerang's far-run guesses and its flow (#366
+(4), #369), split prices read from the round trips a reply waited, and a drafter of the target's
+own release line (#370), all in v0.3.261; item 6 is rewritten from that release's measurements.
+What each release carried is in § "Closed" and `CHANGELOG.md`; the running log of re-rankings
+from 2026-10-02 moved word for word to the archive, § "PRIORITIES re-rank log". Only OPEN work is
+listed here. `docs/plans/` holds the multi-step designs; the entries point at them.
+**2026-10-20:** #318 goes first among P2 by the user's direction: running models too large for
+any one member at a usable speed is what the swarm is for, so split speed for large models is
+the top track (`docs/plans/large_model_splits.md`).
 
 **P0 — wrong answers, silently**
 1. *(none open since #156 closed on 2026-10-03: a mixed copy is refused at load, a part that is
@@ -65,40 +66,26 @@ speed is what the swarm is for, so split speed for large models is the top track
    `net:0` (with #3). Passive: the next evidence is a field `predicted_terms` line.
 
 **P2 — speed and completeness**, ranked by how many users meet it in their first hour
-6. **#318**. A model no single member can hold now answers:
-   Llama-3.3-70B across four machines (TH, TH, AU, IT) first ran on 2026-10-25 at 0.56-0.59 tok/s
-   warm; with its drafter (#351, v0.3.255) 1.90-1.96 tok/s on a repeated question; on v0.3.256,
-   1.29-1.47 tok/s on NEW questions, first token 9-10 s warm (a repeated question lets more of the
-   reply be copied from text already seen; #337 is the copy side). v0.3.255's field check failed 3/3 on a peer's refusal count
-   read in the wrong unit, fixed in v0.3.256 (gotcha #970). Two readers of this node's own
-   figures (#354) closed 2026-10-27; #350 (this node never offered the wider share its idle
-   worker's replacement would load) closed 2026-10-26.
-   **#318** — a large model split across machines is too slow to use: 0.35 tok/s on a 4-segment
-   intercontinental chain, 5-13 tok/s on a 7B Thailand↔Belgium with the stream. Projected
-   lossless 20-31 tok/s across continents and 50-80 inside a region on cards. The stream
-   through a chain of machines, guessing for a user who holds none of the model and trees in
-   every segment are built (2026-10-20); the head's bounded wait and a route carried to the head
-   (10-21); trees the default where every segment runs on a card (5.33-5.74 vs the stream's
-   5.01-5.05 on a real ~405 ms link, #134); a card multiplies a check's rows with llama.cpp's
-   tensor-core MMQ (#325, 10-21: 2.4-3.2× faster at 9-64 rows). The regrow after a missed seed
-   is sized by what it buys, and trees are on only past 300 ms (#134 (a), 10-21: +57% at 20 ms,
-   +4% at 300 on the rig). Near peers over far ones shipped (#192 phase 1, v0.3.247), and where
-   no near group can carry a model, a far chain (#346, v0.3.254). Next: a drafter fed by the model's
-   own state (`large_model_splits.md` build-order step 4); a tree that flows (#134 (b), built
-   10-22: +11-14% over tree rounds on the card rig; its drafter's tree levels are one kernel and
-   one CUDA graph since 10-22; on a thin uplink a guard holds its rows down — 5 Mbit 7.44-7.50 vs
-   4.73-4.80 tok/s unguarded; copied runs from the conversation give it free depth — a code edit
-   23-24 → 42-47 tok/s; on the real TH↔AU link 14-16.5 tok/s with the coder-1.5B; 10-23 a sampled
-   reply ranks on the card and rates its guesses by the shared noise — misses 35 → 24 a 400-token
-   reply; next better guesses: the drafter's size on a far link and the far end's dead draws
-   recycled, `faster_than_local.md` § 6).
-   **Measured 2026-10-29 on the real TH↔AU link (~420 ms), Qwen2.5-14B + the 0.5B Q8_0 drafter,
-   this machine's 8 GB card against a swarm peer's RTX 3060**: the flow with the layers split
-   evenly ran **29.2-29.9 tok/s on code and 9.2-10.0 on prose — about twice this machine's own
-   whole-14B speed on code** (13.6-15.4), 0.7x on prose. A chain that starts and finishes here
-   ran 12.4-16.3 and 5.4-7.1 (tree rounds; it flows since #369, ~1.2x, still ~1.1-1.2x behind
-   the default shape → **#369**); with this machine
-   holding a quarter of the layers the flow fell to 7.8-8.4 and 3.2-3.4 (the peer saturated).
+6. **#318** — a model no single member can hold, at a usable speed. **Measured on v0.3.261
+   (2026-10-29), Llama-3.3-70B on new questions: 1.97-2.29 tok/s, first token 5.4-5.6 s warm**
+   (v0.3.256: 1.29-1.47 and 9-10 s, same three questions, word-identical replies). The plan is
+   now two machines, this one (8 GB card + processor) and an RTX 3060 in Australia (~420 ms),
+   where v0.3.256 used four (TH, TH, AU, IT); the continuous stream checks the 3B drafter's
+   guesses (on this machine's processor: the card is full of the 70B) and keeps 78-88% of them,
+   2.2-2.3 tokens a round trip of ~1.2-1.3 s. Trees and the flow need every segment and the
+   drafter on a card, so the 70B never flows. The planner predicted each 70B reply at ~2.4x its
+   real time (mostly its network term) — check that a stream's recorded rounds reach the 70B's
+   price (#3 (d)). A 14B split evenly between this machine's card and the same 3060 flows at
+   29.2-29.9 tok/s on code, twice this machine's whole-14B speed (13.6-15.4), and 9.2-10.0 on
+   prose; a chain that starts and finishes here flows since v0.3.261 (#369, ~1.2x its tree
+   rounds, still ~1.1-1.2x behind the default shape). Prose is held by the drafter's
+   first-choice rate: the general 0.5B misses 17-20 times a 160-token reply where the coder's
+   0.5B missed 30-35 (#370). **Next**: tokens a round past the drafter (`large_model_splits.md`
+   step 4, a drafter fed by the model's own state); for the 70B, more tokens a check where a
+   check takes a second (the stream ran 3 guesses a chunk), and whether its 1B on the card beats
+   the 3B on the processor (`faster_than_local.md` § 8, the 70B deep dive). The track's history
+   (near chains #192, the far chain #346, trees #134, the stream, tensor-core MMQ #325, requester
+   guesses) is in the #318 entry and § "Closed".
 7. **#115** — the rest of Gemma 4: its image reader and its drafters, refused by name today,
    never loaded wrong. (Gemma 3 reads pictures as llama.cpp does since 2026-10-19; Gemma 4's
    E2B/E4B run since 2026-10-17 and fit a 4 GB / 6 GB card whole since #296.)
