@@ -208,8 +208,8 @@ impl StreamShape {
         !self.chain.is_empty()
     }
 
-    /// For the log line that says which shape a request streamed on.
-    fn name(&self) -> &'static str {
+    /// For the log line that says which shape a request streamed or flowed on.
+    pub(super) fn name(&self) -> &'static str {
         match (self.near.is_empty(), self.after.is_empty()) {
             (false, true) => "peer-last",
             (false, false) => "boomerang",

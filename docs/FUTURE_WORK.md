@@ -96,7 +96,8 @@ speed is what the swarm is for, so split speed for large models is the top track
    this machine's 8 GB card against a swarm peer's RTX 3060**: the flow with the layers split
    evenly ran **29.2-29.9 tok/s on code and 9.2-10.0 on prose — about twice this machine's own
    whole-14B speed on code** (13.6-15.4), 0.7x on prose. A chain that starts and finishes here
-   ran 12.4-16.3 and 5.4-7.1 (tree rounds; it cannot flow → **#369**); with this machine
+   ran 12.4-16.3 and 5.4-7.1 (tree rounds; it flows since #369, ~1.2x, still ~1.1-1.2x behind
+   the default shape → **#369**); with this machine
    holding a quarter of the layers the flow fell to 7.8-8.4 and 3.2-3.4 (the peer saturated).
 7. **#115** — the rest of Gemma 4: its image reader and its drafters, refused by name today,
    never loaded wrong. (Gemma 3 reads pictures as llama.cpp does since 2026-10-19; Gemma 4's
@@ -1579,31 +1580,43 @@ the last one — an agent's next turn — waits for it: those arms' first token 
 the card's device-to-host read) at both speeds; whether freed snapshots' host buffers are reused or
 the copy faults fresh pages (an allocation of 569 MB under WSL2 is 146K first touches).
 
-#### #369 — A chain that starts and finishes here checks its drafter's guesses one round per round trip; the default shape keeps them flowing, 1.6-2.2x as fast
-`P1` · perf-split · **OPEN** — 2026-10-29 · evidence: `docs/plans/faster_than_local.md` § "Measured on the real link, 2026-10-29"
+#### #369 — A chain that starts and finishes here flows now, but still runs ~1.1-1.2x behind the default shape at the same split
+`P1` · perf-split · **NARROWED** — 2026-10-29 · evidence: `docs/plans/faster_than_local.md` § "Measured on the real link, 2026-10-29"
 
-With a drafter, a chain whose head holds the first layers only runs the flowing tree
-(`pipeline::dsd_flow`), which keeps guesses in flight across the round trip; a chain that starts
-and finishes here (the boomerang — "Start and finish on this computer", and AUTOMATIC wherever
-this node holds both ends: `encrypted_pipeline_auto` defaults on) runs DSD tree rounds, one check
-per round trip. `dsd_flow::flow_possible` requires `shape.far_walks()` — no `after` segments — so a
-boomerang never flows. Measured on the same link, the same 14B, the same drafter, the load split
-the same (this machine 24-25 of 48 layers on its 8 GB card, a swarm peer's RTX 3060 in Australia
-the rest, ~420 ms; `~/swarmllm-gate/deep/fr/real_link.sh`, TAG=flowhalf, ABBA): **flow 29.20 /
-29.94 tok/s on code, 9.17 / 10.02 on prose; boomerang 12.38 / 14.86 and 5.55 / 6.45.** The tree
-rounds kept 2.4-2.8 tokens a round on prose (13-22 rows), 8.4-8.9 on code (30-48 rows), each
-round ~460-565 ms of round trip and peer; the flow sent 23 rows a forward and waited 4-5 s of
-17.5-19 s on prose.
+**Done 2026-10-29:** a chain that starts and finishes here (the boomerang — "Start and finish on
+this computer", AUTOMATIC wherever this node holds both ends) flows. The peers are sent hidden
+states and the tree's shape only and answer hidden states; this node's layers after theirs run
+each answer in the order its forward was SENT (`dsd_flow::TurnOrder` — the worker refuses rows
+that do not continue its cache) and the last of them draws every row (`FlowRun::finish_here`).
+No peer change, nothing new leaves this node. A/B `SWARMLLM_FLOW_FINISH_HERE=0` (the tree rounds).
+Measured in ONE binary on the real link (TH↔AU ~420 ms, Qwen2.5-14B Q4_K_M, the 0.5B Q8_0 drafter
+on this card, this machine 25 of 48 layers on its 8 GB card, a swarm peer's RTX 3060 the middle;
+`~/swarmllm-gate/deep/fr/real_link.sh`, TAG=finishhere, arms rounds/flow/default/flow/rounds/default,
+160 greedy tokens, Windows up 22.2-22.4 h): **tree rounds 5.74 / 6.99 tok/s prose, 15.03 / 15.52
+code; the flow finishing here 7.44 / 7.80 and 17.31 / 18.88 (~1.2x); the default shape at the
+same split 10.18 / 8.53 and 22.33 / 21.90.** Every reply of every arm scored against llama.cpp
+(`score_against_reference.py`): each token rank 1 but for rank-2/3 near-ties (the flow finishing
+here 150-157 of 160 rank 1, largest gap 0.39; the rounds 152-157, 0.36; the default shape
+151-158, 0.22) — the draws made here are the model's. A forced failure
+(`SWARMLLM_FAULT_FLOW_FAIL=60`, second run) handed over to the rounds mid-reply on both replies
+(prose at 31 tokens, code at 113) and both finished; scored the same way, 154 and 157 of 160
+rank 1, worst rank 2, largest gap 0.26 / 0.06 — the take-over cut is one every cache holds.
+The second run's other replies: 149-157 rank 1, worst rank 4 (gap 0.36).
 
-**What to build:** the flow with the tree walked HERE. The peer's answer for a flowed forward is
-the last segment's input rows (`h_b`), not a walk; this node runs its last segment over them and
-walks the tree locally — what `dsd_stream`'s `finish_here` already does for a CHAIN in a boomerang
-(run A's `after` segments as each answer is taken, in order). Map before coding: what
-`dsd_flow`'s far walker returns and where the flow consumes it (`Frontier`, misses, rebases,
-stale answers), and how its rebase/cut rules translate to a last segment that is local (its cache
-cut lazily, as tree rounds do through `pending_truncate`). Keep the privacy property: nothing new
-leaves this node — the peer still sees hidden states only (`docs/ARCHITECTURE.md` § Pipeline
-Privacy Model).
+**What is left — the default shape is still a little faster at the same split: ~1.1x on prose,
+~1.2x on code, over two runs.** A second run (TAG=leaf369, one binary, arms
+flow/default/fault/flow/default, Windows up 22.6-22.7 h): the flow finishing here 7.52 / 8.28
+prose, 18.49 / 20.06 code; the default shape 8.05 / 7.74 and 19.41 / 27.88 — prose level, and the
+default shape's own code spread (19.4-29.9 across the day) is wider than the gap. The first run's
+reading that this shape MISSES twice as often was run-to-run variation: the default shape's prose
+misses went from 9-14 to 17 while this shape's stayed 18-20 (code 2-4 against 0-2). In both shapes
+most misses are wrong guesses — the walk outran the tree (`misses_at_a_leaf`) at most 5 times a
+reply in either. What differs: this node's last layers cost ~21 ms a forward (5.2-5.7 s of a
+~21 s prose reply, 2.2-2.4 s on code), awaited inside the flow's loop and run serially with the
+drafter on one card (two processes on one card time-slice, gotcha #759), and this shape sent
+fewer forwards (252-261 a prose reply against 292-322). Next, if the residual holds on a third
+sample: overlap those layers with the drafting rather than awaiting them in the loop, and read
+whether the forwards a reply come back level.
 
 **Also open here:** (b) the flow's speed depends on the load split — with this machine holding 12
 of 48 layers the peer (36 layers + the 152k-vocab head) saturated (queue up to 2.2 s, 18-39 ms a

@@ -2,6 +2,20 @@
 
 ## [Unreleased]
 
+**"Start and finish on this computer" now keeps a small guessing model's guesses flowing — about
+1.2 times as fast over a long connection.** With that setting, which is on automatically wherever
+your computer holds a model's first and last parts, your computer used to send its small model's
+guesses to the other computer in batches, waiting for each batch to come back before sending the
+next. It now keeps sending them while earlier ones are still on their way, and works out which
+guesses were right itself, from what the other computer sends back. Nothing new is sent to the
+other computer: it gets the same in-between numbers it got before. Measured with a 14B model, its
+first and last layers on an 8 GB laptop graphics card in Thailand and its middle on a volunteer's
+graphics card in Australia (about 420 ms there and back): code 15.3 → 18.1 tokens a second, prose
+6.4 → 7.6. Replies are the model's own, checked token by token against llama.cpp. Splitting the
+same model the default way, with the other computer finishing each word, is still a little faster
+(about 1.1 times on prose and 1.2 on code, over two runs); closing that gap is next.
+`SWARMLLM_FLOW_FINISH_HERE=0` turns it off (#369).
+
 **If your models folder is a link to another drive, the node now measures that drive.** The
 dashboard's disk meter, the storage limit for automatic downloads and the free space told to
 other computers all read the drive holding SwarmLLM's own folder, not the drive the models are

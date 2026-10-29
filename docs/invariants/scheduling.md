@@ -5240,6 +5240,28 @@ round costs one per check.
   2026-10-22, gotcha #932). A peer
   gone silent is the router's to re-plan, never waited on twice. Fault switch:
   `SWARMLLM_FAULT_FLOW_FAIL=<n>`.
+- **A run that finishes HERE flows too, its rows drawn by this node's last layers** (#369,
+  2026-10-29). "Start and finish on this computer" is automatic wherever this node holds both
+  ends, and that shape ran tree rounds — 1.6-2.2x slower than the flow at the same split on TH↔AU.
+  Now the peers are sent hidden states and the tree's shape only (no sampler, nothing to draw) and
+  answer hidden states; this node runs its layers after theirs on each answer
+  (`FlowRun::finish_here`), the last of them drawing every row with the walk the far tail would
+  have had. What a change must keep: (1) **those layers run each answer in the order its forward
+  was SENT** (`TurnOrder`), the order every peer ran them (`forward_streams`) — the worker refuses
+  rows that do not continue its cache (`model_worker::draft_tree_to_apply`), and several answers
+  ready at once come out of the forwards out in any order (55 of 285 a reply were held); (2) an
+  answer the peers RAN is run here whatever its epoch, so the two caches hold the same rows in the
+  same order and a rebase cuts both alike — a refused one (a turn a rebase skipped) is run nowhere;
+  (3) a rebase settles only once this node's layers ran it, so the rounds' take-over cut
+  (`settled_base`) is one every cache holds; (4) the shared noise goes to this node's own last
+  layers whatever the peers advertise. A check's recorded cost includes those layers. Measured in
+  one binary on the real link (14B, 0.5B Q8_0 drafter, this machine 25 of 48 layers): tree rounds
+  5.74-6.99 / 15.03-15.52 tok/s prose / code, the flow finishing here 7.44-7.80 / 17.31-18.88, the
+  default shape at the same split 8.53-10.18 / 21.90-22.33 (`faster_than_local.md` § 9); a second
+  run 7.52-8.28 / 18.49-20.06 against 7.74-8.05 / 19.41-27.88. The default shape stays ~1.1x ahead
+  on prose and ~1.2x on code, inside its own code spread; misses are alike in both shapes and
+  mostly wrong guesses, not the walk outrunning the tree — FUTURE_WORK #369. A/B
+  `SWARMLLM_FLOW_FINISH_HERE=0`.
 
 **Measured.** *Correctness, on the processor* (2026-10-22, `flow318.sh CPU=1 LEN=64`, a 557-token
 prompt, 7B split 0-14 | 14-28 over QUIC at 385 ms, greedy, two replies an arm): the flow ran 64-65

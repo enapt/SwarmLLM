@@ -1111,7 +1111,7 @@ peer advertising its feature bit — gated at the SENDER
 | 0x0E | prompt_span | `start(4)+end(4)` | The prompt pass this forward is one piece of (`features::PROMPT_CHUNKS`) |
 | 0x0F | image_spans | `n(2)+n×(start(4)+end(4))` | Where each picture's rows sit, for a family reading them both ways; n ≤ 256 (`features::IMAGES_AT_MARKERS`, #115 (2b)) |
 | 0x10 | draft_parents | `n(2)+n×parent(2)` | A tree of guesses' shape: each row's parent (0 = follows the cache, k = row k−1); 1 ≤ n ≤ 512, a malformed one REFUSED (`features::DRAFT_TREES`, #134) |
-| 0x11 | draft_tree_from | `from(4)` | Where a tree that flows starts: the rows cached since `from` are the tree's earlier rows, and the tail draws every row; only after `0x10`, `from ≤ index_pos`, the tree `(index_pos − from) + positions` rows long, else REFUSED (`features::DRAFT_TREE_FLOW`, #134 (b)) |
+| 0x11 | draft_tree_from | `from(4)` | Where a tree that flows starts: the rows cached since `from` are the tree's earlier rows, and the tail draws every row — a segment that is not the model's last reads the tree and answers hidden states (a chain's middle hop; the peers of a reply that starts and finishes on its requester, #369); only after `0x10`, `from ≤ index_pos`, the tree `(index_pos − from) + positions` rows long, else REFUSED (`features::DRAFT_TREE_FLOW`, #134 (b)) |
 
 All trailers are bound into the encryption AAD via
 `build_layer_forward_aad` (single source of truth in

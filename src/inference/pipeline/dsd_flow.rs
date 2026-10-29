@@ -35,6 +35,16 @@
 //! segment ANSWERED at and the reply past it read again (`rounds_take_over`) —
 //! past the start the cache holds rows in the order SENT, never the reply's.
 //!
+//! **A run that finishes here flows too** (#369): where this node holds the
+//! model's last layers — "start and finish on this computer", automatic
+//! wherever it holds both ends — the peers are sent hidden states and the
+//! tree's shape alone and answer hidden states; this node's layers after
+//! theirs read each answer in the order its forward was SENT (`TurnOrder`,
+//! the order every peer ran them) and the last of them draws every row
+//! (`FlowRun::finish_here`). The peers never see a draw. That shape ran tree
+//! rounds before, one check a round trip: 1.6-2.2x slower than the flow at
+//! the same split on TH↔AU (2026-10-29).
+//!
 //! **Exact at any temperature.** A row's draw is the model's sample after
 //! that row's path, its shared noise keyed by position (`tree_start + 1 +
 //! depth`), whichever forward carried it — the walk's tokens are the ones a
@@ -119,7 +129,8 @@ fn copy_on() -> bool {
 /// send and the reply it keeps alike: every peer of the run, and as token ids
 /// only the first, where this node runs none of the first layers (`send` packs
 /// the rows as ids for it). The tail is sent no ids (`TailWalk::drafts` is
-/// empty): it draws on hidden states.
+/// empty): it draws on hidden states — and where this node's layers after
+/// the run draw (`Here`), no peer draws at all.
 fn flow_exposure(shape: &StreamShape) -> crate::inference::owner_replies::Exposure {
     crate::inference::owner_replies::Exposure::new(
         std::iter::once(shape.far.node_id.clone())
@@ -495,9 +506,26 @@ pub(super) fn flow_requested() -> bool {
     })
 }
 
-/// Can a reply's tree flow on this stream shape: the run's tail walks (it
-/// holds the model's last layers), every peer of the run reads a tree that
-/// flows (`features::DRAFT_TREE_FLOW`, beside `DRAFT_TREES`), and the sampler
+/// Whether a run that finishes on this node's own last layers — "start and
+/// finish on this computer", automatic wherever this node holds both ends —
+/// flows too, its rows drawn here (`FlowRun::finish_here`, #369): ON unless
+/// `SWARMLLM_FLOW_FINISH_HERE=0` (or `off` / `false`), which keeps that
+/// shape's tree rounds — the A/B inside one binary.
+fn finish_here_on() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| {
+        !matches!(
+            std::env::var("SWARMLLM_FLOW_FINISH_HERE").ok().as_deref(),
+            Some("0") | Some("off") | Some("false")
+        )
+    })
+}
+
+/// Can a reply's tree flow on this stream shape: the run's tail draws (it
+/// holds the model's last layers) or this node's own layers after the run do
+/// (`finish_here_on`), every peer of the run reads a tree that flows
+/// (`features::DRAFT_TREE_FLOW`, beside `DRAFT_TREES` — a peer that does not
+/// draw reads the same tree, as a chain's middle hop does), and the sampler
 /// reads no history — a draw per row reads no path's tokens.
 pub(super) fn flow_possible(
     state: &SharedState,
@@ -505,7 +533,7 @@ pub(super) fn flow_possible(
     sampling: &crate::types::SamplingParams,
 ) -> bool {
     use swarmllm_types::node::features::{DRAFT_TREES, DRAFT_TREE_FLOW};
-    shape.far_walks()
+    (shape.far_walks() || finish_here_on())
         && !crate::inference::sampling::sampler_reads_history(sampling)
         && std::iter::once(&shape.far.node_id)
             .chain(shape.chain.iter().map(|h| &h.node_id))
@@ -530,6 +558,56 @@ struct Sent {
     started: std::time::Instant,
     /// A rebase's forward: the tree's start it sets, settled when answered.
     rebases_to: Option<usize>,
+    /// Where this node's own layers after the run draw its rows: what they
+    /// are to read with the peers' answer.
+    here: Option<Here>,
+}
+
+/// What a forward carried, kept where this node's layers after the peers'
+/// draw its rows (`FlowRun::finish_here`): they read the peers' answer with
+/// exactly what the peers were sent — the tree's shape as SENT, never as it
+/// has grown since.
+struct Here {
+    /// What the first peer was sent: its answer is checked against it before
+    /// anything here runs on it.
+    far_input: Vec<u8>,
+    index_pos: u32,
+    wire: Vec<u16>,
+    from: u32,
+    truncate: Option<u32>,
+}
+
+/// Answers released in the order their forwards were sent. This node's
+/// layers after the peers' read a flow's rows into their cache in that order,
+/// as every peer did (`forward_streams` runs a stream by number), and the
+/// worker refuses rows that do not continue its cache
+/// (`model_worker::draft_tree_to_apply`); answers come out of the forwards
+/// out in any order.
+struct TurnOrder<T> {
+    next: u32,
+    held: std::collections::BTreeMap<u32, T>,
+}
+
+impl<T> TurnOrder<T> {
+    fn new() -> Self {
+        Self {
+            next: 0,
+            held: std::collections::BTreeMap::new(),
+        }
+    }
+
+    /// Hold `turn`'s answer; `true` when an earlier turn is still due.
+    fn arrived(&mut self, turn: u32, answer: T) -> bool {
+        self.held.insert(turn, answer);
+        turn != self.next
+    }
+
+    /// The next answer in turn, once it is in.
+    fn next_due(&mut self) -> Option<T> {
+        let answer = self.held.remove(&self.next)?;
+        self.next += 1;
+        Some(answer)
+    }
 }
 
 /// A forward's answer, and when it ARRIVED — not when this node got to it.
@@ -604,6 +682,9 @@ struct FlowRun<'a, 'r> {
     rows_sent: u32,
     rebases: u32,
     misses: u32,
+    /// Misses at a row nothing had grown under yet: the walk outran the
+    /// drafter, where the rest are guesses the model did not draw.
+    misses_at_a_leaf: u32,
     stale_answers: u32,
     /// Where this node's time went (ms): the drafter's calls, its own layers'
     /// forwards, and waiting with nothing to grow or send.
@@ -646,6 +727,13 @@ struct FlowRun<'a, 'r> {
     earlier_runs: u32,
     earlier_rows: u32,
     earlier_walked: u32,
+    /// Where this node's layers after the peers' draw the rows: the answers
+    /// in the order sent, this node's time in those layers (ms), and the
+    /// answers held for an earlier one — several in at once come out of
+    /// `out` in any order, so not all of them arrived early.
+    in_turn: TurnOrder<Answer>,
+    here_ms: f64,
+    out_of_turn: u32,
 }
 
 impl PipelineExecutor {
@@ -660,11 +748,14 @@ impl PipelineExecutor {
         reply: StreamReply<'_>,
     ) -> Result<(), FlowFailed> {
         let state = self.shared_state.clone();
+        // Whoever draws reads the shared noise: this node's own layers after
+        // the run always do, a peer tail only where it says so.
         let coupling = io.noise.map(|n| n.seed()).filter(|_| {
-            state.peer_advertises_feature(
-                shape.tail(),
-                swarmllm_types::node::features::COUPLED_SAMPLING,
-            )
+            !shape.far_walks()
+                || state.peer_advertises_feature(
+                    shape.tail(),
+                    swarmllm_types::node::features::COUPLED_SAMPLING,
+                )
         });
         let root = *reply
             .generated
@@ -730,6 +821,7 @@ impl PipelineExecutor {
             rows_sent: 0,
             rebases: 0,
             misses: 0,
+            misses_at_a_leaf: 0,
             stale_answers: 0,
             drafting_ms: 0.0,
             near_ms: 0.0,
@@ -749,6 +841,9 @@ impl PipelineExecutor {
             earlier_runs: 0,
             earlier_rows: 0,
             earlier_walked: 0,
+            in_turn: TurnOrder::new(),
+            here_ms: 0.0,
+            out_of_turn: 0,
         };
         let started = std::time::Instant::now();
         let emitted_before = run.reply.generated.len();
@@ -774,7 +869,11 @@ impl PipelineExecutor {
         }
         tracing::info!(
             request_id = %self.request.id,
+            shape = run.shape.name(),
             peers = run.shape.chain.len() + 1,
+            drawn_here = !run.shape.far_walks(),
+            here_ms = format_args!("{:.0}", run.here_ms),
+            out_of_turn = run.out_of_turn,
             forwards = run.forwards,
             rows_a_forward = format_args!(
                 "{:.1}",
@@ -782,6 +881,7 @@ impl PipelineExecutor {
             ),
             rebases = run.rebases,
             misses = run.misses,
+            misses_at_a_leaf = run.misses_at_a_leaf,
             stale_answers = run.stale_answers,
             emitted = run.reply.generated.len(),
             flowed_ms = format_args!("{flowed_ms:.0}"),
@@ -838,7 +938,7 @@ impl FlowRun<'_, '_> {
             // Answers already in go first: the walk they move decides what
             // is worth growing.
             while let Some(Some(answer)) = self.out.next().now_or_never() {
-                if let Taken::Done = self.take_answer(answer).await? {
+                if let Taken::Done = self.take(answer).await? {
                     return Ok(());
                 }
             }
@@ -860,7 +960,7 @@ impl FlowRun<'_, '_> {
             self.waiting_ms += waited.elapsed().as_secs_f64() * 1000.0;
             match next {
                 Some(answer) => {
-                    if let Taken::Done = self.take_answer(answer).await? {
+                    if let Taken::Done = self.take(answer).await? {
                         return Ok(());
                     }
                 }
@@ -1193,6 +1293,17 @@ impl FlowRun<'_, '_> {
             coupling: self.coupling,
             parents: &[],
         };
+        // Where this node's layers after the run draw, the peers are sent no
+        // sampler and nothing to draw — hidden states and the tree's shape
+        // alone, as on every other step of a reply that starts and finishes
+        // here.
+        let here = (!self.shape.far_walks()).then(|| Here {
+            far_input: activations.clone(),
+            index_pos,
+            wire: rows.wire.clone(),
+            from: rows.from as u32,
+            truncate: rows.truncate,
+        });
         let far = &self.shape.far;
         let mut forward = super::build_spec_verify_forward(
             request_id,
@@ -1200,7 +1311,7 @@ impl FlowRun<'_, '_> {
             activations,
             far,
             rows.truncate,
-            Some(&walk),
+            self.shape.far_walks().then_some(&walk),
             Some(seq),
         );
         tree(&mut forward);
@@ -1271,7 +1382,12 @@ impl FlowRun<'_, '_> {
             crate::daemon::state::WorkKind::Decode,
             num_layers,
             activation_bytes,
-            ActivationUnits::HiddenStates,
+            // A peer holding the first layers is sent the packed rows.
+            if self.shape.near.is_empty() {
+                ActivationUnits::PromptBytes
+            } else {
+                ActivationUnits::HiddenStates
+            },
         );
         let sent = Sent {
             seq,
@@ -1282,6 +1398,7 @@ impl FlowRun<'_, '_> {
             alone,
             started,
             rebases_to: rows.rebases_to,
+            here,
         };
         let state = self.state.clone();
         let network_tx = exec.network_tx.clone();
@@ -1333,6 +1450,90 @@ impl FlowRun<'_, '_> {
         }))
     }
 
+    /// Take an answer as it comes — or, where this node's layers after the
+    /// peers' draw the rows, every answer in the order its forward was sent
+    /// (`TurnOrder`): a later one waits for those before it.
+    async fn take(&mut self, answer: Answer) -> Result<Taken, SwarmError> {
+        if self.shape.far_walks() {
+            return self.take_answer(answer).await;
+        }
+        if self.in_turn.arrived(stream_seq::turn(answer.0.seq), answer) {
+            self.out_of_turn += 1;
+        }
+        while let Some(answer) = self.in_turn.next_due() {
+            if let Taken::Done = self.take_answer(answer).await? {
+                return Ok(Taken::Done);
+            }
+        }
+        Ok(Taken::Continue)
+    }
+
+    /// This node's layers after the peers', over the first peer's answer to a
+    /// forward, the last of them drawing every row (#369) — what the run's
+    /// tail does where it holds the model's last layers. Run as each answer
+    /// is TAKEN, in turn, never as it arrives: two forwards of one request at
+    /// a worker at once would cross their replies (gotcha #180), and the
+    /// cache reads the rows in the order the peers did.
+    ///
+    /// `&mut self` only so the future is `Send` (`dsd_stream`'s
+    /// `finish_here`: the drafter this run borrows is not `Sync`).
+    async fn finish_here(
+        &mut self,
+        here: &Here,
+        seq: u32,
+        far: LayerResult,
+    ) -> Result<LayerResult, SwarmError> {
+        let exec = self.exec;
+        super::check_intermediate_activations(
+            self.shape.near.len(),
+            &here.far_input,
+            &far.activations,
+        )
+        .map_err(|e| SwarmError::Inference(format!("a tree that flows: {e}")))?;
+        let walk = TailWalk {
+            drafts: &[],
+            sampling: &exec.request.sampling_params,
+            generated: &[],
+            coupling: self.coupling,
+            parents: &[],
+        };
+        let mut activations = far.activations;
+        let segments = self.shape.after.len();
+        for (i, segment) in self.shape.after.iter().enumerate() {
+            let draws = i + 1 == segments;
+            let mut forward = super::build_spec_verify_forward(
+                exec.request.id,
+                here.index_pos,
+                activations,
+                segment,
+                here.truncate,
+                draws.then_some(&walk),
+                Some(seq),
+            );
+            forward.draft_parents = here.wire.clone();
+            forward.draft_tree_from = Some(here.from);
+            let result = self
+                .state
+                .model_process_pool
+                .forward_for_request(forward, None, super::worker_requester(&exec.request))
+                .await?;
+            if let Some(NetworkFinishReason::Error(msg)) = &result.finish_reason {
+                return Err(
+                    crate::error::reclassify_flattened_error(msg).unwrap_or_else(|| {
+                        SwarmError::Inference(format!("a tree that flows: {msg}"))
+                    }),
+                );
+            }
+            if draws {
+                return Ok(result);
+            }
+            activations = result.activations;
+        }
+        Err(SwarmError::Internal(
+            "a tree that flows: no layers of this node's after the peers' to draw its rows".into(),
+        ))
+    }
+
     /// Record a forward's draws, walk them, emit what the walk reached, and
     /// grow from where it stands.
     async fn take_answer(&mut self, (sent, result, arrived): Answer) -> Result<Taken, SwarmError> {
@@ -1373,7 +1574,17 @@ impl FlowRun<'_, '_> {
                     .unwrap_or_else(|| SwarmError::Inference(format!("a tree that flows: {why}"))),
             });
         }
-        let result = result.expect("an error answer returned above");
+        let mut result = result.expect("an error answer returned above");
+        let mut here_ms = 0.0;
+        if let Some(here) = &sent.here {
+            // The peers ran it, so this node's layers after theirs run it
+            // too, whatever its epoch: their cache then holds the rows the
+            // peers' does, in the same order, and a rebase cuts both alike.
+            let started = std::time::Instant::now();
+            result = self.finish_here(here, sent.seq, result).await?;
+            here_ms = started.elapsed().as_secs_f64() * 1000.0;
+            self.here_ms += here_ms;
+        }
         if result.token_ids.len() != sent.rows {
             if !current {
                 self.stale_answers += 1;
@@ -1419,7 +1630,11 @@ impl FlowRun<'_, '_> {
             .as_secs_f64()
             * 1000.0;
         if sent.alone && current && sent.lead == 0 {
-            self.reply.check.record(sent.rows as u32, delay_ms);
+            // A check's cost runs to its draws: this node's layers after the
+            // peers' too, where they draw.
+            self.reply
+                .check
+                .record(sent.rows as u32, delay_ms + here_ms);
         }
         if sent.lead == 0 {
             // A rebase's forward carries the path too: its time is its size's.
@@ -1501,6 +1716,11 @@ impl FlowRun<'_, '_> {
             WalkEnd::Missed { row, token } => {
                 self.advance(row)?;
                 self.misses += 1;
+                // The walk ran past the tree (tree rounds count no miss
+                // there, `TreeRounds::grow_size`), or the drafter guessed wrong.
+                if self.flow.tree().children(Some(row)).next().is_none() {
+                    self.misses_at_a_leaf += 1;
+                }
                 if self.flow.len() + 1 > MAX_TREE_ROWS {
                     if self.unsettled {
                         self.bonus_waiting = Some(token);
@@ -1777,5 +1997,25 @@ mod tests {
                 kv_len: 10,
             }
         );
+    }
+
+    #[test]
+    fn answers_drawn_here_are_taken_in_the_order_their_forwards_were_sent() {
+        let mut order = TurnOrder::new();
+        // Turn 1 lands first: it waits for turn 0, and says it is early.
+        assert!(order.arrived(1, "one"));
+        assert_eq!(order.next_due(), None);
+        assert!(!order.arrived(0, "zero"));
+        assert_eq!(order.next_due(), Some("zero"));
+        assert_eq!(order.next_due(), Some("one"));
+        assert_eq!(order.next_due(), None);
+        // Three out of turn, then the one they waited on: all four in turn.
+        for (turn, answer) in [(5, "five"), (3, "three"), (4, "four")] {
+            assert!(order.arrived(turn, answer));
+        }
+        assert_eq!(order.next_due(), None, "turn 2 is still out");
+        assert!(!order.arrived(2, "two"));
+        let taken: Vec<_> = std::iter::from_fn(|| order.next_due()).collect();
+        assert_eq!(taken, ["two", "three", "four", "five"]);
     }
 }

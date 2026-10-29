@@ -474,8 +474,11 @@ impl PipelineExecutor {
         let mut streamed = false;
         // A tree that FLOWS (`dsd_flow`, #134 (b)): where trees are checked
         // from the start and the run reads one, the tree's rows leave a few a
-        // call and the far end draws every row, instead of a round trip per
-        // check. `SWARMLLM_TREE_FLOW=0` keeps the tree rounds.
+        // call and the model's last layers draw every row — the far end's, or
+        // this node's own where the reply starts and finishes here (#369) —
+        // instead of a round trip per check. `SWARMLLM_TREE_FLOW=0` keeps the
+        // tree rounds; `SWARMLLM_FLOW_FINISH_HERE=0` keeps them for a reply
+        // that finishes here.
         if let Drafter::Engine(engine) = &mut drafter {
             let flow_shape =
                 flow_shape_if_trees.filter(|_| trees_from_the_start && finish_reason.is_empty());

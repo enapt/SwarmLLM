@@ -781,6 +781,7 @@ one binary (main at `4130e0a1`), the route pinned per ask and checked in the log
 | starts and finishes here, no guessing | 2.03-2.05 | 2.03-2.05 |
 | starts and finishes here, far-run guesses (#366 (4)) | 3.74-4.01 | 2.93-3.61 |
 | starts and finishes here, drafter (tree rounds), 25 of 48 | 12.38-16.34 | 5.37-7.10 |
+| starts and finishes here, drafter (the flow, #369), 25 of 48 | 17.31-20.06 | 7.44-8.28 |
 | default shape, drafter (the flow), 12 of 48 | 7.79-8.36 | 3.15-3.38 |
 | **default shape, drafter (the flow), 24 of 48** | **29.20-29.94** | **9.17-10.02** |
 | this machine alone, the whole 14B (card + processor, card guesses) | 13.6-15.4 | ~13 |
@@ -794,6 +795,17 @@ What each figure is made of, from the runs' own lines:
   `flow_possible` needs the tail to walk at the far end) keep 2.4-2.8 tokens a round on prose and
   8.4-8.9 on code, and every round waits one whole round trip. Same link, same drafter, same split:
   the flow is 1.6x (prose) to 2.2x (code) as fast → FUTURE_WORK #369.
+- **The flow for a chain that starts and finishes here** (#369, later the same day, one binary,
+  arms alternating): this node's last layers draw every row, run on each answer in the order its
+  forward was sent. Tree rounds 5.74 / 6.99 prose, 15.03 / 15.52 code; the flow 7.44 / 7.80 and
+  17.31 / 18.88 (~1.2x); the default shape in the same run 10.18 / 8.53 and 22.33 / 21.90 (its code
+  below the morning's 29.2-29.9 — the link's, not the build's: both shapes ran in one binary).
+  A second run (one binary, arms alternating): the flow finishing here 7.52 / 8.28 and 18.49 /
+  20.06, the default shape 8.05 / 7.74 and 19.41 / 27.88. Over both runs the default shape is
+  ~1.1x ahead on prose and ~1.2x on code, inside its own code spread (19.4-29.9). Misses are alike:
+  18-20 a prose reply here against 9-17, 2-4 on code against 0-2, and at most 5 of them a reply
+  are the walk outrunning the tree in either shape (`misses_at_a_leaf`) — the rest are wrong
+  guesses. The last layers here cost ~21 ms a forward, run serially with the drafter on one card.
 - **The flow at 12 of 48** saturated the far card: 36 layers plus the 152k-vocabulary output head
   for every row of every forward, up to 2.2 s queued, 18-39 ms a row. The flow's speed is the
   slower side's; the split must follow the machines' speeds (#356).
@@ -806,8 +818,8 @@ is no longer the limit once a good drafter's tree flows. Code ran past local, be
 reply is easy to guess. Prose is held by how often the drafter's guesses land (§ 7, § 8: the flow
 is held by the drafter's first-choice rate), so the next prose gains are better guesses, not
 shorter trips. The open question for users is whether they GET this shape: a head with the even
-share, a drafter on its card, and, when the head holds both ends, a flow that the boomerang does
-not yet have.
+share, a drafter on its card, and, when the head holds both ends, the flow (since #369, within
+~1.1-1.2x of the default shape's).
 
 ## Sources
 
