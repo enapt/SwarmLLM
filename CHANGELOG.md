@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.3.261-alpha] — 2026-10-29
+
 **"Start and finish on this computer" now keeps a small guessing model's guesses flowing — about
 1.2 times as fast over a long connection.** With that setting, which is on automatically wherever
 your computer holds a model's first and last parts, your computer used to send its small model's
