@@ -3047,12 +3047,13 @@ gave 1.01x; `SWARMLLM_STREAM_SPARE_MIN` is now the fixed-floor A/B. On a far-bou
 1. **Measure the 70B** once AU runs a release advertising bit 35: `SWARMLLM_STREAM_SPARES=1` against
    off on this node (`~/swarmllm-70b/ask70novel.sh`), judged by restarts that waited, tok/s and
    `spares_declined` / `spare_ms`. Default on only where it pays.
-1a. **Find what lengthens the far end's restart gaps on the rig**: 7-10 of ~68 spares ran a
-   reply, yet each remaining gap grew ~40 ms. Calibrating the drafter's two chances from the
-   reply's own outcomes was tried and NOT kept. The 1B's refusal chance read 0.79-0.87 of its word,
-   its spare score 0.71-0.86, decisions barely moved, and times were level (§ "Which spares go").
-   Next: log the price's predicted answer times against their arrivals. A spare "built while this
-   node would wait" is priced free.
+1a. **Separate what spares cost the far end from the reply's text**: on the rig the far end's
+   busy time rose 2-3 s a reply with spares on (§ "Which spares go"). The spare arms' replies
+   differ from the off arm's at a near-tie, so they are different work. Use a prompt whose reply
+   is the same either way, or compare the far end's forwards by width. Found and fixed tonight:
+   the restart gaps grew because the price read each answer's arrival as a point. Refused answers
+   waited 0.5-2.3 s a reply. Priced over the reply's own arrival errors, 0.4-1.2 s. Not the cause:
+   the drafter's calibration (tried, not kept).
 2. **Draft a spare's guesses in the chunk's own drafter calls** — one tree, the runner-up's branch
    grown beside the main line (below). Replayed: a spare at ~210 ms instead of ~312 lifts the
    priced spares from 1.10x to 1.12x; reading its rows in the next chunk's forward too (~120 ms),

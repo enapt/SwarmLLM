@@ -529,11 +529,48 @@ struct SpareTerms<'a> {
 /// The fixed floor it replaced (0.4, [`fixed_spare_floor`]) both sent spares
 /// that cost more than they saved and withheld ones that paid. Replayed over
 /// six of the 70B's own replies with its 3B drafter and this split's measured
-/// times (scratchpad `spare_sim.py`, 2026-10-31), this rule was the best of
-/// the rules tried in all ten cases simulated (3 or 5 guesses a chunk; as
-/// measured, a cheaper spare, a far end twice as slow, a shorter trip):
+/// times (`~/swarmllm-70b/spares/spare_sim.py`, 2026-10-31), this rule was the
+/// best of the rules tried in all ten cases simulated (3 or 5 guesses a chunk;
+/// as measured, a cheaper spare, a far end twice as slow, a shorter trip):
 /// 1.07-1.10x where the floor gave 0.98-1.06x, never slower than no spares.
-fn spare_pays(t: &SpareTerms) -> bool {
+///
+/// It is priced over the errors of this reply's recent predictions:
+/// `lateness` is how much later than predicted each recent answer arrived
+/// (negative: earlier), and each one shifts every time in `t` — the far end
+/// finishing this chunk, every answer due — by itself. The spare pays where
+/// its gain, averaged over those, is above nothing; with none, as predicted.
+/// Whole checks spread where the gaps between them do not (`FarPace`, the
+/// 70B's ~190 ms); on the rig (Llama-3.1-8B + its 1B, 200 ms, 2026-10-31)
+/// answers arrived a median 68-118 ms after their prediction, from 160-290 ms
+/// early (p10) to 175-310 ms late (p90). Priced at the point, a refusal due
+/// just after a spare's build landed in it, or in the chunk the spare pushed
+/// back: refused answers waited 0.5-2.3 s a reply with spares on, none off.
+fn spare_pays(t: &SpareTerms, lateness: &[f64]) -> bool {
+    if lateness.is_empty() {
+        return spare_gain(t) > 0.0;
+    }
+    let mut earlier = Vec::with_capacity(t.earlier.len());
+    let mut sum = 0.0;
+    for &late in lateness {
+        earlier.clear();
+        earlier.extend(
+            t.earlier
+                .iter()
+                .map(|&(due, refused)| (due + late, refused)),
+        );
+        sum += spare_gain(&SpareTerms {
+            earlier: &earlier,
+            this_done: t.this_done + late,
+            ..t.clone()
+        });
+    }
+    sum / lateness.len() as f64 > 0.0
+}
+
+/// What a spare restart is worth at the times `t` predicts: the chance it
+/// runs times the cycle it saves, less what building it delays
+/// ([`spare_pays`]); below nothing where it cannot run.
+fn spare_gain(t: &SpareTerms) -> f64 {
     let clamp = |p: f64| {
         if p.is_finite() {
             p.clamp(0.0, 1.0)
@@ -591,8 +628,22 @@ fn spare_pays(t: &SpareTerms) -> bool {
     let late = (t.spare + t.round_trip / 2.0 - t.this_done).max(0.0);
     let saved = (t.round_trip + t.build - late).max(0.0);
     let runs = clamp(t.score) * none_before;
-    runs > 0.0 && runs * saved > delay
+    if runs > 0.0 {
+        runs * saved - delay
+    } else {
+        -delay.max(f64::MIN_POSITIVE)
+    }
 }
+
+/// Does a spare's price read this reply's prediction errors
+/// ([`spare_pays`])? The A/B: `SWARMLLM_STREAM_SPARE_LATENESS=0`
+/// prices every spare at the predicted times.
+fn spare_price_reads_lateness() -> bool {
+    std::env::var("SWARMLLM_STREAM_SPARE_LATENESS").as_deref() != Ok("0")
+}
+
+/// How many of a reply's latest prediction errors a spare is priced over.
+const LATENESS_KEPT: usize = 16;
 
 /// Whether a chunk about to go, `main_out` main-line chunks already out and
 /// `spares_out` spares, may take a spare beside it: only while every chunk of
@@ -1202,6 +1253,9 @@ struct StreamRun<'a, 'r> {
     line_out: std::collections::VecDeque<LineOut>,
     /// This reply's time to build a spare: drafting and this node's layers.
     spare_ms: RecentMedian,
+    /// How much later than [`StreamRun::line_entry`] predicted each recent
+    /// answer arrived, newest last, at most [`LATENESS_KEPT`] of them.
+    lateness: std::collections::VecDeque<f64>,
     /// Main-line chunks built ([`Sent::order`]).
     main_built: u32,
 }
@@ -1278,6 +1332,7 @@ impl PipelineExecutor {
             spares_declined: 0,
             line_out: std::collections::VecDeque::new(),
             spare_ms: RecentMedian::default(),
+            lateness: std::collections::VecDeque::with_capacity(LATENESS_KEPT),
             main_built: 0,
         };
         run.positions_served = run.positions_served();
@@ -1318,6 +1373,11 @@ impl PipelineExecutor {
             spares_taken = run.spares_taken,
             spares_declined = run.spares_declined,
             spare_ms = format_args!("{:.0}", run.spare_ms.median().unwrap_or(0.0)),
+            answer_late_ms = format_args!("{:.0}", {
+                let mut late: Vec<f64> = run.lateness.iter().copied().collect();
+                late.sort_by(f64::total_cmp);
+                late.get(late.len() / 2).copied().unwrap_or(0.0)
+            }),
             "DSD: streamed checks complete"
         );
         outcome
@@ -1680,16 +1740,24 @@ impl StreamRun<'_, '_> {
             .spare_ms
             .median()
             .unwrap_or(draft_ms * f64::from(spare_guesses()) + near);
-        spare_pays(&SpareTerms {
-            score,
-            earlier: &earlier,
-            this_refused: this.refused,
-            this_done,
-            room: chunks_in_flight().saturating_sub(self.line_out.len()),
-            build,
-            spare,
-            round_trip,
-        })
+        let lateness: Vec<f64> = if spare_price_reads_lateness() {
+            self.lateness.iter().copied().collect()
+        } else {
+            Vec::new()
+        };
+        spare_pays(
+            &SpareTerms {
+                score,
+                earlier: &earlier,
+                this_refused: this.refused,
+                this_done,
+                room: chunks_in_flight().saturating_sub(self.line_out.len()),
+                build,
+                spare,
+                round_trip,
+            },
+            &lateness,
+        )
     }
 
     /// Build and send the spare restart of the chunk just sent (#381), if
@@ -2287,7 +2355,22 @@ impl StreamRun<'_, '_> {
     /// are worth.
     async fn take_answer(&mut self, (sent, result, arrived): Answer) -> Result<Taken, SwarmError> {
         let taken = std::time::Instant::now();
-        self.line_out.retain(|out| out.seq != sent.seq);
+        let due = self
+            .line_out
+            .iter()
+            .position(|out| out.seq == sent.seq)
+            .and_then(|i| self.line_out.remove(i))
+            .and_then(|out| out.due);
+        if let Some(due) = due {
+            let late_ms = match arrived.checked_duration_since(due) {
+                Some(late) => late.as_secs_f64() * 1000.0,
+                None => -(due.duration_since(arrived).as_secs_f64() * 1000.0),
+            };
+            if self.lateness.len() == LATENESS_KEPT {
+                self.lateness.pop_front();
+            }
+            self.lateness.push_back(late_ms);
+        }
         let result = result?;
         if let Some(NetworkFinishReason::Error(msg)) = &result.finish_reason {
             // The class does not survive the wire (gotcha #304).
@@ -2610,8 +2693,11 @@ mod tests {
     #[test]
     fn a_spare_built_while_this_node_would_wait_pays_at_any_chance() {
         let earlier = [(600.0, 0.3)];
-        assert!(spare_pays(&terms(0.05, &earlier, 1000.0, 0)));
-        assert!(!spare_pays(&terms(0.0, &earlier, 1000.0, 0)), "no chance");
+        assert!(spare_pays(&terms(0.05, &earlier, 1000.0, 0), &[]));
+        assert!(
+            !spare_pays(&terms(0.0, &earlier, 1000.0, 0), &[]),
+            "no chance"
+        );
     }
 
     /// A spare holds back the answer already in until it is built: where that
@@ -2623,11 +2709,11 @@ mod tests {
         // 0.6 x 312 ms of a restart held back; it runs only if the earlier
         // chunk is kept (0.4), and then saves 400 + 312 ms.
         let earlier = [(-10.0, 0.6)];
-        assert!(!spare_pays(&terms(0.45, &earlier, 1000.0, 0)));
-        assert!(spare_pays(&terms(0.9, &earlier, 1000.0, 0)));
+        assert!(!spare_pays(&terms(0.45, &earlier, 1000.0, 0), &[]));
+        assert!(spare_pays(&terms(0.9, &earlier, 1000.0, 0), &[]));
         // The same answer due after the spare is built: nothing held back.
         let later = [(400.0, 0.6)];
-        assert!(spare_pays(&terms(0.45, &later, 1000.0, 0)));
+        assert!(spare_pays(&terms(0.45, &later, 1000.0, 0), &[]));
     }
 
     /// Every chunk kept, the far end finishes this one at 600 ms: the next
@@ -2635,10 +2721,36 @@ mod tests {
     /// far end waits 224 ms four times in five, which a spare must outweigh.
     #[test]
     fn a_spare_that_leaves_the_far_end_waiting_is_charged_the_wait() {
-        assert!(!spare_pays(&terms(0.2, &[], 600.0, 1)));
-        assert!(spare_pays(&terms(0.3, &[], 600.0, 1)));
+        assert!(!spare_pays(&terms(0.2, &[], 600.0, 1), &[]));
+        assert!(spare_pays(&terms(0.3, &[], 600.0, 1), &[]));
         // A far end busy for longer waits for nothing.
-        assert!(spare_pays(&terms(0.05, &[], 1200.0, 1)));
+        assert!(spare_pays(&terms(0.05, &[], 1200.0, 1), &[]));
+    }
+
+    /// A spare is priced over how this reply's answers have actually arrived
+    /// against their predictions. A refusal predicted just after the spare's
+    /// build, where answers have been coming 100 ms early, lands inside it; one
+    /// predicted inside the spare's build with a chunk to follow, where they
+    /// have been coming 200 ms late, lands in the chunk the spare pushed back.
+    /// Either way the restart waits, and a spare that paid at the predicted
+    /// times is declined. Mixed errors average.
+    #[test]
+    fn a_spare_is_priced_over_how_late_the_replys_answers_have_come() {
+        let early = [(330.0, 0.6)];
+        assert!(spare_pays(&terms(0.1, &early, 1000.0, 0), &[]));
+        assert!(!spare_pays(&terms(0.1, &early, 1000.0, 0), &[-100.0; 4]));
+        assert!(spare_pays(&terms(0.1, &early, 1000.0, 0), &[100.0; 4]));
+
+        let pushed_back = [(200.0, 0.6)];
+        assert!(spare_pays(&terms(0.3, &pushed_back, 1000.0, 1), &[]));
+        assert!(!spare_pays(
+            &terms(0.3, &pushed_back, 1000.0, 1),
+            &[200.0; 4]
+        ));
+        assert!(spare_pays(
+            &terms(0.3, &pushed_back, 1000.0, 1),
+            &[200.0, 0.0, 0.0, 0.0]
+        ));
     }
 
     /// A chunk's chance of a refusal is one less the chance its drafter keeps

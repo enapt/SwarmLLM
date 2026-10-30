@@ -3685,8 +3685,21 @@ refusals, so the price over-charges on that count. Its spare scores came out at 
 spares actually sent ran ~0.57 as often as rated). Calibrated, the price sent 67-70 spares a
 reply against 66-67, because most go where this node is expected to idle and price at any
 chance. Same reply, calibrated 88.4-89.2 s against 87.4-88.1 s uncalibrated; none 87.7-88.7.
-What lengthens the gaps is still open — next, the price's predicted answer times against their
-arrivals. The rule is that a spare "built while this node would wait" is free.
+
+**Priced over the reply's arrival errors, not at a point** (2026-10-31, `spare_pays`'s
+`lateness`). Logged against their predictions (`line_entry`), answers arrived a median 68-118 ms
+late, from 160-290 ms early (p10) to 175-310 ms late (p90). Whole checks spread where the gaps
+between them do not, as `FarPace` found on the 70B (~190 ms). At the point, a refusal due just
+after a spare's build landed inside it, or inside the chunk the spare pushed back. Refused
+answers waited 0.5-2.3 s a reply with spares on and 0 with them off. That waiting is the ~40 ms
+each remaining gap grew. Now each spare's gain is averaged over the reply's last 16 errors, every
+time in its terms shifted by each. Same rig, same steady reply: refused answers waited 0.4-1.2 s
+against 1.3-5.2 s priced at the point, 56-60 spares sent against 66-74, the same 7-10 run. Reply
+times: 88.8-89.5 s against 88.6-90.6 at the point; none 87.9-88.3. **The rest is open.** With
+spares on, the far end's idle time fell (21.2-23.2 s a reply against 23.2-23.3) but its busy time
+rose 2-3 s (82-84 against 80-81). The spare arms' replies are not the off arm's text (the
+0.08-logit tie), so their far work differs, and that is not yet separated from what spares cost
+the far end. A/B `SWARMLLM_STREAM_SPARE_LATENESS=0`; logged `answer_late_ms`.
 
 Tests: `a_spare_restart_runs_for_the_refusal_it_names`,
 `a_spare_restart_for_another_outcome_is_skipped`, `a_spare_supersedes_nothing_and_only_one_runs_per_refusal`,
@@ -3697,6 +3710,7 @@ fail with their rule removed), `a_spare_bets_on_the_refusal_its_drafter_thinks_l
 `protocol::{layer_forward,encrypted}`; the price: `a_spare_built_while_this_node_would_wait_pays_at_any_chance`,
 `a_spare_that_holds_back_a_likely_refusal_pays_only_if_likely_to_run` (its 0.45 spare went under
 the floor), `a_spare_that_leaves_the_far_end_waiting_is_charged_the_wait`,
+`a_spare_is_priced_over_how_late_the_replys_answers_have_come` (fails with the shift removed),
 `a_chunks_chance_of_a_refusal_is_its_guesses_kept_all_together`.
 
 **A chunk is guessed whole, and every chunk is the stream's width** (2026-10-26,
