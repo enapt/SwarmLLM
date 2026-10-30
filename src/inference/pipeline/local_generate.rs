@@ -606,7 +606,27 @@ mod tests {
             "fixture: the head leads"
         );
 
-        state.note_head_declined_to_lead(&b, &model);
+        // A route it refused was this request's: it is asked to lead the next.
+        let route_refused = crate::error::SwarmError::Inference(format!(
+            "{}: the route names a node this one cannot reach",
+            crate::daemon::dispatch::remote_generate::DELEGATED_SPLIT_ROUTE_REFUSED
+        ));
+        assert_eq!(
+            state.note_head_declined_to_lead(&b, &model, &route_refused),
+            None
+        );
+        assert!(
+            delegation_eligible(&executor_for(state.clone(), split())),
+            "an error about the request passes the head over for nobody"
+        );
+
+        // The field case's refusal, as it arrives: its memory check said no.
+        let declined = crate::error::SwarmError::ServiceUnavailable(
+            "llama-3.3-70b-instruct-q4-k-m needs about 36798 MB of memory".into(),
+        );
+        assert!(state
+            .note_head_declined_to_lead(&b, &model, &declined)
+            .is_some());
         assert!(
             !delegation_eligible(&executor_for(state.clone(), split())),
             "a head that just declined is not asked again: this node drives the plan"

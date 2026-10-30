@@ -31,6 +31,7 @@ use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
 
+use crate::error::SwarmError;
 use crate::types::{ModelId, NodeId};
 
 /// The wait after the first decline; each further one doubles it.
@@ -50,6 +51,31 @@ struct Declined {
 #[derive(Default)]
 pub struct DeclinedLeads {
     map: DashMap<(NodeId, ModelId), Declined>,
+}
+
+/// Is this error, from a head asked to lead a split, a decline about the HEAD?
+///
+/// Only a refusal that says the head cannot lead this model counts: its own
+/// memory or worker refused the load (the field case arrived as `Service
+/// unavailable: … needs about 36798 MB`, which `LocalMemoryUnavailable` shares),
+/// or it does not hold the model's first layers
+/// (`dispatch::remote_generate::DELEGATED_SPLIT_NOT_LED`). Anything else is
+/// about this request, this node or the link, and passing the head over for it
+/// would cost every request of the model up to an hour of a driven plan: a
+/// carried route it refused (`DELEGATED_SPLIT_ROUTE_REFUSED`, per request), a
+/// prompt over a chain member's context, a validation error, a send that
+/// failed here, a first token late behind a cold load (`PeerUnresponsive`,
+/// which `peer_outliers` and the blacklist already answer). Missing a decline
+/// costs one request a second's wait, as before #372. Read only by
+/// `SharedState::note_head_declined_to_lead`, which requires the error.
+pub fn is_a_decline_to_lead(why: &SwarmError) -> bool {
+    match why {
+        SwarmError::ServiceUnavailable(_) | SwarmError::LocalMemoryUnavailable(_) => true,
+        SwarmError::Inference(said) => {
+            said.starts_with(crate::daemon::dispatch::remote_generate::DELEGATED_SPLIT_NOT_LED)
+        }
+        _ => false,
+    }
 }
 
 /// How long a head is passed over after its `n`th decline in a row (1-based).
@@ -102,6 +128,51 @@ mod tests {
 
     fn head() -> NodeId {
         NodeId([0xaa; 32])
+    }
+
+    /// A head's error as `try_delegated_split` holds it: sent as text, its
+    /// class recovered on arrival as the reply stream does.
+    fn as_it_arrives(sent: String) -> SwarmError {
+        crate::error::reclassify_flattened_error(&sent).unwrap_or(SwarmError::Inference(sent))
+    }
+
+    /// Only the head's own refusals pass it over (pre-release review of
+    /// v0.3.262): before, any error ahead of the first token did, so one
+    /// request with a route the head refused, or a prompt over a chain
+    /// member's context, drove every request of the model from here for up to
+    /// an hour.
+    #[test]
+    fn only_a_refusal_about_the_head_passes_it_over() {
+        use crate::daemon::dispatch::remote_generate::{
+            DELEGATED_SPLIT_NOT_LED, DELEGATED_SPLIT_ROUTE_REFUSED,
+        };
+        // The field case: its memory check refused the load.
+        let memory = SwarmError::LocalMemoryUnavailable(
+            "llama-3.3-70b-instruct-q4-k-m needs about 36798 MB of memory".into(),
+        );
+        assert!(is_a_decline_to_lead(&as_it_arrives(memory.to_string())));
+        assert!(is_a_decline_to_lead(&as_it_arrives(
+            SwarmError::ServiceUnavailable("the model's worker could not start".into()).to_string()
+        )));
+        assert!(is_a_decline_to_lead(&as_it_arrives(
+            DELEGATED_SPLIT_NOT_LED.into()
+        )));
+
+        for about_something_else in [
+            as_it_arrives(format!(
+                "{DELEGATED_SPLIT_ROUTE_REFUSED}: the route names a node this one cannot reach"
+            )),
+            as_it_arrives(SwarmError::Validation("the prompt is too long".into()).to_string()),
+            as_it_arrives(
+                SwarmError::PeerUnresponsive("no first token within 120 s".into()).to_string(),
+            ),
+            SwarmError::Network("No peer_id_bytes for node aaaaaaaa".into()),
+        ] {
+            assert!(
+                !is_a_decline_to_lead(&about_something_else),
+                "not about the head: {about_something_else}"
+            );
+        }
     }
     fn model() -> ModelId {
         ModelId("llama-3.3-70b-instruct-q4-k-m".into())

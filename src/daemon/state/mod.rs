@@ -3685,16 +3685,22 @@ impl SharedState {
                     .declining(head, model, std::time::Instant::now()))
     }
 
-    /// `head` declined to lead `model`'s split before a token of it arrived.
-    /// Returns how long [`Self::peer_may_lead`] now answers no for it.
+    /// `head` answered `why` to leading `model`'s split, before a token of it
+    /// arrived. Where that is a decline about the head
+    /// (`declined_leads::is_a_decline_to_lead`), returns how long
+    /// [`Self::peer_may_lead`] now answers no for it; an error about the
+    /// request, this node or the link passes nobody over (`None`).
     pub fn note_head_declined_to_lead(
         &self,
         head: &crate::types::NodeId,
         model: &crate::types::ModelId,
-    ) -> std::time::Duration {
-        self.metrics
-            .declined_leads
-            .note_declined(head, model, std::time::Instant::now())
+        why: &crate::error::SwarmError,
+    ) -> Option<std::time::Duration> {
+        declined_leads::is_a_decline_to_lead(why).then(|| {
+            self.metrics
+                .declined_leads
+                .note_declined(head, model, std::time::Instant::now())
+        })
     }
 
     /// `head` led `model`'s split: forget its declines.

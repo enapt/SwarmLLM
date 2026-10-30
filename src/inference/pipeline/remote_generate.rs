@@ -774,21 +774,38 @@ impl PipelineExecutor {
                 // every request priced the chain as led, waited for the same
                 // decline, and drove a plan chosen only for being led
                 // (2026-10-29, the 70B at 0.95-1.42 tok/s). A reader who left
-                // is not the head's decline.
-                let passed_over_secs = (!self.request.is_cancelled()).then(|| {
-                    self.shared_state
-                        .note_head_declined_to_lead(&head, &self.request.model_id)
-                        .as_secs()
-                });
-                tracing::warn!(
-                    request_id = %self.request.id,
-                    delegate = %head,
-                    error = %e,
-                    passed_over_secs,
-                    "delegated split: the delegate did not serve it — coordinating the \
-                     same plan from here instead; not asked to lead this model again, nor \
-                     priced as leading it, until the wait ends"
-                );
+                // is not the head's decline, nor is an error about this
+                // request, this node or the link (`is_a_decline_to_lead`).
+                let passed_over_secs = (!self.request.is_cancelled())
+                    .then(|| {
+                        self.shared_state.note_head_declined_to_lead(
+                            &head,
+                            &self.request.model_id,
+                            &e,
+                        )
+                    })
+                    .flatten()
+                    .map(|wait| wait.as_secs());
+                if passed_over_secs.is_some() {
+                    tracing::warn!(
+                        request_id = %self.request.id,
+                        delegate = %head,
+                        error = %e,
+                        passed_over_secs,
+                        "delegated split: the delegate declined to lead it — coordinating the \
+                         same plan from here instead; not asked to lead this model again, nor \
+                         priced as leading it, until the wait ends"
+                    );
+                } else {
+                    tracing::warn!(
+                        request_id = %self.request.id,
+                        delegate = %head,
+                        error = %e,
+                        "delegated split: the delegate did not serve it — coordinating the \
+                         same plan from here instead; its error is not a decline to lead, so \
+                         it is still asked to lead this model"
+                    );
+                }
                 Ok(None)
             }
             other => other,

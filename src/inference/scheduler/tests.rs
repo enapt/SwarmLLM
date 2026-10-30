@@ -633,7 +633,13 @@ fn a_head_that_declined_to_lead_is_not_priced_as_leading_the_model() {
         leads(),
         "fixture: a head advertising DELEGATED_SPLIT may lead"
     );
-    state.note_head_declined_to_lead(&head, &model);
+    state.note_head_declined_to_lead(
+        &head,
+        &model,
+        &crate::error::SwarmError::ServiceUnavailable(
+            "llama-3.3-70b-instruct-q4-k-m needs about 36798 MB of memory".into(),
+        ),
+    );
     assert!(
         !leads(),
         "a head that just declined is priced as the chain it will be: driven from here"
