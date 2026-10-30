@@ -436,11 +436,11 @@ fn full_chunks() -> bool {
 /// other guesses as ids (the drafter's alone — the stream copies no text) and
 /// draws the reply's tokens itself.
 fn lookahead_to_send(
+    shape: &StreamShape,
     lookahead: Option<u32>,
-    lone_far_walks: bool,
     far_reads_it: bool,
 ) -> Option<u32> {
-    lookahead.filter(|_| lone_far_walks && far_reads_it)
+    lookahead.filter(|_| shape.far_walks() && shape.chain.is_empty() && far_reads_it)
 }
 
 /// ON unless `SWARMLLM_STREAM_LOOKAHEAD=0`, the A/B arm that names no
@@ -1146,8 +1146,8 @@ impl StreamRun<'_, '_> {
             Some(seq),
         );
         forward.stream_lookahead = lookahead_to_send(
+            &self.shape,
             lookahead,
-            self.shape.far_walks() && self.shape.chain.is_empty(),
             names_the_lookahead()
                 && self.state.peer_advertises_feature(
                     &far.node_id,
@@ -1552,21 +1552,36 @@ mod tests {
     /// AAD carries a trailer it does not know).
     #[test]
     fn the_lookahead_goes_only_to_a_lone_far_end_that_walks_and_reads_it() {
-        assert_eq!(lookahead_to_send(Some(7), true, true), Some(7));
+        let every = |_: &NodeId, _: bool| true;
+        let shape_over = |nodes: &[NodeId]| {
+            let segments = plan(nodes);
+            shape_of(&segments, &ME, every, every_hop_chains(&segments)).unwrap()
+        };
+        let lone = shape_over(&[ME, PEER]);
+        assert_eq!(lookahead_to_send(&lone, Some(7), true), Some(7));
         assert_eq!(
-            lookahead_to_send(Some(7), true, false),
+            lookahead_to_send(&lone, Some(7), false),
             None,
             "older far end"
         );
         assert_eq!(
-            lookahead_to_send(Some(7), false, true),
-            None,
-            "chained or not walked there"
-        );
-        assert_eq!(
-            lookahead_to_send(None, true, true),
+            lookahead_to_send(&lone, None, true),
             None,
             "no look-ahead drafted"
+        );
+        let chained = shape_over(&[ME, PEER, OTHER]);
+        assert!(chained.far_walks() && !chained.chain.is_empty());
+        assert_eq!(
+            lookahead_to_send(&chained, Some(7), true),
+            None,
+            "the chain's tail is a hop away"
+        );
+        let boomerang = shape_over(&[ME, PEER, ME]);
+        assert!(!boomerang.far_walks());
+        assert_eq!(
+            lookahead_to_send(&boomerang, Some(7), true),
+            None,
+            "the walk is ours"
         );
     }
 

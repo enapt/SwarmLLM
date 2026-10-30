@@ -289,16 +289,8 @@ pub(super) async fn handle_layer_forward(
     // failure, and the TP branch's encoding failures).
     let _serving_guard = crate::daemon::state::ServingGuard::new(&shared_state, model_id.clone());
 
-    // A streamed check this node walks: how many guesses it was sent, and the
-    // look-ahead past them, so its answer can say whether it refused one
-    // (`forward_streams`: the turns after a refusal stood on it). A tree is
-    // never walked as a chain.
-    let walked_guesses = (turn.is_some()
-        && is_last
-        && forward.spec_walk_at_tail
-        && forward.draft_parents.is_empty()
-        && forward.draft_tree_from.is_none())
-    .then_some((forward.draft_tokens.len(), forward.stream_lookahead));
+    // Read before the forward is handed to the worker.
+    let walked_guesses = walk_to_judge(&forward, turn.is_some(), is_last);
 
     // Route forward pass to subprocess via process pool
     let result = shared_state.model_process_pool.forward(forward).await;
@@ -905,6 +897,24 @@ fn draft_tree_from_onward(
     forward
         .draft_tree_from
         .filter(|_| !chain.is_empty() && !forward.draft_parents.is_empty())
+}
+
+/// A streamed check this node walks (`streamed`: it holds a turn of the
+/// stream): how many guesses it was sent, and the look-ahead past them (#382),
+/// so its answer can say whether it refused one ([`walk_refused_a_guess`];
+/// `forward_streams`: the turns after a refusal stood on it). `None` where the
+/// walk is not this node's, or the check is a tree, never walked as a chain.
+fn walk_to_judge(
+    forward: &crate::types::LayerForward,
+    streamed: bool,
+    is_last: bool,
+) -> Option<(usize, Option<u32>)> {
+    (streamed
+        && is_last
+        && forward.spec_walk_at_tail
+        && forward.draft_parents.is_empty()
+        && forward.draft_tree_from.is_none())
+    .then_some((forward.draft_tokens.len(), forward.stream_lookahead))
 }
 
 /// Did this node's walk of `guesses` drafts refuse one? A walked answer is
@@ -1817,6 +1827,57 @@ mod tests {
             walk_refused_a_guess(0, Some(4), &walked(&[6])),
             "a lone look-ahead refused"
         );
+    }
+
+    /// #382 end to end at the far end: the look-ahead a forward CARRIES is the
+    /// one its walk is judged by — a capture that dropped it would read the
+    /// same answer as a whole walk (gotcha #516: plant the non-default).
+    #[test]
+    fn the_lookahead_a_streamed_check_carries_is_what_its_walk_is_judged_by() {
+        let mut forward = crate::types::LayerForward {
+            request_id: uuid::Uuid::nil(),
+            sequence_num: 0,
+            index_pos: 17,
+            activations: Vec::new(),
+            format: crate::types::TensorFormat::FP32,
+            model_id: crate::types::ModelId("m".into()),
+            layer_range: (16, 80),
+            vision_embeddings: None,
+            chain: Vec::new(),
+            sender_peer_bytes: None,
+            tp_meta: None,
+            requester_node_id: None,
+            pre_embedded: false,
+            generated_ids: Vec::new(),
+            adapter_id: None,
+            draft_tokens: vec![7, 8],
+            spec_logits_requested: true,
+            spec_walk_at_tail: true,
+            coupling_seed: None,
+            stream_seq: Some(3),
+            truncate_kv_to: None,
+            prompt_cache: None,
+            chunk_meta: None,
+            sampling: None,
+            prompt_span: None,
+            image_spans: Vec::new(),
+            draft_parents: Vec::new(),
+            draft_tree_from: None,
+            stream_lookahead: Some(4),
+        };
+        let mut answer = crate::types::LayerResult::error(uuid::Uuid::nil(), String::new());
+        answer.finish_reason = None;
+        answer.token_ids = vec![7, 8, 9];
+        let (guesses, lookahead) = walk_to_judge(&forward, true, true).expect("walked here");
+        assert_eq!((guesses, lookahead), (2, Some(4)));
+        assert!(
+            walk_refused_a_guess(guesses, lookahead, &answer),
+            "drew 9 where the next chunk stood on 4"
+        );
+        assert_eq!(walk_to_judge(&forward, false, true), None, "no stream");
+        assert_eq!(walk_to_judge(&forward, true, false), None, "not the tail");
+        forward.draft_parents = vec![0, 1, 2];
+        assert_eq!(walk_to_judge(&forward, true, true), None, "a tree");
     }
 }
 
