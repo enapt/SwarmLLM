@@ -350,29 +350,36 @@
       return;
     }
 
+    // Both buttons end in the same apply, and every way it can end is SAID —
+    // a write whose answer is never read reports a refusal as nothing at all
+    // (the Download button's copy went quiet on a refused apply, 2026-10-30).
+    function sayAndReset(btn, key, resetKey) {
+      btn.textContent = I18n.t(key);
+      setTimeout(function() { btn.textContent = I18n.t(resetKey); btn.disabled = false; }, 3000);
+    }
+    async function applyDownloaded(btn) {
+      btn.textContent = I18n.t('update.applying');
+      var resp = await App.authFetch('/api/admin/update/apply', { method: 'POST' });
+      if (!resp.ok) return false;
+      // The node now drains in-flight work and restarts itself, so the page
+      // is about to lose its connection. Say that rather than "restart it
+      // yourself", which is what the old copy said while the button claimed
+      // it would restart.
+      banner.querySelector('span').textContent = I18n.t('update.restarting', { version: data.latest_version });
+      btn.style.display = 'none';
+      return true;
+    }
+
     if (data.downloaded) {
       var applyBtn = document.createElement('button');
       applyBtn.textContent = I18n.t('update.apply_restart');
       applyBtn.className = 'update-banner-btn';
       applyBtn.onclick = async function() {
         applyBtn.disabled = true;
-        applyBtn.textContent = I18n.t('update.applying');
         try {
-          var resp = await App.authFetch('/api/admin/update/apply', { method: 'POST' });
-          if (resp.ok) {
-            // The node now drains in-flight work and restarts itself, so the
-            // page is about to lose its connection. Say that rather than
-            // "restart it yourself", which is what the old copy said while the
-            // button claimed it would restart.
-            banner.querySelector('span').textContent = I18n.t('update.restarting', { version: data.latest_version });
-            applyBtn.style.display = 'none';
-          } else {
-            applyBtn.textContent = I18n.t('update.failed');
-            setTimeout(function() { applyBtn.textContent = I18n.t('actions.retry'); applyBtn.disabled = false; }, 3000);
-          }
+          if (!(await applyDownloaded(applyBtn))) sayAndReset(applyBtn, 'update.failed', 'actions.retry');
         } catch (e) {
-          applyBtn.textContent = I18n.t('update.error');
-          setTimeout(function() { applyBtn.textContent = I18n.t('actions.retry'); applyBtn.disabled = false; }, 3000);
+          sayAndReset(applyBtn, 'update.error', 'actions.retry');
         }
       };
       banner.appendChild(applyBtn);
@@ -384,22 +391,20 @@
         dlBtn.disabled = true;
         dlBtn.textContent = I18n.t('update.checking');
         try {
-          var resp = await App.authFetch('/api/admin/update/check', { method: 'POST' });
-          if (resp.ok) {
-            var result = await resp.json();
-            if (result.status === 'update_available' && result.info && result.info.downloaded) {
-              dlBtn.textContent = I18n.t('update.applying');
-              var applyResp = await App.authFetch('/api/admin/update/apply', { method: 'POST' });
-              if (applyResp.ok) {
-                banner.querySelector('span').textContent = I18n.t('update.restarting', { version: data.latest_version });
-                dlBtn.style.display = 'none';
-              }
-            }
+          // `download=1`: this press IS the ask a `notify` node waits for —
+          // without it the check stages nothing there, ever.
+          var resp = await App.authFetch('/api/admin/update/check?download=1', { method: 'POST' });
+          var result = resp.ok ? await resp.json() : null;
+          if (result && result.status === 'up_to_date') {
+            banner.remove();
+            return;
           }
+          var ready = result && result.status === 'update_available' && result.info && result.info.downloaded;
+          if (ready && (await applyDownloaded(dlBtn))) return;
+          sayAndReset(dlBtn, 'update.failed', 'update.download_apply');
         } catch (e) {
-          dlBtn.textContent = I18n.t('update.error');
+          sayAndReset(dlBtn, 'update.error', 'update.download_apply');
         }
-        setTimeout(function() { dlBtn.textContent = I18n.t('update.download_apply'); dlBtn.disabled = false; }, 3000);
       };
       banner.appendChild(dlBtn);
     }

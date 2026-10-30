@@ -354,7 +354,7 @@ impl DiagnosticsQuery {
 ///
 /// A bare `?full` with no value arrives as `Some("")` and counts as on,
 /// matching how every other CLI and web form treats a valueless flag.
-fn query_flag_is_on(value: Option<&str>) -> bool {
+pub(crate) fn query_flag_is_on(value: Option<&str>) -> bool {
     match value {
         None => false,
         Some(v) => matches!(

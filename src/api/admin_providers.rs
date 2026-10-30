@@ -815,8 +815,9 @@ async fn probe_provider_health(state: &AppState) -> Vec<serde_json::Value> {
 /// POST /api/admin/provider-model-status — Probe availability of specific cloud models.
 ///
 /// Accepts `{ "models": ["model-id-1", "model-id-2", ...] }`.
-/// Sends a tiny max_tokens=1 request to each model with a 5s timeout.
-/// Returns per-model status (up/timeout/error) and latency.
+/// Asks each model's provider `GET /models/{id}` with a 5 s timeout — no
+/// tokens generated. Returns per-model status (up / rate_limited / not_found /
+/// auth_error / unavailable / timeout / error) and latency.
 /// Capped at 20 models per request to prevent abuse.
 #[derive(Deserialize)]
 pub struct ModelStatusRequest {
@@ -1001,12 +1002,23 @@ pub async fn version_info(State(state): State<AppState>) -> Json<serde_json::Val
     }))
 }
 
+/// Query for [`check_update`]. A string, not a `bool`, for the reason
+/// `DiagnosticsQuery::full` gives: `?download=1` must not be a bare-text 400.
+#[derive(serde::Deserialize)]
+pub struct CheckUpdateQuery {
+    /// The person asked for the update to be downloaded (the dashboard's
+    /// Download & Apply), so a `notify` node downloads it too.
+    #[serde(default)]
+    download: Option<String>,
+}
+
 /// POST /api/admin/update/check — Trigger an immediate update check.
 /// Loopback-only — auto-downloads the binary as a side effect, so a remote
 /// API-key holder shouldn't be able to drive disk writes / binary swaps.
 pub async fn check_update(
     origin: crate::api::origin::RequestOrigin,
     State(state): State<AppState>,
+    axum::extract::Query(query): axum::extract::Query<CheckUpdateQuery>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     if !origin.is_this_machine() {
         return Err(ApiError(crate::error::SwarmError::LocalOnly(
@@ -1038,9 +1050,15 @@ pub async fn check_update(
             // at the check, where `include_prereleases` already applies it. Doing
             // it again at the download decision applied a second, different rule
             // to the same question.
+            let asked = if crate::api::admin::query_flag_is_on(query.download.as_deref()) {
+                crate::update::DownloadAsked::ByThePerson
+            } else {
+                crate::update::DownloadAsked::No
+            };
             let should_download = crate::update::should_stage_download(
                 state.shared_state.cfg().updates.effective_mode(),
                 &info,
+                asked,
             );
             if should_download {
                 if let Ok(tmp_path) = checker.download_update(&info).await {

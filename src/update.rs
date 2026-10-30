@@ -359,8 +359,33 @@ fn select_target_release(
 /// A managed install (deb/rpm, hardened anchor) can never replace its own
 /// binary, so it does not download at all — otherwise it re-fetches the release
 /// on every check, forever.
-pub(crate) fn should_stage_download(mode: crate::config::UpdateMode, info: &UpdateInfo) -> bool {
-    mode >= crate::config::UpdateMode::Download && info.self_update_supported
+///
+/// **Who asked is a REQUIRED argument** (2026-10-30). `Notify` promises that
+/// nothing is downloaded until the person asks, and the dashboard's "Download
+/// & Apply" IS the ask — but this rule could not tell an ask from a check, so
+/// on a `notify` node that button checked, staged nothing and went quiet, every
+/// time. `Off` stays off whoever asks.
+pub(crate) fn should_stage_download(
+    mode: crate::config::UpdateMode,
+    info: &UpdateInfo,
+    asked: DownloadAsked,
+) -> bool {
+    use crate::config::UpdateMode;
+    let wanted = match asked {
+        DownloadAsked::No => mode >= UpdateMode::Download,
+        DownloadAsked::ByThePerson => mode >= UpdateMode::Notify,
+    };
+    wanted && info.self_update_supported
+}
+
+/// Whether the person asked for an update to be downloaded, or this is only a
+/// check — see [`should_stage_download`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DownloadAsked {
+    /// A check: the background loop, or `POST /api/admin/update/check`.
+    No,
+    /// The person pressed Download: `POST /api/admin/update/check?download=1`.
+    ByThePerson,
 }
 
 /// Peers advertising a newer version than ours, and whether enough of them
@@ -1467,7 +1492,7 @@ impl UpdateChecker {
                     // apply what it downloads, so it does not download at all —
                     // otherwise it re-fetches the release every check forever.
                     let mut info = info;
-                    let should_download = should_stage_download(mode, &info);
+                    let should_download = should_stage_download(mode, &info, DownloadAsked::No);
                     if mode >= UpdateMode::Download && !info.self_update_supported {
                         // One wording for this, shared with `swarmllm update`
                         // and the dashboard: it names the folder and what to
@@ -2540,6 +2565,37 @@ mod tests {
             "the sidecar must survive a round-trip byte for byte — the \
              signature is over these bytes"
         );
+    }
+
+    /// `Notify` downloads nothing on a check, and does when the person asks —
+    /// the dashboard's Download & Apply did nothing on a `notify` node, because
+    /// the one rule could not tell the two apart (2026-10-30).
+    #[test]
+    fn a_notify_node_downloads_when_the_person_asks_and_not_on_a_check() {
+        use crate::config::UpdateMode::{Download, Install, Notify, Off};
+        let info = |self_update_supported| UpdateInfo {
+            latest_version: "1.0.0".into(),
+            current_version: "0.1.0".into(),
+            download_url: "https://example.com/bin".into(),
+            changelog: String::new(),
+            published_at: "2026-01-01T00:00:00Z".into(),
+            checksum_sha256: None,
+            sidecar_body: None,
+            signature_minisig: None,
+            asset_name: None,
+            downloaded: false,
+            self_update_supported,
+            self_update_blocked: None,
+            install_dir: None,
+        };
+        let (check, ask) = (DownloadAsked::No, DownloadAsked::ByThePerson);
+        assert!(!should_stage_download(Notify, &info(true), check));
+        assert!(should_stage_download(Notify, &info(true), ask));
+        assert!(should_stage_download(Download, &info(true), check));
+        assert!(should_stage_download(Install, &info(true), ask));
+        // Off stays off, and a node that cannot replace itself never fetches.
+        assert!(!should_stage_download(Off, &info(true), ask));
+        assert!(!should_stage_download(Install, &info(false), ask));
     }
 
     #[test]

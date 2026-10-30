@@ -157,7 +157,7 @@ Response:
 ```
 
 ### GET /api/admin/models/{id}/metadata
-Read parsed GGUF metadata from a locally-stored model header (`gguf_header.bin`). Returns architecture parameters, tokenizer settings, quantization type, and all raw metadata key/value pairs (tokenizer vocabulary arrays are excluded). Returns 400 if no header file exists for the model.
+Read parsed GGUF metadata from a locally-stored model header (`gguf_header.bin`). Returns architecture parameters, tokenizer settings, quantization type, and all raw metadata key/value pairs (tokenizer vocabulary arrays are excluded). Returns 404 if this node has no header for the model, and 503 if the header it stored cannot be read.
 
 Response shape:
 ```json
@@ -333,7 +333,7 @@ Response:
 Status values: `up`, `rate_limited`, `overloaded`, `timeout`, `unreachable`, `error_<code>`.
 
 ### POST /api/admin/provider-model-status
-Probe availability and latency for a list of specific cloud model IDs (up to 20 per request). Sends a `max_tokens=1` request to each model's provider endpoint. Anthropic models are skipped (no cloud proxy probing). Needs the API key, like every admin endpoint.
+Probe availability and latency for a list of specific cloud model IDs (up to 20 per request). Checks each model with a light `GET {provider}/models/{id}` — no tokens are generated and no inference quota is used — with a 5 s timeout. Anthropic models are skipped (no cloud proxy probing). Needs the API key, like every admin endpoint.
 
 Request body: `{ "models": ["gpt-5.4", "claude-sonnet-5", "deepseek-v4-flash"] }`
 
@@ -342,7 +342,7 @@ Response:
 { "models": [ { "model": "gpt-4o", "status": "up", "latency_ms": 210 } ] }
 ```
 
-Status values: `up`, `rate_limited`, `not_found`, `unavailable`, `timeout`, `error`.
+Status values: `up`, `rate_limited`, `not_found`, `auth_error`, `unavailable`, `timeout`, `error`. `error` also answers a model id with characters outside the allowed set, or a provider address the node refuses to call, with an `error` message.
 
 ## Claude Subscription (feature-gated)
 
@@ -379,10 +379,10 @@ When enabled, `claude-*` model requests are routed through the local CLI subproc
 Current binary version info.
 
 ### POST /api/admin/update/check
-Check for available updates. Returns version info and changelog if update available.
+Check for available updates. Returns version info and changelog if update available, and downloads it where your `[updates] mode` allows (`download`, `install`). Add `?download=1` when the person asked for the download — the dashboard's Download & Apply does — and a `notify` node downloads it too; `off` never does, and a node that cannot replace its own program never downloads. This computer only.
 
 ### POST /api/admin/update/apply
-Download and apply an update. Bearer auth required.
+Install the downloaded update; the node restarts once it has finished what it is doing. 400 if no update is downloaded yet (call `update/check` first). This computer only.
 
 ## Discovery
 
