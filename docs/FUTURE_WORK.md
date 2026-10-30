@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #380**). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #381**). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -2952,7 +2952,12 @@ the guest's room (`first_range_priced_beside_guest`; a grown range is charged at
 holds for the same reason. Test `room_beside_a_drafter_prices_the_first_range_as_its_spawn_does`
 (a 48-layer target, a 1.7B guest: the room's last layer admits the guest, one more refuses it) —
 red with `SWARMLLM_DRAFTER_ROOM_FIRST=average`. **Left:** the card check — arm 6's shape, the
-drafter on the card and `room_for` one lower.
+drafter on the card and `room_for` one lower. Tried 2026-10-30 15:00Z (`real_link.sh`, TAG `room376`,
+main's card build, four arms alternating with and without the old pricing): with this boot's free
+card memory both pricings gave `room_for=Some(27)` against the plan's 25 and the drafter loaded on
+the card in every arm (prose 5.85-7.41 / code 14.9-19.9 tok/s), so the margin never came up. The
+check needs the margin made: a `[resources] max_gpu_vram_mb` sweep in ~50 MB steps around arm 6's
+6,333 MB budget, both pricings at each.
 
 Rig `bigsend` arm 6 (2026-10-30, `~/swarmllm-gate/deep/fr/real_link_bigsend/H_6_dsdflow.log`):
 Qwen2.5-14B split [0,12) + [35,48) here, [12,35) on the AU peer. The planner left room for the
@@ -2997,6 +3002,24 @@ figures where the card refused, "a reply is still using this model here; try aga
 the conversation window — with a test on the advice, not the wording (`arch-errors.md`). Rig
 note, kept in the rig: a run whose arms ask one peer for DIFFERENT ranges meets this within the
 conversation window; give every arm of one run the same range there.
+
+#### #380 — A split's first token waits a round trip for its peers' memory answer before this node reads its own layers
+`P3` · perf-split / first token · **OPEN** — 2026-10-30 · history: #252 (b), #263
+
+The 70B over the TH↔AU link, warm (`swap378.sh` ask 2, 14:16:43Z, main's build): the plan was
+ready at 43.778; `admit_segments_up_front` asked AU whether the 43-token prompt fits and waited
+for the answer (402 ms, one round trip) before anything ran; this node's [0,16) then read the
+prompt (~0.94 s, to 45.305) and AU's [16,80) answered at 49.108 — 5.4 s to a first token, of
+which the wait is ~0.4 s (7%). On a 14B flow over the same link (~1.2-1.8 s first token) it is a
+quarter. The ask answers before this node's own pass would end, so the two could overlap: the
+peer ask spawned, this node's first segment run meanwhile, and the verdict awaited before the
+first SEND to a peer segment, a refusal re-planning as now (`note_peer_prompt_refusal`; the
+local pass's cache released as a refusal at the peer's forward already is). What it takes: every
+path that sends a prompt to a peer awaits the one verdict first (the rounds, the stream, the
+flow, the boomerang — "one invariant, N paths"), so the wait belongs at the choke point of the
+first peer send, not in each loop; vLLM's `can_allocate` precedent (the module doc) still holds,
+since the question allocates nothing. A test: a refusal after the local pass re-plans with the
+peer held to what fit and the reply is the same; the first token earlier by the ask's round trip.
 
 #### #347 — A first segment on a card keeps its token table there, where llama.cpp keeps it on the processor
 `P3` · memory · **OPEN** — 2026-10-25 · history: #343's residual

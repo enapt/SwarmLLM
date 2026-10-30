@@ -1013,6 +1013,41 @@ forwards on this node, not their rows, and not the link.
     already makes (`tree_rank`), so a 3-level call is one launch and one read back. Not small:
     every kernel a level runs takes its cache length from memory. Parked behind the release.
 
+## 11. The 70B through this PC and AU, evening of 2026-10-30
+
+The 70B (Llama-3.3 Q4_K_M) runs here as this node's [0,16) (10 layers on the card, 6 on the
+processor, the 3B drafter on the processor) and AU's [16,80) (23 on its RTX 3060, 41 on its
+i7-12700's processor), the chain stream between them, ~1.15-1.32 s from a chunk's send to its
+answer. What was measured or ruled out:
+
+1. **AU's checks ran at its narrow decode width — fixed** (#379, `cpu_pools::swarm_check_threads`).
+   A check of 2-32 positions that a far end runs for someone else's split ran on the pool
+   calibrated for ONE position (narrower than the cores its owner offered). On this machine,
+   7B processor-only, 8 cores offered and decode pinned to 4: 4 positions a forward 191 → 128 ms,
+   8 positions 353 → 218 ms; one position unchanged. AU's 41 processor layers are most of its
+   check, so its answer gets shorter once it runs this release.
+2. **The drafter: the 3B stays.** The 1B (Q8_0) against the 3B (Q4_K_M), both on the processor,
+   one binary, arms d3 · d1 · d1 · d3 with three prose prompts at 96 tokens each
+   (`~/swarmllm-70b/ab70drafter.sh`, rig data dir with exactly one drafter; AU pinned to
+   [16,80)): 3B 1.79 2.08 1.93 · 1.78 2.01 1.97 tok/s, 1B 1.64 1.87 1.74 · 1.65 1.83 1.71. The
+   1B guesses 1.6x faster (33-34 against 54-70 ms) but its acceptance falls 0.74-0.77 → 0.69-0.71
+   and the stream restarts 25-30 times a reply against 19-24. Every restart waits a whole check
+   at AU, so a cheaper, worse guess costs more than it saves.
+3. **The processor's few-row kernels are not the lever.** They already beat llama.cpp at 2
+   positions (gotcha #850), repacking bought nothing on this CPU (#843), and the vendored
+   `k_quants` matmul is column-outer with 8-row Q4_K kernels.
+4. **Copying processor-held weights to the card for a check pays only past ~31 rows here**
+   (5 ms/GB a row at 8 threads against 154 ms/GB for the copy) — llama.cpp's 32. A chain's
+   3-row chunk is far below it; nothing to change.
+5. **A first token waits one round trip for the peers' memory answer** (~0.4 of 5.4 s warm) →
+   FUTURE_WORK #380.
+6. **The card's room is the next lever**: this node keeps the 70B's 564 MiB token table on its
+   card, where llama.cpp keeps it on the processor — about one more of the 70B's 519 MiB layers,
+   or part of a card drafter → FUTURE_WORK #347.
+7. **A peer that cannot hold the whole model now stays in the plan** for the part it can (#378,
+   verified live 14:21Z with the whole model forced onto AU: refused at 41,840 MB short,
+   re-planned with AU held to fewer layers).
+
 ## Sources
 
 Petals 2312.08361 · Pope et al. 2211.05102 · StagFormer 2501.15665 · Layer
