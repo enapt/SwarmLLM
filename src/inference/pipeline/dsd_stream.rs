@@ -458,8 +458,9 @@ fn names_the_lookahead() -> bool {
 /// ~150 spares a 160-token reply, 11 run, each costing this node ~120 ms the
 /// answers waited behind — so they stay off until a split where they pay is
 /// measured (the 70B, whose far end must first run a release that reads
-/// them). A far end runs a spare only where it advertises
-/// `features::STREAM_SPARES`, so an older one is never sent one.
+/// them). Each spare is priced by [`spare_pays`] since 2026-10-31 (the rig's
+/// figures above were under a fixed floor). A far end runs a spare only where
+/// it advertises `features::STREAM_SPARES`, so an older one is never sent one.
 fn spares_switched_on() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
     *ON.get_or_init(|| std::env::var("SWARMLLM_STREAM_SPARES").as_deref() == Ok("1"))
@@ -473,22 +474,124 @@ fn spare_guesses() -> u32 {
     *N.get_or_init(|| knob("SWARMLLM_STREAM_SPARE_GUESSES", guesses_per_chunk(), 8))
 }
 
-/// The least chance, by the drafter's own reckoning, that a spare is the
-/// restart its chunk's answer calls for — below it no spare is drafted, its
-/// guesses and this node's rows for it being spent on a restart that would
-/// most likely be skipped. `SWARMLLM_STREAM_SPARE_MIN` (0-1), default 0.4:
-/// on the rig (0.5B drafter for the 7B coder, 605 spares) a spare scored
-/// 0.08-0.40 ran 3-11% of the time whatever its score, one scored 0.40-0.50
-/// 8 times in 10.
-fn spare_floor() -> f32 {
-    static F: OnceLock<f32> = OnceLock::new();
+/// A fixed least chance, by the drafter's own reckoning, that a spare is the
+/// restart its chunk's answer calls for — the A/B of [`spare_pays`], which
+/// decides otherwise. `SWARMLLM_STREAM_SPARE_MIN` (0-1). The first build's
+/// rule was a fixed 0.4, tuned on a pair that guessed badly (the rig's 0.5B
+/// drafter for the 7B coder: a spare scored 0.08-0.40 ran 3-11% of the time
+/// whatever its score); for the 70B's 3B drafter the score IS the chance
+/// (0.2-0.3 ran 27%, 0.3-0.4 44%, 2026-10-31), and 0.4 sent three spares a
+/// reply.
+fn fixed_spare_floor() -> Option<f32> {
+    static F: OnceLock<Option<f32>> = OnceLock::new();
     *F.get_or_init(|| {
         std::env::var("SWARMLLM_STREAM_SPARE_MIN")
             .ok()
             .and_then(|v| v.trim().parse::<f32>().ok())
             .filter(|f| f.is_finite())
-            .map_or(0.4, |f| f.clamp(0.0, 1.0))
+            .map(|f| f.clamp(0.0, 1.0))
     })
+}
+
+/// What [`spare_pays`] prices a spare restart from (#381). Every time is in
+/// milliseconds from the moment it is decided — the chunk just sent, the
+/// spare not yet drafted — and may be negative for an answer already in.
+#[derive(Debug, Clone)]
+struct SpareTerms<'a> {
+    /// [`spare_at`]'s chance of exactly the refusal the spare bets on.
+    score: f64,
+    /// The chunks out before this one on the reply's line, oldest first:
+    /// when each one's answer is due here, and the chance it refuses a guess.
+    earlier: &'a [(f64, f64)],
+    /// The chance this chunk refuses a guess.
+    this_refused: f64,
+    /// When the far end finishes this chunk's check.
+    this_done: f64,
+    /// Chunks the window still lets go before an answer frees a place.
+    room: usize,
+    /// This node's time to build a chunk, and to build the spare.
+    build: f64,
+    spare: f64,
+    round_trip: f64,
+}
+
+/// Whether a spare restart pays (#381): the chance it runs — its own score,
+/// and its chunk not standing on an earlier chunk's refused guess — times
+/// the restart cycle it saves (the refusal's trip back, this node's build,
+/// the trip out, less however late the spare itself reaches the far end),
+/// against what building it delays. This node builds the spare before
+/// anything else: every chunk the window lets go next is that much later,
+/// and so is the taking of every answer that lands meanwhile. An answer
+/// that is a refusal restarts that much later (a chunk's answer is taken
+/// between builds, never inside one — [`StreamRun::run_with`]); where every
+/// chunk out is kept, the far end may wait for the next chunk.
+///
+/// The fixed floor it replaced (0.4, [`fixed_spare_floor`]) both sent spares
+/// that cost more than they saved and withheld ones that paid. Replayed over
+/// six of the 70B's own replies with its 3B drafter and this split's measured
+/// times (scratchpad `spare_sim.py`, 2026-10-31), this rule was the best of
+/// the rules tried in all ten cases simulated (3 or 5 guesses a chunk; as
+/// measured, a cheaper spare, a far end twice as slow, a shorter trip):
+/// 1.07-1.10x where the floor gave 0.98-1.06x, never slower than no spares.
+fn spare_pays(t: &SpareTerms) -> bool {
+    let clamp = |p: f64| {
+        if p.is_finite() {
+            p.clamp(0.0, 1.0)
+        } else {
+            0.0
+        }
+    };
+    // This node's next stretch of work, back to back from now: the chunks
+    // the window lets go — after the spare, with one.
+    let builds = |from: f64| -> Vec<(f64, f64)> {
+        (0..t.room)
+            .map(|i| {
+                let s = from + i as f64 * t.build;
+                (s, s + t.build)
+            })
+            .collect()
+    };
+    let without = builds(0.0);
+    let mut with = vec![(0.0, t.spare)];
+    with.extend(builds(t.spare));
+    // An answer is taken at the end of the work it lands in; one already in
+    // waits for nothing but a spare, which is built before the loop looks.
+    let taken = |due: f64, busy: &[(f64, f64)], spare_first: bool| -> f64 {
+        if due <= 0.0 {
+            return if spare_first { t.spare } else { 0.0 };
+        }
+        busy.iter()
+            .find(|(s, e)| *s <= due && due < *e)
+            .map_or(due, |&(_, e)| e)
+    };
+    let mut delay = 0.0;
+    let mut none_before = 1.0;
+    for &(due, refused) in t.earlier {
+        let refused = clamp(refused);
+        delay += none_before * refused * (taken(due, &with, true) - taken(due, &without, false));
+        none_before *= 1.0 - refused;
+    }
+    // Every chunk kept: the next one reaches the far end later. With no room
+    // in the window it waits for the oldest answer as well.
+    let next_from = |spare: f64| -> f64 {
+        if t.room > 0 {
+            spare
+        } else {
+            let oldest = t
+                .earlier
+                .first()
+                .map_or(t.this_done + t.round_trip / 2.0, |e| e.0);
+            spare.max(oldest)
+        }
+    };
+    let reaches = |from: f64| from + t.build + t.round_trip / 2.0;
+    let idle = |at: f64| (at - t.this_done).max(0.0);
+    let kept = none_before * (1.0 - clamp(t.this_refused));
+    delay += kept * (idle(reaches(next_from(t.spare))) - idle(reaches(next_from(0.0))));
+    let late = (t.spare + t.round_trip / 2.0 - t.this_done).max(0.0);
+    let saved = (t.round_trip + t.build - late).max(0.0);
+    let runs = clamp(t.score) * none_before;
+    runs > 0.0 && runs * saved > delay
 }
 
 /// Whether a chunk about to go, `main_out` main-line chunks already out and
@@ -544,6 +647,32 @@ fn spare_at(
         reached *= r.guess_p;
     }
     best
+}
+
+/// The chance a chunk of `guesses` refuses one, by the drafter's reckoning:
+/// one less the chance it keeps them all — the look-ahead included, whose
+/// miss restarts the stream too ([`StreamRun::take_answer`]). Where the
+/// runner-ups do not answer every guess, the reply's recent acceptance.
+fn chance_of_a_refusal(
+    guesses: &[u32],
+    runner_ups: &[crate::inference::worker_ipc::RunnerUp],
+    alpha: f64,
+) -> f64 {
+    let kept_all = if runner_ups.len() == guesses.len() {
+        runner_ups
+            .iter()
+            .map(|r| f64::from(r.guess_p).clamp(0.0, 1.0))
+            .product::<f64>()
+    } else {
+        alpha
+            .clamp(0.0, 1.0)
+            .powi(i32::try_from(guesses.len()).unwrap_or(i32::MAX))
+    };
+    if kept_all.is_finite() {
+        1.0 - kept_all
+    } else {
+        1.0
+    }
 }
 
 /// The wire tree (`LayerForward::draft_parents`) of a near forward carrying a
@@ -863,6 +992,8 @@ struct SpareOut {
     /// when taken, beside the same figure logged when sent, so the floor
     /// can be checked against how often a spare at each score runs.
     score: f32,
+    /// When it was sent on, this node's layers done.
+    left: std::time::Instant,
     wait: Waiting,
 }
 
@@ -1064,8 +1195,26 @@ struct StreamRun<'a, 'r> {
     near_valid_to: Option<u32>,
     spares_sent: u32,
     spares_taken: u32,
+    /// Spares [`spare_pays`] priced out.
+    spares_declined: u32,
+    /// The chunks out on the reply's line, oldest first — what
+    /// [`spare_pays`] reads; kept only while spares are on.
+    line_out: std::collections::VecDeque<LineOut>,
+    /// This reply's time to build a spare: drafting and this node's layers.
+    spare_ms: RecentMedian,
     /// Main-line chunks built ([`Sent::order`]).
     main_built: u32,
+}
+
+/// A chunk out on the reply's line, as [`spare_pays`] reads it: when the far
+/// end should finish its check and its answer be back — `None` until the
+/// far end's pace and the round trip are measured — and the drafter's chance
+/// it refuses a guess.
+struct LineOut {
+    seq: u32,
+    done: Option<std::time::Instant>,
+    due: Option<std::time::Instant>,
+    refused: f64,
 }
 
 impl PipelineExecutor {
@@ -1126,6 +1275,9 @@ impl PipelineExecutor {
             near_valid_to: None,
             spares_sent: 0,
             spares_taken: 0,
+            spares_declined: 0,
+            line_out: std::collections::VecDeque::new(),
+            spare_ms: RecentMedian::default(),
             main_built: 0,
         };
         run.positions_served = run.positions_served();
@@ -1164,6 +1316,8 @@ impl PipelineExecutor {
             spares_on = run.spares_on,
             spares_sent = run.spares_sent,
             spares_taken = run.spares_taken,
+            spares_declined = run.spares_declined,
+            spare_ms = format_args!("{:.0}", run.spare_ms.median().unwrap_or(0.0)),
             "DSD: streamed checks complete"
         );
         outcome
@@ -1417,6 +1571,11 @@ impl StreamRun<'_, '_> {
                 started: checking,
             })
             .await?;
+        if spares_on {
+            let refused = chance_of_a_refusal(&guesses, &runner_ups, self.width.acceptance.alpha());
+            let entry = self.line_entry(seq, rows.len(), refused, std::time::Instant::now(), None);
+            self.line_out.push_back(entry);
+        }
         if lookahead.is_some() {
             self.frontier.index_pos += rows.len() as u32;
             self.frontier.history.extend_from_slice(&guesses);
@@ -1446,6 +1605,93 @@ impl StreamRun<'_, '_> {
         Ok(wait)
     }
 
+    /// A chunk out on the reply's line, sent at `sent` with `rows` rows, as
+    /// [`spare_pays`] reads it: the far end runs it on arrival or once it
+    /// finishes the chunk before it (`after`, else the line's last), at its
+    /// measured pace for that width ([`FarPace`]), and its answer is back a
+    /// half round trip after that. No times until both are measured.
+    fn line_entry(
+        &self,
+        seq: u32,
+        rows: usize,
+        refused: f64,
+        sent: std::time::Instant,
+        after: Option<std::time::Instant>,
+    ) -> LineOut {
+        let wide =
+            u32::try_from(rows).is_ok_and(|r| r == self.width.wide && r != self.width.narrow);
+        let pace = &*self.reply.far_pace;
+        let far_ms = pace.at(wide).median().or_else(|| pace.at(!wide).median());
+        let times = self
+            .reply
+            .check
+            .floor_ms()
+            .zip(far_ms)
+            .and_then(|(round_trip, far)| {
+                let half =
+                    std::time::Duration::try_from_secs_f64(round_trip.max(0.0) / 2000.0).ok()?;
+                let far = std::time::Duration::try_from_secs_f64(far.max(0.0) / 1000.0).ok()?;
+                let arrives = sent + half;
+                let before = after.or_else(|| self.line_out.back().and_then(|o| o.done));
+                let done = before.map_or(arrives, |b| b.max(arrives)) + far;
+                Some((done, done + half))
+            });
+        LineOut {
+            seq,
+            done: times.map(|t| t.0),
+            due: times.map(|t| t.1),
+            refused,
+        }
+    }
+
+    /// [`spare_pays`] for the spare of the chunk last sent, which `score`
+    /// bets on, from what this reply has measured; no spare until the far
+    /// end's pace, the round trip and the drafter's cost are known.
+    fn spare_pays_now(&self, score: f64) -> bool {
+        let now = std::time::Instant::now();
+        let ms = |t: std::time::Instant| match t.checked_duration_since(now) {
+            Some(ahead) => ahead.as_secs_f64() * 1000.0,
+            None => -(now.duration_since(t).as_secs_f64() * 1000.0),
+        };
+        let Some(this) = self.line_out.back() else {
+            return false;
+        };
+        let Some(this_done) = this.done.map(ms) else {
+            return false;
+        };
+        let mut earlier = Vec::with_capacity(self.line_out.len());
+        for out in self.line_out.iter().take(self.line_out.len() - 1) {
+            let Some(due) = out.due else {
+                return false;
+            };
+            earlier.push((ms(due), out.refused));
+        }
+        let (Some(round_trip), Some(draft_ms)) =
+            (self.reply.check.floor_ms(), self.reply.draft_cost.median())
+        else {
+            return false;
+        };
+        let near = self.width.near_ms[0]
+            .median()
+            .or_else(|| self.width.near_ms[1].median())
+            .unwrap_or(0.0);
+        let build = draft_ms * f64::from(self.width.narrow) + near;
+        let spare = self
+            .spare_ms
+            .median()
+            .unwrap_or(draft_ms * f64::from(spare_guesses()) + near);
+        spare_pays(&SpareTerms {
+            score,
+            earlier: &earlier,
+            this_refused: this.refused,
+            this_done,
+            room: chunks_in_flight().saturating_sub(self.line_out.len()),
+            build,
+            spare,
+            round_trip,
+        })
+    }
+
     /// Build and send the spare restart of the chunk just sent (#381), if
     /// one pays: drafted ([`StreamRun::draft_spare`]), its rows run through
     /// this node's layers as a branch of the chunk's cached rows
@@ -1453,6 +1699,7 @@ impl StreamRun<'_, '_> {
     /// kept in [`StreamRun::spares`]. Nothing here fails the chunk: a spare
     /// this node's layers refuse turns spares off for the reply.
     async fn send_spare(&mut self, chunk: ChunkSent<'_>) -> Result<(), SwarmError> {
+        let building = std::time::Instant::now();
         let Some(spare) = self
             .draft_spare(
                 chunk.guesses,
@@ -1494,6 +1741,8 @@ impl StreamRun<'_, '_> {
                 return Ok(());
             }
         };
+        self.spare_ms
+            .record(building.elapsed().as_secs_f64() * 1000.0);
         let spare_seq = stream_seq::compose(self.attempt, self.turn).ok_or_else(|| {
             SwarmError::Internal("a streamed reply ran past its checks' numbering".into())
         })?;
@@ -1536,6 +1785,7 @@ impl StreamRun<'_, '_> {
             index_pos: spare.index_pos,
             guesses: spare.guesses,
             score: spare.score,
+            left: std::time::Instant::now(),
             wait,
         });
         self.spares_sent += 1;
@@ -1585,7 +1835,13 @@ impl StreamRun<'_, '_> {
         chunk_index_pos: u32,
         history: usize,
     ) -> Option<SparePlan> {
-        let (j, token, score) = spare_at(guesses, runner_ups, lookahead_named, spare_floor())?;
+        let fixed = fixed_spare_floor();
+        let (j, token, score) =
+            spare_at(guesses, runner_ups, lookahead_named, fixed.unwrap_or(0.0))?;
+        if fixed.is_none() && !self.spare_pays_now(f64::from(score)) {
+            self.spares_declined += 1;
+            return None;
+        }
         // A reply that would end at the guesses kept, or at the bet token, has
         // nothing after it to restart.
         if guesses[..j]
@@ -2031,6 +2287,7 @@ impl StreamRun<'_, '_> {
     /// are worth.
     async fn take_answer(&mut self, (sent, result, arrived): Answer) -> Result<Taken, SwarmError> {
         let taken = std::time::Instant::now();
+        self.line_out.retain(|out| out.seq != sent.seq);
         let result = result?;
         if let Some(NetworkFinishReason::Error(msg)) = &result.finish_reason {
             // The class does not survive the wire (gotcha #304).
@@ -2199,6 +2456,7 @@ impl StreamRun<'_, '_> {
                     of = guessed,
                     "DSD: a streamed check refused a guess — restarting after it"
                 );
+                self.line_out.clear();
                 Taken::Restart
             }
             // A chunk without a look-ahead had nothing built after it.
@@ -2225,6 +2483,24 @@ impl StreamRun<'_, '_> {
             "DSD: a streamed check refused a guess — its spare restart already ran"
         );
         self.drafter.push(&spare.guesses);
+        // The spare is the line's only chunk out now; the far end runs it as
+        // it finishes the refused chunk, which it did half a round trip ago.
+        self.line_out.clear();
+        let finished = self
+            .reply
+            .check
+            .floor_ms()
+            .and_then(|rt| std::time::Duration::try_from_secs_f64(rt.max(0.0) / 2000.0).ok())
+            .and_then(|half| std::time::Instant::now().checked_sub(half));
+        let refused = chance_of_a_refusal(&spare.guesses, &[], self.width.acceptance.alpha());
+        let entry = self.line_entry(
+            spare.seq,
+            spare.guesses.len(),
+            refused,
+            spare.left,
+            finished,
+        );
+        self.line_out.push_back(entry);
         let mut history = self.reply.generated.clone();
         history.extend_from_slice(&spare.guesses);
         let index_pos = next_pos + spare.guesses.len() as u32;
@@ -2311,6 +2587,69 @@ mod tests {
             runner_up(0.9, 22, 0.0),
         ];
         assert_eq!(spare_at(&guesses, &ups, true, 0.1), None);
+    }
+
+    /// The 70B's split as measured (#381): a 400 ms round trip, ~312 ms to
+    /// build a chunk here and as much for a spare.
+    fn terms(score: f64, earlier: &[(f64, f64)], this_done: f64, room: usize) -> SpareTerms<'_> {
+        SpareTerms {
+            score,
+            earlier,
+            this_refused: 0.2,
+            this_done,
+            room,
+            build: 312.0,
+            spare: 312.0,
+            round_trip: 400.0,
+        }
+    }
+
+    /// A spare built while this node would only have waited costs nothing,
+    /// so any chance of running pays for it: the window is full and the
+    /// oldest answer is not due until the spare is long built.
+    #[test]
+    fn a_spare_built_while_this_node_would_wait_pays_at_any_chance() {
+        let earlier = [(600.0, 0.3)];
+        assert!(spare_pays(&terms(0.05, &earlier, 1000.0, 0)));
+        assert!(!spare_pays(&terms(0.0, &earlier, 1000.0, 0)), "no chance");
+    }
+
+    /// A spare holds back the answer already in until it is built: where that
+    /// answer is likely a refusal, the restart it calls for waits, and only a
+    /// spare likely to run pays for that. The fixed floor this rule replaced
+    /// sent the 0.45 spare.
+    #[test]
+    fn a_spare_that_holds_back_a_likely_refusal_pays_only_if_likely_to_run() {
+        // 0.6 x 312 ms of a restart held back; it runs only if the earlier
+        // chunk is kept (0.4), and then saves 400 + 312 ms.
+        let earlier = [(-10.0, 0.6)];
+        assert!(!spare_pays(&terms(0.45, &earlier, 1000.0, 0)));
+        assert!(spare_pays(&terms(0.9, &earlier, 1000.0, 0)));
+        // The same answer due after the spare is built: nothing held back.
+        let later = [(400.0, 0.6)];
+        assert!(spare_pays(&terms(0.45, &later, 1000.0, 0)));
+    }
+
+    /// Every chunk kept, the far end finishes this one at 600 ms: the next
+    /// chunk built now reaches it at 512, built after the spare at 824 — the
+    /// far end waits 224 ms four times in five, which a spare must outweigh.
+    #[test]
+    fn a_spare_that_leaves_the_far_end_waiting_is_charged_the_wait() {
+        assert!(!spare_pays(&terms(0.2, &[], 600.0, 1)));
+        assert!(spare_pays(&terms(0.3, &[], 600.0, 1)));
+        // A far end busy for longer waits for nothing.
+        assert!(spare_pays(&terms(0.05, &[], 1200.0, 1)));
+    }
+
+    /// A chunk's chance of a refusal is one less the chance its drafter keeps
+    /// every guess; where the runner-ups do not answer them all, the reply's
+    /// acceptance stands in.
+    #[test]
+    fn a_chunks_chance_of_a_refusal_is_its_guesses_kept_all_together() {
+        let ups = [runner_up(0.9, 20, 0.05), runner_up(0.5, 21, 0.3)];
+        assert!((chance_of_a_refusal(&[10, 11], &ups, 0.7) - 0.55).abs() < 1e-6);
+        assert!((chance_of_a_refusal(&[10, 11], &ups[..1], 0.7) - 0.51).abs() < 1e-6);
+        assert_eq!(chance_of_a_refusal(&[], &[], 0.7), 0.0);
     }
 
     /// A spare's rows ride in its chunk's near forward as a branch: its first

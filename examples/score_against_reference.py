@@ -121,6 +121,13 @@ def main():
         llm.reset()
         llm.eval(ptoks + rtoks)
         logits = np.array(llm.scores[len(ptoks) - 1: len(ptoks) - 1 + len(rtoks)])
+        # A row of equal logits ranks EVERY token first. A weights-free file
+        # (~/swarmllm-ref/vocab holds sparse tokenizer-only GGUFs of the same
+        # name) loads without complaint and gives exactly that: 160 of 160
+        # "rank-1" for any text (2026-10-31, gotcha #1000).
+        if np.ptp(logits, axis=1).min() == 0:
+            sys.exit(f"{gguf}: every logit is equal, so nothing was computed — "
+                     "a weights-free (vocab-only) file? Score against the full model.")
         ranks, gaps = [], []
         for i, tok in enumerate(rtoks):
             step = logits[i]

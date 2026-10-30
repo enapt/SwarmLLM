@@ -3037,14 +3037,24 @@ only on the refusal it names, else is skipped unrun), and the coordinator's spar
 sent). On the two-node rig (7B coder, 0.5B drafter, one shared processor, 300 ms) the stream ran
 14-18% SLOWER: each spare cost this node ~120 ms while arrived answers waited, 7% of spares ran,
 and the drafter's score did not predict which below 0.4. So it is off unless
-`SWARMLLM_STREAM_SPARES=1` (floor `SWARMLLM_STREAM_SPARE_MIN`, 0.4); the far end's half is always on.
+`SWARMLLM_STREAM_SPARES=1`; the far end's half is always on. **Since 2026-10-31 each spare is
+PRICED** (`dsd_stream::spare_pays`, evidence in the same § "Which spares go"): for the 70B's 3B
+drafter the score is the chance a spare runs, and a spare's cost is the work it pushes back —
+replayed over six of the 70B's replies, 1.07-1.10x against no spares where the old 0.4 floor
+gave 1.01x; `SWARMLLM_STREAM_SPARE_MIN` is now the fixed-floor A/B. On a far-bound CPU rig
+(Llama-3.1-8B + 1B, 200 ms) it read about even: 1.5% behind no spares, 1.2% ahead of a 0.2 floor.
 **Residual**:
 1. **Measure the 70B** once AU runs a release advertising bit 35: `SWARMLLM_STREAM_SPARES=1` against
-   off on this node (`~/swarmllm-70b/ask70novel.sh`), judged by restarts that waited and tok/s. Its
-   3B drafter keeps 74% and its second choice is right on 60% of misses — the regime the idea was
-   measured for, unlike the rig's. Default on only where it pays.
+   off on this node (`~/swarmllm-70b/ask70novel.sh`), judged by restarts that waited, tok/s and
+   `spares_declined` / `spare_ms`. Default on only where it pays.
+1a. **Calibrate the two chances the price reads from the reply's own outcomes**: the spare's score
+   (spares run ÷ scores sent) and a chunk's refusal chance (refusals ÷ chances predicted), as
+   `TreeRounds` does for a tree's rows. On the rig the 1B's word under-charged: 7-10 of ~68 spares
+   ran, and each far-end restart gap grew ~40 ms (§ "Which spares go").
 2. **Draft a spare's guesses in the chunk's own drafter calls** — one tree, the runner-up's branch
-   grown beside the main line (below): the three extra calls are most of a spare's cost.
+   grown beside the main line (below). Replayed: a spare at ~210 ms instead of ~312 lifts the
+   priced spares from 1.10x to 1.12x; reading its rows in the next chunk's forward too (~120 ms),
+   1.13x. Worth it only once (1) shows the priced spares pay live.
 3. **Sampled replies**: the runner-up under the shared noise (the second-best of `logit/T + g` among
    the request's candidates, `sampling::draw_among_candidates`); the far end's match is unchanged.
 4. **Runner-ups on the card path**: `argmax_guesses_on_card` stands aside when they are asked for.
@@ -3071,7 +3081,7 @@ Prior art: SSD/Saguaro (2603.03251) pre-drafts for likely verification outcomes 
 PipeInfer cancels stale work. Neither leaves the prepared restart at the far end, which is what
 removes the round trip.
 
-**Measured before any code — how often a spare is right** (scratchpad `spare_hits.py`, the 3B
+**Measured before any code — how often a spare is right** (`~/swarmllm-70b/spares/spare_hits.py`, the 3B
 drafter teacher-forced through six of the 70B's own greedy replies, the chain stream replayed at
 3 guesses + the look-ahead): the drafter's top choice is the 70B's token 74.3% of the time (live
 alpha 0.74-0.77) and the replay restarts 24.7 times a 96-token reply (live 19-24), so it is

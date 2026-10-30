@@ -3636,13 +3636,61 @@ with " stood" rank 2). The rig leans against spares — both halves share one pr
 guesses the 7B poorly (17 of 84 chunks kept whole) — so the 70B (3B drafter, 74% kept, its second
 choice right on 60% of misses) is measured once AU runs a release that reads them. What would cut
 the cost: drafting a spare's guesses in the chunk's own drafter calls, as one tree (FUTURE_WORK
-#381's residual). Tests: `a_spare_restart_runs_for_the_refusal_it_names`,
+#381's residual).
+
+**Which spares go: priced, not floored** (2026-10-31, `dsd_stream::spare_pays`). The floor was
+tuned on a pair that guesses badly; for the 70B's 3B drafter the score IS the chance — six of the
+70B's own greedy replies (748 tokens, `~/swarmllm-70b/ask70cal.sh` + `~/swarmllm-70b/spares/spare_cal.py`,
+the chain stream replayed at 3 guesses + the named look-ahead): spares scored 0.10-0.20 ran 14%,
+0.20-0.30 27%, 0.30-0.40 44%; one spare a chunk would run on 33% of the 28.7 restarts a reply (the
+runner-up was the 70B's token on 55% of them). The floor of 0.4 sent 2.8 spares a reply. What a
+spare costs is not a constant either: it is this node's time, which costs the reply something
+only where it pushes back work that would otherwise run — the next chunk, and the taking of an
+answer that lands meanwhile. A discrete-event replay of `run_with` over those chunks (`~/swarmllm-70b/spares/`
+`spare_sim.py`: this node one server taking an arrived answer before building, the far end one
+server running turns in order, the 70B's measured times: 54 ms a drafted guess, ~150 ms this
+node's 16 layers, 200 ms each way, AU 396 + 97 ms a row) found the cost the floor could not see:
+a spare built after a restart's chunk delays the next chunk, inside whose build the restart's own
+answer then lands and waits — up to ~340 ms a time. Sending every spare (5 guesses a chunk, a
+240 ms round trip) took 12% longer; had a spare cost nothing, the same spares would have saved 9%. So each spare is priced
+(`spare_pays`): the chance it runs (its score × the chance no earlier chunk out is refused, which
+would leave it stale) × the restart cycle it saves (round trip + a build, less its own lateness at
+the far end) against the delay it causes — each earlier chunk's answer taken later (the
+spare first, then the chunks the window lets go, back to back; an answer already in waits for the
+spare), weighted by the chance that answer is the first refusal, plus, where everything is kept,
+the far end's added wait for the next chunk. Answer times come from the far end's measured pace
+per width (`FarPace`) and the round trip (`CheckCost::floor_ms`), the chunks out kept in
+`StreamRun::line_out`; no spare until those and the drafter's cost are measured. Replay, against
+no spares: as measured 1.10x (3 guesses) / 1.10x (5), a cheaper spare (210 ms) 1.12x, the far end
+twice as slow 1.07-1.08x, a 240 ms round trip 1.08-1.09x — the best rule of those tried in every
+case, never below 1.0, where the fixed floors ranged 0.90-1.09x. The replay's own baseline is
+~30% faster than the live 70B (it models no prompt pass and no answer handling), so read its
+ratios, not its rates. `SWARMLLM_STREAM_SPARE_MIN` set = the fixed floor (A/B); logged
+`spares_declined`, `spare_ms`.
+
+**On a rig whose far end is the bottleneck it is about even** (2026-10-31, `spares381.sh`:
+Llama-3.1-8B + its 1B drafter, 4 cores a side, 200 ms; far ~1.15 s a check, this node ~330 ms a
+build, 41 restarts a 160-token reply). Steady replies: none 87.4-88.2 s, priced 88.2-89.8, a fixed
+0.2 floor 90.1-90.2. Priced sent ~68 spares a reply, 7-10 ran. The far end's idle gaps went 42 → 37
+a reply, but each remaining gap grew ~40 ms (560 → 600): a refusal that lands while this node
+builds a spare, or a chunk the spare pushed back, restarts that much later. So the price
+under-charges this pair. The likeliest reason is that the refusal chance is the 1B's own word,
+uncalibrated, where the 70B's 3B was checked against its target. The replies differed from the
+off arm's at a 0.08-logit tie; llama.cpp ranks all of them as the model's own (off 157/160
+rank-1, spares 158 and 159; gotcha #1000 for the reference file). The rig's restart costs ~0.5 of
+a far check; the 70B's ~1.0. Next: calibrate both chances from the reply's own outcomes, as
+`TreeRounds` does for a tree's rows.
+
+Tests: `a_spare_restart_runs_for_the_refusal_it_names`,
 `a_spare_restart_for_another_outcome_is_skipped`, `a_spare_supersedes_nothing_and_only_one_runs_per_refusal`,
 `a_check_built_on_a_spare_that_did_not_run_is_refused`, `a_check_built_on_a_spare_that_refused_a_guess_is_skipped`,
 `a_taken_spare_skips_the_stale_line_whatever_the_switch` (it and `a_spare_restart_for_another_outcome_is_skipped`
 fail with their rule removed), `a_spare_bets_on_the_refusal_its_drafter_thinks_likeliest`, `a_spares_rows_branch_where_its_guess_stood`,
 `a_greedy_guesses_runner_up_is_its_second_choice`, the `0x13` wire and AAD tests in
-`protocol::{layer_forward,encrypted}`.
+`protocol::{layer_forward,encrypted}`; the price: `a_spare_built_while_this_node_would_wait_pays_at_any_chance`,
+`a_spare_that_holds_back_a_likely_refusal_pays_only_if_likely_to_run` (its 0.45 spare went under
+the floor), `a_spare_that_leaves_the_far_end_waiting_is_charged_the_wait`,
+`a_chunks_chance_of_a_refusal_is_its_guesses_kept_all_together`.
 
 **A chunk is guessed whole, and every chunk is the stream's width** (2026-10-26,
 `docs/plans/faster_than_local.md` § 8.6). The drafter's confidence floor (0.4)
