@@ -1096,7 +1096,7 @@ replaced by `false`).
 
 **Holes first (2026-10-25).** A part no computer holds or is fetching, of a model somebody asked
 for that the swarm already holds part of (`scoring::fills_a_hole`, the flag
-`ShardCandidate::fills_a_hole`), is chosen before any further copy, whatever its score: the sort
+`scoring::fills_a_hole`), is chosen before any further copy, whatever its score: the sort
 puts holes first and `select_within_budget` runs its per-model round-robin in two tiers, every
 hole across models, then the rest. The score multiplies by how many machines hold any part of a
 model and by `vram_fitness` (down to 0.1 for a model larger than the swarm's graphics memory) —
@@ -2918,7 +2918,7 @@ against 5.18 — the larger drafter keeps ~20% more, so the largest that can dra
 - **Both passes ask one answer** (gotcha #795): the download pass fetches
   `parts_of_a_drafter_to_fetch` past the replica target and the ring (a drafter must be HERE;
   the target counts the swarm's copies) with `CARRY_BONUS`; prune keeps `copy_drafts_for_a_split`
-  below urgent pressure — the held chosen drafter (`DrafterToAcquire::Held`) or the one being
+  below urgent pressure — the held chosen drafter (`DrafterToAcquire::held`) or the one being
   fetched, for any target wanted within `DRAFTER_WANTED_FOR` (7 days). Each target's answer is
   cached 60 s (`DrafterBook`) and prune reads only that: it asks of every part it holds.
 - **Known cost**: the manifest's family is coarse (`ModelArchitecture::Llama` covers several

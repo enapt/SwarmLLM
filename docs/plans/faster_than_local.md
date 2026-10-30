@@ -373,9 +373,11 @@ drafters before anything was built, and each says what the number decides. Data 
 `~/swarmllm-318/{grammar,lens}/`; the probe dumps the state crossing a split
 (`LOGITS_PROBE_HIDDEN`, `examples/logits_reference_probe.rs`).
 
-**7.1 Decoding to the request's schema: a correctness gain, not a speed lever.** Today
-`response_format` is an instruction in the prompt (`api/openai/types.rs`, `to_internal_messages`)
-and a tool call is whatever the model writes, parsed afterwards. Constrained decoding
+**7.1 Decoding to the request's schema: a correctness gain, not a speed lever.** Until #336
+(2026-10-30) `response_format` was only an instruction in the prompt (`api/openai/types.rs`,
+`to_internal_messages`); it is now held token by token where this node runs the model whole
+(`inference::reply_grammar`) and still only asked for on a split, and a tool call is whatever the
+model writes, parsed afterwards. Constrained decoding
 (llguidance 1.9.1: MIT, pure Rust; a mask costs ~50 µs a token at a 128K vocabulary by its
 authors' figure; `rollback` lets one matcher walk a tree depth-first) makes the output valid by
 construction. The hope for splits: a token the grammar FORCES (one legal token) needs no guess, so

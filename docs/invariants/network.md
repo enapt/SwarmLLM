@@ -5263,7 +5263,7 @@ in place (Windows "set as metered", or `pause`) leaves one to run out.
 
 ## Every part this node serves shares ONE upload limit (2026-10-24, FUTURE_WORK #335)
 
-**What it replaced.** `ResourcesConfig::shard_upload_mbps` (`Minimal`, the default, 10 Mbps;
+**What it replaced.** `ResourceConfig::shard_upload_mbps` (`Minimal`, the default, 10 Mbps;
 `Moderate` 50; `Maximum` unlimited; `max_bandwidth_mbps` overrides) exists so that seeding
 cannot fill the owner's connection. The serving arm slept `bytes / limit` after reading each
 chunk, in that request's own task, so nothing was shared: three parts fetched at once moved at

@@ -51,7 +51,6 @@
 .cc-tool-status.done { color: var(--green-text); }
 .cc-tool-status.error { color: var(--red-text); }
 .cc-tool-error .cc-tool-name { color: var(--red-text); }
-.cc-tool-body { padding: 0 10px 8px; display: none; }
 
 /* ─── Tool Result Blocks ─── */
 .cc-tool-result { margin-top: 6px; }
@@ -92,7 +91,6 @@
 
 /* ─── Bash Output ─── */
 .cc-bash .cc-bash-output { padding: 6px 8px; background: #0d1117; border-radius: var(--radius); font-size: var(--fs-sm); font-family: var(--font-mono); color: #c9d1d9; max-height: 300px; overflow: auto; white-space: pre-wrap; word-break: break-all; border: 1px solid rgba(255,255,255,0.05); }
-.cc-file-summary { padding: 4px 8px; font-size: var(--fs-sm); color: var(--text-secondary); }
 
 /* ─── Permission Prompt (compact inline bar) ─── */
 .cc-permission-prompt { margin: 4px 0; border-radius: var(--radius); overflow: hidden; border: 1px solid rgba(245,158,11,0.3); border-left: 3px solid var(--orange); background: rgba(245,158,11,0.05); }
@@ -182,9 +180,6 @@
 .cc-tool-group[open] > .cc-tool-call,
 .cc-tool-group[open] > .cc-permission-prompt { margin: 4px 0; }
 
-/* ─── Cost Info ─── */
-.cc-cost-info { margin-top: 6px; padding: 3px 8px; font-size: var(--fs-xs); color: var(--text-muted); font-family: var(--font-mono); }
-
 /* ─── Status Messages ─── */
 .cc-status { margin: 4px 0; padding: 4px 8px; font-size: var(--fs-sm); color: var(--text-secondary); font-style: italic; }
 .cc-status-error { color: var(--red-text); font-style: normal; }
@@ -235,7 +230,6 @@
 .cc-agent-bg-done { opacity: 1; border-color: rgba(61,220,132,0.3); }
 
 /* ─── Session Badges ─── */
-.cc-sub-badge { font-size: var(--fs-2xs); font-weight: 700; padding: 1px 5px; background: rgba(168,85,247,0.15); color: #a855f7; border-radius: var(--radius-sm); font-family: var(--font-mono); letter-spacing: 0.03em; }
 .cc-mcp-badge { font-size: var(--fs-2xs); font-weight: 700; padding: 1px 5px; background: rgba(59,130,246,0.15); color: #3b82f6; border-radius: var(--radius-sm); font-family: var(--font-mono); letter-spacing: 0.03em; }
 
 /* ─── Slash Command Autocomplete ─── */

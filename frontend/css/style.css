@@ -874,7 +874,6 @@ a:hover { color: var(--accent-hover); }
   box-shadow: var(--shadow-lg);
 }
 
-.modal-lg { max-width: 720px; }
 .modal-xl { max-width: 820px; }
 
 /* ─── Settings modal ─── */
@@ -1017,16 +1016,6 @@ a:hover { color: var(--accent-hover); }
 }
 .settings-collapsible > *:not(summary) { padding: 14px 16px; }
 
-.form-row-2 {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 14px;
-}
-.form-row-2 .form-group { margin-bottom: 14px; }
-@media (max-width: 640px) {
-  .form-row-2 { grid-template-columns: 1fr; gap: 0; }
-}
-
 .provider-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
@@ -1066,10 +1055,6 @@ a:hover { color: var(--accent-hover); }
 .settings-advanced > .mt-2 { padding: 0 14px 14px; }
 
 /* ---- Model Browser ---- */
-
-
-
-
 
 /* ---- Tier badges ---- */
 .tier-badge {
@@ -1929,7 +1914,6 @@ a:hover { color: var(--accent-hover); }
     border-radius: 0;
     padding: 16px;
   }
-  .modal-lg { max-width: 100vw; }
 
   /* Chat adjustments */
   .chat-messages { padding: 12px; }
@@ -2220,18 +2204,6 @@ label {
   line-height: 14px;
 }
 
-/* Header inline credits pill */
-.header-credits {
-  display: inline-flex; align-items: center; gap: 5px;
-  padding: 2px 8px; margin-left: 4px;
-  background: var(--bg-tertiary); border: 1px solid var(--border);
-  border-radius: var(--radius-pill);
-  font-size: var(--fs-sm); color: var(--text-primary);
-  cursor: default;
-}
-.header-credits-icon { color: var(--accent); font-size: var(--fs-xs); opacity: 0.9; }
-.header-credits-delta { font-size: var(--fs-2xs); opacity: 0; transition: opacity 0.3s ease; }
-.header-credits-delta.flash { animation: header-credits-flash 2s ease; }
 @keyframes header-credits-flash {
   0%   { opacity: 1; transform: translateY(0); }
   80%  { opacity: 1; transform: translateY(-1px); }
@@ -2254,7 +2226,6 @@ label {
   border-radius: var(--radius);
   min-width: 0; white-space: normal;
 }
-.node-compact .node-hw-cell.hw-cell-text { flex-direction: column; align-items: flex-start; gap: 2px; }
 
 /* Device cards — a processor and the memory that bounds it, in one box.
    Three of them (CPU+RAM, GPU+VRAM, Disk) rather than five peer tiles. */
@@ -2377,20 +2348,6 @@ input[type="range"]::-webkit-slider-thumb {
 }
 .chat-session-header.visible { display: flex; }
 
-/* Standalone lock badge in chat header */
-.chat-header-lock {
-  font-size: var(--fs-xl);
-  line-height: 1;
-  cursor: pointer;
-  opacity: 0.5;
-  transition: opacity var(--transition), transform var(--transition);
-  flex-shrink: 0;
-  padding: 2px 4px;
-  border-radius: var(--radius-sm);
-}
-.chat-header-lock:hover { opacity: 0.85; transform: scale(1.15); }
-.chat-header-lock.active { opacity: 1; color: var(--green-text); }
-
 /* Thumbnails of images attached to the next message. The layout lives here
    rather than being written inline on every render, so the JS only has to
    toggle `.hidden` — which is the one thing that actually reveals it, since
@@ -2492,18 +2449,6 @@ input[type="range"]::-webkit-slider-thumb {
 .chat-session-title:hover {
   border-color: var(--border);
   background: var(--bg-tertiary);
-}
-.chat-session-title-input {
-  font-size: var(--fs-lg);
-  font-weight: 600;
-  color: var(--text-primary);
-  background: var(--bg-tertiary);
-  border: 1px solid var(--accent);
-  border-radius: var(--radius-sm);
-  padding: 2px 6px;
-  outline: none;
-  font-family: inherit;
-  max-width: 300px;
 }
 
 .chat-session-model {
@@ -2952,10 +2897,6 @@ kbd {
   margin-bottom: 12px;
   display: flex; align-items: center; gap: 8px;
 }
-.alert-info { background: var(--accent-glow); border: 1px solid rgba(59, 130, 246, 0.3); color: var(--accent); }
-.alert-warning { background: var(--orange-dim); border: 1px solid rgba(245, 158, 11, 0.3); color: var(--orange-text); }
-.alert-error { background: var(--red-dim); border: 1px solid rgba(239, 68, 68, 0.3); color: var(--red-text); }
-.alert-success { background: var(--green-dim); border: 1px solid rgba(34, 197, 94, 0.3); color: var(--green-text); }
 
 /* ---- Empty states ---- */
 .empty-state {
@@ -3055,7 +2996,6 @@ kbd {
 /* ---- HF suggestion chips ---- */
 
 /* (source-badge removed — unused, replaced by msg-source-badge) */
-
 
 /* Model cards */
 .model-card {
@@ -3160,17 +3100,6 @@ kbd {
 /* Shard body — full width to align with health bar in title */
 .model-card-shards { padding: 8px 14px 6px; }
 
-/* Footer */
-.model-card-footer {
-  display: flex; align-items: center; justify-content: space-between;
-  padding: 7px 14px;
-  border-top: 1px solid var(--border);
-  background: rgba(0,0,0,0.06);
-  gap: 10px;
-}
-.model-card-meta { display: flex; gap: 12px; font-size: var(--fs-sm); color: var(--text-secondary); flex-wrap: wrap; }
-.model-card-actions { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
-
 /* "See this model's activity" — the link that replaced the per-model ticker.
    The feed itself lives in the Activity panel, which the model card now points
    at instead of carrying its own copy of. */
@@ -3200,14 +3129,6 @@ kbd {
 }
 .shard-transitioning { animation: shard-flash 1.5s ease-out; }
 
-/* Model status pills */
-.model-status-pill { font-size: var(--fs-md); font-weight: 600; }
-.model-status-pill.active { color: var(--green-text); }
-.model-status-pill.ready { color: var(--green-text); font-weight: 400; }
-.model-status-pill.downloading { color: var(--accent); }
-.model-status-pill.partial { color: var(--orange-text); }
-.model-status-pill.network { color: var(--text-muted); font-weight: 400; }
-
 .model-card .dl-progress { margin: 6px 14px 8px; transition: opacity 0.5s ease-out; }
 .model-card .dl-progress.dl-complete { opacity: 0; transition: opacity 1.2s ease-out 1.5s; }
 .dl-complete-flash {
@@ -3221,14 +3142,6 @@ kbd {
 .model-card .dl-progress .dl-seg { height: 100%; overflow: hidden; position: relative; background: var(--bg-tertiary); }
 .model-card .dl-progress .dl-seg-fill { height: 100%; background: linear-gradient(90deg, var(--cyan), var(--accent)); transition: width 0.5s ease-out; }
 
-/* Per-shard download bars — stacked vertically (WI-13) */
-.per-shard-dl { margin-top: 6px; display: flex; flex-direction: column; gap: 3px; }
-.per-shard-dl-row { display: flex; align-items: center; gap: 6px; font-size: var(--fs-sm); }
-.per-shard-dl-label { width: 52px; color: var(--text-muted); flex-shrink: 0; }
-.per-shard-dl-bar { flex: 1; height: 6px; background: var(--bg-tertiary); border-radius: var(--radius-sm); overflow: hidden; }
-.per-shard-dl-fill { height: 100%; background: linear-gradient(90deg, var(--cyan), var(--accent)); transition: width 0.5s ease-out; }
-.per-shard-dl-pct { width: 130px; text-align: right; color: var(--text-muted); flex-shrink: 0; font-family: 'SF Mono', 'Fira Code', monospace; }
-
 /* Trust level badges */
 /* Trust badges — match ph-tag / composite-badge language */
 .badge-trust {
@@ -3240,7 +3153,6 @@ kbd {
 .badge-trust-popular  { color: var(--green-text);  background: var(--green-dim);  border-color: rgba(34,197,94,0.35); }
 .badge-trust-verified { color: var(--accent); background: var(--accent-glow); border-color: rgba(59,130,246,0.35); }
 .badge-trust-pinned   { color: #f59e0b;        background: rgba(245,158,11,0.15); border-color: rgba(245,158,11,0.35); }
-
 
 /* Provider signup link */
 .provider-signup-link { font-size: var(--fs-sm); color: var(--accent); text-decoration: none; margin-left: 8px; opacity: 0.8; }
@@ -3401,14 +3313,6 @@ select.cloud-model-sort { flex: 0 0 88px; width: 88px; padding: 6px 6px; font-si
 .btn-outline { background: transparent; border: 1px solid var(--border); color: var(--text-secondary); }
 .btn-outline:hover { border-color: var(--orange); color: var(--orange-text); }
 
-/* Metadata info button */
-.model-meta-btn {
-  background: none; border: none; cursor: pointer;
-  color: var(--text-muted); font-size: var(--fs-xl); padding: 2px 4px;
-  transition: color var(--transition); font-weight: 700; line-height: 1;
-}
-.model-meta-btn:hover { color: var(--accent); }
-
 /* GGUF Metadata Panel */
 .gguf-metadata-panel {
   margin-top: 10px; padding: 12px;
@@ -3465,42 +3369,31 @@ select.cloud-model-sort { flex: 0 0 88px; width: 88px; padding: 6px 6px; font-si
 .text-xs { font-size: var(--fs-sm); }
 .text-sm { font-size: var(--fs-sm); }
 .text-base { font-size: var(--fs-lg); }
-.text-md { font-size: var(--fs-lg); }
 .text-lg { font-size: var(--fs-xl); }
 .text-xl { font-size: var(--fs-2xl); }
 .text-2xl { font-size: var(--fs-3xl); }
 
 /* Font weight */
 .font-normal { font-weight: 400; }
-.font-medium { font-weight: 500; }
 .font-semibold { font-weight: 600; }
-.font-bold { font-weight: 700; }
 
 /* Font families */
 .mono { font-family: var(--font-mono); }
-.font-sans { font-family: var(--font-sans); }
 
 /* Text colors */
 .text-muted { color: var(--text-secondary); }
 .text-dim { color: var(--text-muted); }
 .text-green { color: var(--green-text); }
 .text-red { color: var(--red-text); }
-.text-orange { color: var(--orange-text); }
-.text-accent { color: var(--accent); }
 .text-primary { color: var(--text-primary); }
 
 /* Layout */
 .flex { display: flex; }
-.flex-col { display: flex; flex-direction: column; }
 .flex-center { display: flex; align-items: center; }
 .flex-between { display: flex; justify-content: space-between; align-items: center; }
 .flex-wrap { flex-wrap: wrap; }
 .flex-1 { flex: 1; min-width: 0; }
-.items-center { align-items: center; }
-.items-start { align-items: flex-start; }
 .justify-center { justify-content: center; }
-.inline-flex { display: inline-flex; align-items: center; }
-.shrink-0 { flex-shrink: 0; }
 .w-full { width: 100%; }
 .text-center { text-align: center; }
 .text-right { text-align: right; }
@@ -3511,7 +3404,6 @@ select.cloud-model-sort { flex: 0 0 88px; width: 88px; padding: 6px 6px; font-si
 .gap-0 { gap: 4px; }
 .gap-1 { gap: 8px; }
 .gap-2 { gap: 12px; }
-.gap-3 { gap: 16px; }
 
 /* Margin */
 .mt-0 { margin-top: 4px; }
@@ -3531,18 +3423,13 @@ select.cloud-model-sort { flex: 0 0 88px; width: 88px; padding: 6px 6px; font-si
 .p-1 { padding: 6px; }
 .p-2 { padding: 10px; }
 .p-3 { padding: 14px; }
-.px-2 { padding-left: 10px; padding-right: 10px; }
-.py-1 { padding-top: 6px; padding-bottom: 6px; }
 
 /* Borders & dividers */
 .border { border: 1px solid var(--border); }
-.border-t { border-top: 1px solid var(--border); }
 .rounded { border-radius: var(--radius); }
-.rounded-lg { border-radius: var(--radius-lg); }
 
 /* Surface utilities */
 .bg-surface { background: var(--bg-tertiary); }
-.bg-card { background: var(--bg-secondary); }
 
 /* Interactive defaults — all buttons & interactive elements get transitions */
 button, .btn, [role="button"], select, input, textarea {
@@ -3569,7 +3456,6 @@ textarea:focus:not(:focus-visible) {
 
 /* Visibility */
 .hidden { display: none !important; }
-.sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); border: 0; }
 
 /* Badge variant system */
 .badge {
@@ -3642,7 +3528,6 @@ textarea:focus:not(:focus-visible) {
 /* Info box — colored notice panels */
 .info-box { padding: 8px 12px; border-radius: var(--radius); font-size: var(--fs-sm); }
 .info-box-warn { background: rgba(255,160,0,0.08); color: var(--orange-text); }
-.info-box-info { background: var(--accent-glow); color: var(--accent); border: 1px solid rgba(59,130,246,0.2); }
 
 /* ─── Setup wizard ─── */
 
@@ -4223,46 +4108,6 @@ textarea.pool-code-input { min-height: 4.5em; }
   letter-spacing: 0.5px;
 }
 
-/* ---- Cancel download button ---- */
-.shard-cancel-btn {
-  background: none;
-  border: 1px solid var(--red);
-  color: var(--red-text);
-  border-radius: 50%;
-  width: 20px;
-  height: 20px;
-  font-size: var(--fs-xs);
-  cursor: pointer;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  margin-left: 6px;
-  padding: 0;
-  transition: all var(--transition);
-  vertical-align: middle;
-}
-.shard-cancel-btn:hover {
-  background: var(--red);
-  color: var(--on-solid);
-}
-
-/* ---- Remove model button ---- */
-.model-remove-btn {
-  background: none;
-  border: 1px solid var(--border);
-  color: var(--text-muted);
-  border-radius: var(--radius);
-  font-size: var(--fs-sm);
-  padding: 3px 8px;
-  cursor: pointer;
-  transition: all var(--transition);
-}
-.model-remove-btn:hover {
-  border-color: var(--red);
-  color: var(--red-text);
-  background: var(--red-dim);
-}
-
 /* ---- Provider active states ---- */
 .provider-badge-active {
   background: var(--green) !important;
@@ -4527,11 +4372,6 @@ textarea.pool-code-input { min-height: 4.5em; }
 }
 .wizard-step:focus-visible {
   outline: 2px solid var(--accent); outline-offset: 2px;
-}
-
-/* #7: Contribution slider hints */
-.contribution-hint {
-  display: block; font-size: var(--fs-2xs); color: var(--text-muted); font-weight: 400; line-height: 1.2;
 }
 
 /* #13: Stat help icons */
@@ -4866,7 +4706,6 @@ textarea.pool-code-input { min-height: 4.5em; }
 /* Nav tabs — stronger active state */
 /* (nav-tabs/tab-bar removed — unused Bootstrap-style selectors) */
 
-
 /* ---- Toggle switch ---- */
 .toggle-switch {
   position: relative; display: inline-block; width: 36px; height: 20px; cursor: pointer; vertical-align: middle;
@@ -4909,15 +4748,6 @@ textarea.pool-code-input { min-height: 4.5em; }
 .model-card.compact .model-card-shards,
 .model-card.compact .model-card-detail-badges {
   display: none;
-}
-/* The Active/Ready/etc. badge now rides in `.model-card-subline`, on every
-   row in both states. It used to be rendered in the name row and hidden
-   there by CSS, leaving the collapsed row's state to a coloured left edge
-   and nothing else. */
-.model-card.compact .model-card-footer {
-  border-top: none;
-  background: none;
-  padding: 0 14px 8px;
 }
 .model-card.compact .model-card-title {
   border-bottom: none;
@@ -4989,23 +4819,6 @@ textarea.pool-code-input { min-height: 4.5em; }
 .model-card .model-card-title { cursor: pointer; }
 .model-card .model-card-title:hover { background: rgba(255,255,255,0.02); }
 
-/* ---- Architecture + Quantization tags ---- */
-.model-tag {
-  display: inline-flex; align-items: center;
-  font-size: var(--fs-2xs); font-weight: 600; font-family: var(--font-mono);
-  padding: 1px 5px; border-radius: var(--radius-sm); letter-spacing: 0.03em;
-  text-transform: uppercase; white-space: nowrap; margin-left: 6px;
-}
-.model-tag.tag-arch {
-  background: rgba(139,92,246,0.12); color: var(--purple-text); border: 1px solid rgba(139,92,246,0.2);
-}
-.model-tag.tag-quant {
-  background: rgba(34,211,238,0.1); color: var(--cyan-text); border: 1px solid rgba(34,211,238,0.15);
-}
-.model-tag.tag-ctx {
-  background: rgba(245,158,11,0.1); color: var(--orange-text); border: 1px solid rgba(245,158,11,0.15);
-}
-
 /* ---- Active model pulse (loaded in memory) ---- */
 .model-card.ready.active-loaded {
   border-left: 3px solid var(--green);
@@ -5020,45 +4833,11 @@ textarea.pool-code-input { min-height: 4.5em; }
 .model-card.partial { border-left: 2px solid rgba(245,158,11,0.5); }
 .model-card.downloading { border-left: 2px solid rgba(59,130,246,0.5); }
 
-/* ---- Structured footer ---- */
-.model-card-meta {
-  display: flex; align-items: center; gap: 0; font-size: var(--fs-sm); color: var(--text-secondary); flex-wrap: wrap;
-}
-.model-card-meta .meta-item {
-  display: inline-flex; align-items: center; gap: 3px; white-space: nowrap;
-}
-.model-card-meta .meta-sep {
-  margin: 0 8px; color: var(--text-muted); font-size: var(--fs-2xs); opacity: 0.5;
-}
-.model-card-meta .meta-icon { font-size: var(--fs-2xs); opacity: 0.6; }
-.model-card-meta .meta-warn { color: var(--orange-text); font-weight: 600; }
-.model-card-meta .meta-ok { color: var(--text-muted); }
 /* VRAM fit indicator */
 .vram-fit { font-size: var(--fs-2xs); font-weight: 600; }
 .vram-fit.fit-yes { color: var(--green-text); }
 .vram-fit.fit-tight { color: var(--orange-text); }
 .vram-fit.fit-no { color: var(--text-muted); }
-
-/* ---- Styled action buttons ---- */
-/* ---- shadcn-inspired button system ---- */
-.model-card-actions .btn-action {
-  font-size: var(--fs-xs); font-weight: 500; padding: 0 12px; height: 28px;
-  border-radius: var(--radius-md); border: 1px solid var(--border);
-  background: transparent; color: var(--text-secondary);
-  cursor: pointer; transition: all var(--transition);
-  display: inline-flex; align-items: center; justify-content: center;
-  white-space: nowrap; box-shadow: var(--shadow-xs);
-}
-.model-card-actions .btn-action:hover { background: var(--bg-hover); color: var(--text-primary); border-color: var(--border-light); }
-.model-card-actions .btn-action:focus-visible { outline: none; box-shadow: 0 0 0 3px var(--ring); }
-.model-card-actions .btn-action.btn-primary-action {
-  background: rgba(34,197,94,0.12); color: var(--green-text); border-color: rgba(34,197,94,0.3);
-}
-.model-card-actions .btn-action.btn-primary-action:hover { background: rgba(34,197,94,0.22); }
-.model-card-actions .btn-action.btn-danger { color: var(--red-text); border-color: rgba(239,68,68,0.2); }
-.model-card-actions .btn-action.btn-danger:hover { background: var(--red-dim); }
-.model-card-actions .btn-action.btn-download { color: var(--accent); border-color: rgba(59,130,246,0.3); background: var(--accent-glow); }
-.model-card-actions .btn-action.btn-download:hover { background: rgba(59,130,246,0.22); }
 
 /* ---- Composite Health Badge ----
    Shares the ph-tag visual language (uppercase, bordered, compact) used by
@@ -5209,11 +4988,6 @@ textarea.pool-code-input { min-height: 4.5em; }
   background: rgba(239,68,68,0.12);
   border: 1px solid rgba(239,68,68,0.35);
 }
-.provider-health-bar .ph-overflow {
-  padding: 6px 12px; font-size: var(--fs-sm); color: var(--text-muted);
-  cursor: pointer;
-}
-.provider-health-bar .ph-overflow:hover { color: var(--text-primary); background: var(--bg-hover); }
 
 /* ---- Peer Table ---- */
 .peer-table { width: 100%; border-collapse: separate; border-spacing: 0; font-size: var(--fs-sm); }
@@ -5236,12 +5010,6 @@ textarea.pool-code-input { min-height: 4.5em; }
 .peer-table .peer-name-cell .status-dot { flex-shrink: 0; }
 .peer-table .peer-name-cell .peer-nick { font-weight: 600; overflow: hidden; text-overflow: ellipsis; }
 .peer-table .peer-id-sub { font-size: var(--fs-2xs); color: var(--text-muted); font-family: var(--font-mono); }
-.peer-table .peer-latency-spark {
-  display: inline-flex; align-items: flex-end; gap: 1px; height: 14px; vertical-align: middle; margin-left: 4px;
-}
-.peer-table .peer-latency-spark .spark-bar {
-  width: 2px; background: var(--accent); opacity: 0.5; border-radius: 1px 1px 0 0;
-}
 
 /* ---- Cloud Provider Collapsed Mode ---- */
 .cloud-card-collapsed .cloud-card-controls,
@@ -5284,14 +5052,12 @@ textarea.pool-code-input { min-height: 4.5em; }
 /* .model-card-shards and .model-card-footer are direct children of the card
    grid and must span all 3 columns. .model-card-shards is itself a subgrid
    so .model-card-expanded inside it can inherit the column tracks. */
-.model-card .model-card-shards,
-.model-card .model-card-footer {
+.model-card .model-card-shards {
   display: grid;
   grid-template-columns: subgrid;
   grid-column: 1 / -1;
 }
-.model-card .model-card-shards > *,
-.model-card .model-card-footer > * { grid-column: 1 / -1; }
+.model-card .model-card-shards > * { grid-column: 1 / -1; }
 
 /* Expanded content grid inherits the card's 3-column tracks via subgrid. */
 /* ONE column, summary first. It was two: five stacked boxes on the left and
@@ -5332,7 +5098,6 @@ textarea.pool-code-input { min-height: 4.5em; }
   animation: none;
   background: transparent;
 }
-
 
 /* The health sentence: what the state means for the reader. */
 .mce-summary .mce-say {
@@ -5424,17 +5189,6 @@ textarea.pool-code-input { min-height: 4.5em; }
   align-items: center;
   gap: 4px;
   min-width: 0;
-}
-.model-card-expanded .mce-summary .mce-spec .mce-info-pill {
-  display: inline-block;
-  padding: 1px 6px;
-  border-radius: var(--radius-pill, 9999px);
-  background: var(--bg-primary);
-  border: 1px solid var(--border);
-  font-family: var(--font-mono, monospace);
-  font-size: var(--fs-2xs);
-  color: var(--text-primary);
-  letter-spacing: 0.03em;
 }
 .model-card-expanded .mce-summary .mce-spec .model-card-detail-badges {
   display: inline-flex;
@@ -5938,13 +5692,6 @@ textarea.pool-code-input { min-height: 4.5em; }
   color: var(--text-muted);
   margin-bottom: 2px;
 }
-.shard-row-expanded-panel .srep-hash {
-  font-family: var(--font-mono, monospace);
-  font-size: var(--fs-2xs);
-  color: var(--text-muted);
-  user-select: all;
-  word-break: break-all;
-}
 .shard-row-expanded-panel .srep-holders {
   display: flex;
   flex-wrap: wrap;
@@ -6100,14 +5847,6 @@ textarea.pool-code-input { min-height: 4.5em; }
   font-size: var(--fs-2xs);
   white-space: nowrap;
   vertical-align: middle;
-}
-.shard-matrix tbody th .srm-peer-swatch {
-  display: inline-block;
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  margin-right: 5px;
-  vertical-align: baseline;
 }
 .shard-matrix tbody th.you {
   color: var(--text-primary);
