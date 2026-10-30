@@ -5960,6 +5960,22 @@ near-tie flips (the fixed-3 arms matched each other byte for byte, the fixed-5 a
 across). Not a defect — replies are judged against llama.cpp, never by bytes — but an A/B across
 widths compares partly different replies; compare per-prompt only where the texts match.
 
+**Eight prompts, three ways (2026-10-30, `~/swarmllm-70b/ab70p8.out`, arms f3 ch f5 f5 ch f3, 01:37-03:03Z, binary
+`swarmllm-375b` = main at `74b36e30`, route pinned as above, a warm-up ask then 8 × 96 tokens, 0 driver events).**
+Decode s (total less first token) summed over the eight replies, both runs of each arm:
+
+| arm | run 1 | run 2 | s a token |
+|---|---|---|---|
+| fixed 3 | 354.6 | 353.3 | 0.461 |
+| chosen (the default) | 328.0 | 329.6 | 0.428 |
+| fixed 5 | 332.6 | 326.8 | 0.429 |
+
+The choice is 7.1% faster than a fixed 3 and level with a fixed 5 on this pair, with runs of an arm
+within 1-2%; per prompt it was never the slowest of the three where the texts matched (prompts 4 and 5,
+identical text in all six arms: 49.0 / 46.9 against 52.6 / 50.4 and 23.2 / 21.6 against 26.2 / 26.5). It
+went wide on 0 chunks in the fixed arms and on 5-62 a reply in its own. It stays the default: where five
+pays it matches five, and the simulation's other setups (above) are where a fixed 5 loses.
+
 ## A peer that fails a model on every request is left out of its plans for a while (2026-10-02)
 
 **What it replaced.** Field report (2026-10-01, v0.3.218): peer `bf7b3263`, a

@@ -1638,7 +1638,7 @@ experts kept in RAM.
    round's average (~65-135 ms). Revisit if a check's per-position cost falls.
 
 #### #367 — A long prompt's snapshot copy costs 0.15-2.1 s where its memory traffic is ~0.1 s, and the next request waits for it
-`P2` · perf-local · **NARROWED** — 2026-10-29 · evidence: `docs/invariants/inference.md` § "One prefix-cache snapshot is sized by bytes" (the deferred-copy and room-first paragraphs)
+`P2` · perf-local · **NARROWED** — 2026-10-30 · evidence: `docs/invariants/inference.md` § "One prefix-cache snapshot is sized by bytes" (the deferred-copy and room-first paragraphs)
 
 **Found 2026-10-29: the cost is first-touching fresh pages, not the copy.** With mimalloc v3 (what
 the workers link), 569 MB copied into held memory took 43 ms; into fresh memory 255 ms with memory
@@ -1647,14 +1647,17 @@ faults), 409-461 ms with huge pages off. **Done:** both inserts make room BEFORE
 (`PrefixCache::make_room`, llama.cpp's `server_prompt_cache::alloc` order) — the entries the
 snapshot replaces, then the least recently hit over the caps — so the copy lands in memory just let
 go of (a turn-by-turn model: 171-274 → 81-125 ms a save). A/B `SWARMLLM_SNAPSHOT_ROOM=after-copy`.
-**Left:** (a) the REAL worker's gain is unmeasured — re-run `ab7.sh`'s first-token arms with the
-A/B, reading `copy_ms` and `evicted_before_copy` (the 4th unique 569 MB prompt is the first to
-evict under the 2,048 MB cap); (b) the next turn's live cache is allocated into memory mimalloc v3
-gave back 1 s after it was freed (`purge_delay` 1000 ms) — in the model `MIMALLOC_PURGE_DELAY=30000`
-took that restore from ~900 faults to 0; the workers inherit the daemon's environment, so it A/Bs
-with no code (weigh what a longer delay costs `machine_memory`'s readings first); (c)
-`model_worker::host_ram_positions` sizes the room counting the entry the snapshot will replace as
-held, so a tight host budget evicts another conversation's prompt or cuts this one first.
+**Measured in the real worker 2026-10-30** (`~/swarmllm-gate/deep/cg/ab367.sh`, one binary = main at
+`74b36e30`, arms room/after/after/room/purge/purge, Windows up 44.2 h, 0 driver events): a save that
+made room first copied in **100-258 ms** (median ~140) against **457-1,682 ms** (median ~600) copying
+first; a growing conversation's next turn started in 1.50-1.93 s against 1.64-3.32 s. (b) is
+**closed, not adopted**: `MIMALLOC_PURGE_DELAY=30000` on top added nothing (saves 100-241 ms, turns
+1.53-1.83 s) — the copy already lands in memory just let go of.
+**Left:** (c) `model_worker::host_ram_positions` sizes the room counting the entry the snapshot will
+replace as held, so a tight host budget evicts another conversation's prompt or cuts this one first;
+(d) unexplained: 5 of the 30 unique 1,800-token prompts' first tokens took 10.1-12.1 s against
+4.0-5.7 s, in arms of BOTH orders and with the purge delay — not the copy (≤ 0.7 s); read the
+`DIAG` timings of a slow one before guessing.
 
 The same 1,800-token prompt's snapshot (Qwen2.5-14B Q4_K_M, 15 of 48 on the card: 569 MB, 486 of it
 the processor layers' f32 cache, all kept in host RAM under WSL2) was copied in 155-680 ms in one pair

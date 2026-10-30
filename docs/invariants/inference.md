@@ -3676,10 +3676,14 @@ agent's conversation (66 f32 tensors of the 14B's 33 processor layers, each turn
 positions longer, 3 s between turns) a save took 171-274 ms beside the previous snapshot and
 81-125 ms once it was let go. Under a FULL page cache that model was mixed (81-676 ms), because
 the held snapshot's own pages had been swapped out by then (gotcha #993: faking the pressure
-swapped the live node). What is still open is in FUTURE_WORK #367: the next turn's live cache is
-allocated into memory mimalloc v3 returned to the system 1 s after it was freed (`purge_delay`,
-1000 ms; `MIMALLOC_PURGE_DELAY=30000` made that restore fault nothing in the model), and the
-real worker's gain is unmeasured. A/B `SWARMLLM_SNAPSHOT_ROOM=after-copy`. Tests (red with the
+swapped the live node). **In the real worker** (2026-10-30, `~/swarmllm-gate/deep/cg/ab367.sh`: the
+14B Q4_K_M with 15 of 48 layers on the card, 562 MB snapshots kept in host RAM, six unique
+1,800-token prompts 4 s apart then a six-turn conversation 0.5 s apart, one binary, arms
+room/after/after/room/purge/purge) a save that made room first took 100-258 ms (median ~140) and
+one copied first 457-1,682 ms (median ~600) — the first three saves of every arm, with nothing yet
+to let go, 420-688 ms either way; the conversation's next turn started in 1.50-1.93 s against
+1.64-3.32 s. `MIMALLOC_PURGE_DELAY=30000` on top changed nothing measurable (100-241 ms, 1.53-1.83 s),
+so the allocator keeps its default. A/B `SWARMLLM_SNAPSHOT_ROOM=after-copy`. Tests (red with the
 room made after the copy): `a_replaced_snapshot_is_let_go_before_the_copy`,
 `a_full_cache_evicts_before_the_copy`, `a_replaced_split_prompt_is_let_go_before_the_copy`.
 
