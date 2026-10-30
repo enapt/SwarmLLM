@@ -2,6 +2,136 @@
 
 ## [Unreleased]
 
+## [0.3.262-alpha] — 2026-10-30
+
+**A big model split between two computers far apart now writes about 7% faster, because the stream
+of guesses picks its own chunk size.** When a model is split across computers, your computer has a
+small model guess the next words and the split checks them in chunks, several chunks on their way at
+once. Chunks were always 3 guesses. Each chunk is now sent with 3 or 5 guesses, whichever gets more
+words out per millisecond at how well this reply's guesses are being kept: a wider check pays when
+the small model is guessing well, and costs the far computer more when it is not. The price of each
+width is read from the far computer's own time per chunk (taken from the gap between two answers
+when the later chunk was already waiting there, so the long trip cancels out) rather than from whole
+round trips, which were too noisy to choose by. It keeps trying the width it did not pick now and
+then so its figure stays current. Measured on eight 96-token replies of Llama 3.3 70B split between
+this laptop and an RTX 3060 in Australia (about 420 ms there and back), six arms in mirrored order
+in one build: choosing the width took 328.0 and 329.6 s, against 354.6 and 353.3 s for a fixed 3 and
+332.6 and 326.8 s for a fixed 5. On a home network, where the far computer keeps up, nothing
+changes. `SWARMLLM_STREAM_WIDTH=fixed` keeps 3 (#374, #375).
+
+**A split's small guessing model is now the small one even when the computer holds a bigger one, so
+a 70B split writes about 1.17 times as fast.** The node picked the largest small model of the same
+family it held within a fraction of the big model's size, and a quarter of a 70B is a 10 GB model. A
+computer holding Llama 3.1 8B chose it for Llama 3.3 70B, and with the graphics card full of the
+70B's own layers the 8B ran on the processor at 136 ms a guess, against 60 ms for the 3B; its
+guesses were kept no more often. A guessing model that would run in system memory may now read at
+most 2 GiB a guess; one that fits on the card is chosen as before. Measured with this laptop and an
+RTX 3060 in Australia, three 96-token replies, six arms alternating in one build: 160-161 s with the
+8B against 134-142 s with the 3B. `SWARMLLM_PROCESSOR_DRAFTER_READS=any` turns it off (#373).
+
+**A computer whose storage is full now makes room for the parts of large models too few computers
+hold.** It used to give up a spare copy only for a part that no computer held, so copies of small
+models that any one computer can run filled it while parts only a split can use went unhosted: an
+RTX 4050 laptop held 14 models in 96 parts and no part of the Llama 3.3 70B its region was missing.
+It also stopped before planning its own part of a nearby chain, so the chain kept naming it until
+its lease ran out. Each part now says why it may ask for room, strongest first: a part no computer
+holds; this computer's part of a planned chain or of a model it carries; a part of a requested model
+that one computer holds, or too few hold where only a split can run it. The prune pass gives back a
+spare copy for it, never below two other holders, for a scarce part only from a copy with three more
+holders than it has (so full computers cannot trade in circles), never a copy of the wanted part's
+own model, and never a loaded or nearly-complete model (#371).
+
+**Saving a long conversation's memory for next time is quicker: room is made before the copy, not
+after.** A long prompt's saved snapshot (569 MB for a 14B's 1,800 tokens) used to be copied first
+and the entries it replaces dropped afterwards, so the copy landed in fresh memory, which can be
+slow when the system's file cache is full. Both inserts now make room first; the cache ends up
+holding exactly the same entries. Measured in the real worker with a 14B partly on the card: a save
+that let go of an older one first copied in 100-258 ms against 457-1,682 ms in the old order, and a
+conversation's next turn started in 1.50-1.93 s against 1.64-3.32 s.
+`SWARMLLM_SNAPSHOT_ROOM=after-copy` restores the old order (#367).
+
+**Your computer stops sending a large model through a machine that keeps declining to lead it.**
+Seen on a 70B: the planner chose a chain of three far machines because it priced it as led by the
+first, which held the whole model and advertised room for it. That machine declined every request
+within a second, since its own memory check refused the load (about 36.8 GB needed, 32.6 GB
+allowed), and this computer then drove the chain itself at 0.95-1.6 tokens a second with a 49-56 s
+first word, where the route through this computer runs at about 2. A machine that declines to lead a
+model's split is now not asked to lead it, nor priced as leading it, for 5 minutes, doubling up to
+an hour while it keeps declining; one split it leads forgets the declines. Only the machine's own
+refusal counts (its memory, or not holding the model's first layers), never an error about the
+request itself. `SWARMLLM_DECLINED_LEADS=0` turns it off. The other half: a machine planning to retire an idle copy
+of a model to make room counted all the memory that copy gives back, while its loader counts only
+70% of the larger free figure, so it advertised layers its own loader then refused. It now counts it
+as the load will (`SWARMLLM_RECLAIM_HEADROOM=whole` restores the old count). That half takes effect
+once the leading machine updates (#372).
+
+**Splits are priced closer to what they really take, so a good split is no longer passed over.**
+Three fixes. (1) When this computer's share of a model was cut into back-to-back pieces, each piece
+was priced as if it had the whole graphics card to itself: a 14B with 23 of its 48 layers on the
+card read as 45 layers on it, 17.5 s against 29.5 s for the same layers priced whole, which made
+running everything here look cheaper than any split in between. The pieces are now priced as the one
+run the card loads. (2) A computer not yet timed was charged its network round trip twice a step, as
+though the figure were one way; it is the whole trip and is now charged once, as a timed computer, a
+chain another computer leads, and Petals do. It mattered most for large models, whose guessing
+replies never time the computers they run on: Llama 3.3 70B split with an RTX 3060 in Australia
+answered each check in 1,145 ms at best and was priced 800 ms of network a step on top. (3) The two
+figures that price a split (how long a model's replies run, and how many words a round of its splits
+yields) were kept only in memory and trusted after four, so after every restart or auto-update the
+next four replies were priced at 64 words and the next four splits at one round a word; Llama 3.3
+70B's first three splits after v0.3.261's update were priced at 1.7-2.4 times the time they took.
+Both are now kept in the node's database beside its model-load rate and read back at start. Only
+counts are stored, per model, never anything a reply said (#3).
+
+**A reply you ask for as JSON now comes back as JSON, on a model your computer runs by itself.**
+When an app sends `response_format` (or `text.format` on `/v1/responses`), the model used to be only
+asked, in its prompt, to answer in JSON, and a small model would often answer in prose, wrap the
+JSON in markdown, or add keys the app did not expect. Now every word of the reply is held to the
+format as it is written: the reply is valid JSON, and with a JSON schema it has exactly the fields
+and types the schema asks for. A schema marked `strict` that cannot be enforced is refused with an
+error that says why. Checked on four small models of four different families asked "Tell me about
+Paris.": without a format each answered in prose; with a strict schema every reply matched it,
+streamed or not, through both APIs, and with a second request held to a different schema at the same
+time. As with OpenAI, ask for JSON in your prompt as well: a model never told may write its whole
+answer into one long string until the length limit cuts it off. Not yet held on a model split across
+computers or answered by another computer, where the format is still only asked for (#336).
+
+**A tool's result sent to `/v1/responses` as text and pictures is now read instead of refused.**
+OpenAI's Responses API lets a tool's output be a list of text, image and file parts as well as a
+plain string; this server took only the string, so a tool that returns a screenshot got a 400 error.
+The parts now reach the tool turn (a picture included), and the bridge to Anthropic's API sends them
+as the tool result's text and image blocks. An unknown part kind is still refused by name. A tool
+result's picture forwarded to an OpenAI chat provider stays the text `[image]`, because OpenAI's
+chat API refuses images in a tool turn (#312).
+
+**An idle computer repeats its unchanged status and parts list less and less often, so it uploads
+less.** An idle node's upload had doubled since v0.3.241 (2.4 to 4.9 KB/s on a field re-read),
+nearly all of it peers' ~12 KB capability and parts-list messages, repeated unchanged every 5
+minutes and forwarded across the mesh. Each repeat now waits twice as long as the last while nothing
+has changed (5, 10, 20, then 40 minutes), and any change goes out at once and resets the wait. A
+newcomer is still caught up directly when it connects, so nobody waits on a repeat to learn what a
+peer holds. The parts list never repeats sooner than 10 health rounds, so its longest gap stays a
+third of the 2.5 hours after which a holder record goes stale. About 1.9 KB/s less forwarded per
+node is estimated once the swarm updates; the field will be re-read after the release.
+`SWARMLLM_QUIET_REPEAT=fixed` restores the fixed 5 minutes (#91).
+
+**On a computer set to tell you about updates ("notify"), Download & Apply now downloads the
+update.** That setting promises nothing is downloaded until you ask, and the button is the ask — but
+it went through the same rule as an ordinary check, so it checked, downloaded nothing and fell
+quiet, every time. The button also now says when the check or the install was refused, and the
+banner goes away if there turns out to be nothing to install. "off" stays off.
+
+**A saved prompt fetched from another computer is checked more strictly.** Each layer's key shape
+must now account for exactly the values sent, as the value shape already did; a shape whose
+dimensions multiply past the machine's integer range used to slip past that check. Found by a code
+sweep, not seen in the field.
+
+**For people who tune speed: `examples/drafter_ranks.py` can now rank guessing models against any
+target's own replies, offline.** It renders the prompt with the model file's own chat template,
+reads Llama vocabularies as well as Qwen's, replays how many words a check of 1 to 8 guesses would
+keep, and refuses a probe whose rows are flat. On Llama 3.3 70B's replies (747 positions) the Llama
+3.2 1B, 3.2 3B and 3.1 8B match its first choice 81%, 85% and 86% of the time, 2.98, 3.07 and 3.12
+words a check at three guesses, so a larger guessing model is not what speeds the 70B up.
+
 ## [0.3.261-alpha] — 2026-10-29
 
 **"Start and finish on this computer" now keeps a small guessing model's guesses flowing — about
