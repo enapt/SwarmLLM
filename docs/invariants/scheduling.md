@@ -5907,6 +5907,59 @@ Tests: `a_chunk_is_as_wide_as_it_pays`, `the_stream_learns_a_rows_price_from_chu
 (`dsd_stream`; red under `SWARMLLM_STREAM_WIDTH=fixed`), `a_rows_price_is_measured_only_across_two_widths_and_then_forgotten`
 (`dsd_controller`). The reply's line carries `wide_guesses`, `chunks_wide` and `check_slope_measured`.
 
+**Priced by the far end's own time, read from the gaps between answers (2026-10-30, #375).** On the
+rig the choice above was made at random: the fit of a row's price from chunks sent ALONE read 208,
+3.7, 55 and 0 ms a row after four replies (truth ~41), so the lighthouse reply (α 0.70) went wide on
+29-35 of ~45 chunks and ran 6% slower than a fixed 3 — the chooser was 3.3% faster in all
+(`~/swarmllm-70b/ab70w374.out`, six arms ABBAAB). Per-chunk timing (debug line "a streamed check
+answered", three arms: fixed 3, fixed 5, the chooser; `examples/stream_chunk_noise.py`) showed why:
+
+| | fixed 3 | fixed 5 |
+|---|---|---|
+| a chunk sent alone, start to answer: p25-p75 (min-max) | 1318-1511 (1118-2108) ms | 1475-1599 (1419-2160) ms |
+| gap between answers where the later chunk waited at the far end: p25-p75 | 752-767 ms (48 of 69 in 750-800) | 837-865 ms |
+| answers that sat waiting for the loop | 0 ms on 130 chunks | 1.2 s over 96 |
+
+Two rows cost the far end ~82 ms (41 a row — the simulation's fitted 40), buried in lone checks'
+spread of ~190 ms; the gaps are twenty times steadier, because the round trip and this node's work
+cancel out of a difference of two arrivals. That is packet-pair dispersion (Keshav, SIGCOMM 1991):
+two packets queued back to back leave the bottleneck one service time apart. Its known trap — on a
+loaded path the true time can be a LESSER mode of the gaps (Dovrolis, Ramanathan, Moore, INFOCOM
+2001) — is why a median of recent gaps, never one, and why a gap counts only when the later chunk
+left here a round trip before the earlier answer came back (the far end busy throughout). The chooser
+arm, mixing widths, read the same 754 / 841 ms.
+
+What was NOT the cause, checked first: the loop takes answers only between chunks it builds, so an
+answer was timed when read, not when it arrived — fixed (`stamp_on_arrival`, each wait its own
+task, aborted when dropped), but answers waited 0-1.2 s per run: the far end is the bottleneck, so
+the loop is idle when they land (the simulation's "interrupt" lever was ~0 for the same reason).
+
+Rule: each width's check = this node's layers (timed) + the round trip (`CheckCost::floor_ms`) +
+the far end's time (`dsd_controller::FarPace`, a median of ≥ 3 gaps, remembered with the rest per model and
+machines); a width without gaps is tried on chunks that queue, every other one; every 16th chunk
+that queues goes the width not chosen; where no chunk ever waits at the far end (it keeps up), the
+lone-check fit still prices both. At the rig's times the switch is near α 0.78. Tests:
+`the_far_ends_time_is_read_from_answers_that_waited_there`,
+`a_chunk_is_as_wide_as_the_far_ends_time_pays`, `an_answer_is_timed_when_it_arrives_not_when_it_is_read`,
+`dropping_a_timed_wait_withdraws_it`.
+
+A/B of this choice against a fixed 3 (`~/swarmllm-70b/ab70w375.out`, six arms ABBAAB, 00:34-01:28Z, the
+far end slowing through it — its gaps read 833-882 ms at 3 and 881-1079 at 5, against 754-761 / 841-843
+an hour before): fixed 144.4 / 155.8 / 152.9 s, chosen 144.6 / 149.4 / 146.4 — 2.8% faster in all;
+compost −20%, tea −2%, lighthouse +6%. The lighthouse reply the choice writes is the fixed 5's text
+(guessed at 0.70, against the fixed 3's at 0.73), and each arm restarts the node and explores the
+wide width again — once per machines in use, remembered after. **Ruled out the same night**: an
+acceptance estimate by position (each position's refusal rate given the ones before were kept, so
+runs of easy guesses count) did WORSE than the recent α in the simulation on every setup (+4.0%
+against +6.0% on the 70B's fitted costs), and the α choice with true costs is at or above a fixed 5
+everywhere (−0.5% on a LAN card, where a fixed 5 is −16%). What decides is the price, not the
+acceptance model.
+
+⚠ The reply's TEXT depends on the width: a check of 5 rows rounds differently from one of 3, and a
+near-tie flips (the fixed-3 arms matched each other byte for byte, the fixed-5 arms each other, not
+across). Not a defect — replies are judged against llama.cpp, never by bytes — but an A/B across
+widths compares partly different replies; compare per-prompt only where the texts match.
+
 ## A peer that fails a model on every request is left out of its plans for a while (2026-10-02)
 
 **What it replaced.** Field report (2026-10-01, v0.3.218): peer `bf7b3263`, a

@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #375**). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #376**). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -3756,6 +3756,27 @@ archive under the named heading. Reopen one only with the evidence its line name
 Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 19-28 were
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
+
+**Closed 2026-10-30, ships in the next release** (#375)
+- #375 — **The stream's choice of width was made from a price it could not measure.** #374 priced a
+  chunk's two extra guesses from whole checks sent alone; on the 70B split their spread (~190 ms)
+  buried the two rows' ~82 ms, and the fitted price read 208, 3.7, 55 and 0 ms a row after four
+  replies — the width was chosen at random (A/B: 3.3% faster than a fixed 3 in all, a reply guessed
+  at 0.70 going wide on 29-35 of ~45 chunks). Per-chunk timing showed the far end's own time is the
+  gap between two answers where the later chunk was already waiting there — 752-767 ms at 3, 837-865
+  at 5, twenty times steadier (packet-pair dispersion). `dsd_controller::FarPace` now holds it per
+  width, remembered per model and machines; `StreamWidth` prices each width's check as this node's
+  layers + the round trip + that time, tries a width without gaps on every other chunk that queues,
+  sends every 16th the width not chosen, and keeps the lone-check fit only where no chunk waits at
+  the far end. Each chunk's wait is its own task (`stamp_on_arrival`), so a check is timed when its
+  answer arrives. A/B against a fixed 3, six arms: 2.8% faster in all (compost −20%, tea −2%,
+  lighthouse +6% — a different, harder reply at the wider width). A position-by-position acceptance
+  model was simulated and did worse than the recent α everywhere. Tests
+  `the_far_ends_time_is_read_from_answers_that_waited_there`,
+  `a_chunk_is_as_wide_as_the_far_ends_time_pays`, `an_answer_is_timed_when_it_arrives_not_when_it_is_read`,
+  `dropping_a_timed_wait_withdraws_it` (each red with its half of the fix removed). Evidence:
+  `docs/invariants/scheduling.md` § "A chunk is as wide as it pays", the #375 paragraphs; per-chunk
+  analysis `examples/stream_chunk_noise.py`.
 
 **Closed 2026-10-30, ships in the next release** (#374)
 - #374 — **The continuous stream chooses each chunk's width instead of always sending 3 guesses.**

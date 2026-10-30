@@ -63,7 +63,7 @@ use futures::FutureExt;
 use crate::daemon::state::{ExpectedStep, PendingLayerResult, SharedState, WaiterKey};
 use crate::error::SwarmError;
 use crate::inference::coupled_noise::CoupledNoise;
-use crate::inference::dsd_controller::{AcceptanceEstimate, CheckCost, RecentMedian};
+use crate::inference::dsd_controller::{AcceptanceEstimate, CheckCost, FarPace, RecentMedian};
 use crate::inference::router::StreamingTokenTx;
 use crate::types::inference::stream_seq;
 use crate::types::{ChainHop, LayerResult, NetworkCommand, NetworkFinishReason, PipelineSegment};
@@ -158,17 +158,27 @@ fn width_is_fixed() -> bool {
 /// −8% where the far end's rows are dear, and this choice at −0.5% to +8%
 /// everywhere. → `docs/invariants/scheduling.md` § "A chunk is as wide as it pays".
 ///
-/// What it knows, all measured on this node: the check's cost at each width
-/// (`CheckCost`, fitted from chunks sent alone, which nothing queued ahead of
-/// — the round trip, the far end and this node's own layers), this node's own
-/// layers' share of it (timed per width here), the drafter's cost a guess, the
-/// round trip ([`CheckCost::floor_ms`]) and the reply's RECENT acceptance:
-/// kept guesses come in runs, so a reply's easy stretch chooses differently
-/// from its hard one. The fit learns a row's price only from checks of two
-/// widths, so until it has (`CheckCost::slope_is_measured`), chunks sent alone
-/// alternate between them and the rest stay narrow; it is remembered for the
-/// next request on the same machines, and decays, so a width left unsent is
-/// tried again after ~10 lone chunks.
+/// What it knows, all measured on this node: the far end's own time for a
+/// chunk at each width ([`FarPace`], below), this node's own layers' time
+/// (timed per width here), the round trip ([`CheckCost::floor_ms`]), the
+/// drafter's cost a guess, and the reply's RECENT acceptance: kept guesses come
+/// in runs, so a reply's easy stretch chooses differently from its hard one.
+///
+/// The far end's time is the gap between two answers where the later chunk
+/// was already waiting there when the earlier one finished — the round trip
+/// and this node's work cancel out of it (packet-pair dispersion: Keshav,
+/// SIGCOMM 1991; on a loaded path the true time can be a lesser mode of the
+/// gaps, Dovrolis et al., INFOCOM 2001, so a median of recent ones). On the
+/// 70B split (2026-10-30, #375) those gaps read 752-767 ms for half of 69
+/// chunks of 3, where whole checks sent alone spread 1318-1511 ms and fitted a
+/// row's price at 208, 3.7 and 55 ms after three replies — two rows, ~100 ms,
+/// buried in noise twenty times larger. A width with no gaps yet is tried on
+/// chunks that queue (every other one) until it has [`FAR_PACE_SAMPLES`];
+/// both are remembered for the next request on the same machines, and every
+/// [`PROBE_EVERY`]th chunk that queues goes the other way to keep the width
+/// not chosen current. Where chunks never queue at the far end (it keeps up —
+/// a LAN, a card), the check's fit from chunks sent alone (`CheckCost`)
+/// prices both widths, alternating lone chunks until it has two.
 ///
 /// Research: PipeInfer (arXiv 2407.11798) keeps its runs small and fixed;
 /// SmartSpec chooses γ by goodput — tokens over a fitted step cost — which
@@ -187,9 +197,22 @@ struct StreamWidth {
     near_ms: [RecentMedian; 2],
     /// The width of the last chunk sent alone while the fit had one width.
     last_alone_wide: Option<bool>,
+    /// The width of the last chunk that queued while one width had no gaps.
+    last_explored_wide: Option<bool>,
+    /// Chunks that queued and were sized by [`FarPace`], for [`PROBE_EVERY`].
+    paced: u32,
+    /// The turn of the last answer taken and when it arrived.
+    last_answer: Option<(u32, std::time::Instant)>,
     /// Chunks sent wide, for the reply's line.
     sent_wide: u32,
 }
+
+/// Gaps a width needs before [`FarPace`] prices it.
+const FAR_PACE_SAMPLES: usize = 3;
+
+/// Every this many chunks priced by [`FarPace`] that queue, one goes the
+/// width not chosen, so a remembered figure does not go stale.
+const PROBE_EVERY: u32 = 16;
 
 impl StreamWidth {
     fn new() -> Self {
@@ -208,6 +231,9 @@ impl StreamWidth {
             acceptance: AcceptanceEstimate::recent(),
             near_ms: [RecentMedian::default(), RecentMedian::default()],
             last_alone_wide: None,
+            last_explored_wide: None,
+            paced: 0,
+            last_answer: None,
             sent_wide: 0,
         }
     }
@@ -218,10 +244,11 @@ impl StreamWidth {
         &mut self,
         alone: bool,
         check: &CheckCost,
+        far: &FarPace,
         draft_ms_each: Option<f64>,
         window: usize,
     ) -> u32 {
-        if self.goes_wide(alone, check, draft_ms_each, window) {
+        if self.goes_wide(alone, check, far, draft_ms_each, window) {
             self.sent_wide += 1;
             self.wide
         } else {
@@ -233,35 +260,64 @@ impl StreamWidth {
         &mut self,
         alone: bool,
         check: &CheckCost,
+        far: &FarPace,
         draft_ms_each: Option<f64>,
         window: usize,
     ) -> bool {
         if self.fixed || self.wide <= self.narrow {
             return false;
         }
-        if !check.slope_is_measured() {
-            if !alone {
-                return false;
-            }
-            let wide = self.last_alone_wide != Some(true);
-            self.last_alone_wide = Some(wide);
-            return wide;
-        }
-        let (Some(draft_ms_each), Some(narrow_check), Some(wide_check)) = (
-            draft_ms_each,
-            check.predict(self.narrow),
-            check.predict(self.wide),
-        ) else {
-            return false;
-        };
         let round_trip = check.floor_ms().unwrap_or(0.0);
         // A width not yet timed here reads as the other one: this node's own
         // layers cost nearly the same for two more rows.
-        let near = |i: usize| {
-            self.near_ms[i]
-                .median()
-                .or_else(|| self.near_ms[1 - i].median())
-                .unwrap_or(0.0)
+        let near_ms = [self.near_ms[0].median(), self.near_ms[1].median()];
+        let near = |i: usize| near_ms[i].or(near_ms[1 - i]).unwrap_or(0.0);
+        let paced = [
+            far.narrow.len() >= FAR_PACE_SAMPLES,
+            far.wide.len() >= FAR_PACE_SAMPLES,
+        ];
+        let mut probe = false;
+        let checks = match paced {
+            // The check at each width: this node's layers, the trip, and the
+            // far end's own time.
+            [true, true] => {
+                if !alone {
+                    self.paced += 1;
+                    probe = self.paced.is_multiple_of(PROBE_EVERY);
+                }
+                far.narrow
+                    .median()
+                    .zip(far.wide.median())
+                    .map(|(n, w)| (near(0) + round_trip + n, near(1) + round_trip + w))
+            }
+            // Chunks wait at the far end, timed at one width only: the other
+            // is tried on chunks that queue, every other one, until it has
+            // its gaps. A chunk sent alone yields none.
+            [true, false] | [false, true] => {
+                if alone {
+                    return paced[1];
+                }
+                let wide = self.last_explored_wide.map_or(!paced[1], |w| !w);
+                self.last_explored_wide = Some(wide);
+                return wide;
+            }
+            // No chunk has waited there: the check's fit from chunks sent
+            // alone, which learns a row's price from two widths.
+            [false, false] => {
+                if !check.slope_is_measured() {
+                    if !alone {
+                        return false;
+                    }
+                    let wide = self.last_alone_wide != Some(true);
+                    self.last_alone_wide = Some(wide);
+                    return wide;
+                }
+                check.predict(self.narrow).zip(check.predict(self.wide))
+            }
+        };
+        let (Some(draft_ms_each), Some((narrow_check, wide_check))) = (draft_ms_each, checks)
+        else {
+            return false;
         };
         let alpha = self.acceptance.alpha();
         let rate = |guesses, check_ms, near_ms| {
@@ -275,7 +331,46 @@ impl StreamWidth {
                 window,
             )
         };
-        rate(self.wide, wide_check, near(1)) > rate(self.narrow, narrow_check, near(0))
+        let wide = rate(self.wide, wide_check, near(1)) > rate(self.narrow, narrow_check, near(0));
+        wide != probe
+    }
+
+    /// A chunk's answer arrived. Where the chunk before it in the stream was
+    /// the last answered and this one left here a round trip before that
+    /// answer came back — so it was already waiting at the far end when that
+    /// one finished there — the gap between the two answers is the far end's
+    /// own time for this one ([`FarPace`]).
+    fn note_arrival(
+        &mut self,
+        turn: u32,
+        rows: usize,
+        left: std::time::Instant,
+        arrived: std::time::Instant,
+        round_trip_ms: Option<f64>,
+        far: &mut FarPace,
+    ) {
+        let before = self.last_answer.replace((turn, arrived));
+        let (Some((before_turn, before_arrived)), Some(round_trip_ms)) = (before, round_trip_ms)
+        else {
+            return;
+        };
+        let wide = match u32::try_from(rows) {
+            Ok(r) if r == self.narrow => false,
+            Ok(r) if r == self.wide => true,
+            _ => return,
+        };
+        let waited_there = turn == before_turn.wrapping_add(1)
+            && left + std::time::Duration::from_secs_f64(round_trip_ms.max(0.0) / 1000.0)
+                < before_arrived;
+        if waited_there {
+            far.record(
+                wide,
+                arrived
+                    .saturating_duration_since(before_arrived)
+                    .as_secs_f64()
+                    * 1000.0,
+            );
+        }
     }
 
     /// This node's own layers took `ms` over a chunk of `guesses`.
@@ -532,6 +627,9 @@ pub(super) struct StreamReply<'a> {
     pub acceptance: &'a mut AcceptanceEstimate,
     pub check: &'a mut CheckCost,
     pub draft_cost: &'a mut RecentMedian,
+    /// The far end's time for a chunk at each width, remembered across
+    /// requests on the same machines.
+    pub far_pace: &'a mut FarPace,
     pub proposed: &'a mut u32,
     pub accepted: &'a mut u32,
 }
@@ -569,10 +667,53 @@ struct Sent {
     /// of what a check costs (`CheckCost`).
     alone: bool,
     started: std::time::Instant,
+    /// When it was sent on, this node's layers done.
+    left: std::time::Instant,
 }
 
-type Answer = (Sent, Result<LayerResult, SwarmError>);
+/// A chunk, its check's result, and the moment that result arrived
+/// ([`stamp_on_arrival`]).
+type Answer = (Sent, Result<LayerResult, SwarmError>, std::time::Instant);
 type Waiting = Pin<Box<dyn Future<Output = Answer> + Send>>;
+
+/// Run `wait` as its own task and hand back its output with the moment it
+/// finished. Dropping the returned future aborts the task, so a restart that
+/// drops a chunk's wait still withdraws it ([`StreamWaiter`]).
+///
+/// A future only runs when it is polled, and the stream polls its waits only
+/// between the chunks it builds (`StreamRun::run_with`). A wait polled there
+/// read its answer's arrival as late as the end of the build it landed in, up
+/// to a whole chunk's drafting and near forward late, and every check time
+/// recorded carried that. On the 70B split (2026-10-30) the fit of a row's price
+/// from those times read 208, 3.7 and 55 ms after three replies, where the
+/// row costs ~40-55 ms, and a chunk's width chosen from it was chosen at random
+/// (#375).
+fn stamp_on_arrival<T: Send + 'static>(
+    wait: impl Future<Output = T> + Send + 'static,
+) -> impl Future<Output = Result<(T, std::time::Instant), tokio::task::JoinError>> + Send {
+    use tracing::Instrument;
+    let task = tokio::spawn(
+        async move {
+            let out = wait.await;
+            (out, std::time::Instant::now())
+        }
+        .in_current_span(),
+    );
+    let withdraw = AbortOnDrop(task.abort_handle());
+    async move {
+        let _withdraw = withdraw;
+        task.await
+    }
+}
+
+/// Aborts the task it guards when dropped.
+struct AbortOnDrop(tokio::task::AbortHandle);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
 
 /// A streamed chunk's wait on its answer, withdrawn when dropped — answered,
 /// abandoned by a restart, or the reply ending — so a restart drops every
@@ -637,11 +778,17 @@ struct StreamRun<'a, 'r> {
     restarts: u32,
     /// Chunks that held the stream ([`Frontier::held_by`]).
     held: u32,
-    /// The least time a chunk took to come back, read as it is taken — the
-    /// unit the stream's rounds are counted in when it ends
-    /// (`split_rounds::round_trips_waited`). Taken in order, a chunk may sit
-    /// behind the one before it; the least is one that did not.
+    /// The least time a chunk took to come back, read as it arrives
+    /// ([`stamp_on_arrival`]) — the unit the stream's rounds are counted in
+    /// when it ends (`split_rounds::round_trips_waited`). Run in order at the
+    /// far end, a chunk may sit behind the one before it; the least is one
+    /// that did not.
     least_answer_ms: Option<f64>,
+    /// How long answers sat arrived before the loop took them — what a miss
+    /// waits behind the chunk being built costs this reply.
+    answers_waited_ms: f64,
+    /// When the stream began — what each chunk's times are logged from.
+    began: std::time::Instant,
     /// The longest conversation every machine of the chain serves for this
     /// model, the drafter here included — `None` where one has not said
     /// ([`StreamRun::positions_served`]).
@@ -697,6 +844,8 @@ impl PipelineExecutor {
             restarts: 0,
             held: 0,
             least_answer_ms: None,
+            answers_waited_ms: 0.0,
+            began: std::time::Instant::now(),
             positions_served: None,
             width: StreamWidth::new(),
         };
@@ -718,6 +867,7 @@ impl PipelineExecutor {
             chunks = run.chunks,
             rounds_waited,
             least_answer_ms = format_args!("{:.0}", run.least_answer_ms.unwrap_or(0.0)),
+            answers_waited_ms = format_args!("{:.0}", run.answers_waited_ms),
             kept_whole = run.kept_whole,
             restarts = run.restarts,
             held = run.held,
@@ -725,6 +875,8 @@ impl PipelineExecutor {
             wide_guesses = run.width.wide,
             chunks_wide = run.width.sent_wide,
             check_slope_measured = run.reply.check.slope_is_measured(),
+            far_narrow_ms = format_args!("{:.0}", run.reply.far_pace.narrow.median().unwrap_or(0.0)),
+            far_wide_ms = format_args!("{:.0}", run.reply.far_pace.wide.median().unwrap_or(0.0)),
             window = chunks_in_flight(),
             "DSD: streamed checks complete"
         );
@@ -839,6 +991,7 @@ impl StreamRun<'_, '_> {
         let width = self.width.next(
             alone,
             self.reply.check,
+            self.reply.far_pace,
             self.reply.draft_cost.median(),
             chunks_in_flight(),
         );
@@ -1023,6 +1176,7 @@ impl StreamRun<'_, '_> {
         {
             return Err(SwarmError::Network("streamed check: send dropped".into()));
         }
+        let left = std::time::Instant::now();
         // The whole run's layers: its tail answers for all of them.
         let num_layers = self
             .shape
@@ -1065,6 +1219,7 @@ impl StreamRun<'_, '_> {
             far_input,
             alone,
             started: checking,
+            left,
         };
         let state = self.state.clone();
         let network_tx = exec.network_tx.clone();
@@ -1072,10 +1227,10 @@ impl StreamRun<'_, '_> {
         let cancel = exec.request.cancel.clone();
         let segment_idx = self.shape.near.len();
         let chained = !self.shape.chain.is_empty();
-        Ok(Box::pin(async move {
+        let wait = stamp_on_arrival(async move {
             let _waiter = waiter;
             let rebuild = move || forward.clone();
-            let result = PipelineExecutor::wait_for_result(
+            PipelineExecutor::wait_for_result(
                 &state,
                 rx,
                 request_id,
@@ -1098,8 +1253,19 @@ impl StreamRun<'_, '_> {
                     }
                 },
             )
-            .await;
-            (sent, result)
+            .await
+        });
+        Ok(Box::pin(async move {
+            let (result, arrived) = wait.await.unwrap_or_else(|e| {
+                // Only a panic ends it so: an abort comes with this future's drop.
+                (
+                    Err(SwarmError::Internal(format!(
+                        "streamed check's wait failed: {e}"
+                    ))),
+                    std::time::Instant::now(),
+                )
+            });
+            (sent, result, arrived)
         }))
     }
 
@@ -1163,7 +1329,8 @@ impl StreamRun<'_, '_> {
 
     /// Emit what a chunk's check kept and decide what the chunks after it
     /// are worth.
-    async fn take_answer(&mut self, (sent, result): Answer) -> Result<Taken, SwarmError> {
+    async fn take_answer(&mut self, (sent, result, arrived): Answer) -> Result<Taken, SwarmError> {
+        let taken = std::time::Instant::now();
         let result = result?;
         if let Some(NetworkFinishReason::Error(msg)) = &result.finish_reason {
             // The class does not survive the wire (gotcha #304).
@@ -1174,6 +1341,29 @@ impl StreamRun<'_, '_> {
             Some(far_input) => self.finish_here(&sent, far_input, result).await?,
             None => result,
         };
+        // The check ran from this node's first layer until its answer arrived,
+        // and on through this node's last leg where the chain finishes here —
+        // never the time the answer sat waiting for the loop to take it.
+        let last_leg_ms = if sent.far_input.is_some() {
+            taken.elapsed().as_secs_f64() * 1000.0
+        } else {
+            0.0
+        };
+        let answered_ms = arrived
+            .saturating_duration_since(sent.started)
+            .as_secs_f64()
+            * 1000.0
+            + last_leg_ms;
+        let waited_ms = taken.saturating_duration_since(arrived).as_secs_f64() * 1000.0;
+        self.answers_waited_ms += waited_ms;
+        self.width.note_arrival(
+            stream_seq::turn(sent.seq),
+            sent.rows,
+            sent.left,
+            arrived,
+            self.reply.check.floor_ms(),
+            self.reply.far_pace,
+        );
         let answer = if !result.spec_logits.is_empty() {
             VerifyReply::Logits(result.spec_logits)
         } else if !result.token_ids.is_empty() {
@@ -1206,7 +1396,19 @@ impl StreamRun<'_, '_> {
                 .record(kept_guesses as u32, guessed as u32);
             self.width.note_answer(kept_guesses as u32, guessed as u32);
         }
-        let answered_ms = sent.started.elapsed().as_secs_f64() * 1000.0;
+        tracing::debug!(
+            request_id = %self.exec.request.id,
+            turn = stream_seq::turn(sent.seq),
+            rows = sent.rows,
+            alone = sent.alone,
+            check_ms = format_args!("{answered_ms:.0}"),
+            waited_ms = format_args!("{waited_ms:.0}"),
+            started_at_ms = sent.started.saturating_duration_since(self.began).as_millis(),
+            arrived_at_ms = arrived.saturating_duration_since(self.began).as_millis(),
+            kept = kept.len() + usize::from(whole),
+            of = guessed,
+            "DSD: a streamed check answered"
+        );
         self.least_answer_ms = Some(
             self.least_answer_ms
                 .map_or(answered_ms, |l| l.min(answered_ms)),
@@ -1476,6 +1678,150 @@ mod tests {
         )
     }
 
+    /// A check's answer is timed when it arrives, not when the loop, busy
+    /// building the next chunk, gets round to reading it (#375).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_answer_is_timed_when_it_arrives_not_when_it_is_read() {
+        let started = std::time::Instant::now();
+        let wait = stamp_on_arrival(async {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        });
+        // The loop building a chunk for a second before it reads the answer.
+        // Wide margins: a loaded parallel test run must not lose the race
+        // (gotcha #270's shape).
+        tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
+        let ((), arrived) = wait.await.expect("the wait ran");
+        let arrived_ms = arrived.duration_since(started).as_millis();
+        assert!(
+            arrived_ms < 600,
+            "stamped {arrived_ms} ms in: the read, not the arrival"
+        );
+    }
+
+    /// Dropping a chunk's wait — a restart abandoning it — stops the wait, so
+    /// what it holds (its `StreamWaiter`) is let go at once.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn dropping_a_timed_wait_withdraws_it() {
+        struct Held(Arc<std::sync::atomic::AtomicBool>);
+        impl Drop for Held {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::Release);
+            }
+        }
+        let let_go = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let held = Held(let_go.clone());
+        let wait = stamp_on_arrival(async move {
+            let _held = held;
+            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        drop(wait);
+        for _ in 0..300 {
+            if let_go.load(Ordering::Acquire) {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        panic!("the abandoned wait still held its waiter 3 s later");
+    }
+
+    /// The far end's time is the gap between two answers only where the later
+    /// chunk was already waiting there — left here a round trip before the
+    /// earlier answer came back — and was the very next chunk of the stream.
+    #[test]
+    fn the_far_ends_time_is_read_from_answers_that_waited_there() {
+        let mut width = StreamWidth::with(3, 5, false);
+        let mut far = FarPace::default();
+        let t0 = std::time::Instant::now();
+        let at = |ms| t0 + std::time::Duration::from_millis(ms);
+        let near = |got: Option<f64>, want: f64| got.is_some_and(|g| (g - want).abs() < 1e-6);
+        let trip = Some(436.0);
+        width.note_arrival(0, 3, at(300), at(1300), trip, &mut far);
+        assert!(
+            far.narrow.is_empty(),
+            "the first answer has nothing before it"
+        );
+        // Left at 600, a round trip before 1300: it waited there.
+        width.note_arrival(1, 3, at(600), at(2060), trip, &mut far);
+        assert!(
+            near(far.narrow.median(), 760.0),
+            "{:?}",
+            far.narrow.median()
+        );
+        // Left at 1700, reached the far end after 2060's answer had left it.
+        width.note_arrival(2, 5, at(1700), at(2900), trip, &mut far);
+        assert!(far.wide.is_empty(), "the far end sat idle between them");
+        // Turn 3 was dropped by a restart: 4's gap is not its own.
+        width.note_arrival(4, 5, at(1000), at(3800), trip, &mut far);
+        assert!(far.wide.is_empty(), "not the chunk before it");
+        width.note_arrival(5, 5, at(2000), at(4640), trip, &mut far);
+        assert!(near(far.wide.median(), 840.0), "{:?}", far.wide.median());
+        // A chunk held short is neither width; a check with no peer's trip has
+        // no far end to time.
+        width.note_arrival(6, 2, at(2500), at(5300), trip, &mut far);
+        width.note_arrival(7, 3, at(2600), at(6000), None, &mut far);
+        assert_eq!((far.narrow.len(), far.wide.len()), (1, 1));
+    }
+
+    /// Once both widths have the far end's time, it prices them — at the 70B
+    /// split's times (#375) the switch is near α 0.78; until then chunks that
+    /// queue try the width without, and a width not chosen is still tried now
+    /// and then.
+    #[test]
+    fn a_chunk_is_as_wide_as_the_far_ends_time_pays() {
+        let (narrow, wide) = (3, 5);
+        let mut width = StreamWidth::with(narrow, wide, false);
+        let check = CheckCost::for_a_plan(Some(420));
+        let mut far = FarPace::default();
+        for _ in 0..FAR_PACE_SAMPLES {
+            far.record(false, 760.0);
+        }
+        let queued: Vec<u32> = (0..4)
+            .map(|_| width.next(false, &check, &far, Some(61.0), 3))
+            .collect();
+        assert_eq!(
+            queued,
+            [wide, narrow, wide, narrow],
+            "queued, one width timed"
+        );
+        assert_eq!(
+            width.next(true, &check, &far, Some(61.0), 3),
+            narrow,
+            "alone, one width timed"
+        );
+
+        // The 70B split's far end: two more rows cost it ~100 ms.
+        for _ in 0..FAR_PACE_SAMPLES {
+            far.record(true, 860.0);
+        }
+        width.note_near(narrow, 295.0);
+        width.note_near(wide, 325.0);
+        for _ in 0..12 {
+            width.note_answer(2, 3);
+        }
+        assert_eq!(
+            width.next(false, &check, &far, Some(61.0), 3),
+            narrow,
+            "guessed poorly (α ~0.67)"
+        );
+        for _ in 0..30 {
+            width.note_answer(3, 3);
+        }
+        assert_eq!(
+            width.next(false, &check, &far, Some(61.0), 3),
+            wide,
+            "guessed well"
+        );
+        let picks: Vec<u32> = (0..PROBE_EVERY)
+            .map(|_| width.next(false, &check, &far, Some(61.0), 3))
+            .collect();
+        assert_eq!(
+            picks.iter().filter(|&&w| w == narrow).count(),
+            1,
+            "one chunk in {PROBE_EVERY} tries the width not chosen"
+        );
+    }
+
     /// Wide where a row is cheap beside the trip, narrow where it is dear or
     /// where building a chunk here is what takes the time.
     #[test]
@@ -1510,7 +1856,7 @@ mod tests {
         let mut check = CheckCost::for_a_plan(Some(420));
         check.record(narrow, 1000.0);
         let alone: Vec<u32> = (0..4)
-            .map(|_| width.next(true, &check, Some(10.0), 3))
+            .map(|_| width.next(true, &check, &FarPace::default(), Some(10.0), 3))
             .collect();
         assert_eq!(
             alone,
@@ -1518,7 +1864,7 @@ mod tests {
             "alone, one width fitted"
         );
         assert_eq!(
-            width.next(false, &check, Some(10.0), 3),
+            width.next(false, &check, &FarPace::default(), Some(10.0), 3),
             narrow,
             "queued, unpriced"
         );
@@ -1531,7 +1877,7 @@ mod tests {
             width.note_answer(narrow, narrow);
         }
         assert_eq!(
-            width.next(false, &check, Some(10.0), 3),
+            width.next(false, &check, &FarPace::default(), Some(10.0), 3),
             wide,
             "cheap rows, kept"
         );
@@ -1539,7 +1885,11 @@ mod tests {
         let mut dear = CheckCost::for_a_plan(Some(420));
         dear.record(narrow, 1000.0);
         dear.record(wide, 1800.0);
-        assert_eq!(width.next(false, &dear, Some(10.0), 3), narrow, "dear rows");
+        assert_eq!(
+            width.next(false, &dear, &FarPace::default(), Some(10.0), 3),
+            narrow,
+            "dear rows"
+        );
         assert_eq!(width.sent_wide, 3);
     }
 }

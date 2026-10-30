@@ -149,20 +149,23 @@ impl PipelineExecutor {
         // pass has fed the window.
         let check_floor_round_trip_ms =
             super::farthest_segment_round_trip_ms(&self.shared_state, &self.assignment.segments);
-        let (mut acceptance, mut check, mut draft_cost, mut gamma_now) = match recalled {
-            Some(l) => (
-                l.acceptance,
-                l.check.on_a_plan(check_floor_round_trip_ms),
-                crate::inference::dsd_controller::RecentMedian::seeded(l.draft_ms_each),
-                l.gamma,
-            ),
-            None => (
-                AcceptanceEstimate::new(),
-                CheckCost::for_a_plan(check_floor_round_trip_ms),
-                crate::inference::dsd_controller::RecentMedian::default(),
-                initial_gamma,
-            ),
-        };
+        let (mut acceptance, mut check, mut draft_cost, mut far_pace, mut gamma_now) =
+            match recalled {
+                Some(l) => (
+                    l.acceptance,
+                    l.check.on_a_plan(check_floor_round_trip_ms),
+                    crate::inference::dsd_controller::RecentMedian::seeded(l.draft_ms_each),
+                    l.far_pace,
+                    l.gamma,
+                ),
+                None => (
+                    AcceptanceEstimate::new(),
+                    CheckCost::for_a_plan(check_floor_round_trip_ms),
+                    crate::inference::dsd_controller::RecentMedian::default(),
+                    crate::inference::dsd_controller::FarPace::default(),
+                    initial_gamma,
+                ),
+            };
         let held_back_before = check.held_back();
 
         // Resolve peer IDs upfront. Local segments push None and dispatch to
@@ -502,6 +505,7 @@ impl PipelineExecutor {
                             acceptance: &mut acceptance,
                             check: &mut check,
                             draft_cost: &mut draft_cost,
+                            far_pace: &mut far_pace,
                             proposed: &mut acceptance_proposed,
                             accepted: &mut acceptance_accepted,
                         },
@@ -575,6 +579,7 @@ impl PipelineExecutor {
                             acceptance: &mut acceptance,
                             check: &mut check,
                             draft_cost: &mut draft_cost,
+                            far_pace: &mut far_pace,
                             proposed: &mut acceptance_proposed,
                             accepted: &mut acceptance_accepted,
                         },
@@ -1171,6 +1176,7 @@ impl PipelineExecutor {
                 acceptance: acceptance.clone(),
                 check: check.clone(),
                 draft_ms_each: draft_cost.median(),
+                far_pace,
                 gamma: gamma_now,
                 at: std::time::Instant::now(),
             },

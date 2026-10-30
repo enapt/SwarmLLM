@@ -1310,8 +1310,13 @@ delay each way read a 101-104 ms ping). A worker's socket to its node is untouch
 **Split speculation's continuous stream** (`pipeline::dsd_stream`, ON by default on the coordinator since
 v0.3.216 — `SWARMLLM_SPEC_STREAM=0` keeps the rounds; it streams only to a node on v0.3.216 or later, `features::STREAM_AS_ONE_WORK`): `SWARMLLM_SPEC_STREAM_GUESSES` guesses per
 chunk, the look-ahead included (default 3) — or two more where they pay (`StreamWidth`, #374; the line's
-`chunks_wide` counts them, `check_slope_measured=false` means lone chunks are still alternating to price
-a row; `SWARMLLM_STREAM_WIDTH=fixed` keeps 3) — `SWARMLLM_SPEC_STREAM_WINDOW` chunks out at once
+`chunks_wide` counts them; `far_narrow_ms` / `far_wide_ms` are the far end's own time a chunk at each
+width, read from the gaps between answers (#375 — 0 means no chunk waited there, and then
+`check_slope_measured=false` means lone chunks are still alternating to price a row);
+`answers_waited_ms` is how long answers sat before the loop took them; `SWARMLLM_STREAM_WIDTH=fixed`
+keeps 3. Per chunk at DEBUG (`SWARMLLM_LOGGING_LEVEL=debug`): `DSD: a streamed check answered rows=…
+alone=… check_ms=… waited_ms=… started_at_ms=… arrived_at_ms=…` — `examples/stream_chunk_noise.py`
+turns those into each width's spread and gaps) — `SWARMLLM_SPEC_STREAM_WINDOW` chunks out at once
 (default 3). One INFO line per reply on the coordinator, `DIAG`-free:
 `DSD: streamed checks complete chunks=… kept_whole=… restarts=… held=…` — `kept_whole / chunks` is how
 often a chunk's guesses AND its look-ahead were all kept (~0.25-0.35 on a 0.5B drafter for a 7B);

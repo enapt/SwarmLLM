@@ -575,11 +575,41 @@ impl RecentMedian {
     }
 }
 
+/// The far end's own time for a streamed chunk at each of the stream's two
+/// widths, read from the gap between two answers where the later chunk was
+/// already waiting there (`dsd_stream::StreamWidth::note_arrival`). It is the
+/// machines' figure, not the reply's, so it is remembered with the rest
+/// ([`Learned`]).
+#[derive(Debug, Clone, Default)]
+pub struct FarPace {
+    pub narrow: RecentMedian,
+    pub wide: RecentMedian,
+}
+
+impl FarPace {
+    pub fn at(&self, wide: bool) -> &RecentMedian {
+        if wide {
+            &self.wide
+        } else {
+            &self.narrow
+        }
+    }
+
+    pub fn record(&mut self, wide: bool, ms: f64) {
+        if wide {
+            self.wide.record(ms);
+        } else {
+            self.narrow.record(ms);
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Learned {
     pub acceptance: AcceptanceEstimate,
     pub check: CheckCost,
     pub draft_ms_each: Option<f64>,
+    pub far_pace: FarPace,
     pub gamma: u32,
     /// When it was learned — see [`steps_aside`].
     pub at: std::time::Instant,
@@ -814,6 +844,7 @@ mod tests {
                 acceptance: AcceptanceEstimate::new(),
                 check,
                 draft_ms_each: Some(170.0),
+                far_pace: FarPace::default(),
                 gamma: 0,
                 at: std::time::Instant::now(),
             },
@@ -831,6 +862,7 @@ mod tests {
             acceptance: AcceptanceEstimate::new(),
             check: CheckCost::default(),
             draft_ms_each: Some(170.0),
+            far_pace: FarPace::default(),
             gamma,
             at: t0,
         };
