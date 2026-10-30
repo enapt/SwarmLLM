@@ -2,6 +2,51 @@
 
 ## [Unreleased]
 
+## [0.3.263-alpha] — 2026-10-30
+
+**A 70B request no longer fails when one computer holds all of it but cannot fit it.** A peer
+that held every layer of Llama 3.3 70B was handed the whole model, turned it down for lack of
+memory, and was then dropped from the request — and with it the only machine holding most of the
+model, so the request failed with "no reachable node holds layers 16-79". The retry now keeps that
+peer and gives it fewer layers than the whole model; the split it ran minutes before runs again.
+`SWARMLLM_WHOLE_REFUSAL=bar` restores the old behaviour (#378).
+
+**A split that starts and finishes on this computer writes prose faster — 6% on a calm link, up to 38% on a slow one.** With "Start and
+finish on this computer" on, your computer runs the model's first and last layers and a far computer
+the middle. The far computer's answers come back one after another, and each was read through this
+computer's last layers on its own. Answers that arrive together are now read in one pass. Measured
+on Qwen2.5-14B split between this laptop and an RTX 3060 in Australia (about 420 ms there and back),
+three runs of each, interleaved in one build: prose 7.80 / 7.27 / 5.40 tok/s against 6.88 / 5.89 /
+3.90, code 19.39 / 18.34 / 13.44 against 17.46 / 12.68 / 9.77. The link slowed through the run, and
+each run that read answers together beat the old run beside it. Five more runs of each on a calm
+evening link: prose 8.17 tok/s on average (7.50-8.86) against 7.69 (7.00-8.16), code level (18.05,
+14.39-20.19, against 18.42, 17.32-19.63). `SWARMLLM_FLOW_TAIL_JOIN=0` reads each answer alone (#369).
+
+**A computer that checks guesses for someone else's split now uses the cores its owner offered.**
+In a split, the computer running the model's later layers checks several guessed words at once.
+On the processor it did that on the few threads a single word is read with, which can be fewer
+than your contribution setting gives the swarm. It now uses the contribution setting's full width
+(physical cores only), the same width it already used for the swarm's prompts. Measured on
+Qwen2.5-Coder-7B on the processor with 8 threads offered: checks of 4 words ran 1.5x faster (19.8-21.2
+→ 29.4-31.7 words a second) and checks of 8 words 1.6x (21.3-21.9 → 34.4-36.0). Single-word
+replies are unchanged. A computer gains where it had settled on fewer threads than its setting
+allows. `SWARMLLM_CHECK_POOL=owner-only` restores the old width (#379).
+
+**A split's far computer stops sooner when this computer's guess for the next word was wrong.**
+When a split's far computer checks guessed words, this computer has already sent the next batch,
+built on one more guess. When that last guess was wrong, the far computer did not know it and
+worked through one or two batches that were already thrown away before it got to the corrected
+one: 0.65-1.3 s each time on Llama 3.3 70B, about a quarter of its restarts. Batches now name that
+guess, so the far computer drops the stale ones itself, as it already did after any other wrong
+guess. Both computers need this release; until the far one has it, nothing changes.
+`SWARMLLM_STREAM_LOOKAHEAD=0` sends batches as before (#382).
+
+**The small model that guesses ahead for a split stays on the graphics card when the card is
+nearly full.** The planner left room for it beside this computer's layers but priced those layers
+without the word table their first range loads; on Qwen2.5-14B the room came out 23 MB short, the
+guessing model went to the processor and replies ran at half speed. The room is now priced as the
+layers will load (#376). `SWARMLLM_DRAFTER_ROOM_FIRST=average` is the old pricing.
+
 ## [0.3.262-alpha] — 2026-10-30
 
 **A big model split between two computers far apart now writes about 7% faster, because the stream
