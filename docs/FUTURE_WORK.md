@@ -1673,7 +1673,7 @@ the card's device-to-host read) at both speeds; whether freed snapshots' host bu
 the copy faults fresh pages (an allocation of 569 MB under WSL2 is 146K first touches).
 
 #### #369 — A chain that starts and finishes here flows now, but still runs ~1.1-1.2x behind the default shape at the same split
-`P1` · perf-split · **NARROWED** — 2026-10-29 · evidence: `docs/plans/faster_than_local.md` § "Measured on the real link, 2026-10-29"
+`P1` · perf-split · **NARROWED** — 2026-10-30 · evidence: `docs/plans/faster_than_local.md` § "Measured on the real link, 2026-10-29"
 
 **Done 2026-10-29:** a chain that starts and finishes here (the boomerang — "Start and finish on
 this computer", AUTOMATIC wherever this node holds both ends) flows. The peers are sent hidden
@@ -1711,7 +1711,7 @@ Windows up 23.9 h: 7.71 / 17.1 against 9.16 / 20.98; over three runs ~1.13x pros
 Running those layers beside the drafting puts two processes on one card, which time-slice and
 measured a LOSS (gotcha #759, `arch-scheduling.md` § "A tree flows").
 
-**Research 2026-10-30 — the one lever left is a batched tail, untried.** No engine overlaps a
+**Research 2026-10-30 — the one lever left is a batched tail (tested below: it survives).** No engine overlaps a
 drafter's kernels with its target's on one card (vLLM's `draft_model_runner`, TensorRT-LLM's
 separate graphs, llama.cpp's two contexts on one thread all run them in turn), and the one paper
 that tried co-location reports a slowdown ("resource competitions", PEARL arXiv 2408.11850 § 4.5,
@@ -1730,6 +1730,27 @@ not already arrived. Test before building: log how many answers are due per drai
 switch, min-of-5, passing only if the tail's 5.2-5.7 s a prose reply drops. Skipping the tail for
 an answer from before a rebase is NOT a lever: the tail runs it so its cache holds the rows the
 peers' does (the comment at `take_answer`'s `finish_here` call).
+
+**The test, run 2026-10-30 on the 10-29 rig logs — the median says "dead", the bursts say
+otherwise.** No new run: the three runs above logged at debug, which carries each far answer's
+arrival (`Received tensor LayerResult`) and each tail forward (the worker forward whose
+`SplitModel forward pass complete` line reads `is_first=false is_last=true`; the near forwards and
+the 0.5B drafter's are told apart by `num_layers`). Counted for every tail forward: answers already
+arrived and not yet run (`~/swarmllm-gate/deep/fr/due_per_tail.py <measured_*.log>`; a request's
+window opens 1 s before its first tail, so answers still in flight from the previous reply are not
+counted). Ten replies (finishhere arms 2/4, leaf369 1/4, rounds369 1; tail forward median
+20.3-22.3 ms): **the median tail forward has NOTHING waiting** (0 in nine replies, 1 in one), so
+the pre-set test reads dead. But the waiting comes in BURSTS: prose 20-49% of tail forwards had
+one or more answers waiting (mean 0.4-2.0, up to 17), code 31-59% (mean 1.1-3.0, up to 18).
+Replayed at the observed start times, one forward taking every answer already arrived would run
+143-233 tail forwards where 245-281 ran on prose (16-42% fewer) and 53-82 where 99-111 ran on
+code (26-52% fewer). At ~21 ms each that is a first-order ceiling of 0.9-2.1 s of a 19-22 s prose
+reply (4-11%) and 0.6-1.2 s of an 8-9.4 s code one (7-15%), against this shape's gap of ~13% /
+~22%. The ceiling ignores the bigger forward's cost (small: the tail is bound by submissions, not
+rows, which is why a prompt forward of 56 rows takes 26 ms) and that freed time moves later
+arrivals. **So the lever survives, worth up to about half the gap.** Build it behind an env switch,
+never across a rebase's `truncate` (the combined rows must continue one cache, in sent order), and
+pass it only on min-of-5 in one binary where the tail's 5.1-5.9 s a prose reply drops.
 
 **Also open here:** (b) the flow's speed depends on the load split — with this machine holding 12
 of 48 layers the peer (36 layers + the 152k-vocab head) saturated (queue up to 2.2 s, 18-39 ms a
