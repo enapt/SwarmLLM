@@ -57,6 +57,47 @@ pub struct FlowGrowth {
     followers: Vec<Vec<(u32, f32)>>,
     /// A copied row not yet rated: its rating waits for its parent's read.
     unrated: Vec<bool>,
+    /// Where this tree's calls spent their time, logged once as it ends.
+    times: FlowTimes,
+}
+
+/// What a tree's calls spent inside this worker — the requester's
+/// `drafting_ms` is this plus the hop to the worker and its queue. A level's
+/// `forward_ms` runs to its ranking's read back, so the card's work is in it
+/// whether the level was captured or not; `wide_levels` read more rows than a
+/// captured forward carries (`cuda_graph::MAX_POSITIONS`).
+#[derive(Debug, Default)]
+struct FlowTimes {
+    calls: u32,
+    levels: u32,
+    rows_read: u32,
+    wide_levels: u32,
+    call_ms: f64,
+    ops_ms: f64,
+    rebase_ms: f64,
+    forward_ms: f64,
+    followers_ms: f64,
+}
+
+impl Drop for FlowGrowth {
+    fn drop(&mut self) {
+        let t = &self.times;
+        if t.calls == 0 {
+            return;
+        }
+        tracing::debug!(
+            calls = t.calls,
+            levels = t.levels,
+            rows_read = t.rows_read,
+            wide_levels = t.wide_levels,
+            call_ms = format_args!("{:.0}", t.call_ms),
+            ops_ms = format_args!("{:.0}", t.ops_ms),
+            rebase_ms = format_args!("{:.0}", t.rebase_ms),
+            forward_ms = format_args!("{:.0}", t.forward_ms),
+            followers_ms = format_args!("{:.0}", t.followers_ms),
+            "DIAG: a guessing model's flowing tree ended"
+        );
+    }
 }
 
 impl FlowGrowth {
@@ -1093,6 +1134,7 @@ impl SplitModel {
             queue: std::collections::BinaryHeap::new(),
             followers: Vec::new(),
             unrated: vec![false],
+            times: FlowTimes::default(),
         })
     }
 
@@ -1126,6 +1168,8 @@ impl SplitModel {
         prefill_chunk_tokens: usize,
     ) -> Result<Vec<(u16, u32)>, SwarmError> {
         use crate::inference::draft_tree::{FlowOp, MAX_TREE_ROWS};
+        let call_started = std::time::Instant::now();
+        let mut rebase_ms = 0.0;
         let vocab = self.embedding_rows();
         for &op in step.ops {
             match op {
@@ -1152,6 +1196,7 @@ impl SplitModel {
                     .advance(usize::from(row))
                     .map_err(SwarmError::Validation)?,
                 FlowOp::Rebase => {
+                    let rebase_started = std::time::Instant::now();
                     let rebased = session.flow.rebase().map_err(SwarmError::Validation)?;
                     let mut new_index = vec![None; session.rating.len()];
                     for (new, &old) in rebased.kept.iter().enumerate() {
@@ -1193,9 +1238,12 @@ impl SplitModel {
                         )?;
                     }
                     session.read = 0;
+                    rebase_ms += rebase_started.elapsed().as_secs_f64() * 1000.0;
                 }
             }
         }
+        session.times.ops_ms += call_started.elapsed().as_secs_f64() * 1000.0 - rebase_ms;
+        session.times.rebase_ms += rebase_ms;
         let base = session.flow.base();
         let held = kv.request_positions(self.kv_model_key(), request_id);
         if held != base + session.read {
@@ -1232,6 +1280,8 @@ impl SplitModel {
                 break;
             }
         }
+        session.times.calls += 1;
+        session.times.call_ms += call_started.elapsed().as_secs_f64() * 1000.0;
         Ok(out)
     }
 
@@ -1251,6 +1301,7 @@ impl SplitModel {
         }
         let base = flow.base();
         let from = session.read;
+        let started = std::time::Instant::now();
         let input = self.tensor_from_ids(&flow.tokens()[from..])?;
         let out = self.with_draft_tree(flow.tree().clone(), |m| {
             m.forward_verify_all_positions(&input, base + from, kv, request_id)
@@ -1260,6 +1311,12 @@ impl SplitModel {
             .squeeze(0)
             .map_err(SwarmError::internal)
             .and_then(|t| StepScores::read(&t, sampling, coupled))?;
+        let rows = flow.len() - from;
+        let ranked = std::time::Instant::now();
+        session.times.levels += 1;
+        session.times.rows_read += rows as u32;
+        session.times.wide_levels += u32::from(rows > crate::inference::cuda_graph::MAX_POSITIONS);
+        session.times.forward_ms += (ranked - started).as_secs_f64() * 1000.0;
         let mut ctx = crate::inference::sampling::SamplingContext::new(0);
         session.followers.resize(from, Vec::new());
         for (i, row) in (from..flow.len()).enumerate() {
@@ -1307,6 +1364,7 @@ impl SplitModel {
             session.followers.push(followers);
         }
         session.read = flow.len();
+        session.times.followers_ms += ranked.elapsed().as_secs_f64() * 1000.0;
         Ok(())
     }
 

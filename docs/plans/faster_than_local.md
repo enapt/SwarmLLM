@@ -675,8 +675,17 @@ the chain — so the lever exists only where a far end measures its own copy rat
 
 **8.5 What is left, ranked by what it would give the 70B.**
 1. **The far end's speed.** AU's ~1.14 s for 59 layers is ~22 GB/s over ~21 GB on its
-   processor, half what such a machine should read; the cause is unknown and cannot be measured
-   from here. Placement by speed (#356) is the lever the swarm has.
+   processor; the cause cannot be measured from here. Placement by speed (#356) is the lever the
+   swarm has. **Researched 2026-10-30 — it is not half of what such a machine reads**: AU is an
+   i7-12700 (8 P + 4 E cores); the best published llama.cpp processor decode on hybrid Intel is
+   ~27 GB/s (a 12700H, 65B Q4_0, P-cores only — with every core 0.25 against 0.74 tok/s, ggml
+   splitting work evenly so the P-cores wait on the E-cores; discussion #572, issue #842), no
+   12700-class figure reaches its DDR peak, and AVX-VNNI does not help: ggml's Q4_K × Q8_K dot
+   is `maddubs`/`madd` (`_mm256_dpbusd_avx_epi32` only in the Q4_1/Q5_1 helper). The swarm's
+   fast processor for the 70B is the M4 Mac `99aafc41`, which holds it and states ~14 tok/s in
+   7B units (~57 GB/s, ~2.6x AU's processor; llama.cpp on an M4's GPU reads 86-91 GB/s,
+   discussion #4167) — at ~430 ms from here, so it pays only as a stage the stream keeps busy,
+   and the planner prices that, not a rule.
 2. **The chunk's width and the drafter's floor in it** — built, see 8.6.
 3. **The restart's latency at the head** (0.57 s: drafting ~190 ms with the 3B on the processor at
    62 ms a guess, then 21 layers). A drafter on the card would cut the drafting to ~30 ms, but on an
@@ -824,6 +833,166 @@ is held by the drafter's first-choice rate), so the next prose gains are better 
 shorter trips. The open question for users is whether they GET this shape: a head with the even
 share, a drafter on its card, and, when the head holds both ends, the flow (since #369, within
 ~1.1-1.2x of the default shape's).
+
+## 10. The head's own work binds a split that starts and finishes here (2026-10-30)
+
+**Where a reply's time goes**, read off the 10-29 rig logs (`DSD: a tree that flowed is complete`;
+Qwen2.5-14B, 0.5B Q8_0 drafter, TH↔AU):
+
+| shape, reply | total | waiting | drafting | this node's first layers | its last layers | forwards, misses |
+|---|---|---|---|---|---|---|
+| starts and finishes here, prose | 22.6 s | 8.4 s | 4.3 s | 4.0 s | 6.0 s | 285, 20 |
+| starts and finishes here, code | 9.2 s | 3.4 s | 1.7 s | 1.7 s | 2.4 s | —, 4 |
+| default shape, prose | 17.0 s | 3.3 s | 5.2 s | 8.5 s | — | —, 9 |
+| default shape, code | 7.1 s | 0.8 s | 2.2 s | 4.1 s | — | —, — |
+
+Waiting is the misses: 20 × ~420 ms ≈ the 8.4 s. **The rest — 63% of the prose reply — is this
+node's card**, serial on one stream: ~15 ms a drafter call, ~14 ms its first layers, ~21 ms its last
+layers a forward (~26 ms at 56 rows). 285 forwards carried ~6,500 rows for 160 tokens: 2.4% of the
+rows reached the reply, and every forward paid its fixed cost. So the lever is the COUNT of
+forwards on this node, not their rows, and not the link.
+
+**What follows, each with its test:**
+
+1. **One forward per burst of answers** (FUTURE_WORK #369, built behind `SWARMLLM_FLOW_TAIL_JOIN`):
+   the median tail forward has nothing waiting behind it, but answers land in bursts — 20-49% of
+   tail forwards on prose and 31-59% on code had ≥ 1 behind them, up to 18 — so one forward per
+   burst is 16-52% fewer tails, a first-order ceiling of 4-11% of a prose reply and 7-15% of a
+   code reply (`~/swarmllm-gate/deep/fr/due_per_tail.py`). The joined payload is the bytes of the
+   joined tensor (`tensor_util::join_positions`, f32 and Q8_0), the rows the worker reads as one
+   only where each forward continues the last's cache and tree (`dsd_flow::reads_on_from`).
+2. **An answer nobody will read** (counted in the same build, `dead_here`): after a miss, every
+   forward still on its way carries rows under the missed branch — about a round trip of
+   forwards, ~5 at this rate, so up to ~100 of 285 on prose. This node runs its last layers on
+   them only to keep its cache in step with the peers' (must-keep (2) of #369). Their keys and
+   values are read by no live row (`RowVisibility`: a row sees its ancestors), so a forward that
+   only HOLDS their places would keep the cache in step for no compute. **Measured** (2026-10-30,
+   rig `prose1030` arm 1, batched tail off): 121 of a prose reply's 257 tail forwards (2,358 rows)
+   and 23 of a code reply's 105 carried only rows off the walk's way — and that counts only the
+   tree's current epoch; the forwards out when it is rebased come back for rows the rebase cuts
+   on top of those. **Built without a worker change** (`dsd_flow::dead_wait_on`, opt-in
+   `SWARMLLM_FLOW_DEAD_WAIT=1`): such an answer WAITS (`reaches_the_walk`) — read in front of the
+   next answer the walk can reach, in one joined forward (a forward is bound by its weights, ~3 ms
+   for 23 more rows against ~19 alone), or never, where a rebase's forward cuts this node's cache
+   at or below the first one waiting (`cuts_below`). Holding places instead would have needed a
+   worker message, a zero write per layer and every cache layout's rules; waiting needs none.
+   **Measured 2026-10-30 (rig `tailjoin1030`, item 1's numbers in FUTURE_WORK #369): item 1 ON
+   (every joined arm beat the old arm beside it, prose +13-38%); this item OFF** — the tail a
+   further ~35% cheaper and the replies no faster, every prose reply's forwards queued on their
+   way (630-923 ms) and the guard narrowed the tree to 2 rows a level. Freeing this node let its
+   sends leave in bursts — the likeliest reading, unproven; the guard narrows ROWS for a wait the
+   rows do not cause (gotcha #193). Pacing the sends comes before it is tried again.
+3. **Bigger sends** (6 levels or 16 rows a level a drafter call, 2026-10-30 real link, one
+   binary): levels 6 read 7.11 / 15.27 tok/s (prose / code, two runs) and 16 rows 6.54 / 15.12
+   against the default's ONE clean run 6.65 / 14.98 — the second default run lost its drafter to
+   the processor (item 5) and ran the stream at 3.55 / 8.39. A few percent at most: the live
+   budget, not the forward count, caps what a bigger call adds.
+4. **The link is the route, not the software** — re-measured, the finding is #327's (TH↔AU
+   crosses Los Angeles, ~390 ms against ~185 ms direct; § 5's "P"). A TCP handshake to the far
+   peer's public address takes 359-387 ms; the swarm measures 373 (min), so our stack adds ~13 ms.
+   A one-hop detour (RON, Andersen et al. 2001; colocation relays beat the direct path in 76% of
+   pairs, a >100 ms gain in ~5%) still needs a peer near Singapore; the swarm has none today (the
+   other peers are in Germany, Italy and this LAN). Every miss costs a round trip, so such a peer
+   would cut the waiting by up to half. Coordinates cannot propose the detour: it is exactly a
+   triangle-inequality violation, which they smooth away.
+5. **A near-full card loses the drafter to the processor** (2026-10-30, rig `bigsend` arm 6): the
+   planner left room for it (`room_for=25`), the spawn refused it by 23 MB (5,390 + 966 against
+   6,333), and the reply ran the stream at half speed. The planner prices this node's layers as a
+   middle segment (`process_pool::cost_curve_of`, the whole-model line, no end tables) while the
+   spawn charges `[0,12)` its token table — the bound is about a layer too generous in both arms;
+   in the good one 25 fitted by 38 MB. → FUTURE_WORK.
+6. **Before any graph-capture work on 24-row forwards**, `SWARMLLM_PROFILE=1` (DIAGNOSTICS § 3d)
+   settles whether a tail forward's ~21 ms is the card or the host: its weights are ~3 GB at
+   ~448 GB/s, ~7 ms. Capturing ≥ 9 rows needs a fixed MMQ tile (`executor.rs`'s
+   `MAX_POSITIONS`), and padding to a bucket was estimated at ~1 ms saved a forward. The excess is
+   ~25 µs a launch at ~28 launches a layer — more than WSL2's ~10-12 µs a launch, so gaps or
+   under-filled kernels are in it too; a timeline (nsys) separates gaps from kernel time before
+   any of: rows padded to a few captured sizes (SGLang's and TensorRT-Edge-LLM's verify graphs pad
+   the tree to a fixed width, masked), fewer launches a layer (residual + norm + q8_1 quantize in
+   one), a megakernel (1.1-1.3x over graphed launches on L4/L40S/A10G, AutoMegaKernel 2606.09682;
+   Hazy's Llama-1B 2.5x over vLLM is batch 1 on H100). Windows' hardware GPU scheduling, which
+   NVIDIA names the first WSL2 setting, is already on here (dxdiag: `Enabled:True`, 2026-10-30).
+7. **Ideas held for later, with their prior art.** The target's own top-k returned per row to
+   grow the tree (Token Recycling, 2408.08696; here the tail is on THIS node when it starts and
+   finishes here, so no wire change). An EAGLE-style head, possible in that shape because the
+   target's top-layer features are computed HERE (EAGLE-3 reads a low, middle and high layer;
+   the far range could end at the middle one) — llama.cpp's EAGLE-3 is chain-only (PR #18039).
+   For a thin uplink, 4-bit activations with ~1/64 of channels kept wide (Dong et al.
+   2411.07942: 97-99.5% accuracy) and a residual against a predictor both ends hold.
+8. **Read off vLLM, TensorRT-LLM and NVIDIA Dynamo (survey, 2026-10-30, docs only).** Already here:
+   suffix-style copies grafted onto the tree (`FlowOp::Copy`, SuffixDecoding 2411.04975), the
+   fused QKV-bias transpose, best-first trees, shared-noise drawing. New, in order: (a) the
+   verify's accept on the card (TensorRT-Edge-LLM `eagleAcceptKernels`: top-1 and the tree walk
+   on the device) — worth it only if the timeline shows a host gap between forwards; (b) PARD
+   (2504.18583, K drafts in one drafter forward) was set aside in § 5 because drafting does not
+   bind E in the default shape — in a split that starts and finishes HERE the drafter shares this
+   node's serial card time, so it returns if item 1's A/B shows that time binds; (c) Dynamo's
+   router samples among routes by a softmax of their costs (`router_temperature`) so clients do
+   not all herd onto the fastest worker — an idea for a swarm with many requesters, not this one
+   yet. Not for us: NIXL (RDMA / UCX / GPUDirect, no WAN transport), Dynamo's planner (an
+   autoscaler for replicas a swarm does not own).
+9. **Past all of it: the flow's dead rows are free lessons** (2026-10-30, conceptual — each part
+   is tested before it is built). A flow has the target judge ~40 rows for every token it emits
+   (6,500 rows, 160 tokens) and ~97% of them die. Every system read here discards its verifier's
+   output and verifies ~60 rows a round; this one produces thousands of verdicts per reply — the
+   target's distribution after a plausible prefix — and, in a split that starts and finishes
+   here, the drafter's state and the target's final state for the SAME rows land on this node.
+   Three uses, in order:
+   (a) **A dead row costs this node nothing** — item 2, measured first (`dead_here`).
+   (b) **Then the breadth is paid by the far card's idle time**: 256 and 448 live rows did not
+       beat 128 (§ "A tree that flows", 2026-10-23) while every dead row cost this node a
+       forward of its last layers; with (a) the extra rows cost only the far card, idle about
+       half of each cycle. Re-test the live budget once (a) is in, and widen where misses
+       come, not everywhere.
+   (c) **Teach the drafter during the reply from the target's verdicts** — first a
+       per-conversation correction of the drafter's scores toward the tokens the target
+       actually prefers (its top choices per row, a few bytes a row), then a ridge map from the
+       drafter's final state into the target's final space, scored by the target's own head
+       (here in that shape) — the stand-in's fitting machinery (`stand_in::ridge_inverse`)
+       applied across MODELS rather than layers. Prior art found: online distillation (OSD,
+       2310.07177) fine-tunes the drafter; EAGLE/Medusa/Hydra heads read the TARGET's state;
+       model stitching (Bansal et al. 2021) maps between networks offline — none fits a
+       cross-model map online from a verifier's by-product. Test first, offline: teacher-force
+       recorded prose replies through both models (`~/llama.cpp-ref/dump_logits`), simulate the
+       drafter's top-8 coverage of the target's choice with and without each correction learned
+       position by position. Prose misses (~20 a reply) are what hold a prose split below local.
+   (d) **Not the target's own middle state as a second guesser** (researched 2026-10-30, parked):
+       this node holds the target's hidden state at its last layer for every row it sends, so a
+       learned map from it through the real head could foresee the far end's draw a round trip
+       early, or re-score the drafter's rows. No published top-1 agreement exists at that depth
+       for 7-14B models (the tuned lens, 2303.08112, reports perplexity and KL only; one
+       unverified 2026 preprint, 2607.15495, reads near zero mid-depth); exits at 38% depth
+       accept 67-75% only after the whole model is trained for it (LayerSkip, 2404.16710, Llama2
+       13B layer 15 of 40), and a light adapter at a shallow exit accepts 0.48-0.52 (EESD,
+       2406.03853) — below the 0.5B drafter's 0.69 first choice on chat. No prior work re-scores
+       a separate drafter's tree with the target's middle state. "Speculation at a Distance"
+       (2606.25091) puts acceptance first over a long link, as § "A tree that flows" measured.
+10. **A bigger drafter in the default shape — fewer misses, and the drafter's call is now the
+    cost** (2026-10-30, rig `drafter1030`, one binary, this card [0,16) + AU [16,48) and the head,
+    the far asked the SAME range by every arm — alternating ranges inside its worker's window
+    grew its worker onto its processor or refused it, FUTURE_WORK #377). Decode tok/s, three
+    runs each, arms interleaved, 160 tokens:
+
+    | drafter | prose | code | prose misses | drafting ms a call | waiting (prose) |
+    |---|---|---|---|---|---|
+    | Qwen2.5-0.5B Q8_0 (general) | 6.58 7.96 7.65 | 18.97 18.92 19.82 | 12-18 | ~18 | 5.2-9.8 s |
+    | Qwen2.5-1.5B Q8_0 | 9.23 9.80 9.32 | 21.64 24.40 26.93 | 10-11 | ~26 | 4.1-4.7 s |
+    | Qwen2.5-3B Q4_K_M | 8.38 10.10 8.79 | 25.33 23.33 23.38 | 6-9 | ~35 | 2.3-3.6 s |
+
+    The 3B halves the 0.5B's prose misses and its waiting, and loses it again in its own calls:
+    a 3B prose reply spent 9.1-9.8 s drafting, 4.4-4.7 s in this node's 16 layers (~16 ms a
+    forward of ~23 rows, `DIAG: worker forward answered`) and 2.3 s waiting — this node busy
+    85%. The replies are greedy and part between runs only at near-ties, within one drafter as
+    across them (prose after 178-605 characters; code: the six 1.5B and 3B replies identical, the
+    0.5B's "computes" for "calculate") — a card's row moves with the check's width, and every run's
+    tree differs. **So the next lever is the drafter's call**: a
+    3-level call of the 3B at ~35 ms is ~12 ms a level against ~5 ms of weights at the card's
+    bandwidth, the 0.5B's ~6 ms a level against ~1.3 — the excess is per layer, not per byte
+    (0.25-0.32 ms a layer a level for all three). The worker now logs where a call goes
+    (`DIAG: a guessing model's flowing tree ended`: its levels' forwards to their ranking's
+    read-back, the host's queue, the requester's ops, rebases) — read it before choosing between
+    a captured multi-level call, fewer launches a layer, or the hop to the worker. Halving the 3B's
+    call alone would put that prose reply near 11 s, ~14 tok/s: past this machine alone (~13).
 
 ## Sources
 

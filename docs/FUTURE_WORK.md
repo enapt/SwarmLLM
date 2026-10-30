@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #376**). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #378**). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -1752,6 +1752,26 @@ arrivals. **So the lever survives, worth up to about half the gap.** Build it be
 never across a rebase's `truncate` (the combined rows must continue one cache, in sent order), and
 pass it only on min-of-5 in one binary where the tail's 5.1-5.9 s a prose reply drops.
 
+**Built and measured 2026-10-30 — ON** (`dsd_flow::tail_join_on`, `FlowRun::due_together` +
+`tensor_util::join_positions`; A/B `SWARMLLM_FLOW_TAIL_JOIN=0`). Rig `tailjoin1030` (one binary,
+TH↔AU, the 0.5B Q8_0 drafter, far [12,35) for every arm, three arms each interleaved; the link
+DEGRADED through the run — the old arm's own prose went 6.88 → 5.89 → 3.90): the tail's time fell
+25-30% (4.0-4.5 s a prose reply against 5.4-6.6; 117-151 answers read in 31-36 forwards), and every
+joined arm beat the old arm beside it — prose 7.80 / 7.27 / 5.40 tok/s against 6.88 / 5.89 / 3.90,
+code 19.39 / 18.34 / 13.44 against 17.46 / 12.68 / 9.77. Min-of-5 on a calm link is still owed; the
+mechanism fired on every reply. **Not on — an answer the walk can no longer reach waiting to be read
+with the next** (`dead_wait_on`, opt-in `SWARMLLM_FLOW_DEAD_WAIT=1`): it cut the tail a further
+~35% (2.1-3.7 s) and the replies were no faster (prose 6.82 / 5.29 / 4.55, code 16.95 / 14.98 /
+15.42) — in all three of its prose replies the forwards queued on their way (630-923 ms over the
+least, joined alone 71-125), the guard narrowed the tree to 2 rows a level and the misses rose
+(24-29 against 18-22). Likeliest cause, unproven: a dead answer is read in no time, so the sends it
+frees leave in a burst (ACK compression) that the transport paces out (BBR, gotcha #917) — a wait on
+this side the guard reads as the link's queue and answers by narrowing rows, which does not shorten
+it (gotcha #193). **Next**: log each forward's send time beside its arrival to see whether the
+dead-wait arms' delay is this side's pacing or the far's queue; if pacing, space the sends at the
+far's own time a forward (`dsd_controller::FarPace`, the stream's packet-pair reading, #375) and
+re-test the dead wait. The same guard question stands for any change that frees this node.
+
 **Also open here:** (b) the flow's speed depends on the load split — with this machine holding 12
 of 48 layers the peer (36 layers + the 152k-vocab head) saturated (queue up to 2.2 s, 18-39 ms a
 row) and the flow ran 7.8-8.4 / 3.2-3.4 tok/s. **Narrowed 2026-10-29: the planner could not see a
@@ -2920,6 +2940,53 @@ against llama.cpp 0.3.16, then flip `is_supported` and re-read `arch_supports_hy
 StarCoder2, inert while refused).
 
 ### Memory and admission
+
+#### #376 — A near-full card loses a split's drafter to the processor: the planner's room for it is about a layer too generous
+`P2` · memory / scheduling · **OPEN** — 2026-10-30 · history: #275, #342's residual
+
+Rig `bigsend` arm 6 (2026-10-30, `~/swarmllm-gate/deep/fr/real_link_bigsend/H_6_dsdflow.log`):
+Qwen2.5-14B split [0,12) + [35,48) here, [12,35) on the AU peer. The planner left room for the
+0.5B drafter (`Leaving room beside this node's layers for the drafter ... room_for=Some(25)`),
+the plan took all 25, and the drafter's spawn refused the card by 23 MB (`committed_mb=5390` +
+`estimated_mb=966` against `vram_budget_mb=6333`) — so the reply ran the stream on the
+processor-held drafter at 3.55 / 8.39 tok/s (prose / code) against 6.65 / 14.98 in arm 1 an hour
+earlier. The only difference: 70 MB less free card memory at boot (6,967 against 7,037). Nothing
+refused, so nothing re-planned (`note_local_memory_refusal` covers the TARGET's load, not a
+guest that quietly goes to the processor).
+
+Cause (root-cause read of both paths, figures from the logs, UNDETERMINED until the toggle): the
+room is cut from `process_pool::cost_curve_of` — the whole-model line priced as a MIDDLE segment
+(`head_bytes = 0`, the tables spread evenly, #342's residual), fixed term ~261-322 MB — while the
+spawn charges this node's first range with its end's table through the estimator (`is_first`),
+an effective ~515 MB for the 25 layers. Arm 1's bound of 26 would ALSO have been refused (by
+~157 MB); 25 fitted there by 38 MB. "This node is unchanged (its loader prices its own ranges)"
+(#353) holds for the target, whose refusal re-plans, not for the guest.
+
+What it takes: price the room-leaving pass's local ranges as the spawn will — the tables at the
+ends this node's ranges hold (`RangeWeights::excess_layers`, as a peer's are, #353), or the
+estimator's own figure for each candidate range — then check that arm 6's `room_for` drops to
+24 and the drafter lands on the card. First measurement: `segment_cost_curve` against
+`estimate_gpu_footprint_mb(14B, Some((0,12)), …)` on the real header.
+
+#### #377 — A peer's up-front refusal of a split's range quotes its machine memory where its card refused
+`P3` · errors / memory · **OPEN** — 2026-10-30 · history: #345, #349
+
+Rig `prose1030` arm 3 (2026-10-30 11:59Z, `~/swarmllm-gate/deep/fr/real_link_prose1030.out`): the
+AU peer (RTX 3060) was asked for [16,48) of Qwen2.5-14B a minute after it served [26,48) for
+the previous arm, and answered — the words a user reads in the 503:
+"qwen2.5-14b-instruct-q4-k-m needs about 0 MB of memory but this node's budget allows 30100 MB
+and 1055 MB is already in use. Raise `resources.max_ram_mb`, or free memory by unloading another
+model. Of layers 16..48 of the model, 3 would load here." The refusal itself was right — its
+worker was inside the conversation window (`WorkerHandle::in_use`), so `forward_would_load`
+could neither replace it nor grow it on a card already holding it — but every figure in the
+sentence is the MACHINE's (`peer_load_refusal` → `ram_refusal_words` with `needed_mb =
+fresh_spawn_machine_mb`, 0 for a run all on the card), and the advice names a setting that
+cannot help. What it takes: `forward_would_load` says which rung refused (the card's budget,
+a worker kept for a conversation, the machine's share), and the words name that one — the card's
+figures where the card refused, "a reply is still using this model here; try again shortly" for
+the conversation window — with a test on the advice, not the wording (`arch-errors.md`). Rig
+note, kept in the rig: a run whose arms ask one peer for DIFFERENT ranges meets this within the
+conversation window; give every arm of one run the same range there.
 
 #### #347 — A first segment on a card keeps its token table there, where llama.cpp keeps it on the processor
 `P3` · memory · **OPEN** — 2026-10-25 · history: #343's residual

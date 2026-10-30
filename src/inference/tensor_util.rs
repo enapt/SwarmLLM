@@ -512,6 +512,165 @@ pub fn activation_shape_matches(sent: &[u8], returned: &[u8]) -> bool {
         .is_some_and(|need| returned.len().saturating_sub(payload_at) >= need)
 }
 
+/// Several hidden states laid end to end along their positions, as ONE
+/// payload in the same encoding — what `tensor_to_bytes` (or `_q8_0`) of the
+/// concatenated tensor would have written, byte for byte, with no decode.
+///
+/// For the flow's batched tail (`dsd_flow`, FUTURE_WORK #369): answers the far
+/// computer sent back close together are read here in one forward instead of
+/// one each. `None` whenever the parts cannot be joined EXACTLY, and the caller
+/// then reads them one at a time:
+/// - a header that does not parse, or a payload shorter than its shape needs;
+/// - parts that differ in encoding or in any dimension but the positions
+///   (`ndim - 2`), or a leading dimension other than 1 (a batch of two would
+///   interleave);
+/// - a Q8_0 part whose values do not fill whole 32-value blocks — its last
+///   block's scale would cover the next part's first values.
+///
+/// Only the bytes each shape needs are copied: a payload LONGER than its shape
+/// is accepted by `bytes_to_tensor`, and its tail is not this tensor's.
+pub(crate) fn join_positions(parts: &[&[u8]]) -> Option<Vec<u8>> {
+    struct Part<'a> {
+        shape: Vec<u32>,
+        dtype: u32,
+        payload: &'a [u8],
+    }
+    fn parse(bytes: &[u8]) -> Option<Part<'_>> {
+        let word = |at: usize| -> Option<u32> {
+            Some(u32::from_le_bytes(bytes.get(at..at + 4)?.try_into().ok()?))
+        };
+        let ndim = word(0)? as usize;
+        if !(2..=8).contains(&ndim) {
+            return None;
+        }
+        let shape: Vec<u32> = (0..ndim).map(|i| word(4 + i * 4)).collect::<Option<_>>()?;
+        if shape[..ndim - 2].iter().any(|&d| d != 1) {
+            return None;
+        }
+        let dtype = word(4 + ndim * 4)?;
+        let values = shape
+            .iter()
+            .try_fold(1usize, |acc, &d| acc.checked_mul(d as usize))
+            .filter(|&n| n > 0)?;
+        if dtype == DTYPE_TAG_Q8_0 && values % quant::GROUP_SIZE != 0 {
+            return None;
+        }
+        let need = payload_len(dtype)?(values)?;
+        let at = 4 + ndim * 4 + 4;
+        let payload = bytes.get(at..at.checked_add(need)?)?;
+        Some(Part {
+            shape,
+            dtype,
+            payload,
+        })
+    }
+    let parts: Vec<Part> = parts.iter().map(|b| parse(b)).collect::<Option<_>>()?;
+    let first = parts.first()?;
+    let at = first.shape.len() - 2;
+    let mut positions: u32 = 0;
+    for part in &parts {
+        let same_but_positions = part.dtype == first.dtype
+            && part.shape.len() == first.shape.len()
+            && part
+                .shape
+                .iter()
+                .zip(&first.shape)
+                .enumerate()
+                .all(|(i, (a, b))| i == at || a == b);
+        if !same_but_positions {
+            return None;
+        }
+        positions = positions.checked_add(part.shape[at])?;
+    }
+    let payload_bytes = parts
+        .iter()
+        .try_fold(0usize, |acc, p| acc.checked_add(p.payload.len()))?;
+    let mut joined = Vec::with_capacity(4 + first.shape.len() * 4 + 4 + payload_bytes);
+    joined.extend_from_slice(&(first.shape.len() as u32).to_le_bytes());
+    for (i, &dim) in first.shape.iter().enumerate() {
+        let dim = if i == at { positions } else { dim };
+        joined.extend_from_slice(&dim.to_le_bytes());
+    }
+    joined.extend_from_slice(&first.dtype.to_le_bytes());
+    for part in &parts {
+        joined.extend_from_slice(part.payload);
+    }
+    Some(joined)
+}
+
+#[cfg(test)]
+mod join_positions_tests {
+    use super::*;
+    use candle_core::{Device, Tensor};
+
+    /// Distinct values per position, so a wrong order or offset shows.
+    fn hidden(positions: usize, width: usize, start: f32) -> Tensor {
+        let values: Vec<f32> = (0..positions * width)
+            .map(|i| start + i as f32 * 0.01 - (i % 7) as f32)
+            .collect();
+        Tensor::from_vec(values, (1, positions, width), &Device::Cpu).unwrap()
+    }
+
+    #[test]
+    fn joined_parts_are_the_bytes_of_the_joined_tensor_in_either_encoding() {
+        let parts = [hidden(3, 64, 0.0), hidden(1, 64, 50.0), hidden(5, 64, -9.0)];
+        let whole = Tensor::cat(&parts, 1).unwrap();
+        for encode in [tensor_to_bytes, tensor_to_bytes_q8_0] {
+            let bytes: Vec<Vec<u8>> = parts.iter().map(|t| encode(t).unwrap()).collect();
+            let refs: Vec<&[u8]> = bytes.iter().map(Vec::as_slice).collect();
+            assert_eq!(join_positions(&refs).unwrap(), encode(&whole).unwrap());
+        }
+    }
+
+    #[test]
+    fn a_tail_past_the_shape_is_not_copied() {
+        let a = tensor_to_bytes(&hidden(2, 32, 1.0)).unwrap();
+        let mut a_long = a.clone();
+        a_long.extend_from_slice(&[0xAB; 12]);
+        let b = tensor_to_bytes(&hidden(1, 32, 2.0)).unwrap();
+        assert_eq!(join_positions(&[&a_long, &b]), join_positions(&[&a, &b]));
+    }
+
+    #[test]
+    fn parts_that_cannot_be_joined_exactly_are_refused() {
+        let f32_part = tensor_to_bytes(&hidden(2, 64, 0.0)).unwrap();
+        let q8_part = tensor_to_bytes_q8_0(&hidden(2, 64, 0.0)).unwrap();
+        assert_eq!(
+            join_positions(&[&f32_part, &q8_part]),
+            None,
+            "mixed encodings"
+        );
+        let wider = tensor_to_bytes(&hidden(2, 96, 0.0)).unwrap();
+        assert_eq!(
+            join_positions(&[&f32_part, &wider]),
+            None,
+            "different widths"
+        );
+        // 3 positions x 48 = 144 values: four whole blocks and half of a fifth.
+        let partial = tensor_to_bytes_q8_0(&hidden(3, 48, 0.0)).unwrap();
+        assert_eq!(
+            join_positions(&[&partial, &partial]),
+            None,
+            "a partial block"
+        );
+        let batch_of_two =
+            tensor_to_bytes(&Tensor::ones((2, 2, 64), DType::F32, &Device::Cpu).unwrap()).unwrap();
+        assert_eq!(
+            join_positions(&[&batch_of_two, &batch_of_two]),
+            None,
+            "a batch of two"
+        );
+        let mut short = f32_part.clone();
+        short.truncate(short.len() - 1);
+        assert_eq!(
+            join_positions(&[&f32_part, &short]),
+            None,
+            "a short payload"
+        );
+        assert_eq!(join_positions(&[]), None, "nothing to join");
+    }
+}
+
 #[cfg(test)]
 mod activation_shape_tests {
     use super::*;

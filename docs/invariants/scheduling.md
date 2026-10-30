@@ -5392,6 +5392,22 @@ round costs one per check.
   on prose and ~1.2x on code, inside its own code spread; misses are alike in both shapes and
   mostly wrong guesses, not the walk outrunning the tree — FUTURE_WORK #369. A/B
   `SWARMLLM_FLOW_FINISH_HERE=0`.
+- **Answers due together are read in ONE forward of this node's last layers** (2026-10-30, #369;
+  `FlowRun::due_together` + `tensor_util::join_positions`). They land in bursts (20-59% of tail
+  forwards had another answer behind them, up to 18), and a card forward is bound by its weights,
+  not its rows. What a change must keep, beside (1)-(4): an answer is joined only where its forward
+  continues the last one's cache and tree exactly (`reads_on_from`: no `truncate`, the same tree
+  start, its position the last's plus its rows, its shape the last's with its own rows appended) and
+  both were answered whole (`answered_whole`); each joined answer is then taken with its OWN draws
+  and arrival, as if read alone; a join is held to `TAIL_JOIN_ROWS_MOST` rows. Measured (rig
+  `tailjoin1030`, TH↔AU, 0.5B drafter, three arms each interleaved on a link that degraded through
+  the run): the tail's time −25-30%, every joined arm ahead of the old arm beside it — prose 7.80 /
+  7.27 / 5.40 tok/s against 6.88 / 5.89 / 3.90, code 19.39 / 18.34 / 13.44 against 17.46 / 12.68 /
+  9.77. A/B `SWARMLLM_FLOW_TAIL_JOIN=0`. **An answer the walk can no longer reach is still read**:
+  holding it back to be read with the next (`dead_wait_on`, opt-in `SWARMLLM_FLOW_DEAD_WAIT=1`) cut
+  the tail a further ~35% and was no faster — every prose reply's forwards then queued on their way
+  (630-923 ms over the least, against 71-125), the guard narrowed the tree to 2 rows a level and the
+  misses rose; the freed sends likely leave in bursts the transport paces (gotchas #917, #193).
 
 **Measured.** *Correctness, on the processor* (2026-10-22, `flow318.sh CPU=1 LEN=64`, a 557-token
 prompt, 7B split 0-14 | 14-28 over QUIC at 385 ms, greedy, two replies an arm): the flow ran 64-65

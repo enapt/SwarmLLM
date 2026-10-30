@@ -43,7 +43,13 @@
 //! the order every peer ran them) and the last of them draws every row
 //! (`FlowRun::finish_here`). The peers never see a draw. That shape ran tree
 //! rounds before, one check a round trip: 1.6-2.2x slower than the flow at
-//! the same split on TH↔AU (2026-10-29).
+//! the same split on TH↔AU (2026-10-29). Answers that are due together —
+//! they land in bursts — are read here in ONE forward
+//! (`FlowRun::due_together`, `tensor_util::join_positions`): this shape is
+//! bound by this node's cost a forward, not by the link. Opt-in
+//! (`dead_wait_on`, off: measured no faster), an answer none of whose rows the
+//! walk can still reach waits to be read with the next one it can, or is
+//! never read where a rebase cuts this node's cache below it first.
 //!
 //! **Exact at any temperature.** A row's draw is the model's sample after
 //! that row's path, its shared noise keyed by position (`tree_start + 1 +
@@ -521,6 +527,135 @@ fn finish_here_on() -> bool {
     })
 }
 
+/// Whether answers due here together are read in ONE forward of this node's
+/// layers after the peers' (`FlowRun::due_together`, #369): ON unless
+/// `SWARMLLM_FLOW_TAIL_JOIN=0` (or `off` / `false`), which reads each answer
+/// in a forward of its own — the A/B inside one binary.
+///
+/// Why: a split that starts and finishes here is bound by this node's cost a
+/// forward, not by the link (2026-10-29: 285 tail forwards a prose reply at
+/// ~21 ms each, ~26 ms at 56 rows). The answers arrive in bursts — a fifth to
+/// three fifths of the tail forwards had another answer waiting behind them,
+/// up to 18 — so one forward per burst reads the same rows for one fixed cost.
+///
+/// Measured (2026-10-30, rig `tailjoin1030`, TH↔AU, 0.5B Q8_0 drafter, arms
+/// interleaved on a link that degraded through the run): this node's tail
+/// time −25-30% (4.0-4.5 s a prose reply against 5.4-6.6; 117-151 answers in
+/// 31-36 forwards), and every joined arm beat the arm beside it read alone —
+/// prose 7.80 / 7.27 / 5.40 tok/s against 6.88 / 5.89 / 3.90, code 19.39 /
+/// 18.34 / 13.44 against 17.46 / 12.68 / 9.77.
+fn tail_join_on() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| {
+        !matches!(
+            std::env::var("SWARMLLM_FLOW_TAIL_JOIN").ok().as_deref(),
+            Some("0") | Some("off") | Some("false")
+        )
+    })
+}
+
+/// The most rows one joined forward of this node's layers after the peers'
+/// reads: the widest forward a flow already sends — a rebase's, its path
+/// (`REBASE_PATH_ROWS`) and the default live rows (`live_most`). The last
+/// layer scores every row against the whole vocabulary on the card (~0.6 MB a
+/// row at 152k), so a join is held to a size the card has already met
+/// rather than a tree's whole (`MAX_TREE_ROWS`, ~310 MB of scores).
+const TAIL_JOIN_ROWS_MOST: usize = REBASE_PATH_ROWS + 128;
+
+/// Does the forward `next` read on exactly where `last` left this node's
+/// cache, so the two can be read as ONE forward — the rows of both, at
+/// `last`'s position, with `next`'s tree shape? The worker reads a flow's
+/// rows only where the tree's length is the rows before the forward plus the
+/// forward's own (`model_worker::draft_tree_to_apply`), so:
+/// - `next` cuts nothing back (a rebase's `truncate` starts a new tree);
+/// - the same tree start, and `next`'s position is `last`'s plus its rows;
+/// - `next`'s shape is `last`'s with exactly `next`'s rows appended — the
+///   tree only appends between rebases (`FlowTree::push`).
+fn reads_on_from(last: &Here, last_rows: usize, next: &Here, next_rows: usize) -> bool {
+    next.truncate.is_none()
+        && next.from == last.from
+        && u32::try_from(last_rows)
+            .ok()
+            .and_then(|rows| last.index_pos.checked_add(rows))
+            == Some(next.index_pos)
+        && next.wire.len() == last.wire.len() + next_rows
+        && next.wire.starts_with(&last.wire)
+}
+
+/// The peers ran the forward through and answered it: no error, no refusal.
+fn answered_whole(result: &Result<LayerResult, SwarmError>) -> bool {
+    result
+        .as_ref()
+        .is_ok_and(|r| !matches!(r.finish_reason, Some(NetworkFinishReason::Error(_))))
+}
+
+/// Answers none of whose rows the walk can reach WAIT to be read here with the
+/// next answer it can, or are never read where a rebase cuts this node's cache
+/// below them first (`FlowRun::due_together`, #369): OFF unless
+/// `SWARMLLM_FLOW_DEAD_WAIT=1` (or `on` / `true`), and only with the batched
+/// tail.
+///
+/// Why it exists: a row's draw is read only along the walk, yet this node
+/// reads every answer the peers ran — to keep its cache in step with theirs.
+/// On the real link (2026-10-30, rig `prose1030` arm 1) 121 of a prose reply's
+/// 257 tail forwards carried only rows already off the walk's way. Read beside
+/// a live answer such rows cost the joined forward a few ms; cut first,
+/// nothing.
+///
+/// Why it is off: it cut this node's tail time by a further ~35% (rig
+/// `tailjoin1030`, 2.1-3.7 s against 4.0-4.5 joined alone) and the replies
+/// were no faster — in all three of its prose replies the forwards queued on
+/// their way (630-923 ms over the least, against 71-125 joined alone), the
+/// guard narrowed the tree to 2 rows a level, and the misses rose (24-29
+/// against 18-22). The likeliest cause, unproven: reading a dead answer takes
+/// no time, so the sends it frees leave in a burst where the tail's forwards
+/// spaced them (TCP's ACK compression, Zhang, Shenker and Clark 1991), and the
+/// transport paces a burst out (BBR, gotcha #917) — a wait on this side the
+/// guard reads as the link's queue and answers by narrowing rows, which does
+/// not shorten it (gotcha #193). Pacing the sends is the change to test
+/// before turning it on.
+fn dead_wait_on() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| {
+        tail_join_on()
+            && matches!(
+                std::env::var("SWARMLLM_FLOW_DEAD_WAIT").ok().as_deref(),
+                Some("1") | Some("on") | Some("true")
+            )
+    })
+}
+
+/// Can an answer's draws move the walk? A row's draw is read only where the
+/// walk can still reach the row: sent in this `current` epoch, the walk's row
+/// or one under it (`live`); sent in the epoch the last rebase ended, a row
+/// that rebase kept (`remap`, old row → kept row) and live; sent before that,
+/// dropped as stale once read (`FlowRun::take_answer`).
+fn rows_reach_the_walk(
+    rows: std::ops::Range<usize>,
+    epoch: u32,
+    current: u32,
+    remap: Option<&(u32, Vec<Option<usize>>)>,
+    live: impl Fn(usize) -> bool,
+) -> bool {
+    if epoch == current {
+        return rows.into_iter().any(live);
+    }
+    match remap {
+        Some((before, map)) if *before + 1 == current && *before == epoch => rows
+            .into_iter()
+            .any(|row| map.get(row).copied().flatten().is_some_and(&live)),
+        _ => false,
+    }
+}
+
+/// Does `next` cut this node's cache to at or below where the first answer
+/// waiting (`waiting`) would be read — a rebase's `truncate` — so that no
+/// answer waiting need be read at all? Every one waiting reads on from the
+/// one before (`reads_on_from`), so the first is the lowest.
+fn cuts_below(next: &Here, waiting: &Here) -> bool {
+    next.truncate.is_some_and(|to| to <= waiting.index_pos)
+}
+
 /// Can a reply's tree flow on this stream shape: the run's tail draws (it
 /// holds the model's last layers) or this node's own layers after the run do
 /// (`finish_here_on`), every peer of the run reads a tree that flows
@@ -608,6 +743,19 @@ impl<T> TurnOrder<T> {
         self.next += 1;
         Some(answer)
     }
+
+    /// The answer `next_due` would give, left in place.
+    fn peek_due(&self) -> Option<&T> {
+        self.held.get(&self.next)
+    }
+}
+
+/// This node's layers after the peers' already read an answer, inside a
+/// forward joined with others (`FlowRun::take_together`): its draws, and its
+/// share of that forward's time by rows.
+struct Tailed {
+    result: LayerResult,
+    ms: f64,
 }
 
 /// A forward's answer, and when it ARRIVED — not when this node got to it.
@@ -738,6 +886,23 @@ struct FlowRun<'a, 'r> {
     in_turn: TurnOrder<Answer>,
     here_ms: f64,
     out_of_turn: u32,
+    /// Forwards of this node's layers after the peers' that read several
+    /// answers at once (`tail_join_on`), and the answers they read.
+    joined_forwards: u32,
+    answers_joined: u32,
+    /// Answers read here whose rows were ALL off the walk's way by then
+    /// (`FlowTree::is_live`) — read only to keep this node's cache in step
+    /// with the peers', and the rows they carried: what a forward that only
+    /// held their places could save (#369).
+    dead_here: u32,
+    dead_rows_here: u32,
+    /// Answers held back because the walk can reach none of their rows
+    /// (`dead_wait_on`), in turn: read with the next answer it can reach, or
+    /// never, where a rebase cuts this node's cache below them first.
+    waiting_dead: Vec<Answer>,
+    /// Answers held back that way, and those of them never read.
+    dead_waited: u32,
+    dead_cut: u32,
 }
 
 impl PipelineExecutor {
@@ -849,6 +1014,13 @@ impl PipelineExecutor {
             in_turn: TurnOrder::new(),
             here_ms: 0.0,
             out_of_turn: 0,
+            joined_forwards: 0,
+            answers_joined: 0,
+            dead_here: 0,
+            dead_rows_here: 0,
+            waiting_dead: Vec::new(),
+            dead_waited: 0,
+            dead_cut: 0,
         };
         let started = std::time::Instant::now();
         let emitted_before = run.reply.generated.len();
@@ -887,6 +1059,15 @@ impl PipelineExecutor {
             drawn_here = !run.shape.far_walks(),
             here_ms = format_args!("{:.0}", run.here_ms),
             out_of_turn = run.out_of_turn,
+            tail_join = tail_join_on(),
+            joined_forwards = run.joined_forwards,
+            answers_joined = run.answers_joined,
+            dead_here = run.dead_here,
+            dead_rows_here = run.dead_rows_here,
+            dead_wait = dead_wait_on(),
+            dead_waited = run.dead_waited,
+            // Those still waiting when the reply ended were never read either.
+            dead_cut = run.dead_cut + run.waiting_dead.len() as u32,
             forwards = run.forwards,
             rows_a_forward = format_args!(
                 "{:.1}",
@@ -1467,16 +1648,231 @@ impl FlowRun<'_, '_> {
 
     /// Take an answer as it comes — or, where this node's layers after the
     /// peers' draw the rows, every answer in the order its forward was sent
-    /// (`TurnOrder`): a later one waits for those before it.
+    /// (`TurnOrder`): a later one waits for those before it, and answers due
+    /// together are read here together (`due_together`).
     async fn take(&mut self, answer: Answer) -> Result<Taken, SwarmError> {
         if self.shape.far_walks() {
-            return self.take_answer(answer).await;
+            return self.take_answer(answer, None).await;
         }
+        self.hold(answer);
+        loop {
+            if tail_join_on() {
+                // What else has landed joins the forward: an answer behind
+                // this one waits for it anyway, and pays a forward's fixed
+                // cost again if it is read on its own.
+                while let Some(Some(more)) = self.out.next().now_or_never() {
+                    self.hold(more);
+                }
+            }
+            let due = self.due_together();
+            if due.is_empty() {
+                return Ok(Taken::Continue);
+            }
+            if let Taken::Done = self.take_together(due).await? {
+                return Ok(Taken::Done);
+            }
+        }
+    }
+
+    /// Count an answer about to be read here whose rows the walk can no
+    /// longer reach (`dead_here`). Only this epoch's own rows: an older
+    /// answer's rows are remapped, and a rebase's lead is the walk's path.
+    fn note_dead_here(&mut self, sent: &Sent) {
+        if sent.epoch != self.epoch || sent.lead != 0 || sent.here.is_none() {
+            return;
+        }
+        if (sent.first_row..sent.first_row + sent.rows).all(|row| !self.flow.is_live(row)) {
+            self.dead_here += 1;
+            self.dead_rows_here += sent.rows as u32;
+        }
+    }
+
+    fn hold(&mut self, answer: Answer) {
         if self.in_turn.arrived(stream_seq::turn(answer.0.seq), answer) {
             self.out_of_turn += 1;
         }
-        while let Some(answer) = self.in_turn.next_due() {
-            if let Taken::Done = self.take_answer(answer).await? {
+    }
+
+    /// Can anything in this answer move the walk (`rows_reach_the_walk`)? A
+    /// rebase's forward (it settles the tree's start and carries the path), a
+    /// refusal and anything this cannot read always can.
+    fn reaches_the_walk(&self, (sent, result, _): &Answer) -> bool {
+        if sent.here.is_none() || sent.lead != 0 || sent.rebases_to.is_some() {
+            return true;
+        }
+        if !answered_whole(result) {
+            return true;
+        }
+        rows_reach_the_walk(
+            sent.first_row..sent.first_row + sent.rows,
+            sent.epoch,
+            self.epoch,
+            self.remap.as_ref(),
+            |row| self.flow.is_live(row),
+        )
+    }
+
+    /// Does `next` read on from the last answer waiting, within one joined
+    /// forward's rows — so it can wait with them, or be read with them?
+    fn reads_on_from_the_dead(&self, next: &Answer) -> bool {
+        let Some(last) = self.waiting_dead.last() else {
+            return true;
+        };
+        let rows: usize = self.waiting_dead.iter().map(|a| a.0.rows).sum();
+        match (&last.0.here, &next.0.here) {
+            (Some(l), Some(n)) => {
+                answered_whole(&next.1)
+                    && reads_on_from(l, last.0.rows, n, next.0.rows)
+                    && rows + next.0.rows <= TAIL_JOIN_ROWS_MOST
+            }
+            _ => false,
+        }
+    }
+
+    /// The answers due now that this node's layers after the peers' can read
+    /// in ONE forward: the next in turn, and each after it that the peers
+    /// answered whole and that reads on from the one before
+    /// (`reads_on_from`), up to `TAIL_JOIN_ROWS_MOST` rows. Only the next in
+    /// turn where joining is off, or where it cannot join — a refusal, a
+    /// rebase, another tree's start — so each of those is taken alone, as
+    /// before.
+    ///
+    /// An answer the walk can reach none of (`reaches_the_walk`) waits first
+    /// (`dead_wait_on`): for the next it can reach, read in front of it in one
+    /// forward; or for a rebase cutting this node's cache below it
+    /// (`cuts_below`), when it is never read. Its draws are never read either
+    /// way, so waiting costs the reply nothing; this node's cache only has to
+    /// hold its rows before any forward reading on past them, which the order
+    /// here keeps.
+    fn due_together(&mut self) -> Vec<Answer> {
+        if dead_wait_on() {
+            while let Some(next) = self.in_turn.peek_due() {
+                if self.reaches_the_walk(next) || !self.reads_on_from_the_dead(next) {
+                    break;
+                }
+                let answer = self.in_turn.next_due().expect("peeked");
+                self.dead_waited += 1;
+                self.waiting_dead.push(answer);
+            }
+            if let (Some(first), Some(next)) = (self.waiting_dead.first(), self.in_turn.peek_due())
+            {
+                let cut = match (&first.0.here, &next.0.here) {
+                    (Some(waiting), Some(n)) => cuts_below(n, waiting),
+                    _ => false,
+                };
+                if cut {
+                    self.dead_cut += self.waiting_dead.len() as u32;
+                    self.waiting_dead.clear();
+                } else if !self.reads_on_from_the_dead(next) {
+                    // Whatever is due next cannot be read with them: they are
+                    // read first, on their own, so the cache holds their rows.
+                    return std::mem::take(&mut self.waiting_dead);
+                }
+            }
+        }
+        // Nothing due: those waiting go on waiting.
+        if self.in_turn.peek_due().is_none() {
+            return Vec::new();
+        }
+        let mut due = std::mem::take(&mut self.waiting_dead);
+        due.push(self.in_turn.next_due().expect("peeked"));
+        let mut rows: usize = due.iter().map(|a| a.0.rows).sum();
+        if !tail_join_on() {
+            return due;
+        }
+        while let Some(next) = self.in_turn.peek_due() {
+            let last = due.last().expect("one is due");
+            let joins = match (&last.0.here, &next.0.here) {
+                (Some(l), Some(n)) => {
+                    l.truncate.is_none()
+                        && answered_whole(&last.1)
+                        && answered_whole(&next.1)
+                        && reads_on_from(l, last.0.rows, n, next.0.rows)
+                }
+                _ => false,
+            };
+            if !joins || rows + next.0.rows > TAIL_JOIN_ROWS_MOST {
+                break;
+            }
+            rows += next.0.rows;
+            due.push(self.in_turn.next_due().expect("peeked"));
+        }
+        due
+    }
+
+    /// Read answers due together through this node's layers after the
+    /// peers' in ONE forward, then take each in turn with its own draws —
+    /// what reading each alone would have done, for one forward's fixed cost.
+    /// Anything that cannot be joined exactly (a payload, a check of one
+    /// answer) is taken one at a time instead, which reports it as before.
+    async fn take_together(&mut self, due: Vec<Answer>) -> Result<Taken, SwarmError> {
+        if due.len() == 1 {
+            let answer = due.into_iter().next().expect("one is due");
+            return self.take_answer(answer, None).await;
+        }
+        let joined = {
+            let near = self.shape.near.len();
+            let parts: Option<Vec<&[u8]>> = due
+                .iter()
+                .map(|(sent, result, _)| {
+                    let (here, far) = (sent.here.as_ref()?, result.as_ref().ok()?);
+                    super::check_intermediate_activations(near, &here.far_input, &far.activations)
+                        .ok()?;
+                    Some(far.activations.as_slice())
+                })
+                .collect();
+            parts.and_then(|parts| crate::inference::tensor_util::join_positions(&parts))
+        };
+        let (Some(activations), Some(first), Some(last)) = (
+            joined,
+            due.first().and_then(|a| a.0.here.as_ref()),
+            due.last().and_then(|a| a.0.here.as_ref()),
+        ) else {
+            for answer in due {
+                if let Taken::Done = self.take_answer(answer, None).await? {
+                    return Ok(Taken::Done);
+                }
+            }
+            return Ok(Taken::Continue);
+        };
+        let read = Here {
+            far_input: Vec::new(),
+            index_pos: first.index_pos,
+            wire: last.wire.clone(),
+            from: first.from,
+            truncate: None,
+        };
+        for answer in &due {
+            self.note_dead_here(&answer.0);
+        }
+        let seq = due[0].0.seq;
+        let started = std::time::Instant::now();
+        let mut tail = self.read_here(&read, seq, activations).await?;
+        let ms = started.elapsed().as_secs_f64() * 1000.0;
+        self.joined_forwards += 1;
+        self.answers_joined += due.len() as u32;
+        let rows: usize = due.iter().map(|a| a.0.rows).sum();
+        let draws = std::mem::take(&mut tail.token_ids);
+        // Each answer's result is the forward's, with its own rows' draws; a
+        // count that does not match leaves each with none, and `take_answer`'s
+        // own check then says so for each, as it would have alone.
+        let whole = draws.len() == rows;
+        tail.activations = Vec::new();
+        tail.spec_logits = Vec::new();
+        tail.token_logprobs = Vec::new();
+        let mut at = 0;
+        for answer in due {
+            let n = answer.0.rows;
+            let mut result = tail.clone();
+            if whole {
+                result.token_ids = draws[at..at + n].to_vec();
+            }
+            at += n;
+            let tailed = Tailed {
+                result,
+                ms: ms * n as f64 / rows.max(1) as f64,
+            };
+            if let Taken::Done = self.take_answer(answer, Some(tailed)).await? {
                 return Ok(Taken::Done);
             }
         }
@@ -1498,13 +1894,25 @@ impl FlowRun<'_, '_> {
         seq: u32,
         far: LayerResult,
     ) -> Result<LayerResult, SwarmError> {
-        let exec = self.exec;
         super::check_intermediate_activations(
             self.shape.near.len(),
             &here.far_input,
             &far.activations,
         )
         .map_err(|e| SwarmError::Inference(format!("a tree that flows: {e}")))?;
+        self.read_here(here, seq, far.activations).await
+    }
+
+    /// This node's layers after the peers' over `activations` — one answer's,
+    /// or several joined (`take_together`) — read at `read`'s position with
+    /// its tree shape, the last of them drawing every row.
+    async fn read_here(
+        &mut self,
+        read: &Here,
+        seq: u32,
+        activations: Vec<u8>,
+    ) -> Result<LayerResult, SwarmError> {
+        let exec = self.exec;
         let walk = TailWalk {
             drafts: &[],
             sampling: &exec.request.sampling_params,
@@ -1512,21 +1920,21 @@ impl FlowRun<'_, '_> {
             coupling: self.coupling,
             parents: &[],
         };
-        let mut activations = far.activations;
+        let mut activations = activations;
         let segments = self.shape.after.len();
         for (i, segment) in self.shape.after.iter().enumerate() {
             let draws = i + 1 == segments;
             let mut forward = super::build_spec_verify_forward(
                 exec.request.id,
-                here.index_pos,
+                read.index_pos,
                 activations,
                 segment,
-                here.truncate,
+                read.truncate,
                 draws.then_some(&walk),
                 Some(seq),
             );
-            forward.draft_parents = here.wire.clone();
-            forward.draft_tree_from = Some(here.from);
+            forward.draft_parents = read.wire.clone();
+            forward.draft_tree_from = Some(read.from);
             let result = self
                 .state
                 .model_process_pool
@@ -1551,7 +1959,13 @@ impl FlowRun<'_, '_> {
 
     /// Record a forward's draws, walk them, emit what the walk reached, and
     /// grow from where it stands.
-    async fn take_answer(&mut self, (sent, result, arrived): Answer) -> Result<Taken, SwarmError> {
+    /// `tailed`: this node's layers after the peers' already read it, in a
+    /// forward joined with others (`take_together`).
+    async fn take_answer(
+        &mut self,
+        (sent, result, arrived): Answer,
+        tailed: Option<Tailed>,
+    ) -> Result<Taken, SwarmError> {
         self.answers += 1;
         if fault_flow_fail_at() == Some(self.answers) {
             tracing::warn!(
@@ -1591,10 +2005,18 @@ impl FlowRun<'_, '_> {
         }
         let mut result = result.expect("an error answer returned above");
         let mut here_ms = 0.0;
-        if let Some(here) = &sent.here {
+        // A joined forward's time is shared out by rows: no clean sample of
+        // what one check costs.
+        let joined = tailed.is_some();
+        if let Some(tailed) = tailed {
+            result = tailed.result;
+            here_ms = tailed.ms;
+            self.here_ms += here_ms;
+        } else if let Some(here) = &sent.here {
             // The peers ran it, so this node's layers after theirs run it
             // too, whatever its epoch: their cache then holds the rows the
             // peers' does, in the same order, and a rebase cuts both alike.
+            self.note_dead_here(&sent);
             let started = std::time::Instant::now();
             result = self.finish_here(here, sent.seq, result).await?;
             here_ms = started.elapsed().as_secs_f64() * 1000.0;
@@ -1645,7 +2067,7 @@ impl FlowRun<'_, '_> {
             .as_secs_f64()
             * 1000.0;
         self.least_answer_ms = Some(self.least_answer_ms.map_or(delay_ms, |l| l.min(delay_ms)));
-        if sent.alone && current && sent.lead == 0 {
+        if sent.alone && current && sent.lead == 0 && !joined {
             // A check's cost runs to its draws: this node's layers after the
             // peers' too, where they draw.
             self.reply
@@ -2033,5 +2455,133 @@ mod tests {
         assert!(!order.arrived(2, "two"));
         let taken: Vec<_> = std::iter::from_fn(|| order.next_due()).collect();
         assert_eq!(taken, ["two", "three", "four", "five"]);
+    }
+
+    #[test]
+    fn peeking_at_the_next_answer_due_leaves_it_due() {
+        let mut order = TurnOrder::new();
+        assert!(order.arrived(1, "one"));
+        assert_eq!(order.peek_due(), None, "turn 0 is still out");
+        assert!(!order.arrived(0, "zero"));
+        assert_eq!(order.peek_due(), Some(&"zero"));
+        assert_eq!(order.next_due(), Some("zero"));
+        assert_eq!(order.peek_due(), Some(&"one"));
+        assert_eq!(order.next_due(), Some("one"));
+        assert_eq!(order.peek_due(), None);
+    }
+
+    fn here(index_pos: u32, wire_len: usize, from: u32, truncate: Option<u32>) -> Here {
+        Here {
+            far_input: Vec::new(),
+            index_pos,
+            wire: (0..wire_len).map(|i| i as u16).collect(),
+            from,
+            truncate,
+        }
+    }
+
+    /// An answer waits only where the walk can reach none of its rows: in this
+    /// epoch by liveness, from the epoch the last rebase ended only through the
+    /// rows it kept, from any earlier one never.
+    #[test]
+    fn an_answer_waits_only_where_the_walk_can_reach_none_of_its_rows() {
+        let live = |row: usize| (10..20).contains(&row);
+        assert!(rows_reach_the_walk(8..12, 3, 3, None, live), "one row live");
+        assert!(
+            !rows_reach_the_walk(0..10, 3, 3, None, live),
+            "every row off the way"
+        );
+        // The rebase that ended epoch 2 kept old rows 4 and 5 as rows 10 and 30.
+        let mut map = vec![None; 8];
+        map[4] = Some(10);
+        map[5] = Some(30);
+        let remap = (2, map);
+        assert!(
+            rows_reach_the_walk(3..6, 2, 3, Some(&remap), live),
+            "a kept row the walk can reach"
+        );
+        assert!(
+            !rows_reach_the_walk(5..8, 2, 3, Some(&remap), live),
+            "kept, but off the way now — or not kept"
+        );
+        assert!(
+            !rows_reach_the_walk(3..6, 1, 3, Some(&remap), live),
+            "from before the rebase before: stale"
+        );
+        assert!(
+            !rows_reach_the_walk(3..6, 2, 3, None, live),
+            "no map: nothing of it is kept"
+        );
+    }
+
+    /// The answers waiting are never read only where the next forward cuts
+    /// this node's cache to at or below the first of them.
+    #[test]
+    fn only_a_rebase_cutting_below_the_first_waiting_drops_them() {
+        let waiting = here(124, 40, 100, None);
+        assert!(cuts_below(&here(100, 6, 100, Some(100)), &waiting));
+        assert!(cuts_below(&here(124, 6, 124, Some(124)), &waiting), "at it");
+        assert!(
+            !cuts_below(&here(130, 6, 130, Some(130)), &waiting),
+            "above it: their rows must be read first"
+        );
+        assert!(!cuts_below(&here(164, 46, 100, None), &waiting), "no cut");
+    }
+
+    /// A forward joins the one before only where the worker would read the
+    /// pair as one: the rows of both after the first's position, the second's
+    /// tree being the first's with its own rows appended.
+    #[test]
+    fn a_forward_reads_on_from_the_last_only_where_its_rows_continue_the_same_tree() {
+        // Tree from 100: 24 rows at 100 (tree 24 long), 16 more at 124 (40).
+        let last = here(100, 24, 100, None);
+        assert!(reads_on_from(&last, 24, &here(124, 40, 100, None), 16));
+        assert!(
+            !reads_on_from(&last, 24, &here(124, 40, 100, Some(100)), 16),
+            "a rebase cuts the caches back first"
+        );
+        assert!(
+            !reads_on_from(&last, 24, &here(124, 40, 124, None), 16),
+            "another tree's start"
+        );
+        assert!(
+            !reads_on_from(&last, 24, &here(125, 41, 100, None), 16),
+            "a gap: a forward in between is still out"
+        );
+        assert!(
+            !reads_on_from(&last, 24, &here(124, 41, 100, None), 16),
+            "a shape longer than its rows"
+        );
+        let mut grown_elsewhere = here(124, 40, 100, None);
+        grown_elsewhere.wire[3] = 99;
+        assert!(
+            !reads_on_from(&last, 24, &grown_elsewhere, 16),
+            "a shape that is not the last one's with rows appended"
+        );
+    }
+
+    #[test]
+    fn only_an_answer_the_peers_ran_through_is_joined() {
+        let ok = LayerResult {
+            request_id: uuid::Uuid::nil(),
+            token_ids: Vec::new(),
+            finish_reason: None,
+            activations: Vec::new(),
+            sealed_token_ids: None,
+            spec_logits: Vec::new(),
+            matched_stop_sequence: None,
+            token_logprobs: Vec::new(),
+            locally_constructed: false,
+            refusal: None,
+            answers_step: None,
+            prompt_blocks_stored: None,
+        };
+        assert!(answered_whole(&Ok(ok.clone())));
+        let refused = LayerResult {
+            finish_reason: Some(NetworkFinishReason::Error("no".into())),
+            ..ok
+        };
+        assert!(!answered_whole(&Ok(refused)));
+        assert!(!answered_whole(&Err(SwarmError::Inference("gone".into()))));
     }
 }
