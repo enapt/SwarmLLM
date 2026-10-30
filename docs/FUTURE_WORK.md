@@ -1708,8 +1708,28 @@ reply in either. What differs: this node's last layers cost ~21 ms a forward (5.
 drafter on one card (two processes on one card time-slice, gotcha #759), and this shape sent
 fewer forwards (252-261 a prose reply against 292-322). A third sample kept the gap (TAG=rounds369,
 Windows up 23.9 h: 7.71 / 17.1 against 9.16 / 20.98; over three runs ~1.13x prose, ~1.22x code).
-No lever is known: running those layers beside the drafting puts two processes on one card, which
-time-slice and measured a LOSS (gotcha #759, `arch-scheduling.md` § "A tree flows").
+Running those layers beside the drafting puts two processes on one card, which time-slice and
+measured a LOSS (gotcha #759, `arch-scheduling.md` § "A tree flows").
+
+**Research 2026-10-30 — the one lever left is a batched tail, untried.** No engine overlaps a
+drafter's kernels with its target's on one card (vLLM's `draft_model_runner`, TensorRT-LLM's
+separate graphs, llama.cpp's two contexts on one thread all run them in turn), and the one paper
+that tried co-location reports a slowdown ("resource competitions", PEARL arXiv 2408.11850 § 4.5,
+which then puts them on separate devices; DuoDecoding 2503.00784 and SwiftSpec split the hardware
+too). Batch-1 decode streams weights and is bandwidth-bound, so two streams in ONE process (candle's
+`CudaDevice::new` already gives each device its own stream on the shared primary context) would
+mostly contend for the same ~448 GB/s; untested, and it needs the drafter and the tail in one
+process. What the code allows instead: `FlowRun::take` drains every answer that is due, but
+`finish_here` runs ONE tail forward per answer, each reading this node's layers' weights again
+(~21 ms). Answers that arrive back to back could share one forward — a few more rows cost little,
+the reason a check pays at all. Trap: each answer carries its own tree layout
+(`draft_parents`, `draft_tree_from`, `index_pos`, a rebase's `truncate`), so one forward must carry
+their rows in sent order with a combined layout, and the first answer waits for nothing that has
+not already arrived. Test before building: log how many answers are due per drain on the real link
+— a median of 1 means there is nothing to batch and the idea is dead. Then one binary, an env
+switch, min-of-5, passing only if the tail's 5.2-5.7 s a prose reply drops. Skipping the tail for
+an answer from before a rebase is NOT a lever: the tail runs it so its cache holds the rows the
+peers' does (the comment at `take_answer`'s `finish_here` call).
 
 **Also open here:** (b) the flow's speed depends on the load split — with this machine holding 12
 of 48 layers the peer (36 layers + the 152k-vocab head) saturated (queue up to 2.2 s, 18-39 ms a
