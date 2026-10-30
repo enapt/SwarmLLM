@@ -2834,6 +2834,13 @@ fn cost_curve_of(
 /// `None` when there is no per-layer cost to divide by — unknowable, never
 /// "no room" (see `max_hostable_layers` for why that distinction is load
 /// bearing).
+/// `SWARMLLM_DRAFTER_ROOM_FIRST=average` counts the room beside a guest on the
+/// average layer alone, as before #376 — an A/B inside one binary. Read at
+/// each plan, so a test run can flip it.
+fn first_range_priced_beside_guest() -> bool {
+    std::env::var("SWARMLLM_DRAFTER_ROOM_FIRST").map_or(true, |v| v.trim() != "average")
+}
+
 pub(crate) fn layers_that_fit(free_mb: u64, fixed_mb: u64, per_layer_mb: u64) -> Option<u32> {
     if per_layer_mb == 0 {
         return None;
@@ -7503,7 +7510,45 @@ impl ModelProcessPool {
             }
         };
         // The fixed terms are paid once, whatever the segment's length.
-        layers_that_fit(free_mb, fixed_mb, per_layer_mb)
+        let fits = layers_that_fit(free_mb, fixed_mb, per_layer_mb)?;
+        if guest_mb.is_none() || fixed_mb == 0 || !first_range_priced_beside_guest() {
+            return Some(fits);
+        }
+        // Beside a guest, a FRESH spawn is charged its first range as the
+        // estimator prices it — the token table at its end (`head_bytes`), and
+        // the table dequantized where its rows are not read on demand — while
+        // the line above spreads the tables over every layer (`cost_curve_of`
+        // prices a middle segment). A split from here gives this node its
+        // first range, so a room counted on the line was about a layer too
+        // generous: a 14B's 25 layers loaded, and its 0.5B drafter found the
+        // card 23 MB short and guessed from the processor — that reply at
+        // half speed (#376). llama.cpp's `common/fit.cpp` sizes a device the
+        // same way, by the tensors it will hold, its output layer a unit of
+        // its own. A grown range is charged on the line (`growth_figures`),
+        // so only the spawn's range is read this way; the target's own
+        // refusal re-plans (`note_local_memory_refusal`), a guest's does not.
+        let first_range_mb = |layers: u32| {
+            let range = Some((0, layers));
+            if on_gpu {
+                self.estimate_gpu_footprint_mb(model_id, range, KvCharge::Typical)
+            } else {
+                self.estimate_cpu_footprint_mb(model_id, range, KvCharge::Typical)
+            }
+        };
+        // A room past the model's layers means all of them; the header tells
+        // how many there are, and with none the line is all there is.
+        let whole = self
+            .footprint_inputs(model_id, None)
+            .map_or(0, |i| u32::try_from(i.segment_layers).unwrap_or(u32::MAX));
+        if whole == 0 {
+            return Some(fits);
+        }
+        let start = fits.min(whole);
+        let mut layers = start;
+        while layers > 0 && first_range_mb(layers) > free_mb {
+            layers -= 1;
+        }
+        Some(if layers == start { fits } else { layers })
     }
 
     /// How wide ONE range of `model_id` a fresh worker here would take — card
@@ -13011,6 +13056,64 @@ mod tests {
             ),
             None
         );
+    }
+
+    /// **Beside its drafter, a fresh spawn's first range is priced as the
+    /// spawn will charge it** (#376). The planner's line spreads the token
+    /// table over every layer; the first range — this node's in a split from
+    /// here — loads it whole, so a room counted on the line let the target's
+    /// layers load and left the drafter short (a 14B's 25 layers, its 0.5B
+    /// drafter 23 MB short on the card, the reply at half speed). Here the
+    /// table is dequantized on the first segment (about three layers' worth):
+    /// the drafter fits beside the first `room` layers as the spawn charges
+    /// them, and not beside one more. Red with `SWARMLLM_DRAFTER_ROOM_FIRST=average`.
+    #[tokio::test]
+    async fn room_beside_a_drafter_prices_the_first_range_as_its_spawn_does() {
+        let target = ModelId("a-48-layer-model-with-a-wide-table".into());
+        let drafter = ModelId("qwen3-1.7b-q8-0".into());
+        let range = (0, 28);
+        let mut wide = qwen3_1_7b();
+        wide.quantized_weight_bytes = 8_400 * 1024 * 1024;
+        wide.segment_layers = 48;
+        wide.embedding_gatherable = false;
+        wide.kv = crate::inference::split::kv_budget::KvPrice::uniform(
+            48,
+            8,
+            8,
+            128,
+            crate::inference::layers::KvAttention::Standard,
+        );
+        let pool_with = |name: &str| {
+            let p = ModelProcessPool::new(std::path::PathBuf::from(name));
+            p.set_ram_budget_mb(7_995);
+            p.test_footprint_inputs.insert(target.clone(), wide);
+            p.test_footprint_inputs
+                .insert(drafter.clone(), qwen3_1_7b());
+            p
+        };
+        let pool = pool_with("/tmp/swarmllm-first-range");
+        let room = pool
+            .max_hostable_layers_beside_guest(
+                &target,
+                Requester::Swarm,
+                &drafter,
+                range,
+                KvCharge::Typical,
+            )
+            .expect("room is left");
+        assert!(room > 0 && room < 48, "room for {room} layers");
+        for (layers, admitted) in [(room, true), (room + 1, false)] {
+            let p = pool_with("/tmp/swarmllm-first-range-load");
+            let spawn_mb =
+                p.estimate_cpu_footprint_mb(&target, Some((0, layers)), KvCharge::Typical);
+            admit_and_insert_cpu_worker(&p, &target, spawn_mb, false).await;
+            assert_eq!(
+                p.guest_fit(&drafter, range, KvCharge::Typical, Requester::Swarm)
+                    .admitted(),
+                admitted,
+                "the drafter beside the first {layers} layers, charged {spawn_mb} MB (room {room})"
+            );
+        }
     }
 
     /// **On a card the room is left on the card** (#275 (4), 2026-10-22). A card

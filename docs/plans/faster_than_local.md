@@ -994,6 +994,25 @@ forwards on this node, not their rows, and not the link.
     a captured multi-level call, fewer launches a layer, or the hop to the worker. Halving the 3B's
     call alone would put that prose reply near 11 s, ~14 tok/s: past this machine alone (~13).
 
+    **Read 2026-10-30 ~13:15-13:35Z — the call costs what a level costs on an IDLE card; nothing
+    in the split adds to it.** The worker's log (0.5B prose: 686 levels, 5,818 rows, forwards
+    3,631 ms of a 3,757 ms total; ops, rebases and the hop to the worker ~0.3 ms a call) against
+    `prefill_bench` `SWARM_BENCH_GROW=64,8` on this card with nothing else running ("from
+    nothing": 8 levels of 8 rows, graphs warm, min of 5): 0.5B 4.2 ms a level, 1.5B 7.9, 3B 11.0,
+    graphs off 6.6 / 11.9 / 14.4 — in the flow 5.3 / 8.7 / 11.8-13.5 with graphs and 3B 18.1-18.5
+    graphs off (rig `graphoff1030`, three arms each: code 17.81 with graphs against 15.66 without,
+    prose 8.08 against 7.78). A tree's size does not move it (3B: 11.0 / 11.9 / 12.0 ms a level
+    growing 64 / 256 / 512 rows). (The bench's "on a seed" line is ONE level after reading a seed,
+    not eight — 1.6 ms "a level" was that misread.) What is left beyond the weights' read is
+    ~0.14-0.2 ms a layer whatever the drafter: the host recording each level's ~20 operations a
+    layer into the capture before it is updated and launched (`cuda_graph`'s "update" + "launch"
+    are 0.3-0.5 ms a level of it). The lever is a level REPLAYED without being recorded — every
+    input a level reads already sits in fixed device buffers (`layers::stage_tree_forward`); the
+    lengths and positions that change are kernel arguments, which would have to be read from
+    device memory instead — and the next level's rows chosen on the card from the ranking it
+    already makes (`tree_rank`), so a 3-level call is one launch and one read back. Not small:
+    every kernel a level runs takes its cache length from memory. Parked behind the release.
+
 ## Sources
 
 Petals 2312.08361 · Pope et al. 2211.05102 · StagFormer 2501.15665 · Layer

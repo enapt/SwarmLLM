@@ -2942,7 +2942,17 @@ StarCoder2, inert while refused).
 ### Memory and admission
 
 #### #376 — A near-full card loses a split's drafter to the processor: the planner's room for it is about a layer too generous
-`P2` · memory / scheduling · **OPEN** — 2026-10-30 · history: #275, #342's residual
+`P2` · memory / scheduling · **PARTIAL** — 2026-10-30 · history: #275, #342's residual
+
+**Shipped (the arithmetic):** where this node's first range is weighed beside a guest,
+`ModelProcessPool::local_layers_leaving` now walks the room down until the FIRST range — priced
+by the estimator as the spawn charges it, token table and its dequantized copy included — leaves
+the guest's room (`first_range_priced_beside_guest`; a grown range is charged at the average, as
+`growth_figures` charges it). llama.cpp's `common/fit.cpp` sizes a fit by the tensors each layer
+holds for the same reason. Test `room_beside_a_drafter_prices_the_first_range_as_its_spawn_does`
+(a 48-layer target, a 1.7B guest: the room's last layer admits the guest, one more refuses it) —
+red with `SWARMLLM_DRAFTER_ROOM_FIRST=average`. **Left:** the card check — arm 6's shape, the
+drafter on the card and `room_for` one lower.
 
 Rig `bigsend` arm 6 (2026-10-30, `~/swarmllm-gate/deep/fr/real_link_bigsend/H_6_dsdflow.log`):
 Qwen2.5-14B split [0,12) + [35,48) here, [12,35) on the AU peer. The planner left room for the

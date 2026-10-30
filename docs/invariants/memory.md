@@ -2404,6 +2404,24 @@ one run read as "not loaded" and lose only the overlap.
   `docs/invariants/scheduling.md` § "A split leaves room for the model that
   guesses for it".
 
+**The room is weighed on the first range as its spawn charges it (2026-10-30,
+#376).** Rig `bigsend` arm 6: Qwen2.5-14B [0,12) + [35,48) here, the planner left
+room for the 0.5B drafter at 25 layers, the plan took all 25, and the drafter's
+spawn refused the card by 23 MB (`committed_mb=5390` + `estimated_mb=966` against
+6,333) — the reply ran with its drafter on the processor at half speed (3.55 /
+8.39 tok/s against 6.65 / 14.98 an hour earlier, 70 MB less free at boot). The
+room came from `cost_curve_of`, a MIDDLE segment's line (no token table, the
+tables spread evenly), while a fresh spawn charges its first range through the
+estimator with the table and its dequantized copy. `local_layers_leaving` now
+walks the room down from that line's answer until `estimate_*_footprint_mb` of
+the first `layers` leaves the guest's room — on the device the layers are
+planned (a grown range is charged at the average, as `growth_figures` charges
+it, so only a fresh first range is re-priced). llama.cpp's `common/fit.cpp`
+sizes a device by the tensors each layer holds, for the same reason. Test
+`room_beside_a_drafter_prices_the_first_range_as_its_spawn_does` (a 48-layer
+target and a 1.7B guest: at the room the guest is admitted, one layer more it
+is refused) — red with `SWARMLLM_DRAFTER_ROOM_FIRST=average`, the A/B.
+
 **From the rules file (moved 2026-10-02):**
 
 **`process_pool::Tenancy` is a REQUIRED argument of `get_or_spawn`.** A `Guest`
