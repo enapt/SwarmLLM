@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #381**). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #382**). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -3020,6 +3020,67 @@ flow, the boomerang — "one invariant, N paths"), so the wait belongs at the ch
 first peer send, not in each loop; vLLM's `can_allocate` precedent (the module doc) still holds,
 since the question allocates nothing. A test: a refusal after the local pass re-plans with the
 peer held to what fit and the reply is the same; the first token earlier by the ask's round trip.
+Sized 2026-10-30: the saving is the smaller of the round trip and this node's own pass before
+its first peer send — ~0.4 s of the 70B's 5.4 s first token (under 1% of a 96-token reply), but
+only ~50-100 ms on a card head with a short prompt, against six send sites in the prompt pass
+(the plain forward, its stream encoding, the pieces, the failover, tensor-parallel, the kept
+prompt). Parked behind #381, which is where the 70B's time goes.
+
+#### #381 — A refused guess leaves a far processor idle for a round trip: send it the likely restart beforehand
+`P2` · perf-split / 70B · **OPEN** — 2026-10-30 · history: #149, § 8.2's tail skip, SSD (2603.03251)
+
+**Where the 70B's reply goes** (this node [0,16) + AU [16,80), the chain stream, 3B drafter on
+the processor; rig `ab70drafter` arm 4, `~/swarmllm-70b/out/ab70drafter/H_4_d3.log`, answer
+arrival times): while AU is busy an answer lands every ~0.69 s (`far_narrow_ms=687`); after a
+refused guess the next useful answer lands 1.41-1.50 s later — the refusal's trip back (~0.2 s),
+this node drafting the restart's guesses (3 × ~54 ms) and reading its 16 layers (~0.15 s), the
+trip out (~0.2 s), and only then AU's check. AU idles ~0.73 s a restart, and a 96-token prose
+reply has 19-24 of them: ~63% of the reply is restart cycles, ~35% of it AU idle. The tail skip
+(§ 8.2) already stops AU computing stale chunks; it cannot START the right one, because every new
+row must first pass this node's layers.
+
+**The idea**: build the likely restart BEFORE the verdict and leave it at the far end. With each
+chunk, this node also sends a few SPARE chunks, each `[c', g1', g2']` at a guess position `k`: c'
+the drafter's second choice there, its next guesses drafted after it, hidden states from this
+node's layers over the prefix below `k`. The far end walks the chunk (`spec_walk_at_tail`); where
+it refuses at `k` with correction == c', it runs that spare at once as the restart (cache cut to
+`k`, as a restart cuts it), answers both, and drops the other spares of that chunk unrun. This
+node, told the spare was taken, sends no restart and continues the stream from the spare's end.
+Nothing is checked that was not asked for, so a spare costs the far end nothing unless taken.
+Prior art: SSD/Saguaro (2603.03251) pre-drafts for likely verification outcomes on ONE machine;
+PipeInfer cancels stale work. Neither leaves the prepared restart at the far end, which is what
+removes the round trip.
+
+**Measured before any code — how often a spare is right** (scratchpad `spare_hits.py`, the 3B
+drafter teacher-forced through six of the 70B's own greedy replies, the chain stream replayed at
+3 guesses + the look-ahead): the drafter's top choice is the 70B's token 74.3% of the time (live
+alpha 0.74-0.77) and the replay restarts 24.7 times a 96-token reply (live 19-24), so it is
+calibrated. **Among the drafter's misses, its SECOND choice is the 70B's token 60% of the time.**
+A spare at every position catches 60% of restarts; one at the weakest guess (lowest top
+probability) 28%; the 2nd and 3rd choices at the weakest 37%.
+
+**What it costs this node** (the binding part — the drafter and 6 of the 16 layers are on the
+processor): each spare needs 2 drafted guesses and 3 more rows through its layers. Drafted one by
+one, four spares are ~12 drafter calls (~650 ms) a chunk, more than the ~0.4 s this node has free
+per AU check. Grown as one tree (all spares' level 1 in one call, then level 2 — the drafter's
+tree growth, `engine_drafter`'s flowing tree, already does this) it is ~3 calls; 12 more rows
+through 6 processor layers is ~+0.36 s (§ 8.1's ~0.26 of a step per row past 4), so TWO spares
+at the two weakest positions fit (~0.23 s more a chunk) and are computed AFTER the main chunk is
+sent — they reach AU before it finishes that chunk. Expected: ~45% of restarts caught × ~0.7 s ≈
+7 s of a 54 s prose reply, ~+15%; more where the far end is slower against the round trip.
+
+**What it takes**: (1) this node computes the spares' rows over a prefix that does not include the
+main chunk's rows at or past `k` — a tree-masked forward (`RowVisibility`, as the flow's forwards)
+or a forward whose rows are not kept, never a write into the stream's linear cache; the drafter
+the same. (2) A wire field on the streamed forward naming the turn, position and token it is
+contingent on, behind a NEW feature bit (the sender checks the far end advertises it; an older
+far end is never sent one). (3) The far end's `ForwardStreams` holds spares beside their turn,
+runs the matching one as the restart (it already treats a restart's cache cut and the turns it
+supersedes), answers the others skipped, bounds what it holds by what was asked
+(`MAX_STREAM_CHUNKS_HERE`). (4) This node, on "spare taken", rewrites its own cache and the
+drafter's to the spare's rows (off the critical path: AU is busy checking the spare) and goes on.
+Wire protocol → security review. Test first on a delayed link with a processor far end; judge by
+restarts that waited and tok/s, never by a forward's time.
 
 #### #347 — A first segment on a card keeps its token table there, where llama.cpp keeps it on the processor
 `P3` · memory · **OPEN** — 2026-10-25 · history: #343's residual

@@ -1047,6 +1047,13 @@ answer. What was measured or ruled out:
 7. **A peer that cannot hold the whole model now stays in the plan** for the part it can (#378,
    verified live 14:21Z with the whole model forced onto AU: refused at 41,840 MB short,
    re-planned with AU held to fewer layers).
+8. **Where the reply goes, and the lever it leaves** (answer arrival times in arm 4's log): an
+   answer every ~0.69 s while AU is busy, 1.41-1.50 s after a refused guess — ~63% of a prose
+   reply is restart cycles and AU idles ~0.73 s in each, waiting for this node's restart. The
+   drafter's second choice is the 70B's token in 60% of its misses (teacher-forced replay of six
+   70B replies, calibrated against the live alpha and restart count), so a restart prepared before
+   the verdict and left at the far end would catch 28% (one spare a chunk) to 60% (one at every
+   position) of them → FUTURE_WORK #381, ~+15% expected with two spares a chunk.
 
 ## Sources
 
