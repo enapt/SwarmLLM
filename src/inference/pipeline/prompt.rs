@@ -287,12 +287,26 @@ impl PipelineExecutor {
     /// and any other value would describe a different request, so there is
     /// nothing for a caller to get wrong. The stop set itself comes from
     /// `reply_stops`, which the prompt build above has just warmed.
+    ///
+    /// A continued reply's grammar starts where its text left off
+    /// (`ReplyGrammar::written`): the prompt ends with that text, so a grammar
+    /// compiled fresh would open a second JSON document after it.
     pub(super) async fn build_prompt_and_stops(
         &self,
     ) -> (String, swarmllm_types::inference::SamplingParams) {
         let prompt = self.build_prompt().await;
         let mut params = self.request.sampling_params.clone();
         params.stop = self.reply_stops().await.to_vec();
+        if let (Some(continued), Some(grammar)) =
+            (&self.request.continuation, params.reply_grammar.as_deref())
+        {
+            params.reply_grammar = Some(std::sync::Arc::new(
+                swarmllm_types::inference::ReplyGrammar {
+                    written: continued.text.clone(),
+                    ..grammar.clone()
+                },
+            ));
+        }
         (prompt, params)
     }
 

@@ -1174,7 +1174,11 @@ mod tests {
     /// `rejoin_grammar` puts it back.
     #[test]
     fn a_generate_request_carries_its_reply_grammar_to_the_worker() {
-        let grammar = crate::inference::reply_grammar::settle_json_object();
+        // A continued reply's: the text it starts after crosses with it.
+        let grammar = std::sync::Arc::new(crate::types::ReplyGrammar {
+            written: r#"{"a": 1, "#.into(),
+            ..(*crate::inference::reply_grammar::settle_json_object()).clone()
+        });
         let sampling = SamplingParams {
             reply_grammar: Some(grammar.clone()),
             ..Default::default()

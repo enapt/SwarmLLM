@@ -75,6 +75,7 @@ fn with_options(schema: &Value, lenient: bool) -> Value {
 pub fn settle_json_object() -> Arc<ReplyGrammar> {
     Arc::new(ReplyGrammar {
         schema: with_options(&json!({"type": "object"}), false),
+        written: String::new(),
     })
 }
 
@@ -94,7 +95,10 @@ pub fn settle_json_schema(schema: &Value, strict: bool) -> Result<Arc<ReplyGramm
     }
     let settled = with_options(schema, !strict);
     match compile_error(&settled) {
-        None => Ok(Arc::new(ReplyGrammar { schema: settled })),
+        None => Ok(Arc::new(ReplyGrammar {
+            schema: settled,
+            written: String::new(),
+        })),
         Some(why) if strict => Err(SwarmError::Validation(format!(
             "the reply format's schema cannot be enforced: {why}"
         ))),
@@ -106,6 +110,7 @@ pub fn settle_json_schema(schema: &Value, strict: bool) -> Result<Arc<ReplyGramm
             );
             Ok(Arc::new(ReplyGrammar {
                 schema: with_options(&json!({}), true),
+                written: String::new(),
             }))
         }
     }
@@ -232,7 +237,9 @@ impl GrammarVocab {
 /// drawn without the mask and taken back would leave the matcher a token
 /// ahead of the reply.
 pub struct HeldReply {
-    matcher: Matcher,
+    /// `None`: let go — a continued reply whose text so far is not the start
+    /// of the JSON its format asks for ([`HeldReply::new`]).
+    matcher: Option<Matcher>,
     eos: Vec<u32>,
 }
 
@@ -241,17 +248,34 @@ impl HeldReply {
     /// schema, so a refusal here is a fault of this vocabulary, not of the
     /// caller's request — but it is still the caller's request that cannot be
     /// answered as asked, so it fails as one (400), before the prompt is read.
+    ///
+    /// A continued reply (`ReplyGrammar::written`, #236) is held from where its
+    /// text left off, so it finishes the JSON it began — compiled fresh, the
+    /// grammar opened a second object after the first's opening (pre-release
+    /// review of v0.3.262). Where that text cannot be the start of the JSON —
+    /// a split or a peer, which do not hold the format, wrote something else,
+    /// and it has already reached the reader — the rest is let go, as every
+    /// reply was before #336; holding it could only add a second document.
     pub fn new(vocab: &GrammarVocab, grammar: &ReplyGrammar) -> Result<Self, SwarmError> {
-        compile(&vocab.factory, &grammar.schema)
-            .map(|matcher| Self {
-                matcher,
-                eos: vocab.eos.clone(),
-            })
-            .map_err(|why| {
-                SwarmError::Validation(format!(
-                    "the reply format cannot be held on this model: {why}"
-                ))
-            })
+        let mut matcher = compile(&vocab.factory, &grammar.schema).map_err(|why| {
+            SwarmError::Validation(format!(
+                "the reply format cannot be held on this model: {why}"
+            ))
+        })?;
+        let eos = vocab.eos.clone();
+        if !grammar.written.is_empty() && !went_on_from(&mut matcher, grammar.written.as_bytes()) {
+            tracing::warn!(
+                target: "swarmllm::inference::reply_grammar",
+                written_bytes = grammar.written.len(),
+                "a continued reply's text so far is not the start of the JSON its format asks \
+                 for, so the rest of it is not held to the format",
+            );
+            return Ok(Self { matcher: None, eos });
+        }
+        Ok(Self {
+            matcher: Some(matcher),
+            eos,
+        })
     }
 
     /// Set every token that cannot come next to −∞: what continues the JSON,
@@ -260,8 +284,10 @@ impl HeldReply {
     /// never allowed. A mask that leaves no finite score is an error — a draw
     /// from it would pick an arbitrary token.
     pub fn mask(&mut self, logits: &mut [f32]) -> Result<(), SwarmError> {
-        let allowed = self
-            .matcher
+        let Some(matcher) = self.matcher.as_mut() else {
+            return Ok(());
+        };
+        let allowed = matcher
             .compute_mask_or_eos()
             .map_err(|e| SwarmError::Inference(format!("the reply's JSON could not go on: {e}")))?;
         let mut any = false;
@@ -285,13 +311,31 @@ impl HeldReply {
     /// reply — the mask allowed it only where the JSON is whole — so there is
     /// nothing to advance past.
     pub fn took(&mut self, token: u32) -> Result<(), SwarmError> {
+        let Some(matcher) = self.matcher.as_mut() else {
+            return Ok(());
+        };
         if self.eos.contains(&token) {
             return Ok(());
         }
-        self.matcher
+        matcher
             .consume_token(token)
             .map_err(|e| SwarmError::Inference(format!("the reply's JSON could not go on: {e}")))
     }
+}
+
+/// Advance `matcher` past `written`, a continued reply's text so far, spelled
+/// in the grammar's own vocabulary: the grammar reads BYTES, so any spelling of
+/// the same text leaves it in the same place. Only an exact spelling counts —
+/// the approximate tokenizer skips a byte its vocabulary lacks
+/// (llguidance #138) — and only text the grammar accepts as a start.
+fn went_on_from(matcher: &mut Matcher, written: &[u8]) -> bool {
+    let Ok(env) = matcher.tok_env() else {
+        return false;
+    };
+    let tokens = env.tokenize_bytes(written);
+    env.tok_trie().decode_raw(&tokens) == written
+        && matcher.consume_tokens(&tokens).is_ok()
+        && !matcher.is_error()
 }
 
 #[cfg(test)]
@@ -379,6 +423,55 @@ mod tests {
         let grammar = settle_json_schema(&schema, true).unwrap();
         let text = held_reply_text(&grammar, &["x", "blue", "red", "\""]);
         assert_eq!(text, r#"{"color": "blue"}"#);
+    }
+
+    /// A continued reply finishes the JSON it began (pre-release review of
+    /// v0.3.262): compiled fresh, the grammar opened a second object after the
+    /// text the reader already had.
+    #[test]
+    fn a_continued_reply_finishes_the_json_it_began() {
+        let schema = json!({
+            "type": "object",
+            "properties": {"color": {"enum": ["red", "blue"]}},
+            "required": ["color"],
+            "additionalProperties": false,
+        });
+        let settled = settle_json_schema(&schema, true).unwrap();
+        let written = r#"{"color": "bl"#;
+        let continued = ReplyGrammar {
+            written: written.into(),
+            ..(*settled).clone()
+        };
+        let rest = held_reply_text(&continued, &["{", "{\"", "red", "x", "u", "e", "\"}"]);
+        assert_eq!(
+            format!("{written}{rest}"),
+            r#"{"color": "blue"}"#,
+            "rest: {rest}"
+        );
+    }
+
+    /// Text the format cannot continue — written where nothing held it, and
+    /// already with the reader — lets the rest go: held, it could only add a
+    /// second document.
+    #[test]
+    fn a_continued_reply_that_is_not_json_so_far_is_let_go() {
+        let (pieces, names, eos) = vocab();
+        let gv = GrammarVocab::from_pieces(&pieces, &names, &eos).unwrap();
+        let masked = |grammar: &ReplyGrammar| {
+            let mut held = HeldReply::new(&gv, grammar).unwrap();
+            let mut scores = vec![1.0f32; names.len()];
+            held.mask(&mut scores).unwrap();
+            scores.iter().filter(|s| s.is_infinite()).count()
+        };
+        assert!(
+            masked(&settle_json_object()) > 0,
+            "control: a fresh reply is held"
+        );
+        let continued = ReplyGrammar {
+            written: "Sure! Here is".into(),
+            ..(*settle_json_object()).clone()
+        };
+        assert_eq!(masked(&continued), 0, "let go: nothing is ruled out");
     }
 
     #[test]

@@ -2225,11 +2225,41 @@ mod tests {
             text: "The capital of Fr".into(),
             tokens: 5,
         });
-        let exec =
-            PipelineExecutor::new(state.clone(), tx, continued.clone(), assignment(plain.id));
+        let exec = PipelineExecutor::new(
+            state.clone(),
+            tx.clone(),
+            continued.clone(),
+            assignment(plain.id),
+        );
         assert_eq!(
             exec.build_prompt_with_header(None).await,
             format!("{rendered}The capital of Fr")
+        );
+
+        // A reply held to JSON is held from where that text leaves off — the
+        // prompt ends there, and a grammar starting fresh would open a second
+        // document (pre-release review of v0.3.262).
+        let grammar = crate::inference::reply_grammar::settle_json_object();
+        let mut held = continued.clone();
+        held.sampling_params.reply_grammar = Some(grammar.clone());
+        let sampling_for = |request: crate::types::InferenceRequest| {
+            let exec =
+                PipelineExecutor::new(state.clone(), tx.clone(), request, assignment(plain.id));
+            async move { exec.build_prompt_and_stops().await.1 }
+        };
+        assert_eq!(
+            sampling_for(held.clone())
+                .await
+                .reply_grammar
+                .as_deref()
+                .map(|g| g.written.as_str()),
+            Some("The capital of Fr")
+        );
+        held.continuation = None;
+        assert_eq!(
+            sampling_for(held).await.reply_grammar.as_deref(),
+            Some(&*grammar),
+            "a reply that starts fresh is held from its start"
         );
 
         // The singleton executor renders its own prompt too: never handed one.

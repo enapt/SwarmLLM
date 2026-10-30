@@ -368,6 +368,13 @@ impl Default for SamplingParams {
 pub struct ReplyGrammar {
     /// The schema, `x-guidance` included.
     pub schema: serde_json::Value,
+    /// The reply's text the reader already has, where a reply whose machine
+    /// failed mid-stream is continued (#236): the grammar starts AFTER it, so
+    /// the continued reply goes on in the JSON it began instead of opening a
+    /// second one. Empty for a reply that starts fresh. Set only where a
+    /// continued prompt is built (`PipelineExecutor::build_prompt_and_stops`).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub written: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
