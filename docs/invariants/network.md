@@ -3695,11 +3695,18 @@ answers waited 0.5-2.3 s a reply with spares on and 0 with them off. That waitin
 each remaining gap grew. Now each spare's gain is averaged over the reply's last 16 errors, every
 time in its terms shifted by each. Same rig, same steady reply: refused answers waited 0.4-1.2 s
 against 1.3-5.2 s priced at the point, 56-60 spares sent against 66-74, the same 7-10 run. Reply
-times: 88.8-89.5 s against 88.6-90.6 at the point; none 87.9-88.3. **The rest is open.** With
-spares on, the far end's idle time fell (21.2-23.2 s a reply against 23.2-23.3) but its busy time
-rose 2-3 s (82-84 against 80-81). The spare arms' replies are not the off arm's text (the
-0.08-logit tie), so their far work differs, and that is not yet separated from what spares cost
-the far end. A/B `SWARMLLM_STREAM_SPARE_LATENESS=0`; logged `answer_late_ms`.
+times: 88.8-89.5 s against 88.6-90.6 at the point; none 87.9-88.3. With spares on, the far end's
+idle time fell (21.2-23.2 s a reply against 23.2-23.3) but its busy time rose 2-3 s (82-84
+against 80-81). Those replies were not the off arm's text (the 0.08-logit tie). They needed one
+more check (70 chunks against 69) and one more wide one, about a second of far work.
+
+**With the same reply either way, spares paid** (same night, `PROMPT='Explain how a refrigerator
+keeps food cold, in about 150 words, for someone with no science background.'`; every reply
+identical across arms). Steady reply, one per arm: spares 80.0 s against 81.0 and 82.9 none; the
+first ask 87.9 against 86.4 and 89.4. The far end idled 2.4 s less (16.8 against 19.1-19.2) and
+worked no more (77.9 against 76.7-78.1). 6 of 56-62 spares ran, of 35 restarts. A small sample.
+On this rig a restart costs ~0.5 of a far check; on the 70B ~1.0, where the replay put the
+priced spares at 1.07-1.10x. A/B `SWARMLLM_STREAM_SPARE_LATENESS=0`; logged `answer_late_ms`.
 
 Tests: `a_spare_restart_runs_for_the_refusal_it_names`,
 `a_spare_restart_for_another_outcome_is_skipped`, `a_spare_supersedes_nothing_and_only_one_runs_per_refusal`,
