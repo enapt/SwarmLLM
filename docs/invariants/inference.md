@@ -3324,7 +3324,7 @@ open — all 12 requests of each guessing arm speculated; medians of four runs, 
 
 A check's extra position cost 9-19 ms on every core against 34-54 ms at four threads, and the
 controller bought more guesses with it (127-140 a reply against 93-105;
-`cpu_pools::checks_on_the_owners_pool`, `docs/invariants/memory.md`).
+`cpu_pools::check_pool`, `docs/invariants/memory.md`).
 Replies: each arm repeats itself (tail1 = tail6); the middle placement changes the arithmetic of the
 layers that moved, so its greedy reply may part from the tail's at a near-tie (judge against
 llama.cpp, never byte-equality).

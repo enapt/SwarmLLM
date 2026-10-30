@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #379**). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #380**). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -1457,7 +1457,7 @@ A whole model too big for the card runs most of each step on the processor: Qwen
 the processor run sits early in the middle (`hybrid::processor_run`), so the card holds both ends of
 the model and guesses the next tokens alone where the n-gram finds nothing to copy
 (`model_worker::CardGuesses`), checked several at a time by the whole model, the owner's checks on
-every core (`cpu_pools::checks_on_the_owners_pool`, as llama.cpp's `n_threads_batch`). Measured on
+every core (`cpu_pools::check_pool`, as llama.cpp's `n_threads_batch`). Measured on
 Qwen2.5-14B Q4_K_M, 23-24 of 48 on an RTX 3070 Laptop, one binary by env switch: decode 5.61 →
 9.71 tok/s on code, 5.63 → 8.23 on a 1,800-token summary, 6.48 → 8.77 on prose (1.35-1.73x; the
 card's guesses alone 1.15-1.43x, every core on the checks another 1.11-1.23x), first token
@@ -3881,7 +3881,19 @@ Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
 
-**Closed 2026-10-30, ships in the next release** (#378)
+**Closed 2026-10-30, ships in the next release** (#379, #378)
+- #379 — **A computer checking another's guesses did it on fewer cores than its owner offered.**
+  The contribution level is what a machine gives the swarm, and the swarm's prompts ran at it, but
+  a check of 2-32 positions — what every processor peer of a split runs for its coordinator, and
+  the owner's own on a node at Maximum — ran at the width decode calibrates on ONE position (4 of
+  this Ryzen's 8). The 70B's far end paid ~42 ms a position that way. Such a check now runs at the
+  contribution width on physical cores (`cpu_pools::swarm_check_threads`). Measured on the swarm's
+  own path (`test-split --prompt-chunk`, Qwen2.5-Coder-7B processor-only, 8 threads offered, decode
+  at 4, ABBA twice): 4 positions a forward 19.8-21.2 → 29.4-31.7 tokens a second, 8 positions
+  21.3-21.9 → 34.4-36.0; decode steps level. A peer gains where its calibration settled under its
+  cap. A/B `SWARMLLM_CHECK_POOL=owner-only`. Test
+  `the_swarms_check_runs_at_the_contribution_width_not_the_decode_width`. Evidence:
+  `docs/invariants/memory.md` § "The swarm's checks at the contribution width".
 - #378 — **A peer handed the whole model that could not serve it was dropped from the request, and
   with it the only holder of most of the model.** Llama 3.3 70B, this node holding [0,16): the
   Australian RTX 3060 had come to hold all 80 layers and published room for them while its [16,80)
@@ -3894,8 +3906,11 @@ grep `^| N |`).
   peer that cannot start a worker is barred by the segment it fails. Petals ignores its own ban
   where every server of a block is banned, for the same reason. Test
   `a_peer_that_refused_the_whole_model_is_held_short_of_it_not_barred` (red with
-  `SWARMLLM_WHOLE_REFUSAL=bar`, the A/B). Evidence: `docs/invariants/scheduling.md` § "A re-plan is
-  warranted by a changed fact".
+  `SWARMLLM_WHOLE_REFUSAL=bar`, the A/B). Checked live (main's build in the live node's place,
+  14:21Z): with this node offering none of the 70B, AU was handed the whole model, refused, was held
+  to fewer layers (`DIAG: the peer handed the whole model cannot serve it`), and the caller heard its
+  refusal in its own words; the two-machine request after it was served (1.50 tok/s). Evidence:
+  `docs/invariants/scheduling.md` § "A re-plan is warranted by a changed fact".
 
 **Closed 2026-10-30, ships in the next release** (#375)
 - #375 — **The stream's choice of width was made from a price it could not measure.** #374 priced a

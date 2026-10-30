@@ -99,12 +99,28 @@ pub async fn test_split_inference(
         &[1, token_ids.len()],
         &candle_core::Device::Cpu,
     )?;
+    let prompt_started = std::time::Instant::now();
     let logits = tokio::task::block_in_place(|| match prompt_chunk {
         0 => model.forward(&input, 0, &kv_store, test_request_id),
         n => model.forward_prompt_in_chunks(&input, 0, &kv_store, test_request_id, None, false, n),
     })
     .map_err(|e| anyhow::anyhow!("{e}"))?;
     let first_token = sample_token(&logits, 0.0, 1.0).map_err(|e| anyhow::anyhow!("{e}"))?;
+    // A prompt read `--prompt-chunk` positions a forward is a run of forwards
+    // shaped like a speculative check (a forward of 2-32 positions), so this
+    // line prices a check's width too.
+    let prompt_secs = prompt_started.elapsed().as_secs_f64();
+    println!(
+        "Prompt: {} tokens in {:.2} s ({:.1} tokens a second, {} a forward)",
+        token_ids.len(),
+        prompt_secs,
+        token_ids.len() as f64 / prompt_secs,
+        if prompt_chunk == 0 {
+            "all".to_string()
+        } else {
+            prompt_chunk.to_string()
+        }
+    );
 
     let mut generated = vec![first_token];
     print!("Generated: ");

@@ -806,10 +806,22 @@ pub(crate) fn in_phase_pool<R: Send>(
             return pool.install(f);
         }
     }
-    if cpu_layers > 0 && seq_len > 1 && for_the_owner && checks_on_the_owners_pool() {
+    let checks = check_pool();
+    if cpu_layers > 0 && seq_len > 1 && for_the_owner && checks != CheckPool::Narrow {
         if let Some(pool) = owner_prefill_pool() {
             return pool.install(f);
         }
+    }
+    if cpu_layers > 0
+        && (2..=DECODE_SHAPED_MAX_TOKENS).contains(&seq_len)
+        && checks == CheckPool::Wide
+    {
+        // A check the owner's pool did not take: at the contribution level's
+        // width, never the decode width one position calibrated (see `CheckPool`).
+        return match pool_for(swarm_check_threads()) {
+            Some(pool) => pool.install(f),
+            None => f(),
+        };
     }
     if seq_len > DECODE_SHAPED_MAX_TOKENS || cpu_layers == 0 {
         return f();
@@ -872,14 +884,50 @@ pub(crate) fn in_phase_pool<R: Send>(
 /// a reply against 93-105) and decode rose 8.09 → 9.75-9.87 tok/s on code,
 /// 7.70 → 8.25-8.64 on a summary, 8.32 → 8.80-9.24 on prose. A/B
 /// `SWARMLLM_CHECK_POOL=narrow`.
-fn checks_on_the_owners_pool() -> bool {
-    static ON: OnceLock<bool> = OnceLock::new();
-    *ON.get_or_init(|| {
-        !matches!(
-            std::env::var("SWARMLLM_CHECK_POOL").ok().as_deref(),
-            Some("narrow")
-        )
+///
+/// **The swarm's checks too (2026-10-30).** A machine checking ANOTHER's
+/// guesses — every processor peer of a split — still ran them at the decode
+/// width, which calibration settles at or below the contribution level's (4 of
+/// this machine's 8 at Maximum). The contribution level is what the owner
+/// offered the swarm, and the swarm's prompts already run at it, so its checks
+/// now do too ([`swarm_check_threads`]: the contribution width on physical
+/// cores, never past it), as do the owner's where the owner's pool is no wider
+/// (a node at Maximum). The 70B split's far end, its processor reading 41 of
+/// its 64 layers, paid ~42 ms a position at the decode width (the stream's own
+/// reading of its pace, 700 → 784 ms from 3 guesses a chunk to 5).
+/// `SWARMLLM_CHECK_POOL=owner-only` keeps the swarm's checks narrow (v0.3.262);
+/// `=narrow` keeps every check narrow.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum CheckPool {
+    /// Every check at the decode width (before 2026-10-28).
+    Narrow,
+    /// The owner's on the owner's pool, the swarm's at the decode width (v0.3.262).
+    OwnerOnly,
+    /// The owner's on the owner's pool, every other at the contribution width.
+    Wide,
+}
+
+fn check_pool() -> CheckPool {
+    static SETTING: OnceLock<CheckPool> = OnceLock::new();
+    *SETTING.get_or_init(|| {
+        match std::env::var("SWARMLLM_CHECK_POOL")
+            .ok()
+            .as_deref()
+            .map(str::trim)
+        {
+            Some("narrow") => CheckPool::Narrow,
+            Some("owner-only") => CheckPool::OwnerOnly,
+            _ => CheckPool::Wide,
+        }
     })
+}
+
+/// The width a check of a few positions runs at when the owner's pool does not
+/// take it: the contribution level's (the global pool), on physical cores only
+/// — the same cap decode's width sits under ([`decode_threads`]), without the
+/// calibration that narrows decode for ONE position.
+fn swarm_check_threads() -> usize {
+    decode_threads(rayon::current_num_threads(), num_cpus::get_physical())
 }
 
 /// Longest query block still treated as decode-shaped, i.e. narrow-pool work.
@@ -1436,7 +1484,7 @@ mod tests {
     }
 
     /// The owner's prompt — and the owner's check of a few positions
-    /// (`checks_on_the_owners_pool`, as llama.cpp's `n_threads_batch`) — run on
+    /// (`check_pool`, as llama.cpp's `n_threads_batch`) — run on
     /// the owner's width; the swarm's work and every one-token decode step do
     /// not. Asserted on the pool the work RAN on (`current_num_threads` inside
     /// it), not on a speed.
@@ -1471,6 +1519,39 @@ mod tests {
             in_phase_pool(128, 0, true, rayon::current_num_threads),
             global,
             "a forward with no processor layers has no prompt to read here"
+        );
+    }
+
+    /// The swarm's check of a few positions — what every processor peer of a
+    /// split runs for its coordinator — runs at the contribution level's width,
+    /// not the width ONE position calibrated decode to; a decode step keeps the
+    /// calibrated one. Asserted on the pool the work RAN on, with a depth's
+    /// calibration settled at one thread. Fails with `SWARMLLM_CHECK_POOL=owner-only`.
+    #[test]
+    fn the_swarms_check_runs_at_the_contribution_width_not_the_decode_width() {
+        // A processor depth no other test uses (calibration state is shared).
+        const DEPTH: usize = 9_997;
+        let contribution = swarm_check_threads();
+        let width = |seq_len| in_phase_pool(seq_len, DEPTH, false, rayon::current_num_threads);
+        let Some(calib) = calibration_for(DEPTH) else {
+            // One core, or a pinned width: decode has no narrower width to
+            // fall to, and the check still runs at the contribution width.
+            assert_eq!(width(4), contribution.min(rayon::current_num_threads()));
+            return;
+        };
+        calib.chosen.store(1, Ordering::Relaxed);
+        assert_eq!(width(1), 1, "a decode step keeps the width it calibrated");
+        for seq_len in [2, 4, 8, DECODE_SHAPED_MAX_TOKENS] {
+            assert_eq!(
+                width(seq_len),
+                contribution,
+                "the swarm's check of {seq_len} positions ran at the decode width"
+            );
+        }
+        assert!(
+            contribution <= rayon::current_num_threads()
+                && contribution <= num_cpus::get_physical(),
+            "never past what the owner offered, never on an SMT sibling"
         );
     }
 }

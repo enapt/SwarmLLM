@@ -2081,7 +2081,7 @@ control `SWARMLLM_OWNER_PREFILL_THREADS=0`): 2,427 tokens 35.5 → 49.5 tok/s
 (+39%); 6,911 tokens 28.8 → 32.4 (+12%). The long prompt barely scales where
 llama.cpp gains 49% for the same 4→8 — attention there is the next lever.
 **The owner's check of a few positions too** (2026-10-28,
-`cpu_pools::checks_on_the_owners_pool`): a speculative check streams the weights
+`cpu_pools::check_pool`): a speculative check streams the weights
 once and pays compute per extra position, which scales with cores — llama.cpp
 gives every forward of more than one token `n_threads_batch`. On a 14B split it
 cost 9-19 ms a position on every core against 34-54 at the 4 decode threads, and
@@ -2091,6 +2091,30 @@ Tests: `only_the_owners_prompts_and_checks_run_on_the_owners_width` (asserts the
 pool the work RAN on; fails with the branch disabled),
 `an_owner_request_is_marked_per_request_and_released_with_it`,
 `the_owners_prompt_is_read_on_every_core_unless_the_operator_said_otherwise`.
+
+**The swarm's checks at the contribution width** (2026-10-30, `cpu_pools::swarm_check_threads`,
+FUTURE_WORK #379). The change above widened only the OWNER's checks; a machine checking another's
+guesses — every processor peer of a split, and the owner's own where the owner's pool is no wider
+(a node at Maximum) — still ran a forward of 2-32 positions at the width decode CALIBRATES on one
+position, which sits at or below the contribution level's (4 of this Ryzen 7 5800H's 8). The rule
+above already said "the swarm's work keeps the contribution width"; the code gave it less. The
+70B split's far end (an i7-12700 + RTX 3060 reading 41 of its 64 layers on its processor) paid
+~42 ms a position that way — the stream's own reading of its pace, 700 → 784 ms from 3 guesses a
+chunk to 5 (`dsd_controller::FarPace`). Now such a forward runs at `decode_threads(contribution,
+physical)` — the cap decode's own width sits under, never past what the owner offered, never on an
+SMT sibling (the microbench under `DECODE_SHAPED_MAX_TOKENS` is why) — the width the swarm's
+prompts of more than 32 positions already ran at.
+**Measured** (`~/swarmllm-70b/checkpool.sh`, one release card build, live node stopped, Qwen2.5-
+Coder-7B Q4_K_M processor-only through `test-split --prompt-chunk N` — its cache is not the
+owner's, so this IS the swarm's path — at `RAYON_NUM_THREADS=8`, decode pinned at 4, arms ABBA
+twice, 130-token prompt): 4 positions a forward 19.8-21.2 → 29.4-31.7 tokens a second (a forward
+~191 → ~128 ms), 8 positions 21.3-21.9 → 34.4-36.0 (~353 → ~218 ms); the one-token steps of both
+arms level (105-128 ms). Not measured on a peer's real split: the release reaches AU's node by
+auto-update, and its own decode width is not visible from here — where its calibration settled AT
+the cap, nothing changes there. A/B `SWARMLLM_CHECK_POOL=owner-only` (v0.3.262), `=narrow`
+(before 10-28). Test: `the_swarms_check_runs_at_the_contribution_width_not_the_decode_width`
+(a depth's calibration settled at one thread; asserts the pool the check RAN on; fails with
+`owner-only`).
 
 **The forward path too (pre-release review, 2026-09-26).** The change above
 marked only `Generate`, so when the router SPLIT the owner's request, this
