@@ -291,6 +291,7 @@ fn qwen2_forward_with_biases() {
         decode_graph: Default::default(),
         prompt_room: Default::default(),
         stand_in_prior: None,
+        grammar_vocab: Default::default(),
     };
 
     let kv_store = KvCacheStore::new(std::time::Duration::from_secs(600));

@@ -219,6 +219,23 @@ fn validate_chat_request(
         }
     }
 
+    // The JSON the reply is held to (#336), settled once, here, after the size
+    // caps: the only writer of `reply_grammar`, so every path below — fast,
+    // routed, streamed or not — reads one answer through `to_sampling_params`.
+    req.reply_grammar = match &req.response_format {
+        None | Some(crate::api::openai::types::ResponseFormat::Text) => None,
+        Some(crate::api::openai::types::ResponseFormat::JsonObject) => {
+            Some(crate::inference::reply_grammar::settle_json_object())
+        }
+        Some(crate::api::openai::types::ResponseFormat::JsonSchema { json_schema }) => Some(
+            crate::inference::reply_grammar::settle_json_schema(
+                &json_schema.schema,
+                json_schema.strict,
+            )
+            .map_err(ApiError)?,
+        ),
+    };
+
     Ok(())
 }
 
@@ -1483,6 +1500,7 @@ mod tests {
             logprobs: false,
             top_logprobs: None,
             response_format: None,
+            reply_grammar: None,
             session_id: None,
             lora_adapter: None,
             swarm_route: None,

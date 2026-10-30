@@ -2181,6 +2181,79 @@ on the processor): all eight forms — chat, Anthropic and Responses each stream
 `chat` and `compare` — named `distributed`, 2 segments, 1 peer, the nodes the headers named; the
 streamed chat carried it on its finish chunk alone, and the text the model reads held none of it.
 
+## A reply held to JSON is settled at the door and held at every worker draw (2026-10-30, #336)
+
+**What it replaced.** `response_format` was an instruction in the prompt and nothing more
+(`to_internal_messages`), and the Responses API's `text.format` was dropped entirely on the local
+path (`translate.rs` wrote `response_format: None`). A small model wrapped its JSON in a markdown
+fence, or wrote prose first, and the caller's parser failed.
+
+**The engine and why.** llguidance 1.9.1 (MIT, Rust 1.87): vLLM's `guidance` backend, SGLang's,
+llama.cpp's `%llguidance`. It needs only each token's BYTES — `GrammarVocab` builds them once per
+loaded model from `SplitTokenizer::grammar_piece` (the reply decode, `PieceDecoder`), with every
+entry that is never text written `0xFF` + its name (llama.cpp's `common/llguidance.cpp` does the
+same). "Never text" cannot be read off the bytes: a byte-level BPE vocabulary spells `<|im_end|>`
+in printable characters whose decode is exactly the bytes `<|im_end|>`, which a JSON string would
+accept — so the tokenizer keeps the declared types' answer (`never_text_ids`: UNKNOWN, CONTROL,
+UNUSED, llama.cpp's end-of-generation names, a marker shape only where no types are declared).
+Built without default features: no `referencing` (a `$ref` resolves only inside the schema — the
+engine never fetches one), no `lark`, no `rayon`.
+
+**Decisions, each with its reason.**
+- *Settled once, at the door, compiled there* — against a one-byte-per-token vocabulary
+  (`ApproximateTokEnv::single_byte_env`): a compile error is a property of the grammar, not the
+  vocabulary, so a schema the engine cannot hold is a 400 before the reply starts, never a
+  stream that fails after its headers. The worker compiles exactly the schema the door checked.
+- *`strict`* — `true`: an unholdable schema is refused with the engine's reason. `false` (both
+  surfaces' default): unknown keywords are not enforced (`lenient`), and a schema that still will
+  not compile holds the reply to JSON of any shape — never less than before, when nothing was held.
+- *Our compiler options replace the caller's `x-guidance`*: one line, `", "` and `": "`
+  (`json.dumps`' layout), no free whitespace — a grammar that lets whitespace through lets a model
+  write newlines inside a valid prefix for ever (the runaway behind xgrammar's
+  `any_whitespace=False` and vLLM's `disable_any_whitespace`); `coerce_one_of`, since no
+  token-by-token grammar can rule out a reply matching two `oneOf` branches.
+- *In `SamplingParams`, `#[serde(skip)]`* — vLLM's place for it (`structured_outputs`): every path
+  that already hands a request's sampling to a worker carries it without a new argument. Skipped
+  wherever sampling is serialized, so no wire message changes and no peer is told it; the worker
+  IPC carries it beside (`IpcGenerate::grammar`), written only by `IpcGenerate::new` and read only
+  by `rejoin_grammar`, the worker's first act on a generate.
+- *One draw helper, `held` REQUIRED, refusing a forgotten one* — every worker draw for a reply
+  goes through `tensor_util::sample_token_with_logprob_history` (the first token through its
+  history-free sibling): the mask before penalties, top-k/top-p and the logprob, the matcher told
+  the token after. A draw for a grammar-carrying request handed `None` is an error, so a new draw
+  site that forgets it fails loudly instead of letting the reply off its JSON.
+- *Speculation is off for a held reply* (`ngram_spec_eligible`, SWIFT's gate, the batch gate's
+  SWIFT clause): a guess is drawn without the mask, and one taken back would leave the matcher
+  ahead of the reply. A held reply may batch.
+- *A matcher error FAILS the request* with its reason (llama.cpp drops the constraint silently on
+  a mask failure), and a mask that leaves no finite score is an error, never an arbitrary draw.
+
+**Where it is NOT held (yet).** A split, a whole model handed to a peer, the in-process executor
+fallback and the drafter's guesses: each still only asks. FUTURE_WORK #336 carries the residual
+(the grammar on the wire behind a feature bit, the far end masking every row, tool calls as a
+lazy grammar).
+
+**Tests.** `reply_grammar::tests` (a model that prefers prose, markdown and a control token still
+writes `{"color": "blue"}`; the end token only once the JSON is whole; a strict schema with a
+remote `$ref` refused, the lenient one held to JSON; the caller's `x-guidance` replaced).
+Red with the fix off (2026-10-30): the forgotten-grammar refusal in the draw helper removed →
+`the_worker_draw_holds_the_reply_and_refuses_a_forgotten_grammar` fails; `IpcGenerate::new` not
+copying the grammar → `a_generate_request_carries_its_reply_grammar_to_the_worker` fails.
+
+**Verified on real models (2026-10-30, `~/swarmllm-gate/deep/rg336/run336.sh` + `check336.py`, the
+dev build on an isolated probe node, CPU, offline).** Four models, four tokenizer families —
+Qwen2.5-1.5B Q8_0 (BPE), Llama-3.2-1B Q8_0 (llama-bpe), Gemma-2-2B Q4_K_M (SPM), TinyLlama-1.1B
+Q4_K_M (llama SPM) — each asked "Tell me about Paris." at temperature 0.7: with no format every one
+wrote prose; with a strict `json_schema` (four required keys, a number, an array of at most three
+strings, no extra keys) every reply parsed and matched, non-streamed, streamed, through the Responses
+API's `text.format`, and with a second request held to a different schema decoding beside it; an
+`enum` schema gave `{"mood": "happy"}` / `{"mood": "sad"}`; a strict schema with a remote `$ref` was a
+400 naming why. `json_object` parsed on Qwen and TinyLlama; on Llama and Gemma it ran into the
+caller's `max_tokens` (160 of 160) — the prompt never asked for JSON, so the model wrote its prose
+into a string value (Gemma's `{"": "Paris, officially…`). That is OpenAI's behaviour too
+(`finish_reason: "length"`, and OpenAI refuses `json_object` unless the messages mention JSON); this
+node does not refuse, so a caller should ask for JSON in the prompt.
+
 ## Single-source-of-truth helpers — API surfaces, errors and streaming
 
 Each names the ONE place a decision is made. A second implementation of any of

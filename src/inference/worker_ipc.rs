@@ -662,6 +662,51 @@ pub struct IpcGenerate {
     /// the field for a newer daemon.
     #[serde(default)]
     pub keep_here: bool,
+    /// The JSON the reply is held to (#336) — `sampling.reply_grammar`, which
+    /// is skipped wherever `SamplingParams` is serialized (a peer is not told
+    /// it), carried across this hop beside it. Built only by
+    /// [`IpcGenerate::new`] and put back only by
+    /// [`IpcGenerate::rejoin_grammar`], so neither end can drop it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grammar: Option<crate::types::ReplyGrammar>,
+}
+
+impl IpcGenerate {
+    /// The one way the daemon builds a generate request: the reply grammar
+    /// rides beside the sampling it cannot cross inside.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        request_id: Uuid,
+        model_id: ModelId,
+        layer_range: (u32, u32),
+        prompt: String,
+        sampling: SamplingParams,
+        session_id: Option<String>,
+        for_the_owner: bool,
+        keep_here: bool,
+    ) -> Self {
+        let grammar = sampling.reply_grammar.as_deref().cloned();
+        Self {
+            request_id,
+            model_id,
+            layer_range,
+            prompt,
+            sampling,
+            session_id,
+            for_the_owner,
+            keep_here,
+            grammar,
+        }
+    }
+
+    /// Put the reply grammar back into the sampling, as the daemon held it —
+    /// the worker's first act on a generate request, before either path
+    /// (the batched table or `handle_generate`) reads the sampling.
+    pub fn rejoin_grammar(&mut self) {
+        if let Some(grammar) = self.grammar.take() {
+            self.sampling.reply_grammar = Some(std::sync::Arc::new(grammar));
+        }
+    }
 }
 
 /// A drafting call (`DaemonMsg::Draft`).
@@ -1123,6 +1168,36 @@ pub fn permanent_gpu_failure(message: &str) -> Option<PermanentGpuFailure> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A reply's grammar crosses the worker IPC although every serialized
+    /// `SamplingParams` skips it (#336): `IpcGenerate::new` carries it beside,
+    /// `rejoin_grammar` puts it back.
+    #[test]
+    fn a_generate_request_carries_its_reply_grammar_to_the_worker() {
+        let grammar = crate::inference::reply_grammar::settle_json_object();
+        let sampling = SamplingParams {
+            reply_grammar: Some(grammar.clone()),
+            ..Default::default()
+        };
+        let sent = IpcGenerate::new(
+            Uuid::new_v4(),
+            ModelId("m".into()),
+            (0, 2),
+            "hi".into(),
+            sampling,
+            None,
+            true,
+            false,
+        );
+        let mut got: IpcGenerate =
+            serde_json::from_slice(&serde_json::to_vec(&sent).unwrap()).unwrap();
+        assert!(
+            got.sampling.reply_grammar.is_none(),
+            "the premise: the sampling alone does not carry it"
+        );
+        got.rejoin_grammar();
+        assert_eq!(got.sampling.reply_grammar.as_deref(), Some(&*grammar));
+    }
 
     /// Write one frame by hand: a header this build may not know, and a payload.
     async fn write_raw_frame(w: &mut tokio::io::DuplexStream, header: &[u8], payload: &[u8]) {

@@ -10778,16 +10778,16 @@ impl ModelProcessPool {
         // after one".
         let requested_max_tokens = sampling.max_tokens;
 
-        let gen = IpcGenerate {
+        let gen = IpcGenerate::new(
             request_id,
-            model_id: model_id.clone(),
+            model_id.clone(),
             layer_range,
             prompt,
             sampling,
             session_id,
-            for_the_owner: requester == Requester::Owner,
-            keep_here: keep.is_kept(),
-        };
+            requester == Requester::Owner,
+            keep.is_kept(),
+        );
 
         if handle.dead.load(Ordering::Acquire) {
             self.retire_dead_worker(model_id).await;

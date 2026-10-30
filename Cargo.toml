@@ -145,6 +145,14 @@ serde_json = { version = "1", features = ["preserve_order"] }
 # `{% include %}` or `{% extends %}` in a template still has nothing to load.
 minijinja = { version = "2.24", default-features = false, features = ["builtins", "serde", "loop_controls", "fuel", "json", "preserve_order", "macros", "adjacent_loop_items", "multi_template"] }
 minijinja-contrib = { version = "2.24", default-features = false, features = ["pycompat"] }
+# A reply held to the JSON its caller asked for (#336, `inference::reply_grammar`):
+# the engine behind vLLM's `guidance` backend and llama.cpp's `%llguidance`.
+# No default features: not `rayon` (a mask is tens of microseconds on one
+# thread, and our pools are our own), not `lark` (no grammar language is
+# taken from a caller yet), not `referencing` — so a schema's `$ref` reaches
+# only inside the schema itself (`#/...`) and the engine never fetches one.
+# `ahash` is the engine's own hashing, nothing more.
+llguidance = { version = "1.9.1", default-features = false, features = ["ahash"] }
 toml = "1"
 safetensors = "0.7"
 

@@ -33,6 +33,7 @@ pub mod prefill_pacer;
 pub mod process_pool;
 pub(crate) mod prof;
 pub mod quant;
+pub(crate) mod reply_grammar;
 pub mod residual_norm;
 pub mod route_override;
 pub mod router;

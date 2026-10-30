@@ -609,6 +609,33 @@ pub struct SplitTokenizer {
     /// The BOS token's own text, so `encode` can see a prompt that already
     /// opens with it — see there.
     bos_text: Option<String>,
+    /// The entries a reply never writes as text, sorted — see
+    /// [`never_text_ids`].
+    never_text: Vec<u32>,
+}
+
+/// The vocabulary entries a reply can never write as text (#336): UNKNOWN,
+/// CONTROL and UNUSED by their declared type, a marker SHAPE where no types
+/// are declared at all (the prompt rule's fallback, [`matched_whole`]), and
+/// llama.cpp's end-of-generation names, which it treats as control whatever
+/// the declared type.
+///
+/// The bytes alone cannot say it: a byte-level BPE vocabulary spells
+/// `<|im_end|>` in printable characters its decode turns into exactly the
+/// bytes `<|im_end|>`, which a JSON string would accept. USER_DEFINED entries
+/// are text (Gemma's runs of spaces, Qwen's `<tool_call>`), as llama.cpp
+/// renders them.
+fn never_text_ids(tokens: &[String], token_types: &[i32]) -> Vec<u32> {
+    tokens
+        .iter()
+        .enumerate()
+        .filter(|(id, t)| {
+            matches!(token_types.get(*id), Some(2 | 3 | 5))
+                || (token_types.is_empty() && marker_shaped(t))
+                || LLAMA_CPP_END_OF_GENERATION_NAMES.contains(&t.as_str())
+        })
+        .map(|(id, _)| id as u32)
+        .collect()
 }
 
 enum TokenizerKind {
@@ -1210,6 +1237,7 @@ impl SplitTokenizer {
             bos_text: bos_id.and_then(|id| tokens.get(id as usize).cloned()),
             bos_id,
             add_bos_token,
+            never_text: never_text_ids(tokens, token_types),
         }
     }
 
@@ -1233,6 +1261,7 @@ impl SplitTokenizer {
             bos_text: bos_id.and_then(|id| tokens.get(id as usize).cloned()),
             bos_id,
             add_bos_token,
+            never_text: never_text_ids(tokens, token_types),
         }
     }
 
@@ -1286,6 +1315,18 @@ impl SplitTokenizer {
             TokenizerKind::Bpe(bpe) => bpe.encode(text),
             TokenizerKind::SentencePiece(spm) => spm.encode(text),
         }
+    }
+
+    /// Vocabulary entry `id` (spelled `token_str`) as a reply held to a
+    /// grammar may write it (#336): the bytes [`Self::decode_token`] gives, or
+    /// `None` for an entry that is never text — [`never_text_ids`], or one
+    /// whose decode is empty (markup a reply hides).
+    pub fn grammar_piece(&self, id: u32, token_str: &str) -> Option<Vec<u8>> {
+        if self.never_text.binary_search(&id).is_ok() {
+            return None;
+        }
+        let bytes = self.decode_token(token_str);
+        (!bytes.is_empty()).then_some(bytes)
     }
 
     /// Decode a single token string back to UTF-8 bytes.
@@ -1495,6 +1536,40 @@ mod pre_tokenizer_tests {
 #[cfg(test)]
 mod declared_special_tests {
     use super::*;
+
+    /// A reply held to a grammar never writes a control token as text, though
+    /// a byte-level BPE vocabulary spells one in printable characters whose
+    /// decode is exactly its name (#336) — the declared type decides.
+    #[test]
+    fn a_grammar_reads_a_control_token_as_never_text() {
+        let vocab: Vec<String> = ["a", "<|im_end|>", "<tool_call>", "<|im_start|>", "</s>"]
+            .map(String::from)
+            .to_vec();
+        let types = [1, 3, 4, 3, 1];
+        let tok = SplitTokenizer::from_bpe(&vocab, &[], "glm4", "gpt2", false, None, &types);
+        assert_eq!(
+            tok.decode_token("<|im_end|>"),
+            b"<|im_end|>".to_vec(),
+            "the premise"
+        );
+        assert_eq!(tok.grammar_piece(0, "a"), Some(b"a".to_vec()));
+        assert_eq!(tok.grammar_piece(1, "<|im_end|>"), None);
+        assert_eq!(
+            tok.grammar_piece(2, "<tool_call>"),
+            Some(b"<tool_call>".to_vec()),
+            "user-defined entries are text"
+        );
+        assert_eq!(tok.grammar_piece(3, "<|im_start|>"), None);
+        assert_eq!(
+            tok.grammar_piece(4, "</s>"),
+            None,
+            "llama.cpp's end-of-generation name"
+        );
+        // Declaring no types, the marker shape decides.
+        let blind = SplitTokenizer::from_bpe(&vocab, &[], "glm4", "gpt2", false, None, &[]);
+        assert_eq!(blind.grammar_piece(1, "<|im_end|>"), None);
+        assert_eq!(blind.grammar_piece(0, "a"), Some(b"a".to_vec()));
+    }
 
     /// GLM-4's prompt opens `[gMASK]<sop>`. `[gMASK]` is a CONTROL token in the
     /// vocabulary but not `<…>`-shaped, so the name rule alone spelled it out

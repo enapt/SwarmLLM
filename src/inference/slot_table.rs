@@ -118,6 +118,8 @@ pub struct Slot {
     /// reply is done (`model_worker::prompt_saved_when_done`): the slot's
     /// finish copies it, before its caches are freed.
     pub save_when_done: bool,
+    /// The JSON the reply is held to (#336), asked at every draw.
+    pub held: Option<crate::inference::reply_grammar::HeldReply>,
 }
 
 impl Slot {
@@ -399,6 +401,7 @@ mod tests {
                 presence_penalty: 0.0,
                 logprobs: false,
                 top_logprobs: 0,
+                reply_grammar: None,
             },
             prompt_tokens: 8,
             prompt_ids: vec![1, 2, 3, 4, 5, 6, 7, 8],
@@ -409,6 +412,7 @@ mod tests {
             keep_here: false,
             save_at: usize::MAX,
             save_when_done: false,
+            held: None,
         }
     }
 
@@ -446,6 +450,7 @@ mod tests {
                 presence_penalty: 0.0,
                 logprobs: false,
                 top_logprobs: 0,
+                reply_grammar: None,
             },
             prompt_tokens: prompt_len,
             prompt_ids: (1..=prompt_len as u32).collect(),
@@ -456,6 +461,7 @@ mod tests {
             keep_here: false,
             save_at: usize::MAX,
             save_when_done: false,
+            held: None,
         }
     }
 

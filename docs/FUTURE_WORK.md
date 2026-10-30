@@ -134,8 +134,9 @@ the top track (`docs/plans/large_model_splits.md`).
 14. **#326** — on a card newer than a release's machine code (Hopper, Blackwell: RTX 50-series),
     the first reply waits ~2 min while the driver compiles flash attention's PTX (MMQ's ~8 s a
     weight type), then it is cached. Correct since the PTX went in (before: wrong output).
-15. **#336** — `strict: true` and tool calls are not enforced, so an agent driving a small model
-    meets malformed calls (filed 2026-10-24; constrained decoding, `faster_than_local.md` § 7.1).
+15. **#336** — tool calls, and `response_format` on a split, are not enforced, so an agent driving
+    a small model meets malformed calls (filed 2026-10-24; `response_format` held on a model run
+    whole since 2026-10-30; `faster_than_local.md` § 7.1).
 
 Everything else is ranked in its own entry. **P3** is narrow or cosmetic, **P4** is process,
 maintenance or an idea with no user waiting on it.
@@ -3132,28 +3133,30 @@ image-encode refusal stays silent.
 
 ### API surface
 
-#### #336 — `strict: true` and tool calls are not enforced: a reply is checked only after it is written
-`P2` · api · **OPEN** — 2026-10-24 · history: `docs/plans/faster_than_local.md` § 7.1
+#### #336 — Tool calls, and `response_format` on a split, are checked only after they are written
+`P2` · api · **PARTIAL** — 2026-10-24 (narrowed 2026-10-30) · history: `docs/plans/faster_than_local.md` § 7.1
 
-OpenAI's `response_format: {"type": "json_schema", "strict": true}` guarantees a reply that matches
-the schema, and agents (Claude Code, OpenClaw) depend on tool calls that parse. Here
-`response_format` becomes an instruction in the prompt (`api/openai/types.rs`,
-`to_internal_messages`) and a tool call is parsed after generation, so a small model's malformed
-JSON reaches the client. Next: constrained decoding with llguidance 1.9.1 (MIT, pure Rust, Rust
-1.87; its `TokTrie` built once per model from the GGUF vocabulary's bytes, special tokens
-0xFF-marked, as llama.cpp's `common/llguidance.cpp` does). The shape, from the 2026-10-24 research:
-- the mask applies where tokens are DRAWN — the local sampler, and on a split the far end for
-  every row (one matcher walking the tree depth-first with `consume_token` / `rollback`, vLLM's
-  pattern on chains), with the requester's drafter masked by the same grammar;
-- the grammar travels with the request: a new optional field, gated on a feature bit;
-- a tool call is a LAZY grammar (llguidance's `StructTag`: free text until the family's trigger,
+**Shipped (2026-10-30):** `response_format` (`json_object`, `json_schema`) and the Responses API's
+`text.format` are HELD — every token masked by llguidance 1.9.1 — wherever a worker on this node
+runs the whole model (the API's fast path and the router's local segment, streamed or not,
+batched or not): `inference::reply_grammar`, rule and reasons in
+`docs/invariants/api-surfaces.md` § "A reply held to JSON is settled at the door and held at every
+worker draw". Agents (Claude Code, OpenClaw) still depend on tool calls that parse, and those are
+still parsed after generation. What remains, in order:
+- **Tool calls**: a LAZY grammar (llguidance's `StructTag`: free text until the family's trigger,
   then that call's schema), the trigger matched as TEXT as well as the token — the coder-7B
-  writes `<tool_call>` as text, § 7.1 — and the grammar owns the closing text (`"}}\n` is one token);
-- separators pinned to the family's own JSON style (llguidance's default is flexible whitespace);
-- a matcher error FAILS the request with a message (llama.cpp drops the constraint silently on a
-  mask failure);
-- every response path gets it at one choke point (`.claude/rules/architecture.md` § "One
-  invariant, N paths").
+  writes `<tool_call>` as text, § 7.1 — and the grammar owns the closing text (`"}}\n` is one
+  token). Needs the `lark` feature or the engine's tag API, and per-family triggers read off
+  `tool_parse`.
+- **A split** (and a whole model handed to a peer): the grammar travels with the request — a new
+  optional field gated on a feature bit, since `SamplingParams::reply_grammar` is skipped on the
+  wire today — and the mask applies where tokens are DRAWN: on a split the far end for every row
+  (one matcher walking the tree depth-first with `consume_token` / `rollback`, vLLM's pattern on
+  chains), the requester's drafter masked by the same grammar. Until then such a reply is only
+  ASKED for JSON in its prompt.
+- **Speculation**: a held reply runs without the n-gram or SWIFT today; a guess checked against
+  the mask (`Matcher::validate_tokens`) and rolled back with the cache would bring it back.
+- The in-process executor fallback (`executor.generate`, no worker) still only asks.
 Not a speed lever (§ 7.1: the forced tokens are 3.3% of the drafter's surprise).
 
 #### #185 — Three API surfaces each implement streaming and non-streaming replies separately

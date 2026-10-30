@@ -107,6 +107,12 @@ Anything that removes a shard file or model MUST first check `active_pipelines` 
 
 → `docs/invariants/api-surfaces.md` § "A reply says which computers served it, in every form it can take"
 
+## A reply held to JSON is settled at the door and held at every worker draw (2026-10-30, #336)
+
+`response_format` (`json_object` / `json_schema`) and the Responses API's `text.format` are settled ONCE in `validate_chat_request` (**`inference::reply_grammar::settle_json_object` / `settle_json_schema`**, compiled there: `strict` and unholdable → 400; else lenient, else any JSON) into `ChatCompletionRequest::reply_grammar`, which only `to_sampling_params` reads — the grammar rides in `SamplingParams::reply_grammar` (`#[serde(skip)]`: no peer is told) and crosses the worker IPC only through `IpcGenerate::new` / `rejoin_grammar`. Every worker draw goes through `tensor_util::sample_token_with_logprob_history`, whose `held` is REQUIRED and which REFUSES a draw for a grammar-carrying request handed none. Speculation (n-gram, SWIFT) is off for a held reply. Held where a worker here runs the model whole; a split or a peer only ASKS (FUTURE_WORK #336).
+
+→ `docs/invariants/api-surfaces.md` § "A reply held to JSON is settled at the door and held at every worker draw"
+
 ## API errors must be readable by the caller
 
 Every failure is `{"error": {"message", "type", "param", "code"}}`: take bodies with `JsonBody<T>`, never axum's `Json<T>`; keep the router `.fallback()` (`unknown_route`). Choose the STATUS from the cause (`probe_failure_is_user_fixable`). An MCP tool that ran and failed is **`mcp::types::tool_failed`** — an `isError: true` result the model reads, the same `error_body` under `_meta` — never a JSON-RPC error, which is only for a call no tool could run (#196).

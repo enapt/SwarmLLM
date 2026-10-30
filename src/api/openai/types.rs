@@ -49,13 +49,22 @@ pub struct ChatCompletionRequest {
     /// Number of top log probabilities to return per token (0-20). Requires logprobs=true.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub top_logprobs: Option<u32>,
-    /// Structured output format. For a model run here or in the swarm it is an
-    /// INSTRUCTION, not a constraint: `to_internal_messages` prepends a system
-    /// message asking for JSON (and the schema), and nothing checks the reply.
-    /// - `{"type": "json_object"}` — asks for JSON only
-    /// - `{"type": "json_schema", "json_schema": {"name": "...", "schema": {...}}}` — asks for that schema
+    /// Structured output format. `to_internal_messages` prepends a system
+    /// message asking for JSON (and the schema), and where a worker on this
+    /// node runs the whole model every token is held to it as well
+    /// (`reply_grammar`, #336); elsewhere — a split, a peer — it is the
+    /// instruction alone.
+    /// - `{"type": "json_object"}` — one JSON object
+    /// - `{"type": "json_schema", "json_schema": {"name": "...", "schema": {...}}}` — that schema
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub response_format: Option<ResponseFormat>,
+    /// `response_format` as the worker holds the reply to it (#336): set ONLY
+    /// by `validate_chat_request`, which settles it once at the door
+    /// (`inference::reply_grammar`), and read only by `to_sampling_params`.
+    /// Never from the body, never serialized — a forwarded or proxied request
+    /// carries `response_format` itself, settled again where it lands.
+    #[serde(skip)]
+    pub reply_grammar: Option<std::sync::Arc<crate::types::ReplyGrammar>>,
     /// Optional session ID for multi-turn KV-cache reuse.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
@@ -426,7 +435,7 @@ impl ChatCompletionRequest {
             Some(StopSequence::Multiple(v)) => v.clone(),
             None => vec![],
         };
-        crate::api::build_sampling_params(
+        let mut params = crate::api::build_sampling_params(
             self.temperature,
             self.top_p,
             DEFAULT_TOP_K,
@@ -436,7 +445,9 @@ impl ChatCompletionRequest {
             self.presence_penalty,
             self.logprobs,
             self.top_logprobs.unwrap_or(0),
-        )
+        );
+        params.reply_grammar = self.reply_grammar.clone();
+        params
     }
 }
 

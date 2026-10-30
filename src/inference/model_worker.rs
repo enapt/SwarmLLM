@@ -2631,6 +2631,9 @@ async fn handle_forward(
                     &output,
                     &fwd.sampling,
                     &fwd.generated_ids,
+                    // A forward's sampling crosses the IPC without a grammar:
+                    // a split is not held to one yet (#336).
+                    None,
                 )
                 .map_err(|e| format!("Sample: {e}"))?
             } else {
@@ -3064,6 +3067,23 @@ pub(crate) fn ngram_spec_eligible(
         && ngram_cfg.max_ngram_size >= ngram_cfg.min_ngram_size
         && !sampling.logprobs
         && !(swift_cfg.enabled && sampling.temperature == 0.0)
+        // A guess is drawn without the reply's grammar, and one taken back
+        // would leave its matcher ahead of the reply (#336).
+        && sampling.reply_grammar.is_none()
+}
+
+/// The reply's grammar compiled for `model` (#336), or `None` for a reply held
+/// to nothing — built by both generate paths before the prompt is read, so a
+/// grammar this model cannot hold costs no prompt pass.
+fn held_reply_for(
+    model: &SplitModel,
+    sampling: &crate::types::SamplingParams,
+) -> Result<Option<crate::inference::reply_grammar::HeldReply>, SwarmError> {
+    let Some(grammar) = sampling.reply_grammar.as_deref() else {
+        return Ok(None);
+    };
+    let vocab = model.grammar_vocab()?;
+    crate::inference::reply_grammar::HeldReply::new(&vocab, grammar).map(Some)
 }
 
 /// Recent tokens-per-round the local speculator has been achieving, ×100, or 0
@@ -3304,8 +3324,9 @@ fn ngram_spec_round(
                     .map(|logits| (logits, None)),
             }
         })?;
+        // `None`: a held reply is never speculated (`ngram_spec_eligible`).
         let (tok, _) = crate::inference::tensor_util::sample_token_with_logprob_history(
-            &logits, sampling, generated,
+            &logits, sampling, generated, None,
         )?;
         return Ok(SpecRound {
             produced: vec![tok],
@@ -3344,7 +3365,7 @@ fn ngram_spec_round(
             .and_then(|t| t.unsqueeze(0))
             .map_err(SwarmError::internal)?;
         let (tok, _) = crate::inference::tensor_util::sample_token_with_logprob_history(
-            &row, sampling, &hist,
+            &row, sampling, &hist, None,
         )?;
         produced.push(tok);
         // The last position has no draft to check — its token is the round's
@@ -5566,6 +5587,7 @@ async fn handle_generate(
             "empty prompt after tokenization".into(),
         ));
     }
+    let mut held = held_reply_for(model, &gen.sampling)?;
 
     // Assign back, so every downstream reader of `gen.sampling.max_tokens` —
     // the generation loop, the off-by-one guard, the finish-reason check — sees
@@ -5660,6 +5682,8 @@ async fn handle_generate(
         // SWIFT verifies drafts and rolls rejected ones back — impossible over
         // recurrent state (`SplitModel::carries_recurrent_state`).
         && !model.carries_recurrent_state()
+        // Its drafts are drawn without the reply's grammar (#336).
+        && held.is_none()
         && gen.sampling.temperature == 0.0
         && model.total_layers >= 8
         && gen.sampling.max_tokens >= (swift_cfg.gamma + 1);
@@ -5787,7 +5811,11 @@ async fn handle_generate(
     let replied: Result<(), SwarmError> = async {
         let use_logprobs = gen.sampling.logprobs;
         let (mut next_token, mut token_logprob) =
-            crate::inference::tensor_util::sample_token_with_logprob(&logits, &gen.sampling)?;
+            crate::inference::tensor_util::sample_token_with_logprob(
+                &logits,
+                &gen.sampling,
+                held.as_mut(),
+            )?;
 
         // SYNC: token loop logic must match executor.rs generate_stream_inner.
         // Changes to EOS/stop handling must be applied to both.
@@ -5928,6 +5956,7 @@ async fn handle_generate(
                             &logits,
                             &gen.sampling,
                             &generated,
+                            held.as_mut(),
                         )?;
                     next_token = tok;
                     token_logprob = lp;
@@ -7008,8 +7037,10 @@ fn slot_admission_eligible(
         );
         return false;
     }
-    // SWIFT decoding has its own self-speculative loop; not batchable v1.
-    if swift_cfg.enabled && gen.sampling.temperature == 0.0 {
+    // SWIFT decoding has its own self-speculative loop; not batchable v1. A
+    // reply held to JSON never runs it (#336), so it may batch.
+    if swift_cfg.enabled && gen.sampling.temperature == 0.0 && gen.sampling.reply_grammar.is_none()
+    {
         tracing::debug!(request_id = %gen.request_id, "slot admission refused: SWIFT-eligible");
         return false;
     }
@@ -7113,6 +7144,7 @@ async fn try_register_generate_slot(
             "empty prompt after tokenization".into(),
         )));
     }
+    let held = held_reply_for(model, &gen.sampling).map_err(SlotAdmitError::Fatal)?;
     // Same resolution as the non-batched path — and this is the one that runs
     // by default, since `continuous_batching` is on. The slot copies
     // `gen.sampling.max_tokens` into `slot.max_tokens` below, so the assignment
@@ -7252,6 +7284,7 @@ async fn try_register_generate_slot(
         keep_here: gen.keep_here,
         save_at: PrefixCache::save_point(prompt_tokens, model.carries_recurrent_state()),
         save_when_done: false,
+        held,
     };
     let prompt_len = slot.prompt_tokens;
     let remaining_after_prefix = prompt_len.saturating_sub(prefix_len);
@@ -7530,6 +7563,7 @@ async fn step_decode_pool(
                         match crate::inference::tensor_util::sample_token_with_logprob(
                             &logits,
                             &slot.sampling,
+                            slot.held.as_mut(),
                         ) {
                             Ok(v) => v,
                             Err(e) => {
@@ -7728,6 +7762,7 @@ async fn step_decode_pool(
                 &outputs[j],
                 &slot.sampling,
                 &slot.generated_ids,
+                slot.held.as_mut(),
             ) {
                 Ok(v) => v,
                 Err(e) => {
@@ -7973,7 +8008,8 @@ async fn handle_daemon_msg(
                 tracing::warn!(error = %e, "model-worker: BatchForward failed");
             }
         }
-        DaemonMsg::Generate(gen) => {
+        DaemonMsg::Generate(mut gen) => {
+            gen.rejoin_grammar();
             let request_id = gen.request_id;
             // A card that has been stalling takes no more than its pace allows,
             // on EITHER path: this sits before the choice between the batched
@@ -9140,7 +9176,7 @@ mod local_speculation_tests {
         let key = model.kv_model_key().to_string();
         let pick = |logits: &candle_core::Tensor, history: &[u32]| {
             crate::inference::tensor_util::sample_token_with_logprob_history(
-                logits, &sampling, history,
+                logits, &sampling, history, None,
             )
             .unwrap()
             .0

@@ -145,6 +145,12 @@ pub struct SplitModel {
     /// before, for its card's guesses ([`super::StandInPrior`]): made by the
     /// first reply that collects for it, gone with the model.
     pub(super) stand_in_prior: Option<super::StandInPrior>,
+    /// This model's vocabulary as a reply held to JSON reads it (#336) —
+    /// [`Self::grammar_vocab`]: built by the first such reply, gone with the
+    /// model, so a model loaded again from another upload never reads the
+    /// last one's.
+    pub(super) grammar_vocab:
+        std::sync::OnceLock<std::sync::Arc<crate::inference::reply_grammar::GrammarVocab>>,
 }
 
 /// What sizes a prompt chunk on a split copying its processor-held layers'
@@ -665,6 +671,29 @@ impl SplitModel {
     /// Return a reference to the tokenizer, if available.
     pub fn tokenizer(&self) -> Option<&SplitTokenizer> {
         self.tokenizer.as_ref()
+    }
+
+    /// This model's vocabulary as a reply held to JSON reads it (#336), built
+    /// on first use — a 150k-entry vocabulary takes the engine a moment, and
+    /// most models never hold a reply.
+    pub fn grammar_vocab(
+        &self,
+    ) -> Result<std::sync::Arc<crate::inference::reply_grammar::GrammarVocab>, SwarmError> {
+        if let Some(built) = self.grammar_vocab.get() {
+            return Ok(built.clone());
+        }
+        let (Some(vocab), Some(tokenizer)) = (self.vocab(), self.tokenizer()) else {
+            return Err(SwarmError::Validation(
+                "this model's vocabulary is not loaded here, so its reply cannot be held to JSON"
+                    .into(),
+            ));
+        };
+        let built = std::sync::Arc::new(crate::inference::reply_grammar::GrammarVocab::new(
+            vocab,
+            tokenizer,
+            self.eos_tokens(),
+        )?);
+        Ok(self.grammar_vocab.get_or_init(|| built).clone())
     }
 
     /// Return the device this model is loaded on.

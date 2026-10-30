@@ -324,6 +324,20 @@ pub struct SamplingParams {
     /// Number of top log probabilities to return per token (0-20).
     #[serde(default)]
     pub top_logprobs: u32,
+    /// The JSON the caller asked the reply to be (#336) — OpenAI's
+    /// `response_format`, the Responses API's `text.format` — held at every
+    /// draw where a worker on this node runs the whole model.
+    ///
+    /// Here, beside the rest of how a token is drawn, because a grammar IS a
+    /// rule about the draw: vLLM carries it the same way
+    /// (`SamplingParams.structured_outputs`), and every path that already
+    /// hands a request's sampling to a worker carries it without a second
+    /// argument to forget. Skipped over the wire — a peer is not told it in
+    /// this first step, so no message changes and nothing needs a feature bit;
+    /// the worker's own IPC carries it beside (`IpcGenerate::grammar`), which
+    /// is why it is an `Arc`: cloned per request, never per token.
+    #[serde(skip)]
+    pub reply_grammar: Option<std::sync::Arc<ReplyGrammar>>,
 }
 
 impl Default for SamplingParams {
@@ -339,8 +353,21 @@ impl Default for SamplingParams {
             presence_penalty: 0.0,
             logprobs: false,
             top_logprobs: 0,
+            reply_grammar: None,
         }
     }
+}
+
+/// A reply held to JSON (#336): the JSON Schema it must match, exactly as the
+/// worker compiles it — `{"type": "object"}` for OpenAI's `json_object`, the
+/// caller's schema for `json_schema` — with the compiler's options (layout,
+/// leniency) already written into its `x-guidance` member. The API settles it
+/// ONCE, at the door (`inference::reply_grammar`), so the worker compiles what
+/// the door checked and decides nothing about the caller's request.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ReplyGrammar {
+    /// The schema, `x-guidance` included.
+    pub schema: serde_json::Value,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

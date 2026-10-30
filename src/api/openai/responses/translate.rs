@@ -21,8 +21,8 @@ use crate::api::openai::responses::store::ResponsesRecord;
 use crate::api::openai::responses::types::*;
 use crate::api::openai::types::{
     ApiChatMessage, ChatCompletionRequest, ContentPart, FunctionCall as ChatFunctionCall,
-    FunctionDefinition, ImageUrlRef, MessageContent, StopSequence, ToolCall as ChatToolCall,
-    ToolDefinition,
+    FunctionDefinition, ImageUrlRef, JsonSchemaSpec, MessageContent, ResponseFormat, StopSequence,
+    ToolCall as ChatToolCall, ToolDefinition,
 };
 use crate::error::SwarmError;
 use crate::types::Role;
@@ -131,7 +131,16 @@ pub fn request_to_chat(
         tool_choice,
         logprobs: false,
         top_logprobs: None,
-        response_format: None,
+        // `text.format` is the Responses API's `response_format` (#336): it
+        // reaches the same door (`validate_chat_request`), so the reply is
+        // asked for, and held to, the same JSON.
+        response_format: req
+            .text
+            .as_ref()
+            .and_then(|t| t.format.as_ref())
+            .map(response_format_of),
+        // Settled by `validate_chat_request`, as for a chat request.
+        reply_grammar: None,
         session_id: None,
         lora_adapter: None,
         // The Responses surface has no routing-override field of its own; the
@@ -146,6 +155,28 @@ pub fn request_to_chat(
         cache_control: None,
         extras,
     })
+}
+
+/// The Chat Completions `response_format` a Responses `text.format` names.
+/// `strict` defaults to false on both surfaces.
+fn response_format_of(format: &TextFormatSpec) -> ResponseFormat {
+    match format {
+        TextFormatSpec::Text => ResponseFormat::Text,
+        TextFormatSpec::JsonObject => ResponseFormat::JsonObject,
+        TextFormatSpec::JsonSchema {
+            name,
+            schema,
+            description,
+            strict,
+        } => ResponseFormat::JsonSchema {
+            json_schema: JsonSchemaSpec {
+                name: name.clone(),
+                description: description.clone(),
+                schema: schema.clone(),
+                strict: strict.unwrap_or(false),
+            },
+        },
+    }
 }
 
 /// Translate Responses tool definitions to Chat tool definitions. Only

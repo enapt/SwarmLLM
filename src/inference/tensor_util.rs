@@ -314,18 +314,33 @@ pub fn sample_token_with_params_history(
 pub fn sample_token_with_logprob(
     logits: &Tensor,
     params: &crate::types::SamplingParams,
+    held: Option<&mut crate::inference::reply_grammar::HeldReply>,
 ) -> Result<(u32, Option<f32>), SwarmError> {
-    sample_token_with_logprob_history(logits, params, &[])
+    sample_token_with_logprob_history(logits, params, &[], held)
 }
 
 /// Same as `sample_token_with_logprob` but applies frequency/presence
 /// penalties from `generated_ids` (the completion-so-far token list).
 /// Use this in decode loops; pass an empty slice to skip penalties.
+///
+/// `held` is the reply's grammar (#336), REQUIRED: the tokens it rules out are
+/// set to −∞ before anything else reads the scores (so penalties, top-k/top-p
+/// and the logprob all see only what the reply may take — the logprob is the
+/// one the token was drawn with), and it is told the token drawn. A draw for
+/// a request whose sampling carries a grammar but is handed none is REFUSED:
+/// that is a draw site that forgot it, and a reply quietly let off its JSON
+/// is the bug this argument exists to stop.
 pub fn sample_token_with_logprob_history(
     logits: &Tensor,
     params: &crate::types::SamplingParams,
     generated_ids: &[u32],
+    mut held: Option<&mut crate::inference::reply_grammar::HeldReply>,
 ) -> Result<(u32, Option<f32>), SwarmError> {
+    if params.reply_grammar.is_some() && held.is_none() {
+        return Err(SwarmError::Internal(
+            "a reply held to JSON was drawn without its grammar".into(),
+        ));
+    }
     let logits_squeezed = logits.squeeze(0).map_err(SwarmError::internal)?;
     let logits_f32 = logits_squeezed
         .to_dtype(DType::F32)
@@ -334,23 +349,30 @@ pub fn sample_token_with_logprob_history(
     if logits_vec.is_empty() {
         return Err(SwarmError::Internal("Empty logits".into()));
     }
+    if let Some(held) = held.as_mut() {
+        held.mask(&mut logits_vec)?;
+    }
     let mut ctx = crate::inference::sampling::SamplingContext::new(logits_vec.len());
-    if !params.logprobs {
+    let (token_id, logprob) = if !params.logprobs {
         let token_id = crate::inference::sampling::sample_token_with_history(
             &mut logits_vec,
             params,
             generated_ids,
             &mut ctx,
         );
-        return Ok((token_id, None));
+        (token_id, None)
+    } else {
+        let (token_id, info) = crate::inference::sampling::sample_token_with_logprobs_history(
+            &mut logits_vec,
+            params,
+            generated_ids,
+            &mut ctx,
+        );
+        (token_id, info.map(|i| i.logprob))
+    };
+    if let Some(held) = held {
+        held.took(token_id)?;
     }
-    let (token_id, info) = crate::inference::sampling::sample_token_with_logprobs_history(
-        &mut logits_vec,
-        params,
-        generated_ids,
-        &mut ctx,
-    );
-    let logprob = info.map(|i| i.logprob);
     Ok((token_id, logprob))
 }
 

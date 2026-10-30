@@ -158,6 +158,7 @@ async fn tool_chat(
             presence_penalty: 0.0,
             logprobs: false,
             top_logprobs: 0,
+            reply_grammar: None,
         },
         false,
         None,

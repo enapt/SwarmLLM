@@ -3052,6 +3052,7 @@ impl SplitModel {
                 last: None,
             },
             stand_in_prior: None,
+            grammar_vocab: Default::default(),
         })
     }
 }

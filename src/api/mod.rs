@@ -211,6 +211,9 @@ pub(crate) fn build_sampling_params(
         presence_penalty: presence_penalty.clamp(-2.0, 2.0),
         logprobs,
         top_logprobs: top_logprobs.min(20),
+        // Set by the one surface that takes a reply format, after its door
+        // has settled it (`ChatCompletionRequest::to_sampling_params`, #336).
+        reply_grammar: None,
     }
 }
 

@@ -13103,8 +13103,9 @@ fn a_stalling_card_gates_every_generation_path() {
         .expect("read model_worker.rs");
     let handler = fn_body(&src, "async fn handle_daemon_msg(")
         .expect("handle_daemon_msg moved — move this guard with it");
+    // The arm's opening, whatever its binding is spelled (`gen`, `mut gen`).
     let arm_start = handler
-        .find("DaemonMsg::Generate(gen) =>")
+        .find("DaemonMsg::Generate(")
         .expect("the Generate arm moved — move this guard with it");
     let arm = &handler[arm_start..];
     let arm = &arm[..arm.find("DaemonMsg::CancelRequest").unwrap_or(arm.len())];

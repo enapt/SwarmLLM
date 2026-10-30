@@ -35,7 +35,9 @@ All endpoints accept the same Bearer-auth header as the rest of the API.
    `/v1/responses` end-to-end without losing tool-call or streaming
    semantics.
 3. **Local inference** — translates to `/v1/chat/completions` and runs on
-   the local model. Function tools and `tool_choice` translate through;
+   the local model. `text.format` (`json_object`, `json_schema`) becomes
+   `response_format` and is held the same way (see the chat page's
+   `response_format`). Function tools and `tool_choice` translate through;
    built-in tools (`web_search`, `file_search`, `computer_use_preview`,
    `code_interpreter`, `image_generation`, `mcp`, `custom`) are rejected
    with HTTP 400 because they require backing infrastructure SwarmLLM
