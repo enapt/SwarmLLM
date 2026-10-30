@@ -382,6 +382,16 @@ pub mod features {
     /// an older node refuses the truncate, and the forward after it.
     pub const RECURRENT_REWIND: u64 = 1 << 33;
 
+    /// Reads a streamed check's look-ahead (#382): a forward carrying
+    /// `LayerForward::stream_lookahead` (the `0x12` trailer, after `0x11`,
+    /// bound into the AAD) names the guess the coordinator built its next
+    /// chunk on, and a tail that walks the check and keeps every guess but
+    /// draws another token there skips the turns built on it, as after any
+    /// refused guess. A coordinator sends it only to a tail advertising this:
+    /// an older one would rebuild the AAD without the trailer and fail to
+    /// open the forward.
+    pub const STREAM_LOOKAHEAD: u64 = 1 << 34;
+
     /// The full feature set THIS build implements. Advertised by every node,
     /// with [`KV_HALF_ON_CARD`], [`KV_WINDOW_SLIDES`] and
     /// [`REQUESTER_GUESSES`] beside it where they apply.
@@ -415,7 +425,8 @@ pub mod features {
         | CARRIED_ROUTE
         | DRAFT_TREE_FLOW
         | SHARD_BUSY
-        | RECURRENT_REWIND;
+        | RECURRENT_REWIND
+        | STREAM_LOOKAHEAD;
 
     /// Does `advertised` include every bit in `needed`?
     pub fn supports(advertised: u64, needed: u64) -> bool {

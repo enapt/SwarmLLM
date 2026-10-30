@@ -944,6 +944,7 @@ mod tests {
             image_spans: Vec::new(),
             draft_parents: Vec::new(),
             draft_tree_from: None,
+            stream_lookahead: None,
         };
         let encoded = crate::network::protocol::encode_layer_forward(&forward).unwrap();
         let target_id = target.id();

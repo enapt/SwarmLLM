@@ -10126,6 +10126,8 @@ impl ModelProcessPool {
             image_spans,
             draft_parents,
             draft_tree_from,
+            // Read by dispatch before the forward reaches the pool (#382).
+            stream_lookahead: _,
         } = forward;
 
         // Split vision embeddings out of the JSON header into the binary
@@ -10591,6 +10593,7 @@ impl ModelProcessPool {
                 // Nor a tree of guesses.
                 draft_parents: _,
                 draft_tree_from: _,
+                stream_lookahead: _,
             } = f;
             let forward_sampling = sampling.unwrap_or_default();
             activation_lens.push(activations.len() as u32);
@@ -11735,6 +11738,7 @@ mod tests {
             image_spans: Vec::new(),
             draft_parents: Vec::new(),
             draft_tree_from: None,
+            stream_lookahead: None,
         }
     }
 

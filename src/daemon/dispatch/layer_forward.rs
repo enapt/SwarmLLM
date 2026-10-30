@@ -289,20 +289,21 @@ pub(super) async fn handle_layer_forward(
     // failure, and the TP branch's encoding failures).
     let _serving_guard = crate::daemon::state::ServingGuard::new(&shared_state, model_id.clone());
 
-    // A streamed check this node walks: how many guesses it was sent, so its
-    // answer can say whether it refused one (`forward_streams`: the turns
-    // after a refusal stood on it). A tree is never walked as a chain.
+    // A streamed check this node walks: how many guesses it was sent, and the
+    // look-ahead past them, so its answer can say whether it refused one
+    // (`forward_streams`: the turns after a refusal stood on it). A tree is
+    // never walked as a chain.
     let walked_guesses = (turn.is_some()
         && is_last
         && forward.spec_walk_at_tail
         && forward.draft_parents.is_empty()
         && forward.draft_tree_from.is_none())
-    .then_some(forward.draft_tokens.len());
+    .then_some((forward.draft_tokens.len(), forward.stream_lookahead));
 
     // Route forward pass to subprocess via process pool
     let result = shared_state.model_process_pool.forward(forward).await;
-    if let (Some(turn), Some(guesses), Ok(answer)) = (&turn, walked_guesses, &result) {
-        if walk_refused_a_guess(guesses, answer) {
+    if let (Some(turn), Some((guesses, lookahead)), Ok(answer)) = (&turn, walked_guesses, &result) {
+        if walk_refused_a_guess(guesses, lookahead, answer) {
             turn.refused_a_guess();
         }
     }
@@ -563,6 +564,8 @@ pub(super) async fn handle_layer_forward(
                         // siblings and the tail would walk a wrong answer.
                         draft_parents: draft_parents_onward.clone(),
                         draft_tree_from: draft_tree_from_onward,
+                        // Never handed on: a look-ahead goes only to a lone far segment (#382).
+                        stream_lookahead: None,
                     };
                     tracing::info!(
                         request_id = %request_id,
@@ -909,13 +912,30 @@ fn draft_tree_from_onward(
 /// (`sampling::walk_verified_positions`): all kept is `guesses + 1` tokens,
 /// so any fewer is a refusal — and the coordinator restarts after it, so
 /// every streamed check built on that chunk is wasted (`forward_streams`).
-fn walk_refused_a_guess(guesses: usize, answer: &crate::types::LayerResult) -> bool {
-    !matches!(
+///
+/// A walk that kept every draft refused the LOOK-AHEAD when its last token is
+/// not the look-ahead the sender named (#382): the next chunk was built on
+/// that guess, and the coordinator restarts exactly there
+/// (`dsd_stream`'s `whole = all && lookahead == Some(next)`). Unnamed (an
+/// older sender, or one that sends none), a whole walk refused nothing here.
+fn walk_refused_a_guess(
+    guesses: usize,
+    lookahead: Option<u32>,
+    answer: &crate::types::LayerResult,
+) -> bool {
+    if matches!(
         answer.finish_reason,
         Some(crate::types::NetworkFinishReason::Error(_))
-    ) && answer.spec_logits.is_empty()
-        && !answer.token_ids.is_empty()
-        && answer.token_ids.len() <= guesses
+    ) || !answer.spec_logits.is_empty()
+    {
+        return false;
+    }
+    match answer.token_ids.len() {
+        0 => false,
+        n if n <= guesses => true,
+        n if n == guesses + 1 => lookahead.is_some_and(|l| answer.token_ids.last() != Some(&l)),
+        _ => false,
+    }
 }
 
 /// Send a sanitized error `LayerResult` back to the originating peer when
@@ -1322,6 +1342,7 @@ mod chaining_tests {
             image_spans: Vec::new(),
             draft_parents: Vec::new(),
             draft_tree_from: None,
+            stream_lookahead: None,
         };
         let (tx, mut rx) = tokio::sync::mpsc::channel(8);
         super::handle_layer_forward(state, tx, forward).await;
@@ -1456,6 +1477,7 @@ mod chaining_tests {
             image_spans: Vec::new(),
             draft_parents: Vec::new(),
             draft_tree_from: None,
+            stream_lookahead: None,
         };
         let (tx, mut rx) = tokio::sync::mpsc::channel(8);
         tokio::time::timeout(
@@ -1679,6 +1701,7 @@ mod tests {
             image_spans: Vec::new(),
             draft_parents: Vec::new(),
             draft_tree_from: None,
+            stream_lookahead: None,
         };
         let (tx, mut rx) = mpsc::channel(4);
         refuse_forward(
@@ -1737,21 +1760,63 @@ mod tests {
             r.token_ids = ids.to_vec();
             r
         };
-        assert!(!walk_refused_a_guess(2, &walked(&[7, 8, 9])), "both kept");
         assert!(
-            walk_refused_a_guess(2, &walked(&[7, 5])),
+            !walk_refused_a_guess(2, None, &walked(&[7, 8, 9])),
+            "both kept"
+        );
+        assert!(
+            walk_refused_a_guess(2, None, &walked(&[7, 5])),
             "the second refused"
         );
-        assert!(walk_refused_a_guess(2, &walked(&[5])), "the first refused");
-        assert!(!walk_refused_a_guess(2, &walked(&[])), "no answer");
+        assert!(
+            walk_refused_a_guess(2, None, &walked(&[5])),
+            "the first refused"
+        );
+        assert!(!walk_refused_a_guess(2, None, &walked(&[])), "no answer");
         let failed = crate::types::LayerResult::error(uuid::Uuid::nil(), "x");
         assert!(
-            !walk_refused_a_guess(2, &failed),
+            !walk_refused_a_guess(2, Some(4), &failed),
             "an error refused nothing"
         );
         let mut logits = walked(&[5]);
         logits.spec_logits = vec![vec![0.0]; 3];
-        assert!(!walk_refused_a_guess(2, &logits), "not walked here");
+        assert!(
+            !walk_refused_a_guess(2, Some(4), &logits),
+            "not walked here"
+        );
+    }
+
+    /// #382: both drafts kept, but the far end drew 9 where the next chunk
+    /// was built on the look-ahead 4 — the coordinator restarts there, so the
+    /// turns after it are stale. Drawn 4, the next chunk stands.
+    #[test]
+    fn a_whole_walk_that_drew_other_than_the_lookahead_refused_it() {
+        let walked = |ids: &[u32]| {
+            let mut r = crate::types::LayerResult::error(uuid::Uuid::nil(), String::new());
+            r.finish_reason = None;
+            r.token_ids = ids.to_vec();
+            r
+        };
+        assert!(
+            walk_refused_a_guess(2, Some(4), &walked(&[7, 8, 9])),
+            "the look-ahead refused"
+        );
+        assert!(
+            !walk_refused_a_guess(2, Some(4), &walked(&[7, 8, 4])),
+            "the look-ahead kept"
+        );
+        assert!(
+            walk_refused_a_guess(2, Some(4), &walked(&[7, 5])),
+            "a draft refused, whatever the look-ahead"
+        );
+        assert!(
+            !walk_refused_a_guess(0, Some(4), &walked(&[4])),
+            "a lone look-ahead kept"
+        );
+        assert!(
+            walk_refused_a_guess(0, Some(4), &walked(&[6])),
+            "a lone look-ahead refused"
+        );
     }
 }
 
@@ -1874,6 +1939,7 @@ mod forward_positions_tests {
             image_spans: Vec::new(),
             draft_parents: Vec::new(),
             draft_tree_from: None,
+            stream_lookahead: None,
         };
         let piece = turn_wait(&f);
         assert_eq!(

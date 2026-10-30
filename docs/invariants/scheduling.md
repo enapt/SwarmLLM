@@ -5433,7 +5433,10 @@ round costs one per check.
   `tailjoin1030`, TH↔AU, 0.5B drafter, three arms each interleaved on a link that degraded through
   the run): the tail's time −25-30%, every joined arm ahead of the old arm beside it — prose 7.80 /
   7.27 / 5.40 tok/s against 6.88 / 5.89 / 3.90, code 19.39 / 18.34 / 13.44 against 17.46 / 12.68 /
-  9.77. A/B `SWARMLLM_FLOW_TAIL_JOIN=0`. **An answer the walk can no longer reach is still read**:
+  9.77. On a CALM link (rig `tail1030b`, 15:38-15:55Z, same machines and drafter, five arms each
+  alternating ABBA): prose 8.17 tok/s mean (7.50-8.86) against 7.69 (7.00-8.16), +6%; code level,
+  18.05 (14.39-20.19) against 18.42 (17.32-19.63) — the gain is largest where the far end's answers
+  bunch up, which a slowing link makes more often. A/B `SWARMLLM_FLOW_TAIL_JOIN=0`. **An answer the walk can no longer reach is still read**:
   holding it back to be read with the next (`dead_wait_on`, opt-in `SWARMLLM_FLOW_DEAD_WAIT=1`) cut
   the tail a further ~35% and was no faster — every prose reply's forwards then queued on their way
   (630-923 ms over the least, against 71-125), the guard narrowed the tree to 2 rows a level and the

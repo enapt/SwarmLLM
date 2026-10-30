@@ -668,6 +668,18 @@ pub struct LayerForward {
     /// `features::DRAFT_TREE_FLOW`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub draft_tree_from: Option<u32>,
+    /// A streamed check's LOOK-AHEAD (#382): the guess one past its last row,
+    /// which the coordinator built the stream's NEXT chunk on. A tail that
+    /// walks the check, keeps every guess and draws another token there knows
+    /// the chunks after it stood on a guess it refused — the coordinator
+    /// restarts after exactly that answer — and skips them as it skips the
+    /// turns after any refused guess (`forward_streams`), a round trip before
+    /// the restart arrives. Only a token id: it changes no row and no draw.
+    /// `None` on every other forward. Travels in the `0x12` trailer, bound
+    /// into the AAD, only to a peer advertising `features::STREAM_LOOKAHEAD`
+    /// that walks the check itself.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream_lookahead: Option<u32>,
 }
 
 impl LayerForward {
@@ -1404,6 +1416,7 @@ mod chunk_assembly_tests {
             image_spans: Vec::new(),
             draft_parents: Vec::new(),
             draft_tree_from: None,
+            stream_lookahead: None,
         }
     }
 

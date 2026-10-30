@@ -425,6 +425,31 @@ fn full_chunks() -> bool {
     *ON.get_or_init(|| std::env::var("SWARMLLM_STREAM_FULL_CHUNKS").as_deref() != Ok("0"))
 }
 
+/// The look-ahead a chunk names to its far end (#382): the guess one past its
+/// last row, which the next chunk stands on. Told it, a far end that walks the
+/// check sees a whole walk that drew another token there as the refusal it is,
+/// and skips the turns built on it (`forward_streams`) — where it was not told,
+/// the restart waited behind one or two stale chunks (0.65-1.26 s a wrong
+/// look-ahead on the 70B, 2026-10-30). Only to a LONE far segment that walks:
+/// a chained run's tail is a hop away and nothing hands it on. It shows the
+/// far end nothing of a new kind: a far end that walks is sent the chunk's
+/// other guesses as ids (the drafter's alone — the stream copies no text) and
+/// draws the reply's tokens itself.
+fn lookahead_to_send(
+    lookahead: Option<u32>,
+    lone_far_walks: bool,
+    far_reads_it: bool,
+) -> Option<u32> {
+    lookahead.filter(|_| lone_far_walks && far_reads_it)
+}
+
+/// ON unless `SWARMLLM_STREAM_LOOKAHEAD=0`, the A/B arm that names no
+/// look-ahead (the far end then skips only after a refused draft).
+fn names_the_lookahead() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| std::env::var("SWARMLLM_STREAM_LOOKAHEAD").as_deref() != Ok("0"))
+}
+
 /// Whether a coordinator streams its checks: ON unless `SWARMLLM_SPEC_STREAM=0`
 /// (or `off` / `false`), which keeps the rounds. Measured over a real link on
 /// 2026-10-01 — this node's card holding the near half, a processor in Italy
@@ -1120,6 +1145,15 @@ impl StreamRun<'_, '_> {
             self.shape.far_walks().then_some(&walk),
             Some(seq),
         );
+        forward.stream_lookahead = lookahead_to_send(
+            lookahead,
+            self.shape.far_walks() && self.shape.chain.is_empty(),
+            names_the_lookahead()
+                && self.state.peer_advertises_feature(
+                    &far.node_id,
+                    swarmllm_types::node::features::STREAM_LOOKAHEAD,
+                ),
+        );
         if !self.shape.chain.is_empty() {
             // Handed down the run, and answered by its tail: the reply-to it
             // answers (the `0x07` trailer), as on a chained check.
@@ -1510,6 +1544,30 @@ mod tests {
                 layer_range: (i as u32 * 4, i as u32 * 4 + 4),
             })
             .collect()
+    }
+
+    /// #382: the look-ahead goes only to a lone far segment that walks and
+    /// reads it — an older far end, a chained run or the boomerang is told
+    /// nothing (an older peer would fail to open an encrypted forward whose
+    /// AAD carries a trailer it does not know).
+    #[test]
+    fn the_lookahead_goes_only_to_a_lone_far_end_that_walks_and_reads_it() {
+        assert_eq!(lookahead_to_send(Some(7), true, true), Some(7));
+        assert_eq!(
+            lookahead_to_send(Some(7), true, false),
+            None,
+            "older far end"
+        );
+        assert_eq!(
+            lookahead_to_send(Some(7), false, true),
+            None,
+            "chained or not walked there"
+        );
+        assert_eq!(
+            lookahead_to_send(None, true, true),
+            None,
+            "no look-ahead drafted"
+        );
     }
 
     /// A peer that serves a stream but cannot walk a check.

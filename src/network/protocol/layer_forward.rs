@@ -125,6 +125,7 @@ pub fn encode_layer_forward(forward: &LayerForward) -> Result<Vec<u8>, SwarmErro
     append_image_spans_trailer(&mut buf, forward);
     append_draft_tree_trailer(&mut buf, forward);
     append_draft_tree_flow_trailer(&mut buf, forward);
+    append_stream_lookahead_trailer(&mut buf, forward);
 
     Ok(buf)
 }
@@ -504,6 +505,40 @@ pub(crate) fn read_draft_tree_flow_trailer(
     let from = u32::from_le_bytes([data[at], data[at + 1], data[at + 2], data[at + 3]]);
     *cursor += DRAFT_TREE_FLOW_TRAILER_LEN;
     Ok(Some(from))
+}
+
+/// Length of the look-ahead trailer, marker included.
+const STREAM_LOOKAHEAD_TRAILER_LEN: usize = 5;
+
+/// Write the look-ahead trailer: `0x12 | token u32 LE` — the guess a streamed
+/// check's coordinator built its next chunk on (`LayerForward::stream_lookahead`,
+/// #382). Last, after `0x11`, by the ONE function the plaintext frame, the
+/// encrypted frame and the AAD all call. Set only on a check sent to a tail
+/// advertising `features::STREAM_LOOKAHEAD` (`dsd_stream::lookahead_to_send`).
+pub(crate) fn append_stream_lookahead_trailer(buf: &mut Vec<u8>, forward: &LayerForward) {
+    let Some(token) = forward.stream_lookahead else {
+        return;
+    };
+    buf.push(0x12);
+    buf.extend_from_slice(&token.to_le_bytes());
+}
+
+/// Read the look-ahead trailer (`0x12`) at `cursor`. REFUSED when truncated —
+/// a frame cut inside a trailer is not a frame without it.
+pub(crate) fn read_stream_lookahead_trailer(
+    data: &[u8],
+    cursor: &mut usize,
+) -> Result<Option<u32>, SwarmError> {
+    if data.len() <= *cursor || data[*cursor] != 0x12 {
+        return Ok(None);
+    }
+    if data.len() < *cursor + STREAM_LOOKAHEAD_TRAILER_LEN {
+        return Err(SwarmError::Network("look-ahead trailer truncated".into()));
+    }
+    let at = *cursor + 1;
+    let token = u32::from_le_bytes([data[at], data[at + 1], data[at + 2], data[at + 3]]);
+    *cursor += STREAM_LOOKAHEAD_TRAILER_LEN;
+    Ok(Some(token))
 }
 
 /// Write the decoded-so-far trailer: `0x08 | n(2 LE) | n × id(4 LE)`.
@@ -964,6 +999,7 @@ pub fn decode_layer_forward(data: &[u8]) -> Result<LayerForward, SwarmError> {
     let draft_parents = read_draft_tree_trailer(data, &mut cursor)?;
     let draft_tree_from =
         read_draft_tree_flow_trailer(data, &mut cursor, !draft_parents.is_empty())?;
+    let stream_lookahead = read_stream_lookahead_trailer(data, &mut cursor)?;
     let _ = cursor;
 
     Ok(LayerForward {
@@ -995,6 +1031,7 @@ pub fn decode_layer_forward(data: &[u8]) -> Result<LayerForward, SwarmError> {
         image_spans,
         draft_parents,
         draft_tree_from,
+        stream_lookahead,
     })
 }
 
@@ -1041,6 +1078,7 @@ mod tests {
             image_spans: Vec::new(),
             draft_parents: Vec::new(),
             draft_tree_from: None,
+            stream_lookahead: None,
         }
     }
 
@@ -1864,5 +1902,45 @@ mod tests {
             decode_layer_forward(&bytes[..bytes.len() - 1]).is_err(),
             "cut short"
         );
+    }
+
+    /// A streamed check's look-ahead (#382) crosses as `0x12` after every
+    /// other trailer, a tree's start included; a check without one is
+    /// byte-identical to before; and one cut short is REFUSED, never read as
+    /// absent.
+    #[test]
+    fn a_streamed_checks_lookahead_survives_the_wire_and_a_truncated_one_is_refused() {
+        let mut f = base_forward();
+        f.spec_logits_requested = true;
+        f.spec_walk_at_tail = true;
+        f.draft_tokens = vec![11, 12];
+        f.stream_seq = Some(5);
+        f.stream_lookahead = Some(0xDEAD_BEEF);
+        let bytes = encode_layer_forward(&f).unwrap();
+        let back = decode_layer_forward(&bytes).unwrap();
+        assert_eq!(back.stream_lookahead, Some(0xDEAD_BEEF));
+        assert_eq!(back.stream_seq, Some(5), "the trailers before it read");
+        assert_eq!(back.draft_tokens, f.draft_tokens);
+
+        let mut none = f.clone();
+        none.stream_lookahead = None;
+        let plain = encode_layer_forward(&none).unwrap();
+        assert_eq!(plain.len(), bytes.len() - STREAM_LOOKAHEAD_TRAILER_LEN);
+        assert_eq!(decode_layer_forward(&plain).unwrap().stream_lookahead, None);
+
+        // After a tree's start too, the last trailer of all.
+        let mut tree = f.clone();
+        tree.draft_parents = vec![0, 1, 1];
+        tree.draft_tree_from = Some(tree.index_pos - 2);
+        let back = decode_layer_forward(&encode_layer_forward(&tree).unwrap()).unwrap();
+        assert_eq!(back.draft_tree_from, tree.draft_tree_from);
+        assert_eq!(back.stream_lookahead, Some(0xDEAD_BEEF));
+
+        for cut in 1..STREAM_LOOKAHEAD_TRAILER_LEN {
+            assert!(
+                decode_layer_forward(&bytes[..bytes.len() - cut]).is_err(),
+                "cut {cut} bytes short"
+            );
+        }
     }
 }

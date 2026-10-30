@@ -488,6 +488,7 @@ pub(super) fn build_spec_verify_forward(
         image_spans: Vec::new(),
         draft_parents: Vec::new(),
         draft_tree_from: None,
+        stream_lookahead: None,
     }
 }
 
@@ -1082,6 +1083,7 @@ pub(super) fn build_kv_truncate_forward(
         image_spans: Vec::new(),
         draft_parents: Vec::new(),
         draft_tree_from: None,
+        stream_lookahead: None,
     }
 }
 

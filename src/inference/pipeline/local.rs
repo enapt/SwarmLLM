@@ -471,6 +471,7 @@ impl PipelineExecutor {
             image_spans: self.image_spans_from(index_pos),
             draft_parents: Vec::new(),
             draft_tree_from: None,
+            stream_lookahead: None,
         };
         // Watched against the request's cancel flag: a client that leaves
         // during a minutes-long prompt pass on this node's processor ends this
@@ -1920,6 +1921,7 @@ mod segment_budget_tests {
             image_spans: Vec::new(),
             draft_parents: Vec::new(),
             draft_tree_from: None,
+            stream_lookahead: None,
         }
     }
 

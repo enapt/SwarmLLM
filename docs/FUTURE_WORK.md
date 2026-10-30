@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #382**). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #384**). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -3079,6 +3079,21 @@ runs the matching one as the restart (it already treats a restart's cache cut an
 supersedes), answers the others skipped, bounds what it holds by what was asked
 (`MAX_STREAM_CHUNKS_HERE`). (4) This node, on "spare taken", rewrites its own cache and the
 drafter's to the spare's rows (off the critical path: AU is busy checking the spare) and goes on.
+
+**What exists for it** (mapped 2026-10-30): no forward leaves its rows out of the cache — every one
+appends (`layers::append_to_cache`), and `truncate_kv_to` cuts only the END, before a forward
+(`model_worker.rs` ~1995). A tree forward (`IpcForward::draft_parents`, `DraftTree::rows_for`)
+needs its rows to END where the cache ends, and a streamed forward is refused unless the cache
+holds exactly `index_pos` (`model_worker.rs` ~2018-2040). So this node's spare rows are a tree
+forward of the main chunk's rows plus the spare under row `k−1` (one forward; nothing in
+`draft_tree_refusal` refuses a segment split between card and processor), followed — when the
+spare is NOT taken — by a cut back to the main line, the flow's rebase shape (`FlowTree::rebase`,
+truncate + re-read). The chain stream today hard-codes `draft_parents: Vec::new()`
+(`build_spec_verify_forward`) and the far end walks chains only (`walked_guesses` needs no tree,
+`dispatch/layer_forward.rs` ~291) — which suits the far end: it receives the spare as an ordinary
+restart chunk. The drafter: the chain stream drafts through `EngineDrafter::draft` (a chain);
+a second-choice branch is a `FlowOp::Push` under row `k−1` in the flow's growth
+(`SplitModel::grow_flow`), but no call grows ONLY chosen branches — that is new.
 Wire protocol → security review. Test first on a delayed link with a processor far end; judge by
 restarts that waited and tok/s, never by a forward's time.
 
@@ -3500,6 +3515,20 @@ endpoints. `candle-*` stays on 0.10 deliberately (§ "Decided").
 Credits are DORMANT — they gate nothing, and `credits_stay_dormant` fails the build if one
 starts. Read `docs/CREDITS_DESIGN.md` before touching them; the credit items below are
 preconditions for ever switching enforcement on, not work for now.
+
+#### #383 — A serving node's stream of checks is not tied to the peer that opened it
+`P4` · network · **OPEN** — 2026-10-30 · history: #382's security review (low, pre-existing)
+
+`daemon::state::forward_streams` keys a stream by `(request_id, layer_range, attempt)` with no
+sender (`forward_streams.rs` ~121-126, used ~316), and `handle_layer_forward` never checks the
+forward came from the peer that opened it. A peer that knows a live request id — in a lone far
+segment's shape only the coordinator and that peer; in a chain, every hop — can send a forward in
+the stream's attempt and occupy its turn, restart it, or mark it refused (#382's look-ahead is a
+cheaper way to do the last). The forged forward itself already reaches the worker and corrupts that
+request's cache, which is worse. Request ids are random UUIDs, so an unrelated node cannot aim at
+one. No incident is known. Next: bind a stream to the sender that opened it (the authenticated
+peer, as `requester_guesses` and `pending_prompt_admissions` are), and refuse another's forward
+for it.
 
 #### #362 — A peer identified while the peer map is full stays "connected" after it leaves
 `P4` · network · **OPEN** — 2026-10-25 · history: #339's second security review (low), split out of #341
@@ -3965,7 +3994,21 @@ Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
 
-**Closed 2026-10-30, ships in the next release** (#379, #378)
+**Closed 2026-10-30, ships in the next release** (#382, #379, #378)
+- #382 — **A split's far end ran checks the reply had already thrown away after a wrong look-ahead.**
+  A streamed check carries its guesses but not the last one, the look-ahead the next chunk starts
+  from. Where the far end kept every guess but chose another token there, the coordinator
+  restarted, yet the far end saw nothing refused and computed the one or two chunks built on that
+  guess first — 0.65-1.26 s a time on the 70B (one case 2.68 s), about a quarter of its restarts.
+  The coordinator now names the look-ahead (`LayerForward::stream_lookahead`, trailer `0x12`,
+  AAD-bound) to a lone far segment that walks and advertises `features::STREAM_LOOKAHEAD` (bit 34),
+  and the far end reads such a walk as a refusal and skips those chunks, as after any refused
+  guess. On a two-node rig (emulated 300 ms, identical replies in every arm) the far end skipped
+  261 stale checks against 235 without it. No speed is claimed yet: the far end must run this
+  release to read it. A/B
+  `SWARMLLM_STREAM_LOOKAHEAD=0`. Tests `a_whole_walk_that_drew_other_than_the_lookahead_refused_it`,
+  `the_lookahead_goes_only_to_a_lone_far_end_that_walks_and_reads_it`, the `0x12` wire and AAD
+  tests. Evidence: `docs/invariants/network.md` § "A wrong look-ahead is a refusal too".
 - #379 — **A computer checking another's guesses did it on fewer cores than its owner offered.**
   The contribution level is what a machine gives the swarm, and the swarm's prompts ran at it, but
   a check of 2-32 positions — what every processor peer of a split runs for its coordinator, and

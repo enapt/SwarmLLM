@@ -166,6 +166,9 @@ pub fn build_layer_forward_aad(forward: &LayerForward) -> Vec<u8> {
     // The tree-flow trailer (0x11): which cached rows the tree's rows follow,
     // and which position each row's draw fills.
     super::layer_forward::append_draft_tree_flow_trailer(&mut aad, forward);
+    // The look-ahead trailer (0x12): which turns after this check the tail
+    // may skip as built on a guess it refused (#382).
+    super::layer_forward::append_stream_lookahead_trailer(&mut aad, forward);
 
     aad
 }
@@ -281,6 +284,7 @@ pub fn encode_layer_forward_encrypted(
     super::layer_forward::append_image_spans_trailer(&mut buf, forward);
     super::layer_forward::append_draft_tree_trailer(&mut buf, forward);
     super::layer_forward::append_draft_tree_flow_trailer(&mut buf, forward);
+    super::layer_forward::append_stream_lookahead_trailer(&mut buf, forward);
 
     Ok(buf)
 }
@@ -515,6 +519,7 @@ pub fn decode_layer_forward_encrypted(
         &mut cursor,
         !draft_parents.is_empty(),
     )?;
+    let stream_lookahead = super::layer_forward::read_stream_lookahead_trailer(data, &mut cursor)?;
     let _ = cursor;
 
     let mut forward = LayerForward {
@@ -546,6 +551,7 @@ pub fn decode_layer_forward_encrypted(
         image_spans,
         draft_parents,
         draft_tree_from,
+        stream_lookahead,
     };
 
     // Reconstruct AAD from the parsed forward via the helper. This MUST
@@ -597,6 +603,7 @@ mod tests {
             image_spans: Vec::new(),
             draft_parents: Vec::new(),
             draft_tree_from: None,
+            stream_lookahead: None,
         }
     }
 
@@ -903,6 +910,40 @@ mod tests {
         );
         other.draft_tree_from = None;
         assert_ne!(build_layer_forward_aad(&other), aad, "nor drop it");
+    }
+
+    /// A streamed check's look-ahead (#382) decides which of the stream's
+    /// later turns the tail skips, so it is sealed: changed, added or dropped
+    /// on the way, the frame no longer opens.
+    #[test]
+    fn a_streamed_checks_lookahead_is_sealed_and_survives_the_encrypted_frame() {
+        let mut orig = base_forward();
+        orig.spec_logits_requested = true;
+        orig.spec_walk_at_tail = true;
+        orig.draft_tokens = vec![11, 12];
+        orig.stream_seq = Some(9);
+        orig.stream_lookahead = Some(42);
+        let bytes = encode_layer_forward_encrypted(&orig, vec![0u8; 32]).unwrap();
+        let (decoded, _sealed, aad) = decode_layer_forward_encrypted(&bytes).unwrap();
+        assert_eq!(decoded.stream_lookahead, Some(42));
+        assert_eq!(decoded.stream_seq, Some(9));
+        assert_eq!(aad, build_layer_forward_aad(&orig));
+        let mut other = orig.clone();
+        other.stream_lookahead = Some(43);
+        assert_ne!(
+            build_layer_forward_aad(&other),
+            aad,
+            "a relay must not change the look-ahead"
+        );
+        other.stream_lookahead = None;
+        assert_ne!(build_layer_forward_aad(&other), aad, "nor drop it");
+        let mut none = orig.clone();
+        none.stream_lookahead = None;
+        let (decoded, _, _) = decode_layer_forward_encrypted(
+            &encode_layer_forward_encrypted(&none, vec![0u8; 32]).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(decoded.stream_lookahead, None, "absent reads absent");
     }
 
     #[test]

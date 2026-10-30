@@ -1552,6 +1552,7 @@ impl PipelineExecutor {
                     image_spans: spans_for_wire.clone(),
                     draft_parents: Vec::new(),
                     draft_tree_from: None,
+                    stream_lookahead: None,
                 };
                 let forward = rebuild_forward();
 
@@ -2935,6 +2936,7 @@ impl PipelineExecutor {
                 image_spans: replay_spans.clone(),
                 draft_parents: Vec::new(),
                 draft_tree_from: None,
+                stream_lookahead: None,
             };
             let forward = rebuild_forward();
 

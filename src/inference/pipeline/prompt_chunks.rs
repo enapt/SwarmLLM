@@ -704,6 +704,7 @@ impl PipelineExecutor {
             image_spans: Vec::new(),
             draft_parents: Vec::new(),
             draft_tree_from: None,
+            stream_lookahead: None,
         };
         if state.pending_layer_results.len() >= super::MAX_PENDING_LAYER_RESULTS {
             return Err(SwarmError::ServiceUnavailable(

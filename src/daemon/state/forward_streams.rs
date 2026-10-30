@@ -50,10 +50,12 @@
 //! after the refusal, so each miss ran one stale check: 10 of its 29 decode
 //! forwards. The saving is the far end's check time less the restart's latency,
 //! and the far end's time for other requests. A wrong LOOK-AHEAD (every guess
-//! kept, the far end's own next token different) is not visible here — only a
-//! request with penalties sends the history it would be read off — so that
-//! quarter of the restarts still waits for the coordinator. A/B
-//! `SWARMLLM_STREAM_TAIL_SKIP=0`.
+//! kept, the far end's own next token different) is the same refusal where
+//! the coordinator names the look-ahead (`LayerForward::stream_lookahead`,
+//! `features::STREAM_LOOKAHEAD`, #382: to a lone far segment that walks); an
+//! older coordinator names none, and that quarter of the restarts then waits
+//! for it. A/B `SWARMLLM_STREAM_TAIL_SKIP=0` (here),
+//! `SWARMLLM_STREAM_LOOKAHEAD=0` (the coordinator).
 //!
 //! **A turn refused on arrival is stepped over, never waited for.** A forward
 //! the dispatcher turns away at an admission cap never reaches [`ForwardStreams::turn`],

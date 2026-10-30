@@ -1396,6 +1396,7 @@ mod tests {
             image_spans: Vec::new(),
             draft_parents: Vec::new(),
             draft_tree_from: None,
+            stream_lookahead: None,
         };
 
         let encoded = encode_layer_forward(&forward).unwrap();
@@ -1445,6 +1446,7 @@ mod tests {
                 image_spans: Vec::new(),
                 draft_parents: Vec::new(),
                 draft_tree_from: None,
+                stream_lookahead: None,
             };
             let encoded = encode_layer_forward(&forward).unwrap();
             assert_eq!(encoded[25], tag); // tag(1) + uuid(16) + seq(4) + index_pos(4) = 25
@@ -1490,6 +1492,7 @@ mod tests {
             image_spans: Vec::new(),
             draft_parents: Vec::new(),
             draft_tree_from: None,
+            stream_lookahead: None,
         };
 
         let encoded = encode_layer_forward(&forward).unwrap();
@@ -1529,6 +1532,7 @@ mod tests {
             image_spans: Vec::new(),
             draft_parents: Vec::new(),
             draft_tree_from: None,
+            stream_lookahead: None,
         };
 
         let encoded = encode_layer_forward(&forward).unwrap();
@@ -1573,6 +1577,7 @@ mod tests {
             image_spans: Vec::new(),
             draft_parents: Vec::new(),
             draft_tree_from: None,
+            stream_lookahead: None,
         };
         let encoded = encode_layer_forward(&forward).unwrap();
         // Trim to remove the trailer — simulates an old encoder
@@ -1773,6 +1778,7 @@ mod tests {
             image_spans: Vec::new(),
             draft_parents: Vec::new(),
             draft_tree_from: None,
+            stream_lookahead: None,
         };
         let encoded = encode_layer_forward(&forward).unwrap();
 
@@ -1825,6 +1831,7 @@ mod tests {
             image_spans: Vec::new(),
             draft_parents: Vec::new(),
             draft_tree_from: None,
+            stream_lookahead: None,
         };
 
         let encoded = encode_layer_forward(&forward).unwrap();
@@ -1870,6 +1877,7 @@ mod tests {
             image_spans: Vec::new(),
             draft_parents: Vec::new(),
             draft_tree_from: None,
+            stream_lookahead: None,
         };
         let encoded = encode_layer_forward(&forward).unwrap();
         let decoded = decode_layer_forward(&encoded).unwrap();
@@ -1913,6 +1921,7 @@ mod tests {
             image_spans: Vec::new(),
             draft_parents: Vec::new(),
             draft_tree_from: None,
+            stream_lookahead: None,
         };
         let encoded = encode_layer_forward(&forward).unwrap();
         let decoded = decode_layer_forward(&encoded).unwrap();

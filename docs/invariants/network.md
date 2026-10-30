@@ -3519,11 +3519,40 @@ a check took ~1.14 s there, the restart reached it ~1.0 s after the refusal
 it computed were stale — each a full check of the far end's time spent on
 nothing, ahead of the restart in its queue. The saving per miss is the far
 end's check less the restart's latency, plus that time freed for other work;
-it grows as the far end slows relative to the round trip. Not covered: a wrong
-LOOK-AHEAD (every draft kept, the far end's own next token different — about a
-quarter of the 70B's restarts) is invisible at the tail, which is not sent the
-look-ahead; a check already running is not stopped (#149 (b)). A/B
+it grows as the far end slows relative to the round trip. Not covered: a check
+already running is not stopped (#149 (b)). A/B
 `SWARMLLM_STREAM_TAIL_SKIP=0`; test `a_refusal_walked_here_skips_the_turns_built_on_it`.
+
+**A wrong look-ahead is a refusal too, once the tail is told it** (2026-10-30,
+#382). A chunk's rows are its bootstrap and its drafts; the last guess, the
+look-ahead, is not a row — the NEXT chunk starts from it. When the tail keeps
+every draft and draws another token at the look-ahead's position, the
+coordinator restarts there (`dsd_stream`: `whole = all && lookahead ==
+Some(next)`), but the tail, never told the look-ahead, saw a whole walk and ran
+the chunks built on it: on the 70B (far end AU, 2026-10-30 log) each wrong
+look-ahead cost 0.65-1.26 s behind one or two stale chunks, one case 2.68 s
+against the 1.42 s a refused draft costs — about a quarter of its restarts.
+Now the coordinator names it (`LayerForward::stream_lookahead`, trailer `0x12`
+after `0x11`, bound into the AAD) to a LONE far segment that walks and
+advertises `features::STREAM_LOOKAHEAD` (bit 34; `dsd_stream::lookahead_to_send`
+— an older tail would rebuild the AAD without the trailer and fail to open the
+forward; a chained run's tail is a hop away and nothing hands it on), and
+`walk_refused_a_guess` reads a whole walk whose last token is not the named
+look-ahead as a refusal — the coordinator's own rule, mirrored. It shows the
+far end nothing of a new kind: a tail that walks is sent the chunk's other
+guesses as ids (the drafter's; the stream copies no text) and draws the reply
+itself. A hostile coordinator naming a wrong one only skips its own stream's
+turns. A/B `SWARMLLM_STREAM_LOOKAHEAD=0` (the coordinator names none); tests
+`a_whole_walk_that_drew_other_than_the_lookahead_refused_it`,
+`the_lookahead_goes_only_to_a_lone_far_end_that_walks_and_reads_it`, the
+`0x12` wire and AAD tests in `protocol::{layer_forward,encrypted}`. **The mechanism
+fired** (rig `~/swarmllm-gate/deep/fr/lookahead382.sh`, 2026-10-30: `split_rig.sh split` in a
+namespace at an emulated 300 ms, Qwen2.5-Coder-7B with A holding part 0 and the 0.5B drafter, B the
+rest on the processor, two 160-token replies an arm, arms off/on/on/off): the replies were identical
+in every arm (84 chunks, 66 restarts, 17 kept whole each), and B answered 261 turns `refused a guess
+it was built on` with the look-ahead named against 235 without, exact in each pair of arms — 26
+stale checks never computed. Speed on the 70B is measured once AU runs a release that advertises
+the bit.
 
 **A chunk is guessed whole, and every chunk is the stream's width** (2026-10-26,
 `docs/plans/faster_than_local.md` § 8.6). The drafter's confidence floor (0.4)
