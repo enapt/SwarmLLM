@@ -288,9 +288,8 @@ async fn try_cloud_proxy(
 ///
 /// `logprobs`: per-token probabilities never come back from local inference —
 /// every local path pins `token_logprobs: vec![]` (see
-/// `InferenceOutput::from_gen_result`), and the sampler's
-/// `sample_token_with_logprobs` is not on any of them. Answering 200 with the
-/// field absent is indistinguishable from "the model had nothing to report",
+/// `InferenceOutput::from_gen_result`), whatever a worker's draw computed on
+/// the way. Answering 200 with the field absent is indistinguishable from "the model had nothing to report",
 /// and a caller that asked for it will reach into a value that is not there.
 /// The same reasoning is why `n > 1` is refused rather than quietly answered
 /// once.

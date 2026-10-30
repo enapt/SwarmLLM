@@ -2039,10 +2039,12 @@ pub fn deserialize_snapshot_full(
             layers.push(None);
             continue;
         };
-        let sizes = meta
-            .v_shape
-            .iter()
-            .try_fold(1usize, |n, &d| n.checked_mul(d))
+        // K's shape must account for exactly the values sent: candle's own
+        // check multiplies the dims unchecked, so a shape whose product wraps
+        // to `k_count` built a tensor far larger than its storage.
+        let product = |dims: &[usize]| dims.iter().try_fold(1usize, |n, &d| n.checked_mul(d));
+        let sizes = product(&meta.v_shape)
+            .filter(|_| product(&meta.k_shape) == Some(meta.k_count))
             .and_then(|v_count| {
                 let k_bytes = meta.k_count.checked_mul(4)?;
                 let v_bytes = v_count.checked_mul(4)?;
@@ -3104,6 +3106,12 @@ mod tests {
                 k_shape: vec![1],
                 v_shape: vec![usize::MAX, 2],
                 k_count: 1,
+            },
+            // K's shape multiplies past usize round to exactly the 0 values sent.
+            SnapshotLayerMeta {
+                k_shape: vec![1 << (usize::BITS / 2), 1 << (usize::BITS / 2)],
+                v_shape: vec![1],
+                k_count: 0,
             },
         ] {
             let header = serde_json::to_vec(&SnapshotHeader {

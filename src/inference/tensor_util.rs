@@ -11,6 +11,19 @@ use crate::inference::quant;
 const DTYPE_TAG_F32: u32 = 0;
 const DTYPE_TAG_Q8_0: u32 = 1;
 
+/// How many payload bytes a count of values takes in the encoding `dtype_tag`
+/// names — `None` for a tag this build does not decode; the length function
+/// answers `None` for a count that overflows. The ONE rule for both readers
+/// (`bytes_to_tensor` and `activation_shape_matches`): a new encoding taught
+/// to only one would refuse a healthy peer's activation (FUTURE_WORK #98).
+fn payload_len(dtype_tag: u32) -> Option<fn(usize) -> Option<usize>> {
+    match dtype_tag {
+        DTYPE_TAG_F32 => Some(|n| n.checked_mul(4)),
+        DTYPE_TAG_Q8_0 => Some(quant::q8_0_byte_len_checked),
+        _ => None,
+    }
+}
+
 pub fn tensor_to_bytes(tensor: &Tensor) -> Result<Vec<u8>, SwarmError> {
     let tensor = tensor.to_dtype(DType::F32).map_err(SwarmError::internal)?;
     let shape = tensor.shape().dims();
@@ -185,16 +198,12 @@ pub fn bytes_to_tensor(bytes: &[u8]) -> Result<Tensor, SwarmError> {
 
     // How many bytes this payload must contain for the shape it declares.
     // Unknown dtype is answered here, before anything is allocated.
-    let required = match dtype_tag {
-        DTYPE_TAG_F32 => num_elements.checked_mul(4),
-        DTYPE_TAG_Q8_0 => quant::q8_0_byte_len_checked(num_elements),
-        unknown => {
-            return Err(SwarmError::Internal(format!(
-                "Unknown tensor dtype tag: {unknown}"
-            )));
-        }
+    let Some(len_of) = payload_len(dtype_tag) else {
+        return Err(SwarmError::Internal(format!(
+            "Unknown tensor dtype tag: {dtype_tag}"
+        )));
     };
-    let Some(required) = required else {
+    let Some(required) = len_of(num_elements) else {
         return Err(SwarmError::Internal(format!(
             "Tensor shape overflow: {num_elements} elements of dtype {dtype_tag}"
         )));
@@ -498,12 +507,9 @@ pub fn activation_shape_matches(sent: &[u8], returned: &[u8]) -> bool {
     else {
         return false;
     };
-    let required = match dtype {
-        DTYPE_TAG_F32 => elements.checked_mul(4),
-        DTYPE_TAG_Q8_0 => quant::q8_0_byte_len_checked(elements),
-        _ => None,
-    };
-    required.is_some_and(|need| returned.len().saturating_sub(payload_at) >= need)
+    payload_len(dtype)
+        .and_then(|len_of| len_of(elements))
+        .is_some_and(|need| returned.len().saturating_sub(payload_at) >= need)
 }
 
 #[cfg(test)]

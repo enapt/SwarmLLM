@@ -1050,7 +1050,7 @@ fn sample_full_vocab(
     (ctx.probs.len() - 1) as u32
 }
 
-/// Token logprob information returned by `sample_token_with_logprobs`.
+/// Token logprob information returned by `sample_token_with_logprobs_history`.
 #[derive(Debug, Clone)]
 pub struct SampledTokenLogProb {
     /// The sampled token index.
@@ -1061,12 +1061,8 @@ pub struct SampledTokenLogProb {
     pub top_logprobs: Vec<(u32, f32)>,
 }
 
-/// Sample a token and optionally return logprob information.
-///
-/// When `top_logprobs > 0`, saves the raw logits before temperature/top-k/top-p
-/// mutation, then computes log-softmax over those raw logits. Returns the top-N
-/// tokens by pre-sampling probability along with the sampled token's logprob.
-/// This matches the OpenAI spec (logprobs reflect the model's raw distribution).
+/// The tests' shorthand: `sample_token_with_logprobs_history` with no history.
+#[cfg(test)]
 pub fn sample_token_with_logprobs(
     logits: &mut [f32],
     params: &SamplingParams,
@@ -1075,9 +1071,13 @@ pub fn sample_token_with_logprobs(
     sample_token_with_logprobs_history(logits, params, &[], ctx)
 }
 
-/// Same as `sample_token_with_logprobs` but applies repetition penalties
-/// from `generated_ids`. Use this in decode loops with non-zero
-/// frequency/presence penalty AND logprobs enabled.
+/// Sample a token, applying repetition penalties from `generated_ids`, and
+/// optionally return logprob information.
+///
+/// When `top_logprobs > 0`, saves the raw logits before temperature/top-k/top-p
+/// mutation, then computes log-softmax over those raw logits. Returns the top-N
+/// tokens by pre-sampling probability along with the sampled token's logprob.
+/// This matches the OpenAI spec (logprobs reflect the model's raw distribution).
 ///
 /// Note: `raw_logits` is saved BEFORE penalty application so the returned
 /// logprobs reflect the model's raw distribution (matches OpenAI spec —
