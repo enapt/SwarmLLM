@@ -8871,6 +8871,70 @@ fn a_peer_that_refused_the_prompt_up_front_is_held_to_the_layers_it_said_fit() {
     assert!(state.peer_prompt_fits_for_request(rid, &b).is_empty());
 }
 
+/// #378: a peer handed the WHOLE model that answered it cannot serve it is
+/// held, on the re-plan, to fewer layers than the model has — still a
+/// candidate, never barred, never handed the whole model again. Barred, a 70B's
+/// only holder past this node's layers was lost and the request failed with
+/// "no reachable node holds layers 16-79" (2026-10-30). Red with
+/// `SWARMLLM_WHOLE_REFUSAL=bar`.
+#[test]
+fn a_peer_that_refused_the_whole_model_is_held_short_of_it_not_barred() {
+    let (state, local, b, _c, model) = two_whole_model_card_peers();
+    publish_resident(&state, &b, &model, (0, 32));
+    let scheduler =
+        PipelineScheduler::with_local_processor_speed(state.clone(), LOCAL_PROCESSOR_TPS);
+    let manifest = state.model_registry.get_manifest(&model).unwrap();
+    let rid = uuid::Uuid::new_v4();
+    let gather = || {
+        scheduler.gather_candidates(
+            &manifest,
+            &local,
+            rid,
+            None.into(),
+            super::Purpose::Route,
+            &|| true,
+            crate::types::KeepAsked::Unasked,
+        )
+    };
+    let peer = |cands: &[NodeCandidate]| cands.iter().find(|x| x.node_id == b).cloned();
+    let before = peer(&gather()).expect("the peer is a candidate");
+    assert!(
+        before
+            .max_hostable_layers_at_ceiling
+            .is_none_or(|l| l >= 32),
+        "the control: unrefused, nothing holds it below the whole model: {before:?}"
+    );
+
+    let handed = PipelineSegment {
+        node_id: b.clone(),
+        shard_id: ShardId {
+            model_id: model.clone(),
+            index: 0,
+        },
+        layer_range: (0, 32),
+    };
+    crate::inference::pipeline::remote_generate::after_the_whole_model_was_refused(
+        &state, rid, &handed,
+    );
+    assert!(
+        !state.holder_blacklisted_for_request(rid, &b),
+        "a peer that cannot hold all of a model may still serve part of it"
+    );
+    let after = peer(&gather()).expect("still a candidate on the re-plan");
+    assert!(after.memory_refused_this_request, "{after:?}");
+    assert!(
+        after.max_hostable_layers_at_ceiling.is_some_and(|l| l < 32),
+        "held short of the whole model: {after:?}"
+    );
+    assert!(
+        after.max_hostable_layers.is_some_and(|l| l < 32),
+        "{after:?}"
+    );
+
+    state.release_request_state(&rid);
+    assert!(state.peer_prompt_fits_for_request(rid, &b).is_empty());
+}
+
 /// **A peer's count of what fits is weighed in its own unit** (2026-10-26,
 /// v0.3.255's 70B field check). The bounds count AVERAGE layers and weigh a
 /// range as what it loads (#353); a refusal's count is of REAL layers. Here a

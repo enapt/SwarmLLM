@@ -350,6 +350,51 @@ pub(super) enum HandOff {
     DelegatedSplit,
 }
 
+/// A peer handed the WHOLE model answered that it cannot serve it (#378). It
+/// holds every layer, so the re-plan holds it to fewer layers than the model
+/// has — never bars it. Barred, the re-plan lost the model's only holder past
+/// this node's layers: Llama 3.3 70B handed to an Australian peer that holds
+/// all 80 layers was refused for memory (37,841 MB against 31,780), and the
+/// re-plan answered "no reachable node holds layers 16-79" — the same peer had
+/// run [16..80) minutes before (2026-10-30).
+///
+/// The answer arrives as text, and a memory refusal and a worker that cannot
+/// start share `Service unavailable`, so the hold is the one fact both give: not
+/// ALL of it. Counted as `Unsaid` — no unit was stated — so the bound is the
+/// tighter of the count and the weighed charge, below the whole model whatever
+/// a range's tables weigh. The re-plan then asks the peer before its pass
+/// (`prompt_admission`, #252 (b)), which answers what DOES load; a peer whose
+/// worker cannot start fails that segment and is barred there, one attempt
+/// later than before. `SWARMLLM_WHOLE_REFUSAL=bar` bars it, as before — the A/B.
+pub(crate) fn after_the_whole_model_was_refused(
+    state: &crate::daemon::SharedState,
+    request_id: uuid::Uuid,
+    segment: &crate::types::PipelineSegment,
+) {
+    let (start, end) = segment.layer_range;
+    let bar = std::env::var("SWARMLLM_WHOLE_REFUSAL").is_ok_and(|v| v.trim() == "bar");
+    if bar || end <= start.saturating_add(1) {
+        state.blacklist_holder_for_request(request_id, &segment.node_id);
+        return;
+    }
+    state.note_peer_prompt_refusal(
+        request_id,
+        &segment.node_id,
+        crate::daemon::state::PeerPromptFit {
+            from: start,
+            layers: end - start - 1,
+            counted: swarmllm_types::LayersCounted::Unsaid,
+        },
+    );
+    tracing::info!(
+        %request_id,
+        peer = %segment.node_id,
+        layers = format!("[{start}..{end})"),
+        "DIAG: the peer handed the whole model cannot serve it — re-planning with that peer held \
+         to fewer layers, not barred"
+    );
+}
+
 /// `SWARMLLM_DELEGATE_SPLIT=0` keeps every split coordinated here — the
 /// control arm for measuring the delegated split in one binary. Read once.
 fn delegation_switched_off() -> bool {
@@ -1305,18 +1350,20 @@ impl PipelineExecutor {
                             self.shared_state
                                 .blacklist_holder_for_request(request_id, &segment.node_id);
                         } else if crate::inference::router::message_means_peer_cannot_serve(e) {
-                            // The peer holds the shards but cannot run them — its
-                            // worker failed to start, died, or dropped the
-                            // connection. Retracting its claims would be wrong,
-                            // the data really is there; but the retry must not
-                            // come straight back to it. Without this the retry
-                            // re-picked the same broken peer and the request
-                            // failed twice: observed 2026-07-27 as `assemblies=2`
-                            // with the same node id on both attempts, after a
-                            // node whose binary had been replaced underneath it
-                            // lost the ability to start any worker at all.
-                            self.shared_state
-                                .blacklist_holder_for_request(request_id, &segment.node_id);
+                            // The peer holds the shards but cannot run them all —
+                            // its memory refused, or its worker failed to start,
+                            // died, or dropped the connection. Retracting its
+                            // claims would be wrong, the data really is there; but
+                            // the retry must not hand it the whole model again
+                            // (2026-07-27: `assemblies=2` with the same node id on
+                            // both attempts). Held short of the whole model, not
+                            // barred (#378): a peer that cannot hold all of it may
+                            // still be the only holder of the part it can.
+                            after_the_whole_model_was_refused(
+                                &self.shared_state,
+                                request_id,
+                                &segment,
+                            );
                         }
                         self.shared_state.streaming_token_txs.remove(&wire_id);
                         // A conversation longer than THIS peer serves is its

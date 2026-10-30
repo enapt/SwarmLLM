@@ -1115,6 +1115,36 @@ are built, rather than an argument each greedy caller could pass wrong. Test:
 `a_relaxed_greedy_pass_keeps_this_nodes_bound_once_its_memory_refused_the_request`
 (red with the field ignored).
 
+**A peer handed the WHOLE model that cannot serve it is held short of it, not barred
+(2026-10-30, #378).** Llama 3.3 70B, this node holding [0,16): the Australian RTX 3060
+(`aa3d1e66`) had come to hold all 80 layers, published `max_hostable_layers=80` while
+its [16,80) worker was warm, and the plan handed it the whole model. It refused for
+memory within a second ("needs about 37841 MB … budget allows 31780 MB"), and the
+hand-off's error arm barred it from the request, as it bars any peer whose answer
+is `Service unavailable` (the 2026-07-27 rule: a peer whose binary was replaced could
+start no worker, and the retry re-picked it). Barred, the re-plan had nobody for
+[16,80): "no reachable node holds layers 16-79", reported as the peer's refusal —
+the same peer had run [16,80) of the same model nine minutes before, at 2.14 tok/s.
+Reproduced on demand (13:52:49Z, 2.3 s). A memory refusal and a worker that cannot
+start reach the coordinator as the same text, so the hold is what both say: not
+ALL of it — `remote_generate::after_the_whole_model_was_refused` notes a
+`PeerPromptFit` of one layer fewer than the model (`LayersCounted::Unsaid`: no unit
+was stated, so the bound is the tighter of the count and the weighed charge, below
+the whole model whatever a range's tables weigh) through the one writer,
+`note_peer_prompt_refusal`, and `gather_candidates` holds the peer as it holds one
+that refused up front. The re-plan's question before the pass (#252 (b)) then hears
+what DOES load; a peer that cannot start a worker fails that segment and is barred
+there — one attempt later than before, inside `MAX_REPLANS`. Petals' client bans a
+failing server as a whole (`sequence_manager.py`, `on_request_failure` →
+`Blacklist`, backoff 2.0) but ignores its own ban wherever every server holding a
+block is banned ("ignoring blacklist") — a ban that leaves a layer with no server
+is worse than a retry of the one that refused. Ours can say more than Petals' (the
+peer holds all of it, so "not all of it" is a fact), and keeps the bar for a
+segment that fails. A/B
+`SWARMLLM_WHOLE_REFUSAL=bar`. Test:
+`a_peer_that_refused_the_whole_model_is_held_short_of_it_not_barred` (red with the
+A/B set).
+
 **From the rules file (moved 2026-10-02):**
 
 **`SwarmError::LocalMemoryUnavailable`** is what this node's own loader returns

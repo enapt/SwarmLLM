@@ -1014,7 +1014,8 @@ pub struct SharedState {
 
     /// What each PEER said when asked to admit a request's prompt before the
     /// pass and refused: the layers it said fit, each with the start it
-    /// counted from (`PeerPromptFit`; FUTURE_WORK #252 (b)). Write ONLY
+    /// counted from (`PeerPromptFit`; FUTURE_WORK #252 (b)) — or, handed the
+    /// whole model, could not serve it (one layer fewer, #378). Write ONLY
     /// `note_peer_prompt_refusal`, read only `peer_prompt_fits_for_request`
     /// (the scheduler); released by
     /// `release_request_state`.

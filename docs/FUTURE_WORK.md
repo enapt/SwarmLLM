@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #378**). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #379**). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -3880,6 +3880,22 @@ archive under the named heading. Reopen one only with the evidence its line name
 Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 19-28 were
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
+
+**Closed 2026-10-30, ships in the next release** (#378)
+- #378 — **A peer handed the whole model that could not serve it was dropped from the request, and
+  with it the only holder of most of the model.** Llama 3.3 70B, this node holding [0,16): the
+  Australian RTX 3060 had come to hold all 80 layers and published room for them while its [16,80)
+  worker was warm; the plan handed it the whole model, it refused for memory (37,841 MB against
+  31,780) and the hand-off's error arm barred it, as it bars every `Service unavailable` answer.
+  The re-plan then found "no reachable node holds layers 16-79" — the same peer had run [16,80)
+  nine minutes before. Reproduced on demand (2.3 s). `remote_generate::after_the_whole_model_was_refused`
+  now holds such a peer to one layer fewer than the model (`PeerPromptFit`, `Unsaid`, through the one
+  writer) and does not bar it; the re-plan's question before the pass hears what does load, and a
+  peer that cannot start a worker is barred by the segment it fails. Petals ignores its own ban
+  where every server of a block is banned, for the same reason. Test
+  `a_peer_that_refused_the_whole_model_is_held_short_of_it_not_barred` (red with
+  `SWARMLLM_WHOLE_REFUSAL=bar`, the A/B). Evidence: `docs/invariants/scheduling.md` § "A re-plan is
+  warranted by a changed fact".
 
 **Closed 2026-10-30, ships in the next release** (#375)
 - #375 — **The stream's choice of width was made from a price it could not measure.** #374 priced a
