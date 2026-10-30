@@ -3674,12 +3674,19 @@ build, 41 restarts a 160-token reply). Steady replies: none 87.4-88.2 s, priced 
 0.2 floor 90.1-90.2. Priced sent ~68 spares a reply, 7-10 ran. The far end's idle gaps went 42 → 37
 a reply, but each remaining gap grew ~40 ms (560 → 600): a refusal that lands while this node
 builds a spare, or a chunk the spare pushed back, restarts that much later. So the price
-under-charges this pair. The likeliest reason is that the refusal chance is the 1B's own word,
-uncalibrated, where the 70B's 3B was checked against its target. The replies differed from the
-off arm's at a 0.08-logit tie; llama.cpp ranks all of them as the model's own (off 157/160
-rank-1, spares 158 and 159; gotcha #1000 for the reference file). The rig's restart costs ~0.5 of
-a far check; the 70B's ~1.0. Next: calibrate both chances from the reply's own outcomes, as
-`TreeRounds` does for a tree's rows.
+under-charges this pair. The replies differed from the off arm's at a 0.08-logit tie; llama.cpp
+ranks all of them as the model's own (off 157/160 rank-1, spares 158 and 159; gotcha #1000 for
+the reference file). The rig's restart costs ~0.5 of a far check; the 70B's ~1.0.
+
+**Not the drafter's calibration** (tried the same night, not kept). Each reply's outcomes held
+the 1B's two chances to what happened (kept ÷ rated, decayed, every chosen spare scored sent or
+not). The 1B's refusal chances came out at 0.79-0.87 of its word — it slightly OVER-states
+refusals, so the price over-charges on that count. Its spare scores came out at 0.71-0.86 (the
+spares actually sent ran ~0.57 as often as rated). Calibrated, the price sent 67-70 spares a
+reply against 66-67, because most go where this node is expected to idle and price at any
+chance. Same reply, calibrated 88.4-89.2 s against 87.4-88.1 s uncalibrated; none 87.7-88.7.
+What lengthens the gaps is still open — next, the price's predicted answer times against their
+arrivals. The rule is that a spare "built while this node would wait" is free.
 
 Tests: `a_spare_restart_runs_for_the_refusal_it_names`,
 `a_spare_restart_for_another_outcome_is_skipped`, `a_spare_supersedes_nothing_and_only_one_runs_per_refusal`,

@@ -3047,10 +3047,12 @@ gave 1.01x; `SWARMLLM_STREAM_SPARE_MIN` is now the fixed-floor A/B. On a far-bou
 1. **Measure the 70B** once AU runs a release advertising bit 35: `SWARMLLM_STREAM_SPARES=1` against
    off on this node (`~/swarmllm-70b/ask70novel.sh`), judged by restarts that waited, tok/s and
    `spares_declined` / `spare_ms`. Default on only where it pays.
-1a. **Calibrate the two chances the price reads from the reply's own outcomes**: the spare's score
-   (spares run ÷ scores sent) and a chunk's refusal chance (refusals ÷ chances predicted), as
-   `TreeRounds` does for a tree's rows. On the rig the 1B's word under-charged: 7-10 of ~68 spares
-   ran, and each far-end restart gap grew ~40 ms (§ "Which spares go").
+1a. **Find what lengthens the far end's restart gaps on the rig**: 7-10 of ~68 spares ran a
+   reply, yet each remaining gap grew ~40 ms. Calibrating the drafter's two chances from the
+   reply's own outcomes was tried and NOT kept. The 1B's refusal chance read 0.79-0.87 of its word,
+   its spare score 0.71-0.86, decisions barely moved, and times were level (§ "Which spares go").
+   Next: log the price's predicted answer times against their arrivals. A spare "built while this
+   node would wait" is priced free.
 2. **Draft a spare's guesses in the chunk's own drafter calls** — one tree, the runner-up's branch
    grown beside the main line (below). Replayed: a spare at ~210 ms instead of ~312 lifts the
    priced spares from 1.10x to 1.12x; reading its rows in the next chunk's forward too (~120 ms),
