@@ -3027,7 +3027,27 @@ only ~50-100 ms on a card head with a short prompt, against six send sites in th
 prompt). Parked behind #381, which is where the 70B's time goes.
 
 #### #381 — A refused guess leaves a far processor idle for a round trip: send it the likely restart beforehand
-`P2` · perf-split / 70B · **OPEN** — 2026-10-30 · history: #149, § 8.2's tail skip, SSD (2603.03251)
+`P2` · perf-split / 70B · **BUILT, OFF BY DEFAULT — residual open** — 2026-10-30 · history: #149, § 8.2's tail skip, SSD (2603.03251)
+
+**Built 2026-10-30** (mechanism and measurement: `docs/invariants/network.md` § "A likely
+refusal's restart is at the far end before the refusal"): `LayerForward::stream_branch` (trailer
+`0x13`, `features::STREAM_SPARES`, bit 35), the far end's admission (`forward_streams`: a spare runs
+only on the refusal it names, else is skipped unrun), and the coordinator's spare
+(`dsd_stream::send_spare`: one a chunk, at the drafter's likeliest refusal, built after the chunk is
+sent). On the two-node rig (7B coder, 0.5B drafter, one shared processor, 300 ms) the stream ran
+14-18% SLOWER: each spare cost this node ~120 ms while arrived answers waited, 7% of spares ran,
+and the drafter's score did not predict which below 0.4. So it is off unless
+`SWARMLLM_STREAM_SPARES=1` (floor `SWARMLLM_STREAM_SPARE_MIN`, 0.4); the far end's half is always on.
+**Residual**:
+1. **Measure the 70B** once AU runs a release advertising bit 35: `SWARMLLM_STREAM_SPARES=1` against
+   off on this node (`~/swarmllm-70b/ask70novel.sh`), judged by restarts that waited and tok/s. Its
+   3B drafter keeps 74% and its second choice is right on 60% of misses — the regime the idea was
+   measured for, unlike the rig's. Default on only where it pays.
+2. **Draft a spare's guesses in the chunk's own drafter calls** — one tree, the runner-up's branch
+   grown beside the main line (below): the three extra calls are most of a spare's cost.
+3. **Sampled replies**: the runner-up under the shared noise (the second-best of `logit/T + g` among
+   the request's candidates, `sampling::draw_among_candidates`); the far end's match is unchanged.
+4. **Runner-ups on the card path**: `argmax_guesses_on_card` stands aside when they are asked for.
 
 **Where the 70B's reply goes** (this node [0,16) + AU [16,80), the chain stream, 3B drafter on
 the processor; rig `ab70drafter` arm 4, `~/swarmllm-70b/out/ab70drafter/H_4_d3.log`, answer
@@ -3068,34 +3088,6 @@ through 6 processor layers is ~+0.36 s (§ 8.1's ~0.26 of a step per row past 4)
 at the two weakest positions fit (~0.23 s more a chunk) and are computed AFTER the main chunk is
 sent — they reach AU before it finishes that chunk. Expected: ~45% of restarts caught × ~0.7 s ≈
 7 s of a 54 s prose reply, ~+15%; more where the far end is slower against the round trip.
-
-**What it takes**: (1) this node computes the spares' rows over a prefix that does not include the
-main chunk's rows at or past `k` — a tree-masked forward (`RowVisibility`, as the flow's forwards)
-or a forward whose rows are not kept, never a write into the stream's linear cache; the drafter
-the same. (2) A wire field on the streamed forward naming the turn, position and token it is
-contingent on, behind a NEW feature bit (the sender checks the far end advertises it; an older
-far end is never sent one). (3) The far end's `ForwardStreams` holds spares beside their turn,
-runs the matching one as the restart (it already treats a restart's cache cut and the turns it
-supersedes), answers the others skipped, bounds what it holds by what was asked
-(`MAX_STREAM_CHUNKS_HERE`). (4) This node, on "spare taken", rewrites its own cache and the
-drafter's to the spare's rows (off the critical path: AU is busy checking the spare) and goes on.
-
-**What exists for it** (mapped 2026-10-30): no forward leaves its rows out of the cache — every one
-appends (`layers::append_to_cache`), and `truncate_kv_to` cuts only the END, before a forward
-(`model_worker.rs` ~1995). A tree forward (`IpcForward::draft_parents`, `DraftTree::rows_for`)
-needs its rows to END where the cache ends, and a streamed forward is refused unless the cache
-holds exactly `index_pos` (`model_worker.rs` ~2018-2040). So this node's spare rows are a tree
-forward of the main chunk's rows plus the spare under row `k−1` (one forward; nothing in
-`draft_tree_refusal` refuses a segment split between card and processor), followed — when the
-spare is NOT taken — by a cut back to the main line, the flow's rebase shape (`FlowTree::rebase`,
-truncate + re-read). The chain stream today hard-codes `draft_parents: Vec::new()`
-(`build_spec_verify_forward`) and the far end walks chains only (`walked_guesses` needs no tree,
-`dispatch/layer_forward.rs` ~291) — which suits the far end: it receives the spare as an ordinary
-restart chunk. The drafter: the chain stream drafts through `EngineDrafter::draft` (a chain);
-a second-choice branch is a `FlowOp::Push` under row `k−1` in the flow's growth
-(`SplitModel::grow_flow`), but no call grows ONLY chosen branches — that is new.
-Wire protocol → security review. Test first on a delayed link with a processor far end; judge by
-restarts that waited and tok/s, never by a forward's time.
 
 #### #347 — A first segment on a card keeps its token table there, where llama.cpp keeps it on the processor
 `P3` · memory · **OPEN** — 2026-10-25 · history: #343's residual

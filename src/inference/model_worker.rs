@@ -6150,6 +6150,7 @@ async fn handle_draft(
                 tokens,
                 parents,
                 scores: Vec::new(),
+                runner_ups: Vec::new(),
             },
             &[],
         )
@@ -6195,6 +6196,7 @@ async fn handle_draft(
     let noise = d
         .coupling_seed
         .map(crate::inference::coupled_noise::CoupledNoise::new);
+    let mut runner_ups = Vec::new();
     let (tokens, parents, scores) = tokio::task::block_in_place(|| match &d.tree {
         Some(tree) => model
             .draft_tree_after(
@@ -6224,7 +6226,7 @@ async fn handle_draft(
                 (grown.tokens, wire, grown.path_logp)
             }),
         None => model
-            .draft_after(
+            .draft_chain(
                 kv_store,
                 &req,
                 keep,
@@ -6235,6 +6237,8 @@ async fn handle_draft(
                 noise.as_ref(),
                 prefill_chunk_tokens,
                 d.stop_below,
+                // A runner-up is a greedy guess's: a sampled one is a draw.
+                (d.runner_ups && noise.is_none()).then_some(&mut runner_ups),
             )
             .map(|tokens| (tokens, Vec::new(), Vec::new())),
     })?;
@@ -6245,6 +6249,7 @@ async fn handle_draft(
             tokens,
             parents,
             scores,
+            runner_ups,
         },
         &[],
     )
@@ -6629,6 +6634,7 @@ async fn handle_head_guess(
             tokens: guessed,
             parents: Vec::new(),
             scores: Vec::new(),
+            runner_ups: Vec::new(),
         },
         &[],
     )

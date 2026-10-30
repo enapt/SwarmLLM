@@ -51,7 +51,20 @@ pub(super) async fn handle_layer_forward(
     // delivered them in. The turn is given back by dropping it, so every exit
     // below — the early refusals included — lets the next one go.
     let turn = match forward.stream_seq {
-        None => None,
+        None => {
+            if forward.stream_branch.is_some() {
+                send_error_result(
+                    &network_tx,
+                    &reply_to(),
+                    request_id,
+                    answering,
+                    "a spare restart outside a stream of checks refused",
+                )
+                .await;
+                return;
+            }
+            None
+        }
         Some(seq) => match shared_state
             .forward_streams
             .turn(
@@ -59,8 +72,23 @@ pub(super) async fn handle_layer_forward(
                 forward.layer_range,
                 seq,
                 // A streamed forward that cuts the cache back restarts its
-                // stream; the turns it supersedes are skipped.
-                forward.truncate_kv_to.is_some(),
+                // stream (the turns it supersedes are skipped); a spare runs
+                // only for the refusal it names (#381).
+                match stream_turn_kind(&forward, seq) {
+                    Ok(kind) => kind,
+                    Err(reason) => {
+                        // Its turn is given up, so the stream steps over it.
+                        shared_state.forward_streams.refused_on_arrival(
+                            request_id,
+                            forward.layer_range,
+                            seq,
+                            kind_given_up(&forward, seq),
+                        );
+                        send_error_result(&network_tx, &reply_to(), request_id, answering, reason)
+                            .await;
+                        return;
+                    }
+                },
                 turn_wait(&forward),
             )
             .await
@@ -71,13 +99,9 @@ pub(super) async fn handle_layer_forward(
             // wait ends, but not logged as one — on a node serving the middle
             // of a boomerang it happens dozens of times a reply (38 warnings
             // in one rig arm, 2026-10-09, #152).
-            // So is one that stood on a guess this node's own check refused.
-            Err(
-                skipped @ (crate::daemon::state::forward_streams::TurnRefused::Skipped
-                | crate::daemon::state::forward_streams::TurnRefused::StoodOnARefusal {
-                    ..
-                }),
-            ) => {
+            // So is one that stood on a guess this node's own check refused,
+            // and a spare restart for a refusal that did not happen.
+            Err(skipped) if skipped.is_a_skip() => {
                 let reason = skipped.reason(seq);
                 tracing::debug!(%request_id, reason, "streamed check skipped");
                 send_refusal(&network_tx, &reply_to(), request_id, answering, &reason).await;
@@ -295,8 +319,8 @@ pub(super) async fn handle_layer_forward(
     // Route forward pass to subprocess via process pool
     let result = shared_state.model_process_pool.forward(forward).await;
     if let (Some(turn), Some((guesses, lookahead)), Ok(answer)) = (&turn, walked_guesses, &result) {
-        if walk_refused_a_guess(guesses, lookahead, answer) {
-            turn.refused_a_guess();
+        if let Some((kept, token)) = walk_refusal(guesses, lookahead, answer) {
+            turn.refused_a_guess(kept, token);
         }
     }
     // The worker is done with it: the stream's next forward may start while
@@ -558,6 +582,7 @@ pub(super) async fn handle_layer_forward(
                         draft_tree_from: draft_tree_from_onward,
                         // Never handed on: a look-ahead goes only to a lone far segment (#382).
                         stream_lookahead: None,
+                        stream_branch: None,
                     };
                     tracing::info!(
                         request_id = %request_id,
@@ -901,7 +926,7 @@ fn draft_tree_from_onward(
 
 /// A streamed check this node walks (`streamed`: it holds a turn of the
 /// stream): how many guesses it was sent, and the look-ahead past them (#382),
-/// so its answer can say whether it refused one ([`walk_refused_a_guess`];
+/// so its answer can say whether it refused one ([`walk_refusal`];
 /// `forward_streams`: the turns after a refusal stood on it). `None` where the
 /// walk is not this node's, or the check is a tree, never walked as a chain.
 fn walk_to_judge(
@@ -917,8 +942,9 @@ fn walk_to_judge(
     .then_some((forward.draft_tokens.len(), forward.stream_lookahead))
 }
 
-/// Did this node's walk of `guesses` drafts refuse one? A walked answer is
-/// the drafts kept, then the token sampled where the walk stopped
+/// Did this node's walk of `guesses` drafts refuse one — and if so, how many
+/// it kept and the token it drew in the refused one's place? A walked answer
+/// is the drafts kept, then the token sampled where the walk stopped
 /// (`sampling::walk_verified_positions`): all kept is `guesses + 1` tokens,
 /// so any fewer is a refusal — and the coordinator restarts after it, so
 /// every streamed check built on that chunk is wasted (`forward_streams`).
@@ -928,24 +954,65 @@ fn walk_to_judge(
 /// that guess, and the coordinator restarts exactly there
 /// (`dsd_stream`'s `whole = all && lookahead == Some(next)`). Unnamed (an
 /// older sender, or one that sends none), a whole walk refused nothing here.
-fn walk_refused_a_guess(
+///
+/// Either way the answer is (kept, last token) — the numbers the coordinator
+/// reads off the same answer, and a spare restart names (#381).
+fn walk_refusal(
     guesses: usize,
     lookahead: Option<u32>,
     answer: &crate::types::LayerResult,
-) -> bool {
+) -> Option<(u32, u32)> {
     if matches!(
         answer.finish_reason,
         Some(crate::types::NetworkFinishReason::Error(_))
     ) || !answer.spec_logits.is_empty()
     {
-        return false;
+        return None;
     }
-    match answer.token_ids.len() {
-        0 => false,
-        n if n <= guesses => true,
-        n if n == guesses + 1 => lookahead.is_some_and(|l| answer.token_ids.last() != Some(&l)),
-        _ => false,
+    let n = answer.token_ids.len();
+    let last = *answer.token_ids.last()?;
+    let refused = n <= guesses || (n == guesses + 1 && lookahead.is_some_and(|l| last != l));
+    refused.then_some(((n - 1) as u32, last))
+}
+
+/// What streamed forward `seq` is to the turns before it
+/// (`forward_streams::TurnKind::of`), or why it is refused. A branch goes only
+/// to a tail that walks a lone stream (`dsd_stream`): one chained on, or
+/// handed a tree, is refused before it takes a turn.
+fn stream_turn_kind(
+    forward: &crate::types::LayerForward,
+    seq: u32,
+) -> Result<crate::daemon::state::forward_streams::TurnKind, &'static str> {
+    if forward.stream_branch.is_some()
+        && (!forward.chain.is_empty()
+            || !forward.spec_walk_at_tail
+            || !forward.draft_parents.is_empty()
+            || forward.draft_tree_from.is_some())
+    {
+        return Err("a spare restart goes only to a tail that walks a lone stream of checks");
     }
+    crate::daemon::state::forward_streams::TurnKind::of(
+        seq,
+        forward.index_pos,
+        forward.truncate_kv_to,
+        forward.stream_branch,
+    )
+}
+
+/// What streamed forward `seq` is to its stream once this node gives it up:
+/// its own kind, or — where its branch is refused — what it is without one,
+/// so a forward that cuts the cache back still supersedes the turns before
+/// it rather than leaving its stream waiting on them (#381's security
+/// review, LOW-2).
+fn kind_given_up(
+    forward: &crate::types::LayerForward,
+    seq: u32,
+) -> crate::daemon::state::forward_streams::TurnKind {
+    use crate::daemon::state::forward_streams::TurnKind;
+    stream_turn_kind(forward, seq).unwrap_or_else(|_| {
+        TurnKind::of(seq, forward.index_pos, forward.truncate_kv_to, None)
+            .unwrap_or(TurnKind::Follows)
+    })
 }
 
 /// Send a sanitized error `LayerResult` back to the originating peer when
@@ -987,8 +1054,11 @@ pub(super) struct RefusalAddress {
     answering: crate::types::ResultStep,
     requester_node_id: Option<[u8; 32]>,
     sender_peer_bytes: Option<Vec<u8>>,
-    /// It cut the cache back — a streamed forward that restarts its stream.
-    restarts: bool,
+    /// What a streamed forward is to its stream's turns — a restart's
+    /// refusal still supersedes the turns before it ([`kind_given_up`]: a
+    /// forward whose branch is refused takes no turn as a spare, but a cut
+    /// still restarts).
+    kind: crate::daemon::state::forward_streams::TurnKind,
 }
 
 impl RefusalAddress {
@@ -998,7 +1068,10 @@ impl RefusalAddress {
             answering: forward.step(),
             requester_node_id: forward.requester_node_id,
             sender_peer_bytes: forward.sender_peer_bytes.clone(),
-            restarts: forward.truncate_kv_to.is_some(),
+            kind: forward
+                .stream_seq
+                .map(|seq| kind_given_up(forward, seq))
+                .unwrap_or(crate::daemon::state::forward_streams::TurnKind::Follows),
         }
     }
 }
@@ -1028,7 +1101,7 @@ pub(super) async fn refuse_forward(
             to.request_id,
             to.answering.layer_range,
             seq,
-            to.restarts,
+            to.kind,
         );
     }
     let Some(sender) = to.sender_peer_bytes else {
@@ -1353,6 +1426,7 @@ mod chaining_tests {
             draft_parents: Vec::new(),
             draft_tree_from: None,
             stream_lookahead: None,
+            stream_branch: None,
         };
         let (tx, mut rx) = tokio::sync::mpsc::channel(8);
         super::handle_layer_forward(state, tx, forward).await;
@@ -1488,6 +1562,7 @@ mod chaining_tests {
             draft_parents: Vec::new(),
             draft_tree_from: None,
             stream_lookahead: None,
+            stream_branch: None,
         };
         let (tx, mut rx) = tokio::sync::mpsc::channel(8);
         tokio::time::timeout(
@@ -1712,6 +1787,7 @@ mod tests {
             draft_parents: Vec::new(),
             draft_tree_from: None,
             stream_lookahead: None,
+            stream_branch: None,
         };
         let (tx, mut rx) = mpsc::channel(4);
         refuse_forward(
@@ -1760,8 +1836,10 @@ mod tests {
     }
 
     /// A walk of 2 guesses answers 3 tokens when it kept both, fewer when it
-    /// refused one. Only a refusal marks the stream: a whole answer, an error
-    /// and a logits answer (walked at the coordinator) say nothing here.
+    /// refused one — read as the guesses kept and the token drawn in the
+    /// refused one's place, the numbers a spare restart names (#381). Only a
+    /// refusal marks the stream: a whole answer, an error and a logits answer
+    /// (walked at the coordinator) say nothing here.
     #[test]
     fn only_a_walk_that_kept_fewer_than_every_guess_refused_one() {
         let walked = |ids: &[u32]| {
@@ -1771,27 +1849,27 @@ mod tests {
             r
         };
         assert!(
-            !walk_refused_a_guess(2, None, &walked(&[7, 8, 9])),
+            walk_refusal(2, None, &walked(&[7, 8, 9])).is_none(),
             "both kept"
         );
         assert!(
-            walk_refused_a_guess(2, None, &walked(&[7, 5])),
+            walk_refusal(2, None, &walked(&[7, 5])) == Some((1, 5)),
             "the second refused"
         );
         assert!(
-            walk_refused_a_guess(2, None, &walked(&[5])),
+            walk_refusal(2, None, &walked(&[5])) == Some((0, 5)),
             "the first refused"
         );
-        assert!(!walk_refused_a_guess(2, None, &walked(&[])), "no answer");
+        assert!(walk_refusal(2, None, &walked(&[])).is_none(), "no answer");
         let failed = crate::types::LayerResult::error(uuid::Uuid::nil(), "x");
         assert!(
-            !walk_refused_a_guess(2, Some(4), &failed),
+            walk_refusal(2, Some(4), &failed).is_none(),
             "an error refused nothing"
         );
         let mut logits = walked(&[5]);
         logits.spec_logits = vec![vec![0.0]; 3];
         assert!(
-            !walk_refused_a_guess(2, Some(4), &logits),
+            walk_refusal(2, Some(4), &logits).is_none(),
             "not walked here"
         );
     }
@@ -1808,23 +1886,23 @@ mod tests {
             r
         };
         assert!(
-            walk_refused_a_guess(2, Some(4), &walked(&[7, 8, 9])),
+            walk_refusal(2, Some(4), &walked(&[7, 8, 9])) == Some((2, 9)),
             "the look-ahead refused"
         );
         assert!(
-            !walk_refused_a_guess(2, Some(4), &walked(&[7, 8, 4])),
+            walk_refusal(2, Some(4), &walked(&[7, 8, 4])).is_none(),
             "the look-ahead kept"
         );
         assert!(
-            walk_refused_a_guess(2, Some(4), &walked(&[7, 5])),
+            walk_refusal(2, Some(4), &walked(&[7, 5])) == Some((1, 5)),
             "a draft refused, whatever the look-ahead"
         );
         assert!(
-            !walk_refused_a_guess(0, Some(4), &walked(&[4])),
+            walk_refusal(0, Some(4), &walked(&[4])).is_none(),
             "a lone look-ahead kept"
         );
         assert!(
-            walk_refused_a_guess(0, Some(4), &walked(&[6])),
+            walk_refusal(0, Some(4), &walked(&[6])) == Some((0, 6)),
             "a lone look-ahead refused"
         );
     }
@@ -1864,6 +1942,7 @@ mod tests {
             draft_parents: Vec::new(),
             draft_tree_from: None,
             stream_lookahead: Some(4),
+            stream_branch: None,
         };
         let mut answer = crate::types::LayerResult::error(uuid::Uuid::nil(), String::new());
         answer.finish_reason = None;
@@ -1871,13 +1950,96 @@ mod tests {
         let (guesses, lookahead) = walk_to_judge(&forward, true, true).expect("walked here");
         assert_eq!((guesses, lookahead), (2, Some(4)));
         assert!(
-            walk_refused_a_guess(guesses, lookahead, &answer),
+            walk_refusal(guesses, lookahead, &answer).is_some(),
             "drew 9 where the next chunk stood on 4"
         );
         assert_eq!(walk_to_judge(&forward, false, true), None, "no stream");
         assert_eq!(walk_to_judge(&forward, true, false), None, "not the tail");
         forward.draft_parents = vec![0, 1, 2];
         assert_eq!(walk_to_judge(&forward, true, true), None, "a tree");
+    }
+
+    /// #381: a spare restart goes only to a tail walking a lone stream —
+    /// chained on, not walked here, or a tree, it is refused before it takes
+    /// a turn — and a well-formed one is read as the kind it names.
+    #[test]
+    fn a_spare_restart_is_taken_only_by_a_tail_walking_a_lone_stream() {
+        use crate::daemon::state::forward_streams::TurnKind;
+        let spare = crate::types::LayerForward {
+            request_id: uuid::Uuid::nil(),
+            sequence_num: 0,
+            index_pos: 17,
+            activations: Vec::new(),
+            format: crate::types::TensorFormat::FP32,
+            model_id: crate::types::ModelId("m".into()),
+            layer_range: (16, 80),
+            vision_embeddings: None,
+            chain: Vec::new(),
+            sender_peer_bytes: None,
+            tp_meta: None,
+            requester_node_id: None,
+            pre_embedded: false,
+            generated_ids: Vec::new(),
+            adapter_id: None,
+            draft_tokens: vec![7, 8],
+            spec_logits_requested: true,
+            spec_walk_at_tail: true,
+            coupling_seed: None,
+            stream_seq: Some(3),
+            truncate_kv_to: Some(17),
+            prompt_cache: None,
+            chunk_meta: None,
+            sampling: None,
+            prompt_span: None,
+            image_spans: Vec::new(),
+            draft_parents: Vec::new(),
+            draft_tree_from: None,
+            stream_lookahead: Some(4),
+            stream_branch: Some(crate::types::StreamBranch::Spare {
+                of: 2,
+                kept: 1,
+                token: 5,
+            }),
+        };
+        assert_eq!(
+            stream_turn_kind(&spare, 3),
+            Ok(TurnKind::Spare {
+                of: 2,
+                kept: 1,
+                token: 5
+            })
+        );
+        let mut chained = spare.clone();
+        chained.chain = vec![crate::types::ChainHop {
+            node_id: crate::types::NodeId([1u8; 32]),
+            layer_range: (48, 80),
+        }];
+        let mut unwalked = spare.clone();
+        unwalked.spec_walk_at_tail = false;
+        let mut tree = spare.clone();
+        tree.draft_parents = vec![0, 1, 2];
+        for refused in [&chained, &unwalked, &tree] {
+            assert!(stream_turn_kind(refused, 3).is_err(), "{refused:?}");
+            // Refused as a spare, its cut still restarts the stream: the
+            // turns before it are not left for the stream to wait on.
+            assert_eq!(kind_given_up(refused, 3), TurnKind::Restarts);
+        }
+        let mut uncut = chained.clone();
+        uncut.truncate_kv_to = None;
+        assert_eq!(kind_given_up(&uncut, 3), TurnKind::Follows);
+        assert_eq!(
+            kind_given_up(&spare, 3),
+            stream_turn_kind(&spare, 3).unwrap()
+        );
+        let mut restart = chained.clone();
+        restart.stream_branch = None;
+        assert_eq!(
+            stream_turn_kind(&restart, 3),
+            Ok(TurnKind::Restarts),
+            "a chain's own restart is still one"
+        );
+        restart.truncate_kv_to = None;
+        assert_eq!(stream_turn_kind(&restart, 3), Ok(TurnKind::Follows));
     }
 }
 
@@ -2001,6 +2163,7 @@ mod forward_positions_tests {
             draft_parents: Vec::new(),
             draft_tree_from: None,
             stream_lookahead: None,
+            stream_branch: None,
         };
         let piece = turn_wait(&f);
         assert_eq!(

@@ -1553,6 +1553,7 @@ impl PipelineExecutor {
                     draft_parents: Vec::new(),
                     draft_tree_from: None,
                     stream_lookahead: None,
+                    stream_branch: None,
                 };
                 let forward = rebuild_forward();
 
@@ -2937,6 +2938,7 @@ impl PipelineExecutor {
                 draft_parents: Vec::new(),
                 draft_tree_from: None,
                 stream_lookahead: None,
+                stream_branch: None,
             };
             let forward = rebuild_forward();
 

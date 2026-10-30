@@ -202,6 +202,9 @@ pub enum WorkerMsg {
         /// (`split::draft::GrownTree::path_logp`); empty for a chain.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         scores: Vec<f32>,
+        /// One per guess where `IpcDraft::runner_ups` asked; else empty.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        runner_ups: Vec<RunnerUp>,
     },
     /// A `DaemonMsg::AdmitPrompt` fitted: the request's cache is promised over
     /// every range it named, and their forwards ask nothing more. Sent only in
@@ -759,6 +762,25 @@ pub struct IpcDraft {
     /// `gamma`, `stop_below`, `tree` and `history` are unused then.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub flow: Option<FlowAsk>,
+    /// Answer each chain guess's runner-up too (`Drafted::runner_ups`), for a
+    /// stream's spare restart (#381). Greedy guesses only: unused with a
+    /// `coupling_seed`, a `tree` or a `flow`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub runner_ups: bool,
+}
+
+/// The drafter's view of one chain guess's position (`IpcDraft::runner_ups`):
+/// how sure it was of its guess, and the token it would have guessed instead
+/// — what a stream's spare restart (#381, `dsd_stream`) bets the check draws
+/// there if it refuses the guess.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq)]
+pub struct RunnerUp {
+    /// The drafter's probability for its own guess.
+    pub guess_p: f32,
+    /// Its second choice there.
+    pub token: u32,
+    /// Its probability for `token`.
+    pub p: f32,
 }
 
 /// A drafting call of a tree that flows (`IpcDraft::flow`,
@@ -847,6 +869,8 @@ pub struct Drafted {
     pub tokens: Vec<u32>,
     pub parents: Vec<u16>,
     pub scores: Vec<f32>,
+    /// Each guess's runner-up, where the call asked (`IpcDraft::runner_ups`).
+    pub runner_ups: Vec<RunnerUp>,
 }
 
 impl IpcDraft {
@@ -1300,6 +1324,7 @@ mod tests {
                 tokens: vec![],
                 parents: vec![],
                 scores: vec![],
+                runner_ups: vec![],
             },
             WorkerMsg::PromptAdmitted {
                 request_id: Uuid::nil(),

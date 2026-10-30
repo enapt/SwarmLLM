@@ -31,9 +31,10 @@ pub use inference::{
     InferenceRequest, KeepAsked, LayerForward, LayerResult, NetworkFinishReason,
     PipelineAssignment, PipelineSegment, PromptCacheHint, PromptSpan, RemoteGenerateRequest,
     ReplyContinuation, ReplyGrammar, ReplyIds, RequestedBy, ResultStep, Role, SamplingParams,
-    StreamingToken, TensorFormat, TensorParallelGroup, TensorParallelMeta, TokenLogProbEntry,
-    ToolCallFunction, ToolCallTurn, ToolTurn, TpAllReduceRequest, TpAllReduceResponse, TpPhase,
-    TpRingChunk, VisionEncodeRequest, VisionEncodeResponse, DEFAULT_REPLY_BUDGET,
+    StreamBranch, StreamingToken, TensorFormat, TensorParallelGroup, TensorParallelMeta,
+    TokenLogProbEntry, ToolCallFunction, ToolCallTurn, ToolTurn, TpAllReduceRequest,
+    TpAllReduceResponse, TpPhase, TpRingChunk, VisionEncodeRequest, VisionEncodeResponse,
+    DEFAULT_REPLY_BUDGET,
 };
 pub use model::{
     MmprojInfo, ModelArchitecture, ModelManifest, ModelTrustInfo, ModelTrustLevel, Quantization,

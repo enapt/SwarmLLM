@@ -2010,6 +2010,7 @@ mod seal_tests {
             draft_parents: Vec::new(),
             draft_tree_from: None,
             stream_lookahead: None,
+            stream_branch: None,
         }
     }
 

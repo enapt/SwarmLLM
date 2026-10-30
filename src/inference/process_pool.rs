@@ -10128,6 +10128,7 @@ impl ModelProcessPool {
             draft_tree_from,
             // Read by dispatch before the forward reaches the pool (#382).
             stream_lookahead: _,
+            stream_branch: _,
         } = forward;
 
         // Split vision embeddings out of the JSON header into the binary
@@ -10345,6 +10346,7 @@ impl ModelProcessPool {
                             tokens,
                             parents,
                             scores,
+                            runner_ups,
                         },
                         _,
                     )) if rid == request_id => {
@@ -10353,6 +10355,7 @@ impl ModelProcessPool {
                             tokens,
                             parents,
                             scores,
+                            runner_ups,
                         });
                     }
                     Some((
@@ -10594,6 +10597,7 @@ impl ModelProcessPool {
                 draft_parents: _,
                 draft_tree_from: _,
                 stream_lookahead: _,
+                stream_branch: _,
             } = f;
             let forward_sampling = sampling.unwrap_or_default();
             activation_lens.push(activations.len() as u32);
@@ -11739,6 +11743,7 @@ mod tests {
             draft_parents: Vec::new(),
             draft_tree_from: None,
             stream_lookahead: None,
+            stream_branch: None,
         }
     }
 
@@ -13742,6 +13747,7 @@ mod tests {
             history: Vec::new(),
             coupling_seed: None,
             for_the_owner: true,
+            runner_ups: false,
             stop_below: None,
             tree: None,
             flow: None,

@@ -680,6 +680,29 @@ pub struct LayerForward {
     /// that walks the check itself.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stream_lookahead: Option<u32>,
+    /// Where a streamed check stands against a SPARE restart (#381); `None`
+    /// on every other forward. A [`StreamBranch::Spare`] is the restart its
+    /// coordinator will need if an earlier check is walked to refuse one
+    /// particular guess for one particular token: the tail runs it the moment
+    /// that happens — a round trip before the coordinator could send it — and
+    /// skips it unrun otherwise. A [`StreamBranch::AfterSpare`] builds on a
+    /// spare's rows and is refused unless that spare ran there. Travels in
+    /// the `0x13` trailer, bound into the AAD, only to a peer advertising
+    /// `features::STREAM_SPARES` that walks the check itself.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream_branch: Option<StreamBranch>,
+}
+
+/// Where a streamed check stands against a spare restart — see
+/// [`LayerForward::stream_branch`]. Every number is a `stream_seq` of the
+/// same attempt, earlier than the forward carrying it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum StreamBranch {
+    /// Run only where check `of`'s walk kept `kept` guesses and drew `token`
+    /// next — the refusal this spare is the restart for.
+    Spare { of: u32, kept: u32, token: u32 },
+    /// Built on spare `spare`'s rows: refused where that spare did not run.
+    AfterSpare { spare: u32 },
 }
 
 impl LayerForward {
@@ -1417,6 +1440,7 @@ mod chunk_assembly_tests {
             draft_parents: Vec::new(),
             draft_tree_from: None,
             stream_lookahead: None,
+            stream_branch: None,
         }
     }
 

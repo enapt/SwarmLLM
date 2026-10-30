@@ -169,6 +169,9 @@ pub fn build_layer_forward_aad(forward: &LayerForward) -> Vec<u8> {
     // The look-ahead trailer (0x12): which turns after this check the tail
     // may skip as built on a guess it refused (#382).
     super::layer_forward::append_stream_lookahead_trailer(&mut aad, forward);
+    // The branch trailer (0x13): whether this check is a spare restart, or
+    // built on one, and which (#381).
+    super::layer_forward::append_stream_branch_trailer(&mut aad, forward);
 
     aad
 }
@@ -285,6 +288,7 @@ pub fn encode_layer_forward_encrypted(
     super::layer_forward::append_draft_tree_trailer(&mut buf, forward);
     super::layer_forward::append_draft_tree_flow_trailer(&mut buf, forward);
     super::layer_forward::append_stream_lookahead_trailer(&mut buf, forward);
+    super::layer_forward::append_stream_branch_trailer(&mut buf, forward);
 
     Ok(buf)
 }
@@ -520,6 +524,7 @@ pub fn decode_layer_forward_encrypted(
         !draft_parents.is_empty(),
     )?;
     let stream_lookahead = super::layer_forward::read_stream_lookahead_trailer(data, &mut cursor)?;
+    let stream_branch = super::layer_forward::read_stream_branch_trailer(data, &mut cursor)?;
     let _ = cursor;
 
     let mut forward = LayerForward {
@@ -552,6 +557,7 @@ pub fn decode_layer_forward_encrypted(
         draft_parents,
         draft_tree_from,
         stream_lookahead,
+        stream_branch,
     };
 
     // Reconstruct AAD from the parsed forward via the helper. This MUST
@@ -604,6 +610,7 @@ mod tests {
             draft_parents: Vec::new(),
             draft_tree_from: None,
             stream_lookahead: None,
+            stream_branch: None,
         }
     }
 
@@ -944,6 +951,55 @@ mod tests {
         )
         .unwrap();
         assert_eq!(decoded.stream_lookahead, None, "absent reads absent");
+    }
+
+    /// A streamed check's branch (#381) decides whether the tail runs it at
+    /// all, and on which rows, so it is sealed: changed, added or dropped on
+    /// the way, the frame no longer opens.
+    #[test]
+    fn a_streamed_checks_branch_is_sealed_and_survives_the_encrypted_frame() {
+        use crate::types::StreamBranch;
+        let mut orig = base_forward();
+        orig.spec_logits_requested = true;
+        orig.spec_walk_at_tail = true;
+        orig.draft_tokens = vec![11, 12];
+        orig.stream_seq = Some(9);
+        orig.truncate_kv_to = Some(orig.index_pos);
+        orig.stream_branch = Some(StreamBranch::Spare {
+            of: 8,
+            kept: 1,
+            token: 42,
+        });
+        let bytes = encode_layer_forward_encrypted(&orig, vec![0u8; 32]).unwrap();
+        let (decoded, _sealed, aad) = decode_layer_forward_encrypted(&bytes).unwrap();
+        assert_eq!(decoded.stream_branch, orig.stream_branch);
+        assert_eq!(aad, build_layer_forward_aad(&orig));
+        let mut other = orig.clone();
+        other.stream_branch = Some(StreamBranch::Spare {
+            of: 8,
+            kept: 1,
+            token: 43,
+        });
+        assert_ne!(
+            build_layer_forward_aad(&other),
+            aad,
+            "a relay must not change the token a spare waits for"
+        );
+        other.stream_branch = Some(StreamBranch::AfterSpare { spare: 8 });
+        assert_ne!(build_layer_forward_aad(&other), aad, "nor its kind");
+        other.stream_branch = None;
+        assert_ne!(
+            build_layer_forward_aad(&other),
+            aad,
+            "nor drop it, which would make the spare an ordinary restart"
+        );
+        let mut none = orig.clone();
+        none.stream_branch = None;
+        let (decoded, _, _) = decode_layer_forward_encrypted(
+            &encode_layer_forward_encrypted(&none, vec![0u8; 32]).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(decoded.stream_branch, None, "absent reads absent");
     }
 
     #[test]

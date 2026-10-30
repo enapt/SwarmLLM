@@ -799,6 +799,7 @@ pub(super) fn read_ahead(
         history: Vec::new(),
         coupling_seed: None,
         for_the_owner: requester == Requester::Owner,
+        runner_ups: false,
         stop_below: None,
         tree: None,
         flow: None,
@@ -1046,6 +1047,60 @@ impl EngineDrafter {
         stop_below: Option<f32>,
         cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     ) -> Result<Vec<u32>, SwarmError> {
+        self.draft_chain(
+            state,
+            gamma,
+            sampling,
+            history,
+            coupling_seed,
+            stop_below,
+            cancel,
+            false,
+        )
+        .await
+        .map(|d| d.tokens)
+    }
+
+    /// [`Self::draft`] with each guess's runner-up (`worker_ipc::RunnerUp`,
+    /// #381) — for greedy guesses only: with a `coupling_seed` none come
+    /// back, and neither do any from a worker that did not answer them, so
+    /// the caller reads `runner_ups` as possibly empty.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) async fn draft_with_runner_ups(
+        &mut self,
+        state: &SharedState,
+        gamma: u32,
+        sampling: &SamplingParams,
+        history: &[u32],
+        coupling_seed: Option<u64>,
+        stop_below: Option<f32>,
+        cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    ) -> Result<crate::inference::worker_ipc::Drafted, SwarmError> {
+        self.draft_chain(
+            state,
+            gamma,
+            sampling,
+            history,
+            coupling_seed,
+            stop_below,
+            cancel,
+            true,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn draft_chain(
+        &mut self,
+        state: &SharedState,
+        gamma: u32,
+        sampling: &SamplingParams,
+        history: &[u32],
+        coupling_seed: Option<u64>,
+        stop_below: Option<f32>,
+        cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+        runner_ups: bool,
+    ) -> Result<crate::inference::worker_ipc::Drafted, SwarmError> {
         self.before_a_call()?;
         let d = IpcDraft {
             request_id: self.key,
@@ -1058,13 +1113,14 @@ impl EngineDrafter {
             history: history.to_vec(),
             coupling_seed,
             for_the_owner: self.requester == Requester::Owner,
+            runner_ups,
             stop_below,
             tree: None,
             flow: None,
         };
-        let guesses = state.model_process_pool.draft(d, cancel).await?.tokens;
-        self.open = Some((self.seq.len(), guesses.len()));
-        Ok(guesses)
+        let drafted = state.model_process_pool.draft(d, cancel).await?;
+        self.open = Some((self.seq.len(), drafted.tokens.len()));
+        Ok(drafted)
     }
 
     /// The checks every call makes before asking the worker: the fault switch,
@@ -1130,6 +1186,7 @@ impl EngineDrafter {
             history: history.to_vec(),
             coupling_seed,
             for_the_owner: self.requester == Requester::Owner,
+            runner_ups: false,
             stop_below: None,
             tree: Some(crate::inference::worker_ipc::TreeAsk {
                 rows,
@@ -1224,6 +1281,7 @@ impl EngineDrafter {
             history: Vec::new(),
             coupling_seed,
             for_the_owner: self.requester == Requester::Owner,
+            runner_ups: false,
             stop_below: None,
             tree: None,
             flow: Some(crate::inference::worker_ipc::FlowAsk {

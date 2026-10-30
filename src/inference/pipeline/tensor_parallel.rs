@@ -119,6 +119,7 @@ impl PipelineExecutor {
                     draft_parents: Vec::new(),
                     draft_tree_from: None,
                     stream_lookahead: None,
+                    stream_branch: None,
                 };
                 self.shared_state
                     .model_process_pool
@@ -168,6 +169,7 @@ impl PipelineExecutor {
                         draft_parents: Vec::new(),
                         draft_tree_from: None,
                         stream_lookahead: None,
+                        stream_branch: None,
                     };
                     let _ = self
                         .network_tx
@@ -214,6 +216,7 @@ impl PipelineExecutor {
                     draft_parents: Vec::new(),
                     draft_tree_from: None,
                     stream_lookahead: None,
+                    stream_branch: None,
                 };
                 let attn_partial = self
                     .shared_state
@@ -312,6 +315,7 @@ impl PipelineExecutor {
                         draft_parents: Vec::new(),
                         draft_tree_from: None,
                         stream_lookahead: None,
+                        stream_branch: None,
                     };
                     let _ = self
                         .network_tx
@@ -358,6 +362,7 @@ impl PipelineExecutor {
                     draft_parents: Vec::new(),
                     draft_tree_from: None,
                     stream_lookahead: None,
+                    stream_branch: None,
                 };
                 let ffn_partial = self
                     .shared_state
@@ -461,6 +466,7 @@ impl PipelineExecutor {
                 draft_parents: Vec::new(),
                 draft_tree_from: None,
                 stream_lookahead: None,
+                stream_branch: None,
             };
             let layer_result = self
                 .shared_state

@@ -339,7 +339,9 @@ impl StreamWidth {
     /// the last answered and this one left here a round trip before that
     /// answer came back — so it was already waiting at the far end when that
     /// one finished there — the gap between the two answers is the far end's
-    /// own time for this one ([`FarPace`]).
+    /// own time for this one ([`FarPace`]). `turn` is its place on the main
+    /// line ([`Sent::order`]): a spare not taken between two chunks is
+    /// skipped unrun at the far end, and does not part them.
     fn note_arrival(
         &mut self,
         turn: u32,
@@ -448,6 +450,148 @@ fn lookahead_to_send(
 fn names_the_lookahead() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
     *ON.get_or_init(|| std::env::var("SWARMLLM_STREAM_LOOKAHEAD").as_deref() != Ok("0"))
+}
+
+/// Spare restarts (#381): OFF unless `SWARMLLM_STREAM_SPARES=1`. Measured
+/// on the two-node rig (7B coder, 0.5B drafter, both halves on one
+/// processor, 300 ms, 2026-10-30) the stream ran 14-18% slower with them —
+/// ~150 spares a 160-token reply, 11 run, each costing this node ~120 ms the
+/// answers waited behind — so they stay off until a split where they pay is
+/// measured (the 70B, whose far end must first run a release that reads
+/// them). A far end runs a spare only where it advertises
+/// `features::STREAM_SPARES`, so an older one is never sent one.
+fn spares_switched_on() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| std::env::var("SWARMLLM_STREAM_SPARES").as_deref() == Ok("1"))
+}
+
+/// The guesses a spare restart carries, its first row's token aside: the
+/// stream's narrow width by default, as the restart it stands in for would
+/// carry. `SWARMLLM_STREAM_SPARE_GUESSES` (1-8).
+fn spare_guesses() -> u32 {
+    static N: OnceLock<u32> = OnceLock::new();
+    *N.get_or_init(|| knob("SWARMLLM_STREAM_SPARE_GUESSES", guesses_per_chunk(), 8))
+}
+
+/// The least chance, by the drafter's own reckoning, that a spare is the
+/// restart its chunk's answer calls for — below it no spare is drafted, its
+/// guesses and this node's rows for it being spent on a restart that would
+/// most likely be skipped. `SWARMLLM_STREAM_SPARE_MIN` (0-1), default 0.4:
+/// on the rig (0.5B drafter for the 7B coder, 605 spares) a spare scored
+/// 0.08-0.40 ran 3-11% of the time whatever its score, one scored 0.40-0.50
+/// 8 times in 10.
+fn spare_floor() -> f32 {
+    static F: OnceLock<f32> = OnceLock::new();
+    *F.get_or_init(|| {
+        std::env::var("SWARMLLM_STREAM_SPARE_MIN")
+            .ok()
+            .and_then(|v| v.trim().parse::<f32>().ok())
+            .filter(|f| f.is_finite())
+            .map_or(0.4, |f| f.clamp(0.0, 1.0))
+    })
+}
+
+/// Whether a chunk about to go, `main_out` main-line chunks already out and
+/// `spares_out` spares, may take a spare beside it: only while every chunk of
+/// the stream out at once — main and spare, the two about to go included —
+/// stays within `forward_streams::MAX_STREAM_WINDOW`. The far end holds a
+/// stream's chunks up to twice that, the other half for the chunks a restart
+/// leaves queued there; spares counted on top of a full window would pass it,
+/// the spare would be refused on arrival, and a reply whose check then took
+/// that spare would fail (security review of #381, LOW-1). A spare is
+/// optional; a main chunk never is.
+fn room_for_a_spare(main_out: usize, spares_out: usize) -> bool {
+    let window = crate::daemon::state::forward_streams::MAX_STREAM_WINDOW as usize;
+    // The chunk about to go and its spare.
+    let about_to_go = 2;
+    main_out + spares_out + about_to_go <= window
+}
+
+/// Where a chunk's spare restart stands (#381), if anywhere: the guess `j`
+/// whose refusal it bets on, the token it bets the check draws there instead
+/// (the drafter's runner-up), and the chance of exactly that answer as the
+/// drafter sees it — every guess before `j` kept, then its runner-up drawn at
+/// `j`: `p₂(j) · Π_{i<j} p₁(i)`. A guess past the rows (the look-ahead, the
+/// last) is a candidate only where the far end is told it
+/// ([`lookahead_to_send`]): a walk that kept every row and drew another token
+/// there is a refusal only then. `None` below `floor`, or where the runner-ups
+/// do not answer every guess.
+fn spare_at(
+    guesses: &[u32],
+    runner_ups: &[crate::inference::worker_ipc::RunnerUp],
+    lookahead_named: bool,
+    floor: f32,
+) -> Option<(usize, u32, f32)> {
+    if guesses.is_empty() || runner_ups.len() != guesses.len() {
+        return None;
+    }
+    let candidates = if lookahead_named {
+        guesses.len()
+    } else {
+        guesses.len() - 1
+    };
+    let mut reached = 1.0f32;
+    let mut best: Option<(usize, u32, f32)> = None;
+    for (j, r) in runner_ups.iter().enumerate().take(candidates) {
+        let score = reached * r.p;
+        if score.is_finite()
+            && score >= floor
+            && r.token != guesses[j]
+            && best.is_none_or(|(_, _, b)| score > b)
+        {
+            best = Some((j, r.token, score));
+        }
+        reached *= r.guess_p;
+    }
+    best
+}
+
+/// The wire tree (`LayerForward::draft_parents`) of a near forward carrying a
+/// spare (#381): `chain` rows, each after the one before — the rows read
+/// again after a spare was taken, then the chunk's — and `spare` rows
+/// branching after chain row `after`, each after the one before. Wire form:
+/// 0 follows the cache's end, `k` follows row `k − 1`.
+fn near_tree(chain: usize, after: usize, spare: usize) -> Vec<u16> {
+    let wire = |row: usize| u16::try_from(row + 1).unwrap_or(u16::MAX);
+    (0..chain)
+        .map(|i| if i == 0 { 0 } else { wire(i - 1) })
+        .chain((0..spare).map(|i| {
+            if i == 0 {
+                wire(after)
+            } else {
+                wire(chain + i - 1)
+            }
+        }))
+        .collect()
+}
+
+/// Rows `from..to` of a near forward's answer of `rows` rows, each the same
+/// width.
+fn rows_of(bytes: &[u8], rows: usize, from: usize, to: usize) -> Result<Vec<u8>, SwarmError> {
+    use crate::inference::tensor_util;
+    // Hidden states cross as a shape header and an f32 or Q8_0 payload, never
+    // bare rows: the header says how many rows they are (gotcha #133's class).
+    let held = tensor_util::activation_positions(bytes);
+    if held != u32::try_from(rows).ok() || from >= to || to > rows {
+        return Err(SwarmError::Internal(format!(
+            "streamed check: {} bytes holding {held:?} rows are not {rows} to take {from}..{to} of",
+            bytes.len()
+        )));
+    }
+    if from == 0 && to == rows {
+        return Ok(bytes.to_vec());
+    }
+    if let Some(taken) = tensor_util::take_positions(bytes, from as u32, to as u32) {
+        return Ok(taken);
+    }
+    // A Q8_0 row that ends inside a block cannot be cut in its encoding:
+    // narrowed after decoding, it goes as f32, which every reader takes.
+    let tensor = tensor_util::bytes_to_tensor(bytes)?;
+    let at = tensor.dims().len().saturating_sub(2);
+    let narrowed = tensor
+        .narrow(at, from, to - from)
+        .map_err(SwarmError::internal)?;
+    tensor_util::tensor_to_bytes(&narrowed)
 }
 
 /// Whether a coordinator streams its checks: ON unless `SWARMLLM_SPEC_STREAM=0`
@@ -691,9 +835,86 @@ struct Sent {
     /// Nothing else was out when it was built, so its time is a clean sample
     /// of what a check costs (`CheckCost`).
     alone: bool,
+    /// Its place among the chunks the far end runs or skips in turn — the
+    /// main line's count, which a spare shares with the chunk it stands
+    /// beside ([`StreamWidth::note_arrival`] reads two answers as back to back
+    /// by it, never by their numbers, which spares leave gaps in).
+    order: u32,
     started: std::time::Instant,
     /// When it was sent on, this node's layers done.
     left: std::time::Instant,
+}
+
+/// A spare restart out (#381): run at the far end only where chunk `of`'s
+/// walk keeps `kept` guesses and draws `token` next; skipped there, unrun,
+/// otherwise.
+struct SpareOut {
+    of: u32,
+    kept: u32,
+    token: u32,
+    /// Its own number.
+    seq: u32,
+    /// Where its first row — `token` — sits.
+    index_pos: u32,
+    /// Its rows after the first, then its look-ahead: what the reply stands
+    /// on once it is taken.
+    guesses: Vec<u32>,
+    /// The drafter's chance of exactly its refusal ([`spare_at`]) — logged
+    /// when taken, beside the same figure logged when sent, so the floor
+    /// can be checked against how often a spare at each score runs.
+    score: f32,
+    wait: Waiting,
+}
+
+/// The chunk [`StreamRun::send_spare`] builds a spare beside: its number and
+/// main-line order, where it started, how much of the frontier's history was
+/// there then, its guesses with the drafter's runner-ups, whether its
+/// look-ahead was named, and where its rows start in this node's caches.
+struct ChunkSent<'a> {
+    seq: u32,
+    order: u32,
+    index_pos: u32,
+    history: usize,
+    guesses: &'a [u32],
+    runner_ups: &'a [crate::inference::worker_ipc::RunnerUp],
+    named: bool,
+    near_from: u32,
+}
+
+/// A chunk on its way to the far segment ([`StreamRun::send_to_far`]).
+struct FarChunk {
+    seq: u32,
+    index_pos: u32,
+    activations: Vec<u8>,
+    drafts: Vec<u32>,
+    lookahead: Option<u32>,
+    /// The look-ahead as the far end is told it ([`lookahead_to_send`]).
+    named: Option<u32>,
+    /// The reply through the chunk's first row.
+    history: Vec<u32>,
+    truncate: Option<u32>,
+    branch: Option<crate::types::StreamBranch>,
+    alone: bool,
+    order: u32,
+    started: std::time::Instant,
+}
+
+/// A spare restart drafted for a chunk ([`StreamRun::draft_spare`]).
+struct SparePlan {
+    /// The guess it bets the check refuses: as many are kept before it.
+    after_guess: usize,
+    /// The token it bets the check draws there — its first row.
+    token: u32,
+    /// Where that row sits.
+    index_pos: u32,
+    /// Its rows: `token`, then its guesses but the last.
+    rows: Vec<u32>,
+    /// Its guesses, the look-ahead last.
+    guesses: Vec<u32>,
+    /// The reply through `token`.
+    history: Vec<u32>,
+    /// [`spare_at`]'s chance of exactly this refusal.
+    score: f32,
 }
 
 /// A chunk, its check's result, and the moment that result arrived
@@ -772,6 +993,10 @@ struct Frontier {
     /// the round trip outlasts the far computer's check, each hold left that
     /// computer idle for a round trip (`faster_than_local.md` § 8.6).
     held_by: Option<u32>,
+    /// What the next chunk is to the far end's turns: built on a taken spare
+    /// (`StreamBranch::AfterSpare`), or `None` — follows, or restarts by its
+    /// `truncate`.
+    branch: Option<crate::types::StreamBranch>,
 }
 
 enum Taken {
@@ -779,6 +1004,9 @@ enum Taken {
     Continue,
     /// Every chunk out was built on a refused guess.
     Restart,
+    /// Every chunk out was built on a refused guess, and the spare for that
+    /// refusal ran at the far end (#381): its wait is the only one left.
+    Spare(Waiting),
     /// The reply is over.
     Done,
 }
@@ -820,6 +1048,24 @@ struct StreamRun<'a, 'r> {
     positions_served: Option<u32>,
     /// How wide each chunk is.
     width: StreamWidth,
+    /// Whether this reply's chunks may carry spare restarts (#381), decided
+    /// once at its start ([`StreamRun::spares_possible`]); turned off for the
+    /// rest of the reply if a near forward refuses a spare's rows.
+    spares_on: bool,
+    /// The spares out, at most one a chunk, oldest first.
+    spares: Vec<SpareOut>,
+    /// Where this node's segments' caches stop holding the reply's line: a
+    /// spare's rows sit past it, so the next near forward cuts them there.
+    near_cut: Option<u32>,
+    /// Below this position only do this node's segments' caches hold the
+    /// reply: a taken spare's rows rode in an earlier near forward as a
+    /// branch, so they are in no near cache, and the next near forward reads
+    /// the reply again from here ([`StreamRun::near_pass`]).
+    near_valid_to: Option<u32>,
+    spares_sent: u32,
+    spares_taken: u32,
+    /// Main-line chunks built ([`Sent::order`]).
+    main_built: u32,
 }
 
 impl PipelineExecutor {
@@ -857,6 +1103,7 @@ impl PipelineExecutor {
                 history,
                 truncate: None,
                 held_by: None,
+                branch: None,
             },
             drafter,
             drafting_off: false,
@@ -873,16 +1120,27 @@ impl PipelineExecutor {
             began: std::time::Instant::now(),
             positions_served: None,
             width: StreamWidth::new(),
+            spares_on: false,
+            spares: Vec::new(),
+            near_cut: None,
+            near_valid_to: None,
+            spares_sent: 0,
+            spares_taken: 0,
+            main_built: 0,
         };
         run.positions_served = run.positions_served();
+        run.spares_on = run.spares_possible();
         let started = std::time::Instant::now();
         let outcome = run.run().await;
         // The rounds the price will read for this reply (FUTURE_WORK #3 (d)):
         // the round trips the stream waited, its chunks overlapping.
+        // A spare that was not taken was skipped at the far end, unrun: not
+        // a forward the reply waited on.
         let rounds_waited = crate::daemon::state::split_rounds::round_trips_waited(
             started.elapsed().as_secs_f64() * 1000.0,
             run.least_answer_ms,
-            run.turn,
+            run.turn
+                .saturating_sub(run.spares_sent.saturating_sub(run.spares_taken)),
         );
         run.state.note_decode_rounds(self.request.id, rounds_waited);
         tracing::info!(
@@ -903,6 +1161,9 @@ impl PipelineExecutor {
             far_narrow_ms = format_args!("{:.0}", run.reply.far_pace.narrow.median().unwrap_or(0.0)),
             far_wide_ms = format_args!("{:.0}", run.reply.far_pace.wide.median().unwrap_or(0.0)),
             window = chunks_in_flight(),
+            spares_on = run.spares_on,
+            spares_sent = run.spares_sent,
+            spares_taken = run.spares_taken,
             "DSD: streamed checks complete"
         );
         outcome
@@ -980,7 +1241,7 @@ impl StreamRun<'_, '_> {
                         && out.len() < window
                         && (self.frontier.history.len() as u32) < self.io.max_tokens;
                     if may_build {
-                        let chunk = self.send_chunk(out.is_empty()).await?;
+                        let chunk = self.send_chunk(out.len()).await?;
                         out.push_back(chunk);
                         continue;
                     }
@@ -997,14 +1258,21 @@ impl StreamRun<'_, '_> {
                 // Dropping them withdraws their waits; their late answers
                 // find none.
                 Taken::Restart => *out = FuturesOrdered::new(),
+                Taken::Spare(wait) => {
+                    *out = FuturesOrdered::new();
+                    out.push_back(wait);
+                }
                 Taken::Done => return Ok(()),
             }
         }
     }
 
     /// Guess, run this node's layers over the chunk, send it to the far
-    /// segment, and hand back the wait on its answer.
-    async fn send_chunk(&mut self, alone: bool) -> Result<Waiting, SwarmError> {
+    /// segment, and hand back the wait on its answer — with, where one pays,
+    /// the chunk's spare restart sent beside it (#381), its wait kept in
+    /// [`StreamRun::spares`].
+    async fn send_chunk(&mut self, main_out: usize) -> Result<Waiting, SwarmError> {
+        let alone = main_out == 0;
         let exec = self.exec;
         let request_id = exec.request.id;
         let sampling = &exec.request.sampling_params;
@@ -1026,23 +1294,39 @@ impl StreamRun<'_, '_> {
             self.positions_served
                 .map(|served| served.saturating_sub(self.frontier.index_pos)),
         );
-        let guesses: Vec<u32> = if self.drafting_off || want == 0 {
-            Vec::new()
+        let spares_on = self.spares_on;
+        let (guesses, runner_ups): (Vec<u32>, Vec<_>) = if self.drafting_off || want == 0 {
+            (Vec::new(), Vec::new())
         } else {
-            match self
-                .drafter
-                .draft(
-                    &self.state,
-                    want,
-                    sampling,
-                    &self.frontier.history,
-                    self.io.noise.map(|n| n.seed()),
-                    super::engine_drafter::stream_confidence_floor(),
-                    exec.request.cancel.clone(),
-                )
-                .await
-            {
-                Ok(guesses) => {
+            let drafted = if spares_on {
+                self.drafter
+                    .draft_with_runner_ups(
+                        &self.state,
+                        want,
+                        sampling,
+                        &self.frontier.history,
+                        self.io.noise.map(|n| n.seed()),
+                        super::engine_drafter::stream_confidence_floor(),
+                        exec.request.cancel.clone(),
+                    )
+                    .await
+                    .map(|d| (d.tokens, d.runner_ups))
+            } else {
+                self.drafter
+                    .draft(
+                        &self.state,
+                        want,
+                        sampling,
+                        &self.frontier.history,
+                        self.io.noise.map(|n| n.seed()),
+                        super::engine_drafter::stream_confidence_floor(),
+                        exec.request.cancel.clone(),
+                    )
+                    .await
+                    .map(|guesses| (guesses, Vec::new()))
+            };
+            match drafted {
+                Ok((guesses, runner_ups)) => {
                     // Taken as kept: the next chunk is drafted on top of them,
                     // and `rewind` undoes it at a refusal.
                     self.drafter.settle(guesses.len());
@@ -1055,7 +1339,7 @@ impl StreamRun<'_, '_> {
                         );
                     }
                     self.drafter_warm = true;
-                    guesses
+                    (guesses, runner_ups)
                 }
                 Err(e) => {
                     tracing::warn!(
@@ -1064,7 +1348,7 @@ impl StreamRun<'_, '_> {
                         "DSD: the drafter failed — finishing this reply without guessing ahead"
                     );
                     self.drafting_off = true;
-                    Vec::new()
+                    (Vec::new(), Vec::new())
                 }
             }
         };
@@ -1082,6 +1366,16 @@ impl StreamRun<'_, '_> {
             .collect();
         let index_pos = self.frontier.index_pos;
         let truncate = self.frontier.truncate.take();
+        let branch = self.frontier.branch.take();
+        let named = lookahead_to_send(
+            &self.shape,
+            lookahead,
+            names_the_lookahead()
+                && self.state.peer_advertises_feature(
+                    &self.shape.far.node_id,
+                    swarmllm_types::node::features::STREAM_LOOKAHEAD,
+                ),
+        );
         // A check's cost is timed from here, drafting excluded — the rounds'
         // `CheckCost` measures the same span.
         let checking = std::time::Instant::now();
@@ -1089,23 +1383,393 @@ impl StreamRun<'_, '_> {
             SwarmError::Internal("a streamed reply ran past its checks' numbering".into())
         })?;
         self.turn += 1;
+        let order = self.main_built;
+        self.main_built += 1;
         // No round is counted here: chunks overlap, so the stream counts the
         // round trips it waited when it ends (`split_rounds::
         // round_trips_waited`, FUTURE_WORK #3 (d)).
 
         // This node's own layers before the peer's, one segment after another.
-        let mut activations = super::pack_verify_tokens_to_le_bytes(&rows);
         let near_started = std::time::Instant::now();
+        let (activations, near_from) = self.near_pass(index_pos, truncate, &rows, seq).await?;
+        if !self.shape.near.is_empty() {
+            self.width.note_near(
+                rows.len() as u32,
+                near_started.elapsed().as_secs_f64() * 1000.0,
+            );
+        }
+
+        let history = self.frontier.history.clone();
+        let chunk_history = history.len();
+        let wait = self
+            .send_to_far(FarChunk {
+                seq,
+                index_pos,
+                activations,
+                drafts,
+                lookahead,
+                named,
+                history,
+                truncate,
+                branch,
+                alone,
+                order,
+                started: checking,
+            })
+            .await?;
+        if lookahead.is_some() {
+            self.frontier.index_pos += rows.len() as u32;
+            self.frontier.history.extend_from_slice(&guesses);
+        }
+        if lookahead.is_none() || (guesses.len() as u32) < want {
+            self.frontier.held_by = Some(seq);
+            self.held += 1;
+        }
+
+        // The spare goes after the chunk it stands beside, built while the far
+        // end checks that chunk: the far end runs a stream in its order, a
+        // spare runs only once that chunk's walk has said which refusal it
+        // made, and the chunk itself waits for nothing of the spare's.
+        if spares_on && lookahead.is_some() && room_for_a_spare(main_out, self.spares.len()) {
+            self.send_spare(ChunkSent {
+                seq,
+                order,
+                index_pos,
+                history: chunk_history,
+                guesses: &guesses,
+                runner_ups: &runner_ups,
+                named: named.is_some(),
+                near_from,
+            })
+            .await?;
+        }
+        Ok(wait)
+    }
+
+    /// Build and send the spare restart of the chunk just sent (#381), if
+    /// one pays: drafted ([`StreamRun::draft_spare`]), its rows run through
+    /// this node's layers as a branch of the chunk's cached rows
+    /// ([`StreamRun::near_spare`]), sent to the far end behind the chunk and
+    /// kept in [`StreamRun::spares`]. Nothing here fails the chunk: a spare
+    /// this node's layers refuse turns spares off for the reply.
+    async fn send_spare(&mut self, chunk: ChunkSent<'_>) -> Result<(), SwarmError> {
+        let Some(spare) = self
+            .draft_spare(
+                chunk.guesses,
+                chunk.runner_ups,
+                chunk.named,
+                chunk.index_pos,
+                chunk.history,
+            )
+            .await
+        else {
+            return Ok(());
+        };
+        let Some((&spare_lookahead, spare_drafts)) = spare.guesses.split_last() else {
+            return Ok(());
+        };
+        let spare_drafts = spare_drafts.to_vec();
+        let checking = std::time::Instant::now();
+        // The chunk's rows — its bootstrap and every guess but the
+        // look-ahead — end where its look-ahead sits.
+        let chunk_end = chunk.index_pos + chunk.guesses.len() as u32;
+        let activations = match self
+            .near_spare(
+                chunk.near_from,
+                chunk_end,
+                (chunk.index_pos - chunk.near_from) as usize + spare.after_guess,
+                &spare.rows,
+                chunk.seq,
+            )
+            .await
+        {
+            Ok(activations) => activations,
+            Err(e) => {
+                tracing::warn!(
+                    request_id = %self.exec.request.id,
+                    error = %e,
+                    "DSD: this node's layers refused a spare restart's rows — no more spares this reply"
+                );
+                self.spares_on = false;
+                return Ok(());
+            }
+        };
+        let spare_seq = stream_seq::compose(self.attempt, self.turn).ok_or_else(|| {
+            SwarmError::Internal("a streamed reply ran past its checks' numbering".into())
+        })?;
+        self.turn += 1;
+        let spare_named = lookahead_to_send(&self.shape, Some(spare_lookahead), chunk.named);
+        let kept = spare.after_guess as u32;
+        let wait = self
+            .send_to_far(FarChunk {
+                seq: spare_seq,
+                index_pos: spare.index_pos,
+                activations,
+                drafts: spare_drafts,
+                lookahead: Some(spare_lookahead),
+                named: spare_named,
+                history: spare.history,
+                truncate: Some(spare.index_pos),
+                branch: Some(crate::types::StreamBranch::Spare {
+                    of: chunk.seq,
+                    kept,
+                    token: spare.token,
+                }),
+                alone: false,
+                order: chunk.order,
+                started: checking,
+            })
+            .await?;
+        tracing::debug!(
+            request_id = %self.exec.request.id,
+            of = stream_seq::turn(chunk.seq),
+            spare = stream_seq::turn(spare_seq),
+            kept,
+            score = spare.score,
+            "DSD: a spare restart sent"
+        );
+        self.spares.push(SpareOut {
+            of: chunk.seq,
+            kept,
+            token: spare.token,
+            seq: spare_seq,
+            index_pos: spare.index_pos,
+            guesses: spare.guesses,
+            score: spare.score,
+            wait,
+        });
+        self.spares_sent += 1;
+        Ok(())
+    }
+
+    /// Whether this reply's chunks may carry spare restarts (#381): switched
+    /// on, the far end a LONE segment that walks (its walk says which refusal
+    /// it made; a chain's tail is a hop away) and runs spares
+    /// (`features::STREAM_SPARES`), a greedy request (a runner-up bets on a
+    /// greedy pick — a sampled check's token is a draw), and, where this node
+    /// runs layers before the far end, a family whose layers read a tree:
+    /// the spare's rows ride in the chunk's near forward as a branch.
+    fn spares_possible(&self) -> bool {
+        let reads_trees = || {
+            self.state
+                .gguf_meta_for(&self.shape.far.shard_id.model_id)
+                .is_some_and(|m| {
+                    crate::inference::model_arch::ModelArch::from_gguf_arch(&m.architecture)
+                        .reads_draft_trees()
+                })
+        };
+        spares_switched_on()
+            && self.shape.far_walks()
+            && self.shape.chain.is_empty()
+            && self.io.noise.is_none()
+            && self.state.peer_advertises_feature(
+                &self.shape.far.node_id,
+                swarmllm_types::node::features::STREAM_SPARES,
+            )
+            && (self.shape.near.is_empty() || reads_trees())
+    }
+
+    /// Draft the spare restart for a chunk of `guesses` (#381), if one pays
+    /// ([`spare_at`]): its first row is the drafter's runner-up at the guess
+    /// it bets the check refuses, its guesses the drafter's after that. The
+    /// drafter's line is put back to the chunk's afterwards: the spare is a
+    /// branch the reply takes only if the far end runs it
+    /// ([`StreamRun::take_answer`]). `index_pos` is where the chunk started
+    /// and `history` how much of the frontier's history was there then: the
+    /// chunk has already moved the frontier past itself.
+    async fn draft_spare(
+        &mut self,
+        guesses: &[u32],
+        runner_ups: &[crate::inference::worker_ipc::RunnerUp],
+        lookahead_named: bool,
+        chunk_index_pos: u32,
+        history: usize,
+    ) -> Option<SparePlan> {
+        let (j, token, score) = spare_at(guesses, runner_ups, lookahead_named, spare_floor())?;
+        // A reply that would end at the guesses kept, or at the bet token, has
+        // nothing after it to restart.
+        if guesses[..j]
+            .iter()
+            .chain(std::iter::once(&token))
+            .any(|t| self.io.eos.contains(t))
+        {
+            return None;
+        }
+        let index_pos = chunk_index_pos + 1 + j as u32;
+        // The drafter's sequence ends with the chunk's guesses; guess `j` sits
+        // at the spare's first position.
+        let at = self.drafter.tokens().len().checked_sub(guesses.len() - j)?;
+        if at != index_pos as usize {
+            tracing::debug!(
+                request_id = %self.exec.request.id,
+                at,
+                index_pos,
+                "DSD: the drafter's sequence is not where the stream is — no spare"
+            );
+            return None;
+        }
+        let mut history = self.frontier.history.get(..history)?.to_vec();
+        history.extend_from_slice(&guesses[..j]);
+        history.push(token);
+        let room = self.io.max_tokens.saturating_sub(history.len() as u32);
+        let want = chunk_guesses(
+            spare_guesses(),
+            room,
+            self.positions_served
+                .map(|served| served.saturating_sub(index_pos)),
+        );
+        if want == 0 {
+            return None;
+        }
+        self.drafter.rewind(at);
+        self.drafter.push(&[token]);
+        let drafted = self
+            .drafter
+            .draft(
+                &self.state,
+                want,
+                &self.exec.request.sampling_params,
+                &history,
+                None,
+                super::engine_drafter::stream_confidence_floor(),
+                self.exec.request.cancel.clone(),
+            )
+            .await;
+        // Back to the chunk's line, which the next chunk is drafted on.
+        self.drafter.rewind(at);
+        self.drafter.push(&guesses[j..]);
+        let spare = match drafted {
+            Ok(spare) if !spare.is_empty() => spare,
+            Ok(_) => return None,
+            Err(e) => {
+                tracing::debug!(
+                    request_id = %self.exec.request.id,
+                    error = %e,
+                    "DSD: a spare restart's guesses failed — the chunk goes without one"
+                );
+                return None;
+            }
+        };
+        let rows = std::iter::once(token)
+            .chain(spare[..spare.len() - 1].iter().copied())
+            .collect();
+        Some(SparePlan {
+            after_guess: j,
+            token,
+            index_pos,
+            rows,
+            guesses: spare,
+            history,
+            score,
+        })
+    }
+
+    /// This node's own segments over a chunk's `rows` from `index_pos`,
+    /// handing back what goes to the far end — the chunk's rows — and where
+    /// this forward's rows start in this node's caches (`index_pos`, or
+    /// earlier where the reply's rows the caches lost to a taken spare are
+    /// read again first, [`StreamRun::near_valid_to`]). A spare's rows left
+    /// past the line by the forward before are cut ([`StreamRun::near_cut`]).
+    /// With no segment of this node's before the far end, the rows go as
+    /// token ids.
+    async fn near_pass(
+        &mut self,
+        index_pos: u32,
+        truncate: Option<u32>,
+        rows: &[u32],
+        seq: u32,
+    ) -> Result<(Vec<u8>, u32), SwarmError> {
+        if self.shape.near.is_empty() {
+            return Ok((super::pack_verify_tokens_to_le_bytes(rows), index_pos));
+        }
+        let near_from = self
+            .near_valid_to
+            .take()
+            .map_or(index_pos, |valid| valid.min(index_pos));
+        // The reply's tokens from `near_from` up to the chunk's bootstrap,
+        // which ends `history` at `index_pos`.
+        let reread: Vec<u32> = {
+            let back = (index_pos - near_from) as usize;
+            let end = self.frontier.history.len().saturating_sub(1);
+            let from = end.checked_sub(back).ok_or_else(|| {
+                SwarmError::Internal(format!(
+                    "streamed check: {back} rows to read again before a reply of {}",
+                    self.frontier.history.len()
+                ))
+            })?;
+            self.frontier.history[from..end].to_vec()
+        };
+        let cut = if reread.is_empty() {
+            [truncate, self.near_cut.take()].into_iter().flatten().min()
+        } else {
+            self.near_cut = None;
+            Some(near_from)
+        };
+        let mut tokens = reread;
+        let reread = tokens.len();
+        tokens.extend_from_slice(rows);
+        let answered = self
+            .near_forwards(near_from, cut, &tokens, None, seq)
+            .await?;
+        Ok((
+            rows_of(&answered, tokens.len(), reread, tokens.len())?,
+            near_from,
+        ))
+    }
+
+    /// This node's own segments over a spare restart's `rows` (#381): a
+    /// branch of the chunk whose rows its caches hold from `near_from` to
+    /// `chunk_end`, standing under the chunk's row `after` (counted from
+    /// `near_from`) — a tree that continues the cached rows
+    /// (`LayerForward::draft_tree_from`, the flow's shape), so the chunk went
+    /// before it with nothing of the spare's. The spare's rows go to the far
+    /// end; in this node's caches they sit past the line, so the next forward
+    /// cuts there ([`StreamRun::near_cut`]) whatever this one does.
+    async fn near_spare(
+        &mut self,
+        near_from: u32,
+        chunk_end: u32,
+        after: usize,
+        rows: &[u32],
+        seq: u32,
+    ) -> Result<Vec<u8>, SwarmError> {
+        if self.shape.near.is_empty() {
+            return Ok(super::pack_verify_tokens_to_le_bytes(rows));
+        }
+        self.near_cut = Some(chunk_end);
+        let tree = near_tree((chunk_end - near_from) as usize, after, rows.len());
+        self.near_forwards(chunk_end, None, rows, Some((&tree, near_from)), seq)
+            .await
+    }
+
+    /// One forward of `tokens` from `index_pos` through each of this node's
+    /// segments before the far end, cut to `cut` first, shaped by `tree`
+    /// where one is given; the last segment's activations. `&mut self` only
+    /// so the future is `Send` (see [`StreamRun::finish_here`]).
+    async fn near_forwards(
+        &mut self,
+        index_pos: u32,
+        cut: Option<u32>,
+        tokens: &[u32],
+        tree: Option<(&[u16], u32)>,
+        seq: u32,
+    ) -> Result<Vec<u8>, SwarmError> {
+        let exec = self.exec;
+        let mut activations = super::pack_verify_tokens_to_le_bytes(tokens);
         for segment in &self.shape.near {
-            let forward = super::build_spec_verify_forward(
-                request_id,
+            let mut forward = super::build_spec_verify_forward(
+                exec.request.id,
                 index_pos,
                 activations,
                 segment,
-                truncate,
+                cut,
                 None,
                 Some(seq),
             );
+            if let Some((tree, from)) = tree {
+                forward.draft_parents = tree.to_vec();
+                forward.draft_tree_from = Some(from);
+            }
             let result = self
                 .state
                 .model_process_pool
@@ -1117,20 +1781,37 @@ impl StreamRun<'_, '_> {
             }
             activations = result.activations;
         }
-        if !self.shape.near.is_empty() {
-            self.width.note_near(
-                rows.len() as u32,
-                near_started.elapsed().as_secs_f64() * 1000.0,
-            );
-        }
+        Ok(activations)
+    }
 
+    /// Send one chunk — the main line's or a spare — to the far segment and
+    /// hand back the wait on its answer.
+    async fn send_to_far(&mut self, chunk: FarChunk) -> Result<Waiting, SwarmError> {
+        let exec = self.exec;
+        let request_id = exec.request.id;
+        let sampling = &exec.request.sampling_params;
+        let FarChunk {
+            seq,
+            index_pos,
+            activations,
+            drafts,
+            lookahead,
+            named,
+            history,
+            truncate,
+            branch,
+            alone,
+            order,
+            started,
+        } = chunk;
+        let rows = drafts.len() + 1;
         // The walk goes to the peer only where it samples. In the boomerang it
         // is sent no guess, no history and no sampler — hidden states alone,
         // as on every other step of a reply that starts and finishes here.
         let walk = TailWalk {
             drafts: &drafts,
             sampling,
-            generated: &self.frontier.history,
+            generated: &history,
             coupling: self.coupling,
             parents: &[],
         };
@@ -1145,15 +1826,8 @@ impl StreamRun<'_, '_> {
             self.shape.far_walks().then_some(&walk),
             Some(seq),
         );
-        forward.stream_lookahead = lookahead_to_send(
-            &self.shape,
-            lookahead,
-            names_the_lookahead()
-                && self.state.peer_advertises_feature(
-                    &far.node_id,
-                    swarmllm_types::node::features::STREAM_LOOKAHEAD,
-                ),
-        );
+        forward.stream_lookahead = named;
+        forward.stream_branch = branch;
         if !self.shape.chain.is_empty() {
             // Handed down the run, and answered by its tail: the reply-to it
             // answers (the `0x07` trailer), as on a chained check.
@@ -1233,26 +1907,18 @@ impl StreamRun<'_, '_> {
             },
         );
 
-        let history = self.frontier.history.clone();
-        if lookahead.is_some() {
-            self.frontier.index_pos += rows.len() as u32;
-            self.frontier.history.extend_from_slice(&guesses);
-        }
-        if lookahead.is_none() || (guesses.len() as u32) < want {
-            self.frontier.held_by = Some(seq);
-            self.held += 1;
-        }
         let sent = Sent {
             seq,
             index_pos,
-            rows: rows.len(),
+            rows,
             drafts,
             lookahead,
             history,
             truncate,
             far_input,
             alone,
-            started: checking,
+            order,
+            started,
             left,
         };
         let state = self.state.clone();
@@ -1391,7 +2057,7 @@ impl StreamRun<'_, '_> {
         let waited_ms = taken.saturating_duration_since(arrived).as_secs_f64() * 1000.0;
         self.answers_waited_ms += waited_ms;
         self.width.note_arrival(
-            stream_seq::turn(sent.seq),
+            sent.order,
             sent.rows,
             sent.left,
             arrived,
@@ -1485,7 +2151,9 @@ impl StreamRun<'_, '_> {
             return Ok(Taken::Done);
         }
         if whole {
-            // Its look-ahead was right: the frontier already stands on it.
+            // Its look-ahead was right: the frontier already stands on it,
+            // and its spare, if it had one, is skipped at the far end.
+            self.spares.retain(|s| s.of != sent.seq);
             if self.frontier.held_by == Some(sent.seq) {
                 self.frontier.held_by = None;
             }
@@ -1497,11 +2165,29 @@ impl StreamRun<'_, '_> {
         let next_pos = sent.index_pos + emitted.len() as u32;
         self.drafter.rewind(next_pos as usize);
         self.drafter.push(&[last]);
+        // The spare for exactly this refusal ran at the far end (#381) — its
+        // rule there is this one (`forward_streams`) — and every other spare
+        // out stood beside a chunk this refusal ended.
+        let taken = self
+            .spares
+            .iter()
+            .position(|s| {
+                s.of == sent.seq
+                    && s.kept as usize == kept.len()
+                    && s.token == last
+                    && s.index_pos == next_pos
+            })
+            .map(|i| self.spares.swap_remove(i));
+        self.spares.clear();
+        if let Some(spare) = taken {
+            return Ok(self.take_spare(spare, next_pos));
+        }
         self.frontier = Frontier {
             index_pos: next_pos,
             history: self.reply.generated.clone(),
             truncate: Some(next_pos),
             held_by: None,
+            branch: None,
         };
         Ok(match sent.lookahead {
             Some(_) => {
@@ -1518,6 +2204,42 @@ impl StreamRun<'_, '_> {
             // A chunk without a look-ahead had nothing built after it.
             None => Taken::Continue,
         })
+    }
+
+    /// The far end ran the spare restart for the refusal just taken (#381):
+    /// the reply goes on from its rows as from a chunk sent now, a round trip
+    /// sooner than the restart would have reached the far end. The drafter
+    /// and the frontier stand on its guesses, the next chunk is built on it
+    /// (`StreamBranch::AfterSpare`), and this node's caches — which held the
+    /// spare's rows only as a branch — read the reply again from its first
+    /// row ([`StreamRun::near_valid_to`]).
+    fn take_spare(&mut self, spare: SpareOut, next_pos: u32) -> Taken {
+        self.spares_taken += 1;
+        self.restarts += 1;
+        tracing::debug!(
+            request_id = %self.exec.request.id,
+            of = stream_seq::turn(spare.of),
+            spare = stream_seq::turn(spare.seq),
+            kept = spare.kept,
+            score = spare.score,
+            "DSD: a streamed check refused a guess — its spare restart already ran"
+        );
+        self.drafter.push(&spare.guesses);
+        let mut history = self.reply.generated.clone();
+        history.extend_from_slice(&spare.guesses);
+        let index_pos = next_pos + spare.guesses.len() as u32;
+        self.frontier = Frontier {
+            index_pos,
+            history,
+            truncate: Some(index_pos),
+            held_by: None,
+            branch: Some(crate::types::StreamBranch::AfterSpare { spare: spare.seq }),
+        };
+        self.near_valid_to = Some(
+            self.near_valid_to
+                .map_or(next_pos, |valid| valid.min(next_pos)),
+        );
+        Taken::Spare(spare.wait)
     }
 }
 
@@ -1548,6 +2270,152 @@ mod tests {
 
     /// #382: the look-ahead goes only to a lone far segment that walks and
     /// reads it — an older far end, a chained run or the boomerang is told
+    fn runner_up(guess_p: f32, token: u32, p: f32) -> crate::inference::worker_ipc::RunnerUp {
+        crate::inference::worker_ipc::RunnerUp { guess_p, token, p }
+    }
+
+    /// A spare bets on the refusal the drafter thinks likeliest: every guess
+    /// before it kept, then its runner-up drawn — not the likeliest runner-up
+    /// alone, which a guess deep in the chunk rarely reaches. The look-ahead
+    /// is a candidate only where the far end is told it; below the floor, or
+    /// with runner-ups that do not answer every guess, there is none.
+    #[test]
+    fn a_spare_bets_on_the_refusal_its_drafter_thinks_likeliest() {
+        let guesses = [10, 11, 12];
+        let ups = [
+            runner_up(0.9, 20, 0.05),
+            runner_up(0.5, 21, 0.3),
+            runner_up(0.6, 22, 0.4),
+        ];
+        // 0.05 at the first; 0.9 x 0.3 = 0.27 at the second; 0.9 x 0.5 x 0.4
+        // = 0.18 at the look-ahead, whose runner-up alone is the likeliest.
+        let (j, token, score) = spare_at(&guesses, &ups, true, 0.08).unwrap();
+        assert_eq!((j, token), (1, 21));
+        assert!((score - 0.27).abs() < 1e-6);
+        assert_eq!(spare_at(&guesses, &ups, false, 0.08).map(|s| s.0), Some(1));
+        assert_eq!(spare_at(&guesses, &ups, true, 0.3), None, "below the floor");
+        assert_eq!(spare_at(&guesses, &ups[..2], true, 0.0), None);
+        assert_eq!(spare_at(&[], &[], true, 0.0), None);
+        // Only the look-ahead clears the floor, and it is not named.
+        let ups = [
+            runner_up(0.9, 20, 0.0),
+            runner_up(0.9, 21, 0.0),
+            runner_up(0.9, 22, 0.9),
+        ];
+        assert_eq!(spare_at(&guesses, &ups, true, 0.5).map(|s| s.0), Some(2));
+        assert_eq!(spare_at(&guesses, &ups, false, 0.5), None);
+        // A runner-up that is the guess itself is no other outcome.
+        let ups = [
+            runner_up(0.5, 10, 0.5),
+            runner_up(0.9, 21, 0.0),
+            runner_up(0.9, 22, 0.0),
+        ];
+        assert_eq!(spare_at(&guesses, &ups, true, 0.1), None);
+    }
+
+    /// A spare's rows ride in its chunk's near forward as a branch: its first
+    /// row follows the row before the guess it stands at, at that guess's
+    /// position, and each of its rows the one before — after any rows read
+    /// again ahead of the chunk.
+    #[test]
+    fn a_spares_rows_branch_where_its_guess_stood() {
+        use crate::inference::draft_tree::DraftTree;
+        // Chunk rows [b, d0, d1]; a spare of 2 at guess 1 (d1's place).
+        let wire = near_tree(3, 1, 2);
+        assert_eq!(wire, vec![0, 1, 2, 2, 4]);
+        let tree = DraftTree::from_wire(100, &wire).unwrap();
+        let depths: Vec<usize> = (0..tree.len()).map(|r| tree.depth(r)).collect();
+        assert_eq!(
+            depths,
+            vec![0, 1, 2, 2, 3],
+            "the spare's first row sits where d1 does"
+        );
+        assert_eq!(tree.parent(3), Some(1));
+        // Two rows read again first, then the chunk; a spare at the look-ahead.
+        let wire = near_tree(5, 2 + 2, 3);
+        let tree = DraftTree::from_wire(100, &wire).unwrap();
+        let depths: Vec<usize> = (0..tree.len()).map(|r| tree.depth(r)).collect();
+        assert_eq!(depths, vec![0, 1, 2, 3, 4, 5, 6, 7]);
+        assert_eq!(tree.parent(5), Some(4));
+        assert_eq!(tree.parent(6), Some(5));
+    }
+
+    /// Spares never take a stream past the window the far end's cap is sized
+    /// for: at the default window every chunk may carry one, at the widest
+    /// none once the main line fills it.
+    #[test]
+    fn a_spare_goes_only_where_the_far_end_has_room_for_it() {
+        let window = crate::daemon::state::forward_streams::MAX_STREAM_WINDOW as usize;
+        // The default window (3): the third chunk and its spare still fit.
+        assert!(room_for_a_spare(2, 2));
+        assert!(room_for_a_spare(0, 0));
+        // The widest window: the last main chunk goes alone.
+        assert!(!room_for_a_spare(window - 1, 0));
+        assert!(room_for_a_spare(window - 2, 0));
+        assert!(!room_for_a_spare(window - 2, 1));
+    }
+
+    /// A near forward's answer — hidden states with a shape header, f32 or
+    /// Q8_0, as this node's layers send them — is cut into the chunk's rows
+    /// and the spare's, each the rows the narrowed tensor holds; a whole
+    /// answer passes untouched; a count the header does not hold is refused.
+    /// The first version cut BYTES into equal parts, and every 7B check on the
+    /// rig (3 rows of 3,584 in Q8_0: 11,444 bytes) was refused.
+    #[test]
+    fn a_near_answer_is_cut_into_whole_rows() {
+        use crate::inference::tensor_util::{
+            bytes_to_tensor, tensor_to_bytes, tensor_to_bytes_q8_0,
+        };
+        use candle_core::{Device, Tensor};
+        let hidden = |rows: usize, width: usize| {
+            let values: Vec<f32> = (0..rows * width)
+                .map(|i| (i % 97) as f32 * 0.03 - (i / width) as f32)
+                .collect();
+            Tensor::from_vec(values, (1, rows, width), &Device::Cpu).unwrap()
+        };
+        let rows_in = |bytes: &[u8]| bytes_to_tensor(bytes).unwrap().dims()[1];
+        // The rig's shape, and a Q8_0 width that ends inside a block.
+        for (width, encode) in [
+            (3584, tensor_to_bytes_q8_0 as fn(&Tensor) -> _),
+            (3584, tensor_to_bytes),
+            (48, tensor_to_bytes_q8_0),
+        ] {
+            let whole = hidden(3, width);
+            let bytes = encode(&whole).unwrap();
+            assert_eq!(
+                rows_of(&bytes, 3, 0, 3).unwrap(),
+                bytes,
+                "whole passes as it is"
+            );
+            let decoded = bytes_to_tensor(&bytes).unwrap();
+            for (from, to) in [(0, 2), (2, 3), (1, 3)] {
+                let cut = rows_of(&bytes, 3, from, to).unwrap();
+                assert_eq!(rows_in(&cut), to - from);
+                let want: Vec<f32> = decoded
+                    .narrow(1, from, to - from)
+                    .unwrap()
+                    .flatten_all()
+                    .unwrap()
+                    .to_vec1()
+                    .unwrap();
+                let got: Vec<f32> = bytes_to_tensor(&cut)
+                    .unwrap()
+                    .flatten_all()
+                    .unwrap()
+                    .to_vec1()
+                    .unwrap();
+                assert_eq!(got, want, "width {width}, rows {from}..{to}");
+            }
+            assert!(rows_of(&bytes, 4, 0, 1).is_err(), "the header holds 3");
+            assert!(rows_of(&bytes, 3, 2, 4).is_err());
+            assert!(rows_of(&bytes, 3, 1, 1).is_err());
+        }
+        assert!(
+            rows_of(&[0u8; 12], 3, 0, 1).is_err(),
+            "bare bytes are not rows"
+        );
+    }
+
     /// nothing (an older peer would fail to open an encrypted forward whose
     /// AAD carries a trailer it does not know).
     #[test]

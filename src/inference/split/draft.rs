@@ -733,9 +733,43 @@ impl SplitModel {
         prefill_chunk_tokens: usize,
         stop_below: Option<f32>,
     ) -> Result<Vec<u32>, SwarmError> {
+        self.draft_chain(
+            kv,
+            request_id,
+            keep,
+            append,
+            gamma,
+            sampling,
+            history,
+            noise,
+            prefill_chunk_tokens,
+            stop_below,
+            None,
+        )
+    }
+
+    /// [`Self::draft_after`], with each greedy guess's runner-up pushed onto
+    /// `runner_ups` where it is given (#381: a stream's spare restart bets on
+    /// it). Those guesses go through the host loop, which reads each row
+    /// whole, on a card too: the card's loop reads back only its picks.
+    #[allow(clippy::too_many_arguments)]
+    pub fn draft_chain(
+        &mut self,
+        kv: &KvCacheStore,
+        request_id: &str,
+        keep: usize,
+        append: &[u32],
+        gamma: usize,
+        sampling: &crate::types::SamplingParams,
+        history: &[u32],
+        noise: Option<&crate::inference::coupled_noise::CoupledNoise>,
+        prefill_chunk_tokens: usize,
+        stop_below: Option<f32>,
+        mut runner_ups: Option<&mut Vec<crate::inference::worker_ipc::RunnerUp>>,
+    ) -> Result<Vec<u32>, SwarmError> {
         let mut logits = self.read_after(kv, request_id, keep, append, prefill_chunk_tokens)?;
         let first = keep + append.len();
-        if noise.is_none() && self.device.is_cuda() {
+        if noise.is_none() && self.device.is_cuda() && runner_ups.is_none() {
             return self.argmax_guesses_on_card(
                 kv,
                 request_id,
@@ -799,6 +833,10 @@ impl SplitModel {
                     let unsure = raw.is_some_and(|(raw, floor)| {
                         probability_at(&raw, t as usize, sampling.temperature) < floor
                     });
+                    // A greedy row is read as it came: the pick rewrote nothing.
+                    if let (Some(sink), None) = (runner_ups.as_mut(), noise) {
+                        sink.push(runner_up_of(&row, t, sampling.temperature));
+                    }
                     (t, unsure)
                 }
             };
@@ -1576,6 +1614,46 @@ pub(crate) fn guesses_through_far_run(
     guessed
 }
 
+/// The drafter's view of a greedy guess's position (#381): its probability
+/// for `guess` and its second choice there — the largest logit but `guess`'s,
+/// the first of equal ones, as the greedy pick breaks a tie — with that one's,
+/// at the request's temperature (1 for a greedy request) as [`probability_at`]
+/// reads a guess's. A row with no finite logit gives both probability 0.
+fn runner_up_of(
+    logits: &[f32],
+    guess: u32,
+    temperature: f32,
+) -> crate::inference::worker_ipc::RunnerUp {
+    let t = if temperature > 0.0 { temperature } else { 1.0 };
+    let max = logits.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+    let (second, second_logit) = logits
+        .iter()
+        .enumerate()
+        .filter(|&(i, _)| i != guess as usize)
+        .fold((0usize, f32::NEG_INFINITY), |best, (i, &x)| {
+            if x > best.1 {
+                (i, x)
+            } else {
+                best
+            }
+        });
+    let token = second as u32;
+    if !max.is_finite() {
+        return crate::inference::worker_ipc::RunnerUp {
+            guess_p: 0.0,
+            token,
+            p: 0.0,
+        };
+    }
+    let sum: f64 = logits.iter().map(|&x| f64::from((x - max) / t).exp()).sum();
+    let p_of = |x: f32| (f64::from((x - max) / t).exp() / sum) as f32;
+    crate::inference::worker_ipc::RunnerUp {
+        guess_p: logits.get(guess as usize).map_or(0.0, |&x| p_of(x)),
+        token,
+        p: p_of(second_logit),
+    }
+}
+
 /// `softmax(logits / T)[token]`, with `T` the request's temperature or 1 for a
 /// greedy one — the probability a drafter gives its own guess.
 fn probability_at(logits: &[f32], token: usize, temperature: f32) -> f32 {
@@ -1593,7 +1671,24 @@ fn probability_at(logits: &[f32], token: usize, temperature: f32) -> f32 {
 
 #[cfg(test)]
 mod tests {
-    use super::{likeliest, likeliest_rows_where_they_are, probability_at};
+    use super::{likeliest, likeliest_rows_where_they_are, probability_at, runner_up_of};
+
+    /// A guess's runner-up is the largest logit but the guess's — an equal
+    /// one included, the first such, as the greedy pick breaks a tie — and
+    /// both probabilities are the softmax's, as a guess's own is read.
+    #[test]
+    fn a_greedy_guesses_runner_up_is_its_second_choice() {
+        let row = [1.0, 3.0, 2.0, 3.0];
+        let r = runner_up_of(&row, 1, 0.0);
+        assert_eq!(r.token, 3, "the equal maximum after the guess");
+        assert_eq!(r.p, r.guess_p);
+        let r = runner_up_of(&[0.0, 4.0, 2.0], 1, 0.0);
+        assert_eq!(r.token, 2);
+        assert!((r.guess_p - probability_at(&[0.0, 4.0, 2.0], 1, 0.0)).abs() < 1e-6);
+        assert!((r.p - probability_at(&[0.0, 4.0, 2.0], 2, 0.0)).abs() < 1e-6);
+        let r = runner_up_of(&[f32::NEG_INFINITY; 3], 0, 0.0);
+        assert_eq!((r.guess_p, r.p), (0.0, 0.0));
+    }
 
     /// A sampled row whose draw reads only its top k is drawn and ranked
     /// through `followers_drawn_from_top_k` — whether this host ranked it or a

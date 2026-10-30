@@ -530,41 +530,10 @@ pub fn activation_shape_matches(sent: &[u8], returned: &[u8]) -> bool {
 /// Only the bytes each shape needs are copied: a payload LONGER than its shape
 /// is accepted by `bytes_to_tensor`, and its tail is not this tensor's.
 pub(crate) fn join_positions(parts: &[&[u8]]) -> Option<Vec<u8>> {
-    struct Part<'a> {
-        shape: Vec<u32>,
-        dtype: u32,
-        payload: &'a [u8],
-    }
-    fn parse(bytes: &[u8]) -> Option<Part<'_>> {
-        let word = |at: usize| -> Option<u32> {
-            Some(u32::from_le_bytes(bytes.get(at..at + 4)?.try_into().ok()?))
-        };
-        let ndim = word(0)? as usize;
-        if !(2..=8).contains(&ndim) {
-            return None;
-        }
-        let shape: Vec<u32> = (0..ndim).map(|i| word(4 + i * 4)).collect::<Option<_>>()?;
-        if shape[..ndim - 2].iter().any(|&d| d != 1) {
-            return None;
-        }
-        let dtype = word(4 + ndim * 4)?;
-        let values = shape
-            .iter()
-            .try_fold(1usize, |acc, &d| acc.checked_mul(d as usize))
-            .filter(|&n| n > 0)?;
-        if dtype == DTYPE_TAG_Q8_0 && values % quant::GROUP_SIZE != 0 {
-            return None;
-        }
-        let need = payload_len(dtype)?(values)?;
-        let at = 4 + ndim * 4 + 4;
-        let payload = bytes.get(at..at.checked_add(need)?)?;
-        Some(Part {
-            shape,
-            dtype,
-            payload,
-        })
-    }
-    let parts: Vec<Part> = parts.iter().map(|b| parse(b)).collect::<Option<_>>()?;
+    let parts: Vec<PositionsPart> = parts
+        .iter()
+        .map(|b| PositionsPart::parse(b))
+        .collect::<Option<_>>()?;
     let first = parts.first()?;
     let at = first.shape.len() - 2;
     let mut positions: u32 = 0;
@@ -598,6 +567,88 @@ pub(crate) fn join_positions(parts: &[&[u8]]) -> Option<Vec<u8>> {
     Some(joined)
 }
 
+/// One hidden-state buffer as [`join_positions`] and [`take_positions`] read
+/// it: its shape, its encoding and exactly the payload bytes the shape needs.
+/// `None` for a header that does not parse, a leading dimension other than 1,
+/// no values, a payload shorter than the shape needs, or a Q8_0 buffer whose
+/// values do not fill whole 32-value blocks.
+struct PositionsPart<'a> {
+    shape: Vec<u32>,
+    dtype: u32,
+    payload: &'a [u8],
+}
+
+impl<'a> PositionsPart<'a> {
+    fn parse(bytes: &'a [u8]) -> Option<Self> {
+        let word = |at: usize| -> Option<u32> {
+            Some(u32::from_le_bytes(bytes.get(at..at + 4)?.try_into().ok()?))
+        };
+        let ndim = word(0)? as usize;
+        if !(2..=8).contains(&ndim) {
+            return None;
+        }
+        let shape: Vec<u32> = (0..ndim).map(|i| word(4 + i * 4)).collect::<Option<_>>()?;
+        if shape[..ndim - 2].iter().any(|&d| d != 1) {
+            return None;
+        }
+        let dtype = word(4 + ndim * 4)?;
+        let values = shape
+            .iter()
+            .try_fold(1usize, |acc, &d| acc.checked_mul(d as usize))
+            .filter(|&n| n > 0)?;
+        if dtype == DTYPE_TAG_Q8_0 && values % quant::GROUP_SIZE != 0 {
+            return None;
+        }
+        let need = payload_len(dtype)?(values)?;
+        let at = 4 + ndim * 4 + 4;
+        let payload = bytes.get(at..at.checked_add(need)?)?;
+        Some(Self {
+            shape,
+            dtype,
+            payload,
+        })
+    }
+}
+
+/// Positions `from..to` of one hidden-state buffer, in its own encoding — what
+/// `tensor_to_bytes` (or `_q8_0`) of the narrowed tensor would have written,
+/// byte for byte, with no decode. The inverse of [`join_positions`].
+///
+/// For the continuous stream's spares (`dsd_stream`, FUTURE_WORK #381): one
+/// forward through this node's layers carries the chunk's rows and a spare
+/// restart's, and each goes to the far end as its own buffer. `None` wherever
+/// the cut cannot be EXACT, and the caller decodes instead:
+/// - anything [`PositionsPart::parse`] refuses;
+/// - an empty range, or one past the buffer's positions;
+/// - a Q8_0 buffer whose positions do not each fill whole 32-value blocks —
+///   a block's one scale would cover values on both sides of the cut.
+pub(crate) fn take_positions(bytes: &[u8], from: u32, to: u32) -> Option<Vec<u8>> {
+    let part = PositionsPart::parse(bytes)?;
+    let at = part.shape.len() - 2;
+    if from >= to || to > part.shape[at] {
+        return None;
+    }
+    let per_position = part.shape[at + 1..]
+        .iter()
+        .try_fold(1usize, |acc, &d| acc.checked_mul(d as usize))?;
+    if part.dtype == DTYPE_TAG_Q8_0 && per_position % quant::GROUP_SIZE != 0 {
+        return None;
+    }
+    let len_of = payload_len(part.dtype)?;
+    let start = len_of((from as usize).checked_mul(per_position)?)?;
+    let end = len_of((to as usize).checked_mul(per_position)?)?;
+    let payload = part.payload.get(start..end)?;
+    let mut taken = Vec::with_capacity(4 + part.shape.len() * 4 + 4 + payload.len());
+    taken.extend_from_slice(&(part.shape.len() as u32).to_le_bytes());
+    for (i, &dim) in part.shape.iter().enumerate() {
+        let dim = if i == at { to - from } else { dim };
+        taken.extend_from_slice(&dim.to_le_bytes());
+    }
+    taken.extend_from_slice(&part.dtype.to_le_bytes());
+    taken.extend_from_slice(payload);
+    Some(taken)
+}
+
 #[cfg(test)]
 mod join_positions_tests {
     use super::*;
@@ -620,6 +671,36 @@ mod join_positions_tests {
             let refs: Vec<&[u8]> = bytes.iter().map(Vec::as_slice).collect();
             assert_eq!(join_positions(&refs).unwrap(), encode(&whole).unwrap());
         }
+    }
+
+    #[test]
+    fn taken_positions_are_the_bytes_of_the_narrowed_tensor_in_either_encoding() {
+        let whole = hidden(5, 64, 3.0);
+        for encode in [tensor_to_bytes, tensor_to_bytes_q8_0] {
+            let bytes = encode(&whole).unwrap();
+            for (from, to) in [(0, 5), (0, 3), (3, 5), (2, 3)] {
+                let narrowed = whole
+                    .narrow(1, from as usize, (to - from) as usize)
+                    .unwrap();
+                assert_eq!(
+                    take_positions(&bytes, from, to).unwrap(),
+                    encode(&narrowed).unwrap(),
+                    "{from}..{to}"
+                );
+            }
+            assert_eq!(take_positions(&bytes, 2, 2), None, "an empty range");
+            assert_eq!(take_positions(&bytes, 4, 6), None, "past the positions");
+        }
+        // A Q8_0 position of 48 values ends inside a block: no exact cut.
+        let ragged = tensor_to_bytes_q8_0(&hidden(2, 48, 0.0)).unwrap();
+        assert_eq!(take_positions(&ragged, 0, 1), None);
+        // Cut and joined again, a buffer is itself.
+        let bytes = tensor_to_bytes_q8_0(&whole).unwrap();
+        let (a, b) = (
+            take_positions(&bytes, 0, 2).unwrap(),
+            take_positions(&bytes, 2, 5).unwrap(),
+        );
+        assert_eq!(join_positions(&[&a, &b]).unwrap(), bytes);
     }
 
     #[test]

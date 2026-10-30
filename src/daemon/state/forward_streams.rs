@@ -57,6 +57,24 @@
 //! for it. A/B `SWARMLLM_STREAM_TAIL_SKIP=0` (here),
 //! `SWARMLLM_STREAM_LOOKAHEAD=0` (the coordinator).
 //!
+//! **A spare restart runs the moment its refusal happens (#381).** Skipping
+//! stops this node computing stale checks; it cannot start the right one,
+//! which must first pass the coordinator's layers. So the coordinator sends,
+//! beside a check, the restart it would send if that check refused one
+//! particular guess for one particular token (`LayerForward::stream_branch`,
+//! `StreamBranch::Spare`). It waits here in its turn like any check and, when
+//! it comes due, runs only where the walk it names refused exactly that guess
+//! for exactly that token ([`TurnKind::Spare`]) — cutting the cache back as a
+//! restart would — and is skipped unrun everywhere else. It supersedes
+//! nothing on arrival (the check it waits on may still be queued), and
+//! running it leaves the refusal standing, so the stale turns built on the
+//! refused guess are still skipped. The coordinator reads the same walk and
+//! knows the spare ran; the checks it then builds on the spare name it
+//! ([`TurnKind::AfterSpare`]) — they run only where it did, are refused out
+//! loud where it did not (a spare refused on arrival, say), and are skipped
+//! where the spare itself refused a guess. The 70B's far end idled ~0.7 s a
+//! refused guess, waiting for the restart (`docs/FUTURE_WORK.md` #381).
+//!
 //! **A turn refused on arrival is stepped over, never waited for.** A forward
 //! the dispatcher turns away at an admission cap never reaches [`ForwardStreams::turn`],
 //! so the stream's next number would never advance past it and every later
@@ -131,13 +149,10 @@ struct Stream {
     next: tokio::sync::watch::Sender<u32>,
     /// Turns below this were superseded by a restart and are skipped.
     skip_below: AtomicU32,
-    /// The last turn whose check, walked HERE, refused a guess — `u32::MAX`
-    /// once a restart has run since. Every later turn that does not cut the
-    /// cache back was built on that guess and is skipped (module doc).
-    refused_at: AtomicU32,
-    /// What decides how far `next` may move. Every change to `next` happens
-    /// under this lock, so a refusal recorded, or a restart arriving, just as
-    /// the turn before it ends is never missed.
+    /// What decides how far `next` may move, and which turn may run when it
+    /// comes due. Every change to `next` happens under this lock, so a
+    /// refusal recorded, or a restart arriving, just as the turn before it
+    /// ends is never missed.
     order: parking_lot::Mutex<Order>,
     /// Epoch milliseconds of the last turn taken or ended, for the sweep.
     touched_ms: AtomicU64,
@@ -151,6 +166,161 @@ struct Order {
     /// A turn is held — its forward is at the worker. While it is, `next`
     /// names it and nothing may jump past it.
     running: bool,
+    /// The last check walked HERE that refused a guess, since a restart last
+    /// ran. Every later turn that does not cut the cache back was built on
+    /// that guess and is skipped (module doc) — and a spare restart for
+    /// exactly this refusal runs.
+    refusal: Option<Refusal>,
+    /// The spare restart that ran here for `refusal`, if one did: the turn a
+    /// check built on it names.
+    taken: Option<TakenSpare>,
+}
+
+/// A check walked here that refused a guess: its turn, the guesses it kept
+/// and the token it drew in the refused one's place.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Refusal {
+    turn: u32,
+    kept: u32,
+    token: u32,
+}
+
+/// A spare restart that ran here, and the check whose refusal it restarted.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct TakenSpare {
+    spare: u32,
+    of: u32,
+}
+
+/// What a streamed forward is to the turns before it — read off the forward
+/// by [`TurnKind::of`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TurnKind {
+    /// It builds on the turn before it: skipped where a check walked here
+    /// since the last restart refused a guess.
+    Follows,
+    /// It cuts the cache back (`truncate_kv_to`): it restarts the stream, and
+    /// the turns before it that have not run are superseded.
+    Restarts,
+    /// A spare restart (#381): run only where turn `of`'s walk here kept
+    /// `kept` guesses and drew `token` — the restart its coordinator would
+    /// otherwise send a round trip later — and skipped unrun everywhere else.
+    /// It cuts the cache back when it runs, but supersedes nothing on
+    /// arrival: the check it waits on may not have run yet.
+    Spare { of: u32, kept: u32, token: u32 },
+    /// It builds on spare `spare`'s rows: refused out loud unless that spare
+    /// ran here, skipped where the line through it has since been refused.
+    AfterSpare { spare: u32 },
+}
+
+impl TurnKind {
+    /// What forward `seq` (`LayerForward::stream_seq`) is, from its cut and
+    /// its branch (`LayerForward::stream_branch`). Refused where the branch
+    /// cannot mean what it says: either cuts the cache back to its own first
+    /// row (`truncate_kv_to` = `index_pos` — a spare as the restart it is, a
+    /// check built on one to drop anything run after the spare), and either
+    /// names an EARLIER turn of its own attempt.
+    pub(crate) fn of(
+        seq: u32,
+        index_pos: u32,
+        truncate_kv_to: Option<u32>,
+        branch: Option<crate::types::StreamBranch>,
+    ) -> Result<Self, &'static str> {
+        use crate::types::StreamBranch;
+        let earlier = |named: u32| {
+            (stream_seq::attempt(named) == stream_seq::attempt(seq)
+                && stream_seq::turn(named) < stream_seq::turn(seq))
+            .then_some(stream_seq::turn(named))
+        };
+        match branch {
+            None if truncate_kv_to.is_some() => Ok(TurnKind::Restarts),
+            None => Ok(TurnKind::Follows),
+            Some(StreamBranch::Spare { of, kept, token }) => {
+                if truncate_kv_to != Some(index_pos) {
+                    return Err("a spare restart must cut the cache back to its own first row");
+                }
+                let of = earlier(of)
+                    .ok_or("a spare restart must wait on an earlier check of its own stream")?;
+                Ok(TurnKind::Spare { of, kept, token })
+            }
+            Some(StreamBranch::AfterSpare { spare }) => {
+                if truncate_kv_to != Some(index_pos) {
+                    return Err(
+                        "a check built on a spare must cut the cache back to its own first row",
+                    );
+                }
+                let spare = earlier(spare)
+                    .ok_or("a check must be built on an earlier spare of its own stream")?;
+                Ok(TurnKind::AfterSpare { spare })
+            }
+        }
+    }
+
+    /// It supersedes, on arrival, every turn before it that has not run.
+    fn supersedes(self) -> bool {
+        self == TurnKind::Restarts
+    }
+}
+
+impl Order {
+    /// The refusal a check that follows the line stood on, if turn `turn` must
+    /// be skipped for it: with `tail_skip` (the A/B switch,
+    /// `skip_on_a_refusal_here`), any refusal before it; without, only one a
+    /// spare has run for. That skip is not an A/B choice: the spare cut the
+    /// cache back and wrote its own rows, which a stale turn run now would
+    /// overwrite under the checks built on them.
+    fn stood_on(&self, turn: u32, tail_skip: bool) -> Option<Refusal> {
+        self.refusal
+            .filter(|r| turn > r.turn && (tail_skip || self.taken.is_some_and(|t| t.of == r.turn)))
+    }
+
+    /// Whether turn `turn`, of `kind`, runs now that it has come due with
+    /// nothing running — recording what running it changes — or why not.
+    fn admit(&mut self, turn: u32, kind: TurnKind, tail_skip: bool) -> Result<(), TurnRefused> {
+        match kind {
+            TurnKind::Follows => {
+                if let Some(r) = self.stood_on(turn, tail_skip) {
+                    return Err(TurnRefused::StoodOnARefusal { refused_at: r.turn });
+                }
+            }
+            TurnKind::Restarts => {
+                // What a refusal here left stale is behind it now.
+                self.refusal = None;
+                self.taken = None;
+            }
+            TurnKind::Spare { of, kept, token } => {
+                let wanted = self.refusal
+                    == Some(Refusal {
+                        turn: of,
+                        kept,
+                        token,
+                    });
+                // One restart per refusal: a second spare for the same one is
+                // a coordinator's mistake, and the first already cut the cache.
+                let one_ran = self.taken.is_some_and(|t| t.of == of);
+                if !wanted || one_ran {
+                    return Err(TurnRefused::SpareNotNeeded { of });
+                }
+                // The refusal stands: every turn after it that is not built
+                // on this spare stood on the refused guess.
+                self.taken = Some(TakenSpare { spare: turn, of });
+            }
+            TurnKind::AfterSpare { spare } => {
+                // A refusal at or after the spare ended the line through it:
+                // the coordinator restarts after that answer.
+                if let Some(r) = self.refusal.filter(|r| r.turn >= spare) {
+                    return Err(TurnRefused::StoodOnARefusal { refused_at: r.turn });
+                }
+                if self.taken.map(|t| t.spare) != Some(spare) {
+                    return Err(TurnRefused::SpareMissing { spare });
+                }
+                // Built on what the spare kept: the refusal it restarted is
+                // behind it now.
+                self.refusal = None;
+            }
+        }
+        Ok(())
+    }
 }
 
 impl Stream {
@@ -159,7 +329,6 @@ impl Stream {
         let stream = Self {
             next,
             skip_below: AtomicU32::new(0),
-            refused_at: AtomicU32::new(u32::MAX),
             order: parking_lot::Mutex::new(Order::default()),
             touched_ms: AtomicU64::new(0),
         };
@@ -222,14 +391,20 @@ pub(crate) struct Turn {
 }
 
 impl Turn {
-    /// This turn's check, walked here, refused one of its guesses: every later
-    /// turn that does not restart the stream stood on that guess and is
-    /// skipped when it comes due, without waiting for the restart to say so
-    /// (module doc). Called before the turn ends, so the next turn sees it.
-    pub(crate) fn refused_a_guess(&self) {
-        if skip_on_a_refusal_here() {
-            self.stream.refused_at.store(self.turn, Ordering::Release);
-        }
+    /// This turn's check, walked here, kept `kept` guesses and drew `token`
+    /// in place of the next: every later turn that does not restart the
+    /// stream stood on that guess and is skipped when it comes due, without
+    /// waiting for the restart to say so, and a spare restart for exactly
+    /// this refusal runs (module doc). Called before the turn ends, so the
+    /// next turn sees it.
+    pub(crate) fn refused_a_guess(&self, kept: u32, token: u32) {
+        // Recorded whatever the A/B switch says: a spare restart's coordinator
+        // reads the same walk and builds on the spare as having run.
+        self.stream.order.lock().refusal = Some(Refusal {
+            turn: self.turn,
+            kept,
+            token,
+        });
     }
 }
 
@@ -269,6 +444,27 @@ pub(crate) enum TurnRefused {
     Skipped,
     /// A check before it, walked here, refused a guess it was built on.
     StoodOnARefusal { refused_at: u32 },
+    /// A spare restart for a refusal that did not happen here (#381) — the
+    /// check it waited on kept its guesses, or refused another — or for one a
+    /// spare already restarted.
+    SpareNotNeeded { of: u32 },
+    /// Built on a spare restart that did not run here. Not a skip: its
+    /// coordinator believed the spare ran, and is told it did not.
+    SpareMissing { spare: u32 },
+}
+
+impl TurnRefused {
+    /// The turn was skipped by the stream's early cancellation working — a
+    /// restart or a refusal — not lost: answered like a failure, so the
+    /// coordinator's wait ends, but not logged as one.
+    pub(crate) fn is_a_skip(&self) -> bool {
+        matches!(
+            self,
+            TurnRefused::Skipped
+                | TurnRefused::StoodOnARefusal { .. }
+                | TurnRefused::SpareNotNeeded { .. }
+        )
+    }
 }
 
 impl TurnRefused {
@@ -289,21 +485,28 @@ impl TurnRefused {
             TurnRefused::StoodOnARefusal { refused_at } => format!(
                 "streamed check {turn} was skipped — check {refused_at} refused a guess it was built on"
             ),
+            TurnRefused::SpareNotNeeded { of } => format!(
+                "streamed check {turn} was skipped — check {of} did not refuse the guess it is the restart for"
+            ),
+            TurnRefused::SpareMissing { spare } => format!(
+                "streamed check {turn} is built on spare restart {spare}, which did not run here"
+            ),
         }
     }
 }
 
 impl ForwardStreams {
     /// Wait until forward `seq` (`LayerForward::stream_seq`) may run — its
-    /// attempt's stream has reached its turn — at most `wait`. `restarts`: the
-    /// forward cuts the cache back, so the turns before it that have not run
-    /// are skipped (module doc).
+    /// attempt's stream has reached its turn — at most `wait`. `kind`: what it
+    /// is to the turns before it ([`TurnKind::of`]); a restart supersedes the
+    /// turns before it that have not run, and a spare runs only for the
+    /// refusal it names (module doc).
     pub(crate) async fn turn(
         &self,
         request_id: uuid::Uuid,
         layer_range: (u32, u32),
         seq: u32,
-        restarts: bool,
+        kind: TurnKind,
         wait: Duration,
     ) -> Result<Turn, TurnRefused> {
         let turn = stream_seq::turn(seq);
@@ -315,7 +518,7 @@ impl ForwardStreams {
             .or_insert_with(|| Arc::new(Stream::new()))
             .clone();
         stream.touch();
-        if restarts {
+        if kind.supersedes() {
             stream.skip_below.fetch_max(turn, Ordering::AcqRel);
             // Past the superseded turns at once if nothing runs; otherwise
             // the running turn's end does it.
@@ -334,34 +537,30 @@ impl ForwardStreams {
                 let mut order = stream.order.lock();
                 let next = *stream.next.borrow();
                 let superseded = turn < stream.skip_below.load(Ordering::Acquire);
-                // A restart cuts the cache back to rows that were kept, so
-                // only a turn that does not is built on the refused guess.
-                let refused_at = stream.refused_at.load(Ordering::Acquire);
-                let stood_on_a_refusal = !restarts && turn > refused_at;
-                let skipped = || {
-                    if superseded {
-                        TurnRefused::Skipped
-                    } else {
-                        TurnRefused::StoodOnARefusal { refused_at }
-                    }
-                };
                 if next == turn && !order.running {
-                    if superseded || stood_on_a_refusal {
+                    let admitted = if superseded {
+                        Err(TurnRefused::Skipped)
+                    } else {
+                        order.admit(turn, kind, skip_on_a_refusal_here())
+                    };
+                    if let Err(refused) = admitted {
                         // Due, with nothing running: stepped over now, which
                         // lets the restart go.
                         stream.advance_locked(&mut order, turn.saturating_add(1));
-                        return Err(skipped());
+                        return Err(refused);
                     }
                     order.running = true;
-                    if restarts {
-                        // What a refusal here left stale is behind it now.
-                        stream.refused_at.store(u32::MAX, Ordering::Release);
-                    }
                     drop(order);
                     return Ok(Turn { stream, turn });
                 }
-                if superseded || stood_on_a_refusal {
-                    Err(skipped())
+                // Passed: superseded, stood on a refusal, or a second copy.
+                if superseded {
+                    Err(TurnRefused::Skipped)
+                } else if let Some(r) = (kind == TurnKind::Follows)
+                    .then(|| order.stood_on(turn, skip_on_a_refusal_here()))
+                    .flatten()
+                {
+                    Err(TurnRefused::StoodOnARefusal { refused_at: r.turn })
                 } else {
                     Err(TurnRefused::AlreadyRan { next })
                 }
@@ -374,14 +573,15 @@ impl ForwardStreams {
 
     /// Forward `seq` was refused on arrival — an admission cap answered it
     /// before it could wait for its turn — so its turn is stepped over when it
-    /// comes due (module doc). `restarts`: it cut the cache back, so the turns
-    /// before it that have not run are superseded as if it had arrived.
+    /// comes due (module doc). A restart (`kind`) still supersedes the turns
+    /// before it that have not run, as if it had arrived; a spare stepped over
+    /// never ran, so a check built on it is refused.
     pub(crate) fn refused_on_arrival(
         &self,
         request_id: uuid::Uuid,
         layer_range: (u32, u32),
         seq: u32,
-        restarts: bool,
+        kind: TurnKind,
     ) {
         let turn = stream_seq::turn(seq);
         let stream = self
@@ -390,7 +590,7 @@ impl ForwardStreams {
             .or_insert_with(|| Arc::new(Stream::new()))
             .clone();
         stream.touch();
-        if restarts {
+        if kind.supersedes() {
             stream.skip_below.fetch_max(turn, Ordering::AcqRel);
         }
         let mut order = stream.order.lock();
@@ -441,7 +641,7 @@ mod tests {
             let (streams, ran) = (streams.clone(), ran.clone());
             tasks.push(tokio::spawn(async move {
                 let turn = streams
-                    .turn(id, RANGE, seq, false, STREAM_TURN_WAIT)
+                    .turn(id, RANGE, seq, TurnKind::Follows, STREAM_TURN_WAIT)
                     .await
                     .unwrap();
                 ran.lock().unwrap().push(seq);
@@ -463,19 +663,19 @@ mod tests {
         let id = uuid::Uuid::new_v4();
         drop(
             streams
-                .turn(id, RANGE, 0, false, STREAM_TURN_WAIT)
+                .turn(id, RANGE, 0, TurnKind::Follows, STREAM_TURN_WAIT)
                 .await
                 .unwrap(),
         );
         drop(
             streams
-                .turn(id, RANGE, 1, false, STREAM_TURN_WAIT)
+                .turn(id, RANGE, 1, TurnKind::Follows, STREAM_TURN_WAIT)
                 .await
                 .unwrap(),
         );
         assert_eq!(
             streams
-                .turn(id, RANGE, 0, false, STREAM_TURN_WAIT)
+                .turn(id, RANGE, 0, TurnKind::Follows, STREAM_TURN_WAIT)
                 .await
                 .err(),
             Some(TurnRefused::AlreadyRan { next: 2 })
@@ -489,7 +689,7 @@ mod tests {
         let id = uuid::Uuid::new_v4();
         assert_eq!(
             streams
-                .turn(id, RANGE, 1, false, STREAM_TURN_WAIT)
+                .turn(id, RANGE, 1, TurnKind::Follows, STREAM_TURN_WAIT)
                 .await
                 .err(),
             Some(TurnRefused::Waited)
@@ -505,17 +705,17 @@ mod tests {
         let seq = |attempt, turn| stream_seq::compose(attempt, turn).unwrap();
         drop(
             streams
-                .turn(id, RANGE, seq(1, 0), false, STREAM_TURN_WAIT)
+                .turn(id, RANGE, seq(1, 0), TurnKind::Follows, STREAM_TURN_WAIT)
                 .await
                 .unwrap(),
         );
         let _dead = streams
-            .turn(id, RANGE, seq(1, 1), false, STREAM_TURN_WAIT)
+            .turn(id, RANGE, seq(1, 1), TurnKind::Follows, STREAM_TURN_WAIT)
             .await
             .unwrap();
         assert!(
             streams
-                .turn(id, RANGE, seq(2, 0), false, STREAM_TURN_WAIT)
+                .turn(id, RANGE, seq(2, 0), TurnKind::Follows, STREAM_TURN_WAIT)
                 .await
                 .is_ok(),
             "the retry's first chunk is not held behind the dead attempt's"
@@ -529,19 +729,27 @@ mod tests {
         let streams = Arc::new(ForwardStreams::default());
         let id = uuid::Uuid::new_v4();
         let running = streams
-            .turn(id, RANGE, 0, false, STREAM_TURN_WAIT)
+            .turn(id, RANGE, 0, TurnKind::Follows, STREAM_TURN_WAIT)
             .await
             .unwrap();
         // Turns 1 and 2 were built on a guess turn 0's check refused; 3 is the
         // restart, and arrives while 0 still runs and 1 waits.
         let stale = {
             let streams = streams.clone();
-            tokio::spawn(async move { streams.turn(id, RANGE, 1, false, STREAM_TURN_WAIT).await })
+            tokio::spawn(async move {
+                streams
+                    .turn(id, RANGE, 1, TurnKind::Follows, STREAM_TURN_WAIT)
+                    .await
+            })
         };
         tokio::task::yield_now().await;
         let restart = {
             let streams = streams.clone();
-            tokio::spawn(async move { streams.turn(id, RANGE, 3, true, STREAM_TURN_WAIT).await })
+            tokio::spawn(async move {
+                streams
+                    .turn(id, RANGE, 3, TurnKind::Restarts, STREAM_TURN_WAIT)
+                    .await
+            })
         };
         tokio::task::yield_now().await;
         assert!(!restart.is_finished(), "never beside the running turn");
@@ -552,7 +760,7 @@ mod tests {
         // Turn 2 arrives late: answered unrun.
         assert_eq!(
             streams
-                .turn(id, RANGE, 2, false, STREAM_TURN_WAIT)
+                .turn(id, RANGE, 2, TurnKind::Follows, STREAM_TURN_WAIT)
                 .await
                 .err(),
             Some(TurnRefused::Skipped)
@@ -560,7 +768,7 @@ mod tests {
         drop(restart);
         assert!(
             streams
-                .turn(id, RANGE, 4, false, STREAM_TURN_WAIT)
+                .turn(id, RANGE, 4, TurnKind::Follows, STREAM_TURN_WAIT)
                 .await
                 .is_ok(),
             "and what follows it"
@@ -576,20 +784,24 @@ mod tests {
         let streams = Arc::new(ForwardStreams::default());
         let id = uuid::Uuid::new_v4();
         let kept = streams
-            .turn(id, RANGE, 0, false, STREAM_TURN_WAIT)
+            .turn(id, RANGE, 0, TurnKind::Follows, STREAM_TURN_WAIT)
             .await
             .unwrap();
         drop(kept);
         let refusing = streams
-            .turn(id, RANGE, 1, false, STREAM_TURN_WAIT)
+            .turn(id, RANGE, 1, TurnKind::Follows, STREAM_TURN_WAIT)
             .await
             .expect("a walk that kept every guess skips nothing");
         let waiting = {
             let streams = streams.clone();
-            tokio::spawn(async move { streams.turn(id, RANGE, 2, false, STREAM_TURN_WAIT).await })
+            tokio::spawn(async move {
+                streams
+                    .turn(id, RANGE, 2, TurnKind::Follows, STREAM_TURN_WAIT)
+                    .await
+            })
         };
         tokio::task::yield_now().await;
-        refusing.refused_a_guess();
+        refusing.refused_a_guess(0, 7);
         drop(refusing);
         assert_eq!(
             waiting.await.unwrap().err(),
@@ -598,20 +810,20 @@ mod tests {
         );
         assert_eq!(
             streams
-                .turn(id, RANGE, 3, false, STREAM_TURN_WAIT)
+                .turn(id, RANGE, 3, TurnKind::Follows, STREAM_TURN_WAIT)
                 .await
                 .err(),
             Some(TurnRefused::StoodOnARefusal { refused_at: 1 }),
             "arriving after it"
         );
         let restart = streams
-            .turn(id, RANGE, 4, true, STREAM_TURN_WAIT)
+            .turn(id, RANGE, 4, TurnKind::Restarts, STREAM_TURN_WAIT)
             .await
             .expect("the restart runs");
         drop(restart);
         assert!(
             streams
-                .turn(id, RANGE, 5, false, STREAM_TURN_WAIT)
+                .turn(id, RANGE, 5, TurnKind::Follows, STREAM_TURN_WAIT)
                 .await
                 .is_ok(),
             "and what follows it"
@@ -627,12 +839,16 @@ mod tests {
         let streams = Arc::new(ForwardStreams::default());
         let id = uuid::Uuid::new_v4();
         let running = streams
-            .turn(id, RANGE, 0, false, STREAM_TURN_WAIT)
+            .turn(id, RANGE, 0, TurnKind::Follows, STREAM_TURN_WAIT)
             .await
             .unwrap();
         let restart = {
             let streams = streams.clone();
-            tokio::spawn(async move { streams.turn(id, RANGE, 3, true, STREAM_TURN_WAIT).await })
+            tokio::spawn(async move {
+                streams
+                    .turn(id, RANGE, 3, TurnKind::Restarts, STREAM_TURN_WAIT)
+                    .await
+            })
         };
         tokio::task::yield_now().await;
         assert!(!restart.is_finished(), "never beside the running turn");
@@ -646,11 +862,13 @@ mod tests {
         );
         drop(restart);
         // And with nothing running when it arrives, it goes at once.
-        let again = streams.turn(id, RANGE, 6, true, STREAM_TURN_WAIT).await;
+        let again = streams
+            .turn(id, RANGE, 6, TurnKind::Restarts, STREAM_TURN_WAIT)
+            .await;
         assert!(again.is_ok(), "{:?}", again.err());
         drop(again);
         assert!(streams
-            .turn(id, RANGE, 7, false, STREAM_TURN_WAIT)
+            .turn(id, RANGE, 7, TurnKind::Follows, STREAM_TURN_WAIT)
             .await
             .is_ok());
     }
@@ -661,12 +879,12 @@ mod tests {
         let streams = ForwardStreams::default();
         let id = uuid::Uuid::new_v4();
         let _running = streams
-            .turn(id, RANGE, 0, false, STREAM_TURN_WAIT)
+            .turn(id, RANGE, 0, TurnKind::Follows, STREAM_TURN_WAIT)
             .await
             .unwrap();
         assert_eq!(
             streams
-                .turn(id, RANGE, 0, false, STREAM_TURN_WAIT)
+                .turn(id, RANGE, 0, TurnKind::Follows, STREAM_TURN_WAIT)
                 .await
                 .err(),
             Some(TurnRefused::AlreadyRan { next: 0 })
@@ -681,13 +899,17 @@ mod tests {
         let streams = Arc::new(ForwardStreams::default());
         let id = uuid::Uuid::new_v4();
         let running = streams
-            .turn(id, RANGE, 0, false, STREAM_TURN_WAIT)
+            .turn(id, RANGE, 0, TurnKind::Follows, STREAM_TURN_WAIT)
             .await
             .unwrap();
-        streams.refused_on_arrival(id, RANGE, 0, false);
+        streams.refused_on_arrival(id, RANGE, 0, TurnKind::Follows);
         let waiting = {
             let streams = streams.clone();
-            tokio::spawn(async move { streams.turn(id, RANGE, 1, false, STREAM_TURN_WAIT).await })
+            tokio::spawn(async move {
+                streams
+                    .turn(id, RANGE, 1, TurnKind::Follows, STREAM_TURN_WAIT)
+                    .await
+            })
         };
         tokio::task::yield_now().await;
         drop(running);
@@ -705,14 +927,16 @@ mod tests {
         for seq in 0..20 {
             drop(
                 streams
-                    .turn(id, RANGE, seq, false, STREAM_TURN_WAIT)
+                    .turn(id, RANGE, seq, TurnKind::Follows, STREAM_TURN_WAIT)
                     .await
                     .unwrap(),
             );
         }
-        streams.refused_on_arrival(id, RANGE, 20, false);
+        streams.refused_on_arrival(id, RANGE, 20, TurnKind::Follows);
         let started = tokio::time::Instant::now();
-        let restart = streams.turn(id, RANGE, 21, true, STREAM_TURN_WAIT).await;
+        let restart = streams
+            .turn(id, RANGE, 21, TurnKind::Restarts, STREAM_TURN_WAIT)
+            .await;
         assert!(restart.is_ok(), "the restart runs: {:?}", restart.err());
         assert!(
             started.elapsed() < Duration::from_secs(1),
@@ -720,7 +944,7 @@ mod tests {
         );
         drop(restart);
         assert!(streams
-            .turn(id, RANGE, 22, false, STREAM_TURN_WAIT)
+            .turn(id, RANGE, 22, TurnKind::Follows, STREAM_TURN_WAIT)
             .await
             .is_ok());
     }
@@ -735,23 +959,23 @@ mod tests {
         let id = uuid::Uuid::new_v4();
         drop(
             streams
-                .turn(id, RANGE, 0, false, STREAM_TURN_WAIT)
+                .turn(id, RANGE, 0, TurnKind::Follows, STREAM_TURN_WAIT)
                 .await
                 .unwrap(),
         );
         for seq in 2..2 + MAX_REFUSED_TURNS as u32 {
-            streams.refused_on_arrival(id, RANGE, seq, false);
+            streams.refused_on_arrival(id, RANGE, seq, TurnKind::Follows);
         }
         drop(
             streams
-                .turn(id, RANGE, 100, true, STREAM_TURN_WAIT)
+                .turn(id, RANGE, 100, TurnKind::Restarts, STREAM_TURN_WAIT)
                 .await
                 .unwrap(),
         );
-        streams.refused_on_arrival(id, RANGE, 101, false);
+        streams.refused_on_arrival(id, RANGE, 101, TurnKind::Follows);
         let started = tokio::time::Instant::now();
         assert!(streams
-            .turn(id, RANGE, 102, false, STREAM_TURN_WAIT)
+            .turn(id, RANGE, 102, TurnKind::Follows, STREAM_TURN_WAIT)
             .await
             .is_ok());
         assert!(
@@ -768,15 +992,19 @@ mod tests {
         let streams = Arc::new(ForwardStreams::default());
         let id = uuid::Uuid::new_v4();
         let running = streams
-            .turn(id, RANGE, 0, false, STREAM_TURN_WAIT)
+            .turn(id, RANGE, 0, TurnKind::Follows, STREAM_TURN_WAIT)
             .await
             .unwrap();
         let behind = {
             let streams = streams.clone();
-            tokio::spawn(async move { streams.turn(id, RANGE, 2, false, STREAM_TURN_WAIT).await })
+            tokio::spawn(async move {
+                streams
+                    .turn(id, RANGE, 2, TurnKind::Follows, STREAM_TURN_WAIT)
+                    .await
+            })
         };
         tokio::task::yield_now().await;
-        streams.refused_on_arrival(id, RANGE, 1, false);
+        streams.refused_on_arrival(id, RANGE, 1, TurnKind::Follows);
         tokio::task::yield_now().await;
         assert!(!behind.is_finished(), "never beside the running turn");
         let started = tokio::time::Instant::now();
@@ -791,12 +1019,12 @@ mod tests {
     async fn consecutive_refused_turns_are_all_stepped_over() {
         let streams = ForwardStreams::default();
         let id = uuid::Uuid::new_v4();
-        streams.refused_on_arrival(id, RANGE, 0, false);
-        streams.refused_on_arrival(id, RANGE, 2, false);
-        streams.refused_on_arrival(id, RANGE, 1, false);
+        streams.refused_on_arrival(id, RANGE, 0, TurnKind::Follows);
+        streams.refused_on_arrival(id, RANGE, 2, TurnKind::Follows);
+        streams.refused_on_arrival(id, RANGE, 1, TurnKind::Follows);
         let started = tokio::time::Instant::now();
         assert!(streams
-            .turn(id, RANGE, 3, false, STREAM_TURN_WAIT)
+            .turn(id, RANGE, 3, TurnKind::Follows, STREAM_TURN_WAIT)
             .await
             .is_ok());
         assert!(started.elapsed() < Duration::from_secs(1));
@@ -809,19 +1037,23 @@ mod tests {
         let streams = Arc::new(ForwardStreams::default());
         let id = uuid::Uuid::new_v4();
         let running = streams
-            .turn(id, RANGE, 0, false, STREAM_TURN_WAIT)
+            .turn(id, RANGE, 0, TurnKind::Follows, STREAM_TURN_WAIT)
             .await
             .unwrap();
         let stale = {
             let streams = streams.clone();
-            tokio::spawn(async move { streams.turn(id, RANGE, 1, false, STREAM_TURN_WAIT).await })
+            tokio::spawn(async move {
+                streams
+                    .turn(id, RANGE, 1, TurnKind::Follows, STREAM_TURN_WAIT)
+                    .await
+            })
         };
         tokio::task::yield_now().await;
-        streams.refused_on_arrival(id, RANGE, 2, true);
+        streams.refused_on_arrival(id, RANGE, 2, TurnKind::Restarts);
         drop(running);
         assert_eq!(stale.await.unwrap().err(), Some(TurnRefused::Skipped));
         assert!(streams
-            .turn(id, RANGE, 3, false, STREAM_TURN_WAIT)
+            .turn(id, RANGE, 3, TurnKind::Follows, STREAM_TURN_WAIT)
             .await
             .is_ok());
     }
@@ -833,13 +1065,13 @@ mod tests {
         let id = uuid::Uuid::new_v4();
         drop(
             streams
-                .turn(id, RANGE, 0, false, STREAM_TURN_WAIT)
+                .turn(id, RANGE, 0, TurnKind::Follows, STREAM_TURN_WAIT)
                 .await
                 .unwrap(),
         );
-        streams.refused_on_arrival(id, RANGE, 0, false);
+        streams.refused_on_arrival(id, RANGE, 0, TurnKind::Follows);
         assert!(streams
-            .turn(id, RANGE, 1, false, STREAM_TURN_WAIT)
+            .turn(id, RANGE, 1, TurnKind::Follows, STREAM_TURN_WAIT)
             .await
             .is_ok());
     }
@@ -850,11 +1082,11 @@ mod tests {
         let streams = ForwardStreams::default();
         let id = uuid::Uuid::new_v4();
         let _head = streams
-            .turn(id, (0, 14), 0, false, STREAM_TURN_WAIT)
+            .turn(id, (0, 14), 0, TurnKind::Follows, STREAM_TURN_WAIT)
             .await
             .unwrap();
         assert!(streams
-            .turn(id, RANGE, 0, false, STREAM_TURN_WAIT)
+            .turn(id, RANGE, 0, TurnKind::Follows, STREAM_TURN_WAIT)
             .await
             .is_ok());
     }
@@ -865,16 +1097,302 @@ mod tests {
         let streams = ForwardStreams::default();
         let (busy, idle) = (uuid::Uuid::new_v4(), uuid::Uuid::new_v4());
         let _turn = streams
-            .turn(busy, RANGE, 0, false, STREAM_TURN_WAIT)
+            .turn(busy, RANGE, 0, TurnKind::Follows, STREAM_TURN_WAIT)
             .await
             .unwrap();
         drop(
             streams
-                .turn(idle, RANGE, 0, false, STREAM_TURN_WAIT)
+                .turn(idle, RANGE, 0, TurnKind::Follows, STREAM_TURN_WAIT)
                 .await
                 .unwrap(),
         );
         assert_eq!(streams.sweep(Duration::ZERO), 1);
         assert_eq!(streams.len(), 1);
+    }
+    fn spare(of: u32, kept: u32, token: u32) -> TurnKind {
+        TurnKind::Spare { of, kept, token }
+    }
+
+    /// Take turn `turn` of a stream and end it at once.
+    async fn run(streams: &ForwardStreams, id: uuid::Uuid, turn: u32, kind: TurnKind) {
+        drop(
+            streams
+                .turn(id, RANGE, turn, kind, STREAM_TURN_WAIT)
+                .await
+                .unwrap_or_else(|e| panic!("turn {turn} ({kind:?}) refused: {e:?}")),
+        );
+    }
+
+    /// #381: a spare restart runs where the check it waits on refused exactly
+    /// its guess for exactly its token — the stale turn after it is still
+    /// skipped, the check built on the spare runs, and so does what follows.
+    #[tokio::test]
+    async fn a_spare_restart_runs_for_the_refusal_it_names() {
+        let streams = ForwardStreams::default();
+        let id = uuid::Uuid::new_v4();
+        let check = streams
+            .turn(id, RANGE, 0, TurnKind::Follows, STREAM_TURN_WAIT)
+            .await
+            .unwrap();
+        check.refused_a_guess(1, 42);
+        drop(check);
+        run(&streams, id, 1, spare(0, 1, 42)).await;
+        assert_eq!(
+            streams
+                .turn(id, RANGE, 2, TurnKind::Follows, STREAM_TURN_WAIT)
+                .await
+                .err(),
+            Some(TurnRefused::StoodOnARefusal { refused_at: 0 }),
+            "the stale turn built on the refused guess, though the spare ran"
+        );
+        run(&streams, id, 3, TurnKind::AfterSpare { spare: 1 }).await;
+        run(&streams, id, 4, TurnKind::Follows).await;
+    }
+
+    /// The control: a spare for any other outcome of the check it waits on is
+    /// skipped unrun — another token, another guess refused, every guess kept
+    /// — and the turn after a check that kept everything runs.
+    #[tokio::test]
+    async fn a_spare_restart_for_another_outcome_is_skipped() {
+        for refusal in [Some((1, 43)), Some((2, 42)), Some((0, 42)), None] {
+            let streams = ForwardStreams::default();
+            let id = uuid::Uuid::new_v4();
+            let check = streams
+                .turn(id, RANGE, 0, TurnKind::Follows, STREAM_TURN_WAIT)
+                .await
+                .unwrap();
+            if let Some((kept, token)) = refusal {
+                check.refused_a_guess(kept, token);
+            }
+            drop(check);
+            assert_eq!(
+                streams
+                    .turn(id, RANGE, 1, spare(0, 1, 42), STREAM_TURN_WAIT)
+                    .await
+                    .err(),
+                Some(TurnRefused::SpareNotNeeded { of: 0 }),
+                "check 0 refused {refusal:?}"
+            );
+            if refusal.is_none() {
+                run(&streams, id, 2, TurnKind::Follows).await;
+            }
+        }
+    }
+
+    /// A check built on a spare that did not run here is refused out loud —
+    /// never run on rows it was not built on: the spare was not needed, or it
+    /// was refused on arrival.
+    #[tokio::test]
+    async fn a_check_built_on_a_spare_that_did_not_run_is_refused() {
+        let streams = ForwardStreams::default();
+        let id = uuid::Uuid::new_v4();
+        run(&streams, id, 0, TurnKind::Follows).await;
+        assert!(streams
+            .turn(id, RANGE, 1, spare(0, 1, 42), STREAM_TURN_WAIT)
+            .await
+            .is_err());
+        assert_eq!(
+            streams
+                .turn(
+                    id,
+                    RANGE,
+                    2,
+                    TurnKind::AfterSpare { spare: 1 },
+                    STREAM_TURN_WAIT
+                )
+                .await
+                .err(),
+            Some(TurnRefused::SpareMissing { spare: 1 }),
+            "the spare was not needed"
+        );
+
+        let id = uuid::Uuid::new_v4();
+        let check = streams
+            .turn(id, RANGE, 0, TurnKind::Follows, STREAM_TURN_WAIT)
+            .await
+            .unwrap();
+        check.refused_a_guess(1, 42);
+        drop(check);
+        streams.refused_on_arrival(id, RANGE, 1, spare(0, 1, 42));
+        assert_eq!(
+            streams
+                .turn(
+                    id,
+                    RANGE,
+                    2,
+                    TurnKind::AfterSpare { spare: 1 },
+                    STREAM_TURN_WAIT
+                )
+                .await
+                .err(),
+            Some(TurnRefused::SpareMissing { spare: 1 }),
+            "the spare was refused on arrival"
+        );
+        assert!(!TurnRefused::SpareMissing { spare: 1 }.is_a_skip());
+        assert!(TurnRefused::SpareNotNeeded { of: 0 }.is_a_skip());
+    }
+
+    /// A spare that refused a guess itself ends the line through it: the
+    /// check built on it is skipped, and the restart after the spare runs.
+    #[tokio::test]
+    async fn a_check_built_on_a_spare_that_refused_a_guess_is_skipped() {
+        let streams = ForwardStreams::default();
+        let id = uuid::Uuid::new_v4();
+        let check = streams
+            .turn(id, RANGE, 0, TurnKind::Follows, STREAM_TURN_WAIT)
+            .await
+            .unwrap();
+        check.refused_a_guess(1, 42);
+        drop(check);
+        let spare_turn = streams
+            .turn(id, RANGE, 1, spare(0, 1, 42), STREAM_TURN_WAIT)
+            .await
+            .unwrap();
+        spare_turn.refused_a_guess(0, 9);
+        drop(spare_turn);
+        assert_eq!(
+            streams
+                .turn(
+                    id,
+                    RANGE,
+                    2,
+                    TurnKind::AfterSpare { spare: 1 },
+                    STREAM_TURN_WAIT
+                )
+                .await
+                .err(),
+            Some(TurnRefused::StoodOnARefusal { refused_at: 1 })
+        );
+        run(&streams, id, 3, TurnKind::Restarts).await;
+        run(&streams, id, 4, TurnKind::Follows).await;
+    }
+
+    /// With the tail skip switched off (the A/B arm) a stale turn still runs
+    /// after a refusal — but never once a spare has run for it: the spare's
+    /// rows are in the cache, and the stale turn would write over them.
+    #[test]
+    fn a_taken_spare_skips_the_stale_line_whatever_the_switch() {
+        let mut order = Order::default();
+        order.admit(0, TurnKind::Follows, false).unwrap();
+        order.refusal = Some(Refusal {
+            turn: 0,
+            kept: 1,
+            token: 42,
+        });
+        assert_eq!(
+            order.admit(1, TurnKind::Follows, false),
+            Ok(()),
+            "the A/B arm runs a stale turn while no spare has"
+        );
+        order.admit(2, spare(0, 1, 42), false).unwrap();
+        assert_eq!(
+            order.admit(3, TurnKind::Follows, false),
+            Err(TurnRefused::StoodOnARefusal { refused_at: 0 })
+        );
+        order
+            .admit(4, TurnKind::AfterSpare { spare: 2 }, false)
+            .unwrap();
+        assert_eq!(order.admit(5, TurnKind::Follows, false), Ok(()));
+    }
+
+    /// A spare supersedes nothing on arrival — the check it waits on may not
+    /// have run yet, and must — where a restart arriving the same way
+    /// supersedes it. One spare per refusal: a second for the same one is
+    /// skipped, the cache already cut.
+    #[tokio::test]
+    async fn a_spare_supersedes_nothing_and_only_one_runs_per_refusal() {
+        let streams = Arc::new(ForwardStreams::default());
+        let id = uuid::Uuid::new_v4();
+        let early = {
+            let streams = streams.clone();
+            tokio::spawn(async move {
+                streams
+                    .turn(id, RANGE, 1, spare(0, 1, 42), STREAM_TURN_WAIT)
+                    .await
+                    .map(drop)
+            })
+        };
+        tokio::task::yield_now().await;
+        let check = streams
+            .turn(id, RANGE, 0, TurnKind::Follows, STREAM_TURN_WAIT)
+            .await
+            .expect("the check a spare waits on is not superseded by it");
+        check.refused_a_guess(1, 42);
+        drop(check);
+        assert!(early.await.unwrap().is_ok(), "the spare then runs");
+        assert_eq!(
+            streams
+                .turn(id, RANGE, 2, spare(0, 1, 42), STREAM_TURN_WAIT)
+                .await
+                .err(),
+            Some(TurnRefused::SpareNotNeeded { of: 0 })
+        );
+
+        // A restart in the spare's place supersedes the check queued before it.
+        let id = uuid::Uuid::new_v4();
+        let restart = {
+            let streams = streams.clone();
+            tokio::spawn(async move {
+                streams
+                    .turn(id, RANGE, 1, TurnKind::Restarts, STREAM_TURN_WAIT)
+                    .await
+                    .map(drop)
+            })
+        };
+        tokio::task::yield_now().await;
+        assert_eq!(
+            streams
+                .turn(id, RANGE, 0, TurnKind::Follows, STREAM_TURN_WAIT)
+                .await
+                .err(),
+            Some(TurnRefused::Skipped)
+        );
+        assert!(restart.await.unwrap().is_ok());
+    }
+
+    /// What a forward is, from its cut and branch: a branch that cannot mean
+    /// what it says — a spare that does not cut to its own first row, a
+    /// check on a spare that does not either, a later or another attempt's
+    /// turn named — is refused.
+    #[test]
+    fn a_forwards_kind_is_read_off_its_cut_and_branch() {
+        use crate::types::StreamBranch;
+        let seq = |attempt, turn| stream_seq::compose(attempt, turn).unwrap();
+        let at = seq(3, 7);
+        let spare_of = |of| StreamBranch::Spare {
+            of,
+            kept: 1,
+            token: 42,
+        };
+        assert_eq!(TurnKind::of(at, 50, None, None), Ok(TurnKind::Follows));
+        assert_eq!(TurnKind::of(at, 50, Some(48), None), Ok(TurnKind::Restarts));
+        assert_eq!(
+            TurnKind::of(at, 50, Some(50), Some(spare_of(seq(3, 6)))),
+            Ok(spare(6, 1, 42))
+        );
+        assert_eq!(
+            TurnKind::of(
+                at,
+                50,
+                Some(50),
+                Some(StreamBranch::AfterSpare { spare: seq(3, 5) })
+            ),
+            Ok(TurnKind::AfterSpare { spare: 5 })
+        );
+        for (cut, branch) in [
+            (None, spare_of(seq(3, 6))),
+            (Some(48), spare_of(seq(3, 6))),
+            (Some(50), spare_of(seq(3, 7))),
+            (Some(50), spare_of(seq(3, 8))),
+            (Some(50), spare_of(seq(2, 6))),
+            (None, StreamBranch::AfterSpare { spare: seq(3, 5) }),
+            (Some(50), StreamBranch::AfterSpare { spare: seq(4, 5) }),
+            (Some(50), StreamBranch::AfterSpare { spare: seq(3, 9) }),
+        ] {
+            assert!(
+                TurnKind::of(at, 50, cut, Some(branch)).is_err(),
+                "{cut:?} {branch:?}"
+            );
+        }
     }
 }

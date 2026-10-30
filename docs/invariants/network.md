@@ -3554,6 +3554,96 @@ it was built on` with the look-ahead named against 235 without, exact in each pa
 stale checks never computed. Speed on the 70B is measured once AU runs a release that advertises
 the bit.
 
+**A likely refusal's restart is at the far end before the refusal** (2026-10-31, #381). The tail
+skip and the look-ahead stop a far end computing stale chunks; neither can START the right one,
+because every row of a restart must first pass this node's layers. On the 70B (this node [0,16),
+AU [16,80), 3B drafter on the processor) a refusal left AU idle ~0.73 s — its trip back, the
+restart's drafting and this node's layers, the trip out — and a 96-token prose reply had 19-24 of
+them (FUTURE_WORK #381's measurement). So with a chunk M the coordinator may send ONE spare S: the
+restart M needs if its walk keeps `j` guesses and draws `c′` at the next, `c′` the drafter's
+runner-up there. Measured before any code (the 3B teacher-forced through six of the 70B's greedy
+replies): where the drafter's first choice is wrong its second is right 60% of the time.
+
+- **Which refusal** (`dsd_stream::spare_at`): the position with the highest `p₂(j)·Π_{i<j} p₁(i)` —
+  the drafter's probability that the walk reaches `j`, refuses there and draws its runner-up — if
+  at least `SWARMLLM_STREAM_SPARE_MIN` (0.08); the look-ahead's position counts only where it is
+  named (#382), and a runner-up equal to its guess is no outcome. Runner-ups come from the
+  drafter's own rows (`IpcDraft::runner_ups`, `split::draft::runner_up_of` — the largest logit
+  but the guess, ties to the first index as every argmax here; the card shortcut stands aside
+  when asked). The spare's guesses are drafted after `c′` (`draft_spare`: the drafter rewound to
+  `k`, `c′` pushed, `SWARMLLM_STREAM_SPARE_GUESSES` drafted, then rewound and the main line put
+  back).
+- **The spare is built AFTER its chunk is sent, while the far end checks it** (`send_spare`): the
+  chunk goes exactly as with spares off — drafted, a chain through this node's layers, sent — and
+  only then is the spare drafted and its rows run as a branch under the row before `k`, a tree
+  that CONTINUES the chunk's cached rows (`near_tree` + `LayerForward::draft_tree_from`, the
+  flow's shape). The first version drafted the spare and ran both in ONE tree forward before the
+  chunk went: every chunk, restarts included, waited for the spare, answers sat 10-12 s a reply
+  before the coordinator took them (3 ms with spares off), and the stream ran 18% slower on the
+  rig. This node's caches then hold the spare's rows past the main line, so the next forward cuts
+  there (`StreamRun::near_cut`);
+  after a TAKEN spare they hold the main line past `k`, so the next pass reads the reply again
+  from `k` (`near_valid_to`, from the frontier's history). A family that cannot read a tree sends
+  no spare; a spare's forward refused turns spares off for the reply (the chunk has already
+  gone). A re-read forward's answer is cut by POSITION in its own encoding (`tensor_util::take_positions`, the inverse of
+  `join_positions`; a Q8_0 row ending inside a block is decoded and sent as f32) — the first
+  version split the bytes into equal parts, which a shape header and Q8_0 blocks never are, and
+  the rig's every check failed on it, spares off included (gotcha #133's class).
+- **A spare goes only where the far end has room for it** (`room_for_a_spare`): main chunks and
+  spares out at once, the pair about to go included, stay within `MAX_STREAM_WINDOW` — the far end
+  holds twice that per stream, the other half for chunks a restart leaves queued. Uncounted, a
+  stream at window 8 would have its spares refused on arrival and fail whenever its check took
+  one (security review, LOW-1). A forward whose branch is refused still restarts its stream when
+  it cuts the cache (`layer_forward::kind_given_up`, LOW-2).
+- **The far end runs a spare only on the refusal it names** (`forward_streams::Order::admit`,
+  `TurnKind::Spare`): the check `of` refused with `kept` guesses kept and `token` drawn — read by
+  `walk_refusal`, the coordinator's own rule mirrored (a walk that kept every guess and drew past a
+  named look-ahead is a refusal at the look-ahead) — and only the first spare for that refusal.
+  Otherwise it is answered `SpareNotNeeded` unrun. A spare supersedes nothing; it is the restart.
+- **Once a spare ran, the stale line is skipped whatever the tail-skip switch** (`Order::stood_on`).
+  With `SWARMLLM_STREAM_TAIL_SKIP=0` a chunk built on the refused guess used to run harmlessly —
+  its answer thrown away, the restart cutting the cache back. Behind a spare that already cut the
+  cache to `k` it would run on the spare's rows instead and leave them in the cache: the switch
+  is a speed A/B, so its off arm must not break the stream.
+- **A chunk after a taken spare names it** (`StreamBranch::AfterSpare`, a cut to the spare's end)
+  and runs only if that spare ran (`SpareMissing`) and no later refusal stood on it. A
+  coordinator that believes the spare ran never has a chunk computed on a cache that did not
+  take it.
+- **Pacing and rounds count the main line**: a spare shares its chunk's `Sent::order`
+  (`note_arrival`'s far-end pace would otherwise read a spare's gap as the far end's speed), and
+  the rounds a reply waited are `turn − (spares sent − spares taken)`.
+
+Gated at the SENDER on `features::STREAM_SPARES` (bit 35), the same lone far segment that walks as
+the look-ahead, greedy replies only (a sampled draw's runner-up under the shared noise is
+FUTURE_WORK #381's residual). The trailer `0x13` is bound into the AAD. It shows the far end
+nothing of a new kind — a restart's guesses already reach it as ids — and a hostile coordinator
+gains nothing: a spare costs the far end at most the restart chunk it could send anyway, inside
+the same stream's slot. **OFF by default; opt-in `SWARMLLM_STREAM_SPARES=1`** — the far end's
+half is always on, so a coordinator can switch them on against any far end of this release.
+
+**Measured** (rig `~/swarmllm-gate/deep/fr/spares381.sh`, 2026-10-30: `split_rig.sh split` in a
+namespace at an emulated 300 ms, Qwen2.5-Coder-7B with A holding part 0 and the 0.5B drafter, B the
+rest, both on the processor, two 160-token greedy replies an arm, arms off/on/on/off, floor 0.08):
+the mechanism fired cleanly — ~150 spares sent a reply, 11-12 run, B skipped the rest unrun and
+built nothing on a missing spare, no stream failed — but the stream ran SLOWER: 83-88 s a reply
+against 70-75 off with the spare built before its chunk, 83-85 against 71-76 with it built after.
+Each spare cost this node ~120 ms (three drafter calls and its rows) during which arrived answers
+waited (18 s a reply against 3 ms off), and 7% of spares ran. The drafter's own score did not
+predict which: spares scored 0.08-0.40 ran 3-11% of the time whatever the score (605 spares), ten
+scored 0.40-0.50 ran eight times — hence the floor of 0.4. Replies: the off arms' and the on arms'
+parted once, at a 0.006-logit near-tie (`score_against_reference.py`: on 160/160 rank-1, off 159
+with " stood" rank 2). The rig leans against spares — both halves share one processor and the 0.5B
+guesses the 7B poorly (17 of 84 chunks kept whole) — so the 70B (3B drafter, 74% kept, its second
+choice right on 60% of misses) is measured once AU runs a release that reads them. What would cut
+the cost: drafting a spare's guesses in the chunk's own drafter calls, as one tree (FUTURE_WORK
+#381's residual). Tests: `a_spare_restart_runs_for_the_refusal_it_names`,
+`a_spare_restart_for_another_outcome_is_skipped`, `a_spare_supersedes_nothing_and_only_one_runs_per_refusal`,
+`a_check_built_on_a_spare_that_did_not_run_is_refused`, `a_check_built_on_a_spare_that_refused_a_guess_is_skipped`,
+`a_taken_spare_skips_the_stale_line_whatever_the_switch` (it and `a_spare_restart_for_another_outcome_is_skipped`
+fail with their rule removed), `a_spare_bets_on_the_refusal_its_drafter_thinks_likeliest`, `a_spares_rows_branch_where_its_guess_stood`,
+`a_greedy_guesses_runner_up_is_its_second_choice`, the `0x13` wire and AAD tests in
+`protocol::{layer_forward,encrypted}`.
+
 **A chunk is guessed whole, and every chunk is the stream's width** (2026-10-26,
 `docs/plans/faster_than_local.md` § 8.6). The drafter's confidence floor (0.4)
 was set for the ROUNDS, where an unsure guess ends a round and saves the far

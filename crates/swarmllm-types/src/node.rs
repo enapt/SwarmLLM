@@ -392,6 +392,16 @@ pub mod features {
     /// open the forward.
     pub const STREAM_LOOKAHEAD: u64 = 1 << 34;
 
+    /// Runs a streamed check's SPARE restarts (#381): a forward carrying
+    /// `LayerForward::stream_branch` (the `0x13` trailer, after `0x12`, bound
+    /// into the AAD) is either a spare — run only where the check it names
+    /// was walked here to refuse the guess it names for the token it names,
+    /// skipped unrun otherwise — or a check built on a spare, refused unless
+    /// that spare ran here. A coordinator sends either only to a tail
+    /// advertising this that walks the checks itself: an older one would
+    /// rebuild the AAD without the trailer and fail to open the forward.
+    pub const STREAM_SPARES: u64 = 1 << 35;
+
     /// The full feature set THIS build implements. Advertised by every node,
     /// with [`KV_HALF_ON_CARD`], [`KV_WINDOW_SLIDES`] and
     /// [`REQUESTER_GUESSES`] beside it where they apply.
@@ -426,7 +436,8 @@ pub mod features {
         | DRAFT_TREE_FLOW
         | SHARD_BUSY
         | RECURRENT_REWIND
-        | STREAM_LOOKAHEAD;
+        | STREAM_LOOKAHEAD
+        | STREAM_SPARES;
 
     /// Does `advertised` include every bit in `needed`?
     pub fn supports(advertised: u64, needed: u64) -> bool {

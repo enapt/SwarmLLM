@@ -489,6 +489,7 @@ pub(super) fn build_spec_verify_forward(
         draft_parents: Vec::new(),
         draft_tree_from: None,
         stream_lookahead: None,
+        stream_branch: None,
     }
 }
 
@@ -1084,6 +1085,7 @@ pub(super) fn build_kv_truncate_forward(
         draft_parents: Vec::new(),
         draft_tree_from: None,
         stream_lookahead: None,
+        stream_branch: None,
     }
 }
 

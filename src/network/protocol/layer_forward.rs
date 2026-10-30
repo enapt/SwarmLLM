@@ -126,6 +126,7 @@ pub fn encode_layer_forward(forward: &LayerForward) -> Result<Vec<u8>, SwarmErro
     append_draft_tree_trailer(&mut buf, forward);
     append_draft_tree_flow_trailer(&mut buf, forward);
     append_stream_lookahead_trailer(&mut buf, forward);
+    append_stream_branch_trailer(&mut buf, forward);
 
     Ok(buf)
 }
@@ -539,6 +540,76 @@ pub(crate) fn read_stream_lookahead_trailer(
     let token = u32::from_le_bytes([data[at], data[at + 1], data[at + 2], data[at + 3]]);
     *cursor += STREAM_LOOKAHEAD_TRAILER_LEN;
     Ok(Some(token))
+}
+
+/// Length of a spare's branch trailer, marker and kind included.
+const STREAM_SPARE_TRAILER_LEN: usize = 14;
+/// Length of an after-spare branch trailer, marker and kind included.
+const STREAM_AFTER_SPARE_TRAILER_LEN: usize = 6;
+
+/// Write the branch trailer: `0x13 | 0 | of u32 | kept u32 | token u32` for a
+/// spare restart, `0x13 | 1 | spare u32` for a check built on one, all LE
+/// (`LayerForward::stream_branch`, #381). Last, after `0x12`, by the ONE
+/// function the plaintext frame, the encrypted frame and the AAD all call.
+/// Set only on a check sent to a tail advertising `features::STREAM_SPARES`.
+pub(crate) fn append_stream_branch_trailer(buf: &mut Vec<u8>, forward: &LayerForward) {
+    let Some(branch) = forward.stream_branch else {
+        return;
+    };
+    buf.push(0x13);
+    match branch {
+        crate::types::StreamBranch::Spare { of, kept, token } => {
+            buf.push(0);
+            buf.extend_from_slice(&of.to_le_bytes());
+            buf.extend_from_slice(&kept.to_le_bytes());
+            buf.extend_from_slice(&token.to_le_bytes());
+        }
+        crate::types::StreamBranch::AfterSpare { spare } => {
+            buf.push(1);
+            buf.extend_from_slice(&spare.to_le_bytes());
+        }
+    }
+}
+
+/// Read the branch trailer (`0x13`) at `cursor`. REFUSED when truncated or of
+/// a kind this build does not know — a frame cut inside a trailer is not a
+/// frame without it, and a branch read as something else would run a check
+/// on rows it was not built on.
+pub(crate) fn read_stream_branch_trailer(
+    data: &[u8],
+    cursor: &mut usize,
+) -> Result<Option<crate::types::StreamBranch>, SwarmError> {
+    if data.len() <= *cursor || data[*cursor] != 0x13 {
+        return Ok(None);
+    }
+    let u32_at =
+        |at: usize| u32::from_le_bytes([data[at], data[at + 1], data[at + 2], data[at + 3]]);
+    let (branch, len) = match data.get(*cursor + 1) {
+        Some(0) if data.len() >= *cursor + STREAM_SPARE_TRAILER_LEN => (
+            crate::types::StreamBranch::Spare {
+                of: u32_at(*cursor + 2),
+                kept: u32_at(*cursor + 6),
+                token: u32_at(*cursor + 10),
+            },
+            STREAM_SPARE_TRAILER_LEN,
+        ),
+        Some(1) if data.len() >= *cursor + STREAM_AFTER_SPARE_TRAILER_LEN => (
+            crate::types::StreamBranch::AfterSpare {
+                spare: u32_at(*cursor + 2),
+            },
+            STREAM_AFTER_SPARE_TRAILER_LEN,
+        ),
+        Some(0 | 1) | None => {
+            return Err(SwarmError::Network("branch trailer truncated".into()));
+        }
+        Some(kind) => {
+            return Err(SwarmError::Network(format!(
+                "branch trailer of unknown kind {kind} refused"
+            )));
+        }
+    };
+    *cursor += len;
+    Ok(Some(branch))
 }
 
 /// Write the decoded-so-far trailer: `0x08 | n(2 LE) | n × id(4 LE)`.
@@ -1000,6 +1071,7 @@ pub fn decode_layer_forward(data: &[u8]) -> Result<LayerForward, SwarmError> {
     let draft_tree_from =
         read_draft_tree_flow_trailer(data, &mut cursor, !draft_parents.is_empty())?;
     let stream_lookahead = read_stream_lookahead_trailer(data, &mut cursor)?;
+    let stream_branch = read_stream_branch_trailer(data, &mut cursor)?;
     let _ = cursor;
 
     Ok(LayerForward {
@@ -1032,6 +1104,7 @@ pub fn decode_layer_forward(data: &[u8]) -> Result<LayerForward, SwarmError> {
         draft_parents,
         draft_tree_from,
         stream_lookahead,
+        stream_branch,
     })
 }
 
@@ -1079,6 +1152,7 @@ mod tests {
             draft_parents: Vec::new(),
             draft_tree_from: None,
             stream_lookahead: None,
+            stream_branch: None,
         }
     }
 
@@ -1942,5 +2016,62 @@ mod tests {
                 "cut {cut} bytes short"
             );
         }
+    }
+
+    /// A spare restart (#381) and a check built on one each survive the wire
+    /// after the look-ahead; a forward with neither is byte-identical to
+    /// before; and a branch cut short, or of a kind this build does not know,
+    /// is REFUSED — read as absent, a spare would run as an ordinary restart.
+    #[test]
+    fn a_streamed_checks_branch_survives_the_wire_and_a_malformed_one_is_refused() {
+        use crate::types::StreamBranch;
+        let mut f = base_forward();
+        f.spec_logits_requested = true;
+        f.spec_walk_at_tail = true;
+        f.draft_tokens = vec![11, 12];
+        f.stream_seq = Some(6);
+        f.stream_lookahead = Some(13);
+        f.truncate_kv_to = Some(f.index_pos);
+        let none = encode_layer_forward(&f).unwrap();
+        for (branch, len) in [
+            (
+                StreamBranch::Spare {
+                    of: 5,
+                    kept: 1,
+                    token: 0xDEAD_BEEF,
+                },
+                STREAM_SPARE_TRAILER_LEN,
+            ),
+            (
+                StreamBranch::AfterSpare { spare: 0xFEED_F00D },
+                STREAM_AFTER_SPARE_TRAILER_LEN,
+            ),
+        ] {
+            let mut with = f.clone();
+            with.stream_branch = Some(branch);
+            let bytes = encode_layer_forward(&with).unwrap();
+            assert_eq!(bytes.len(), none.len() + len);
+            let back = decode_layer_forward(&bytes).unwrap();
+            assert_eq!(back.stream_branch, Some(branch));
+            assert_eq!(
+                back.stream_lookahead,
+                Some(13),
+                "the trailer before it reads"
+            );
+            assert_eq!(back.truncate_kv_to, f.truncate_kv_to);
+            for cut in 1..len {
+                assert!(
+                    decode_layer_forward(&bytes[..bytes.len() - cut]).is_err(),
+                    "{branch:?} cut {cut} bytes short"
+                );
+            }
+            let mut unknown = bytes.clone();
+            unknown[none.len() + 1] = 2;
+            assert!(
+                decode_layer_forward(&unknown).is_err(),
+                "a kind this build does not know"
+            );
+        }
+        assert_eq!(decode_layer_forward(&none).unwrap().stream_branch, None);
     }
 }

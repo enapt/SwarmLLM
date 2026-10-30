@@ -1053,7 +1053,11 @@ answer. What was measured or ruled out:
    drafter's second choice is the 70B's token in 60% of its misses (teacher-forced replay of six
    70B replies, calibrated against the live alpha and restart count), so a restart prepared before
    the verdict and left at the far end would catch 28% (one spare a chunk) to 60% (one at every
-   position) of them → FUTURE_WORK #381, ~+15% expected with two spares a chunk.
+   position) of them → FUTURE_WORK #381, ~+15% expected with two spares a chunk. **Built
+   2026-10-30 with ONE spare a chunk, off by default**: on the two-node rig (0.5B drafter, one
+   shared processor) it ran 14-18% slower — ~120 ms of this node a spare, 7% of spares run — so
+   the 70B is measured with `SWARMLLM_STREAM_SPARES=1` once AU runs a release that reads them
+   (`docs/invariants/network.md` § "A likely refusal's restart is at the far end").
 
 ## Sources
 
