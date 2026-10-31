@@ -92,8 +92,8 @@ the top track (`docs/plans/large_model_splits.md`).
    match its first choice 81%, 85%, 86% (2.98, 3.07, 3.12 tokens a check at three guesses,
    `examples/drafter_ranks.py`). The stream's guesses a chunk, read that day as no lever from a
    model of the stream, was one live: 3 or 5 chosen per chunk (#374/#375, v0.3.262) took ~7% off a
-   reply. Spare restarts at the far end (#381, v0.3.264, off by default) are measured next. What is
-   left is where its layers sit: the far side runs ~44 of
+   reply. Spare restarts at the far end (#381, v0.3.264, off by default) measured even on the 70B
+   (2026-10-31: 2.46 against 2.49 tok/s), so they stay off. What is left is where its layers sit: the far side runs ~44 of
    its 64 layers on a processor (~70 ms a row), which also keeps trees off
    (`faster_than_local.md` § 8, the 70B deep dive). The track's history
    (near chains #192, the far chain #346, trees #134, the stream, tensor-core MMQ #325, requester
@@ -3030,7 +3030,7 @@ only ~50-100 ms on a card head with a short prompt, against six send sites in th
 prompt). Parked behind #381, which is where the 70B's time goes.
 
 #### #381 — A refused guess leaves a far processor idle for a round trip: send it the likely restart beforehand
-`P2` · perf-split / 70B · **BUILT, OFF BY DEFAULT — residual open** — 2026-10-30 · history: #149, § 8.2's tail skip, SSD (2603.03251)
+`P3` · perf-split / 70B · **BUILT, OFF BY DEFAULT — measured even on the 70B, parked** — 2026-10-30 · history: #149, § 8.2's tail skip, SSD (2603.03251)
 
 **Built 2026-10-30** (mechanism and measurement: `docs/invariants/network.md` § "A likely
 refusal's restart is at the far end before the refusal"): `LayerForward::stream_branch` (trailer
@@ -3047,10 +3047,20 @@ replayed over six of the 70B's replies, 1.07-1.10x against no spares where the o
 gave 1.01x; `SWARMLLM_STREAM_SPARE_MIN` is now the fixed-floor A/B. On a far-bound CPU rig
 (Llama-3.1-8B + 1B, 200 ms) it read about even: 1.5% behind no spares, 1.2% ahead of a 0.2 floor.
 **Residual**:
-1. **Measure the 70B** once AU runs v0.3.264+ (published 2026-10-31, the first advertising bit 35):
-   `SWARMLLM_STREAM_SPARES=1` against off on this node (`~/swarmllm-70b/ab70spares.sh`, arms
-   off/on/on/off, same three prompts each), judged by restarts that waited, tok/s and
-   `spares_declined` / `spare_ms`. Default on only where it pays. **Tried twice, no verdict yet**:
+1. **Measured on the 70B: even, so spares stay off** (2026-10-31 04:03-05:02Z, v0.3.264 both
+   ends, `~/swarmllm-70b/ab70spares.sh`: this laptop + AU's RTX 3060, every reply on those two;
+   arms off/on/on/off, four asks an arm — 32 tokens, then three of 96). Mean decode, arm by arm:
+   off 2.61 and 2.37 tok/s, on 2.47 and 2.45 — 2.46 against 2.49, inside the 10% the two off arms
+   differ by. Where the reply was the same text: ask 0 off 2.37/1.76, on 2.09/1.75; ask 2 off
+   3.99/3.77, on 3.64/4.00 (none of its 18-22 spares ran); ask 1 off 1.71, on 1.80 (9 spares ran,
+   round trips waited 43 against 49). Spares ran 15-16 of 85-90 sent an arm, at 298-345 ms of this
+   node each, and arrived answers waited 1.1-5.0 s a reply (off: 0-0.7 s). The replay had put the
+   priced spares at 1.07-1.10x; live they are ~1.0x, and (2)'s cheaper spare is worth ~2% in the
+   same replay, so it cannot close that. Two replies changed wording between arms at a near-tie
+   (one change was between the two OFF arms), so their speeds were not compared. **Parked**: reopen
+   only where a restart costs this node clearly more than one far check, or with a spare that costs
+   it nothing while answers wait. The far end's half stays on (it costs nothing unless a
+   coordinator sends spares). **Earlier attempts**:
    2026-10-31 01:54Z, cut by a card fault after arm 2, and the off arm's replies went through three
    machines; 03:12Z (rig pinned to this node + AU), stopped in arm 1 — AU's room fell from 68 layers
    to 51-54 between two asks (its 70B unloaded, budget 27,230 MB, likely its owner's use; its
@@ -3058,7 +3068,7 @@ gave 1.01x; `SWARMLLM_STREAM_SPARE_MIN` is now the fixed-floor A/B. On a far-bou
    With AU that small the 70B needs a third machine, and a spare goes only to a LONE far segment,
    so the A/B waits for AU to offer [≤16, 80) again. The arm-1 reply that ran ([0,12) + [12,80),
    AU's card at 15 layers) read 1.45 tok/s — AU's load, not a reading of .264.
-1a. **More rig replies, the same text either way**: with an identical reply, spares took 80.0 s
+1a. **More rig replies, the same text either way** (superseded by (1)'s live answer): with an identical reply, spares took 80.0 s
    against 81.0-82.9 s without (one steady reply an arm, § "Which spares go"). Repeat with
    several prompts before reading a percentage off it. A rig prompt whose spare reply differs in
    wording (a near-tie) measures different work; check the reply hashes first. Settled
@@ -3068,7 +3078,7 @@ gave 1.01x; `SWARMLLM_STREAM_SPARE_MIN` is now the fixed-floor A/B. On a far-bou
 2. **Draft a spare's guesses in the chunk's own drafter calls** — one tree, the runner-up's branch
    grown beside the main line (below). Replayed: a spare at ~210 ms instead of ~312 lifts the
    priced spares from 1.10x to 1.12x; reading its rows in the next chunk's forward too (~120 ms),
-   1.13x. Worth it only once (1) shows the priced spares pay live.
+   1.13x. Worth it only once (1) shows the priced spares pay live — and (1) did not (2026-10-31).
 3. **Sampled replies**: the runner-up under the shared noise (the second-best of `logit/T + g` among
    the request's candidates, `sampling::draw_among_candidates`); the far end's match is unchanged.
 4. **Runner-ups on the card path**: `argmax_guesses_on_card` stands aside when they are asked for.

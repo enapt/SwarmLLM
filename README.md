@@ -170,7 +170,7 @@ model guesses the next few words and the big one checks them all at once.
 | Qwen2.5 14B, about half on this laptop and half in Australia | 16–29 writing code, 6.1–10 writing prose | v0.3.261 |
 | Qwen2.5 14B, the same, set to "Start and finish on this computer" | 13–20 writing code, 5.4–8.9 writing prose | v0.3.264 |
 | Qwen2.5 14B, split three ways: this laptop, the laptop in Europe and the computer in Australia | 12–14 writing code, 4.4–4.9 writing prose | v0.3.261 |
-| Llama 3.3 70B, this laptop and the computer in Australia, new questions | 2.0–2.3 | v0.3.261 |
+| Llama 3.3 70B, this laptop and the computer in Australia, new questions | 2.4–2.6 | v0.3.264 |
 | Llama 3.3 70B, four computers in Thailand, Australia and Italy, a question asked again | 1.9–2.0 | v0.3.255 |
 
 On code, two computers on different continents were faster than this laptop

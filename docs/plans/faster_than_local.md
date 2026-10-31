@@ -1065,7 +1065,12 @@ answer. What was measured or ruled out:
    over this reply's arrival errors (`dsd_stream::spare_pays`): 1.07-1.10x replayed over six
    70B replies; 80.0 s against 81.0/82.9 s on the 8B rig with the same reply either way
    (`docs/invariants/network.md`, "A likely refusal's restart is at the far end before the
-   refusal" and "Which spares go: priced, not floored").
+   refusal" and "Which spares go: priced, not floored"). **Measured on the 70B itself (2026-10-31,
+   v0.3.264 both ends): even** — 2.46 tok/s with spares against 2.49 without, arms off/on/on/off,
+   inside the 10% the two off arms differ by; 15-16 of ~90 spares an arm ran, at ~300-345 ms of
+   this node each, while arrived answers waited 1.1-5.0 s a reply. They stay off and #381 is parked:
+   the replay that promised 1.07-1.10x reads ~1.0x live, so the restart cycle is not where the
+   next 10% of the 70B is.
 
 ## Sources
 

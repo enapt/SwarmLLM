@@ -3708,6 +3708,16 @@ worked no more (77.9 against 76.7-78.1). 6 of 56-62 spares ran, of 35 restarts. 
 On this rig a restart costs ~0.5 of a far check; on the 70B ~1.0, where the replay put the
 priced spares at 1.07-1.10x. A/B `SWARMLLM_STREAM_SPARE_LATENESS=0`; logged `answer_late_ms`.
 
+**On the 70B itself, even — so the coordinator's half stays off** (2026-10-31, v0.3.264 at both
+ends, `~/swarmllm-70b/ab70spares.sh`: this laptop + AU's RTX 3060, ~420 ms; arms off/on/on/off,
+four asks an arm). Mean decode: off 2.61 and 2.37 tok/s, on 2.47 and 2.45. On the asks whose text
+matched across arms the spares were level (ask 2: 3.99/3.77 off, 3.64/4.00 on, none of 18-22 spares
+run) or slightly ahead (ask 1: 1.80 against 1.71, 9 run, round trips waited 43 against 49). An arm
+sent 85-90 spares and ran 15-16, each ~300-345 ms of this node, and arrived answers waited 1.1-5.0 s
+a reply (off 0-0.7 s): what a run spare saves, the ones that do not run spend. The replay's
+1.07-1.10x is ~1.0x live. Two replies changed wording at a near-tie, one of them between the two
+OFF arms, so a changed wording here is not the spares' doing.
+
 Tests: `a_spare_restart_runs_for_the_refusal_it_names`,
 `a_spare_restart_for_another_outcome_is_skipped`, `a_spare_supersedes_nothing_and_only_one_runs_per_refusal`,
 `a_check_built_on_a_spare_that_did_not_run_is_refused`, `a_check_built_on_a_spare_that_refused_a_guess_is_skipped`,
