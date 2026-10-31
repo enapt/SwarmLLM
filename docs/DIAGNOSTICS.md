@@ -2091,6 +2091,21 @@ A/B inside one binary: `SWARMLLM_PREFIX_CACHE_HOME=card` (the behaviour before #
 2026-10-13 four rounds a side read three rises after the first prompt on the card and none
 in host RAM, at 59-169 ms a copy.
 
+**Is the DRIVER running out while the budget reads comfortable?** (FUTURE_WORK #385, fixed in
+v0.3.265.) The budget is driver free + the pool's unused part, so the sum can stay above the
+margin while the driver's own free memory falls to nothing — a native card then ends in
+`CUDA_ERROR_OUT_OF_MEMORY`; under WSL2 Windows lends host memory instead (the card's "shared"
+use grows). Read `device_free_mb` and `pool_reserved_mb` on `DIAG: card memory reading` (`-v`):
+a reservation climbing in 32 MB steps while `pool_used_mb` stays flat and `device_free_mb`
+falls is the creep. Since v0.3.265,
+`DIAG: card pool handed idle memory back to keep the driver's margin` (debug) fires each time
+the reading gives back the shortfall — `released_mb`,
+`driver_free_mb`, `driver_free_after_mb`, `margin_mb`, `pool_reserved_mb`, `pool_used_mb`.
+A/B inside one binary: `SWARMLLM_CUDA_POOL_MARGIN=0` turns the hand-back off. A repro needs the
+report's RATIO of a saved prompt to the margin, not just a long chat (gotcha #1004): 20 min of
+~3,100-token prompts on Llama-3.1-8B, 8 GB card, took driver free 721 → 64 MB with it off and
+held 384-416 MB with it on (`docs/invariants/memory.md` § "The driver's margin, measured (2026-10-31, FUTURE_WORK #385)").
+
 ## Attention-kernel A/B — `SWARMLLM_FORCE_STANDARD_ATTN=1`
 
 Forces every attention call in the process onto `standard_attention`, so the

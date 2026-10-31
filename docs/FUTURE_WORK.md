@@ -33,14 +33,19 @@ residual).
 
 ## ▶ PRIORITIES — read this first
 
-Re-ranked 2026-10-29 after v0.3.261 (released 2026-10-29). Since the 2026-10-26 ranking
-(v0.3.256), v0.3.257-v0.3.261 shipped the split stream without its hold (v0.3.257), card guesses
-for a card/processor split (#366, v0.3.260), the boomerang's far-run guesses and its flow (#366
-(4), #369), split prices read from the round trips a reply waited, and a drafter of the target's
-own release line (#370), all in v0.3.261; item 6 is rewritten from that release's measurements.
-What each release carried is in § "Closed" and `CHANGELOG.md`; the running log of re-rankings
-from 2026-10-02 moved word for word to the archive, § "PRIORITIES re-rank log". Only OPEN work is
-listed here. `docs/plans/` holds the multi-step designs; the entries point at them.
+Re-ranked 2026-10-31 after v0.3.265 (released 2026-10-31). Since the 2026-10-29 ranking
+(v0.3.261), v0.3.262 shipped the split stream's chunk width (#374/#375, ~7% off a 70B reply), the
+small drafter on the processor (#373), `response_format` held on a model run whole (#336), a saved
+prompt making room before its copy (#367), spare copies for parts of large models (#371) and a head
+passed over only for its own refusal (#372); v0.3.264 a whole-model refusal held to N−1 layers
+(#378), the boomerang's batched tail (#369), swarm checks on the contribution width (#379), the far
+end told the look-ahead (#382), the drafter's room priced on the first range (#376) and spare
+restarts, measured even on the 70B and left off (#381); v0.3.265 the 2026-10-31 field report
+(#384-#387: a processor pin that ends, a card pool that gives idle memory back under the driver's
+margin, refusals that name each computer's room). #369 is listed on its own (P1) and item 7 is
+rewritten. What each release carried is in § "Closed" and `CHANGELOG.md`; earlier rankings moved
+word for word to the archive, § "PRIORITIES re-rank log". Only OPEN work is listed here.
+`docs/plans/` holds the multi-step designs; the entries point at them.
 **2026-10-20:** #318 goes first among P2 by the user's direction: running models too large for
 any one member at a usable speed is what the swarm is for, so split speed for large models is
 the top track (`docs/plans/large_model_splits.md`).
@@ -64,47 +69,40 @@ the top track (`docs/plans/large_model_splits.md`).
    far peers instead of answering locally. Its causes closed in v0.3.236 and v0.3.239; left: the
    prompt priced on the processor prior for a card/processor split, and a far hop priced at
    `net:0` (with #3). Passive: the next evidence is a field `predicted_terms` line.
+6. **#369** — "Start and finish on this computer" runs AUTOMATICALLY wherever a node holds both
+   ends of a model, and flows since v0.3.261, but ~1.1x behind the default shape at the same split
+   on prose (~1.2x on code, inside the default shape's own spread); v0.3.264's batched tail added
+   6% on prose. **Next**: the drafter's call (`faster_than_local.md` § 10 item 10: ~0.14-0.2 ms a
+   layer of host recording into each graph capture — replay a level without re-recording), then
+   the dead wait (built, off: forwards queued 630-923 ms; pace the sends).
 
 **P2 — speed and completeness**, ranked by how many users meet it in their first hour
-6. **#318** — a model no single member can hold, at a usable speed. **Measured on v0.3.261
-   (2026-10-29), Llama-3.3-70B on new questions: 1.97-2.29 tok/s, first token 5.4-5.6 s warm**
-   (v0.3.256: 1.29-1.47 and 9-10 s, same three questions, word-identical replies). The plan is
-   now two machines, this one (8 GB card + processor) and an RTX 3060 in Australia (~420 ms),
-   where v0.3.256 used four (TH, TH, AU, IT); the continuous stream checks the 3B drafter's
-   guesses (on this machine's processor: the card is full of the 70B) and keeps 78-88% of them,
-   2.2-2.3 tokens a round trip of ~1.2-1.3 s. Trees and the flow need every segment and the
-   drafter on a card, so the 70B never flows. The planner predicted each 70B reply at ~2.4x its
-   real time (mostly its network term): the stream's rounds do reach the price, but only after
-   four splits since the node started — every update restarted the count (#3 (g), fixed
-   2026-10-29); the round itself is still priced ~1.7x (#3 (h)). A 14B split evenly between this machine's card and the same 3060 flows at
-   29.2-29.9 tok/s on code, twice this machine's whole-14B speed (13.6-15.4), and 9.2-10.0 on
-   prose; a chain that starts and finishes here flows since v0.3.261 (#369, ~1.2x its tree
-   rounds, ~1.1-1.2x behind the default shape as measured on v0.3.261; v0.3.264's batched tail
-   added 6% on prose on a calm link, the gap since unmeasured). Prose is held by the drafter's
-   first-choice rate: the general 0.5B misses 17-20 times a 160-token reply where the coder's
-   0.5B missed 30-35 (#370). Three cards chained (this one, an RTX 4050 laptop in Europe at
-   ~230 ms, the 3060) flowed at 12.4-14.3 tok/s on code and 4.4-4.9 on prose, against 15.7-20.9
-   and 6.1-7.3 for the two-card split run alongside (2026-10-29, v0.3.261, four runs each): the
-   check crosses three links (~600 ms against ~480) and a chain's window of 8 forwards carried
-   7-12 rows each against 18-25, so a third machine pays only where it holds what two cannot. **Next**: tokens a round past the drafter (`large_model_splits.md`
-   step 4, a drafter fed by the model's own state). For the 70B, a larger or smaller guesser is not
-   a lever (2026-10-29): on 747 positions of its own replies the Llama 3.2 1B, 3.2 3B and 3.1 8B
-   match its first choice 81%, 85%, 86% (2.98, 3.07, 3.12 tokens a check at three guesses,
-   `examples/drafter_ranks.py`). The stream's guesses a chunk, read that day as no lever from a
-   model of the stream, was one live: 3 or 5 chosen per chunk (#374/#375, v0.3.262) took ~7% off a
-   reply. Spare restarts at the far end (#381, v0.3.264, off by default) measured even on the 70B
-   (2026-10-31: 2.46 against 2.49 tok/s), so they stay off. What is left is where its layers sit: the far side runs ~44 of
-   its 64 layers on a processor (~70 ms a row), which also keeps trees off
-   (`faster_than_local.md` § 8, the 70B deep dive). The track's history
-   (near chains #192, the far chain #346, trees #134, the stream, tensor-core MMQ #325, requester
-   guesses) is in the #318 entry and § "Closed". **Holding the parts**: since #371 (closed
-   2026-10-29) a full machine gives back a spare copy for its part of a chain and for a part of a
-   large model too few computers hold; whether the 6 GB laptop in Europe that held 14 models and no
-   part of the 70B takes some is read from its `hosted_models` after the next release.
-7. **#115** — the rest of Gemma 4: its image reader and its drafters, refused by name today,
+7. **#318** — a model no single member can hold, at a usable speed. **Llama-3.3-70B on two
+   machines — this one (8 GB card + processor) and an RTX 3060 in Australia (~420 ms) — reads
+   2.37-2.61 tok/s on new questions (v0.3.264, 2026-10-31 04Z) and 1.81-2.22 (v0.3.265, 12Z, the
+   same setup), first token ~5 s warm** (v0.3.256 on four machines: 1.29-1.47 and 9-10 s). The same
+   setup moves ~25% with the hour, so a 70B figure is compared only inside one interleaved sitting.
+   The stream checks the 3B drafter's guesses on this machine's processor (the card is full of the
+   70B) and keeps 78-88% of them; trees and the flow need every segment and the drafter on a card,
+   so the 70B never flows. Not levers for it: a larger or smaller guesser (the Llama 1B, 3B and 8B
+   match its first choice 81%, 85%, 86%, `examples/drafter_ranks.py`) and spare restarts at the far
+   end (#381: 2.46 against 2.49 tok/s, left off); the stream's guesses a chunk was one (3 or 5 a
+   chunk, #374/#375, ~7% off a reply). **What is left is where its layers sit: the far side runs ~44
+   of its 64 layers on a processor (~70 ms a row, `faster_than_local.md` § 8).** **Next**: a third
+   CARD — a swarm peer's RTX 3080 Ti in the US (12 GB, joined 2026-10-31) could take ~20-25 of them
+   if it holds those parts (#371 gives spare copies back for a large model too few computers hold);
+   then tokens a round past the drafter (`large_model_splits.md` step 4). Its planning residuals: a
+   head holding it whole declining to lead (#372), the drafter's room on a near-full card (#376).
+   On a 14B: split evenly between this machine's card and the 3060 the flow runs 29.2-29.9 tok/s on
+   code, twice this machine's whole-14B speed (13.6-15.4), and 9.2-10.0 on prose; three cards (+ an
+   RTX 4050 in Europe, ~230 ms) 12.4-14.3 and 4.4-4.9 against 15.7-20.9 and 6.1-7.3 for two — a
+   third machine pays only where it holds what two cannot, which is the 70B's case. The track's
+   history (near chains #192, the far chain #346, trees #134, the stream, tensor-core MMQ #325,
+   requester guesses) is in the #318 entry and § "Closed".
+8. **#115** — the rest of Gemma 4: its image reader and its drafters, refused by name today,
    never loaded wrong. (Gemma 3 reads pictures as llama.cpp does since 2026-10-19; Gemma 4's
    E2B/E4B run since 2026-10-17 and fit a 4 GB / 6 GB card whole since #296.)
-8. **#91** — an idle node's upload (the complaint that uninstalls a P2P app): 5.5 KB/s on the .241
+9. **#91** — an idle node's upload (the complaint that uninstalls a P2P app): 5.5 KB/s on the .241
    fleet (6.7 on .240, 8.8 on .239), measured 2026-10-17. Manifests now arrive about once an hour
    (0.83 a minute before (2)), and a restart no longer re-gossips them ((2c), v0.3.242). The part
    that is not gossip is 2.5 KB/s on 10-18 (4.1 out), and our own direct messages are only 0.19 of it
@@ -115,7 +113,7 @@ the top track (`docs/plans/large_model_splits.md`).
    v0.3.244) read on the field 10-19: upload 2.4 KB/s, Kademlia answers 0.51 KB/s, every one a
    `find_node` — peers' routing-table refreshes. (2h) refreshes every 10 min instead of 5 (released in
    v0.3.245); next, re-read once the fleet runs it, then the answers' size.
-9. **#3**, **#180** — the routing cost model mis-prices a split by regime, which keeps partial
+10. **#3**, **#180** — the routing cost model mis-prices a split by regime, which keeps partial
     ranges off. Fit on three peers 2026-10-18: a short reply's `max_tokens` now caps the passes
     (16-token replies 0.49 → 0.97 of their price), a long one is priced at its model's mean
     reply length (160-token replies were 2.5x their price), and a chain its head leads is priced
@@ -126,19 +124,20 @@ the top track (`docs/plans/large_model_splits.md`).
     rounds it takes, a guessed token not crossing alone (#3 (d), 0.49 → 0.77 of its price on the
     drafter rig), 10-19, all in v0.3.244; next, a chain driven from here (#3 (a2)). Never tune the
     constant.
-10. **#10**, **#171** — conversation prefixes across computers (no digests gossiped, caches end at
+11. **#10**, **#171** — conversation prefixes across computers (no digests gossiped, caches end at
     the 10-minute expiry), and a split's prompt pieces chained between two peers.
-11. **#138**, **#129** — a model that does not fit the card (MoE and a split's prompt stages
+12. **#138**, **#129** — a model that does not fit the card (MoE and a split's prompt stages
     shipped in v0.3.235-v0.3.237; the entries hold what is left), and a near-fit model sent far.
-12. **#228** — Qwen 3.5 guesses ahead on one computer (processor and card) and through a split's n-gram loop (bit 33) since 2026-10-25; the drafter's paths and MTP still stay off — a checkpoint replayed across steps, #228 (5).
-13. **#30** — the plaintext-prompt trust bar sits at the score an unknown peer starts on: a policy
+13. **#228** — Qwen 3.5 guesses ahead on one computer (processor and card) and through a split's n-gram loop (bit 33) since 2026-10-25; the drafter's paths and MTP still stay off — a checkpoint replayed across steps, #228 (5).
+14. **#336** — tool calls, and `response_format` on a split or a peer's whole-model hand-off, are
+    checked only after they are written, so an agent driving a small model meets malformed calls.
+    `response_format` is held on a model run whole since v0.3.262 (llguidance); next, a feature bit
+    and far-end masking for a split, then tool calls as a lazy grammar (`faster_than_local.md` § 7.1).
+15. **#30** — the plaintext-prompt trust bar sits at the score an unknown peer starts on: a policy
     decision, with research, when picked up.
-14. **#326** — on a card newer than a release's machine code (Hopper, Blackwell: RTX 50-series),
+16. **#326** — on a card newer than a release's machine code (Hopper, Blackwell: RTX 50-series),
     the first reply waits ~2 min while the driver compiles flash attention's PTX (MMQ's ~8 s a
     weight type), then it is cached. Correct since the PTX went in (before: wrong output).
-15. **#336** — tool calls, and `response_format` on a split, are not enforced, so an agent driving
-    a small model meets malformed calls (filed 2026-10-24; `response_format` held on a model run
-    whole since 2026-10-30; `faster_than_local.md` § 7.1).
 
 Everything else is ranked in its own entry. **P3** is narrow or cosmetic, **P4** is process,
 maintenance or an idea with no user waiting on it.
@@ -2416,6 +2415,15 @@ it, the verdict sent to every segment so dead rows are dropped before they are c
 EAGLE-3 taps where a head is published; (5) an MoE tree priced by the experts it touches; (6)
 regional chains (#192); (7) the opt-in fast mode. The plan records one retracted projection
 (~40 tok/s across continents, from treating the miss rate as free).
+
+**2026-10-31 (v0.3.264-v0.3.265), the 70B on two machines** (this one [0,15) + the Australian
+3060 [15,80), `swarm_route`, three new questions of 96 tokens an arm, arms interleaved): 2.37-2.61
+tok/s at 04Z on v0.3.264 and 1.81-2.22 at 12Z on v0.3.265 — the same setup, and the 12Z arms read
+the same with v0.3.265's memory change on and off, so the spread is the hour (the link and the far
+machine's load), not a build. Compare a 70B figure only inside one interleaved sitting. Spare
+restarts (#381) measured even and stay off. **Next: a third card for the far side's ~44
+processor-held layers** — a swarm peer's RTX 3080 Ti in the US (12 GB, joined 2026-10-31), if it
+holds those parts; read its holdings and its round trip from both ends first.
 
 #### #10 — Conversation prefixes across computers: a cache this node did not fill is invisible
 `P2` · perf-split · **PARTIAL** — 2026-09-07 · absorbs #139 and archive § "Speeding up inference BETWEEN nodes" idea 1 (prefix-keyed remote KV); history: archive row #10 and § "A conversation's later turns do not seek out the peer holding its prefix"
