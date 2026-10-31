@@ -1057,7 +1057,11 @@ answer. What was measured or ruled out:
    2026-10-30 with ONE spare a chunk, off by default**: on the two-node rig (0.5B drafter, one
    shared processor) it ran 14-18% slower — ~120 ms of this node a spare, 7% of spares run — so
    the 70B is measured with `SWARMLLM_STREAM_SPARES=1` once AU runs a release that reads them
-   (`docs/invariants/network.md` § "A likely refusal's restart is at the far end").
+   (v0.3.264, published 2026-10-31). Since then a spare goes only where it is PRICED to pay,
+   over this reply's arrival errors (`dsd_stream::spare_pays`): 1.07-1.10x replayed over six
+   70B replies; 80.0 s against 81.0/82.9 s on the 8B rig with the same reply either way
+   (`docs/invariants/network.md`, "A likely refusal's restart is at the far end before the
+   refusal" and "Which spares go: priced, not floored").
 
 ## Sources
 

@@ -3044,8 +3044,9 @@ replayed over six of the 70B's replies, 1.07-1.10x against no spares where the o
 gave 1.01x; `SWARMLLM_STREAM_SPARE_MIN` is now the fixed-floor A/B. On a far-bound CPU rig
 (Llama-3.1-8B + 1B, 200 ms) it read about even: 1.5% behind no spares, 1.2% ahead of a 0.2 floor.
 **Residual**:
-1. **Measure the 70B** once AU runs a release advertising bit 35: `SWARMLLM_STREAM_SPARES=1` against
-   off on this node (`~/swarmllm-70b/ask70novel.sh`), judged by restarts that waited, tok/s and
+1. **Measure the 70B** once AU runs v0.3.264+ (published 2026-10-31, the first advertising bit 35):
+   `SWARMLLM_STREAM_SPARES=1` against off on this node (`~/swarmllm-70b/ab70spares.sh`, arms
+   off/on/on/off, same three prompts each), judged by restarts that waited, tok/s and
    `spares_declined` / `spare_ms`. Default on only where it pays.
 1a. **More rig replies, the same text either way**: with an identical reply, spares took 80.0 s
    against 81.0-82.9 s without (one steady reply an arm, § "Which spares go"). Repeat with

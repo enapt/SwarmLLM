@@ -148,15 +148,15 @@ test computer, a laptop with an 8 GB NVIDIA RTX 3070 graphics card and an
 the version it was measured on.
 
 <!-- release-check:begin -->
-**On one computer**: the v0.3.262 release check, run on the downloaded release. Each
+**On one computer**: the v0.3.264 release check, run on the downloaded release. Each
 model reads a 1,800-token document and writes 128 tokens about it.
 
 | Model | Runs on | Writing (tokens a second) | Reading (tokens a second) |
 |---|---|---|---|
-| Qwen2.5 Coder 7B | the graphics card | 57 | 1,750–1,770 |
-| Qwen2.5 14B | card and processor together (too big for the card) | 11.0–12.0 | 390 |
-| Qwen3 30B-A3B (2-bit) | card and processor together (a mixture of experts, too big for the card) | 16.8–19.0 | 120–130 |
-| Llama 3.2 3B | the processor only | 14.9 | 70 |
+| Qwen2.5 Coder 7B | the graphics card | 59 | 1,840–1,860 |
+| Qwen2.5 14B | card and processor together (too big for the card) | 13.1–14.6 | 600–630 |
+| Qwen3 30B-A3B (2-bit) | card and processor together (a mixture of experts, too big for the card) | 20.6–22.5 | 240–250 |
+| Llama 3.2 3B | the processor only | 13.4–15.5 | 70 |
 <!-- release-check:end -->
 
 **Across computers**: the same laptop in Thailand, teamed up with volunteers'
