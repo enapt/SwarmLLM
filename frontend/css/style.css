@@ -4530,7 +4530,6 @@ textarea.pool-code-input { min-height: 4.5em; }
 .compare-results.cols-3 { grid-template-columns: 1fr 1fr 1fr; }
 .compare-results.cols-4 { grid-template-columns: 1fr 1fr 1fr 1fr; }
 .compare-results.cols-many { grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); }
-.compare-card-meta { font-size: var(--fs-sm); color: var(--text-muted); display: flex; gap: 10px; }
 .compare-card-body.error { color: var(--red-text); }
 .compare-spinner {
   display: flex; align-items: center; justify-content: center; gap: 8px;

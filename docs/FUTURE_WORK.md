@@ -2975,7 +2975,7 @@ most at 1,766 tokens — under 410. A margin of max(5%, measured peak × 1.25) n
 not shipped.
 
 **Leading hypothesis (untested):** the budget counts the memory pool's idle bytes as free
-(`kv_budget_now`: the driver's free memory plus `pool_reusable`, 620-940 MB here), but the pool
+(`kv_budget_now`: the driver's free memory plus `pool_reusable_mb`, 620-940 MB here), but the pool
 serves an allocation only from a block of its size — a snapshot or a forward of another size takes
 new memory from the driver, whose free memory falls below the margin while the "reusable" bytes
 stay. **Next:** log per turn the driver's free memory, the pool's reserved/used/reusable and the

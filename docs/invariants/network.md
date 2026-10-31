@@ -3505,7 +3505,7 @@ only to a peer advertising `features::STREAM_AS_ONE_WORK`.
 
 **A refusal walked at the tail skips what stood on it, before the restart
 arrives** (2026-10-26). The tail knows a check refused a guess the moment its
-own walk ends (`layer_forward::walk_refused_a_guess`: a walk of `g` guesses
+own walk ends (`layer_forward::walk_refusal`: a walk of `g` guesses
 answers `g + 1` tokens only when it kept all of them), and the coordinator
 restarts after every refused check (`dsd_stream::take_answer` cuts the
 frontier back; a chunk without a look-ahead had nothing sent after it). So
@@ -3537,7 +3537,7 @@ after `0x11`, bound into the AAD) to a LONE far segment that walks and
 advertises `features::STREAM_LOOKAHEAD` (bit 34; `dsd_stream::lookahead_to_send`
 — an older tail would rebuild the AAD without the trailer and fail to open the
 forward; a chained run's tail is a hop away and nothing hands it on), and
-`walk_refused_a_guess` reads a whole walk whose last token is not the named
+`walk_refusal` reads a whole walk whose last token is not the named
 look-ahead as a refusal — the coordinator's own rule, mirrored. It shows the
 far end nothing of a new kind: a tail that walks is sent the chunk's other
 guesses as ids (the drafter's; the stream copies no text) and draws the reply

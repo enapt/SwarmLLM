@@ -277,11 +277,18 @@ impl PipelineExecutor {
     pub(super) async fn execute_local(&self) -> Result<InferenceOutput, SwarmError> {
         let prompt = self.build_prompt().await;
 
-        // Check if speculative decoding is available
-        if self.shared_state.config.inference.speculative_decoding {
+        // Check if speculative decoding is available. Both settings are read
+        // live: a reload of config.toml changes them (dsd.rs reads the same way).
+        let (speculative, gamma) = {
+            let cfg = self.shared_state.cfg();
+            (
+                cfg.inference.speculative_decoding,
+                cfg.inference.guesses_per_check(),
+            )
+        };
+        if speculative {
             let mut draft = self.shared_state.draft_executor.lock().await;
             if draft.is_loaded() {
-                let gamma = self.shared_state.config.inference.guesses_per_check();
                 let mut executor = self.shared_state.executor.lock().await;
                 if !executor.is_loaded() {
                     return Err(SwarmError::NoModelLoaded);

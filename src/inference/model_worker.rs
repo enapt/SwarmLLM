@@ -4565,17 +4565,6 @@ fn positions_beside_live(
     plan.positions
 }
 
-/// Make sure the whole prompt's KV can live on the device BEFORE prefill
-/// starts — evicting cached prompts first, refusing second (gotcha #440).
-///
-/// Called after the prefix-cache lookup and before hydration, at both entry
-/// points (sequential and batched), because hydration is itself an
-/// allocation of the matched prefix. The prefix cache's snapshots are the
-/// same device memory as the live caches and were charged nowhere; on an
-/// 8 GB card the second long prompt's cache landed in host-backed memory
-/// and decoded at 3-5 tok/s where an empty card did 19-33. A refusal here
-/// is a 503 the coordinator can route elsewhere, at token 0, with nothing
-/// half-built.
 /// Refuse a segment's prompt pass that is longer than this node serves —
 /// the WHOLE prompt, before any layer runs.
 ///
@@ -4599,10 +4588,6 @@ fn refuse_a_prompt_past_the_served_context(
     Ok(())
 }
 
-/// `reply_positions` is the reply's reserve — [`reply_reserve_positions`] of
-/// the granted budget where the worker knows it, [`REPLY_RESERVE_POSITIONS`]
-/// where it cannot (a segment's prompt pass). A required argument, so no
-/// entry point can fall back to the fixed quantum by omission.
 /// Does a FIRST segment's input carry the prompt as TEXT, to be tokenized here,
 /// rather than token ids? Only a whole prompt pass from position 0 that neither
 /// resumes a kept prompt (#10) nor is a piece of a pass (#171): those, and every
@@ -4644,6 +4629,23 @@ fn width_handed_to_the_caches(
     }
 }
 
+/// Make sure the whole prompt's KV can live on the device BEFORE prefill
+/// starts — evicting cached prompts first, refusing second (gotcha #440).
+///
+/// Called after the prefix-cache lookup and before hydration, at both entry
+/// points (sequential and batched), because hydration is itself an
+/// allocation of the matched prefix. The prefix cache's snapshots are the
+/// same device memory as the live caches and were charged nowhere; on an
+/// 8 GB card the second long prompt's cache landed in host-backed memory
+/// and decoded at 3-5 tok/s where an empty card did 19-33. A refusal here
+/// is a 503 the coordinator can route elsewhere, at token 0, with nothing
+/// half-built.
+///
+/// `reply_positions` is the reply's reserve — [`reply_reserve_positions`] of
+/// the granted budget where the worker knows it, [`REPLY_RESERVE_POSITIONS`]
+/// where it cannot (a segment's prompt pass). A required argument, so no
+/// entry point can fall back to the fixed quantum by omission.
+///
 /// `forward_width` is how many positions the forward asking hands a windowed
 /// layer's cache at once where that is wider than this worker's own chunk
 /// ([`width_handed_to_the_caches`]); 0 where it is not.
