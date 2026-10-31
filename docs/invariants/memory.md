@@ -1346,7 +1346,7 @@ device memory** (2026-09-03): `SplitModel::kv_budget_now(live, cached)` =
 `min(load-time budget, live + cached + free_now − margin)`, `free_now` from
 cudarc's `mem_get_info` (microseconds), margin 5% of the card with a
 256 MB floor (`kv_budget::budget_reconciled_with_device`). Asked by
-`ensure_room_for_prompt`, `model_worker::positions_beside_live` and the per-chunk
+`ensure_room_for_prompt`, `model_worker::room_beside_live` and the per-chunk
 guard — never on the per-token path. **The load-time budget is a
 prediction; the card is the fact**: `kv_headroom_bytes` was taken from free
 memory at load and could not see a tenant that arrived later (a second
@@ -3945,7 +3945,7 @@ lists every memory a model charges (its device's, plus `Host` for a split); `kv_
 ask each: the executor's growth claim (`claim_room(home, …)`, a REQUIRED argument), prompt
 admission (`admit_prompt_over` → `admit_prompt_in` per home; the promises — `admitted_claims` now
 one figure per home, drawn down by what the request wrote IN that home — are recorded only once
-every home has room), `positions_beside_live` (the model's own home) and the host snapshot sizing
+every home has room), `room_beside_live` (the model's own home) and the host snapshot sizing
 (every home's per-position cost: a snapshot copies every layer). The split's host budget
 (`host_kv_budget_bytes`) is the daemon's `--kv-budget-bytes` when it handed one, else the machine's
 available memory at load less `device_free_margin_bytes` — the bound the reconciliation applies at

@@ -6273,8 +6273,8 @@ reach `keep + seq_len`), so a bound built from the window alone is wrong for a o
 - Readers: the loader's affordable tokens (its log lines' `kv_bytes_per_position` is the
   figure while no window is full), admission (`admit_prompt_over` → `admit_prompt_in`
   promises `bytes_for(positions)`), the snapshot plan (`plan_snapshot`), the context reported
-  (`context_fits_in`, `longest_prompt_that_fits`), `host_ram_positions`,
-  `positions_beside_live`.
+  (`context_fits_in`, `longest_prompt_that_fits`), `host_ram_room`,
+  `room_beside_live`.
 - **The head-room guard reads the buffers, not the estimate**: `KvCacheStore::bytes_a_forward_adds`
   sums `LayerKv::bytes_added_by` — `SeqCache::positions_added_by` simulates `append` (slide,
   `growth_step`, a first allocation) at the dtype the buffer holds, and the f16 mirror as

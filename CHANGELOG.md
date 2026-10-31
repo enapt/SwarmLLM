@@ -11,7 +11,8 @@ a computer short of memory it dropped OTHER conversations' saved prompts, or kep
 one, to make room it was about to get back. Two more cases gave saved prompts up for nothing: a
 prompt that was already saved, and a copy that then went to the computer's memory instead of the
 graphics card while the card's saved prompts were cleared for it. The room is now planned once
-the save knows what it replaces, and nothing is cleared until a copy is certain (#367).
+the save knows what it replaces and where its copy will go, so nothing is cleared for a prompt
+already saved or for room on the card when the copy goes to the computer's memory (#367).
 
 **A starting node no longer stalls its network connections for a quarter of a second.** When the
 first other computer connected, the node read the files describing each model it holds only a

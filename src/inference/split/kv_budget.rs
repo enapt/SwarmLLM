@@ -629,7 +629,7 @@ pub(crate) fn budget_reconciled_with_device(
 /// with nothing else in flight: a 1,835-token prompt served, and the next of
 /// the same size refused against 683 of the real 1,336 MB, four runs of four,
 /// the prefix cache on or off. Every caller is already off the per-token path
-/// (`ensure_room_for_prompt`, `positions_beside_live`, the executor's
+/// (`ensure_room_for_prompt`, `room_beside_live`, the executor's
 /// guard on a growth boundary), so the wait is for work the next step would
 /// queue behind anyway. `SWARMLLM_KV_DEVICE_SYNC=0` reads without it, for the
 /// A/B inside one binary.
@@ -743,7 +743,7 @@ fn device_sync_enabled_for(v: Option<&str>) -> bool {
 /// `mem_get_info` is a driver call costing microseconds; a system-memory
 /// refresh reads `/proc/meminfo` (or the mach equivalent), which is cheap but
 /// not free. Every caller of the reconciliation is already off the per-token
-/// path — `ensure_room_for_prompt`, `positions_beside_live`, and the
+/// path — `ensure_room_for_prompt`, `room_beside_live`, and the
 /// per-chunk guard, which itself only runs on a growth-quantum boundary — so
 /// a short window costs nothing and bounds the syscall rate under a prefill
 /// that crosses many quanta.
