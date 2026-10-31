@@ -2,6 +2,47 @@
 
 ## [Unreleased]
 
+## [0.3.265-alpha] — 2026-10-31
+
+**A graphics card no longer fills up under a long chat until it runs out.** Under one steady
+conversation, the card's memory pool kept taking a little more from the driver every few minutes
+while holding plenty it was not using. The memory budget counted that unused memory as free, so it
+never saw the driver itself running dry: a 14B on a 12 GB card ran out after 4-6 minutes of
+back-to-back replies and was moved to the processor. The card's memory reading now hands the pool's
+unused memory back whenever the driver's own free memory falls under the safety margin, only the
+shortfall. Measured on Llama-3.1-8B on an 8 GB card with ~3,100-token prompts, 20 minutes each way
+in one build: the driver's free memory fell from 721 to 64 MB without the change and held at
+384-416 MB with it; replies ran at the same speed (41.0 / 40.5 tokens a second, first token
+2.02 / 2.00 s at the median). `SWARMLLM_CUDA_POOL_MARGIN=0` turns it off (#385).
+
+**A model moved off a full graphics card goes back to it.** A model whose card ran out of memory
+was moved to the processor and stayed there, at about a fifth of its speed, until it was unloaded
+by hand. The move now lasts 2 minutes, doubling up to 30 while the card keeps running out; after
+that the next request moves the model back once the card has room. A card too old for the
+model's kernels still keeps it on the processor (#384).
+
+**"Not enough memory in the swarm" now says which computer is short.** A 70B split was refused
+for over an hour without saying why; one computer holding it had lost its graphics card to a
+driver fault and offered about half of what it held. The message now names each computer holding
+the model with the room it offers, the shortest first — "0202… has room for 9 of the 17 layers it
+holds; this computer has room for all 63 it holds". When the asking computer was itself one of
+them, the total used to be left out altogether (#386).
+
+**A prompt refused because the card was briefly busy is told to try again, not to be shorter.**
+When something else was using the card's memory for a moment, the refusal said the prompt was
+too long. It now says the memory is in use and to try again in a moment (#387).
+
+**The computers list shows where each computer is, its graphics memory, uptime and models.** A
+Location column gives each computer's country, named in your language and sortable — what each
+computer announces about itself (found from its internet address, or set by its owner); only a
+two-letter country code is passed on. Under each name: the graphics card's memory beside its
+name, how long the computer has been up, and how many models it holds (named on hover). On a
+phone the list scrolls sideways inside its panel instead of running past its edge. The "Computer"
+column header is fixed in eight languages that still said "Peer" or "Partner".
+
+**Speculative decoding's settings follow a reload of `config.toml`.** One path read them from the
+configuration as it was at startup.
+
 ## [0.3.264-alpha] — 2026-10-31
 
 **A 70B request no longer fails when one computer holds all of it but cannot fit it.** A peer
