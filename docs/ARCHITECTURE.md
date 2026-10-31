@@ -2849,7 +2849,11 @@ Routes Claude model requests through a locally-authenticated `claude` CLI subpro
   MINIMUM the coordinate is actually fed, not `latency_ms`, which is the last
   raw sample and is bimodal. Judging the estimate against the raw sample is
   the comparison the design says not to make, and the pair existed to answer
-  exactly that question
+  exactly that question. `region` is the peer's announced country as a
+  two-letter code (anything else it sends is `null` — it is the peer's own
+  text) and `gpu_vram_mb` its card's memory; the dashboard's peer list shows
+  both (2026-10-31). The WebSocket `peer_list` carries the same record
+  without `addresses` / `last_seen`
 - `GET     /api/admin/diagnostics` — Plain-text support dump, **address-redacted unless `?full=1`** (it is written to be pasted into a bug report; `swarmllm diagnostics` is the CLI wrapper). Sections: **this machine** (CPU, GPU,
   measured memory bandwidth, and the advertised 7B tok/s every peer's
   scheduler ranks this node on — the answer to "why does nobody route work
@@ -3005,7 +3009,7 @@ Routes Claude model requests through a locally-authenticated `claude` CLI subpro
 - Cross-component calls: `App.componentName.method()`. Shared state: `App.state.*`. Utilities: `App.utils.*`.
 
 ### Frontend Features
-- **i18n**: 1420 translation keys (1422 entries per locale incl. `_lang` + `_dir`) across 21 languages (en, es, fr, de, pt, it, nl, ru, zh, ja, ko, ar, tr, pl, sv, th, hi, vi, id, uk, cs). Auto-detects browser language. `I18n.t()` + `data-i18n` DOM attributes. Interpolation via `{variable}` placeholders. Fallback chain: current language → English → raw key. "Continue in English" UX for non-English users who prefer English.
+- **i18n**: 1425 translation keys (1427 entries per locale incl. `_lang` + `_dir`) across 21 languages (en, es, fr, de, pt, it, nl, ru, zh, ja, ko, ar, tr, pl, sv, th, hi, vi, id, uk, cs). Auto-detects browser language. `I18n.t()` + `data-i18n` DOM attributes. Interpolation via `{variable}` placeholders. Fallback chain: current language → English → raw key. "Continue in English" UX for non-English users who prefer English.
 - **Theme**: Light / Dark / System toggle. `[data-theme="light"]` CSS overrides. Persisted in localStorage.
 - **Swarm background**: animated canvas flocking network behind the dashboard (`frontend/js/neural-bg.js`). Up to 90 boids (scaled by viewport area) with connecting links, feeler tendrils, gentle drift and mouse repulsion/glow. State-reactive colouring: blue (idle) → cyan (active inference) → red-orange (unhealthy/disconnected); peer count boosts vibrancy and active requests trigger firing pulses.
   **It is the one thing on the page with an ongoing power cost, so it is bounded at four levels.** It advances at 30 Hz rather than the browser's 60 while the pointer is in play; drops to 10 Hz once the pointer has been still for 4 s, which is the ordinary state of a dashboard left open; drops to 8 Hz whenever `state.active > 0` (this page is usually open on the machine running the node, so the decoration yields to the real work — the slowest applicable rate wins); and stops entirely when the tab is hidden. Users can switch it off in Settings (`App.SWARM_ANIM_KEY`), and it defaults to OFF where the device reports `prefers-reduced-motion: reduce` — a canvas loop is invisible to the CSS media query that honours that everywhere else on the page. Turning it off cancels the frame loop rather than hiding the canvas, since a hidden animation costs what a visible one does.

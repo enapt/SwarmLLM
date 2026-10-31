@@ -2228,7 +2228,12 @@
           (p.latency_ms || 0) + '|' + (p.hosted_shards || 0) + '|' +
           (p.trust_score || 0) + '|' + (p.is_lan_peer ? 1 : 0) + '|' +
           (p.is_pool_member ? 1 : 0) + '|' +
-          (p.nickname || '') + '|' + (p.gpu || '') + '|' + (p.version || '');
+          (p.nickname || '') + '|' + (p.gpu || '') + '|' + (p.version || '') + '|' +
+          (p.region || '') + '|' + (p.gpu_vram_mb || 0) + '|' +
+          (p.hosted_models ? p.hosted_models.length : 0) + '|' +
+          // Uptime to the minute: the row shows it no finer, so a peer_list
+          // burst inside the same minute still skips the rebuild.
+          Math.floor((p.uptime_seconds || 0) / 60);
       }).sort().join('||') + '#' + App.dashboard._peerSort + ':' + App.dashboard._peerSortDir;
       if (App.dashboard._lastPeerRenderSig === renderSig) return;
       App.dashboard._lastPeerRenderSig = renderSig;
@@ -2276,11 +2281,25 @@
         summary.textContent = I18n.t('dashboard.peers_summary', { count: peers.length, lan: lanCount, healthy: healthyCount });
       }
 
+      // A peer's region is a two-letter country code (the daemon passes on
+      // nothing else); shown as the country's name in the reader's language,
+      // through the same lookup the network map's tooltip uses. No flag: a
+      // flag emoji renders as two bare letters on Windows.
+      function _countryName(code) {
+        return (App.networkMap && App.networkMap.countryName) ? App.networkMap.countryName(code) : code;
+      }
+
       // Sort peers
       var sortKey = App.dashboard._peerSort;
       var sortDir = App.dashboard._peerSortDir;
       var sorted = peers.slice().sort(function(a, b) {
         var va, vb;
+        if (sortKey === 'location') {
+          // A computer that named no country goes last either way round.
+          if (!a.region || !b.region) return (a.region ? 0 : 1) - (b.region ? 0 : 1);
+          var c = _countryName(a.region).localeCompare(_countryName(b.region));
+          return sortDir === 'asc' ? c : -c;
+        }
         if (sortKey === 'name') {
           va = (a.nickname || a.node_id || '').toLowerCase();
           vb = (b.nickname || b.node_id || '').toLowerCase();
@@ -2303,6 +2322,7 @@
 
       var html = '<table class="peer-table"><thead><tr>' +
         '<th data-peer-sort="name"' + _thClass('name') + '>' + U.escapeHtml(I18n.t('dashboard.peer_col_name')) + _sortArrow('name') + '</th>' +
+        '<th data-peer-sort="location"' + _thClass('location') + '>' + U.escapeHtml(I18n.t('dashboard.peer_col_location')) + _sortArrow('location') + '</th>' +
         '<th data-peer-sort="latency"' + _thClass('latency') + '>' + U.escapeHtml(I18n.t('dashboard.peer_col_latency')) + _sortArrow('latency') + '</th>' +
         '<th data-peer-sort="shards"' + _thClass('shards') + '>' + U.escapeHtml(I18n.t('dashboard.info_shards')) + _sortArrow('shards') + '</th>' +
         '<th data-peer-sort="trust"' + _thClass('trust') + '>' + U.escapeHtml(I18n.t('dashboard.peer_col_trust')) + _sortArrow('trust') + '</th>' +
@@ -2362,8 +2382,11 @@
                 : (g.indexOf('intel') >= 0 || g.indexOf('arc') >= 0
                     ? '\u25A0'
                     : (g.indexOf('apple') >= 0 ? '\u25C6' : '\u25AB')));
-          hwText = '<span title="' + U.escapeHtml(I18n.t('dashboard.gpu_label')) + ': ' + U.escapeHtml(p.gpu) + '">' +
-            vendor + ' ' + U.escapeHtml(p.gpu) + '</span>';
+          // Its memory beside its name: that is what decides which models
+          // the card can run, and two cards of one name can differ in it.
+          var vram = p.gpu_vram_mb ? ' (' + U.formatMB(p.gpu_vram_mb) + ')' : '';
+          hwText = '<span title="' + U.escapeHtml(I18n.t('dashboard.gpu_label')) + ': ' + U.escapeHtml(p.gpu + vram) + '">' +
+            vendor + ' ' + U.escapeHtml(p.gpu + vram) + '</span>';
         } else if (p.version) {
           // Only claim "CPU" once the peer has actually reported a capability
           // (version is part of it) — otherwise we would label a peer we simply
@@ -2383,13 +2406,27 @@
           }
           hwText = '<span title="' + U.escapeHtml(cpuTip) + '">\u2699 ' + cpuText + '</span>';
         }
-        var metaParts = [verText, hwText].filter(Boolean);
-        var gpu = metaParts.length
-          ? '<div class="text-muted" style="font-size:0.62rem">' + metaParts.join(' · ') + '</div>'
+        // How long it has been up (a computer that keeps restarting shows here
+        // first) and how many models it holds parts of, named on hover.
+        var upText = p.uptime_seconds
+          ? U.escapeHtml(I18n.t('dashboard.peer_uptime', { time: U.formatUptime(p.uptime_seconds) }))
           : '';
+        var models = p.hosted_models || [];
+        var modelsText = models.length
+          ? '<span title="' + U.escapeHtml(models.map(function(m) { return U.formatModelDisplayName(m); }).join(', ')) + '">' +
+            U.escapeHtml(I18n.t('dashboard.peer_models', { count: models.length })) + '</span>'
+          : '';
+        var metaParts = [verText, hwText, upText, modelsText].filter(Boolean);
+        var gpu = metaParts.length
+          ? '<div class="text-muted peer-meta">' + metaParts.join(' · ') + '</div>'
+          : '';
+        var where = p.region
+          ? '<span title="' + U.escapeHtml(I18n.t('dashboard.peer_location_tip')) + '">' + U.escapeHtml(_countryName(p.region)) + '</span>'
+          : '<span class="text-muted">—</span>';
 
         html += '<tr>' +
           '<td><div class="peer-name-cell"><span class="status-dot ' + dotClass + '"></span><span class="peer-nick">' + U.escapeHtml(name) + '</span>' + idSub + lanBadge + '</div>' + gpu + '</td>' +
+          '<td>' + where + '</td>' +
           '<td class="mono">' + latency + '</td>' +
           '<td class="mono">' + shards + '</td>' +
           '<td class="mono">' + trust + '</td>' +

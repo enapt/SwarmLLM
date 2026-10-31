@@ -5010,6 +5010,15 @@ textarea.pool-code-input { min-height: 4.5em; }
 .peer-table .peer-name-cell .status-dot { flex-shrink: 0; }
 .peer-table .peer-name-cell .peer-nick { font-weight: 600; overflow: hidden; text-overflow: ellipsis; }
 .peer-table .peer-id-sub { font-size: var(--fs-2xs); color: var(--text-muted); font-family: var(--font-mono); }
+/* The line under a computer's name wraps rather than widening the table. */
+.peer-table .peer-meta { font-size: 0.62rem; white-space: normal; }
+/* On a phone the six columns are wider than the panel: the table scrolls
+   sideways inside it (the app shell never page-scrolls) rather than spilling
+   past its edge, where the last columns could not be reached. */
+#peers-list { overflow-x: auto; }
+@media (max-width: 600px) {
+  .peer-table th, .peer-table td { padding: 6px 6px; }
+}
 
 /* ---- Cloud Provider Collapsed Mode ---- */
 .cloud-card-collapsed .cloud-card-controls,

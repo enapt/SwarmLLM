@@ -628,7 +628,7 @@
           App.dashboard._peerSortDir = App.dashboard._peerSortDir === 'asc' ? 'desc' : 'asc';
         } else {
           App.dashboard._peerSort = key;
-          App.dashboard._peerSortDir = key === 'name' ? 'asc' : 'desc';
+          App.dashboard._peerSortDir = (key === 'name' || key === 'location') ? 'asc' : 'desc';
         }
         App.dashboard.renderPeers(App.dashboard._lastPeers);
         return;

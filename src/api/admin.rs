@@ -24,6 +24,16 @@ const MAX_BATCH_TIMEOUT_MS: u64 = 60_000;
 /// Maximum bytes accepted for the `status` filter on `list_responses`.
 const MAX_STATUS_FILTER_BYTES: usize = 256;
 
+/// A peer's announced region as the ISO 3166-1 alpha-2 code it is meant to be
+/// (`IdentityConfig::region`, else the country its own address was located
+/// in), upper-cased; anything else is `None`. The text is the other
+/// computer's, so the peer list is handed nothing but a two-letter code.
+fn country_code(region: Option<&str>) -> Option<String> {
+    let code = region?.trim();
+    (code.len() == 2 && code.bytes().all(|b| b.is_ascii_alphabetic()))
+        .then(|| code.to_ascii_uppercase())
+}
+
 /// Serialize a peer registry entry to JSON. Used by both REST and WebSocket.
 ///
 /// When `include_addresses` is true, includes `addresses` and `last_seen` fields
@@ -147,6 +157,12 @@ pub fn serialize_peer_to_json(
             "name": c.name,
             "cores": c.cores,
         }))),
+        // The card's memory decides which models it can run there, so it is
+        // read beside the card's name.
+        "gpu_vram_mb": peer.capability.as_ref().and_then(|c| c.gpu.as_ref().map(|g| g.vram_total_mb)),
+        // Where it says it is — the same figure the network map counts by
+        // region, per computer. Its own word: shown, never routed on here.
+        "region": country_code(peer.capability.as_ref().and_then(|c| c.region.as_deref())),
         // What this peer reckons it can manage on a 7B model. Measured rather
         // than assumed since 2026-08-18 for processor-only nodes, so it finally
         // distinguishes one from another.
@@ -3126,6 +3142,18 @@ bootstrap_peers = ["/ip4/10.0.0.7/tcp/8810"]
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A region is the other computer's own text; the peer list carries it
+    /// only as a country code the dashboard can name.
+    #[test]
+    fn a_peers_region_reaches_the_peer_list_only_as_a_country_code() {
+        assert_eq!(country_code(Some("us")).as_deref(), Some("US"));
+        assert_eq!(country_code(Some(" DE ")).as_deref(), Some("DE"));
+        assert_eq!(country_code(Some("asia")), None);
+        assert_eq!(country_code(Some("<b")), None);
+        assert_eq!(country_code(Some("")), None);
+        assert_eq!(country_code(None), None);
+    }
 
     /// A reload makes the FILE the live config, every setting in it — not only
     /// the five operational figures the subsystems are woken for. Hand-edited,
