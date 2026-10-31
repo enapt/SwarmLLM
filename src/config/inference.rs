@@ -36,10 +36,13 @@ pub struct InferenceConfig {
     ///   that this value was read exclusively by the legacy llama.cpp executor
     ///   (`inference/executor.rs`, `--features llama`) and a CUDA build would
     ///   silently run on the GPU no matter what was configured here.
-    /// - `> 0` — GPU. SwarmLLM's split engine places a worker's whole layer
-    ///   window on one device, so a fractional value is rounded up to "all of
-    ///   this worker's layers" and logged. Use shard windows
-    ///   (`ModelProcessPool::restart_with_window`) to bound VRAM instead.
+    /// - `> 0` — GPU, that many of a worker's layers on the card and the rest
+    ///   on the processor (`split::GPU_LAYER_LIMIT`), where the model would fit
+    ///   the card whole. Where it would not, the pool's own card/processor
+    ///   split decides how many layers the card takes, sized by the card's free
+    ///   memory as the worker's load reads it (`process_pool::card_split`,
+    ///   `refit_split_to_the_load`), and this number is not read. To leave more
+    ///   of the card to other programs, lower `resources.max_gpu_vram_mb`.
     #[serde(default = "default_gpu_layers")]
     pub gpu_layers: i32,
     /// KV-cache session TTL in seconds (default 600 = 10 minutes).

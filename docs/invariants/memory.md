@@ -2682,6 +2682,15 @@ growing back from the driver after a hand-back — a fresh allocation, which und
 host uptime (#146) — and it arises only with saved prompts ON the card, which WSL2 does not do by
 default (#257). A native driver grows the pool quickly at any uptime.
 
+⚠ **Corrected 2026-10-31 (FUTURE_WORK #367 (d)):** "only with saved prompts ON the card" is wrong. A
+card/processor split under WSL2 with its saved prompts in host RAM (Qwen2.5-14B, 15 of 48 on the
+8 GB card beside a 1.8 GB hog, unique 1,800-token prompts) hands back 96-288 MB after nearly every
+prompt forward and grows it back in the next — whatever the chunk's width: the trim keeps the pieces
+around live buffers and releases the blocks the forward uses. The growth starts from the margin, so
+it bottoms at margin − growth (103-263 MB), and below ~200 MB Windows places it in host memory
+(`Shared Usage` +50-120 MB): first tokens 6.6-23 s against 5.5-6.1. The cost is not only the fresh
+allocation.
+
 **What others do.** PyTorch's caching allocator reclaims cached blocks once the card's use passes
 `garbage_collection_threshold`, "to avoid triggering expensive sync-and-reclaim-all"; its
 `cudaMallocAsync` backend keeps the release threshold at `UINT64_MAX`, as `keep_freed_memory`

@@ -1659,7 +1659,7 @@ experts kept in RAM.
    round's average (~65-135 ms). Revisit if a check's per-position cost falls.
 
 #### #367 — A long prompt's snapshot copy costs 0.15-2.1 s where its memory traffic is ~0.1 s, and the next request waits for it
-`P2` · perf-local · **NARROWED** — 2026-10-30 · evidence: `docs/invariants/inference.md` § "One prefix-cache snapshot is sized by bytes" (the deferred-copy and room-first paragraphs)
+`P2` · perf-local · **NARROWED** — 2026-10-31 · evidence: `docs/invariants/inference.md` § "One prefix-cache snapshot is sized by bytes" (the deferred-copy and room-first paragraphs); (d): `docs/invariants/memory.md` § "The driver's margin, measured"
 
 **Found 2026-10-29: the cost is first-touching fresh pages, not the copy.** With mimalloc v3 (what
 the workers link), 569 MB copied into held memory took 43 ms; into fresh memory 255 ms with memory
@@ -1677,17 +1677,35 @@ first; a growing conversation's next turn started in 1.50-1.93 s against 1.64-3.
 **(c) fixed 2026-10-31:** the room is planned inside the insert with what the save replaces counted
 as its own (`LetGo`), a prompt already saved plans nothing, and the plan's eviction is made only by
 `make_room`, in the home chosen (`docs/invariants/inference.md` § "One prefix-cache snapshot is sized
-by bytes", the last paragraph). **Left:** (d) unexplained: 5 of the 30 unique 1,800-token prompts'
-first tokens took 10.1-12.1 s against 4.0-5.7 s, in arms of BOTH orders and with the purge delay — not
-the copy (≤ 0.7 s). **Narrowed 2026-10-31 from the rig's own debug logs** (`ab367/node.*.log`): the
-whole extra time is inside ONE prompt chunk's forward — `forward_ms` 6.5-10.3 s against 2.3-3.3 s for
-a first chunk and 1.1-1.5 s for a second, either chunk; queue, schedule and slot timings are the same
-as a fast request's. Not the card pool: fast and slow chunks alike find it already holding the
-forward's memory (`card pool already holds a prompt forward's memory`, 637-765 MB free in the pool,
-the driver at 229-286 MB). The first slow chunk (room arm, 03:04:30Z) came as the host-RAM snapshots
-first reached three (~1.7 GB). **Next**: one profiled repro on the release binary
-(`SWARMLLM_PROFILE`, the ab367 shape) to see which stage of the slow forward grows — the processor
-weights' copies to the card (pageable, link-bound) or the processor layers themselves.
+by bytes", the last paragraph). **Left: (d)**, narrowed 2026-10-31 to a mechanism: 5 of the 30
+unique 1,800-token prompts' first tokens took 10.1-12.1 s against 4.0-5.7 s; the whole extra time is
+inside ONE prompt chunk's forward, and every stage of it slows 3-5x at full card clock (copies
+5.7-7.1 s against 1.5, a feed-forward 2.4-3.7 s against 0.49). **That forward grew the card's pool
+into the driver's margin, and under WSL2 the overflow lands in host-backed shared memory** (gotcha
+#440). Measured (`~/swarmllm-gate/deep/cg/ab367w.sh`, release v0.3.265, Qwen2.5-14B 15 of 48 on an
+8 GB card beside a 1.8 GB hog, Windows' `\GPU Adapter Memory(<NVIDIA luid>)\Shared Usage` sampled
+from WSL by `powershell.exe Get-Counter`): a forward that took the driver to 259-262 MB free read
+5.5-6.1 s with the counter flat; to 196 MB, 6.6-9.4 s and +50-64 MB shared; to 132-164 MB,
+12.1-23.3 s and +100-120 MB. Heat (hot prompts at 86.9 °C ran 5.3 s) and page faults (system time
+flat) were ruled out on the way. ⚠ **Correction**: this entry said earlier on 2026-10-31 "Not the card
+pool: fast and slow chunks alike find it already holding the forward's memory" — that check runs
+BEFORE the forward; the growth is inside it.
+**Why it grows** (the trace of every forward, `ab367f/node.*.log`): #385's hold trims the pool back to
+the margin after each forward, releasing the forward's freed blocks and keeping the pieces around
+live buffers (415-543 MB "free" that the next forward cannot use), so the next forward grows again —
+96-288 MB in 32 MB steps, whatever the chunk's width (916-1,486 tokens alike). The bottom of each
+dip is the margin less that growth. **Tried and NOT adopted**: sizing the chunk with the prime's
+quarter for fragments (`with_pool_fragments` for both, A/B `SWARMLLM_PROMPT_CHUNK_FRAGMENTS=0`,
+`~/swarmllm-gate/deep/cg/ab367f.sh`, one CUDA build, fix/bare/fix/bare): the first pair favoured it
+(medians 5.2 vs 6.8 s, deepest 260 vs 100 MB), the second the other way (6.4 vs 4.3 s, deepest 103
+vs 167 MB) — the growth does not scale with the chunk. **Next**, in order: (1) the hold should not
+hand back what the very next forward takes again — keep the last prompt forward's growth in the
+pool while a conversation is live (`WorkerHandle::in_use`), trimming only creep; (2) on WSL2, a
+margin that covers one forward's growth (≥ ~600 MB on 8 GB: the dips bottomed at margin − growth);
+(3) learn the growth per worker and charge it in `prompt_room_tokens`. Judge any of them by the
+hand-back count and the deepest driver free per arm (the `ab367f` summary), never by first tokens
+alone — the second pair loaded 16 layers instead of 15 (`load_reads_free_mb` 5,205 vs 5,161) and
+ran fastest of all where it did not dip (3.6-4.1 s).
 
 The same 1,800-token prompt's snapshot (Qwen2.5-14B Q4_K_M, 15 of 48 on the card: 569 MB, 486 of it
 the processor layers' f32 cache, all kept in host RAM under WSL2) was copied in 155-680 ms in one pair
