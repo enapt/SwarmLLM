@@ -1140,7 +1140,7 @@ remove one. Measure the newcomer's first-plan delay before and after.
 ### Network and transport
 
 #### #155 — AutoNAT redials a peer this node is already connected to, and the per-peer cap denies it, every ~5 s
-`P3` · network · **PARTIAL** — 2026-10-02, narrowed 2026-10-07 (measured on the swarm: not seen there) · history: archive row #155, gotcha #774
+`P3` · network · **PARTIAL** — 2026-10-02, narrowed 2026-10-07, recurred 2026-10-30/31 (measured on the swarm: not seen there) · history: archive row #155, gotcha #774
 
 **Narrowed 2026-10-07.** Settled in the pinned source (libp2p-autonat 0.15.0, `v2`): the server
 dials back with `PeerCondition::Always` (`server/behaviour.rs`), our per-peer cap then denies the
@@ -1176,6 +1176,17 @@ LAN box, against ~350 in the same window after 0.3.249. 0.3.250 also ends the UP
 04:54Z each node held its own router rows (box TCP 8810 + UDP 8800, this PC TCP 48807 + UDP 47681).
 So the burst did not recur once the two nodes stopped advertising one address. That is still a
 correlation from one window, so the cause stays UNDETERMINED; nothing to build unless it recurs.
+
+**2026-10-31: it recurred, for ~26 h.** This node logged 6,888 closes in 38 h (10-30 00Z → 10-31
+14Z), 99.3% from the LAN box (`96842635`), QUIC, closed by the box at once (`ApplicationClosed 0`),
+up to 819 an hour (10-31 00Z), quiet since 10-31 04Z. Every one was INBOUND here (`is_dialer=false`;
+in the six worst hours 3,504 of 3,512) — the box dialled — yet the box's INFO log shows 149
+connections with this node in the same window, 112 of them closed `ApplicationClosed 0`. A
+connection the box's own swarm refuses AFTER the handshake (connection-limits denies an outbound
+connection in `handle_established_outbound_connection`) is closed without a line at INFO there and
+reads exactly so here; that is the 10-02 mechanism (the AutoNAT v2 server dials back with
+`PeerCondition::Always`), still unproven. Next, the next time it runs: the box at debug for 10
+minutes, counting `OutgoingConnectionError` / denied dial-backs against this node's inbound count.
 
 **As filed:**
 
@@ -1387,7 +1398,7 @@ secret and drop an answer that names another (`EphemeralKeyExchange` carries a `
 check the answer echoes the initiator's), or skip a new exchange while one is pending for the peer.
 
 #### #314 — The network event loop stalls 0.2-2.6 s, most often while this machine is busy
-`P3` · network · **NARROWED** — 2026-10-20 · history: the live node's log, 10-19; `docs/invariants/network.md` § "The network loop never waits for the disk"
+`P3` · network · **NARROWED** — 2026-10-31 · history: the live node's log, 10-19; `docs/invariants/network.md` § "The network loop never waits for the disk"
 
 The live node (v0.3.244, serving nothing) logged 65 `DIAG: network event loop stalled` lines on
 10-19 (190 ms-2.6 s: 43 in `swarm_event:RequestResponse`, 15 `Identify`, 7 `peer_cache_interval`),
@@ -1422,6 +1433,14 @@ a commit elsewhere delays an arm only BEFORE it starts. So each stall line now s
 thread was doing (`network::manager::loop_stall`: time on and off the processor, page faults that
 read the disk, waits, preemptions, and a `likely` reading). Next, besides the count above: the
 first stall line from a node on this build under a large copy names its cause.
+*Counted 2026-10-31 (v0.3.262-.265, 10-30 00Z → 10-31 14Z, 38 h):* 89 stall lines, and 84 of them
+were ONE cause at a START: the first `Identify` refreshed the capacity snapshot, which parsed the
+header of each model held as a header only (~28 ms each, nine here) on the loop. Fixed the same day:
+the snapshot reads only learned geometry (`refused_model_if_learned`) and the health tick learns the
+rest off the loop. So the day's count while RUNNING is 5 in 38 h (10-19: 65 in a day): 4 blocked
+(`ConnectionEstablished` 1.46 s inside #155's re-dial storm, 2 `RequestResponse`, 1 `Identify`)
+and 1 disk page fault. Next: none of those five is understood; the large-copy field case above
+still stands.
 
 #### #191 — A part download that loses its peer restarts from byte 0 on the next one
 `P3` · storage · **OPEN** — 2026-09-03 · history: archive § "A multi-megabyte forward over ONE QUIC stream can kill the connection" (its banner: the cause was quinn-proto, #112)

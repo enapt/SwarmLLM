@@ -3215,6 +3215,32 @@ impl SharedState {
         self.gguf_meta_for(model_id)?.refusal()
     }
 
+    /// [`Self::refused_model`] from the geometry this node has ALREADY
+    /// learned — never a read of the disk. For the capacity snapshot, which
+    /// the network loop refreshes at every Identify and every disconnect:
+    /// there a first `gguf_meta_for` parsed a whole header, vocabulary
+    /// included (~28 ms a model), and a node holding nine models as a header
+    /// only stalled the loop 250-400 ms at its first peer, at every start —
+    /// 84 of the 89 stall lines in 38 h on the live node (#314). What is not
+    /// learned yet reads as "not refused"; the health tick learns it off the
+    /// loop ([`Self::learn_geometry_of_known_models`]) before its own refresh.
+    pub fn refused_model_if_learned(
+        &self,
+        model_id: &crate::types::ModelId,
+    ) -> Option<crate::inference::split::ModelRefusal> {
+        self.gguf_meta.get(model_id)?.refusal()
+    }
+
+    /// Learn the geometry of every known model this node holds a header for
+    /// — the disk reads [`Self::refused_model_if_learned`] leaves out. A miss
+    /// parses a header, so call it on a blocking thread, never the network
+    /// loop.
+    pub fn learn_geometry_of_known_models(&self) {
+        for model_id in self.model_registry.model_ids() {
+            let _ = self.gguf_meta_for(&model_id);
+        }
+    }
+
     /// Is `model_id` a model with its safety training removed, or marked as
     /// adult content (`model::huggingface::is_uncensored_model`, by its id,
     /// its name or the repo it comes from), that this computer's owner has not

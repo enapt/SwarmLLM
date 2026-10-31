@@ -1645,6 +1645,12 @@ impl ModelRegistry {
         self.manifests.iter().map(|v| v.value().clone()).collect()
     }
 
+    /// The id of every known model — [`Self::models`] without cloning each
+    /// manifest's tensor table.
+    pub fn model_ids(&self) -> Vec<ModelId> {
+        self.manifests.iter().map(|v| v.key().clone()).collect()
+    }
+
     /// The manifests this node should re-gossip: ones it published, **and ones
     /// it holds at least one shard of**.
     ///

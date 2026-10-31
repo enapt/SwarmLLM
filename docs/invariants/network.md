@@ -2872,6 +2872,26 @@ first inbound connection a machine ever sees (`record_inbound_connection_observe
 once per machine) and a peer-served part that hashes wrong (`update_trust`, once
 per bad part).
 
+**Nor does it read a model's header (2026-10-31).** The stall lines answered
+their own question once counted: on the live node, 89 in 38 h (10-30 00Z → 10-31
+14Z, v0.3.262-.265, against 65 in ONE day on 10-19), 84 of them in `Identify`
+with 200-400 ms on the processor, each within 5 s of a burst of "Learned GGUF
+geometry from the local shard header" — and every burst was a node START (84
+starts: rigs and gates start nodes on this data directory). Startup's scan
+learns the geometry of the models it holds PARTS of; the first peer's Identify
+then ran `refresh_swarm_capacity`, whose `refused_model` asked `gguf_meta_for`
+for every registry model and parsed, ON the loop, the header of each model held
+as a header only (nine here, ~28 ms each: candle's `Content::read` takes the
+whole vocabulary). The snapshot now asks `SharedState::refused_model_if_learned`
+(no disk), and the health tick learns what is missing first, on the blocking
+thread it already reads the model budget on (`learn_geometry_of_known_models`).
+An unlearned model reads as "not refused" for at most one tick. Tokio's rule is
+the reference: a task runs at most 10-100 µs between `.await`s (Alice Ryhl,
+"Async: What is blocking?"). The other 5 stalls in those 38 h: 4 blocked
+(`ConnectionEstablished` 1.46 s during #155's re-dial storm, 2 `RequestResponse`,
+1 `Identify`) and 1 page fault. Test
+`the_snapshot_reads_no_header_and_the_tick_learns_it`.
+
 ## A result names the step it answers (2026-09-25, #113)
 
 **The failure.** A serving node computed a 28.8 MB prompt-pass result and its send

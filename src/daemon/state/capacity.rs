@@ -273,8 +273,9 @@ pub fn compute_swarm_capacity(state: &SharedState, model_budget_mb: Option<u64>)
     for (mid, cov) in by_model {
         // What the swarm can RUN: a model this node knows cannot write
         // replies (an embedding model, a family it has no loader for) is not
-        // among them, however many computers hold it.
-        if state.refused_model(&mid).is_some() {
+        // among them, however many computers hold it. Only what is already
+        // learned: this runs on the network loop (#314).
+        if state.refused_model_if_learned(&mid).is_some() {
             continue;
         }
         let entry = ModelEntry {
@@ -361,7 +362,7 @@ pub fn current_model_budget_mb(state: &SharedState) -> Option<u64> {
 
 /// Recompute and publish the capacity snapshot to `MetricsProviders`,
 /// carrying the last model budget read over. Cheap — single pass, reads
-/// nothing from the card; safe to call from the network loop.
+/// nothing from the card or the disk; safe to call from the network loop.
 pub fn refresh_swarm_capacity(state: &SharedState) {
     let snapshot = compute_swarm_capacity(state, current_model_budget_mb(state));
     state.metrics.swarm_capacity.store(Arc::new(snapshot));
@@ -372,10 +373,12 @@ pub fn refresh_swarm_capacity(state: &SharedState) {
 /// health monitor's tick, never the network loop. The snapshot is computed
 /// AFTER the reading returns: computed before it, a reading of a few seconds
 /// would store peer counts older than a refresh the network loop made
-/// meanwhile.
+/// meanwhile. The same blocking thread first learns any model geometry the
+/// snapshot cannot read off the disk itself (#314).
 pub async fn refresh_swarm_capacity_reading_the_budget(state: &Arc<SharedState>) {
     let reading = Arc::clone(state);
     let budget = match tokio::task::spawn_blocking(move || {
+        reading.learn_geometry_of_known_models();
         crate::model::auto_manage::vram::node_model_budget_mb(&reading)
     })
     .await
@@ -505,5 +508,52 @@ mod tests {
         assert_eq!(fits("small-q8-0"), Some(Some(true)));
         assert_eq!(fits("enormous-q8-0"), Some(Some(false)));
         assert_eq!(fits("embedding-q8-0"), None, "it cannot write replies");
+    }
+
+    /// The network loop refreshes this snapshot at every Identify, so it never
+    /// parses a header (#314: ~28 ms a model, 250-400 ms at every start); the
+    /// health tick learns the geometry off the loop, and the next snapshot
+    /// leaves a model that cannot chat out.
+    #[test]
+    fn the_snapshot_reads_no_header_and_the_tick_learns_it() {
+        use candle_core::quantized::gguf_file::{self, Value};
+        let state = state();
+        let embedding = held(&state, "embedding-q8-0", 100 * 1024 * 1024);
+        let md: Vec<(&str, Value)> = vec![
+            ("general.architecture", Value::String("qwen3".into())),
+            ("qwen3.attention.head_count", Value::U32(16)),
+            ("qwen3.attention.head_count_kv", Value::U32(8)),
+            ("qwen3.block_count", Value::U32(28)),
+            ("qwen3.embedding_length", Value::U32(1024)),
+            ("qwen3.attention.layer_norm_rms_epsilon", Value::F32(1e-6)),
+            ("qwen3.pooling_type", Value::U32(3)),
+        ];
+        let refs: Vec<(&str, &Value)> = md.iter().map(|(k, v)| (*k, v)).collect();
+        let dir = state.model_dir(&embedding.0);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut file =
+            std::fs::File::create(dir.join(crate::model::shard::HEADER_FILENAME)).unwrap();
+        gguf_file::write(&mut file, &refs, &[]).unwrap();
+        drop(file);
+        let listed = |cap: &SwarmCapacity| {
+            cap.serveable_models
+                .iter()
+                .any(|m| m.model_id == embedding.0)
+        };
+
+        let cap = compute_swarm_capacity(&state, Some(1024));
+        assert!(
+            state.gguf_meta.is_empty(),
+            "the snapshot parsed a header — on the network loop"
+        );
+        assert!(listed(&cap), "not learned yet, so not known to be refused");
+
+        state.learn_geometry_of_known_models();
+        assert!(
+            state.refused_model(&embedding).is_some(),
+            "the header is read"
+        );
+        let cap = compute_swarm_capacity(&state, Some(1024));
+        assert!(!listed(&cap), "learned: it cannot write replies");
     }
 }

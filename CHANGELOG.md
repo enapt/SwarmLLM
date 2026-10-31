@@ -11,6 +11,13 @@ prompt that was already saved, and a copy that then went to the computer's memor
 graphics card while the card's saved prompts were cleared for it. The room is now planned once
 the save knows what it replaces, and nothing is cleared until a copy is certain (#367).
 
+**A starting node no longer stalls its network connections for a quarter of a second.** When the
+first other computer connected, the node read the files describing each model it holds only a
+description of, one after another, on the task that handles every network message — 200-400 ms
+in which no message moved, at every start. That accounted for 84 of the 89 such stalls on a busy
+node over 38 hours. Those files are now read in the background; the network task uses only what
+is already known (#314).
+
 ## [0.3.265-alpha] — 2026-10-31
 
 **A graphics card no longer fills up under a long chat until it runs out.** Under one steady
