@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+**A conversation's saved prompt no longer pushes another conversation's out of memory.** After a
+reply, a node keeps the prompt it just read so the next turn does not read it again. It counted
+the conversation's previous saved turn, which the new one replaces, as still taking memory, so on
+a computer short of memory it dropped OTHER conversations' saved prompts, or kept less of this
+one, to make room it was about to get back. Two more cases gave saved prompts up for nothing: a
+prompt that was already saved, and a copy that then went to the computer's memory instead of the
+graphics card while the card's saved prompts were cleared for it. The room is now planned once
+the save knows what it replaces, and nothing is cleared until a copy is certain (#367).
+
 ## [0.3.265-alpha] — 2026-10-31
 
 **A graphics card no longer fills up under a long chat until it runs out.** Under one steady

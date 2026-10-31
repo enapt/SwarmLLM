@@ -55,7 +55,7 @@ use crate::inference::slot_table::{Slot, SlotTable};
 use crate::inference::split::kv_budget::KvGrowth;
 use crate::inference::split::kv_cache::KvHome;
 use crate::inference::split::{
-    self, BatchItem, KvCacheStore, PrefixCache, SnapshotHome, SnapshotRoom, SplitModel,
+    self, BatchItem, KvCacheStore, LetGo, PrefixCache, SnapshotHome, SnapshotRoom, SplitModel,
 };
 use crate::inference::swift::{SwiftCalibrator, SwiftConfig};
 use crate::inference::worker_ipc::*;
@@ -2751,14 +2751,22 @@ async fn handle_forward(
         .filter(|_| fwd.sequence_num == 0 && final_piece)
     {
         let held = kv_store.request_positions(&model_key, &req_id_str);
-        let room = snapshot_room(model, kv_store, prefix_cache, held, ReplyAhead::ToDecode);
         let blocks = prefix_cache.insert_chain_from_kv(
             &model_key,
             &req_id_str,
             kv_store,
             hint.block_tokens,
             &hint.keys,
-            room,
+            |let_go| {
+                snapshot_room(
+                    model,
+                    kv_store,
+                    prefix_cache,
+                    held,
+                    ReplyAhead::ToDecode,
+                    let_go,
+                )
+            },
         );
         // Stored blocks kept beside the live cache are device memory the
         // head-room guard must see.
@@ -4341,31 +4349,44 @@ fn prefix_cache_charged() -> bool {
 /// split read the 3,718-token prompt again — 103 s on the peer abroad that had
 /// kept its part. The copy off the card costs 59-145 ms per 264 MB (#257's
 /// measurement); the turn it saves costs the whole prompt on every segment.
+///
+/// **The entries the save replaces are room** (`let_go`, from the insert —
+/// #367 (c)): a growing conversation's previous turn is still held while its
+/// next is planned, and counted as held it made a tight budget give up
+/// another conversation's prompt, or cut this one, for room it was about to
+/// get back. Nothing is evicted here: the plan says how much
+/// (`SnapshotRoom::evict_bytes`) and the insert lets go of it only once a
+/// copy is certain, in the home chosen.
 fn snapshot_room(
     model: &SplitModel,
     kv_store: &KvCacheStore,
     prefix_cache: &PrefixCache,
     prompt_tokens: usize,
     reply: ReplyAhead,
+    let_go: LetGo,
 ) -> SnapshotRoom {
     let home = SnapshotHome::for_device(model.device());
     if home == SnapshotHome::HostRam {
-        return SnapshotRoom {
-            home,
-            max_positions: host_ram_positions(model, prefix_cache, prompt_tokens),
-        };
+        return host_ram_room(model, prefix_cache, prompt_tokens, let_go.host_ram);
     }
-    let beside = positions_beside_live(model, kv_store, prefix_cache, prompt_tokens, reply);
+    let beside = room_beside_live(
+        model,
+        kv_store,
+        prefix_cache,
+        prompt_tokens,
+        reply,
+        let_go.beside_live,
+    );
     let room = room_off_the_card_if_more(
         beside,
         prompt_tokens,
         SnapshotHome::may_leave_the_card(model.device()),
-        || host_ram_positions(model, prefix_cache, prompt_tokens),
+        || host_ram_room(model, prefix_cache, prompt_tokens, let_go.host_ram),
     );
     if room.home == SnapshotHome::HostRam {
         tracing::info!(
             prompt_tokens,
-            beside_live = beside,
+            beside_live = beside.max_positions,
             in_host_memory = room.max_positions.min(prompt_tokens),
             "DIAG: prefix-cache snapshot kept in host memory — the card has no room for it \
              beside the live cache"
@@ -4376,29 +4397,23 @@ fn snapshot_room(
 
 /// [`snapshot_room`]'s choice for a card's snapshot: beside the live cache
 /// when `beside` holds the whole prompt or the copy may not leave the card,
-/// else host RAM where it holds more there (`host`, asked only then — it may
-/// evict older host copies).
+/// else host RAM where it holds more there (`host`, asked only then). The
+/// room chosen carries its own eviction: the card's is never made for a copy
+/// that goes to host memory.
 fn room_off_the_card_if_more(
-    beside: usize,
+    beside: SnapshotRoom,
     prompt_tokens: usize,
     may_leave_the_card: bool,
-    host: impl FnOnce() -> usize,
+    host: impl FnOnce() -> SnapshotRoom,
 ) -> SnapshotRoom {
-    let on_the_card = SnapshotRoom {
-        home: SnapshotHome::BesideLive,
-        max_positions: beside,
-    };
-    if beside >= prompt_tokens || !may_leave_the_card {
-        return on_the_card;
+    if beside.max_positions >= prompt_tokens || !may_leave_the_card {
+        return beside;
     }
     let host = host();
-    if host > beside {
-        SnapshotRoom {
-            home: SnapshotHome::HostRam,
-            max_positions: host,
-        }
+    if host.max_positions > beside.max_positions {
+        host
     } else {
-        on_the_card
+        beside
     }
 }
 
@@ -4418,8 +4433,14 @@ fn save_prompt_opening(
     keep: KeepAsked,
     reply: ReplyAhead,
 ) -> Vec<crate::types::PrefixBlockEntry> {
-    let room = snapshot_room(model, kv_store, prefix_cache, tokens.len(), reply);
-    let manifest = prefix_cache.insert_from_kv(model_key, req_id, kv_store, tokens, room, keep);
+    let manifest = prefix_cache.insert_from_kv(
+        model_key,
+        req_id,
+        kv_store,
+        tokens,
+        |let_go| snapshot_room(model, kv_store, prefix_cache, tokens.len(), reply, let_go),
+        keep,
+    );
     // A snapshot kept beside the live cache is device memory the head-room
     // guard must see.
     if prefix_cache_charged() {
@@ -4465,18 +4486,25 @@ fn prompt_outlives(error: Option<&str>) -> bool {
     error.is_none_or(|e| !crate::inference::worker_ipc::worker_error_is_fatal(e))
 }
 
-/// Positions of a card's snapshot that fit in host RAM beside the
-/// snapshots already there, evicting the oldest of those first. `usize::MAX`
-/// when the machine's memory or a position's weight cannot be read. Not
-/// switched off with `SWARMLLM_KV_PREFIX_CHARGE=0`: that A/B is about the
-/// card's budget, and this is the only bound host RAM has.
-fn host_ram_positions(
+/// The room in host RAM for a card's snapshot, beside the snapshots already
+/// there — the oldest of those to go first as `evict_bytes`, those it replaces
+/// (`letting_go`) counted as its own. `usize::MAX` positions when the
+/// machine's memory or a position's weight cannot be read. Not switched off
+/// with `SWARMLLM_KV_PREFIX_CHARGE=0`: that A/B is about the card's budget,
+/// and this is the only bound host RAM has.
+fn host_ram_room(
     model: &SplitModel,
     prefix_cache: &PrefixCache,
     prompt_tokens: usize,
-) -> usize {
+    letting_go: u64,
+) -> SnapshotRoom {
     use crate::inference::split::kv_budget::{
         host_free_and_total_bytes, host_snapshot_budget, plan_snapshot, KvGrowth,
+    };
+    let unbounded = SnapshotRoom {
+        home: SnapshotHome::HostRam,
+        max_positions: usize::MAX,
+        evict_bytes: 0,
     };
     // A snapshot copies every layer's cache, card-held and processor-held.
     let growth = model
@@ -4484,43 +4512,54 @@ fn host_ram_positions(
         .map(|home| model.kv_budget(home).1)
         .fold(KvGrowth::default(), KvGrowth::plus);
     let Some((available, total)) = host_free_and_total_bytes() else {
-        return usize::MAX;
+        return unbounded;
     };
     if growth.per_position() == 0 {
-        return usize::MAX;
+        return unbounded;
     }
+    // What is held now is in neither `available` nor gone yet: the budget
+    // counts all of it, the plan only what stays.
     let held = prefix_cache.bytes_in(SnapshotHome::HostRam) as u64;
     let budget = host_snapshot_budget(available, total, held);
-    let plan = plan_snapshot(budget, 0, held, growth, prompt_tokens);
-    if plan.evict_bytes > 0 {
-        prefix_cache.release(plan.evict_bytes as usize, SnapshotHome::HostRam);
-    }
+    let staying = held.saturating_sub(letting_go);
+    let plan = plan_snapshot(budget, 0, staying, growth, prompt_tokens);
     if plan.positions < prompt_tokens {
         tracing::info!(
             prompt_tokens,
             keeping = plan.positions,
             held_mb = held / (1024 * 1024),
+            letting_go_mb = letting_go / (1024 * 1024),
             available_mb = available / (1024 * 1024),
             budget_mb = budget / (1024 * 1024),
             "DIAG: prefix-cache snapshot cut to the host memory the machine can spare"
         );
     }
-    plan.positions
+    SnapshotRoom {
+        home: SnapshotHome::HostRam,
+        max_positions: plan.positions,
+        evict_bytes: plan.evict_bytes,
+    }
 }
 
-/// How many positions of a finished prompt to snapshot into the prefix cache
-/// so the copy fits BESIDE the request's live cache (gotcha #440). Evicts
-/// older cached prompts first. `usize::MAX` when the budget is unknown or
-/// charging is switched off.
-fn positions_beside_live(
+/// The room for a finished prompt's snapshot BESIDE the request's live cache
+/// (gotcha #440): older cached prompts to go first as `evict_bytes`, those it
+/// replaces (`letting_go`) counted as its own. `usize::MAX` positions when
+/// the budget is unknown or charging is switched off.
+fn room_beside_live(
     model: &SplitModel,
     kv_store: &KvCacheStore,
     prefix_cache: &PrefixCache,
     prompt_tokens: usize,
     reply: ReplyAhead,
-) -> usize {
+    letting_go: u64,
+) -> SnapshotRoom {
+    let unbounded = SnapshotRoom {
+        home: SnapshotHome::BesideLive,
+        max_positions: usize::MAX,
+        evict_bytes: 0,
+    };
     if !prefix_cache_charged() {
-        return usize::MAX;
+        return unbounded;
     }
     let home = model.kv_home();
     let allocated = kv_store.occupancy().allocated_in(home);
@@ -4529,10 +4568,10 @@ fn positions_beside_live(
     // snapshot is a device allocation the size of the prompt, taken on a card
     // that may hold tenants the load-time figure never saw.
     let (Some(budget), growth) = model.kv_budget_now(home, allocated, cached) else {
-        return usize::MAX;
+        return unbounded;
     };
     if growth.per_position() == 0 {
-        return usize::MAX;
+        return unbounded;
     }
     // The live figure carries one growth quantum of reserve for a reply
     // still to be decoded: a snapshot sized to the last byte left this
@@ -4542,27 +4581,30 @@ fn positions_beside_live(
     let live = allocated.saturating_add(
         growth.bytes_between(prompt_tokens, prompt_tokens + reply.reserve_positions()),
     );
+    let staying = cached.saturating_sub(letting_go);
     let plan = crate::inference::split::kv_budget::plan_snapshot(
         budget,
         live,
-        cached,
+        staying,
         growth,
         prompt_tokens,
     );
-    if plan.evict_bytes > 0 {
-        prefix_cache.release(plan.evict_bytes as usize, SnapshotHome::BesideLive);
-    }
     if plan.positions < prompt_tokens {
         tracing::info!(
             prompt_tokens,
             keeping = plan.positions,
             live_mb = live / (1024 * 1024),
             cached_mb = cached / (1024 * 1024),
+            letting_go_mb = letting_go / (1024 * 1024),
             budget_mb = budget / (1024 * 1024),
             "DIAG: prefix-cache snapshot cut to the room beside the live cache"
         );
     }
-    plan.positions
+    SnapshotRoom {
+        home: SnapshotHome::BesideLive,
+        max_positions: plan.positions,
+        evict_bytes: plan.evict_bytes,
+    }
 }
 
 /// Refuse a segment's prompt pass that is longer than this node serves —
@@ -9852,6 +9894,7 @@ mod up_front_admission_tests {
         let room = SnapshotRoom {
             home: SnapshotHome::BesideLive,
             max_positions: usize::MAX,
+            evict_bytes: 0,
         };
         let keys = vec![[7u8; 32]; positions / 8];
         assert_eq!(
@@ -9937,14 +9980,25 @@ mod up_front_admission_tests {
     #[test]
     fn a_snapshot_the_card_cannot_hold_whole_goes_to_host_memory() {
         let asked = std::cell::Cell::new(false);
-        let host = |positions: usize| {
+        // Each room carries its own eviction, so the one chosen says which
+        // memory gives anything up.
+        let card = |max_positions: usize| SnapshotRoom {
+            home: SnapshotHome::BesideLive,
+            max_positions,
+            evict_bytes: 11,
+        };
+        let host = |max_positions: usize| {
             let asked = &asked;
             move || {
                 asked.set(true);
-                positions
+                SnapshotRoom {
+                    home: SnapshotHome::HostRam,
+                    max_positions,
+                    evict_bytes: 22,
+                }
             }
         };
-        let room = room_off_the_card_if_more(3718, 3718, true, host(9000));
+        let room = room_off_the_card_if_more(card(3718), 3718, true, host(9000));
         assert_eq!(room.home, SnapshotHome::BesideLive);
         assert_eq!(room.max_positions, 3718);
         assert!(
@@ -9952,18 +10006,22 @@ mod up_front_admission_tests {
             "a card holding the whole copy never asks host memory"
         );
 
-        let room = room_off_the_card_if_more(640, 3718, true, host(9000));
+        let room = room_off_the_card_if_more(card(640), 3718, true, host(9000));
         assert_eq!(room.home, SnapshotHome::HostRam);
         assert_eq!(room.max_positions, 9000);
-
-        let room = room_off_the_card_if_more(640, 3718, true, host(100));
         assert_eq!(
-            (room.home, room.max_positions),
-            (SnapshotHome::BesideLive, 640),
+            room.evict_bytes, 22,
+            "a copy sent to host memory gives up host copies, never the card's (#367 (c))"
+        );
+
+        let room = room_off_the_card_if_more(card(640), 3718, true, host(100));
+        assert_eq!(
+            (room.home, room.max_positions, room.evict_bytes),
+            (SnapshotHome::BesideLive, 640, 11),
             "host memory holding less than the card keeps the card's cut"
         );
         asked.set(false);
-        let room = room_off_the_card_if_more(640, 3718, false, host(9000));
+        let room = room_off_the_card_if_more(card(640), 3718, false, host(9000));
         assert_eq!(
             (room.home, room.max_positions),
             (SnapshotHome::BesideLive, 640)

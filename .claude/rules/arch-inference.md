@@ -346,6 +346,12 @@ request that arrives back to back waits for the rest of the copy. A/B
 order): the entries it replaces, then the least recently hit over the caps — a
 copy beside them faults fresh pages (255 ms per 569 MB with memory free, 0.6-0.8 s
 under a full page cache, 43 ms into held memory). A/B `SWARMLLM_SNAPSHOT_ROOM=after-copy`.
+**The room is planned INSIDE the insert, with what the save replaces** (#367 (c)):
+an already-covered prompt plans nothing; the planner (a REQUIRED `RoomPlan`
+closure → `model_worker::snapshot_room`) is handed the replaced entries' bytes
+per memory (`LetGo`) and counts them as its own, and returns its eviction
+(`SnapshotRoom::evict_bytes`), which only `make_room` makes, in the home chosen.
+Never evict in a planner.
 
 → `docs/invariants/inference.md` § "One prefix-cache snapshot is sized by bytes"
 

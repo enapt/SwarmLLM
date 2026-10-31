@@ -1655,11 +1655,20 @@ made room first copied in **100-258 ms** (median ~140) against **457-1,682 ms** 
 first; a growing conversation's next turn started in 1.50-1.93 s against 1.64-3.32 s. (b) is
 **closed, not adopted**: `MIMALLOC_PURGE_DELAY=30000` on top added nothing (saves 100-241 ms, turns
 1.53-1.83 s) — the copy already lands in memory just let go of.
-**Left:** (c) `model_worker::host_ram_positions` sizes the room counting the entry the snapshot will
-replace as held, so a tight host budget evicts another conversation's prompt or cuts this one first;
-(d) unexplained: 5 of the 30 unique 1,800-token prompts' first tokens took 10.1-12.1 s against
-4.0-5.7 s, in arms of BOTH orders and with the purge delay — not the copy (≤ 0.7 s); read the
-`DIAG` timings of a slow one before guessing.
+**(c) fixed 2026-10-31:** the room is planned inside the insert with what the save replaces counted
+as its own (`LetGo`), a prompt already saved plans nothing, and the plan's eviction is made only by
+`make_room`, in the home chosen (`docs/invariants/inference.md` § "One prefix-cache snapshot is sized
+by bytes", the last paragraph). **Left:** (d) unexplained: 5 of the 30 unique 1,800-token prompts'
+first tokens took 10.1-12.1 s against 4.0-5.7 s, in arms of BOTH orders and with the purge delay — not
+the copy (≤ 0.7 s). **Narrowed 2026-10-31 from the rig's own debug logs** (`ab367/node.*.log`): the
+whole extra time is inside ONE prompt chunk's forward — `forward_ms` 6.5-10.3 s against 2.3-3.3 s for
+a first chunk and 1.1-1.5 s for a second, either chunk; queue, schedule and slot timings are the same
+as a fast request's. Not the card pool: fast and slow chunks alike find it already holding the
+forward's memory (`card pool already holds a prompt forward's memory`, 637-765 MB free in the pool,
+the driver at 229-286 MB). The first slow chunk (room arm, 03:04:30Z) came as the host-RAM snapshots
+first reached three (~1.7 GB). **Next**: one profiled repro on the release binary
+(`SWARMLLM_PROFILE`, the ab367 shape) to see which stage of the slow forward grows — the processor
+weights' copies to the card (pageable, link-bound) or the processor layers themselves.
 
 The same 1,800-token prompt's snapshot (Qwen2.5-14B Q4_K_M, 15 of 48 on the card: 569 MB, 486 of it
 the processor layers' f32 cache, all kept in host RAM under WSL2) was copied in 155-680 ms in one pair

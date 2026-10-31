@@ -372,6 +372,64 @@ pub struct SnapshotRoom {
     /// Positions that fit in `home`; 0 stores nothing, `usize::MAX` means no
     /// bound is known.
     pub max_positions: usize,
+    /// Bytes of other snapshots kept in `home` — any model's, least recently
+    /// hit first — to let go before the copy, beyond the entries it replaces
+    /// ([`LetGo`]). The insert lets them go in [`PrefixCache::make_room`],
+    /// only once a copy is certain: planned with an eviction of its own, a
+    /// prompt already saved, or a copy then sent to the other home, gave
+    /// other conversations' prompts up for nothing (#367 (c)).
+    pub evict_bytes: u64,
+}
+
+/// Bytes of the snapshots a save will let go of because the new one covers
+/// them — a growing conversation's previous turn — by where each is kept.
+/// Room the plan counts as its own: still held while it is planned, so
+/// charged to the memory it is in, but gone before the copy lands (#367 (c);
+/// counted as held, a tight host budget evicted ANOTHER conversation's prompt
+/// to make room this one's previous turn was about to give back).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct LetGo {
+    pub beside_live: u64,
+    pub host_ram: u64,
+}
+
+impl LetGo {
+    fn of<'a>(entries: impl Iterator<Item = &'a Entry>) -> Self {
+        entries.fold(Self::default(), |sum, e| Self {
+            beside_live: sum.beside_live + e.snapshot.bytes_in(SnapshotHome::BesideLive) as u64,
+            host_ram: sum.host_ram + e.snapshot.bytes_in(SnapshotHome::HostRam) as u64,
+        })
+    }
+
+    /// The bytes let go of in `home`.
+    pub fn in_home(self, home: SnapshotHome) -> u64 {
+        match home {
+            SnapshotHome::BesideLive => self.beside_live,
+            SnapshotHome::HostRam => self.host_ram,
+        }
+    }
+}
+
+/// How an insert asks for its [`SnapshotRoom`]: once it knows what the save
+/// replaces, and only when a copy is still wanted — the plan is handed the
+/// [`LetGo`]. Production callers pass the worker's planner as a closure; a
+/// fixed room exists only for tests, so no caller can size a snapshot
+/// without being told what it replaces.
+pub trait RoomPlan {
+    fn plan(self, let_go: LetGo) -> SnapshotRoom;
+}
+
+impl<F: FnOnce(LetGo) -> SnapshotRoom> RoomPlan for F {
+    fn plan(self, let_go: LetGo) -> SnapshotRoom {
+        self(let_go)
+    }
+}
+
+#[cfg(test)]
+impl RoomPlan for SnapshotRoom {
+    fn plan(self, _let_go: LetGo) -> SnapshotRoom {
+        self
+    }
 }
 
 struct Entry {
@@ -398,6 +456,40 @@ struct Entry {
 }
 
 impl Entry {
+    /// Does this entry already hold `tokens` (`at` = their length) — so a
+    /// save of them copies nothing (`lookup` narrows a longer entry)?
+    fn covers_tokens(&self, tokens: &[u32], at: usize) -> bool {
+        self.tokens.starts_with(tokens) && self.snapshot.serves_from <= at
+    }
+
+    /// Does a save of `tokens`, answering from `serves`, replace this entry?
+    /// A chain-keyed entry has empty `tokens`, which every prompt "starts
+    /// with" — it is never replaced by a token entry. Nor is one shorter than
+    /// where a slid snapshot answers from: it serves an earlier branch of the
+    /// conversation the new one cannot — llama.cpp keeps checkpoints of a
+    /// windowed cache for the same reason (FUTURE_WORK #281).
+    fn replaced_by_tokens(&self, tokens: &[u32], serves: usize) -> bool {
+        self.chain.is_empty() && tokens.starts_with(&self.tokens) && self.tokens.len() >= serves
+    }
+
+    /// Does this split entry already hold `chain` (`positions` long)?
+    fn covers_chain(&self, chain: &[[u8; 32]], block_tokens: u32, positions: usize) -> bool {
+        self.chain_block == block_tokens
+            && self.chain.starts_with(chain)
+            && self.snapshot.token_count >= positions
+            && self.snapshot.serves_from <= positions
+    }
+
+    /// Does a save of `chain`, answering from `serves`, replace this split
+    /// entry — the one of this split that ours extends, unless it is shorter
+    /// than where ours answers from?
+    fn replaced_by_chain(&self, chain: &[[u8; 32]], block_tokens: u32, serves: usize) -> bool {
+        !self.chain.is_empty()
+            && self.chain_block == block_tokens
+            && chain.starts_with(&self.chain)
+            && self.snapshot.token_count >= serves
+    }
+
     /// Compute the chained BLAKE3 manifest for this entry's tokens at the
     /// configured block size. Only complete blocks contribute; the entry's
     /// trailing partial block (if any, when `tokens.len() % block_size != 0`)
@@ -666,25 +758,15 @@ impl PrefixCache {
         request_id: &str,
         kv_store: &KvCacheStore,
         prompt_tokens: &[u32],
-        room: SnapshotRoom,
+        // Where the copy goes and what fits there (`model_worker::snapshot_room`
+        // → `kv_budget::plan_snapshot` — a snapshot that does not fit is worse
+        // than none, gotcha #440), asked once the save knows what it replaces
+        // and only if a copy is still wanted (#367 (c)).
+        room: impl RoomPlan,
         // The request's own instruction (#251 (2b)) — required, so neither
         // insert site can save a kept request's cache as one to share.
         keep: KeepAsked,
     ) -> Vec<PrefixBlockEntry> {
-        // `room` is where the copy goes and what fits there, from
-        // `kv_budget::plan_snapshot` — a snapshot that does not fit is worse
-        // than none (gotcha #440). `usize::MAX` positions means no bound.
-        let max_positions = room.max_positions;
-        if max_positions == 0 {
-            tracing::info!(
-                model_key,
-                request_id,
-                prompt_tokens = prompt_tokens.len(),
-                home = ?room.home,
-                "DIAG: prefix-cache: not snapshotting — no room for the copy"
-            );
-            return Vec::new();
-        }
         // Each bail-out below says why. They were silent, and that made a
         // cross-node prefix-KV measurement undiagnosable: the producing node
         // simply never announced any blocks, with nothing in the log to say
@@ -700,32 +782,21 @@ impl PrefixCache {
             return Vec::new();
         }
         let key = KvCacheStore::cache_key(model_key, request_id);
-        let Some(entry_ref) = kv_store_get(kv_store, &key) else {
-            tracing::debug!(
-                model_key,
-                request_id,
-                "prefix-cache: no KV entry to snapshot"
-            );
-            return Vec::new();
+        let held = match HeldCache::read(kv_store, &key) {
+            Ok(held) => held,
+            Err(why) => {
+                tracing::debug!(
+                    model_key,
+                    request_id,
+                    "prefix-cache: not snapshotting — {why}"
+                );
+                return Vec::new();
+            }
         };
-        let entry = entry_ref;
-
-        // Figure out the seq dim / max_seq_len from the first populated layer.
-        let Some(first_kv) = entry.layers.iter().flatten().next() else {
-            tracing::debug!(
-                model_key,
-                "prefix-cache: not snapshotting — KV entry has no populated layers"
-            );
-            return Vec::new();
-        };
-        let dim = first_kv.k_cache().dim();
-        let max_seq_len = first_kv.k_cache().max_seq_len();
-        let available = first_kv.current_seq_len();
-        // Bound insertion points by what the KV actually holds, by the room on
-        // the device, and by the ceiling — which keeps the opening of a longer
-        // prompt instead of refusing it.
-        let cost = SnapshotCost::of(&entry.layers);
-        let ceiling = self.positions_ceiling(cost);
+        // Bound insertion points by what the KV actually holds and by the
+        // ceiling — which keeps the opening of a longer prompt instead of
+        // refusing it — and, below, by the room.
+        let ceiling = self.positions_ceiling(held.cost);
         if ceiling < prompt_tokens.len() {
             tracing::info!(
                 model_key,
@@ -736,10 +807,40 @@ impl PrefixCache {
                 "prefix-cache: prompt longer than one snapshot may hold — keeping its opening"
             );
         }
-        let available = available
-            .min(prompt_tokens.len())
-            .min(max_positions)
-            .min(ceiling);
+        let whole = held.positions.min(prompt_tokens.len()).min(ceiling);
+        if whole < self.min_tokens {
+            tracing::debug!(
+                model_key,
+                available = whole,
+                min_tokens = self.min_tokens,
+                "prefix-cache: not snapshotting — fewer KV positions than the floor"
+            );
+            return Vec::new();
+        }
+        // Fast path: an entry already covering this prefix (equal or longer)
+        // makes the snapshot redundant — `lookup` narrows the longer entry to
+        // any shared length at hit time. Skipping here is what makes a
+        // repeated identical prompt cost nothing instead of re-copying the
+        // whole KV every request — and, asked before the room is planned, give
+        // nothing up either.
+        if let Some(manifest) = self.covered_by_tokens(model_key, &prompt_tokens[..whole], whole) {
+            return manifest;
+        }
+        let planned_let_go = self.let_go(model_key, |e| {
+            e.replaced_by_tokens(&prompt_tokens[..whole], held.serves_once_saved(whole))
+        });
+        let room = room.plan(planned_let_go);
+        if room.max_positions == 0 {
+            tracing::info!(
+                model_key,
+                request_id,
+                prompt_tokens = prompt_tokens.len(),
+                home = ?room.home,
+                "DIAG: prefix-cache: not snapshotting — no room for the copy"
+            );
+            return Vec::new();
+        }
+        let available = whole.min(room.max_positions);
         if available < self.min_tokens {
             tracing::debug!(
                 model_key,
@@ -752,12 +853,11 @@ impl PrefixCache {
         // A sliding-window layer that has dropped the prompt's opening cannot
         // be saved at a length its window no longer reaches — the opening the
         // ceiling or the room would keep (FUTURE_WORK #281).
-        let serves = serves_from(&entry.layers);
-        if available < serves {
+        if available < held.serves {
             tracing::info!(
                 model_key,
                 available,
-                serves_from = serves,
+                serves_from = held.serves,
                 "prefix-cache: not snapshotting — the sliding-window layers no longer hold \
                  the opening that fits"
             );
@@ -767,13 +867,7 @@ impl PrefixCache {
         // cannot be cut back, so it is saved only where the pass stopped to
         // save it (`PrefixCache::save_point`, #228) — never beside attention
         // layers narrowed to a shorter opening.
-        if let Some(at) = entry
-            .ssm_states
-            .iter()
-            .flatten()
-            .map(SsmState::positions)
-            .find(|&at| at != available)
-        {
+        if let Some(&at) = held.recurrent_at.iter().find(|&&at| at != available) {
             tracing::info!(
                 model_key,
                 available,
@@ -785,57 +879,52 @@ impl PrefixCache {
         }
 
         let snap_tokens = &prompt_tokens[..available];
-
-        // Fast path: an entry already covering this prefix (equal or longer)
-        // makes the snapshot redundant — `lookup` narrows the longer entry to
-        // any shared length at hit time. Skipping here is what makes a
-        // repeated identical prompt cost nothing instead of re-copying the
-        // whole KV every request. `last_hit` is atomic, so the bump needs
-        // only the read lock (same as `lookup`).
-        {
-            let Ok(inner) = self.inner.read() else {
-                return Vec::new();
-            };
-            if let Some(bucket) = inner.per_model.get(model_key) {
-                if let Some(covering) = bucket.iter().find(|e| {
-                    e.tokens.starts_with(snap_tokens) && e.snapshot.serves_from <= available
-                }) {
-                    covering.last_hit.store(self.next_tick(), Ordering::Relaxed);
-                    let manifest = enumerate_manifest_locked(bucket, self.block_tokens);
-                    tracing::debug!(
-                        model_key,
-                        prompt_tokens = available,
-                        covering_tokens = covering.tokens.len(),
-                        "prefix-cache: prefix already covered — skipping snapshot"
-                    );
-                    return manifest;
-                }
-            }
-        }
-
         // Where the snapshot will answer from (`snapshot_at`'s figure): a
         // recurrent state's serves only its whole length.
-        let serves_once_saved = if entry.ssm_states.iter().any(Option::is_some) {
-            available
-        } else {
-            serves
+        let serves_once_saved = held.serves_once_saved(available);
+        if available < whole {
+            // Cut to the room: an entry holding more of this prompt covers
+            // the cut, and one it no longer replaces was planned as let go.
+            if let Some(manifest) = self.covered_by_tokens(model_key, snap_tokens, available) {
+                return manifest;
+            }
+            let let_go = self.let_go(model_key, |e| {
+                e.replaced_by_tokens(snap_tokens, serves_once_saved)
+            });
+            if let_go.in_home(room.home) < planned_let_go.in_home(room.home) {
+                tracing::info!(
+                    model_key,
+                    available,
+                    whole,
+                    "prefix-cache: not snapshotting — the room's cut keeps an entry the plan \
+                     counted as let go"
+                );
+                return Vec::new();
+            }
+        }
+        let Some(entry) = kv_store_get(kv_store, &key)
+            .filter(|e| HeldCache::positions_of(&e.layers) >= available)
+        else {
+            tracing::debug!(
+                model_key,
+                request_id,
+                "prefix-cache: not snapshotting — the KV entry changed while its room was planned"
+            );
+            return Vec::new();
         };
         let room_made = self.make_room(
             model_key,
-            |e| {
-                e.chain.is_empty()
-                    && snap_tokens.starts_with(&e.tokens)
-                    && e.tokens.len() >= serves_once_saved
-            },
-            cost.bytes_at(available),
+            |e| e.replaced_by_tokens(snap_tokens, serves_once_saved),
+            held.cost.bytes_at(available),
+            room,
         );
         let copy_started = Instant::now();
         let snap = match snapshot_at(
             &entry.layers,
             &entry.ssm_states,
             available,
-            dim,
-            max_seq_len,
+            held.dim,
+            held.max_seq_len,
             room.home,
         ) {
             Ok(s) => Arc::new(s),
@@ -871,21 +960,15 @@ impl PrefixCache {
         // new entry — `lookup` narrows to serve them — so retaining them
         // would only burn `max_entries` slots and their KV bytes. A growing
         // conversation therefore keeps ONE entry, not one per turn.
-        // A chain-keyed entry has empty `tokens`, which every prompt "starts
-        // with" — it is never covered by a token entry. Nor is one shorter
-        // than where a slid snapshot answers from: it serves an earlier branch
-        // of the conversation ours cannot — llama.cpp keeps checkpoints of a
-        // windowed cache for the same reason (FUTURE_WORK #281).
         let serves = snap.serves_from;
-        let covered = |e: &Entry| {
-            e.chain.is_empty() && tokens.starts_with(&e.tokens) && e.tokens.len() >= serves
-        };
         // An entry this one replaces passes its keep on: the strictest
         // instruction wins, as it does for the request (`api::keep_here`).
         let kept_here = keep == KeepAsked::OnThisComputer
             || room_made.replaced_kept_here
-            || bucket.iter().any(|e| covered(e) && e.kept_here);
-        bucket.retain(|e| !covered(e));
+            || bucket
+                .iter()
+                .any(|e| e.replaced_by_tokens(&tokens, serves) && e.kept_here);
+        bucket.retain(|e| !e.replaced_by_tokens(&tokens, serves));
         bucket.push(Entry {
             tokens,
             chain: Vec::new(),
@@ -917,68 +1000,145 @@ impl PrefixCache {
         manifest
     }
 
+    /// The manifest to announce if an entry of `model_key` already holds
+    /// `tokens` (`at` long) — a save of them copies nothing — after marking
+    /// that entry hit. `last_hit` is atomic, so the bump needs only the read
+    /// lock (same as `lookup`).
+    fn covered_by_tokens(
+        &self,
+        model_key: &str,
+        tokens: &[u32],
+        at: usize,
+    ) -> Option<Vec<PrefixBlockEntry>> {
+        let inner = self.inner.read().ok()?;
+        let bucket = inner.per_model.get(model_key)?;
+        let covering = bucket.iter().find(|e| e.covers_tokens(tokens, at))?;
+        covering.last_hit.store(self.next_tick(), Ordering::Relaxed);
+        tracing::debug!(
+            model_key,
+            prompt_tokens = at,
+            covering_tokens = covering.tokens.len(),
+            "prefix-cache: prefix already covered — skipping snapshot"
+        );
+        Some(enumerate_manifest_locked(bucket, self.block_tokens))
+    }
+
+    /// Blocks held if a split entry of `model_key` already holds `chain`
+    /// (`positions` long), after marking it hit.
+    fn covered_by_chain(
+        &self,
+        model_key: &str,
+        chain: &[[u8; 32]],
+        block_tokens: u32,
+        positions: usize,
+    ) -> Option<u32> {
+        let inner = self.inner.read().ok()?;
+        let covering = inner
+            .per_model
+            .get(model_key)?
+            .iter()
+            .find(|e| e.covers_chain(chain, block_tokens, positions))?;
+        covering.last_hit.store(self.next_tick(), Ordering::Relaxed);
+        Some(chain.len() as u32)
+    }
+
+    /// What a save lets go of in `model_key`'s bucket — the entries
+    /// `replaced` names — by where each is kept ([`LetGo`]).
+    fn let_go(&self, model_key: &str, replaced: impl Fn(&Entry) -> bool) -> LetGo {
+        self.inner
+            .read()
+            .ok()
+            .and_then(|i| {
+                i.per_model
+                    .get(model_key)
+                    .map(|b| LetGo::of(b.iter().filter(|e| replaced(e))))
+            })
+            .unwrap_or_default()
+    }
+
     /// Makes room in `model_key`'s bucket for a snapshot of `incoming_bytes`
     /// BEFORE it is copied (#367): first the entries it replaces
     /// (`superseded`), then the least recently hit until it fits both caps —
     /// llama.cpp's `server_prompt_cache::alloc` order ("make room before
     /// allocating the new vectors", `tools/server/server-task.cpp` at
-    /// 4b1a27f). What it lets go is what [`Self::evict_over_caps`] would drop
-    /// after the insert; done first, the save never holds what it replaces
-    /// beside the copy (a 14B's 1,800-token prompt: 569 MB), and the copy lands
-    /// mostly in memory the allocator already holds instead of fresh pages —
-    /// under WSL2 a fresh 569 MB took 255 ms to touch with memory free and
-    /// 0.6-0.8 s under a full page cache (the kernel's huge-page compactions
-    /// failing), against 43 ms into touched memory; in a turn-by-turn model of
-    /// the worker (mimalloc v3, as the workers run it) a save took 171-274 ms
-    /// beside the old snapshot and 81-125 ms after letting it go. Each insert's
-    /// own pass after the copy stays: it catches an entry that raced in
-    /// meanwhile. The cost: a copy that then fails keeps neither — it fails
-    /// on a device with no memory left, where that room is what it lacked.
+    /// 4b1a27f) — then, if the memory's own budget needs more
+    /// (`room.evict_bytes`, from the plan), the least recently hit kept in
+    /// `room.home`, any model's. What it lets go is what
+    /// [`Self::evict_over_caps`] would drop after the insert; done first, the
+    /// save never holds what it replaces beside the copy (a 14B's
+    /// 1,800-token prompt: 569 MB), and the copy lands mostly in memory the
+    /// allocator already holds instead of fresh pages — under WSL2 a fresh
+    /// 569 MB took 255 ms to touch with memory free and 0.6-0.8 s under a
+    /// full page cache (the kernel's huge-page compactions failing), against
+    /// 43 ms into touched memory; in a turn-by-turn model of the worker
+    /// (mimalloc v3, as the workers run it) a save took 171-274 ms beside the
+    /// old snapshot and 81-125 ms after letting it go. Each insert's own pass
+    /// after the copy stays: it catches an entry that raced in meanwhile. The
+    /// cost: a copy that then fails keeps neither — it fails on a device with
+    /// no memory left, where that room is what it lacked.
     fn make_room(
         &self,
         model_key: &str,
         superseded: impl Fn(&Entry) -> bool,
         incoming_bytes: usize,
+        room: SnapshotRoom,
     ) -> RoomMade {
         // `SWARMLLM_SNAPSHOT_ROOM=after-copy`: the old order — each insert's
-        // own pass after the copy drops the same entries. Read once.
+        // own pass after the copy drops the replaced entries and the caps'.
+        // The plan's own eviction is made before the copy either way, as it
+        // always was. Read once.
         static AFTER_COPY: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-        if *AFTER_COPY
-            .get_or_init(|| std::env::var("SWARMLLM_SNAPSHOT_ROOM").as_deref() == Ok("after-copy"))
-        {
-            return RoomMade::default();
-        }
+        let after_copy = *AFTER_COPY
+            .get_or_init(|| std::env::var("SWARMLLM_SNAPSHOT_ROOM").as_deref() == Ok("after-copy"));
         // Dropped once the lock is released: freeing 0.5 GB is not instant.
-        let (gone, room) = {
+        let (gone, room_made) = {
             let Ok(mut inner) = self.inner.write() else {
                 return RoomMade::default();
             };
-            let Some(bucket) = inner.per_model.get_mut(model_key) else {
-                return RoomMade::default();
-            };
-            let mut gone: Vec<Entry> = bucket.extract_if(.., |e| superseded(e)).collect();
-            let replaced = gone.len();
-            let replaced_kept_here = gone.iter().any(|e| e.kept_here);
-            bucket.sort_by_key(|e| e.last_hit.load(Ordering::Relaxed));
-            let mut total: usize = bucket.iter().map(|e| e.snapshot.bytes()).sum();
-            while !bucket.is_empty()
-                && (bucket.len() >= self.max_entries
-                    || (self.max_bytes > 0
-                        && total.saturating_add(incoming_bytes) > self.max_bytes))
-            {
-                let oldest = bucket.remove(0);
-                total = total.saturating_sub(oldest.snapshot.bytes());
-                gone.push(oldest);
+            let mut gone: Vec<Entry> = Vec::new();
+            let mut replaced = 0;
+            let mut replaced_kept_here = false;
+            if let Some(bucket) = inner.per_model.get_mut(model_key).filter(|_| !after_copy) {
+                gone = bucket.extract_if(.., |e| superseded(e)).collect();
+                replaced = gone.len();
+                replaced_kept_here = gone.iter().any(|e| e.kept_here);
+                bucket.sort_by_key(|e| e.last_hit.load(Ordering::Relaxed));
+                let mut total: usize = bucket.iter().map(|e| e.snapshot.bytes()).sum();
+                while !bucket.is_empty()
+                    && (bucket.len() >= self.max_entries
+                        || (self.max_bytes > 0
+                            && total.saturating_add(incoming_bytes) > self.max_bytes))
+                {
+                    let oldest = bucket.remove(0);
+                    total = total.saturating_sub(oldest.snapshot.bytes());
+                    gone.push(oldest);
+                }
+                if bucket.is_empty() {
+                    inner.per_model.remove(model_key);
+                }
             }
-            let room = RoomMade {
+            // The plan's eviction counts what the caps already gave back in
+            // the same memory; the replaced entries were its own room.
+            let freed_in_home: u64 = gone[replaced..]
+                .iter()
+                .map(|e| e.snapshot.bytes_in(room.home) as u64)
+                .sum();
+            if room.evict_bytes > freed_in_home {
+                gone.extend(take_least_recently_hit(
+                    &mut inner,
+                    room.evict_bytes - freed_in_home,
+                    room.home,
+                ));
+            }
+            let room_made = RoomMade {
                 replaced,
                 evicted: gone.len() - replaced,
                 replaced_kept_here,
             };
-            (gone, room)
+            (gone, room_made)
         };
         drop(gone);
-        room
+        room_made
     }
 
     /// Evict LRU entries of one model until both caps hold.
@@ -1075,40 +1235,45 @@ impl PrefixCache {
         kv_store: &KvCacheStore,
         block_tokens: u32,
         keys: &[[u8; 32]],
-        room: SnapshotRoom,
+        // As on the token path: asked once the save knows what it replaces.
+        room: impl RoomPlan,
     ) -> u32 {
         let bt = block_tokens as usize;
-        let max_positions = room.max_positions;
-        if !self.enabled || bt == 0 || keys.is_empty() || max_positions == 0 {
+        if !self.enabled || bt == 0 || keys.is_empty() {
             return 0;
         }
         let key = KvCacheStore::cache_key(model_key, request_id);
-        let Some(entry) = kv_store_get(kv_store, &key) else {
+        let Ok(held) = HeldCache::read(kv_store, &key) else {
             return 0;
         };
-        if entry.ssm_states.iter().any(|s| s.is_some()) {
+        // A split segment's state is refused: a chain entry carries
+        // attention layers only.
+        if !held.recurrent_at.is_empty() {
             return 0;
         }
-        let Some(first_kv) = entry.layers.iter().flatten().next() else {
+        let ceiling = self.positions_ceiling(held.cost);
+        let whole = held.positions.min(keys.len() * bt).min(ceiling) / bt * bt;
+        if whole == 0 || whole < self.min_tokens {
             return 0;
-        };
-        let dim = first_kv.k_cache().dim();
-        let max_seq_len = first_kv.k_cache().max_seq_len();
-        let cost = SnapshotCost::of(&entry.layers);
-        let ceiling = self.positions_ceiling(cost);
-        let available = first_kv
-            .current_seq_len()
-            .min(keys.len() * bt)
-            .min(max_positions)
-            .min(ceiling);
-        let blocks = available / bt;
-        let positions = blocks * bt;
+        }
+        // Already held, whole: nothing to copy, and nothing given up.
+        if let Some(blocks) =
+            self.covered_by_chain(model_key, &keys[..whole / bt], block_tokens, whole)
+        {
+            return blocks;
+        }
+        let serves = held.serves;
+        let planned_let_go = self.let_go(model_key, |e| {
+            e.replaced_by_chain(&keys[..whole / bt], block_tokens, serves)
+        });
+        let room = room.plan(planned_let_go);
+        let positions = whole.min(room.max_positions) / bt * bt;
+        let blocks = positions / bt;
         if blocks == 0 || positions < self.min_tokens {
             return 0;
         }
         // As on the token path: a slid window cannot be saved short of where
         // it still answers (FUTURE_WORK #281).
-        let serves = serves_from(&entry.layers);
         if positions < serves {
             tracing::info!(
                 model_key,
@@ -1120,38 +1285,45 @@ impl PrefixCache {
             return 0;
         }
         let chain = &keys[..blocks];
-        // Already held, whole: nothing to copy.
-        {
-            let Ok(inner) = self.inner.read() else {
+        if positions < whole {
+            if let Some(blocks) = self.covered_by_chain(model_key, chain, block_tokens, positions) {
+                return blocks;
+            }
+            let let_go = self.let_go(model_key, |e| {
+                e.replaced_by_chain(chain, block_tokens, serves)
+            });
+            if let_go.in_home(room.home) < planned_let_go.in_home(room.home) {
+                tracing::info!(
+                    model_key,
+                    positions,
+                    whole,
+                    "prefix-cache: not storing a split's prompt — the room's cut keeps an entry \
+                     the plan counted as let go"
+                );
                 return 0;
-            };
-            if let Some(covering) = inner.per_model.get(model_key).and_then(|b| {
-                b.iter().find(|e| {
-                    e.chain_block == block_tokens
-                        && e.chain.starts_with(chain)
-                        && e.snapshot.token_count >= positions
-                        && e.snapshot.serves_from <= positions
-                })
-            }) {
-                covering.last_hit.store(self.next_tick(), Ordering::Relaxed);
-                return blocks as u32;
             }
         }
+        let Some(entry) = kv_store_get(kv_store, &key)
+            .filter(|e| HeldCache::positions_of(&e.layers) >= positions)
+        else {
+            return 0;
+        };
         // Room first (#367): the entry of this split that ours extends — the
-        // `retain` below, inverted — then the caps.
+        // `retain` below — then the caps, then the plan's own eviction.
         let room_made = self.make_room(
             model_key,
-            |e| {
-                !e.chain.is_empty()
-                    && e.chain_block == block_tokens
-                    && chain.starts_with(&e.chain)
-                    && e.snapshot.token_count >= serves
-            },
-            cost.bytes_at(positions),
+            |e| e.replaced_by_chain(chain, block_tokens, serves),
+            held.cost.bytes_at(positions),
+            room,
         );
-        // A split segment's state is refused above: a chain entry carries
-        // attention layers only.
-        let snap = match snapshot_at(&entry.layers, &[], positions, dim, max_seq_len, room.home) {
+        let snap = match snapshot_at(
+            &entry.layers,
+            &[],
+            positions,
+            held.dim,
+            held.max_seq_len,
+            room.home,
+        ) {
             Ok(s) => Arc::new(s),
             Err(e) => {
                 tracing::warn!(model_key, positions, replaced = room_made.replaced,
@@ -1169,12 +1341,7 @@ impl PrefixCache {
         // a growing conversation keeps ONE entry, as on the token path, unless
         // it is shorter than where ours answers from.
         let serves = snap.serves_from;
-        bucket.retain(|e| {
-            e.chain.is_empty()
-                || e.chain_block != block_tokens
-                || !chain.starts_with(&e.chain)
-                || e.snapshot.token_count < serves
-        });
+        bucket.retain(|e| !e.replaced_by_chain(chain, block_tokens, serves));
         let tick = self.next_tick();
         bucket.push(Entry {
             tokens: Vec::new(),
@@ -1498,35 +1665,8 @@ impl PrefixCache {
         let Ok(mut inner) = self.inner.write() else {
             return 0;
         };
-        let mut freed = 0usize;
-        while freed < needed {
-            let oldest = inner
-                .per_model
-                .iter()
-                .flat_map(|(key, bucket)| {
-                    bucket
-                        .iter()
-                        .enumerate()
-                        .filter(|(_, e)| e.snapshot.home() == home)
-                        .map(move |(i, e)| (e.last_hit.load(Ordering::Relaxed), key.clone(), i))
-                })
-                .min_by_key(|(hit, _, _)| *hit);
-            let Some((_, key, idx)) = oldest else {
-                break;
-            };
-            let bytes = {
-                let bucket = inner
-                    .per_model
-                    .get_mut(&key)
-                    .expect("key came from the map");
-                let removed = bucket.remove(idx);
-                if bucket.is_empty() {
-                    inner.per_model.remove(&key);
-                }
-                removed.snapshot.bytes()
-            };
-            freed = freed.saturating_add(bytes);
-        }
+        let gone = take_least_recently_hit(&mut inner, needed as u64, home);
+        let freed: usize = gone.iter().map(|e| e.snapshot.bytes()).sum();
         if freed > 0 {
             tracing::info!(
                 freed_mb = freed / (1024 * 1024),
@@ -1542,6 +1682,10 @@ impl PrefixCache {
                 "DIAG: prefix-cache released cached prompts to make room"
             );
         }
+        // The entries go once the lock is released: freeing 0.5 GB is not
+        // instant.
+        drop(inner);
+        drop(gone);
         freed
     }
 
@@ -1560,6 +1704,103 @@ impl PrefixCache {
             })
             .unwrap_or(0)
     }
+}
+
+/// What a request's cache holds, read once for a save and let go before the
+/// save's room is planned: the plan reads the store
+/// (`KvCacheStore::occupancy`), never under a guard on one of its entries.
+struct HeldCache {
+    dim: usize,
+    max_seq_len: usize,
+    /// Positions the cache holds (its first populated layer's length).
+    positions: usize,
+    cost: SnapshotCost,
+    /// Where a snapshot of it answers from ([`serves_from`]).
+    serves: usize,
+    /// The position each recurrent layer's state is at (#228); empty for a
+    /// model without one.
+    recurrent_at: Vec<usize>,
+}
+
+impl HeldCache {
+    fn read(kv_store: &KvCacheStore, key: &str) -> Result<Self, &'static str> {
+        let entry = kv_store_get(kv_store, key).ok_or("no KV entry to snapshot")?;
+        let first_kv = entry
+            .layers
+            .iter()
+            .flatten()
+            .next()
+            .ok_or("the KV entry has no populated layers")?;
+        Ok(Self {
+            dim: first_kv.k_cache().dim(),
+            max_seq_len: first_kv.k_cache().max_seq_len(),
+            positions: first_kv.current_seq_len(),
+            cost: SnapshotCost::of(&entry.layers),
+            serves: serves_from(&entry.layers),
+            recurrent_at: entry
+                .ssm_states
+                .iter()
+                .flatten()
+                .map(SsmState::positions)
+                .collect(),
+        })
+    }
+
+    /// Positions `layers` hold, as [`Self::positions`] reads them.
+    fn positions_of(layers: &[Option<LayerKv>]) -> usize {
+        layers
+            .iter()
+            .flatten()
+            .next()
+            .map_or(0, |kv| kv.current_seq_len())
+    }
+
+    /// Where a snapshot taken at `at` answers from (`snapshot_at`'s figure):
+    /// a recurrent state's serves only its whole length.
+    fn serves_once_saved(&self, at: usize) -> usize {
+        if self.recurrent_at.is_empty() {
+            self.serves
+        } else {
+            at
+        }
+    }
+}
+
+/// Takes the least recently hit entries kept in `home`, across every model,
+/// out of `inner` until at least `needed` bytes of that memory are gone or
+/// none is left — the ONE eviction order of [`PrefixCache::release`] and of a
+/// save's planned room ([`PrefixCache::make_room`]). The caller drops them
+/// once its lock is released.
+fn take_least_recently_hit(inner: &mut Inner, needed: u64, home: SnapshotHome) -> Vec<Entry> {
+    let mut gone = Vec::new();
+    let mut freed = 0u64;
+    while freed < needed {
+        let oldest = inner
+            .per_model
+            .iter()
+            .flat_map(|(key, bucket)| {
+                bucket
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, e)| e.snapshot.home() == home)
+                    .map(move |(i, e)| (e.last_hit.load(Ordering::Relaxed), key.clone(), i))
+            })
+            .min_by_key(|(hit, _, _)| *hit);
+        let Some((_, key, idx)) = oldest else {
+            break;
+        };
+        let bucket = inner
+            .per_model
+            .get_mut(&key)
+            .expect("key came from the map");
+        let removed = bucket.remove(idx);
+        if bucket.is_empty() {
+            inner.per_model.remove(&key);
+        }
+        freed = freed.saturating_add(removed.snapshot.bytes() as u64);
+        gone.push(removed);
+    }
+    gone
 }
 
 fn kv_store_get<'a>(
@@ -2100,12 +2341,14 @@ mod tests {
     const ANYWHERE: SnapshotRoom = SnapshotRoom {
         home: SnapshotHome::BesideLive,
         max_positions: usize::MAX,
+        evict_bytes: 0,
     };
 
     fn beside(max_positions: usize) -> SnapshotRoom {
         SnapshotRoom {
             home: SnapshotHome::BesideLive,
             max_positions,
+            evict_bytes: 0,
         }
     }
 
@@ -2722,6 +2965,155 @@ mod tests {
         );
         assert!(pc.lookup("m", &turn_1).is_none());
         assert!(pc.lookup("m", &[other.as_slice(), &[1]].concat()).is_some());
+    }
+
+    /// #367 (c): the room is planned once the save knows what it replaces —
+    /// the planner is handed the previous turn's bytes, in the memory it is
+    /// kept in, and never another conversation's — and the plan's own
+    /// eviction is made only by the insert, beyond that. Counted as held, the
+    /// previous turn made a tight budget evict the other conversation for
+    /// room it was about to give back.
+    #[test]
+    fn the_room_is_planned_with_what_the_save_replaces() {
+        let pc = PrefixCache::new(true, 16, 4, 4, 8192, 0);
+        let kv_store = KvCacheStore::new(std::time::Duration::from_secs(600));
+        make_fake_kv(&kv_store, "m", "turn-1", 2, 8);
+        let turn_1: Vec<u32> = (1..=8).collect();
+        pc.insert_from_kv(
+            "m",
+            "turn-1",
+            &kv_store,
+            &turn_1,
+            ANYWHERE,
+            KeepAsked::Unasked,
+        );
+        let turn_1_bytes = pc.bytes_in(SnapshotHome::BesideLive) as u64;
+        // Another conversation, older than turn 1's next.
+        make_fake_kv(&kv_store, "m", "other", 2, 8);
+        let other: Vec<u32> = (101..=108).collect();
+        pc.insert_from_kv(
+            "m",
+            "other",
+            &kv_store,
+            &other,
+            ANYWHERE,
+            KeepAsked::Unasked,
+        );
+
+        make_fake_kv(&kv_store, "m", "turn-2", 2, 16);
+        let turn_2: Vec<u32> = (1..=16).collect();
+        let handed = std::cell::Cell::new(None);
+        let manifest = pc.insert_from_kv(
+            "m",
+            "turn-2",
+            &kv_store,
+            &turn_2,
+            |let_go: LetGo| {
+                handed.set(Some(let_go));
+                ANYWHERE
+            },
+            KeepAsked::Unasked,
+        );
+        assert!(!manifest.is_empty());
+        assert_eq!(
+            handed.get(),
+            Some(LetGo {
+                beside_live: turn_1_bytes,
+                host_ram: 0,
+            }),
+            "the plan is told the previous turn goes, and nothing else"
+        );
+        assert_eq!(pc.entry_count("m"), 2, "turn 1 replaced, the other kept");
+        assert!(pc.lookup("m", &[other.as_slice(), &[1]].concat()).is_some());
+    }
+
+    /// #367 (c): a prompt already saved copies nothing, so it asks for no
+    /// room and gives up nothing — the plan, which evicted before the insert
+    /// looked, took other conversations' prompts for a copy then skipped.
+    #[test]
+    fn a_prompt_already_saved_asks_for_no_room() {
+        let pc = PrefixCache::new(true, 16, 4, 4, 8192, 0);
+        let kv_store = KvCacheStore::new(std::time::Duration::from_secs(600));
+        for (req, base) in [("other", 100u32), ("again", 200)] {
+            make_fake_kv(&kv_store, "m", req, 2, 8);
+            let tokens: Vec<u32> = (base..base + 8).collect();
+            pc.insert_from_kv("m", req, &kv_store, &tokens, ANYWHERE, KeepAsked::Unasked);
+        }
+        make_fake_kv(&kv_store, "m", "again-2", 2, 8);
+        let again: Vec<u32> = (200..208).collect();
+        let manifest = pc.insert_from_kv(
+            "m",
+            "again-2",
+            &kv_store,
+            &again,
+            |_: LetGo| -> SnapshotRoom { panic!("a covered prompt planned room") },
+            KeepAsked::Unasked,
+        );
+        assert!(!manifest.is_empty(), "the covering entry's blocks");
+        assert_eq!(pc.entry_count("m"), 2, "nothing given up");
+
+        // The same on a split's stored prompt (#10).
+        make_fake_kv(&kv_store, "seg", "turn-1", 2, 16);
+        let keys = vec![[3u8; 32]; 2];
+        assert_eq!(
+            pc.insert_chain_from_kv("seg", "turn-1", &kv_store, 8, &keys, ANYWHERE),
+            2
+        );
+        make_fake_kv(&kv_store, "seg", "turn-1b", 2, 16);
+        assert_eq!(
+            pc.insert_chain_from_kv(
+                "seg",
+                "turn-1b",
+                &kv_store,
+                8,
+                &keys,
+                |_: LetGo| -> SnapshotRoom { panic!("a covered chain planned room") }
+            ),
+            2
+        );
+    }
+
+    /// #367 (c): the plan's eviction is made in the memory the copy goes to,
+    /// least recently hit first across every model, counting what the caps
+    /// already gave back there — never in the other memory.
+    #[test]
+    fn a_planned_eviction_is_made_in_the_home_the_copy_goes_to() {
+        let pc = PrefixCache::new(true, 16, 4, 4, 8192, 0);
+        let kv_store = KvCacheStore::new(std::time::Duration::from_secs(600));
+        // Oldest first: one off the card (another model), then two beside it.
+        for (model, req, base) in [
+            ("n", "host", 100u32),
+            ("n", "card-old", 200),
+            ("m", "card-new", 300),
+        ] {
+            make_fake_kv(&kv_store, model, req, 2, 8);
+            let tokens: Vec<u32> = (base..base + 8).collect();
+            pc.insert_from_kv(model, req, &kv_store, &tokens, ANYWHERE, KeepAsked::Unasked);
+        }
+        move_off_card(&pc, "n", 100);
+        let per_entry = pc.bytes_in(SnapshotHome::HostRam) as u64;
+        assert!(per_entry > 0);
+
+        make_fake_kv(&kv_store, "m", "new", 2, 8);
+        let new: Vec<u32> = (400..408).collect();
+        let room = SnapshotRoom {
+            home: SnapshotHome::BesideLive,
+            max_positions: usize::MAX,
+            evict_bytes: per_entry,
+        };
+        assert!(!pc
+            .insert_from_kv("m", "new", &kv_store, &new, room, KeepAsked::Unasked)
+            .is_empty());
+        assert!(
+            pc.lookup("n", &(200..209).collect::<Vec<u32>>()).is_none(),
+            "the oldest copy beside the card went, though it is another model's"
+        );
+        assert!(pc.lookup("m", &(300..309).collect::<Vec<u32>>()).is_some());
+        assert_eq!(
+            pc.bytes_in(SnapshotHome::HostRam) as u64,
+            per_entry,
+            "the older copy in host memory gave the card nothing"
+        );
     }
 
     /// And the caps: a full bucket's least recently hit entry goes BEFORE the

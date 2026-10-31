@@ -3687,6 +3687,32 @@ so the allocator keeps its default. A/B `SWARMLLM_SNAPSHOT_ROOM=after-copy`. Tes
 room made after the copy): `a_replaced_snapshot_is_let_go_before_the_copy`,
 `a_full_cache_evicts_before_the_copy`, `a_replaced_split_prompt_is_let_go_before_the_copy`.
 
+**The room is planned with what the save replaces, and evicted only by the insert** (2026-10-31,
+#367 (c)). The plan (`model_worker::snapshot_room`) ran BEFORE the insert and counted every snapshot
+held as staying — the entry the save was about to replace included — then evicted the shortfall
+itself (`PrefixCache::release`, least recently hit, any model). The replaced entry is the previous
+turn of the same conversation, which the request's lookup had just hit, so it went LAST: on a tight
+budget the plan gave up OTHER conversations' prompts, or cut this one, for room the save was about to
+get back. The same order had two more ways to give memory up for nothing: a prompt already saved
+whole (the repeated-prompt fast path) still had its room planned and evicted for before the insert
+skipped the copy, and a card's plan evicted beside the live cache before choosing host RAM for the
+copy (`room_off_the_card_if_more`). Now the insert reads what the request's cache holds
+(`HeldCache`), answers an already-covered prompt first (`covered_by_tokens` / `covered_by_chain`,
+nothing planned), then hands the planner what it replaces in each memory (`LetGo`, by the same
+predicates its own pass uses — `Entry::replaced_by_tokens` / `replaced_by_chain`); the plan counts
+those bytes as its own (`plan_snapshot`'s cached figure is what STAYS; the budget still counts all
+that is held, since none of it is in the machine's available memory yet) and returns its eviction as
+`SnapshotRoom::evict_bytes`, which `make_room` makes in the home chosen, after the replaced entries and
+the caps' (counting what they freed there). A cut that leaves an entry the plan counted as let go saves
+nothing rather than overshoot (non-windowed caches never reach it: a cut short of a replaced entry is
+covered by it). The planner is a REQUIRED closure (`RoomPlan`); a fixed `SnapshotRoom` passes only in
+tests. Field evidence that the host budget binds: on this machine a 70B split's 1,720-token prompts
+were cut to 320 positions (`budget_mb=0`, ~2.3 GB available, 10-31 02:27Z) — that is the quarter
+reserve, not this bug, but it is the regime where counting the replaced turn as held decides what is
+kept. Tests (red with the old order): `the_room_is_planned_with_what_the_save_replaces`,
+`a_prompt_already_saved_asks_for_no_room`, `a_planned_eviction_is_made_in_the_home_the_copy_goes_to`,
+`a_snapshot_the_card_cannot_hold_whole_goes_to_host_memory` (its eviction travels with the home).
+
 ## A blocked GQA attention call is grouped per block, never expanded (2026-09-26)
 
 `standard_attention` groups a GQA call's query heads against the unexpanded
