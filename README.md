@@ -140,7 +140,7 @@ idea, applied to running AI instead of sharing files.)
 
 ## How fast is it?
 
-<!-- speeds:begin, reviewed for 0.3.265-alpha. Refreshed at every release: .claude/rules/completeness.md § "README speeds" -->
+<!-- speeds:begin, reviewed for 0.3.266-alpha. Refreshed at every release: .claude/rules/completeness.md § "README speeds" -->
 Speed here is **tokens a second**. A token is a word or part of one, and most
 people read about 5 a second. Every figure below comes from this project's
 test computer, a laptop with an 8 GB NVIDIA RTX 3070 graphics card and an
@@ -148,15 +148,15 @@ test computer, a laptop with an 8 GB NVIDIA RTX 3070 graphics card and an
 the version it was measured on.
 
 <!-- release-check:begin -->
-**On one computer**: the v0.3.264 release check, run on the downloaded release. Each
+**On one computer**: the v0.3.265 release check, run on the downloaded release. Each
 model reads a 1,800-token document and writes 128 tokens about it.
 
 | Model | Runs on | Writing (tokens a second) | Reading (tokens a second) |
 |---|---|---|---|
-| Qwen2.5 Coder 7B | the graphics card | 59 | 1,840–1,860 |
-| Qwen2.5 14B | card and processor together (too big for the card) | 13.1–14.6 | 600–630 |
-| Qwen3 30B-A3B (2-bit) | card and processor together (a mixture of experts, too big for the card) | 20.6–22.5 | 240–250 |
-| Llama 3.2 3B | the processor only | 13.4–15.5 | 70 |
+| Qwen2.5 Coder 7B | the graphics card | 58–62 | 1,810–1,860 |
+| Qwen2.5 14B | card and processor together (too big for the card) | 12.4–12.6 | 600–640 |
+| Qwen3 30B-A3B (2-bit) | card and processor together (a mixture of experts, too big for the card) | 19.8–21.4 | 230–250 |
+| Llama 3.2 3B | the processor only | 13.8–15.2 | 70 |
 <!-- release-check:end -->
 
 **Across computers**: the same laptop in Thailand, teamed up with volunteers'
@@ -170,7 +170,7 @@ model guesses the next few words and the big one checks them all at once.
 | Qwen2.5 14B, about half on this laptop and half in Australia | 16–29 writing code, 6.1–10 writing prose | v0.3.261 |
 | Qwen2.5 14B, the same, set to "Start and finish on this computer" | 13–20 writing code, 5.4–8.9 writing prose | v0.3.264 |
 | Qwen2.5 14B, split three ways: this laptop, the laptop in Europe and the computer in Australia | 12–14 writing code, 4.4–4.9 writing prose | v0.3.261 |
-| Llama 3.3 70B, this laptop and the computer in Australia, new questions | 2.4–2.6 | v0.3.264 |
+| Llama 3.3 70B, this laptop and the computer in Australia, new questions | 1.8–2.6 | v0.3.264–v0.3.265 |
 | Llama 3.3 70B, four computers in Thailand, Australia and Italy, a question asked again | 1.9–2.0 | v0.3.255 |
 
 On code, two computers on different continents were faster than this laptop
@@ -362,7 +362,7 @@ SwarmLLM is built by a human developer working with Claude Code, an AI
 programming assistant: the human sets the direction, tests and reviews, and
 Claude writes the code. We say so openly so you can judge the project on its
 merits. Every change is checked by thousands of automated tests
-(4170 lib tests + 80 integration tests) before it ships, and regular
+(4174 lib tests + 80 integration tests) before it ships, and regular
 automated audits are logged in the repository. Scrutiny and contributions are
 welcome.
 

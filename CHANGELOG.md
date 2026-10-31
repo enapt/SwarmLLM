@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.3.266-alpha] — 2026-11-01
+
 **A conversation's saved prompt no longer pushes another conversation's out of memory.** After a
 reply, a node keeps the prompt it just read so the next turn does not read it again. It counted
 the conversation's previous saved turn, which the new one replaces, as still taking memory, so on

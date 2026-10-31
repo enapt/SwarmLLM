@@ -1437,7 +1437,10 @@ first stall line from a node on this build under a large copy names its cause.
 were ONE cause at a START: the first `Identify` refreshed the capacity snapshot, which parsed the
 header of each model held as a header only (~28 ms each, nine here) on the loop. Fixed the same day:
 the snapshot reads only learned geometry (`refused_model_if_learned`) and the health tick learns the
-rest off the loop. So the day's count while RUNNING is 5 in 38 h (10-19: 65 in a day): 4 blocked
+rest off the loop. On the live node (a card build of main, 2026-10-31 18:03Z, its own data): no stall
+at its start, against one at each of v0.3.265's five starts that day (`Identify`, 261-368 ms, almost
+all on the processor), with the same 33 models' geometry learned — two of them had been parsed twice,
+the second time on the loop. So the day's count while RUNNING is 5 in 38 h (10-19: 65 in a day): 4 blocked
 (`ConnectionEstablished` 1.46 s inside #155's re-dial storm, 2 `RequestResponse`, 1 `Identify`)
 and 1 disk page fault. Next: none of those five is understood; the large-copy field case above
 still stands.
