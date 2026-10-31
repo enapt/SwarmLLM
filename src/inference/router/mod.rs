@@ -339,7 +339,7 @@ fn report_after_a_replan(
     match short {
         Some(o) => SwarmError::SwarmShortOfMemory {
             model_id: model_id.to_string(),
-            room: crate::error::describe_offered_room(o.layers, o.num_layers),
+            room: crate::error::describe_room_by_holder(o.layers, o.num_layers, &o.holders),
         },
         None => SwarmError::HoldersDeclined {
             model_id: model_id.to_string(),

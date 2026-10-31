@@ -882,7 +882,7 @@ async fn send_worker_error(writer: &mut IpcWriter, request_id: uuid::Uuid, err: 
 /// loads goes on the same device, and the alternative is threading an
 /// immutable `bool` through six call layers alongside `shard_window`. The
 /// daemon respawns the worker to change placement (see
-/// `ModelProcessPool::cpu_pinned_models`), so there is no in-process
+/// `ModelProcessPool::cpu_pins`), so there is no in-process
 /// transition to reason about.
 static WORKER_FORCE_CPU: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
@@ -5036,8 +5036,9 @@ fn admit_prompt_in(
         mb(live),
         mb(budget),
         mb(short_by),
-        other_conversations_hold_the_room(live, budget, needed),
+        shortfall(live, budget, load_time_budget, needed),
         longest_prompt_that_fits(budget, growth, reply_positions),
+        mb(load_time_budget),
     ));
     Err(PromptRefusal {
         error,
@@ -5256,6 +5257,35 @@ fn other_conversations_hold_the_room(live: u64, budget: u64, needed: u64) -> boo
     live > 0 && needed <= budget
 }
 
+/// Why a prompt was refused, as far as the advice goes — one cause, one thing
+/// to do about it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Shortfall {
+    /// Other conversations here hold the room: it fits once they finish.
+    OtherConversations,
+    /// Less memory stands free than when the model loaded — another model or
+    /// program took it — and the prompt fits what the load set aside: it fits
+    /// once that memory is freed.
+    TakenSinceLoad,
+    /// The prompt does not fit what this model has here: a shorter one does.
+    TooLong,
+}
+
+/// **A device that has less free memory than at load is not a prompt that is
+/// too long** (field report 2026-10-31): a 610-token chat on a 12 GB card was
+/// refused 14 times in a row with "66 MB available for conversations… Shorter
+/// conversations still work", and went through by itself 1.5 min later — the
+/// card had been short, not the prompt long.
+fn shortfall(live: u64, budget: u64, load_time_budget: u64, needed: u64) -> Shortfall {
+    if other_conversations_hold_the_room(live, budget, needed) {
+        Shortfall::OtherConversations
+    } else if budget < load_time_budget && live.saturating_add(needed) <= load_time_budget {
+        Shortfall::TakenSinceLoad
+    } else {
+        Shortfall::TooLong
+    }
+}
+
 #[cfg(test)]
 mod reply_reserve_tests {
     use super::*;
@@ -5344,20 +5374,52 @@ mod reply_reserve_tests {
         assert!(!other_conversations_hold_the_room(0, 683, 1000));
         assert!(!other_conversations_hold_the_room(500, 1336, 2000));
 
-        let busy = prompt_refusal_message(45, 1152, 1336, 8, true, 2048);
+        let busy =
+            prompt_refusal_message(45, 1152, 1336, 8, Shortfall::OtherConversations, 2048, 1336);
         assert!(busy.starts_with("Not enough free memory on this node for a 45-token prompt"));
         assert!(busy.contains("try again in a moment"), "{busy}");
         assert!(!busy.contains("Shorter conversations still work"), "{busy}");
 
-        let too_long = prompt_refusal_message(4035, 0, 1336, 400, false, 2944);
+        let too_long = prompt_refusal_message(4035, 0, 1336, 400, Shortfall::TooLong, 2944, 1336);
         assert!(too_long.starts_with("Not enough free memory on this node for a 4035-token prompt"));
         assert!(
             too_long.contains("Shorter conversations still work"),
             "{too_long}"
         );
         assert!(too_long.contains("up to about 2944 tokens"), "{too_long}");
-        let none_fit = prompt_refusal_message(4035, 0, 100, 1300, false, 0);
+        let none_fit = prompt_refusal_message(4035, 0, 100, 1300, Shortfall::TooLong, 0, 100);
         assert!(!none_fit.contains("up to about"), "{none_fit}");
+    }
+
+    /// Field report 2026-10-31 (b): a 610-token chat refused 14 times with "66
+    /// MB available for conversations… Shorter conversations still work", and
+    /// through by itself 1.5 min later. The load had set aside far more; the
+    /// card had less free — the advice is to wait, never to shorten.
+    #[test]
+    fn a_device_short_since_the_load_is_not_a_prompt_too_long() {
+        let mib = 1024 * 1024;
+        let (live, budget, at_load, needed) = (0, 66 * mib, 2_048 * mib, 215 * mib);
+        assert_eq!(
+            shortfall(live, budget, at_load, needed),
+            Shortfall::TakenSinceLoad
+        );
+        let told = prompt_refusal_message(610, 0, 66, 149, Shortfall::TakenSinceLoad, 450, 2_048);
+        assert!(told.contains("try again in a moment"), "{told}");
+        assert!(told.contains("another model or program"), "{told}");
+        assert!(!told.contains("Shorter conversations"), "{told}");
+        // Null controls: the room the load set aside is short too — a prompt
+        // too long however free the device is; a device no shorter than at
+        // load — the prompt is too long for it.
+        assert_eq!(
+            shortfall(live, budget, at_load, 3_000 * mib),
+            Shortfall::TooLong
+        );
+        assert_eq!(shortfall(live, budget, budget, needed), Shortfall::TooLong);
+        // Other conversations holding the room still come first.
+        assert_eq!(
+            shortfall(500 * mib, 1_000 * mib, at_load, 400 * mib),
+            Shortfall::OtherConversations
+        );
     }
 
     /// Field report #035's figures: an 860 MB budget, a Qwen3-14B's 160 KiB a
@@ -5508,10 +5570,20 @@ fn prompt_refusal_message(
     live_mb: u64,
     budget_mb: u64,
     short_by_mb: u64,
-    busy: bool,
+    cause: Shortfall,
     fits_tokens: usize,
+    load_time_budget_mb: u64,
 ) -> String {
-    if busy {
+    if cause == Shortfall::TakenSinceLoad {
+        return format!(
+            "Not enough free memory on this node for a {prompt_tokens}-token prompt right now: \
+             less memory is free than when this model loaded — another model or program on \
+             this node is using it — so {budget_mb} MB is left for conversations (it had \
+             {load_time_budget_mb} MB), short by {short_by_mb} MB. It fits once that memory is \
+             freed, so try again in a moment."
+        );
+    }
+    if cause == Shortfall::OtherConversations {
         format!(
             "Not enough free memory on this node for a {prompt_tokens}-token prompt right now: \
              other conversations on this node are using {live_mb} MB of the {budget_mb} MB \

@@ -1307,20 +1307,20 @@ fn segment(byte: u8, range: (u32, u32)) -> PipelineSegment {
 fn the_room_the_holders_offer_is_counted_once_each_and_capped_by_what_they_hold() {
     let elsewhere = NodeId([0xEE; 32]);
     assert_eq!(
-        super::layers_offered(&qwen3_30b_holders(), &elsewhere),
+        super::rooms_offered(&qwen3_30b_holders(), &elsewhere).0,
         Some(17)
     );
     // Overlapping ranges are layers held once, not twice.
     let mut twice = simple_candidate(9, vec![(0, 10), (5, 15)]);
     twice.max_hostable_layers_at_face_value = Some(40);
     assert_eq!(
-        super::layers_offered(&[twice.clone(), twice], &elsewhere),
+        super::rooms_offered(&[twice.clone(), twice], &elsewhere).0,
         Some(15)
     );
     // A holder that did not say leaves no total to state.
     let mut holders = qwen3_30b_holders();
     holders[2].max_hostable_layers_at_face_value = None;
-    assert_eq!(super::layers_offered(&holders, &elsewhere), None);
+    assert_eq!(super::rooms_offered(&holders, &elsewhere).0, None);
 }
 
 /// **This node's room is beside what its worker holds** (FUTURE_WORK #350):
@@ -1341,10 +1341,10 @@ fn this_nodes_offer_counts_the_layers_its_worker_holds() {
     let local = me.node_id.clone();
     me.max_hostable_layers = Some(0);
     let holders = [me.clone(), rest.clone()];
-    assert_eq!(super::layers_offered(&holders, &local), Some(80));
+    assert_eq!(super::rooms_offered(&holders, &local).0, Some(80));
     // Null control: the same node seen as a peer offers its figure, a total.
     assert_eq!(
-        super::layers_offered(&holders, &NodeId([0xEE; 32])),
+        super::rooms_offered(&holders, &NodeId([0xEE; 32])).0,
         Some(67)
     );
 
@@ -1357,7 +1357,7 @@ fn this_nodes_offer_counts_the_layers_its_worker_holds() {
     let mut fresh = me.clone();
     fresh.max_hostable_layers_at_face_value = Some(20);
     assert_eq!(
-        super::layers_offered(&[fresh, rest.clone()], &local),
+        super::rooms_offered(&[fresh, rest.clone()], &local).0,
         Some(70)
     );
     // Its conversation memory refused the prompt: the figure is
@@ -1366,7 +1366,60 @@ fn this_nodes_offer_counts_the_layers_its_worker_holds() {
     refused.prompt_memory_refused = true;
     refused.max_hostable_layers = Some(10);
     refused.max_hostable_layers_at_face_value = Some(10);
-    assert_eq!(super::layers_offered(&[refused, rest], &local), Some(60));
+    assert_eq!(super::rooms_offered(&[refused, rest], &local).0, Some(60));
+}
+
+/// **A shortfall names the holder that is short** (field report 2026-10-31,
+/// (c)): a 70B held 0-17 by a peer that had lost its card to a driver fault,
+/// 17-80 here, was refused for over an hour as "do not have room for all 80
+/// of its layers" — this node has no ceiling, and that dropped the total and
+/// every figure with it. This node now counts as able to take what it holds,
+/// and each holder's own room is named, the short one first.
+#[test]
+fn a_shortfall_at_the_ceilings_names_the_holder_that_is_short() {
+    let mut here = simple_candidate(1, vec![(17, 80)]);
+    here.max_hostable_layers_at_ceiling = None; // its loader decides
+    here.max_hostable_layers = Some(10);
+    let local = here.node_id.clone();
+    let mut peer = simple_candidate(2, vec![(0, 17)]);
+    peer.max_hostable_layers_at_ceiling = Some(9);
+    let err = super::short_of_memory(&[here.clone(), peer.clone()], 80, &local);
+    let text = err.to_string();
+    assert!(
+        matches!(err, SwarmError::SwarmShortOfMemory { .. }),
+        "got {text}"
+    );
+    assert!(
+        text.contains("room for about 72 of its 80 layers"),
+        "{text}"
+    );
+    let short = format!("{} has room for 9 of the 17 layers it holds", peer.node_id);
+    let whole = "this computer has room for all 63 it holds";
+    assert!(text.contains(&short) && text.contains(whole), "{text}");
+    assert!(
+        text.find(&short) < text.find(whole),
+        "the short holder comes first: {text}"
+    );
+
+    // Its memory refused this request: every planner then holds it to its
+    // room, and so does the refusal.
+    let mut refused = here.clone();
+    refused.memory_refused_this_request = true;
+    let text = super::short_of_memory(&[refused, peer.clone()], 80, &local).to_string();
+    assert!(
+        text.contains("room for about 19 of its 80 layers"),
+        "{text}"
+    );
+    assert!(
+        text.contains("this computer has room for 10 of the 63 layers it holds"),
+        "{text}"
+    );
+
+    // A PEER that did not say still leaves no total — but the others are named.
+    peer.max_hostable_layers_at_ceiling = None;
+    let text = super::short_of_memory(&[here, peer], 80, &local).to_string();
+    assert!(text.contains("do not have room for all 80"), "{text}");
+    assert!(text.contains("did not say how much room it has"), "{text}");
 }
 
 /// A layer held by several computers is carried once (#346): what they carry

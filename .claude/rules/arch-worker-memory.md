@@ -142,6 +142,12 @@ Prune's soft-unload narrows a loaded model only when our CHARGED graphics memory
 
 → `docs/invariants/memory.md` § "A card full of our own model is not pressure"
 
+## A memory pin ends, and it ends in `cpu_reason` (2026-10-31)
+
+**`process_pool::CpuPins`**: a card that FAILED a model (`classify_worker_error`) holds it on the processor `PIN_HOLD_FIRST` (120 s), doubled up to 30 min while the card keeps failing it; then `cpu_reason` stops reporting it, so the promotion and a fresh spawn both weigh the card as it stands. Never end a pin in one path, and never wait for another worker to leave: the worker that ran out is evicted BEFORE its pin is taken, so on a card it had to itself the pin never ended (field report 2026-10-31). `ArchitectureTooOld` never ends.
+
+→ `docs/invariants/memory.md` § "Graphics memory has ONE owner" (**A memory pin ENDS**)
+
 ## A card that stalls is given less work, not more (2026-09-28)
 
 **`inference::card_pace::CardPace` is the one answer to "may this worker start another generation on its card now"**: a device-bound step ≥ 2 s halves the ceiling. The gate sits in the `Generate` arm BEFORE the batched/sequential choice; a new device-bound step is timed into it, a new generation path gated by it. Refusal = `LocalMemoryUnavailable`. A/B `SWARMLLM_CARD_PACE=0`.

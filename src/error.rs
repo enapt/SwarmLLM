@@ -320,7 +320,7 @@ pub enum SwarmError {
     #[error("Not enough memory in the swarm for {model_id}: {room}")]
     SwarmShortOfMemory {
         model_id: String,
-        /// Built by [`describe_offered_room`] from the figure the plan was
+        /// Built by [`describe_room_by_holder`] from the figures the plan was
         /// checked against.
         room: String,
     },
@@ -590,6 +590,66 @@ pub fn describe_offered_room(offered_layers: Option<u32>, num_layers: u32) -> St
              between them"
         ),
     }
+}
+
+/// One holder's room, as a short-of-memory refusal names it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HolderRoom {
+    /// "this computer", or the holder's node id as the dashboard shows it.
+    pub holder: String,
+    /// Layers of the model it holds.
+    pub holds: u32,
+    /// Layers it has room for; `None` where it did not say.
+    pub room: Option<u32>,
+}
+
+/// The holders [`describe_room_by_holder`] names before it says "and N more".
+const HOLDERS_NAMED: usize = 4;
+
+/// [`describe_offered_room`], then each holder's own room, the shortest first.
+///
+/// **A shortfall names the computer that is short** (field report 2026-10-31):
+/// a 70B split refused for over an hour said only that "the computers holding
+/// it do not have room for all 80 of its layers" — one holder had lost its
+/// graphics card to a driver fault and was offering a fraction of what it
+/// held, and nothing in the refusal said which one, or by how much.
+pub fn describe_room_by_holder(
+    offered_layers: Option<u32>,
+    num_layers: u32,
+    holders: &[HolderRoom],
+) -> String {
+    let mut text = describe_offered_room(offered_layers, num_layers);
+    if holders.is_empty() {
+        return text;
+    }
+    // Short first, by how short; then the ones that did not say; then the rest.
+    let mut ordered: Vec<&HolderRoom> = holders.iter().collect();
+    ordered.sort_by_key(|h| match h.room {
+        Some(room) if room < h.holds => (0, u32::MAX - (h.holds - room)),
+        None => (1, 0),
+        Some(_) => (2, 0),
+    });
+    let named: Vec<String> = ordered
+        .iter()
+        .take(HOLDERS_NAMED)
+        .map(|h| match h.room {
+            Some(room) if room < h.holds => format!(
+                "{} has room for {room} of the {} layers it holds",
+                h.holder, h.holds
+            ),
+            Some(_) => format!("{} has room for all {} it holds", h.holder, h.holds),
+            None => format!(
+                "{} holds {} and did not say how much room it has",
+                h.holder, h.holds
+            ),
+        })
+        .collect();
+    text.push_str(" — ");
+    text.push_str(&named.join("; "));
+    if ordered.len() > HOLDERS_NAMED {
+        text.push_str(&format!("; and {} more", ordered.len() - HOLDERS_NAMED));
+    }
+    text
 }
 
 /// A prompt longer than the context ONE node serves for a model: how long the

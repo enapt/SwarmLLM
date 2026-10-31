@@ -1547,8 +1547,8 @@ may take it from a loaded model.**
   busy worker, and never one used within the swap floor.
 - Timed reclaim: `try_idle_vram_unload`, outside the `auto_manage.enabled` gate.
 - A refusal places the model on the processor for *that spawn* and takes no
-  standing pin; `cpu_pinned_models` means only that the card FAILED for a model
-  (`classify_worker_error`).
+  standing pin; `cpu_pins` means only that the card FAILED for a model
+  (`classify_worker_error`), and a memory pin ends after its hold (`CpuPins`).
 - A processor-resident model returns to the card on its next request once there
   is room, including room the pool is willing to make
   (`should_return_to_gpu` + `reclaimable_vram_mb`).

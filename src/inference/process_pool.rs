@@ -573,7 +573,9 @@ struct PromotionInputs {
 ///   weighed.
 /// - **The reason must actually be gone** (`reason_still_holds`). Of the three
 ///   causes in [`ModelProcessPool::cpu_reason`], only the OOM pin ever clears —
-///   so this fires on the event that lifted it rather than polling for one.
+///   when another model's worker frees the card, or when its hold runs out
+///   (`CpuPins`, field report 2026-10-31) — and this is asked at the next
+///   request rather than polled for.
 ///   This bullet was written long before it was checked: the function used to
 ///   ask only whether the estimate fit, so a model still pinned was retired,
 ///   respawned on the processor by that same pin, and retired again.
@@ -611,6 +613,141 @@ fn promotion_is_worth_weighing(i: &PromotionInputs) -> bool {
         && i.idle_secs >= vram_make_room_min_idle_secs()
         && i.gpu_estimate_mb != 0
         && (i.ceiling_mb == 0 || i.gpu_estimate_mb <= i.ceiling_mb)
+}
+
+/// How long a model whose card ran out of memory stays on the processor before
+/// the card is weighed for it again, the first time.
+const PIN_HOLD_FIRST: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// The longest that hold grows to.
+const PIN_HOLD_MOST: std::time::Duration = std::time::Duration::from_secs(30 * 60);
+
+/// A card that fails the same model again within this long of the last pin
+/// ending doubles the next hold.
+const PIN_REPEAT_WITHIN: std::time::Duration = std::time::Duration::from_secs(30 * 60);
+
+/// Models sent to the processor because their card FAILED them
+/// (`classify_worker_error`), and for how long.
+///
+/// **A memory pin ENDS** (field report 2026-10-31): a 14B alone on a 12 GB
+/// card ran out of memory after ~5 min of one chat, was pinned, and stayed on
+/// the processor at a fifth of its speed until it was unloaded by hand. The pin
+/// used to clear only when ANOTHER model's worker gave graphics memory back —
+/// and the worker that ran out is evicted before its pin is taken, so on a card
+/// it had to itself nothing ever cleared it. llama.cpp, vLLM and SGLang pin
+/// nothing: they shed cache and retry. A pin here is held for a while so a
+/// model that fails at every load does not burn one load per request —
+/// `PIN_HOLD_FIRST`, doubled up to `PIN_HOLD_MOST` while the card keeps failing
+/// it within `PIN_REPEAT_WITHIN` of the last pin ending (the shape of
+/// `peer_outliers`) — and then it simply stops holding: `cpu_reason` no longer
+/// reports it, so the promotion and any fresh spawn weigh the card as it stands
+/// (admission, which takes no pin). Ending in `cpu_reason`, the one place every
+/// placement asks, rather than in whichever path lifts it, is the point. A card
+/// too old for this build's kernels never ends its pin.
+#[derive(Debug, Default)]
+struct CpuPins {
+    /// Every model a card has failed, kept after its pin ends: a pin taken soon
+    /// after doubles from the last one's hold. One entry per model ever pinned.
+    pins: DashMap<ModelId, CpuPin>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct CpuPin {
+    /// When the pin stops holding; `None` = never (a card too old for this
+    /// build's kernels).
+    until: Option<std::time::Instant>,
+    hold: std::time::Duration,
+}
+
+impl CpuPins {
+    /// Pin `model_id` to the processor for `kind`; returns the hold (`None`:
+    /// for good).
+    fn pin(
+        &self,
+        model_id: &ModelId,
+        kind: crate::inference::worker_ipc::PermanentGpuFailure,
+    ) -> Option<std::time::Duration> {
+        self.pin_at(model_id, kind, std::time::Instant::now())
+    }
+
+    fn pin_at(
+        &self,
+        model_id: &ModelId,
+        kind: crate::inference::worker_ipc::PermanentGpuFailure,
+        now: std::time::Instant,
+    ) -> Option<std::time::Duration> {
+        use crate::inference::worker_ipc::PermanentGpuFailure;
+        let hold = match self.pins.get(model_id).map(|p| *p.value()) {
+            Some(CpuPin {
+                until: Some(until),
+                hold,
+            }) if now < until + PIN_REPEAT_WITHIN => hold.saturating_mul(2).min(PIN_HOLD_MOST),
+            _ => PIN_HOLD_FIRST,
+        };
+        let until = (kind != PermanentGpuFailure::ArchitectureTooOld).then(|| now + hold);
+        self.pins.insert(model_id.clone(), CpuPin { until, hold });
+        until.map(|_| hold)
+    }
+
+    /// Does a pin hold `model_id` on the processor right now?
+    fn holds(&self, model_id: &ModelId) -> bool {
+        self.holds_at(model_id, std::time::Instant::now())
+    }
+
+    fn holds_at(&self, model_id: &ModelId, now: std::time::Instant) -> bool {
+        self.pins
+            .get(model_id)
+            .is_some_and(|p| p.until.is_none_or(|u| now < u))
+    }
+
+    /// End `model_id`'s memory pin now (graphics memory was freed); true if one
+    /// held. Its hold is kept, so a failure soon after doubles it.
+    fn lift(&self, model_id: &ModelId) -> bool {
+        let now = std::time::Instant::now();
+        self.pins
+            .get_mut(model_id)
+            .is_some_and(|mut p| match p.until {
+                Some(u) if now < u => {
+                    p.until = Some(now);
+                    true
+                }
+                _ => false,
+            })
+    }
+
+    /// End every memory pin now; the models lifted, sorted.
+    fn lift_all(&self) -> Vec<String> {
+        let models: Vec<ModelId> = self.pins.iter().map(|e| e.key().clone()).collect();
+        let mut lifted: Vec<String> = models
+            .into_iter()
+            .filter(|m| self.lift(m))
+            .map(|m| m.0)
+            .collect();
+        lifted.sort();
+        lifted
+    }
+
+    /// The models a pin holds right now, sorted.
+    fn ids(&self) -> Vec<String> {
+        let models: Vec<ModelId> = self.pins.iter().map(|e| e.key().clone()).collect();
+        let mut v: Vec<String> = models
+            .into_iter()
+            .filter(|m| self.holds(m))
+            .map(|m| m.0)
+            .collect();
+        v.sort();
+        v
+    }
+
+    /// End `model_id`'s hold as though its time had run out, for a test.
+    #[cfg(test)]
+    fn run_out(&self, model_id: &ModelId) {
+        if let Some(mut p) = self.pins.get_mut(model_id) {
+            if p.until.is_some() {
+                p.until = Some(std::time::Instant::now());
+            }
+        }
+    }
 }
 
 static RESPONSE_ATTEMPT_TOKEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
@@ -3566,8 +3703,11 @@ pub struct ModelProcessPool {
     /// then changed — see the `freed_gpu_memory` branch there, and
     /// `worker_should_return_to_gpu` for the resident-worker half. Reasoning
     /// about this field as permanent is how a model that could move back to
-    /// the card gets left on the processor (gotcha #401).
-    cpu_pinned_models: dashmap::DashSet<ModelId>,
+    /// the card gets left on the processor (gotcha #401). Nor does it wait for
+    /// another model to unload: a memory pin ENDS after its hold, and the card
+    /// is weighed again as it stands ([`CpuPins`], field report 2026-10-31 —
+    /// the model that ran out was the card's only tenant).
+    cpu_pins: CpuPins,
     /// GPU memory budget in MB, 0 = unset (no admission control).
     ///
     /// The LAST reading of the effective `resources` budget — re-read at every
@@ -3919,7 +4059,7 @@ impl ModelProcessPool {
             header_cache: crate::inference::split::HeaderCache::default(),
             active_shard_windows: DashMap::new(),
             gpu_layers: std::sync::atomic::AtomicI32::new(-1),
-            cpu_pinned_models: dashmap::DashSet::new(),
+            cpu_pins: CpuPins::default(),
             vram_budget_mb: std::sync::atomic::AtomicU64::new(0),
             vram_budget_source: std::sync::RwLock::new(None),
             vram_ceiling_source: std::sync::OnceLock::new(),
@@ -4529,9 +4669,9 @@ impl ModelProcessPool {
         // error`), not merely that it was full at some moment. An admission
         // refusal deliberately takes no pin: it is arithmetic against the
         // budget as it stands, and re-taking it next spawn costs one header
-        // read — whereas a pin is cleared only when a GPU-holding worker
-        // unloads, so it outlives its own cause. See `get_or_spawn`.
-        if self.cpu_pinned_models.contains(model_id) {
+        // read — whereas a pin holds until its hold ends or a GPU-holding
+        // worker unloads (`CpuPins`). See `get_or_spawn`.
+        if self.cpu_pins.holds(model_id) {
             return Some(CpuReason::NotEnoughVram);
         }
         // A GPU older than this build's kernel floor cannot run a single
@@ -4603,7 +4743,7 @@ impl ModelProcessPool {
 
     /// Is this model currently forced onto the CPU after a GPU OOM?
     pub fn is_cpu_pinned(&self, model_id: &ModelId) -> bool {
-        self.cpu_pinned_models.contains(model_id)
+        self.cpu_pins.holds(model_id)
     }
 
     // `model_uses_gpu_memory` stood here: a per-model placement predicate whose
@@ -8460,20 +8600,7 @@ impl ModelProcessPool {
     /// "CUDA" while every model had been pinned to the CPU, so an operator
     /// losing ~10x throughput had nothing to see. Reported 2026-07-30.
     pub fn cpu_pinned_model_ids(&self) -> Vec<String> {
-        let mut v: Vec<String> = self
-            .cpu_pinned_models
-            .iter()
-            .map(|m| m.key().0.clone())
-            .collect();
-        v.sort();
-        v
-    }
-
-    /// Clear a CPU pin so the next worker spawn may use the GPU again.
-    /// Exposed for the admin "retry on GPU" path — VRAM pressure is usually
-    /// transient (another model unloaded, another process exited).
-    pub fn clear_cpu_pin(&self, model_id: &ModelId) -> bool {
-        self.cpu_pinned_models.remove(model_id).is_some()
+        self.cpu_pins.ids()
     }
 
     /// Force every attention call through `standard_attention` on
@@ -9031,7 +9158,7 @@ impl ModelProcessPool {
                 // the whole time, because `effective_gpu_layers` saw the pin
                 // and never reached admission at all.
                 //
-                // `cpu_pinned_models` now means only what its name says: the
+                // `cpu_pins` now means only what its name says: the
                 // graphics card has FAILED for this model (`classify_worker_
                 // error`), which is the case where retrying really does cost a
                 // load.
@@ -11046,7 +11173,7 @@ impl ModelProcessPool {
             let permanent = crate::inference::worker_ipc::permanent_gpu_failure(&message);
             if let (true, Some(kind)) = (was_on_gpu, permanent) {
                 use crate::inference::worker_ipc::PermanentGpuFailure;
-                self.cpu_pinned_models.insert(model_id.clone());
+                let hold = self.cpu_pins.pin(model_id, kind);
                 let reason = match kind {
                     PermanentGpuFailure::OutOfMemory => "GPU out of memory",
                     PermanentGpuFailure::ArchitectureTooOld => {
@@ -11059,6 +11186,7 @@ impl ModelProcessPool {
                 tracing::warn!(
                     model = %model_id,
                     reason,
+                    card_weighed_again_after_secs = hold.map(|h| h.as_secs()),
                     "Pinning this model to CPU until graphics memory frees up"
                 );
                 if let Some(tx) = self.activity_tx.get() {
@@ -11396,19 +11524,19 @@ impl ModelProcessPool {
         // repeat verbatim on respawn") only held while VRAM pressure was
         // static, which it was, because eviction never actually freed
         // anything. Now that it does, releasing memory is exactly the event
-        // that makes a retry worth it — the same condition
-        // `clear_cpu_pin`'s own documentation names.
+        // that makes a retry worth it. (The worker that ran out is evicted
+        // BEFORE its own pin is taken, so this never lifts that pin; the end
+        // of its hold does — `CpuPins`.)
         //
         // Worst case a pinned model retries the GPU, OOMs again and re-pins,
         // costing one model load. That is a far better trade than staying on
         // the CPU for ever.
-        if freed_gpu_memory && !self.cpu_pinned_models.is_empty() {
-            let lifted: Vec<String> = self
-                .cpu_pinned_models
-                .iter()
-                .map(|m| m.key().0.clone())
-                .collect();
-            self.cpu_pinned_models.clear();
+        let lifted = if freed_gpu_memory {
+            self.cpu_pins.lift_all()
+        } else {
+            Vec::new()
+        };
+        if !lifted.is_empty() {
             tracing::info!(
                 freed_by = %model_id,
                 lifted = ?lifted,
@@ -12719,6 +12847,112 @@ mod tests {
         );
     }
 
+    /// **A memory pin ends** (field report 2026-10-31): a 14B alone on a 12 GB
+    /// card ran out of memory, was pinned, and stayed on the processor at a
+    /// fifth of its speed until it was unloaded by hand — the only thing that
+    /// ended a pin was ANOTHER model's worker freeing the card, and the model
+    /// that ran out was the card's only tenant. It holds `PIN_HOLD_FIRST`;
+    /// a card that fails it again soon after doubles the hold, up to
+    /// `PIN_HOLD_MOST`; long after, it starts over. A card too old for this
+    /// build's kernels never ends its pin, and freed memory does not end it.
+    #[test]
+    fn a_memory_pin_ends_after_its_hold_and_doubles_when_the_card_fails_again() {
+        use crate::inference::worker_ipc::PermanentGpuFailure::{
+            ArchitectureTooOld, NoKvCacheRoom, OutOfMemory,
+        };
+        let pins = CpuPins::default();
+        let m = ModelId("qwen2.5-14b".into());
+        let t0 = std::time::Instant::now();
+        let at = |secs: u64| t0 + std::time::Duration::from_secs(secs);
+        let first = PIN_HOLD_FIRST.as_secs();
+
+        assert_eq!(pins.pin_at(&m, OutOfMemory, t0), Some(PIN_HOLD_FIRST));
+        assert!(pins.holds_at(&m, at(first - 1)), "inside its hold");
+        assert!(!pins.holds_at(&m, at(first)), "the hold has run out");
+
+        // The card fails it again a minute after the pin ended: twice the hold.
+        let again = first + 60;
+        assert_eq!(
+            pins.pin_at(&m, NoKvCacheRoom, at(again)),
+            Some(PIN_HOLD_FIRST * 2)
+        );
+        assert!(pins.holds_at(&m, at(again + 2 * first - 1)));
+        assert!(!pins.holds_at(&m, at(again + 2 * first)));
+
+        // ...and keeps failing it: the hold grows to its ceiling and no further.
+        let mut now = again;
+        let mut hold = 2 * first;
+        for _ in 0..10 {
+            now += hold;
+            hold = pins
+                .pin_at(&m, OutOfMemory, at(now))
+                .expect("a memory pin ends")
+                .as_secs();
+        }
+        assert_eq!(hold, PIN_HOLD_MOST.as_secs());
+
+        // Long after the last pin ended: a first failure again.
+        now += hold + PIN_REPEAT_WITHIN.as_secs();
+        assert_eq!(pins.pin_at(&m, OutOfMemory, at(now)), Some(PIN_HOLD_FIRST));
+
+        // A card too old for the kernels never ends its pin, however long. Its
+        // own set: the pins above were taken at simulated times hours ahead,
+        // so in real time they still hold, and `lift_all` would rightly end them.
+        let pins = CpuPins::default();
+        let old = ModelId("on-a-kepler".into());
+        assert_eq!(pins.pin_at(&old, ArchitectureTooOld, t0), None);
+        assert!(pins.holds_at(&old, at(365 * 24 * 3600)));
+        assert!(!pins.lift(&old), "freed memory does not make a card newer");
+        assert_eq!(pins.lift_all(), Vec::<String>::new());
+        assert!(pins.holds(&old));
+    }
+
+    /// The pin ends where every placement asks — `cpu_reason` — so the model
+    /// gets back to the card by WHICHEVER path comes next: the promotion of its
+    /// processor worker, or a fresh spawn after that worker was unloaded idle
+    /// (admission then weighs the card as it stands, and takes no pin). Ending
+    /// it in the promotion alone would have left the second path pinned.
+    #[tokio::test]
+    async fn a_pinned_model_returns_to_an_empty_card_once_its_hold_runs_out() {
+        use crate::inference::worker_ipc::PermanentGpuFailure::OutOfMemory;
+        let pool = ModelProcessPool::new(std::path::PathBuf::from("/tmp/swarmllm-pin-ends"));
+        pool.set_gpu_layers(-1);
+        // A 12 GB card with nothing else on it, as in the report.
+        pool.set_vram_budget_source(Box::new(|| Some(11_000)));
+        let qwen = ModelId("qwen2.5-14b".into());
+        pool.cpu_pins.pin(&qwen, OutOfMemory);
+
+        let a_minute_ago = std::time::Instant::now()
+            .checked_sub(std::time::Duration::from_secs(60))
+            .expect("a clock old enough to express the idle time");
+        let mut h =
+            fake_worker_handle_spawned(false, Some(CpuReason::NotEnoughVram), true, a_minute_ago)
+                .await;
+        Arc::get_mut(&mut h).expect("one owner").gpu_estimate_mb = 9_800;
+
+        assert_eq!(pool.effective_gpu_layers(&qwen), 0, "pinned: the processor");
+        assert!(
+            !pool.promotion_weighed(&qwen, &h, false),
+            "inside its hold, an empty card is not weighed"
+        );
+
+        pool.cpu_pins.run_out(&qwen);
+        assert_eq!(pool.cpu_reason(&qwen), None);
+        assert_eq!(
+            pool.effective_gpu_layers(&qwen),
+            -1,
+            "a fresh spawn asks the card again"
+        );
+        assert!(
+            pool.promotion_weighed(&qwen, &h, false),
+            "the hold has run out and 11,000 MB stand free: back to the card"
+        );
+        assert!(
+            pool.cpu_pinned_model_ids().is_empty(),
+            "nor is it reported as pinned"
+        );
+    }
+
     /// **#260 as the report placed it**: with Ollama on the card, admission
     /// SPLIT Mistral 7B — 12 of its 32 layers, 1,400 MB, on the card — rather
     /// than send it to the processor, and a split was never weighed for a move
@@ -13217,7 +13451,10 @@ mod tests {
         // A drafter whose worker failed on the card is kept off it, so it
         // shares no memory with the layers: nothing is left for it there.
         let kept_off = pool_with("/tmp/swarmllm-beside-guest-card-pinned");
-        kept_off.cpu_pinned_models.insert(drafter.clone());
+        kept_off.cpu_pins.pin(
+            &drafter,
+            crate::inference::worker_ipc::PermanentGpuFailure::OutOfMemory,
+        );
         assert_eq!(
             kept_off.max_hostable_layers_beside_guest(
                 &target,
@@ -15539,7 +15776,10 @@ mod tests {
     async fn a_crashed_gpu_worker_lets_pinned_models_try_the_card_again() {
         let p = test_pool();
         let pinned = ModelId("was-pushed-to-the-cpu".into());
-        p.cpu_pinned_models.insert(pinned.clone());
+        p.cpu_pins.pin(
+            &pinned,
+            crate::inference::worker_ipc::PermanentGpuFailure::OutOfMemory,
+        );
 
         let on_card = ModelId("held-the-card".into());
         p.workers.insert(
@@ -15549,7 +15789,7 @@ mod tests {
         assert!(p.retire_dead_worker(&on_card).await);
 
         assert!(
-            p.cpu_pinned_models.is_empty(),
+            !p.cpu_pins.holds(&pinned),
             "the card is free again, so the pin its occupancy caused must lift"
         );
     }
@@ -15562,7 +15802,10 @@ mod tests {
     async fn a_crashed_cpu_worker_lifts_no_pins() {
         let p = test_pool();
         let pinned = ModelId("still-pushed-to-the-cpu".into());
-        p.cpu_pinned_models.insert(pinned.clone());
+        p.cpu_pins.pin(
+            &pinned,
+            crate::inference::worker_ipc::PermanentGpuFailure::OutOfMemory,
+        );
 
         let on_cpu = ModelId("was-on-the-cpu".into());
         p.workers
@@ -15570,7 +15813,7 @@ mod tests {
         assert!(p.retire_dead_worker(&on_cpu).await);
 
         assert!(
-            p.cpu_pinned_models.contains(&pinned),
+            p.cpu_pins.holds(&pinned),
             "no graphics memory was freed, so nothing may be sent back to the card"
         );
     }
@@ -15630,28 +15873,35 @@ mod tests {
         pool.set_gpu_layers(-1);
         let pinned = ModelId("oom-model".into());
         let other = ModelId("healthy-model".into());
-        pool.cpu_pinned_models.insert(pinned.clone());
+        pool.cpu_pins.pin(
+            &pinned,
+            crate::inference::worker_ipc::PermanentGpuFailure::OutOfMemory,
+        );
 
         assert_eq!(pool.effective_gpu_layers(&pinned), 0);
         assert_eq!(pool.effective_gpu_layers(&other), -1);
         assert!(pool.is_cpu_pinned(&pinned));
         assert!(!pool.is_cpu_pinned(&other));
 
-        assert!(pool.clear_cpu_pin(&pinned));
+        assert!(pool.cpu_pins.lift(&pinned));
         assert_eq!(pool.effective_gpu_layers(&pinned), -1);
-        assert!(!pool.clear_cpu_pin(&pinned), "second clear is a no-op");
+        assert!(!pool.cpu_pins.lift(&pinned), "second clear is a no-op");
     }
 
-    /// A pin lasted the life of the process because `clear_cpu_pin` had no
-    /// caller — a ~10x throughput loss triggered by the daemon's own background
-    /// churn, with nothing in the API to show it. Freeing GPU memory is the
-    /// event that makes a retry worthwhile.
+    /// A pin lasted the life of the process because `clear_cpu_pin` (since
+    /// removed: a memory pin ends by itself, `CpuPins`) had no caller — a ~10x
+    /// throughput loss triggered by the daemon's own background churn, with
+    /// nothing in the API to show it. Freeing GPU memory is the event that
+    /// makes a retry worthwhile.
     #[tokio::test]
     async fn unloading_a_gpu_worker_lifts_cpu_pins() {
         let pool = test_pool();
         pool.set_gpu_layers(-1);
         let pinned = ModelId("oom-model".into());
-        pool.cpu_pinned_models.insert(pinned.clone());
+        pool.cpu_pins.pin(
+            &pinned,
+            crate::inference::worker_ipc::PermanentGpuFailure::OutOfMemory,
+        );
         assert!(pool.is_cpu_pinned(&pinned));
 
         // No worker registered for this id, but it is not CPU-pinned itself, so
@@ -15673,8 +15923,14 @@ mod tests {
         pool.set_gpu_layers(-1);
         let a = ModelId("cpu-bound".into());
         let b = ModelId("also-pinned".into());
-        pool.cpu_pinned_models.insert(a.clone());
-        pool.cpu_pinned_models.insert(b.clone());
+        pool.cpu_pins.pin(
+            &a,
+            crate::inference::worker_ipc::PermanentGpuFailure::OutOfMemory,
+        );
+        pool.cpu_pins.pin(
+            &b,
+            crate::inference::worker_ipc::PermanentGpuFailure::OutOfMemory,
+        );
 
         pool.unload_model(&a).await;
         assert!(
@@ -16672,10 +16928,16 @@ mod tests {
     #[test]
     fn cpu_pinned_ids_are_reported_for_the_api() {
         let pool = test_pool();
-        pool.cpu_pinned_models.insert(ModelId("zeta".into()));
-        pool.cpu_pinned_models.insert(ModelId("alpha".into()));
+        pool.cpu_pins.pin(
+            &ModelId("zeta".into()),
+            crate::inference::worker_ipc::PermanentGpuFailure::OutOfMemory,
+        );
+        pool.cpu_pins.pin(
+            &ModelId("alpha".into()),
+            crate::inference::worker_ipc::PermanentGpuFailure::OutOfMemory,
+        );
         assert_eq!(pool.cpu_pinned_model_ids(), vec!["alpha", "zeta"]);
-        pool.clear_cpu_pin(&ModelId("alpha".into()));
+        pool.cpu_pins.lift(&ModelId("alpha".into()));
         assert_eq!(pool.cpu_pinned_model_ids(), vec!["zeta"]);
     }
 

@@ -282,7 +282,7 @@ impl super::SharedState {
     ) -> Option<super::OfferedMemory> {
         self.planned_past_offered_memory
             .get(&request_id)
-            .map(|o| *o)
+            .map(|o| o.clone())
     }
 
     /// Record what this request has committed to each peer's graphics memory,

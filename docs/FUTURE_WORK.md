@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #384**). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #388**). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -64,6 +64,9 @@ the top track (`docs/plans/large_model_splits.md`).
    far peers instead of answering locally. Its causes closed in v0.3.236 and v0.3.239; left: the
    prompt priced on the processor prior for a card/processor split, and a far hop priced at
    `net:0` (with #3). Passive: the next evidence is a field `predicted_terms` line.
+5a. **#385** — under steady chat a model's card fills toward its limit (prefix-cache snapshots
+   counted against memory the pool cannot reuse, unconfirmed) until it runs out, or under WSL2
+   slows ~25%. Reproduced on this laptop's card; one hypothesis measured and disproved.
 
 **P2 — speed and completeness**, ranked by how many users meet it in their first hour
 6. **#318** — a model no single member can hold, at a usable speed. **Measured on v0.3.261
@@ -2944,6 +2947,44 @@ StarCoder2, inert while refused).
 
 ### Memory and admission
 
+#### #385 — Under steady chat a model's card fills toward its limit, then runs out (or, under WSL2, slows)
+`P1` · memory · **OPEN** — 2026-10-31 · history: field report "shared vs alone, sustained" (v0.3.262), beside #384/#386/#387
+
+**Reported:** a 14B alone on a 12 GB RTX 3060, back-to-back 256-token replies with the last six
+turns kept: card use crept from ~10.0 to ~11.8 GB over 4-6 minutes, then
+`CUDA_ERROR_OUT_OF_MEMORY` and the model sat on the processor (that pin now ends, #384 — the
+creep is what caused it). The reporter suspected the prefix-cache snapshots (`home=BesideLive`,
+~400 MB each).
+
+**Reproduced here** (2026-10-31; Llama-3.1-8B Q4_K_M on this laptop's 8 GB RTX 3070 under WSL2,
+`SWARMLLM_PREFIX_CACHE_HOME=card`, a chat kept at ~1,800 prompt tokens): the cache stores a ~220 MB
+snapshot a turn and keeps 4-5 of them (~1 GB); the card went 6.0 → 7.4 GB in the first minute and
+7.7 GB by ten; the driver's free memory fell to 319 MB, below the 410 MB the budget means to keep
+free (`kv_budget::device_free_margin_bytes`, 5% of the card). At the same prompt length decode ran
+52-53 tok/s until the card reached 7.4 GB, then 31-48; four 10-minute runs agreed (median 41.8-45.3
+tok/s from turn 10, slowest tenth 34.1-38.7, card 7.6 GB). Under WSL2 nothing ran out: host memory
+lent to the card ("Shared Usage") stayed at 118-131 MB throughout, and CUDA graphs kept launching
+(~2,200 a minute, ~9 uncaptured) — so neither lending as that counter reads it nor lost graphs
+explains the slowdown; Windows' per-process video-memory budget (below the card's total) is
+unchecked. The snapshots share only the 39-token system prompt with any later turn of a sliding
+chat: they hold the memory and serve no hit.
+
+**Disproved (2026-10-31): a prompt pass needing more than the margin.** Every card prompt forward
+was measured (the pool's high-water less what was in use and what the cache added): 15-302 MB, the
+most at 1,766 tokens — under 410. A margin of max(5%, measured peak × 1.25) never moved, so it was
+not shipped.
+
+**Leading hypothesis (untested):** the budget counts the memory pool's idle bytes as free
+(`kv_budget_now`: the driver's free memory plus `pool_reusable`, 620-940 MB here), but the pool
+serves an allocation only from a block of its size — a snapshot or a forward of another size takes
+new memory from the driver, whose free memory falls below the margin while the "reusable" bytes
+stay. **Next:** log per turn the driver's free memory, the pool's reserved/used/reusable and the
+snapshot bytes, then try in turn (a) the margin held against the driver's free memory alone,
+(b) the pool handing idle blocks back when the driver's free memory falls under the margin
+(PyTorch's caching allocator frees cached blocks and retries before it reports out-of-memory),
+(c) no snapshot kept that no later turn could share (a sliding window's). Rig:
+`~/swarmllm-gate/deep/fr/creep_repro_ab.sh` (per-turn speed, card and shared memory per arm).
+
 #### #376 — A near-full card loses a split's drafter to the processor: the planner's room for it is about a layer too generous
 `P2` · memory / scheduling · **PARTIAL** — 2026-10-30 · history: #275, #342's residual
 
@@ -3187,7 +3228,7 @@ question with the load's own reading, by fitting first (`common/fit.cpp`, `--fit
 1 GiB margin, context shrunk before layers move off the card). **Next (rescoped)**: the loader's
 refusal of a WHOLE placement (`PermanentGpuFailure::NoKvCacheRoom` on a worker with no card split)
 sends the model down the spawn's ladder to the split rung, sized from a fresh card reading, instead
-of pinning it whole to the processor (`classify_worker_error` → `cpu_pinned_models`); the mark lifts
+of pinning it whole to the processor (`classify_worker_error` → `cpu_pins`); the mark lifts
 where the pin does, and promotion counts it as a reason still holding. A refused split keeps the
 processor pin. P3 still: three refusals in five weeks, all during rig work.
 
@@ -4019,6 +4060,40 @@ archive under the named heading. Reopen one only with the evidence its line name
 Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 19-28 were
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
+
+**Closed 2026-10-31, ships in the next release** (#384, #386, #387 — one field report, "shared vs
+alone, sustained", v0.3.262; its memory creep, #385, is still open)
+- #384 — **A model whose graphics card ran out of memory stayed on the processor until it was
+  unloaded by hand.** A 14B alone on a 12 GB card ran out after ~5 min of one back-to-back chat,
+  was moved to the processor ("pinned") and stayed there at a fifth of its speed for the rest of
+  the test, twice. The pin lifted only when ANOTHER model's worker gave graphics memory back, and
+  the worker that ran out is removed before its pin is taken — so on a card it had to itself,
+  nothing ever lifted it. A memory pin now holds 2 minutes, doubling up to 30 while the card keeps
+  failing the model, then ends where every placement asks (`process_pool::CpuPins`, read by
+  `cpu_reason`): the next request after a 5 s gap moves the model back if the card has room, and a
+  fresh worker goes through admission. A card too old for the kernels stays pinned. Tests
+  `a_memory_pin_ends_after_its_hold_and_doubles_when_the_card_fails_again`,
+  `a_pinned_model_returns_to_an_empty_card_once_its_hold_runs_out`. Evidence:
+  `docs/invariants/memory.md` § "Graphics memory has ONE owner" (**A memory pin ENDS**); gotcha #1002.
+- #386 — **"Not enough memory in the swarm" did not say which computer was short.** A 70B split
+  was refused for over an hour with "the computers holding it do not have room for all 80 of its
+  layers"; one holder had lost its graphics card to a driver fault and was offering about half
+  of what it held. The total was dropped whenever the asking computer was itself a holder (it has
+  no advertised ceiling, and one unknown figure made the whole sum unknown). At the ceilings it
+  now counts as able to take what it holds — its room alone once its memory refused that request,
+  as every planner then holds it — and the refusal names each holder's room, the shortest first:
+  "…room for about 72 of its 80 layers between them — 0202… has room for 9 of the 17 layers it
+  holds; this computer has room for all 63 it holds" (`scheduler::rooms_offered{,_at}`,
+  `error::describe_room_by_holder`; both writers of the refusal). Test
+  `a_shortfall_at_the_ceilings_names_the_holder_that_is_short`.
+- #387 — **A prompt refused because the card was briefly full was told to be shorter.** A
+  610-token chat was refused 14 times in a row with "66 MB available for conversations… Shorter
+  conversations still work", and went through by itself 1.5 min later: less memory stood free
+  than when the model loaded (another model's share was on the card), not a prompt too long. Where
+  the room the load set aside would hold the prompt, the refusal now says something else on the
+  computer is using the memory and to try again in a moment (`model_worker::shortfall` →
+  `Shortfall::TakenSinceLoad`). What held that card is not known from here (the reporter's log
+  did not travel). Test `a_device_short_since_the_load_is_not_a_prompt_too_long`.
 
 **Closed 2026-10-30, ships in the next release** (#382, #379, #378)
 - #382 — **A split's far end ran checks the reply had already thrown away after a wrong look-ahead.**
@@ -6568,7 +6643,7 @@ grep `^| N |`).
   (`router::a_refusal_the_caller_should_hear`), and when the re-plan finds nothing reports what
   happened: `SwarmShortOfMemory` when the refused plan had gone past the memory the holders
   OFFER — the scheduler records that per request (`plan_exceeds_offered_memory`,
-  `layers_offered`, `SharedState::planned_past_offered_memory`) and retrying cannot help — or
+  `layers_offered` (now `rooms_offered`), `SharedState::planned_past_offered_memory`) and retrying cannot help — or
   `HoldersDeclined`, in the last holder's own words, when the plan fitted their offers (usually
   busy: retry later). Two hint keys in 21 locales. Verified live with the fixed build: Qwen3-30B-A3B
   (18.7 GB) → "Not enough memory in the swarm … the computers holding it have room for about 43

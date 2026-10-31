@@ -556,6 +556,40 @@ does AFTER the part you copied.** Knowing the "one invariant, N paths" rule
 did not prevent this; applying it deliberately, as a checklist over the new
 path's siblings, is what caught it within hours.
 
+**A memory pin ENDS — `process_pool::CpuPins`** (2026-10-31, field report
+"shared vs alone, sustained"). A 14B alone on a 12 GB card grew its card memory
+over 4-6 min of one back-to-back chat, ran out (`CUDA_ERROR_OUT_OF_MEMORY`), was
+pinned, and stayed on the processor at a fifth of its speed for the rest of the
+block — twice, and only an unload by hand brought it back. **The pin's clearing
+condition could not happen on a card with one tenant**: it lifted only when a
+worker that HELD graphics memory went away (above), and the worker that ran out
+is evicted BEFORE `classify_worker_error` takes its pin, so the one event that
+freed the card had already passed. Nothing else asked again: `cpu_reason`
+returned the pin, so the promotion's `reason_still_holds` stayed true for ever,
+and a fresh spawn went straight to the processor. llama.cpp, vLLM and SGLang pin
+nothing — they shed cache and retry (vLLM preempts and recomputes; SGLang evicts
+radix-cache leaves; llama.cpp's server keeps its prompt cache in host RAM,
+`--cache-ram`).
+**The rule**: a memory pin (`OutOfMemory`, `NoKvCacheRoom`) holds for
+`PIN_HOLD_FIRST` (120 s), doubled up to `PIN_HOLD_MOST` (30 min) while the card
+fails the model again within `PIN_REPEAT_WITHIN` (30 min) of the last pin ending
+— `peer_outliers`' shape, so a model that fails at every load costs one load per
+hold, not one per request. Then it **stops holding in `cpu_reason`**, the one
+place every placement asks — not in whichever path lifts it: ended in the
+promotion alone (the first draft), a processor worker unloaded while idle came
+back pinned on its next spawn. Past the hold, the promotion weighs the card as it
+stands (`promotion_weighed`, its other guards unchanged — a 5 s gap in the
+traffic, the estimate fitting `vram_budget_now`), and a fresh spawn goes through
+admission, which takes no pin. A card too old for the kernels
+(`ArchitectureTooOld`) never ends its pin, and freed memory does not lift it.
+Tests: `a_memory_pin_ends_after_its_hold_and_doubles_when_the_card_fails_again`
+(the clock passed in, never back-dated: a CI runner minutes old cannot express
+an `Instant` an hour ago), `a_pinned_model_returns_to_an_empty_card_once_its_hold_runs_out`.
+⚠ **Under traffic with no 5 s gap the promotion still waits** (its idle floor
+keeps a request from dying with the worker it was about to use); the creep that
+caused the out-of-memory is the cause to fix — the pin only stops it lasting
+(still open, FUTURE_WORK #385).
+
 **A range that subsumes loaded ranges replaces them, before it loads**
 (2026-09-05, report #010). `model_worker::subsumed_segment_keys`; the worker's
 `models` map is keyed by the exact `(start, end, tp_rank, tp_size)`, so a plan

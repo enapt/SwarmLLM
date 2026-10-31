@@ -262,7 +262,7 @@ const INBOUND_REACHABILITY_KEY: &str = "inbound_ever_observed";
 
 /// What the holders of a model offered when a request had to be planned past
 /// it — see [`SharedState::planned_past_offered_memory`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OfferedMemory {
     /// Layers the holders said they could take between them, each computer
     /// counted once. `None` when one of them did not say: an unknown figure is
@@ -270,6 +270,8 @@ pub struct OfferedMemory {
     pub layers: Option<u32>,
     /// Layers the model has.
     pub num_layers: u32,
+    /// Each holder's own room, so the refusal can name who is short.
+    pub holders: Vec<crate::error::HolderRoom>,
 }
 
 /// One failed inference, retained for `GET /api/admin/diagnostics`.

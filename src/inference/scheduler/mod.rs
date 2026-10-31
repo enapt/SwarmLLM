@@ -728,7 +728,7 @@ impl NodeCandidate {
     /// (`min(held + room, fit)`, #263), as a peer's always is, and a range
     /// costs its [`Self::width_in_bound`]. Charged its width, this node — card
     /// full, layers 0-13 loaded — was never a standby for a peer's 0-13, which
-    /// would have added nothing (FUTURE_WORK #354 (a); `layers_offered_at`
+    /// would have added nothing (FUTURE_WORK #354 (a); `rooms_offered_at`
     /// reads the same figure the same way).
     fn charge_in_bound(&self, range: (u32, u32), local_node_id: &NodeId) -> u32 {
         if &self.node_id == local_node_id && !self.prompt_memory_refused {
@@ -1446,15 +1446,20 @@ fn plan_exceeds_offered_memory(
 ///
 /// What the caller is told when a plan past these offers is refused ("room for
 /// about 17 of its 48 layers"), so it reads the same figure the plan was
-/// checked against.
-fn layers_offered(candidates: &[NodeCandidate], local_node_id: &NodeId) -> Option<u32> {
-    layers_offered_at(candidates, local_node_id, |c| {
+/// checked against — with each holder's own room beside it.
+fn rooms_offered(
+    candidates: &[NodeCandidate],
+    local_node_id: &NodeId,
+) -> (Option<u32>, Vec<crate::error::HolderRoom>) {
+    rooms_offered_at(candidates, local_node_id, |c| {
         c.max_hostable_layers_at_face_value
     })
 }
 
-/// [`layers_offered`] at any figure — what a plan that cannot be made at the
-/// holders' CEILINGS reports (`short_of_memory`), with the same arithmetic.
+/// [`rooms_offered`] at any figure — what a plan that cannot be made at the
+/// holders' CEILINGS reports (`short_of_memory`), with the same arithmetic —
+/// and each holder's own room beside the total (`error::HolderRoom`), so the
+/// refusal names who is short and by how much (field report 2026-10-31).
 ///
 /// This node's `max_hostable_layers` is room to ADD beside what its worker
 /// already holds (`NodeCandidate::layers_it_would_add`), not a total, so what
@@ -1467,34 +1472,75 @@ fn layers_offered(candidates: &[NodeCandidate], local_node_id: &NodeId) -> Optio
 /// once its conversation memory refused the prompt (`prompt_memory_refused`,
 /// #263: `min(held + room, fit)`) — so it is the larger of the two readings,
 /// and after a refusal the figure alone (the pre-release review of v0.3.255).
-fn layers_offered_at(
+fn rooms_offered_at(
     candidates: &[NodeCandidate],
     local_node_id: &NodeId,
     figure: impl Fn(&NodeCandidate) -> Option<u32>,
-) -> Option<u32> {
+) -> (Option<u32>, Vec<crate::error::HolderRoom>) {
+    let mut order: Vec<&NodeId> = Vec::new();
     let mut held: HashMap<&NodeId, Vec<(u32, u32)>> = HashMap::new();
-    let mut offered: HashMap<&NodeId, u32> = HashMap::new();
+    // `None` once any of the node's candidates did not say.
+    let mut offered: HashMap<&NodeId, Option<u32>> = HashMap::new();
     for c in candidates {
-        let mut o = figure(c)?;
-        if &c.node_id == local_node_id && !c.prompt_memory_refused {
-            let holds: u32 = c
-                .held_ranges
-                .iter()
-                .map(|h| h.range.1.saturating_sub(h.range.0))
-                .sum();
-            let beside = c.max_hostable_layers.unwrap_or(0).saturating_add(holds);
-            o = o.max(beside);
+        let is_local = &c.node_id == local_node_id;
+        let o = figure(c).map(|o| {
+            if is_local && !c.prompt_memory_refused {
+                let holds: u32 = c
+                    .held_ranges
+                    .iter()
+                    .map(|h| h.range.1.saturating_sub(h.range.0))
+                    .sum();
+                o.max(c.max_hostable_layers.unwrap_or(0).saturating_add(holds))
+            } else {
+                o
+            }
+        });
+        if !held.contains_key(&c.node_id) {
+            order.push(&c.node_id);
         }
         held.entry(&c.node_id)
             .or_default()
             .extend(c.available_ranges.iter().copied());
-        let best = offered.entry(&c.node_id).or_insert(0);
-        *best = (*best).max(o);
+        let best = offered.entry(&c.node_id).or_insert(Some(0));
+        *best = best.zip(o).map(|(b, o)| b.max(o));
     }
-    Some(layers_carried(
-        held.into_iter()
-            .map(|(node, ranges)| (ranges, offered[node])),
-    ))
+    let holders = order
+        .iter()
+        .map(|node| {
+            let holds = layers_in(&held[node]);
+            crate::error::HolderRoom {
+                holder: if *node == local_node_id {
+                    "this computer".to_string()
+                } else {
+                    node.to_string()
+                },
+                holds,
+                room: offered[node].map(|room| room.min(holds)),
+            }
+        })
+        .collect();
+    let total = offered.values().all(Option::is_some).then(|| {
+        layers_carried(
+            held.into_iter()
+                .map(|(node, ranges)| (ranges, offered[node].unwrap_or(0))),
+        )
+    });
+    (total, holders)
+}
+
+/// How many layers `ranges` cover, each counted once.
+fn layers_in(ranges: &[(u32, u32)]) -> u32 {
+    let mut sorted = ranges.to_vec();
+    sorted.sort_unstable();
+    let (mut count, mut reached) = (0u32, 0u32);
+    for (from, to) in sorted {
+        let from = from.max(reached);
+        if to > from {
+            count += to - from;
+            reached = to;
+        }
+    }
+    count
 }
 
 /// A peer's `figure` never past its `ceiling` — what it could EVER hold: the
@@ -1519,7 +1565,7 @@ fn clamp_room_to_ceiling(room: Option<f64>, ceiling: Option<u32>) -> Option<f64>
 /// Layers a set of computers could carry between them: the most layers that
 /// can each be given to ONE computer holding it, none given more than it
 /// could take — a maximum flow from the layers to the computers. The one
-/// arithmetic behind "room for about N of its L layers" (`layers_offered_at`)
+/// arithmetic behind "room for about N of its L layers" (`rooms_offered_at`)
 /// and auto-manage's "do its holders carry this model"
 /// (`auto_manage::coverage`, #231).
 ///
@@ -1682,14 +1728,25 @@ fn short_of_memory(
             span: crate::error::describe_missing_layers(from, to),
         };
     }
+    // **This node has no ceiling** — its loader decides — and the ceiling rungs
+    // hold it to none unless its memory refused this request, when every
+    // planner holds it to `max_hostable_layers` (`memory_refused_this_request`).
+    // Unbounded, it can take every layer it holds. Read as "did not say", it
+    // made the whole total unknown: a 70B refused for over an hour with this
+    // node among its holders said only "do not have room for all 80 of its
+    // layers", while a peer offered 9 of the 17 it held (field report 2026-10-31).
+    let (layers, holders) = rooms_offered_at(candidates, local_node_id, |c| {
+        if c.max_hostable_layers_at_ceiling.is_some() || &c.node_id != local_node_id {
+            c.max_hostable_layers_at_ceiling
+        } else if c.memory_refused_this_request {
+            c.max_hostable_layers
+        } else {
+            Some(layers_in(&c.available_ranges))
+        }
+    });
     SwarmError::SwarmShortOfMemory {
         model_id,
-        room: crate::error::describe_offered_room(
-            layers_offered_at(candidates, local_node_id, |c| {
-                c.max_hostable_layers_at_ceiling
-            }),
-            num_layers,
-        ),
+        room: crate::error::describe_room_by_holder(layers, num_layers, &holders),
     }
 }
 
@@ -4294,11 +4351,13 @@ impl PipelineScheduler {
         if purpose.explains_a_real_request()
             && plan_exceeds_offered_memory(&segments, &candidates, local_node_id)
         {
+            let (layers, holders) = rooms_offered(&candidates, local_node_id);
             self.shared_state.note_planned_past_offered_memory(
                 request_id,
                 crate::daemon::state::OfferedMemory {
-                    layers: layers_offered(&candidates, local_node_id),
+                    layers,
                     num_layers,
+                    holders,
                 },
             );
         }

@@ -1313,7 +1313,7 @@ logged "no route fits even what the peers themselves advertised" and handed the
 M4 all 48 layers against an offer of 0. So the scheduler records, at its exit and
 for real requests only, that a plan hands some peer more layers than it offered
 (`plan_exceeds_offered_memory` — peers only: this node's figure is room to ADD,
-not a total — and `layers_offered`, the figure the caller is shown).
+not a total — and `rooms_offered`, the figure the caller is shown, with each holder's own room).
 
 - Refused plan past the offers → **`SwarmShortOfMemory`**, "the computers holding
   it have room for about N of its M layers between them": retrying cannot help.

@@ -614,6 +614,7 @@ fn a_refused_plan_past_the_holders_offers_is_a_swarm_short_of_memory() {
     let offered = crate::daemon::state::OfferedMemory {
         layers: Some(17),
         num_layers: 48,
+        holders: Vec::new(),
     };
     let reported = super::report_after_a_replan(refusal, gone, "m", Some(offered));
     assert!(
@@ -634,6 +635,7 @@ fn a_refused_plan_past_the_holders_offers_is_a_swarm_short_of_memory() {
     let enough = crate::daemon::state::OfferedMemory {
         layers: Some(50),
         num_layers: 48,
+        holders: Vec::new(),
     };
     let reported = super::report_after_a_replan(
         SwarmError::ServiceUnavailable("short of memory".into()),
@@ -679,6 +681,7 @@ fn a_re_plans_shortfall_after_a_peer_said_no_is_the_holders_declining() {
     let offered = crate::daemon::state::OfferedMemory {
         layers: Some(17),
         num_layers: 28,
+        holders: Vec::new(),
     };
     let reported = super::report_after_a_replan(refusal(), re_plan(), "m", Some(offered));
     assert!(
