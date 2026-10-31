@@ -2,7 +2,7 @@
 
 ## [Unreleased]
 
-## [0.3.263-alpha] — 2026-10-30
+## [0.3.264-alpha] — 2026-10-31
 
 **A 70B request no longer fails when one computer holds all of it but cannot fit it.** A peer
 that held every layer of Llama 3.3 70B was handed the whole model, turned it down for lack of
@@ -46,6 +46,20 @@ nearly full.** The planner left room for it beside this computer's layers but pr
 without the word table their first range loads; on Qwen2.5-14B the room came out 23 MB short, the
 guessing model went to the processor and replies ran at half speed. The room is now priced as the
 layers will load (#376). `SWARMLLM_DRAFTER_ROOM_FIRST=average` is the old pricing.
+
+**A split's far computer can now run the likely restart before it is asked — off for now, so it
+can be measured on the 70B.** When the far computer in a split refuses one of this computer's
+guessed words, it sits idle while the corrected batch travels back to it: about 0.7 s each time on
+Llama 3.3 70B, some twenty times a reply. This computer can now send, beside each batch, a spare
+restart for the refusal its guessing model thinks likeliest. The far computer runs it only if
+exactly that refusal happens, and skips it otherwise. A spare goes only where it is expected to
+save more than it delays, priced from the round trip, both computers' measured times and how late
+this reply's answers have been arriving. Replayed over six of the 70B's own replies, that came to
+1.07-1.10x the speed without spares. On a test pair (Llama 3.1 8B with its 1B guessing model, two
+4-core halves 200 ms apart, the same reply either way) a reply took 80.0 s with spares against
+81.0 and 82.9 s without. The far computer's half is on in this release, so a computer that turns
+spares on (`SWARMLLM_STREAM_SPARES=1`) is served by peers that have updated; nothing changes for
+anyone else (#381).
 
 ## [0.3.262-alpha] — 2026-10-30
 
