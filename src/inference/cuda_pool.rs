@@ -236,6 +236,94 @@ pub(crate) fn trim(device: &Device) -> Option<(PoolUsage, PoolUsage)> {
     None
 }
 
+/// Whether the pool hands memory back when the driver's own free memory falls
+/// under the card's margin (on unless `SWARMLLM_CUDA_POOL_MARGIN=0`, the A/B).
+#[cfg(any(feature = "candle-cuda", test))]
+fn margin_held() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| keep_enabled_for(std::env::var("SWARMLLM_CUDA_POOL_MARGIN").ok().as_deref()))
+}
+
+/// How many bytes the pool may keep so that the driver's free memory is
+/// `margin` again: what it holds less the shortfall, never less than what
+/// live buffers occupy. `None` when nothing need go — the driver already has
+/// its margin, or the pool holds nothing idle to give.
+#[cfg(any(feature = "candle-cuda", test))]
+pub(crate) fn bytes_to_keep_for_margin(
+    pool: PoolUsage,
+    driver_free: u64,
+    margin: u64,
+) -> Option<u64> {
+    let short = margin.checked_sub(driver_free).filter(|s| *s > 0)?;
+    let give = short.min(pool.reusable());
+    (give > 0).then(|| pool.reserved - give)
+}
+
+/// Keep the DRIVER's free memory at `margin` by handing back the shortfall
+/// from what the pool holds idle (FUTURE_WORK #385). Called by the card's one
+/// budget reading (`kv_budget::device_free_and_total_bytes`), right after its
+/// synchronize, with that reading's figures. Returns the pool's figures and the
+/// driver's free memory after a trim that released something; `None` when none
+/// was due, none was released, or it could not be done.
+///
+/// **Why.** With the release threshold at its maximum ([`keep_freed_memory`])
+/// the pool never gives memory back while it serves, and its idle bytes count
+/// as this process's room ([`reusable_bytes`]). Under one steady chat the pool
+/// still took a fresh 32 MB block from the driver every few minutes while
+/// holding 450-1,200 MB idle — its peak use flat at ~5.9 GB, its reservation
+/// 6,560 → 6,688 MB and the driver's free memory 288 → 137 MB in 15 minutes,
+/// far under the 409 MB margin (Llama-3.1-8B on an 8 GB card, ~3,100-token
+/// prompts, saved prompts on the card, 2026-10-31). The budget saw none of it:
+/// idle plus driver-free stayed above the margin. Nothing then stops the
+/// driver running dry — a 14B on a 12 GB card did, in 4-6 minutes, and was
+/// moved to the processor (the field report behind #384/#385).
+///
+/// **What others do.** PyTorch's caching allocator reclaims cached blocks once
+/// the card's use passes `garbage_collection_threshold`, "to avoid triggering
+/// expensive sync-and-reclaim-all", and its `cudaMallocAsync` backend, which
+/// keeps the threshold at `UINT64_MAX` as this module does, synchronizes and
+/// calls `cudaMemPoolTrimTo(pool, 0)` before it reports out of memory
+/// (`c10/cuda/CUDAMallocAsyncAllocator.cpp`). This keeps only the shortfall's
+/// worth, so the memory the pool reuses turn after turn stays with it (#146).
+/// `cuMemPoolTrimTo` releases only blocks no live buffer touches; what it
+/// cannot release stays counted as before.
+#[cfg(any(feature = "candle-cuda", test))]
+pub(crate) fn hold_driver_margin(
+    device: &Device,
+    pool: PoolUsage,
+    driver_free: u64,
+    margin: u64,
+) -> Option<(PoolUsage, u64)> {
+    if !margin_held() || !keep_enabled() {
+        return None;
+    }
+    let keep = bytes_to_keep_for_margin(pool, driver_free, margin)?;
+    #[cfg(feature = "candle-cuda")]
+    if let Device::Cuda(dev) = device {
+        return match cuda::trim_keeping(dev, keep) {
+            Ok(Some((after, free))) if after.reserved < pool.reserved => {
+                tracing::debug!(
+                    released_mb = (pool.reserved - after.reserved) >> 20,
+                    driver_free_mb = driver_free >> 20,
+                    driver_free_after_mb = free >> 20,
+                    margin_mb = margin >> 20,
+                    pool_reserved_mb = after.reserved >> 20,
+                    pool_used_mb = after.used >> 20,
+                    "DIAG: card pool handed idle memory back to keep the driver's margin"
+                );
+                Some((after, free))
+            }
+            Ok(_) => None,
+            Err(e) => {
+                tracing::debug!(error = %e, "card pool: could not hand idle memory back");
+                None
+            }
+        };
+    }
+    let _ = (device, keep);
+    None
+}
+
 /// Fresh allocations [`probe_once`] times, each [`PROBE_BYTES_EACH`]: 64 MB
 /// in 16 calls. The step that slowed (#146's deep dive) was a few hundred MB
 /// in ~64 calls, and whether the cost grows per call or per byte is not
@@ -554,6 +642,24 @@ mod cuda {
         }
     }
 
+    /// Release what the pool holds idle until it keeps `keep` bytes, then
+    /// read it and the driver's free memory again. The caller has just
+    /// synchronized (the budget reading), so freed buffers already count as
+    /// idle. `Ok(None)` without a pool or while the stream is captured.
+    pub(super) fn trim_keeping(
+        dev: &candle_core::CudaDevice,
+        keep: u64,
+    ) -> Result<Option<(PoolUsage, u64)>, DriverError> {
+        let Some(pool) = current_pool(dev)? else {
+            return Ok(None);
+        };
+        let keep = usize::try_from(keep).unwrap_or(usize::MAX);
+        // SAFETY: a valid pool; only memory no live buffer holds is released.
+        unsafe { result::mem_pool::trim_to(pool, keep)? };
+        let (free, _) = dev.cuda_stream().context().mem_get_info()?;
+        Ok(Some((read(pool)?, free as u64)))
+    }
+
     pub(super) fn trim(
         dev: &candle_core::CudaDevice,
     ) -> Result<Option<(PoolUsage, PoolUsage)>, DriverError> {
@@ -601,6 +707,43 @@ mod tests {
             used: 2 << 30,
         };
         assert_eq!(racing.reusable(), 0);
+    }
+
+    /// #385: the pool gives back exactly the driver's shortfall under the
+    /// margin, from idle memory only — never a byte a buffer holds, nothing
+    /// when the driver has its margin, nothing when nothing is idle.
+    #[test]
+    fn the_pool_gives_back_only_the_drivers_shortfall_and_only_idle_memory() {
+        const MB: u64 = 1 << 20;
+        let pool = PoolUsage {
+            reserved: 6688 * MB,
+            used: 5908 * MB,
+        };
+        // The repro's last reading: 137 MB free at the driver, margin 409.
+        assert_eq!(
+            bytes_to_keep_for_margin(pool, 137 * MB, 409 * MB),
+            Some((6688 - 272) * MB)
+        );
+        // The driver already has its margin: keep everything.
+        assert_eq!(bytes_to_keep_for_margin(pool, 409 * MB, 409 * MB), None);
+        assert_eq!(bytes_to_keep_for_margin(pool, 900 * MB, 409 * MB), None);
+        // A shortfall larger than what is idle gives back only the idle part.
+        let tight = PoolUsage {
+            reserved: 6000 * MB,
+            used: 5900 * MB,
+        };
+        assert_eq!(
+            bytes_to_keep_for_margin(tight, 0, 409 * MB),
+            Some(5900 * MB)
+        );
+        // Nothing idle: nothing to give.
+        let full = PoolUsage {
+            reserved: 6000 * MB,
+            used: 6000 * MB,
+        };
+        assert_eq!(bytes_to_keep_for_margin(full, 0, 409 * MB), None);
+        // The processor has no pool: nothing is done.
+        assert_eq!(hold_driver_margin(&Device::Cpu, pool, 0, 409 * MB), None);
     }
 
     #[test]

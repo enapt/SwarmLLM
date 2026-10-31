@@ -587,8 +587,8 @@ Tests: `a_memory_pin_ends_after_its_hold_and_doubles_when_the_card_fails_again`
 an `Instant` an hour ago), `a_pinned_model_returns_to_an_empty_card_once_its_hold_runs_out`.
 ⚠ **Under traffic with no 5 s gap the promotion still waits** (its idle floor
 keeps a request from dying with the worker it was about to use); the creep that
-caused the out-of-memory is the cause to fix — the pin only stops it lasting
-(still open, FUTURE_WORK #385).
+caused the out-of-memory is fixed separately — the driver keeps its margin
+(#385, § "A card's memory pool keeps what the worker frees").
 
 **A range that subsumes loaded ranges replaces them, before it loads**
 (2026-09-05, report #010). `model_worker::subsumed_segment_keys`; the worker's
@@ -2629,6 +2629,70 @@ control / keep / control):
   cannot tell it from another program's memory.
 - **The synchronize before the reading stays**: a buffer freed on the stream counts as unused
   only after it.
+- **The driver keeps its margin too (2026-10-31, #385).** The budget's room is the driver's
+  free memory PLUS the pool's idle bytes, so it cannot see the pool slowly taking the driver's
+  last memory. `kv_budget::device_free_and_total_bytes` asks `cuda_pool::hold_driver_margin`
+  after its synchronize: when the driver's own free memory is under
+  `device_free_margin_bytes`, the pool hands back the shortfall from what it holds idle
+  (`cuMemPoolTrimTo(pool, reserved − shortfall)`, `bytes_to_keep_for_margin`) and the reading
+  is taken again. Never more than the shortfall — the rest is what the pool reuses turn after
+  turn, which #146 exists to keep.
+
+### The driver's margin, measured (2026-10-31, FUTURE_WORK #385)
+
+**What it cost.** A field report (v0.3.262, Linux, RTX 3060 12 GB): a 14B alone on the card,
+back-to-back 256-token replies with the last six turns kept, crept from ~10.0 to ~11.8 GB over
+4-6 minutes, then `CUDA_ERROR_OUT_OF_MEMORY`, and the model was moved to the processor at a fifth
+of its speed (#384 ends that pin; this ends the creep).
+
+**What it was not** (each measured on this laptop's RTX 3070 8 GB, under WSL2):
+- *A prompt pass needing more than the margin*: every card prompt forward took 15-302 MB, under
+  the 409 MB margin (gotcha #1003).
+- *A pool that cannot reuse its idle bytes for another size*: a driver-API probe filled the pool
+  to a steady chat's shape (weights, transients, four ~220 MB saved prompts a turn; driver free
+  346-361 MB, 852 MB idle) and then asked it for one 788 MB block — served from idle memory —
+  and for 788 MB OUTSIDE the pool (`cuMemAlloc`, as a library workspace would), which the driver
+  served by taking idle memory back from the pool of the same process. 200 turns, no failure.
+- *Cache growth*: a cache grows one layer's buffer at a time (`SeqCache::append`), ~6 MB on a
+  14B.
+
+**What it was.** The reporter's shape — Llama-3.1-8B, saved prompts on the card
+(`SWARMLLM_PREFIX_CACHE_HOME=card`, as on a native node), ~3,100-token prompts so each saved
+prompt is ~390 MB against the 409 MB margin, as theirs was ~400 against 614
+(`~/swarmllm-gate/deep/fr/creep_repro_ab.sh`, `PAD=130`): the pool's peak use stayed flat at
+~5.9 GB a turn while its reservation took one more 32 MB block every few minutes, with 450-1,200
+MB idle. The driver's free memory fell 721 → 256 → 128 → 64 MB in 20 minutes, and Windows began
+lending host memory to the card (118 → 236 MB) — WSL2's form of running out. The budget saw
+none of it: driver free + idle stayed well above the margin.
+
+**The A/B** (CUDA release build of main + this change, one binary, arms 20 min each, the live
+node stopped, Windows up ~6 h; `creep_out/1031_0913`):
+
+| | `SWARMLLM_CUDA_POOL_MARGIN=0` | on (default) |
+|---|---|---|
+| driver free memory | 721 → 64 MB, falling | 384-416 MB, held |
+| pool reserved | 6,112 → 6,784 MB, rising | 6,432-6,464 MB, flat |
+| host memory lent to the card | 119 → 236 MB | 117-120 MB |
+| decode, median / slowest tenth (turn ≥ 10) | 41.0 / 36.3 tok/s | 40.5 / 35.5 tok/s |
+| first token, median / slowest tenth | 2.02 / 2.35 s | 2.00 / 2.90 s |
+
+The mechanism fired 44 times (32-288 MB each, `DIAG: card pool handed idle memory back to keep
+the driver's margin`); 148 and 145 turns, no errors. The slower tenth of first tokens is the pool
+growing back from the driver after a hand-back — a fresh allocation, which under WSL2 slows with
+host uptime (#146) — and it arises only with saved prompts ON the card, which WSL2 does not do by
+default (#257). A native driver grows the pool quickly at any uptime.
+
+**What others do.** PyTorch's caching allocator reclaims cached blocks once the card's use passes
+`garbage_collection_threshold`, "to avoid triggering expensive sync-and-reclaim-all"; its
+`cudaMallocAsync` backend keeps the release threshold at `UINT64_MAX`, as `keep_freed_memory`
+does, and synchronizes and trims the pool to 0 before it reports out of memory
+(`c10/cuda/CUDAMallocAsyncAllocator.cpp`). A retry at the allocation would need cudarc patched
+(its `result::malloc_async` is the one choke point); the hold at the reading prevents the dry
+driver instead, and needs no vendored crate.
+
+**What a change must keep.** Hold the margin against the DRIVER's figure, not the sum; give back
+only the shortfall; read again after a hand-back. A/B `SWARMLLM_CUDA_POOL_MARGIN=0`. Test
+`the_pool_gives_back_only_the_drivers_shortfall_and_only_idle_memory`.
 
 **From the rules file (moved 2026-10-02):**
 

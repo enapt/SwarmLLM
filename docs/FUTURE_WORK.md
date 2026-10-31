@@ -64,9 +64,6 @@ the top track (`docs/plans/large_model_splits.md`).
    far peers instead of answering locally. Its causes closed in v0.3.236 and v0.3.239; left: the
    prompt priced on the processor prior for a card/processor split, and a far hop priced at
    `net:0` (with #3). Passive: the next evidence is a field `predicted_terms` line.
-5a. **#385** — under steady chat a model's card fills toward its limit (prefix-cache snapshots
-   counted against memory the pool cannot reuse, unconfirmed) until it runs out, or under WSL2
-   slows ~25%. Reproduced on this laptop's card; one hypothesis measured and disproved.
 
 **P2 — speed and completeness**, ranked by how many users meet it in their first hour
 6. **#318** — a model no single member can hold, at a usable speed. **Measured on v0.3.261
@@ -2947,44 +2944,6 @@ StarCoder2, inert while refused).
 
 ### Memory and admission
 
-#### #385 — Under steady chat a model's card fills toward its limit, then runs out (or, under WSL2, slows)
-`P1` · memory · **OPEN** — 2026-10-31 · history: field report "shared vs alone, sustained" (v0.3.262), beside #384/#386/#387
-
-**Reported:** a 14B alone on a 12 GB RTX 3060, back-to-back 256-token replies with the last six
-turns kept: card use crept from ~10.0 to ~11.8 GB over 4-6 minutes, then
-`CUDA_ERROR_OUT_OF_MEMORY` and the model sat on the processor (that pin now ends, #384 — the
-creep is what caused it). The reporter suspected the prefix-cache snapshots (`home=BesideLive`,
-~400 MB each).
-
-**Reproduced here** (2026-10-31; Llama-3.1-8B Q4_K_M on this laptop's 8 GB RTX 3070 under WSL2,
-`SWARMLLM_PREFIX_CACHE_HOME=card`, a chat kept at ~1,800 prompt tokens): the cache stores a ~220 MB
-snapshot a turn and keeps 4-5 of them (~1 GB); the card went 6.0 → 7.4 GB in the first minute and
-7.7 GB by ten; the driver's free memory fell to 319 MB, below the 410 MB the budget means to keep
-free (`kv_budget::device_free_margin_bytes`, 5% of the card). At the same prompt length decode ran
-52-53 tok/s until the card reached 7.4 GB, then 31-48; four 10-minute runs agreed (median 41.8-45.3
-tok/s from turn 10, slowest tenth 34.1-38.7, card 7.6 GB). Under WSL2 nothing ran out: host memory
-lent to the card ("Shared Usage") stayed at 118-131 MB throughout, and CUDA graphs kept launching
-(~2,200 a minute, ~9 uncaptured) — so neither lending as that counter reads it nor lost graphs
-explains the slowdown; Windows' per-process video-memory budget (below the card's total) is
-unchecked. The snapshots share only the 39-token system prompt with any later turn of a sliding
-chat: they hold the memory and serve no hit.
-
-**Disproved (2026-10-31): a prompt pass needing more than the margin.** Every card prompt forward
-was measured (the pool's high-water less what was in use and what the cache added): 15-302 MB, the
-most at 1,766 tokens — under 410. A margin of max(5%, measured peak × 1.25) never moved, so it was
-not shipped.
-
-**Leading hypothesis (untested):** the budget counts the memory pool's idle bytes as free
-(`kv_budget_now`: the driver's free memory plus `pool_reusable_mb`, 620-940 MB here), but the pool
-serves an allocation only from a block of its size — a snapshot or a forward of another size takes
-new memory from the driver, whose free memory falls below the margin while the "reusable" bytes
-stay. **Next:** log per turn the driver's free memory, the pool's reserved/used/reusable and the
-snapshot bytes, then try in turn (a) the margin held against the driver's free memory alone,
-(b) the pool handing idle blocks back when the driver's free memory falls under the margin
-(PyTorch's caching allocator frees cached blocks and retries before it reports out-of-memory),
-(c) no snapshot kept that no later turn could share (a sliding window's). Rig:
-`~/swarmllm-gate/deep/fr/creep_repro_ab.sh` (per-turn speed, card and shared memory per arm).
-
 #### #376 — A near-full card loses a split's drafter to the processor: the planner's room for it is about a layer too generous
 `P2` · memory / scheduling · **PARTIAL** — 2026-10-30 · history: #275, #342's residual
 
@@ -4061,8 +4020,8 @@ Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
 
-**Closed 2026-10-31, ships in the next release** (#384, #386, #387 — one field report, "shared vs
-alone, sustained", v0.3.262; its memory creep, #385, is still open)
+**Closed 2026-10-31, ships in the next release** (#384, #385, #386, #387 — one field report, "shared vs
+alone, sustained", v0.3.262)
 - #384 — **A model whose graphics card ran out of memory stayed on the processor until it was
   unloaded by hand.** A 14B alone on a 12 GB card ran out after ~5 min of one back-to-back chat,
   was moved to the processor ("pinned") and stayed there at a fifth of its speed for the rest of
@@ -4075,6 +4034,20 @@ alone, sustained", v0.3.262; its memory creep, #385, is still open)
   `a_memory_pin_ends_after_its_hold_and_doubles_when_the_card_fails_again`,
   `a_pinned_model_returns_to_an_empty_card_once_its_hold_runs_out`. Evidence:
   `docs/invariants/memory.md` § "Graphics memory has ONE owner" (**A memory pin ENDS**); gotcha #1002.
+- #385 — **Under steady chat a model's graphics card filled up until it ran out.** The memory
+  budget counts the card's free memory plus what the worker's memory pool holds idle; the pool
+  slowly took more from the driver (one 32 MB block every few minutes, its peak use flat), so the
+  driver ran dry while that sum still read as plenty — the reporter's 14B on a 12 GB card in 4-6
+  minutes. The card's one reading now hands the pool's idle memory back whenever the driver's own
+  free memory falls under the margin, the shortfall only (`cuda_pool::hold_driver_margin`; PyTorch
+  reclaims for the same reason, `garbage_collection_threshold`). Reproduced on Llama-3.1-8B, an 8 GB
+  card, ~3,100-token prompts, saved prompts on the card, 20 min an arm in one build: driver free
+  721 → 64 MB and falling with `SWARMLLM_CUDA_POOL_MARGIN=0`, held at 384-416 MB with it (44
+  hand-backs); decode 41.0 / 40.5 tok/s median, first token 2.02 / 2.00 s median (2.35 / 2.90 s at
+  the slowest tenth, the pool growing back under WSL2). Three causes measured and ruled out first
+  (a prompt pass over the margin, a pool that could not reuse its idle bytes, cache growth).
+  Test `the_pool_gives_back_only_the_drivers_shortfall_and_only_idle_memory`. Evidence:
+  `docs/invariants/memory.md` § "The driver's margin, measured".
 - #386 — **"Not enough memory in the swarm" did not say which computer was short.** A 70B split
   was refused for over an hour with "the computers holding it do not have room for all 80 of its
   layers"; one holder had lost its graphics card to a driver fault and was offering about half

@@ -162,7 +162,7 @@ Prune's soft-unload narrows a loaded model only when our CHARGED graphics memory
 
 ## A card's memory pool keeps what the worker frees, until the worker is idle (2026-09-28)
 
-**`split::loader::load_device` is the one place a worker picks the card** and raises the pool release threshold (`cuda_pool::keep_freed_memory`); `model_worker::run_worker` trims after `cuda_pool::IDLE_TRIM`. Any "free for this process" reading adds `cuda_pool::reusable_bytes`. Guard: `every_split_model_reaches_the_card_through_load_device`; A/B `SWARMLLM_CUDA_POOL_KEEP=0`.
+**`split::loader::load_device` is the one place a worker picks the card** and raises the pool release threshold (`cuda_pool::keep_freed_memory`); `model_worker::run_worker` trims after `cuda_pool::IDLE_TRIM`. Any "free for this process" reading adds `cuda_pool::reusable_bytes`. Guard: `every_split_model_reaches_the_card_through_load_device`; A/B `SWARMLLM_CUDA_POOL_KEEP=0`. **The driver keeps its margin too** (#385): idle plus driver-free cannot see the pool slowly taking the driver's last memory, so the card's one reading asks **`cuda_pool::hold_driver_margin`**, which hands back only the shortfall under `device_free_margin_bytes`; a steady chat's driver free fell 721 → 64 MB without it. A/B `SWARMLLM_CUDA_POOL_MARGIN=0`.
 
 → `docs/invariants/memory.md` § "A card's memory pool keeps what the worker frees (2026-09-28)"
 

@@ -651,12 +651,26 @@ pub(crate) fn device_free_and_total_bytes(device: &candle_core::Device) -> Optio
             // existed — conservative, never larger than the truth.
             let _ = stream.synchronize();
         }
-        let pool = crate::inference::cuda_pool::usage(device);
-        let reading = stream
+        let mut pool = crate::inference::cuda_pool::usage(device);
+        let mut reading = stream
             .context()
             .mem_get_info()
             .ok()
             .map(|(free, total)| (free as u64, total as u64));
+        // The driver's own free memory is held at the margin too: idle pool
+        // bytes count as room here, and without this the pool's slow growth
+        // ran the driver dry while that sum still read as plenty (#385).
+        if let (Some(p), Some((free, total))) = (pool, reading) {
+            if let Some((after, free_after)) = crate::inference::cuda_pool::hold_driver_margin(
+                device,
+                p,
+                free,
+                device_free_margin_bytes(total),
+            ) {
+                pool = Some(after);
+                reading = Some((free_after, total));
+            }
+        }
         if let (Some(p), Some((free, _))) = (pool, reading) {
             tracing::debug!(
                 device_free_mb = free >> 20,
