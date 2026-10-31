@@ -1360,7 +1360,14 @@ change) and re-measured 22:50-23:25Z, 35 min: **9 coordinate broadcasts** — 8 
 while the coordinate converged, then one re-centring at +32 min (16 ms) — and the published coordinate's error 4% in
 minutes 16-25 and 3% in 26-35, beside 3% live. **Residual (2k)**: a restart re-learns the coordinate from the origin
 (~16-20 minutes at ~2 samples a minute from 4 peers) and announces about every 2 minutes meanwhile; keeping the
-coordinate across a restart would remove most of that.
+coordinate across a restart would remove most of that. Researched 2026-11-01, not built: Ledlie, Gardner and Seltzer
+(NSDI 2007, § 7.1) advise "instead of starting from scratch when restarting a client, have it begin where it left
+off" — nodes re-entering at the origin "had a deleterious effect" — while Serf persisted it and STOPPED
+(hashicorp/serf#489, fixed by #490: persisting "making it much harder to clean up after errors"; today's
+`snapshot.go` skips old `coordinate:` records, "serf should re-converge"), after a coordinate stuck at an absurd
+value "essentially forever" (#487). So a restore must validate (finite, within a sane bound) and fall back to the
+origin, and should come back with its error RAISED so a computer that changed networks (a laptop) re-learns at
+Vivaldi's fast early pace rather than defending a stale place; no source covers the moved-network case.
 
 #### #169 — Connection churn on multi-interface hosts: only the LAN dial is deterministic
 `P3` · network · **PARTIAL** — 2026-07-25 · history: archive § "Connection churn on multi-interface hosts — deterministic dialer partial", gotcha #353
