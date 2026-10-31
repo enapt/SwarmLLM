@@ -874,7 +874,10 @@ mod tests {
             &cancel(),
         );
         let not_relayed = seal(&SwarmMessage::PeerExchangeResponse(
-            crate::types::PeerExchangeResponse { peers: vec![] },
+            crate::types::PeerExchangeResponse {
+                peers: vec![],
+                coord: None,
+            },
         ));
         let proven = seal(&cancel());
 

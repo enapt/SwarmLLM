@@ -82,8 +82,13 @@ impl NetworkManager {
                             .filter(|addr| !is_non_public_addr(addr))
                             .take(20)
                             .collect();
+                        // Our coordinate as it stands now: the asker times this
+                        // answer and needs our position for that very sample (#91).
                         let pex_resp = SwarmMessage::PeerExchangeResponse(
-                            crate::types::PeerExchangeResponse { peers },
+                            crate::types::PeerExchangeResponse {
+                                peers,
+                                coord: self.shared_state.network_coord_now(),
+                            },
                         );
                         let resp = SwarmResponse::Message(Box::new(pex_resp));
                         if self
@@ -650,9 +655,14 @@ impl NetworkManager {
                             // been dropped: `observe_network_coord` reads
                             // `peer_registry` itself, and holding a `get_mut`
                             // Ref across another call on the same map is
-                            // gotcha #10.
-                            self.shared_state
-                                .observe_network_coord(&node_id, rtt_ms as f32);
+                            // gotcha #10. The answer carries the peer's coordinate as
+                            // it stood when it answered — the right reference for this
+                            // sample (#91); an older peer's carries none.
+                            self.shared_state.observe_network_coord(
+                                &node_id,
+                                rtt_ms as f32,
+                                pex_resp.coord,
+                            );
                         }
                     }
                     // SEC: Only process PEX from registered peers

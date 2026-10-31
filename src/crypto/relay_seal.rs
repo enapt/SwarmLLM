@@ -703,6 +703,7 @@ mod tests {
         let huge = "x".repeat(MAX_RELAY_INNER_BYTES);
         let msg = SwarmMessage::PeerExchangeResponse(crate::types::PeerExchangeResponse {
             peers: vec![huge],
+            coord: None,
         });
         let err = seal_relayed_message(
             &origin,

@@ -318,10 +318,13 @@ const CAPABILITY_MEMORY_DEADBAND_MB: u64 = 256;
 /// swarm's storage pool and a peer's coverage plan.
 const CAPABILITY_DISK_DEADBAND_MB: u64 = 1024;
 
-/// The same for the network coordinate, as the distance it predicts between
-/// the old and new position. Nothing routes on coordinates yet; a receiver
-/// folds ours into its own estimate.
-const CAPABILITY_COORD_DEADBAND_MS: f32 = 5.0;
+/// The same for the network coordinate, as the distance between the old and
+/// new position. The coordinate published is already held still while it only
+/// orbits a point (`swarmllm_types::netcoord::UpdateFilter`, #91); this floor
+/// is for a node still filling its first window, which publishes its
+/// coordinate as it stands. The scheduler prices a led chain's hops from
+/// peers' published coordinates (`parallax::led_hop_ms`).
+const CAPABILITY_COORD_DEADBAND_MS: f32 = swarmllm_types::netcoord::UPDATE_MIN_MOVE_MS;
 
 /// The same for a worker's own decode speed (`ResidentModelLayers::
 /// decode_us_per_layer`, FUTURE_WORK #3 (f)), as a FACTOR: it is news once the
@@ -440,8 +443,7 @@ fn capability_news(
         );
     }
     if let (Some(n), Some(s)) = (now.coord, sent.coord) {
-        let moved = (n.x - s.x).hypot(n.y - s.y) + (n.height - s.height).abs();
-        if moved < CAPABILITY_COORD_DEADBAND_MS {
+        if n.moved_from(&s) < CAPABILITY_COORD_DEADBAND_MS {
             now.coord = sent.coord;
         }
     }

@@ -18,12 +18,20 @@ pub struct MetricsProviders {
     /// Written only by `SharedState::observe_network_coord`, from round trips
     /// the tensor path already measures (`AckRttEstimator`'s samples, which are
     /// gated to small forwards where the time is the peer's rather than the
-    /// payload's). Read by the capability builder that publishes it and — once
-    /// routing consumes it — by the scheduler.
+    /// payload's) and the PEX ping. Read by the peer-exchange answer, which
+    /// carries it as it stands (`SharedState::network_coord_now`), and by the
+    /// peer listing's predictions. What the capability PUBLISHES is
+    /// `network_coord_published`'s.
     ///
     /// A `std::sync::RwLock` rather than an async one because both readers are
     /// synchronous and the critical section is a struct copy.
     pub network_coord: std::sync::RwLock<swarmllm_types::netcoord::NetworkCoord>,
+    /// The coordinate this node publishes in its capability: `network_coord`
+    /// held still while it only orbits a point, moved when it has moved (#91,
+    /// `swarmllm_types::netcoord::UpdateFilter`). Written only by
+    /// `SharedState::observe_network_coord`, beside `network_coord`; read only
+    /// by `SharedState::network_coord_for_publication`.
+    pub network_coord_published: std::sync::Mutex<swarmllm_types::netcoord::UpdateFilter>,
     /// Recent round trips per peer, answering with the windowed MINIMUM — the
     /// only figure fed to `network_coord`.
     ///

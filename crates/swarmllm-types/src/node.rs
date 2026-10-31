@@ -1028,6 +1028,15 @@ impl PeerInfo {
 pub struct PeerExchangeResponse {
     /// Up to 20 known peer multiaddrs.
     pub peers: Vec<String>,
+    /// The answering node's network coordinate as it stands NOW — the
+    /// reference the asker's Vivaldi step needs for the round trip this very
+    /// answer timed. Serf appends its coordinate to every ping ack for the
+    /// same reason (`serf/ping_delegate.go`, `AckPayload`). The capability's
+    /// copy then repeats only when the position has really moved, instead of
+    /// a whole capability on every drift (#91). `None` from a node before
+    /// this field: the asker falls back to the capability's coordinate.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub coord: Option<crate::netcoord::NetworkCoord>,
 }
 
 /// Mixed-version wire-compatibility guard (NETWORKING_PLAN cross-cutting). These
@@ -1247,6 +1256,41 @@ mod version_compat_tests {
         assert_eq!(
             old.ram_available_mb, 4096,
             "and reads the field it does know, unchanged"
+        );
+    }
+
+    /// #91: a peer-exchange answer carries the answerer's coordinate. A node
+    /// from before the field still decodes our answer (control messages are
+    /// JSON and these structs take unknown fields), an answer from such a node
+    /// reads as "no coordinate" (the asker then uses the capability's), and an
+    /// answer without one is the old bytes exactly.
+    #[test]
+    fn a_peer_exchange_answer_with_or_without_a_coordinate_decodes_on_either_release() {
+        #[derive(serde::Deserialize)]
+        struct OldPeerExchangeResponse {
+            peers: Vec<String>,
+        }
+        let ours = PeerExchangeResponse {
+            peers: vec!["/ip4/1.2.3.4/tcp/8810".into()],
+            coord: Some(crate::netcoord::NetworkCoord::new()),
+        };
+        let json = serde_json::to_string(&ours).unwrap();
+        assert!(json.contains("\"coord\""));
+        let old: OldPeerExchangeResponse =
+            serde_json::from_str(&json).expect("an older node must still decode our answer");
+        assert_eq!(old.peers, ours.peers);
+
+        let from_old: PeerExchangeResponse =
+            serde_json::from_str(r#"{"peers":["/ip4/1.2.3.4/tcp/8810"]}"#).unwrap();
+        assert!(from_old.coord.is_none());
+        let without = PeerExchangeResponse {
+            peers: vec![],
+            coord: None,
+        };
+        assert_eq!(
+            serde_json::to_string(&without).unwrap(),
+            r#"{"peers":[]}"#,
+            "no coordinate adds nothing to the wire"
         );
     }
 

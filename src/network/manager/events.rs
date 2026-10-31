@@ -280,9 +280,12 @@ impl NetworkManager {
                                 // would teach the coordinate a distance
                                 // nothing travelled. Vivaldi does its own
                                 // smoothing through the error weight.
+                                // An acknowledgement carries no coordinate: the
+                                // peer's published one is the reference.
                                 self.shared_state.observe_network_coord(
                                     &node_id,
                                     elapsed.as_secs_f64() as f32 * 1000.0,
+                                    None,
                                 );
                             }
                         }

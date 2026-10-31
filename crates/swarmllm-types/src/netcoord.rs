@@ -333,6 +333,272 @@ impl NetworkCoord {
             self.height = MIN_HEIGHT_MS;
         }
     }
+
+    /// How far this coordinate is from `other` as a POSITION, in milliseconds:
+    /// planar distance plus the change in height. Not [`Self::distance_ms`],
+    /// which adds both heights because it predicts a round trip between two
+    /// nodes; a node compared with its own earlier position has one height.
+    pub fn moved_from(&self, other: &NetworkCoord) -> f32 {
+        (self.x - other.x).hypot(self.y - other.y) + (self.height - other.height).abs()
+    }
+
+    fn is_finite(&self) -> bool {
+        self.x.is_finite()
+            && self.y.is_finite()
+            && self.height.is_finite()
+            && self.error.is_finite()
+    }
+}
+
+/// How many of this node's own coordinates each window of [`UpdateFilter`]
+/// holds. Ledlie, Pietzuch and Seltzer ("Stable and Accurate Network
+/// Coordinates", ICDCS 2006, § 5) found every window from 32 to 512 improved
+/// both stability and accuracy; 32 is the smallest of them and the one they
+/// ran on PlanetLab. At the PEX ping's rate (one per peer every 2 min) seven
+/// peers fill it in ~9 minutes; a split's acknowledged forwards, in seconds.
+pub const UPDATE_WINDOW: usize = 32;
+
+/// How far the recent centroid must have moved from the earlier one, as a
+/// fraction of the predicted round trip to the nearest neighbour, before the
+/// published coordinate follows — the paper's RELATIVE heuristic and its
+/// threshold: accuracy began to fall past 0.3, the most conservative value
+/// that still bought stability.
+pub const UPDATE_RELATIVE_THRESHOLD: f32 = 0.3;
+
+/// The smallest move ever worth publishing, whatever the neighbour's distance:
+/// a coordinate learned from application-level round trips cannot place a
+/// neighbour 2 ms away to within 0.6 ms. Also the capability's own deadband
+/// for the coordinate (`health::monitor::capability_news`), which reads it
+/// from here.
+pub const UPDATE_MIN_MOVE_MS: f32 = 5.0;
+
+/// How many of the newest coordinates say where the node now IS, whenever the
+/// published coordinate changes.
+///
+/// A change fires as soon as enough of the recent window has moved, so that
+/// window's centroid still holds positions from before the move, and a node's
+/// first window holds its coordinate converging from wherever it began. The
+/// paper publishes the whole window's centroid; on the live node (2026-11-01,
+/// ~2 samples a minute, minutes 16-25 after a start) that held the published
+/// coordinate's predictions at a 10% median error beside the live
+/// coordinate's 5%. The newest quarter is past the move; whether there WAS a
+/// move is still decided on whole windows, so a few odd samples cannot fire it.
+pub const UPDATE_SETTLED_FROM_NEWEST: usize = UPDATE_WINDOW / 4;
+
+/// The coordinate this node PUBLISHES, kept apart from the one Vivaldi moves on
+/// every sample (#91).
+///
+/// A Vivaldi coordinate never stops moving: each sample nudges it, and a node
+/// that has settled orbits a point rather than resting on it. Published as it
+/// stands, every orbit past a fixed deadband is news, and on 2026-10-31 16 of
+/// a live node's 18 capability broadcasts in 18 minutes were that — each one a
+/// whole capability (~5 KB, and ~12 KB from a peer listing ~300 parts)
+/// forwarded across the mesh.
+/// A fixed threshold cannot fix it: "a single threshold ('react if moved more
+/// than 50ms') did not work for all nodes because the volume through which
+/// each coordinate moved was node-dependent" (Ledlie, Gardner and Seltzer,
+/// "Network Coordinates in the Wild", NSDI 2007, § 4.1), and the ICDCS paper
+/// measured the windowless thresholds as a trade with a narrow sweet spot.
+///
+/// So this is the paper's RELATIVE heuristic, which separates a coordinate
+/// orbiting one point from one that has MOVED: a start window of the first
+/// [`UPDATE_WINDOW`] coordinates after the last change, frozen once full, and a
+/// window of the latest ones sliding behind it (Ben-David, Gehrke and Kifer's
+/// change detection). When the centroids differ by more than
+/// [`UPDATE_RELATIVE_THRESHOLD`] of the round trip to the nearest neighbour,
+/// the centroid of the newest [`UPDATE_SETTLED_FROM_NEWEST`] is published and
+/// both windows start again; the first full window after that re-centres it
+/// when it has moved past [`UPDATE_MIN_MOVE_MS`] since. Whole windows decide
+/// WHEN the published coordinate changes; the newest quarter says WHERE to.
+/// Until the first window fills, the coordinate as it stands is published
+/// whenever it has moved past the same threshold since it was last published —
+/// from the first sample on, since a node starting up must still publish,
+/// however rough (`a_brand_new_node_still_publishes_its_coordinate`) — and the
+/// first full window counts as a change: it holds the coordinate's convergence
+/// from wherever it started, not a place it settled.
+///
+/// What a peer TIMES against us is our coordinate as it stands when it asks —
+/// the peer-exchange answer carries that one (`PeerExchangeResponse::coord`).
+/// This one is for everything else: the scheduler's distance between two
+/// peers, and an older peer's own updates.
+#[derive(Clone, Debug, Default)]
+pub struct UpdateFilter {
+    start: Vec<NetworkCoord>,
+    recent: std::collections::VecDeque<NetworkCoord>,
+    followed: Option<NetworkCoord>,
+    settled: Option<NetworkCoord>,
+    nearest: Option<Neighbour>,
+}
+
+/// The neighbour a move is measured against: the peer with the smallest
+/// windowed round trip, as each sample teaches it (the paper's "approximate
+/// nearest neighbor is learned through a comparison with each latency sample").
+#[derive(Clone, Debug)]
+struct Neighbour {
+    id: crate::NodeId,
+    rtt_ms: f32,
+    coord: NetworkCoord,
+    at_ms: u64,
+}
+
+/// What a change point published, for the log that proves one fired.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Migration {
+    /// How far the recent centroid was from the earlier one.
+    pub moved_ms: f32,
+    /// The move it had to exceed.
+    pub threshold_ms: f32,
+}
+
+impl UpdateFilter {
+    /// The coordinate to publish: the settled one once a window has filled;
+    /// before that, the coordinate as it stood when it last moved past the
+    /// threshold — from the first sample on.
+    pub fn published(&self) -> Option<NetworkCoord> {
+        self.settled.or(self.followed)
+    }
+
+    /// The move that counts, judged from `at`: [`UPDATE_RELATIVE_THRESHOLD`]
+    /// of the round trip from there to the nearest neighbour, never under
+    /// [`UPDATE_MIN_MOVE_MS`].
+    fn threshold_ms(&self, at: &NetworkCoord) -> f32 {
+        let scale = self
+            .nearest
+            .as_ref()
+            .map_or(0.0, |n| at.distance_ms(&n.coord));
+        (UPDATE_RELATIVE_THRESHOLD * scale).max(UPDATE_MIN_MOVE_MS)
+    }
+
+    /// Note that a sample to `peer` — its windowed minimum `rtt_ms`, its
+    /// coordinate `theirs`, at `at_ms` — has moved this node's coordinate to
+    /// `now`. Returns what was published when the sample completed a change.
+    pub fn note(
+        &mut self,
+        now: NetworkCoord,
+        peer: &crate::NodeId,
+        rtt_ms: f32,
+        theirs: &NetworkCoord,
+        at_ms: u64,
+    ) -> Option<Migration> {
+        if !now.is_finite() {
+            return None;
+        }
+        if rtt_ms.is_finite() && rtt_ms > 0.0 && theirs.is_finite() {
+            let replace = match &self.nearest {
+                None => true,
+                Some(n) => {
+                    n.id == *peer
+                        || rtt_ms < n.rtt_ms
+                        || at_ms.saturating_sub(n.at_ms) > LATENCY_SAMPLE_MAX_AGE_MS
+                }
+            };
+            if replace {
+                self.nearest = Some(Neighbour {
+                    id: peer.clone(),
+                    rtt_ms,
+                    coord: *theirs,
+                    at_ms,
+                });
+            }
+        }
+
+        if self.settled.is_none() {
+            // Before the first window fills there is no centroid to compare, so
+            // the coordinate as it stands is published when it has moved past
+            // the same threshold — the paper measured only after start-up
+            // effects and says nothing of this phase. Following every sample
+            // cost ~14 broadcasts in the 16 minutes a live node with 4
+            // coordinate-publishing peers took to fill its first window
+            // (2026-11-01).
+            let moved = self
+                .followed
+                .is_none_or(|f| now.moved_from(&f) > self.threshold_ms(&f));
+            if moved {
+                self.followed = Some(now);
+            }
+        }
+        let mut refilled = false;
+        if self.start.len() < UPDATE_WINDOW {
+            self.start.push(now);
+            refilled = self.start.len() == UPDATE_WINDOW;
+        }
+        self.recent.push_back(now);
+        if self.recent.len() > UPDATE_WINDOW {
+            self.recent.pop_front();
+        }
+        // Both windows refill together after a change, so the recent one is
+        // full exactly when the start one is.
+        if self.recent.len() < UPDATE_WINDOW {
+            return None;
+        }
+        let recent = centroid(self.recent.iter());
+        if refilled {
+            let Some(settled) = self.settled else {
+                // The first full window since this node started holds its
+                // coordinate converging from wherever it began (the live node
+                // was still ~20 ms on its way after 16 minutes, 2026-11-01): a
+                // change from nothing, so the newest quarter is published and a
+                // start window frozen now would describe the trip, not a place.
+                self.settled = Some(self.newest());
+                self.start.clear();
+                self.recent.clear();
+                return None;
+            };
+            // The first full window since a change: publish where the node
+            // SETTLED, if what was published then missed it. In the paper's
+            // form (the whole recent window published) the windows then refill
+            // identically and never differ again, and the published coordinate
+            // stayed part of the way there for as long as the node stayed put;
+            // a move still under way at the change does the same to the newest
+            // quarter.
+            let moved_ms = recent.moved_from(&settled);
+            if moved_ms <= UPDATE_MIN_MOVE_MS {
+                return None;
+            }
+            self.settled = Some(self.newest());
+            return Some(Migration {
+                moved_ms,
+                threshold_ms: UPDATE_MIN_MOVE_MS,
+            });
+        }
+        let start = centroid(self.start.iter());
+        let threshold_ms = self.threshold_ms(&start);
+        let moved_ms = recent.moved_from(&start);
+        if moved_ms <= threshold_ms {
+            return None;
+        }
+        self.settled = Some(self.newest());
+        self.start.clear();
+        self.recent.clear();
+        Some(Migration {
+            moved_ms,
+            threshold_ms,
+        })
+    }
+
+    /// The centroid of the newest [`UPDATE_SETTLED_FROM_NEWEST`] coordinates.
+    fn newest(&self) -> NetworkCoord {
+        let skip = self.recent.len().saturating_sub(UPDATE_SETTLED_FROM_NEWEST);
+        centroid(self.recent.iter().skip(skip))
+    }
+}
+
+/// The mean position (and error) of a non-empty window.
+fn centroid<'a>(window: impl ExactSizeIterator<Item = &'a NetworkCoord>) -> NetworkCoord {
+    let n = window.len().max(1) as f32;
+    let (mut x, mut y, mut h, mut e) = (0.0, 0.0, 0.0, 0.0);
+    for c in window {
+        x += c.x;
+        y += c.y;
+        h += c.height;
+        e += c.error;
+    }
+    NetworkCoord {
+        x: x / n,
+        y: y / n,
+        height: (h / n).max(MIN_HEIGHT_MS),
+        error: (e / n).clamp(0.0, MAX_ERROR),
+    }
 }
 
 #[cfg(test)]
@@ -721,5 +987,253 @@ mod tests {
             slow.height,
             neighbours
         );
+    }
+
+    fn at(x: f32, y: f32) -> NetworkCoord {
+        NetworkCoord {
+            x,
+            y,
+            height: 2.0,
+            error: 0.2,
+        }
+    }
+
+    /// Feed `filter` one sample per coordinate, all against one neighbour at
+    /// `neighbour`, and return every published value seen after each sample.
+    fn feed(
+        filter: &mut UpdateFilter,
+        coords: impl IntoIterator<Item = NetworkCoord>,
+        neighbour: NetworkCoord,
+    ) -> Vec<NetworkCoord> {
+        let peer = crate::NodeId([7; 32]);
+        coords
+            .into_iter()
+            .enumerate()
+            .map(|(i, c)| {
+                filter.note(c, &peer, 40.0, &neighbour, i as u64 * 1_000);
+                filter.published().unwrap()
+            })
+            .collect()
+    }
+
+    /// A settled coordinate orbiting one point: the old rule (publish whenever
+    /// the coordinate is 5 ms from the one last sent) republished it again and
+    /// again; the filter publishes once, when its first window fills.
+    #[test]
+    fn a_coordinate_orbiting_one_point_is_published_once() {
+        let orbit: Vec<NetworkCoord> = (0..400)
+            .map(|i| {
+                let a = i as f32 * 2.4;
+                at(100.0 + 6.0 * a.cos(), 50.0 + 6.0 * a.sin())
+            })
+            .collect();
+
+        let mut sent = orbit[0];
+        let old_rule = orbit
+            .iter()
+            .filter(|c| {
+                let news = c.moved_from(&sent) >= UPDATE_MIN_MOVE_MS;
+                if news {
+                    sent = **c;
+                }
+                news
+            })
+            .count();
+        assert!(
+            old_rule > 100,
+            "the orbit must be news to the old rule ({old_rule})"
+        );
+
+        let mut filter = UpdateFilter::default();
+        let published = feed(&mut filter, orbit, at(0.0, 0.0));
+        let settled = &published[UPDATE_WINDOW - 1..];
+        assert!(
+            settled.iter().all(|c| *c == settled[0]),
+            "an orbit is not a move: the published coordinate changed after its first window"
+        );
+        assert!(
+            settled[0].moved_from(&at(100.0, 50.0)) < 1.0,
+            "published at the orbit's centre, got {:?}",
+            settled[0]
+        );
+    }
+
+    /// Before its first window fills, a node publishes its coordinate from its
+    /// first sample, and again only once it has moved past the threshold — a
+    /// node starting up must publish, however rough, but not every wobble.
+    #[test]
+    fn a_node_starting_up_publishes_from_its_first_sample_and_follows_only_a_move() {
+        let mut filter = UpdateFilter::default();
+        assert_eq!(filter.published(), None);
+        // The neighbour ~504 ms away: a move must pass ~150 ms.
+        let neighbour = at(500.0, 0.0);
+        let wobble: Vec<NetworkCoord> = (0..10).map(|i| at((i % 4) as f32 * 3.0, 0.0)).collect();
+        let published = feed(&mut filter, wobble.clone(), neighbour);
+        assert!(
+            published.iter().all(|c| *c == wobble[0]),
+            "a wobble of a few ms is not a move: {published:?}"
+        );
+        let published = feed(&mut filter, [at(200.0, 0.0)], neighbour);
+        assert_eq!(
+            published,
+            vec![at(200.0, 0.0)],
+            "a move past the threshold is published at once"
+        );
+    }
+
+    /// A node that moves is published where it went, at the change: the newest
+    /// quarter is past the move, where the recent window's centroid (the
+    /// paper's choice) is still part of the way there.
+    #[test]
+    fn a_coordinate_that_moves_is_published_where_it_went() {
+        let here = at(100.0, 0.0);
+        let there = at(150.0, 0.0);
+        // The neighbour 100 ms from here: a move must pass 30 ms.
+        let neighbour = at(0.0, 0.0);
+        let wobble = |c: NetworkCoord, i: usize| at(c.x + (i % 3) as f32 - 1.0, c.y);
+
+        let mut filter = UpdateFilter::default();
+        let peer = crate::NodeId([7; 32]);
+        let mut changes = Vec::new();
+        for i in 0..UPDATE_WINDOW * 2 {
+            changes.extend(filter.note(wobble(here, i), &peer, 40.0, &neighbour, 0));
+        }
+        assert!(changes.is_empty());
+        let mut at_the_change = None;
+        for i in 0..UPDATE_WINDOW * 3 {
+            changes.extend(filter.note(wobble(there, i), &peer, 40.0, &neighbour, 0));
+            if !changes.is_empty() {
+                at_the_change.get_or_insert(filter.published().unwrap());
+            }
+        }
+        assert_eq!(changes.len(), 1, "one move, one change: {changes:?}");
+        assert!(changes[0].moved_ms > changes[0].threshold_ms);
+        assert!(
+            (changes[0].threshold_ms - 30.0).abs() < 1.5,
+            "0.3 of the ~102 ms round trip to the neighbour, got {}",
+            changes[0].threshold_ms
+        );
+        let at_the_change = at_the_change.unwrap();
+        assert!(
+            at_the_change.moved_from(&there) < 1.0,
+            "published part of the way there: {at_the_change:?}"
+        );
+        assert_eq!(filter.published(), Some(at_the_change));
+    }
+
+    /// A move still under way when the change fires is published where it
+    /// ended once the windows have refilled — the re-centring, without which
+    /// the coordinate stays where the move was at the change for good.
+    #[test]
+    fn a_move_still_under_way_at_the_change_is_published_where_it_ended() {
+        let neighbour = at(0.0, 0.0);
+        let mut filter = UpdateFilter::default();
+        let peer = crate::NodeId([7; 32]);
+        let mut changes = Vec::new();
+        for i in 0..UPDATE_WINDOW * 2 {
+            changes.extend(filter.note(at(100.0, 0.0), &peer, 40.0, &neighbour, i as u64));
+        }
+        // 60 ms over 48 samples, then still: the change fires mid-way.
+        let ramp = (1..=48).map(|j| at(100.0 + 1.25 * j as f32, 0.0));
+        let still = std::iter::repeat_n(at(160.0, 0.0), UPDATE_WINDOW * 3);
+        let mut mid_way = None;
+        for c in ramp.chain(still) {
+            changes.extend(filter.note(c, &peer, 40.0, &neighbour, 0));
+            if !changes.is_empty() {
+                mid_way.get_or_insert(filter.published().unwrap());
+            }
+        }
+        assert_eq!(changes.len(), 2, "a change and a re-centring: {changes:?}");
+        assert!(
+            mid_way.unwrap().x < 150.0,
+            "the change fired mid-way: {mid_way:?}"
+        );
+        let published = filter.published().unwrap();
+        assert!(
+            published.moved_from(&at(160.0, 0.0)) < 0.01,
+            "published where the move ended: {published:?}"
+        );
+    }
+
+    /// A node starting up converges from wherever its coordinate began, and
+    /// its first full window holds that trip: published as that window's
+    /// centroid, the coordinate went BACK toward the start. On the live node
+    /// the first change came two minutes after the first window filled, a
+    /// 21.8 ms move (2026-11-01).
+    #[test]
+    fn a_node_converging_after_start_up_is_never_published_behind_where_it_was() {
+        let target = at(100.0, 0.0);
+        let neighbour = at(200.0, 0.0);
+        let converging =
+            (0..UPDATE_WINDOW * 8).map(|k| at(target.x * (1.0 - (-(k as f32) / 20.0).exp()), 0.0));
+        let mut filter = UpdateFilter::default();
+        let published = feed(&mut filter, converging, neighbour);
+        let mut distinct = published.clone();
+        distinct.dedup();
+        assert!(
+            distinct.windows(2).all(|w| w[1].x > w[0].x),
+            "every publication is nearer where the node is going: {distinct:?}"
+        );
+        assert!(
+            distinct.len() <= 4,
+            "a start-up is a handful of publications: {distinct:?}"
+        );
+        let last = published.last().unwrap();
+        assert!(
+            last.moved_from(&target) < 6.0,
+            "published within the threshold of where it settled: {last:?}"
+        );
+    }
+
+    /// The same move is news beside a near neighbour and not beside a far one:
+    /// the threshold is relative to the node's locale, which is why a fixed
+    /// one "did not work for all nodes" — and never under the floor. Two
+    /// windows still first: the window after a node's first is a re-centring,
+    /// judged on the floor alone.
+    #[test]
+    fn the_move_that_counts_scales_with_the_nearest_neighbour() {
+        let moves = |neighbour: NetworkCoord, by: f32| {
+            let mut filter = UpdateFilter::default();
+            let peer = crate::NodeId([7; 32]);
+            let mut changes = 0;
+            for i in 0..UPDATE_WINDOW * 2 {
+                changes += filter
+                    .note(at(0.0, 0.0), &peer, 40.0, &neighbour, i as u64)
+                    .is_some() as usize;
+            }
+            for i in 0..UPDATE_WINDOW {
+                changes += filter
+                    .note(at(by, 0.0), &peer, 40.0, &neighbour, i as u64)
+                    .is_some() as usize;
+            }
+            changes
+        };
+        assert!(
+            moves(at(30.0, 0.0), 20.0) > 0,
+            "20 ms beside a neighbour ~34 ms away"
+        );
+        assert_eq!(
+            moves(at(200.0, 0.0), 20.0),
+            0,
+            "20 ms beside a neighbour ~204 ms away"
+        );
+        assert_eq!(
+            moves(at(1.0, 0.0), 4.0),
+            0,
+            "under the 5 ms floor, however near the neighbour"
+        );
+    }
+
+    /// A nonsense coordinate teaches the filter nothing.
+    #[test]
+    fn a_coordinate_that_is_not_a_number_is_not_published() {
+        let mut filter = UpdateFilter::default();
+        let peer = crate::NodeId([7; 32]);
+        filter.note(at(1.0, 2.0), &peer, 40.0, &at(0.0, 0.0), 0);
+        assert_eq!(
+            filter.note(at(f32::NAN, 2.0), &peer, 40.0, &at(0.0, 0.0), 1),
+            None
+        );
+        assert_eq!(filter.published(), Some(at(1.0, 2.0)));
     }
 }

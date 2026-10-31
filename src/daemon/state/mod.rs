@@ -1461,6 +1461,7 @@ impl SharedState {
             cancel_signals: DashMap::new(),
             metrics: MetricsProviders {
                 network_coord: std::sync::RwLock::new(swarmllm_types::netcoord::NetworkCoord::new()),
+                network_coord_published: std::sync::Mutex::default(),
                 network_coord_samples: dashmap::DashMap::new(),
                 reply_lengths: reply_lengths::ReplyLengths::default(),
                 split_rounds: split_rounds::SplitRounds::default(),
@@ -3950,7 +3951,8 @@ impl SharedState {
 
     /// Fold one measured exchange into this node's network coordinate.
     ///
-    /// **The single writer of `metrics.network_coord`.** `exchange_ms` must be a
+    /// **The single writer of `metrics.network_coord`** and of the coordinate
+    /// published beside it (`network_coord_published`). `exchange_ms` must be a
     /// real request-response exchange timed to `node_id` (the PEX ping, a small
     /// acknowledged forward); it is turned into the PHYSICAL round trip here,
     /// through `network::manager::physical_rtt_ms`, because an exchange cost two
@@ -3965,7 +3967,18 @@ impl SharedState {
     /// forwards, where the elapsed time is the peer's round trip rather than
     /// the payload's transfer — which is exactly the quantity Vivaldi models,
     /// and the same reason `ACK_OBSERVE_MAX_BYTES` exists.
-    pub fn observe_network_coord(&self, node_id: &NodeId, exchange_ms: f32) {
+    ///
+    /// `sent_with_it` is the coordinate the peer sent IN the timed answer (the
+    /// PEX answer carries one, #91), preferred over its published one: a
+    /// capability carries the coordinate held still while it only orbits a
+    /// point, and the sample is about where the peer is NOW. Required, so a new
+    /// sample source has to say whether its exchange carried one.
+    pub fn observe_network_coord(
+        &self,
+        node_id: &NodeId,
+        exchange_ms: f32,
+        sent_with_it: Option<swarmllm_types::netcoord::NetworkCoord>,
+    ) {
         let rtt_ms = crate::network::manager::physical_rtt_ms(exchange_ms);
         // Filter FIRST, and record the sample even when the peer publishes no
         // coordinate yet: the window is about this link, not about whether we
@@ -3985,15 +3998,34 @@ impl SharedState {
             return;
         };
 
-        let Some(remote) = self
-            .peer_registry
-            .get(node_id)
-            .and_then(|p| p.capability.as_ref().and_then(|c| c.coord))
-        else {
+        let Some(remote) = sent_with_it.or_else(|| {
+            self.peer_registry
+                .get(node_id)
+                .and_then(|p| p.capability.as_ref().and_then(|c| c.coord))
+        }) else {
             return;
         };
-        if let Ok(mut ours) = self.metrics.network_coord.write() {
+        let now = {
+            let Ok(mut ours) = self.metrics.network_coord.write() else {
+                return;
+            };
             ours.observe(filtered, &remote);
+            *ours
+        };
+        // What the capability publishes follows only a MOVE, never an orbit (#91).
+        let migration = self
+            .metrics
+            .network_coord_published
+            .lock()
+            .ok()
+            .and_then(|mut f| f.note(now, node_id, filtered, &remote, now_ms));
+        if let Some(m) = migration {
+            tracing::debug!(
+                target: "swarmllm::daemon::state",
+                moved_ms = m.moved_ms,
+                threshold_ms = m.threshold_ms,
+                "DIAG: published network coordinate moved"
+            );
         }
     }
 
@@ -4015,7 +4047,36 @@ impl SharedState {
     ///
     /// `is_usable()` is the CONSUMER's gate — routing declines to act on a
     /// coordinate it does not trust. Keep it there and not here.
+    ///
+    /// What the CAPABILITY carries: the coordinate held still while it only
+    /// orbits a point (`swarmllm_types::netcoord::UpdateFilter`, #91) — every
+    /// orbit past a fixed deadband had been a whole capability gossiped across
+    /// the mesh. `SWARMLLM_COORD_FILTER=0` publishes it as it stands, the
+    /// control arm. A peer timing an exchange with us is handed the coordinate
+    /// as it stands instead (`network_coord_now`).
     pub fn network_coord_for_publication(&self) -> Option<swarmllm_types::netcoord::NetworkCoord> {
+        static FILTER_OFF: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        let off = *FILTER_OFF
+            .get_or_init(|| std::env::var("SWARMLLM_COORD_FILTER").is_ok_and(|v| v.trim() == "0"));
+        if !off {
+            if let Some(c) = self
+                .metrics
+                .network_coord_published
+                .lock()
+                .ok()
+                .and_then(|f| f.published())
+            {
+                return Some(c);
+            }
+        }
+        self.network_coord_now()
+    }
+
+    /// This node's coordinate as it stands, for the answer a peer TIMES: its
+    /// update against us needs where we are now, not where we last published.
+    /// Serf carries the coordinate on every ping acknowledgement for the same
+    /// reason (`serf/ping_delegate.go`, `AckPayload`).
+    pub fn network_coord_now(&self) -> Option<swarmllm_types::netcoord::NetworkCoord> {
         Some(*self.metrics.network_coord.read().ok()?)
     }
 

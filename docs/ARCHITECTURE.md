@@ -2844,7 +2844,10 @@ Routes Claude model requests through a locally-authenticated `claude` CLI subpro
 - `GET     /api/admin/models/{id}/status` — Model acquisition progress
 - `GET     /api/admin/hf/source/{model_id}` — The model's HuggingFace source. Since v0.3.221 a search fallback records EVERY matching upload as a claim and answers the best-ranked one (`model::canonical`), never the first search hit.
 - `GET     /api/admin/peers` — Connected peers with latency/trust. Carries
-  `predicted_rtt_ms` (what the peer's published network coordinate predicts)
+  `predicted_rtt_ms` (what the peer's published network coordinate predicts
+  against ours as it stands) and `predicted_rtt_published_ms` (against the one
+  we PUBLISH, held still between moves — what any other node and the scheduler
+  predict, #91, 2026-11-01)
   beside `measured_min_rtt_ms` + `rtt_samples` (2026-09-21) — the windowed
   MINIMUM the coordinate is actually fed, not `latency_ms`, which is the last
   raw sample and is bimodal. Judging the estimate against the raw sample is

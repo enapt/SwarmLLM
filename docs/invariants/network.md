@@ -2059,11 +2059,81 @@ probing is exactly what that fix removed. The floor costs a quiet link a slower
 reaction to genuine degradation — ~16 min instead of 5 — which at one sample
 per 120 s is the best available anyway.
 
+### 4. What is PUBLISHED moves only when the node has moved (2026-11-01, FUTURE_WORK #91)
+
+A Vivaldi coordinate never rests: every sample nudges it, and a settled node
+orbits a point. The capability published it as it stood, past a 5 ms deadband
+(`capability_news`), and on 2026-10-31 (the live node at `-v`, 18:49-19:08Z,
+v0.3.265) **16 of its 18 capability broadcasts were `why=coord`** — each a whole
+capability (~5 KB from this node, ~12 KB from a peer listing ~300 parts),
+forwarded across the mesh, on a node
+whose idle upload was 2.7 KB/s, 2.1 of it gossip.
+
+**Raising the deadband was the plan, and the literature says why it fails.**
+Ledlie, Gardner and Seltzer ("Network Coordinates in the Wild", NSDI 2007,
+§ 4.1): "A single threshold ('react if moved more than 50ms') did not work for
+all nodes because the volume through which each coordinate moved was
+node-dependent." Ledlie, Pietzuch and Seltzer ("Stable and Accurate Network
+Coordinates", ICDCS 2006, § 5) measured four update heuristics on PlanetLab
+traces: our deadband is their windowless APPLICATION heuristic, which "could
+only directly trade off accuracy for stability and had a limited 'sweet spot'";
+the window-based ones gained stability "before any significant decline in
+accuracy". Their RELATIVE heuristic is what `netcoord::UpdateFilter` implements:
+the centroid of a START window (the first 32 coordinates after the last change,
+then frozen) against the centroid of a sliding RECENT window (the last 32); a
+change when they differ by more than 0.3 of the distance to the nearest
+neighbour (the most conservative threshold that still bought stability —
+accuracy fell past it), which publishes the recent centroid and clears both.
+Windows of 32 to 512 all improved both measures; 32 is the size they deployed.
+
+**One departure, found by the test that a move is published where it went**: in
+the paper's form a change publishes the recent centroid while that window still
+holds positions from before the move, and both windows then refill with the new
+position and never differ again — the published coordinate stays part of the
+way there for as long as the node stays put (a 50 ms move against a 30 ms
+threshold published at 31 ms, 19 short, for good). So whole windows decide WHEN
+the published coordinate changes, and the newest quarter
+(`UPDATE_SETTLED_FROM_NEWEST`, 8) says WHERE to: past the move at a change, and
+again at the first full window after it (the re-centring, when the window has
+moved more than `UPDATE_MIN_MOVE_MS` since — a move still under way at the
+change). One broadcast per finished move, two per one still under way, none per
+orbit. **A node's first full window counts as a change**: it holds the
+coordinate converging from wherever it began, and its centroid published the
+coordinate BEHIND where it already stood. On the live node (2026-11-01, minutes
+16-25 after a start, the first form of the filter) the published coordinate's
+predictions had a 10% median error beside the live coordinate's 5%, and the
+first change came two minutes after the first window filled (21.8 ms). Revised
+and re-measured (22:50-23:25Z, 35 min): 9 coordinate broadcasts — 8 in the first
+16 minutes while the coordinate converged, one re-centring at +32 min (16 ms) —
+and the published coordinate's error 4% in minutes 16-25, 3% in 26-35, beside
+3% live. The first form made 14-15 in 25 minutes, as many as no filter.
+
+**And the coordinate a peer TIMES is the one as it stands.** A sample's
+reference must be the peer's position when it answered; a published one held
+still is up to a threshold behind. The peer-exchange answer carries
+`network_coord_now` (`PeerExchangeResponse::coord`, `#[serde(default)]`, skipped
+when absent so an older peer reads the same bytes), as Serf carries the
+coordinate on every ping acknowledgement (`serf/ping_delegate.go`,
+`AckPayload`), and `observe_network_coord` takes it as a REQUIRED argument so a
+new sample source must say whether its exchange carried one.
+
 ### What a change must keep
 
 - **Publish whenever we have a coordinate.** Pinned by
   `a_brand_new_node_still_publishes_its_coordinate`; verified by restoring the
-  old behaviour and watching it fail.
+  old behaviour and watching it fail. Before its first window fills, the filter
+  publishes the coordinate from its first sample, and again only past the same
+  relative threshold
+  (`a_node_starting_up_publishes_from_its_first_sample_and_follows_only_a_move`)
+  — following every sample there cost ~14 broadcasts in a live node's first
+  16 minutes (4 coordinate-publishing peers fill a 32-sample window that slowly).
+- **What the capability publishes follows a MOVE, never an orbit**
+  (`a_coordinate_orbiting_one_point_is_published_once`,
+  `a_coordinate_that_moves_is_published_where_it_went`,
+  `a_move_still_under_way_at_the_change_is_published_where_it_ended`,
+  `a_node_converging_after_start_up_is_never_published_behind_where_it_was`,
+  `the_move_that_counts_scales_with_the_nearest_neighbour`). A timed answer
+  carries the coordinate as it stands.
 - **Feed the filtered minimum, never a raw sample.**
   `SharedState::observe_network_coord` is the single writer and does the
   filtering itself, so no caller can bypass it.
@@ -2079,8 +2149,9 @@ per 120 s is the best available anyway.
   of the real sample rather than its end — asserting on the last answer alone
   passes with the floor removed, because that sample happens to finish beside a
   fast observation (gotcha #502).
-- Nothing routed on coordinates as of 2026-09-21. A consumer must check
-  `is_usable()` and fall back to `region`.
+- A consumer must check `is_usable()`. The one that routes on coordinates
+  (`parallax::led_hop_ms`, since 2026-10-18) prices a led chain's hops from
+  peers' PUBLISHED coordinates, held still between moves.
 
 **From the rules file (moved 2026-10-02):**
 

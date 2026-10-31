@@ -1343,6 +1343,24 @@ manifest it holds in full, twice, a few seconds apart (§ Closed). Left: the
 mesh is still sized once at startup, from peers ever met rather than reachable now (a rig first
 before going further: a thinner mesh partitions sooner); (3) a both-direction traffic ceiling at the transport
 (risky — throttling gossip can partition a node); `max_bandwidth_mbps` shapes part serving only.
+**Read 2026-10-31 (2k)** on v0.3.265 (the live node at `-v`, 18:49-19:08Z, 7 peers, idle): upload 2.7 KB/s, gossip
+2.1 — the doubling (2i) answered — and **16 of the node's 18 capability broadcasts were `why=coord`**: a settled
+Vivaldi coordinate orbits a point and crossed the 5 ms deadband about once a minute, each time a whole capability.
+**Fixed 2026-11-01 (2k)**: the capability publishes a coordinate held still while it only orbits a point and moved
+when the node has moved (`netcoord::UpdateFilter`, Ledlie et al.'s RELATIVE heuristic — a fixed threshold "did not
+work for all nodes"), and the peer-exchange answer carries the coordinate as it stands for the peer that times it
+(`PeerExchangeResponse::coord`, Serf's `AckPayload`); `docs/invariants/network.md` § "A network coordinate must be
+published rough", point 4. A/B `SWARMLLM_COORD_FILTER=0`. **Measured** on the live node
+(one binary, `-v`, 2026-10-31): the first form (on/off/on, 25 min each, 21:20-22:37Z) stopped re-announcing after ~18
+minutes where off kept going every 2-3, but followed every sample until its first window filled (14-15 coordinate
+broadcasts per arm, on and off alike) and then published BEHIND — predictions from the published coordinate had a
+10-12% median error in minutes 16-25 beside 3-5% live, the first window's centroid holding the start-up convergence.
+Revised (start-up follows only past the threshold; the newest quarter is published; the first window counts as a
+change) and re-measured 22:50-23:25Z, 35 min: **9 coordinate broadcasts** — 8 in the first 16 minutes, one every 2,
+while the coordinate converged, then one re-centring at +32 min (16 ms) — and the published coordinate's error 4% in
+minutes 16-25 and 3% in 26-35, beside 3% live. **Residual (2k)**: a restart re-learns the coordinate from the origin
+(~16-20 minutes at ~2 samples a minute from 4 peers) and announces about every 2 minutes meanwhile; keeping the
+coordinate across a restart would remove most of that.
 
 #### #169 — Connection churn on multi-interface hosts: only the LAN dial is deterministic
 `P3` · network · **PARTIAL** — 2026-07-25 · history: archive § "Connection churn on multi-interface hosts — deterministic dialer partial", gotcha #353

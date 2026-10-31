@@ -2,6 +2,19 @@
 
 ## [Unreleased]
 
+**An idle computer re-announces its place on the network only when it has moved.** Each computer
+keeps an estimate of how far, in milliseconds, it is from the others, and re-announces itself to the
+whole swarm when that changes. The estimate never sits still — it wobbles around one point — and
+each wobble past 5 ms re-sent the computer's full description to every peer: on 2026-10-31, 16 of
+one computer's 18 announcements in 18 minutes. The announced position now changes only when a
+window of recent estimates has moved away from an earlier one by a share of the distance to the
+nearest computer, the rule a published study of network coordinates found worked for every node
+where a fixed threshold did not (Ledlie, Pietzuch and Seltzer, 2006). On a live computer: 8
+position announcements in its first 16 minutes while it learned where it is, then one in the next
+19, where it made 15 in 25 minutes and kept going every 2-3. The announced position predicts round
+trips as well as the estimate itself (3-4% median error after the first 16 minutes). A computer
+timing a reply against yours still gets your estimate as it stands, sent with the reply (#91).
+
 ## [0.3.266-alpha] — 2026-11-01
 
 **A conversation's saved prompt no longer pushes another conversation's out of memory.** After a

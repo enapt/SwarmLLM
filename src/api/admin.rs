@@ -101,18 +101,24 @@ pub fn serialize_peer_to_json(
     // purpose: a coordinate is only worth routing on if its prediction tracks
     // the measurement, and the cheapest way to know is to be able to read both
     // off one listing. `null` until both sides publish one.
-    let predicted_rtt_ms = peer
-        .capability
-        .as_ref()
-        .and_then(|c| c.coord)
-        .and_then(|theirs| {
-            state
-                .metrics
-                .network_coord
-                .read()
-                .ok()
-                .map(|ours| ours.distance_ms(&theirs))
-        });
+    let theirs = peer.capability.as_ref().and_then(|c| c.coord);
+    let predicted_rtt_ms = theirs.and_then(|theirs| {
+        state
+            .metrics
+            .network_coord
+            .read()
+            .ok()
+            .map(|ours| ours.distance_ms(&theirs))
+    });
+    // The same pair as ANY OTHER node predicts it — from both PUBLISHED
+    // coordinates, which is what the scheduler prices a hop by
+    // (`parallax::led_hop_ms`). Ours is held still between moves (#91), so
+    // this is the figure that says whether holding it still costs accuracy.
+    let predicted_rtt_published_ms = theirs.and_then(|theirs| {
+        state
+            .network_coord_for_publication()
+            .map(|ours| ours.distance_ms(&theirs))
+    });
     // ...and the figure the prediction should actually be judged against.
     //
     // `latency_ms` above is the last sample, and the measurable round trip is
@@ -137,6 +143,7 @@ pub fn serialize_peer_to_json(
         "nickname": nickname,
         "latency_ms": peer.latency_ms,
         "predicted_rtt_ms": predicted_rtt_ms,
+        "predicted_rtt_published_ms": predicted_rtt_published_ms,
         "measured_min_rtt_ms": measured_min_rtt_ms,
         "rtt_samples": rtt_samples,
         // What a VISIT to this peer costs before any layer is computed, and
