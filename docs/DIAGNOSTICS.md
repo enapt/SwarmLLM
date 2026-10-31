@@ -263,6 +263,14 @@ Not handing this model to peer: <reason>  peer= latency_ms= free_vram_mb= peer_t
         (one line per peer that did not qualify for a whole-model hand-off)
 This model does not fit our GPU, so a nearby peer runs the whole of it ...
         (whole-model delegation fired)
+delegated split: the delegate declined to lead it — coordinating the same plan from here instead ...
+        delegate= error= passed_over_secs=
+        (WARN, v0.3.262+, #372: the split's head refused to lead for a reason
+         about ITSELF — its memory or worker, or not holding the first layers.
+         It is not asked to lead this model, nor priced as leading it, for
+         passed_over_secs (5 min, doubling to 60 while it keeps declining).
+         A refused route, a too-long prompt or a late first token passes
+         nobody over; `SWARMLLM_DECLINED_LEADS=0` turns it off)
 DIAG: pipeline candidate  node= est_tokens_per_sec= has_gpu= cost_prefill_ms= cost_compute_ms= ...
         (every holder priced over the whole model — the LOCAL line's
          est_tokens_per_sec and has_gpu describe the device the request
@@ -1310,7 +1318,7 @@ delay each way read a 101-104 ms ping). A worker's socket to its node is untouch
 **Split speculation's continuous stream** (`pipeline::dsd_stream`, ON by default on the coordinator since
 v0.3.216 — `SWARMLLM_SPEC_STREAM=0` keeps the rounds; it streams only to a node on v0.3.216 or later, `features::STREAM_AS_ONE_WORK`): `SWARMLLM_SPEC_STREAM_GUESSES` guesses per
 chunk, the look-ahead included (default 3) — or two more where they pay (`StreamWidth`, #374; the line's
-`chunks_wide` counts them; `far_narrow_ms` / `far_wide_ms` are the far end's own time a chunk at each
+`guesses_per_chunk` / `wide_guesses` are the two widths and `chunks_wide` counts the wide chunks; `far_narrow_ms` / `far_wide_ms` are the far end's own time a chunk at each
 width, read from the gaps between answers (#375 — 0 means no chunk waited there, and then
 `check_slope_measured=false` means lone chunks are still alternating to price a row);
 `answers_waited_ms` is how long answers sat before the loop took them; `SWARMLLM_STREAM_WIDTH=fixed`
@@ -1328,7 +1336,16 @@ also the stream's full width, the reply's last one too, up to the positions the 
 each restart is logged at DEBUG (`a streamed check refused a guess`, with the turn and how many of
 its guesses were kept). On the serving node a superseded chunk is answered `streamed check N was
 skipped` and never computed. One built on a guess the serving node's OWN walk refused is answered
-`streamed check N was skipped — check M refused a guess it was built on` before the restart arrives
+`streamed check N was skipped — check M refused a guess it was built on` before the restart arrives;
+since v0.3.264 the same holds for a chunk built on a refused LOOK-AHEAD where both ends are .264+ (#382,
+`SWARMLLM_STREAM_LOOKAHEAD=0` = old). **Spare restarts** (#381, the coordinator's half OFF unless
+`SWARMLLM_STREAM_SPARES=1`; the far end's half is on in every .264+ node): the same INFO line carries
+`spares_on`, `spares_sent` (spares that left beside a chunk), `spares_taken` (ran because exactly that
+refusal happened), `spares_declined` (priced not to pay, `dsd_stream::spare_pays`), `spare_ms` (median
+time to build one here: drafting and this node's layers) and `answer_late_ms` (median of how late this reply's answers came against
+their prediction — what the price reads). Many sent and few taken with a large `spare_ms` is a spare
+costing more than it saves; `SWARMLLM_STREAM_SPARE_LATENESS=0` prices at the point estimate,
+`SWARMLLM_STREAM_SPARE_MIN=<p>` restores the old floor
 (2026-10-26; `SWARMLLM_STREAM_TAIL_SKIP=0` turns that off). ⚠ **A rig that runs both halves on ONE card measures the stream's
 cost, not its gain** — the far half's checks and this node's next chunk share the device, so the
 stream reads ~15% SLOWER there than rounds (25-27 vs 28-33 tok/s at an emulated 24 ms, 2026-09-30),

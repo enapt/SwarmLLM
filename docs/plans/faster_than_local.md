@@ -631,7 +631,9 @@ the stream, and every later turn that is not a restart is answered as skipped
 The far end then idles until the restart arrives instead of finishing a stale check, so the
 requester gains the far end's check less the restart's latency — ~0.14 s a miss here, ~3% of the
 reply — and the far end's time is free for anyone else's work. It grows where the far end is slow
-against the round trip. A wrong look-ahead (a quarter of the restarts) is not visible at the tail.
+against the round trip. A wrong look-ahead (a quarter of the restarts) was not visible at the tail
+until v0.3.264: chunks now name their look-ahead (`0x12`, `features::STREAM_LOOKAHEAD`), so a far
+end on .264+ drops the batches built on a wrong one itself (#382, `SWARMLLM_STREAM_LOOKAHEAD=0` = old).
 
 **8.3 A wide check through a card + processor far end: the card copy floors it, and trees still
 lose here.** A forward of ≥ 32 rows copies each processor-held weight to the card for the call
@@ -900,7 +902,9 @@ forwards on this node, not their rows, and not the link.
    6,333), and the reply ran the stream at half speed. The planner prices this node's layers as a
    middle segment (`process_pool::cost_curve_of`, the whole-model line, no end tables) while the
    spawn charges `[0,12)` its token table — the bound is about a layer too generous in both arms;
-   in the good one 25 fitted by 38 MB. → FUTURE_WORK.
+   in the good one 25 fitted by 38 MB. **Fixed in v0.3.264** (#376): the room is priced on the first
+   range's real load (`SWARMLLM_DRAFTER_ROOM_FIRST=average` = old); the live check on a near-full card
+   is FUTURE_WORK #376's residual.
 6. **Before any graph-capture work on 24-row forwards**, `SWARMLLM_PROFILE=1` (DIAGNOSTICS § 3d)
    settles whether a tail forward's ~21 ms is the card or the host: its weights are ~3 GB at
    ~448 GB/s, ~7 ms. Capturing ≥ 9 rows needs a fixed MMQ tile (`executor.rs`'s

@@ -79,19 +79,21 @@ the top track (`docs/plans/large_model_splits.md`).
    2026-10-29); the round itself is still priced ~1.7x (#3 (h)). A 14B split evenly between this machine's card and the same 3060 flows at
    29.2-29.9 tok/s on code, twice this machine's whole-14B speed (13.6-15.4), and 9.2-10.0 on
    prose; a chain that starts and finishes here flows since v0.3.261 (#369, ~1.2x its tree
-   rounds, still ~1.1-1.2x behind the default shape). Prose is held by the drafter's
+   rounds, ~1.1-1.2x behind the default shape as measured on v0.3.261; v0.3.264's batched tail
+   added 6% on prose on a calm link, the gap since unmeasured). Prose is held by the drafter's
    first-choice rate: the general 0.5B misses 17-20 times a 160-token reply where the coder's
    0.5B missed 30-35 (#370). Three cards chained (this one, an RTX 4050 laptop in Europe at
    ~230 ms, the 3060) flowed at 12.4-14.3 tok/s on code and 4.4-4.9 on prose, against 15.7-20.9
    and 6.1-7.3 for the two-card split run alongside (2026-10-29, v0.3.261, four runs each): the
    check crosses three links (~600 ms against ~480) and a chain's window of 8 forwards carried
    7-12 rows each against 18-25, so a third machine pays only where it holds what two cannot. **Next**: tokens a round past the drafter (`large_model_splits.md`
-   step 4, a drafter fed by the model's own state). For the 70B, two levers were read and are not
-   levers (2026-10-29): the stream's guesses a chunk (a fixed 3; a model of the stream puts 1-5 at
-   2.5-2.9 tok/s, the shape being the far side's processor layers and the restarts), and a larger
-   or smaller guesser — on 747 positions of its own replies the Llama 3.2 1B, 3.2 3B and 3.1 8B
+   step 4, a drafter fed by the model's own state). For the 70B, a larger or smaller guesser is not
+   a lever (2026-10-29): on 747 positions of its own replies the Llama 3.2 1B, 3.2 3B and 3.1 8B
    match its first choice 81%, 85%, 86% (2.98, 3.07, 3.12 tokens a check at three guesses,
-   `examples/drafter_ranks.py`). What is left is where its layers sit: the far side runs ~44 of
+   `examples/drafter_ranks.py`). The stream's guesses a chunk, read that day as no lever from a
+   model of the stream, was one live: 3 or 5 chosen per chunk (#374/#375, v0.3.262) took ~7% off a
+   reply. Spare restarts at the far end (#381, v0.3.264, off by default) are measured next. What is
+   left is where its layers sit: the far side runs ~44 of
    its 64 layers on a processor (~70 ms a row), which also keeps trees off
    (`faster_than_local.md` § 8, the 70B deep dive). The track's history
    (near chains #192, the far chain #346, trees #134, the stream, tensor-core MMQ #325, requester
@@ -1672,7 +1674,7 @@ the last one — an agent's next turn — waits for it: those arms' first token 
 the card's device-to-host read) at both speeds; whether freed snapshots' host buffers are reused or
 the copy faults fresh pages (an allocation of 569 MB under WSL2 is 146K first touches).
 
-#### #369 — A chain that starts and finishes here flows now, but still runs ~1.1-1.2x behind the default shape at the same split
+#### #369 — A chain that starts and finishes here flows now, but ran ~1.1-1.2x behind the default shape at the same split (v0.3.261; the batched tail since)
 `P1` · perf-split · **NARROWED** — 2026-10-30 · evidence: `docs/plans/faster_than_local.md` § "Measured on the real link, 2026-10-29"
 
 **Done 2026-10-29:** a chain that starts and finishes here (the boomerang — "Start and finish on
@@ -1758,8 +1760,9 @@ TH↔AU, the 0.5B Q8_0 drafter, far [12,35) for every arm, three arms each inter
 DEGRADED through the run — the old arm's own prose went 6.88 → 5.89 → 3.90): the tail's time fell
 25-30% (4.0-4.5 s a prose reply against 5.4-6.6; 117-151 answers read in 31-36 forwards), and every
 joined arm beat the old arm beside it — prose 7.80 / 7.27 / 5.40 tok/s against 6.88 / 5.89 / 3.90,
-code 19.39 / 18.34 / 13.44 against 17.46 / 12.68 / 9.77. Min-of-5 on a calm link is still owed; the
-mechanism fired on every reply. **Not on — an answer the walk can no longer reach waiting to be read
+code 19.39 / 18.34 / 13.44 against 17.46 / 12.68 / 9.77; the mechanism fired on every reply. On a
+CALM link the same evening (rig `tail1030b`, five arms each, ABBA): prose 8.17 tok/s mean
+(7.50-8.86) against 7.69 (7.00-8.16), +6%; code level (`docs/invariants/scheduling.md`). **Not on — an answer the walk can no longer reach waiting to be read
 with the next** (`dead_wait_on`, opt-in `SWARMLLM_FLOW_DEAD_WAIT=1`): it cut the tail a further
 ~35% (2.1-3.7 s) and the replies were no faster (prose 6.82 / 5.29 / 4.55, code 16.95 / 14.98 /
 15.42) — in all three of its prose replies the forwards queued on their way (630-923 ms over the
@@ -3047,7 +3050,14 @@ gave 1.01x; `SWARMLLM_STREAM_SPARE_MIN` is now the fixed-floor A/B. On a far-bou
 1. **Measure the 70B** once AU runs v0.3.264+ (published 2026-10-31, the first advertising bit 35):
    `SWARMLLM_STREAM_SPARES=1` against off on this node (`~/swarmllm-70b/ab70spares.sh`, arms
    off/on/on/off, same three prompts each), judged by restarts that waited, tok/s and
-   `spares_declined` / `spare_ms`. Default on only where it pays.
+   `spares_declined` / `spare_ms`. Default on only where it pays. **Tried twice, no verdict yet**:
+   2026-10-31 01:54Z, cut by a card fault after arm 2, and the off arm's replies went through three
+   machines; 03:12Z (rig pinned to this node + AU), stopped in arm 1 — AU's room fell from 68 layers
+   to 51-54 between two asks (its 70B unloaded, budget 27,230 MB, likely its owner's use; its
+   announcement still said 80 for a minute, the #378 re-plan fired and was then refused honestly).
+   With AU that small the 70B needs a third machine, and a spare goes only to a LONE far segment,
+   so the A/B waits for AU to offer [≤16, 80) again. The arm-1 reply that ran ([0,12) + [12,80),
+   AU's card at 15 layers) read 1.45 tok/s — AU's load, not a reading of .264.
 1a. **More rig replies, the same text either way**: with an identical reply, spares took 80.0 s
    against 81.0-82.9 s without (one steady reply an arm, § "Which spares go"). Repeat with
    several prompts before reading a percentage off it. A rig prompt whose spare reply differs in
@@ -4042,7 +4052,11 @@ grep `^| N |`).
   `SWARMLLM_WHOLE_REFUSAL=bar`, the A/B). Checked live (main's build in the live node's place,
   14:21Z): with this node offering none of the 70B, AU was handed the whole model, refused, was held
   to fewer layers (`DIAG: the peer handed the whole model cannot serve it`), and the caller heard its
-  refusal in its own words; the two-machine request after it was served (1.50 tok/s). Evidence:
+  refusal in its own words; the two-machine request after it was served (1.50 tok/s). Seen in the
+  field on v0.3.264 (2026-10-31 03:23Z, both ends .264): AU, its room fallen to ~54 layers while it
+  still announced 80, was handed the whole model, refused, held short and asked [12,80); its answer
+  before the pass (54 fit) bounded the next plan, and with no route left the caller heard AU's
+  refusal in 1.7 s. Evidence:
   `docs/invariants/scheduling.md` § "A re-plan is warranted by a changed fact".
 
 **Closed 2026-10-30, ships in the next release** (#375)
