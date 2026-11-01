@@ -56,6 +56,14 @@ pub enum ModelArch {
     /// `layers::ValueHeadOrder`), NEOX RoPE. Refused until a real file's reply
     /// is checked ([`Self::is_supported`], #390).
     Qwen3Next,
+    /// OpenAI's gpt-oss (`gpt-oss`, llama.cpp `LLM_ARCH_OPENAI_MOE`): every
+    /// layer routes 4 of its experts, whose stacks are MXFP4, through
+    /// [`Activation::SwigluOai`]; attention sinks, biases on the attention
+    /// output and on the router and expert stacks, a 128-position window on
+    /// the even layers, NEOX RoPE with YaRN. Named so far, NOT run: refused
+    /// outright ([`Self::is_supported`]) until its sinks and biases are read
+    /// (#390 item 2, `docs/FUTURE_WORK.md`).
+    GptOss,
     /// Architecture not recognized — falls back to Llama-like behavior
     Unknown(String),
 }
@@ -99,6 +107,7 @@ impl ModelArch {
             "qwen35" => ModelArch::Qwen35,
             "qwen35moe" | "qwen3_5moe" => ModelArch::Qwen35Moe,
             "qwen3next" => ModelArch::Qwen3Next,
+            "gpt-oss" => ModelArch::GptOss,
             other => ModelArch::Unknown(other.to_string()),
         }
     }
@@ -157,6 +166,7 @@ impl ModelArch {
             | ModelArch::Gemma3
             | ModelArch::Gemma4
             | ModelArch::Starcoder2 => Activation::Gelu,
+            ModelArch::GptOss => Activation::SwigluOai,
             _ => Activation::SiLU,
         }
     }
@@ -213,10 +223,20 @@ impl ModelArch {
     /// llama.cpp on test files with GLM-4.5-Air's ratios
     /// (`examples/make_tiny_glm4moe_gguf.py`); the smallest real file is
     /// ~45 GB.
+    ///
+    /// **gpt-oss is named, not built** (#390 item 2): its MXFP4 experts and
+    /// its activation are read as llama.cpp reads them, but a layer's attention
+    /// sinks and its biases (attention output, router, expert stacks) are not
+    /// read yet, so a reply would be wrong however it ran — refused outright,
+    /// with no switch, until they are; then it waits for its real file like
+    /// the two above.
     pub fn is_supported(&self) -> bool {
         !matches!(
             self,
-            ModelArch::Unknown(_) | ModelArch::DeepSeek2 | ModelArch::Starcoder2
+            ModelArch::Unknown(_)
+                | ModelArch::DeepSeek2
+                | ModelArch::Starcoder2
+                | ModelArch::GptOss
         ) && (!self.awaits_a_real_check() || unchecked_family_named(&self.to_string()))
     }
 
@@ -229,7 +249,7 @@ impl ModelArch {
     /// Every architecture this build knows by name, `Unknown` aside — what
     /// [`Self::manifest_architecture_is_refused`] reads a manifest's coarse
     /// variant against.
-    const NAMED: [ModelArch; 16] = [
+    const NAMED: [ModelArch; 17] = [
         ModelArch::Llama,
         ModelArch::Qwen2,
         ModelArch::Gemma,
@@ -246,6 +266,7 @@ impl ModelArch {
         ModelArch::Qwen35,
         ModelArch::Qwen35Moe,
         ModelArch::Qwen3Next,
+        ModelArch::GptOss,
     ];
 
     /// Does a manifest that says `arch` describe a model this build refuses?
@@ -355,6 +376,7 @@ impl ModelArch {
             | Self::Glm4
             | Self::Glm4Moe
             | Self::Llama4
+            | Self::GptOss
             | Self::Unknown(_) => ModelArchitecture::Llama,
         }
     }
@@ -379,6 +401,7 @@ impl std::fmt::Display for ModelArch {
             ModelArch::Qwen35 => write!(f, "qwen35"),
             ModelArch::Qwen35Moe => write!(f, "qwen35moe"),
             ModelArch::Qwen3Next => write!(f, "qwen3next"),
+            ModelArch::GptOss => write!(f, "gpt-oss"),
             ModelArch::Unknown(s) => write!(f, "{s}"),
         }
     }
@@ -409,6 +432,11 @@ pub(crate) enum Activation {
     SiLU,
     /// Gelu — used by Gemma, Gemma 2, Gemma 3, Gemma 4
     Gelu,
+    /// gpt-oss's clamped SwiGLU (llama.cpp `ggml_swiglu_oai`, α 1.702, limit
+    /// 7): the gate clamped from above, `up` both ways and lifted by one —
+    /// [`crate::inference::fast_math::swiglu_oai_mul`]. A gated activation
+    /// only: llama.cpp aborts without a gate, and so does this engine.
+    SwigluOai,
 }
 
 #[cfg(test)]
@@ -438,6 +466,7 @@ mod tests {
                 ModelArch::Qwen35 => Some(13),
                 ModelArch::Qwen35Moe => Some(14),
                 ModelArch::Qwen3Next => Some(15),
+                ModelArch::GptOss => Some(16),
                 ModelArch::Unknown(_) => None,
             }
         }

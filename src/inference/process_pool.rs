@@ -3481,18 +3481,28 @@ pub enum CpuReason {
     /// [`Self::GpuTooOld`]: the card is fine, and the remedy is an install and
     /// a restart, not a newer card.
     CudaLibrariesMissing,
+    /// The model holds weights in a format this build's card kernels cannot
+    /// read — MXFP4 (unsloth's `MXFP4_MOE` files; gpt-oss), read since
+    /// 2026-11-02 on the processor only. On a card each such product would
+    /// copy its weight to host memory, dequantize it there and send it back,
+    /// every token: seconds a token. Kept off the card until the card reads
+    /// it (#390 item 2, step 7), by [`ModelProcessPool::cpu_reason`], so the
+    /// planner and the spawn agree. Distinct from [`Self::GpuTooOld`]: the
+    /// card is fine, and other models still use it.
+    WeightFormatNeedsTheProcessor,
 }
 
 impl CpuReason {
     /// Every reason, so whatever puts a reason into words can be checked
     /// against all of them.
-    pub const ALL: [CpuReason; 6] = [
+    pub const ALL: [CpuReason; 7] = [
         CpuReason::Configured,
         CpuReason::GpuTooOld,
         CpuReason::GpuUnavailable,
         CpuReason::NotEnoughVram,
         CpuReason::DriverNotAnswering,
         CpuReason::CudaLibrariesMissing,
+        CpuReason::WeightFormatNeedsTheProcessor,
     ];
 
     /// Stable machine-readable tag. Used in logs and in the admin API, so keep
@@ -3505,6 +3515,7 @@ impl CpuReason {
             CpuReason::NotEnoughVram => "not_enough_vram",
             CpuReason::DriverNotAnswering => "driver_not_answering",
             CpuReason::CudaLibrariesMissing => "cuda_libraries_missing",
+            CpuReason::WeightFormatNeedsTheProcessor => "weight_format_needs_the_processor",
         }
     }
 }
@@ -4717,7 +4728,28 @@ impl ModelProcessPool {
         {
             return Some(CpuReason::Configured);
         }
+        // After the owner's own setting, the truer answer where both hold.
+        #[cfg(feature = "candle-cuda")]
+        if self.holds_weights_the_card_cannot_read(model_id) {
+            return Some(CpuReason::WeightFormatNeedsTheProcessor);
+        }
         None
+    }
+
+    /// Whether `model_id`'s header names a weight this build's card kernels
+    /// cannot read ([`crate::inference::split::holds_weights_the_card_cannot_read`]),
+    /// through the pool's header cache — asked by every [`Self::cpu_reason`].
+    /// No header yet: no answer, so `false`; the spawn asks again once it is
+    /// here, as the loader needs it.
+    #[cfg(any(feature = "candle-cuda", test))]
+    fn holds_weights_the_card_cannot_read(&self, model_id: &ModelId) -> bool {
+        let header = crate::model::shard::model_dir(&self.data_dir, &model_id.0)
+            .join(crate::model::shard::HEADER_FILENAME);
+        self.header_cache.read(&header).is_ok_and(|cached| {
+            crate::inference::split::holds_weights_the_card_cannot_read(
+                &cached.content_without_vocabulary,
+            )
+        })
     }
 
     /// Why this model is on the processor, for the admin API and the dashboard —
@@ -16263,6 +16295,38 @@ mod tests {
             .map(|(n, d, k)| (n.as_str(), d.as_slice(), *k))
             .collect();
         header_only_model(tag, model, &table)
+    }
+
+    /// A model holding MXFP4 weights (type 39) is one the card cannot read
+    /// yet, read off its header through the pool's cache; a model of Q4_K
+    /// and F32 is not, nor one whose header is not here (#390 item 2).
+    #[test]
+    fn a_model_holding_mxfp4_weights_is_one_the_card_cannot_read() {
+        let mxfp4 = ModelId("holds-mxfp4".into());
+        let data_dir = header_only_model(
+            "holds-mxfp4",
+            &mxfp4,
+            &[
+                ("blk.0.attn_q.weight", &[8192, 8192], 12),
+                ("blk.0.ffn_gate_exps.weight", &[8192, 2048, 8], 39),
+                ("blk.0.attn_norm.weight", &[8192], 0),
+            ],
+        );
+        let pool = ModelProcessPool::new(data_dir);
+        assert!(pool.holds_weights_the_card_cannot_read(&mxfp4));
+
+        let plain = ModelId("holds-q4k".into());
+        let data_dir = header_only_model(
+            "holds-q4k",
+            &plain,
+            &[
+                ("blk.0.attn_q.weight", &[8192, 8192], 12),
+                ("blk.0.attn_norm.weight", &[8192], 0),
+            ],
+        );
+        let pool = ModelProcessPool::new(data_dir);
+        assert!(!pool.holds_weights_the_card_cannot_read(&plain));
+        assert!(!pool.holds_weights_the_card_cannot_read(&ModelId("no-header-here".into())));
     }
 
     /// A plan asks a model's geometry dozens of times, and the header is

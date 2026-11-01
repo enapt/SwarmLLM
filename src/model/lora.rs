@@ -135,6 +135,7 @@ pub fn check_fits(meta: &AdapterMetadata, model: &AdapterTarget<'_>) -> Result<(
             | ModelArch::Qwen35
             | ModelArch::Qwen35Moe
             | ModelArch::Qwen3Next
+            | ModelArch::GptOss
             | ModelArch::Unknown(_)
     ) {
         return Err(format!(

@@ -76,6 +76,101 @@ pub fn gelu_mul_into(gate: &[f32], up: &[f32], out: &mut [f32]) {
     }
 }
 
+/// gpt-oss's `alpha` in [`swiglu_oai_mul_into`] (llama.cpp
+/// `LLM_FFN_SWIGLU_OAI_MOE`, `llama-graph.cpp`; HF's `GptOssExperts.alpha`).
+pub const SWIGLU_OAI_ALPHA: f32 = 1.702;
+/// gpt-oss's clamp in [`swiglu_oai_mul_into`] (HF's `swiglu_limit`).
+pub const SWIGLU_OAI_LIMIT: f32 = 7.0;
+
+/// `out[i] = swiglu_oai(gate[i], up[i])` — gpt-oss's activation, llama.cpp's
+/// `ggml_compute_forward_swiglu_oai_f32` expression for expression: the gate
+/// clamped from ABOVE only (`std::min`), `up` both ways (`std::clamp`), a
+/// sigmoid sharpened by [`SWIGLU_OAI_ALPHA`] through libm's `expf`, and `up`
+/// lifted by one. Scalar on purpose, as llama.cpp's is: `f32::exp` is the
+/// same libm call, so a product here holds llama.cpp's bits. A NaN gate stays
+/// NaN, as `std::min(NaN, limit)` does.
+#[inline]
+pub fn swiglu_oai_mul_into(gate: &[f32], up: &[f32], out: &mut [f32]) {
+    debug_assert_eq!(gate.len(), up.len());
+    debug_assert_eq!(gate.len(), out.len());
+    const LIMIT: f32 = SWIGLU_OAI_LIMIT;
+    for ((&g, &u), o) in gate.iter().zip(up).zip(out.iter_mut()) {
+        let x = if LIMIT < g { LIMIT } else { g };
+        // `std::clamp` and `f32::clamp` agree on every input, NaN and -0 too.
+        let y = u.clamp(-LIMIT, LIMIT);
+        let out_glu = x / (1.0 + (SWIGLU_OAI_ALPHA * (-x)).exp());
+        *o = out_glu * (y + 1.0);
+    }
+}
+
+/// [`swiglu_oai_mul_into`] over two tensors of one shape: one pass on the
+/// processor, candle's composition elsewhere (the same expression in five
+/// ops; a card's `exp` is not libm's, so a card's product is judged against
+/// llama.cpp's, never by its bits).
+pub fn swiglu_oai_mul(gate: &Tensor, up: &Tensor) -> Result<Tensor> {
+    if gate.dtype() == DType::F32
+        && up.dtype() == DType::F32
+        && gate.is_contiguous()
+        && up.is_contiguous()
+        && gate.dims() == up.dims()
+        && matches!(gate.device(), Device::Cpu)
+        && matches!(up.device(), Device::Cpu)
+    {
+        return gate.apply_op2_no_bwd(up, &SwigluOaiMul);
+    }
+    swiglu_oai_composed(gate, up)
+}
+
+/// [`swiglu_oai_mul`] as candle ops. On the processor each op is llama.cpp's
+/// (candle's f32 `exp` is libm's too), so it holds [`swiglu_oai_mul_into`]'s
+/// bits there — pinned by `swiglu_oai_is_llama_cpps_expression`.
+fn swiglu_oai_composed(gate: &Tensor, up: &Tensor) -> Result<Tensor> {
+    let x = gate.minimum(SWIGLU_OAI_LIMIT)?;
+    let y = up.clamp(-SWIGLU_OAI_LIMIT, SWIGLU_OAI_LIMIT)?;
+    let sigmoid_den = x
+        .affine(-f64::from(SWIGLU_OAI_ALPHA), 0.0)?
+        .exp()?
+        .affine(1.0, 1.0)?;
+    (x / sigmoid_den)? * y.affine(1.0, 1.0)?
+}
+
+#[derive(Debug, Clone)]
+struct SwigluOaiMul;
+
+impl CustomOp2 for SwigluOaiMul {
+    fn name(&self) -> &'static str {
+        "swiglu-oai-mul"
+    }
+
+    fn cpu_fwd(
+        &self,
+        s1: &CpuStorage,
+        l1: &Layout,
+        s2: &CpuStorage,
+        l2: &Layout,
+    ) -> Result<(CpuStorage, Shape)> {
+        let (CpuStorage::F32(g), CpuStorage::F32(u)) = (s1, s2) else {
+            candle_core::bail!("swiglu-oai-mul: f32 only");
+        };
+        let (Some((go, ge)), Some((uo, ue))) = (l1.contiguous_offsets(), l2.contiguous_offsets())
+        else {
+            candle_core::bail!("swiglu-oai-mul: inputs must be contiguous");
+        };
+        let g = &g[go..ge];
+        let u = &u[uo..ue];
+        if g.len() != u.len() {
+            candle_core::bail!("swiglu-oai-mul: shape mismatch {} vs {}", g.len(), u.len());
+        }
+        let mut out = vec![0f32; g.len()];
+        let chunk = l1.dims().last().copied().unwrap_or(g.len()).max(1024);
+        out.par_chunks_mut(chunk)
+            .zip(g.par_chunks(chunk))
+            .zip(u.par_chunks(chunk))
+            .for_each(|((o, g), u)| swiglu_oai_mul_into(g, u, o));
+        Ok((CpuStorage::F32(out), Shape::from_dims(l1.shape().dims())))
+    }
+}
+
 #[cfg(target_feature = "avx2")]
 mod avx2 {
     use std::arch::x86_64::*;
@@ -344,6 +439,90 @@ mod tests {
                 .fold(0f32, f32::max);
             assert!(worst < 2e-6, "{rows}x{cols}: worst rel diff {worst}");
         }
+    }
+
+    /// gpt-oss's activation is llama.cpp's `ggml_compute_forward_swiglu_oai_f32`
+    /// bit for bit — over inputs either side of both clamps, the clamps
+    /// themselves, the sigmoid's saturation and a NaN gate — and so is the
+    /// candle composition a card runs. The figure is llama.cpp's own op's
+    /// (`examples/swiglu_oai_reference.c`); the C expression transcribed below
+    /// says which element parts, should one.
+    #[test]
+    fn swiglu_oai_is_llama_cpps_expression() {
+        // ops.cpp, verbatim: x = std::min(g, limit); y = std::clamp(u, -limit,
+        // limit); out_glu = x / (1.f + expf(alpha * (-x))); out_glu * (y + 1.f).
+        fn llama_cpp(g: f32, u: f32) -> f32 {
+            let (alpha, limit) = (1.702f32, 7.0f32);
+            let x = if limit < g { limit } else { g };
+            let y = u.clamp(-limit, limit); // std::clamp
+            let out_glu = x / (1.0 + (alpha * (-x)).exp());
+            out_glu * (y + 1.0)
+        }
+        let mut gate: Vec<f32> = vec![
+            -90.0, -7.5, -7.0, -1.0, -0.0, 0.0, 0.3, 6.99, 7.0, 7.01, 50.0,
+        ];
+        let mut up: Vec<f32> = vec![
+            -50.0, -7.01, -7.0, -1.0, 0.0, -0.0, 0.7, 6.99, 7.0, 7.01, 90.0,
+        ];
+        // And a spread wide enough that most values sit past a clamp.
+        let mut s = 0x9e37_79b9u32;
+        for _ in 0..4093 {
+            s ^= s << 13;
+            s ^= s >> 17;
+            s ^= s << 5;
+            gate.push((s % 40_001) as f32 / 2_000.0 - 10.0);
+            s ^= s << 13;
+            s ^= s >> 17;
+            s ^= s << 5;
+            up.push((s % 40_001) as f32 / 2_000.0 - 10.0);
+        }
+        let want: Vec<u32> = gate
+            .iter()
+            .zip(&up)
+            .map(|(&g, &u)| llama_cpp(g, u).to_bits())
+            .collect();
+        assert!(gate.iter().any(|&g| g > SWIGLU_OAI_LIMIT));
+        assert!(up.iter().any(|&u| u < -SWIGLU_OAI_LIMIT));
+
+        // llama.cpp's own op on these inputs (`examples/swiglu_oai_reference.c`,
+        // 2026-11-02, master 4b1a27f): the FNV-1a hash of its output's bytes.
+        let fnv = want
+            .iter()
+            .flat_map(|w| w.to_le_bytes())
+            .fold(0xcbf2_9ce4_8422_2325u64, |h, b| {
+                (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3)
+            });
+        assert_eq!(fnv, 0xa594_237e_1c52_159c, "llama.cpp's output");
+
+        let mut out = vec![0f32; gate.len()];
+        swiglu_oai_mul_into(&gate, &up, &mut out);
+        let got: Vec<u32> = out.iter().map(|o| o.to_bits()).collect();
+        assert_eq!(got, want, "the slice kernel");
+
+        let n = gate.len();
+        let (g, u) = (
+            Tensor::from_vec(gate.clone(), (n / 8, 8), &Device::Cpu).unwrap(),
+            Tensor::from_vec(up.clone(), (n / 8, 8), &Device::Cpu).unwrap(),
+        );
+        for (name, t) in [
+            ("the processor op", swiglu_oai_mul(&g, &u).unwrap()),
+            ("the composition", swiglu_oai_composed(&g, &u).unwrap()),
+        ] {
+            let got: Vec<u32> = t
+                .flatten_all()
+                .unwrap()
+                .to_vec1::<f32>()
+                .unwrap()
+                .iter()
+                .map(|o| o.to_bits())
+                .collect();
+            assert_eq!(got, want, "{name}");
+        }
+
+        // A NaN gate stays NaN (`std::min(NaN, limit)` is the NaN).
+        let mut nan = [0f32];
+        swiglu_oai_mul_into(&[f32::NAN], &[1.0], &mut nan);
+        assert!(nan[0].is_nan());
     }
 
     /// The CUDA fusion must agree with the two kernels it replaces EXACTLY,

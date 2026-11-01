@@ -612,6 +612,7 @@ impl Mlp {
             let __prod = match self.activation {
                 Activation::SiLU => crate::inference::fast_math::silu_mul(&gate, &up)?,
                 Activation::Gelu => (gate.gelu()? * up)?,
+                Activation::SwigluOai => crate::inference::fast_math::swiglu_oai_mul(&gate, &up)?,
             };
             crate::inference::prof::add(P::FfnAct, __act_t.elapsed().as_nanos() as u64);
             __prod
@@ -620,6 +621,11 @@ impl Mlp {
             match self.activation {
                 Activation::SiLU => candle_nn::ops::silu(&up)?,
                 Activation::Gelu => up.gelu()?,
+                // llama.cpp aborts here too (`LLM_FFN_SWIGLU_OAI_MOE` with no
+                // gate): the activation is defined on a gate and an `up`.
+                Activation::SwigluOai => candle_core::bail!(
+                    "gpt-oss's activation needs a gate projection, and this layer has none"
+                ),
             }
         };
 
@@ -1790,6 +1796,7 @@ fn gated(activation: Activation, gate: &Tensor, up: &Tensor) -> CandleResult<Ten
     match activation {
         Activation::SiLU => crate::inference::fast_math::silu_mul(gate, up),
         Activation::Gelu => gate.gelu()? * up,
+        Activation::SwigluOai => crate::inference::fast_math::swiglu_oai_mul(gate, up),
     }
 }
 
@@ -2341,6 +2348,7 @@ impl MoeFfn {
         let act_mul = |((a, g), u): ((&mut [f32], &[f32]), &[f32])| match activation {
             Activation::SiLU => crate::inference::fast_math::silu_mul_into(g, u, a),
             Activation::Gelu => crate::inference::fast_math::gelu_mul_into(g, u, a),
+            Activation::SwigluOai => crate::inference::fast_math::swiglu_oai_mul_into(g, u, a),
         };
         if split {
             act_cols

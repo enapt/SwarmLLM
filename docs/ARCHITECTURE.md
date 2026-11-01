@@ -162,6 +162,9 @@ swarmllm/
 │                 mxfp4_reference.c — llama.cpp's own MXFP4 code (dequantise, the processor
 │                 dot, the quantiser) on fixed inputs: the figures `mxfp4_tests` asserts
 │                 (gpt-oss's expert format, #390; built by gcc, build line in its header);
+│                 swiglu_oai_reference.c — llama.cpp's own `ggml_swiglu_oai` (gpt-oss's
+│                 activation) on fixed inputs past both clamps: the hash
+│                 `swiglu_oai_is_llama_cpps_expression` asserts (built the same way);
 │                 make_tiny_llama4_gguf.py writes one where none exists (Llama 4, gguf-py);
 │                 make_tiny_gemma_gguf.py — Gemma 2 with an 8-position window (#278) and
 │                 the 27B's 46 layers (#279); ARCH=gemma3: Q/K norms, per-layer RoPE,
@@ -3043,7 +3046,7 @@ Routes Claude model requests through a locally-authenticated `claude` CLI subpro
 - Cross-component calls: `App.componentName.method()`. Shared state: `App.state.*`. Utilities: `App.utils.*`.
 
 ### Frontend Features
-- **i18n**: 1425 translation keys (1427 entries per locale incl. `_lang` + `_dir`) across 21 languages (en, es, fr, de, pt, it, nl, ru, zh, ja, ko, ar, tr, pl, sv, th, hi, vi, id, uk, cs). Auto-detects browser language. `I18n.t()` + `data-i18n` DOM attributes. Interpolation via `{variable}` placeholders. Fallback chain: current language → English → raw key. "Continue in English" UX for non-English users who prefer English.
+- **i18n**: 1426 translation keys (1428 entries per locale incl. `_lang` + `_dir`) across 21 languages (en, es, fr, de, pt, it, nl, ru, zh, ja, ko, ar, tr, pl, sv, th, hi, vi, id, uk, cs). Auto-detects browser language. `I18n.t()` + `data-i18n` DOM attributes. Interpolation via `{variable}` placeholders. Fallback chain: current language → English → raw key. "Continue in English" UX for non-English users who prefer English.
 - **Theme**: Light / Dark / System toggle. `[data-theme="light"]` CSS overrides. Persisted in localStorage.
 - **Swarm background**: animated canvas flocking network behind the dashboard (`frontend/js/neural-bg.js`). Up to 90 boids (scaled by viewport area) with connecting links, feeler tendrils, gentle drift and mouse repulsion/glow. State-reactive colouring: blue (idle) → cyan (active inference) → red-orange (unhealthy/disconnected); peer count boosts vibrancy and active requests trigger firing pulses.
   **It is the one thing on the page with an ongoing power cost, so it is bounded at four levels.** It advances at 30 Hz rather than the browser's 60 while the pointer is in play; drops to 10 Hz once the pointer has been still for 4 s, which is the ordinary state of a dashboard left open; drops to 8 Hz whenever `state.active > 0` (this page is usually open on the machine running the node, so the decoration yields to the real work — the slowest applicable rate wins); and stops entirely when the tab is hidden. Users can switch it off in Settings (`App.SWARM_ANIM_KEY`), and it defaults to OFF where the device reports `prefers-reduced-motion: reduce` — a canvas loop is invisible to the CSS media query that honours that everywhere else on the page. Turning it off cancels the frame loop rather than hiding the canvas, since a hidden animation costs what a visible one does.
@@ -3102,7 +3105,15 @@ quantiser and processor dot (`avx.rs::vec_dot_mxfp4_q8_0`, in llama.cpp's AVX2 o
 its answers are llama.cpp's bit for bit on fixed inputs (`mxfp4_tests`,
 `examples/mxfp4_reference.c`). No card kernel reads it yet — `QCudaStorage::fwd`
 sends a type with no dequantize kernel through `dequantize_matmul`'s host-dequantised
-copy, correct and slow — and Metal refuses it. gpt-oss stays refused (FUTURE_WORK #390).
+copy, correct and slow (seconds a token for a mixture-of-experts model) — so a card
+build keeps a model holding one OFF the card: `ModelProcessPool::cpu_reason` answers
+`CpuReason::WeightFormatNeedsTheProcessor` from its header
+(`split::holds_weights_the_card_cannot_read`), the one answer the planner and the spawn
+both ask, until a card kernel reads the type. Metal refuses it. gpt-oss is named
+(`ModelArch::GptOss`: its window, norm names and routing as llama.cpp's `openai-moe.cpp`;
+its activation `fast_math::swiglu_oai_mul`, llama.cpp's bits,
+`examples/swiglu_oai_reference.c`) and refused outright until its sinks and biases are
+read (FUTURE_WORK #390).
 
 ### The right attention kernel is OPPOSITE for prefill and decode
 

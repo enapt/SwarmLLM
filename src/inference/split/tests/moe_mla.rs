@@ -26,6 +26,17 @@ fn a_family_no_real_file_loads_is_recognised_but_not_offered() {
     // StarCoder2 (#118) the same way.
     assert!(!ModelArch::from_gguf_arch("starcoder2").is_supported());
     assert!(!ModelArch::supported_list().contains(&"starcoder2"));
+    // gpt-oss (#390 item 2) is named, its activation and NEOX rotation read
+    // off llama.cpp, and refused with no switch until its sinks and biases
+    // are read.
+    let gpt_oss = ModelArch::from_gguf_arch("gpt-oss");
+    assert_eq!(gpt_oss, ModelArch::GptOss);
+    assert_eq!(gpt_oss.to_string(), "gpt-oss");
+    assert!(!gpt_oss.is_supported());
+    assert!(!ModelArch::supported_list().contains(&"gpt-oss"));
+    assert_eq!(gpt_oss.default_activation(), Activation::SwigluOai);
+    assert!(gpt_oss.use_rope_contiguous(), "LLAMA_ROPE_TYPE_NEOX");
+    assert!(!gpt_oss.accumulates_outputs_in_f32());
     // Qwen 3.5's MoE was refused the same way until checked (#228 (1)); the
     // list must carry it now that the predicate admits it.
     assert!(ModelArch::supported_list().contains(&"qwen35moe"));

@@ -375,6 +375,10 @@ pub(crate) fn arch_supports_hybrid(arch: &crate::inference::model_arch::ModelArc
         A::Qwen35 | A::Qwen35Moe | A::Qwen3Next => true,
         // MLA attention with its own projection set; unverified.
         A::DeepSeek2 => false,
+        // gpt-oss runs the standard loop, but no layer of it has run at all
+        // yet (refused, `ModelArch::is_supported`), let alone split on a card
+        // (#390 item 2's sixth step).
+        A::GptOss => false,
         // An architecture we do not recognise is one whose loop nobody has
         // read. Deny, for the same reason the list is an allowlist.
         A::Unknown(_) => false,

@@ -310,6 +310,10 @@ fn cpu_reason_in_words(tag: &str) -> String {
             "NVIDIA's CUDA libraries are not installed — install them and restart SwarmLLM (the log names them)"
                 .to_string()
         }
+        "weight_format_needs_the_processor" => {
+            "it is stored in a format (MXFP4) this version cannot yet run quickly on the graphics card"
+                .to_string()
+        }
         other => other.to_string(),
     }
 }

@@ -2838,9 +2838,22 @@ match llama.cpp** (#715, `arch-inference.md`).
    real header parses (`a_real_gpt_oss_header_parses_with_its_experts_mxfp4`, ignored: a 16 MB range
    read). ⚠ **A card multiplies an MXFP4 weight correctly but very slowly** until step 7: no card kernel
    reads it, so `QCudaStorage::fwd` sends it through `dequantize_matmul`'s host-dequantised copy on
-   EVERY call — step 2 keeps MXFP4 experts in RAM on a card and out of the prompt-on-the-card copies.
-   Never add MXFP4 to `swarmllm_types::Quantization` without a feature bit (an older peer fails to
-   decode a manifest naming a variant it lacks).
+   EVERY call (seconds a token for a MoE) — so **a card build keeps a model holding MXFP4 OFF the card
+   since 2026-11-02** (`CpuReason::WeightFormatNeedsTheProcessor`, from the header through
+   `split::holds_weights_the_card_cannot_read`; the dashboard says why, in all 21 languages). Step 7
+   removes that reason; experts in RAM with attention on the card (`CardSplit::ExpertsInRam` for every
+   layer) is the middle road if step 7 slips, but every placement path (whole-card admission,
+   promotion, growth, guests) would have to ask it. Never add MXFP4 to `swarmllm_types::Quantization`
+   without a feature bit (an older peer fails to decode a manifest naming a variant it lacks).
+   **Steps 2 and 3 in since 2026-11-02**: `ModelArch::GptOss` (hard-refused in `is_supported`, no
+   switch, until steps 4-5), its window (`SlidingWindow::from_file`: 128 on even layers), norm names
+   (`NormNames`: `post_attention_norm` before the experts), routing (softmax over the top 4, as
+   Gemma 4's), YaRN on windowed layers too (`LayerRope::read`'s default arm — no change), NEOX; its
+   activation `Activation::SwigluOai` (`fast_math::swiglu_oai_mul{,_into}`) on all three paths (dense
+   gated, `gated()`, the processor's `act_mul`), llama.cpp's own op's bits on inputs past both clamps
+   (`examples/swiglu_oai_reference.c`), the card's composition the same expression in candle ops. An
+   MXFP4 expert layer runs on the processor within its 8-bit rounding of the exact answer
+   (`an_mxfp4_expert_layer_runs_on_the_processor`). Next: step 4 (biases).
 3. **`glm4moe` — GLM-4.5-Air 106B-A12B** (UD-Q4_K_XL 67.7 GB: three or four cards; ~46K).
    **Loader in since 2026-11-02, refused until a real file is checked**: the selection bias is a
    REQUIRED argument of both routers (`MoeFfn::selection_bias`), `expert_weights_scale` folds into

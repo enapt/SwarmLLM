@@ -114,8 +114,12 @@ so its files were refused as unreadable. It reads them now, and on fixed test da
 own answers bit for bit. gpt-oss itself stays off until the rest of the model is built — its
 attention, its choice of experts and its activation each differ from the families here — and its
 replies are checked against llama.cpp; until then its files are refused as a family this build does
-not run. Files of other models that keep a few weights in MXFP4, such as unsloth's
-Qwen3-Coder-Next, now read too. (#390)
+not run. Files of other models that keep weights in MXFP4, such as unsloth's `MXFP4_MOE` uploads,
+now read too. **On a computer with a graphics card such a model runs on the processor for now**, and
+the dashboard says why: the card has no code for the format yet, and running it there would take
+seconds a token. gpt-oss's activation (a clamped SwiGLU) is built too, giving llama.cpp's own answers
+bit for bit, and the family is known by name with its window and norms read as llama.cpp reads them.
+(#390)
 
 ## [0.3.267-alpha] — 2026-11-01
 

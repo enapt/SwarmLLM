@@ -469,7 +469,9 @@ struct StandardFfn {
 /// `post_attention_layernorm`, kept by the converter; llama.cpp `glm4-moe.cpp`
 /// reads it as `attn_post_norm` on `ffn_inp`), the name Gemma 2-4 and GLM-4
 /// give a SANDWICH norm on the attention's OUTPUT. Read the generic way, the
-/// file has no `ffn_norm` and its pre-norm lands after attention.
+/// file has no `ffn_norm` and its pre-norm lands after attention. gpt-oss
+/// names it the same way (`openai-moe.cpp`: `attn_post_norm` on `ffn_inp`,
+/// then the experts; its files carry no `ffn_norm`).
 #[derive(Clone, Copy)]
 struct NormNames {
     /// The norm the feed-forward's input is read through.
@@ -482,7 +484,7 @@ struct NormNames {
 impl NormNames {
     fn of(arch: &ModelArch) -> Self {
         match arch {
-            ModelArch::Glm4Moe => Self {
+            ModelArch::Glm4Moe | ModelArch::GptOss => Self {
                 ffn: "post_attention_norm",
                 sandwich: false,
             },
@@ -1204,11 +1206,15 @@ impl SplitModel {
                 weight_before_ffn: true,
                 weights_scale: 1.0,
             }
-        } else if matches!(model_arch, ModelArch::Gemma4) {
+        } else if matches!(model_arch, ModelArch::Gemma4 | ModelArch::GptOss) {
             // Gemma 4's graph reads no routing key either: softmax over every
             // expert, the top k renormalized (`norm_w = true`), weights on the
             // output (`models/gemma4.cpp`, master read 2026-10-16) — what
-            // softmax over the k picks computes (`topk_host`).
+            // softmax over the k picks computes (`topk_host`). gpt-oss's
+            // computes the same weights another way: the top k of the raw
+            // logits, softmax over those k (`SOFTMAX_WEIGHT`, `norm_w =
+            // false`; `models/openai-moe.cpp`, master read 2026-11-02), and
+            // reads no `expert_weights_scale`.
             MoeRoutingConfig {
                 gating_func: MoeGatingFunc::Softmax,
                 renormalize_weights: true,
@@ -3787,6 +3793,121 @@ mod expert_stack_tests {
         assert!(moe.shared_gate.is_none() && moe.shared_gate_inp.is_none());
         let x = Tensor::ones((1, 5, hidden), candle_core::DType::F32, &Device::Cpu).unwrap();
         assert_eq!(moe.forward(&x).unwrap().dims(), &[1, 5, hidden]);
+    }
+
+    /// An MXFP4 expert stack (unsloth's `MXFP4_MOE` files, gpt-oss) loads as
+    /// MXFP4 experts, never dequantized, and the processor multiplies them —
+    /// one token and a prompt's 40, gpt-oss's activation — to the exact
+    /// answer within the processor's 8-bit rounding of the activation
+    /// (`mxfp4_tests` pins the products themselves to llama.cpp's bits). A
+    /// misread block is off by the answer's own size.
+    #[test]
+    fn an_mxfp4_expert_layer_runs_on_the_processor() {
+        use super::MoeFfn;
+        use crate::inference::layers::{ExpertFfn, QMatMul};
+        let (n, hidden, inter) = (8, 64, 96);
+        // splitmix64 into [-0.5, 0.5): hashed, so a misread lane cannot cancel.
+        let hashed = |count: usize, salt: u64| -> Vec<f32> {
+            (0..count as u64)
+                .map(|i| {
+                    let mut z = (i ^ (salt << 32)).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+                    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+                    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+                    ((z ^ (z >> 31)) >> 40) as f32 / (1u64 << 24) as f32 - 0.5
+                })
+                .collect()
+        };
+        let q = |shape: (usize, usize, usize), salt: u64| {
+            let v = hashed(shape.0 * shape.1 * shape.2, salt);
+            QTensor::quantize(
+                &Tensor::from_vec(v, shape, &Device::Cpu).unwrap(),
+                GgmlDType::Mxfp4,
+            )
+            .unwrap()
+        };
+        let router = Tensor::from_vec(hashed(n * hidden, 1), (n, hidden), &Device::Cpu).unwrap();
+        let router = QTensor::quantize(&router, GgmlDType::F32).unwrap();
+        let (ct, mut reader) = written(&[
+            ("blk.0.ffn_gate_inp.weight", &router),
+            ("blk.0.ffn_gate_exps.weight", &q((n, inter, hidden), 2)),
+            ("blk.0.ffn_up_exps.weight", &q((n, inter, hidden), 3)),
+            ("blk.0.ffn_down_exps.weight", &q((n, hidden, inter), 4)),
+        ]);
+        // The pool keeps such a model off a card (`CpuReason::
+        // WeightFormatNeedsTheProcessor`); the Q8_0 stacks above it are not.
+        assert!(crate::inference::split::holds_weights_the_card_cannot_read(
+            &ct
+        ));
+        assert!(
+            !crate::inference::split::holds_weights_the_card_cannot_read(&moe_gguf(2, 64, 32).0)
+        );
+        let moe = load_moe_ffn(
+            &ct,
+            &mut reader,
+            "blk.0",
+            &placed_on(Device::Cpu, 0),
+            0,
+            4,
+            MoeRoutingConfig::default(),
+            Activation::SwigluOai,
+        )
+        .unwrap();
+        for e in &moe.experts {
+            for m in [&e.gate, &e.up, &e.down] {
+                assert_eq!(
+                    m.quantized_weight().map(|w| w.dtype()),
+                    Some(GgmlDType::Mxfp4),
+                    "an expert matrix was dequantized"
+                );
+            }
+        }
+        // The same layer with every expert dequantized to f32.
+        let exact = MoeFfn {
+            experts: moe
+                .experts
+                .iter()
+                .map(|e| {
+                    let f = |w: &QMatMul| {
+                        let d = w
+                            .quantized_weight()
+                            .unwrap()
+                            .dequantize(&Device::Cpu)
+                            .unwrap();
+                        QMatMul::from_qtensor(QTensor::quantize(&d, GgmlDType::F32).unwrap())
+                            .unwrap()
+                    };
+                    ExpertFfn {
+                        gate: f(&e.gate),
+                        up: f(&e.up),
+                        down: f(&e.down),
+                    }
+                })
+                .collect(),
+            ..moe.clone()
+        };
+        let largest = |t: &Tensor| {
+            t.abs()
+                .unwrap()
+                .max_all()
+                .unwrap()
+                .to_scalar::<f32>()
+                .unwrap()
+        };
+        for tokens in [1usize, 5, 40] {
+            let x = Tensor::from_vec(
+                hashed(tokens * hidden, 5),
+                (1, tokens, hidden),
+                &Device::Cpu,
+            )
+            .unwrap();
+            let got = moe.forward(&x).unwrap();
+            let want = exact.forward(&x).unwrap();
+            let gap = largest(&(&got - &want).unwrap()) / largest(&want);
+            assert!(
+                gap < 2e-2,
+                "{tokens} tokens: {gap} of the largest output off the exact answer"
+            );
+        }
     }
 }
 

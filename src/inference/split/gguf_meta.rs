@@ -372,6 +372,10 @@ impl SlidingWindow {
         let (default_size, period) = match arch.as_str() {
             "gemma2" => (4096, 2),
             "gemma3" | "gemma4" => (0, 6),
+            // gpt-oss: `load_swa_pattern(ml, 2)`, the even layers windowed
+            // (`openai-moe.cpp`). llama.cpp requires the window's key; 128 is
+            // the only figure gpt-oss ships with.
+            "gpt-oss" => (128, 2),
             _ => return None,
         };
         let size = ct
@@ -722,6 +726,20 @@ pub(crate) fn kv_sources(ct: &gguf_file::Content) -> Vec<Option<usize>> {
             })
         })
         .collect()
+}
+
+/// Whether a file holds a weight this build's card kernels cannot read: MXFP4
+/// (type 39 — unsloth's `MXFP4_MOE` uploads, gpt-oss). The vendored candle
+/// multiplies it on the processor (`BlockMxfp4`, llama.cpp's bits) and on a
+/// card only by dequantizing it in HOST memory for every product
+/// (`QCudaStorage::dequantize`'s fallback), so a model holding one is kept
+/// off the card (`process_pool::CpuReason::WeightFormatNeedsTheProcessor`)
+/// until a card kernel reads it (#390 item 2, step 7).
+#[cfg(any(feature = "candle-cuda", test))]
+pub(crate) fn holds_weights_the_card_cannot_read(ct: &gguf_file::Content) -> bool {
+    ct.tensor_infos
+        .values()
+        .any(|t| t.ggml_dtype == candle_core::quantized::GgmlDType::Mxfp4)
 }
 
 /// The bytes of layers `[start, end)`'s routed expert stacks
@@ -2379,6 +2397,23 @@ pub(super) mod sliding_window_tests {
 
         let unnamed = SlidingWindow::read(&header("gemma2", vec![])).unwrap();
         assert_eq!(unnamed.size, 4096, "the family default");
+    }
+
+    /// gpt-oss as llama.cpp reads it (`openai-moe.cpp`: `load_swa_pattern(ml,
+    /// 2)`): the file's window, 128 on the real 20B, on every EVEN layer.
+    #[test]
+    fn gpt_oss_windows_its_even_layers() {
+        let w = SlidingWindow::read(&header(
+            "gpt-oss",
+            vec![(
+                "gpt-oss.attention.sliding_window",
+                gguf_file::Value::U32(128),
+            )],
+        ))
+        .expect("gpt-oss has a window");
+        assert_eq!(w.size, 128);
+        assert_eq!(windowed_layers(&w, 24).len(), 12);
+        assert_eq!(windowed_layers(&w, 5), vec![0, 2, 4]);
     }
 
     /// The pattern key wins over the family's period: an integer is a period
