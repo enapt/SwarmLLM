@@ -834,7 +834,8 @@ reply is easy to guess. Prose is held by how often the drafter's guesses land (�
 is held by the drafter's first-choice rate), so the next prose gains are better guesses, not
 shorter trips. The open question for users is whether they GET this shape: a head with the even
 share, a drafter on its card, and, when the head holds both ends, the flow (since #369, within
-~1.1-1.2x of the default shape's).
+~1.1-1.2x of the default shape's; LEVEL with it since 2026-11-01's dead wait — `shape1101`, ABBA × 3,
+one binary: prose 6.69 against 6.88 tok/s, code 18.52 against 17.20).
 
 ## 10. The head's own work binds a split that starts and finishes here (2026-10-30)
 

@@ -34,7 +34,8 @@ dropped where the guesses are cut back anyway. It was built on 2026-10-30 and le
 found it no faster; that test's own records show its two runs fell inside a slow spell on the far
 computer that hit the old behaviour just as hard. Measured again with the runs interleaved
 (Thailand–Australia, Qwen2.5-14B, 12 runs): ordinary writing 17% faster (8.2 against 7.0 tokens a
-second), code unchanged (#369).
+second), code unchanged (#369). This shape now runs as fast as the usual one at the same split (12
+interleaved runs: 6.7 against 6.9 tokens a second on writing, 18.5 against 17.2 on code).
 
 ## [0.3.266-alpha] — 2026-11-01
 

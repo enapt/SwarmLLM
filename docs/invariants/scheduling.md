@@ -5447,7 +5447,10 @@ round costs one per check.
   beside it in every pair; code level (17.81 against 18.01); 108-138 dead answers waited a prose
   reply, this node's own time 3.6 against 5.2 s; scored against llama.cpp, as faithful as the old
   arms (prose 150-156 of 160 first choices against 150-154, code 157 of 160, every other token a
-  near-tie, gap ≤ 0.40 logits). **Two arms run back to back are one sample of the
+  near-tie, gap ≤ 0.40 logits). Against the default shape at the same split (`shape1101`, ABBA × 3,
+  this machine 25 of 48 layers against 24, the dead wait on): prose 6.69 tok/s against 6.88 (7.17
+  without one reply's 37 s spell on the far), code 18.52 against 17.20 — level, where v0.3.261 was
+  ~1.1-1.2x behind. **Two arms run back to back are one sample of the
   link, not two** — interleave, or a slow stretch reads as the change.
 
 **Measured.** *Correctness, on the processor* (2026-10-22, `flow318.sh CPU=1 LEN=64`, a 557-token

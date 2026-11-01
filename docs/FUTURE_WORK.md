@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #388**). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #389**). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -69,17 +69,13 @@ the top track (`docs/plans/large_model_splits.md`).
    far peers instead of answering locally. Its causes closed in v0.3.236 and v0.3.239; left: the
    prompt priced on the processor prior for a card/processor split, and a far hop priced at
    `net:0` (with #3). Passive: the next evidence is a field `predicted_terms` line.
-6. **#369** — "Start and finish on this computer" runs AUTOMATICALLY wherever a node holds both
-   ends of a model, and flows since v0.3.261, but ~1.1x behind the default shape at the same split
-   on prose (~1.2x on code, inside the default shape's own spread); v0.3.264's batched tail added
-   6% on prose, and the dead wait (ON since 2026-11-01) +17% more on prose, code level. **Next**:
-   the flow's guard takes the far's own delay for the link's queue (one prose reply in six, 11-01,
-   cut to 2 rows a level) — the far reports its time from receipt to answer, the guard reads the rest.
-   The drafter's call is NOT host-bound (measured 2026-11-01, `faster_than_local.md` § 10 item 10):
-   a level is the card's own time, at llama.cpp's speed for the same 8-row forward; replaying a
-   level without recording would save at most ~0.35 ms of ~4.5 (0.5B), ~0.1 of ~11.7 (3B).
-
-**P2 — speed and completeness**, ranked by how many users meet it in their first hour
+6. **#388** — the flow's guard takes a far computer's own delay for a queue on the link and
+   narrows a tree that cannot shorten it: neutral on a calm link, but the slowest reply of two
+   12-arm runs on 2026-11-01 (prose 4.26 and 5.95 tok/s) was each a far slow on its own, cut to 2
+   rows a level — and a far shared with other users is the swarm's normal case. **Next**: the far
+   reports its time from receipt to answer (a feature-gated answer field), the guard reads the
+   rest. (#369 CLOSED 2026-11-01: "Start and finish on this computer" is level with the default
+   shape at the same split.)
 7. **#318** — a model no single member can hold, at a usable speed. **Llama-3.3-70B on two
    machines — this one (8 GB card + processor) and an RTX 3060 in Australia (~420 ms) — reads
    2.37-2.61 tok/s on new questions (v0.3.264, 2026-10-31 04Z) and 1.81-2.22 (v0.3.265, 12Z, the
@@ -1729,11 +1725,27 @@ dip is the margin less that growth. **Tried and NOT adopted**: sizing the chunk 
 quarter for fragments (`with_pool_fragments` for both, A/B `SWARMLLM_PROMPT_CHUNK_FRAGMENTS=0`,
 `~/swarmllm-gate/deep/cg/ab367f.sh`, one CUDA build, fix/bare/fix/bare): the first pair favoured it
 (medians 5.2 vs 6.8 s, deepest 260 vs 100 MB), the second the other way (6.4 vs 4.3 s, deepest 103
-vs 167 MB) — the growth does not scale with the chunk. **Next**, in order: (1) the hold should not
-hand back what the very next forward takes again — keep the last prompt forward's growth in the
-pool while a conversation is live (`WorkerHandle::in_use`), trimming only creep; (2) on WSL2, a
-margin that covers one forward's growth (≥ ~600 MB on 8 GB: the dips bottomed at margin − growth);
-(3) learn the growth per worker and charge it in `prompt_room_tokens`. Judge any of them by the
+vs 167 MB) — the growth does not scale with the chunk. **Researched 2026-11-01 — the cause is ONE
+pool serving two lifetimes, and the fix is two pools.** The cache's buffers are allocated INSIDE the
+prompt forward (`SeqCache::append` → `Tensor::zeros`, one per layer at the admitted length, a
+`Tensor::cat` per growth step), between that forward's transients, so its freed transients leave
+holes around live cache buffers that `cuMemPoolTrimTo` cannot release and the next forward cannot
+use. How others avoid it: llama.cpp allocates the cache and weights as their own backend buffers and
+reserves the graph's scratch once (`ggml_gallocr_reserve`; `ggml_cuda_pool_vmm` is a LIFO bump
+allocator over a reserved virtual range that never unmaps while serving); vLLM profiles the peak
+forward once and allocates the cache in one block, never trimming while serving
+(`gpu_worker.py::determine_available_memory`); onnxruntime's BFC arena and PyTorch's
+`garbage_collection_threshold` free only regions with no live chunk — the limit hit here. PyTorch's
+`cudaMallocAsync` backend shares this pool's limit. ⚠ The queue's former first candidate — keep the
+last forward's growth — is the creep #385 ended (margin off: 6,112 → 6,784 MB in 20 min, peak use
+flat): the regrowth IS fragmentation. **Next**: (1) allocate the cache's buffers (and a card-held
+saved prompt's) from a second pool on the device (`cuMemAllocFromPoolAsync` behind a scoped override
+in the vendored candle allocator; cudarc's free already returns a block to its own pool), so the
+forward pool holds transients only and its high-water mark is one forward's working set — kept, not
+trimmed, and charged in the budget as the forward's own; the margin hold then trims only what a
+finished conversation's cache let go. Verify the mechanism first: per pool, reserved and live after
+each forward. (2) Fallback, on WSL2: a margin that covers one forward's growth (≥ ~600 MB on 8 GB: the
+dips bottomed at margin − growth), at the price of a layer on the card. Judge either by the
 hand-back count and the deepest driver free per arm (the `ab367f` summary), never by first tokens
 alone — the second pair loaded 16 layers instead of 15 (`load_reads_free_mb` 5,205 vs 5,161) and
 ran fastest of all where it did not dip (3.6-4.1 s).
@@ -1750,149 +1762,36 @@ the last one — an agent's next turn — waits for it: those arms' first token 
 the card's device-to-host read) at both speeds; whether freed snapshots' host buffers are reused or
 the copy faults fresh pages (an allocation of 569 MB under WSL2 is 146K first touches).
 
-#### #369 — A chain that starts and finishes here flows now, but ran ~1.1-1.2x behind the default shape at the same split (v0.3.261; the batched tail since)
-`P1` · perf-split · **NARROWED** — 2026-10-30 · evidence: `docs/plans/faster_than_local.md` § "Measured on the real link, 2026-10-29"
+#### #388 — The flow's guard takes a far computer's own delay for a queue on the link, and narrows a tree that cannot shorten it
+`P2` · perf-split · **OPEN** — 2026-11-01 · evidence: `docs/invariants/scheduling.md` § "On the real link the guard is neutral, and its one cost is the far's own delay"; history: #369 (closed 2026-11-01, archive § "#369")
 
-**Done 2026-10-29:** a chain that starts and finishes here (the boomerang — "Start and finish on
-this computer", AUTOMATIC wherever this node holds both ends) flows. The peers are sent hidden
-states and the tree's shape only and answer hidden states; this node's layers after theirs run
-each answer in the order its forward was SENT (`dsd_flow::TurnOrder` — the worker refuses rows
-that do not continue its cache) and the last of them draws every row (`FlowRun::finish_here`).
-No peer change, nothing new leaves this node. A/B `SWARMLLM_FLOW_FINISH_HERE=0` (the tree rounds).
-Measured in ONE binary on the real link (TH↔AU ~420 ms, Qwen2.5-14B Q4_K_M, the 0.5B Q8_0 drafter
-on this card, this machine 25 of 48 layers on its 8 GB card, a swarm peer's RTX 3060 the middle;
-`~/swarmllm-gate/deep/fr/real_link.sh`, TAG=finishhere, arms rounds/flow/default/flow/rounds/default,
-160 greedy tokens, Windows up 22.2-22.4 h): **tree rounds 5.74 / 6.99 tok/s prose, 15.03 / 15.52
-code; the flow finishing here 7.44 / 7.80 and 17.31 / 18.88 (~1.2x); the default shape at the
-same split 10.18 / 8.53 and 22.33 / 21.90.** Every reply of every arm scored against llama.cpp
-(`score_against_reference.py`): each token rank 1 but for rank-2/3 near-ties (the flow finishing
-here 150-157 of 160 rank 1, largest gap 0.39; the rounds 152-157, 0.36; the default shape
-151-158, 0.22) — the draws made here are the model's. A forced failure
-(`SWARMLLM_FAULT_FLOW_FAIL=60`, second run) handed over to the rounds mid-reply on both replies
-(prose at 31 tokens, code at 113) and both finished; scored the same way, 154 and 157 of 160
-rank 1, worst rank 2, largest gap 0.26 / 0.06 — the take-over cut is one every cache holds.
-The second run's other replies: 149-157 rank 1, worst rank 4 (gap 0.36).
+`FlowGuard` (LEDBAT++'s window in rows, `dsd_flow.rs`) narrows a flowing tree's rows a level
+(8 → 2), then its live budget (128 → 32), when the least of the last 4 answer delays sits 60 ms
+over the least seen. It cannot tell a queue on the link — which fewer rows shorten (a 5 Mbit
+uplink: 7.44 tok/s with it against 4.73) — from the far computer's own delay, which they do not.
+Measured on TH↔AU (Qwen2.5-14B, the 0.5B drafter, release v0.3.266 binary, ABBA × 3 a rig):
+neutral on a calm link (`guard1101`: prose 7.99 tok/s off against 7.66 on, 8.00 without its one
+slow reply; code level), and in the replies where the far turned slow on its own it cut hard and
+the reply was its run's slowest — `guard1101` arm 8 (the far slow 12 s after its receipt ACK, 5
+cuts to 2 rows a level, misses 34 against 20-27, 5.95 tok/s) and `shape1101` arm 1 (37 s slow,
+462 ms a forward over the least after the receipt, 17 cuts to 2×32, prose 4.26 against 6.6-7.5).
+On 10-30, forwards cut 130 → 33 KB left the far's spikes as long (gotcha #193). A far shared with
+other users — the swarm's normal case — is slow on its own whenever they are busy, and a cut is
+kept 10 min per (model, machines).
+**Next**: Swift's split (Kumar et al., SIGCOMM 2020: a fabric window and an endpoint window).
+(1) The far reports its time from receipt to answer sent on each answer — a new `LayerResult`
+field sent only to a requester advertising a new `features` bit; from an older far the guard
+reads the whole delay, as now. The receipt ACK alone cannot split it: quinn round-robins streams
+of one priority (`send_fairness`, on by default), so a small receipt passes answer bytes queued in
+quinn's send buffer on the far's uplink. (2) The guard reads the delay less the far's time; the
+far's time gets its own window, which cuts only where a cut shortens it (the far saturated by OUR
+rows — 12 of 48 here, 18-39 ms a row — is; outside load is not). Rig: the netns rig's far half
+sharing its card with a second request is the outside-load arm; `real_link.sh` guard on/off arms
+show whether the real link's spells still cut.
 
-**What is left — the default shape is still a little faster at the same split: ~1.1x on prose,
-~1.2x on code, over two runs.** A second run (TAG=leaf369, one binary, arms
-flow/default/fault/flow/default, Windows up 22.6-22.7 h): the flow finishing here 7.52 / 8.28
-prose, 18.49 / 20.06 code; the default shape 8.05 / 7.74 and 19.41 / 27.88 — prose level, and the
-default shape's own code spread (19.4-29.9 across the day) is wider than the gap. The first run's
-reading that this shape MISSES twice as often was run-to-run variation: the default shape's prose
-misses went from 9-14 to 17 while this shape's stayed 18-20 (code 2-4 against 0-2). In both shapes
-most misses are wrong guesses — the walk outran the tree (`misses_at_a_leaf`) at most 5 times a
-reply in either. What differs: this node's last layers cost ~21 ms a forward (5.2-5.7 s of a
-~21 s prose reply, 2.2-2.4 s on code), awaited inside the flow's loop and run serially with the
-drafter on one card (two processes on one card time-slice, gotcha #759), and this shape sent
-fewer forwards (252-261 a prose reply against 292-322). A third sample kept the gap (TAG=rounds369,
-Windows up 23.9 h: 7.71 / 17.1 against 9.16 / 20.98; over three runs ~1.13x prose, ~1.22x code).
-Running those layers beside the drafting puts two processes on one card, which time-slice and
-measured a LOSS (gotcha #759, `arch-scheduling.md` § "A tree flows").
-
-**Research 2026-10-30 — the one lever left is a batched tail (tested below: it survives).** No engine overlaps a
-drafter's kernels with its target's on one card (vLLM's `draft_model_runner`, TensorRT-LLM's
-separate graphs, llama.cpp's two contexts on one thread all run them in turn), and the one paper
-that tried co-location reports a slowdown ("resource competitions", PEARL arXiv 2408.11850 § 4.5,
-which then puts them on separate devices; DuoDecoding 2503.00784 and SwiftSpec split the hardware
-too). Batch-1 decode streams weights and is bandwidth-bound, so two streams in ONE process (candle's
-`CudaDevice::new` already gives each device its own stream on the shared primary context) would
-mostly contend for the same ~448 GB/s; untested, and it needs the drafter and the tail in one
-process. What the code allows instead: `FlowRun::take` drains every answer that is due, but
-`finish_here` runs ONE tail forward per answer, each reading this node's layers' weights again
-(~21 ms). Answers that arrive back to back could share one forward — a few more rows cost little,
-the reason a check pays at all. Trap: each answer carries its own tree layout
-(`draft_parents`, `draft_tree_from`, `index_pos`, a rebase's `truncate`), so one forward must carry
-their rows in sent order with a combined layout, and the first answer waits for nothing that has
-not already arrived. Test before building: log how many answers are due per drain on the real link
-— a median of 1 means there is nothing to batch and the idea is dead. Then one binary, an env
-switch, min-of-5, passing only if the tail's 5.2-5.7 s a prose reply drops. Skipping the tail for
-an answer from before a rebase is NOT a lever: the tail runs it so its cache holds the rows the
-peers' does (the comment at `take_answer`'s `finish_here` call).
-
-**The test, run 2026-10-30 on the 10-29 rig logs — the median says "dead", the bursts say
-otherwise.** No new run: the three runs above logged at debug, which carries each far answer's
-arrival (`Received tensor LayerResult`) and each tail forward (the worker forward whose
-`SplitModel forward pass complete` line reads `is_first=false is_last=true`; the near forwards and
-the 0.5B drafter's are told apart by `num_layers`). Counted for every tail forward: answers already
-arrived and not yet run (`~/swarmllm-gate/deep/fr/due_per_tail.py <measured_*.log>`; a request's
-window opens 1 s before its first tail, so answers still in flight from the previous reply are not
-counted). Ten replies (finishhere arms 2/4, leaf369 1/4, rounds369 1; tail forward median
-20.3-22.3 ms): **the median tail forward has NOTHING waiting** (0 in nine replies, 1 in one), so
-the pre-set test reads dead. But the waiting comes in BURSTS: prose 20-49% of tail forwards had
-one or more answers waiting (mean 0.4-2.0, up to 17), code 31-59% (mean 1.1-3.0, up to 18).
-Replayed at the observed start times, one forward taking every answer already arrived would run
-143-233 tail forwards where 245-281 ran on prose (16-42% fewer) and 53-82 where 99-111 ran on
-code (26-52% fewer). At ~21 ms each that is a first-order ceiling of 0.9-2.1 s of a 19-22 s prose
-reply (4-11%) and 0.6-1.2 s of an 8-9.4 s code one (7-15%), against this shape's gap of ~13% /
-~22%. The ceiling ignores the bigger forward's cost (small: the tail is bound by submissions, not
-rows, which is why a prompt forward of 56 rows takes 26 ms) and that freed time moves later
-arrivals. **So the lever survives, worth up to about half the gap.** Build it behind an env switch,
-never across a rebase's `truncate` (the combined rows must continue one cache, in sent order), and
-pass it only on min-of-5 in one binary where the tail's 5.1-5.9 s a prose reply drops.
-
-**Built and measured 2026-10-30 — ON** (`dsd_flow::tail_join_on`, `FlowRun::due_together` +
-`tensor_util::join_positions`; A/B `SWARMLLM_FLOW_TAIL_JOIN=0`). Rig `tailjoin1030` (one binary,
-TH↔AU, the 0.5B Q8_0 drafter, far [12,35) for every arm, three arms each interleaved; the link
-DEGRADED through the run — the old arm's own prose went 6.88 → 5.89 → 3.90): the tail's time fell
-25-30% (4.0-4.5 s a prose reply against 5.4-6.6; 117-151 answers read in 31-36 forwards), and every
-joined arm beat the old arm beside it — prose 7.80 / 7.27 / 5.40 tok/s against 6.88 / 5.89 / 3.90,
-code 19.39 / 18.34 / 13.44 against 17.46 / 12.68 / 9.77; the mechanism fired on every reply. On a
-CALM link the same evening (rig `tail1030b`, five arms each, ABBA): prose 8.17 tok/s mean
-(7.50-8.86) against 7.69 (7.00-8.16), +6%; code level (`docs/invariants/scheduling.md`).
-
-**ON since 2026-11-01 — an answer the walk can no longer reach waits to be read with the next**
-(`dead_wait_on`, A/B `SWARMLLM_FLOW_DEAD_WAIT=0`). On 10-30 it cut the tail a further ~35% and the
-replies were no faster, with the forwards queued 630-923 ms over the least; the written cause was
-"the freed sends leave in a burst the transport paces out". **Re-read 2026-11-01 from those logs
-(debug carries each forward's send and its round trip cut at the far's receipt ACK) — REFUTED**:
-0 of ~2,400 forwards left within 5 ms of the one before (median gap 22-31 ms, a drafter call);
-65-80% of the delay over the least sat AFTER the far's receipt; our forwards kept the far busy only
-20-36% of the time; the far's delay came in 2-4 s spikes of 300-600 ms that narrowing the forwards
-130 → 33 KB did not shorten; and the spikes hit the OLD arm as hard (147 against 138 ms a forward)
-— the two dead-wait arms had run back to back inside one. Scripts: `split_by_side.py`,
-`far_load.py`, `episodes.py`, `arm_compare.py` beside the rig in `~/swarmllm-gate/deep/fr/`.
-**Re-measured `deadwait1101`** (release v0.3.266 binary, TH↔AU, ABBA × 3, 02:24-02:45Z): prose
-**8.16 tok/s mean (7.46-8.67, n 6) against 6.98 (6.07-7.64, n 5), +17%**, the dead wait ahead of the
-arm beside it in every pair; code level (17.81 against 18.01); this node's own time a prose reply
-3.6 against 5.2 s, 108-138 dead answers waited per reply (the mechanism fired). Scored against
-llama.cpp (`score369.sh deadwait1101`): as faithful as the old arms — prose 150-156 of 160 tokens
-its first choice against 150-154, code 157 of 160 in every dead-wait reply, every other token a
-near-tie (gap ≤ 0.40 logits) in both. One default arm
-fell out — it started before the peer's round trip was measured and guessing went off for the
-reply (gotcha #1008, fixed the same day: `dsd_controller::CheckReach`).
-
-**The guard on the real link** (`guard1101`, the same binary and sitting, dead wait on in both,
-ABBA × 3, A/B `SWARMLLM_FLOW_GUARD=0`): prose 7.99 tok/s mean (7.58-8.31) off against 7.66
-(5.95-8.63) on, code level (17.99 against 18.36); without its one slow reply the guard-on prose is
-8.00 — neutral on a calm link, and kept (5 Mbit uplink: 7.44 against 4.73). That reply: the far
-slow for 12 s after its receipt ACK, the guard cut 5 times to 2 rows a level, misses 34 against
-20-27. **Next for the guard**: tell the link's queue from the far's own (Swift's fabric and
-endpoint windows, `docs/invariants/scheduling.md` § "On the real link the guard is neutral") —
-the far reports its time from receipt to answer sent, a new answer field gated on a feature bit,
-and the guard reads only what is left.
-
-**Also open here:** (b) the flow's speed depends on the load split — with this machine holding 12
-of 48 layers the peer (36 layers + the 152k-vocab head) saturated (queue up to 2.2 s, 18-39 ms a
-row) and the flow ran 7.8-8.4 / 3.2-3.4 tok/s. **Narrowed 2026-10-29: the planner could not see a
-flow's speed at all.** It prices a split by the tokens a round its model's splits yielded
-(#3 (d)), and the flow counted every FORWARD a round: 0.44-0.63 tokens a round on prose, floored
-to 1, so the even split's 7-9 tok/s was priced at ~2 and a split never beat running here; being
-per model, one flow also dragged the model's tree-round figure from ~4 to 1.7. The flow and the
-stream now count the round trips they waited (`split_rounds::round_trips_waited`: decode over
-least answer — 3.2-4.3 prose and 7.7-10.3 code at the even split, 1.6-1.8 and 4.3-4.4 saturated;
-`docs/invariants/scheduling.md` § "A split is priced for the rounds it takes"). **Which split
-point users get (read 2026-10-29, code only):** none, for this pair — a machine that can run the
-model whole plans no chain (`near_chain::compute_near_chain` → `OneRunsItWhole`), and a 12 GB
-card holds the 14B, so it is handed over whole; the 29.6 is the rig's pinned shape, not a
-placement. Where a chain IS planned, `plan_chain` fills each machine to its ceiling in turn
-(Petals' rule; ties go to the furthest end) and the router offers only held ranges
-(`partial_ranges` off), so balance is never chosen; the router's per-model figure scales every
-split segment alike (`rounds_entered`), so it decides split-or-not, never where. Summing the
-segments is right for rounds and the stream, and for a flow until one side saturates — the only
-saturated case measured (36 layers + head on the far card) is not one placement builds here. Left:
-a balance term for a cards-only chain whose reply flows, once a placement that saturates one side
-is seen on a real chain (a model needing about one and a half cards, planned over three, is the
-shape with room to spare).
+**Also** (moved from #369 (b), passive): a balance term for a cards-only chain whose reply flows,
+once a placement that saturates one side is seen on a real chain — today `plan_chain` fills each
+machine to its ceiling in turn, and a flow is priced by `split_rounds::round_trips_waited` (#3 (d)).
 
 #### #357 — A card's first graph of a new shape, late in a worker's life, can stall one forward 10-59 s
 `P3` · perf-local · **OPEN** — 2026-10-26 · evidence: `faster_than_local.md` § 8.6; gotcha #883
@@ -4124,6 +4023,15 @@ archive under the named heading. Reopen one only with the evidence its line name
 Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 19-28 were
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
+
+**Closed 2026-11-01, ships in the next release** (#369)
+- #369 — **"Start and finish on this computer" caught up with the default split.** v0.3.261 made
+  it flow, ~1.1-1.2x behind the default shape at the same split; v0.3.264's batched tail (+6% on
+  prose) and 2026-11-01's dead wait (+17% on prose, `dsd_flow::dead_wait_on`) closed the gap.
+  Measured ABBA × 3 in one binary on TH↔AU (`shape1101`, this machine 25 of 48 layers against 24):
+  prose 6.69 tok/s (7.17 without one reply's 37 s spell on the far) against 6.88 for the default
+  shape, code 18.52 against 17.20. Left: the flow's guard (#388). The entry as it stood: archive
+  § "#369".
 
 **Closed 2026-10-31, ships in the next release** (#384, #385, #386, #387 — one field report, "shared vs
 alone, sustained", v0.3.262)
