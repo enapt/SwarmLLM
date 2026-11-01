@@ -131,8 +131,9 @@ pub struct PopularSnapshot {
     /// Unix seconds of the read (0 = never).
     pub fetched_at: i64,
     /// Files this build cannot hold (`NotRegistered::PassOver`), never picked
-    /// again — the next upload of the base is. Carried from read to read and
-    /// across restarts, at most `MOST_PASSED_OVER`, the oldest dropped first.
+    /// again by this build — the next upload of the base is. Carried from read
+    /// to read and across restarts, at most `MOST_PASSED_OVER`, the oldest
+    /// dropped first; another build tries each again (`PassedOver::by`).
     #[serde(default)]
     pub passed_over: Vec<PassedOver>,
 }
@@ -144,6 +145,19 @@ pub struct PopularSnapshot {
 pub struct PassedOver {
     pub repo_id: String,
     pub filename: String,
+    /// The build that passed it over. Only that build skips it: a later one
+    /// may read what this one could not — a family switched on once a real
+    /// file is checked (Qwen3-Coder-Next, #390), a quantization the engine
+    /// learned — and a file kept passed over by an older build's verdict would
+    /// stay unpicked until 64 newer files pushed it out. A record from before
+    /// this field reads as no build's, so it is tried again too.
+    #[serde(default)]
+    pub by: String,
+}
+
+/// The build a [`PassedOver`] verdict holds for.
+fn this_build() -> &'static str {
+    env!("CARGO_PKG_VERSION")
 }
 
 /// Most files [`PopularSnapshot::passed_over`] remembers.
@@ -159,9 +173,13 @@ impl PopularSnapshot {
     /// it at nothing until it is resolved again (`watcher::resolve_upload`).
     pub fn pass_over(&mut self, repo_id: &str, filename: &str) {
         if !self.is_passed_over(repo_id, filename) {
+            // An older build's verdict on the same file gives way to this one.
+            self.passed_over
+                .retain(|p| !(p.repo_id.eq_ignore_ascii_case(repo_id) && p.filename == filename));
             self.passed_over.push(PassedOver {
                 repo_id: repo_id.to_string(),
                 filename: filename.to_string(),
+                by: this_build().to_string(),
             });
             let excess = self.passed_over.len().saturating_sub(MOST_PASSED_OVER);
             self.passed_over.drain(..excess);
@@ -388,9 +406,9 @@ pub(crate) fn pick_file_of(
 }
 
 fn passed(passed_over: &[PassedOver], repo_id: &str, filename: &str) -> bool {
-    passed_over
-        .iter()
-        .any(|p| p.repo_id.eq_ignore_ascii_case(repo_id) && p.filename == filename)
+    passed_over.iter().any(|p| {
+        p.by == this_build() && p.repo_id.eq_ignore_ascii_case(repo_id) && p.filename == filename
+    })
 }
 
 /// Why a model people run was not registered ([`register_without_parts`]).
@@ -839,6 +857,48 @@ mod tests {
         assert!(
             !s.is_passed_over("unsloth/Qwen3-Coder-Next-GGUF", unreadable),
             "the oldest goes first"
+        );
+    }
+
+    /// A file an older build passed over is tried again by this one — the
+    /// family this build refused may be one the next build runs (#390) — and
+    /// this build's own verdict then replaces the older one.
+    #[test]
+    fn a_file_another_build_passed_over_is_tried_again() {
+        let unreadable = "Qwen3-Coder-Next-Q4_K_M.gguf";
+        let older = PassedOver {
+            repo_id: "unsloth/Qwen3-Coder-Next-GGUF".into(),
+            filename: unreadable.into(),
+            by: "0.3.268-alpha-but-not-this-one".into(),
+        };
+        let stored_before_the_field: PassedOver = serde_json::from_value(serde_json::json!({
+            "repo_id": "bartowski/Qwen3-Coder-Next-GGUF",
+            "filename": unreadable,
+        }))
+        .unwrap();
+        let mut s = PopularSnapshot {
+            passed_over: vec![older, stored_before_the_field],
+            ..Default::default()
+        };
+        assert!(!s.is_passed_over("unsloth/Qwen3-Coder-Next-GGUF", unreadable));
+        assert!(!s.is_passed_over("bartowski/Qwen3-Coder-Next-GGUF", unreadable));
+        assert_eq!(
+            pick_file_of(
+                "unsloth/Qwen3-Coder-Next-GGUF",
+                &[unreadable.to_string()],
+                80_000_000_000,
+                &s.passed_over
+            )
+            .as_deref(),
+            Some(unreadable)
+        );
+
+        s.pass_over("unsloth/Qwen3-Coder-Next-GGUF", unreadable);
+        assert!(s.is_passed_over("unsloth/Qwen3-Coder-Next-GGUF", unreadable));
+        assert_eq!(
+            s.passed_over.len(),
+            2,
+            "this build's verdict replaced the older one"
         );
     }
 

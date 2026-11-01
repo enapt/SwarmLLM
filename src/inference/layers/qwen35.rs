@@ -255,6 +255,48 @@ impl GroupedValueHeads {
                 self.n_k_heads
             )
         }
+        // The head counts and widths are the header's numbers, and every row
+        // list below is sized by them: they must describe the tensors the file
+        // holds before one is built (a size another computer chose is checked
+        // before it sizes anything).
+        let rows_of = |t: &QTensor| t.shape().dims2().map(|(rows, _)| rows);
+        let made = (|| {
+            let keys = self
+                .n_k_heads
+                .checked_mul(self.k_head_dim)?
+                .checked_mul(2)?;
+            let values = self.n_v_heads.checked_mul(self.v_head_dim)?;
+            Some((
+                keys.checked_add(values)?,
+                values,
+                self.n_v_heads.checked_mul(2)?,
+            ))
+        })();
+        let Some((qkv_rows, value_rows, ba_rows)) = made else {
+            candle_core::bail!("the header's head geometry overflows: {self:?}")
+        };
+        let mut checks = vec![("ssm_ba", rows_of(ba)?, ba_rows)];
+        match input {
+            InputProjections::Split { qkv, gate } => {
+                checks.push(("attn_qkv", rows_of(qkv)?, qkv_rows));
+                checks.push(("attn_gate", rows_of(gate)?, value_rows));
+            }
+            // Per key head its q, its k, its group's values and gates.
+            InputProjections::Fused(fused) => {
+                checks.push((
+                    "ssm_in",
+                    rows_of(fused)?,
+                    qkv_rows.saturating_add(value_rows),
+                ));
+            }
+        }
+        for (name, held, wanted) in checks {
+            if held != wanted {
+                candle_core::bail!(
+                    "{name} holds {held} rows where the header's heads make {wanted}"
+                )
+            }
+        }
         let matrix =
             |t: &QTensor, rows: &[usize]| QMatMul::from_qtensor(rows_in_order(t, rows, device)?);
         let (wqkv, wz) = match input {
@@ -1178,6 +1220,63 @@ mod tests {
                 .to_scalar::<f32>()
                 .unwrap();
             assert!(off < 1e-5, "{layout}: {off}");
+        }
+    }
+
+    /// A header whose head counts do not describe the tensors is refused before
+    /// a row list is sized by them — one claiming billions of heads would have
+    /// aborted on the allocation (pre-release review of 0.3.268).
+    #[test]
+    fn a_head_geometry_the_tensors_do_not_hold_is_refused_before_it_sizes_anything() {
+        let device = Device::Cpu;
+        let q = |rows: usize, cols: usize| {
+            QTensor::quantize(
+                &Tensor::zeros((rows, cols), DType::F32, &device).unwrap(),
+                candle_core::quantized::GgmlDType::F32,
+            )
+            .unwrap()
+        };
+        let input = InputProjections::Split {
+            qkv: q(32, 8),
+            gate: q(16, 8),
+        };
+        let ba = q(8, 8);
+        let conv = Tensor::zeros((32, 4), DType::F32, &device).unwrap();
+        let per_head = Tensor::zeros((4,), DType::F32, &device).unwrap();
+        let held = GroupedValueHeads {
+            n_k_heads: 2,
+            n_v_heads: 4,
+            k_head_dim: 4,
+            v_head_dim: 4,
+        };
+        assert!(held
+            .kernel_order(&input, &ba, &conv, &per_head, &per_head, &device)
+            .is_ok());
+        for claimed in [
+            GroupedValueHeads {
+                n_v_heads: 8,
+                ..held
+            },
+            GroupedValueHeads {
+                k_head_dim: 8,
+                ..held
+            },
+            GroupedValueHeads {
+                n_k_heads: 1 << 40,
+                n_v_heads: 1 << 41,
+                k_head_dim: 1 << 40,
+                v_head_dim: 1 << 40,
+            },
+        ] {
+            let err = claimed
+                .kernel_order(&input, &ba, &conv, &per_head, &per_head, &device)
+                .err()
+                .unwrap_or_else(|| panic!("{claimed:?} was taken"))
+                .to_string();
+            assert!(
+                err.contains("where the header's heads make") || err.contains("overflows"),
+                "{claimed:?}: {err}"
+            );
         }
     }
 

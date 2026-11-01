@@ -25,7 +25,7 @@ formats), whatever their name says — unsloth's Qwen3-Coder-Next "Q4_K_M" is on
 the dashboard answered "502 — the cloud provider returned an error, try again", advice that could
 never work; it is now a plain 400 that names the format and the builds to choose instead. The list
 of models people run no longer gets stuck on such a file: it moves to the next upload of the same
-model. (#394)
+model, and a later release, which may read the file, tries it again. (#394)
 
 **Qwen models' tool calls reach your app as tool calls.** Qwen 3.5 and the Qwen models after
 it — and Qwen3-Coder — call a tool in an XML form their own instructions ask for. This server read

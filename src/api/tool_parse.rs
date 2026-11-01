@@ -1894,16 +1894,22 @@ fn try_qwen_xml(text: &str, tools: &RequestTools) -> Option<Vec<ParsedToolCall>>
             break;
         };
         let body = &body_and_rest[..close];
-        rest = &body_and_rest[close + CLOSE.len()..];
-        if name.is_empty()
+        let arguments = if name.is_empty()
             || name.contains(char::is_whitespace)
             || !(wrapped || tools.defines(name))
         {
-            continue;
-        }
-        let Some(arguments) = qwen_xml_arguments(body, name, tools) else {
+            None
+        } else {
+            qwen_xml_arguments(body, name, tools)
+        };
+        let Some(arguments) = arguments else {
+            // Not a call — prose that names the marker ("use <function=foo>
+            // syntax") — so the search goes on from just past it: a real call
+            // after it ends at the same `</function>` (pre-release review).
+            rest = after;
             continue;
         };
+        rest = &body_and_rest[close + CLOSE.len()..];
         calls.push(ParsedToolCall {
             id: synth_id(calls.len()),
             name: name.to_string(),
@@ -4102,6 +4108,18 @@ mod qwen_xml_tests {
     fn the_call_qwen35_wrote_is_a_call() {
         let reply = "<tool_call>\n<function=get_weather>\n<parameter=city>\nParis\n</parameter>\n</function>\n</tool_call>";
         let calls = parse_tool_calls(reply, &weather_tools()).expect("a call");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "get_weather");
+        assert_eq!(arguments(&calls[0]), json!({"city": "Paris"}));
+    }
+
+    /// Prose that names the marker before a real call does not hide the call:
+    /// the prose's `<function=…>` is no call, and its search ends at the real
+    /// call's `</function>` (found by the pre-release review of 0.3.268).
+    #[test]
+    fn prose_naming_the_marker_does_not_hide_the_call_after_it() {
+        let reply = "Tools are called with <function=NAME> blocks.\n<tool_call>\n<function=get_weather>\n<parameter=city>\nParis\n</parameter>\n</function>\n</tool_call>";
+        let calls = parse_tool_calls(reply, &weather_tools()).expect("the call after the prose");
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].name, "get_weather");
         assert_eq!(arguments(&calls[0]), json!({"city": "Paris"}));
