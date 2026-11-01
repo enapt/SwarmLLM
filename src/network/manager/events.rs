@@ -1120,6 +1120,10 @@ impl NetworkManager {
                     ?peer_id, %error,
                     "Outgoing connection failed"
                 );
+                if let Some((peer, address)) = super::dht::pair_proven_wrong(peer_id, &error) {
+                    let address = address.clone();
+                    self.forget_address_answered_by_another(peer, &address);
+                }
                 // A dial that fails raises THIS event, not `ConnectionClosed`,
                 // so the re-dial scheduled when the peer dropped is not
                 // re-enqueued by anything. One attempt is not enough: it lands

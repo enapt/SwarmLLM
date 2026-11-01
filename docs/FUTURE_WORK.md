@@ -1137,7 +1137,30 @@ remove one. Measure the newcomer's first-plan delay before and after.
 ### Network and transport
 
 #### #155 — AutoNAT redials a peer this node is already connected to, and the per-peer cap denies it, every ~5 s
-`P3` · network · **PARTIAL** — 2026-10-02, narrowed 2026-10-07, recurred 2026-10-30/31 (measured on the swarm: not seen there) · history: archive row #155, gotcha #774
+`P3` · network · **PARTIAL** — 2026-10-02, narrowed 2026-10-07, recurred 2026-10-30/31, **cause found and fixed 2026-11-02** (field check left) · history: archive row #155, gotcha #774, #1020
+
+**2026-11-02: the LAN churn is stale Kademlia records, not AutoNAT — fixed; read it after the release.** It was
+running again (this node's log, 16:42-20:33Z 11-01): 1,540 connections from the LAN box, each inbound,
+`ApplicationClosed 0` within ~0.1 ms — and this node itself made **3,148 dials that failed "Unexpected peer ID"**,
+every one to an identity that had once listened on THIS machine's port 8800 (192.168.1.60, 10.255.255.254 —
+WSL's mirrored address), so each was a handshake with itself (3,026 "Local peer ID" refusals on the listening
+side). Each burst follows a Kademlia event; this node's own AutoNAT client produced 7 probe results in the same
+4 h, so AutoNAT cannot be the source. Peer exchange is ruled out too: the box's `PEX: dialed` lines (every 2 min
+at :22) do not line up with the bursts here, and exchange drops private addresses. The mechanism, in the pinned
+source: **libp2p-kad 0.48 forgets an address only after `DialError::Transport`** (`on_dial_failure` →
+`address_failed`), never after `WrongPeerId`, and never a peer's last address — so a dead identity whose address
+now belongs to another computer stays in every routing table, is dialled by every lookup that picks it and is
+handed to every node that asks. The box met those identities over the LAN, so its dials land here (inferred: the
+box logs at INFO, which names no dial). **Fixed** (`network::manager::dht`): a `WrongPeerId` forgets exactly that
+(peer, address) pair in Kademlia's table and in the peer registry — the peer cache and peer exchange read it
+(`forget_address_answered_by_another`); safe because the handshake proved who answers there. Peer exchange also
+stops dialling THIS node when a list names it (156 self-dials in the same 4 h). Test
+`an_address_another_computer_answered_at_is_forgotten_for_the_peer_it_meant`, red without the call. **Left**: once
+0.3.268 runs on this node AND the box, re-read the same counts (inbound closes from `96842635`, "Unexpected peer
+ID", "Local peer ID") — a node that cannot reach the private address (every internet peer) still keeps it as the
+last one and may hand it to a LAN node in a lookup answer, which is then dialled once per such lookup. If that
+residual is large, the next step is a per-(peer, address) dial backoff (go-libp2p's `DialBackoff`) — never per
+peer, which lets anyone who answers at an address they control block our dials to a peer they name.
 
 **Narrowed 2026-10-07.** Settled in the pinned source (libp2p-autonat 0.15.0, `v2`): the server
 dials back with `PeerCondition::Always` (`server/behaviour.rs`), our per-peer cap then denies the

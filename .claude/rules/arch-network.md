@@ -241,6 +241,12 @@ order — the cap dropped a 12-address peer's public QUIC address at random
 
 → `docs/invariants/network.md` § "One dial per PEER"
 
+## An address another computer answered at is forgotten for the peer it named (2026-11-02, #155)
+
+A dial that fails `WrongPeerId` proves the (peer, address) pair wrong: **`NetworkManager::forget_address_answered_by_another`** (from `dht::pair_proven_wrong`, in the `OutgoingConnectionError` arm) removes exactly that pair from Kademlia's table and the peer registry. libp2p-kad 0.48 forgets only after a transport error, never a last address — stale identities were dialled 3,148 times in 4 h. Never back off a PEER on it: whoever answers at an address can name any peer.
+
+→ `docs/invariants/network.md` § "An address another computer answered at is forgotten"
+
 ## Peer Cache: storable vs dialable
 
 `network/peer_cache.rs` answers two different questions; never use one as the

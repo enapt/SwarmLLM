@@ -762,6 +762,37 @@ TRACE. Two investigations have turned on "was that dial ours?" and both had to
 rebuild to answer it; the second only found the self-dialling because the
 instrument was finally there to say so.
 
+## An address another computer answered at is forgotten for the peer it named
+
+**Rule.** A dial that fails `DialError::WrongPeerId` — the handshake at the address answered as ANOTHER computer —
+forgets exactly that (peer, address) pair, in Kademlia's routing table and in the peer registry
+(`NetworkManager::forget_address_answered_by_another`, called from the `OutgoingConnectionError` arm through
+`dht::pair_proven_wrong`). Peer exchange skips this node's own id.
+
+**What it replaced (#155, 2026-11-01).** In 4 h this node made 3,148 dials that failed "Unexpected peer ID": every
+one to an identity that had once listened on this machine's own port 8800, so every one was a handshake with
+itself (3,026 "Local peer ID" refusals on the listening side, ~12 a minute). None was attributed by `dial_checked`
+— they were Kademlia's own lookup dials, each burst right after a `Kademlia` event. The LAN box, holding the same
+identities at this machine's LAN address, opened 1,540 connections here in the same window and closed each at
+once (its `WrongPeerId`; inferred — it logs at INFO). The cause is in the pinned source: libp2p-kad 0.48's
+`on_dial_failure` calls `address_failed` only for `DialError::Transport`, and `address_failed` keeps a peer's LAST
+address "to avoid (temporary) loss of network connectivity". A dead identity whose only address now belongs to
+another computer therefore stays in the table, is dialled by every lookup that picks it, and is returned to
+every node that asks — the hairpin through this house's router delivered the public form here too.
+
+**Why it is safe.** Only the handshake proves the pair wrong, so a timeout or a refusal forgets nothing (an
+unreachable address may come back). A computer answering at an address can make us forget only pairs that name
+THAT address. The opposite design — backing off the PEER after a wrong answer — is not safe: anyone answering at
+an address they control could name any peer there and block our dials to it. go-libp2p backs off per (peer,
+address) (`DialBackoff`), which is the shape a further step would take.
+
+**What it does not reach.** A node that cannot reach the address (any internet peer, for a LAN address) sees a
+transport error and keeps it as the peer's last address, and can hand it to a LAN node in a lookup answer; that
+lookup dials it once more. Measure after a release carries the fix on every LAN node (FUTURE_WORK #155).
+
+Test: `an_address_another_computer_answered_at_is_forgotten_for_the_peer_it_meant` (feeds the real event through
+`handle_swarm_event`; red with the call removed).
+
 ## Peer Cache: storable vs dialable
 
 `network/peer_cache.rs` answers two different questions and they must not be

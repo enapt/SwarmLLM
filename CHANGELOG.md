@@ -89,6 +89,16 @@ file's replies are checked; the smallest copy is about 45 GB. (#390)
 GLM-4, DeepSeek-2 and Llama 4 — "Llama", the catalogue's catch-all for families it has no entry
 for. They now give the family the model's own file names ("gemma4") once this computer has read it.
 
+**A computer stops dialling old identities at addresses another computer now uses.** When a node
+reaches an address and a different computer answers, the address book kept that address under the
+old name anyway — Kademlia's library forgets an address only when nothing answers at all. A node
+that once ran on a computer, then started again under a new identity, so stayed listed at its old
+address for good, and every lookup that picked it dialled it again: one computer here did so about
+3,000 times in four hours, each time reaching itself, and a computer on the same network opened 1,500
+connections to it that it closed at once. Such an address is now forgotten the first time a
+different computer answers there, and a computer no longer dials itself when an exchanged peer list
+names it. (#155)
+
 ## [0.3.267-alpha] — 2026-11-01
 
 **You can now ask a model to answer without thinking first, or to think.** Models such as

@@ -8,13 +8,104 @@
 //! State (`pending_provider_queries`, `swarm`, `peer_to_node_id`) lives on
 //! `NetworkManager` in mod.rs; this file is a `pub(super) impl` block.
 
-use libp2p::Multiaddr;
+use libp2p::{Multiaddr, PeerId};
 
 use crate::network::helpers::{is_non_public_addr, target_peer_from_address};
 
 use super::{NetworkManager, MAX_PENDING_PROVIDER_QUERIES};
 
+/// The (peer, address) pair a failed dial proved wrong: the handshake at
+/// `address` answered as ANOTHER computer. Only `WrongPeerId` proves it — a
+/// timeout or a refused connection says nothing about who lives there now.
+pub(super) fn pair_proven_wrong(
+    expected: Option<PeerId>,
+    error: &libp2p::swarm::DialError,
+) -> Option<(PeerId, &Multiaddr)> {
+    match (expected, error) {
+        (Some(expected), libp2p::swarm::DialError::WrongPeerId { obtained, address })
+            if *obtained != expected =>
+        {
+            Some((expected, address))
+        }
+        _ => None,
+    }
+}
+
+/// Whether `held` (a registry address, with or without its `/p2p/` part) is
+/// `address` for `peer` — compared as Kademlia compares them, `/p2p/` added.
+fn is_this_address_of(held: &str, peer: PeerId, address: &Multiaddr) -> bool {
+    let Ok(held) = held.parse::<Multiaddr>() else {
+        return false;
+    };
+    matches!(
+        (held.with_p2p(peer), address.clone().with_p2p(peer)),
+        (Ok(a), Ok(b)) if a == b
+    )
+}
+
+/// Forget `address` for `peer` in this node's peer registry — what the peer
+/// cache saves and what peer exchange hands out. Returns how many went.
+fn forget_in_registry(
+    registry: &dashmap::DashMap<crate::types::NodeId, crate::types::PeerInfo>,
+    peer: PeerId,
+    address: &Multiaddr,
+) -> usize {
+    let peer_bytes = peer.to_bytes();
+    // Found under read locks, then each entry written alone: `iter_mut` would
+    // write-lock every shard of the registry in turn, from the network loop.
+    let entries: Vec<crate::types::NodeId> = registry
+        .iter()
+        .filter(|entry| entry.peer_id_bytes.as_deref() == Some(peer_bytes.as_slice()))
+        .map(|entry| entry.key().clone())
+        .collect();
+    let mut forgot = 0;
+    for node in entries {
+        if let Some(mut entry) = registry.get_mut(&node) {
+            let before = entry.addresses.len();
+            entry
+                .addresses
+                .retain(|held| !is_this_address_of(held, peer, address));
+            forgot += before - entry.addresses.len();
+        }
+    }
+    forgot
+}
+
 impl NetworkManager {
+    /// A dial to `peer` at `address` reached ANOTHER computer: forget the pair
+    /// everywhere this node keeps it, so nothing dials it, saves it or passes it
+    /// on again.
+    ///
+    /// libp2p-kad 0.48 forgets an address only after a transport error
+    /// (`on_dial_failure` → `address_failed`, for `DialError::Transport` alone),
+    /// and never a peer's last one. So an identity that once listened where
+    /// another computer now does stays in the routing table, is dialled by every
+    /// lookup that picks it, and is handed to every node that asks. On
+    /// 2026-11-01 this node made 3,148 such dials in 4 h — identities that had
+    /// run on this machine's own port 8800, so each dial was a handshake with
+    /// ITSELF — and the LAN box, holding the same identities at this machine's
+    /// LAN address, opened 1,540 connections here that it closed at once (#155).
+    ///
+    /// Safe to act on: the handshake proved who answers at `address`, and a
+    /// computer that controls an address can only make us forget pairs that
+    /// point at it.
+    pub(super) fn forget_address_answered_by_another(&mut self, peer: PeerId, address: &Multiaddr) {
+        let left_the_table = self
+            .swarm
+            .behaviour_mut()
+            .kademlia
+            .remove_address(&peer, address)
+            .is_some();
+        let registry = forget_in_registry(&self.shared_state.peer_registry, peer, address);
+        tracing::debug!(
+            %peer,
+            %address,
+            left_the_table,
+            registry,
+            "Another computer answered at this address — forgetting it for this peer"
+        );
+    }
+
     /// Who owns this address, according to our own peer registry?
     ///
     /// The fallback for a PEX address that names nobody, so the caller can run
@@ -95,6 +186,12 @@ impl NetworkManager {
                 break;
             }
             if let Some(pid) = &dial.peer {
+                // An exchange can list THIS node: dialled, it is a handshake
+                // with ourselves that both ends then refuse (156 in 4 h,
+                // 2026-11-01).
+                if pid == self.swarm.local_peer_id() {
+                    continue;
+                }
                 // Skip a peer Identify has already shown is not SwarmLLM.
                 // PEX hands out addresses without any claim about whose they
                 // are, so this is the only thing stopping us re-dialling the
@@ -269,5 +366,173 @@ impl NetworkManager {
                 .model_registry
                 .merge_dht_providers(&shard_id, &resolved);
         }
+    }
+}
+
+#[cfg(test)]
+mod proven_wrong_tests {
+    use super::*;
+    use libp2p::swarm::{ConnectionId, DialError, SwarmEvent};
+    use std::sync::Arc;
+    use tokio::sync::{mpsc, watch};
+
+    fn manager() -> NetworkManager {
+        let dir = tempfile::tempdir().unwrap().keep();
+        let db = crate::storage::db::Database::open(&dir).unwrap();
+        let config = crate::config::Config::default();
+        let (state, _, _) = crate::daemon::SharedState::new(
+            config.clone(),
+            crate::identity::Identity::generate(),
+            db,
+            Arc::new(tokio::sync::Mutex::new(
+                crate::inference::executor::ModelExecutor::new(),
+            )),
+            None,
+        );
+        let (command_tx, command_rx) = mpsc::channel(8);
+        let (out_tx, _dispatched) = mpsc::channel(8);
+        let (_shutdown_tx, shutdown_rx) = watch::channel(false);
+        let (_dht_tx, dht_rx) = mpsc::channel(8);
+        NetworkManager::new(
+            state.clone(),
+            &state.identity,
+            &config,
+            command_rx,
+            command_tx,
+            out_tx,
+            shutdown_rx,
+            None,
+            dht_rx,
+        )
+        .unwrap()
+    }
+
+    fn in_the_table(manager: &mut NetworkManager, peer: &PeerId) -> bool {
+        manager
+            .swarm
+            .behaviour_mut()
+            .kademlia
+            .kbuckets()
+            .any(|bucket| bucket.iter().any(|e| e.node.key.preimage() == peer))
+    }
+
+    fn registry_entry(peer: PeerId, addresses: &[&str]) -> crate::types::PeerInfo {
+        crate::types::PeerInfo {
+            node_id: crate::types::NodeId([7; 32]),
+            addresses: addresses.iter().map(|a| a.to_string()).collect(),
+            capability: None,
+            last_seen: chrono::Utc::now(),
+            latency_ms: None,
+            trust_score: 0.5,
+            peer_id_bytes: Some(peer.to_bytes()),
+            ack_srtt_ms: None,
+            goodput_bytes_per_sec: None,
+            goodput_samples: 0,
+            active_request_count: 0,
+            first_seen: 0,
+            verified_transaction_count: 0,
+            is_lan_peer: true,
+        }
+    }
+
+    /// A dial that reached another computer at an address forgets that address
+    /// for the peer it meant — in Kademlia's table and in the registry the peer
+    /// cache and peer exchange read — and nothing else (#155, 2026-11-01: an
+    /// identity that once listened on this machine's port 8800 was dialled
+    /// 3,148 times in 4 h, each a handshake with this node itself).
+    #[tokio::test]
+    async fn an_address_another_computer_answered_at_is_forgotten_for_the_peer_it_meant() {
+        let mut manager = manager();
+        let stale = PeerId::random();
+        let answered = PeerId::random();
+        let lan: Multiaddr = "/ip4/192.168.1.60/udp/8800/quic-v1".parse().unwrap();
+        let elsewhere = "/ip4/198.51.100.9/tcp/8810";
+        manager
+            .swarm
+            .behaviour_mut()
+            .kademlia
+            .add_address(&stale, lan.clone());
+        manager.shared_state.peer_registry.insert(
+            crate::types::NodeId([7; 32]),
+            registry_entry(stale, &["/ip4/192.168.1.60/udp/8800/quic-v1", elsewhere]),
+        );
+        assert!(in_the_table(&mut manager, &stale));
+
+        // The swarm names the address it dialled with the peer it meant.
+        let error = DialError::WrongPeerId {
+            obtained: answered,
+            address: lan.clone().with_p2p(stale).unwrap(),
+        };
+        manager
+            .handle_swarm_event(SwarmEvent::OutgoingConnectionError {
+                connection_id: ConnectionId::new_unchecked(1),
+                peer_id: Some(stale),
+                error,
+            })
+            .await;
+
+        assert!(
+            !in_the_table(&mut manager, &stale),
+            "its only address answered as someone else: the peer leaves the table"
+        );
+        let kept = manager
+            .shared_state
+            .peer_registry
+            .get(&crate::types::NodeId([7; 32]))
+            .unwrap()
+            .addresses
+            .clone();
+        assert_eq!(
+            kept,
+            vec![elsewhere.to_string()],
+            "only the address proven wrong goes"
+        );
+    }
+
+    /// A dial that failed WITHOUT reaching anybody proves nothing about who is
+    /// at the address: a timeout, a refusal, no addresses at all.
+    #[test]
+    fn only_a_handshake_with_another_computer_proves_the_pair_wrong() {
+        let meant = PeerId::random();
+        let address: Multiaddr = "/ip4/192.168.1.60/tcp/8810".parse().unwrap();
+        let wrong = DialError::WrongPeerId {
+            obtained: PeerId::random(),
+            address: address.clone(),
+        };
+        assert_eq!(
+            pair_proven_wrong(Some(meant), &wrong),
+            Some((meant, &address))
+        );
+        assert_eq!(
+            pair_proven_wrong(None, &wrong),
+            None,
+            "a bare dial meant nobody"
+        );
+        assert_eq!(
+            pair_proven_wrong(Some(meant), &DialError::NoAddresses),
+            None
+        );
+        assert_eq!(pair_proven_wrong(Some(meant), &DialError::Aborted), None);
+    }
+
+    #[test]
+    fn a_registry_address_matches_with_or_without_its_peer_part() {
+        let peer = PeerId::random();
+        let address: Multiaddr = "/ip4/192.168.1.60/udp/8800/quic-v1".parse().unwrap();
+        let with_peer = address.clone().with_p2p(peer).unwrap();
+        assert!(is_this_address_of(&address.to_string(), peer, &with_peer));
+        assert!(is_this_address_of(&with_peer.to_string(), peer, &address));
+        assert!(!is_this_address_of(
+            "/ip4/192.168.1.60/tcp/8810",
+            peer,
+            &address
+        ));
+        let someone_else = address.clone().with_p2p(PeerId::random()).unwrap();
+        assert!(!is_this_address_of(
+            &someone_else.to_string(),
+            peer,
+            &address
+        ));
+        assert!(!is_this_address_of("not an address", peer, &address));
     }
 }
