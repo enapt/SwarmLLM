@@ -281,6 +281,9 @@ pub fn spawn_split_stream(
     // The caller's instruction to keep the request on this computer (#251
     // (2b)) — the worker then saves its prompt's cache for reuse here only.
     keep: crate::types::KeepAsked,
+    // Whether the owner asked (#337): only then may the worker's guesses
+    // copy from the owner's earlier replies.
+    requested_by: crate::types::RequestedBy,
 ) -> Option<SplitStream> {
     let meta = get_split_model_meta(&state.shared_state, model_id)?;
     let prompt = crate::inference::chat_template::build_prompt(
@@ -378,6 +381,7 @@ pub fn spawn_split_stream(
             rid,
             // Asked of this node's own API: the owner's request.
             crate::inference::process_pool::Requester::Owner,
+            requested_by,
             keep,
             None,
             Some(token_tx),
@@ -521,6 +525,8 @@ pub async fn run_split_generate(
     // The caller's instruction to keep the request on this computer (#251
     // (2b)) — the worker then saves its prompt's cache for reuse here only.
     keep: crate::types::KeepAsked,
+    // Whether the owner asked (#337), as for `spawn_split_stream`.
+    requested_by: crate::types::RequestedBy,
 ) -> Result<crate::inference::router::InferenceOutput, ApiError> {
     let meta = get_split_model_meta(&state.shared_state, model_id)
         .ok_or(ApiError(crate::error::SwarmError::NoModelLoaded))?;
@@ -576,6 +582,7 @@ pub async fn run_split_generate(
             rid,
             // Asked of this node's own API: the owner's request.
             crate::inference::process_pool::Requester::Owner,
+            requested_by,
             keep,
             None,
             None,
@@ -1089,6 +1096,7 @@ pub(super) async fn split_non_stream_response(
     // The caller's template variables (#391), settled at the door.
     template_vars: Option<crate::types::TemplateVars>,
     keep: crate::types::KeepAsked,
+    requested_by: crate::types::RequestedBy,
 ) -> Result<axum::response::Response, ApiError> {
     let reply_tools = crate::api::tool_parse::RequestTools::from_definitions(tools.as_deref());
     let output = run_split_generate(
@@ -1100,6 +1108,7 @@ pub(super) async fn split_non_stream_response(
         tools.as_deref(),
         template_vars.as_ref(),
         keep,
+        requested_by,
     )
     .await?;
     let trace = output.trace.clone();
@@ -1147,6 +1156,7 @@ pub(super) async fn split_stream_response(
     template_vars: Option<crate::types::TemplateVars>,
     include_usage: bool,
     keep: crate::types::KeepAsked,
+    requested_by: crate::types::RequestedBy,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
     let reply_tools = crate::api::tool_parse::RequestTools::from_definitions(tools.as_deref());
     // Captured before `state` is moved into the generation task. This is the
@@ -1202,6 +1212,7 @@ pub(super) async fn split_stream_response(
             tools.as_deref(),
             template_vars.as_ref(),
             keep,
+            requested_by,
         ) {
             Some(pair) => pair,
             None => {
@@ -1858,6 +1869,7 @@ mod route_in_body_tests {
             None,
             None,
             crate::types::KeepAsked::Unasked,
+            crate::types::RequestedBy::Owner,
         );
         assert!(spawned.is_some(), "the model is held whole here");
         let route = trace.snapshot().route_summary();

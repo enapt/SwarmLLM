@@ -120,6 +120,9 @@ pub struct Slot {
     pub save_when_done: bool,
     /// The JSON the reply is held to (#336), asked at every draw.
     pub held: Option<crate::inference::reply_grammar::HeldReply>,
+    /// The owner's earlier replies, this reply kept in them when it finishes
+    /// (#337, `OwnerReplies::in_this_process`); `None` for anyone else's.
+    pub earlier: Option<crate::inference::owner_replies::EarlierReplies>,
 }
 
 impl Slot {
@@ -413,6 +416,7 @@ mod tests {
             save_at: usize::MAX,
             save_when_done: false,
             held: None,
+            earlier: None,
         }
     }
 
@@ -462,6 +466,7 @@ mod tests {
             save_at: usize::MAX,
             save_when_done: false,
             held: None,
+            earlier: None,
         }
     }
 

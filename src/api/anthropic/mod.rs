@@ -318,6 +318,7 @@ pub async fn messages(
                 convert::tool_definitions_for_template(&req),
                 template_vars,
                 keep,
+                requested_by,
             )
             .await;
         } else {
@@ -330,6 +331,7 @@ pub async fn messages(
                 convert::tool_definitions_for_template(&req),
                 template_vars,
                 keep,
+                requested_by,
             )
             .await;
         }

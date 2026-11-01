@@ -3524,6 +3524,16 @@ struct LocalSpec {
     /// The card's own guesses, for a whole model split between the card and
     /// the processor; `None` elsewhere.
     card: Option<CardGuesses>,
+    /// The owner's earlier replies, looked in where the conversation has no
+    /// match (#337) — `None` unless the owner asked
+    /// (`OwnerReplies::in_this_process`). Read as shown to no peer: the
+    /// guesses are checked here.
+    earlier: Option<(
+        crate::inference::owner_replies::EarlierReplies,
+        crate::inference::owner_replies::Exposure,
+    )>,
+    /// Lookups answered from `earlier`.
+    from_earlier: u64,
     /// Every round, as the test prints it.
     #[cfg(test)]
     trace: Vec<Traced>,
@@ -3865,6 +3875,8 @@ impl LocalSpec {
             probe_after: Self::FIRST_PROBE_AFTER,
             probes: 0,
             card: (!fixed).then(|| CardGuesses::for_model(model)).flatten(),
+            earlier: None,
+            from_earlier: 0,
             #[cfg(test)]
             trace: Vec::new(),
             #[cfg(test)]
@@ -3888,6 +3900,16 @@ impl LocalSpec {
             card.stand_in = stand_in;
             card.prompt = prompt;
         }
+        self
+    }
+
+    /// Look in the owner's earlier replies where the conversation has no
+    /// match (#337); `None` for anyone else's request.
+    fn with_earlier(
+        mut self,
+        earlier: Option<crate::inference::owner_replies::EarlierReplies>,
+    ) -> Self {
+        self.earlier = earlier.map(|e| (e, crate::inference::owner_replies::Exposure::here()));
         self
     }
 
@@ -3978,13 +4000,14 @@ impl LocalSpec {
             )
         });
         format!(
-            "rounds {} accepted {} rejected {} declined {} probes {} one-off {} step {step} ms check {fit} ms alpha {:.2} next {}{card}",
+            "rounds {} accepted {} rejected {} declined {} probes {} one-off {} earlier {} step {step} ms check {fit} ms alpha {:.2} next {}{card}",
             self.rounds,
             self.accepted,
             self.rejected,
             self.declined,
             self.probes,
             self.one_offs,
+            self.from_earlier,
             self.acceptance.alpha(),
             self.guesses(self.room()),
         )
@@ -4030,6 +4053,17 @@ impl LocalSpec {
                 NGRAM_RECENT_GEN_WINDOW,
                 self.cfg,
             );
+            // Nothing in the conversation: the owner's earlier replies (#337).
+            if found.is_empty() {
+                if let Some(run) = self
+                    .earlier
+                    .as_ref()
+                    .and_then(|(e, here)| e.copied_run(&self.ctx, here, self.cfg, room))
+                {
+                    found = run.tokens;
+                    self.from_earlier += 1;
+                }
+            }
             found.truncate(room);
             found
         } else {
@@ -5837,6 +5871,12 @@ async fn handle_generate(
     // The card's stand-in for the run its guesses skip is fitted from the
     // prompt's last positions first (`CardGuesses`).
     let mut stand_in = card_stand_in_for(model, speculating);
+    // The owner's earlier replies: read by the guesses, and this reply kept
+    // in them once written (#337). `None` for anyone else's request.
+    let earlier = crate::inference::owner_replies::OwnerReplies::in_this_process(
+        &model_id.0,
+        gen.reads_owner_replies,
+    );
 
     // Prefill — block_in_place for CPU-bound inference
     let mut manifest = Vec::new();
@@ -6020,6 +6060,7 @@ async fn handle_generate(
             let mut spec = speculating.then(|| {
                 LocalSpec::new(*ngram_cfg, &prompt_ids, model, local_guess_gamma_fixed())
                     .with_stand_in(stand_in.take(), prompt_caught.take())
+                    .with_earlier(earlier.clone())
             });
 
             for _ in 0..gen.sampling.max_tokens {
@@ -6164,6 +6205,14 @@ async fn handle_generate(
                 .await
                 .map_err(|e| SwarmError::Internal(format!("send final Token: {e}")))?;
             }
+        }
+
+        // Kept for the owner's next replies to copy from (#337).
+        if let Some(earlier) = earlier.as_ref() {
+            earlier.keep(
+                &generated,
+                &crate::inference::owner_replies::Exposure::here(),
+            );
         }
 
         // Send GenerateDone
@@ -7433,6 +7482,10 @@ async fn try_register_generate_slot(
         save_at: PrefixCache::save_point(prompt_tokens, model.carries_recurrent_state()),
         save_when_done: false,
         held,
+        earlier: crate::inference::owner_replies::OwnerReplies::in_this_process(
+            &model_id.0,
+            gen.reads_owner_replies,
+        ),
     };
     let prompt_len = slot.prompt_tokens;
     let remaining_after_prefix = prompt_len.saturating_sub(prefix_len);
@@ -8045,6 +8098,14 @@ async fn finalize_slot(
     .await
     .map_err(|e| SwarmError::Internal(format!("send GenerateDone: {e}")))?;
 
+    // Kept for the owner's next replies to copy from (#337). Its last draw —
+    // the end of text, or one past the limit — is the token `keep` leaves.
+    if let Some(earlier) = slot.earlier.as_ref() {
+        earlier.keep(
+            &slot.generated_ids,
+            &crate::inference::owner_replies::Exposure::here(),
+        );
+    }
     save_slot_prompt_when_done(writer, kv_store, prefix_cache, model, &slot).await;
     kv_store.clear_request(&slot.model_key, &slot.req_id_str);
     Ok(())
@@ -9341,6 +9402,61 @@ mod local_speculation_tests {
         assert_eq!(plain.0, ids, "guessed {:?}", text(&ids));
     }
 
+    /// The owner asking the same thing again (#337): the second reply's
+    /// guesses copy the first, kept by the model process, where its own
+    /// conversation offers nothing — and it is still the reply written one
+    /// token at a time. Red with the lookup in the earlier replies left out of
+    /// `LocalSpec::next` (nothing is copied from them). Processor only.
+    ///
+    /// `SWARMLLM_GUESS_TEST_GGUF=~/swarmllm-ref/tinyllama-1.1b-chat-v1.0.q4-k-m.gguf
+    /// cargo dev-test --lib asked_again -- --ignored --nocapture`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[ignore = "needs a GGUF in SWARMLLM_GUESS_TEST_GGUF"]
+    async fn the_owner_asked_again_is_guessed_from_the_first_reply() {
+        let Some(mut model) = guess_test_model() else {
+            return;
+        };
+        let prompt = model.encode_ids(
+            "Write a short Python function that returns the n-th Fibonacci number, \
+             with a docstring.\n",
+        );
+        let kv = crate::inference::split::KvCacheStore::new(std::time::Duration::from_secs(600));
+        let store = "the-owner-asked-again";
+        let plain = guessed_reply(&mut model, &kv, &prompt, "again-plain", None, None).0;
+        let earlier =
+            || crate::inference::owner_replies::OwnerReplies::in_this_process(store, true);
+        earlier()
+            .unwrap()
+            .keep(&plain, &crate::inference::owner_replies::Exposure::here());
+        let (alone, _, alone_spec) =
+            guessed_reply(&mut model, &kv, &prompt, "again-alone", Some(true), None);
+        let (again, _, spec) = guessed_reply_reading(
+            &mut model,
+            &kv,
+            &prompt,
+            "again-earlier",
+            Some(true),
+            None,
+            earlier(),
+        );
+        let (alone_spec, spec) = (alone_spec.unwrap(), spec.unwrap());
+        eprintln!("alone: {}", alone_spec.summary());
+        eprintln!("earlier: {}", spec.summary());
+        assert!(
+            spec.from_earlier > 0,
+            "nothing was copied: {}",
+            spec.summary()
+        );
+        assert!(
+            spec.accepted > alone_spec.accepted,
+            "the earlier reply kept no more guesses: {} against {}",
+            spec.summary(),
+            alone_spec.summary()
+        );
+        assert_eq!(plain, again);
+        assert_eq!(plain, alone);
+    }
+
     const GUESSED_REPLY_STEPS: usize = 96;
 
     /// How close two logits must be for a card to pick either (2026-10-25,
@@ -9374,6 +9490,19 @@ mod local_speculation_tests {
         guessing: Option<bool>,
         held_to: Option<std::sync::Arc<crate::inference::reply_grammar::ReplyGrammar>>,
     ) -> (Vec<u32>, f64, Option<LocalSpec>) {
+        guessed_reply_reading(model, kv, prompt, request, guessing, held_to, None)
+    }
+
+    /// [`guessed_reply`], its guesses also looking in `earlier` (#337).
+    fn guessed_reply_reading(
+        model: &mut SplitModel,
+        kv: &crate::inference::split::KvCacheStore,
+        prompt: &[u32],
+        request: &str,
+        guessing: Option<bool>,
+        held_to: Option<std::sync::Arc<crate::inference::reply_grammar::ReplyGrammar>>,
+        earlier: Option<crate::inference::owner_replies::EarlierReplies>,
+    ) -> (Vec<u32>, f64, Option<LocalSpec>) {
         let sampling = SamplingParams {
             reply_grammar: held_to,
             ..greedy()
@@ -9406,7 +9535,8 @@ mod local_speculation_tests {
                 .unwrap_or(NgramLookupConfig::default().num_pred_tokens),
             ..NgramLookupConfig::default()
         };
-        let mut spec = guessing.map(|fixed| LocalSpec::new(cfg, prompt, model, fixed));
+        let mut spec =
+            guessing.map(|fixed| LocalSpec::new(cfg, prompt, model, fixed).with_earlier(earlier));
         // `SWARMLLM_GUESS_TEST_SCRIPT=3,0,7,…`: the guesses each round of the
         // guesses that pay checks, as a failing run printed them.
         if let (Some(spec), Some(false), Ok(script)) = (

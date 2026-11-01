@@ -5365,6 +5365,28 @@ round costs one per check.
   the chain stream (the drafter not yet on the card), which keeps nothing, so the second had
   nothing to copy. The replies' text varied between repeats in EVERY arm, the store's off ones
   too (greedy near-ties under the flow's batch shapes), so it is not the store's.
+
+  **On one computer (2026-11-01)** a whole model's reply is written in its model process
+  (`model_worker::LocalSpec`), which the daemon's store cannot reach a step at a time. The process
+  keeps its OWN (`OwnerReplies::in_this_process`, one per process): `LocalSpec::next` looks in it
+  where the conversation has no match, and both generate paths keep the reply when it is done (the
+  one-at-a-time loop before `GenerateDone`; a batched slot in `finalize_slot`, its last draw — the
+  end of text or one past the limit, never sent — the token `keep` leaves). Rule 1 holds by ONE
+  predicate, `owner_replies::the_owner_asked(requested_by, requester)`, which `for_the_owner` asks
+  and the pool sends as `IpcGenerate::reads_owner_replies` (set only by `IpcGenerate::new`, never
+  off the network): `requested_by` became a REQUIRED argument of `ModelProcessPool::generate`,
+  because the API's fast paths name every request `Requester::Owner` — a pool member's forward
+  included — and only `requested_by` tells them apart. Rule 2 holds trivially: such a reply reaches
+  no peer and its guesses are checked here, so it is kept and read as `Exposure::here()`, and a run
+  is never copied from it towards a peer. Rule 3: the process's store has the same bounds and goes
+  with the process when it is retired. The two stores are separate — a local reply does not copy a
+  split's replies — which costs only the cross-path matches; one store would need the daemon's index
+  in the process or a lookup per step across the pipe. Measured (TinyLlama-1.1B Q4_K_M, processor,
+  96 greedy tokens, the same question asked again as a new conversation): guesses kept 45 in 53
+  rounds → 74 in 24, 8 lookups answered from the first reply, the reply identical token for token
+  (`local_speculation_tests::the_owner_asked_again_is_guessed_from_the_first_reply`, red with the
+  lookup taken out; `owner_replies::tests::a_model_process_keeps_the_owners_replies_for_the_owner_alone`).
+  The summary line (`DIAG: local n-gram speculation complete`, `learned`) counts `earlier`.
 - **Several levels a drafter call** (`levels_a_call` 3 × `rows_a_level` 8): each level reads the
   last one's proposals in one forward and proposes after them. At ONE level a call a branch grew
   one row deeper a call and the walk with it — 0.63-0.74 tokens a call whatever the rows a call

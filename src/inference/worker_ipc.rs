@@ -665,6 +665,13 @@ pub struct IpcGenerate {
     /// the field for a newer daemon.
     #[serde(default)]
     pub keep_here: bool,
+    /// The owner asked, and this node runs the reply for the owner
+    /// (`owner_replies::the_owner_asked`, #337): only then may the reply's
+    /// guesses copy from the owner's earlier replies, and the reply be kept
+    /// for the next (`OwnerReplies::in_this_process`). Set only by
+    /// [`IpcGenerate::new`]; never read off the network.
+    #[serde(default)]
+    pub reads_owner_replies: bool,
     /// The JSON the reply is held to (#336) — `sampling.reply_grammar`, which
     /// is skipped wherever `SamplingParams` is serialized (a peer is not told
     /// it), carried across this hop beside it. Built only by
@@ -687,6 +694,7 @@ impl IpcGenerate {
         session_id: Option<String>,
         for_the_owner: bool,
         keep_here: bool,
+        reads_owner_replies: bool,
     ) -> Self {
         let grammar = sampling.reply_grammar.as_deref().cloned();
         Self {
@@ -698,6 +706,7 @@ impl IpcGenerate {
             session_id,
             for_the_owner,
             keep_here,
+            reads_owner_replies,
             grammar,
         }
     }
@@ -1216,6 +1225,7 @@ mod tests {
             None,
             true,
             false,
+            true,
         );
         let mut got: IpcGenerate =
             serde_json::from_slice(&serde_json::to_vec(&sent).unwrap()).unwrap();
@@ -1225,6 +1235,10 @@ mod tests {
         );
         got.rejoin_grammar();
         assert_eq!(got.sampling.reply_grammar.as_deref(), Some(&*grammar));
+        assert!(
+            got.reads_owner_replies,
+            "the owner's flag crosses too (#337)"
+        );
     }
 
     /// Write one frame by hand: a header this build may not know, and a payload.

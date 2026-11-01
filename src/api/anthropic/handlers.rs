@@ -545,6 +545,7 @@ pub(super) async fn anthropic_split_non_stream(
     // in `messages` (`chat_template::vars::from_anthropic`).
     template_vars: Option<crate::types::TemplateVars>,
     keep: crate::types::KeepAsked,
+    requested_by: crate::types::RequestedBy,
 ) -> Result<axum::response::Response, ApiError> {
     let reply_tools = crate::api::tool_parse::RequestTools::from_definitions(tools.as_deref());
     let requested_mid = crate::types::ModelId(model.clone());
@@ -557,6 +558,7 @@ pub(super) async fn anthropic_split_non_stream(
         tools.as_deref(),
         template_vars.as_ref(),
         keep,
+        requested_by,
     )
     .await?;
 
@@ -588,6 +590,7 @@ pub(super) async fn anthropic_split_stream(
     // in `messages` (`chat_template::vars::from_anthropic`).
     template_vars: Option<crate::types::TemplateVars>,
     keep: crate::types::KeepAsked,
+    requested_by: crate::types::RequestedBy,
 ) -> Result<axum::response::Response, ApiError> {
     let reply_tools = crate::api::tool_parse::RequestTools::from_definitions(tools.as_deref());
     let progress_handle = Some((
@@ -632,6 +635,7 @@ pub(super) async fn anthropic_split_stream(
             tools.as_deref(),
             template_vars.as_ref(),
             keep,
+            requested_by,
         ) {
             Some(pair) => pair,
             None => {

@@ -87,6 +87,7 @@ impl PipelineExecutor {
                 // A plan that came back here is the owner's, unless a peer
                 // delegated the request to us (`worker_requester`).
                 super::worker_requester(&self.request),
+                self.request.requested_by,
                 self.request.keep,
                 self.request.session_id.clone(),
                 token_tx,

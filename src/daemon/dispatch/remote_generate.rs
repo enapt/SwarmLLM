@@ -289,6 +289,7 @@ pub(super) async fn handle_remote_generate_request(
             request_id,
             // A peer's request: served within the contribution level.
             crate::inference::process_pool::Requester::Swarm,
+            crate::types::RequestedBy::NotTheOwner,
             // A request its caller kept on THEIR computer never reaches this
             // one, so a peer's request carries no such instruction (#251 (2b)).
             crate::types::KeepAsked::Unasked,

@@ -105,6 +105,19 @@ fn store_on() -> bool {
     })
 }
 
+/// Whether a reply may read and be kept in a store: the owner asked
+/// (`requested_by`) AND this node runs it for the owner, not leading a split
+/// for another node (`requester`). The ONE predicate — the daemon's store asks
+/// it ([`OwnerReplies::for_the_owner`]) and so does a model process's
+/// (`IpcGenerate::reads_owner_replies`, set from it).
+pub fn the_owner_asked(
+    requested_by: RequestedBy,
+    requester: crate::inference::process_pool::Requester,
+) -> bool {
+    requested_by == RequestedBy::Owner
+        && requester == crate::inference::process_pool::Requester::Owner
+}
+
 /// Every model's store (`state.models.owner_replies`).
 #[derive(Default)]
 pub struct OwnerReplies {
@@ -115,17 +128,36 @@ pub struct OwnerReplies {
 impl OwnerReplies {
     /// The store for `request`, or `None` where the request may neither read
     /// nor be kept in it: not the owner's, or this node leading the split for
-    /// another (module doc). The ONLY way to a store's contents.
+    /// another (module doc). The ONLY way to the daemon's store.
     pub fn for_the_owner(self: &Arc<Self>, request: &InferenceRequest) -> Option<EarlierReplies> {
-        let owners = request.requested_by == RequestedBy::Owner
-            && crate::inference::pipeline::worker_requester(request)
-                == crate::inference::process_pool::Requester::Owner;
+        let owners = the_owner_asked(
+            request.requested_by,
+            crate::inference::pipeline::worker_requester(request),
+        );
         if !owners || !store_on() {
             return None;
         }
         Some(EarlierReplies {
             store: Arc::clone(self),
             model: request.model_id.0.clone(),
+        })
+    }
+
+    /// A model process's own store, for the replies it writes whole on this
+    /// computer (`model_worker::LocalSpec`, the batched decode): `None` unless
+    /// the daemon found the owner asked (`IpcGenerate::reads_owner_replies`,
+    /// from [`the_owner_asked`]). The ONLY way to it. Such a reply reaches no
+    /// peer and its guesses are checked here, so it is kept and read as
+    /// [`Exposure::here`]. Separate from the daemon's: a split's replies stay
+    /// there, and a model process's go with it when it is retired.
+    pub fn in_this_process(model: &str, owners: bool) -> Option<EarlierReplies> {
+        static STORE: OnceLock<Arc<OwnerReplies>> = OnceLock::new();
+        if !owners || !store_on() {
+            return None;
+        }
+        Some(EarlierReplies {
+            store: Arc::clone(STORE.get_or_init(Default::default)),
+            model: model.to_string(),
         })
     }
 
@@ -210,6 +242,12 @@ impl Exposure {
         }
     }
 
+    /// Reaches no peer: a reply written, and a guess checked, on this
+    /// computer alone.
+    pub fn here() -> Self {
+        Self::new(std::iter::empty(), std::iter::empty())
+    }
+
     /// Whether a run copied from a reply seen as `self` may be sent as
     /// `shown`: every peer it would reach saw the reply, and every peer it
     /// would reach as ids knew the reply as ids.
@@ -223,7 +261,8 @@ impl Exposure {
 }
 
 /// One owner's request's view of the store. Built only by
-/// [`OwnerReplies::for_the_owner`].
+/// [`OwnerReplies::for_the_owner`] and [`OwnerReplies::in_this_process`].
+#[derive(Clone)]
 pub struct EarlierReplies {
     store: Arc<OwnerReplies>,
     model: String,
@@ -556,6 +595,35 @@ mod tests {
         });
         assert!(store.for_the_owner(&led).is_none());
         assert!(store.for_the_owner(&request(RequestedBy::Owner)).is_some());
+    }
+
+    /// A model process's store (#337): reached only where the daemon found
+    /// the owner asked, shared by that process's replies, and what it keeps
+    /// — written on this computer alone — never copied into a guess a peer
+    /// would see.
+    #[test]
+    fn a_model_process_keeps_the_owners_replies_for_the_owner_alone() {
+        use crate::inference::process_pool::Requester;
+        assert!(the_owner_asked(RequestedBy::Owner, Requester::Owner));
+        assert!(!the_owner_asked(RequestedBy::Owner, Requester::Swarm));
+        assert!(!the_owner_asked(RequestedBy::NotTheOwner, Requester::Owner));
+        assert!(!the_owner_asked(RequestedBy::NotTheOwner, Requester::Swarm));
+
+        let model = "a-model-process-keeps-the-owners-replies";
+        assert!(OwnerReplies::in_this_process(model, false).is_none());
+        OwnerReplies::in_this_process(model, true)
+            .unwrap()
+            .keep(&[20, 21, 22, 23, 24, 25, 99], &Exposure::here());
+        let next = OwnerReplies::in_this_process(model, true).unwrap();
+        let run = next
+            .copied_run(&[7, 21, 22, 23], &Exposure::here(), cfg(), 32)
+            .expect("the next reply of the same process copies the first");
+        assert_eq!(run.tokens, vec![24, 25]);
+        assert_eq!(
+            next.copied_run(&[7, 21, 22, 23], &via(&[1], &[]), cfg(), 32),
+            None,
+            "a reply no peer saw is never copied towards one"
+        );
     }
 
     /// llama.cpp's lax vote: a bigram seen once copies nothing, twice with the

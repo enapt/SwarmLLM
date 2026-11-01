@@ -657,6 +657,10 @@ says what the guess count was priced from (2026-10-25): the step and the
 check line in ms, the recent acceptance, `declined` (guesses found and not worth
 their check — high on a card where a check costs several steps) and `probes`
 (declined guesses checked anyway, to see whether the text turned to copying).
+`earlier` (2026-11-01, #337) counts the lookups answered from the owner's EARLIER
+replies, which the model process keeps for the owner alone: 0 on every request
+not made with this node's key directly, on the first reply after the model was
+loaded, and with `SWARMLLM_FLOW_COPY_STORE=0`.
 `SWARMLLM_LOCAL_GUESS_GAMMA=fixed` checks every guess, the rule before. A request
 that is not alone on the worker joins the batch instead and logs nothing.
 

@@ -10863,6 +10863,12 @@ impl ModelProcessPool {
     /// every core, or the swarm's, within the contribution level
     /// ([`Requester`]). Required, so no caller can forget to say.
     ///
+    /// `requested_by` says whether the owner asked (`InferenceRequest::requested_by`,
+    /// from the headers at the API): with `requester`, it decides whether the
+    /// reply's guesses may copy from the owner's earlier replies and the reply
+    /// be kept for the next (#337, `owner_replies::the_owner_asked`). Required,
+    /// for the same reason.
+    ///
     /// `keep` is the caller's instruction to keep the request on this
     /// computer (#251 (2b)): the worker saves its prompt's cache for reuse
     /// here only. Required for the same reason.
@@ -10881,6 +10887,7 @@ impl ModelProcessPool {
         sampling: SamplingParams,
         request_id: uuid::Uuid,
         requester: Requester,
+        requested_by: crate::types::RequestedBy,
         keep: crate::types::KeepAsked,
         session_id: Option<String>,
         token_tx: Option<crate::inference::router::StreamingTokenTx>,
@@ -10901,6 +10908,7 @@ impl ModelProcessPool {
                 sampling.clone(),
                 request_id,
                 requester,
+                requested_by,
                 keep,
                 session_id.clone(),
                 token_tx.clone(),
@@ -10935,6 +10943,7 @@ impl ModelProcessPool {
                         sampling,
                         request_id,
                         requester,
+                        requested_by,
                         keep,
                         session_id,
                         token_tx,
@@ -10958,6 +10967,7 @@ impl ModelProcessPool {
         sampling: SamplingParams,
         request_id: uuid::Uuid,
         requester: Requester,
+        requested_by: crate::types::RequestedBy,
         keep: crate::types::KeepAsked,
         session_id: Option<String>,
         token_tx: Option<crate::inference::router::StreamingTokenTx>,
@@ -10987,6 +10997,7 @@ impl ModelProcessPool {
             session_id,
             requester == Requester::Owner,
             keep.is_kept(),
+            crate::inference::owner_replies::the_owner_asked(requested_by, requester),
         );
 
         if handle.dead.load(Ordering::Acquire) {

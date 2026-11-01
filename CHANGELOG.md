@@ -43,6 +43,16 @@ so the reply is the one it would have been without guessing. In a test that copi
 the question into JSON (TinyLlama, on the processor), 37 of the reply's tokens came from guesses
 checked together instead of one step each, and the reply was the same, token for token. (#336)
 
+**A model on your own computer writes a reply faster when you have asked it something like it
+before.** An agent's requests repeat a great deal of what its earlier requests got back. A split
+across computers already copied from your earlier replies; a model running whole on your computer
+copied only from the conversation in front of it. It now keeps your earlier replies too, in its
+own memory, and guesses ahead from them where the conversation offers nothing. Only your own
+requests — made with this computer's key, not passed on by another computer — read or add to
+it; nothing is saved to disk or shown to another computer. Asking TinyLlama the same question
+twice, on the processor: 74 of the second reply's 96 tokens came from guesses instead of 45, in
+24 checks instead of 53, and the reply was the same, token for token. (#337)
+
 **Groundwork for Qwen3-Coder-Next, not yet switched on.** This engine can now read the
 Qwen3-Next family's files — its layers are Qwen 3.5's with the attention heads stored in a
 different order, which is put right as the file is read — and on test files it agrees with

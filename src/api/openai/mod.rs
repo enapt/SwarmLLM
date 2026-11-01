@@ -631,6 +631,7 @@ pub async fn chat_completions(
                     .and_then(|v| v.as_bool())
                     .unwrap_or(false),
                 req.keep_asked(),
+                req.requested_by,
             )
             .await
             .into_response());
@@ -646,6 +647,7 @@ pub async fn chat_completions(
                 req.tool_definitions(),
                 req.template_vars.clone(),
                 req.keep_asked(),
+                req.requested_by,
             )
             .await;
         }

@@ -2694,7 +2694,7 @@ per-session response histories are a candidate input for #3 — keep that in min
 deleting.)
 
 #### #337 — A copied run looks only in this conversation, so an agent's first replies copy little
-`P2` · perf-split · **OPEN** (the flow done 2026-10-24; residual below) · history: `docs/plans/faster_than_local.md` § 7.6
+`P2` · perf-split · **OPEN** (the flow and the rounds done 2026-10-24, one computer 2026-11-01; residual below) · history: `docs/plans/faster_than_local.md` § 7.6
 
 A copied run (`ngram_lookup::copied_run`, read by the flow's `copy_ahead`, the n-gram loop and local
 prompt lookup) searches the prompt and the reply so far. An agent's opening calls repeat its EARLIER
@@ -2732,11 +2732,20 @@ reply whose peers changed (failover) is not kept (`PipelineExecutor::exposure_of
 **Residual**:
 - The chain stream (`dsd_stream`) neither reads nor keeps the store — on the rig a reply's first
   answer ran it (the drafter not yet on the card), so the next had nothing to copy.
-- The worker's local prompt lookup (`model_worker::ngram_spec_round`, another process, knowing only
-  `IpcGenerate::for_the_owner`). Its path needs the reply's ids at the write point:
-  `WorkerMsg::Token` carries `token_id`, which `ModelProcessPool::generate_attempt` drops
-  (`token_id: _`), and a forwarded request reaches the pool as `Requester::Owner`
-  (`api/openai/streaming.rs`), so `requested_by` must be threaded too.
+- ~~The worker's local prompt lookup~~ **Done 2026-11-01**: a model process keeps its own store
+  (`OwnerReplies::in_this_process`), read by `LocalSpec` where the conversation has no match and kept
+  by both generate paths (the one-at-a-time loop, a batched slot's finish) — so the ids are there at
+  the write point and nothing crosses the pipe. Reached only where the daemon found the owner asked:
+  `IpcGenerate::reads_owner_replies` ← `owner_replies::the_owner_asked(requested_by, requester)`, the
+  predicate `for_the_owner` now asks too, with `requested_by` a REQUIRED argument of
+  `ModelProcessPool::generate` threaded from both chat APIs' fast paths (a pool member's forward
+  reaches the pool as `Requester::Owner` but `NotTheOwner`; a peer's hand-off is neither). Shown to no
+  peer (`Exposure::here`), so never copied towards one. TinyLlama on the processor, the same question
+  asked again as a new conversation: 45 of the reply's 96 tokens kept from guesses in 53 rounds →
+  74 in 24 (8 lookups answered from the first reply), the reply identical
+  (`the_owner_asked_again_is_guessed_from_the_first_reply`). **Left of it**: the model process's store
+  is not the daemon's — a local reply does not copy from a split's replies (a split's never from a
+  local one: shown to nobody, `Exposure::covers`) — and goes with the process when it is retired.
 - A requester guessing for the head that leads its split (`requester_guesses`) does not read it.
 - Field measurement on an agent's replayed session (the rig measures the mechanism, below).
 
