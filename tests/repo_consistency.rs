@@ -4338,15 +4338,30 @@ fn the_router_answers_bad_methods_in_the_error_envelope() {
 /// generic cloud-provider hint ("The cloud provider returned an error. Try
 /// again") — naming the wrong system and advising the one thing that cannot
 /// help. The stale comment there even claimed to match probe.rs.
+///
+/// Since #394 both answer through ONE helper, `admin_hf::probe_failure_error`,
+/// which also reports an unreadable file as the caller's (400): each site must
+/// call it, and it must take its answer from the shared classifier.
 #[test]
 fn both_huggingface_probe_sites_treat_a_typo_as_the_callers_mistake() {
     let root = repo_root();
     for rel in ["src/api/admin_hf/probe.rs", "src/api/admin_hf/shards.rs"] {
         let src = std::fs::read_to_string(root.join(rel)).expect("call site must exist");
         assert!(
-            src.contains("probe_failure_is_user_fixable"),
-            "{rel} probes HuggingFace, so it must separate a wrong name from an \
-             upstream failure — otherwise a typo is reported as a gateway error"
+            src.contains("probe_failure_error("),
+            "{rel} probes HuggingFace, so it must answer a failure through \
+             `probe_failure_error` — otherwise a typo is reported as a gateway error"
+        );
+    }
+    let helper = std::fs::read_to_string(root.join("src/api/admin_hf/mod.rs"))
+        .expect("admin_hf/mod.rs must exist");
+    let body = fn_body(&helper, "fn probe_failure_error(")
+        .expect("admin_hf/mod.rs must still define `probe_failure_error`");
+    for needed in ["probe_failure(", "NotFound", "Validation"] {
+        assert!(
+            body.contains(needed),
+            "`probe_failure_error` must classify with `probe_failure` and answer a \
+             wrong name or an unreadable file as the caller's — `{needed}` is missing"
         );
     }
 }
