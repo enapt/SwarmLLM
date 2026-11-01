@@ -43,7 +43,9 @@ fn build_chat_completion_response(
     completion_tokens: u32,
     session_id: Option<String>,
     token_logprobs: &[crate::inference::router::TokenLogProbEntry],
-    tools_requested: bool,
+    // The request's tools as the prompt carried them — whether to look for a
+    // call, and how to type one (#395).
+    tools: &crate::api::tool_parse::RequestTools,
     // Which computers served it — REQUIRED, so a new caller cannot build a
     // reply that leaves its route out of the body (#251 (3)).
     trace: Option<&crate::inference::trace::TraceSnapshot>,
@@ -75,8 +77,8 @@ fn build_chat_completion_response(
     // Gated on the request actually carrying tools: otherwise a model asked to
     // "reply in JSON" could have a legitimate answer reinterpreted as a call.
     // Truncated output deliberately stays text (see `api::tool_parse`).
-    let (content, reasoning_content, tool_calls, finish_reason) = if tools_requested {
-        match crate::api::tool_parse::parse_tool_calls(&content) {
+    let (content, reasoning_content, tool_calls, finish_reason) = if tools.requested() {
+        match crate::api::tool_parse::parse_tool_calls(&content, tools) {
             Some(parsed) => {
                 let calls: Vec<crate::api::openai::types::ToolCall> = parsed
                     .into_iter()
@@ -618,6 +620,9 @@ pub(super) async fn router_inference(
     created: i64,
     cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 ) -> Result<axum::response::Response, ApiError> {
+    // The definitions the prompt is built from are the ones the reply is read
+    // against (#395).
+    let tool_definitions = req.tool_definitions();
     let mut inference_req = InferenceRequest::local(
         ModelId(req.model.clone()),
         messages,
@@ -625,7 +630,7 @@ pub(super) async fn router_inference(
         false,
         req.session_id.clone(),
         req.lora_adapter.clone(),
-        req.tool_definitions(),
+        tool_definitions.clone(),
         req.template_vars.clone(),
         req.keep_asked(),
         req.requested_by,
@@ -647,7 +652,7 @@ pub(super) async fn router_inference(
         output.completion_tokens,
         output.session_id,
         &output.token_logprobs,
-        req.tools.as_ref().is_some_and(|t| !t.is_empty()),
+        &crate::api::tool_parse::RequestTools::from_definitions(tool_definitions.as_deref()),
         trace.as_ref(),
     );
 
@@ -714,11 +719,7 @@ async fn emit_openai_tool_calls(
     // still holds text back (a reasoning preamble it is part-way through), so
     // this must run — but parsing prose for a call could only ever produce a
     // false `finish_reason: "tool_calls"` on an ordinary answer.
-    let parsed = if buffered.detects_tools() {
-        crate::api::tool_parse::parse_tool_calls(buffered.reply_text())
-    } else {
-        None
-    };
+    let parsed = buffered.parsed_calls();
     // The scratchpad goes out before anything else the flush releases: the
     // tail `take_reasoning` held back, or the whole of a block the reply never
     // closed. Whether a call ends it decides where an unclosed block stops.
@@ -826,8 +827,10 @@ async fn router_inference_stream(
 
     // Captured before the spawn: `req` is borrowed and cannot cross into the
     // task. A local model expresses tool calls as text, so this decides whether
-    // the token stream is forwarded live or withheld for inspection.
-    let tools_requested = req.tools.as_ref().is_some_and(|t| !t.is_empty());
+    // the token stream is forwarded live or withheld for inspection — read off
+    // the definitions the prompt carried, so `tool_choice: "none"` reads text.
+    let reply_tools =
+        crate::api::tool_parse::RequestTools::from_definitions(req.tool_definitions().as_deref());
 
     // Bridge the streaming token channel into SSE events
     let (sse_tx, sse_rx) = tokio::sync::mpsc::channel::<StreamEvent>(64);
@@ -852,7 +855,7 @@ async fn router_inference_stream(
         // Text held back for tool inspection — but only the part that could
         // still BE a tool call. See `tool_parse::content_prefix_len`.
         let mut buffered = crate::api::tool_parse::StreamingToolText::new(
-            tools_requested,
+            reply_tools,
             crate::api::tool_parse::ReasoningOut::Separate,
             token_rx.prompt_opened(),
         );
@@ -1087,7 +1090,7 @@ pub(super) async fn split_non_stream_response(
     template_vars: Option<crate::types::TemplateVars>,
     keep: crate::types::KeepAsked,
 ) -> Result<axum::response::Response, ApiError> {
-    let tools_requested = tools.as_ref().is_some_and(|t| !t.is_empty());
+    let reply_tools = crate::api::tool_parse::RequestTools::from_definitions(tools.as_deref());
     let output = run_split_generate(
         &state,
         &model_id,
@@ -1112,7 +1115,7 @@ pub(super) async fn split_non_stream_response(
         output.completion_tokens,
         None,
         &[],
-        tools_requested,
+        &reply_tools,
         trace.as_ref(),
     );
 
@@ -1145,7 +1148,7 @@ pub(super) async fn split_stream_response(
     include_usage: bool,
     keep: crate::types::KeepAsked,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
-    let tools_requested = tools.as_ref().is_some_and(|t| !t.is_empty());
+    let reply_tools = crate::api::tool_parse::RequestTools::from_definitions(tools.as_deref());
     // Captured before `state` is moved into the generation task. This is the
     // LOCAL-model streaming path — the one most likely to sit in a long prefill
     // on a modest machine — so omitting progress here would leave it missing
@@ -1219,7 +1222,7 @@ pub(super) async fn split_stream_response(
         // either tool_calls or the text at the end. Matches OpenAI, which does
         // not stream partial text for a tool call either.
         let mut buffered = crate::api::tool_parse::StreamingToolText::new(
-            tools_requested,
+            reply_tools,
             crate::api::tool_parse::ReasoningOut::Separate,
             token_rx.prompt_opened(),
         );
@@ -1932,7 +1935,7 @@ mod route_in_body_tests {
                 1,
                 None,
                 &[],
-                tools,
+                &crate::api::tool_parse::RequestTools::untyped(tools),
                 None,
             ))
             .unwrap()
@@ -1964,6 +1967,43 @@ mod route_in_body_tests {
             .is_none());
     }
 
+    /// Qwen's XML call becomes `tool_calls` with its arguments typed by the
+    /// tool's schema (#395): the surface hands the parser the definitions,
+    /// not a flag, so an integer argument arrives as a number.
+    #[test]
+    fn a_qwen_xml_call_is_a_tool_call_typed_by_its_schema() {
+        let tools = crate::api::tool_parse::RequestTools::from_definitions(Some(&[
+            serde_json::json!({"type": "function", "function": {
+                "name": "get_weather",
+                "parameters": {"type": "object", "properties": {
+                    "city": {"type": "string"}, "days": {"type": "integer"}
+                }}
+            }}),
+        ]));
+        let reply = serde_json::to_value(build_chat_completion_response(
+            "id".into(),
+            0,
+            "m".into(),
+            "<tool_call>\n<function=get_weather>\n<parameter=city>\nParis\n</parameter>\n<parameter=days>\n3\n</parameter>\n</function>\n</tool_call>".into(),
+            None,
+            "stop".into(),
+            1,
+            1,
+            None,
+            &[],
+            &tools,
+            None,
+        ))
+        .unwrap();
+        let choice = &reply["choices"][0];
+        assert_eq!(choice["finish_reason"], "tool_calls");
+        let call = &choice["message"]["tool_calls"][0]["function"];
+        assert_eq!(call["name"], "get_weather");
+        let arguments: serde_json::Value =
+            serde_json::from_str(call["arguments"].as_str().unwrap()).unwrap();
+        assert_eq!(arguments, serde_json::json!({"city": "Paris", "days": 3}));
+    }
+
     /// A chat completion that is not streamed carries the same object in its
     /// body as well as the headers, so one parser reads both forms; a reply
     /// with no swarm route leaves it out rather than guessing.
@@ -1982,7 +2022,7 @@ mod route_in_body_tests {
                 1,
                 None,
                 &[],
-                false,
+                &crate::api::tool_parse::RequestTools::default(),
                 trace,
             ))
             .unwrap()

@@ -27,6 +27,13 @@ never work; it is now a plain 400 that names the format and the builds to choose
 of models people run no longer gets stuck on such a file: it moves to the next upload of the same
 model. (#394)
 
+**Qwen models' tool calls reach your app as tool calls.** Qwen 3.5 and the Qwen models after
+it — and Qwen3-Coder — call a tool in an XML form their own instructions ask for. This server read
+only JSON calls, so every call such a model made came back to your app as plain text, and an agent
+(Claude Code, an OpenAI or Anthropic client) saw a model that never used its tools. It is now read
+as llama.cpp reads it, on both APIs, streamed or not, with each argument given the type the tool
+says it has — a number arrives as a number, text as text. (#395)
+
 **Groundwork for Qwen3-Coder-Next, not yet switched on.** This engine can now read the
 Qwen3-Next family's files — its layers are Qwen 3.5's with the attention heads stored in a
 different order, which is put right as the file is read — and on test files it agrees with

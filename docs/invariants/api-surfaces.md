@@ -828,6 +828,41 @@ the guard it already carried.
 appends the family's own generation prompt when the rendered prompt ends on a
 turn-CLOSING marker.
 
+## A reply is read against the tools the prompt carried (2026-11-01, FUTURE_WORK #395)
+
+**What was wrong.** Qwen 3.5, the Qwen 3.6 / 3.8 models after it and Qwen3-Coder are trained
+on an XML call — `<tool_call>\n<function=NAME>\n<parameter=KEY>\nVALUE\n</parameter>\n…</function>\n</tool_call>`
+— and their shipped templates ask for it (the network's Qwen3.5-4B, `fixtures/qwen35_gguf_shipped.jinja`).
+Since #283 those templates are handed the tools, so the model answers in that form; the reader
+knew only JSON bodies, found nothing, and the call reached the client as text with
+`finish_reason: "stop"`. Measured on the live node (v0.3.266, Qwen3.5-4B, processor, 2026-11-01):
+"What is the weather in Paris right now? Use the tool." → a correct XML call, returned as content.
+
+**Why the reader needs the schemas.** An XML argument is text: `<parameter=days>\n3\n</parameter>`
+is the number 3 for an integer parameter and the string "3" for a string one. llama.cpp
+(`common/parsers/qwen3-coder.cpp`, master `4b1a27f`) types it from the schema — no string type:
+JSON; only string: the text; both: JSON of an allowed non-string type, else the text — and vLLM's
+Qwen3-Coder parser does the same, keeping an argument the schema does not name as text and reading
+Python's `True` / `None` for a boolean / null. Every surface held only a `tools_requested: bool`
+derived from the definitions, so `RequestTools` replaced the bool everywhere: built once from the
+definitions, handed to `parse_tool_calls` and `StreamingToolText::new` as a REQUIRED argument. The
+local OpenAI paths now build it from `tool_definitions()` — the list the prompt is built from,
+which `tool_choice: "none"` empties — where the bool had read the raw list and searched a reply
+the model was told no tools for.
+
+**What else the format needs.** One newline after `<parameter=…>` and one before `</parameter>`
+are the format's; the value keeps its own lines and indentation (code). Qwen3-Coder sometimes
+leaves out `<tool_call>`: llama.cpp then accepts `<function=NAME>` only for a NAME the request
+defines, and so does this reader; `<function=` is a framed call marker, so a streamed bare call is
+held back. A call is tried before every JSON reader — an argument may itself be JSON with a
+`"name"`. A call cut off before `</function>`, or a body holding anything but parameters, is text.
+
+**Checked**: `api::tool_parse::qwen_xml_tests` (the reply Qwen3.5-4B wrote, the typing rules, two
+calls, the bare form, cut-off and malformed bodies, a JSON argument naming something, the stream)
+and one test per surface (`a_qwen_xml_call_is_a_tool_call_typed_by_its_schema`,
+`a_qwen_xml_call_is_a_tool_use_block_typed_by_its_schema` — an integer argument arrives as a
+number); with the reader removed nine go red. The real request on main is in the commit.
+
 ## A tool-carrying reply streams the part that cannot be a tool call
 
 **`tool_parse::content_prefix_len`** is the single answer to "how much of this

@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #395**). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #396**). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -4064,6 +4064,17 @@ archive under the named heading. Reopen one only with the evidence its line name
 Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 19-28 were
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
+
+**Closed 2026-11-01, ships in the next release** (#395)
+- #395 — **A Qwen model's tool call is a tool call, not text.** Qwen 3.5 and the families after
+  it, and Qwen3-Coder, answer a tool request in an XML form their templates ask for
+  (`<tool_call><function=NAME><parameter=KEY>…`); the reader knew only JSON bodies, so every such
+  call reached the client as prose (`finish_reason: "stop"`, the network's Qwen3.5-4B on v0.3.266,
+  2026-11-01). Now `tool_parse::try_qwen_xml` reads it as llama.cpp does, typing each argument by
+  the request's schema (`typed_argument`), and one value — `RequestTools`, built from the
+  definitions the prompt carried — replaced the `tools_requested` flag on all four surfaces, so no
+  path can read a reply knowing that tools were asked for but not what they take. Evidence:
+  `docs/invariants/api-surfaces.md` § "A reply is read against the tools the prompt carried".
 
 **Closed 2026-11-01, ships in the next release** (#394)
 - #394 — **A file this engine cannot read is the file's fault, wherever a probe meets it.**

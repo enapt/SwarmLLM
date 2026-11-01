@@ -73,6 +73,12 @@ No default system prompt, ever — HF's `apply_chat_template`, llama.cpp, vLLM a
 
 → `docs/invariants/api-surfaces.md` § "A prompt that closed someone else's turn is finished for the model"
 
+## A reply is read against the tools the prompt carried (2026-11-01, #395)
+
+**`tool_parse::RequestTools`** is the one answer to what a reply is read against — whether to look for a call, and each tool's argument schema — built by `RequestTools::from_definitions` from the SAME definitions the prompt was built from (`tool_definitions()` on OpenAI, so `tool_choice: "none"` reads text), and REQUIRED by `parse_tool_calls` and `StreamingToolText::new` (`parsed_calls` at a stream's end). Never a `bool` beside the definitions: Qwen's XML calls (`try_qwen_xml`) carry arguments as text, typed by the schema as llama.cpp types them (`typed_argument`).
+
+→ `docs/invariants/api-surfaces.md` § "A reply is read against the tools the prompt carried"
+
 ## What part of a tool-carrying reply is content is decided in one place
 
 **`tool_parse::leading_content`** is the single answer, for both non-streaming surfaces, to what part of a tool-carrying reply is content.

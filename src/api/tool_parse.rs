@@ -177,6 +177,72 @@ pub fn tool_choice_forbids_tools(tool_choice: &Option<serde_json::Value>) -> boo
     }
 }
 
+/// The request's tools, as reading its reply needs them (#395).
+///
+/// Two answers: whether to look for a call at all, and each tool's argument
+/// schema by name. Qwen's XML calls (`<parameter=days>\n3\n</parameter>`)
+/// carry every argument as text, and only the schema says whether `3` is the
+/// number or the string — llama.cpp (`common/parsers/qwen3-coder.cpp`) and
+/// vLLM both type it from the schema. Built once per request from the SAME
+/// definitions the prompt was built from, and REQUIRED by [`parse_tool_calls`]
+/// and [`StreamingToolText::new`]: a flag beside the definitions is how a
+/// reader ends up knowing a call was asked for but not what its arguments are.
+#[derive(Clone, Debug, Default)]
+pub struct RequestTools {
+    requested: bool,
+    /// Each tool's `parameters` schema, by name.
+    schemas: std::collections::HashMap<String, Value>,
+}
+
+impl RequestTools {
+    /// From the definitions the prompt was built from — OpenAI's shape,
+    /// `{"type": "function", "function": {"name", "parameters"}}`, which the
+    /// Anthropic surface translates its tools to first; a bare
+    /// `{"name", "parameters"}` is read too. `None` or an empty list: a reply
+    /// no one asked to call anything, read as text.
+    pub fn from_definitions(tools: Option<&[Value]>) -> Self {
+        let tools = tools.unwrap_or_default();
+        let schemas = tools
+            .iter()
+            .filter_map(|tool| {
+                let function = tool.get("function").unwrap_or(tool);
+                let name = function.get("name")?.as_str()?;
+                let schema = function.get("parameters").cloned().unwrap_or(Value::Null);
+                Some((name.to_string(), schema))
+            })
+            .collect();
+        Self {
+            requested: !tools.is_empty(),
+            schemas,
+        }
+    }
+
+    /// Did the request ask for tools — is the reply searched for a call?
+    pub fn requested(&self) -> bool {
+        self.requested
+    }
+
+    /// Does the request define a tool of this name?
+    fn defines(&self, name: &str) -> bool {
+        self.schemas.contains_key(name)
+    }
+
+    /// The schema of `tool`'s argument `name`, where the request gives one.
+    fn argument_schema(&self, tool: &str, name: &str) -> Option<&Value> {
+        self.schemas.get(tool)?.get("properties")?.get(name)
+    }
+
+    /// Tools asked for (or not) with no schemas: what every format but Qwen's
+    /// XML reads the same either way, for the tests of those formats.
+    #[cfg(test)]
+    pub(crate) fn untyped(requested: bool) -> Self {
+        Self {
+            requested,
+            schemas: Default::default(),
+        }
+    }
+}
+
 /// One tool call recovered from model output, in the shape both API layers need.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ParsedToolCall {
@@ -229,12 +295,13 @@ pub fn leading_content(text: &str) -> Option<&str> {
     (!prefix.is_empty()).then_some(prefix)
 }
 
-pub fn parse_tool_calls(text: &str) -> Option<Vec<ParsedToolCall>> {
+pub fn parse_tool_calls(text: &str, tools: &RequestTools) -> Option<Vec<ParsedToolCall>> {
     let trimmed = strip_code_fences(text.trim());
 
     // Cheap pre-filter: every supported format contains one of these. Avoids
     // running four parsers over normal chat output.
     let looks_like_tool_call = trimmed.contains("tool_call")
+        || trimmed.contains(QWEN_XML_FUNCTION)
         || trimmed.contains("[TOOL_CALLS]")
         || trimmed.contains("<|python_tag|>")
         || trimmed.contains("functools")
@@ -246,7 +313,11 @@ pub fn parse_tool_calls(text: &str) -> Option<Vec<ParsedToolCall>> {
         return None;
     }
 
+    // Qwen's XML before every JSON reader: an argument may itself be JSON
+    // carrying a `"name"`, which the generic and Llama readers would take for
+    // the call.
     try_gemma4(trimmed)
+        .or_else(|| try_qwen_xml(trimmed, tools))
         .or_else(|| try_generic(trimmed))
         .or_else(|| try_hermes(trimmed))
         .or_else(|| try_mistral(trimmed))
@@ -267,13 +338,14 @@ pub fn parse_tool_calls(text: &str) -> Option<Vec<ParsedToolCall>> {
 /// needs an object, so the brace is reached first or the text cannot parse as
 /// a call at all. Leaving it out lets prose that merely mentions tool calls
 /// keep streaming.
-const CALL_MARKERS: [&str; 7] = [
+const CALL_MARKERS: [&str; 8] = [
     FRAMED_CALL_MARKERS[0],
     FRAMED_CALL_MARKERS[1],
     FRAMED_CALL_MARKERS[2],
     FRAMED_CALL_MARKERS[3],
     FRAMED_CALL_MARKERS[4],
     FRAMED_CALL_MARKERS[5],
+    FRAMED_CALL_MARKERS[6],
     "{",
 ];
 
@@ -282,7 +354,7 @@ const CALL_MARKERS: [&str; 7] = [
 /// (`StreamingToolText::take_reasoning`): a brace is everywhere in a model
 /// thinking about code, and stopping at it would silence exactly the
 /// scratchpads that run longest.
-const FRAMED_CALL_MARKERS: [&str; 6] = [
+const FRAMED_CALL_MARKERS: [&str; 7] = [
     "<tool_call>",
     "[TOOL_CALLS]",
     "<|python_tag|>",
@@ -294,6 +366,8 @@ const FRAMED_CALL_MARKERS: [&str; 6] = [
     // Gemma 4's ([`try_gemma4`]): its call's name sits between the marker and
     // the brace, so the brace alone let `<|tool_call>call:name` stream.
     "<|tool_call>",
+    // Qwen3-Coder's call when it leaves out `<tool_call>` ([`try_qwen_xml`]).
+    QWEN_XML_FUNCTION,
 ];
 
 /// How many bytes at the END of `text` could be the beginning of `marker`.
@@ -535,7 +609,7 @@ enum Reasoning {
 
 /// Where a reasoning model's scratchpad goes while its reply streams.
 ///
-/// A REQUIRED constructor argument for the same reason `detect_tools` is: the
+/// A REQUIRED constructor argument for the same reason `tools` is: the
 /// two surfaces answer it differently, and a default would let one of them
 /// answer it by accident.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -561,11 +635,12 @@ pub struct StreamingToolText {
     text: String,
     emitted: usize,
     reasoning: Reasoning,
-    /// Is this reply being inspected for tool calls?
+    /// The request's tools: whether this reply is inspected for calls, and
+    /// how a call's arguments are typed.
     ///
     /// Deliberately a field rather than a condition at the call site, and
     /// deliberately NOT defaulted — see [`StreamingToolText::new`].
-    detect_tools: bool,
+    tools: RequestTools,
     reasoning_out: ReasoningOut,
     /// Where the scratchpad's own text begins (just past `<think>`), once the
     /// reply is known to open with one.
@@ -626,9 +701,9 @@ pub fn scratchpads_in_order(closed: Option<String>, unfinished: Option<String>) 
 impl StreamingToolText {
     /// A buffer for one streamed reply.
     ///
-    /// `detect_tools` says whether this request asked for tools, and so whether
+    /// `tools` says whether this request asked for tools, and so whether
     /// text must be held back until it is clear it is not the beginning of a
-    /// tool call. It does NOT gate the reasoning-block filter, which applies to
+    /// tool call — and how a call found at the end is typed ([`RequestTools`]). It does NOT gate the reasoning-block filter, which applies to
     /// every reply — that distinction is the whole reason this is a
     /// constructor parameter instead of an `if` around `push`.
     ///
@@ -653,7 +728,7 @@ impl StreamingToolText {
     /// scratchpad as the answer. It is read when the reply's first non-blank
     /// character arrives, since the prompt is rendered after the stream exists.
     pub(crate) fn new(
-        detect_tools: bool,
+        tools: RequestTools,
         reasoning_out: ReasoningOut,
         prompt_opened: PromptOpenedSlot,
     ) -> Self {
@@ -661,7 +736,7 @@ impl StreamingToolText {
             text: String::new(),
             emitted: 0,
             reasoning: Reasoning::default(),
-            detect_tools,
+            tools,
             reasoning_out,
             reasoning_from: None,
             reasoning_to: None,
@@ -676,7 +751,16 @@ impl StreamingToolText {
     /// helpers, which must not try to parse a call out of a reply that never
     /// asked for one.
     pub fn detects_tools(&self) -> bool {
-        self.detect_tools
+        self.tools.requested()
+    }
+
+    /// The calls the finished reply makes, read against the request's tools —
+    /// `None` for a reply that never asked for one, or that makes none.
+    pub fn parsed_calls(&self) -> Option<Vec<ParsedToolCall>> {
+        if !self.tools.requested() {
+            return None;
+        }
+        parse_tool_calls(self.reply_text(), &self.tools)
     }
 
     /// How much of the buffer is safe to release now.
@@ -686,7 +770,7 @@ impl StreamingToolText {
     /// token is released as soon as the reasoning filter is done with it —
     /// ordinary chat keeps streaming at exactly the rate it always did.
     fn releasable_len(&self) -> usize {
-        if self.detect_tools {
+        if self.tools.requested() {
             // Searched from where the reply proper begins, never from the top:
             // a closed scratchpad is not a place a call can start, and a `{` in
             // it — a model thinking about code writes them constantly — sat
@@ -867,7 +951,7 @@ impl StreamingToolText {
                 // instead of `</think>` (Qwen3 does it); its markup is not
                 // thinking. Held at the framed markers only — see
                 // `FRAMED_CALL_MARKERS` for why not at a brace.
-                if self.detect_tools {
+                if self.tools.requested() {
                     from + before_any_marker(&self.text[from..open], &FRAMED_CALL_MARKERS)
                 } else {
                     open
@@ -1766,6 +1850,206 @@ fn synth_id(index: usize) -> String {
     format!("call_{}", index + 1)
 }
 
+/// Where Qwen's XML call names its function ([`try_qwen_xml`]).
+const QWEN_XML_FUNCTION: &str = "<function=";
+
+/// Qwen's XML calls — Qwen3-Coder, Qwen 3.5 and the families after (#395):
+///
+/// ```text
+/// <tool_call>
+/// <function=get_weather>
+/// <parameter=city>
+/// Paris
+/// </parameter>
+/// </function>
+/// </tool_call>
+/// ```
+///
+/// Read as llama.cpp reads it (`common/parsers/qwen3-coder.cpp`, master
+/// `4b1a27f`): one newline after `<parameter=…>` and one before
+/// `</parameter>` belong to the format, the rest is the value, and the value
+/// is TYPED by the request's schema ([`typed_argument`]). Qwen3-Coder
+/// sometimes leaves out the opening `<tool_call>`, so a bare `<function=…>` is
+/// a call too — only for a tool the request defines, as llama.cpp accepts it,
+/// since `<function=` alone could be anything. A call whose `</function>`
+/// never came was cut off and is not a call, as everywhere here; so is a body
+/// holding anything but parameters.
+///
+/// Every call here was text before: the shipped templates of Qwen 3.5 and
+/// later describe tools in this format, a reply in it parsed as nothing, and
+/// the call reached the client as prose (Qwen3.5-4B, v0.3.266, 2026-11-01).
+fn try_qwen_xml(text: &str, tools: &RequestTools) -> Option<Vec<ParsedToolCall>> {
+    const CLOSE: &str = "</function>";
+    let mut calls = Vec::new();
+    let mut rest = text;
+    while let Some(at) = rest.find(QWEN_XML_FUNCTION) {
+        let wrapped = rest[..at].trim_end().ends_with("<tool_call>");
+        let after = &rest[at + QWEN_XML_FUNCTION.len()..];
+        let Some(name_end) = after.find('>') else {
+            break;
+        };
+        let name = after[..name_end].trim();
+        let body_and_rest = &after[name_end + 1..];
+        let Some(close) = body_and_rest.find(CLOSE) else {
+            break;
+        };
+        let body = &body_and_rest[..close];
+        rest = &body_and_rest[close + CLOSE.len()..];
+        if name.is_empty()
+            || name.contains(char::is_whitespace)
+            || !(wrapped || tools.defines(name))
+        {
+            continue;
+        }
+        let Some(arguments) = qwen_xml_arguments(body, name, tools) else {
+            continue;
+        };
+        calls.push(ParsedToolCall {
+            id: synth_id(calls.len()),
+            name: name.to_string(),
+            arguments: Value::Object(arguments).to_string(),
+        });
+    }
+    (!calls.is_empty()).then_some(calls)
+}
+
+/// A function body's `<parameter=…>` blocks, in the order written, or `None`
+/// when it holds anything else or a block is not closed.
+fn qwen_xml_arguments(
+    body: &str,
+    tool: &str,
+    tools: &RequestTools,
+) -> Option<serde_json::Map<String, Value>> {
+    const OPEN: &str = "<parameter=";
+    const CLOSE: &str = "</parameter>";
+    let mut arguments = serde_json::Map::new();
+    let mut rest = body.trim_start();
+    while !rest.is_empty() {
+        let after = rest.strip_prefix(OPEN)?;
+        let name_end = after.find('>')?;
+        let name = after[..name_end].trim();
+        if name.is_empty() {
+            return None;
+        }
+        let value_and_rest = &after[name_end + 1..];
+        // The format's own newline before the close tag is the value's end;
+        // a bare close tag only where the model left it out.
+        let (end, close_len) = match value_and_rest.find(&format!("\n{CLOSE}")) {
+            Some(end) => (end, CLOSE.len() + 1),
+            None => (value_and_rest.find(CLOSE)?, CLOSE.len()),
+        };
+        let raw = &value_and_rest[..end];
+        let raw = raw.strip_prefix('\n').unwrap_or(raw);
+        arguments.insert(
+            name.to_string(),
+            typed_argument(raw, tools.argument_schema(tool, name)),
+        );
+        rest = value_and_rest[end + close_len..].trim_start();
+    }
+    Some(arguments)
+}
+
+/// One XML argument's text as the JSON value its schema says it is.
+///
+/// llama.cpp's rule (`qwen3-coder.cpp`): a parameter whose schema allows no
+/// string is JSON; one that allows only strings is the text as written; one
+/// that allows both is JSON where the text is a JSON value of an allowed
+/// non-string type, else the text. An argument the request gives no schema
+/// for is the text — vLLM's choice, since nothing says it is anything else.
+/// A boolean or null the model wrote Python's way (`True`, `None` — what these
+/// templates render a boolean argument as, through Jinja's `string`) is read
+/// as one where the schema allows it, as vLLM reads it.
+fn typed_argument(raw: &str, schema: Option<&Value>) -> Value {
+    let text = || Value::String(raw.to_string());
+    let Some(schema) = schema else {
+        return text();
+    };
+    let types = schema_types(schema);
+    if !types.is_empty() && types.iter().all(|t| *t == "string") {
+        return text();
+    }
+    // A whole number is a `number` too.
+    let allows = |t: &str| {
+        types.is_empty() || types.contains(&t) || (t == "integer" && types.contains(&"number"))
+    };
+    let parsed = serde_json::from_str::<Value>(raw.trim())
+        .ok()
+        .or_else(|| match raw.trim() {
+            "True" | "TRUE" if allows("boolean") => Some(Value::Bool(true)),
+            "False" | "FALSE" if allows("boolean") => Some(Value::Bool(false)),
+            "None" | "NULL" | "Null" if allows("null") => Some(Value::Null),
+            _ => None,
+        });
+    match parsed {
+        // A schema with no string in it takes what the model wrote as JSON.
+        Some(value) if !allows("string") => value,
+        // One with both takes a JSON value only of a type it allows.
+        Some(value) if !value.is_string() && allows(json_type(&value)) => value,
+        _ => text(),
+    }
+}
+
+/// The JSON Schema type of a value, as a schema's `type` names it.
+fn json_type(value: &Value) -> &'static str {
+    match value {
+        Value::Null => "null",
+        Value::Bool(_) => "boolean",
+        Value::Number(n) if n.is_i64() || n.is_u64() => "integer",
+        Value::Number(_) => "number",
+        Value::String(_) => "string",
+        Value::Array(_) => "array",
+        Value::Object(_) => "object",
+    }
+}
+
+/// The types a schema allows — `type` (one or a list), else the union of its
+/// `anyOf` / `oneOf` members, else what its `enum` / `const` values are. Empty
+/// when it says nothing, which allows anything.
+fn schema_types(schema: &Value) -> Vec<&str> {
+    match schema.get("type") {
+        Some(Value::String(t)) => return vec![t.as_str()],
+        Some(Value::Array(list)) => return list.iter().filter_map(Value::as_str).collect(),
+        _ => {}
+    }
+    for key in ["anyOf", "oneOf"] {
+        if let Some(Value::Array(members)) = schema.get(key) {
+            let mut types = Vec::new();
+            for member in members {
+                let member_types = schema_types(member);
+                if member_types.is_empty() {
+                    return Vec::new();
+                }
+                for t in member_types {
+                    if !types.contains(&t) {
+                        types.push(t);
+                    }
+                }
+            }
+            return types;
+        }
+    }
+    let mut types = Vec::new();
+    let values = match (schema.get("enum"), schema.get("const")) {
+        (Some(Value::Array(values)), _) => values.iter().collect(),
+        (_, Some(value)) => vec![value],
+        _ => Vec::new(),
+    };
+    for value in values {
+        let t = json_type(value);
+        if !types.contains(&t) {
+            types.push(t);
+        }
+    }
+    types
+}
+
+/// [`parse_tool_calls`] for a request whose tools carry no schemas — how the
+/// tests of every format but Qwen's XML read a reply.
+#[cfg(test)]
+fn parse_untyped(text: &str) -> Option<Vec<ParsedToolCall>> {
+    parse_tool_calls(text, &RequestTools::untyped(true))
+}
+
 #[cfg(test)]
 mod tests {
     /// Tokenise a reply the way a model produces it and count what a client
@@ -1774,7 +2058,7 @@ mod tests {
     /// **1** with them.
     fn deltas_for(reply: &str, token_len: usize) -> (Vec<String>, super::StreamingToolText) {
         let mut buf = super::StreamingToolText::new(
-            true,
+            super::RequestTools::untyped(true),
             super::ReasoningOut::Withheld,
             crate::inference::PromptOpenedSlot::default(),
         );
@@ -1798,7 +2082,7 @@ mod tests {
             "prose must stream, not arrive in one lump: got {} deltas",
             deltas.len()
         );
-        assert!(super::parse_tool_calls(buf.reply_text()).is_none());
+        assert!(super::parse_untyped(buf.reply_text()).is_none());
         // Everything emitted plus whatever is left is exactly the reply — no
         // token lost, none duplicated.
         let mut seen = deltas.concat();
@@ -1820,7 +2104,7 @@ mod tests {
             "not one character of the marker may leak: {streamed:?}"
         );
         // The call is recognised from the whole text, exactly as before.
-        let calls = super::parse_tool_calls(buf.reply_text()).expect("still parses");
+        let calls = super::parse_untyped(buf.reply_text()).expect("still parses");
         assert_eq!(calls[0].name, "read");
         // And the leftover content is the tail of the prose, never the call.
         let leftover = buf.pending_content().unwrap_or_default();
@@ -1836,7 +2120,7 @@ mod tests {
         let reply = "{\"name\": \"read\", \"arguments\": {\"path\": \"/x\"}}";
         let (deltas, mut buf) = deltas_for(reply, 3);
         assert!(deltas.is_empty(), "nothing to stream, got {deltas:?}");
-        assert!(super::parse_tool_calls(buf.reply_text()).is_some());
+        assert!(super::parse_untyped(buf.reply_text()).is_some());
         assert_eq!(buf.pending_content(), None, "there is no content in it");
     }
 
@@ -1847,7 +2131,7 @@ mod tests {
 
     #[test]
     fn gemma_4s_own_call_syntax_is_read_as_a_call() {
-        let calls = super::parse_tool_calls(GEMMA4_CALL).expect("Gemma 4's call parses");
+        let calls = super::parse_untyped(GEMMA4_CALL).expect("Gemma 4's call parses");
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].name, "search_flights");
         let args: serde_json::Value = serde_json::from_str(&calls[0].arguments).unwrap();
@@ -1880,7 +2164,7 @@ mod tests {
             "<|tool_call>call:noop{}<tool_call|>",
             "<|tool_call>call:cut{path:<|\"|>/x",
         );
-        let calls = super::parse_tool_calls(reply).expect("parses");
+        let calls = super::parse_untyped(reply).expect("parses");
         assert_eq!(calls.len(), 2, "{calls:?}");
         let args: serde_json::Value = serde_json::from_str(&calls[0].arguments).unwrap();
         assert_eq!(
@@ -1896,7 +2180,7 @@ mod tests {
         assert_eq!(calls[1].name, "noop");
         assert_eq!(calls[1].arguments, "{}");
         // An unquoted word is the text it spells; a quoted key is the key.
-        let calls = super::parse_tool_calls(
+        let calls = super::parse_untyped(
             "<|tool_call>call:get_weather{\"city\":Paris, unit: celsius}<tool_call|>",
         )
         .expect("parses");
@@ -1913,7 +2197,7 @@ mod tests {
             let (deltas, mut buf) = deltas_for(&reply, token_len);
             let streamed = deltas.concat() + &buf.pending_content().unwrap_or_default();
             assert_eq!(streamed, "Searching now.\n", "token length {token_len}");
-            let calls = super::parse_tool_calls(buf.reply_text()).expect("still parses");
+            let calls = super::parse_untyped(buf.reply_text()).expect("still parses");
             assert_eq!(calls[0].name, "search_flights");
         }
     }
@@ -1975,7 +2259,7 @@ mod tests {
                 deltas.is_empty(),
                 "token_len {token_len}: streamed {deltas:?}"
             );
-            assert!(super::parse_tool_calls(buf.reply_text()).is_some());
+            assert!(super::parse_untyped(buf.reply_text()).is_some());
             assert_eq!(buf.pending_content(), None, "token_len {token_len}");
         }
         // Prose before the array still goes out, and only the prose.
@@ -1991,7 +2275,7 @@ mod tests {
     #[test]
     fn a_call_in_the_templates_doubled_braces_is_read_and_nothing_leaks() {
         let reply = "<{{\"name\": \"get_time\", \"arguments\": {\"zone\": \"UTC\"}}}}";
-        let calls = super::parse_tool_calls(reply).expect("the conformance reply is a call");
+        let calls = super::parse_untyped(reply).expect("the conformance reply is a call");
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].name, "get_time");
         assert_eq!(calls[0].arguments, "{\"zone\":\"UTC\"}");
@@ -2011,7 +2295,7 @@ mod tests {
             "<tool_call>\n{{\"name\": \"get_time\", \"arguments\": {\"zone\": \"UTC\"}}}\n</tool_call>",
             "<{{\"name\": \"get_time\", \"arguments\": {\"zone\": \"UTC\"}}}>",
         ] {
-            let calls = super::parse_tool_calls(framed).unwrap_or_default();
+            let calls = super::parse_untyped(framed).unwrap_or_default();
             assert_eq!(calls.len(), 1, "{framed:?}");
             assert_eq!(calls[0].name, "get_time", "{framed:?}");
         }
@@ -2027,7 +2311,7 @@ mod tests {
             "{{\"type\": \"function\", \"function\": {\"name\": \"get_time\"}}}",
             "{{\"name\": \"get_time\", \"arguments\": {}}}}}}",
         ] {
-            assert!(super::parse_tool_calls(reply).is_none(), "{reply:?}");
+            assert!(super::parse_untyped(reply).is_none(), "{reply:?}");
         }
         // A `<` with a space before the brace is a word of the reply.
         let prose = "a < {\"b\": 1}";
@@ -2048,7 +2332,7 @@ mod tests {
             let (deltas, mut buf) = deltas_for(reply, 1);
             assert!(deltas.is_empty(), "{reply:?} streamed {deltas:?}");
             assert!(
-                super::parse_tool_calls(buf.reply_text()).is_some(),
+                super::parse_untyped(buf.reply_text()).is_some(),
                 "{reply:?}"
             );
             assert_eq!(buf.pending_content(), None, "{reply:?}");
@@ -2060,7 +2344,7 @@ mod tests {
         let t = "Let me check that.\n<tool_call>{\"name\": \"f\"}</tool_call>";
         assert_eq!(super::content_prefix_len(t), "Let me check that.\n".len());
         // And what is held back is exactly what the parser then recognises.
-        assert!(super::parse_tool_calls(t).is_some());
+        assert!(super::parse_untyped(t).is_some());
     }
 
     #[test]
@@ -2101,7 +2385,7 @@ mod tests {
     #[test]
     fn an_array_closed_with_a_brace_is_still_a_tool_call() {
         let observed = r#"{"tool_calls": [{"id": "call_7c5f4d3f", "type": "function", "function": {"name": "get_weather", "arguments": {"city": "Paris"}}}}"#;
-        let calls = parse_tool_calls(observed).expect("should recover the call");
+        let calls = parse_untyped(observed).expect("should recover the call");
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].name, "get_weather");
         // The ARGUMENTS must survive untouched — a repair that changed them
@@ -2117,10 +2401,10 @@ mod tests {
     /// merely looks bracket-ish cannot become a call.
     #[test]
     fn repair_never_invents_a_tool_call() {
-        assert!(parse_tool_calls(r#"{"tool_calls": [{"id": "x"}}"#).is_none());
-        assert!(parse_tool_calls(r#"{"tool_calls": [{"function": {}}}"#).is_none());
+        assert!(parse_untyped(r#"{"tool_calls": [{"id": "x"}}"#).is_none());
+        assert!(parse_untyped(r#"{"tool_calls": [{"function": {}}}"#).is_none());
         // Ordinary prose that happens to contain braces.
-        assert!(parse_tool_calls("I would use {the tool} if I could.").is_none());
+        assert!(parse_untyped("I would use {the tool} if I could.").is_none());
     }
 
     /// **The other string a live model produced**: the array closes correctly
@@ -2129,7 +2413,7 @@ mod tests {
     #[test]
     fn a_call_missing_only_its_final_brace_is_recovered() {
         let observed = r#"{"tool_calls": [{"id": "call_1", "type": "function", "function": {"name": "get_weather", "arguments": {"city": "Paris"}}}]"#;
-        let calls = parse_tool_calls(observed).expect("should recover the call");
+        let calls = parse_untyped(observed).expect("should recover the call");
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].name, "get_weather");
         assert!(calls[0].arguments.contains("Paris"));
@@ -2141,18 +2425,18 @@ mod tests {
     #[test]
     fn a_cut_inside_a_value_is_never_completed() {
         // Ends inside the city string: "Par… could have been Paris or Parma.
-        assert!(parse_tool_calls(
+        assert!(parse_untyped(
             r#"{"tool_calls": [{"function": {"name": "get_weather", "arguments": {"city": "Par"#
         )
         .is_none());
         // Ends on a dangling separator: a value was about to follow.
-        assert!(parse_tool_calls(
+        assert!(parse_untyped(
             r#"{"tool_calls": [{"function": {"name": "get_weather", "arguments": {"city":"#
         )
         .is_none());
         // Ends before the name is known at all.
         assert!(
-            parse_tool_calls(r#"{"tool_calls": [{"function": {"nam"#).is_none(),
+            parse_untyped(r#"{"tool_calls": [{"function": {"nam"#).is_none(),
             "a call with no recoverable name must not be invented"
         );
     }
@@ -2163,7 +2447,7 @@ mod tests {
     fn wildly_unbalanced_input_is_refused() {
         let junk = r#"{"tool_calls": [[[[{"name": "x"}}}}}}}}"#;
         // Either None, or at minimum never a confident call with a bad name.
-        if let Some(calls) = parse_tool_calls(junk) {
+        if let Some(calls) = parse_untyped(junk) {
             assert!(calls.iter().all(|c| !c.name.is_empty()));
         }
     }
@@ -2181,7 +2465,7 @@ mod tests {
             "I could call a tool_call but I won't", // mentions the word only
             "{\"answer\": 42}",                     // JSON without a name field
         ] {
-            assert_eq!(parse_tool_calls(s), None, "false positive on {s:?}");
+            assert_eq!(parse_untyped(s), None, "false positive on {s:?}");
         }
     }
 
@@ -2201,8 +2485,8 @@ mod tests {
             {"id": "call_1", "function": {"name": "get_weather", "arguments": "{\"city\":\"Cairo\"}"}},
             {"id": "call_1", "function": {"name": "get_weather", "arguments": "{\"city\":\"Lima\"}"}}]}"#;
 
-        let a = parse_tool_calls(first).expect("parses");
-        let b = parse_tool_calls(second).expect("parses");
+        let a = parse_untyped(first).expect("parses");
+        let b = parse_untyped(second).expect("parses");
 
         let mut ids: Vec<&str> = a.iter().chain(b.iter()).map(|c| c.id.as_str()).collect();
         assert_eq!(ids.len(), 4);
@@ -2271,7 +2555,7 @@ mod tests {
                 streamed.contains("```python\nprint(1)"),
                 "token_len {token_len}: the code block must stream, got {streamed:?}"
             );
-            assert!(super::parse_tool_calls(buf.reply_text()).is_none());
+            assert!(super::parse_untyped(buf.reply_text()).is_none());
             let rest = buf.pending_all().unwrap_or_default();
             assert_eq!(format!("{streamed}{rest}"), reply, "token_len {token_len}");
         }
@@ -2289,7 +2573,7 @@ mod tests {
             "<xml>\n  {\"name\": \"get_weather\", \"arguments\": {\"city\": \"Paris\"}}\n</xml>",
             "```json\n<tools>\n{\"name\": \"get_weather\", \"arguments\": {\"city\": \"Paris\"}}\n</tools>\n```",
         ] {
-            let calls = super::parse_tool_calls(reply).unwrap_or_default();
+            let calls = super::parse_untyped(reply).unwrap_or_default();
             assert_eq!(calls.len(), 1, "{reply:?}");
             assert_eq!(calls[0].name, "get_weather", "{reply:?}");
             assert_eq!(super::leading_content(reply), None, "{reply:?}");
@@ -2299,7 +2583,7 @@ mod tests {
                     deltas.is_empty(),
                     "{reply:?} token_len {token_len}: streamed {deltas:?}"
                 );
-                assert!(super::parse_tool_calls(buf.reply_text()).is_some());
+                assert!(super::parse_untyped(buf.reply_text()).is_some());
                 assert_eq!(buf.pending_content(), None, "{reply:?} {token_len}");
             }
         }
@@ -2323,7 +2607,7 @@ mod tests {
             for token_len in [1, 2, 3] {
                 let (deltas, mut buf) = deltas_for(reply, token_len);
                 assert!(deltas.len() > 3, "{reply:?} {token_len}: {deltas:?}");
-                assert!(super::parse_tool_calls(buf.reply_text()).is_none());
+                assert!(super::parse_untyped(buf.reply_text()).is_none());
                 let rest = buf.pending_all().unwrap_or_default();
                 assert!(rest.len() <= 3, "{reply:?} {token_len}: held {rest:?}");
                 assert_eq!(format!("{}{rest}", deltas.concat()), reply);
@@ -2345,20 +2629,20 @@ mod tests {
             assert_eq!(calls[0].arguments, r#"{"command":"date"}"#, "{label}");
         };
         expect(
-            super::parse_tool_calls(
+            super::parse_untyped(
                 r#"functools[{"name": "terminal", "arguments": {"command": "date"}}]"#,
             ),
             "functools",
         );
         expect(
-            super::parse_tool_calls(
+            super::parse_untyped(
                 r#"<|tool_calls|>[{"name": "terminal", "arguments": {"command": "date"}}]<|/tool_calls|>"#,
             ),
             "tool_calls tags",
         );
         // Prose after the closing bracket is what the model actually does.
         expect(
-            super::parse_tool_calls(
+            super::parse_untyped(
                 r#"functools[{"name": "terminal", "arguments": {"command": "date"}}]
                    I will run that for you."#,
             ),
@@ -2370,7 +2654,7 @@ mod tests {
     /// shape ("all function calls generated in a single JSON list").
     #[test]
     fn parses_several_phi4_calls_in_one_list() {
-        let calls = super::parse_tool_calls(
+        let calls = super::parse_untyped(
             r#"functools[{"name": "a", "arguments": {}}, {"name": "b", "arguments": {"x": 1}}]"#,
         )
         .expect("should parse");
@@ -2389,7 +2673,7 @@ mod tests {
             r#"functools[{"name": "terminal", "arguments": {"command": "da"#,
             "functools[]",
         ] {
-            assert_eq!(super::parse_tool_calls(text), None, "text: {text:?}");
+            assert_eq!(super::parse_untyped(text), None, "text: {text:?}");
         }
     }
 
@@ -2422,7 +2706,7 @@ mod tests {
         let reply = "```json\n\
              {\"tool_calls\": [{\"name\": \"terminal\", \"arguments\": {\"command\": \"date\"}}]\n\
              ```\n\nCette demande JSON spécifie l'utilisation de la commande `date`.";
-        let calls = parse_tool_calls(reply).expect("a fenced call with prose after it");
+        let calls = parse_untyped(reply).expect("a fenced call with prose after it");
         assert_eq!(calls.len(), 1, "{calls:?}");
         assert_eq!(calls[0].name, "terminal");
         assert_eq!(calls[0].arguments, r#"{"command":"date"}"#);
@@ -2444,7 +2728,7 @@ mod tests {
              {\"tool_calls\": [{\"name\": \"terminal\", \"arguments\": {\"command\": \"ls\"}}]}\n\
              ```\nCela liste les fichiers.";
         assert_eq!(super::leading_content(reply), Some("Voici l'appel :"));
-        let calls = parse_tool_calls(reply).expect("should parse");
+        let calls = parse_untyped(reply).expect("should parse");
         assert_eq!(calls.len(), 1, "{calls:?}");
         assert_eq!(calls[0].arguments, r#"{"command":"ls"}"#);
     }
@@ -2455,7 +2739,7 @@ mod tests {
     #[test]
     fn a_bare_call_object_inside_prose_is_not_a_tool_call() {
         assert_eq!(
-            parse_tool_calls(r#"The record looks like {"name": "Alice", "arguments": {}}."#),
+            parse_untyped(r#"The record looks like {"name": "Alice", "arguments": {}}."#),
             None
         );
     }
@@ -2469,7 +2753,7 @@ mod tests {
     fn parses_a_call_in_the_definitions_tag() {
         let reply =
             "<tools>\n{\"name\": \"get_time\", \"arguments\": {\"zone\": \"UTC\"}}\n</tools>";
-        let calls = parse_tool_calls(reply).expect("Qwen2.5-Coder's real reply must parse");
+        let calls = parse_untyped(reply).expect("Qwen2.5-Coder's real reply must parse");
         assert_eq!(calls.len(), 1, "{calls:?}");
         assert_eq!(calls[0].name, "get_time");
         assert_eq!(calls[0].arguments, r#"{"zone":"UTC"}"#);
@@ -2483,7 +2767,7 @@ mod tests {
     fn echoed_tool_definitions_are_not_calls() {
         let echo = "<tools>\n{\"type\": \"function\", \"function\": {\"name\": \"get_time\", \
                     \"parameters\": {\"type\": \"object\", \"properties\": {}}}}\n</tools>";
-        assert_eq!(parse_tool_calls(echo), None, "a definition is not a call");
+        assert_eq!(parse_untyped(echo), None, "a definition is not a call");
     }
 
     /// A reply that echoes the definitions AND makes a real call is read from the
@@ -2495,7 +2779,7 @@ mod tests {
         let both = "<tools>\n{\"type\": \"function\", \"function\": {\"name\": \"other\", \
                     \"parameters\": {\"type\": \"object\", \"properties\": {\"q\": {\"type\": \"string\"}}}}}\n</tools>\n\
                     <tool_call>\n{\"name\": \"get_time\", \"arguments\": {\"zone\": \"UTC\"}}\n</tool_call>";
-        let calls = parse_tool_calls(both).expect("should parse");
+        let calls = parse_untyped(both).expect("should parse");
         assert_eq!(calls.len(), 1, "{calls:?}");
         assert_eq!(calls[0].name, "get_time", "the real call, not the echo");
         assert_eq!(calls[0].arguments, r#"{"zone":"UTC"}"#);
@@ -2512,7 +2796,7 @@ mod tests {
     #[test]
     fn parses_a_call_the_model_wrapped_in_a_tag_it_invented() {
         let reply = "<xml>\n  {\"name\": \"get_time\", \"arguments\": {\"zone\": \"UTC\"}}\n</xml>";
-        let calls = parse_tool_calls(reply).expect("Qwen2.5-Coder's real reply must parse");
+        let calls = parse_untyped(reply).expect("Qwen2.5-Coder's real reply must parse");
         assert_eq!(calls.len(), 1, "{calls:?}");
         assert_eq!(calls[0].name, "get_time");
         assert_eq!(calls[0].arguments, r#"{"zone":"UTC"}"#);
@@ -2530,7 +2814,7 @@ mod tests {
             "<xml>\n{\"name\": \"get_time\", \"arguments\": {}}\n</other>",
         ] {
             assert_eq!(
-                parse_tool_calls(reply),
+                parse_untyped(reply),
                 None,
                 "a wrapper that is not the entire reply must not parse: {reply}"
             );
@@ -2543,7 +2827,7 @@ mod tests {
     fn an_invented_wrapper_around_a_definition_is_not_a_call() {
         let echo = "<xml>\n{\"type\": \"function\", \"function\": {\"name\": \"get_time\", \
                     \"parameters\": {\"type\": \"object\", \"properties\": {}}}}\n</xml>";
-        assert_eq!(parse_tool_calls(echo), None, "a definition is not a call");
+        assert_eq!(parse_untyped(echo), None, "a definition is not a call");
     }
 
     /// The shape `format_tool_prompt` requests today: flat, no `id`, no `type`.
@@ -2555,7 +2839,7 @@ mod tests {
     #[test]
     fn parses_the_flat_shape_we_now_prompt_for() {
         let text = r#"{"tool_calls": [{"name": "get_weather", "arguments": {"city": "Paris"}}]}"#;
-        let calls = parse_tool_calls(text).expect("should parse");
+        let calls = parse_untyped(text).expect("should parse");
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].name, "get_weather");
         assert_eq!(calls[0].arguments, r#"{"city":"Paris"}"#);
@@ -2574,7 +2858,7 @@ mod tests {
     fn parses_the_nested_openai_shape_we_no_longer_request() {
         let text = r#"{"tool_calls": [{"id": "call_abc", "type": "function",
             "function": {"name": "get_weather", "arguments": "{\"city\":\"Paris\"}"}}]}"#;
-        let calls = parse_tool_calls(text).expect("should parse");
+        let calls = parse_untyped(text).expect("should parse");
         assert_eq!(calls.len(), 1);
         // The model's own id is deliberately discarded — see
         // `ParsedToolCall::id` and `a_models_own_call_id_is_never_used`.
@@ -2589,14 +2873,14 @@ mod tests {
     fn strips_markdown_fences_including_a_stray_trailing_one() {
         let fenced = "```json\n{\"tool_calls\": [{\"function\": \
                       {\"name\": \"get_weather\", \"arguments\": {\"city\": \"Paris\"}}}]}\n```";
-        let calls = parse_tool_calls(fenced).expect("fenced JSON should parse");
+        let calls = parse_untyped(fenced).expect("fenced JSON should parse");
         assert_eq!(calls[0].name, "get_weather");
         assert_eq!(calls[0].arguments, r#"{"city":"Paris"}"#);
 
         // Unterminated fence — what truncation at max_tokens produces.
         let unterminated = "```\n{\"tool_calls\": [{\"function\": \
                             {\"name\": \"ping\", \"arguments\": {}}}]}";
-        assert_eq!(parse_tool_calls(unterminated).unwrap()[0].name, "ping");
+        assert_eq!(parse_untyped(unterminated).unwrap()[0].name, "ping");
     }
 
     /// Hermes / Qwen-Instruct — the most common native format in the wild.
@@ -2604,7 +2888,7 @@ mod tests {
     fn parses_hermes_tool_call_tags_including_multiple() {
         let text = "<tool_call>{\"name\": \"get_weather\", \"arguments\": {\"city\": \"Paris\"}}</tool_call>\n\
                     <tool_call>{\"name\": \"get_time\", \"arguments\": {\"tz\": \"UTC\"}}</tool_call>";
-        let calls = parse_tool_calls(text).expect("should parse");
+        let calls = parse_untyped(text).expect("should parse");
         assert_eq!(calls.len(), 2);
         assert_eq!(calls[0].name, "get_weather");
         assert_eq!(calls[1].name, "get_time");
@@ -2615,17 +2899,17 @@ mod tests {
     #[test]
     fn parses_mistral_and_llama3_formats() {
         let mistral = r#"[TOOL_CALLS][{"name": "get_weather", "arguments": {"city": "Paris"}}]"#;
-        assert_eq!(parse_tool_calls(mistral).unwrap()[0].name, "get_weather");
+        assert_eq!(parse_untyped(mistral).unwrap()[0].name, "get_weather");
 
         // Llama 3.x uses "parameters" rather than "arguments".
         let llama = r#"{"name": "get_weather", "parameters": {"city": "Paris"}}"#;
-        let calls = parse_tool_calls(llama).unwrap();
+        let calls = parse_untyped(llama).unwrap();
         assert_eq!(calls[0].name, "get_weather");
         assert_eq!(calls[0].arguments, r#"{"city":"Paris"}"#);
 
         let tagged =
             "<|python_tag|>{\"name\": \"get_weather\", \"parameters\": {\"city\": \"Paris\"}}";
-        assert_eq!(parse_tool_calls(tagged).unwrap()[0].name, "get_weather");
+        assert_eq!(parse_untyped(tagged).unwrap()[0].name, "get_weather");
     }
 
     /// Truncated output must stay text. Fabricating a call from half an object
@@ -2634,11 +2918,11 @@ mod tests {
     fn truncated_tool_calls_are_refused_not_guessed() {
         // Cut mid-arguments, no closing brace — the reported failure shape.
         let truncated = r#"{"tool_calls": [{"function": {"name": "get_weather", "argum"#;
-        assert_eq!(parse_tool_calls(truncated), None);
+        assert_eq!(parse_untyped(truncated), None);
 
         // Hermes block with no closing tag.
         let unclosed = "<tool_call>{\"name\": \"get_weather\", \"arguments\": {\"city\"";
-        assert_eq!(parse_tool_calls(unclosed), None);
+        assert_eq!(parse_untyped(unclosed), None);
     }
 
     /// A model rarely emits a bare object — it explains itself first, or adds a
@@ -2650,12 +2934,12 @@ mod tests {
         let prefixed = "Sure! Here is the tool call:\n\
             {\"tool_calls\": [{\"id\": \"call_1\", \"function\": \
             {\"name\": \"get_weather\", \"arguments\": {\"city\": \"Paris\"}}}]}";
-        let calls = parse_tool_calls(prefixed).expect("prose-prefixed call should parse");
+        let calls = parse_untyped(prefixed).expect("prose-prefixed call should parse");
         assert_eq!(calls[0].name, "get_weather");
 
         let suffixed = "{\"tool_calls\": [{\"function\": {\"name\": \"ping\", \
             \"arguments\": {}}}]}\n\nI'll call that for you.";
-        assert_eq!(parse_tool_calls(suffixed).unwrap()[0].name, "ping");
+        assert_eq!(parse_untyped(suffixed).unwrap()[0].name, "ping");
     }
 
     /// A brace inside a string value must not end the object early, or the
@@ -2664,7 +2948,7 @@ mod tests {
     fn braces_inside_strings_do_not_end_the_object() {
         let tricky = "Here you go: {\"tool_calls\": [{\"function\": \
             {\"name\": \"echo\", \"arguments\": {\"text\": \"a } brace\"}}}]} done";
-        let calls = parse_tool_calls(tricky).expect("should parse past the inner brace");
+        let calls = parse_untyped(tricky).expect("should parse past the inner brace");
         assert_eq!(calls[0].name, "echo");
         assert!(calls[0].arguments.contains("a } brace"));
     }
@@ -2675,7 +2959,7 @@ mod tests {
     fn prose_wrapped_but_truncated_is_still_refused() {
         let truncated = "Here is the call: {\"tool_calls\": [{\"function\": \
             {\"name\": \"get_weather\", \"argum";
-        assert_eq!(parse_tool_calls(truncated), None);
+        assert_eq!(parse_untyped(truncated), None);
     }
 
     /// A GPU-heavy caller path could pass megabytes of prose; make sure a
@@ -2683,7 +2967,7 @@ mod tests {
     #[test]
     fn text_without_any_object_is_rejected_cheaply() {
         assert_eq!(
-            parse_tool_calls("I will use the tool_call soon, promise"),
+            parse_untyped("I will use the tool_call soon, promise"),
             None
         );
     }
@@ -2692,7 +2976,7 @@ mod tests {
     #[test]
     fn missing_arguments_become_an_empty_object() {
         let text = r#"{"tool_calls": [{"function": {"name": "list_files"}}]}"#;
-        let calls = parse_tool_calls(text).unwrap();
+        let calls = parse_untyped(text).unwrap();
         assert_eq!(calls[0].name, "list_files");
         assert_eq!(calls[0].arguments, "{}");
     }
@@ -2702,7 +2986,7 @@ mod tests {
     #[test]
     fn accepts_flattened_entries() {
         let text = r#"{"tool_calls": [{"name": "get_weather", "arguments": {"city": "Paris"}}]}"#;
-        let calls = parse_tool_calls(text).unwrap();
+        let calls = parse_untyped(text).unwrap();
         assert_eq!(calls[0].name, "get_weather");
         assert_eq!(calls[0].arguments, r#"{"city":"Paris"}"#);
     }
@@ -2718,7 +3002,7 @@ mod schema_echo_tests {
     #[test]
     fn schema_echo_is_unwrapped() {
         let text = r#"{"tool_calls":[{"id":"call_1","type":"function","function":{"name":"get_weather","arguments":{"properties":{"city":"Paris"}}}}]}"#;
-        let calls = parse_tool_calls(text).expect("should parse");
+        let calls = parse_untyped(text).expect("should parse");
         assert_eq!(calls[0].name, "get_weather");
         assert_eq!(calls[0].arguments, r#"{"city":"Paris"}"#);
     }
@@ -2727,7 +3011,7 @@ mod schema_echo_tests {
     #[test]
     fn schema_echo_is_unwrapped_when_stringified() {
         let text = r#"{"tool_calls":[{"function":{"name":"f","arguments":"{\"properties\":{\"city\":\"Paris\"}}"}}]}"#;
-        let calls = parse_tool_calls(text).expect("should parse");
+        let calls = parse_untyped(text).expect("should parse");
         assert_eq!(calls[0].arguments, r#"{"city":"Paris"}"#);
     }
 
@@ -2735,7 +3019,7 @@ mod schema_echo_tests {
     #[test]
     fn correct_arguments_are_left_alone() {
         let text = r#"{"tool_calls":[{"function":{"name":"f","arguments":{"city":"Paris","units":"c"}}}]}"#;
-        let calls = parse_tool_calls(text).expect("should parse");
+        let calls = parse_untyped(text).expect("should parse");
         let v: serde_json::Value = serde_json::from_str(&calls[0].arguments).unwrap();
         assert_eq!(v["city"], "Paris");
         assert_eq!(v["units"], "c");
@@ -2746,7 +3030,7 @@ mod schema_echo_tests {
     #[test]
     fn properties_alongside_other_arguments_is_not_unwrapped() {
         let text = r#"{"tool_calls":[{"function":{"name":"f","arguments":{"properties":{"a":1},"name":"x"}}}]}"#;
-        let calls = parse_tool_calls(text).expect("should parse");
+        let calls = parse_untyped(text).expect("should parse");
         let v: serde_json::Value = serde_json::from_str(&calls[0].arguments).unwrap();
         assert!(v.get("properties").is_some(), "must not unwrap");
         assert_eq!(v["name"], "x");
@@ -2757,7 +3041,7 @@ mod schema_echo_tests {
     fn scalar_properties_value_is_not_unwrapped() {
         let text =
             r#"{"tool_calls":[{"function":{"name":"f","arguments":{"properties":"blue"}}}]}"#;
-        let calls = parse_tool_calls(text).expect("should parse");
+        let calls = parse_untyped(text).expect("should parse");
         assert_eq!(calls[0].arguments, r#"{"properties":"blue"}"#);
     }
 
@@ -2808,7 +3092,7 @@ mod bare_call_tests {
     #[test]
     fn bare_single_call_object_is_accepted() {
         let text = r#"{"id":"call_weather","type":"function","function":{"name":"get_weather","arguments":{"city":"Paris"}}}"#;
-        let calls = parse_tool_calls(text).expect("bare call should parse");
+        let calls = parse_untyped(text).expect("bare call should parse");
         assert_eq!(calls.len(), 1);
         assert_ne!(
             calls[0].id, "call_weather",
@@ -2822,7 +3106,7 @@ mod bare_call_tests {
     #[test]
     fn wrapped_form_still_parses() {
         let text = r#"{"tool_calls":[{"function":{"name":"a","arguments":{"x":1}}},{"function":{"name":"b","arguments":{}}}]}"#;
-        let calls = parse_tool_calls(text).expect("wrapped should parse");
+        let calls = parse_untyped(text).expect("wrapped should parse");
         assert_eq!(calls.len(), 2);
         assert_eq!(calls[0].name, "a");
         assert_eq!(calls[1].name, "b");
@@ -2834,7 +3118,7 @@ mod bare_call_tests {
     fn truncated_call_is_still_refused() {
         let text =
             r#"{"tool_calls": [{"id": "c", "type": "function", "function": {"name": "get_weat"#;
-        assert!(parse_tool_calls(text).is_none());
+        assert!(parse_untyped(text).is_none());
     }
 
     /// Prose that merely mentions a function must not become a tool call.
@@ -2845,7 +3129,7 @@ mod bare_call_tests {
             r#"Here is some config: {"function": "enabled"}"#,
             r#"{"function": {"description": "no name field here"}}"#,
         ] {
-            assert!(parse_tool_calls(s).is_none(), "false positive on: {s}");
+            assert!(parse_untyped(s).is_none(), "false positive on: {s}");
         }
     }
 }
@@ -2856,7 +3140,7 @@ mod bare_call_tests {
 /// an agentic client then executes nothing and reports no error.
 #[cfg(test)]
 mod array_wrapped_calls {
-    use super::parse_tool_calls;
+    use super::parse_untyped;
 
     /// Captured verbatim from `qwen2.5-14b-instruct` on 2026-08-31, served
     /// distributed across the swarm: the requested object inside a
@@ -2875,7 +3159,7 @@ mod array_wrapped_calls {
     ]
   }
 ]"#;
-        let calls = parse_tool_calls(text).expect("array-wrapped calls must parse");
+        let calls = parse_untyped(text).expect("array-wrapped calls must parse");
         assert_eq!(calls.len(), 2);
         assert_eq!(calls[0].name, "write");
         assert_eq!(calls[1].name, "bash");
@@ -2888,7 +3172,7 @@ mod array_wrapped_calls {
     fn a_bare_array_of_entries_parses() {
         let text = r#"[{"id":"call_0","type":"function",
                        "function":{"name":"bash","arguments":{"command":"ls"}}}]"#;
-        let calls = parse_tool_calls(text).expect("bare entry array must parse");
+        let calls = parse_untyped(text).expect("bare entry array must parse");
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].name, "bash");
     }
@@ -2898,8 +3182,8 @@ mod array_wrapped_calls {
     /// tools". Nothing here yields a string `name`.
     #[test]
     fn an_array_of_ordinary_json_is_not_a_tool_call() {
-        assert!(parse_tool_calls(r#"[{"city":"Paris"},{"city":"Rome"}]"#).is_none());
-        assert!(parse_tool_calls(r#"[1, 2, 3]"#).is_none());
+        assert!(parse_untyped(r#"[{"city":"Paris"},{"city":"Rome"}]"#).is_none());
+        assert!(parse_untyped(r#"[1, 2, 3]"#).is_none());
     }
 }
 
@@ -2985,7 +3269,11 @@ mod streaming_reasoning_tests {
         mode: ReasoningOut,
         opened: PromptOpened,
     ) -> (String, Vec<String>, StreamingToolText) {
-        let mut b = StreamingToolText::new(detect_tools, mode, PromptOpenedSlot::known(opened));
+        let mut b = StreamingToolText::new(
+            super::RequestTools::untyped(detect_tools),
+            mode,
+            PromptOpenedSlot::known(opened),
+        );
         let mut out = String::new();
         let mut reasoning = Vec::new();
         for c in chunks {
@@ -3097,7 +3385,7 @@ mod streaming_reasoning_tests {
         let tokens: Vec<String> = chars.chunks(5).map(|c| c.iter().collect()).collect();
         let tokens: Vec<&str> = tokens.iter().map(String::as_str).collect();
         let (content, mut reasoning, mut b) = stream_in(&tokens, true, ReasoningOut::Separate);
-        let calls = super::parse_tool_calls(b.reply_text()).expect("the call parses");
+        let calls = super::parse_untyped(b.reply_text()).expect("the call parses");
         if let Some(r) = b.finish_reasoning(true) {
             reasoning.push(r);
         }
@@ -3122,7 +3410,7 @@ mod streaming_reasoning_tests {
             &[],
             crate::inference::PromptOpened::Nothing,
         );
-        assert_eq!(super::parse_tool_calls(&whole).map(|c| c.len()), Some(1));
+        assert_eq!(super::parse_untyped(&whole).map(|c| c.len()), Some(1));
         assert_eq!(super::leading_content(&whole), None);
     }
 
@@ -3469,7 +3757,7 @@ mod streaming_reasoning_tests {
             true,
             ReasoningOut::Separate,
         );
-        assert!(super::parse_tool_calls(b.reply_text()).is_none());
+        assert!(super::parse_untyped(b.reply_text()).is_none());
 
         // The control: the same JSON AFTER the block is a call.
         let (_, _, b) = stream_in(
@@ -3483,7 +3771,7 @@ mod streaming_reasoning_tests {
             true,
             ReasoningOut::Separate,
         );
-        assert!(super::parse_tool_calls(b.reply_text()).is_some());
+        assert!(super::parse_untyped(b.reply_text()).is_some());
     }
 
     /// A block CLOSED by `</think>` is thinking to its end, even if the model
@@ -3610,7 +3898,7 @@ mod streaming_reasoning_tests {
     #[test]
     fn the_answer_still_streams_token_by_token() {
         let mut b = StreamingToolText::new(
-            true,
+            super::RequestTools::untyped(true),
             ReasoningOut::Withheld,
             crate::inference::PromptOpenedSlot::default(),
         );
@@ -3626,7 +3914,7 @@ mod streaming_reasoning_tests {
     #[test]
     fn an_ordinary_reply_is_not_delayed() {
         let mut b = StreamingToolText::new(
-            true,
+            super::RequestTools::untyped(true),
             ReasoningOut::Separate,
             crate::inference::PromptOpenedSlot::default(),
         );
@@ -3674,7 +3962,7 @@ mod streaming_reasoning_tests {
 
 #[cfg(test)]
 mod qwen3_native_framing {
-    use super::parse_tool_calls;
+    use super::parse_untyped;
 
     /// The exact framing Qwen3's own template asks the model for, now that the
     /// template is actually rendered (2026-09-10). Rendering native framing and
@@ -3683,7 +3971,7 @@ mod qwen3_native_framing {
     #[test]
     fn a_qwen3_native_tool_call_parses() {
         let reply = "<tool_call>\n{\"name\": \"terminal\", \"arguments\": {\"command\": \"date\"}}\n</tool_call>";
-        let calls = parse_tool_calls(reply).expect("Qwen3's own framing must parse");
+        let calls = parse_untyped(reply).expect("Qwen3's own framing must parse");
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].name, "terminal");
         assert_eq!(
@@ -3697,7 +3985,7 @@ mod qwen3_native_framing {
     fn two_qwen3_native_tool_calls_parse() {
         let reply = "<tool_call>\n{\"name\": \"a\", \"arguments\": {}}\n</tool_call>\n\
                      <tool_call>\n{\"name\": \"b\", \"arguments\": {}}\n</tool_call>";
-        let calls = parse_tool_calls(reply).expect("both calls must parse");
+        let calls = parse_untyped(reply).expect("both calls must parse");
         assert_eq!(calls.len(), 2);
         assert_eq!(calls[0].name, "a");
         assert_eq!(calls[1].name, "b");
@@ -3766,12 +4054,190 @@ mod leading_content_tests {
             "```json\n[{\"name\": \"get_weather\", \"arguments\": {}}]\n```",
         ] {
             assert!(
-                super::parse_tool_calls(reply).is_some(),
+                super::parse_untyped(reply).is_some(),
                 "{reply:?} must parse"
             );
             assert_eq!(leading_content(reply), None, "{reply:?}");
         }
         let reply = "Checking the weather.\n[{\"name\": \"get_weather\", \"arguments\": {}}]";
         assert_eq!(leading_content(reply), Some("Checking the weather."));
+    }
+}
+
+#[cfg(test)]
+mod qwen_xml_tests {
+    use super::{parse_tool_calls, ParsedToolCall, ReasoningOut, RequestTools, StreamingToolText};
+    use serde_json::{json, Value};
+
+    /// A weather tool with a string, an integer, a boolean and an object.
+    fn weather_tools() -> RequestTools {
+        RequestTools::from_definitions(Some(&[json!({
+            "type": "function",
+            "function": {
+                "name": "get_weather",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "city": {"type": "string"},
+                        "days": {"type": "integer"},
+                        "metric": {"type": "boolean"},
+                        "where": {"type": "object"},
+                        "note": {"type": ["string", "null"]},
+                        "code": {"type": "string"}
+                    },
+                    "required": ["city"]
+                }
+            }
+        })]))
+    }
+
+    fn arguments(call: &ParsedToolCall) -> Value {
+        serde_json::from_str(&call.arguments).expect("arguments are JSON")
+    }
+
+    /// The reply Qwen3.5-4B wrote on the live node (v0.3.266, 2026-11-01) to
+    /// "What is the weather in Paris right now? Use the tool." — its template
+    /// asks for this format, and the reply reached the client as text.
+    #[test]
+    fn the_call_qwen35_wrote_is_a_call() {
+        let reply = "<tool_call>\n<function=get_weather>\n<parameter=city>\nParis\n</parameter>\n</function>\n</tool_call>";
+        let calls = parse_tool_calls(reply, &weather_tools()).expect("a call");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "get_weather");
+        assert_eq!(arguments(&calls[0]), json!({"city": "Paris"}));
+    }
+
+    /// Each argument is typed by its schema, as llama.cpp types it: a string
+    /// stays text even when it reads as a number, an integer and a boolean
+    /// (Python's spelling too) are values, an object is JSON, a string-or-null
+    /// takes `null`, and a value's own lines and indentation are kept.
+    #[test]
+    fn an_argument_is_what_its_schema_says_it_is() {
+        let reply = "<tool_call>\n<function=get_weather>\n\
+            <parameter=city>\n42\n</parameter>\n\
+            <parameter=days>\n3\n</parameter>\n\
+            <parameter=metric>\nTrue\n</parameter>\n\
+            <parameter=where>\n{\"lat\": 48.8, \"name\": \"Paris\"}\n</parameter>\n\
+            <parameter=note>\nnull\n</parameter>\n\
+            <parameter=code>\ndef f():\n    return 1\n\n</parameter>\n\
+            </function>\n</tool_call>";
+        let calls = parse_tool_calls(reply, &weather_tools()).expect("a call");
+        assert_eq!(
+            arguments(&calls[0]),
+            json!({
+                "city": "42",
+                "days": 3,
+                "metric": true,
+                "where": {"lat": 48.8, "name": "Paris"},
+                "note": null,
+                "code": "def f():\n    return 1\n"
+            })
+        );
+        // The order written is the order sent.
+        assert!(calls[0].arguments.starts_with(r#"{"city""#));
+    }
+
+    /// An argument the request gives no schema for is the text as written.
+    #[test]
+    fn an_argument_with_no_schema_is_text() {
+        let reply = "<tool_call>\n<function=get_weather>\n<parameter=hours>\n6\n</parameter>\n</function>\n</tool_call>";
+        let calls = parse_tool_calls(reply, &weather_tools()).expect("a call");
+        assert_eq!(arguments(&calls[0]), json!({"hours": "6"}));
+    }
+
+    #[test]
+    fn two_calls_are_two_calls_with_their_own_ids() {
+        let reply = "<tool_call>\n<function=get_weather>\n<parameter=city>\nParis\n</parameter>\n</function>\n</tool_call>\n\
+            <tool_call>\n<function=get_weather>\n<parameter=city>\nLyon\n</parameter>\n</function>\n</tool_call>";
+        let calls = parse_tool_calls(reply, &weather_tools()).expect("calls");
+        assert_eq!(calls.len(), 2);
+        assert_eq!(arguments(&calls[1]), json!({"city": "Lyon"}));
+        assert_ne!(calls[0].id, calls[1].id);
+    }
+
+    /// Qwen3-Coder sometimes leaves out `<tool_call>`: a bare function is a
+    /// call for a tool the request defines, never for a name it does not.
+    #[test]
+    fn a_bare_function_is_a_call_only_for_a_defined_tool() {
+        let bare = "<function=get_weather>\n<parameter=city>\nParis\n</parameter>\n</function>";
+        assert!(parse_tool_calls(bare, &weather_tools()).is_some());
+        let other = "<function=delete_all>\n<parameter=x>\n1\n</parameter>\n</function>";
+        assert!(parse_tool_calls(other, &weather_tools()).is_none());
+    }
+
+    /// A call cut off before `</function>`, or a body holding prose, is not a
+    /// call — nothing is invented.
+    #[test]
+    fn a_cut_off_or_malformed_call_is_text() {
+        let tools = weather_tools();
+        let cut = "<tool_call>\n<function=get_weather>\n<parameter=city>\nPar";
+        assert!(parse_tool_calls(cut, &tools).is_none());
+        let unclosed = "<tool_call>\n<function=get_weather>\n<parameter=city>\nParis\n</function>";
+        assert!(parse_tool_calls(unclosed, &tools).is_none());
+        let prose =
+            "<tool_call>\n<function=get_weather>\nI think Paris.\n</function>\n</tool_call>";
+        assert!(parse_tool_calls(prose, &tools).is_none());
+    }
+
+    /// An argument that is itself JSON with a `"name"` is the argument, not a
+    /// call in another format.
+    #[test]
+    fn a_json_argument_naming_something_stays_an_argument() {
+        let reply = "<tool_call>\n<function=get_weather>\n<parameter=where>\n{\"name\": \"x\", \"arguments\": {}}\n</parameter>\n</function>\n</tool_call>";
+        let calls = parse_tool_calls(reply, &weather_tools()).expect("a call");
+        assert_eq!(calls[0].name, "get_weather");
+        assert_eq!(
+            arguments(&calls[0]),
+            json!({"where": {"name": "x", "arguments": {}}})
+        );
+    }
+
+    /// Streamed: the prose before the call goes out, the call is held back,
+    /// and the finished reply is read against the request's schemas.
+    #[test]
+    fn a_streamed_call_is_held_back_and_typed() {
+        let reply =
+            "Checking.\n<function=get_weather>\n<parameter=days>\n2\n</parameter>\n</function>";
+        let mut buf = StreamingToolText::new(
+            weather_tools(),
+            ReasoningOut::Separate,
+            crate::inference::PromptOpenedSlot::default(),
+        );
+        let mut out = String::new();
+        let chars: Vec<char> = reply.chars().collect();
+        for chunk in chars.chunks(3) {
+            if let Some(safe) = buf.push(&chunk.iter().collect::<String>()) {
+                out.push_str(&safe);
+            }
+        }
+        assert!(out.starts_with("Checking."), "{out:?}");
+        assert!(!out.contains("<function"), "{out:?}");
+        let calls = buf.parsed_calls().expect("a call");
+        assert_eq!(arguments(&calls[0]), json!({"days": 2}));
+    }
+
+    /// The definitions are read in OpenAI's shape and the bare one; none, or
+    /// an empty list, asks for no call.
+    #[test]
+    fn the_definitions_say_whether_a_reply_is_searched() {
+        let bare = RequestTools::from_definitions(Some(&[json!({
+            "name": "f", "parameters": {"properties": {"n": {"type": "integer"}}}
+        })]));
+        assert!(bare.requested());
+        assert_eq!(
+            bare.argument_schema("f", "n"),
+            Some(&json!({"type": "integer"}))
+        );
+        assert!(!RequestTools::from_definitions(None).requested());
+        assert!(!RequestTools::from_definitions(Some(&[])).requested());
+        let reply =
+            "<tool_call>\n<function=f>\n<parameter=n>\n1\n</parameter>\n</function>\n</tool_call>";
+        let mut buf = StreamingToolText::new(
+            RequestTools::from_definitions(None),
+            ReasoningOut::Separate,
+            crate::inference::PromptOpenedSlot::default(),
+        );
+        let _ = buf.push(reply);
+        assert!(buf.parsed_calls().is_none());
     }
 }

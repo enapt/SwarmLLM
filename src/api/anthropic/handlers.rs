@@ -29,10 +29,10 @@ fn build_messages_response(
     request_id: String,
     model: String,
     output: InferenceOutput,
-    tools_requested: bool,
+    tools: &crate::api::tool_parse::RequestTools,
 ) -> MessagesResponse {
     let swarmllm = crate::api::SwarmllmReply::for_trace(output.trace.as_ref());
-    let mut response = messages_response_body(request_id, model, output, tools_requested);
+    let mut response = messages_response_body(request_id, model, output, tools);
     response.swarmllm = swarmllm;
     response
 }
@@ -41,7 +41,7 @@ fn messages_response_body(
     request_id: String,
     model: String,
     output: InferenceOutput,
-    tools_requested: bool,
+    tools: &crate::api::tool_parse::RequestTools,
 ) -> MessagesResponse {
     let stop_reason = super::convert::map_finish_reason_with_match(
         &output.finish_reason,
@@ -52,8 +52,8 @@ fn messages_response_body(
     // `tool_use` blocks. Gated on the request carrying tools so a model asked
     // to reply in JSON keeps its answer as text. Truncated output stays text
     // (see `api::tool_parse`).
-    if tools_requested {
-        if let Some(parsed) = crate::api::tool_parse::parse_tool_calls(&output.content) {
+    if tools.requested() {
+        if let Some(parsed) = crate::api::tool_parse::parse_tool_calls(&output.content, tools) {
             // Text the model produced BEFORE the call is a text block, not
             // something to throw away — the shape Anthropic's own API uses and
             // the shape the OpenAI sibling now returns. It is also what lets
@@ -173,7 +173,7 @@ async fn emit_anthropic_tool_blocks(
         }
         return false;
     }
-    let parsed = crate::api::tool_parse::parse_tool_calls(buffered.reply_text());
+    let parsed = buffered.parsed_calls();
     // Into block 0, which is still open: the prose before a call, or the whole
     // reply when there is none.
     let leftover = match parsed {
@@ -238,7 +238,7 @@ pub(super) async fn anthropic_non_stream(
     keep: crate::types::KeepAsked,
     requested_by: crate::types::RequestedBy,
 ) -> Result<axum::response::Response, ApiError> {
-    let tools_requested = tools.as_ref().is_some_and(|t| !t.is_empty());
+    let reply_tools = crate::api::tool_parse::RequestTools::from_definitions(tools.as_deref());
     let inference_req = InferenceRequest::local(
         ModelId(model.clone()),
         messages,
@@ -256,7 +256,7 @@ pub(super) async fn anthropic_non_stream(
     // request whose caller stopped waiting.
     let output = crate::api::submit_to_router(&router_tx, inference_req).await?;
     let trace = output.trace.clone();
-    let response = build_messages_response(request_id, model, output, tools_requested);
+    let response = build_messages_response(request_id, model, output, &reply_tools);
     Ok(crate::api::attach_route_headers(
         Json(response).into_response(),
         trace.as_ref(),
@@ -282,7 +282,7 @@ pub(super) async fn anthropic_stream(
     keep: crate::types::KeepAsked,
     requested_by: crate::types::RequestedBy,
 ) -> Result<axum::response::Response, ApiError> {
-    let tools_requested = tools.as_ref().is_some_and(|t| !t.is_empty());
+    let reply_tools = crate::api::tool_parse::RequestTools::from_definitions(tools.as_deref());
     // The request's own cancel flag: `/v1/messages` has no cancel-by-token
     // wire, but the flag is what a long wait inside the pipeline watches, so a
     // client leaving during the prompt pass stops the work instead of being
@@ -324,7 +324,7 @@ pub(super) async fn anthropic_stream(
         // See the split-path sibling: with tools requested, text is withheld
         // until complete because a tool call is only recognisable in full.
         let mut buffered = crate::api::tool_parse::StreamingToolText::new(
-            tools_requested,
+            reply_tools,
             crate::api::tool_parse::ReasoningOut::Withheld,
             token_rx.prompt_opened(),
         );
@@ -546,7 +546,7 @@ pub(super) async fn anthropic_split_non_stream(
     template_vars: Option<crate::types::TemplateVars>,
     keep: crate::types::KeepAsked,
 ) -> Result<axum::response::Response, ApiError> {
-    let tools_requested = tools.as_ref().is_some_and(|t| !t.is_empty());
+    let reply_tools = crate::api::tool_parse::RequestTools::from_definitions(tools.as_deref());
     let requested_mid = crate::types::ModelId(model.clone());
     let output = crate::api::openai::run_split_generate(
         state,
@@ -561,7 +561,7 @@ pub(super) async fn anthropic_split_non_stream(
     .await?;
 
     let trace = output.trace.clone();
-    let response = build_messages_response(request_id, model, output, tools_requested);
+    let response = build_messages_response(request_id, model, output, &reply_tools);
     Ok(crate::api::attach_route_headers(
         Json(response).into_response(),
         trace.as_ref(),
@@ -589,7 +589,7 @@ pub(super) async fn anthropic_split_stream(
     template_vars: Option<crate::types::TemplateVars>,
     keep: crate::types::KeepAsked,
 ) -> Result<axum::response::Response, ApiError> {
-    let tools_requested = tools.as_ref().is_some_and(|t| !t.is_empty());
+    let reply_tools = crate::api::tool_parse::RequestTools::from_definitions(tools.as_deref());
     let progress_handle = Some((
         state.shared_state.clone(),
         crate::api::request_uuid(&request_id),
@@ -646,7 +646,7 @@ pub(super) async fn anthropic_split_stream(
         let mut text_block = TextBlock::Open;
         let mut matched_stop_sequence: Option<String> = None;
         let mut buffered = crate::api::tool_parse::StreamingToolText::new(
-            tools_requested,
+            reply_tools,
             crate::api::tool_parse::ReasoningOut::Withheld,
             token_rx.prompt_opened(),
         );
@@ -1486,6 +1486,42 @@ mod tests {
         }
     }
 
+    /// Qwen's XML call becomes a `tool_use` block whose input is typed by the
+    /// tool's schema (#395): the surface hands the parser the definitions,
+    /// not a flag, so an integer argument arrives as a number.
+    #[test]
+    fn a_qwen_xml_call_is_a_tool_use_block_typed_by_its_schema() {
+        let tools = crate::api::tool_parse::RequestTools::from_definitions(Some(&[
+            serde_json::json!({"type": "function", "function": {
+                "name": "get_weather",
+                "parameters": {"type": "object", "properties": {
+                    "city": {"type": "string"}, "days": {"type": "integer"}
+                }}
+            }}),
+        ]));
+        let mut output = output_with(10, 20);
+        output.content = "<tool_call>\n<function=get_weather>\n<parameter=city>\nParis\n</parameter>\n<parameter=days>\n3\n</parameter>\n</function>\n</tool_call>".into();
+        let body = serde_json::to_value(build_messages_response(
+            "msg".into(),
+            "m".into(),
+            output,
+            &tools,
+        ))
+        .unwrap();
+        let block = body["content"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|b| b["type"] == "tool_use")
+            .expect("a tool_use block");
+        assert_eq!(block["name"], "get_weather");
+        assert_eq!(
+            block["input"],
+            serde_json::json!({"city": "Paris", "days": 3})
+        );
+        assert_eq!(body["stop_reason"], "tool_use");
+    }
+
     /// A streamed reply reports the same prompt count its non-streaming
     /// sibling does.
     ///
@@ -1947,7 +1983,7 @@ mod route_in_body_tests {
             "msg".into(),
             "m".into(),
             output(Some(snapshot.clone())),
-            false,
+            &crate::api::tool_parse::RequestTools::default(),
         ))
         .unwrap();
         assert_eq!(
@@ -1958,7 +1994,7 @@ mod route_in_body_tests {
             "msg".into(),
             "m".into(),
             output(None),
-            false,
+            &crate::api::tool_parse::RequestTools::default(),
         ))
         .unwrap();
         assert!(unrouted.get("swarmllm").is_none());
