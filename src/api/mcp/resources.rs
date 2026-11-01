@@ -103,7 +103,7 @@ async fn resource_models(state: &AppState, id: Option<Value>) -> JsonRpcResponse
                         obj.insert("shards".to_string(), json!(manifest.shards.len()));
                         obj.insert(
                             "architecture".to_string(),
-                            json!(format!("{:?}", manifest.architecture)),
+                            json!(state.shared_state.model_family_label(&manifest)),
                         );
                     }
                 }

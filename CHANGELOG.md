@@ -19,6 +19,11 @@ copy: asking for all of a model you held half of downloaded the whole thing. A p
 already holds, checked when it arrived, is now kept and skipped; a part whose contents are in
 question is still fetched again, since that is how it is put right. (#393)
 
+**The model list Claude Code and other MCP clients read names a Gemma model as Gemma.** The
+`node_info` tool and the `swarmllm://models` resource called every Gemma model — and StarCoder2,
+GLM-4, DeepSeek-2 and Llama 4 — "Llama", the catalogue's catch-all for families it has no entry
+for. They now give the family the model's own file names ("gemma4") once this computer has read it.
+
 ## [0.3.267-alpha] — 2026-11-01
 
 **You can now ask a model to answer without thinking first, or to think.** Models such as

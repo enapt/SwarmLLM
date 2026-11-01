@@ -964,7 +964,7 @@ async fn tool_node_info(state: &AppState, id: Option<Value>) -> JsonRpcResponse 
             "id": manifest.id.0,
             "name": manifest.name,
             "shards": shard_count,
-            "architecture": format!("{:?}", manifest.architecture),
+            "architecture": state.shared_state.model_family_label(&manifest),
         }));
     }
 

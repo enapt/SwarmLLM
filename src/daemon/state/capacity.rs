@@ -465,6 +465,54 @@ mod tests {
         mid
     }
 
+    /// A Gemma model is not told as Llama: the manifest records every family
+    /// it has no entry for as `Llama`, so a reader is given the header's name
+    /// once it is learned, and the label only until then.
+    #[test]
+    fn a_models_family_is_told_as_its_header_names_it() {
+        let state = state();
+        let mid = held(&state, "gemma-4-12b-it-q4_k_m", 100 * 1024 * 1024);
+        let mut manifest = state.model_registry.get_manifest(&mid).unwrap();
+        manifest.architecture =
+            crate::inference::model_arch::ModelArch::Gemma4.to_manifest_architecture();
+        assert!(
+            matches!(
+                manifest.architecture,
+                crate::types::ModelArchitecture::Llama
+            ),
+            "the premise: the manifest has no Gemma entry"
+        );
+        assert_eq!(
+            state.model_family_label(&manifest),
+            "Llama",
+            "nothing learned yet"
+        );
+        state.gguf_meta.insert(
+            mid,
+            crate::inference::split::GgufTensorMeta {
+                tensors: Default::default(),
+                tensor_data_offset: 0,
+                model_name: None,
+                head_count: 16,
+                head_count_kv: 8,
+                block_count: 48,
+                embedding_length: 3840,
+                head_dim: 256,
+                rope_dim: 256,
+                rope_freq_base: 1_000_000.0,
+                rms_norm_eps: 1e-6,
+                expert_count: 0,
+                expert_used_count: 0,
+                architecture: "gemma4".into(),
+                context_length: 131_072,
+                pooling_type: 0,
+                kv_layout: None,
+                shared_kv_layers: 0,
+            },
+        );
+        assert_eq!(state.model_family_label(&manifest), "gemma4");
+    }
+
     /// The "Running now" list says what runs on this computer, by the budget
     /// the HuggingFace search marks "Runs locally" by, and leaves out a model
     /// whose header says it cannot write replies (field report 2026-10-15).

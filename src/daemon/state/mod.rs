@@ -3257,6 +3257,21 @@ impl SharedState {
         self.gguf_meta.get(model_id)?.refusal()
     }
 
+    /// The family a reader is told `manifest`'s model is: the name its header
+    /// gives (`general.architecture`: "gemma4", "qwen35moe") once this node
+    /// has learned it, else the manifest's label. The label alone is too
+    /// coarse to show: `ModelArchitecture` has no Gemma, StarCoder2,
+    /// DeepSeek-2, GLM-4 or Llama 4 entry and records each as `Llama`
+    /// (`ModelArch::to_manifest_architecture`), so the MCP model lists called
+    /// every Gemma model Llama. Learned geometry only, never a read of the
+    /// disk ([`Self::refused_model_if_learned`]): the network loop asks it.
+    pub fn model_family_label(&self, manifest: &crate::types::ModelManifest) -> String {
+        match self.gguf_meta.get(&manifest.id) {
+            Some(meta) => meta.architecture.clone(),
+            None => format!("{:?}", manifest.architecture),
+        }
+    }
+
     /// Learn the geometry of every known model this node holds a header for
     /// — the disk reads [`Self::refused_model_if_learned`] leaves out. A miss
     /// parses a header, so call it on a blocking thread, never the network
