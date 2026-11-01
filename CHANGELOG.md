@@ -12,6 +12,13 @@ llama.cpp reads it: the answer is the answer, and the reasoning goes where reaso
 the model is still thinking returns that thinking as reasoning with an empty answer, as before.
 Nothing changes between computers: a computer leading a request reads the reply itself. (#392)
 
+**Getting a model you already have part of no longer downloads those parts again.** Every
+download — the dashboard's Get, `swarmllm get-model`, the reference models — fetched each part it
+named from HuggingFace in full, even a part already on this computer, and replaced it with the new
+copy: asking for all of a model you held half of downloaded the whole thing. A part this computer
+already holds, checked when it arrived, is now kept and skipped; a part whose contents are in
+question is still fetched again, since that is how it is put right. (#393)
+
 ## [0.3.267-alpha] — 2026-11-01
 
 **You can now ask a model to answer without thinking first, or to think.** Models such as

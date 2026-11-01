@@ -1436,6 +1436,21 @@ exact length, with a hash for the bytes. Tests `a_part_is_whole_only_at_exactly_
 - the download check dropped fails the second;
 - the request gate's old rule (the file exists) fails the second.
 
+**An explicit download asks it too (2026-11-01, #393).** `/api/admin/hf/download-shards` — the
+dashboard's Get, `swarmllm get-model`, the reference models — never looked at the disk: every part it
+named was fetched from HuggingFace whole and renamed over the one held, so a Get of a model held in
+half downloaded all of it (the 70B pin #389 (b) needed would have re-fetched the 15.1 GB held). It
+now takes out, BEFORE it registers the download (a part the progress map marks as under way is not
+servable), what `admin_hf::shards::parts_already_here` names: this answer's parts, cut exactly as the
+probe cuts the file (total, count, each part's layers and size), not disputed (an explicit download
+from the upload is how a dispute is settled), of a copy not withheld. A fair share's seed too.
+huggingface_hub's `snapshot_download` and Ollama's `pull` skip a file held with the right digest; a
+part here is credited only after its BLAKE3 check, which is that digest. Verified on a probe node off
+the swarm, its own copy of TinyLlama, part 1 asked for (`memory/tools/s393_probe.sh`): the file kept
+(same inode, "not fetched again"); v0.3.266 on the same copy fetched 314 MB and renamed a new file
+over it. Test `a_part_already_here_is_not_fetched_again`, red with the skip off and with the dispute
+rule off.
+
 → `docs/invariants/network.md`
 
 ## Destroying a shard we hold needs better evidence than a stranger's claim

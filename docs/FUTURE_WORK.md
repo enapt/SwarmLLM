@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #393**). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #394**). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -4063,6 +4063,20 @@ archive under the named heading. Reopen one only with the evidence its line name
 Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 19-28 were
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
+
+**Closed 2026-11-01, ships in the next release** (#393)
+- #393 — **A download of a model this computer holds in part no longer fetches the parts it has.**
+  Found pinning the rigs' models for #389 (b): `/api/admin/hf/download-shards` — the dashboard's
+  Get, `swarmllm get-model`, the reference models — never looked at the disk, so every part named
+  was fetched from HuggingFace whole and renamed over the one held (a pin of the 70B, 27 of its 79
+  parts here, would have re-fetched 15.1 GB). It now asks `parts_already_here` before the download
+  is registered: the parts `SharedState::parts_servable_here` names (credited after their BLAKE3
+  check, whole, none under way), cut exactly as the probe cuts the file, not disputed, of a copy
+  not withheld; a fair share's seed too. The request still pins the model, so a pin of what is
+  held fetches only the header. Verified on a probe node off the swarm with its own copy of
+  TinyLlama, part 1 asked for: kept (same file, "not fetched again"), where v0.3.266 on the same
+  copy fetched 314 MB and replaced the file. Test `a_part_already_here_is_not_fetched_again`, red
+  with the skip off and with the dispute rule off.
 
 **Closed 2026-11-01, ships in the next release** (#392)
 - #392 — **A model whose template starts its reply inside the scratchpad answers with the

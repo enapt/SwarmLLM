@@ -91,6 +91,57 @@ fn validate_shard_selection(
     }
 }
 
+/// The parts of this file this computer already holds, which a download never
+/// fetches again (#393: a "Get" of a model held in part re-downloaded every
+/// part it had, whole). A part counts when
+/// [`crate::daemon::SharedState::parts_servable_here`] — the one answer to
+/// which parts this computer can serve from its disk: credited here, whole, no
+/// download under way — names it AND it is cut exactly as this probe cuts the
+/// file (the same total and count, each part's layers and size). A disputed
+/// part is fetched, since a download from the upload is how it is settled, and
+/// so is every part of a copy waiting to be replaced (withheld).
+///
+/// Ask it BEFORE the download is registered: a part the progress map marks as
+/// under way is not servable. huggingface_hub's `snapshot_download` and
+/// Ollama's `pull` skip a file they hold with the right digest; a part is
+/// credited here only once its BLAKE3 check against the manifest passed.
+fn parts_already_here(
+    shared: &crate::daemon::SharedState,
+    model_id: &crate::types::ModelId,
+    layouts: &[crate::inference::split::LayerShardLayout],
+    total_size: u64,
+) -> std::collections::BTreeSet<u32> {
+    let Some(manifest) = shared.model_registry.get_manifest(model_id) else {
+        return Default::default();
+    };
+    if manifest.total_size_bytes != total_size
+        || manifest.shard_count as usize != layouts.len()
+        || shared.model_registry.model_is_withheld(model_id)
+    {
+        return Default::default();
+    }
+    shared
+        .parts_servable_here(&manifest)
+        .into_iter()
+        .filter(|&index| {
+            let cut_alike = manifest
+                .shards
+                .iter()
+                .find(|part| part.index == index)
+                .zip(layouts.get(index as usize))
+                .is_some_and(|(part, layout)| {
+                    part.size_bytes == layout.size_bytes
+                        && part.layer_range == (layout.layer_start, layout.layer_end)
+                });
+            cut_alike
+                && !shared.shard_is_disputed(&crate::types::ShardId {
+                    model_id: model_id.clone(),
+                    index,
+                })
+        })
+        .collect()
+}
+
 pub async fn hf_download_shards(
     State(state): State<AppState>,
     JsonBody(body): JsonBody<HfShardDownloadRequest>,
@@ -356,6 +407,22 @@ pub async fn hf_download_shards(
         shard_indices = (0..info.shard_count()).collect();
     }
 
+    // A part this computer already holds is not fetched again (#393). The
+    // request still pins the model (above), which is all some callers want.
+    let already_here =
+        parts_already_here(&state.shared_state, &mid, &info.layouts, info.total_size);
+    let asked_for = shard_indices.len();
+    shard_indices.retain(|index| !already_here.contains(index));
+    let not_fetched_again = asked_for - shard_indices.len();
+    if not_fetched_again > 0 {
+        tracing::info!(
+            model = %model_id_str,
+            parts = not_fetched_again,
+            fetching = ?shard_indices,
+            "parts already on this computer — not fetched again"
+        );
+    }
+
     // Create initial acquisition progress entry with per-shard progress so that
     // auto-manage can detect these downloads are already in flight and skip them.
     let log_msg = if peer_fair_share && shard_indices.is_empty() {
@@ -382,6 +449,11 @@ pub async fn hf_download_shards(
         log_msg,
     );
     status.shard_progress = initial_shard_progress;
+    if not_fetched_again > 0 {
+        status.log_push(format!(
+            "{not_fetched_again} part(s) already on this computer — not downloaded again"
+        ));
+    }
     let shared = state.shared_state.clone();
 
     // Clone values needed both in the spawn and the response
@@ -427,12 +499,15 @@ pub async fn hf_download_shards(
                 model_id_str.as_bytes(),
             ]) % total_shards;
 
-            let assigned = vec![seed_shard];
+            // A seed this computer already holds is not fetched again (#393).
+            let held = already_here.contains(&seed_shard);
+            let assigned = if held { Vec::new() } else { vec![seed_shard] };
 
             tracing::info!(
                 total_shards,
                 peers = peer_count,
                 seed_shard,
+                already_here = held,
                 "peer_fair_share: seeding 1 shard (auto-manage will acquire more as needed)"
             );
 
@@ -442,14 +517,20 @@ pub async fn hf_download_shards(
                 .acquisition_progress
                 .get_mut(&download_mid)
             {
-                entry.total_shards = 1;
-                entry.log_push(format!(
-                    "Seeding shard {seed_shard}/{total_shards} — auto-manage will acquire more as peers join"
-                ));
-                entry.shard_progress.insert(
-                    seed_shard,
-                    crate::model::acquisition::ShardProgress::new_downloading(seed_shard, 0),
-                );
+                entry.total_shards = assigned.len() as u32;
+                if held {
+                    entry.log_push(format!(
+                        "Part {seed_shard}/{total_shards} is already on this computer — auto-manage will acquire more as peers join"
+                    ));
+                } else {
+                    entry.log_push(format!(
+                        "Seeding shard {seed_shard}/{total_shards} — auto-manage will acquire more as peers join"
+                    ));
+                    entry.shard_progress.insert(
+                        seed_shard,
+                        crate::model::acquisition::ShardProgress::new_downloading(seed_shard, 0),
+                    );
+                }
             }
             assigned
         } else {
@@ -1042,5 +1123,104 @@ mod tests {
         assert!(
             validate_shard_selection(&body.shards, body.peer_fair_share, body.all_shards).is_ok()
         );
+    }
+
+    /// #393: a part this computer holds — credited here, whole, cut as the
+    /// probe cuts the file — is not fetched again. One not on disk, one in
+    /// dispute, one cut otherwise and every part of a withheld copy are.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_part_already_here_is_not_fetched_again() {
+        use crate::types::*;
+        const PART: u64 = 1000;
+        let temp = tempfile::tempdir().unwrap();
+        let mut config = crate::config::Config::default();
+        config.node.data_dir = temp.path().join("data");
+        let db = crate::storage::db::Database::open(temp.path()).unwrap();
+        let executor = std::sync::Arc::new(tokio::sync::Mutex::new(
+            crate::inference::executor::ModelExecutor::new(),
+        ));
+        let (state, _, _) = crate::daemon::SharedState::new(
+            config,
+            crate::identity::Identity::generate(),
+            db,
+            executor,
+            None,
+        );
+        let id = ModelId("held".into());
+        let manifest = ModelManifest {
+            id: id.clone(),
+            name: "Held".into(),
+            architecture: ModelArchitecture::Llama,
+            num_layers: 4,
+            num_params_billions: 0.001,
+            quantization: Quantization::Q4KM,
+            total_size_bytes: 4 * PART,
+            shard_count: 4,
+            shards: (0..4)
+                .map(|i| ShardInfo {
+                    index: i,
+                    layer_range: (i, i + 1),
+                    size_bytes: PART,
+                    hash: [9u8; 32],
+                    tensors: vec![],
+                })
+                .collect(),
+            tokenizer_hash: [0u8; 32],
+            manifest_hash: [0u8; 32],
+            publisher: NodeId([0u8; 32]),
+            publish_date: chrono::Utc::now(),
+            license: "MIT".into(),
+            mmproj: None,
+            context_length: None,
+        };
+        state.model_registry.register_manifest(manifest.clone());
+        let part = |index| ShardId {
+            model_id: id.clone(),
+            index,
+        };
+        // Parts 0, 1 and 2 are held whole; part 3 is not on this computer.
+        let store = state.shard_store();
+        for index in 0..3 {
+            let path = store.shard_path(&id, index);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, vec![0u8; PART as usize]).unwrap();
+            state
+                .model_registry
+                .record_shard_holder(part(index), state.identity.node_id().clone());
+        }
+        // Part 2's bytes are in dispute: a download from the upload settles it.
+        state.note_shard_disputed(
+            &part(2),
+            &crate::error::SwarmError::ShardIntegrity {
+                expected: hex::encode([9u8; 32]),
+                actual: hex::encode([7u8; 32]),
+            },
+        );
+        let probe: Vec<crate::inference::split::LayerShardLayout> = (0..4)
+            .map(|i| crate::inference::split::LayerShardLayout {
+                index: i,
+                layer_start: i,
+                layer_end: i + 1,
+                tensors: vec![],
+                size_bytes: PART,
+            })
+            .collect();
+        let here = |layouts: &[crate::inference::split::LayerShardLayout]| {
+            parts_already_here(&state, &id, layouts, 4 * PART)
+                .into_iter()
+                .collect::<Vec<_>>()
+        };
+
+        assert_eq!(here(&probe), vec![0, 1]);
+
+        // The probe cuts part 1 elsewhere (another part size): it is another
+        // part of the file, whatever its index.
+        let mut recut = probe.clone();
+        recut[1].layer_end = 3;
+        assert_eq!(here(&recut), vec![0]);
+
+        // A copy waiting to be replaced keeps nothing.
+        state.model_registry.set_model_withheld(&id, true);
+        assert!(here(&probe).is_empty());
     }
 }
