@@ -399,9 +399,30 @@ fn load_moe_ffn<R: std::io::Read + std::io::Seek>(
     let selection_bias = per_expert("exp_probs_b.bias", reader)?
         .map(|host| super::ExpertScales::new(host, device).map_err(SwarmError::internal))
         .transpose()?;
-    let (experts, stacked) = if let Some(stacked) =
-        load_stacked_experts(ct, reader, prefix, experts_device, n_router, routing)?
-    {
+    // gpt-oss's router bias, on its logits: it chooses AND weighs
+    // (`MoeFfn::router_bias`).
+    let router_bias = per_expert("ffn_gate_inp.bias", reader)?
+        .map(|host| {
+            candle_core::Tensor::from_vec(host, (n_router,), device).map_err(SwarmError::internal)
+        })
+        .transpose()?;
+    let expert_biases = load_expert_biases(ct, reader, prefix, experts_device, n_router)?;
+    // An output scale is folded into the routing weight, which llama.cpp
+    // applies AFTER the down bias: folded, it would scale the bias too.
+    if expert_biases.is_some() && expert_scales.is_some() {
+        return Err(SwarmError::Internal(format!(
+            "{prefix}: an output scale on experts that carry biases is not supported"
+        )));
+    }
+    let (experts, stacked) = if let Some(stacked) = load_stacked_experts(
+        ct,
+        reader,
+        prefix,
+        experts_device,
+        n_router,
+        routing,
+        expert_biases.is_some(),
+    )? {
         (Vec::new(), Some(stacked))
     } else {
         (
@@ -448,8 +469,85 @@ fn load_moe_ffn<R: std::io::Read + std::io::Seek>(
         activation,
         expert_scales,
         selection_bias,
+        router_bias,
+        expert_biases,
         beside: None,
     })
+}
+
+/// A layer's per-expert biases (`ffn_{gate,up,down}_exps.bias`: gpt-oss), on
+/// the experts' device — `None` where it has none. Each is `[n_experts, width]`,
+/// checked against its stack's output width; a projection the file leaves
+/// unbiased adds zeros. A bias on a fused gate/up stack is refused by name: no
+/// file this build has met carries one.
+fn load_expert_biases<R: std::io::Read + std::io::Seek>(
+    ct: &gguf_file::Content,
+    reader: &mut R,
+    prefix: &str,
+    device: &Device,
+    n_router: usize,
+) -> Result<Option<Box<super::ExpertBiases>>, SwarmError> {
+    let fused = format!("{prefix}.ffn_gate_up_exps.bias");
+    if ct.tensor_infos.contains_key(&fused) {
+        return Err(SwarmError::Internal(format!(
+            "{fused}: a bias on a fused gate/up expert stack is not supported"
+        )));
+    }
+    let stacks = ["ffn_gate_exps", "ffn_up_exps", "ffn_down_exps"];
+    if !stacks
+        .iter()
+        .any(|t| ct.tensor_infos.contains_key(&format!("{prefix}.{t}.bias")))
+    {
+        return Ok(None);
+    }
+    let rows = |t: &str, reader: &mut R| -> Result<super::ExpertRows, SwarmError> {
+        // A stack is [n_experts, out, in] in candle's order.
+        let weight = format!("{prefix}.{t}.weight");
+        let width = match ct.tensor_infos.get(&weight).map(|i| i.shape.dims()) {
+            Some(&[e, out, _]) if e == n_router => out,
+            other => {
+                return Err(SwarmError::Internal(format!(
+                    "{weight}: {other:?} is not a stack of {n_router} experts"
+                )))
+            }
+        };
+        let name = format!("{prefix}.{t}.bias");
+        let host = match read_f32s(ct, reader, &name)? {
+            Some(host) if host.len() == n_router * width => host,
+            Some(host) => {
+                return Err(SwarmError::Internal(format!(
+                    "{name}: {} figures for {n_router} experts of width {width}",
+                    host.len()
+                )))
+            }
+            None => vec![0.0; n_router * width],
+        };
+        super::ExpertRows::new(host, n_router, device).map_err(SwarmError::internal)
+    };
+    Ok(Some(Box::new(super::ExpertBiases {
+        gate: rows(stacks[0], reader)?,
+        up: rows(stacks[1], reader)?,
+        down: rows(stacks[2], reader)?,
+    })))
+}
+
+/// The attention output projection's bias (`attn_output.bias`: gpt-oss), where
+/// the file has one — llama.cpp reads `wo_b` wherever a file carries it. A
+/// present tensor that fails to read is an error, never an absence.
+fn attention_output_bias<R: std::io::Read + std::io::Seek>(
+    ct: &gguf_file::Content,
+    reader: &mut R,
+    prefix: &str,
+    device: &Device,
+) -> Result<Option<candle_core::Tensor>, SwarmError> {
+    let name = format!("{prefix}.attn_output.bias");
+    if !ct.tensor_infos.contains_key(&name) {
+        return Ok(None);
+    }
+    ct.tensor(reader, &name, device)
+        .and_then(|t| t.dequantize(device))
+        .map(Some)
+        .map_err(|e| SwarmError::Internal(format!("{name}: {e}")))
 }
 
 /// What [`load_standard_ffn`] needs of the model, beside the layer.
@@ -660,6 +758,7 @@ fn load_stacked_experts<R: std::io::Read + std::io::Seek>(
     device: &Device,
     n_router: usize,
     routing: MoeRoutingConfig,
+    experts_biased: bool,
 ) -> Result<Option<super::StackedExperts>, SwarmError> {
     let fused = experts_fused(ct, prefix);
     let names = if fused {
@@ -686,7 +785,13 @@ fn load_stacked_experts<R: std::io::Read + std::io::Seek>(
         infos[1].ggml_dtype,
         infos[2].ggml_dtype,
     ];
-    if !super::StackedExperts::fit(device.is_cuda(), dtypes, [dims[0][2], dims[2][2]], routing) {
+    if !super::StackedExperts::fit(
+        device.is_cuda(),
+        dtypes,
+        [dims[0][2], dims[2][2]],
+        routing,
+        experts_biased,
+    ) {
         return Ok(None);
     }
     let read = |reader: &mut R, n: &str| {
@@ -2178,6 +2283,7 @@ impl SplitModel {
                         attention_bq,
                         attention_bk,
                         attention_bv,
+                        attention_bo: attention_output_bias(&ct, &mut file, &prefix, &device)?,
                         attention_norm: make_norm(attn_norm, rms_norm_eps)?,
                         attn_q_norm: None,
                         attn_k_norm: None,
@@ -2330,6 +2436,7 @@ impl SplitModel {
                     attention_bq,
                     attention_bk,
                     attention_bv,
+                    attention_bo: attention_output_bias(&ct, &mut file, &prefix, &device)?,
                     attention_norm: make_norm(attn_norm, rms_norm_eps)?,
                     attn_q_norm: None,
                     attn_k_norm: None,
@@ -2874,6 +2981,12 @@ impl SplitModel {
                                         attention_bq,
                                         attention_bk,
                                         attention_bv,
+                                        attention_bo: attention_output_bias(
+                                            ct_ref,
+                                            &mut cursor,
+                                            &prefix,
+                                            device_ref,
+                                        )?,
                                         attention_norm: make_norm(attn_norm, rms_norm_eps)?,
                                         attn_q_norm,
                                         attn_k_norm,
@@ -3034,6 +3147,7 @@ impl SplitModel {
                         attention_bq: bq,
                         attention_bk: bk,
                         attention_bv: bv,
+                        attention_bo: attention_output_bias(&ct, file, &prefix, &device)?,
                         attention_norm: make_norm(attn_norm, rms_norm_eps)?,
                         attn_q_norm: attn_q_norm
                             .map(|t| make_norm(t, rms_norm_eps))
@@ -3906,6 +4020,165 @@ mod expert_stack_tests {
             assert!(
                 gap < 2e-2,
                 "{tokens} tokens: {gap} of the largest output off the exact answer"
+            );
+        }
+    }
+
+    /// gpt-oss's biases (#390 item 2, step 4), as llama.cpp's `build_moe_ffn`
+    /// adds them: the router's on its logits — it chooses AND weighs — each
+    /// expert's gate and up bias before the activation, its down bias before
+    /// the routing weight. Checked against a hand-written sum over the
+    /// dequantized weights, and the processor's one-region path against one
+    /// expert at a time, bit for bit. A card's stacked kernel adds no bias, so
+    /// the layer is never stacked.
+    #[test]
+    fn a_biased_expert_layer_is_llama_cpps_sum() {
+        use crate::inference::layers::QMatMul;
+        let (n, hidden, inter, k) = (8usize, 64usize, 96usize, 4usize);
+        // splitmix64 into [-0.5, 0.5).
+        let hashed = |count: usize, salt: u64| -> Vec<f32> {
+            (0..count as u64)
+                .map(|i| {
+                    let mut z = (i ^ (salt << 32)).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+                    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+                    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+                    ((z ^ (z >> 31)) >> 40) as f32 / (1u64 << 24) as f32 - 0.5
+                })
+                .collect()
+        };
+        let scaled = |v: Vec<f32>, by: f32| v.into_iter().map(|x| x * by).collect::<Vec<f32>>();
+        let f32s = |v: Vec<f32>, shape: &[usize]| {
+            QTensor::quantize(
+                &Tensor::from_vec(v, shape, &Device::Cpu).unwrap(),
+                GgmlDType::F32,
+            )
+            .unwrap()
+        };
+        let q8 = |shape: (usize, usize, usize), salt: u64| {
+            let v = hashed(shape.0 * shape.1 * shape.2, salt);
+            QTensor::quantize(
+                &Tensor::from_vec(v, shape, &Device::Cpu).unwrap(),
+                GgmlDType::Q8_0,
+            )
+            .unwrap()
+        };
+        // Biases as large as the products they join, the router's large
+        // enough to change which experts are chosen.
+        let router_bias = scaled(hashed(n, 6), 4.0);
+        let gate_bias = scaled(hashed(n * inter, 7), 2.0);
+        let up_bias = scaled(hashed(n * inter, 8), 2.0);
+        let down_bias = scaled(hashed(n * hidden, 9), 2.0);
+        let (ct, mut reader) = written(&[
+            (
+                "blk.0.ffn_gate_inp.weight",
+                &f32s(hashed(n * hidden, 1), &[n, hidden]),
+            ),
+            ("blk.0.ffn_gate_inp.bias", &f32s(router_bias.clone(), &[n])),
+            ("blk.0.ffn_gate_exps.weight", &q8((n, inter, hidden), 2)),
+            ("blk.0.ffn_up_exps.weight", &q8((n, inter, hidden), 3)),
+            ("blk.0.ffn_down_exps.weight", &q8((n, hidden, inter), 4)),
+            (
+                "blk.0.ffn_gate_exps.bias",
+                &f32s(gate_bias.clone(), &[n, inter]),
+            ),
+            (
+                "blk.0.ffn_up_exps.bias",
+                &f32s(up_bias.clone(), &[n, inter]),
+            ),
+            (
+                "blk.0.ffn_down_exps.bias",
+                &f32s(down_bias.clone(), &[n, hidden]),
+            ),
+        ]);
+        let moe = load_moe_ffn(
+            &ct,
+            &mut reader,
+            "blk.0",
+            &placed_on(Device::Cpu, 0),
+            0,
+            k,
+            MoeRoutingConfig::default(),
+            Activation::SwigluOai,
+        )
+        .unwrap();
+        assert!(moe.router_bias.is_some() && moe.expert_biases.is_some());
+        assert!(moe.stacked.is_none() && !moe.experts_could_stack_on_a_card());
+
+        let deq = |w: &QMatMul| -> Vec<Vec<f32>> {
+            w.quantized_weight()
+                .unwrap()
+                .dequantize(&Device::Cpu)
+                .unwrap()
+                .to_vec2()
+                .unwrap()
+        };
+        let experts: Vec<[Vec<Vec<f32>>; 3]> = moe
+            .experts
+            .iter()
+            .map(|e| [deq(&e.gate), deq(&e.up), deq(&e.down)])
+            .collect();
+        let router: Vec<Vec<f32>> = moe.gate.to_vec2().unwrap();
+        let dot = |a: &[f32], b: &[f32]| a.iter().zip(b).map(|(x, y)| x * y).sum::<f32>();
+        // llama.cpp's sum for one token: top-k of the biased logits, softmax
+        // over those k, each expert's biased products.
+        let reference = |x: &[f32]| -> Vec<f32> {
+            let logits: Vec<f32> = (0..n)
+                .map(|e| dot(&router[e], x) + router_bias[e])
+                .collect();
+            let mut order: Vec<usize> = (0..n).collect();
+            order.sort_by(|&a, &b| logits[b].total_cmp(&logits[a]));
+            let picks = &order[..k];
+            let top = logits[picks[0]];
+            let exps: Vec<f32> = picks.iter().map(|&e| (logits[e] - top).exp()).collect();
+            let total: f32 = exps.iter().sum();
+            let mut out = vec![0f32; hidden];
+            for (&e, ex) in picks.iter().zip(&exps) {
+                let [wg, wu, wd] = &experts[e];
+                let g: Vec<f32> = (0..inter)
+                    .map(|j| dot(&wg[j], x) + gate_bias[e * inter + j])
+                    .collect();
+                let u: Vec<f32> = (0..inter)
+                    .map(|j| dot(&wu[j], x) + up_bias[e * inter + j])
+                    .collect();
+                let mut a = vec![0f32; inter];
+                crate::inference::fast_math::swiglu_oai_mul_into(&g, &u, &mut a);
+                for (c, o) in out.iter_mut().enumerate() {
+                    *o += ex / total * (dot(&wd[c], &a) + down_bias[e * hidden + c]);
+                }
+            }
+            out
+        };
+        let largest = |v: &[f32]| v.iter().fold(0f32, |m, x| m.max(x.abs()));
+        for tokens in [1usize, 5, 40] {
+            let xs = hashed(tokens * hidden, 5);
+            let x = Tensor::from_vec(xs.clone(), (1, tokens, hidden), &Device::Cpu).unwrap();
+            let got: Vec<f32> = moe
+                .forward(&x)
+                .unwrap()
+                .flatten_all()
+                .unwrap()
+                .to_vec1()
+                .unwrap();
+            let want: Vec<f32> = xs.chunks(hidden).flat_map(&reference).collect();
+            let off: Vec<f32> = got.iter().zip(&want).map(|(g, w)| g - w).collect();
+            let gap = largest(&off) / largest(&want);
+            assert!(
+                gap < 2e-2,
+                "{tokens} tokens: {gap} of the largest output off llama.cpp's sum"
+            );
+
+            let x_flat = x.reshape((tokens, hidden)).unwrap();
+            let batches = moe.route(&x_flat).unwrap();
+            let region = moe
+                .experts_in_one_region(&x_flat, &batches, tokens, hidden)
+                .unwrap();
+            let one_by_one = moe
+                .experts_one_at_a_time(&x_flat, &batches, tokens, hidden)
+                .unwrap();
+            assert_eq!(
+                region.to_vec2::<f32>().unwrap(),
+                one_by_one.to_vec2::<f32>().unwrap(),
+                "{tokens} tokens: the one-region path parts from one expert at a time"
             );
         }
     }

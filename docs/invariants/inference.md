@@ -6182,6 +6182,41 @@ not a multiple of 256, so no K-quant fits their down projection: unsloth's Q2_K 
 Q5_0 for Q4_K (`llama-quant.cpp` `tensor_type_fallback`), which this engine reads. An older upload
 is refused as the file's fault (#394). The tokenizer is `gpt2` / `glm4` pre-splitting.
 
+
+## gpt-oss: a router bias that weighs, and a bias on every expert projection (2026-11-02, FUTURE_WORK #390 item 2, step 4)
+
+**What differs** (llama.cpp master `src/models/openai-moe.cpp`, `llama-graph.cpp` `build_moe_ffn` and
+`build_attn`): (a) `ffn_gate_inp.bias` is added to the router's LOGITS (`logits = ggml_add(logits,
+gate_inp_b)`) before the top-k and before the softmax over the picks — unlike GLM-4.5's selection
+bias, it weighs as well as chooses; (b) each expert's gate and up outputs get their own bias row
+(`ggml_add_id`) BEFORE the activation, and its down output its own row BEFORE the routing weight
+multiplies it (after an output scale, `down_exps_s`, where a file has one); (c) `attn_output.bias` is
+added after the output projection (`wo_b`, after any adapter's delta).
+
+**What was chosen.** (a) `MoeFfn::router_scores` is the ONE place a router is read, by both routers
+(`route` on the host, `experts_stacked` on a card); `routed_on` copies the bias with the router.
+(b) `MoeFfn::expert_biases` (`ExpertBiases`: an `ExpertRows` per projection — host rows for the
+processor's one-region path, a `[n_experts, width]` tensor on the experts' device for `expert_ffn`).
+The one-region path adds them to its column-major outputs (`add_column_bias`), the same f32 sums
+`broadcast_add` makes, so it stays bit-identical to one expert at a time. The card's stacked kernel
+adds none: `StackedExperts::fit` takes `experts_biased` and refuses, so such a layer keeps one matrix
+per expert on a card and never offers its experts to a processor layer's prompt card
+(`experts_could_stack_on_a_card`); `stacked_products` refuses one outright. A projection the file
+leaves unbiased adds zeros. An output scale beside biases is refused: folded into the routing weight
+(`ExpertScales`), it would scale the down bias too. (c) `LayerWeights::output_projection`, the one
+place both attention paths (`attend`, `forward_attn_batched`) project, adds `attention_bo`; it is
+read for any family whose file carries one (`attention_output_bias`), as llama.cpp reads `wo_b`.
+Under tensor parallelism only rank 0 keeps it — the ranks' outputs are partial sums (Megatron-LM
+adds a row-parallel layer's bias after the reduction).
+
+**Checked.** `a_biased_expert_layer_is_llama_cpps_sum`: a Q8_0 layer of 8 experts, 4 chosen, the
+router's bias ±2 (enough to change the choice) and the experts' ±1, within 2e-2 of a hand-written
+sum of llama.cpp's graph over the dequantized weights at 1, 5 and 40 tokens, and the one-region path
+equal to one expert at a time bit for bit. Red with the router bias dropped (0.42 off), the host
+path's gate bias dropped (0.45 off) and `expert_ffn`'s down bias dropped (the two paths part).
+`an_attention_output_bias_is_added_on_both_paths`: each output is the unbiased one plus the bias, bit
+for bit, for one request and for a batch; red with the bias dropped. The end-to-end check against
+llama.cpp's `dump_logits` waits for the sinks (step 5): without them no gpt-oss forward is llama.cpp's.
 ## Qwen 3.5's decode steps are captured too: a DeltaNet state is written into a second pair of buffers (2026-10-11, FUTURE_WORK #228 (4))
 
 **What refused it.** `decode_graph_ineligibility` let only dense layers into a

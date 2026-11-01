@@ -2853,7 +2853,15 @@ match llama.cpp** (#715, `arch-inference.md`).
    gated, `gated()`, the processor's `act_mul`), llama.cpp's own op's bits on inputs past both clamps
    (`examples/swiglu_oai_reference.c`), the card's composition the same expression in candle ops. An
    MXFP4 expert layer runs on the processor within its 8-bit rounding of the exact answer
-   (`an_mxfp4_expert_layer_runs_on_the_processor`). Next: step 4 (biases).
+   (`an_mxfp4_expert_layer_runs_on_the_processor`). **Step 4 in since 2026-11-02**: the router's bias on
+   its logits (`MoeFfn::router_scores`, the one place a router is read — it weighs as well as chooses),
+   each expert's gate/up/down bias (`MoeFfn::expert_biases`, on the processor's one-region path and
+   `expert_ffn`), `attn_output.bias` (`LayerWeights::output_projection`, both attention paths; rank 0
+   only under tensor parallelism). The card's stacked kernel adds no bias: `StackedExperts::fit` refuses
+   a biased layer (one matrix per expert on a card, never a processor layer's prompt card) — step 7
+   adds it there. Checked against a hand-written sum of llama.cpp's graph
+   (`a_biased_expert_layer_is_llama_cpps_sum`) and bit for bit across the two processor paths. Next:
+   step 5 (sinks), then the end-to-end check against llama.cpp's `dump_logits` on a tiny file.
 3. **`glm4moe` — GLM-4.5-Air 106B-A12B** (UD-Q4_K_XL 67.7 GB: three or four cards; ~46K).
    **Loader in since 2026-11-02, refused until a real file is checked**: the selection bias is a
    REQUIRED argument of both routers (`MoeFfn::selection_bias`), `expert_weights_scale` folds into

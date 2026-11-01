@@ -966,6 +966,16 @@ pub(crate) struct MoeFfn {
     /// and on the layer's device, carried as [`Self::expert_scales`] is.
     /// `None`: the gated score alone chooses.
     pub(crate) selection_bias: Option<ExpertScales>,
+    /// The router's bias, `[n_experts]` on the router's device, added to its
+    /// logits before anything reads them — gpt-oss's `ffn_gate_inp.bias`
+    /// (llama.cpp `build_moe_ffn`: `logits = ggml_add(logits, gate_inp_b)`), so
+    /// it chooses AND weighs, unlike [`Self::selection_bias`]. Read only
+    /// through [`Self::router_scores`]. `None`: unbiased.
+    pub(crate) router_bias: Option<Tensor>,
+    /// Each expert's biases ([`ExpertBiases`]). The stacked card kernel adds
+    /// none, so [`StackedExperts::fit`] refuses a biased layer and the
+    /// processor's paths and [`expert_ffn`] add them. `None`: unbiased.
+    pub(crate) expert_biases: Option<Box<ExpertBiases>>,
     /// A dense feed-forward run beside the experts, each branch normed on its
     /// own (Gemma 4's MoE layer). `None` for every other family.
     pub(crate) beside: Option<Box<DenseBeside>>,
@@ -987,6 +997,75 @@ impl ExpertScales {
             device: Tensor::from_vec(host.clone(), (n,), device)?,
             host,
         })
+    }
+}
+
+/// [`MoeFfn::expert_biases`]: each expert's bias on its gate, up and down
+/// projections — gpt-oss's `ffn_{gate,up,down}_exps.bias`, added where
+/// llama.cpp's `build_moe_ffn` adds them (`ggml_add_id`: gate and up before the
+/// activation, down before the routing weight). A projection the file leaves
+/// unbiased holds zeros.
+#[derive(Debug, Clone)]
+pub(crate) struct ExpertBiases {
+    pub(crate) gate: ExpertRows,
+    pub(crate) up: ExpertRows,
+    pub(crate) down: ExpertRows,
+}
+
+impl ExpertBiases {
+    /// Expert `e`'s gate, up and down rows on the experts' device, for
+    /// [`expert_ffn`].
+    fn rows_of(&self, e: usize) -> CandleResult<[Tensor; 3]> {
+        Ok([
+            self.gate.device.get(e)?,
+            self.up.device.get(e)?,
+            self.down.device.get(e)?,
+        ])
+    }
+}
+
+/// One projection's bias for every expert: expert `e`'s row at
+/// `host[e * width..(e + 1) * width]` for the processor's one-region path
+/// ([`MoeFfn::experts_in_one_region`]), and `device` `[n_experts, width]` on
+/// the experts' device for the others.
+#[derive(Debug, Clone)]
+pub(crate) struct ExpertRows {
+    pub(crate) host: Vec<f32>,
+    pub(crate) width: usize,
+    pub(crate) device: Tensor,
+}
+
+impl ExpertRows {
+    /// `host` as `n_experts` rows, with its copy on `device`.
+    pub(crate) fn new(host: Vec<f32>, n_experts: usize, device: &Device) -> CandleResult<Self> {
+        if n_experts == 0 || !host.len().is_multiple_of(n_experts) {
+            candle_core::bail!("{} bias figures for {n_experts} experts", host.len());
+        }
+        let width = host.len() / n_experts;
+        Ok(Self {
+            device: Tensor::from_vec(host.clone(), (n_experts, width), device)?,
+            host,
+            width,
+        })
+    }
+
+    /// Expert `e`'s row on the host.
+    fn row(&self, e: usize) -> CandleResult<&[f32]> {
+        self.host
+            .get(e * self.width..(e + 1) * self.width)
+            .ok_or_else(|| candle_core::Error::Msg(format!("no bias row for expert {e}")))
+    }
+}
+
+/// `bias[j]` added to every value of column `j` of `block`, an expert's
+/// outputs held column-major for `m` tokens (column `j` at `j * m..(j + 1) * m`,
+/// [`MoeFfn::experts_for_tokens`]'s layout) — the f32 sums `broadcast_add`
+/// makes on [`expert_ffn`]'s row-major outputs.
+fn add_column_bias(block: &mut [f32], m: usize, bias: &[f32]) {
+    for (col, &b) in block.chunks_exact_mut(m.max(1)).zip(bias) {
+        for v in col {
+            *v += b;
+        }
     }
 }
 
@@ -1053,18 +1132,22 @@ impl StackedExperts {
     /// to its OUTPUT — the kernel scales outputs; Llama 4 scales inputs
     /// (`weight_before_ffn`) and keeps one matrix per expert.
     /// `SWARMLLM_MOE_CARD=per-expert` keeps one matrix per expert everywhere
-    /// (A/B switch).
+    /// (A/B switch). A layer whose experts carry biases (`experts_biased`,
+    /// gpt-oss — [`MoeFfn::expert_biases`]) keeps one matrix per expert too:
+    /// the kernel adds no bias (#390 item 2, step 7).
     pub(crate) fn fit(
         on_a_card: bool,
         dtypes: [candle_core::quantized::GgmlDType; 3],
         input_widths: [usize; 2],
         routing: MoeRoutingConfig,
+        experts_biased: bool,
     ) -> bool {
         static PER_EXPERT: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
         let per_expert = *PER_EXPERT
             .get_or_init(|| std::env::var("SWARMLLM_MOE_CARD").as_deref() == Ok("per-expert"));
         on_a_card
             && !per_expert
+            && !experts_biased
             && !routing.weight_before_ffn
             && dtypes.iter().all(|&t| moe_card::kernel_type(t).is_some())
             && input_widths.iter().all(|w| w % 8 == 0)
@@ -1404,6 +1487,7 @@ impl LayerOnTheCard {
                 attention_bq: some(&layer.attention_bq)?,
                 attention_bk: some(&layer.attention_bk)?,
                 attention_bv: some(&layer.attention_bv)?,
+                attention_bo: some(&layer.attention_bo)?,
                 attention_norm: norm(&layer.attention_norm)?,
                 attn_q_norm: some_norm(&layer.attn_q_norm)?,
                 attn_k_norm: some_norm(&layer.attn_k_norm)?,
@@ -1812,10 +1896,15 @@ fn gated(activation: Activation, gate: &Tensor, up: &Tensor) -> CandleResult<Ten
 ///
 /// Exact for the same reason: every step here treats each token independently,
 /// so splitting rows changes only how many are materialised at once.
+///
+/// `bias`: the expert's gate, up and down rows ([`ExpertBiases::rows_of`]),
+/// added where llama.cpp adds them — gate and up before the activation, down
+/// on its output (the caller weighs it after).
 fn expert_ffn(
     batch_input: &Tensor,
     expert: &ExpertFfn,
     activation: Activation,
+    bias: Option<&[Tensor; 3]>,
 ) -> CandleResult<Tensor> {
     let tokens = batch_input.dim(0)?;
     // The gate is [intermediate, hidden]; the projection widens to its dim 0.
@@ -1830,8 +1919,19 @@ fn expert_ffn(
         // Gate and up read the same activation: quantize it once, as the
         // dense `Mlp` does (`QMatMul::forward_shared`).
         let gate_up = QMatMul::forward_shared(input, &[&expert.gate, &expert.up])?;
-        let combined = gated(activation, &gate_up[0], &gate_up[1])?;
-        expert.down.forward(&combined)
+        let combined = match bias {
+            Some([g, u, _]) => gated(
+                activation,
+                &gate_up[0].broadcast_add(g)?,
+                &gate_up[1].broadcast_add(u)?,
+            )?,
+            None => gated(activation, &gate_up[0], &gate_up[1])?,
+        };
+        let down = expert.down.forward(&combined)?;
+        match bias {
+            Some([_, _, d]) => down.broadcast_add(d),
+            None => Ok(down),
+        }
     };
 
     if block >= tokens {
@@ -1983,6 +2083,12 @@ impl MoeFfn {
                     })
                 })
                 .transpose()?,
+            // The experts stay on the processor, and their biases with them.
+            router_bias: self
+                .router_bias
+                .as_ref()
+                .map(|b| sent_to_card(b, card))
+                .transpose()?,
             beside: self
                 .beside
                 .as_ref()
@@ -2022,6 +2128,7 @@ impl MoeFfn {
                 [gate.dtype(), up.dtype(), down.dtype()],
                 [width(&gate), width(&down)],
                 self.routing,
+                self.expert_biases.is_some(),
             )
     }
 
@@ -2098,7 +2205,7 @@ impl MoeFfn {
     /// lists `(token, weight)` for each token routed to expert `e`.
     pub(crate) fn route(&self, x_flat: &Tensor) -> CandleResult<Vec<Vec<(usize, f32)>>> {
         // Router scores: [num_tokens, n_experts]
-        let router_scores = x_flat.matmul(&self.gate.t()?)?;
+        let router_scores = self.router_scores(x_flat)?;
         let n_experts = self.gate.dim(0)?;
 
         // Phase 1: route every token from ONE host copy of the layer's scores.
@@ -2139,6 +2246,14 @@ impl MoeFfn {
             }
         }
         Ok(expert_batches)
+    }
+
+    /// The router's logits for `x` `[tokens, hidden]`: `[tokens, n_experts]`,
+    /// plus the router's bias where the layer has one ([`Self::router_bias`]).
+    /// The ONE place a router is read — [`Self::route`] on the host and
+    /// [`Self::experts_stacked`] on a card.
+    fn router_scores(&self, x: &Tensor) -> CandleResult<Tensor> {
+        biased(x.matmul(&self.gate.t()?)?, self.router_bias.as_ref())
     }
 
     /// May [`Self::experts_in_one_region`] answer this call? f32 on the
@@ -2241,6 +2356,7 @@ impl MoeFfn {
         // them — with its pairs: (token row in this region, weight).
         type Chosen = ([std::sync::Arc<QTensor>; 3], Vec<(usize, f32)>);
         let mut chosen: Vec<Chosen> = Vec::new();
+        let mut chosen_experts: Vec<usize> = Vec::new();
         for (e, batch) in batches.iter().enumerate() {
             let pairs: Vec<(usize, f32)> = batch
                 .iter()
@@ -2262,11 +2378,18 @@ impl MoeFfn {
                 qtensor(&expert.down)?,
             ];
             chosen.push((weights, pairs));
+            chosen_experts.push(e);
         }
         let intermediate = match chosen.first() {
             Some(([gate, ..], _)) => gate.shape().dims2()?.0,
             None => return Ok(()),
         };
+        let biases = self.expert_biases.as_ref();
+        if biases.is_some_and(|b| {
+            b.gate.width != intermediate || b.up.width != intermediate || b.down.width != hidden
+        }) {
+            candle_core::bail!("expert biases of the wrong width for this layer");
+        }
         let n_pairs: usize = chosen.iter().map(|(_, pairs)| pairs.len()).sum();
         let split = n_pairs >= MOE_PAIRS_TO_SPLIT_HOST_WORK;
 
@@ -2338,6 +2461,16 @@ impl MoeFfn {
         }
         matmul_many(jobs)?;
         drop(inputs);
+        // gpt-oss's gate and up biases, before the activation.
+        if let Some(b) = biases {
+            let mut first = 0;
+            for (&e, (_, pairs)) in chosen_experts.iter().zip(&chosen) {
+                let block = first * intermediate..(first + pairs.len()) * intermediate;
+                add_column_bias(&mut gate_out[block.clone()], pairs.len(), b.gate.row(e)?);
+                add_column_bias(&mut up_out[block], pairs.len(), b.up.row(e)?);
+                first += pairs.len();
+            }
+        }
 
         // act(gate) * up elementwise ([`gated`]'s kernels on host slices),
         // then each expert's rows made row-major for the down projection's
@@ -2406,6 +2539,15 @@ impl MoeFfn {
         }
         matmul_many(jobs)?;
         drop(whole_act);
+        // gpt-oss's down bias, before the routing weight.
+        if let Some(b) = biases {
+            let mut first = 0;
+            for (&e, (_, pairs)) in chosen_experts.iter().zip(&chosen) {
+                let block = first * hidden..(first + pairs.len()) * hidden;
+                add_column_bias(&mut down_out[block], pairs.len(), b.down.row(e)?);
+                first += pairs.len();
+            }
+        }
 
         // Each token's pairs summed in expert order from zero, as `index_add`
         // sums them — column by column, so columns split across threads; the
@@ -2481,11 +2623,9 @@ impl MoeFfn {
         let k = self.n_experts_used.clamp(1, self.gate.dim(0)?);
         self.stacked_products(x_flat, stacked, k, |x, start, len| {
             let scores = match router_flat {
-                Some(r) => r
-                    .narrow(0, start, len)?
-                    .to_dtype(candle_core::DType::F32)?
-                    .matmul(&self.gate.t()?)?,
-                None => x.matmul(&self.gate.t()?)?,
+                Some(r) => self
+                    .router_scores(&r.narrow(0, start, len)?.to_dtype(candle_core::DType::F32)?)?,
+                None => self.router_scores(x)?,
             };
             let (ids, weights) = topk_on_device(
                 &scores,
@@ -2519,6 +2659,11 @@ impl MoeFfn {
         pick: impl Fn(&Tensor, usize, usize) -> CandleResult<(Tensor, Tensor)>,
     ) -> CandleResult<Tensor> {
         const STACKED_IDS_PER_CALL: usize = 4096;
+        if self.expert_biases.is_some() {
+            candle_core::bail!(
+                "the stacked expert kernel adds no expert bias (StackedExperts::fit refuses such a layer)"
+            );
+        }
         let (num_tokens, hidden) = x_flat.dims2()?;
         let chunk = (STACKED_IDS_PER_CALL / k).max(1);
         let mut parts = Vec::with_capacity(num_tokens.div_ceil(chunk));
@@ -2600,10 +2745,21 @@ impl MoeFfn {
             let weight_tensor =
                 Tensor::from_vec(weight_vec, (batch.len(), 1), device)?.to_dtype(dtype)?;
             let act = self.activation;
+            let bias = self
+                .expert_biases
+                .as_ref()
+                .map(|b| b.rows_of(eidx))
+                .transpose()?;
+            let bias = bias.as_ref();
             let weighted = if self.routing.weight_before_ffn {
-                expert_ffn(&batch_input.broadcast_mul(&weight_tensor)?, expert, act)?
+                expert_ffn(
+                    &batch_input.broadcast_mul(&weight_tensor)?,
+                    expert,
+                    act,
+                    bias,
+                )?
             } else {
-                expert_ffn(&batch_input, expert, act)?.broadcast_mul(&weight_tensor)?
+                expert_ffn(&batch_input, expert, act, bias)?.broadcast_mul(&weight_tensor)?
             }; // [batch_tokens, hidden]
             weighted_parts.push(weighted);
             routed_rows.extend(batch.iter().map(|&(pos, _)| pos as i64));
@@ -3220,6 +3376,11 @@ pub(crate) struct LayerWeights {
     pub(crate) attention_bq: Option<Tensor>,
     pub(crate) attention_bk: Option<Tensor>,
     pub(crate) attention_bv: Option<Tensor>,
+    /// The attention output projection's bias (`attn_output.bias`: gpt-oss),
+    /// added after it and after any adapter's delta, as llama.cpp's
+    /// `build_attn` adds `wo_b` — in [`Self::output_projection`], the one place
+    /// both attention paths project. `None` for most families.
+    pub(crate) attention_bo: Option<Tensor>,
     pub(crate) attention_norm: RmsNorm,
     /// Qwen3 applies RmsNorm to Q per-head after projection (before RoPE).
     pub(crate) attn_q_norm: Option<RmsNorm>,
@@ -3485,6 +3646,12 @@ impl LayerWeights {
         }
         if let Some(ref bv) = self.attention_bv {
             self.attention_bv = Some(bv.narrow(0, kv_offset, kv_len)?.contiguous()?);
+        }
+        // Row-parallel: each rank's output is a partial sum, so the output
+        // bias is added once, by rank 0 — as Megatron-LM adds a row-parallel
+        // layer's bias after the reduction.
+        if tp_rank != 0 {
+            self.attention_bo = None;
         }
 
         // Split FFN weights
@@ -5790,15 +5957,25 @@ impl LayerWeights {
             P::AttnShape,
             y.transpose(1, 2)?.reshape(&[b_sz, seq_len, attn_out_dim])
         )?;
-        let mut wo_out = crate::inference::prof::timed!(P::AttnOut, self.attention_wo.forward(&y))?;
+        self.output_projection(&y, lora)
+    }
 
-        // Apply LoRA delta to O projection
+    /// The attention's output projection of `y` `[b, seq, n_head * head_dim]`:
+    /// `attention_wo`, any adapter's delta, then the output bias
+    /// ([`Self::attention_bo`]) — the ONE place both attention paths
+    /// ([`Self::attend`], [`Self::forward_attn_batched`]) project, so neither
+    /// can drop the bias.
+    fn output_projection(
+        &self,
+        y: &Tensor,
+        lora: Option<(&LoraAdapter, usize)>,
+    ) -> CandleResult<Tensor> {
+        let mut wo_out = crate::inference::prof::timed!(P::AttnOut, self.attention_wo.forward(y))?;
         if let Some((adapter, abs_layer)) = lora {
-            let key_o = format!("blk.{abs_layer}.attn_output");
-            if let Some(lw) = adapter.weights.get(&key_o) {
+            if let Some(lw) = adapter.weights.get(&format!("blk.{abs_layer}.attn_output")) {
                 wo_out = crate::model::lora::apply_lora(
                     &wo_out,
-                    &y,
+                    y,
                     lw,
                     adapter.metadata.alpha,
                     adapter.metadata.rank,
@@ -5806,7 +5983,7 @@ impl LayerWeights {
                 .map_err(|e| candle_core::Error::Msg(format!("LoRA attn_output: {e}")))?;
             }
         }
-        Ok(wo_out)
+        biased(wo_out, self.attention_bo.as_ref())
     }
 
     /// Attention for a whole batch of requests that share `index_pos` and
@@ -5976,20 +6153,7 @@ impl LayerWeights {
             P::AttnShape,
             y.transpose(1, 2)?.reshape(&[b_sz, seq_len, attn_out_dim])
         )?;
-        let mut wo_out = crate::inference::prof::timed!(P::AttnOut, self.attention_wo.forward(&y))?;
-        if let Some((adapter, abs_layer)) = lora {
-            if let Some(lw) = adapter.weights.get(&format!("blk.{abs_layer}.attn_output")) {
-                wo_out = crate::model::lora::apply_lora(
-                    &wo_out,
-                    &y,
-                    lw,
-                    adapter.metadata.alpha,
-                    adapter.metadata.rank,
-                )
-                .map_err(|e| candle_core::Error::Msg(format!("LoRA attn_output: {e}")))?;
-            }
-        }
-        Ok(wo_out)
+        self.output_projection(&y, lora)
     }
 }
 
@@ -6050,6 +6214,7 @@ mod batched_attention_tests {
             attention_bq: None,
             attention_bk: None,
             attention_bv: None,
+            attention_bo: None,
             attention_norm: rms(hidden, dev),
             attn_q_norm: None,
             attn_k_norm: None,
@@ -6099,6 +6264,38 @@ mod batched_attention_tests {
         layer.attention_wo = QMatMul::from_arc(shared.clone()).unwrap();
         let mut layers = vec![LayerVariant::Dense(layer)];
         assert_eq!(accumulate_output_projections_in_f32(&mut layers), (1, 1));
+    }
+
+    /// gpt-oss's `attn_output.bias` is added after the output projection on
+    /// BOTH attention paths ([`LayerWeights::output_projection`]): each output
+    /// is the unbiased one plus the bias, bit for bit.
+    #[test]
+    fn an_attention_output_bias_is_added_on_both_paths() {
+        let dev = Device::Cpu;
+        let plain = test_layer_weights(2, 1, 32, &dev);
+        let bo = Tensor::randn(0f32, 1.0, (64,), &dev).unwrap();
+        let mut with = plain.clone();
+        with.attention_bo = Some(bo.clone());
+        let plus_bias = |t: &Tensor| t.broadcast_add(&bo).unwrap().to_vec3::<f32>().unwrap();
+
+        let x = Tensor::randn(0f32, 1.0, (1, 3, 64), &dev).unwrap();
+        let single = |lw: &LayerWeights| {
+            let mut cache = None;
+            lw.forward_attn(&x, None, 0, &mut cache, 64, 0, None)
+                .unwrap()
+        };
+        let got = single(&with).to_vec3::<f32>().unwrap();
+        assert_eq!(got, plus_bias(&single(&plain)), "one request");
+
+        let xb = Tensor::randn(0f32, 1.0, (2, 1, 64), &dev).unwrap();
+        let batched = |lw: &LayerWeights| {
+            let (mut a, mut b) = (None, None);
+            let mut refs = vec![&mut a, &mut b];
+            lw.forward_attn_batched(&xb, None, &[0, 0], &mut refs, 64, &[], None)
+                .unwrap()
+        };
+        let got = batched(&with).to_vec3::<f32>().unwrap();
+        assert_eq!(got, plus_bias(&batched(&plain)), "a batch");
     }
 
     /// A model whose rotary width is narrower than its head dimension must
@@ -7159,7 +7356,7 @@ mod blocked_expert_ffn_tests {
             up: QMatMul::from_dense(u.clone()),
             down: QMatMul::from_dense(d.clone()),
         };
-        let blocked = expert_ffn(&input, &expert, Activation::SiLU).unwrap();
+        let blocked = expert_ffn(&input, &expert, Activation::SiLU, None).unwrap();
         let whole = {
             let gate_out = input.matmul(&g.t().unwrap()).unwrap();
             let up_out = input.matmul(&u.t().unwrap()).unwrap();
@@ -7198,7 +7395,7 @@ mod blocked_expert_ffn_tests {
             up: QMatMul::from_dense(u),
             down: QMatMul::from_dense(d),
         };
-        let out = expert_ffn(&input, &expert, Activation::SiLU).unwrap();
+        let out = expert_ffn(&input, &expert, Activation::SiLU, None).unwrap();
         assert_eq!(out.dims(), &[tokens, hidden]);
     }
 }

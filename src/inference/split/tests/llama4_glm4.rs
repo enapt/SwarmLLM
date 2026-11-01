@@ -47,6 +47,7 @@ fn llama4_normalises_q_and_k_after_rope_where_rope_runs() {
         attention_bq: None,
         attention_bk: None,
         attention_bv: None,
+        attention_bo: None,
         attention_norm: make_rms_norm(&norm_w),
         attn_q_norm: None,
         attn_k_norm: None,
@@ -141,6 +142,7 @@ fn test_partial_rope_glm4_style() {
         attention_bq: None,
         attention_bk: None,
         attention_bv: None,
+        attention_bo: None,
         attention_norm: make_rms_norm(&norm_w),
         attn_q_norm: None,
         attn_k_norm: None,
@@ -217,6 +219,7 @@ fn test_nope_skip_rope() {
         attention_bq: None,
         attention_bk: None,
         attention_bv: None,
+        attention_bo: None,
         attention_norm: make_rms_norm(&norm_w),
         attn_q_norm: None,
         attn_k_norm: None,
@@ -303,6 +306,8 @@ fn test_ffn_variant_moe_forward() {
         activation: crate::inference::model_arch::Activation::SiLU,
         expert_scales: None,
         selection_bias: None,
+        router_bias: None,
+        expert_biases: None,
         beside: None,
     };
 
@@ -375,6 +380,8 @@ fn test_llama4_moe_layer_forward() {
                 activation: crate::inference::model_arch::Activation::SiLU,
                 expert_scales: None,
                 selection_bias: None,
+                router_bias: None,
+                expert_biases: None,
                 beside: None,
             })
         } else {
@@ -395,6 +402,7 @@ fn test_llama4_moe_layer_forward() {
             attention_bq: None,
             attention_bk: None,
             attention_bv: None,
+            attention_bo: None,
             attention_norm: make_rms_norm_dim(hidden_dim, &device),
             attn_q_norm: None,
             attn_k_norm: None,

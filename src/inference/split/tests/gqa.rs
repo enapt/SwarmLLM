@@ -224,6 +224,7 @@ fn qwen2_forward_with_biases() {
         attention_bq: Some(Tensor::randn(0f32, 0.01, (hidden_dim,), &device).unwrap()),
         attention_bk: Some(Tensor::randn(0f32, 0.01, (kv_dim,), &device).unwrap()),
         attention_bv: Some(Tensor::randn(0f32, 0.01, (kv_dim,), &device).unwrap()),
+        attention_bo: None,
         attention_norm: make_rms_norm(&norm_w),
         attn_q_norm: None,
         attn_k_norm: None,

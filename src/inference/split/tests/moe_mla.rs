@@ -212,6 +212,8 @@ fn test_moe_forward_single_expert() {
         activation: crate::inference::model_arch::Activation::SiLU,
         expert_scales: None,
         selection_bias: None,
+        router_bias: None,
+        expert_biases: None,
         beside: None,
     };
 
@@ -254,6 +256,8 @@ fn test_moe_forward_multi_expert() {
         activation: crate::inference::model_arch::Activation::SiLU,
         expert_scales: None,
         selection_bias: None,
+        router_bias: None,
+        expert_biases: None,
         beside: None,
     };
 
@@ -306,6 +310,8 @@ fn test_shared_expert_integration() {
         activation: crate::inference::model_arch::Activation::SiLU,
         expert_scales: None,
         selection_bias: None,
+        router_bias: None,
+        expert_biases: None,
         beside: None,
     };
 
@@ -329,6 +335,8 @@ fn test_shared_expert_integration() {
         activation: crate::inference::model_arch::Activation::SiLU,
         expert_scales: None,
         selection_bias: None,
+        router_bias: None,
+        expert_biases: None,
         beside: None,
     };
 
@@ -748,6 +756,8 @@ fn the_batched_moe_forward_is_bit_identical_to_routing_token_by_token() {
                     activation: crate::inference::model_arch::Activation::SiLU,
                     expert_scales: None,
                     selection_bias: None,
+                    router_bias: None,
+                    expert_biases: None,
                     beside: None,
                 };
                 // A prompt-sized batch, a single decode token, and two sequences.
@@ -845,6 +855,8 @@ fn one_region_experts_are_bit_identical_to_one_at_a_time() {
                     activation,
                     expert_scales: None,
                     selection_bias: None,
+                    router_bias: None,
+                    expert_biases: None,
                     beside: None,
                 };
                 for tokens in [1usize, 3, 8, 37, 100] {
@@ -1068,7 +1080,17 @@ fn only_a_card_with_types_the_grouped_kernel_reads_keeps_experts_stacked() {
         weight_before_ffn: true,
         weights_scale: 1.0,
     };
-    let fits = |card, dtypes, widths, routing| StackedExperts::fit(card, dtypes, widths, routing);
+    let fits =
+        |card, dtypes, widths, routing| StackedExperts::fit(card, dtypes, widths, routing, false);
+    // The kernel adds no expert bias (gpt-oss): such a layer keeps one matrix
+    // per expert.
+    assert!(!StackedExperts::fit(
+        true,
+        [G::Q8_0, G::Q8_0, G::Q8_0],
+        [2048, 768],
+        default,
+        true
+    ));
     assert!(fits(true, [G::Q4K, G::Q4K, G::Q6K], [2048, 768], default));
     assert!(fits(true, [G::Q2K, G::Q2K, G::Q3K], [2048, 768], default));
     assert!(fits(
@@ -1191,6 +1213,8 @@ fn a_llama4_expert_is_weighted_on_its_input() {
             activation: crate::inference::model_arch::Activation::SiLU,
             expert_scales: None,
             selection_bias: None,
+            router_bias: None,
+            expert_biases: None,
             beside: None,
         };
         let llama4 = moe(MoeRoutingConfig {
@@ -1316,6 +1340,8 @@ fn a_prompts_processor_experts_go_to_the_card_only_where_it_can_take_them() {
         activation: crate::inference::model_arch::Activation::SiLU,
         expert_scales: None,
         selection_bias: None,
+        router_bias: None,
+        expert_biases: None,
         beside: None,
     };
     let llama4 = MoeRoutingConfig {
@@ -1432,6 +1458,8 @@ fn a_card_segment_keeping_its_experts_in_ram_works_on_the_processor_for_them() {
         activation: crate::inference::model_arch::Activation::SiLU,
         expert_scales: None,
         selection_bias: None,
+        router_bias: None,
+        expert_biases: None,
         beside: None,
     };
     let mut model = make_test_split_model(2, hidden);
@@ -1511,6 +1539,8 @@ fn gelu_moe(
         activation: Activation::Gelu,
         expert_scales,
         selection_bias: None,
+        router_bias: None,
+        expert_biases: None,
         beside: None,
     }
 }

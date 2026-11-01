@@ -119,7 +119,8 @@ now read too. **On a computer with a graphics card such a model runs on the proc
 the dashboard says why: the card has no code for the format yet, and running it there would take
 seconds a token. gpt-oss's activation (a clamped SwiGLU) is built too, giving llama.cpp's own answers
 bit for bit, and the family is known by name with its window and norms read as llama.cpp reads them.
-(#390)
+Its biases — on the attention's output, on the choice of experts and on every expert — are read and
+added where llama.cpp adds them. (#390)
 
 ## [0.3.267-alpha] — 2026-11-01
 

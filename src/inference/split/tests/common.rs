@@ -124,6 +124,7 @@ fn make_test_split_model_impl(
             attention_bq: None,
             attention_bk: None,
             attention_bv: None,
+            attention_bo: None,
             attention_norm: make_rms_norm(&norm_w),
             attn_q_norm: None,
             attn_k_norm: None,
@@ -227,6 +228,7 @@ pub(super) fn make_gqa_test_model(
             attention_bq: None,
             attention_bk: None,
             attention_bv: None,
+            attention_bo: None,
             attention_norm: make_rms_norm(&norm_w),
             attn_q_norm: None,
             attn_k_norm: None,
@@ -342,6 +344,7 @@ pub(super) fn make_deepseek_test_model(hidden_dim: usize) -> SplitModel {
         attention_bq: None,
         attention_bk: None,
         attention_bv: None,
+        attention_bo: None,
         attention_norm: make_rms_norm_dim(hidden_dim, &device),
         attn_q_norm: None,
         attn_k_norm: None,
@@ -409,6 +412,8 @@ pub(super) fn make_deepseek_test_model(hidden_dim: usize) -> SplitModel {
         activation: crate::inference::model_arch::Activation::SiLU,
         expert_scales: None,
         selection_bias: None,
+        router_bias: None,
+        expert_biases: None,
         beside: None,
     };
 
