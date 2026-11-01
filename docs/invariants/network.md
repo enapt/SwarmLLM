@@ -4811,7 +4811,14 @@ and served nothing while spending ~2.6 Mbit/s.
   `models.requests_served_for_peers`, written only by
   `SharedState::note_request_served_for_a_peer` — a whole-model hand-off and a
   split led for a peer (`dispatch::remote_generate`), and the first forward of
-  a peer's request through a segment here (`dispatch::layer_forward`) — and
+  a peer's request through a segment here (`dispatch::layer_forward`), whose
+  asker is found by `reply_target`'s rule (`layer_forward::requester_of`): the
+  coordinator a chained forward names, else the AUTHENTICATED sender. Read
+  from the claim alone, an unchained split — the ordinary one, which names
+  nobody, since its sender asked — exempted no one, and the owner's own pool
+  device's splits were gossiped as a peer's demand (pre-release review of
+  v0.3.267, before any release carried it; test
+  `an_unchained_forward_was_asked_by_its_sender`) — and
   the announcement carries `WishlistEntry::announced_score`, the score without
   that term, ranked and capped by it. The owner's requests still reach
   `region_demand`, this node's own view, where they hold the owner's copies

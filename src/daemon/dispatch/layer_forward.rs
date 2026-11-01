@@ -346,7 +346,7 @@ pub(super) async fn handle_layer_forward(
     let _serving_guard = crate::daemon::state::ServingGuard::new(&shared_state, model_id.clone());
     // A request a peer asked of this node, counted once — at its prompt pass's
     // first forward — toward the demand this node gossips (#389 (a)). The
-    // requester is the coordinator, never the previous hop.
+    // requester is the coordinator, never the previous hop (`requester_of`).
     if sequence_num == 0
         && forward
             .prompt_span
@@ -355,7 +355,7 @@ pub(super) async fn handle_layer_forward(
     {
         shared_state.note_request_served_for_a_peer(
             &model_id,
-            requester_node_id.map(crate::types::NodeId).as_ref(),
+            requester_of(requester_node_id, &sender_peer_bytes).as_ref(),
         );
     }
 
@@ -804,6 +804,25 @@ fn reply_target(
             .and_then(|n| resolve(&n))
             .unwrap_or(sender_peer_bytes),
     )
+}
+
+/// Whose request a forward serves — the coordinator, by [`reply_target`]'s
+/// rule: a chained forward names it (`requester_node_id`); an unchained one,
+/// the ordinary split, names nobody, because its sender IS the coordinator,
+/// the authenticated peer the network took it from. Read from the claim alone,
+/// every unchained split the owner's own pool device ran here was counted as
+/// a peer's demand (#389 (a), pre-release review of v0.3.267). The chained
+/// claim is cleartext the seal does not authenticate (`hop_forwards`); a
+/// forger naming a pool member only keeps its own requests out of the count.
+fn requester_of(
+    requester_node_id: Option<[u8; 32]>,
+    sender_peer_bytes: &[u8],
+) -> Option<crate::types::NodeId> {
+    requester_node_id.map(crate::types::NodeId).or_else(|| {
+        libp2p::PeerId::from_bytes(sender_peer_bytes)
+            .ok()
+            .and_then(|p| crate::network::transport::peer_id_to_node_id(&p))
+    })
 }
 
 /// The peer a `LayerResult` goes to — only ever built by [`reply_target`], so a
@@ -1371,7 +1390,42 @@ mod chaining_tests {
         assert!(!chaining_applies(&hop(), false, true));
     }
 
-    use super::reply_target;
+    use super::{reply_target, requester_of};
+
+    /// #389 (a): the demand count asks whose request a forward serves. An
+    /// unchained forward — the ordinary split — names no requester, because
+    /// its sender is the coordinator; read from the claim alone it named
+    /// nobody, and the owner's own pool device's split was counted as a
+    /// peer's demand (`is_pool_member` never saw who asked).
+    #[test]
+    fn an_unchained_forward_was_asked_by_its_sender() {
+        let coordinator = libp2p::identity::Keypair::generate_ed25519()
+            .public()
+            .to_peer_id();
+        let coordinator_id = crate::network::transport::peer_id_to_node_id(&coordinator);
+        assert!(
+            coordinator_id.is_some(),
+            "control: an ed25519 peer has a node id"
+        );
+        assert_eq!(
+            requester_of(None, &coordinator.to_bytes()),
+            coordinator_id,
+            "unchained: the authenticated sender asked"
+        );
+
+        // Chained, the sender is the previous hop, which asked nothing.
+        let previous_hop = libp2p::identity::Keypair::generate_ed25519()
+            .public()
+            .to_peer_id();
+        assert_eq!(
+            requester_of(Some([9u8; 32]), &previous_hop.to_bytes()),
+            Some(NodeId([9u8; 32])),
+            "chained: the coordinator the forward names"
+        );
+
+        // Neither a claim nor a sender that is a node: nobody to exempt.
+        assert_eq!(requester_of(None, b"not a peer id"), None);
+    }
 
     /// The bug this prevents: in a chain the previous hop hands the work along
     /// and stops caring, while the coordinator waits on the tail. Replying to
