@@ -2540,6 +2540,15 @@ submission COUNT, not bandwidth".
    of a step but not the kernels' durations: compare kernel sums, never traced step times. First
    reading (2026-10-19, FUTURE_WORK #309): TinyLlama 3501 µs of kernels a step against 2912, of which
    decode attention 778 against 173 — the matvecs were faster than llama.cpp's.
+3f. **Is a forward HOST- or CARD-bound?** Time the card's busy span inside each forward and set it
+   beside the forward's untraced wall time — never reason from "what the weights' read leaves over"
+   (the drafter's call was blamed on graph recording that way, and was card-bound, 2026-11-01). Rig:
+   `~/swarmllm-gate/deep/cg/replay1101.sh` (`prefill_bench SWARM_BENCH_GROW`, plain and under nsys) +
+   `level_busy.py` (each kernel; per-level breakdown by kernel) / `level_busy_g.py` (each whole
+   graph, `--cuda-graph-trace=graph`, low overhead): levels cut at each `tree_rank_merge`, busy = the
+   union of kernels, graph runs and copies. Both traces agreeing is the known-answer check. ⚠
+   `prefill_bench` runs on the PROCESSOR unless `SWARM_BENCH_DEVICE=cuda` — its first line
+   `device=` says which.
 4. **Where inside a layer?** `SWARMLLM_PROFILE=1` **plus**
    `SWARMLLM_PROFILE_SYNC=1` for correct per-stage attribution on CUDA.
    ⚠ **Read the two runs for different questions.** Sync inserts a

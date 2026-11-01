@@ -72,9 +72,10 @@ the top track (`docs/plans/large_model_splits.md`).
 6. **#369** — "Start and finish on this computer" runs AUTOMATICALLY wherever a node holds both
    ends of a model, and flows since v0.3.261, but ~1.1x behind the default shape at the same split
    on prose (~1.2x on code, inside the default shape's own spread); v0.3.264's batched tail added
-   6% on prose. **Next**: the drafter's call (`faster_than_local.md` § 10 item 10: ~0.14-0.2 ms a
-   layer of host recording into each graph capture — replay a level without re-recording), then
-   the dead wait (built, off: forwards queued 630-923 ms; pace the sends).
+   6% on prose. **Next**: the dead wait (built, off: forwards queued 630-923 ms; pace the sends).
+   The drafter's call is NOT host-bound (measured 2026-11-01, `faster_than_local.md` § 10 item 10):
+   a level is the card's own time, at llama.cpp's speed for the same 8-row forward; replaying a
+   level without recording would save at most ~0.35 ms of ~4.5 (0.5B), ~0.1 of ~11.7 (3B).
 
 **P2 — speed and completeness**, ranked by how many users meet it in their first hour
 7. **#318** — a model no single member can hold, at a usable speed. **Llama-3.3-70B on two

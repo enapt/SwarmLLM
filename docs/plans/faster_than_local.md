@@ -1017,6 +1017,27 @@ forwards on this node, not their rows, and not the link.
     already makes (`tree_rank`), so a 3-level call is one launch and one read back. Not small:
     every kernel a level runs takes its cache length from memory. Parked behind the release.
 
+    **Measured 2026-11-01 — REFUTED: a level is the CARD's time, not the host's.** The excess
+    above was attributed to recording without timing the card. `prefill_bench`
+    `SWARM_BENCH_GROW=64,8` (with `SWARM_BENCH_DEVICE=cuda` — the bench's default is the
+    processor) under nsys, levels cut at each `tree_rank_merge`, the live node stopped (rig
+    `~/swarmllm-gate/deep/cg/replay1101.sh` + `level_busy.py`): the card is busy 4.15-4.22 ms of
+    the 0.5B's ~4.5 ms level and 11.5-11.6 ms of the 3B's ~11.7, the same whether nsys traces each
+    kernel (+71-128% on the run's wall) or each whole graph (+4-27%). The host records the next group
+    while the card runs this one, so a level replayed without recording would save at most ~0.35 ms
+    (0.5B) and ~0.1 ms (3B). What fills a 3B level is its 8-row quantized products: llama.cpp's MMQ
+    7.9 ms and its stream-K fix-up 0.55 ms (174 + 173 launches), ~9.4 ms with the small weights'
+    vector kernels for ~2.0 GB read — ~65% of the ~330 GB/s this card sustains — then attention
+    (~1 ms) and ~30 small kernels a layer (~1.3 ms); a 0.5B level is 3.0 ms of products in 4.2.
+    **llama.cpp is no faster at this**: 4b1a27f's `llama-bench -p 8 -d 896 -ub 8 -fa 1` on
+    Qwen2.5-Coder-0.5B Q8_0 (the file this node holds as parts) takes 4.11 ms an 8-token forward
+    against our 4.44 ms a level with its ranking and read back; decode 3.11 against 3.0 ms (rig
+    `ref8rows1101.sh`). Also wrong above: a level's ids, visibility words and rope rows are fresh
+    allocations every level, not fixed buffers. Left for the call, none measured yet: fewer small
+    kernels a layer (at most ~11-14% of a level), the Q4_K products at 8 rows against llama.cpp's
+    (no Q4_K_M model here is held both as parts and as a file the card holds whole), and fewer,
+    wider levels a call.
+
 ## 11. The 70B through this PC and AU, evening of 2026-10-30
 
 The 70B (Llama-3.3 Q4_K_M) runs here as this node's [0,16) (10 layers on the card, 6 on the
