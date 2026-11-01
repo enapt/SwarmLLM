@@ -181,20 +181,31 @@ impl TrustManager {
 
     /// Apply time-based decay toward DEFAULT_TRUST for all known peers.
     /// Called once per health ping cycle. Moves each score 1% toward 0.5.
+    ///
+    /// Decayed under the registry's locks, written AFTER them, in one commit.
+    /// It wrote each peer with its own commit from inside `iter_mut`, so every
+    /// shard stayed write-locked while the disk was waited for, peer after
+    /// peer — and the network loop touches the registry on every message it
+    /// takes. Sampled 2026-11-02 under a busy disk: a commit every ~95 ms for
+    /// 1.16 s, and the loop's one 141 ms wait ended in the gap between two of
+    /// them (#314). A score that did not move writes nothing.
     pub fn decay_all(&self, peer_registry: &DashMap<NodeId, crate::types::PeerInfo>) {
-        for mut entry in peer_registry.iter_mut() {
-            let old = entry.trust_score;
-            // Linear interpolation toward DEFAULT_TRUST
-            entry.trust_score = old + TRUST_DECAY_RATE * (DEFAULT_TRUST - old);
-            // Persist the decayed score
-            let key = hex::encode(entry.node_id.0);
-            if let Err(e) = self
-                .db
-                .put_json(TREE_TRUST_SCORES, &key, &entry.trust_score)
-            {
-                tracing::warn!(error = %e, node = %key, "Failed to persist decayed trust score");
-            }
-            self.cache.insert(entry.node_id.clone(), entry.trust_score);
+        let moved = decay_scores(peer_registry);
+        if moved.is_empty() {
+            return;
+        }
+        let rows: Vec<(String, f32)> = moved
+            .iter()
+            .map(|(node_id, score)| (hex::encode(node_id.0), *score))
+            .collect();
+        if let Err(e) = self.db.put_json_many(
+            TREE_TRUST_SCORES,
+            rows.iter().map(|(key, score)| (key.as_str(), score)),
+        ) {
+            tracing::warn!(error = %e, peers = rows.len(), "Failed to persist decayed trust scores");
+        }
+        for (node_id, score) in moved {
+            self.cache.insert(node_id, score);
         }
     }
 
@@ -235,6 +246,24 @@ impl TrustManager {
             }
         }
     }
+}
+
+/// Move every registered peer's score `TRUST_DECAY_RATE` of the way toward
+/// `DEFAULT_TRUST`; return the ones that moved. It holds the registry's locks
+/// and is handed nothing else — no database — so nothing slow can run while
+/// they are held. A score at the default, or so near it that the step rounds
+/// away, does not move.
+fn decay_scores(peer_registry: &DashMap<NodeId, crate::types::PeerInfo>) -> Vec<(NodeId, f32)> {
+    let mut moved = Vec::new();
+    for mut entry in peer_registry.iter_mut() {
+        let old = entry.trust_score;
+        let new = old + TRUST_DECAY_RATE * (DEFAULT_TRUST - old);
+        if new != old {
+            entry.trust_score = new;
+            moved.push((entry.node_id.clone(), new));
+        }
+    }
+    moved
 }
 
 #[cfg(test)]
@@ -335,6 +364,100 @@ mod tests {
         let node = NodeId([6u8; 32]);
 
         assert!((tm.get_trust(&node) - DEFAULT_TRUST).abs() < 0.001);
+    }
+
+    /// Counts the commits `db` makes, and how many of `watched` were locked in
+    /// `registry` at each one — what a thread waiting on the registry would
+    /// have waited out (#314).
+    fn watch_commits(
+        db: &Database,
+        registry: &std::sync::Arc<DashMap<NodeId, PeerInfo>>,
+        watched: &[NodeId],
+    ) -> (
+        std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    ) {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let commits = std::sync::Arc::new(AtomicUsize::new(0));
+        let locked = std::sync::Arc::new(AtomicUsize::new(0));
+        let (c, l, r, ids) = (
+            commits.clone(),
+            locked.clone(),
+            registry.clone(),
+            watched.to_vec(),
+        );
+        db.on_commit(Some(Box::new(move || {
+            c.fetch_add(1, Ordering::SeqCst);
+            // `try_get_mut` never waits: from the committing thread itself it
+            // answers Locked for a shard that thread still holds.
+            let held = ids
+                .iter()
+                .filter(|id| r.try_get_mut(id).is_locked())
+                .count();
+            l.fetch_add(held, Ordering::SeqCst);
+        })));
+        (commits, locked)
+    }
+
+    /// #314: a decay pass committed once per peer from inside `iter_mut`, so
+    /// each commit's wait for the disk held a registry shard write-locked.
+    #[test]
+    fn a_decay_pass_commits_once_with_no_registry_entry_locked() {
+        use std::sync::atomic::Ordering;
+        let db = Database::open_temp().unwrap();
+        let tm = TrustManager::new(db.clone());
+        let registry = std::sync::Arc::new(DashMap::new());
+        let ids: Vec<NodeId> = (0..40u8).map(|i| NodeId([i; 32])).collect();
+        for id in &ids {
+            let mut peer = make_peer(id.clone());
+            peer.trust_score = 0.2;
+            registry.insert(id.clone(), peer);
+        }
+        let (commits, locked) = watch_commits(&db, &registry, &ids);
+
+        tm.decay_all(&registry);
+        db.on_commit(None);
+
+        assert_eq!(
+            locked.load(Ordering::SeqCst),
+            0,
+            "no registry entry is locked while the commit waits for the disk"
+        );
+        assert_eq!(
+            commits.load(Ordering::SeqCst),
+            1,
+            "forty moved scores are one commit, not one each"
+        );
+        let expected = 0.2 + TRUST_DECAY_RATE * (DEFAULT_TRUST - 0.2);
+        let reread = TrustManager::new(db);
+        for id in &ids {
+            assert!((registry.get(id).unwrap().trust_score - expected).abs() < 1e-6);
+            assert!(
+                (reread.get_trust(id) - expected).abs() < 1e-6,
+                "the decayed score is what the database holds"
+            );
+        }
+    }
+
+    #[test]
+    fn a_decay_pass_with_every_score_at_the_default_writes_nothing() {
+        use std::sync::atomic::Ordering;
+        let db = Database::open_temp().unwrap();
+        let tm = TrustManager::new(db.clone());
+        let registry = std::sync::Arc::new(DashMap::new());
+        let ids: Vec<NodeId> = (100..105u8).map(|i| NodeId([i; 32])).collect();
+        for id in &ids {
+            registry.insert(id.clone(), make_peer(id.clone()));
+        }
+        let (commits, _) = watch_commits(&db, &registry, &ids);
+
+        tm.decay_all(&registry);
+        db.on_commit(None);
+
+        assert_eq!(commits.load(Ordering::SeqCst), 0);
+        for id in &ids {
+            assert_eq!(registry.get(id).unwrap().trust_score, DEFAULT_TRUST);
+        }
     }
 
     #[test]

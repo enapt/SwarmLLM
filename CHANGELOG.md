@@ -99,6 +99,15 @@ connections to it that it closed at once. Such an address is now forgotten the f
 different computer answers there, and a computer no longer dials itself when an exchanged peer list
 names it. (#155)
 
+**A busy disk no longer holds up a computer's network every half minute.** Every 30 seconds a
+computer saves how far it trusts each peer it knows, and it saved them one at a time, each save
+waiting for the disk while the list of peers stayed locked — and the part of the computer that
+handles the network reads that list for every message it takes. While the disk is busy (a large
+copy, a build), a save takes about a tenth of a second, so the network could wait that long for
+each peer in turn. The scores are now changed with the list locked and saved together afterwards,
+in one write, and a score that has not moved is not saved at all. A pause that is still logged now
+names the message it was handling, so the next cause can be found rather than guessed. (#314)
+
 ## [0.3.267-alpha] — 2026-11-01
 
 **You can now ask a model to answer without thinking first, or to think.** Models such as

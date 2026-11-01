@@ -151,7 +151,16 @@ pub struct Database {
     /// reach it would silently inject nothing.
     #[cfg(any(test, debug_assertions))]
     fail_writes_to: Arc<arc_swap::ArcSwapOption<String>>,
+    /// Test-only: run just before every commit — where a test counts commits
+    /// or checks what the writer still holds while the disk is waited for.
+    /// Shared by every clone, like `fail_writes_to`. See `on_commit`.
+    #[cfg(test)]
+    before_commit: Arc<arc_swap::ArcSwapOption<CommitHook>>,
 }
+
+/// What `Database::on_commit` runs before each commit (tests only).
+#[cfg(test)]
+pub(crate) type CommitHook = Box<dyn Fn() + Send + Sync>;
 
 /// RAII guard for `open_temp()` files — removes the path on drop so test
 /// runs don't leak redb files into the system temp directory.
@@ -222,6 +231,8 @@ impl Database {
             _temp_dir: None,
             #[cfg(any(test, debug_assertions))]
             fail_writes_to: Arc::new(arc_swap::ArcSwapOption::empty()),
+            #[cfg(test)]
+            before_commit: Arc::new(arc_swap::ArcSwapOption::empty()),
         };
         Ok(db)
     }
@@ -250,7 +261,17 @@ impl Database {
             inner: Arc::new(inner),
             _temp_dir: Some(Arc::new(TempFileGuard(temp_path))),
             fail_writes_to: Arc::new(arc_swap::ArcSwapOption::empty()),
+            #[cfg(test)]
+            before_commit: Arc::new(arc_swap::ArcSwapOption::empty()),
         })
+    }
+
+    /// Run `hook` just before every commit from now on, or stop (`None`).
+    /// Tests only: it is where a test sees how many commits a call makes and
+    /// what the caller still holds while the commit waits for the disk.
+    #[cfg(test)]
+    pub(crate) fn on_commit(&self, hook: Option<CommitHook>) {
+        self.before_commit.store(hook.map(Arc::new));
     }
 
     /// Make writes to one tree fail, or stop doing so (testing only).
@@ -333,6 +354,10 @@ impl Database {
                     .map_err(|e| SwarmError::Database(e.to_string()))?;
                 f(&mut table)?
             };
+            #[cfg(test)]
+            if let Some(hook) = self.before_commit.load_full() {
+                hook();
+            }
             txn.commit()
                 .map_err(|e| SwarmError::Database(e.to_string()))?;
             Ok(result)
@@ -352,6 +377,32 @@ impl Database {
             table
                 .insert(k.as_slice(), bytes.as_slice())
                 .map_err(|e| SwarmError::Database(e.to_string()))?;
+            Ok(())
+        })
+    }
+
+    /// Store several JSON-serializable values in ONE commit. A commit waits
+    /// for the disk (`fdatasync`); N rows written with `put_json` wait for it
+    /// N times — under a busy disk ~95 ms each (#314, 2026-11-02). Nothing is
+    /// written if any value fails to serialize; an empty batch commits nothing.
+    pub fn put_json_many<'a, T: serde::Serialize + 'a>(
+        &self,
+        tree_name: &str,
+        rows: impl IntoIterator<Item = (&'a str, &'a T)>,
+    ) -> Result<(), SwarmError> {
+        let rows = rows
+            .into_iter()
+            .map(|(key, value)| Ok((make_key(tree_name, key), serde_json::to_vec(value)?)))
+            .collect::<Result<Vec<_>, SwarmError>>()?;
+        if rows.is_empty() {
+            return Ok(());
+        }
+        self.with_write_table(tree_name, |table| {
+            for (k, bytes) in &rows {
+                table
+                    .insert(k.as_slice(), bytes.as_slice())
+                    .map_err(|e| SwarmError::Database(e.to_string()))?;
+            }
             Ok(())
         })
     }
@@ -834,6 +885,29 @@ mod tests {
 
         let val: Option<serde_json::Value> = db.get_json("test_tree", "key1").unwrap();
         assert_eq!(val.unwrap()["hello"], "world");
+    }
+
+    #[test]
+    fn many_rows_are_one_commit_and_none_are_no_commit() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let db = Database::open_temp().unwrap();
+        let commits = Arc::new(AtomicUsize::new(0));
+        let counted = commits.clone();
+        db.on_commit(Some(Box::new(move || {
+            counted.fetch_add(1, Ordering::SeqCst);
+        })));
+
+        let rows: Vec<(String, u32)> = (0..25).map(|i| (format!("k{i}"), i)).collect();
+        db.put_json_many("batch", rows.iter().map(|(k, v)| (k.as_str(), v)))
+            .unwrap();
+        db.put_json_many::<u32>("batch", std::iter::empty())
+            .unwrap();
+        db.on_commit(None);
+
+        assert_eq!(commits.load(Ordering::SeqCst), 1);
+        for (k, v) in &rows {
+            assert_eq!(db.get_json::<u32>("batch", k).unwrap(), Some(*v));
+        }
     }
 
     #[test]

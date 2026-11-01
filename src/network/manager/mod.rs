@@ -2239,7 +2239,7 @@ impl NetworkManager {
                 }
                 // Swarm events from the network
                 event = self.swarm.select_next_some() => {
-                    last_arm = format!("swarm_event:{}", crate::network::helpers::swarm_event_name(&event)).into();
+                    last_arm = crate::network::helpers::swarm_event_arm(&event).into();
                     arm_started = loop_stall::ArmStart::now();
                     self.handle_swarm_event(event).await;
                     // Process any broadcasts queued during event handling

@@ -2194,7 +2194,9 @@ F16 where standard runs in F32, and a fast wrong answer is not an optimisation.
 
 Every arm of `NetworkManager::run`'s `select!` is timed; an iteration over
 100 ms logs `DIAG: network event loop stalled` with `arm=` (the interval or
-queue that was being serviced, or `swarm_event:<kind>`) and `took_ms`. Every
+queue that was being serviced, or `swarm_event:<kind>` — a request-response
+event adds which way it went and its message, `swarm_event:RequestResponse:in:ShardTransfer`,
+`…:reply:Ack`, `…:failed:outbound`, since 2026-11-02) and `took_ms`. Every
 latency this node measures — the PEX ping that becomes `latency_ms`, per-hop
 pipeline timings, ACK deadlines — is measured across this loop, so a stall
 here is added to every number routing uses. Zero lines on a live node is the

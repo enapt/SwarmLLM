@@ -125,6 +125,38 @@ pub(crate) fn addresses_worth_passing_on(listen_addrs: &[Multiaddr], cap: usize)
         .collect()
 }
 
+/// The `arm=` a slow swarm event is reported under (`DIAG: network event loop
+/// stalled`): its kind, and for a request-response event which way it went
+/// and the message it carried — `swarm_event:RequestResponse:in:ShardTransfer`.
+/// `RequestResponse` alone named every direct message at once, so none of the
+/// stalls reported under it could be traced to its handler (#314, 2026-11-02).
+/// The names are the traffic meter's, so a stall reads against the same kinds
+/// `direct_by_kind` counts.
+pub(crate) fn swarm_event_arm(event: &SwarmEvent<SwarmBehaviourEvent>) -> String {
+    use crate::network::protocol::{request_kind, response_kind};
+    use libp2p::request_response::{Event, Message};
+    let name = swarm_event_name(event);
+    let SwarmEvent::Behaviour(SwarmBehaviourEvent::RequestResponse(rr)) = event else {
+        return format!("swarm_event:{name}");
+    };
+    // No `_` arm: a new event kind must be named here, not reported as its
+    // neighbour.
+    let (way, what) = match rr {
+        Event::Message {
+            message: Message::Request { request, .. },
+            ..
+        } => ("in", request_kind(request)),
+        Event::Message {
+            message: Message::Response { response, .. },
+            ..
+        } => ("reply", response_kind(response)),
+        Event::OutboundFailure { .. } => ("failed", "outbound"),
+        Event::InboundFailure { .. } => ("failed", "inbound"),
+        Event::ResponseSent { .. } => ("sent", "response"),
+    };
+    format!("swarm_event:{name}:{way}:{what}")
+}
+
 /// Get a human-readable name for a SwarmEvent (for debug logging).
 pub(crate) fn swarm_event_name(event: &SwarmEvent<SwarmBehaviourEvent>) -> &'static str {
     match event {

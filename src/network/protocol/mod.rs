@@ -200,7 +200,7 @@ pub struct SwarmCodec {
 
 /// The kind a request is counted under in `DirectKindMeter`: a message's own
 /// variant name, else the frame's.
-fn request_kind(req: &SwarmRequest) -> &'static str {
+pub(crate) fn request_kind(req: &SwarmRequest) -> &'static str {
     match req {
         SwarmRequest::Message(m) => m.kind_name(),
         SwarmRequest::ShardTransfer(_) => "ShardTransfer",
@@ -211,7 +211,7 @@ fn request_kind(req: &SwarmRequest) -> &'static str {
 }
 
 /// The kind a response is counted under — see [`request_kind`].
-fn response_kind(resp: &SwarmResponse) -> &'static str {
+pub(crate) fn response_kind(resp: &SwarmResponse) -> &'static str {
     match resp {
         SwarmResponse::Message(m) => m.kind_name(),
         SwarmResponse::ShardData(_) => "ShardData",

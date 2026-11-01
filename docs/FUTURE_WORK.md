@@ -1456,7 +1456,7 @@ secret and drop an answer that names another (`EphemeralKeyExchange` carries a `
 check the answer echoes the initiator's), or skip a new exchange while one is pending for the peer.
 
 #### #314 — The network event loop stalls 0.2-2.6 s, most often while this machine is busy
-`P3` · network · **NARROWED** — 2026-10-31 · history: the live node's log, 10-19; `docs/invariants/network.md` § "The network loop never waits for the disk"
+`P3` · network · **NARROWED** — 2026-11-02 · history: the live node's log, 10-19; `docs/invariants/network.md` § "The network loop never waits for the disk"
 
 The live node (v0.3.244, serving nothing) logged 65 `DIAG: network event loop stalled` lines on
 10-19 (190 ms-2.6 s: 43 in `swarm_event:RequestResponse`, 15 `Identify`, 7 `peer_cache_interval`),
@@ -1502,6 +1502,15 @@ the second time on the loop. So the day's count while RUNNING is 5 in 38 h (10-1
 (`ConnectionEstablished` 1.46 s inside #155's re-dial storm, 2 `RequestResponse`, 1 `Identify`)
 and 1 disk page fault. Next: none of those five is understood; the large-copy field case above
 still stands.
+*2026-11-02:* one "blocked" `RequestResponse` stall sampled (141 ms off the processor, one wait,
+under a full `cargo dev-test`): no loop thread in a disk wait, and a runtime worker committing
+back to back for 1.16 s. The one lock-across-a-commit the loop also takes: `TrustManager::decay_all`
+committed each peer's decayed score from inside `peer_registry.iter_mut()`, every 30 s, so each shard
+stayed write-locked through a commit (that the sampled worker was it is inferred, not seen). Fixed:
+the scores change under the locks, one commit after them, none for a
+score at the default (`docs/invariants/network.md` § "The network loop never waits for the disk").
+A request-response stall line now names its message (`swarm_event:RequestResponse:in:<kind>`), so
+the next one is attributable. Next: the running count on .268 (field and live node), read by kind.
 
 #### #191 — A part download that loses its peer restarts from byte 0 on the next one
 `P3` · storage · **OPEN** — 2026-09-03 · history: archive § "A multi-megabyte forward over ONE QUIC stream can kill the connection" (its banner: the cause was quinn-proto, #112)

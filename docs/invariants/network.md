@@ -3031,6 +3031,35 @@ the reference: a task runs at most 10-100 µs between `.await`s (Alice Ryhl,
 1 `Identify`) and 1 page fault. Test
 `the_snapshot_reads_no_header_and_the_tick_learns_it`.
 
+**Nor waits on a lock another task holds through a commit (2026-11-02).** A
+"blocked" stall in `RequestResponse` (141 ms, all off the processor, ONE wait)
+came while a full `cargo dev-test` loaded the disk. A sampler reading every
+thread's `wchan` every 10 ms (`/proc/<pid>/task/*/wchan`; `syscall` needs ptrace)
+showed no loop thread in a disk wait — the loop sat on a lock — and one runtime
+worker in back-to-back flushes (`folio_wait_bit_common` then `submit_bio_wait`,
+the shape of `fdatasync`) every ~95 ms for 1.16 s; the loop's wait ended in the
+gap between two of them. A search for code that holds a lock across a commit
+found one that the loop also takes: `TrustManager::decay_all` (every 30 s health
+cycle) walked `peer_registry` with `iter_mut` and committed each peer's score from
+inside the loop — every shard write-locked through its own commit, peer after
+peer — and the loop's request arm touches the registry first thing
+(`refresh_peer_last_seen`). That the sampled worker WAS that pass is inferred, not
+seen: the database file's commits come in bursts of 3-4 about every 28 s, but the
+health cycle saves other figures too.
+It is the synchronous form of the DashMap-across-`.await` rule, and
+`clippy.toml`'s lint cannot see it. Now `decay_scores` changes the scores under
+the locks and returns what moved (it is handed no database), and one
+`Database::put_json_many` writes them after; a score at the default writes
+nothing. Test `a_decay_pass_commits_once_with_no_registry_entry_locked` asks the
+registry, from a hook run before the commit (`Database::on_commit`, tests only),
+whether any entry is locked — the old code: 58 sightings over 40 commits; now
+none, one commit. The standard answer, held to here: no lock across I/O, and one
+transaction for many rows rather than a commit per row. One more guard is held
+across commits — `escrow::cleanup_expired` (an escrow entry and the credit
+balance, one commit per expired escrow) — and nothing on the loop takes either.
+To name the next one, a request-response stall line now says which message it
+was (`swarm_event:RequestResponse:in:ShardTransfer`, `helpers::swarm_event_arm`).
+
 ## A result names the step it answers (2026-09-25, #113)
 
 **The failure.** A serving node computed a 28.8 MB prompt-pass result and its send
