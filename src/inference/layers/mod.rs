@@ -838,8 +838,10 @@ pub(crate) enum MoeGatingFunc {
 /// - `Sigmoid + renormalize=false`: rare; sigmoid scores used directly.
 ///
 /// Sourced from GGUF metadata: `{arch}.expert_gating_func` (uint) +
-/// `{arch}.expert_weights_norm` (bool). Missing keys → softmax + renorm.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// `{arch}.expert_weights_norm` (bool) + `{arch}.expert_weights_scale`; what a
+/// missing key means is per family (`split::loader`'s `moe_gating_by_default`,
+/// `moe_renormalizes_by_default`, `moe_weights_scale`).
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct MoeRoutingConfig {
     pub(crate) gating_func: MoeGatingFunc,
     pub(crate) renormalize_weights: bool,
@@ -847,6 +849,13 @@ pub(crate) struct MoeRoutingConfig {
     /// Llama 4, llama.cpp `build_moe_ffn`'s `weight_before_ffn`. An expert is
     /// nonlinear, so `f(w·x)` and `w·f(x)` are two different models.
     pub(crate) weight_before_ffn: bool,
+    /// What every routed expert's weight is multiplied by once chosen and
+    /// renormalised — HF's `routed_scaling_factor`, the GGUF's
+    /// `{arch}.expert_weights_scale` (GLM-4.5: 2.5; DeepSeek-V3: 2.5). The
+    /// loader folds it into the layer's per-expert output scale
+    /// ([`MoeFfn::expert_scales`]), the one figure every routing path
+    /// multiplies its picked weights by; 1.0 is none.
+    pub(crate) weights_scale: f32,
 }
 
 impl Default for MoeRoutingConfig {
@@ -855,6 +864,7 @@ impl Default for MoeRoutingConfig {
             gating_func: MoeGatingFunc::Softmax,
             renormalize_weights: true,
             weight_before_ffn: false,
+            weights_scale: 1.0,
         }
     }
 }
@@ -943,6 +953,13 @@ pub(crate) struct MoeFfn {
     /// the expert's down projection by it before the routing weight
     /// (`build_moe_ffn`'s `down_exps_s`), the same product. `None`: unscaled.
     pub(crate) expert_scales: Option<ExpertScales>,
+    /// A per-expert bias added to each expert's GATED score to CHOOSE the
+    /// experts, never to weigh them — DeepSeek-V3's and GLM-4.5's
+    /// `exp_probs_b` (llama.cpp `build_moe_ffn`: "leave probs unbiased as it's
+    /// later used to get expert weights"). One figure per expert on the host
+    /// and on the layer's device, carried as [`Self::expert_scales`] is.
+    /// `None`: the gated score alone chooses.
+    pub(crate) selection_bias: Option<ExpertScales>,
     /// A dense feed-forward run beside the experts, each branch normed on its
     /// own (Gemma 4's MoE layer). `None` for every other family.
     pub(crate) beside: Option<Box<DenseBeside>>,
@@ -1468,16 +1485,41 @@ pub(crate) fn own_storage(t: Tensor) -> CandleResult<Tensor> {
 /// scores are on: `(ids [tokens, k] u32, weights [tokens, k] f32)`, best
 /// first. The device form of [`topk_host`], policy for policy — the default
 /// softmax over the `k` raw picks, the full softmax at the picks without
-/// renormalising, or the sigmoid at the picks with or without — so nothing
-/// crosses to the host.
+/// renormalising, or the sigmoid at the picks with or without, and a
+/// selection bias as [`topk_host`] reads one — so nothing crosses to the host.
+///
+/// `selection_bias` (`[n_experts]`, on the scores' device) is REQUIRED, `None`
+/// where the layer has none: a router that cannot be handed one is a router
+/// that chooses the wrong experts for DeepSeek-V3 and GLM-4.5 without a word.
 pub(crate) fn topk_on_device(
     scores: &Tensor,
     k: usize,
     config: MoeRoutingConfig,
+    selection_bias: Option<&Tensor>,
 ) -> CandleResult<(Tensor, Tensor)> {
     use candle_core::D;
     let scores = scores.to_dtype(candle_core::DType::F32)?.contiguous()?;
     let k = k.min(scores.dim(D::Minus1)?);
+    if let Some(bias) = selection_bias {
+        // llama.cpp `build_moe_ffn`: the gated scores over EVERY expert, the
+        // bias added to choose, the unbiased scores at the picks to weigh.
+        let probs = match config.gating_func {
+            MoeGatingFunc::Softmax => candle_nn::ops::softmax_last_dim(&scores)?,
+            MoeGatingFunc::Sigmoid => candle_nn::ops::sigmoid(&scores)?,
+        };
+        let ids = probs
+            .broadcast_add(bias)?
+            .arg_sort_last_dim(false)?
+            .narrow(D::Minus1, 0, k)?
+            .contiguous()?;
+        let w = probs.gather(&ids, D::Minus1)?;
+        let w = if config.renormalize_weights {
+            w.broadcast_div(&w.sum_keepdim(D::Minus1)?)?
+        } else {
+            w
+        };
+        return Ok((ids, w));
+    }
     // Both gates are monotonic in the raw score, so the raw order is the pick.
     let ids = scores
         .arg_sort_last_dim(false)?
@@ -1541,7 +1583,7 @@ pub(crate) fn topk_cpu(
 ) -> CandleResult<(Tensor, Tensor)> {
     let device = scores.device();
     let scores_vec: Vec<f32> = scores.to_vec1()?;
-    let (indices, weights) = topk_host(&scores_vec, k, config);
+    let (indices, weights) = topk_host(&scores_vec, k, config, None);
     let k = indices.len();
     let idx_i64: Vec<i64> = indices.iter().map(|&i| i as i64).collect();
     Ok((
@@ -1593,11 +1635,18 @@ fn trace_experts(ids: &[usize]) {
 /// `candle_nn::ops::softmax` computes it (max, `exp(x - max)` in order, an
 /// in-order sum, divide), so on the processor the weights are the bits the
 /// candle op produced.
+///
+/// `selection_bias` (one figure per expert) is REQUIRED, `None` where the layer
+/// has none — see [`topk_host_biased`].
 pub(crate) fn topk_host(
     scores_vec: &[f32],
     k: usize,
     config: MoeRoutingConfig,
+    selection_bias: Option<&[f32]>,
 ) -> (Vec<usize>, Vec<f32>) {
+    if let Some(bias) = selection_bias {
+        return topk_host_biased(scores_vec, k, config, bias);
+    }
     let n = scores_vec.len();
     let k = k.min(n);
 
@@ -1679,6 +1728,46 @@ pub(crate) fn topk_host(
         softmax_like_candle(&weights)
     } else {
         weights
+    };
+    (indices, weights)
+}
+
+/// [`topk_host`] for a layer with a selection bias (DeepSeek-V3, GLM-4.5's
+/// `exp_probs_b`), llama.cpp `build_moe_ffn` op for op: every expert's GATED
+/// score (the softmax over ALL of them, or the sigmoid) plus its bias chooses
+/// the `k`; the weights are the UNBIASED gated scores at the picks,
+/// renormalised over them where the config says. The bias moves which experts
+/// run, never how much each counts — and with it the raw score's order is no
+/// longer the pick, so none of the unbiased fast paths applies.
+fn topk_host_biased(
+    scores: &[f32],
+    k: usize,
+    config: MoeRoutingConfig,
+    bias: &[f32],
+) -> (Vec<usize>, Vec<f32>) {
+    let n = scores.len();
+    let k = k.min(n);
+    let probs: Vec<f32> = match config.gating_func {
+        MoeGatingFunc::Softmax => softmax_like_candle(scores),
+        MoeGatingFunc::Sigmoid => scores.iter().map(|s| 1.0 / (1.0 + (-s).exp())).collect(),
+    };
+    let mut indices: Vec<usize> = (0..n).collect();
+    indices.sort_by(|&a, &b| {
+        (probs[b] + bias[b])
+            .partial_cmp(&(probs[a] + bias[a]))
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    indices.truncate(k);
+    let picked: Vec<f32> = indices.iter().map(|&i| probs[i]).collect();
+    let weights = if config.renormalize_weights {
+        let sum: f32 = picked.iter().sum();
+        if sum > 0.0 {
+            picked.iter().map(|w| w / sum).collect()
+        } else {
+            picked
+        }
+    } else {
+        picked
     };
     (indices, weights)
 }
@@ -1877,6 +1966,16 @@ impl MoeFfn {
                     })
                 })
                 .transpose()?,
+            selection_bias: self
+                .selection_bias
+                .as_ref()
+                .map(|s| {
+                    CandleResult::Ok(ExpertScales {
+                        host: s.host.clone(),
+                        device: sent_to_card(&s.device, card)?,
+                    })
+                })
+                .transpose()?,
             beside: self
                 .beside
                 .as_ref()
@@ -2013,9 +2112,17 @@ impl MoeFfn {
                 scale.map_or(0, <[f32]>::len)
             );
         }
+        let bias = self.selection_bias.as_ref().map(|b| &b.host[..]);
+        if bias.is_some_and(|b| b.len() != n_experts) {
+            candle_core::bail!(
+                "{} expert selection biases for {n_experts} experts",
+                bias.map_or(0, <[f32]>::len)
+            );
+        }
         let one_token = scores_host.len() == n_experts;
         for (pos, token_scores) in scores_host.chunks_exact(n_experts).enumerate() {
-            let (indices, weights) = topk_host(token_scores, self.n_experts_used, self.routing);
+            let (indices, weights) =
+                topk_host(token_scores, self.n_experts_used, self.routing, bias);
             if one_token {
                 trace_experts(&indices);
             }
@@ -2372,7 +2479,12 @@ impl MoeFfn {
                     .matmul(&self.gate.t()?)?,
                 None => x.matmul(&self.gate.t()?)?,
             };
-            let (ids, weights) = topk_on_device(&scores, k, self.routing)?;
+            let (ids, weights) = topk_on_device(
+                &scores,
+                k,
+                self.routing,
+                self.selection_bias.as_ref().map(|b| &b.device),
+            )?;
             let weights = match &self.expert_scales {
                 Some(s) => {
                     (weights

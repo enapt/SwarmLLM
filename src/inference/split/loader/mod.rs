@@ -361,21 +361,39 @@ fn load_moe_ffn<R: std::io::Read + std::io::Seek>(
         .and_then(|t| t.dequantize(device))
         .map_err(|e| SwarmError::Internal(format!("{prefix}.ffn_gate_inp: {e}")))?;
     let n_router = router.dim(0).map_err(SwarmError::internal)?;
-    let expert_scales = read_f32s(ct, reader, &format!("{prefix}.ffn_down_exps.scale"))?
-        .map(|host| {
-            if host.len() != n_router {
-                return Err(SwarmError::Internal(format!(
-                    "{prefix}.ffn_down_exps.scale: {} scales for {n_router} experts",
-                    host.len()
-                )));
-            }
-            if routing.weight_before_ffn {
-                return Err(SwarmError::Internal(format!(
-                    "{prefix}.ffn_down_exps.scale: an output scale on experts weighted at their input"
-                )));
-            }
-            super::ExpertScales::new(host, device).map_err(SwarmError::internal)
-        })
+    let per_expert = |name: &str, reader: &mut R| -> Result<Option<Vec<f32>>, SwarmError> {
+        let Some(host) = read_f32s(ct, reader, &format!("{prefix}.{name}"))? else {
+            return Ok(None);
+        };
+        if host.len() != n_router {
+            return Err(SwarmError::Internal(format!(
+                "{prefix}.{name}: {} figures for {n_router} experts",
+                host.len()
+            )));
+        }
+        Ok(Some(host))
+    };
+    // The family's `expert_weights_scale` multiplies every picked weight, as
+    // a per-expert output scale does: folded into that one figure, so no
+    // routing path can apply one and miss the other.
+    let scaled = routing.weights_scale != 1.0;
+    let expert_scales = match per_expert("ffn_down_exps.scale", reader)? {
+        Some(host) if scaled => Some(host.iter().map(|s| s * routing.weights_scale).collect()),
+        None if scaled => Some(vec![routing.weights_scale; n_router]),
+        host => host,
+    };
+    if routing.weight_before_ffn && expert_scales.is_some() {
+        return Err(SwarmError::Internal(format!(
+            "{prefix}: an output scale on experts weighted at their input"
+        )));
+    }
+    let expert_scales = expert_scales
+        .map(|host| super::ExpertScales::new(host, device).map_err(SwarmError::internal))
+        .transpose()?;
+    // DeepSeek-V3's and GLM-4.5's `exp_probs_b`: added to the gated scores to
+    // CHOOSE the experts, never to weigh them (`MoeFfn::selection_bias`).
+    let selection_bias = per_expert("exp_probs_b.bias", reader)?
+        .map(|host| super::ExpertScales::new(host, device).map_err(SwarmError::internal))
         .transpose()?;
     let (experts, stacked) = if let Some(stacked) =
         load_stacked_experts(ct, reader, prefix, experts_device, n_router, routing)?
@@ -425,6 +443,7 @@ fn load_moe_ffn<R: std::io::Read + std::io::Seek>(
         routing,
         activation,
         expert_scales,
+        selection_bias,
         beside: None,
     })
 }
@@ -437,6 +456,38 @@ struct StandardFfn {
     activation: Activation,
     gemma4: bool,
     rms_norm_eps: f64,
+}
+
+/// Which tensors a standard-layout layer's norms are read from — ONE answer
+/// for the parallel and the sequential per-layer loops (gotcha #714).
+///
+/// GLM-4.5 names its norm BEFORE the feed-forward `post_attention_norm` (HF's
+/// `post_attention_layernorm`, kept by the converter; llama.cpp `glm4-moe.cpp`
+/// reads it as `attn_post_norm` on `ffn_inp`), the name Gemma 2-4 and GLM-4
+/// give a SANDWICH norm on the attention's OUTPUT. Read the generic way, the
+/// file has no `ffn_norm` and its pre-norm lands after attention.
+#[derive(Clone, Copy)]
+struct NormNames {
+    /// The norm the feed-forward's input is read through.
+    ffn: &'static str,
+    /// Whether the layer may carry sandwich norms on its attention's and
+    /// feed-forward's outputs (`post_attention_norm`, `post_ffw_norm`).
+    sandwich: bool,
+}
+
+impl NormNames {
+    fn of(arch: &ModelArch) -> Self {
+        match arch {
+            ModelArch::Glm4Moe => Self {
+                ffn: "post_attention_norm",
+                sandwich: false,
+            },
+            _ => Self {
+                ffn: "ffn_norm",
+                sandwich: true,
+            },
+        }
+    }
 }
 
 /// A standard-layout layer's feed-forward: routed experts where the layer
@@ -697,8 +748,37 @@ fn load_experts_one_by_one<R: std::io::Read + std::io::Seek>(
 /// each family's graph rather than writing a key, so the answer is per family:
 /// `qwen2moe.cpp` passes `norm_w = false` and `qwen3moe.cpp` `true` (read
 /// 2026-09-25). Everything else keeps the long-standing default of `true`.
+///
+/// DeepSeek-2 and GLM-4.5 read the key, and llama.cpp's default when it is
+/// absent is `false` (`llama-hparams.h`) — which is what the DeepSeek
+/// converter MEANS by leaving it out: it writes the key only when
+/// `norm_topk_prob` is true (`conversion/deepseek.py`, read 2026-11-02).
 fn moe_renormalizes_by_default(arch: &str) -> bool {
-    arch != "qwen2moe"
+    !matches!(arch, "qwen2moe" | "deepseek2" | "glm4moe")
+}
+
+/// The gating a family's router uses when the GGUF does not say
+/// (`{arch}.expert_gating_func` absent, or llama.cpp's `NONE`, 0): sigmoid for
+/// GLM-4.5 (`glm4-moe.cpp` sets it), softmax for every other family here.
+fn moe_gating_by_default(arch: &str) -> MoeGatingFunc {
+    if arch == "glm4moe" {
+        MoeGatingFunc::Sigmoid
+    } else {
+        MoeGatingFunc::Softmax
+    }
+}
+
+/// The number a family multiplies its picked experts' weights by
+/// (`{arch}.expert_weights_scale`, HF's `routed_scaling_factor`), from the
+/// file's figure `read`. Only the families whose llama.cpp loader READS the
+/// key take it — DeepSeek-2 and GLM-4.5 among those here (`deepseek2.cpp`,
+/// `glm4-moe.cpp`, master read 2026-11-02); every other graph is handed
+/// llama.cpp's default 0, which `build_moe_ffn` skips, as it skips 1.
+fn moe_weights_scale(arch: &str, read: Option<f32>) -> f32 {
+    match read {
+        Some(s) if matches!(arch, "deepseek2" | "glm4moe") && s != 0.0 => s,
+        _ => 1.0,
+    }
 }
 
 /// A layer's output scale — Gemma 4's `layer_output_scale`, one number the
@@ -1118,6 +1198,7 @@ impl SplitModel {
                 gating_func: MoeGatingFunc::Sigmoid,
                 renormalize_weights: false,
                 weight_before_ffn: true,
+                weights_scale: 1.0,
             }
         } else if matches!(model_arch, ModelArch::Gemma4) {
             // Gemma 4's graph reads no routing key either: softmax over every
@@ -1128,29 +1209,54 @@ impl SplitModel {
                 gating_func: MoeGatingFunc::Softmax,
                 renormalize_weights: true,
                 weight_before_ffn: false,
+                weights_scale: 1.0,
             }
         } else {
             MoeRoutingConfig {
-                gating_func: md_get("expert_gating_func")
+                gating_func: match md_get("expert_gating_func")
                     .and_then(|v| v.to_u32().map_err(SwarmError::internal))
-                    .ok()
-                    .map(|n| {
-                        if n == 2 {
-                            MoeGatingFunc::Sigmoid
-                        } else {
-                            MoeGatingFunc::Softmax
-                        }
-                    })
-                    .unwrap_or(MoeGatingFunc::Softmax),
+                {
+                    Ok(2) => MoeGatingFunc::Sigmoid,
+                    Ok(n) if n != 0 => MoeGatingFunc::Softmax,
+                    _ => moe_gating_by_default(&arch_str),
+                },
                 renormalize_weights: md_get("expert_weights_norm")
                     .and_then(|v| v.to_bool().map_err(SwarmError::internal))
                     .unwrap_or_else(|_| moe_renormalizes_by_default(&arch_str)),
                 weight_before_ffn: false,
+                weights_scale: moe_weights_scale(
+                    &arch_str,
+                    md_get("expert_weights_scale")
+                        .and_then(|v| v.to_f32().map_err(SwarmError::internal))
+                        .ok(),
+                ),
             }
         };
+        // llama.cpp reads `expert_group_count` for EVERY family and, above 1,
+        // first keeps the `expert_group_used_count` groups whose two best
+        // selection scores sum highest, then picks the top k inside them
+        // (`llama-model.cpp` `load_hparams`, `llama-graph.cpp` `build_moe_ffn`;
+        // DeepSeek-V3's 8 groups). This engine picks among every expert, so a
+        // file that limits the groups is refused, never answered from experts
+        // its model would not have chosen.
+        let group_count = |key: &str| {
+            md_get(key)
+                .and_then(|v| v.to_u32().map_err(SwarmError::internal))
+                .ok()
+        };
+        if let Some(groups) = group_count("expert_group_count").filter(|&g| g > 1) {
+            let used = group_count("expert_group_used_count");
+            if used != Some(groups) {
+                return Err(SwarmError::Internal(format!(
+                    "{arch}: experts chosen within {} of {groups} groups is not supported",
+                    used.map_or_else(|| "an unstated number".to_string(), |u| u.to_string())
+                )));
+            }
+        }
         tracing::debug!(
             gating_func = ?moe_routing.gating_func,
             renormalize = moe_routing.renormalize_weights,
+            weights_scale = moe_routing.weights_scale,
             "Loaded MoE routing config from GGUF"
         );
 
@@ -2493,6 +2599,7 @@ impl SplitModel {
                 gemma4,
                 rms_norm_eps,
             };
+            let norm_names = NormNames::of(&model_arch);
             if let Some(mmap_ref) = parallel_data {
                 // Parallel layer loading: each thread gets its own Cursor into mmap'd data.
                 // ~N× speedup for N layers on NVMe/SSD.
@@ -2679,12 +2786,13 @@ impl SplitModel {
                                     let ffn_norm = ct_ref
                                         .tensor(
                                             &mut cursor,
-                                            &format!("{prefix}.ffn_norm.weight"),
+                                            &format!("{prefix}.{}.weight", norm_names.ffn),
                                             device_ref,
                                         )
                                         .map_err(|e| {
                                             SwarmError::Internal(format!(
-                                                "Failed to load {prefix}.ffn_norm: {e}"
+                                                "Failed to load {prefix}.{}: {e}",
+                                                norm_names.ffn
                                             ))
                                         })?;
 
@@ -2714,7 +2822,7 @@ impl SplitModel {
                                             SwarmError::Internal(format!("attn_k_norm: {e}"))
                                         })?;
 
-                                    // Gemma 2 post-norms (optional)
+                                    // Gemma 2-4 / GLM-4 sandwich norms (optional)
                                     let post_attention_norm = ct_ref
                                         .tensor(
                                             &mut cursor,
@@ -2722,6 +2830,7 @@ impl SplitModel {
                                             device_ref,
                                         )
                                         .ok()
+                                        .filter(|_| norm_names.sandwich)
                                         .map(|t| make_norm(t, rms_norm_eps))
                                         .transpose()?;
                                     let post_ffw_norm = ct_ref
@@ -2731,6 +2840,7 @@ impl SplitModel {
                                             device_ref,
                                         )
                                         .ok()
+                                        .filter(|_| norm_names.sandwich)
                                         .map(|t| make_norm(t, rms_norm_eps))
                                         .transpose()?;
 
@@ -2850,8 +2960,14 @@ impl SplitModel {
                         .tensor(file, &format!("{prefix}.attn_norm.weight"), &device)
                         .map_err(|e| SwarmError::Internal(format!("{prefix}.attn_norm: {e}")))?;
                     let ffn_norm_t = ct
-                        .tensor(file, &format!("{prefix}.ffn_norm.weight"), &device)
-                        .map_err(|e| SwarmError::Internal(format!("{prefix}.ffn_norm: {e}")))?;
+                        .tensor(
+                            file,
+                            &format!("{prefix}.{}.weight", norm_names.ffn),
+                            &device,
+                        )
+                        .map_err(|e| {
+                            SwarmError::Internal(format!("{prefix}.{}: {e}", norm_names.ffn))
+                        })?;
 
                     let bq = ct
                         .tensor(file, &format!("{prefix}.attn_q.bias"), &device)
@@ -2878,10 +2994,12 @@ impl SplitModel {
                             &format!("{prefix}.post_attention_norm.weight"),
                             &device,
                         )
-                        .ok();
+                        .ok()
+                        .filter(|_| norm_names.sandwich);
                     let post_ffw_norm = ct
                         .tensor(file, &format!("{prefix}.post_ffw_norm.weight"), &device)
-                        .ok();
+                        .ok()
+                        .filter(|_| norm_names.sandwich);
 
                     // FFN: routed experts (Qwen2/Qwen3-MoE, Gemma 4), else dense.
                     let ffn =

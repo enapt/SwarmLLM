@@ -94,6 +94,7 @@ fn r132_softmax_no_renorm_weights_sum_below_one() {
         gating_func: MoeGatingFunc::Softmax,
         renormalize_weights: false,
         weight_before_ffn: false,
+        weights_scale: 1.0,
     };
     let (indices, weights) = topk_cpu(&scores, 2, cfg).unwrap();
     let idx_vec: Vec<i64> = indices.to_vec1().unwrap();
@@ -123,6 +124,7 @@ fn r132_sigmoid_renorm_weights_sum_to_one() {
         gating_func: MoeGatingFunc::Sigmoid,
         renormalize_weights: true,
         weight_before_ffn: false,
+        weights_scale: 1.0,
     };
     let (indices, weights) = topk_cpu(&scores, 2, cfg).unwrap();
     let idx_vec: Vec<i64> = indices.to_vec1().unwrap();
@@ -146,6 +148,7 @@ fn r132_sigmoid_no_renorm_weights_are_raw_sigmoids() {
         gating_func: MoeGatingFunc::Sigmoid,
         renormalize_weights: false,
         weight_before_ffn: false,
+        weights_scale: 1.0,
     };
     let (indices, weights) = topk_cpu(&scores, 2, cfg).unwrap();
     let idx_vec: Vec<i64> = indices.to_vec1().unwrap();
@@ -197,6 +200,7 @@ fn test_moe_forward_single_expert() {
         routing: MoeRoutingConfig::default(),
         activation: crate::inference::model_arch::Activation::SiLU,
         expert_scales: None,
+        selection_bias: None,
         beside: None,
     };
 
@@ -238,6 +242,7 @@ fn test_moe_forward_multi_expert() {
         routing: MoeRoutingConfig::default(),
         activation: crate::inference::model_arch::Activation::SiLU,
         expert_scales: None,
+        selection_bias: None,
         beside: None,
     };
 
@@ -289,6 +294,7 @@ fn test_shared_expert_integration() {
         routing: MoeRoutingConfig::default(),
         activation: crate::inference::model_arch::Activation::SiLU,
         expert_scales: None,
+        selection_bias: None,
         beside: None,
     };
 
@@ -311,6 +317,7 @@ fn test_shared_expert_integration() {
         routing: MoeRoutingConfig::default(),
         activation: crate::inference::model_arch::Activation::SiLU,
         expert_scales: None,
+        selection_bias: None,
         beside: None,
     };
 
@@ -613,7 +620,8 @@ fn the_batched_moe_forward_is_bit_identical_to_routing_token_by_token() {
         let mut batches: Vec<Vec<(usize, f32)>> = vec![vec![]; n_experts];
         for pos in 0..n {
             let row: Vec<f32> = scores.get(pos).unwrap().to_vec1().unwrap();
-            let (idx, w) = topk_host(&row, moe.n_experts_used, moe.routing);
+            let bias = moe.selection_bias.as_ref().map(|b| &b.host[..]);
+            let (idx, w) = topk_host(&row, moe.n_experts_used, moe.routing, bias);
             let w: Vec<f32> = if moe.routing == MoeRoutingConfig::default() {
                 let raw: Vec<f32> = idx.iter().map(|&i| row[i]).collect();
                 let k = raw.len();
@@ -684,16 +692,19 @@ fn the_batched_moe_forward_is_bit_identical_to_routing_token_by_token() {
             gating_func: MoeGatingFunc::Softmax,
             renormalize_weights: false,
             weight_before_ffn: false,
+            weights_scale: 1.0,
         },
         MoeRoutingConfig {
             gating_func: MoeGatingFunc::Sigmoid,
             renormalize_weights: true,
             weight_before_ffn: false,
+            weights_scale: 1.0,
         },
         MoeRoutingConfig {
             gating_func: MoeGatingFunc::Sigmoid,
             renormalize_weights: false,
             weight_before_ffn: false,
+            weights_scale: 1.0,
         },
     ];
     let dense = |o: usize, i: usize| {
@@ -725,6 +736,7 @@ fn the_batched_moe_forward_is_bit_identical_to_routing_token_by_token() {
                     routing,
                     activation: crate::inference::model_arch::Activation::SiLU,
                     expert_scales: None,
+                    selection_bias: None,
                     beside: None,
                 };
                 // A prompt-sized batch, a single decode token, and two sequences.
@@ -791,6 +803,7 @@ fn one_region_experts_are_bit_identical_to_one_at_a_time() {
             gating_func: MoeGatingFunc::Sigmoid,
             renormalize_weights: false,
             weight_before_ffn: true,
+            weights_scale: 1.0,
         },
     ];
     // SiLU-gated experts, and Gemma 4's GELU-gated ones (`fast_math::gelu_mul_into`
@@ -820,6 +833,7 @@ fn one_region_experts_are_bit_identical_to_one_at_a_time() {
                     routing,
                     activation,
                     expert_scales: None,
+                    selection_bias: None,
                     beside: None,
                 };
                 for tokens in [1usize, 3, 8, 37, 100] {
@@ -953,7 +967,8 @@ fn many_row_products_in_one_region_match_forward() {
 
 /// Routing on the device (`topk_on_device`, the stacked experts' path on a
 /// card) picks the experts `topk_host` picks and gives them its weights, for
-/// every policy — checked here on the processor, where both run.
+/// every policy, with and without a selection bias — checked here on the
+/// processor, where both run.
 #[test]
 fn routing_on_the_device_agrees_with_routing_on_the_host() {
     use crate::inference::layers::{topk_host, topk_on_device};
@@ -961,31 +976,73 @@ fn routing_on_the_device_agrees_with_routing_on_the_host() {
     let (tokens, n_experts) = (5usize, 64usize);
     let scores = Tensor::randn(0f32, 2.0, (tokens, n_experts), &device).unwrap();
     let rows: Vec<Vec<f32>> = scores.to_vec2().unwrap();
-    for gating_func in [MoeGatingFunc::Softmax, MoeGatingFunc::Sigmoid] {
-        for renormalize_weights in [true, false] {
-            let routing = MoeRoutingConfig {
-                gating_func,
-                renormalize_weights,
-                weight_before_ffn: false,
-            };
-            for k in [1usize, 8] {
-                let (ids, weights) = topk_on_device(&scores, k, routing).unwrap();
-                let ids: Vec<Vec<u32>> = ids.to_vec2().unwrap();
-                let weights: Vec<Vec<f32>> = weights.to_vec2().unwrap();
-                for (t, row) in rows.iter().enumerate() {
-                    let (want_ids, want_w) = topk_host(row, k, routing);
-                    let got: Vec<usize> = ids[t].iter().map(|&i| i as usize).collect();
-                    assert_eq!(got, want_ids, "{routing:?} k={k} token {t}");
-                    for (g, w) in weights[t].iter().zip(&want_w) {
-                        assert!(
-                            (g - w).abs() <= 1e-6,
-                            "{routing:?} k={k} token {t}: {g} vs {w}"
-                        );
+    let bias = Tensor::randn(0f32, 0.4, (n_experts,), &device).unwrap();
+    let bias_host: Vec<f32> = bias.to_vec1().unwrap();
+    for biased in [false, true] {
+        for gating_func in [MoeGatingFunc::Softmax, MoeGatingFunc::Sigmoid] {
+            for renormalize_weights in [true, false] {
+                let routing = MoeRoutingConfig {
+                    gating_func,
+                    renormalize_weights,
+                    weight_before_ffn: false,
+                    weights_scale: 1.0,
+                };
+                for k in [1usize, 8] {
+                    let (ids, weights) =
+                        topk_on_device(&scores, k, routing, biased.then_some(&bias)).unwrap();
+                    let ids: Vec<Vec<u32>> = ids.to_vec2().unwrap();
+                    let weights: Vec<Vec<f32>> = weights.to_vec2().unwrap();
+                    for (t, row) in rows.iter().enumerate() {
+                        let (want_ids, want_w) =
+                            topk_host(row, k, routing, biased.then_some(&bias_host[..]));
+                        let got: Vec<usize> = ids[t].iter().map(|&i| i as usize).collect();
+                        assert_eq!(got, want_ids, "{routing:?} biased {biased} k={k} token {t}");
+                        for (g, w) in weights[t].iter().zip(&want_w) {
+                            assert!(
+                                (g - w).abs() <= 1e-6,
+                                "{routing:?} k={k} token {t}: {g} vs {w}"
+                            );
+                        }
                     }
                 }
             }
         }
     }
+}
+
+/// A selection bias (DeepSeek-V3's and GLM-4.5's `exp_probs_b`) decides which
+/// experts run and never how much each counts — llama.cpp `build_moe_ffn`
+/// ("leave probs unbiased as it's later used to get expert weights"). Expert 0
+/// scores lowest and is lifted into the pick by its bias; its weight is still
+/// its own sigmoid. A router that ignored the bias would not pick it, and one
+/// that weighed with it would give it ~10.
+#[test]
+fn a_selection_bias_chooses_the_experts_and_never_weighs_them() {
+    use crate::inference::layers::{topk_host, topk_on_device};
+    let routing = MoeRoutingConfig {
+        gating_func: MoeGatingFunc::Sigmoid,
+        renormalize_weights: false,
+        weight_before_ffn: false,
+        weights_scale: 1.0,
+    };
+    let row = [-3.0f32, 1.0, 0.5, 2.0];
+    let bias = [10.0f32, 0.0, 0.0, 0.0];
+    let sigmoid = |x: f32| 1.0 / (1.0 + (-x).exp());
+
+    let (ids, _) = topk_host(&row, 2, routing, None);
+    assert_eq!(ids, [3, 1], "unbiased, the two highest scores");
+    let (ids, weights) = topk_host(&row, 2, routing, Some(&bias));
+    assert_eq!(ids, [0, 3], "the bias lifts expert 0 into the pick");
+    assert_eq!(weights, [sigmoid(-3.0), sigmoid(2.0)], "weighed unbiased");
+
+    let device = Device::Cpu;
+    let scores = Tensor::new(&[row], &device).unwrap();
+    let bias = Tensor::new(&bias, &device).unwrap();
+    let (ids, weights) = topk_on_device(&scores, 2, routing, Some(&bias)).unwrap();
+    assert_eq!(ids.to_vec2::<u32>().unwrap(), [[0, 3]]);
+    let weights = weights.to_vec2::<f32>().unwrap();
+    assert!((weights[0][0] - sigmoid(-3.0)).abs() < 1e-6, "{weights:?}");
+    assert!((weights[0][1] - sigmoid(2.0)).abs() < 1e-6, "{weights:?}");
 }
 
 /// Which layers keep their experts stacked for the grouped card kernel.
@@ -998,6 +1055,7 @@ fn only_a_card_with_types_the_grouped_kernel_reads_keeps_experts_stacked() {
         gating_func: MoeGatingFunc::Sigmoid,
         renormalize_weights: false,
         weight_before_ffn: true,
+        weights_scale: 1.0,
     };
     let fits = |card, dtypes, widths, routing| StackedExperts::fit(card, dtypes, widths, routing);
     assert!(fits(true, [G::Q4K, G::Q4K, G::Q6K], [2048, 768], default));
@@ -1121,12 +1179,14 @@ fn a_llama4_expert_is_weighted_on_its_input() {
             routing,
             activation: crate::inference::model_arch::Activation::SiLU,
             expert_scales: None,
+            selection_bias: None,
             beside: None,
         };
         let llama4 = moe(MoeRoutingConfig {
             gating_func: MoeGatingFunc::Sigmoid,
             renormalize_weights: false,
             weight_before_ffn: true,
+            weights_scale: 1.0,
         });
         let plain = moe(MoeRoutingConfig::default());
 
@@ -1244,12 +1304,14 @@ fn a_prompts_processor_experts_go_to_the_card_only_where_it_can_take_them() {
         routing,
         activation: crate::inference::model_arch::Activation::SiLU,
         expert_scales: None,
+        selection_bias: None,
         beside: None,
     };
     let llama4 = MoeRoutingConfig {
         gating_func: MoeGatingFunc::Sigmoid,
         renormalize_weights: false,
         weight_before_ffn: true,
+        weights_scale: 1.0,
     };
     let plain = moe(MoeRoutingConfig::default());
     assert!(plain.experts_could_stack_on_a_card());
@@ -1358,6 +1420,7 @@ fn a_card_segment_keeping_its_experts_in_ram_works_on_the_processor_for_them() {
         routing: MoeRoutingConfig::default(),
         activation: crate::inference::model_arch::Activation::SiLU,
         expert_scales: None,
+        selection_bias: None,
         beside: None,
     };
     let mut model = make_test_split_model(2, hidden);
@@ -1436,6 +1499,7 @@ fn gelu_moe(
         routing: MoeRoutingConfig::default(),
         activation: Activation::Gelu,
         expert_scales,
+        selection_bias: None,
         beside: None,
     }
 }

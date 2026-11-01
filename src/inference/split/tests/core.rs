@@ -1093,6 +1093,7 @@ fn model_arch_detection() {
     assert_eq!(ModelArch::from_gguf_arch("qwen2moe"), ModelArch::Qwen2);
     assert_eq!(ModelArch::from_gguf_arch("deepseek2"), ModelArch::DeepSeek2);
     assert_eq!(ModelArch::from_gguf_arch("glm4"), ModelArch::Glm4);
+    assert_eq!(ModelArch::from_gguf_arch("glm4moe"), ModelArch::Glm4Moe);
     assert_eq!(ModelArch::from_gguf_arch("llama4"), ModelArch::Llama4);
     assert_eq!(
         ModelArch::from_gguf_arch("starcoder2"),
@@ -1128,6 +1129,8 @@ fn model_arch_properties() {
         ("starcoder2", true),
         // `llama_model_rope_type`: LLM_ARCH_QWEN3NEXT is NEOX (#390).
         ("qwen3next", true),
+        // GLM_4_MOE is NEOX where GLM-4 is NORM (#390, master 2026-11-02).
+        ("glm4moe", true),
     ] {
         assert_eq!(
             ModelArch::from_gguf_arch(arch).use_rope_contiguous(),
@@ -1170,6 +1173,12 @@ fn model_arch_properties() {
         ModelArch::Qwen3Next.is_supported(),
         std::env::var("SWARMLLM_UNCHECKED_FAMILIES").is_ok_and(|v| v.contains("qwen3next"))
     );
+    // GLM-4.5 likewise (#390).
+    assert_eq!(
+        ModelArch::Glm4Moe.is_supported(),
+        std::env::var("SWARMLLM_UNCHECKED_FAMILIES").is_ok_and(|v| v.contains("glm4moe"))
+    );
+    assert!(!ModelArch::supported_list().contains(&"glm4moe"));
     assert!(!ModelArch::Llama.is_hybrid_ssm());
     assert!(!ModelArch::Unknown("mamba".to_string()).is_supported());
 }

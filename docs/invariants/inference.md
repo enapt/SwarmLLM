@@ -6014,6 +6014,70 @@ that check. The real file's tokenizer is `gpt2` with `qwen2` pre-splitting (read
 header, 2026-11-01), already here. The recurrent-layer marker moved from `ssm_alpha` to
 `ssm_conv1d` (`gguf_meta::recurrent_layer_marker`), which both families have.
 
+## GLM-4.5: experts CHOSEN with a bias, weighed without it, and its pre-feed-forward norm under GLM-4's sandwich name (2026-11-02, FUTURE_WORK #390)
+
+**What differs from the families here** (llama.cpp master: `src/models/glm4-moe.cpp`,
+`llama-graph.cpp` `build_moe_ffn`; GLM-4.5-Air's real header, unsloth's Q2_K, read 2026-11-02):
+(a) a SELECTION bias per expert (`blk.N.exp_probs_b.bias`) is added to the sigmoid scores to choose
+the top k and never used to weigh them — "leave probs unbiased as it's later used to get expert
+weights"; (b) the picked weights are renormalised, then multiplied by `expert_weights_scale` (Air
+1.0, the full GLM-4.5 2.5); (c) `post_attention_norm` is the norm BEFORE the feed-forward (HF's
+`post_attention_layernorm`), the name Gemma 2-4 and GLM-4 give a sandwich norm on the attention's
+output, and there is no `ffn_norm`; (d) NEOX partial RoPE where GLM-4 is NORM; (e) the first
+`leading_dense_block_count` layers are dense; (f) one next-token-prediction block after the model's
+own (`nextn_predict_layers`), which `gguf_meta` already takes off the layer count. Q/K/V biases, the
+optional per-head Q/K norms (the full GLM-4.5; Air has none) and the shared expert with no gate are
+the generic loop's. llama.cpp marks GLM4_MOE's `wo` and FFN down `GGML_PREC_F32`
+(`accumulates_outputs_in_f32`).
+
+**What was chosen.** Both routers take the bias as a REQUIRED argument (`topk_host`,
+`topk_on_device`; `MoeFfn::selection_bias`, copied to the card with the layer by `routed_on`), so a
+path that forgets it does not compile; without one, both are the code they were, bit for bit. The
+scale is folded at load into the per-expert output scale (`ExpertScales`), which every path already
+multiplies its picked weights by. Both read in `load_moe_ffn`, so DeepSeek-2 (refused, #116),
+whose V3 files carry both, gets them too. What a missing key means is per family, read off each
+llama.cpp loader: the scale only for `deepseek2` and `glm4moe` (`moe_weights_scale`; the others'
+graphs are handed llama.cpp's default 0, which `build_moe_ffn` skips), sigmoid gating for
+`glm4moe` (`moe_gating_by_default`), and no renormalising for both (`moe_renormalizes_by_default`
+— the DeepSeek converter writes `expert_weights_norm` only when it is true). The norm names are ONE
+answer for both per-layer loops (`split::loader::NormNames`, gotcha #714).
+
+**Checked** against llama.cpp master's `dump_logits` on random-weight files with GLM-4.5-Air's
+ratios (`examples/make_tiny_glm4moe_gguf.py`: 4 query heads over 2 key/value heads, RoPE over half
+of each 32-wide head, a dense first layer, 3 of 8 experts by sigmoid plus a bias as wide as the
+scores' spread, `W_SCALE` 2.5, a next-token block; 20 prompt positions + 4 decoded):
+
+| file | worst cos | median | top-1 |
+|---|---|---|---|
+| f32 | 0.999979 | 0.999998 | 24/24 |
+| f32, split at layer 1, and at layer 2 | 0.999979 | 0.999998 | 24/24 |
+| f32 with per-head Q/K norms, `W_SCALE` 1.0 (Air's) | 0.999999 | 1.000000 | 24/24 |
+| f32 with the bias dropped (toggle) | 0.525558 | 0.850745 | 6/24 |
+| f32 with the scale dropped (toggle) | 0.775801 | 0.891753 | 9/24 |
+| f32 with the generic norm names (toggle) | refused: no `blk.0.ffn_norm` | | |
+
+**Where a file parts, an exact forward says which engine is right.** The Q8_0 file read 0.922
+worst and its weights written back as f32 (`DEQUANTIZED=1`) 0.931 — both at scattered positions.
+`examples/glm4moe_exact_reference.py` (float64, llama.cpp's graph) prints each pick's MARGIN, the
+gap between the k-th and (k+1)-th selection score. On the f32 twin, llama.cpp sits on the exact
+answer at every position and we part from position 12 on, where layer 1's pick has a margin of
+3.0e-5. Our hidden state there was already ~1e-3 off before the router, too far for f32 arithmetic:
+this engine keeps the token table as f16 (`split::token_embedding`). Rounding the table to f16 in
+the exact forward (`F16_TOKEN_TABLE=1`) puts it on OUR side at all 24 positions (cos 1.00000) and
+llama.cpp then parts at 12. So the code computes the graph exactly; an f16 table meeting a
+3e-5 margin flipped one pick. A real file's table is a K-quant, rounded far more coarsely than
+f16 adds. On the Q8_0 file both engines sit equally far from the exact answer (activation
+rounding, which the exact forward does not model) and each flips a different near-tie — at
+position 22 the exact answer is ours.
+
+**Why the family is still refused.** A family joins `supported_list` only once a REAL file's reply
+matches llama.cpp (#715); the smallest GLM-4.5-Air is ~45 GB. `awaits_a_real_check` refuses
+`glm4moe` unless `SWARMLLM_UNCHECKED_FAMILIES` names it. ⚠ Air's routed experts are 1,408 wide,
+not a multiple of 256, so no K-quant fits their down projection: unsloth's Q2_K keeps it as IQ4_NL
+(type 20), which candle cannot read; llama.cpp master's fallback now writes Q4_0 for Q2_K/Q3_K and
+Q5_0 for Q4_K (`llama-quant.cpp` `tensor_type_fallback`), which this engine reads. An older upload
+is refused as the file's fault (#394). The tokenizer is `gpt2` / `glm4` pre-splitting.
+
 ## Qwen 3.5's decode steps are captured too: a DeltaNet state is written into a second pair of buffers (2026-10-11, FUTURE_WORK #228 (4))
 
 **What refused it.** `decode_graph_ineligibility` let only dense layers into a

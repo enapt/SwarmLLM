@@ -302,6 +302,7 @@ fn test_ffn_variant_moe_forward() {
         routing: MoeRoutingConfig::default(),
         activation: crate::inference::model_arch::Activation::SiLU,
         expert_scales: None,
+        selection_bias: None,
         beside: None,
     };
 
@@ -373,6 +374,7 @@ fn test_llama4_moe_layer_forward() {
                 routing: MoeRoutingConfig::default(),
                 activation: crate::inference::model_arch::Activation::SiLU,
                 expert_scales: None,
+                selection_bias: None,
                 beside: None,
             })
         } else {

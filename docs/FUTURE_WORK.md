@@ -2796,10 +2796,18 @@ match llama.cpp** (#715, `arch-inference.md`).
    (α 1.702, limit 7, `y+1`); biases on router and expert stacks; a 128 window on even layers
    (`SlidingWindow::from_file` knows Gemma only). Harmony stops are here. Riskiest: MXFP4 through the
    vendored kernels.
-3. **`glm4moe` — GLM-4.5-Air 106B-A12B** (UD-Q4_K_XL 67.7 GB: three or four cards; ~46K). Medium:
-   the expert SELECTION bias (`ffn_exp_probs_b`, added to choose the top-k, not to weigh it,
-   `llama-graph.cpp:2074-2078`) on both routers, `topk_on_device` included; `expert_weights_scale`
-   (1.0 for Air; the full GLM-4.5 needs it); a `use_rope_contiguous` row. K-quants, splittable.
+3. **`glm4moe` — GLM-4.5-Air 106B-A12B** (UD-Q4_K_XL 67.7 GB: three or four cards; ~46K).
+   **Loader in since 2026-11-02, refused until a real file is checked**: the selection bias is a
+   REQUIRED argument of both routers (`MoeFfn::selection_bias`), `expert_weights_scale` folds into
+   `ExpertScales` at load, `post_attention_norm` is read as the pre-feed-forward norm
+   (`split::loader::NormNames`), sigmoid gating and no renormalising when the file is silent. It
+   matches llama.cpp on random-weight files with Air's ratios, whole and split, and an exact float64
+   forward (`examples/glm4moe_exact_reference.py`) says which engine is right where a near-tie pick
+   parts them (`docs/invariants/inference.md` § "GLM-4.5"). **Left**: one REAL file's reply against
+   llama.cpp on swarm peers (~45 GB at the least; `SWARMLLM_UNCHECKED_FAMILIES=glm4moe`), its split
+   on a card, then `supported_list`. ⚠ Air's 1,408-wide down experts fit no K-quant: older uploads
+   below Q4 keep them as IQ4_NL (unsloth's Q2_K header), which candle cannot read and #394 refuses
+   as the file's fault; llama.cpp master writes Q4_0 / Q5_0 there, which reads.
 4. **`qwen4exp` — Qwen3.8-Flash-Next** (UD-Q2_K_XL 78.9 GB; ~1.1M + 7.7M from ISTA-DASLab). Large:
    hyper-connections (`hc` residual streams, `qwen4exp.cpp:267-455` — every hop ships `hc` hidden
    states, a wire change), sparse attention with an indexer cache (`:542`, `:695`), an n-gram
@@ -2987,10 +2995,15 @@ DeepSeek-V2/V2-Lite/V3/R1, Kimi-K2, GLM-4.7-Flash. The loader's MLA branch, `Mla
 `attn_kv_a_mqa` tensor name; (2) per-layer MLA detection when `attn_q_a` is absent
 (V2-Lite); (3) the split `attn_k_b`/`attn_v_b` layout and `key_length_mla` keys; (4) YaRN on
 the MLA branch, which builds its own RoPE table, with the `yarn_log_multiplier` mscale (YaRN
-itself is read since #280: `split::rope::RopeScaling`); (5) routing — `expert_weights_norm`
-default false, `expert_weights_scale`, the `exp_probs_b` bias, expert groups, the gating
-function. Verify on a tiny GGUF of each layout, then flip `is_supported` and review the MLA
-projections for `arch_supports_hybrid`.
+itself is read since #280: `split::rope::RopeScaling`); (5) routing — **mostly in since
+2026-11-02** (#390 item 3, shared by every MoE family): `expert_weights_norm` defaults to false,
+`expert_weights_scale` and the `exp_probs_b` selection bias are read (`moe_weights_scale`,
+`MoeFfn::selection_bias`). Left: group-limited routing (`expert_group_count` > 1, DeepSeek-V3's
+8 groups; llama.cpp reads the key for every family, `llama-model.cpp:1330` — a file using it is
+refused at load), and deepseek2's gating default for GLM-4.7-Flash (sigmoid when the key is
+absent and the model has 47-48 layers and a 154,880 vocabulary, `deepseek2.cpp:23-31`).
+Verify on a tiny GGUF of each layout, then flip `is_supported` and review the MLA projections
+for `arch_supports_hybrid`.
 
 #### #114 — Mixture-of-experts: Llama-4's long-context attention is not implemented (real Qwen3/Qwen3.5 MoE files verified)
 `P2` · model-support · **PARTIAL** — 2026-09-25 · history: archive row #114

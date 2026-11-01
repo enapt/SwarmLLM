@@ -408,6 +408,7 @@ pub(super) fn make_deepseek_test_model(hidden_dim: usize) -> SplitModel {
         routing: MoeRoutingConfig::default(),
         activation: crate::inference::model_arch::Activation::SiLU,
         expert_scales: None,
+        selection_bias: None,
         beside: None,
     };
 

@@ -355,6 +355,7 @@ pub(crate) fn arch_supports_hybrid(arch: &crate::inference::model_arch::ModelArc
         | A::Mistral
         | A::Starcoder2
         | A::Glm4
+        | A::Glm4Moe
         | A::Llama4 => true,
         // Qwen 3.5 (dense), read 2026-10-07 (FUTURE_WORK #228): the rewritten
         // loop loads every tensor through the shadowed `device` and takes its

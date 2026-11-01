@@ -37,6 +37,14 @@ pub enum ModelArch {
     DeepSeek2,
     /// GLM-4 — partial RoPE (half head dims), QKV biases, extreme GQA (2 KV heads)
     Glm4,
+    /// GLM-4.5 / 4.5-Air / 4.6 (`glm4moe`) — GLM-4's attention with NEOX
+    /// partial RoPE and optional per-head Q/K norms, a dense first layer, then
+    /// sigmoid-routed experts chosen with a selection bias
+    /// (`layers::MoeFfn::selection_bias`) plus a shared expert. Its
+    /// `post_attention_norm` is the norm BEFORE the feed-forward
+    /// (`split::loader::NormNames`). Refused until a real file's reply is
+    /// checked ([`Self::is_supported`], #390).
+    Glm4Moe,
     /// Llama 4 Scout/Maverick — iRoPE (NoPE every 4th layer) + MoE
     Llama4,
     /// Qwen 3.5 dense — hybrid attention + Gated Delta Network (SSM) layers
@@ -70,6 +78,7 @@ impl ModelArch {
             "starcoder2" => ModelArch::Starcoder2,
             "deepseek2" => ModelArch::DeepSeek2,
             "glm4" => ModelArch::Glm4,
+            "glm4moe" => ModelArch::Glm4Moe,
             "llama4" => ModelArch::Llama4,
             "qwen35" => ModelArch::Qwen35,
             "qwen35moe" | "qwen3_5moe" => ModelArch::Qwen35Moe,
@@ -117,11 +126,11 @@ impl ModelArch {
     /// 4b1a27f, 2026-09-25): `ggml_prec_set_acc(cur, GGML_PREC_F32)` on
     /// `ffn_down` and on `wo` for `LLM_ARCH_GLM4`, `GLM4_MOE` and `JAIS2` —
     /// "seem to have numerical issues with half-precision accumulators". Of
-    /// those, GLM-4 is the one that runs here. Its two arms already differed
+    /// those, GLM-4 and GLM-4.5 load here. GLM-4's two arms already differed
     /// more than any other family's in the 4K check (worst cosine between them
     /// 0.99956 against ≥ 0.99985).
     pub(crate) fn accumulates_outputs_in_f32(&self) -> bool {
-        matches!(self, ModelArch::Glm4)
+        matches!(self, ModelArch::Glm4 | ModelArch::Glm4Moe)
     }
 
     /// Default activation function for this architecture's MLP.
@@ -184,7 +193,10 @@ impl ModelArch {
     /// Until then it is refused like an unknown family unless the operator
     /// names it in `SWARMLLM_UNCHECKED_FAMILIES` (comma-separated
     /// `general.architecture` names): the switch the rig running that check
-    /// sets.
+    /// sets. **GLM-4.5 (`glm4moe`) waits the same way**: its loader matched
+    /// llama.cpp on test files with GLM-4.5-Air's ratios
+    /// (`examples/make_tiny_glm4moe_gguf.py`); the smallest real file is
+    /// ~45 GB.
     pub fn is_supported(&self) -> bool {
         !matches!(
             self,
@@ -195,13 +207,13 @@ impl ModelArch {
     /// A family whose loader matched llama.cpp on test files only — see
     /// [`Self::is_supported`].
     fn awaits_a_real_check(&self) -> bool {
-        matches!(self, ModelArch::Qwen3Next)
+        matches!(self, ModelArch::Qwen3Next | ModelArch::Glm4Moe)
     }
 
     /// Every architecture this build knows by name, `Unknown` aside — what
     /// [`Self::manifest_architecture_is_refused`] reads a manifest's coarse
     /// variant against.
-    const NAMED: [ModelArch; 15] = [
+    const NAMED: [ModelArch; 16] = [
         ModelArch::Llama,
         ModelArch::Qwen2,
         ModelArch::Gemma,
@@ -213,6 +225,7 @@ impl ModelArch {
         ModelArch::Starcoder2,
         ModelArch::DeepSeek2,
         ModelArch::Glm4,
+        ModelArch::Glm4Moe,
         ModelArch::Llama4,
         ModelArch::Qwen35,
         ModelArch::Qwen35Moe,
@@ -321,6 +334,7 @@ impl ModelArch {
             | Self::Starcoder2
             | Self::DeepSeek2
             | Self::Glm4
+            | Self::Glm4Moe
             | Self::Llama4
             | Self::Unknown(_) => ModelArchitecture::Llama,
         }
@@ -341,6 +355,7 @@ impl std::fmt::Display for ModelArch {
             ModelArch::Starcoder2 => write!(f, "starcoder2"),
             ModelArch::DeepSeek2 => write!(f, "deepseek2"),
             ModelArch::Glm4 => write!(f, "glm4"),
+            ModelArch::Glm4Moe => write!(f, "glm4moe"),
             ModelArch::Llama4 => write!(f, "llama4"),
             ModelArch::Qwen35 => write!(f, "qwen35"),
             ModelArch::Qwen35Moe => write!(f, "qwen35moe"),
@@ -399,10 +414,11 @@ mod tests {
                 ModelArch::Starcoder2 => Some(8),
                 ModelArch::DeepSeek2 => Some(9),
                 ModelArch::Glm4 => Some(10),
-                ModelArch::Llama4 => Some(11),
-                ModelArch::Qwen35 => Some(12),
-                ModelArch::Qwen35Moe => Some(13),
-                ModelArch::Qwen3Next => Some(14),
+                ModelArch::Glm4Moe => Some(11),
+                ModelArch::Llama4 => Some(12),
+                ModelArch::Qwen35 => Some(13),
+                ModelArch::Qwen35Moe => Some(14),
+                ModelArch::Qwen3Next => Some(15),
                 ModelArch::Unknown(_) => None,
             }
         }

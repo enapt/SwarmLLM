@@ -131,6 +131,7 @@ pub fn check_fits(meta: &AdapterMetadata, model: &AdapterTarget<'_>) -> Result<(
         ModelArch::from_gguf_arch(model.architecture),
         ModelArch::DeepSeek2
             | ModelArch::Gemma4
+            | ModelArch::Glm4Moe
             | ModelArch::Qwen35
             | ModelArch::Qwen35Moe
             | ModelArch::Qwen3Next
@@ -1331,6 +1332,7 @@ mod tests {
         for arch in [
             "deepseek2",
             "gemma4",
+            "glm4moe",
             "qwen35",
             "qwen35moe",
             "qwen3next",

@@ -59,6 +59,13 @@ different order, which is put right as the file is read — and on test files it
 llama.cpp. It stays turned off until one real file's replies are checked the same way: the
 smallest copy is 28 GB, more than one ordinary computer here can hold. (#390)
 
+**Groundwork for GLM-4.5-Air, not yet switched on.** This engine can now read the GLM-4.5
+family's files. Its experts are picked with a per-expert nudge that decides which experts run but
+not how much each one counts, and this engine now reads that nudge on every path. On test files it
+agrees with llama.cpp. Where the two part on a near-tie pick, an exact calculation shows the
+difference comes from rounding, not a mistake. Like Qwen3-Coder-Next, it stays off until one real
+file's replies are checked; the smallest copy is about 45 GB. (#390)
+
 **The model list Claude Code and other MCP clients read names a Gemma model as Gemma.** The
 `node_info` tool and the `swarmllm://models` resource called every Gemma model — and StarCoder2,
 GLM-4, DeepSeek-2 and Llama 4 — "Llama", the catalogue's catch-all for families it has no entry
