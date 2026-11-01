@@ -3835,7 +3835,9 @@ impl LocalSpec {
             widest,
             fixed,
             step_ms: Default::default(),
-            check: crate::inference::dsd_controller::CheckCost::for_a_plan(None),
+            check: crate::inference::dsd_controller::CheckCost::for_a_plan(
+                crate::inference::dsd_controller::CheckReach::Here,
+            ),
             acceptance: crate::inference::dsd_controller::AcceptanceEstimate::recent(),
             rounds: 0,
             produced: 0,

@@ -1013,6 +1013,40 @@ pub(super) fn farthest_segment_round_trip_ms(
     })
 }
 
+/// Where a plan's checks go, for the floor under their fitted cost
+/// (`dsd_controller::CheckReach`): this computer, or a peer — measured or
+/// not. Never [`farthest_segment_round_trip_ms`]'s `None` alone, which reads
+/// "no peer" and "a peer not yet measured" alike: right for trees (unknown is
+/// neither near nor far), wrong for a floor — a fresh node's first request
+/// fitted a line through the origin and switched guessing off for 10 min
+/// (2026-11-01, gotchas #942/#943).
+pub(super) fn check_reach(
+    shared_state: &SharedState,
+    segments: &[crate::types::PipelineSegment],
+) -> crate::inference::dsd_controller::CheckReach {
+    reach_of(
+        segments,
+        shared_state.identity.node_id(),
+        farthest_segment_round_trip_ms(shared_state, segments),
+    )
+}
+
+/// [`check_reach`] over its one reading.
+fn reach_of(
+    segments: &[crate::types::PipelineSegment],
+    local: &crate::types::NodeId,
+    farthest_round_trip_ms: Option<u32>,
+) -> crate::inference::dsd_controller::CheckReach {
+    use crate::inference::dsd_controller::CheckReach;
+    if segments.iter().all(|s| s.node_id == *local) {
+        CheckReach::Here
+    } else {
+        CheckReach::Peer {
+            round_trip_ms: farthest_round_trip_ms,
+        }
+    }
+}
+
 /// [`farthest_segment_round_trip_ms`] over its one reading.
 fn farthest_round_trip(
     segments: &[crate::types::PipelineSegment],
@@ -2636,6 +2670,37 @@ mod tests {
             farthest_round_trip(&plan(&[&here]), &here, rtt),
             None,
             "no peer at all"
+        );
+    }
+
+    /// The two `None`s above are one answer for trees and two for a check's
+    /// floor: a plan with a peer not yet measured is still a peer's
+    /// (`dsd_controller::CheckReach`, 2026-11-01).
+    #[test]
+    fn a_plan_with_a_peer_not_yet_measured_still_reaches_a_peer() {
+        use crate::inference::dsd_controller::CheckReach;
+        let here = NodeId([1; 32]);
+        let far = NodeId([3; 32]);
+        let unmeasured = NodeId([4; 32]);
+        let plan = |nodes: &[&NodeId]| -> Vec<PipelineSegment> {
+            nodes
+                .iter()
+                .enumerate()
+                .map(|(i, n)| remote_segment(n, (i as u32 * 7, (i as u32 + 1) * 7)))
+                .collect()
+        };
+        assert_eq!(reach_of(&plan(&[&here]), &here, None), CheckReach::Here);
+        assert_eq!(
+            reach_of(&plan(&[&here, &far, &unmeasured]), &here, None),
+            CheckReach::Peer {
+                round_trip_ms: None
+            }
+        );
+        assert_eq!(
+            reach_of(&plan(&[&here, &far]), &here, Some(420)),
+            CheckReach::Peer {
+                round_trip_ms: Some(420)
+            }
         );
     }
 

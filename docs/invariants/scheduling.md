@@ -6131,6 +6131,26 @@ is the guard: production has no `CheckCost::default()`, only `for_a_plan` and a 
 `on_a_plan`, so neither speculating path (`dsd`, `ngram_only_spec`) can fit without the floor. Test:
 `a_check_is_never_fitted_below_the_round_trip_it_crossed`, red with the floor clause removed.
 
+**A peer not yet measured is still a peer** (2026-11-01). The floor rode on
+`farthest_segment_round_trip_ms`, whose `None` means "no peer segment" AND "a peer not yet measured"
+— right for trees, where unknown is neither near nor far (gotcha #942), wrong for a floor: a plan
+crossing to an unmeasured peer was fitted as if every check stayed here. On the real TH↔AU link
+(`real_link.sh` TAG=deadwait1101, 12 fresh rig nodes, Qwen2.5-14B) 3 nodes asked before their first
+round-trip reading, and one fitted its 8-token warm-up's three streamed checks at 0 ms + 440.5 a
+position (`farthest_round_trip_ms=None check_floor_ms=None final_gamma=0`). Its next two replies
+logged "guessing did not pay on these machines last time" and ran at 3.5 and 4.3 tok/s, against
+6.1-7.6 prose and 17.7-18.6 code in the arms beside it. #943's fix had covered a measured peer only;
+the harnesses had been made to wait for the reading instead (#942), and `real_link.sh` never had.
+Now `for_a_plan` / `on_a_plan` take **`dsd_controller::CheckReach`** (`Here` / `Peer { round_trip_ms }`),
+built only by **`pipeline::check_reach`**; an unmeasured peer is floored by the cheapest check this
+request timed — the round trip plus one check's work, BBR's way of seeding its least round trip from
+the connection's own samples. The same distinction fixes `predict_beside_a_step`, which priced an
+unmeasured peer's check through this computer's own step. The stream's readers of the floor as its
+round trip (`StreamWidth::goes_wide`, the spares' timing) now read the cheapest check there instead of
+nothing. Tests: `a_check_to_a_peer_not_yet_measured_is_floored_by_its_cheapest_check`,
+`a_check_to_any_peer_is_never_priced_through_the_local_step`,
+`a_plan_with_a_peer_not_yet_measured_still_reaches_a_peer`.
+
 **On one computer the step is priced on its own** (2026-10-25, `model_worker::LocalSpec`). The
 worker's n-gram checked every guess it found, up to `num_pred_tokens`, at any width. Its own
 measurement (the arms of `a_guessed_reply_is_the_reply_read_one_token_at_a_time`, release build,

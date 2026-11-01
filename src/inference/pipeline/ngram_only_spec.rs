@@ -799,7 +799,7 @@ impl PipelineExecutor {
         // (`~/swarmllm-318/guess318.sh`, 10-20).
         let mut guess_gamma = cfg.guesses_per_check();
         let mut check_cost = crate::inference::dsd_controller::CheckCost::for_a_plan(
-            super::farthest_segment_round_trip_ms(&self.shared_state, &self.assignment.segments),
+            super::check_reach(&self.shared_state, &self.assignment.segments),
         );
         let mut guess_acceptance = crate::inference::dsd_controller::AcceptanceEstimate::new();
         let mut waits = GuessWaits::default();

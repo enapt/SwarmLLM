@@ -146,21 +146,20 @@ impl PipelineExecutor {
         // A check crossing to a peer costs at least the round trip there: the
         // floor of the check-cost line (`CheckCost::floor_ms`), read once here
         // — the trees' distance line below reads it again after the prompt
-        // pass has fed the window.
-        let check_floor_round_trip_ms =
-            super::farthest_segment_round_trip_ms(&self.shared_state, &self.assignment.segments);
+        // pass has fed the window. A peer not yet measured is still a peer.
+        let reach = super::check_reach(&self.shared_state, &self.assignment.segments);
         let (mut acceptance, mut check, mut draft_cost, mut far_pace, mut gamma_now) =
             match recalled {
                 Some(l) => (
                     l.acceptance,
-                    l.check.on_a_plan(check_floor_round_trip_ms),
+                    l.check.on_a_plan(reach),
                     crate::inference::dsd_controller::RecentMedian::seeded(l.draft_ms_each),
                     l.far_pace,
                     l.gamma,
                 ),
                 None => (
                     AcceptanceEstimate::new(),
-                    CheckCost::for_a_plan(check_floor_round_trip_ms),
+                    CheckCost::for_a_plan(reach),
                     crate::inference::dsd_controller::RecentMedian::default(),
                     crate::inference::dsd_controller::FarPace::default(),
                     initial_gamma,

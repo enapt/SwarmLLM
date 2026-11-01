@@ -75,6 +75,18 @@ pub fn expected_tokens_per_round(alpha: f64, gamma: u32) -> f64 {
 /// `(0, floor)` instead: bounded-variable least squares (Stark & Parker 1995;
 /// with a single bound, the optimum lies on it). It fitted those checks at
 /// 406 + 243 a position, γ = 2.
+///
+/// **A peer not yet measured is still a peer** ([`CheckReach`]). The plan's
+/// round trip is unknown until the first pings to the peer have been read
+/// (gotcha #942), and the floor once rode on it: unknown read as "this
+/// computer", no floor — #943's fix covered only a measured peer. On the real
+/// TH↔AU link (2026-11-01, `real_link.sh` TAG=deadwait1101) 3 of 12 fresh nodes
+/// asked before that reading, and one fitted its warm-up's three checks at
+/// 0 ms + 440.5 a position, remembered γ = 0, and ran its next two replies
+/// with no guessing at 3.5 and 4.3 tok/s against 6.1-7.6 and 17.7-18.6 for the
+/// arms beside it. Unmeasured, the floor is the cheapest check this request
+/// timed — the round trip plus one check's work, as BBR seeds its least round
+/// trip from the connection's own samples (Cardwell et al., ACM Queue 2016).
 #[derive(Debug, Clone)]
 pub struct CheckCost {
     w: f64,
@@ -88,10 +100,9 @@ pub struct CheckCost {
     held: Option<(u32, f64)>,
     /// Checks ever held back — see [`Self::held_back`].
     held_back: u32,
-    /// The least round trip measured to this request's farthest peer segment
-    /// (`pipeline::farthest_segment_round_trip_ms`); `None` where the plan
-    /// has no peer segment or it is unmeasured. See [`Self::floor_ms`].
-    round_trip_ms: Option<f64>,
+    /// Where the plan's checks go (`pipeline::check_reach`). See
+    /// [`Self::floor_ms`].
+    reach: CheckReach,
     /// The cheapest check ever recorded, held back or fitted.
     least_check_ms: Option<f64>,
 }
@@ -108,10 +119,10 @@ impl CheckCost {
     /// Rounds the fit needs before it can call a check an outlier.
     const HOLD_AFTER: u32 = 3;
 
-    /// An empty fit for a plan whose farthest peer segment is
-    /// `farthest_round_trip_ms` away — required, so no speculating path fits
-    /// its checks without the floor ([`Self::floor_ms`]).
-    pub fn for_a_plan(farthest_round_trip_ms: Option<u32>) -> Self {
+    /// An empty fit for a plan whose checks go as far as `reach` — required,
+    /// so no speculating path fits its checks without the floor
+    /// ([`Self::floor_ms`]).
+    pub fn for_a_plan(reach: CheckReach) -> Self {
         Self {
             w: 0.0,
             x: 0.0,
@@ -121,15 +132,15 @@ impl CheckCost {
             rounds: 0,
             held: None,
             held_back: 0,
-            round_trip_ms: farthest_round_trip_ms.map(f64::from),
+            reach,
             least_check_ms: None,
         }
     }
 
     /// A fit remembered from an earlier request ([`recall`]), floored by THIS
     /// request's reading of the same machines.
-    pub fn on_a_plan(mut self, farthest_round_trip_ms: Option<u32>) -> Self {
-        self.round_trip_ms = farthest_round_trip_ms.map(f64::from);
+    pub fn on_a_plan(mut self, reach: CheckReach) -> Self {
+        self.reach = reach;
         self
     }
 
@@ -236,14 +247,25 @@ impl CheckCost {
     /// crosses to, as its windowed minimum read it — but never more than the
     /// cheapest check recorded. On the first request of a fresh node
     /// that reading was 757-809 ms on a 380 ms link (4 of 6 runs, 2026-10-23),
-    /// and a check cannot cost less than what one was measured at.
-    /// `None` without a measured peer: a local check has no floor.
+    /// and a check cannot cost less than what one was measured at. A peer not
+    /// yet measured is floored by that cheapest check alone, once there is
+    /// one. A check that stays on this computer has no floor.
     pub fn floor_ms(&self) -> Option<f64> {
-        let round_trip = self.round_trip_ms?;
-        Some(
-            self.least_check_ms
-                .map_or(round_trip, |least| round_trip.min(least)),
-        )
+        match self.reach {
+            CheckReach::Here => None,
+            CheckReach::Peer {
+                round_trip_ms: Some(round_trip),
+            } => {
+                let round_trip = f64::from(round_trip);
+                Some(
+                    self.least_check_ms
+                        .map_or(round_trip, |least| round_trip.min(least)),
+                )
+            }
+            CheckReach::Peer {
+                round_trip_ms: None,
+            } => self.least_check_ms,
+        }
     }
 
     /// Predicted cost of a check reading `positions`.
@@ -275,7 +297,7 @@ impl CheckCost {
         let mx = self.x / self.w;
         let my = self.y / self.w;
         let spread = self.xx / self.w - mx * mx >= 0.25;
-        if spread || mx <= 1.0 || self.round_trip_ms.is_some() {
+        if spread || mx <= 1.0 || self.reach != CheckReach::Here {
             return self.predict(positions);
         }
         let slope = ((my - step_ms) / (mx - 1.0)).max(0.0);
@@ -290,12 +312,29 @@ impl CheckCost {
     }
 }
 
-/// Tests only: production names its plan's round trip ([`CheckCost::for_a_plan`]).
+/// Tests only: production names where its plan's checks go
+/// ([`CheckCost::for_a_plan`]).
 #[cfg(test)]
 impl Default for CheckCost {
     fn default() -> Self {
-        Self::for_a_plan(None)
+        Self::for_a_plan(CheckReach::Here)
     }
+}
+
+/// Where a plan's checks go — what floors their fitted cost
+/// ([`CheckCost::floor_ms`]). A required argument of
+/// [`CheckCost::for_a_plan`] and [`CheckCost::on_a_plan`]: an `Option` of the
+/// round trip read "not yet measured" exactly as "on this computer", and a
+/// fresh node's first request to a peer was fitted with no floor (see
+/// [`CheckCost`]). Built by `pipeline::check_reach`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CheckReach {
+    /// Every segment the check reads runs on this computer.
+    Here,
+    /// The check crosses to a peer. `round_trip_ms` is the least round trip
+    /// measured to the farthest one (`pipeline::farthest_segment_round_trip_ms`),
+    /// `None` until every peer of the plan has been measured.
+    Peer { round_trip_ms: Option<u32> },
 }
 
 /// `SWARMLLM_DSD_CHECK_OUTLIERS=keep` fits every check as it came, the rule
@@ -712,7 +751,9 @@ mod tests {
             one_width.predict(2)
         );
         // A check that crosses to a peer is its fit's, whatever the widths.
-        let mut remote = CheckCost::for_a_plan(Some(400));
+        let mut remote = CheckCost::for_a_plan(CheckReach::Peer {
+            round_trip_ms: Some(400),
+        });
         remote.record(11, 420.0);
         assert_eq!(remote.predict_beside_a_step(2, 95.0), remote.predict(2));
         // Nothing timed yet: no answer, the caller explores.
@@ -1049,14 +1090,17 @@ mod tests {
     /// the floor.
     #[test]
     fn a_check_is_never_fitted_below_the_round_trip_it_crossed() {
-        let fitted = |round_trip: Option<u32>| {
-            let mut check = CheckCost::for_a_plan(round_trip);
+        let peer = |ms: u32| CheckReach::Peer {
+            round_trip_ms: Some(ms),
+        };
+        let fitted = |reach: CheckReach| {
+            let mut check = CheckCost::for_a_plan(reach);
             for (rows, ms) in [(3, 771.0), (3, 1529.0), (1, 406.0)] {
                 check.record_with(rows, ms, true);
             }
             check
         };
-        let free = fitted(None);
+        let free = fitted(CheckReach::Here);
         let (fixed, slope) = free.fit().unwrap();
         assert!(fixed < 20.0 && slope > 380.0, "{fixed} + {slope}x");
         assert!(!free.fit_is_floored());
@@ -1066,7 +1110,7 @@ mod tests {
             "the free line is what the request remembered"
         );
 
-        let floored = fitted(Some(757));
+        let floored = fitted(peer(757));
         assert_eq!(
             floored.floor_ms(),
             Some(406.0),
@@ -1079,12 +1123,68 @@ mod tests {
         assert!(best_gamma_overall(0.706, &floored, 8.6, 4, BEST_GAMMA_MAX) > 0);
 
         // The link's own reading floors it the same way.
-        let at_the_link = fitted(Some(380));
+        let at_the_link = fitted(peer(380));
         assert_eq!(at_the_link.fit().unwrap().0, 380.0);
         assert!(best_gamma_overall(0.706, &at_the_link, 8.6, 4, BEST_GAMMA_MAX) > 0);
 
         // A remembered fit takes the new request's reading.
-        assert_eq!(free.on_a_plan(Some(380)).floor_ms(), Some(380.0));
+        assert_eq!(free.on_a_plan(peer(380)).floor_ms(), Some(380.0));
+    }
+
+    /// A fresh node's first request reached its peer before any round trip to
+    /// it was read (2026-11-01, `deadwait1101` arm 9: `farthest_round_trip_ms=None`,
+    /// `check_floor_ms=None`, 0 ms + 440.5 a position, γ = 0 remembered, the
+    /// next two replies at 3.5 and 4.3 tok/s). Still a peer: its checks are
+    /// floored by the cheapest one timed, and guessing goes on.
+    #[test]
+    fn a_check_to_a_peer_not_yet_measured_is_floored_by_its_cheapest_check() {
+        let unmeasured = CheckReach::Peer {
+            round_trip_ms: None,
+        };
+        let mut check = CheckCost::for_a_plan(unmeasured);
+        assert_eq!(check.floor_ms(), None, "nothing timed yet");
+        for (rows, ms) in [(3, 771.0), (3, 1529.0), (1, 406.0)] {
+            check.record_with(rows, ms, true);
+        }
+        assert_eq!(check.floor_ms(), Some(406.0));
+        let (fixed, slope) = check.fit().unwrap();
+        assert_eq!(fixed, 406.0);
+        assert!((200.0..300.0).contains(&slope), "{slope}");
+        assert!(check.fit_is_floored());
+        assert!(best_gamma_overall(0.706, &check, 8.6, 4, BEST_GAMMA_MAX) > 0);
+
+        // A fit remembered from such a request, on a plan now measured, takes
+        // the reading.
+        let measured = check.on_a_plan(CheckReach::Peer {
+            round_trip_ms: Some(380),
+        });
+        assert_eq!(measured.floor_ms(), Some(380.0));
+    }
+
+    /// A check that crosses to a peer is priced by its fit alone, measured or
+    /// not — never through this computer's own step, which prices a LOCAL
+    /// check (`predict_beside_a_step`).
+    #[test]
+    fn a_check_to_any_peer_is_never_priced_through_the_local_step() {
+        let checks = |reach: CheckReach| {
+            let mut check = CheckCost::for_a_plan(reach);
+            for _ in 0..3 {
+                check.record_with(4, 450.0, true);
+            }
+            check
+        };
+        let here = checks(CheckReach::Here);
+        let unmeasured = checks(CheckReach::Peer {
+            round_trip_ms: None,
+        });
+        assert!(
+            here.predict_beside_a_step(2, 20.0).unwrap() < 450.0,
+            "through the step"
+        );
+        assert_eq!(
+            unmeasured.predict_beside_a_step(2, 20.0),
+            unmeasured.predict(2)
+        );
     }
 
     /// Where the line already starts above the round trip, the floor changes
@@ -1092,8 +1192,10 @@ mod tests {
     /// over a 380 ms link.
     #[test]
     fn a_line_above_the_round_trip_is_left_alone() {
-        let mut floored = CheckCost::for_a_plan(Some(380));
-        let mut free = CheckCost::for_a_plan(None);
+        let mut floored = CheckCost::for_a_plan(CheckReach::Peer {
+            round_trip_ms: Some(380),
+        });
+        let mut free = CheckCost::for_a_plan(CheckReach::Here);
         for rows in [1, 3, 5, 2, 4, 1, 3] {
             let ms = 405.0 + 95.0 * f64::from(rows);
             floored.record_with(rows, ms, true);
@@ -1149,7 +1251,9 @@ mod tests {
     /// unsent is forgotten, so the stream tries it again.
     #[test]
     fn a_rows_price_is_measured_only_across_two_widths_and_then_forgotten() {
-        let mut check = CheckCost::for_a_plan(Some(420));
+        let mut check = CheckCost::for_a_plan(CheckReach::Peer {
+            round_trip_ms: Some(420),
+        });
         assert!(!check.slope_is_measured(), "an empty fit");
         for _ in 0..4 {
             check.record_with(3, 1250.0, false);

@@ -3163,7 +3163,9 @@ mod tests {
     fn a_chunk_is_as_wide_as_the_far_ends_time_pays() {
         let (narrow, wide) = (3, 5);
         let mut width = StreamWidth::with(narrow, wide, false);
-        let check = CheckCost::for_a_plan(Some(420));
+        let check = CheckCost::for_a_plan(crate::inference::dsd_controller::CheckReach::Peer {
+            round_trip_ms: Some(420),
+        });
         let mut far = FarPace::default();
         for _ in 0..FAR_PACE_SAMPLES {
             far.record(false, 760.0);
@@ -3245,7 +3247,9 @@ mod tests {
     fn the_stream_learns_a_rows_price_from_chunks_sent_alone_then_chooses() {
         let mut width = StreamWidth::new();
         let (narrow, wide) = (guesses_per_chunk(), wide_guesses_per_chunk());
-        let mut check = CheckCost::for_a_plan(Some(420));
+        let mut check = CheckCost::for_a_plan(crate::inference::dsd_controller::CheckReach::Peer {
+            round_trip_ms: Some(420),
+        });
         check.record(narrow, 1000.0);
         let alone: Vec<u32> = (0..4)
             .map(|_| width.next(true, &check, &FarPace::default(), Some(10.0), 3))
@@ -3274,7 +3278,9 @@ mod tests {
             "cheap rows, kept"
         );
         // Dear rows on the same trip: narrow.
-        let mut dear = CheckCost::for_a_plan(Some(420));
+        let mut dear = CheckCost::for_a_plan(crate::inference::dsd_controller::CheckReach::Peer {
+            round_trip_ms: Some(420),
+        });
         dear.record(narrow, 1000.0);
         dear.record(wide, 1800.0);
         assert_eq!(

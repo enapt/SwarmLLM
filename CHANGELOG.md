@@ -15,6 +15,17 @@ position announcements in its first 16 minutes while it learned where it is, the
 trips as well as the estimate itself (3-4% median error after the first 16 minutes). A computer
 timing a reply against yours still gets your estimate as it stands, sent with the reply (#91).
 
+**A computer's first shared reply after a start no longer turns off guessing for ten minutes.** A
+model split across computers runs faster when this computer guesses a few words ahead and the others
+check the guesses in one go. How many to guess is worked out from what each check costs, and a check
+to another computer can never cost less than the trip there and back. That floor was only applied
+once the trip had been timed, which takes the first few seconds after a start. A reply asked in those
+seconds could read one slow check as "checking costs more the more you guess", decide guessing never
+pays, and remember that for ten minutes. On the Thailand–Australia link 3 of 12 freshly started
+computers asked that early, and one then ran its next two replies at half speed (3.5 and 4.3 tokens a
+second against 6-8 and 18). A check to another computer is now floored by the cheapest check the
+reply has timed until the trip itself has been.
+
 ## [0.3.266-alpha] — 2026-11-01
 
 **A conversation's saved prompt no longer pushes another conversation's out of memory.** After a
