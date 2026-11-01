@@ -486,13 +486,19 @@ mod tests {
 
         // llama.cpp's own op on these inputs (`examples/swiglu_oai_reference.c`,
         // 2026-11-02, master 4b1a27f): the FNV-1a hash of its output's bytes.
+        // The figure is glibc's `expf`: Apple's libm rounds a few of these
+        // exponentials differently (CI's macos-15 job, 2026-11-02), as
+        // llama.cpp built there would. Elsewhere the transcription stands, on
+        // that platform's own `expf`, and the kernels below are held to it.
         let fnv = want
             .iter()
             .flat_map(|w| w.to_le_bytes())
             .fold(0xcbf2_9ce4_8422_2325u64, |h, b| {
                 (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3)
             });
-        assert_eq!(fnv, 0xa594_237e_1c52_159c, "llama.cpp's output");
+        if cfg!(all(target_os = "linux", target_env = "gnu")) {
+            assert_eq!(fnv, 0xa594_237e_1c52_159c, "llama.cpp's output");
+        }
 
         let mut out = vec![0f32; gate.len()];
         swiglu_oai_mul_into(&gate, &up, &mut out);
