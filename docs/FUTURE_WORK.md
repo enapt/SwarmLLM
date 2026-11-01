@@ -2830,6 +2830,20 @@ checked on a real 3B file against llama.cpp master and an exact float64 forward 
 as the other; llama.cpp master reads this family with a norm epsilon of 0; `docs/invariants/inference.md`
 § "Qwen2.5-VL"). **Left**: its image reader (`qwen2.5vl_merger`, with Qwen3-VL's above).
 
+**Read 2026-11-02, not mapping-only** (llama.cpp `4b1a27f`): **`granite`** (IBM Granite dense, ~1.3M)
+is Llama with four multipliers off its header — the token row × `embedding_scale`, the attention
+score × `attention.scale` in place of 1/√d, BOTH residual branches (attention out, feed-forward out)
+× `residual_scale` before their add, the logits ÷ `logit_scale` — plus `rope.scaling.finetuned` =
+false meaning NO rotation at all, optional `attn_output` / feed-forward biases, and Granite Vision's
+`deepstack_mapping` (`granite.cpp`). The residual scale meets every forward path (card graphs and
+decode kernels included), so fold the scalars at load instead: 1/`logit_scale` into
+`output_norm.weight` (and 1/`embedding_scale` too when the head is the tied table and the table is
+scaled), `residual_scale` into `attn_v` and `ffn_up` (each linear in its branch's output),
+`attention.scale`·√d into `attn_q` — quantized tensors, so through their f16 block scales (Q8_0 `d`;
+Q4_K/Q5_K `d` + `dmin`; Q6_K `d`), never a requantise. Needs a card boot to check the card paths.
+**`spark2_5`** (~2.5M) adds a per-head sigmoid gate on the attention output (`attn_gate`), a sliding
+window by layer pattern and a GELU feed-forward (`spark2-5.cpp`) — a family, not a mapping.
+
 #### #326 — A card newer than the release's machine code waits minutes for its first reply
 `P2` · platform · **OPEN** — 2026-10-21 · history: gotcha #928, #325 (closed)
 
