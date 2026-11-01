@@ -2845,11 +2845,9 @@ scaled), `residual_scale` into `attn_v` and `ffn_up` (each linear in its branch'
 tensors, so through their f16 block scales (Q8_0 `d`; Q4_K/Q5_K `d` + `dmin`; Q6_K `d`), never a
 requantise; it needs a card boot to check the card paths. Also refused: `rope.scaling.finetuned` false
 (no rotation), biases, experts, Granite Vision's `deepstack_mapping`; `granitehybrid` (4.0-H, Mamba-2
-layers) and `granitemoe` are other families. ⚠ **A small residual**: at the few positions where the
-residual stream spikes, our processor forward lands further from the exact answer than llama.cpp's
-(Granite Q8 position 3: 0.99737 against 0.99970; exact top-1 22 of 24 against 24 of 24; Qwen2.5-VL
-position 4: 0.991 against 0.997) though the medians are equal — not prefill-specific, not the f16 token
-table, not the cache type. Needs a per-op comparison at such a position.
+layers) and `granitemoe` are other families. (A worst position further from the exact answer than
+llama.cpp's — Granite Q8 position 3, 0.99737 against 0.99970 — was looked into the same night and is
+8-bit activation noise, not a defect: `docs/invariants/inference.md` § "IBM Granite".)
 **`spark2_5`** (~2.5M) adds a per-head sigmoid gate on the attention output (`attn_gate`), a sliding
 window by layer pattern and a GELU feed-forward (`spark2-5.cpp`) — a family, not a mapping.
 

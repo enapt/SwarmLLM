@@ -11,6 +11,16 @@ OURS.* are logits_reference_probe's output (`LOGITS_PROBE_IDS` for a real prompt
 F16_TOKEN_TABLE=1 rounds the token table to f16, as this engine holds it (`split::token_embedding`).
 EXACT_HIDDEN=1 also writes every layer's residual state to OURS.f32.exact_hidden.npy
 ([layers, positions, width]), for the probe's `LOGITS_PROBE_SPLIT=L LOGITS_PROBE_HIDDEN=1`.
+
+Where a gap enters, and whether it is a defect at all:
+- SAVE_EXACT=E.npy keeps the exact logits; EXACT_LOGITS=E.npy then compares a variant run against them
+  instead of against the engines.
+- START_LAYER=L START_HIDDEN=OURS_L.hidden.f32 finishes the forward exactly from OUR state entering
+  layer L (the probe's `LOGITS_PROBE_SPLIT=L LOGITS_PROBE_HIDDEN=1 LOGITS_PROBE_DECODE=0`): where the
+  finished logits stop recovering the exact ones, our layers before L let the error in.
+- Q8_ACT=even|away rounds every matmul's input to Q8_0 blocks of 32, as both engines' processor
+  matmuls do (ties to even, or away from zero): if that simulation lands as far from exact as an
+  engine does, the gap is 8-bit activation noise, not a defect (Granite 4.2-3B, 2026-11-02).
 Memory: one layer's weights in float64 plus the token table in float32 (a 3B: ~3 GB).
 Results: docs/invariants/inference.md § "Qwen2.5-VL"."""
 import json
@@ -73,8 +83,22 @@ def rope(x):  # [N, heads, hd]; MROPE with a text position in every section is N
     return np.concatenate([a * c - b * s, a * s + b * c], axis=-1)
 
 
+Q8_ACT = os.environ.get("Q8_ACT")
+
+
+def act(x):  # a matmul's input as an engine hands it over (Q8_ACT), else exact
+    if not Q8_ACT:
+        return x
+    blocks = x.reshape(-1, 32)
+    amax = np.abs(blocks).max(-1, keepdims=True)
+    inv = np.where(amax > 0, 127.0 / np.where(amax > 0, amax, 1), 0.0)
+    v = (blocks * inv).astype(np.float32).astype(np.float64)
+    q = np.round(v) if Q8_ACT == "even" else np.sign(v) * np.floor(np.abs(v) + 0.5)
+    return (q * (amax / 127.0).astype(np.float16).astype(np.float64)).reshape(x.shape)
+
+
 def proj(x, name):  # weight, plus its bias where the file has one
-    y = x @ W(name + ".weight").T
+    y = act(x) @ W(name + ".weight").T
     return y + W(name + ".bias") if name + ".bias" in TI else y
 
 
@@ -83,7 +107,10 @@ table = np.float16 if os.environ.get("F16_TOKEN_TABLE") == "1" else np.float64
 h = tok[ids].astype(table).astype(np.float64)
 mask = np.triu(np.full((N, N), -np.inf), 1)
 hidden = []
-for il in range(n_layer):
+START = int(os.environ.get("START_LAYER", "0"))
+if START:
+    h = np.fromfile(os.environ["START_HIDDEN"], dtype="<f4").reshape(N, emb).astype(np.float64)
+for il in range(START, n_layer):
     p = f"blk.{il}."
     x = rms(h, W(p + "attn_norm.weight"))
     q = rope(proj(x, p + "attn_q").reshape(N, n_head, hd))
@@ -97,8 +124,8 @@ for il in range(n_layer):
         out[:, hh] = (s / s.sum(-1, keepdims=True)) @ v[:, hh // group]
     h = h + proj(out.reshape(N, emb), p + "attn_output")
     x = rms(h, W(p + "ffn_norm.weight"))
-    gate, up = x @ W(p + "ffn_gate.weight").T, x @ W(p + "ffn_up.weight").T
-    h = h + (gate / (1 + np.exp(-gate)) * up) @ W(p + "ffn_down.weight").T
+    gate, up = act(x) @ W(p + "ffn_gate.weight").T, act(x) @ W(p + "ffn_up.weight").T
+    h = h + act(gate / (1 + np.exp(-gate)) * up) @ W(p + "ffn_down.weight").T
     hidden.append(h.astype(np.float32))
     spike = np.unravel_index(np.abs(h).argmax(), h.shape)
     print(f"layer {il:2d}: largest |state| {np.abs(h).max():8.1f} at position {spike[0]}, dimension {spike[1]}")
@@ -106,6 +133,7 @@ if os.environ.get("EXACT_HIDDEN") == "1":
     np.save(ours_path + ".exact_hidden.npy", np.stack(hidden))
 h = rms(h, W("output_norm.weight"))
 head = W("output.weight", np.float32) if "output.weight" in TI else tok
+h = act(h)
 exact = np.concatenate([h @ head[i:i + 16384].astype(np.float64).T for i in range(0, head.shape[0], 16384)], axis=1)
 
 ours = np.fromfile(ours_path, dtype="<f4").reshape(N, -1)
@@ -115,6 +143,16 @@ ref = np.fromfile(ref_path, dtype="<f4").reshape(N, -1)
 def cos(a, b):
     return float((a * b).sum() / np.sqrt((a * a).sum() * (b * b).sum()))
 
+
+if os.environ.get("SAVE_EXACT"):
+    np.save(os.environ["SAVE_EXACT"], exact)
+if os.environ.get("EXACT_LOGITS"):
+    full = np.load(os.environ["EXACT_LOGITS"])
+    for name, got in (("this run", exact), ("ours", ours), ("llama.cpp", ref)):
+        cs = [cos(got[i], full[i]) for i in range(N)]
+        top = sum(int(got[i].argmax()) == int(full[i].argmax()) for i in range(N))
+        print(f"{name:>9} ~ exact: worst {min(cs):.6f} at {int(np.argmin(cs))}  median {np.median(cs):.6f}  top-1 {top}/{N}")
+    sys.exit(0)
 
 co, cr = [cos(ours[i], exact[i]) for i in range(N)], [cos(ref[i], exact[i]) for i in range(N)]
 for i in range(N):

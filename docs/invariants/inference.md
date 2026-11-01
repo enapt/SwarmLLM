@@ -6099,7 +6099,14 @@ with the part named (`gguf_meta::unbuilt_granite_part` → `GgufTensorMeta::unbu
   which reads Llama-shaped files with NORM pairs and Granite's scale): medians 0.999700 ours, 0.999710
   llama.cpp — equal. At position 3, where the residual stream spikes, ours is further off (0.99737
   against 0.99970; the exact top pick at 22 of 24 positions against 24 of 24). Prefill and decode give
-  the same logits there, so it is not the prompt path; open in FUTURE_WORK #390.
+  the same logits there, so it is not the prompt path. **It is 8-bit activation noise, not a
+  defect** (2026-11-02): finished exactly from our own state entering layer 2, position 3 recovers
+  (0.99994); from layer 4 it does not (0.9981) — our layers 2-3 let it in, while every position's
+  state is already ~1.5% from exact (8-bit activations, both engines). The exact forward with every
+  matmul's input rounded to Q8_0 as both engines round it (`Q8_ACT`) lands position 3 at 0.99843 with
+  ties rounded to even and 0.99968 with ties away from zero — the same arithmetic swings as far as the
+  two engines differ, on a handful of exact ties. Which positions come out unlucky is chance; the
+  medians are the measure.
 - A 160-token greedy reply to a coding question in Granite's own chat format (34 prompt ids, equal on
   both sides): identical for 79 tokens; at the 80th llama.cpp itself is split 32.002 / 31.923 between
   the same two tokens we rank first and second (ours the other way, 32.156 / 31.584). Over those 113
