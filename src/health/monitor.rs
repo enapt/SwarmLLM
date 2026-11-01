@@ -442,8 +442,11 @@ fn capability_news(
             CAPABILITY_MEMORY_DEADBAND_MB,
         );
     }
+    // A coordinate that became usable (or stopped being) is news however
+    // little it moved: routing acts only on a usable one, and a starting
+    // node's can become usable inside the deadband (#91).
     if let (Some(n), Some(s)) = (now.coord, sent.coord) {
-        if n.moved_from(&s) < CAPABILITY_COORD_DEADBAND_MS {
+        if n.moved_from(&s) < CAPABILITY_COORD_DEADBAND_MS && n.is_usable() == s.is_usable() {
             now.coord = sent.coord;
         }
     }
@@ -3195,6 +3198,11 @@ mod tests {
             (
                 "the coordinate moved",
                 Box::new(|c| c.coord.as_mut().unwrap().y += 8.0),
+            ),
+            (
+                // Routing acts only on a usable coordinate (#91).
+                "the coordinate stopped being usable without moving",
+                Box::new(|c| c.coord.as_mut().unwrap().error = 0.7),
             ),
             (
                 "the contribution level changed",

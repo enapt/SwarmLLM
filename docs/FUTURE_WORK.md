@@ -1365,6 +1365,19 @@ off" — nodes re-entering at the origin "had a deleterious effect" — while Se
 value "essentially forever" (#487). So a restore must validate (finite, within a sane bound) and fall back to the
 origin, and should come back with its error RAISED so a computer that changed networks (a laptop) re-learns at
 Vivaldi's fast early pace rather than defending a stale place; no source covers the moved-network case.
+**Built, measured and NOT shipped (2026-11-01)**: the restore above (kept only if it had settled and is inside the
+clamp, back at the error of a node that knows nothing) on a 5-arm rig (`~/swarmllm-91/out/restore1101/`, the
+release binary's coordinate path, live swarm peers): median relative error of the PUBLISHED coordinate in minutes
+0-16 was 0.16 and 0.40 for the two restore arms, 0.40 and 0.21 for the two fresh starts (0.27 seeded) — the second
+restore, from the first fresh arm's saved place, chased two early round-trip spikes (386 and 810 ms) to ~400 ms
+predictions by minute 3, because a sample from a node at the maximum error moves it by nearly its whole weight
+(`w = e_i/(e_i+e_j)` ≈ 0.83). Nothing between the arms beats run-to-run noise, the bad arm is the trap Serf's #487
+describes, and a stored LOW error would make it stick. So restarts re-converge, as Serf's do; the patch is kept in
+`memory/archive/coord_restore_91_2k_1101.patch`. **What building it found, fixed**: a starting node's coordinate
+became usable (error under 0.5) on a sample that moved it less than the threshold, so it was published unusable —
+routed around — until its first window filled (~16 min); now a change of usability is news to the start-up filter
+and to `capability_news` (`a_node_starting_up_is_published_usable_as_soon_as_it_is`: usable after 4 samples,
+published usable after 4, never within 31 without the fix).
 
 #### #169 — Connection churn on multi-interface hosts: only the LAN dial is deterministic
 `P3` · network · **PARTIAL** — 2026-07-25 · history: archive § "Connection churn on multi-interface hosts — deterministic dialer partial", gotcha #353

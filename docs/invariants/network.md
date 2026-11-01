@@ -2132,6 +2132,24 @@ coordinate on every ping acknowledgement (`serf/ping_delegate.go`,
 `AckPayload`), and `observe_network_coord` takes it as a REQUIRED argument so a
 new sample source must say whether its exchange carried one.
 
+**A change of usability is news, however little the coordinate moved
+(2026-11-01).** Routing acts only on a coordinate that `is_usable` (error under
+0.5), and a starting node's error falls under that bar on a sample that may
+move it less than the start-up threshold — so its last publication stayed the
+UNUSABLE one, and peers routed around it until the first window filled (~16
+minutes). In a settled 5-node layout the coordinate as it stands was usable
+after 4 samples; without the fix the published one was not usable within 31.
+`UpdateFilter` and `health::monitor::capability_news` both treat the flip as a
+change. Found while building a coordinate RESTORE across restarts (Ledlie et
+al., NSDI 2007 § 7.1, "begin where it left off"), which was measured and NOT
+shipped: on a 5-arm rig the published coordinate's median error in minutes 0-16
+was 0.16 and 0.40 for the two restore arms beside 0.40 and 0.21 for two fresh
+starts — run-to-run noise larger than any gain, and the bad restore chased two
+early 386/810 ms spikes, a node at the maximum error being moved by nearly a
+sample's whole weight. Serf persisted coordinates and stopped (hashicorp/serf
+#487/#489/#490; `snapshot.go` now skips them, "serf should re-converge"). Patch:
+`memory/archive/coord_restore_91_2k_1101.patch`.
+
 ### What a change must keep
 
 - **Publish whenever we have a coordinate.** Pinned by
@@ -2142,6 +2160,10 @@ new sample source must say whether its exchange carried one.
   (`a_node_starting_up_publishes_from_its_first_sample_and_follows_only_a_move`)
   — following every sample there cost ~14 broadcasts in a live node's first
   16 minutes (4 coordinate-publishing peers fill a 32-sample window that slowly).
+- **A coordinate that became usable, or stopped being, is published**
+  (`a_node_starting_up_is_published_usable_as_soon_as_it_is`; the capability's
+  case in `a_capability_change_that_matters_goes_out_at_once`). Do not restore
+  a coordinate across a restart without re-reading the paragraph above.
 - **What the capability publishes follows a MOVE, never an orbit**
   (`a_coordinate_orbiting_one_point_is_published_once`,
   `a_coordinate_that_moves_is_published_where_it_went`,

@@ -411,9 +411,10 @@ pub const UPDATE_SETTLED_FROM_NEWEST: usize = UPDATE_WINDOW / 4;
 /// when it has moved past [`UPDATE_MIN_MOVE_MS`] since. Whole windows decide
 /// WHEN the published coordinate changes; the newest quarter says WHERE to.
 /// Until the first window fills, the coordinate as it stands is published
-/// whenever it has moved past the same threshold since it was last published —
-/// from the first sample on, since a node starting up must still publish,
-/// however rough (`a_brand_new_node_still_publishes_its_coordinate`) — and the
+/// whenever it has moved past the same threshold since it was last published,
+/// or has become usable (or stopped being) since — from the first sample on,
+/// since a node starting up must still publish, however rough
+/// (`a_brand_new_node_still_publishes_its_coordinate`) — and the
 /// first full window counts as a change: it holds the coordinate's convergence
 /// from wherever it started, not a place it settled.
 ///
@@ -510,9 +511,15 @@ impl UpdateFilter {
             // cost ~14 broadcasts in the 16 minutes a live node with 4
             // coordinate-publishing peers took to fill its first window
             // (2026-11-01).
-            let moved = self
-                .followed
-                .is_none_or(|f| now.moved_from(&f) > self.threshold_ms(&f));
+            //
+            // …or when a reader's verdict on it changed: routing acts only on a
+            // coordinate that `is_usable`, and a starting node's error can fall
+            // under the bar on a sample that moves it less than the threshold —
+            // held, it was published as unusable until its first window filled
+            // (`a_node_starting_up_is_published_usable_as_soon_as_it_is`).
+            let moved = self.followed.is_none_or(|f| {
+                now.moved_from(&f) > self.threshold_ms(&f) || now.is_usable() != f.is_usable()
+            });
             if moved {
                 self.followed = Some(now);
             }
@@ -1078,6 +1085,73 @@ mod tests {
             published,
             vec![at(200.0, 0.0)],
             "a move past the threshold is published at once"
+        );
+    }
+
+    /// The true round trip between two nodes of a `converge` layout.
+    fn layout_rtt(truth: &[(f32, f32, f32)], a: usize, b: usize) -> f32 {
+        let (ax, ay, ah) = truth[a];
+        let (bx, by, bh) = truth[b];
+        ((ax - bx).powi(2) + (ay - by).powi(2)).sqrt() + ah + bh
+    }
+
+    /// Start node 0 of a settled layout afresh (the others stay settled) and
+    /// feed it `samples` round trips, one peer at a time, through a fresh
+    /// filter. Returns the sample after which its coordinate as it stands was
+    /// first usable, and the sample after which the PUBLISHED one first was.
+    fn start_node_0(
+        truth: &[(f32, f32, f32)],
+        settled: &[NetworkCoord],
+        samples: usize,
+    ) -> (Option<usize>, Option<usize>) {
+        let mut me = NetworkCoord::new();
+        let mut filter = UpdateFilter::default();
+        let (mut live_after, mut published_after) = (None, None);
+        for s in 0..samples {
+            let j = 1 + s % (truth.len() - 1);
+            let rtt = layout_rtt(truth, 0, j);
+            me.observe(rtt, &settled[j]);
+            filter.note(
+                me,
+                &crate::NodeId([j as u8; 32]),
+                rtt,
+                &settled[j],
+                s as u64 * 30_000,
+            );
+            if live_after.is_none() && me.is_usable() {
+                live_after = Some(s + 1);
+            }
+            if published_after.is_none() && filter.published().is_some_and(|c| c.is_usable()) {
+                published_after = Some(s + 1);
+            }
+        }
+        (live_after, published_after)
+    }
+
+    const LAYOUT: [(f32, f32, f32); 5] = [
+        (0.0, 0.0, 2.0),
+        (120.0, 10.0, 3.0),
+        (60.0, 200.0, 5.0),
+        (-150.0, 80.0, 2.0),
+        (30.0, -170.0, 4.0),
+    ];
+
+    /// A node starting up is published usable at the sample its coordinate
+    /// becomes usable, not when its first window fills: routing acts only on a
+    /// coordinate that `is_usable`, and one whose last publication was made
+    /// while it was still unusable would otherwise be routed around until the
+    /// window filled (~16 minutes on the live node) unless it happened to move
+    /// past the threshold again first.
+    #[test]
+    fn a_node_starting_up_is_published_usable_as_soon_as_it_is() {
+        let (settled, worst) = converge(&LAYOUT, 300);
+        assert!(worst < 0.2, "the layout must settle first ({worst})");
+        let (live, published) = start_node_0(&LAYOUT, &settled, UPDATE_WINDOW - 1);
+        let live = live.expect("the coordinate becomes usable inside the first window");
+        assert_eq!(
+            published,
+            Some(live),
+            "published usable after {published:?} samples, usable itself after {live}"
         );
     }
 

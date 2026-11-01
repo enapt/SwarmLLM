@@ -122,7 +122,10 @@ where a fixed threshold did not (Ledlie, Pietzuch and Seltzer, 2006). On a live 
 position announcements in its first 16 minutes while it learned where it is, then one in the next
 19, where it made 15 in 25 minutes and kept going every 2-3. The announced position predicts round
 trips as well as the estimate itself (3-4% median error after the first 16 minutes). A computer
-timing a reply against yours still gets your estimate as it stands, sent with the reply (#91).
+timing a reply against yours still gets your estimate as it stands, sent with the reply. A computer
+that has just started is announced as sure enough to route by as soon as it is (about its fourth
+measurement): until 2026-11-01 its first announcement, made while it still knew nothing, could stand
+for its first 16 minutes, and the others would not plan a split that leaned on its position (#91).
 
 **A computer's first shared reply after a start no longer turns off guessing for ten minutes.** A
 model split across computers runs faster when this computer guesses a few words ahead and the others
