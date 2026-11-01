@@ -159,6 +159,9 @@ swarmllm/
 │                 flash_reference_check.rs — the card's flash kernel against plain f32
 │                 attention at every head width and prompt shape (`--features cuda`; run
 │                 before claiming a new width on a card, gotcha #868);
+│                 mxfp4_reference.c — llama.cpp's own MXFP4 code (dequantise, the processor
+│                 dot, the quantiser) on fixed inputs: the figures `mxfp4_tests` asserts
+│                 (gpt-oss's expert format, #390; built by gcc, build line in its header);
 │                 make_tiny_llama4_gguf.py writes one where none exists (Llama 4, gguf-py);
 │                 make_tiny_gemma_gguf.py — Gemma 2 with an 8-position window (#278) and
 │                 the 27B's 46 layers (#279); ARCH=gemma3: Q/K norms, per-layer RoPE,
@@ -3090,6 +3093,16 @@ routes on the card and runs each projection for every chosen pair in one
 `candle_nn::moe::moe_gemm_gguf` launch (`MoeFfn::experts_stacked`); the prompt
 kernel needs the vendored candle-kernels barrier. A decode step on the same
 model, 26 layers on an 8 GB laptop card: 74-89 → 40-55 ms.
+
+### MXFP4 is read, and multiplied on the processor (2026-11-02)
+
+`vendor/candle/candle-core/src/quantized/k_quants.rs::BlockMxfp4` adds GGML type 39,
+the 4-bit format gpt-oss keeps its experts in, with llama.cpp's dequantiser,
+quantiser and processor dot (`avx.rs::vec_dot_mxfp4_q8_0`, in llama.cpp's AVX2 order):
+its answers are llama.cpp's bit for bit on fixed inputs (`mxfp4_tests`,
+`examples/mxfp4_reference.c`). No card kernel reads it yet — `QCudaStorage::fwd`
+sends a type with no dequantize kernel through `dequantize_matmul`'s host-dequantised
+copy, correct and slow — and Metal refuses it. gpt-oss stays refused (FUTURE_WORK #390).
 
 ### The right attention kernel is OPPOSITE for prefill and decode
 

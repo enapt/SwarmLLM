@@ -19,6 +19,31 @@ pub const QK5_0: usize = 32;
 pub const QK5_1: usize = 32;
 pub const QK8_0: usize = 32;
 pub const QK8_1: usize = 32;
+/// SwarmLLM patch: MXFP4's block (llama.cpp `QK_MXFP4`).
+pub const QK_MXFP4: usize = 32;
+
+/// SwarmLLM patch: llama.cpp's `kvalues_mxfp4` (`ggml-common.h`) — the sixteen
+/// E2M1 values DOUBLED, so every one is an integer. The block's scale is halved
+/// to match ([`e8m0_to_f32_half`]); a value is `MXFP4_VALUES[nibble] × half scale`.
+pub(crate) const MXFP4_VALUES: [i8; 16] = [0, 1, 2, 3, 4, 6, 8, 12, 0, -1, -2, -3, -4, -6, -8, -12];
+
+/// SwarmLLM patch: the bits of half the scale an E8M0 byte stores — llama.cpp's
+/// `ggml_e8m0_to_fp32_half` (`ggml-impl.h`): `2^(e - 128)`, below the normal
+/// range for `e < 2`.
+#[inline(always)]
+pub(crate) fn e8m0_half_bits(e: u8) -> u32 {
+    if e < 2 {
+        0x0020_0000u32 << e
+    } else {
+        (e as u32 - 1) << 23
+    }
+}
+
+/// SwarmLLM patch: half the scale an E8M0 byte stores, exactly.
+#[inline(always)]
+pub(crate) fn e8m0_to_f32_half(e: u8) -> f32 {
+    f32::from_bits(e8m0_half_bits(e))
+}
 
 pub trait GgmlType: Sized + Clone + Send + Sync {
     const DTYPE: GgmlDType;
@@ -232,6 +257,18 @@ pub struct BlockQ8K {
 }
 const _: () = assert!(4 + QK_K + QK_K / 16 * 2 == std::mem::size_of::<BlockQ8K>());
 
+/// SwarmLLM patch: MXFP4, the OCP microscaling format gpt-oss's experts are
+/// stored in (GGML type 39, llama.cpp `block_mxfp4`): 32 four-bit E2M1 values
+/// sharing one power-of-two scale kept as an E8M0 exponent. The low nibble of
+/// `qs[j]` is element `j`, the high nibble element `j + 16`, as in Q4_0.
+#[derive(Debug, Clone, PartialEq)]
+#[repr(C)]
+pub struct BlockMxfp4 {
+    pub(crate) e: u8,
+    pub(crate) qs: [u8; QK_MXFP4 / 2],
+}
+const _: () = assert!(std::mem::size_of::<BlockMxfp4>() == 17);
+
 impl GgmlType for BlockQ4_0 {
     const DTYPE: GgmlDType = GgmlDType::Q4_0;
     const BLCK_SIZE: usize = QK4_0;
@@ -337,6 +374,107 @@ impl GgmlType for BlockQ4_0 {
                 sum_i += v0 * ys.qs[j] as i32 + v1 * ys.qs[j + QK8_0 / 2] as i32
             }
             sumf += sum_i as f32 * f16::to_f32(xs.d) * f16::to_f32(ys.d)
+        }
+        sumf
+    }
+}
+
+/// SwarmLLM patch: one MXFP4 block against one Q8_0 block, llama.cpp's scalar
+/// rule (`ggml_vec_dot_mxfp4_q8_0_generic`): the integer sums of each half,
+/// times the product of the two scales. The AVX2 kernel's odd last block is
+/// this too.
+#[inline(always)]
+pub(crate) fn mxfp4_block_dot(x: &BlockMxfp4, y: &BlockQ8_0) -> f32 {
+    let d = f16::to_f32(y.d) * e8m0_to_f32_half(x.e);
+    let (mut sumi1, mut sumi2) = (0i32, 0i32);
+    for j in 0..QK_MXFP4 / 2 {
+        sumi1 += y.qs[j] as i32 * MXFP4_VALUES[(x.qs[j] & 0x0F) as usize] as i32;
+        sumi2 += y.qs[j + QK_MXFP4 / 2] as i32 * MXFP4_VALUES[(x.qs[j] >> 4) as usize] as i32;
+    }
+    d * (sumi1 + sumi2) as f32
+}
+
+/// llama.cpp's `best_index_mxfp4`: the table entry nearest `x` at this scale,
+/// the first of equals.
+fn mxfp4_best_index(x: f32, d: f32) -> u8 {
+    let mut best = 0u8;
+    let mut best_err = (MXFP4_VALUES[0] as f32 * d - x).abs();
+    for (i, &v) in MXFP4_VALUES.iter().enumerate().skip(1) {
+        let err = (v as f32 * d - x).abs();
+        if err < best_err {
+            best = i as u8;
+            best_err = err;
+        }
+    }
+    best
+}
+
+impl GgmlType for BlockMxfp4 {
+    const DTYPE: GgmlDType = GgmlDType::Mxfp4;
+    const BLCK_SIZE: usize = QK_MXFP4;
+    type VecDotType = BlockQ8_0;
+
+    // llama.cpp `dequantize_row_mxfp4` (ggml-quants.c).
+    fn to_float(xs: &[Self], ys: &mut [f32]) {
+        let k = ys.len();
+        let qk = Self::BLCK_SIZE;
+        debug_assert!(
+            k.is_multiple_of(qk),
+            "dequantize_row_mxfp4: {k} is not divisible by {qk}"
+        );
+        for (x, ys) in xs.iter().zip(ys.chunks_exact_mut(qk)) {
+            let d = e8m0_to_f32_half(x.e);
+            for (j, &q) in x.qs.iter().enumerate() {
+                ys[j] = MXFP4_VALUES[(q & 0x0F) as usize] as f32 * d;
+                ys[j + qk / 2] = MXFP4_VALUES[(q >> 4) as usize] as f32 * d;
+            }
+        }
+    }
+
+    // llama.cpp `quantize_row_mxfp4_ref` (ggml-quants.c): the exponent from the
+    // block's largest magnitude, each value the nearest table entry.
+    fn from_float(xs: &[f32], ys: &mut [Self]) {
+        let qk = Self::BLCK_SIZE;
+        let k = xs.len();
+        debug_assert!(k.is_multiple_of(qk), "{k} is not divisible by {qk}");
+        debug_assert_eq!(ys.len(), k / qk, "size mismatch {} {} {}", xs.len(), ys.len(), qk);
+        for (xs, y) in xs.chunks_exact(qk).zip(ys.iter_mut()) {
+            let mut amax = 0f32;
+            for &v in xs {
+                if amax < v.abs() {
+                    amax = v.abs();
+                }
+            }
+            let e = if amax > 0.0 {
+                (amax.log2().floor() - 2.0 + 127.0) as u8
+            } else {
+                0
+            };
+            let d = e8m0_to_f32_half(e);
+            y.e = e;
+            for (j, q) in y.qs.iter_mut().enumerate() {
+                *q = mxfp4_best_index(xs[j], d) | (mxfp4_best_index(xs[qk / 2 + j], d) << 4);
+            }
+        }
+    }
+
+    #[allow(unreachable_code)]
+    fn vec_dot(n: usize, xs: &[Self], ys: &[Self::VecDotType]) -> f32 {
+        #[cfg(target_feature = "avx2")]
+        return super::avx::vec_dot_mxfp4_q8_0(n, xs, ys);
+
+        Self::vec_dot_unopt(n, xs, ys)
+    }
+
+    // llama.cpp `ggml_vec_dot_mxfp4_q8_0_generic` (ggml-cpu/quants.c).
+    fn vec_dot_unopt(n: usize, xs: &[Self], ys: &[Self::VecDotType]) -> f32 {
+        debug_assert!(
+            n.is_multiple_of(QK_MXFP4),
+            "vec_dot_mxfp4_q8_0: {n} is not divisible by {QK_MXFP4}"
+        );
+        let mut sumf = 0f32;
+        for (x, y) in xs.iter().zip(ys.iter()) {
+            sumf += mxfp4_block_dot(x, y);
         }
         sumf
     }

@@ -1,6 +1,7 @@
 use super::k_quants::{
-    BlockQ2K, BlockQ3K, BlockQ4K, BlockQ4_0, BlockQ4_1, BlockQ5K, BlockQ5_0, BlockQ5_1, BlockQ6K,
-    BlockQ8K, BlockQ8_0, BlockQ8_1, QK8_0, QK_K,
+    e8m0_half_bits, mxfp4_block_dot, BlockMxfp4, BlockQ2K, BlockQ3K, BlockQ4K, BlockQ4_0,
+    BlockQ4_1, BlockQ5K, BlockQ5_0, BlockQ5_1, BlockQ6K, BlockQ8K, BlockQ8_0, BlockQ8_1,
+    MXFP4_VALUES, QK8_0, QK_K,
 };
 use byteorder::{ByteOrder, LittleEndian};
 use half::f16;
@@ -83,6 +84,63 @@ pub(crate) fn vec_dot_q8_0_q8_0(n: usize, xs: &[BlockQ8_0], ys: &[BlockQ8_0]) ->
         }
         hsum_float_8(acc)
     }
+}
+
+/// SwarmLLM patch: MXFP4 against Q8_0 on AVX2 — llama.cpp's
+/// `ggml_vec_dot_mxfp4_q8_0` (`ggml-cpu/arch/x86/quants.c`), operation for
+/// operation: each half's nibbles looked up in the value table with one byte
+/// shuffle, blocks taken in pairs into two accumulators, an odd last block by
+/// the scalar rule.
+#[inline(always)]
+pub(crate) fn vec_dot_mxfp4_q8_0(n: usize, xs: &[BlockMxfp4], ys: &[BlockQ8_0]) -> f32 {
+    debug_assert!(
+        n.is_multiple_of(QK8_0),
+        "vec_dot_mxfp4_q8_0: {n} is not divisible by {QK8_0}"
+    );
+    let nb = xs.len().min(ys.len());
+    unsafe {
+        let mut accum1 = _mm256_setzero_ps();
+        let mut accum2 = _mm256_setzero_ps();
+        let mut ib = 0;
+        while ib + 1 < nb {
+            let (x0, x1) = (&xs[ib], &xs[ib + 1]);
+            let (y0, y1) = (&ys[ib], &ys[ib + 1]);
+            let by0 = _mm256_loadu_si256(y0.qs.as_ptr() as *const __m256i);
+            let by1 = _mm256_loadu_si256(y1.qs.as_ptr() as *const __m256i);
+            let p0 = mul_sum_i8_pairs_float(mxfp4_bytes(x0), by0);
+            let p1 = mul_sum_i8_pairs_float(mxfp4_bytes(x1), by1);
+            accum1 = _mm256_fmadd_ps(mxfp4_scale(x0.e, y0.d), p0, accum1);
+            accum2 = _mm256_fmadd_ps(mxfp4_scale(x1.e, y1.d), p1, accum2);
+            ib += 2;
+        }
+        let mut sumf = hsum_float_8(_mm256_add_ps(accum1, accum2));
+        if ib < nb {
+            sumf += mxfp4_block_dot(&xs[ib], &ys[ib]);
+        }
+        sumf
+    }
+}
+
+/// MXFP4: each nibble's table value (the doubled E2M1), elements 0-15 in the
+/// low lane and 16-31 in the high, as the Q8_0 block holds them.
+#[inline(always)]
+unsafe fn mxfp4_bytes(x: &BlockMxfp4) -> __m256i {
+    let values = _mm_loadu_si128(MXFP4_VALUES.as_ptr() as *const __m128i);
+    let m4b = _mm_set1_epi8(0x0F);
+    let q4bits = _mm_loadu_si128(x.qs.as_ptr() as *const __m128i);
+    let low = _mm_shuffle_epi8(values, _mm_and_si128(q4bits, m4b));
+    let high = _mm_shuffle_epi8(values, _mm_and_si128(_mm_srli_epi16(q4bits, 4), m4b));
+    _mm256_set_m128i(high, low)
+}
+
+/// An MXFP4 block's half scale times a Q8_0 block's, broadcast — both built in
+/// general registers and moved whole (see [`scale_product`] for why a scalar
+/// `f16::to_f32` is kept out of this loop).
+#[inline(always)]
+unsafe fn mxfp4_scale(e: u8, y: f16) -> __m256 {
+    let yd = _mm_cvtph_ps(_mm_cvtsi32_si128(y.to_bits() as i32));
+    let xd = _mm_castsi128_ps(_mm_cvtsi32_si128(e8m0_half_bits(e) as i32));
+    _mm256_broadcastss_ps(_mm_mul_ss(yd, xd))
 }
 
 /// SwarmLLM patch: Q5_0 against Q8_0 on AVX2 — upstream candle had no SIMD

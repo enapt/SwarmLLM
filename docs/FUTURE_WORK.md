@@ -2832,6 +2832,15 @@ match llama.cpp** (#715, `arch-inference.md`).
    can come last): two gaps beyond the above — `attn_output.bias` is read nowhere, and a reply's harmony
    channels (analysis / final) are not split the way `<think>` is. Eight steps, processor first and
    card last, each checked against llama.cpp on a tiny random file: `memory/gptoss_map.md`.
+   **Step 1 in since 2026-11-02 — MXFP4 in the vendored candle**: type 39 read, quantised and
+   multiplied on the processor (AVX2 in llama.cpp's order), giving llama.cpp's own answers bit for bit
+   on fixed inputs (`examples/mxfp4_reference.c` runs its code; `mxfp4_tests` asserts the figures); the
+   real header parses (`a_real_gpt_oss_header_parses_with_its_experts_mxfp4`, ignored: a 16 MB range
+   read). ⚠ **A card multiplies an MXFP4 weight correctly but very slowly** until step 7: no card kernel
+   reads it, so `QCudaStorage::fwd` sends it through `dequantize_matmul`'s host-dequantised copy on
+   EVERY call — step 2 keeps MXFP4 experts in RAM on a card and out of the prompt-on-the-card copies.
+   Never add MXFP4 to `swarmllm_types::Quantization` without a feature bit (an older peer fails to
+   decode a manifest naming a variant it lacks).
 3. **`glm4moe` — GLM-4.5-Air 106B-A12B** (UD-Q4_K_XL 67.7 GB: three or four cards; ~46K).
    **Loader in since 2026-11-02, refused until a real file is checked**: the selection bias is a
    REQUIRED argument of both routers (`MoeFfn::selection_bias`), `expert_weights_scale` folds into

@@ -184,6 +184,10 @@ pub fn qtensor_from_ggml(
         GgmlDType::Q6K => {
             from_raw_data::<k_quants::BlockQ6K>(raw_data, size_in_bytes, dims, device)
         }
+        // SwarmLLM patch: gpt-oss's experts.
+        GgmlDType::Mxfp4 => {
+            from_raw_data::<k_quants::BlockMxfp4>(raw_data, size_in_bytes, dims, device)
+        }
         _ => crate::bail!("quantized type {ggml_dtype:?} is not supported yet"),
     }
 }

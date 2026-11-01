@@ -105,6 +105,10 @@ impl QMetalStorage {
                 let vec: Vec<crate::quantized::BlockQ8K> = read_to_vec(&buffer, block_len);
                 crate::quantized::BlockQ8K::to_float(&vec, &mut out);
             }
+            GgmlDType::Mxfp4 => {
+                let vec: Vec<crate::quantized::BlockMxfp4> = read_to_vec(&buffer, block_len);
+                crate::quantized::BlockMxfp4::to_float(&vec, &mut out);
+            }
         }
 
         let buffer = self.device.new_buffer_with_data(&out)?;
@@ -194,6 +198,10 @@ impl QMetalStorage {
     ) -> Result<(MetalStorage, Shape)> {
         use crate::MetalError;
 
+        // SwarmLLM patch: no Metal kernel reads MXFP4.
+        if self.dtype == GgmlDType::Mxfp4 {
+            crate::bail!("MXFP4 has no Metal kernel")
+        }
         if !layout.is_contiguous() {
             crate::bail!("input tensor is not contiguous {layout:?}")
         }
@@ -251,6 +259,10 @@ impl QMetalStorage {
     ) -> Result<(MetalStorage, Shape)> {
         use crate::MetalError;
 
+        // SwarmLLM patch: no Metal kernel reads MXFP4.
+        if self.dtype == GgmlDType::Mxfp4 {
+            crate::bail!("MXFP4 has no Metal kernel")
+        }
         if !layout.is_contiguous() {
             crate::bail!("input tensor is not contiguous {layout:?}")
         }
@@ -386,6 +398,8 @@ impl From<GgmlDType> for candle_metal_kernels::GgmlDType {
             GgmlDType::F16 => candle_metal_kernels::GgmlDType::F16,
             GgmlDType::F32 => candle_metal_kernels::GgmlDType::F32,
             GgmlDType::BF16 => candle_metal_kernels::GgmlDType::F16,
+            // SwarmLLM patch: `fwd` and `fwd_mv`, the only callers, refuse MXFP4 first.
+            GgmlDType::Mxfp4 => unreachable!("MXFP4 is refused before a Metal kernel is chosen"),
         }
     }
 }

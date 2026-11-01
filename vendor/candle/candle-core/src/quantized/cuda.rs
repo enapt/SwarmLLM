@@ -1414,6 +1414,9 @@ impl QCudaStorage {
             GgmlDType::Q5K => deq::<crate::quantized::BlockQ5K>(&buffer, block_len, &mut out),
             GgmlDType::Q6K => deq::<crate::quantized::BlockQ6K>(&buffer, block_len, &mut out),
             GgmlDType::Q8K => deq::<crate::quantized::BlockQ8K>(&buffer, block_len, &mut out),
+            GgmlDType::Mxfp4 => {
+                deq::<crate::quantized::BlockMxfp4>(&buffer, block_len, &mut out)
+            }
         }
 
         self.device
@@ -1648,8 +1651,12 @@ impl QCudaStorage {
             [b, _k] => *b,
             _ => usize::MAX,
         };
-        let use_vec_kernel =
-            rows <= max_bm && !mmq_takes_few_rows(self.device(), self.dtype, rows, self.data.len);
+        // SwarmLLM patch: a type with no card kernel (MXFP4, until gpt-oss's
+        // card step) never reaches the vector or MMQ kernels, which would
+        // refuse it: `dequantize_matmul` multiplies its dequantized weight.
+        let use_vec_kernel = has_dequantize_kernel(self.dtype)
+            && rows <= max_bm
+            && !mmq_takes_few_rows(self.device(), self.dtype, rows, self.data.len);
         if use_vec_kernel {
             self.dequantize_matmul_vec(self_shape, storage, layout)
         } else {
@@ -1728,7 +1735,9 @@ impl QCudaStorage {
             crate::bail!("mismatch on matmul dim {self_shape:?} {:?}", layout.shape())
         }
 
-        let out = if FORCE_DMMV.load(std::sync::atomic::Ordering::Relaxed) {
+        let out = if FORCE_DMMV.load(std::sync::atomic::Ordering::Relaxed)
+            || !has_dequantize_kernel(self.dtype)
+        {
             let data_f32 = self.dequantize(n * k)?;
             let rhs_l = crate::Layout::new((k, n).into(), vec![1, k], 0).broadcast_as((b, k, n))?;
             storage.matmul(&data_f32, (b, m, n, k), layout, &rhs_l)?

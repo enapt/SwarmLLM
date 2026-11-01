@@ -1358,6 +1358,249 @@ mod qmatmul_exactness_tests {
     }
 }
 
+/// MXFP4 (GGML type 39, gpt-oss's experts) in the vendored candle, checked
+/// against llama.cpp's own code: `examples/mxfp4_reference.c` runs
+/// `dequantize_row_mxfp4`, the CPU `vec_dot` and `quantize_row_mxfp4_ref` on the
+/// inputs [`reference_inputs`] makes (the same xorshift32, step for step) and
+/// printed the figures asserted here (llama.cpp master, AVX2 build, 2026-11-02).
+#[cfg(test)]
+mod mxfp4_tests {
+    use candle_core::quantized::k_quants::{BlockMxfp4, BlockQ8_0, GgmlType};
+    use candle_core::quantized::{gguf_file, GgmlDType, QMatMul, QTensor};
+    use candle_core::{Device, Module, Tensor};
+
+    struct XorShift(u32);
+    impl XorShift {
+        fn next(&mut self) -> u32 {
+            let mut s = self.0;
+            s ^= s << 13;
+            s ^= s >> 17;
+            s ^= s << 5;
+            self.0 = s;
+            s
+        }
+    }
+
+    /// Blocks from the bytes a GGUF holds them as.
+    fn blocks<T: GgmlType>(bytes: &[u8]) -> Vec<T> {
+        let size = std::mem::size_of::<T>();
+        assert_eq!(bytes.len() % size, 0);
+        let n = bytes.len() / size;
+        let mut out = vec![T::zeros(); n];
+        // SAFETY: both types are `repr(C)` plain data, and `out` holds exactly
+        // `bytes.len()` bytes.
+        unsafe {
+            std::ptr::copy_nonoverlapping(bytes.as_ptr(), out.as_mut_ptr() as *mut u8, bytes.len())
+        };
+        out
+    }
+
+    fn fnv1a(bytes: impl IntoIterator<Item = u8>) -> u64 {
+        bytes.into_iter().fold(0xcbf2_9ce4_8422_2325, |h, b| {
+            (h ^ b as u64).wrapping_mul(0x0000_0100_0000_01b3)
+        })
+    }
+
+    /// Nine MXFP4 blocks (the first two with the scales below the normal range),
+    /// nine Q8_0 blocks, and 192 values to quantize.
+    fn reference_inputs() -> (Vec<BlockMxfp4>, Vec<BlockQ8_0>, Vec<f32>) {
+        let mut r = XorShift(0x1234_5678);
+        let mut x = Vec::new();
+        for b in 0..9 {
+            let e = match b {
+                0 => 0u8,
+                1 => 1,
+                _ => (110 + r.next() % 30) as u8,
+            };
+            x.push(e);
+            x.extend((0..16).map(|_| (r.next() & 0xFF) as u8));
+        }
+        let mut y = Vec::new();
+        for _ in 0..9 {
+            y.extend_from_slice(&((0x2000 + r.next() % 0x2000) as u16).to_le_bytes());
+            y.extend((0..32).map(|_| (r.next() & 0xFF) as u8));
+        }
+        let mut src: Vec<f32> = (0..128)
+            .map(|_| ((r.next() % 20001) as i32 - 10000) as f32 / 997.0)
+            .collect();
+        src.extend(std::iter::repeat_n(0.0, 32));
+        src.extend((0..32).map(|_| ((r.next() % 2001) as i32 - 1000) as f32 / 65536.0));
+        (blocks(&x), blocks(&y), src)
+    }
+
+    #[test]
+    fn mxfp4_reads_multiplies_and_quantizes_as_llama_cpp_does() {
+        let (x, y, src) = reference_inputs();
+
+        let mut deq = vec![0f32; 9 * 32];
+        BlockMxfp4::to_float(&x, &mut deq);
+        let bits = |v: &[f32]| fnv1a(v.iter().flat_map(|f| f.to_bits().to_le_bytes()));
+        assert_eq!(bits(&deq), 0x62d0_a978_220d_a17a, "dequantized values");
+        // Spot values: a scale below the normal range (block 0) reads exactly.
+        assert_eq!(deq[0].to_bits(), 0x00c0_0000);
+
+        let mut q = vec![BlockMxfp4::zeros(); 6];
+        BlockMxfp4::from_float(&src, &mut q);
+        let q_bytes: Vec<u8> = q
+            .iter()
+            .flat_map(|b| {
+                let mut v = vec![0u8; 17];
+                // SAFETY: a `repr(C)` block of 17 bytes.
+                unsafe {
+                    std::ptr::copy_nonoverlapping(
+                        b as *const BlockMxfp4 as *const u8,
+                        v.as_mut_ptr(),
+                        17,
+                    )
+                };
+                v
+            })
+            .collect();
+        assert_eq!(
+            fnv1a(q_bytes.iter().copied()),
+            0x27ff_17c1_8192_1ddc,
+            "quantized bytes"
+        );
+
+        // The dot product. llama.cpp's figures are its AVX2 kernel's, whose
+        // order this build's AVX2 kernel follows; the scalar loop sums in
+        // another order, so it is held to the rounding only.
+        let (want8, want9) = (f32::from_bits(0xc560_81d8), f32::from_bits(0x448f_3078));
+        let dot8 = BlockMxfp4::vec_dot(8 * 32, &x[..8], &y[..8]);
+        let dot9 = BlockMxfp4::vec_dot(9 * 32, &x, &y);
+        #[cfg(target_feature = "avx2")]
+        assert_eq!(
+            (dot8.to_bits(), dot9.to_bits()),
+            (want8.to_bits(), want9.to_bits()),
+            "{dot8} {dot9}"
+        );
+        for (got, want) in [
+            (dot8, want8),
+            (dot9, want9),
+            (BlockMxfp4::vec_dot_unopt(8 * 32, &x[..8], &y[..8]), want8),
+            (BlockMxfp4::vec_dot_unopt(9 * 32, &x, &y), want9),
+        ] {
+            assert!(
+                (got - want).abs() <= 1e-5 * want.abs(),
+                "{got} against llama.cpp's {want}"
+            );
+        }
+    }
+
+    /// The low nibble of byte `j` is element `j`, the high one element `j + 16`,
+    /// and a value is the doubled E2M1 table entry times half the scale.
+    #[test]
+    fn an_mxfp4_block_reads_its_nibbles_in_llama_cpps_order() {
+        // e = 127: a scale of 1, so half of it is 0.5.
+        let mut bytes = vec![127u8];
+        bytes.extend((0..16u8).map(|j| j | ((15 - j) << 4)));
+        let x: Vec<BlockMxfp4> = blocks(&bytes);
+        let mut out = [0f32; 32];
+        BlockMxfp4::to_float(&x, &mut out);
+        let table = [
+            0., 1., 2., 3., 4., 6., 8., 12., 0., -1., -2., -3., -4., -6., -8., -12.,
+        ];
+        for j in 0..16 {
+            assert_eq!(out[j], table[j] * 0.5, "element {j}");
+            assert_eq!(out[j + 16], table[15 - j] * 0.5, "element {}", j + 16);
+        }
+    }
+
+    /// A GGUF names MXFP4 by type 39, and a weight stored so multiplies on the
+    /// processor as its dequantized values do.
+    #[test]
+    fn an_mxfp4_weight_survives_a_gguf_and_multiplies_like_its_values() {
+        let dev = Device::Cpu;
+        let (n, k) = (48usize, 256usize);
+        let mut r = XorShift(0x0bad_cafe);
+        let w: Vec<f32> = (0..n * k)
+            .map(|_| (r.next() % 2001) as f32 / 1000.0 - 1.0)
+            .collect();
+        let w = Tensor::from_vec(w, (n, k), &dev).unwrap();
+        let q = QTensor::quantize(&w, GgmlDType::Mxfp4).unwrap();
+        assert_eq!(q.storage_size_in_bytes(), n * k / 32 * 17);
+
+        let mut file = std::io::Cursor::new(Vec::new());
+        gguf_file::write(&mut file, &[], &[("w", &q)]).unwrap();
+        // ggml's tensor-info entry: name, dims, then the type as a u32.
+        let raw = file.get_ref();
+        let at = raw.windows(1).position(|s| s == b"w").unwrap();
+        let type_at = at + 1 + 4 + 2 * 8;
+        assert_eq!(
+            u32::from_le_bytes(raw[type_at..type_at + 4].try_into().unwrap()),
+            39
+        );
+        file.set_position(0);
+        let content = gguf_file::Content::read(&mut file).unwrap();
+        assert_eq!(content.tensor_infos["w"].ggml_dtype, GgmlDType::Mxfp4);
+        let back = content.tensor(&mut file, "w", &dev).unwrap();
+        let values = back.dequantize(&dev).unwrap();
+        assert_eq!(
+            values.flatten_all().unwrap().to_vec1::<f32>().unwrap(),
+            q.dequantize(&dev)
+                .unwrap()
+                .flatten_all()
+                .unwrap()
+                .to_vec1::<f32>()
+                .unwrap()
+        );
+
+        for rows in [1usize, 3, 4, 9] {
+            let a: Vec<f32> = (0..rows * k)
+                .map(|_| (r.next() % 2001) as f32 / 1000.0 - 1.0)
+                .collect();
+            let a = Tensor::from_vec(a, (rows, k), &dev).unwrap();
+            let got = QMatMul::from_qtensor(content.tensor(&mut file, "w", &dev).unwrap())
+                .unwrap()
+                .forward(&a)
+                .unwrap()
+                .flatten_all()
+                .unwrap()
+                .to_vec1::<f32>()
+                .unwrap();
+            let want = a
+                .matmul(&values.t().unwrap())
+                .unwrap()
+                .flatten_all()
+                .unwrap()
+                .to_vec1::<f32>()
+                .unwrap();
+            // The activations are rounded to Q8_0 on the way in: about 0.4% a
+            // value, summed over 256 products of unit size.
+            for (g, w) in got.iter().zip(&want) {
+                assert!((g - w).abs() <= 0.25, "{rows} rows: {g} against {w}");
+            }
+        }
+    }
+
+    /// The real file. `SWARMLLM_GPT_OSS_HEADER` names the opening bytes of
+    /// ggml-org's `gpt-oss-20b-MXFP4.gguf` (its header ends 13.0 MB in; a range
+    /// read of 16 MB holds it): the header parses, and exactly the three expert
+    /// stacks of each of its 24 layers are MXFP4, 2,880 values (90 blocks) a row.
+    #[test]
+    #[ignore = "needs SWARMLLM_GPT_OSS_HEADER"]
+    fn a_real_gpt_oss_header_parses_with_its_experts_mxfp4() {
+        let path = std::env::var("SWARMLLM_GPT_OSS_HEADER").expect("SWARMLLM_GPT_OSS_HEADER");
+        let content =
+            crate::inference::split::read_gguf_header(std::path::Path::new(&path)).unwrap();
+        let mxfp4: Vec<_> = content
+            .tensor_infos
+            .iter()
+            .filter(|(_, t)| t.ggml_dtype == GgmlDType::Mxfp4)
+            .collect();
+        assert_eq!(mxfp4.len(), 24 * 3);
+        for (name, t) in mxfp4 {
+            assert!(
+                ["ffn_gate_exps", "ffn_up_exps", "ffn_down_exps"]
+                    .iter()
+                    .any(|kind| name.ends_with(&format!(".{kind}.weight"))),
+                "{name}"
+            );
+            assert_eq!(t.shape.dims(), &[32, 2880, 2880], "{name}");
+        }
+    }
+}
+
 #[cfg(test)]
 mod reasoning_block_tests {
     use super::{finalize_reply_text, take_leading_reasoning_block};

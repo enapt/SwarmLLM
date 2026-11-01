@@ -789,8 +789,8 @@ mod tests {
         );
     }
 
-    /// A file this build cannot hold — unsloth's Qwen3-Coder-Next "Q4_K_M"
-    /// keeps tensors as MXFP4 — is passed over for good: the base it held is
+    /// A file this build cannot hold — as unsloth's Qwen3-Coder-Next "Q4_K_M",
+    /// with its MXFP4 tensors, was before 2026-11-02 — is passed over for good: the base it held is
     /// unresolved, the file is never picked again, and the next read carries
     /// no base from it.
     #[test]

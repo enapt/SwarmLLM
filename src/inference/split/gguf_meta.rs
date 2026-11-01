@@ -105,7 +105,6 @@ pub fn explain_gguf_parse_error(e: &candle_core::Error) -> String {
         29 => "IQ1_M",
         34 => "TQ1_0",
         35 => "TQ2_0",
-        39 => "MXFP4",
         _ => "a type this build does not know",
     };
     format!(

@@ -108,6 +108,15 @@ each peer in turn. The scores are now changed with the list locked and saved tog
 in one write, and a score that has not moved is not saved at all. A pause that is still logged now
 names the message it was handling, so the next cause can be found rather than guessed. (#314)
 
+**Groundwork for gpt-oss, not yet switched on: this engine reads MXFP4.** gpt-oss, among the most
+downloaded open models, keeps its expert weights in MXFP4, a 4-bit format this engine could not read,
+so its files were refused as unreadable. It reads them now, and on fixed test data it gives llama.cpp's
+own answers bit for bit. gpt-oss itself stays off until the rest of the model is built — its
+attention, its choice of experts and its activation each differ from the families here — and its
+replies are checked against llama.cpp; until then its files are refused as a family this build does
+not run. Files of other models that keep a few weights in MXFP4, such as unsloth's
+Qwen3-Coder-Next, now read too. (#390)
+
 ## [0.3.267-alpha] — 2026-11-01
 
 **You can now ask a model to answer without thinking first, or to think.** Models such as

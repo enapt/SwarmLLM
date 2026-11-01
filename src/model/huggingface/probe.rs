@@ -47,10 +47,10 @@ pub enum ProbeFailure {
     /// for is wrong.
     NoSuchFile,
     /// The file is there and this build cannot read it: a tensor in a
-    /// quantization candle does not implement, whatever the file's NAME says —
-    /// unsloth's `Qwen3-Coder-Next-Q4_K_M.gguf` keeps two tensors a layer as
-    /// MXFP4 (header read 2026-11-01). Another build of the model is the fix;
-    /// asking again never is. Found as HuggingFace's own GGUF viewer finds it,
+    /// quantization candle does not implement (the IQ formats), whatever the
+    /// file's NAME says — unsloth's `Qwen3-Coder-Next-Q4_K_M.gguf` kept two
+    /// tensors a layer as MXFP4, which builds before 2026-11-02 could not read.
+    /// Another build of the model is the fix; asking again never is. Found as HuggingFace's own GGUF viewer finds it,
     /// by reading the header.
     UnreadableFile,
     /// HuggingFace or the network: a rate limit, an outage, a broken link.
@@ -502,7 +502,7 @@ mod hf_failure_level_tests {
     #[test]
     fn a_file_in_an_unreadable_quantization_is_the_files_fault() {
         use super::{probe_failure, ProbeFailure};
-        let parse = candle_core::Error::Msg("unknown dtype for tensor 39".into());
+        let parse = candle_core::Error::Msg("unknown dtype for tensor 18".into());
         let as_probed = format!(
             "Failed to parse GGUF header from probe: {}",
             crate::inference::split::explain_gguf_parse_error(&parse)
