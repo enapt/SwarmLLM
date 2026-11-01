@@ -1146,6 +1146,20 @@ swarm's own manifests arrive first. Not offline, not on a metered connection. Th
 through a client with a 30 s INACTIVITY timeout: ~5 MB under the watcher's 30 s total would make a
 connection under ~1.3 Mbit/s a condition for the swarm to follow what people run.
 
+**A file is chosen by its NAME, so a file this build cannot read is passed over for good (#394).**
+The pick reads the file list, never the tensors (`popular::pick_file`: Q4_K_M or Q8_0 by the
+name's label), and a name hides what is inside: unsloth's `Qwen3-Coder-Next-Q4_K_M.gguf` keeps two
+tensors a layer as MXFP4 (header read 2026-11-01), bartowski's and lmstudio-community's builds are
+K-quants and Q8_0 throughout. Knowing the types needs the header — HuggingFace's own GGUF viewer
+reads it the same way — and probing every base's file on every node every day would cost each a
+16 MB fetch per new base. So the registration's own probe decides: a failure that is the FILE's
+(`model::huggingface::probe_failure` other than `Upstream`, or `GgufTensorMeta::refusal`) is
+`popular::NotRegistered::PassOver`; `HfWatcher::pass_over` records it in
+`PopularSnapshot::passed_over` (kept across reads and restarts, at most 64), never picks it again
+(`pick_file_of`, `carried_for`) and points the base at its next upload at once. Without it the
+base stayed on the file, failed at every pass and spent one of the day's three registrations each
+day, and no other upload was ever tried.
+
 ### A download nobody asked for waits while the connection is metered (2026-10-15)
 
 A tester's fresh laptop, left on a phone's USB tether for five minutes, took

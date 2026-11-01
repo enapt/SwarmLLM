@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #394**). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #395**). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -4063,6 +4063,26 @@ archive under the named heading. Reopen one only with the evidence its line name
 Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 19-28 were
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
+
+**Closed 2026-11-01, ships in the next release** (#394)
+- #394 — **A file this engine cannot read is the file's fault, wherever a probe meets it.**
+  Found working #390: unsloth's `Qwen3-Coder-Next-Q4_K_M.gguf` keeps two tensors a layer as
+  MXFP4 (its header, read 2026-11-01), which candle cannot read, though its name says Q4_K_M.
+  The probe's parse said so in words (`explain_gguf_parse_error`), but the one classifier of the
+  HuggingFace client's string errors (`probe_failure_is_user_fixable`) read it as HuggingFace's
+  trouble: the dashboard's probe and Get answered `502` with "the cloud provider returned an
+  error. Try again", the copy repair retried it, and #389's list of what people run, which picks
+  a file by its NAME, would have registered such a file and failed on it every day, each time
+  spending one of the day's three registrations, with no other upload ever tried. Now
+  `probe_failure` names three cases (`NoSuchFile` 404, `UnreadableFile` 400 with what to choose
+  instead, `Upstream` 502), matched on `split::UNREADABLE_QUANTIZATION`, the explanation's own
+  words; both dashboard endpoints answer through `admin_hf::probe_failure_error`; a registration
+  that fails on the file (`popular::NotRegistered::PassOver`) passes it over for good
+  (`PopularSnapshot::passed_over`, kept across reads and restarts, at most 64) and moves its base
+  to the next upload at once. Verified on a probe node off the swarm: the MXFP4 file is `400` with
+  the explanation on both endpoints, where v0.3.266 answered `502`; bartowski's build of the same
+  model `200` on both. Tests `a_file_in_an_unreadable_quantization_is_the_files_fault`,
+  `a_file_this_build_cannot_hold_is_passed_over_for_the_next_upload`, each red with its fix off.
 
 **Closed 2026-11-01, ships in the next release** (#393)
 - #393 — **A download of a model this computer holds in part no longer fetches the parts it has.**

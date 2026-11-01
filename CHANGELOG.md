@@ -19,6 +19,14 @@ copy: asking for all of a model you held half of downloaded the whole thing. A p
 already holds, checked when it arrived, is now kept and skipped; a part whose contents are in
 question is still fetched again, since that is how it is put right. (#393)
 
+**A model file this computer cannot read is reported as such, not as a HuggingFace failure.**
+Some files carry a few tensors in a format this engine does not read yet (MXFP4, or the IQ
+formats), whatever their name says — unsloth's Qwen3-Coder-Next "Q4_K_M" is one. Getting one from
+the dashboard answered "502 — the cloud provider returned an error, try again", advice that could
+never work; it is now a plain 400 that names the format and the builds to choose instead. The list
+of models people run no longer gets stuck on such a file: it moves to the next upload of the same
+model. (#394)
+
 **The model list Claude Code and other MCP clients read names a Gemma model as Gemma.** The
 `node_info` tool and the `swarmllm://models` resource called every Gemma model — and StarCoder2,
 GLM-4, DeepSeek-2 and Llama 4 — "Llama", the catalogue's catch-all for families it has no entry

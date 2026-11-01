@@ -93,6 +93,25 @@ pub(super) fn validate_hf_inputs(repo_id: &str, filename: &str) -> Result<(), Ap
     Ok(())
 }
 
+/// The answer to a failed probe, for both endpoints that probe (`hf/probe`,
+/// `hf/download-shards`) — by [`crate::model::huggingface::probe_failure`]:
+/// a wrong name is 404, a build this engine cannot read is 400 with what to
+/// choose instead, and only HuggingFace's own trouble is 502. Answered 502,
+/// a file in an unreadable quantization read as "HuggingFace is broken, try
+/// again" — advice that can never work.
+pub(super) fn probe_failure_error(message: &str) -> ApiError {
+    use crate::model::huggingface::ProbeFailure;
+    let detail = crate::api::scrub_truncate_error(message);
+    ApiError(match crate::model::huggingface::probe_failure(message) {
+        ProbeFailure::NoSuchFile => crate::error::SwarmError::NotFound(detail),
+        ProbeFailure::UnreadableFile => crate::error::SwarmError::Validation(detail),
+        ProbeFailure::Upstream => crate::error::SwarmError::ProviderError {
+            status: 502,
+            body: format!("HuggingFace probe failed: {detail}"),
+        },
+    })
+}
+
 /// Extract EOS token IDs from a GGUF file, with architecture-specific fallbacks.
 pub(super) fn extract_eos_token_ids(path: &std::path::Path, arch: &str) -> Vec<u32> {
     match crate::inference::split::GgufTokenizerMeta::from_gguf_file(path) {

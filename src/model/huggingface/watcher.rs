@@ -571,33 +571,19 @@ impl HfWatcher {
         );
         let before = state.models.hf_popular.load_full();
         for base in &mut bases {
-            if let Some(known) = before.bases.iter().find(|b| {
-                b.base == base.base && !b.model_id.is_empty() && base.uploads.contains(&b.repo_id)
-            }) {
+            if let Some(known) = before.carried_for(base) {
                 base.repo_id = known.repo_id.clone();
                 base.filename = known.filename.clone();
                 base.model_id = known.model_id.clone();
                 continue;
             }
-            for upload in base.uploads.clone() {
-                let Some(files) = self.repo_files(&upload).await else {
-                    continue;
-                };
-                if let Some(file) = crate::model::huggingface::popular::pick_file(
-                    files.iter().map(String::as_str),
-                    base.parameters,
-                ) {
-                    base.model_id = crate::model::canonical::model_id_for_gguf_filename(&file);
-                    base.repo_id = upload;
-                    base.filename = file;
-                    break;
-                }
-            }
+            self.resolve_upload(base, &before.passed_over).await;
         }
         bases.retain(|b| !b.model_id.is_empty());
         let snapshot = crate::model::huggingface::popular::PopularSnapshot {
             bases,
             fetched_at: now,
+            passed_over: before.passed_over.clone(),
         };
         if let Err(e) = state.db.put_json(
             crate::model::huggingface::popular::POPULAR_TREE,
@@ -622,7 +608,7 @@ impl HfWatcher {
     /// first. Nothing while the reading is stale. Cheap once all are known.
     async fn keep_popular_models(&self) {
         use crate::model::huggingface::popular::{
-            register_without_parts, MOST_REGISTERED_A_DAY, REGISTER_AFTER_UPTIME,
+            register_without_parts, NotRegistered, MOST_REGISTERED_A_DAY, REGISTER_AFTER_UPTIME,
         };
         let state = &self.shared_state;
         let snapshot = state.models.hf_popular.load_full();
@@ -662,7 +648,12 @@ impl HfWatcher {
                         downloads = base.downloads,
                         "HfWatcher: registered a model people run"
                     ),
-                    Err(e) => {
+                    Err(NotRegistered::PassOver(e)) => {
+                        tracing::warn!(model = %mid, repo = %base.repo_id, file = %base.filename, error = %e, "HfWatcher: this build cannot hold a model people run from this upload — its next upload is tried");
+                        self.pass_over(base).await;
+                        continue;
+                    }
+                    Err(NotRegistered::Failed(e)) => {
                         tracing::warn!(model = %mid, repo = %base.repo_id, error = %e, "HfWatcher: a model people run was not registered");
                         continue;
                     }
@@ -673,6 +664,58 @@ impl HfWatcher {
         if woke {
             state.models.auto_manage_notify.notify_one();
         }
+    }
+
+    /// Point `base` at the first of its uploads, best first, with a file the
+    /// swarm holds (`popular::pick_file_of`) that was not passed over. Left
+    /// unresolved (an empty `model_id`) when none has one.
+    async fn resolve_upload(
+        &self,
+        base: &mut crate::model::huggingface::popular::PopularBase,
+        passed_over: &[crate::model::huggingface::popular::PassedOver],
+    ) {
+        for upload in base.uploads.clone() {
+            let Some(files) = self.repo_files(&upload).await else {
+                continue;
+            };
+            if let Some(file) = crate::model::huggingface::popular::pick_file_of(
+                &upload,
+                &files,
+                base.parameters,
+                passed_over,
+            ) {
+                base.model_id = crate::model::canonical::model_id_for_gguf_filename(&file);
+                base.repo_id = upload;
+                base.filename = file;
+                return;
+            }
+        }
+    }
+
+    /// `base`'s file cannot be held (`NotRegistered::PassOver`): never pick it
+    /// again, and point the base at its next upload now — the next pass
+    /// registers that one — instead of failing on this file every day. Saved,
+    /// so a restart does not ask the file again.
+    async fn pass_over(&self, base: &crate::model::huggingface::popular::PopularBase) {
+        let state = &self.shared_state;
+        let mut next = (*state.models.hf_popular.load_full()).clone();
+        next.pass_over(&base.repo_id, &base.filename);
+        let passed_over = next.passed_over.clone();
+        if let Some(held) = next.bases.iter_mut().find(|b| b.base == base.base) {
+            self.resolve_upload(held, &passed_over).await;
+            if !held.model_id.is_empty() {
+                tracing::info!(base = %held.base, repo = %held.repo_id, file = %held.filename, "HfWatcher: a model people run moved to its next upload");
+            }
+        }
+        next.bases.retain(|b| !b.model_id.is_empty());
+        if let Err(e) = state.db.put_json(
+            crate::model::huggingface::popular::POPULAR_TREE,
+            crate::model::huggingface::popular::POPULAR_KEY,
+            &next,
+        ) {
+            tracing::warn!(error = %e, "HfWatcher: a passed-over upload was not saved — asked again after a restart");
+        }
+        state.models.hf_popular.store(Arc::new(next));
     }
 
     /// A repo's file names, or `None` on any failure.

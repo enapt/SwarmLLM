@@ -2101,8 +2101,10 @@ of which shipped:
   names the replacement.
 
 Choose the STATUS from the cause, not from where the error came from.
-`probe_failure_is_user_fixable` is the pattern: a mistyped HuggingFace repo is a
-404 the caller can act on, while a rate limit or an upstream outage stays a 502.
+`probe_failure` is the pattern: a mistyped HuggingFace repo is a
+404 the caller can act on, a file in a quantization the engine cannot read a 400
+naming what to choose instead (#394: it was a 502 with "Try again"), while a rate
+limit or an upstream outage stays a 502.
 Reporting a typo as `502 Bad Gateway` says this server is broken about something
 in the caller's own input.
 

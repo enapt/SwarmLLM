@@ -1920,6 +1920,7 @@ mod fetch_what_prune_keeps {
                 })
                 .collect(),
             fetched_at,
+            ..Default::default()
         }));
     }
 

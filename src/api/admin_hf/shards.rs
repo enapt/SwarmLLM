@@ -337,31 +337,15 @@ pub async fn hf_download_shards(
                 // is broken. This site already knew the difference one line
                 // further down and logged first anyway.
                 if crate::model::huggingface::probe_failure_is_user_fixable(&e) {
-                    tracing::info!(error = %e, "HuggingFace probe: no such repo or file");
+                    tracing::info!(error = %e, "HuggingFace probe: not a file this node can use");
                 } else {
                     tracing::warn!(error = %e, "HuggingFace probe failed");
                 }
-                let detail = crate::api::scrub_truncate_error(&e);
-                // A wrong repo name or filename is the caller's to fix, exactly
-                // as in probe.rs. This arm was missing here, so the endpoint
-                // people actually use to add a model answered a typo with
-                // `502 Bad Gateway` and the generic cloud-provider hint —
-                // "The cloud provider returned an error. Try again" — which
-                // names the wrong system and advises the one thing that cannot
-                // work. The comment this replaces claimed to "match the variant
-                // used in probe.rs"; probe.rs learned to tell the two apart and
-                // this call site did not, so the comment read as verification
-                // while the behaviour had diverged.
-                if crate::model::huggingface::probe_failure_is_user_fixable(&e) {
-                    return ApiError(crate::error::SwarmError::NotFound(detail));
-                }
-                // Anything else really is upstream: rate limits, outages,
-                // network faults. 502 keeps those distinct from local "this
-                // server can't serve" (503) without leaking topology.
-                ApiError(crate::error::SwarmError::ProviderError {
-                    status: 502,
-                    body: format!("HuggingFace probe failed: {detail}"),
-                })
+                // The same answer as `hf/probe` gives, from the one mapping:
+                // this endpoint once answered a typo `502 Bad Gateway` with
+                // the cloud-provider hint ("Try again") while probe.rs had
+                // learned to tell the two apart.
+                super::probe_failure_error(&e)
             })?;
 
     // Never mix two uploads in one model directory. A node holding parts of

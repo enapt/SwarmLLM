@@ -53,6 +53,7 @@ pub use self::gguf_meta::{
     ensure_gguf_header, explain_gguf_parse_error, gguf_arch_str, read_gguf_header,
     save_gguf_header, CachedHeader, GgufTensorMeta, GgufTokenizerMeta, HeaderCache, ModelRefusal,
     SidecarSpec, TensorLocation, ROPE_FREQS_FILENAME, TIED_OUTPUT_FILENAME,
+    UNREADABLE_QUANTIZATION,
 };
 pub(crate) use self::gguf_meta::{
     host_resident, kv_layers, kv_sources, layer_is_recurrent, query_scale, routed_expert_bytes,

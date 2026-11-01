@@ -109,11 +109,16 @@ pub fn explain_gguf_parse_error(e: &candle_core::Error) -> String {
         _ => "a type this build does not know",
     };
     format!(
-        "this GGUF stores its weights as {name} (ggml type {code}), a quantization this \
-         engine cannot read. Choose a K-quant build of the model instead — Q2_K, Q3_K_M, \
-         Q4_K_M, Q5_K_M, Q6_K or Q8_0"
+        "this GGUF stores its weights as {name} (ggml type {code}), {UNREADABLE_QUANTIZATION}. \
+         Choose a K-quant build of the model instead — Q2_K, Q3_K_M, Q4_K_M, Q5_K_M, Q6_K or \
+         Q8_0"
     )
 }
+
+/// The words [`explain_gguf_parse_error`] says a file's quantization with, and
+/// that `model::huggingface::probe_failure` recognises it by — one constant,
+/// so the two cannot drift apart.
+pub const UNREADABLE_QUANTIZATION: &str = "a quantization this engine cannot read";
 
 /// Read-ahead window for [`read_gguf_header`]. See that function for why.
 const GGUF_HEADER_READ_BUFFER_BYTES: usize = 1 << 20;

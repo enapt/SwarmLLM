@@ -130,9 +130,62 @@ pub struct PopularSnapshot {
     pub bases: Vec<PopularBase>,
     /// Unix seconds of the read (0 = never).
     pub fetched_at: i64,
+    /// Files this build cannot hold (`NotRegistered::PassOver`), never picked
+    /// again — the next upload of the base is. Carried from read to read and
+    /// across restarts, at most `MOST_PASSED_OVER`, the oldest dropped first.
+    #[serde(default)]
+    pub passed_over: Vec<PassedOver>,
 }
 
+/// An upload's file this build cannot hold: a quantization it cannot read
+/// whatever the file's name says, a kind or family it will not run, or a file
+/// that has gone.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PassedOver {
+    pub repo_id: String,
+    pub filename: String,
+}
+
+/// Most files [`PopularSnapshot::passed_over`] remembers.
+pub(crate) const MOST_PASSED_OVER: usize = 64;
+
 impl PopularSnapshot {
+    /// Was `filename` of `repo_id` passed over?
+    pub fn is_passed_over(&self, repo_id: &str, filename: &str) -> bool {
+        passed(&self.passed_over, repo_id, filename)
+    }
+
+    /// Never pick `filename` of `repo_id` again, and point the base that held
+    /// it at nothing until it is resolved again (`watcher::resolve_upload`).
+    pub fn pass_over(&mut self, repo_id: &str, filename: &str) {
+        if !self.is_passed_over(repo_id, filename) {
+            self.passed_over.push(PassedOver {
+                repo_id: repo_id.to_string(),
+                filename: filename.to_string(),
+            });
+            let excess = self.passed_over.len().saturating_sub(MOST_PASSED_OVER);
+            self.passed_over.drain(..excess);
+        }
+        for base in &mut self.bases {
+            if base.repo_id.eq_ignore_ascii_case(repo_id) && base.filename == filename {
+                base.repo_id.clear();
+                base.filename.clear();
+                base.model_id.clear();
+            }
+        }
+    }
+
+    /// The resolved base of the read before this one to keep for `base`: the
+    /// same base, an upload it still lists, a file not passed over since.
+    pub(crate) fn carried_for(&self, base: &PopularBase) -> Option<&PopularBase> {
+        self.bases.iter().find(|b| {
+            b.base == base.base
+                && !b.model_id.is_empty()
+                && base.uploads.contains(&b.repo_id)
+                && !self.is_passed_over(&b.repo_id, &b.filename)
+        })
+    }
+
     /// Read recently enough to act on (`MOST_SNAPSHOT_AGE_SECS`).
     pub fn fresh(&self, now: i64) -> bool {
         self.fetched_at > 0 && now.saturating_sub(self.fetched_at) <= MOST_SNAPSHOT_AGE_SECS
@@ -318,6 +371,49 @@ pub(crate) fn pick_file<'a>(
         .map(str::to_string)
 }
 
+/// [`pick_file`] of `upload`'s `files`, leaving out the files passed over.
+pub(crate) fn pick_file_of(
+    upload: &str,
+    files: &[String],
+    parameters: u64,
+    passed_over: &[PassedOver],
+) -> Option<String> {
+    pick_file(
+        files
+            .iter()
+            .map(String::as_str)
+            .filter(|f| !passed(passed_over, upload, f)),
+        parameters,
+    )
+}
+
+fn passed(passed_over: &[PassedOver], repo_id: &str, filename: &str) -> bool {
+    passed_over
+        .iter()
+        .any(|p| p.repo_id.eq_ignore_ascii_case(repo_id) && p.filename == filename)
+}
+
+/// Why a model people run was not registered ([`register_without_parts`]).
+#[derive(Debug)]
+pub(crate) enum NotRegistered {
+    /// This file can never be this build's copy — its header names a
+    /// quantization the engine cannot read (`probe_failure`), or a family or
+    /// kind it will not run, or the file has gone. Its base moves to the next
+    /// upload ([`PopularSnapshot::pass_over`]); asked again, it would fail
+    /// again every day, each time spending one of the day's registrations.
+    PassOver(String),
+    /// HuggingFace, the network, the disk: asked again later.
+    Failed(String),
+}
+
+impl std::fmt::Display for NotRegistered {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::PassOver(e) | Self::Failed(e) => f.write_str(e),
+        }
+    }
+}
+
 /// Where the day's reading is saved, so a restart has it at once.
 pub(crate) const POPULAR_TREE: &str = "hf_popular";
 pub(crate) const POPULAR_KEY: &str = "snapshot";
@@ -346,8 +442,9 @@ pub(crate) async fn register_without_parts(
     network_tx: &tokio::sync::mpsc::Sender<crate::types::NetworkCommand>,
     repo_id: &str,
     filename: &str,
-) -> Result<crate::types::ModelId, String> {
-    super::validate_hf_repo_id(repo_id)?;
+) -> Result<crate::types::ModelId, NotRegistered> {
+    use NotRegistered::{Failed, PassOver};
+    super::validate_hf_repo_id(repo_id).map_err(PassOver)?;
     let mid = crate::types::ModelId(crate::model::canonical::model_id_for_gguf_filename(
         filename,
     ));
@@ -371,9 +468,16 @@ pub(crate) async fn register_without_parts(
         &source.filename,
         state.config.model.shard_size_bytes(),
     )
-    .await?;
+    .await
+    .map_err(|e| {
+        if super::probe_failure_is_user_fixable(&e) {
+            PassOver(e)
+        } else {
+            Failed(e)
+        }
+    })?;
     if let Some(refusal) = info.tensor_meta.refusal() {
-        return Err(format!("this build will not run it: {refusal:?}"));
+        return Err(PassOver(format!("this build will not run it: {refusal:?}")));
     }
     let dest_dir = state.model_dir(&mid.0);
     super::download_gguf_header(
@@ -382,7 +486,8 @@ pub(crate) async fn register_without_parts(
         &dest_dir,
         info.header_size,
     )
-    .await?;
+    .await
+    .map_err(Failed)?;
     if let Err(e) = super::download_sidecar_tensors(
         &source.repo_id,
         &source.filename,
@@ -404,7 +509,8 @@ pub(crate) async fn register_without_parts(
             shared: state,
             precomputed_layouts: Some(&info.layouts),
         },
-    )?;
+    )
+    .map_err(Failed)?;
     let _ = network_tx
         .send(crate::types::NetworkCommand::Broadcast(
             crate::types::SwarmMessage::HfSourceGossip(crate::types::HfSourceGossip {
@@ -665,11 +771,83 @@ mod tests {
         );
     }
 
+    /// A file this build cannot hold — unsloth's Qwen3-Coder-Next "Q4_K_M"
+    /// keeps tensors as MXFP4 — is passed over for good: the base it held is
+    /// unresolved, the file is never picked again, and the next read carries
+    /// no base from it.
+    #[test]
+    fn a_file_this_build_cannot_hold_is_passed_over_for_the_next_upload() {
+        let unreadable = "Qwen3-Coder-Next-Q4_K_M.gguf";
+        let base = PopularBase {
+            base: "qwen/qwen3-coder-next".into(),
+            uploads: vec![
+                "unsloth/Qwen3-Coder-Next-GGUF".into(),
+                "lmstudio-community/Qwen3-Coder-Next-GGUF".into(),
+            ],
+            repo_id: "unsloth/Qwen3-Coder-Next-GGUF".into(),
+            filename: unreadable.into(),
+            model_id: "qwen3-coder-next-q4-k-m".into(),
+            ..Default::default()
+        };
+        let mut s = PopularSnapshot {
+            bases: vec![base.clone()],
+            fetched_at: NOW,
+            ..Default::default()
+        };
+        assert!(s.carried_for(&base).is_some(), "resolved, it is carried");
+        s.pass_over("unsloth/Qwen3-Coder-Next-GGUF", unreadable);
+        assert!(s.bases[0].model_id.is_empty(), "the base is unresolved");
+        assert!(s.is_passed_over("UNSLOTH/Qwen3-Coder-Next-GGUF", unreadable));
+        s.pass_over("unsloth/Qwen3-Coder-Next-GGUF", unreadable);
+        assert_eq!(s.passed_over.len(), 1, "remembered once");
+
+        let before = PopularSnapshot {
+            bases: vec![base.clone()],
+            fetched_at: NOW,
+            passed_over: s.passed_over.clone(),
+        };
+        assert!(
+            before.carried_for(&base).is_none(),
+            "a read never carries a base from a file passed over"
+        );
+        let files = vec![unreadable.to_string(), "README.md".to_string()];
+        assert_eq!(
+            pick_file_of(
+                "unsloth/Qwen3-Coder-Next-GGUF",
+                &files,
+                80_000_000_000,
+                &s.passed_over
+            ),
+            None
+        );
+        assert_eq!(
+            pick_file_of(
+                "lmstudio-community/Qwen3-Coder-Next-GGUF",
+                &files,
+                80_000_000_000,
+                &s.passed_over
+            )
+            .as_deref(),
+            Some(unreadable),
+            "the same name in another upload is another file"
+        );
+
+        for i in 0..MOST_PASSED_OVER + 5 {
+            s.pass_over("x/y", &format!("f{i}-Q4_K_M.gguf"));
+        }
+        assert_eq!(s.passed_over.len(), MOST_PASSED_OVER, "bounded");
+        assert!(
+            !s.is_passed_over("unsloth/Qwen3-Coder-Next-GGUF", unreadable),
+            "the oldest goes first"
+        );
+    }
+
     #[test]
     fn a_snapshot_is_acted_on_only_while_fresh() {
         let s = PopularSnapshot {
             bases: vec![],
             fetched_at: NOW,
+            ..Default::default()
         };
         assert!(s.fresh(NOW + 3600));
         assert!(!s.fresh(NOW + MOST_SNAPSHOT_AGE_SECS + 1));

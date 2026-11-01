@@ -39,16 +39,47 @@ where
     Err(last_err.unwrap_or_else(|| "exhausted retries".into()))
 }
 
-/// True when a probe failure is something the person asking can correct — a
-/// wrong repo name, a wrong filename, a private repo needing a token — rather
-/// than HuggingFace being unavailable.
-///
-/// Used to choose the HTTP status. Reporting a mistyped model name as `502 Bad
-/// Gateway` tells someone the server is broken when the thing to fix is their
-/// spelling.
-pub fn probe_failure_is_user_fixable(message: &str) -> bool {
-    message.contains("could not be read. Either the name is wrong")
+/// What a failed probe says about the file asked for — the one reading of this
+/// client's errors, which are strings all the way down.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProbeFailure {
+    /// No such repo or file, or a private one needing a token: the name asked
+    /// for is wrong.
+    NoSuchFile,
+    /// The file is there and this build cannot read it: a tensor in a
+    /// quantization candle does not implement, whatever the file's NAME says —
+    /// unsloth's `Qwen3-Coder-Next-Q4_K_M.gguf` keeps two tensors a layer as
+    /// MXFP4 (header read 2026-11-01). Another build of the model is the fix;
+    /// asking again never is. Found as HuggingFace's own GGUF viewer finds it,
+    /// by reading the header.
+    UnreadableFile,
+    /// HuggingFace or the network: a rate limit, an outage, a broken link.
+    Upstream,
+}
+
+/// Classify a probe failure (`probe_gguf_file`'s error).
+pub fn probe_failure(message: &str) -> ProbeFailure {
+    if message.contains("could not be read. Either the name is wrong")
         || message.contains("has no file named")
+    {
+        ProbeFailure::NoSuchFile
+    } else if message.contains(crate::inference::split::UNREADABLE_QUANTIZATION) {
+        ProbeFailure::UnreadableFile
+    } else {
+        ProbeFailure::Upstream
+    }
+}
+
+/// True when a probe failure is something the person asking can correct — a
+/// wrong repo name, a wrong filename, a private repo needing a token, a build
+/// in a quantization this engine cannot read — rather than HuggingFace being
+/// unavailable ([`probe_failure`]).
+///
+/// Used to choose the HTTP status and whether to ask again. Reporting a
+/// mistyped model name as `502 Bad Gateway` tells someone the server is broken
+/// when the thing to fix is their spelling.
+pub fn probe_failure_is_user_fixable(message: &str) -> bool {
+    probe_failure(message) != ProbeFailure::Upstream
 }
 
 /// How loudly a HuggingFace failure should be recorded in THIS node's log.
@@ -461,5 +492,30 @@ mod hf_failure_level_tests {
             assert!(!probe_failure_is_user_fixable(msg));
             assert_eq!(hf_failure_log_level(msg), FailureLevel::Warn, "{msg}");
         }
+    }
+
+    /// A file whose header names a quantization this engine cannot read —
+    /// worded by the parser's own explanation, as the probe reports it — is
+    /// the file's fault: asking again can never work, so the dashboard
+    /// answers 400 and the popular list moves to another upload. Read as
+    /// HuggingFace's trouble, it was a 502 and a daily retry.
+    #[test]
+    fn a_file_in_an_unreadable_quantization_is_the_files_fault() {
+        use super::{probe_failure, ProbeFailure};
+        let parse = candle_core::Error::Msg("unknown dtype for tensor 39".into());
+        let as_probed = format!(
+            "Failed to parse GGUF header from probe: {}",
+            crate::inference::split::explain_gguf_parse_error(&parse)
+        );
+        assert_eq!(probe_failure(&as_probed), ProbeFailure::UnreadableFile);
+        assert!(probe_failure_is_user_fixable(&as_probed));
+        assert_eq!(
+            probe_failure("repo has no file named model-q4.gguf"),
+            ProbeFailure::NoSuchFile
+        );
+        assert_eq!(
+            probe_failure("HTTP 429 Too Many Requests"),
+            ProbeFailure::Upstream
+        );
     }
 }
