@@ -246,6 +246,12 @@ pub(super) async fn handle_remote_generate_request(
         return;
     }
 
+    // Demand this node may gossip: a peer's request, never the owner's (#389 (a)).
+    let requester = libp2p::PeerId::from_bytes(&sender_bytes)
+        .ok()
+        .and_then(|p| crate::network::transport::peer_id_to_node_id(&p));
+    shared_state.note_request_served_for_a_peer(&model_id, requester.as_ref());
+
     // Keep what this reply sends, so the coordinator can ask for a token that
     // never arrived (gotcha #438). Retained for every requester, whether or
     // not it advertises `RESEND_TOKENS` — an older one never asks, and the
@@ -660,6 +666,9 @@ pub(super) async fn handle_delegated_split(
             return;
         }
     };
+
+    // Demand this node may gossip: a peer's request, never the owner's (#389 (a)).
+    shared_state.note_request_served_for_a_peer(&model_id, requester.as_ref());
 
     shared_state
         .retained_replies

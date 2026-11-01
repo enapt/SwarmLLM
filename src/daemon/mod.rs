@@ -475,6 +475,7 @@ impl Daemon {
         if !anchor && shared_state.cfg().auto_manage.hf_watcher_enabled {
             let hf_watcher = crate::model::huggingface::HfWatcher::new(
                 shared_state.clone(),
+                network_tx.clone(),
                 shutdown_rx.clone(),
             );
             subsystems.spawn(async move {

@@ -169,6 +169,86 @@ pub fn manifest_from_header(
     Ok((manifest, meta))
 }
 
+/// What [`generate_manifest_from_header`] needs.
+pub(crate) struct ManifestGenParams<'a> {
+    pub(crate) header_path: &'a std::path::Path,
+    pub(crate) model_id_str: &'a str,
+    pub(crate) filename: &'a str,
+    pub(crate) total_size: u64,
+    pub(crate) shard_count: u32,
+    pub(crate) shard_indices: &'a [u32],
+    pub(crate) shared: &'a std::sync::Arc<crate::daemon::SharedState>,
+    /// Pre-computed layouts from probe. When provided, these are used directly
+    /// instead of recomputing (avoids shard_count mismatch between probe and manifest).
+    pub(crate) precomputed_layouts: Option<&'a [crate::inference::split::LayerShardLayout]>,
+}
+
+/// Generate a manifest from a downloaded GGUF header and register shards.
+/// The dashboard's shard download and the registration of a model people run
+/// (`huggingface::popular::register_without_parts`, #389 (b)) — one step, so
+/// both describe an upload alike.
+pub(crate) fn generate_manifest_from_header(params: &ManifestGenParams<'_>) -> Result<(), String> {
+    let model_id = crate::types::ModelId(params.model_id_str.to_string());
+    let node_id = params.shared.identity.node_id().clone();
+    let computed_layouts;
+    let layouts: &[crate::inference::split::LayerShardLayout] =
+        if let Some(precomputed) = params.precomputed_layouts {
+            precomputed
+        } else {
+            let meta = crate::inference::split::GgufTensorMeta::from_gguf_file(params.header_path)
+                .map_err(|e| format!("Failed to parse GGUF header: {e}"))?;
+            computed_layouts =
+                crate::inference::split::compute_layer_shard_layouts(&meta, params.shard_count);
+            &computed_layouts
+        };
+    let (manifest, meta) = manifest_from_header(
+        params.header_path,
+        &model_id,
+        params.filename,
+        params.total_size,
+        layouts,
+        node_id.clone(),
+    )?;
+    let num_layers = manifest.num_layers;
+    let model_dir = params
+        .header_path
+        .parent()
+        .ok_or_else(|| "GGUF header path has no parent directory".to_string())?;
+
+    // Save manifest to disk
+    manifest.save_to_dir(model_dir).map_err(|e| e.to_string())?;
+
+    // Register manifest in the model registry
+    params
+        .shared
+        .model_registry
+        .register_manifest(manifest.clone());
+
+    // Store GGUF metadata
+    params.shared.gguf_meta.insert(model_id.clone(), meta);
+
+    // Register this node as holder of the downloaded shards
+    for &shard_idx in params.shard_indices {
+        let shard_id = crate::types::ShardId {
+            model_id: model_id.clone(),
+            index: shard_idx,
+        };
+        params
+            .shared
+            .model_registry
+            .record_shard_holder(shard_id, node_id.clone());
+    }
+
+    tracing::info!(
+        model = %model_id,
+        shards_registered = params.shard_indices.len(),
+        num_layers,
+        "Generated manifest and registered shards from HF download"
+    );
+
+    Ok(())
+}
+
 /// Build a `ModelManifest` with standard zero-defaults for fields that are
 /// filled in later (params, quantization, tokenizer hash, license).
 /// Computes and sets `manifest_hash` automatically.

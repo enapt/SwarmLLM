@@ -2211,18 +2211,23 @@ impl HealthMonitor {
         if snapshot.entries.is_empty() {
             return;
         }
-        // Cap the announcement to the wire limit; entries are already
-        // sorted by score descending in `compute_wishlist`, so a simple
-        // truncate gives us the top-K.
+        // The ANNOUNCED score, never `score`: it leaves out the regional
+        // demand, which counts the owner's own requests (#389 (a)). Ranked and
+        // capped by it too, so a model does not make the list for being the
+        // owner's.
         const ANNOUNCE_CAP: usize = 64;
-        let entries: Vec<crate::types::WishlistAnnouncementEntry> = snapshot
+        let mut ranked: Vec<&crate::model::auto_manage::wishlist::WishlistEntry> = snapshot
             .entries
             .iter()
+            .filter(|e| e.announced_score > 0)
+            .collect();
+        ranked.sort_by_key(|e| std::cmp::Reverse(e.announced_score));
+        let entries: Vec<crate::types::WishlistAnnouncementEntry> = ranked
+            .into_iter()
             .take(ANNOUNCE_CAP)
-            .filter(|e| e.score > 0)
             .map(|e| crate::types::WishlistAnnouncementEntry {
                 model_id: crate::types::ModelId(e.model_id.clone()),
-                score: e.score,
+                score: e.announced_score,
             })
             .collect();
         if entries.is_empty() {

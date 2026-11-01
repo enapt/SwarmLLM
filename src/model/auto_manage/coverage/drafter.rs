@@ -84,8 +84,7 @@ impl AutoShardManager {
     /// a drafter candidate: not a backup copy, a family this build runs, its
     /// upload settled, not switched off by policy, no part deleted by the
     /// owner, trusted the way a new model
-    /// must be to be adopted, not one with its safety training removed that the
-    /// owner did not choose — and a header that can be learned: here already,
+    /// must be to be adopted — and a header that can be learned: here already,
     /// or a HuggingFace source not tried in vain lately
     /// (`SharedState::ensure_model_geometry`'s cooldown).
     fn may_fetch_as_a_drafter(&self, m: &ModelManifest) -> bool {
@@ -93,7 +92,6 @@ impl AutoShardManager {
         if crate::model::manifest::is_backup_artifact_id(&m.id.0)
             || state.refused_model(&m.id).is_some()
             || !state.canonical_allows_acquisition(&m.id)
-            || state.unchosen_uncensored_model(&m.id)
         {
             return false;
         }
@@ -192,12 +190,16 @@ impl AutoShardManager {
         &self,
         shard_id: &ShardId,
     ) -> bool {
-        if shard_id.index == MMPROJ_SHARD_INDEX
-            || self.shared_state.models.drafters_wanted.is_empty()
-        {
+        shard_id.index != MMPROJ_SHARD_INDEX && self.drafts_for_a_split(&shard_id.model_id)
+    }
+
+    /// Is `model` the drafter of a split this computer runs, or the one it is
+    /// fetching to? A drafter's use counts toward the model it drafts for, so
+    /// the model-level answer is asked too (`unused::nobody_runs`, #389 (d)).
+    pub(in crate::model::auto_manage) fn drafts_for_a_split(&self, model: &ModelId) -> bool {
+        if self.shared_state.models.drafters_wanted.is_empty() {
             return false;
         }
-        let model = &shard_id.model_id;
         // The cached answer only: prune asks of every part it holds.
         self.targets_wanting_a_drafter()
             .iter()

@@ -4800,6 +4800,26 @@ and served nothing while spending ~2.6 Mbit/s.
   `the_demand_we_gossip_is_the_demand_we_measured`. **GossipSub already carries
   the originator's message to every node — re-originating is not what makes it
   travel.**
+- **And of what it measured, only work done FOR PEERS** (2026-11-01, #389
+  (a)). `local_region_demand` was the EMA of `model_request_counts`, which the
+  router bumps for EVERY request it takes, the owner's own included, and the
+  monitor published it as `ModelDemandGossip { model_id, decayed_rate,
+  publisher }` under this node's id every 30 s: on a computer one person uses,
+  that was the model they were using, to about ten minutes, sent to every
+  peer. The wishlist announcement leaked the same fact through its score's
+  regional-demand term (up to 25 of 100). Now the gossiped half reads
+  `models.requests_served_for_peers`, written only by
+  `SharedState::note_request_served_for_a_peer` — a whole-model hand-off and a
+  split led for a peer (`dispatch::remote_generate`), and the first forward of
+  a peer's request through a segment here (`dispatch::layer_forward`) — and
+  the announcement carries `WishlistEntry::announced_score`, the score without
+  that term, ranked and capped by it. The owner's requests still reach
+  `region_demand`, this node's own view, where they hold the owner's copies
+  and the replica target. What stays visible: the capability lists the layers
+  a node has LOADED, so a model kept loaded for its owner shows either way —
+  why this was P2, not P1. Tests:
+  `the_owners_requests_are_never_gossiped_and_a_peers_are`,
+  `the_announced_score_leaves_out_the_demand_the_owner_filed`.
 - **A newcomer is caught up POINT TO POINT.** Gossip cannot be addressed to one
   peer, so answering "someone new connected" with a topic-wide re-announce made
   one join cost every node a full copy of every manifest: inbound on

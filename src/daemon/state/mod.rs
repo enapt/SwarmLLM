@@ -1166,10 +1166,12 @@ pub struct SharedState {
     /// re-originating it was never what made it travel.
     pub region_demand: DashMap<(crate::types::ModelId, String), f64>,
     /// Demand this node MEASURED itself, per model, always for its own region:
-    /// the EMA of `models.model_request_counts`, maintained by
-    /// `auto_manage::manager::decay_request_counts` and read only by the health
-    /// monitor's gossip publisher. A node that has served nothing has nothing
-    /// here and so says nothing.
+    /// the EMA of `models.requests_served_for_peers` — work served FOR PEERS,
+    /// never the owner's own requests (#389 (a): on a node one person uses,
+    /// that was the model they were using, to about ten minutes, sent to every
+    /// peer) — maintained by `auto_manage::manager::decay_request_counts` and
+    /// read only by the health monitor's gossip publisher. A node that has
+    /// served no peer has nothing here and so says nothing.
     pub local_region_demand: DashMap<crate::types::ModelId, f64>,
     pub dht_query_tx: mpsc::Sender<crate::types::ModelId>,
 
@@ -1637,6 +1639,7 @@ impl SharedState {
                 kept_on_this_computer_unread: std::sync::atomic::AtomicBool::new(kept_unread),
                 metered: Default::default(),
                 model_request_counts: DashMap::new(),
+                requests_served_for_peers: DashMap::new(),
                 resource_schedule: RwLock::new(config.resources.schedule.clone()),
                 prune_history: RwLock::new(VecDeque::new()),
                 shard_p2p_failed: dashmap::DashSet::new(),
@@ -1662,6 +1665,28 @@ impl SharedState {
                 hf_trending_cache: arc_swap::ArcSwap::from_pointee(
                     crate::model::huggingface::HfTrendingSnapshot::default(),
                 ),
+                hf_popular: arc_swap::ArcSwap::from_pointee(
+                    db.get_json::<crate::model::huggingface::popular::PopularSnapshot>(
+                        crate::model::huggingface::popular::POPULAR_TREE,
+                        crate::model::huggingface::popular::POPULAR_KEY,
+                    )
+                    .ok()
+                    .flatten()
+                    .unwrap_or_default(),
+                ),
+                model_use: {
+                    let map = DashMap::new();
+                    if let Ok(pairs) = db
+                        .get_all_json::<crate::model::auto_manage::unused::ModelUse>(
+                            crate::model::auto_manage::unused::USE_TREE,
+                        )
+                    {
+                        for (key, record) in pairs {
+                            map.insert(crate::types::ModelId(key), record);
+                        }
+                    }
+                    map
+                },
                 foreign_wishlist: DashMap::new(),
                 quant_recommendations: arc_swap::ArcSwap::from_pointee(
                     crate::model::auto_manage::quant::QuantRecommendations::default(),
@@ -3242,16 +3267,41 @@ impl SharedState {
         }
     }
 
+    /// Did this computer's owner choose `model_id` — download it from the
+    /// dashboard or pin it (`pinned_by_user`; a download pins), keep it on this
+    /// computer, make it the default model, or give it prompt privacy by hand?
+    /// The one answer to "is this model the owner's?": nothing automatic gives
+    /// back what it names (#389 (d)), and only what it names may be picked for
+    /// someone who did not pick it when the model is uncensored.
+    pub fn owner_chose(&self, model_id: &crate::types::ModelId) -> bool {
+        self.models
+            .model_trust
+            .get(model_id)
+            .is_some_and(|t| t.pinned_by_user)
+            || self.kept_on_this_computer(model_id)
+            || self.cfg().inference.default_model == model_id.0
+            || self.privacy_explicitly_enabled_for(model_id)
+    }
+
+    /// Do people outside the swarm run `model_id` (#389 (b))? The day's reading
+    /// of HuggingFace's GGUF list names it — one file per base model
+    /// (`huggingface::popular`). `None` while no reading is fresh
+    /// (`popular::MOST_SNAPSHOT_AGE_SECS`): a node offline, or one HuggingFace
+    /// has not answered for days, cannot say, and a caller must never take that
+    /// for "nobody runs it".
+    pub fn popular_outside_the_swarm(&self, model_id: &crate::types::ModelId) -> Option<bool> {
+        let snapshot = self.models.hf_popular.load();
+        snapshot
+            .fresh(chrono::Utc::now().timestamp())
+            .then(|| snapshot.names_model(&model_id.0))
+    }
+
     /// Is `model_id` a model with its safety training removed, or marked as
     /// adult content (`model::huggingface::is_uncensored_model`, by its id,
     /// its name or the repo it comes from), that this computer's owner has not
-    /// chosen? Such a model is never hosted automatically — prune sheds it and
-    /// the download pass does not fetch it (`AutoShardManager::would_shed_copy`)
-    /// — and never picked for someone who did not pick it (`auto`, the chat
-    /// picker's default). Field report 2026-10-15.
-    ///
-    /// Chosen means downloaded or pinned (`pinned_by_user`), kept on this
-    /// computer, made the default model, or given prompt privacy by hand.
+    /// chosen ([`Self::owner_chose`])? Such a model is never picked for someone
+    /// who did not pick it (`auto`, the chat picker's default; field report
+    /// 2026-10-15). Hosting it is decided as for any model (#389 (c)).
     pub fn unchosen_uncensored_model(&self, model_id: &crate::types::ModelId) -> bool {
         let marked = |name: &str| crate::model::huggingface::is_uncensored_model(name, &[]);
         let is_marked = marked(&model_id.0)
@@ -3264,15 +3314,7 @@ impl SharedState {
         if !is_marked {
             return false;
         }
-        let chosen = self
-            .models
-            .model_trust
-            .get(model_id)
-            .is_some_and(|t| t.pinned_by_user)
-            || self.kept_on_this_computer(model_id)
-            || self.cfg().inference.default_model == model_id.0
-            || self.privacy_explicitly_enabled_for(model_id);
-        !chosen
+        !self.owner_chose(model_id)
     }
 
     /// Make a model's geometry available to the ROUTER, fetching the header
@@ -3682,6 +3724,31 @@ impl SharedState {
                 );
             }
         }
+    }
+
+    /// This node took a request for `model_id` FROM A PEER (#389 (a)): a
+    /// whole-model hand-off, a split it leads for a peer, or the first forward
+    /// of a peer's request through a segment here. Counted for the demand this
+    /// node gossips (`local_region_demand`) — the one writer of
+    /// `models.requests_served_for_peers`. Not counted: a request from a member
+    /// of this node's pool (`requester`, `pool::scope::is_pool_member`) — the
+    /// owner's other devices are the owner's use — and a model not in the
+    /// registry, so a peer naming arbitrary ids cannot grow the map.
+    pub fn note_request_served_for_a_peer(
+        &self,
+        model_id: &crate::types::ModelId,
+        requester: Option<&crate::types::NodeId>,
+    ) {
+        if self.model_registry.get_manifest(model_id).is_none()
+            || requester.is_some_and(|r| crate::pool::scope::is_pool_member(self, r))
+        {
+            return;
+        }
+        self.models
+            .requests_served_for_peers
+            .entry(model_id.clone())
+            .or_insert_with(|| std::sync::atomic::AtomicU64::new(0))
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// `node_id` saw a request for `model_id` through to the end — resets its

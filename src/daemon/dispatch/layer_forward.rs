@@ -344,6 +344,20 @@ pub(super) async fn handle_layer_forward(
     // RAII, so the count survives the several early returns below (worker
     // failure, and the TP branch's encoding failures).
     let _serving_guard = crate::daemon::state::ServingGuard::new(&shared_state, model_id.clone());
+    // A request a peer asked of this node, counted once — at its prompt pass's
+    // first forward — toward the demand this node gossips (#389 (a)). The
+    // requester is the coordinator, never the previous hop.
+    if sequence_num == 0
+        && forward
+            .prompt_span
+            .as_ref()
+            .is_none_or(|span| span.starts_at(index_pos))
+    {
+        shared_state.note_request_served_for_a_peer(
+            &model_id,
+            requester_node_id.map(crate::types::NodeId).as_ref(),
+        );
+    }
 
     // Read before the forward is handed to the worker.
     let walked_guesses = walk_to_judge(&forward, turn.is_some(), is_last);

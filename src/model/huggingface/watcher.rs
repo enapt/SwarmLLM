@@ -285,10 +285,26 @@ pub struct HfWatcher {
     /// When each origin was last asked about (`origins_to_ask`). Memory only:
     /// a restart asks again, as its first poll always has.
     asked: parking_lot::Mutex<HashMap<crate::types::ModelId, Instant>>,
+    /// The daily read of what people run (#389 (b)), ~5 MB: an inactivity
+    /// timeout, never `client`'s 30 s total, which would make a connection
+    /// under ~1.3 Mbit/s a condition for the swarm's models to follow what
+    /// people run (`.claude/rules/architecture.md` § Timeouts).
+    list_client: reqwest::Client,
+    /// Where a model registered from the reading is announced.
+    network_tx: tokio::sync::mpsc::Sender<crate::types::NetworkCommand>,
+    /// The Unix day, and how many models were registered from the reading in it
+    /// (`popular::MOST_REGISTERED_A_DAY`).
+    registered_today: parking_lot::Mutex<(i64, u32)>,
+    /// Nothing is registered before `popular::REGISTER_AFTER_UPTIME` from here.
+    started: Instant,
 }
 
 impl HfWatcher {
-    pub fn new(shared_state: Arc<SharedState>, shutdown_rx: watch::Receiver<bool>) -> Self {
+    pub fn new(
+        shared_state: Arc<SharedState>,
+        network_tx: tokio::sync::mpsc::Sender<crate::types::NetworkCommand>,
+        shutdown_rx: watch::Receiver<bool>,
+    ) -> Self {
         // Through `crate::http::build_client`, not a bare `Client::builder()`:
         // that helper exists so the build-failure fallback and any future shared
         // default reach every client, and this one is long-lived background
@@ -301,12 +317,24 @@ impl HfWatcher {
                 env!("CARGO_PKG_VERSION")
             ))
         });
+        let list_client = crate::http::build_client(|b| {
+            b.connect_timeout(Duration::from_secs(15))
+                .read_timeout(Duration::from_secs(30))
+                .user_agent(format!(
+                    "SwarmLLM/{} (+swarmllm.app)",
+                    env!("CARGO_PKG_VERSION")
+                ))
+        });
         Self {
             shared_state,
             shutdown_rx,
             interval: Duration::from_secs(HF_WATCHER_INTERVAL_SECS),
             client,
             asked: parking_lot::Mutex::new(HashMap::new()),
+            list_client,
+            network_tx,
+            registered_today: parking_lot::Mutex::new((0, 0)),
+            started: Instant::now(),
         }
     }
 
@@ -361,6 +389,15 @@ impl HfWatcher {
                 }
             }
 
+            // What people run (#389 (b)): read once a day, and the models it
+            // names kept trusted and registered on every pass — so a reading
+            // saved before a restart acts at once, and one HuggingFace cannot
+            // refresh still acts until it goes stale.
+            if let Err(e) = self.refresh_popular_if_due().await {
+                tracing::warn!(error = %e, "HfWatcher: what people run was not read; the last reading stands");
+            }
+            self.keep_popular_models().await;
+
             // Until the next poll, a model given a new origin is asked about
             // within a minute: peers on auto-manage fetch no part of a model
             // they hold none of until it is trusted, and an hourly poll made
@@ -413,37 +450,9 @@ impl HfWatcher {
     }
 
     async fn poll_once(&self) -> Result<usize, PollError> {
-        let resp =
-            self.client.get(HF_API_URL).send().await.map_err(|e| {
-                PollError::Other(SwarmError::Internal(format!("HfWatcher fetch: {e}")))
-            })?;
-        if resp.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
-            let retry_after_secs = resp
-                .headers()
-                .get(reqwest::header::RETRY_AFTER)
-                .and_then(|v| v.to_str().ok())
-                .and_then(crate::model::huggingface::parse_retry_after)
-                .unwrap_or(HF_WATCHER_BASE_BACKOFF_SECS);
-            return Err(PollError::RateLimited { retry_after_secs });
-        }
-        if !resp.status().is_success() {
-            return Err(PollError::Other(SwarmError::Internal(format!(
-                "HfWatcher status {}",
-                resp.status()
-            ))));
-        }
-        // We bound the body size — HF /api/models with limit=100&full=true
-        // returns ~1-2 MB. 4 MB is comfortable headroom.
-        let bytes = resp
-            .bytes()
-            .await
-            .map_err(|e| PollError::Other(SwarmError::Internal(format!("HfWatcher body: {e}"))))?;
-        if bytes.len() > 4 * 1024 * 1024 {
-            return Err(PollError::Other(SwarmError::Internal(format!(
-                "HfWatcher response too large ({} bytes)",
-                bytes.len()
-            ))));
-        }
+        // HF /api/models with limit=100&full=true returns ~1-2 MB; 4 MB is
+        // comfortable headroom.
+        let bytes = get_capped(&self.client, HF_API_URL, 4 * 1024 * 1024).await?;
         let raw: Vec<HfApiModel> = serde_json::from_slice(&bytes).map_err(|e| {
             PollError::Other(SwarmError::Internal(format!("HfWatcher decode: {e}")))
         })?;
@@ -465,14 +474,12 @@ impl HfWatcher {
             // An embedding model can carry `text-generation` among its tags
             // (Qwen3-Embedding-0.6B does), which let it into this list — shown
             // as "Chat", auto-hosted, and chatted with to 30 s of one word
-            // (field report 2026-10-15).
-            // Nor is a model with its safety training removed, or tagged as
-            // adult content, recommended to every node: this list feeds what
-            // the swarm wants and what a new user is shown. Search still finds
-            // it for someone who looks (field report 2026-10-15).
+            // (field report 2026-10-15). Content is not judged (#389 (c)):
+            // what is held follows use (`auto_manage::unused`), and a model
+            // with its safety training removed is only never pre-selected for
+            // someone who did not pick it (`SharedState::unchosen_uncensored_model`).
             if !is_text
                 || crate::model::huggingface::is_embedding_repo(m.pipeline_tag.as_deref(), &m.tags)
-                || crate::model::huggingface::is_uncensored_model(&m.repo_id, &m.tags)
             {
                 continue;
             }
@@ -520,6 +527,235 @@ impl HfWatcher {
             .store(Arc::new(snapshot));
         Ok(count)
     }
+
+    /// What people run (#389 (b)), read once a day (`popular::REFRESH_EVERY_SECS`):
+    /// the list (`popular::HF_POPULAR_URL`), its bases (`popular::choose`) and a
+    /// file for each, from the first of a base's uploads that has one. A base
+    /// whose upload is unchanged keeps the file found before — names do not
+    /// move. Saved, so a restart has it at once. Not offline, not on a metered
+    /// connection: it is something this node does on its own.
+    async fn refresh_popular_if_due(&self) -> Result<(), PollError> {
+        let state = &self.shared_state;
+        let now = chrono::Utc::now().timestamp();
+        if !state.models.hf_popular.load().due(now)
+            || state
+                .credits
+                .offline_mode
+                .load(std::sync::atomic::Ordering::Relaxed)
+            || state.metered_hold().await
+        {
+            return Ok(());
+        }
+        let popular = crate::model::huggingface::popular::HF_POPULAR_URL;
+        let most = crate::model::huggingface::popular::MOST_LIST_BYTES;
+        let bytes = get_capped(&self.list_client, popular, most).await?;
+        let listed: Vec<crate::model::huggingface::popular::ListedRepo> =
+            serde_json::from_slice(&bytes).map_err(|e| {
+                PollError::Other(SwarmError::Internal(format!(
+                    "HfWatcher what people run, decode: {e}"
+                )))
+            })?;
+        let held: std::collections::HashSet<String> = state
+            .models
+            .hf_sources
+            .iter()
+            .map(|e| e.value().repo_id.to_ascii_lowercase())
+            .collect();
+        let mut bases = crate::model::huggingface::popular::choose(
+            &listed,
+            &|arch: &str| {
+                crate::inference::model_arch::ModelArch::from_gguf_arch(arch).is_supported()
+            },
+            &|repo: &str| held.contains(&repo.to_ascii_lowercase()),
+            now,
+        );
+        let before = state.models.hf_popular.load_full();
+        for base in &mut bases {
+            if let Some(known) = before.bases.iter().find(|b| {
+                b.base == base.base && !b.model_id.is_empty() && base.uploads.contains(&b.repo_id)
+            }) {
+                base.repo_id = known.repo_id.clone();
+                base.filename = known.filename.clone();
+                base.model_id = known.model_id.clone();
+                continue;
+            }
+            for upload in base.uploads.clone() {
+                let Some(files) = self.repo_files(&upload).await else {
+                    continue;
+                };
+                if let Some(file) = crate::model::huggingface::popular::pick_file(
+                    files.iter().map(String::as_str),
+                    base.parameters,
+                ) {
+                    base.model_id = crate::model::canonical::model_id_for_gguf_filename(&file);
+                    base.repo_id = upload;
+                    base.filename = file;
+                    break;
+                }
+            }
+        }
+        bases.retain(|b| !b.model_id.is_empty());
+        let snapshot = crate::model::huggingface::popular::PopularSnapshot {
+            bases,
+            fetched_at: now,
+        };
+        if let Err(e) = state.db.put_json(
+            crate::model::huggingface::popular::POPULAR_TREE,
+            crate::model::huggingface::popular::POPULAR_KEY,
+            &snapshot,
+        ) {
+            tracing::warn!(error = %e, "HfWatcher: what people run was not saved — read again after a restart");
+        }
+        tracing::info!(
+            bases = snapshot.bases.len(),
+            models = ?snapshot.bases.iter().map(|b| b.model_id.as_str()).collect::<Vec<_>>(),
+            "HfWatcher: what people run, read"
+        );
+        state.models.hf_popular.store(Arc::new(snapshot));
+        Ok(())
+    }
+
+    /// Keep the models people run trusted ([`keep_trusted`]), and register those
+    /// the swarm has not heard of ([`crate::model::huggingface::popular::register_without_parts`])
+    /// — at most `popular::MOST_REGISTERED_A_DAY` a day, once this node has been
+    /// up `popular::REGISTER_AFTER_UPTIME`, so the swarm's own manifests arrive
+    /// first. Nothing while the reading is stale. Cheap once all are known.
+    async fn keep_popular_models(&self) {
+        use crate::model::huggingface::popular::{
+            register_without_parts, MOST_REGISTERED_A_DAY, REGISTER_AFTER_UPTIME,
+        };
+        let state = &self.shared_state;
+        let snapshot = state.models.hf_popular.load_full();
+        let now = chrono::Utc::now().timestamp();
+        if !snapshot.fresh(now) {
+            return;
+        }
+        let mut woke = false;
+        for base in &snapshot.bases {
+            let mid = crate::types::ModelId(base.model_id.clone());
+            if state.model_registry.get_manifest(&mid).is_none() {
+                if self.started.elapsed() < REGISTER_AFTER_UPTIME
+                    || state
+                        .credits
+                        .offline_mode
+                        .load(std::sync::atomic::Ordering::Relaxed)
+                    || state.metered_hold().await
+                {
+                    continue;
+                }
+                {
+                    let mut day = self.registered_today.lock();
+                    if day.0 != now / 86_400 {
+                        *day = (now / 86_400, 0);
+                    }
+                    if day.1 >= MOST_REGISTERED_A_DAY {
+                        continue;
+                    }
+                    day.1 += 1;
+                }
+                match register_without_parts(state, &self.network_tx, &base.repo_id, &base.filename)
+                    .await
+                {
+                    Ok(registered) => tracing::info!(
+                        model = %registered,
+                        base = %base.base,
+                        downloads = base.downloads,
+                        "HfWatcher: registered a model people run"
+                    ),
+                    Err(e) => {
+                        tracing::warn!(model = %mid, repo = %base.repo_id, error = %e, "HfWatcher: a model people run was not registered");
+                        continue;
+                    }
+                }
+            }
+            woke |= keep_trusted(state, &mid);
+        }
+        if woke {
+            state.models.auto_manage_notify.notify_one();
+        }
+    }
+
+    /// A repo's file names, or `None` on any failure.
+    async fn repo_files(&self, repo_id: &str) -> Option<Vec<String>> {
+        crate::model::huggingface::validate_hf_repo_id(repo_id).ok()?;
+        let url = format!("https://huggingface.co/api/models/{repo_id}");
+        let bytes = get_capped(&self.client, &url, 4 * 1024 * 1024).await.ok()?;
+        let model: HfApiModel = serde_json::from_slice(&bytes).ok()?;
+        Some(model.siblings.into_iter().map(|s| s.rfilename).collect())
+    }
+}
+
+/// GET `url`, its body capped at `most` bytes as it arrives — a server
+/// answering more is refused before more is read. A 429 is `RateLimited`
+/// with HuggingFace's `Retry-After`.
+async fn get_capped(
+    client: &reqwest::Client,
+    url: &str,
+    most: usize,
+) -> Result<Vec<u8>, PollError> {
+    let mut resp = client
+        .get(url)
+        .send()
+        .await
+        .map_err(|e| PollError::Other(SwarmError::Internal(format!("HfWatcher fetch: {e}"))))?;
+    if resp.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
+        let retry_after_secs = resp
+            .headers()
+            .get(reqwest::header::RETRY_AFTER)
+            .and_then(|v| v.to_str().ok())
+            .and_then(crate::model::huggingface::parse_retry_after)
+            .unwrap_or(HF_WATCHER_BASE_BACKOFF_SECS);
+        return Err(PollError::RateLimited { retry_after_secs });
+    }
+    if !resp.status().is_success() {
+        return Err(PollError::Other(SwarmError::Internal(format!(
+            "HfWatcher status {}",
+            resp.status()
+        ))));
+    }
+    let too_large = |n: usize| {
+        PollError::Other(SwarmError::Internal(format!(
+            "HfWatcher response too large (over {most} bytes, {n} read)"
+        )))
+    };
+    if resp.content_length().is_some_and(|n| n > most as u64) {
+        return Err(too_large(0));
+    }
+    let mut body = Vec::new();
+    while let Some(chunk) = resp
+        .chunk()
+        .await
+        .map_err(|e| PollError::Other(SwarmError::Internal(format!("HfWatcher body: {e}"))))?
+    {
+        if body.len() + chunk.len() > most {
+            return Err(too_large(body.len() + chunk.len()));
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body)
+}
+
+/// A model people run is trusted for the download pass (`DemandVerified`)
+/// whatever its strikes (`should_auto_promote`): those count promotions that
+/// drew no request HERE, and while the swarm is small, people outside it are
+/// the evidence (#389). Never over an owner's pin. True when it changed.
+fn keep_trusted(state: &SharedState, model_id: &crate::types::ModelId) -> bool {
+    let mut entry = state
+        .models
+        .model_trust
+        .entry(model_id.clone())
+        .or_insert_with(crate::types::ModelTrustInfo::new_discovered);
+    if entry.pinned_by_user || entry.trust_level >= crate::types::ModelTrustLevel::DemandVerified {
+        return false;
+    }
+    entry.trust_level = crate::types::ModelTrustLevel::DemandVerified;
+    entry.last_auto_promoted_at = Some(chrono::Utc::now());
+    let value = entry.value().clone();
+    drop(entry);
+    if let Err(e) = state.db.put_json("model_trust", &model_id.0, &value) {
+        tracing::warn!(model = %model_id, error = %e, "HfWatcher: trust for a model people run not saved");
+    }
+    true
 }
 
 /// Infer a small set of capability tags from HF metadata. Stable tokens

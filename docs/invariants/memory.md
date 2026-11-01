@@ -1007,6 +1007,14 @@ would stop fetching what demand asks for); every target reading goes through
 
 ### A model nobody chose that has its safety training removed is not hosted automatically (2026-10-15)
 
+> **Hosting part lifted 2026-11-01 (#389 (c))** — the owner's words: "dont filter out uncensored -
+> we want to allow all models just not get carried away". Nothing automatic judges content now:
+> such a model is hosted, fetched, planned a near chain and chosen as a drafter like any other, and
+> given back when nobody runs it (§ "A model nobody runs is given back", below). What stands is the
+> rest of this section's PICKING half: `auto` and the chat picker's default never name one the
+> owner did not choose (`SharedState::unchosen_uncensored_model`, now asked only there). The
+> trending list no longer leaves it out. The text below is the 2026-10-15 rule as it was.
+
 A tester's brand-new laptop held all 8 parts of
 `qwen2.5-coder-7b-instruct-abliterated-q4-k-m` within minutes of starting,
 with nothing chosen, and its chat picker pre-selected it (field report
@@ -1059,6 +1067,84 @@ Tests: `an_uncensored_model_is_hosted_only_by_an_owner_who_chose_it` (red with
 the prune rule off), `auto_never_names_an_uncensored_model_the_owner_did_not_choose`
 (red with the predicate answering "never"),
 `an_uncensored_model_is_told_by_its_name_or_its_tag`.
+
+### A model nobody runs is given back (2026-11-01, #389 (d))
+
+The swarm held 34 models on 2026-11-01, nearly all of 2024 — Qwen2.5 in nine sizes and variants,
+the 0.5B in four copies — most of them this node's test models that peers had copied. Nothing gave
+a model back for not being used: prune acts on disk pressure and the replica target, trust decays
+after seven idle days and deletes nothing, and `update_model_trust` re-promotes any model three
+computers hold to `NetworkPopular` on every tick, so a copied model kept itself trusted.
+
+**The rule** is TinyLFU's admission (Einziger et al., ACM TOS 2017: a newcomer displaces a holding
+only with a higher estimated frequency): a model is held only on evidence it is used.
+`AutoShardManager::nobody_runs` (`auto_manage/unused.rs`) is the one answer, asked in
+`copy_kept_because` — so prune sheds such a copy and the download pass, asking the same through
+`would_shed_once_fetched`, never fetches it — and per model in the prune pass, which gives back
+every part in one pass however few hold it (`PruneCandidate::nobody_runs`, the machinery the
+2026-10-15 rule built: the replica count, busy holders and re-acquirable are skipped, a model IN
+USE is still waited for), its projector too. It answers yes only when a fresh reading of what
+people run does not name the model (`SharedState::popular_outside_the_swarm`, #389 (b)) AND the
+model is none of:
+
+- **run here within `USE_WINDOW_SECS` (14 days) after being watched for it** — the record
+  (`ModelUse`, `models.model_use`, saved in `model_use`) begins at this node's first part of the
+  model and ends with its last; `watch_model_use`, at the start of every prune pass, folds in a
+  request a worker ran (`ModelProcessPool::model_used_secs_ago`: `register_response`, which every
+  execution path passes, the owner's and peers' alike — a peer's QUESTION does not count) and one
+  the router took (`ModelTrustInfo::last_request_at`). A new copy has the window as its trial,
+  and an upgrade gives nothing back for 14 days. Twice trust's 7 idle days, so a model run at
+  weekends survives one missed;
+- **chosen by this computer's owner** (`SharedState::owner_chose`: pinned — a dashboard download
+  pins — kept on this computer, the default model, prompt privacy set by hand);
+- **asked for on the swarm now** (`coverage::asked_for`: the demand this node routed, or peers'
+  gossip of work they served for others — so the parts carrying, a near chain and the holes rule
+  fetch are always of a model asked for);
+- **a reference model** (`model::reference`: testers compare results on them);
+- **the drafter of a split this computer runs** (`drafts_for_a_split`: its work is counted
+  toward the model it drafts for, and a drafter given back could never be fetched to be used).
+
+**No fresh reading, nothing given back for want of use** (`popular::MOST_SNAPSHOT_AGE_SECS`, 3
+days): a node offline, or one HuggingFace has not answered, cannot tell a model nobody runs from
+one it has not heard about. Swarm use only ever SPARES, never evicts: with a handful of testers it
+says little about what people run (the owner, 2026-11-01), so the outside reading decides what is
+added and what is kept beyond use.
+
+**One quantisation per model** (#389 (e)) follows: the reading names one file per base
+(`popular::pick_file` — Q4_K_M, Q8_0 at 2B and under), so a second quantisation of a base people
+run is held only while it is used or chosen.
+
+What a change must keep: one predicate, asked by both passes (gotcha #795's loop); the record
+starts only from a held part, so "unused" is never claimed of a span nobody watched; a model in
+use is never deleted under it. Tests (`scoring::tests`):
+`a_model_nobody_runs_is_given_back_and_each_kind_of_use_keeps_it`,
+`a_reference_model_is_never_given_back_for_want_of_use`,
+`prune_gives_back_a_model_nobody_runs_however_few_hold_it`,
+`prune_waits_for_a_model_nobody_runs_while_it_is_in_use`,
+`a_held_model_is_watched_from_its_first_part_and_forgotten_with_its_last`,
+`an_uncensored_model_is_hosted_like_any_other`; `unused::tests::*` for the window.
+
+### What people run is read from outside the swarm, every day (2026-11-01, #389 (b))
+
+The HuggingFace watcher adopted from `library=gguf&sort=downloads&limit=100`, whose top on
+2026-11-01 was MiniLM, BERT, bge, audio and image repos — HuggingFace counts every GET of a weight
+file (`docs/hub/models-download-stats`), so automated pulls of small models lead it — at 100,000
+downloads (10,000 from a trusted publisher). `HfWatcher::refresh_popular_if_due` reads, once a day,
+GGUF repos with their GGUF facts (`?filter=gguf&expand[]=gguf`, `popular::HF_POPULAR_URL`): only
+families this build loads, only chat pipelines, summed PER BASE MODEL
+(`base_model:quantized:<repo>`), the top three per size tier (3/6/12/24 GB at Q4_K_M), each held
+as ONE upload — the trusted publishers' order (`model::canonical`'s), an upload adoptable only on
+its OWN downloads and a day old (the watcher's anti-pump rule) — and one file. On 2026-11-01 that
+read Qwen3.8-27B, Qwen3.6-35B-A3B, Gemma 4 12B / 26B-A4B, Qwen3.5-9B / 4B on top whether sorted by
+trending, downloads or likes. The reading is saved (`hf_popular`), so a restart acts on it at once,
+and kept until 3 days old. Each pass of the watcher keeps its models trusted (`keep_trusted`:
+`DemandVerified` whatever their strikes — those count promotions that drew no request HERE — never
+over a pin), exempts them from trust decay, and registers up to 3 a day the swarm has not heard of
+(`popular::register_without_parts`: the header and manifest, no part — the dashboard download's
+own steps, `model::manifest::generate_manifest_from_header`), after 10 minutes of uptime so the
+swarm's own manifests arrive first. Not offline, not on a metered connection. The list is read
+through a client with a 30 s INACTIVITY timeout: ~5 MB under the watcher's 30 s total would make a
+connection under ~1.3 Mbit/s a condition for the swarm to follow what people run.
 
 ### A download nobody asked for waits while the connection is metered (2026-10-15)
 
@@ -3062,8 +3148,8 @@ against 5.18 — the larger drafter keeps ~20% more, so the largest that can dra
 - **The download pass's own gates** (`may_fetch_as_a_drafter`): not a backup artifact, not a
   refused family, the canonical upload settled, not off by policy, no part the owner deleted
   (scoring never fetches one back, so such a model would be named and never come), trust ≥
-  `DemandVerified` or pinned (what adopting a model requires), not an uncensored model nobody
-  chose; offline and metered connections fetch nothing (the pass's own `metered_hold`).
+  `DemandVerified` or pinned (what adopting a model requires) — content is not judged (#389 (c));
+  offline and metered connections fetch nothing (the pass's own `metered_hold`).
 - **Both passes ask one answer** (gotcha #795): the download pass fetches
   `parts_of_a_drafter_to_fetch` past the replica target and the ring (a drafter must be HERE;
   the target counts the swarm's copies) with `CARRY_BONUS`; prune keeps `copy_drafts_for_a_split`

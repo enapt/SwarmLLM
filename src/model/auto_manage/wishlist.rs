@@ -104,6 +104,12 @@ pub struct WishlistEntry {
     /// shard-level score we'd compute from `gather_candidates`, normalised.
     /// Frontend renders as a soft heat indicator, not a precise number.
     pub score: u32,
+    /// The score this node may ANNOUNCE to peers (`WishlistAnnouncement`,
+    /// #389 (a)): `score` without its regional-demand component, which counts
+    /// the owner's own requests — announced, it told every peer which model
+    /// the owner was using. Never serialised: the dashboard shows `score`.
+    #[serde(skip)]
+    pub announced_score: u32,
     /// Human-readable reasons we surfaced this entry. Each tag is an i18n
     /// key under `wishlist.why.*` so the frontend localises them. Examples:
     /// `wishlist.why.your_region_needs_this`, `wishlist.why.popular_on_swarm`,
@@ -353,8 +359,12 @@ pub fn compute_wishlist(state: &SharedState) -> Wishlist {
                 regional_demand = *d.value();
             }
         }
+        // Kept out of what this node announces (#389 (a)): the owner's own
+        // requests are in it.
+        let mut demand_points = 0.0;
         if regional_demand > 0.0 {
-            score += 25.0 * (regional_demand / (regional_demand + 5.0));
+            demand_points = 25.0 * (regional_demand / (regional_demand + 5.0));
+            score += demand_points;
             why_tags.push("wishlist.why.your_region_needs_this".to_string());
         }
 
@@ -480,6 +490,7 @@ pub fn compute_wishlist(state: &SharedState) -> Wishlist {
             display_name: manifest.name.clone(),
             status: final_status,
             score: score_clamped,
+            announced_score: (score - demand_points).clamp(0.0, 100.0).round() as u32,
             why_tags,
             swarm_replicas: holders.len() as u32,
             target_replicas,
@@ -575,6 +586,7 @@ pub fn compute_wishlist(state: &SharedState) -> Wishlist {
                 display_name,
                 status: cand_status,
                 score: cand_score.clamp(0.0, 100.0).round() as u32,
+                announced_score: cand_score.clamp(0.0, 100.0).round() as u32,
                 why_tags,
                 swarm_replicas: 0,
                 target_replicas: recommended_replica_target(online_node_count, 0.0),
@@ -639,6 +651,58 @@ fn recommended_replica_target(online_nodes: u32, regional_demand: f64) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #389 (a): the score this node announces leaves out the regional
+    /// demand, which counts the owner's own requests. With demand filed, the
+    /// announced score is what the score is without it; the dashboard's score
+    /// still shows it.
+    #[test]
+    fn the_announced_score_leaves_out_the_demand_the_owner_filed() {
+        let (state, _manager) = super::super::test_support::make_test_manager_with_config(
+            crate::config::Config::default(),
+        );
+        // This node's region as it is learned (`effective_region_sync`).
+        *state
+            .detected_region
+            .try_write()
+            .expect("nothing else holds it yet") = Some("EU".into());
+        let mid = super::super::test_support::register_manifest_with_shards(
+            &state,
+            "owners-model",
+            8,
+            &[(0, 8)],
+        );
+        state.model_registry.record_shard_holder(
+            ShardId {
+                model_id: mid.clone(),
+                index: 0,
+            },
+            state.identity.node_id().clone(),
+        );
+        let entry_of = |w: &Wishlist| {
+            w.entries
+                .iter()
+                .find(|e| e.model_id == mid.0)
+                .cloned()
+                .expect("the model is listed")
+        };
+        let without = entry_of(&compute_wishlist(&state));
+        assert_eq!(
+            without.announced_score, without.score,
+            "control: no demand, nothing to leave out"
+        );
+
+        state.region_demand.insert((mid.clone(), "EU".into()), 50.0);
+        let with = entry_of(&compute_wishlist(&state));
+        assert!(
+            with.score > without.score,
+            "the dashboard's score counts it"
+        );
+        assert_eq!(
+            with.announced_score, without.score,
+            "the announced score does not"
+        );
+    }
 
     #[test]
     fn replica_target_small_swarm() {
@@ -772,6 +836,7 @@ mod tests {
             display_name: "Mistral-7B".into(),
             status: WishlistStatus::Candidate,
             score: 70,
+            announced_score: 70,
             why_tags: vec!["wishlist.why.popular_on_hf".into()],
             swarm_replicas: 0,
             target_replicas: 2,

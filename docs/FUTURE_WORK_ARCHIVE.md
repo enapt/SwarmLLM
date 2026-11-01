@@ -17013,3 +17013,79 @@ a balance term for a cards-only chain whose reply flows, once a placement that s
 is seen on a real chain (a model needing about one and a half cards, planned over three, is the
 shape with room to spare).
 
+### #389 — closed 2026-11-01 (the entry as it stood when closed, word for word)
+
+#### #389 — The swarm keeps models nobody uses, chooses new ones by a count automated pulls inflate, and its demand gossip names the owner's model
+`P2` (a)-(e), new users first · models · **OPEN** — 2026-11-01 · user-raised
+
+The owner's words (2026-11-01): "lots of semi useless models on the swarm, that aren't used … we need
+models people are going to actually use"; "while we need to support all models, we dont want a bunch of
+models clogging up or not being pruned"; "dont filter out uncensored - we want to allow all models just
+not get carried away"; "we still dont have many testers, so use/popularity on swarm wont be a good
+indicator of actual popularity yet"; "ensure we dont get stalled or dont update".
+
+**What the swarm holds** (`/api/admin/models` on this node, 2026-11-01): 34 models, nearly all of 2024
+— Qwen2.5 in nine sizes and variants (the 0.5B in four copies: fp16, f16, q8_0, q4_k_m), Llama 3.1/3.2,
+Mistral 7B v0.3, Phi-3.5, Gemma 2, TinyLlama, LLaVA 1.5, and an embedding model no one can chat with.
+Most are this node's test models that peers copied.
+
+**What people run** (r/LocalLLaMA through 2026 — the subreddit's search feed, `search.rss`, the only
+form it serves an unauthenticated client — and the April 2026 "Best Local LLMs" megathread):
+Qwen 3.5/3.6/3.8 (27B dense, 35B-A3B, 9B and 4B on small cards) and Gemma 4 (E4B, 12B, 26B-A4B, 31B);
+on 48 GB and more, GLM, gpt-oss and Qwen3-Coder-Next. Qwen 3.6 and 3.8 are HuggingFace's `qwen3_5` /
+`qwen3_5_moe` — our `qwen35` / `qwen35moe` — and Gemma 4 is `gemma4`: every one of them loads today.
+
+**Why the set drifted** (code, 2026-11-01):
+1. **In**: the HuggingFace watcher's feed is `library=gguf&sort=downloads&limit=100`
+   (`model/huggingface/watcher.rs`): its top 100 today is MiniLM, BERT, bge, audio and image repos,
+   and Qwen3-0.6B at 24M pulls a month — HuggingFace counts every GET of a weight file
+   (`docs/hub/models-download-stats`), so test pipelines and mirrors dominate. A model is adopted at
+   100,000 (10,000 from a trusted publisher) of that count.
+2. **Out**: nothing gives back a model for not being used. Prune acts on disk pressure (0.5 / 0.8 /
+   0.95, `prune.rs`) and the replica target; trust decays after 7 idle days and deletes nothing.
+3. **Its use**: `model_request_counts` counts only the router's path, lives in memory (a restart
+   forgets it), and with a handful of testers says almost nothing about what is worth holding.
+
+**(a) The demand gossip tells the swarm which model the owner is using.** `router/mod.rs`
+counts EVERY request the router takes, the owner's own included, into `model_request_counts`;
+`AutoShardManager::decay_request_counts` folds it into `local_region_demand`; the monitor's
+`broadcast_region_demand` publishes that as `ModelDemandGossip { model_id, decayed_rate, publisher }`
+under this node's id every 30 s. On a node one person uses, that is the model they are using now, to
+about 10 minutes, sent to every peer. The same class as the rule that a worker never times the
+OWNER's decode steps for gossip (`arch-scheduling.md`). **Fix**: count for gossip only work served FOR
+peers; the owner's use stays on this computer, where it protects the owner's own copies. P2, not P1:
+the capability every peer reads already lists the layers a node has LOADED, so a model kept loaded
+for its owner shows either way; the gossip adds when it is used and how much.
+
+**(b) The primary signal is what people run outside the swarm, read on a schedule** — never a list
+that changes only at a release. HuggingFace's model list filtered to GGUF repos whose
+`gguf.architecture` this build loads (`?filter=gguf&expand[]=gguf`, embedding / speech / image
+pipeline tags dropped) put the right families on top whether sorted by trending, 30-day downloads or
+likes (2026-11-01: Qwen3.8-27B first on all three, then Qwen3.6-35B-A3B, Gemma 4 12B / 26B-A4B,
+Qwen3.5-9B / 4B) — but its tail is many uploads of ONE base. So popularity is summed PER BASE MODEL
+(`base_model:quantized:<repo>`), and the swarm holds ONE upload of each (`model::canonical`, the
+trusted publishers' order); a fine-tune is a model of its own with its own count. Swarm use is blended
+in with a weight that grows with the swarm. Cross-checks seen: Ollama's library sorts by pulls
+(all-time, per family, HTML only); OpenRouter publishes daily tokens per model
+(`/api/v1/datasets/rankings-daily`, an API key, CC BY 4.0); AI Horde shows queue against workers per
+model (`/api/v2/status/models`) — and that workers mostly do not follow it (a 4,608-deep queue on one
+worker, 2026-11-01): publishing demand informs, the node has to act on it.
+
+**(c) Every model is allowed; holdings are bounded.** No content filter in anything automatic: an
+uncensored or abliterated model is hosted when used and given back when not, like any other (this
+lifts the 2026-10-15 rule that hosted one only where its owner chose it — `docs/invariants/memory.md`;
+what stays is that such a model is never pre-selected as a new user's default). ⚠ Nothing fetches a
+model's parts when a request arrives and no node holds it (read 2026-11-01: the router waits for
+holders, `retry_within_grace`, and fails; #286 is the replica target's hold, not a fetch), so the
+exit below spares everything the world or the swarm runs, and a model it gives back entirely is one
+neither does.
+
+**(d) Out**: a copy this node fetched by itself is given back when its model is in none of: the
+outside top set for the card sizes the swarm has, used on the swarm lately, or chosen by an owner —
+TinyLFU's admission rule (Einziger et al., ACM TOS 2017: a newcomer displaces a holding only with a
+higher estimated frequency), with a trial window so a new model is not judged on its first day.
+
+**(e) One quantisation per model per size** (Q4_K_M; Q8_0 at 2B and under, the drafters'), so the
+0.5B is not held four times.
+
+**Families people run that do not load yet** → #390.

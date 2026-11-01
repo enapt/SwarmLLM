@@ -214,6 +214,14 @@ pub struct ModelMgmt {
     /// `SharedState::admit_a_peers_manifest` (`judge_peer_manifest`).
     pub peer_models: super::peer_models::PeerModels,
     pub model_request_counts: DashMap<crate::types::ModelId, AtomicU64>,
+    /// Requests this node served FOR A PEER, per model (#389 (a)): a whole-model
+    /// hand-off, a split it leads for a peer, or the first forward of a peer's
+    /// request through a segment held here. The ONLY input to the demand this
+    /// node gossips (`SharedState::local_region_demand`): the owner's own
+    /// requests (`model_request_counts`) stay on this computer, where they
+    /// protect the owner's copies. Written only by
+    /// `SharedState::note_request_served_for_a_peer`.
+    pub requests_served_for_peers: DashMap<crate::types::ModelId, AtomicU64>,
     pub resource_schedule: RwLock<crate::config::ResourceSchedule>,
     pub prune_history: RwLock<VecDeque<crate::types::PruneEvent>>,
     /// Parallax Phase C.2 stability counter per shard. Positive values mean
@@ -299,6 +307,17 @@ pub struct ModelMgmt {
     /// scorer (boosts trending models) and by the future task-filter
     /// view in the HF browser. Empty until the first successful fetch.
     pub hf_trending_cache: arc_swap::ArcSwap<crate::model::huggingface::HfTrendingSnapshot>,
+    /// What people run outside the swarm (#389 (b)): HuggingFace's GGUF list
+    /// summed per base model, one file each (`huggingface::popular`), read once
+    /// a day by the `HfWatcher` and saved, so a restart has it at once. Read
+    /// through [`super::SharedState::popular_outside_the_swarm`], which takes a
+    /// stale one for none.
+    pub hf_popular: arc_swap::ArcSwap<crate::model::huggingface::popular::PopularSnapshot>,
+    /// What this node has seen of each held model's use (#389 (d)): watched
+    /// from its first part here, its last request here. Written only by
+    /// `AutoShardManager::watch_model_use`, saved (`unused::USE_TREE`); read by
+    /// `AutoShardManager::nobody_runs`.
+    pub model_use: DashMap<crate::types::ModelId, crate::model::auto_manage::unused::ModelUse>,
     /// R130: foreign wishlist interest, populated from inbound
     /// `WishlistAnnouncement` gossip. Key = (publisher node id, model id);
     /// value = (publisher's score 0..100, timestamp_ms received). Capped
@@ -1180,6 +1199,7 @@ mod tests {
             manifest_sync: Default::default(),
             peer_models: Default::default(),
             model_request_counts: DashMap::new(),
+            requests_served_for_peers: DashMap::new(),
             resource_schedule: RwLock::new(Default::default()),
             prune_history: RwLock::new(VecDeque::new()),
             parallax_stability: DashMap::new(),
@@ -1193,6 +1213,10 @@ mod tests {
             hf_trending_cache: arc_swap::ArcSwap::from_pointee(
                 crate::model::huggingface::HfTrendingSnapshot::default(),
             ),
+            hf_popular: arc_swap::ArcSwap::from_pointee(
+                crate::model::huggingface::popular::PopularSnapshot::default(),
+            ),
+            model_use: DashMap::new(),
             foreign_wishlist: DashMap::new(),
             quant_recommendations: arc_swap::ArcSwap::from_pointee(
                 crate::model::auto_manage::quant::QuantRecommendations::default(),

@@ -1,6 +1,7 @@
 //! HuggingFace API client: search, download, probe, byte-range shard fetching.
 
 mod download;
+pub(crate) mod popular;
 mod private_types;
 mod probe;
 mod search;
@@ -169,11 +170,12 @@ const NOT_FOR_ALL_AUDIENCES: &str = "not-for-all-audiences";
 /// content — by a name (a model id, a display name or a repo id) and, where
 /// known, its HuggingFace tags?
 ///
-/// Such a model is hosted or answered with only where its owner chose it
-/// (`SharedState::unchosen_uncensored_model`): a fresh node was found hosting
-/// an abliterated model within minutes, its chat picker pre-selecting it
-/// (field report 2026-10-15). HuggingFace's own handling of the tag is the
-/// model — a click-through, so it is still listed and can still be picked.
+/// Such a model is never pre-selected for someone who did not pick it
+/// (`SharedState::unchosen_uncensored_model`: `auto` and the chat picker's
+/// default) — a fresh node's picker once pre-selected one (field report
+/// 2026-10-15). Hosting it follows use like any model (#389 (c)).
+/// HuggingFace's own handling of the tag is the model — a click-through, so
+/// it is still listed and can still be picked.
 pub fn is_uncensored_model(name: &str, tags: &[String]) -> bool {
     let name = name.to_ascii_lowercase();
     UNCENSORED_MARKS.iter().any(|mark| name.contains(mark))

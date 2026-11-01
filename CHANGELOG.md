@@ -2,6 +2,23 @@
 
 ## [Unreleased]
 
+**The network now keeps the models people actually use, and gives back the ones nobody does.** Until
+now a model stayed on the network once a few computers held it, whether or not anyone used it: on
+2026-11-01 it held 34 models, nearly all from 2024, several in more than one copy of the same size.
+Once a day each computer now reads which models people run from HuggingFace's list of downloadable
+models — only families this release can run, counted per model across all of its uploads rather
+than per upload (automated test downloads otherwise top the list), the most-run three for each size
+of computer — keeps those on the network, and registers up to three a day the network has not heard
+of. A computer gives back its copy of a model only when that model is not on the list, has not been
+used on this computer for 14 days, is not wanted on the network right now, and was not chosen by
+this computer's owner: a model downloaded from the dashboard, pinned, kept on this computer or set
+as the default is never given back. A computer that cannot read the list — offline, or HuggingFace
+unreachable for three days — gives nothing back, and after this update every computer watches for
+14 days before it gives anything back. Content is not judged: a model with its safety training
+removed is kept or given back like any other, and is still never pre-selected for someone who did
+not pick it. A computer also no longer tells the others which model its owner is using: the demand
+it shares with the network now counts only the work it does for other people's requests (#389).
+
 **Computers now say how long they held each part of a shared reply — the groundwork for not slowing
 a split down when the far computer is busy.** When a model is split between this computer and a far
 one, this computer guesses words ahead and keeps batches of guesses on their way, and sends fewer

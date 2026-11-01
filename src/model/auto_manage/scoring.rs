@@ -1886,61 +1886,161 @@ mod fetch_what_prune_keeps {
         assert_eq!(fetched(&manager, &state, 8_000), vec![(mid, 1)]);
     }
 
-    /// A model with its safety training removed is hosted only by an owner
-    /// who chose it: a fresh node held an abliterated model whole within
-    /// minutes of starting (field report 2026-10-15). The shape the control
-    /// above fetches from fetches nothing once the name carries the mark, and
-    /// the part already held is given back; pinned, it is a model like any
-    /// other.
+    /// Every model is hosted on the same terms (#389 (c)): one with its safety
+    /// training removed is fetched and kept like the control above. Until
+    /// 2026-11-01 one its owner had not chosen was never fetched, and a part
+    /// already held was given back.
     #[test]
-    fn an_uncensored_model_is_hosted_only_by_an_owner_who_chose_it() {
+    fn an_uncensored_model_is_hosted_like_any_other() {
         let (state, manager) = manager_with(Config::default());
         let mid = busy_model(&state, &manager, "coder-7b-abliterated-q4");
-        let local = state.identity.node_id().clone();
+        assert!(
+            state.unchosen_uncensored_model(&mid),
+            "fixture: marked, and not chosen"
+        );
+        assert_eq!(fetched(&manager, &state, 2_000), vec![(mid.clone(), 1)]);
         let part0 = ShardId {
-            model_id: mid.clone(),
+            model_id: mid,
             index: 0,
         };
-        assert!(
-            fetched(&manager, &state, 2_000).is_empty(),
-            "nobody chose it: no part of it is fetched"
+        let local = state.identity.node_id().clone();
+        assert!(!manager.would_shed_copy(&part0, &[local], 0.0, &[]));
+    }
+
+    /// A fresh reading of what people run (#389 (b)) naming `models`, read at
+    /// `fetched_at`.
+    fn reading_names(state: &Arc<SharedState>, models: &[&str], fetched_at: i64) {
+        use crate::model::huggingface::popular::{PopularBase, PopularSnapshot};
+        state.models.hf_popular.store(Arc::new(PopularSnapshot {
+            bases: models
+                .iter()
+                .map(|m| PopularBase {
+                    model_id: (*m).to_string(),
+                    ..Default::default()
+                })
+                .collect(),
+            fetched_at,
+        }));
+    }
+
+    /// `busy_model` that nothing asks for, watched here for `watched_days`
+    /// without a request, beside a fresh reading of what people run that names
+    /// another model.
+    fn model_nobody_runs(
+        state: &Arc<SharedState>,
+        manager: &AutoShardManager,
+        name: &str,
+        watched_days: i64,
+    ) -> ModelId {
+        let mid = busy_model(state, manager, name);
+        state.models.model_request_counts.remove(&mid);
+        let now = chrono::Utc::now().timestamp();
+        state.models.model_use.insert(
+            mid.clone(),
+            crate::model::auto_manage::unused::ModelUse {
+                watched_since: now - watched_days * 86_400,
+                last_used: 0,
+            },
         );
+        reading_names(state, &["someone-else-q4"], now);
+        mid
+    }
+
+    /// A model nobody runs is given back, and its parts are not fetched again
+    /// (#389 (d)) — however few hold it: its only copy here. Each piece of
+    /// evidence that someone runs it keeps it, alone.
+    #[test]
+    fn a_model_nobody_runs_is_given_back_and_each_kind_of_use_keeps_it() {
+        use crate::model::auto_manage::unused::ModelUse;
+        let (state, manager) = manager_with(Config::default());
+        let mid = model_nobody_runs(&state, &manager, "old-coder-q4", 15);
+        let local = state.identity.node_id().clone();
+        let part = |index| ShardId {
+            model_id: mid.clone(),
+            index,
+        };
+        let shed = || manager.would_shed_copy(&part(0), std::slice::from_ref(&local), 0.0, &[]);
+        assert!(shed(), "its only copy here is given back");
         assert!(
-            manager.would_shed_copy(&part0, std::slice::from_ref(&local), 0.0, &[]),
-            "the part this node took up is given back, even as its only copy here"
+            manager.would_shed_copy(
+                &part(1),
+                &[local.clone(), NodeId([7; 32]), NodeId([8; 32])],
+                0.0,
+                &[]
+            ),
+            "and the download pass, asking the same, fetches no part of it"
         );
 
+        let now = chrono::Utc::now().timestamp();
+        reading_names(&state, &["old-coder-q4"], now);
+        assert!(!shed(), "people run it");
+        reading_names(&state, &["someone-else-q4"], now - 4 * 86_400);
+        assert!(
+            !shed(),
+            "no fresh reading of what people run: nobody can say"
+        );
+        reading_names(&state, &["someone-else-q4"], now);
+        let watched = |since_days: i64, used_days: Option<i64>| {
+            state.models.model_use.insert(
+                mid.clone(),
+                ModelUse {
+                    watched_since: now - since_days * 86_400,
+                    last_used: used_days.map_or(0, |d| now - d * 86_400),
+                },
+            );
+        };
+        watched(13, None);
+        assert!(!shed(), "watched 13 days: still on trial");
+        watched(40, Some(2));
+        assert!(!shed(), "run here two days ago");
+        watched(40, None);
+        assert!(shed(), "control: nobody again");
+        state
+            .models
+            .model_request_counts
+            .insert(mid.clone(), AtomicU64::new(1));
+        assert!(!shed(), "asked for now");
+        state.models.model_request_counts.remove(&mid);
+        assert!(shed(), "control: nobody again");
         state
             .models
             .model_trust
             .insert(mid.clone(), crate::types::ModelTrustInfo::new_pinned());
-        assert_eq!(
-            fetched(&manager, &state, 2_000),
-            vec![(mid, 1)],
-            "the owner pinned it: fetched like any model"
+        assert!(!shed(), "its owner pinned it");
+    }
+
+    /// The models testers compare results on stay (`model::reference`).
+    #[test]
+    fn a_reference_model_is_never_given_back_for_want_of_use() {
+        let (state, manager) = manager_with(Config::default());
+        let reference = model_nobody_runs(&state, &manager, "tinyllama-1.1b-chat-v1.0.q4-k-m", 30);
+        let other = model_nobody_runs(&state, &manager, "tinyllama-1.1b-chat-v0.9.q4-k-m", 30);
+        assert!(!manager.nobody_runs(&reference));
+        assert!(
+            manager.nobody_runs(&other),
+            "control: one that is not a reference model"
         );
-        assert!(!manager.would_shed_copy(&part0, &[local], 0.0, &[]));
     }
 
     /// Prune gives such a copy back, not only says it would: its execution
-    /// re-checks the replica count, and kept any part three computers or fewer
-    /// held (pre-release review, 2026-10-15). An ordinary model's only copy
-    /// here is kept.
+    /// re-checks the replica count, which kept any part three computers or
+    /// fewer held (pre-release review, 2026-10-15). A model asked for keeps
+    /// its only copy here.
     #[tokio::test]
-    async fn prune_gives_back_an_uncensored_copy_nobody_chose_however_few_hold_it() {
+    async fn prune_gives_back_a_model_nobody_runs_however_few_hold_it() {
         let (state, manager) = manager_with(Config::default());
-        let unchosen = busy_model(&state, &manager, "coder-7b-abliterated-q4");
-        let ordinary = busy_model(&state, &manager, "coder-7b-q4");
+        let unused = model_nobody_runs(&state, &manager, "old-coder-q4", 15);
+        let asked = busy_model(&state, &manager, "coder-7b-q4");
         manager.evaluate_and_prune().await;
         let held = |mid: &ModelId| {
             crate::model::shard::model_dir(&state.config.node.data_dir, &mid.0)
                 .join(crate::model::shard::shard_filename(0))
                 .exists()
         };
-        assert!(!held(&unchosen), "its only copy here is given back");
+        assert!(!held(&unused), "its only copy here is given back");
         assert!(
-            held(&ordinary),
-            "control: an ordinary model's only copy here is kept"
+            held(&asked),
+            "control: a model asked for keeps its only copy here"
         );
     }
 
@@ -1948,24 +2048,110 @@ mod fetch_what_prune_keeps {
     /// were what kept a model's files while it was in use (pre-release review,
     /// 2026-10-15).
     #[tokio::test]
-    async fn prune_waits_for_an_uncensored_copy_nobody_chose_while_it_is_in_use() {
+    async fn prune_waits_for_a_model_nobody_runs_while_it_is_in_use() {
         let (state, manager) = manager_with(Config::default());
-        let unchosen = busy_model(&state, &manager, "coder-7b-abliterated-q4");
+        let unused = model_nobody_runs(&state, &manager, "old-coder-q4", 15);
         let request_id = uuid::Uuid::new_v4();
         state.active_traces.insert(
             request_id,
             Arc::new(crate::inference::trace::RequestTrace::new(
                 request_id,
-                unchosen.0.clone(),
+                unused.0.clone(),
                 "chat",
             )),
         );
         manager.evaluate_and_prune().await;
         assert!(
-            crate::model::shard::model_dir(&state.config.node.data_dir, &unchosen.0)
+            crate::model::shard::model_dir(&state.config.node.data_dir, &unused.0)
                 .join(crate::model::shard::shard_filename(0))
                 .exists(),
             "kept while a reply is being written"
+        );
+    }
+
+    /// A model is watched from its first part here and forgotten with its
+    /// last; a request the router took moves its last use, and the record is
+    /// saved (#389 (d)).
+    #[test]
+    fn a_held_model_is_watched_from_its_first_part_and_forgotten_with_its_last() {
+        use crate::model::auto_manage::unused::{ModelUse, USE_TREE};
+        let (state, manager) = manager_with(Config::default());
+        let mid = busy_model(&state, &manager, "coder-7b-q4");
+        let now = chrono::Utc::now().timestamp();
+        manager.watch_model_use();
+        let record = state
+            .models
+            .model_use
+            .get(&mid)
+            .map(|r| *r)
+            .expect("held: watched");
+        assert!((now - record.watched_since).abs() < 60, "{record:?}");
+        assert_eq!(record.last_used, 0, "nothing ran yet");
+
+        state
+            .models
+            .model_trust
+            .entry(mid.clone())
+            .or_insert_with(crate::types::ModelTrustInfo::new_discovered)
+            .last_request_at = Some(chrono::Utc::now());
+        manager.watch_model_use();
+        let record = state.models.model_use.get(&mid).map(|r| *r).unwrap();
+        assert!(record.last_used >= now, "{record:?}");
+        assert_eq!(
+            state.db.get_json::<ModelUse>(USE_TREE, &mid.0).unwrap(),
+            Some(record),
+            "saved"
+        );
+
+        state.model_registry.remove_shard_holder(
+            &ShardId {
+                model_id: mid.clone(),
+                index: 0,
+            },
+            state.identity.node_id(),
+        );
+        manager.watch_model_use();
+        assert!(
+            state.models.model_use.get(&mid).is_none(),
+            "no part here: forgotten"
+        );
+        assert_eq!(
+            state.db.get_json::<ModelUse>(USE_TREE, &mid.0).unwrap(),
+            None
+        );
+    }
+
+    /// A model people run outside the swarm keeps the trust the download pass
+    /// fetches it on through idle days here (#389 (b)); another decays.
+    #[test]
+    fn a_model_people_run_keeps_its_trust_through_idle_days() {
+        use crate::types::ModelTrustLevel;
+        let (state, manager) = manager_with(Config::default());
+        let popular = busy_model(&state, &manager, "popular-q4");
+        let other = busy_model(&state, &manager, "other-q4");
+        let idle_since = chrono::Utc::now() - chrono::Duration::days(8);
+        for mid in [&popular, &other] {
+            let mut trust = crate::types::ModelTrustInfo::new_discovered();
+            trust.first_seen = idle_since - chrono::Duration::days(30);
+            trust.last_request_at = Some(idle_since);
+            state.models.model_trust.insert(mid.clone(), trust);
+        }
+        reading_names(&state, &["popular-q4"], chrono::Utc::now().timestamp());
+        manager.update_model_trust();
+        let level = |mid: &ModelId| {
+            state
+                .models
+                .model_trust
+                .get(mid)
+                .unwrap()
+                .trust_level
+                .clone()
+        };
+        assert_eq!(level(&popular), ModelTrustLevel::NetworkPopular);
+        assert_eq!(
+            level(&other),
+            ModelTrustLevel::DemandVerified,
+            "control: eight idle days take one step down"
         );
     }
 
@@ -2020,6 +2206,65 @@ mod fetch_what_prune_keeps {
             3,
             "and the target still sees them, through the demand the decay filed"
         );
+    }
+
+    /// #389 (a): the demand this node gossips (`local_region_demand`, which
+    /// the monitor publishes under this node's id) counts only requests served
+    /// FOR PEERS. The owner's own stay in this node's own view, where the
+    /// replica target reads them — gossiped, they named the model the owner
+    /// was using, to every peer.
+    #[test]
+    fn the_owners_requests_are_never_gossiped_and_a_peers_are() {
+        let (state, manager) = manager_with(Config::default());
+        let mid = busy_model(&state, &manager, "owners-model");
+        manager.decay_request_counts();
+        assert!(
+            state.region_demand.iter().any(|e| e.key().0 == mid),
+            "control: the owner's requests reach this node's own view"
+        );
+        assert!(
+            state.local_region_demand.get(&mid).is_none(),
+            "the owner's requests are never gossiped"
+        );
+
+        let stranger = ModelId("not-in-the-registry".into());
+        for _ in 0..3 {
+            state.note_request_served_for_a_peer(&mid, None);
+        }
+        state.note_request_served_for_a_peer(&stranger, None);
+        manager.decay_request_counts();
+        assert!(
+            state
+                .local_region_demand
+                .get(&mid)
+                .is_some_and(|d| *d > 0.0),
+            "a peer's requests are"
+        );
+        assert!(
+            state
+                .models
+                .requests_served_for_peers
+                .get(&stranger)
+                .is_none(),
+            "a model outside the registry is not counted"
+        );
+        let counted = |s: &SharedState| {
+            s.models
+                .requests_served_for_peers
+                .get(&mid)
+                .map(|c| c.load(Relaxed))
+        };
+        state.note_request_served_for_a_peer(&mid, Some(state.identity.node_id()));
+        assert_eq!(
+            counted(&state),
+            Some(0),
+            "a request from this node's own pool is the owner's use, never gossiped"
+        );
+
+        // With no more served, what was published decays like any demand.
+        let first = *state.local_region_demand.get(&mid).unwrap();
+        manager.decay_request_counts();
+        assert!(*state.local_region_demand.get(&mid).unwrap() < first);
     }
 }
 

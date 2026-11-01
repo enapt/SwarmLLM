@@ -258,6 +258,9 @@ impl AutoShardManager {
         // can change, and this loop runs every tick.
         let live = self.shared_state.cfg();
         let config = &live.auto_manage;
+        // Each held model's use, folded in before anything is judged on it —
+        // with prune off too, so turning it on judges a full record (#389 (d)).
+        self.watch_model_use();
         if !config.prune_enabled {
             return;
         }
@@ -396,6 +399,8 @@ impl AutoShardManager {
             // of the last day — never the one this instant reads (`target_hold`).
             let target = self.shed_target_replicas(&manifest.id, config.min_replicas, pool_size);
             let contribution_auto = live.node.contribution_auto;
+            // Once per model: every part of one nobody runs goes (#389 (d)).
+            let nobody_runs = self.nobody_runs(&manifest.id);
 
             for shard in &manifest.shards {
                 let shard_id = ShardId {
@@ -440,19 +445,17 @@ impl AutoShardManager {
                     continue;
                 }
 
-                // A copy that is not this node's to host — a model with its
-                // safety training removed that the owner did not choose — is
-                // given back however few hold it. The replica count, busy
-                // holders and a way to fetch it back all guard the swarm's
-                // copies of a model this node SHOULD carry; asked of this one
-                // they kept it wherever three computers or fewer held it, which
-                // in a small swarm is everywhere (pre-release review,
-                // 2026-10-15). A model in use is still waited for, whatever the
-                // disk pressure: those checks were what kept its files while a
-                // reply was being written (`SharedState::model_is_in_use`, the
-                // answer to "may I delete this model's files?").
-                let not_ours_to_host = self.shared_state.unchosen_uncensored_model(&manifest.id);
-                if not_ours_to_host && self.shared_state.model_is_in_use(&manifest.id) {
+                // A copy of a model nobody runs (#389 (d)) is given back however
+                // few hold it. The replica count, busy holders and a way to
+                // fetch it back all guard the swarm's copies of a model this
+                // node SHOULD carry; asked of this one they would keep it
+                // wherever three computers or fewer held it, which in a small
+                // swarm is everywhere (pre-release review, 2026-10-15). A model
+                // in use is still waited for, whatever the disk pressure: those
+                // checks were what kept its files while a reply was being
+                // written (`SharedState::model_is_in_use`, the answer to "may I
+                // delete this model's files?").
+                if nobody_runs && self.shared_state.model_is_in_use(&manifest.id) {
                     continue;
                 }
 
@@ -470,7 +473,7 @@ impl AutoShardManager {
                 );
 
                 // Load-aware: block if remaining holders are busy
-                if !not_ours_to_host
+                if !nobody_runs
                     && self.remaining_holders_busy(
                         &holders,
                         &local_node_id,
@@ -486,7 +489,7 @@ impl AutoShardManager {
                 }
 
                 // Re-acquisition check: can we get it back?
-                if !not_ours_to_host
+                if !nobody_runs
                     && !self.can_reacquire(&manifest.id, &shard_id, &holders, &local_node_id)
                 {
                     continue;
@@ -586,8 +589,8 @@ impl AutoShardManager {
                 // not shed at all: the penalty alone only reordered the
                 // candidates, and a node whose ONLY candidate was a part that
                 // landed 28 s earlier deleted it (field report 2026-10-16). A
-                // copy that is not ours to host is still given back at once.
-                if recently_acquired && !not_ours_to_host && disk_pressure < PRESSURE_NORMAL {
+                // copy of a model nobody runs is still given back at once.
+                if recently_acquired && !nobody_runs && disk_pressure < PRESSURE_NORMAL {
                     continue;
                 }
                 if recently_acquired {
@@ -673,7 +676,7 @@ impl AutoShardManager {
                     holder_count,
                     target_replicas: effective_target,
                     score,
-                    not_ours_to_host,
+                    nobody_runs,
                     to_make_room: self.sheds_only_to_make_room(
                         &shard_id,
                         &holders,
@@ -718,7 +721,13 @@ impl AutoShardManager {
                         // Higher floor: at least 3 replicas (or pool_size, whichever is smaller)
                         let mmproj_min = mmproj_prune_floor(config.min_replicas, pool_size);
                         let mmproj_holder_count = mmproj_holders.len();
-                        if mmproj_sheds_at(disk_pressure, mmproj_holder_count, mmproj_min) {
+                        // A model nobody runs gives back its projector too —
+                        // not while a reply is being written.
+                        let given_back =
+                            nobody_runs && !self.shared_state.model_is_in_use(&manifest.id);
+                        if given_back
+                            || mmproj_sheds_at(disk_pressure, mmproj_holder_count, mmproj_min)
+                        {
                             let mmproj_size =
                                 manifest.mmproj.as_ref().map(|m| m.size_bytes).unwrap_or(0);
                             prune_candidates.push(PruneCandidate {
@@ -729,7 +738,7 @@ impl AutoShardManager {
                                 holder_count: mmproj_holder_count,
                                 target_replicas: mmproj_min,
                                 score: 0.1, // Very low score -- only prune under extreme pressure
-                                not_ours_to_host: false,
+                                nobody_runs: given_back,
                                 to_make_room: false,
                             });
                         }
@@ -815,7 +824,7 @@ impl AutoShardManager {
                 .copied()
                 .unwrap_or(0);
             // Every part of a copy that is not ours to host goes in one pass.
-            if count >= max_per_model && !candidate.not_ours_to_host {
+            if count >= max_per_model && !candidate.nobody_runs {
                 continue;
             }
             if candidate.to_make_room && room_made >= room_bytes {
@@ -877,7 +886,7 @@ impl AutoShardManager {
             } else {
                 current_holders > effective_target as usize
             };
-            if !still_spare && !candidate.not_ours_to_host {
+            if !still_spare && !candidate.nobody_runs {
                 tracing::debug!(
                     model = %candidate.model_id,
                     shard = candidate.shard_index,
@@ -975,6 +984,11 @@ impl AutoShardManager {
                         current_holders,
                         current_holders.saturating_sub(1)
                     )
+                } else if candidate.nobody_runs {
+                    format!(
+                        "Not run here for {} days, nor among the models people run",
+                        super::unused::USE_WINDOW_SECS / 86_400
+                    )
                 } else {
                     format!(
                         "Over-replicated ({} holders, target {})",
@@ -1006,6 +1020,14 @@ impl AutoShardManager {
                         .as_ref()
                         .map_or("a part", |room| room.why.describe()),
                     "DIAG: gave back a spare copy to make room for a part the swarm is short of"
+                );
+            } else if candidate.nobody_runs {
+                tracing::info!(
+                    model = %candidate.model_id,
+                    shard = candidate.shard_index,
+                    holders = candidate.holder_count,
+                    freed_mb = candidate.shard_size_bytes / (1024 * 1024),
+                    "Giving back a part of a model nobody runs (#389)"
                 );
             } else {
                 tracing::info!(
@@ -1508,17 +1530,15 @@ impl AutoShardManager {
         {
             return Some("a pool pin");
         }
-        // A model with its safety training removed, or marked as adult
-        // content, is held only by an owner who chose it: automatic hosting
-        // never takes one up, and a copy it took up is given back (field
-        // report 2026-10-15). Here, so the download pass — which asks this —
-        // never fetches what prune sheds. Before the exemptions below: prompt
-        // privacy's automatic ends would otherwise keep two parts of a model
-        // nobody chose, and an explicit privacy choice counts as choosing it.
-        if self
-            .shared_state
-            .unchosen_uncensored_model(&shard_id.model_id)
-        {
+        // A model nobody runs is given back, every part, however few hold it
+        // (#389 (d), `unused::nobody_runs`): not among the models people run,
+        // not run here for the window it was watched, not the owner's, not
+        // asked for, not a reference model, not a split's drafter. Here, so
+        // the download pass — which asks this — never fetches what prune
+        // sheds. Before the exemptions below: prompt privacy's automatic ends
+        // would otherwise keep two parts of a model nobody runs, and an
+        // explicit privacy choice is the owner's.
+        if self.nobody_runs(&shard_id.model_id) {
             return None;
         }
         // Prompt privacy needs BOTH ends of the model on this node, so

@@ -903,6 +903,10 @@ struct WorkerHandle {
     /// Stored as seconds since `spawned_at` rather than a wall-clock stamp, so
     /// a clock step cannot make a busy worker look idle for hours.
     last_used: AtomicU64,
+    /// Has a request ever been registered against this worker? `last_used` is
+    /// 0 both before the first and for one registered in its first second.
+    /// Read by [`ModelProcessPool::model_used_secs_ago`].
+    ran_a_request: AtomicBool,
     /// Requests whose conversation cache this worker holds BETWEEN forwards,
     /// and when each last sent one.
     ///
@@ -2053,6 +2057,7 @@ impl WorkerHandle {
     ) -> (ResponseGuard, Option<u64>) {
         self.last_used
             .store(self.spawned_at.elapsed().as_secs(), Ordering::Relaxed);
+        self.ran_a_request.store(true, Ordering::Relaxed);
         self.register_unseen(request_id, tx, cancel_on_drop)
     }
 
@@ -10019,6 +10024,7 @@ impl ModelProcessPool {
             reader_handle,
             spawned_at: std::time::Instant::now(),
             last_used: AtomicU64::new(0),
+            ran_a_request: AtomicBool::new(false),
             kv_holders: std::sync::Mutex::new(std::collections::HashMap::new()),
             placed_on_cpu_because,
             charged_mb: AtomicU64::new(charge.mb),
@@ -11697,6 +11703,18 @@ impl ModelProcessPool {
     pub fn model_idle_secs(&self) -> Vec<(ModelId, u64)> {
         self.workers
             .iter()
+            .map(|e| (e.key().clone(), e.value().idle_secs()))
+            .collect()
+    }
+
+    /// [`Self::model_idle_secs`] for the workers that have run a request: a
+    /// model's use record (#389 (d), `auto_manage::unused`) keeps "used" for
+    /// days, and a worker loaded ahead of a request (a peer's go-ahead, a
+    /// planned chain) has run nothing.
+    pub fn model_used_secs_ago(&self) -> Vec<(ModelId, u64)> {
+        self.workers
+            .iter()
+            .filter(|e| e.value().ran_a_request.load(Ordering::Relaxed))
             .map(|e| (e.key().clone(), e.value().idle_secs()))
             .collect()
     }
@@ -15191,6 +15209,7 @@ mod tests {
             reader_handle,
             spawned_at,
             last_used: AtomicU64::new(0),
+            ran_a_request: AtomicBool::new(false),
             kv_holders: std::sync::Mutex::new(std::collections::HashMap::new()),
             charged_mb: AtomicU64::new(0),
             charged_segments: std::sync::Mutex::new(Vec::new()),

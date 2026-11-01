@@ -14,6 +14,7 @@ mod scoring;
 mod target_hold;
 #[cfg(test)]
 mod test_support;
+pub(crate) mod unused;
 pub mod vram;
 pub mod wishlist;
 

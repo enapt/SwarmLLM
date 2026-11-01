@@ -279,9 +279,9 @@ pub(super) struct PruneCandidate {
     pub target_replicas: u32,
     /// Score: higher = more prunable.
     pub score: f64,
-    /// Not this node's to host (`SharedState::unchosen_uncensored_model`):
-    /// shed however few hold it, every part in one pass.
-    pub not_ours_to_host: bool,
+    /// A model nobody runs (`AutoShardManager::nobody_runs`, #389 (d)): shed
+    /// however few hold it, every part in one pass.
+    pub nobody_runs: bool,
     /// Kept by the replica count, shed only to make room for a part the swarm
     /// is short of (`prune::sheds_only_to_make_room`): given back within the
     /// room the download pass noted, and re-checked against that room's floor
@@ -1139,6 +1139,11 @@ impl AutoShardManager {
     /// Decay model request counts with EMA and feed into region_demand.
     /// Instead of zeroing counters, we blend: new_rate = old * EMA_DECAY + fresh * EMA_FRESH.
     /// A spike of 100 requests persists ~30min and drops to noise after ~2h.
+    ///
+    /// Two halves: `region_demand` (this node's own view, every request it
+    /// routed, the owner's included) and `local_region_demand` (what it
+    /// gossips: only work served FOR PEERS, `requests_served_for_peers` —
+    /// #389 (a)).
     pub(super) fn decay_request_counts(&self) {
         let our_region = self.demand_region();
 
@@ -1164,22 +1169,46 @@ impl AutoShardManager {
             let old = if old.is_finite() { old } else { 0.0 };
             let new_rate = old * EMA_DECAY_WEIGHT + fresh as f64 * EMA_FRESH_WEIGHT;
             if new_rate > 0.001 {
-                self.shared_state
-                    .region_demand
-                    .insert(key.clone(), new_rate);
+                self.shared_state.region_demand.insert(key, new_rate);
             } else {
                 // Clean up negligible entries
                 self.shared_state.region_demand.remove(&key);
             }
+        }
 
-            // The same EMA over OUR OWN counter only, kept apart from the
-            // merged view above because only this half is ours to gossip.
-            //
-            // `old` comes from this map rather than from `region_demand`, so a
-            // same-region peer's gossip cannot inflate the figure we then
-            // publish as our own measurement — which fed a region's traffic
-            // back into itself and made every entry immortal.
-            let (model_id, _) = key;
+        // The same EMA over the requests this node served FOR PEERS, kept
+        // apart from the merged view above because only this half is ours to
+        // gossip — and never the owner's own requests (#389 (a)): on a node one
+        // person uses, those named the model they were using, to about ten
+        // minutes, to every peer.
+        //
+        // `old` comes from this map rather than from `region_demand`, so a
+        // same-region peer's gossip cannot inflate the figure we then publish
+        // as our own measurement — which fed a region's traffic back into
+        // itself and made every entry immortal. Every model already published
+        // decays too, counted or not this tick.
+        let mut fresh_for_peers: std::collections::HashMap<crate::types::ModelId, u64> = self
+            .shared_state
+            .models
+            .requests_served_for_peers
+            .iter()
+            .map(|e| {
+                (
+                    e.key().clone(),
+                    e.value().swap(0, std::sync::atomic::Ordering::Relaxed),
+                )
+            })
+            .collect();
+        let published: Vec<crate::types::ModelId> = self
+            .shared_state
+            .local_region_demand
+            .iter()
+            .map(|e| e.key().clone())
+            .collect();
+        for model_id in published {
+            fresh_for_peers.entry(model_id).or_insert(0);
+        }
+        for (model_id, fresh) in fresh_for_peers {
             let own_old = self
                 .shared_state
                 .local_region_demand
@@ -1259,8 +1288,13 @@ impl AutoShardManager {
                 );
             }
 
-            // Decay inactive models
-            trust.maybe_decay();
+            // Decay inactive models — never one people run outside the swarm
+            // (#389 (b)): while the swarm is small, its idle days here say
+            // little, and a decay would leave the download pass no trust to
+            // fetch it on.
+            if self.shared_state.popular_outside_the_swarm(&manifest.id) != Some(true) {
+                trust.maybe_decay();
+            }
 
             // Persist updated trust info
             let _ = self
@@ -1675,7 +1709,7 @@ mod tests {
             holder_count: 6,
             target_replicas: 2,
             score: 3.0 + 1.0, // high redundancy + cold bonus
-            not_ours_to_host: false,
+            nobody_runs: false,
             to_make_room: false,
         };
         let warm_less_redundant = PruneCandidate {
@@ -1686,7 +1720,7 @@ mod tests {
             holder_count: 3,
             target_replicas: 2,
             score: 1.5, // low redundancy, first shard penalty
-            not_ours_to_host: false,
+            nobody_runs: false,
             to_make_room: false,
         };
         assert!(cold_redundant.score > warm_less_redundant.score);

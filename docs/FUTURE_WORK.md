@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #389**). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #392**). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -2742,6 +2742,47 @@ reply whose peers changed (failover) is not kept (`PipelineExecutor::exposure_of
 
 ### Model families and platforms
 
+#### #390 — Families people run that this build cannot load: Qwen3-Coder-Next, gpt-oss, GLM-4.5-Air, Qwen3.8-Flash-Next, GLM-5.3-Flash
+`P2` · models · **OPEN** — 2026-11-01 · user-raised with #389 ("add models we can run and work towards as per the list")
+
+From #389's survey of what people run. Each GGUF's `general.architecture` read off HuggingFace
+(`?expand[]=gguf`, 2026-11-01); the gap read against llama.cpp `4b1a27f` (2026-09-25, `~/llama.cpp-ref`)
+and this tree. Ranked by what we already have, what consumer cards can split, and use (unsloth's
+30-day downloads). **A family joins `supported_list` only once a REAL file's header and one reply
+match llama.cpp** (#715, `arch-inference.md`).
+
+1. **`qwen3next` — Qwen3-Coder-Next 80B-A3B** (Q4_K_M 48.5 GB, UD-Q2_K_XL 26.8: two or three cards;
+   ~0.21M). Small-medium: Qwen 3.5's DeltaNet, gated attention, Q/K norm and gated shared expert are
+   here (`layers::qwen35`, `delta_rule_{cpu,cuda}`, `SsmState`); nextn is dropped already. Missing:
+   the FUSED `ssm_beta_alpha` tensor, de-interleaved per key head (`qwen3next.cpp:418-446`); the
+   V heads GROUPED by key head (`h / r`, `:500-520`) where our kernels read `h % nk`
+   (`delta_rule.cu:82`, `qwen35.rs:488`) — a kernel mode or a load-time permutation of the V, z,
+   a/dt, conv and `ssm_out` rows; NEOX rope where Qwen 3.5 has IMROPE (text-only, to verify). Also
+   the shared pieces #4 and #5 need.
+2. **`gpt-oss` — gpt-oss-20b** (11.6-12.1 GB: ONE 16 GB card or a split of two small ones; ~0.6M,
+   the largest audience). Large: MXFP4 experts — a new candle type (id 39, `ggml-common.h:214`:
+   dequantise, processor dot + AVX2, card mat-vec and MMQ, `moe_card::kernel_type`); attention SINKS
+   (`attn_sinks` per head adds a logit to the softmax denominator, `openai-moe.cpp:113`) in every
+   attention path (`attn_rows`, `decode_attn.cu`, the tree kernels, standard; flash corrected from its
+   log-sum-exp — untested); routing softmax over the top-k only (`llama-graph.cpp:2058`); swiglu_oai
+   (α 1.702, limit 7, `y+1`); biases on router and expert stacks; a 128 window on even layers
+   (`SlidingWindow::from_file` knows Gemma only). Harmony stops are here. Riskiest: MXFP4 through the
+   vendored kernels.
+3. **`glm4moe` — GLM-4.5-Air 106B-A12B** (UD-Q4_K_XL 67.7 GB: three or four cards; ~46K). Medium:
+   the expert SELECTION bias (`ffn_exp_probs_b`, added to choose the top-k, not to weigh it,
+   `llama-graph.cpp:2074-2078`) on both routers, `topk_on_device` included; `expert_weights_scale`
+   (1.0 for Air; the full GLM-4.5 needs it); a `use_rope_contiguous` row. K-quants, splittable.
+4. **`qwen4exp` — Qwen3.8-Flash-Next** (UD-Q2_K_XL 78.9 GB; ~1.1M + 7.7M from ISTA-DASLab). Large:
+   hyper-connections (`hc` residual streams, `qwen4exp.cpp:267-455` — every hop ships `hc` hidden
+   states, a wire change), sparse attention with an indexer cache (`:542`, `:695`), an n-gram
+   per-layer embedding read from token ids (`:1038-1128`: only the first segment sees ids, so a
+   whole-run risk like Gemma 4 E2B unless ids travel). llama.cpp's own arch test marks it TODO.
+5. **`glm5-next` — GLM-5.3-Flash** (UD-IQ1_S 93 GB; ~0.83M). Held: not in the local checkout, the
+   upstream PR (#27754) closed unmerged, no reference to port from; KDA + DSA + a 4-stream mHC
+   residual + selection-biased routing. Revisit when `glm5next.cpp` is readable upstream.
+
+`deepseek2` (MLA) is loaded but not listed — a separate check.
+
 #### #326 — A card newer than the release's machine code waits minutes for its first reply
 `P2` · platform · **OPEN** — 2026-10-21 · history: gotcha #928, #325 (closed)
 
@@ -3417,6 +3458,37 @@ live A/B on every surface (OpenAI stream / non-stream, Anthropic stream / non-st
 foreground / background, MCP). Until then: choke-point helpers (`finalize_reply_text`,
 `strip_prefix_in_body`) and `.claude/rules/architecture.md` § "One invariant, N paths".
 
+#### #391 — A caller cannot turn a model's thinking off: `chat_template_kwargs`, `reasoning_effort` and Anthropic's `thinking` are ignored for local models
+`P2` · api · new users first · **OPEN** — 2026-11-01
+
+Qwen 3 / 3.5 / 3.6 / 3.8 and Gemma 4 — the families people run (#389) — switch their reasoning in the
+chat template, by the variable `enable_thinking` (`fixtures/qwen35_gguf_shipped.jinja` ~149,
+`gemma4_gguf_shipped.jinja` ~180). Nothing sets it: the one render site
+(`chat_template/mod.rs:125`, `minijinja::context!`) passes `messages`, `add_generation_prompt`,
+`bos_token`, `eos_token` and `tools` only. A request's `chat_template_kwargs` and `reasoning_effort`
+land in `ChatRequest.extras` (`openai/types.rs:103-111`), forwarded to cloud providers only
+(`providers.rs:807`); Anthropic's `thinking` is forwarded to proxies only; Responses' `reasoning` is
+never read locally. So a client asking for a quick answer gets whatever the upload's template
+defaults to, and pays the reasoning tokens — on a split, minutes. Seen 2026-11-01: Qwen 3.5 4B with
+`"chat_template_kwargs":{"enable_thinking":false}` began its reply "Thinking Process:".
+
+**How the reference servers do it**: vLLM takes a request's `chat_template_kwargs` (over
+`--default-chat-template-kwargs`), and maps `reasoning_effort` to `enable_thinking`, `"none"` →
+false, an explicit `enable_thinking` winning (docs.vllm.ai `features/reasoning_outputs`); llama.cpp's
+server has `--chat-template-kwargs`, `--reasoning on|off|auto` and `--reasoning-budget` (0 ends the
+think at once); SGLang documents `enable_thinking` per family.
+
+**Design**: one optional `chat_template_kwargs` on `InferenceRequest` (the router and pipeline
+render from it, `pipeline/prompt.rs:38`, and the cached-prefix planner must render the same string),
+filled by ONE helper from the request — explicit kwargs, else `reasoning_effort: "none"` / Responses
+`reasoning.effort: "none"` / Anthropic `thinking.type: "disabled"` → `enable_thinking=false` — and
+passed to every `build_prompt` caller as a REQUIRED argument (`architecture.md`: a convenience
+wrapper passing none is how six of seven paths lost the template fallback, gotcha #171). The five
+built-in keys win over a kwarg. **Check first**: whether a whole-model hand-off to a peer sends the
+rendered prompt or the messages — if the messages, the field crosses the wire and is gated at the
+sender like any new field. Tests: the Qwen 3.5 fixture rendered with the flag on and off; a kwarg
+naming `messages` does not replace them.
+
 #### #141 (b) — The Anthropic surface never shows a reasoning model's scratchpad, even when the request enables thinking
 `P4` · api · **OPEN** — 2026-10-19 (the OpenAI half closed) · history: archive row #141
 
@@ -4022,6 +4094,23 @@ archive under the named heading. Reopen one only with the evidence its line name
 Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 19-28 were
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
+
+**Closed 2026-11-01, ships in the next release** (#389)
+- #389 — **The swarm keeps the models people run and gives back the ones nobody does.** (a) Only
+  work served FOR PEERS is gossiped as demand (`models.requests_served_for_peers`); the owner's own
+  requests stay on this computer. (b) Once a day the HuggingFace watcher reads what people run —
+  GGUF repos whose architecture this build loads, summed per base model, the top 3 per size tier,
+  one file each (Q4_K_M; Q8_0 at 2B and under) — saves it, keeps those trusted through idle days,
+  and registers up to 3 a day the swarm has not heard of, without parts (`huggingface::popular`).
+  (c) Nothing automatic judges content; an uncensored model is hosted and given back like any other,
+  never a newcomer's default. (d) Prune gives back every part of a model nobody runs
+  (`auto_manage::unused::nobody_runs`, TinyLFU's admission): not named by a FRESH reading, not run
+  here for 14 days after being watched that long, not the owner's choice, not asked for, not a
+  reference model or a split's drafter — its last holders included. (e) One file per base where
+  the watcher registers. Decided, not left: swarm use only SPARES a model, it never evicts one (a
+  handful of testers says little yet); Ollama's and OpenRouter's lists stay unread (HTML only, and
+  an API key). Families people run that do not load yet: #390. The entry as it stood: archive
+  § "#389".
 
 **Closed 2026-11-01, ships in the next release** (#369)
 - #369 — **"Start and finish on this computer" caught up with the default split.** v0.3.261 made

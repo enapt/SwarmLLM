@@ -5,7 +5,6 @@ use serde::Deserialize;
 
 use crate::api::server::AppState;
 use crate::error::ApiError;
-use crate::model::manifest::ModelManifestExt;
 
 use super::{gguf_filename_to_model_id, progress::spawn_progress_updater, validate_hf_inputs};
 
@@ -537,16 +536,18 @@ pub async fn hf_download_shards(
         // Generate manifest from header BEFORE downloading shard data.
         // Pass empty shard_indices — no shards to register yet (they don't exist on disk).
         let header_path = dest_dir.join(crate::model::shard::HEADER_FILENAME);
-        let manifest_result = generate_manifest_from_header(&ManifestGenParams {
-            header_path: &header_path,
-            model_id_str: &model_id_str,
-            filename: &filename,
-            total_size: info.total_size,
-            shard_count: info.shard_count(),
-            shard_indices: &[],
-            shared: &download_shared,
-            precomputed_layouts: Some(&info.layouts),
-        });
+        let manifest_result = crate::model::manifest::generate_manifest_from_header(
+            &crate::model::manifest::ManifestGenParams {
+                header_path: &header_path,
+                model_id_str: &model_id_str,
+                filename: &filename,
+                total_size: info.total_size,
+                shard_count: info.shard_count(),
+                shard_indices: &[],
+                shared: &download_shared,
+                precomputed_layouts: Some(&info.layouts),
+            },
+        );
 
         if let Err(e) = &manifest_result {
             tracing::error!(error = %e, "Manifest generation failed (early broadcast skipped)");
@@ -929,16 +930,18 @@ pub async fn hf_download_shards(
 
             // Regenerate manifest with correct BLAKE3 hashes now that shard files
             // exist on disk. The early manifest had [0u8; 32] placeholders.
-            if let Err(e) = generate_manifest_from_header(&ManifestGenParams {
-                header_path: &header_path,
-                model_id_str: &model_id_str,
-                filename: &filename,
-                total_size: info.total_size,
-                shard_count: info.shard_count(),
-                shard_indices: &shard_indices,
-                shared: &download_shared,
-                precomputed_layouts: Some(&info.layouts),
-            }) {
+            if let Err(e) = crate::model::manifest::generate_manifest_from_header(
+                &crate::model::manifest::ManifestGenParams {
+                    header_path: &header_path,
+                    model_id_str: &model_id_str,
+                    filename: &filename,
+                    total_size: info.total_size,
+                    shard_count: info.shard_count(),
+                    shard_indices: &shard_indices,
+                    shared: &download_shared,
+                    precomputed_layouts: Some(&info.layouts),
+                },
+            ) {
                 tracing::error!(error = %e, model = %model_id_str, "Final manifest regeneration failed after shard download");
                 let display = download_shared.model_registry.display_name(&download_mid);
                 download_shared.emit_activity(
@@ -1004,82 +1007,6 @@ pub async fn hf_download_shards(
         "shards": response_shards,
         "peer_fair_share": peer_fair_share,
     })))
-}
-
-struct ManifestGenParams<'a> {
-    header_path: &'a std::path::Path,
-    model_id_str: &'a str,
-    filename: &'a str,
-    total_size: u64,
-    shard_count: u32,
-    shard_indices: &'a [u32],
-    shared: &'a std::sync::Arc<crate::daemon::SharedState>,
-    /// Pre-computed layouts from probe. When provided, these are used directly
-    /// instead of recomputing (avoids shard_count mismatch between probe and manifest).
-    precomputed_layouts: Option<&'a [crate::inference::split::LayerShardLayout]>,
-}
-
-/// Generate a manifest from a downloaded GGUF header and register shards.
-fn generate_manifest_from_header(params: &ManifestGenParams<'_>) -> Result<(), String> {
-    let model_id = crate::types::ModelId(params.model_id_str.to_string());
-    let node_id = params.shared.identity.node_id().clone();
-    let computed_layouts;
-    let layouts: &[crate::inference::split::LayerShardLayout] =
-        if let Some(precomputed) = params.precomputed_layouts {
-            precomputed
-        } else {
-            let meta = crate::inference::split::GgufTensorMeta::from_gguf_file(params.header_path)
-                .map_err(|e| format!("Failed to parse GGUF header: {e}"))?;
-            computed_layouts =
-                crate::inference::split::compute_layer_shard_layouts(&meta, params.shard_count);
-            &computed_layouts
-        };
-    let (manifest, meta) = crate::model::manifest::manifest_from_header(
-        params.header_path,
-        &model_id,
-        params.filename,
-        params.total_size,
-        layouts,
-        node_id.clone(),
-    )?;
-    let num_layers = manifest.num_layers;
-    let model_dir = params
-        .header_path
-        .parent()
-        .ok_or_else(|| "GGUF header path has no parent directory".to_string())?;
-
-    // Save manifest to disk
-    manifest.save_to_dir(model_dir).map_err(|e| e.to_string())?;
-
-    // Register manifest in the model registry
-    params
-        .shared
-        .model_registry
-        .register_manifest(manifest.clone());
-
-    // Store GGUF metadata
-    params.shared.gguf_meta.insert(model_id.clone(), meta);
-
-    // Register this node as holder of the downloaded shards
-    for &shard_idx in params.shard_indices {
-        let shard_id = crate::types::ShardId {
-            model_id: model_id.clone(),
-            index: shard_idx,
-        };
-        params
-            .shared
-            .model_registry
-            .record_shard_holder(shard_id, node_id.clone());
-    }
-
-    tracing::info!(
-        model = %model_id,
-        shards_registered = params.shard_indices.len(),
-        num_layers,
-        "Generated manifest and registered shards from HF download"
-    );
-
-    Ok(())
 }
 
 #[cfg(test)]

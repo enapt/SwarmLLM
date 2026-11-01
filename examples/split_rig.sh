@@ -660,9 +660,10 @@ export LD_LIBRARY_PATH=/usr/local/cuda/lib64:/usr/lib/wsl/lib
 make_node() { # dir shards bootstrap
   local d="$1" m="$1/models/$MODEL"
   mkdir -p "$m"
-  # softunload: A runs auto-manage as a default install does, on a short cycle
-  # and without the HuggingFace watcher (the rig must not fetch anything).
-  local am=$'enabled = false\nprune_enabled = false'
+  # No node runs the HuggingFace watcher: the rig must not fetch anything, and
+  # since #389 the watcher registers the models people run. softunload: A runs
+  # auto-manage as a default install does, on a short cycle.
+  local am=$'enabled = false\nprune_enabled = false\nhf_watcher_enabled = false'
   [ "$MODE" = softunload ] && [ "$(basename "$d")" = A ] \
     && am=$'enabled = true\nprune_enabled = true\ninterval_seconds = 30\nhf_watcher_enabled = false'
   [ -n "${FETCH_DRAFTER:-}" ] && [ "$(basename "$d")" = A ] \

@@ -916,13 +916,12 @@ impl AutoShardManager {
         !lapsed
     }
 
-    /// May this node plan `model_id`'s near chain — asked for, and a model it
-    /// would host? One the owner did not choose with its safety training
-    /// removed (`SharedState::unchosen_uncensored_model`) is never fetched
-    /// here, so it is planned no chain and its header is not fetched for one
-    /// (the v0.3.247 security review). The chain and the header ask this.
+    /// May this node plan `model_id`'s near chain — is it asked for? Any model
+    /// may be (#389 (c): nothing automatic judges content); a model nobody runs
+    /// is not asked for (`unused::nobody_runs`). The chain and the header ask
+    /// this.
     fn may_plan_a_near_chain(&self, model_id: &ModelId) -> bool {
-        self.asked_for(model_id) && !self.shared_state.unchosen_uncensored_model(model_id)
+        self.asked_for(model_id)
     }
 
     /// `manifest`'s chain, computed now: over the near machines, else — where
@@ -1469,12 +1468,17 @@ mod tests {
     /// is met and nothing needs carrying: only a near chain moves anything.
     /// This node could run 16 of its layers, the peer `near_rtt_ms` away 20.
     fn swarm(near_rtt_ms: f32) -> Swarm {
+        swarm_named("near-me", near_rtt_ms)
+    }
+
+    /// [`swarm`] with the model named `name`.
+    fn swarm_named(name: &str, near_rtt_ms: f32) -> Swarm {
         let mut config = Config::default();
         config.auto_manage.min_replicas = 1;
         let (state, manager) = make_test_manager_with_config(config);
         state.models.auto_manage_default_model_cap.store(0, Relaxed);
         let ranges: Vec<(u32, u32)> = (0..8).map(|i| (i * 4, i * 4 + 4)).collect();
-        let mid = register_manifest_with_sized_shards(&state, "near-me", 32, &ranges, PART);
+        let mid = register_manifest_with_sized_shards(&state, name, 32, &ranges, PART);
         state
             .model_process_pool
             .test_cost_curve
@@ -1506,7 +1510,12 @@ mod tests {
     /// LAN box: the chain is this node on layers 0-12 (parts 0-2) and the
     /// peer on 12-32 (it lacks part 7), four parts against five for any other.
     fn fleet(near_rtt_ms: f32) -> Swarm {
-        let s = swarm(near_rtt_ms);
+        fleet_named("near-me", near_rtt_ms)
+    }
+
+    /// [`fleet`] with the model named `name`.
+    fn fleet_named(name: &str, near_rtt_ms: f32) -> Swarm {
+        let s = swarm_named(name, near_rtt_ms);
         holds(&s.state, &s.mid, &s.near, &[2, 3, 4, 5, 6]);
         s
     }
@@ -2034,40 +2043,28 @@ mod tests {
             .manager
             .models_a_near_chain_needs_a_header_for()
             .is_empty());
-
-        // A model with its safety training removed that the owner did not
-        // choose is never hosted here: no chain, no header for one.
-        s.state.models.hf_sources.insert(
-            s.mid.clone(),
-            crate::daemon::state::HfSource {
-                repo_id: "someone/near-me-abliterated-GGUF".into(),
-                filename: "near-me.gguf".into(),
-                mmproj_filename: None,
-            },
-        );
-        assert!(s.state.unchosen_uncensored_model(&s.mid));
-        assert!(s
-            .manager
-            .models_a_near_chain_needs_a_header_for()
-            .is_empty());
     }
 
-    /// A model the owner did not choose with its safety training removed is
-    /// planned no near chain here: this node would never fetch its parts.
+    /// A model with its safety training removed is planned a near chain like
+    /// any other once it is asked for (#389 (c)): nothing automatic judges
+    /// content. Until 2026-11-01 one the owner had not chosen was planned none.
+    /// Marked by its NAME: an origin entry would mark it too, but leaves its
+    /// upload unvalidated, and `canonical_allows_acquisition` then refuses
+    /// every fetch whatever the content rule says.
     #[test]
-    fn an_unchosen_uncensored_model_is_planned_no_near_chain() {
-        let s = fleet(4.0);
-        assert!(s.chain().is_some(), "control: an ordinary model");
-        s.state.models.hf_sources.insert(
-            s.mid.clone(),
-            crate::daemon::state::HfSource {
-                repo_id: "someone/near-me-abliterated-GGUF".into(),
-                filename: "near-me.gguf".into(),
-                mmproj_filename: None,
-            },
+    fn an_uncensored_model_is_planned_a_near_chain_like_any_other() {
+        let s = fleet_named("near-me-abliterated", 4.0);
+        assert!(
+            s.state.unchosen_uncensored_model(&s.mid),
+            "fixture: marked, not chosen"
         );
-        assert!(s.chain().is_none());
-        assert!(s.offered().is_empty());
+        assert!(s.state.canonical_allows_acquisition(&s.mid));
+        let chain = s.chain().expect("a near chain");
+        assert_eq!(
+            chain.segments,
+            vec![(s.local(), (0, 12)), (s.near.clone(), (12, 32))]
+        );
+        assert_eq!(s.offered(), vec![0, 1, 2]);
     }
 
     fn machine(byte: u8, ceiling: u32, has: &[bool]) -> Machine {
