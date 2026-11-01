@@ -77,8 +77,10 @@ impl ModelArch {
             // `build_inp_embd`), and its IMROPE turns a text position, the
             // same in every section, as NEOX does. Its image reader
             // (`qwen3vl_merger`) is not read here, so a picture is refused by
-            // name (`vision::load_from_mmproj_gguf`).
-            "qwen2" | "qwen3" | "qwen3vl" | "qwen2moe" | "qwen3moe" => ModelArch::Qwen2,
+            // name (`vision::load_from_mmproj_gguf`). Qwen2.5-VL's (`qwen2vl`)
+            // is Qwen2's the same way (Qwen2.5-VL-3B-Instruct's header): no
+            // deepstack, and its MROPE also turns a text position as NEOX does.
+            "qwen2" | "qwen2vl" | "qwen3" | "qwen3vl" | "qwen2moe" | "qwen3moe" => ModelArch::Qwen2,
             "gemma" => ModelArch::Gemma,
             "gemma2" => ModelArch::Gemma2,
             "gemma3" => ModelArch::Gemma3,
@@ -277,6 +279,7 @@ impl ModelArch {
         &[
             "llama",
             "qwen2",
+            "qwen2vl",
             "qwen3",
             "qwen3vl",
             "qwen2moe",

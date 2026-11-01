@@ -72,9 +72,13 @@ pub(super) struct SplitLoadOptions<'a> {
 /// OOMs on one it thought would. `embedding_dtype_matches_the_vram_estimate`
 /// pins the last of those three.
 ///
-/// f16 rather than f32: `Embedding::new` needs a dense tensor, but the values
-/// come from a quantized tensor whose own block scales are f16, so the wider
-/// type stores nothing extra. On a large-vocabulary model the difference is
+/// f16 rather than f32: `Embedding::new` needs a dense tensor. f16 does round
+/// — a quantized value (an f16 block scale times a quant) can need more than
+/// its 11 significant bits — but measurably harmlessly: against an exact
+/// float64 forward of Qwen2.5-VL-3B the f16 table moved the logits' cosine by
+/// 1e-5 at most, and on GLM-4.5 test files it tipped only near-ties of 3e-5
+/// (`docs/invariants/inference.md` § "Qwen2.5-VL", § "GLM-4.5"). On a
+/// large-vocabulary model the saving is
 /// decisive — Gemma 2 2B's 256,000-token table costs 2250 MB at f32 against
 /// 1629 MB for the entire rest of the model, which by itself pushed a 6 GB
 /// card to a CPU fallback (reported 2026-08-01).

@@ -822,7 +822,10 @@ The SplitModel loader detects the model architecture from GGUF metadata
 > tensor, and its two extras act only on pictures (a text token's deepstack inputs are zeros; IMROPE
 > turns a text position as NEOX does). Text only — its image reader (`qwen3vl_merger`) is not read.
 > Checked 2026-11-02 on `Qwen3VL-4B-Instruct-Q4_K_M` against llama.cpp master: a 160-token greedy reply
-> identical token for token (`docs/invariants/inference.md` § "Qwen3-VL").
+> identical token for token (`docs/invariants/inference.md` § "Qwen3-VL"). **Qwen2.5-VL** (`qwen2vl`)
+> loads the same way as Qwen2's language model (its MROPE turns a text position as NEOX does); checked
+> on the 3B against llama.cpp master and an exact float64 forward, each engine as close as the other
+> (§ "Qwen2.5-VL"). Text only — `qwen2.5vl_merger` is not read.
 
 > **Phi-3 fused tensors**: Phi-3 GGUF models store `attn_qkv.weight` (Q+K+V concatenated) and `ffn_up.weight` (gate+up concatenated, no `ffn_gate.weight`). The loader dequantizes on CPU, splits by head dimensions, and re-quantizes to Q4_0 on the target device.
 

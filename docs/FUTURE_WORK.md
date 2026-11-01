@@ -2825,6 +2825,11 @@ model is Qwen3's, checked on a real 4B file (a 160-token reply identical to llam
 projector in `vision.rs`, read off llama.cpp's `tools/mtmd/models/`), and `qwen3vlmoe`
 (30B-A3B: Qwen3-MoE's layers) once a real file is checked.
 
+**`qwen2vl` (Qwen2.5-VL: 1.67M) — text runs since 2026-11-02**: its language model is Qwen2's,
+checked on a real 3B file against llama.cpp master and an exact float64 forward (each engine as close
+as the other; llama.cpp master reads this family with a norm epsilon of 0; `docs/invariants/inference.md`
+§ "Qwen2.5-VL"). **Left**: its image reader (`qwen2.5vl_merger`, with Qwen3-VL's above).
+
 #### #326 — A card newer than the release's machine code waits minutes for its first reply
 `P2` · platform · **OPEN** — 2026-10-21 · history: gotcha #928, #325 (closed)
 

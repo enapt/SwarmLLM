@@ -6036,6 +6036,46 @@ a request with an image is a 400 naming it (`vision::load_from_mmproj_gguf`). `q
 (Qwen3-VL-30B-A3B) is the same reading over Qwen3-MoE's layers, and stays unrecognised until a
 real file is checked (#715).
 
+## Qwen2.5-VL: its language model is Qwen2's, and its looser agreement is the model's, not the reading (2026-11-02, FUTURE_WORK #390)
+
+Qwen2.5-VL (`qwen2vl`, 1.67M downloads a month across HuggingFace's most-downloaded GGUFs, read
+2026-11-02) was refused as an unknown family. **What differs from Qwen2** (llama.cpp master
+`src/models/qwen2vl.cpp` diffed against `qwen2.cpp`; `Qwen2.5-VL-3B-Instruct-Q4_K_M.gguf`'s header:
+36 layers, 2048 wide, 16 heads over 2 KV heads, Q/K/V biases, tied output): only the rotation.
+`rope.dimension_sections` [16, 24, 24, 0] make it MROPE (`ggml_rope_multi`). llama.cpp copies a text
+token's position into every section (`llama-batch.cpp`), and with equal positions ggml's MROPE
+computes NEOX's angles and turns NEOX's pairs (`ggml-cpu/ops.cpp`, `ggml_mrope_cache_init`) — the
+same numbers. So `qwen2vl` maps to `ModelArch::Qwen2`.
+
+**llama.cpp master reads this family with a norm epsilon of 0** (4b1a27f, 2026-09-25):
+`llama_model_qwen2vl::load_arch_hparams` reads only the rope sections — a `// fall through` left
+from when its case ran on into Qwen2's, which read `attention.layer_norm_rms_epsilon`. Its
+`print_info` says `f_norm_rms_eps = 0.0e+00` for this file and 1e-06 for Qwen3-VL's. We use the
+file's 1e-6. It is not what separates the engines (our copy set to 0: worst cosine 0.990 → 0.9935,
+median unchanged), but a check of this family should know the reference does not read it.
+
+**Checked** on the real 3B file, on the processor, a chat prompt of 38 ids (the same both sides):
+logits over 40 positions at Q4_K_M worst 0.990, median 0.99914 — looser than a plain Qwen2.5-3B at
+the same quantisation on the same ids (requantised from Q8_0: worst 0.99904, median 0.99961). The
+greedy reply parts at its third token, after "Certainly!": ours "Here", llama.cpp " A", a three-way
+near-tie (ours 23.266 / 23.248 / 23.104, llama.cpp 23.242 / 23.202 / 23.014).
+
+**Which engine is off was settled against an exact float64 forward** (`examples/qwen2_exact_reference.py`,
+the file requantised to Q8_0): **neither more than the other** — median cosine to the exact logits
+0.999847 ours, 0.999823 llama.cpp; the exact top pick matched at 39 of 40 positions by ours and 40 of
+40 by llama.cpp; at Q8_0 the reply's third token is " A" in all three. The looser agreement is this
+model's: its residual stream carries a spike in one dimension (318) reaching 2,364 — at the first
+token from layer 2, at positions 3-4 from about layer 24 — which leaves the final norm little of
+anything else, so the positions it dominates have small logits (largest 12, against about 30
+elsewhere) that any engine's rounding tips (position 4: ours 0.991, llama.cpp 0.997 to the exact).
+Our hidden state drifts from the exact at the same slow rate at every position (after layer 34,
+spike dimensions left out: median 0.99961, position 4 0.99954; no layer where one position jumps).
+Ruled out by measurement: our f16 token table (the exact forward with one: unchanged to five
+digits) and llama.cpp's f16 attention cache (`DUMP_KV_F32=1`: its logits bitwise unchanged).
+
+**Not done**: pictures — its image reader (`clip.projector_type` `qwen2.5vl_merger`) is not read, so a
+request with an image is a 400 naming it (`vision::load_from_mmproj_gguf`).
+
 ## GLM-4.5: experts CHOSEN with a bias, weighed without it, and its pre-feed-forward norm under GLM-4's sandwich name (2026-11-02, FUTURE_WORK #390)
 
 **What differs from the families here** (llama.cpp master: `src/models/glm4-moe.cpp`,
