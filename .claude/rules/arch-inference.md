@@ -193,9 +193,9 @@ Qwen 3.5's DeltaNet layers keep a recurrent state per request, and a rejected gu
 
 ## Qwen 3.5's delta rule is ONE op per layer (2026-10-11)
 
-`layers::qwen35::forward_deltanet` runs a layer's whole recurrence in one op: **`delta_rule_cpu`** (a task per sequence and value head, the state updated in place) and, on a card, **`delta_rule_cuda`** → `kernels/delta_rule.cu` (llama.cpp's `gated_delta_net_cuda`; scope `card_delta_rule_covers`). Value head h reads key head h % nk; q and k are normalised as one tensor. NOT bit-identical to the composition `delta_rule`, which stays as the A/B (`SWARMLLM_DELTA_RULE=steps`) and the reference of `one_pass_delta_rule_matches_token_by_token` — judge replies against llama.cpp. Profile stage `delta rule`.
+`layers::qwen35::forward_deltanet` runs a layer's whole recurrence in one op: **`delta_rule_cpu`** (a task per sequence and value head, the state updated in place) and, on a card, **`delta_rule_cuda`** → `kernels/delta_rule.cu` (llama.cpp's `gated_delta_net_cuda`; scope `card_delta_rule_covers`). Value head h reads key head h % nk; q and k are normalised as one tensor. **A Qwen3-Next file groups them (h / r)**: its rows are put in this order at load, still quantized (`GroupedValueHeads::kernel_order`), and `ssm_out` reads its input put back (`ValueHeadOrder`) — never a second order in a kernel. A family awaiting its real-file check is refused unless `SWARMLLM_UNCHECKED_FAMILIES` names it (`ModelArch::is_supported`, #390). NOT bit-identical to the composition `delta_rule`, which stays as the A/B (`SWARMLLM_DELTA_RULE=steps`) and the reference of `one_pass_delta_rule_matches_token_by_token` — judge replies against llama.cpp. Profile stage `delta rule`.
 
-→ `docs/invariants/inference.md` § "Qwen 3.5's delta rule is ONE op per layer"
+→ `docs/invariants/inference.md` § "Qwen 3.5's delta rule is ONE op per layer", § "Qwen3-Next: value heads grouped by key head"
 
 ## A sliding window is cut where it binds, and its cache keeps the window (2026-10-15/16, #278, #281)
 

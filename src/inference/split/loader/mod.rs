@@ -24,9 +24,9 @@ use super::rope::{
 };
 use super::token_embedding::TokenEmbedding;
 use super::{
-    Activation, DeepSeekMeta, DeltaNetWeights, FfnVariant, LayerVariant, LayerWeights, MlaWeights,
-    Mlp, ModelArch, MoeFfn, MoeGatingFunc, MoeRoutingConfig, QMatMul, Qwen35AttnWeights,
-    DEFAULT_MAX_SEQ_LEN,
+    Activation, DeepSeekMeta, DeltaNetWeights, FfnVariant, GroupedValueHeads, InputProjections,
+    KernelOrder, LayerVariant, LayerWeights, MlaWeights, Mlp, ModelArch, MoeFfn, MoeGatingFunc,
+    MoeRoutingConfig, QMatMul, Qwen35AttnWeights, ValueHeadOrder, DEFAULT_MAX_SEQ_LEN,
 };
 
 /// Per-call options for [`SplitModel::load_model_from_content`]. Bundles the
@@ -2259,8 +2259,19 @@ impl SplitModel {
             let state_size = md_usize("ssm.state_size")?;
             let n_k_heads = md_usize("ssm.group_count")?;
             let n_v_heads = md_usize("ssm.time_step_rank")?;
-            let is_moe = matches!(model_arch, ModelArch::Qwen35Moe);
+            let is_moe = matches!(model_arch, ModelArch::Qwen35Moe | ModelArch::Qwen3Next);
+            // Qwen3-Next's files group the value heads by key head; the kernels
+            // read them tiled, so its rows are put in that order as they load
+            // (`layers::ValueHeadOrder`, #390).
+            let grouped_heads =
+                matches!(model_arch, ModelArch::Qwen3Next).then_some(GroupedValueHeads {
+                    n_k_heads,
+                    n_v_heads,
+                    k_head_dim: state_size,
+                    v_head_dim: state_size,
+                });
             tracing::info!(
+                arch = %model_arch,
                 conv_kernel,
                 state_size,
                 n_k_heads,
@@ -2331,8 +2342,11 @@ impl SplitModel {
                 if is_deltanet {
                     let conv1d =
                         q35_dense(&mut *file, format!("{prefix}.ssm_conv1d.weight"), &device)?;
-                    layers.push(LayerVariant::Qwen35Ssm {
-                        weights: DeltaNetWeights {
+                    let dt_bias = q35_dense(&mut *file, format!("{prefix}.ssm_dt.bias"), &device)?;
+                    let a = q35_dense(&mut *file, format!("{prefix}.ssm_a"), &device)?;
+                    let order = match grouped_heads {
+                        // Qwen 3.5: in kernel order already, beta and alpha apart.
+                        None => KernelOrder {
                             wqkv: q35_mm(&mut *file, format!("{prefix}.attn_qkv.weight"), &device)?,
                             wz: q35_mm(&mut *file, format!("{prefix}.attn_gate.weight"), &device)?,
                             w_beta: q35_mm(
@@ -2345,13 +2359,53 @@ impl SplitModel {
                                 format!("{prefix}.ssm_alpha.weight"),
                                 &device,
                             )?,
-                            dt_bias: q35_dense(
-                                &mut *file,
-                                format!("{prefix}.ssm_dt.bias"),
-                                &device,
-                            )?,
-                            a: q35_dense(&mut *file, format!("{prefix}.ssm_a"), &device)?,
                             conv1d,
+                            dt_bias,
+                            a,
+                        },
+                        // Qwen3-Next: read on the processor, rows put in kernel
+                        // order, the result placed on this layer's `device`.
+                        Some(heads) => {
+                            let fused = format!("{prefix}.ssm_in.weight");
+                            let input = if ct.tensor_infos.contains_key(&fused) {
+                                InputProjections::Fused(q35_tensor(
+                                    &mut *file,
+                                    fused,
+                                    &Device::Cpu,
+                                )?)
+                            } else {
+                                InputProjections::Split {
+                                    qkv: q35_tensor(
+                                        &mut *file,
+                                        format!("{prefix}.attn_qkv.weight"),
+                                        &Device::Cpu,
+                                    )?,
+                                    gate: q35_tensor(
+                                        &mut *file,
+                                        format!("{prefix}.attn_gate.weight"),
+                                        &Device::Cpu,
+                                    )?,
+                                }
+                            };
+                            let ba = q35_tensor(
+                                &mut *file,
+                                format!("{prefix}.ssm_ba.weight"),
+                                &Device::Cpu,
+                            )?;
+                            heads
+                                .kernel_order(&input, &ba, &conv1d, &dt_bias, &a, &device)
+                                .map_err(|e| SwarmError::Internal(format!("{prefix}: {e}")))?
+                        }
+                    };
+                    layers.push(LayerVariant::Qwen35Ssm {
+                        weights: DeltaNetWeights {
+                            wqkv: order.wqkv,
+                            wz: order.wz,
+                            w_beta: order.w_beta,
+                            w_alpha: order.w_alpha,
+                            dt_bias: order.dt_bias,
+                            a: order.a,
+                            conv1d: order.conv1d,
                             ssm_norm: RmsNorm::from_qtensor(
                                 q35_tensor(
                                     &mut *file,
@@ -2372,6 +2426,11 @@ impl SplitModel {
                             v_head_dim: state_size,
                             conv_kernel,
                             eps: rms_norm_eps,
+                            out_heads: if grouped_heads.is_some() {
+                                ValueHeadOrder::GroupedByKeyHead
+                            } else {
+                                ValueHeadOrder::Tiled
+                            },
                         },
                         ffn,
                         attention_norm: make_norm(attn_norm, rms_norm_eps)?,

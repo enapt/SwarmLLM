@@ -367,7 +367,11 @@ pub(crate) fn arch_supports_hybrid(arch: &crate::inference::model_arch::ModelArc
         // The MoE variant runs the same loop; its feed-forward loads through
         // `load_moe_ffn` with that loop's shadowed `device`, and was checked
         // split on the card against llama.cpp on 2026-10-11 (#228 (1)).
-        A::Qwen35 | A::Qwen35Moe => true,
+        // Qwen3-Next is this loop too; its reordered rows reach the card
+        // through the same shadowed `device` (`GroupedValueHeads::kernel_order`).
+        // Its split on a card is part of the real-file check its family
+        // waits for (`ModelArch::is_supported`, #390).
+        A::Qwen35 | A::Qwen35Moe | A::Qwen3Next => true,
         // MLA attention with its own projection set; unverified.
         A::DeepSeek2 => false,
         // An architecture we do not recognise is one whose loop nobody has
@@ -908,7 +912,7 @@ mod tests {
         let recurrent = header(
             "qwen35",
             vec![("qwen35.block_count", Value::U32(4))],
-            &["blk.1.ssm_alpha.weight"],
+            &["blk.1.ssm_conv1d.weight"],
         );
         assert!(!card_may_guess(&recurrent, 0, 4, true, true));
 

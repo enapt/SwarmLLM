@@ -133,6 +133,7 @@ pub fn check_fits(meta: &AdapterMetadata, model: &AdapterTarget<'_>) -> Result<(
             | ModelArch::Gemma4
             | ModelArch::Qwen35
             | ModelArch::Qwen35Moe
+            | ModelArch::Qwen3Next
             | ModelArch::Unknown(_)
     ) {
         return Err(format!(
@@ -1327,7 +1328,14 @@ mod tests {
 
         // Layers the executor never hands an adapter, or of shapes this check
         // cannot judge (Gemma 4's): refused, not ignored.
-        for arch in ["deepseek2", "gemma4", "qwen35", "qwen35moe", "mamba"] {
+        for arch in [
+            "deepseek2",
+            "gemma4",
+            "qwen35",
+            "qwen35moe",
+            "qwen3next",
+            "mamba",
+        ] {
             let other = AdapterTarget {
                 architecture: arch,
                 ..tiny

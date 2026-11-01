@@ -2752,13 +2752,14 @@ and this tree. Ranked by what we already have, what consumer cards can split, an
 match llama.cpp** (#715, `arch-inference.md`).
 
 1. **`qwen3next` — Qwen3-Coder-Next 80B-A3B** (Q4_K_M 48.5 GB, UD-Q2_K_XL 26.8: two or three cards;
-   ~0.21M). Small-medium: Qwen 3.5's DeltaNet, gated attention, Q/K norm and gated shared expert are
-   here (`layers::qwen35`, `delta_rule_{cpu,cuda}`, `SsmState`); nextn is dropped already. Missing:
-   the FUSED `ssm_beta_alpha` tensor, de-interleaved per key head (`qwen3next.cpp:418-446`); the
-   V heads GROUPED by key head (`h / r`, `:500-520`) where our kernels read `h % nk`
-   (`delta_rule.cu:82`, `qwen35.rs:488`) — a kernel mode or a load-time permutation of the V, z,
-   a/dt, conv and `ssm_out` rows; NEOX rope where Qwen 3.5 has IMROPE (text-only, to verify). Also
-   the shared pieces #4 and #5 need.
+   ~0.21M). **Loader in since 2026-11-01, refused until a real file is checked**: the grouped value
+   heads are put in the kernels' order at load, still quantized, `ssm_ba` cut in two, the older
+   `ssm_in` read, `ssm_out`'s input put back (`layers::ValueHeadOrder`); it matches llama.cpp on
+   random-weight files with the real ratios, both layouts, split or whole (`docs/invariants/inference.md`
+   § "Qwen3-Next"). Tokenizer `gpt2` / `qwen2`, already here. **Left**: one REAL file's reply against
+   llama.cpp — bartowski's Q2_K (28.2 GB) or larger, so two cards or swarm peers, never this
+   machine's 15 GB (`SWARMLLM_UNCHECKED_FAMILIES=qwen3next` on the nodes running it) — its split on
+   a card, then `supported_list`. unsloth's files carry MXFP4 tensors (#394; #2 here adds the type).
 2. **`gpt-oss` — gpt-oss-20b** (11.6-12.1 GB: ONE 16 GB card or a split of two small ones; ~0.6M,
    the largest audience). Large: MXFP4 experts — a new candle type (id 39, `ggml-common.h:214`:
    dequantise, processor dot + AVX2, card mat-vec and MMQ, `moe_card::kernel_type`); attention SINKS

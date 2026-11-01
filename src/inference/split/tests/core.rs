@@ -1100,6 +1100,7 @@ fn model_arch_detection() {
     );
     assert_eq!(ModelArch::from_gguf_arch("qwen35"), ModelArch::Qwen35);
     assert_eq!(ModelArch::from_gguf_arch("qwen35moe"), ModelArch::Qwen35Moe);
+    assert_eq!(ModelArch::from_gguf_arch("qwen3next"), ModelArch::Qwen3Next);
     assert!(matches!(
         ModelArch::from_gguf_arch("unknown_arch"),
         ModelArch::Unknown(_)
@@ -1125,6 +1126,8 @@ fn model_arch_properties() {
         ("gemma2", true),
         ("phi3", true),
         ("starcoder2", true),
+        // `llama_model_rope_type`: LLM_ARCH_QWEN3NEXT is NEOX (#390).
+        ("qwen3next", true),
     ] {
         assert_eq!(
             ModelArch::from_gguf_arch(arch).use_rope_contiguous(),
@@ -1160,6 +1163,13 @@ fn model_arch_properties() {
     assert!(ModelArch::Qwen35Moe.is_supported());
     assert!(ModelArch::Qwen35.is_hybrid_ssm());
     assert!(ModelArch::Qwen35Moe.is_hybrid_ssm());
+    // Qwen3-Next matched llama.cpp on test files only (#390): refused until a
+    // real file's reply is checked, unless the operator names it.
+    assert!(ModelArch::Qwen3Next.is_hybrid_ssm());
+    assert_eq!(
+        ModelArch::Qwen3Next.is_supported(),
+        std::env::var("SWARMLLM_UNCHECKED_FAMILIES").is_ok_and(|v| v.contains("qwen3next"))
+    );
     assert!(!ModelArch::Llama.is_hybrid_ssm());
     assert!(!ModelArch::Unknown("mamba".to_string()).is_supported());
 }

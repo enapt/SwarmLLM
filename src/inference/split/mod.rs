@@ -26,9 +26,10 @@ mod token_embedding;
 
 // Re-export types from extracted modules so external `crate::inference::split::X` paths still work.
 pub(crate) use super::layers::{
-    DeepSeekMeta, DeltaNetWeights, DenseBeside, ExpertFfn, ExpertScales, FfnVariant, LayerVariant,
-    LayerWeights, MlaWeights, Mlp, MoeFfn, MoeGatingFunc, MoeRoutingConfig, PerLayerEmbedding,
-    QMatMul, Qwen35AttnWeights, SsmState, StackedExperts,
+    DeepSeekMeta, DeltaNetWeights, DenseBeside, ExpertFfn, ExpertScales, FfnVariant,
+    GroupedValueHeads, InputProjections, KernelOrder, LayerVariant, LayerWeights, MlaWeights, Mlp,
+    MoeFfn, MoeGatingFunc, MoeRoutingConfig, PerLayerEmbedding, QMatMul, Qwen35AttnWeights,
+    SsmState, StackedExperts, ValueHeadOrder,
 };
 pub(crate) use super::model_arch::Activation;
 pub use super::model_arch::ModelArch;

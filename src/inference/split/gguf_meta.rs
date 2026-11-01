@@ -297,11 +297,14 @@ pub fn gguf_arch_str(ct: &gguf_file::Content) -> String {
         .unwrap_or_else(|| "llama".to_string())
 }
 
-/// Is layer `layer_idx` a RECURRENT layer — Qwen 3.5's Gated DeltaNet, which
-/// carries a fixed-size state instead of a KV cache that grows per position?
+/// Is layer `layer_idx` a RECURRENT layer — Qwen 3.5's or Qwen3-Next's Gated
+/// DeltaNet, which carries a fixed-size state instead of a KV cache that grows
+/// per position?
 ///
 /// Read off the tensor table: the loader builds a DeltaNet layer exactly where
-/// `blk.N.ssm_alpha.weight` exists, so this is the loader's own test, and a
+/// `blk.N.ssm_conv1d.weight` exists — every DeltaNet layer has its
+/// convolution, whether its file keeps beta and alpha apart (Qwen 3.5) or
+/// fused (Qwen3-Next's `ssm_ba`, #390) — so this is the loader's own test, and a
 /// header answers it for a segment whose parts are not on disk. llama.cpp
 /// derives the same layers from `full_attention_interval`
 /// (`(il + 1) % interval != 0`); the file is the stronger witness.
@@ -535,7 +538,7 @@ pub(crate) fn query_scale(ct: &gguf_file::Content, head_dim: usize) -> Option<f6
 /// spelling, for the header ([`layer_is_recurrent`]) and the manifest's
 /// tensor table ([`GgufTensorMeta::layers_keeping_kv`]) alike.
 fn recurrent_layer_marker(layer_idx: usize) -> String {
-    format!("blk.{layer_idx}.ssm_alpha.weight")
+    format!("blk.{layer_idx}.ssm_conv1d.weight")
 }
 
 /// Gemma 4 E2B/E4B's per-layer token embeddings: `[n_layer × n_embd_per_layer,
@@ -2021,13 +2024,13 @@ mod kv_layer_tests {
 
     /// Qwen 3.5's shape: a full-attention layer every fourth (llama.cpp:
     /// recurrent where `(il + 1) % 4 != 0`), told apart as the loader tells
-    /// them — by `ssm_alpha`.
+    /// them — by `ssm_conv1d`.
     #[test]
     fn only_a_models_attention_layers_keep_a_kv_cache() {
         let names: Vec<String> = (0..8)
             .map(|il| {
                 if (il + 1) % 4 != 0 {
-                    format!("blk.{il}.ssm_alpha.weight")
+                    format!("blk.{il}.ssm_conv1d.weight")
                 } else {
                     format!("blk.{il}.attn_k.weight")
                 }

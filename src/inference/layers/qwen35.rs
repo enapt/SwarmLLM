@@ -4,11 +4,14 @@
 
 use crate::inference::decode_attn::{axpy, dot};
 use crate::inference::split::kv_cache::LayerKv;
+use candle_core::quantized::QTensor;
 use candle_core::{DType, Device, Result as CandleResult, Tensor, D};
 use candle_nn::Module;
 use rayon::prelude::*;
 
-use super::{run_attention, DeltaNetWeights, Qwen35AttnWeights, SsmRows, SsmSlot, SsmState};
+use super::{
+    run_attention, DeltaNetWeights, QMatMul, Qwen35AttnWeights, SsmRows, SsmSlot, SsmState,
+};
 
 // ── Qwen 3.5 full-attention layer forward ──
 
@@ -19,7 +22,8 @@ impl Qwen35AttnWeights {
         let sin = self.sin.narrow(0, index_pos, seq_len)?;
         // IMROPE with every position component equal to the token index —
         // what text is — rotates each pair by `pos * base^(-2i/n_rot)`, i.e.
-        // plain NEOX-style partial RoPE over the first `rope_dim` dims.
+        // plain NEOX-style partial RoPE over the first `rope_dim` dims —
+        // Qwen3-Next's own type (`llama_model_rope_type`).
         super::rope_over_heads(x, &cos, &sin, self.rope_dim, true)
     }
 
@@ -100,6 +104,216 @@ impl Qwen35AttnWeights {
         let gated = (y * candle_nn::ops::sigmoid(&gate)?)?;
         self.wo.forward(&gated)
     }
+}
+
+// ── Value heads grouped by key head (Qwen3-Next) ──
+
+/// The order a DeltaNet layer's FILE keeps its value heads in. Both families
+/// give each key head `r = nv / nk` value heads, and llama.cpp spells out the
+/// difference (`llama-model.cpp` `get_split_segments`, master `4b1a27f`):
+/// Qwen 3.5 TILES them — value head `h` reads key head `h % nk`,
+/// `[k0_v0, k1_v1, k0_v2, k1_v3]` — and Qwen3-Next GROUPS them — `h / r`,
+/// `[k0_v0, k0_v1, k1_v2, k1_v3]` (`qwen3next.cpp` repeats each key head `r`
+/// times in place). Every per-head weight follows: the value rows of
+/// `attn_qkv` and of the convolution, `attn_gate`, beta, alpha, `ssm_dt`,
+/// `ssm_a`, and `ssm_out`'s columns.
+///
+/// The kernels read the tiled order (`delta_rule.cu`, `delta_rule_cpu`), so
+/// the loader puts a grouped file's rows in it ([`GroupedValueHeads`]) — whole
+/// rows, still quantized. `ssm_out` alone keeps the file's order: its value
+/// heads are COLUMNS, and a 256-wide K-quant block holds two 128-wide heads
+/// that land apart, so its input is put back in the file's order instead (one
+/// copy of `nv · vd` values a position).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ValueHeadOrder {
+    /// The kernels' order — Qwen 3.5's files.
+    Tiled,
+    /// Grouped by key head — what a Qwen3-Next file's `ssm_out` reads.
+    GroupedByKeyHead,
+}
+
+/// A Qwen3-Next DeltaNet layer's head geometry, for putting its file's rows in
+/// the kernels' order ([`ValueHeadOrder`]). Kernel head `h` is the file's head
+/// `(h % nk) · r + h / nk`: both read key head `h % nk`, and the `j`-th kernel
+/// head of a key head is the `j`-th of its group.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct GroupedValueHeads {
+    pub(crate) n_k_heads: usize,
+    pub(crate) n_v_heads: usize,
+    pub(crate) k_head_dim: usize,
+    pub(crate) v_head_dim: usize,
+}
+
+/// A Qwen3-Next layer's input projections as its file holds them.
+pub(crate) enum InputProjections {
+    /// `attn_qkv` (q, k, the values) and `attn_gate` (z).
+    Split { qkv: QTensor, gate: QTensor },
+    /// The older files' `ssm_in`: per key head its q, its k, its group's
+    /// values, then its group's gates (llama.cpp's "legacy (slower) path").
+    Fused(QTensor),
+}
+
+/// A DeltaNet layer's per-head weights in the kernels' order — what
+/// [`GroupedValueHeads::kernel_order`] answers, and what a Qwen 3.5 file
+/// holds as it is.
+pub(crate) struct KernelOrder {
+    pub(crate) wqkv: QMatMul,
+    pub(crate) wz: QMatMul,
+    pub(crate) w_beta: QMatMul,
+    pub(crate) w_alpha: QMatMul,
+    pub(crate) conv1d: Tensor,
+    pub(crate) dt_bias: Tensor,
+    pub(crate) a: Tensor,
+}
+
+impl GroupedValueHeads {
+    fn per_key_head(&self) -> usize {
+        self.n_v_heads / self.n_k_heads
+    }
+
+    /// The file's value head for kernel head `h`.
+    fn file_head(&self, h: usize) -> usize {
+        (h % self.n_k_heads) * self.per_key_head() + h / self.n_k_heads
+    }
+
+    /// One entry per value head (`ssm_dt`, `ssm_a`), in kernel order.
+    pub(crate) fn head_rows(&self) -> Vec<usize> {
+        (0..self.n_v_heads).map(|h| self.file_head(h)).collect()
+    }
+
+    /// `v_head_dim` rows per value head, the file's heads starting at row
+    /// `from`, in kernel order.
+    fn value_rows(&self, from: usize) -> impl Iterator<Item = usize> + '_ {
+        (0..self.n_v_heads).flat_map(move |h| {
+            let start = from + self.file_head(h) * self.v_head_dim;
+            start..start + self.v_head_dim
+        })
+    }
+
+    /// `attn_qkv`'s rows — and the convolution's channels — in kernel order:
+    /// q and k as they are, the values reordered.
+    pub(crate) fn qkv_rows(&self) -> Vec<usize> {
+        let keys = 2 * self.n_k_heads * self.k_head_dim;
+        (0..keys).chain(self.value_rows(keys)).collect()
+    }
+
+    /// `attn_gate`'s rows in kernel order — and `ssm_out`'s columns.
+    pub(crate) fn gate_rows(&self) -> Vec<usize> {
+        self.value_rows(0).collect()
+    }
+
+    /// `ssm_ba`'s beta rows and its alpha rows, in kernel order: per key head
+    /// the file holds its group's `r` betas, then their `r` alphas
+    /// (`qwen3next.cpp` `build_layer_attn_linear`).
+    pub(crate) fn beta_alpha_rows(&self) -> (Vec<usize>, Vec<usize>) {
+        let r = self.per_key_head();
+        let row = |h: usize, past: usize| (h % self.n_k_heads) * 2 * r + past + h / self.n_k_heads;
+        (
+            (0..self.n_v_heads).map(|h| row(h, 0)).collect(),
+            (0..self.n_v_heads).map(|h| row(h, r)).collect(),
+        )
+    }
+
+    /// The fused `ssm_in`'s rows for `attn_qkv` and for `attn_gate`, in kernel
+    /// order ([`InputProjections::Fused`]).
+    pub(crate) fn fused_rows(&self) -> (Vec<usize>, Vec<usize>) {
+        let (nk, kd, vd, r) = (
+            self.n_k_heads,
+            self.k_head_dim,
+            self.v_head_dim,
+            self.per_key_head(),
+        );
+        let block = 2 * kd + 2 * r * vd;
+        let q = (0..nk).flat_map(|kh| kh * block..kh * block + kd);
+        let k = (0..nk).flat_map(|kh| kh * block + kd..kh * block + 2 * kd);
+        let group = |h: usize, past: usize| {
+            let start = (h % nk) * block + 2 * kd + past + (h / nk) * vd;
+            start..start + vd
+        };
+        let v = (0..self.n_v_heads).flat_map(|h| group(h, 0));
+        let z = (0..self.n_v_heads).flat_map(|h| group(h, r * vd));
+        (q.chain(k).chain(v).collect(), z.collect())
+    }
+
+    /// The layer's per-head weights in kernel order, on `device`: the
+    /// projections' rows gathered whole and still quantized, `ssm_ba` cut into
+    /// beta and alpha, the convolution's channels and the per-head vectors
+    /// reordered. `ssm_out` is not among them ([`ValueHeadOrder`]).
+    pub(crate) fn kernel_order(
+        &self,
+        input: &InputProjections,
+        ba: &QTensor,
+        conv1d: &Tensor,
+        dt_bias: &Tensor,
+        a: &Tensor,
+        device: &Device,
+    ) -> CandleResult<KernelOrder> {
+        if self.n_k_heads == 0 || !self.n_v_heads.is_multiple_of(self.n_k_heads) {
+            candle_core::bail!(
+                "{} value heads do not share {} key heads evenly",
+                self.n_v_heads,
+                self.n_k_heads
+            )
+        }
+        let matrix =
+            |t: &QTensor, rows: &[usize]| QMatMul::from_qtensor(rows_in_order(t, rows, device)?);
+        let (wqkv, wz) = match input {
+            InputProjections::Split { qkv, gate } => (
+                matrix(qkv, &self.qkv_rows())?,
+                matrix(gate, &self.gate_rows())?,
+            ),
+            InputProjections::Fused(fused) => {
+                let (qkv, z) = self.fused_rows();
+                (matrix(fused, &qkv)?, matrix(fused, &z)?)
+            }
+        };
+        let (beta, alpha) = self.beta_alpha_rows();
+        let select = |t: &Tensor, rows: &[usize]| -> CandleResult<Tensor> {
+            if t.dim(0)? != rows.len() {
+                candle_core::bail!("{} rows where the heads make {}", t.dim(0)?, rows.len())
+            }
+            let ids: Vec<u32> = rows.iter().map(|&row| row as u32).collect();
+            t.index_select(&Tensor::new(ids.as_slice(), t.device())?, 0)
+        };
+        Ok(KernelOrder {
+            wqkv,
+            wz,
+            w_beta: matrix(ba, &beta)?,
+            w_alpha: matrix(ba, &alpha)?,
+            conv1d: select(conv1d, &self.qkv_rows())?,
+            dt_bias: select(dt_bias, &self.head_rows())?,
+            a: select(a, &self.head_rows())?,
+        })
+    }
+}
+
+/// Rows `rows` of a quantized matrix, in that order, as a new matrix on
+/// `device` — whole rows, so whole quantization blocks: nothing is
+/// dequantized. Every row asked for must be one of the matrix's.
+fn rows_in_order(t: &QTensor, rows: &[usize], device: &Device) -> CandleResult<QTensor> {
+    let (n_rows, cols) = t.shape().dims2()?;
+    let dtype = t.dtype();
+    if !cols.is_multiple_of(dtype.block_size()) {
+        candle_core::bail!("a row of {cols} is not whole {dtype:?} blocks")
+    }
+    let row_bytes = cols / dtype.block_size() * dtype.type_size();
+    let data = t.data()?;
+    if data.len() != n_rows * row_bytes {
+        candle_core::bail!("{} bytes are not {n_rows} rows of {row_bytes}", data.len())
+    }
+    let mut gathered = Vec::with_capacity(rows.len() * row_bytes);
+    for &row in rows {
+        if row >= n_rows {
+            candle_core::bail!("row {row} of a {n_rows}-row matrix")
+        }
+        gathered.extend_from_slice(&data[row * row_bytes..(row + 1) * row_bytes]);
+    }
+    candle_core::quantized::ggml_file::qtensor_from_ggml(
+        dtype,
+        &gathered,
+        vec![rows.len(), cols],
+        device,
+    )
 }
 
 // ── Qwen 3.5 Gated DeltaNet ("linear attention") layer forward ──
@@ -230,6 +444,15 @@ impl DeltaNetWeights {
         let z = z.reshape((b_sz, seq_len, nv, vd))?;
         let normed = self.ssm_norm.forward(&out)?;
         let gated = (normed * candle_nn::ops::silu(&z)?)?;
+        // `ssm_out` reads the file's head order (`ValueHeadOrder`): a grouped
+        // file's kernel head `j·nk + kh` is its `kh·r + j`.
+        let gated = match self.out_heads {
+            ValueHeadOrder::Tiled => gated,
+            ValueHeadOrder::GroupedByKeyHead => gated
+                .reshape((b_sz, seq_len, nv / nk, nk, vd))?
+                .transpose(2, 3)?
+                .contiguous()?,
+        };
         let gated = gated.reshape((b_sz, seq_len, nv * vd))?;
 
         let in_place = target.is_some();
@@ -780,6 +1003,181 @@ mod tests {
             v_head_dim: vd,
             conv_kernel: k,
             eps: 1e-6,
+            out_heads: ValueHeadOrder::Tiled,
+        }
+    }
+
+    /// The loader reorders a Qwen3-Next file's rows still quantized (#390):
+    /// whole rows are whole blocks, so the gathered matrix must be the chosen
+    /// rows exactly — for a 32-value format and a 256-value K-quant alike. A
+    /// row the matrix does not have is refused, never read past.
+    #[test]
+    fn rows_gathered_from_a_quantized_matrix_are_its_rows_exactly() {
+        use candle_core::quantized::GgmlDType;
+        let device = Device::Cpu;
+        let rows = [4usize, 0, 5, 2];
+        let ids = Tensor::new(&[4u32, 0, 5, 2], &device).unwrap();
+        for (dtype, cols) in [(GgmlDType::Q8_0, 64), (GgmlDType::Q4K, 256)] {
+            let dense = Tensor::randn(0f32, 1.0, (6, cols), &device).unwrap();
+            let q = QTensor::quantize(&dense, dtype).unwrap();
+            let got = rows_in_order(&q, &rows, &device).unwrap();
+            assert_eq!(got.dtype(), dtype);
+            let want = q
+                .dequantize(&device)
+                .unwrap()
+                .index_select(&ids, 0)
+                .unwrap();
+            assert_eq!(
+                got.dequantize(&device).unwrap().to_vec2::<f32>().unwrap(),
+                want.to_vec2::<f32>().unwrap(),
+                "{dtype:?}"
+            );
+            assert!(rows_in_order(&q, &[6], &device).is_err(), "{dtype:?}");
+        }
+    }
+
+    /// A Qwen3-Next file keeps its value heads grouped by key head; the loader
+    /// puts its rows in the kernels' tiled order and the layer puts `ssm_out`'s
+    /// input back (#390). A tiled layer's weights, filed as Qwen3-Next files
+    /// them — both input layouts — must answer as that layer does, over a
+    /// prompt and the steps decoded after it.
+    #[test]
+    fn a_file_grouping_its_value_heads_answers_as_the_layer_it_files() {
+        let device = Device::Cpu;
+        let (hidden, nk, kd, nv, vd, k) = (8usize, 2usize, 4usize, 4usize, 4usize, 4usize);
+        let c = 2 * nk * kd + nv * vd;
+        let heads = GroupedValueHeads {
+            n_k_heads: nk,
+            n_v_heads: nv,
+            k_head_dim: kd,
+            v_head_dim: vd,
+        };
+        let randn =
+            |rows: usize, cols: usize| Tensor::randn(0f32, 0.3, (rows, cols), &device).unwrap();
+        let (qkv, z, out) = (
+            randn(c, hidden),
+            randn(nv * vd, hidden),
+            randn(hidden, nv * vd),
+        );
+        let (beta, alpha, conv1d) = (randn(nv, hidden), randn(nv, hidden), randn(c, k));
+        let dt_bias = Tensor::randn(0f32, 0.3, (nv,), &device).unwrap();
+        let a = Tensor::randn(0f32, 0.3, (nv,), &device)
+            .unwrap()
+            .abs()
+            .unwrap()
+            .neg()
+            .unwrap();
+
+        // As a file holds them: its row `order[i]` is the kernel's row `i`.
+        let filed = |t: &Tensor, order: &[usize]| {
+            let mut kernel_row = vec![0u32; order.len()];
+            for (i, &row) in order.iter().enumerate() {
+                kernel_row[row] = i as u32;
+            }
+            t.contiguous()
+                .unwrap()
+                .index_select(&Tensor::new(kernel_row.as_slice(), &device).unwrap(), 0)
+                .unwrap()
+        };
+        let quantized =
+            |t: &Tensor| QTensor::quantize(t, candle_core::quantized::GgmlDType::F32).unwrap();
+        let stacked = |a: &Tensor, b: &Tensor| Tensor::cat(&[a, b], 0).unwrap();
+        let joined = |(a, b): (Vec<usize>, Vec<usize>)| a.into_iter().chain(b).collect::<Vec<_>>();
+        let ba = quantized(&filed(
+            &stacked(&beta, &alpha),
+            &joined(heads.beta_alpha_rows()),
+        ));
+        let file_out = filed(&out.t().unwrap(), &heads.gate_rows())
+            .t()
+            .unwrap()
+            .contiguous()
+            .unwrap();
+        let file_conv = filed(&conv1d, &heads.qkv_rows());
+        let file_dt = filed(&dt_bias, &heads.head_rows());
+        let file_a = filed(&a, &heads.head_rows());
+
+        let layer =
+            |order: KernelOrder, ssm_out: &Tensor, out_heads: ValueHeadOrder| DeltaNetWeights {
+                wqkv: order.wqkv,
+                wz: order.wz,
+                w_beta: order.w_beta,
+                w_alpha: order.w_alpha,
+                dt_bias: order.dt_bias,
+                a: order.a,
+                conv1d: order.conv1d,
+                ssm_norm: crate::inference::residual_norm::RmsNorm::from_qtensor(
+                    quantized(&Tensor::ones((vd,), DType::F32, &device).unwrap()),
+                    1e-6,
+                )
+                .unwrap(),
+                ssm_out: QMatMul::from_dense(ssm_out.clone()),
+                n_k_heads: nk,
+                k_head_dim: kd,
+                n_v_heads: nv,
+                v_head_dim: vd,
+                conv_kernel: k,
+                eps: 1e-6,
+                out_heads,
+            };
+        let tiled = layer(
+            KernelOrder {
+                wqkv: QMatMul::from_dense(qkv.clone()),
+                wz: QMatMul::from_dense(z.clone()),
+                w_beta: QMatMul::from_dense(beta.clone()),
+                w_alpha: QMatMul::from_dense(alpha.clone()),
+                conv1d: conv1d.clone(),
+                dt_bias: dt_bias.clone(),
+                a: a.clone(),
+            },
+            &out,
+            ValueHeadOrder::Tiled,
+        );
+
+        let x = Tensor::randn(0f32, 1.0, (1, 6, hidden), &device).unwrap();
+        let run = |w: &DeltaNetWeights| {
+            let mut state = None;
+            let mut outs = vec![w
+                .forward_deltanet_into(&x.narrow(1, 0, 4).unwrap(), &mut state, 0, false)
+                .unwrap()];
+            for t in 4..6 {
+                outs.push(
+                    w.forward_deltanet_into(&x.narrow(1, t, 1).unwrap(), &mut state, t, false)
+                        .unwrap(),
+                );
+            }
+            Tensor::cat(&outs, 1).unwrap()
+        };
+        let want = run(&tiled);
+        for (layout, input) in [
+            (
+                "attn_qkv + attn_gate",
+                InputProjections::Split {
+                    qkv: quantized(&filed(&qkv, &heads.qkv_rows())),
+                    gate: quantized(&filed(&z, &heads.gate_rows())),
+                },
+            ),
+            (
+                "ssm_in",
+                InputProjections::Fused(quantized(&filed(
+                    &stacked(&qkv, &z),
+                    &joined(heads.fused_rows()),
+                ))),
+            ),
+        ] {
+            let order = heads
+                .kernel_order(&input, &ba, &file_conv, &file_dt, &file_a, &device)
+                .unwrap();
+            let got = run(&layer(order, &file_out, ValueHeadOrder::GroupedByKeyHead));
+            let off = got
+                .sub(&want)
+                .unwrap()
+                .abs()
+                .unwrap()
+                .max_all()
+                .unwrap()
+                .to_scalar::<f32>()
+                .unwrap();
+            assert!(off < 1e-5, "{layout}: {off}");
         }
     }
 

@@ -43,6 +43,11 @@ pub enum ModelArch {
     Qwen35,
     /// Qwen 3.5 MoE — hybrid attention + SSM layers with mixture-of-experts FFN
     Qwen35Moe,
+    /// Qwen3-Next (Qwen3-Coder-Next 80B-A3B) — Qwen 3.5 MoE's layers with the
+    /// value heads grouped by key head and beta/alpha in one tensor (`ssm_ba`;
+    /// `layers::ValueHeadOrder`), NEOX RoPE. Refused until a real file's reply
+    /// is checked ([`Self::is_supported`], #390).
+    Qwen3Next,
     /// Architecture not recognized — falls back to Llama-like behavior
     Unknown(String),
 }
@@ -68,6 +73,7 @@ impl ModelArch {
             "llama4" => ModelArch::Llama4,
             "qwen35" => ModelArch::Qwen35,
             "qwen35moe" | "qwen3_5moe" => ModelArch::Qwen35Moe,
+            "qwen3next" => ModelArch::Qwen3Next,
             other => ModelArch::Unknown(other.to_string()),
         }
     }
@@ -169,17 +175,33 @@ impl ModelArch {
     /// 2026-09-25). The shared metadata parser REQUIRES
     /// `attention.layer_norm_rms_epsilon`, so no file gets past it, and the
     /// loader reads none of those biases and normalises by RMS.
+    ///
+    /// **Qwen3-Next waits for a real file** (#390): its loader matched
+    /// llama.cpp on test files with Qwen3-Coder-Next's ratios
+    /// (`examples/make_tiny_qwen3next_gguf.py`, both input layouts), but no
+    /// real file's reply has been compared — the smallest this engine reads is
+    /// tens of gigabytes — and a family is claimed only after that (#715).
+    /// Until then it is refused like an unknown family unless the operator
+    /// names it in `SWARMLLM_UNCHECKED_FAMILIES` (comma-separated
+    /// `general.architecture` names): the switch the rig running that check
+    /// sets.
     pub fn is_supported(&self) -> bool {
         !matches!(
             self,
             ModelArch::Unknown(_) | ModelArch::DeepSeek2 | ModelArch::Starcoder2
-        )
+        ) && (!self.awaits_a_real_check() || unchecked_family_named(&self.to_string()))
+    }
+
+    /// A family whose loader matched llama.cpp on test files only — see
+    /// [`Self::is_supported`].
+    fn awaits_a_real_check(&self) -> bool {
+        matches!(self, ModelArch::Qwen3Next)
     }
 
     /// Every architecture this build knows by name, `Unknown` aside — what
     /// [`Self::manifest_architecture_is_refused`] reads a manifest's coarse
     /// variant against.
-    const NAMED: [ModelArch; 14] = [
+    const NAMED: [ModelArch; 15] = [
         ModelArch::Llama,
         ModelArch::Qwen2,
         ModelArch::Gemma,
@@ -194,6 +216,7 @@ impl ModelArch {
         ModelArch::Llama4,
         ModelArch::Qwen35,
         ModelArch::Qwen35Moe,
+        ModelArch::Qwen3Next,
     ];
 
     /// Does a manifest that says `arch` describe a model this build refuses?
@@ -249,7 +272,10 @@ impl ModelArch {
 
     /// Whether this architecture uses hybrid attention + SSM (Gated Delta Network) layers.
     pub fn is_hybrid_ssm(&self) -> bool {
-        matches!(self, ModelArch::Qwen35 | ModelArch::Qwen35Moe)
+        matches!(
+            self,
+            ModelArch::Qwen35 | ModelArch::Qwen35Moe | ModelArch::Qwen3Next
+        )
     }
 
     /// Whether a split of this family is sent trees of guesses (#134): plain
@@ -281,7 +307,7 @@ impl ModelArch {
         match self {
             Self::Qwen2 => ModelArchitecture::Qwen2,
             Self::Qwen35 => ModelArchitecture::Qwen35,
-            Self::Qwen35Moe => ModelArchitecture::Qwen35Moe {
+            Self::Qwen35Moe | Self::Qwen3Next => ModelArchitecture::Qwen35Moe {
                 num_experts: 0,
                 experts_per_token: 0,
             },
@@ -318,9 +344,28 @@ impl std::fmt::Display for ModelArch {
             ModelArch::Llama4 => write!(f, "llama4"),
             ModelArch::Qwen35 => write!(f, "qwen35"),
             ModelArch::Qwen35Moe => write!(f, "qwen35moe"),
+            ModelArch::Qwen3Next => write!(f, "qwen3next"),
             ModelArch::Unknown(s) => write!(f, "{s}"),
         }
     }
+}
+
+/// Whether the operator named `family` in `SWARMLLM_UNCHECKED_FAMILIES`
+/// (comma-separated `general.architecture` names, read once) — the switch that
+/// loads a family awaiting its real-file check ([`ModelArch::is_supported`]).
+fn unchecked_family_named(family: &str) -> bool {
+    static NAMED: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+    NAMED
+        .get_or_init(|| {
+            std::env::var("SWARMLLM_UNCHECKED_FAMILIES")
+                .unwrap_or_default()
+                .split(',')
+                .map(|name| name.trim().to_ascii_lowercase())
+                .filter(|name| !name.is_empty())
+                .collect()
+        })
+        .iter()
+        .any(|name| name == family)
 }
 
 /// Activation function used in the MLP/FFN.
@@ -357,6 +402,7 @@ mod tests {
                 ModelArch::Llama4 => Some(11),
                 ModelArch::Qwen35 => Some(12),
                 ModelArch::Qwen35Moe => Some(13),
+                ModelArch::Qwen3Next => Some(14),
                 ModelArch::Unknown(_) => None,
             }
         }

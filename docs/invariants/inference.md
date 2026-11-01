@@ -5964,6 +5964,56 @@ A/B: `SWARMLLM_DELTA_RULE=steps`. Profile stage: `delta rule`.
 The 48 reply tokens identical in all eight runs, processor and card alike. On the processor the rest of the
 prompt is now the projections and the FFN, as for any dense model.
 
+## Qwen3-Next: value heads grouped by key head, put in the kernels' order at load (2026-11-01, FUTURE_WORK #390)
+
+**What differs from Qwen 3.5** (llama.cpp master `4b1a27f`: `src/models/qwen3next.cpp`,
+`llama-model.cpp` `get_split_segments`): (a) a file's value heads are GROUPED by key head — value
+head h reads key head h / r, r = nv / nk — where Qwen 3.5's are TILED (h % nk), the order
+`delta_rule_{cpu,cuda}` and `replay_rows` read; (b) beta and alpha are one tensor, `ssm_ba`: per key
+head its r betas, then its r alphas; (c) older files fuse `attn_qkv` and `attn_gate` into `ssm_in`
+(per key head: q, k, its group's values, its group's gates — llama.cpp's "legacy (slower) path");
+(d) NEOX RoPE (`llama_model_rope_type`), which is what Qwen 3.5's IMROPE does for text. Routing,
+the shared expert's sigmoid gate, the attention's Q/gate interleave and its Q/K norms are qwen35moe's.
+
+**What was chosen.** A grouped mode in the kernels would put a second head order into two kernels
+and the replay; a permutation at load puts none. `layers::GroupedValueHeads::kernel_order` gathers
+whole rows of each projection STILL QUANTIZED (`rows_in_order`: a row is whole blocks, nothing is
+dequantized), cuts `ssm_ba` in two and reorders the convolution's channels, `ssm_dt` and `ssm_a`.
+Kernel head h' is file head (h' % nk) · r + h' / nk. `ssm_out` cannot be reordered that way: its
+value heads are COLUMNS, and a 256-wide K-quant block spans two 128-wide heads that land apart. So
+the layer puts `ssm_out`'s input back in the file's order (`ValueHeadOrder::GroupedByKeyHead`: one
+reshape-transpose-copy of nv · vd values a position, the only per-step cost). The rows are read on
+the processor and the result is placed on the layer's own device, so a card split goes through
+the same `LayerPlacement` as Qwen 3.5 (`hybrid::arch_supports_hybrid`).
+
+**Checked** against llama.cpp master's `dump_logits` on random-weight files with
+Qwen3-Coder-Next's ratios (`examples/make_tiny_qwen3next_gguf.py`: 2 key heads, 4 value heads,
+4 experts + a shared one; 20 prompt positions + 4 decoded):
+
+| file | worst cos | median | top-1 |
+|---|---|---|---|
+| f32, 4 layers, attention every 2nd | 0.999962 | 0.999997 | 23/24 |
+| the same weights as `ssm_in` (llama.cpp reads both layouts to max \|d\| 0) | 0.999962 | 0.999997 | 23/24 |
+| f32, 8 layers, attention every 4th (the real interval) | 0.999269 | 0.999960 | 24/24 |
+| Q8_0 DeltaNet projections written back as f32, 8 layers, split at layer 3 | 0.997645 | 0.999939 | 23/24 |
+
+**A Q8_0 file is not the test.** With Q8_0 projections the same file reads 0.832 worst against
+llama.cpp — but llama.cpp against ITSELF on those weights written back as f32 (`DEQUANTIZED=1`)
+reads 0.618 worst: activation rounding moves this tiny random model further than we sit from
+llama.cpp (as in § "Gemma 4's 26B-A4B: a dense feed-forward beside GELU experts": judge a tiny file unquantized, #715). The block types are
+checked exactly instead — `rows_gathered_from_a_quantized_matrix_are_its_rows_exactly` (Q8_0 and
+Q4_K, bit for bit, a row past the end refused). `a_file_grouping_its_value_heads_answers_as_the_layer_it_files`
+(a tiled layer's weights filed in Qwen3-Next's order, both input layouts, a prompt and two decoded
+steps within 1e-5) goes red with the un-permute removed.
+
+**Why the family is still refused.** A family joins `supported_list` only once a REAL file's reply
+matches llama.cpp (#715), and the smallest Qwen3-Coder-Next this engine reads is bartowski's Q2_K
+(28.2 GB) — more than this machine's 15 GB of RAM. `ModelArch::is_supported` refuses it unless
+`SWARMLLM_UNCHECKED_FAMILIES` names it (`awaits_a_real_check`): the switch for the rig that runs
+that check. The real file's tokenizer is `gpt2` with `qwen2` pre-splitting (read off bartowski's
+header, 2026-11-01), already here. The recurrent-layer marker moved from `ssm_alpha` to
+`ssm_conv1d` (`gguf_meta::recurrent_layer_marker`), which both families have.
+
 ## Qwen 3.5's decode steps are captured too: a DeltaNet state is written into a second pair of buffers (2026-10-11, FUTURE_WORK #228 (4))
 
 **What refused it.** `decode_graph_ineligibility` let only dense layers into a

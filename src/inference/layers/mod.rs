@@ -2724,6 +2724,9 @@ pub(crate) struct DeltaNetWeights {
     pub(crate) conv_kernel: usize,
     /// The model's RMS epsilon — also the L2 norm's (`build_gdn_l2_norm`).
     pub(crate) eps: f64,
+    /// The order `ssm_out` reads the value heads in; every other per-head
+    /// weight is in the kernels' order ([`ValueHeadOrder`], #390).
+    pub(crate) out_heads: ValueHeadOrder,
 }
 
 /// Per-request SSM (delta net) state for Qwen 3.5 hybrid models — the
@@ -5872,6 +5875,7 @@ impl LayerWeights {
 
 pub(crate) mod moe_card;
 mod qwen35;
+pub(crate) use qwen35::{GroupedValueHeads, InputProjections, KernelOrder, ValueHeadOrder};
 
 #[cfg(test)]
 mod batched_attention_tests {

@@ -27,6 +27,12 @@ never work; it is now a plain 400 that names the format and the builds to choose
 of models people run no longer gets stuck on such a file: it moves to the next upload of the same
 model. (#394)
 
+**Groundwork for Qwen3-Coder-Next, not yet switched on.** This engine can now read the
+Qwen3-Next family's files — its layers are Qwen 3.5's with the attention heads stored in a
+different order, which is put right as the file is read — and on test files it agrees with
+llama.cpp. It stays turned off until one real file's replies are checked the same way: the
+smallest copy is 28 GB, more than one ordinary computer here can hold. (#390)
+
 **The model list Claude Code and other MCP clients read names a Gemma model as Gemma.** The
 `node_info` tool and the `swarmllm://models` resource called every Gemma model — and StarCoder2,
 GLM-4, DeepSeek-2 and Llama 4 — "Llama", the catalogue's catch-all for families it has no entry

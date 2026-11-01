@@ -5084,14 +5084,14 @@ fn a_prompt_position_is_priced_like_the_worker_charges_it() {
         super::kv_bytes_per_position_per_layer(&mla, card_half),
         2 * 16 * 192 * 4
     );
-    // Qwen 3.5's shape: three in four layers recurrent (`ssm_alpha`), keeping
+    // Qwen 3.5's shape: three in four layers recurrent (`ssm_conv1d`), keeping
     // a fixed state rather than a cache — so a layer costs a quarter of an
     // attention layer on average (#228).
     let recurrent = (0..24u32)
         .filter(|il| (il + 1) % 4 != 0)
         .map(|il| {
             (
-                format!("blk.{il}.ssm_alpha.weight"),
+                format!("blk.{il}.ssm_conv1d.weight"),
                 crate::inference::split::TensorLocation { offset: 0, size: 1 },
             )
         })
