@@ -2746,6 +2746,11 @@ reply whose peers changed (failover) is not kept (`PipelineExecutor::exposure_of
   (`the_owner_asked_again_is_guessed_from_the_first_reply`). **Left of it**: the model process's store
   is not the daemon's — a local reply does not copy from a split's replies (a split's never from a
   local one: shown to nobody, `Exposure::covers`) — and goes with the process when it is retired.
+  **Unmeasured on a card**: on a whole model split between the card and the processor a store hit
+  takes the round before the card's own guesses (`card_due` needs `found` empty — the precedence a
+  copy from the conversation already has), and the store answers a bigram seen twice; whether a
+  weak store copy should yield to a card guess at alpha ~0.78 wants the 14B card split, A/B
+  `SWARMLLM_FLOW_COPY_STORE=0`, on a card boot (review of `bcf3127a`, 2026-11-01).
 - A requester guessing for the head that leads its split (`requester_guesses`) does not read it.
 - Field measurement on an agent's replayed session (the rig measures the mechanism, below).
 

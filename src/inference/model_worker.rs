@@ -4138,6 +4138,10 @@ impl LocalSpec {
         // next (#336): one it rules out can never be drawn.
         if let Some(held) = held.as_deref_mut() {
             worth = worth.min(held.guesses_it_allows(&found[..worth]));
+            // Every guess ruled out: the round is a plain step, neither a
+            // probe of the check's price nor a round of the card's guesses.
+            probe &= worth > 0;
+            card_round &= worth > 0;
         }
         let round = ngram_spec_round(
             model,
