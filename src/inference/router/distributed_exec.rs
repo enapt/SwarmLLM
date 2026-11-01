@@ -686,9 +686,14 @@ pub(super) async fn execute_request(
             }
         };
 
+        // Whether that prompt left the reply inside a reasoning block (#392):
+        // this path renders its own prompt, so it says so itself.
+        let opened = crate::inference::PromptOpened::of(&prompt);
+
         // Use streaming generation if token_tx is present
         if let Some(ref tx) = token_tx {
             let tx = tx.clone();
+            tx.note_prompt_opened(opened);
             let mut accumulated = String::new();
             let gen_result = crate::inference::executor::without_starving_the_runtime(|| {
                 executor.generate_stream(&prompt, &request.sampling_params, |token: &str| -> bool {
@@ -727,7 +732,7 @@ pub(super) async fn execute_request(
 
         let (content, gen_result) =
             crate::inference::executor::without_starving_the_runtime(|| {
-                executor.generate(&prompt, &request.sampling_params)
+                executor.generate(&prompt, &request.sampling_params, opened)
             })?;
 
         return Ok(InferenceOutput::from_gen_result(

@@ -1683,6 +1683,10 @@ pub struct PipelineExecutor {
     /// through, so it always describes the template the prompt was actually
     /// built from and finalising costs no second header parse.
     pub(super) reply_stops: tokio::sync::OnceCell<Vec<String>>,
+    /// Whether this request's prompt left the reply inside a reasoning block
+    /// — see `prompt_opened`. Warmed by `build_prompt_with_header` beside
+    /// `reply_stops`, for the same reason (#392).
+    pub(super) prompt_opened: tokio::sync::OnceCell<crate::inference::PromptOpened>,
     /// What this request has generated so far — see [`PartialReply`]. Written
     /// by the shared emit helpers, read once by `keeping_the_partial`.
     pub(super) partial_reply: PartialReply,
@@ -1717,6 +1721,7 @@ impl PipelineExecutor {
             collected_logprobs: std::sync::Mutex::new(Vec::new()),
             chaining_disabled: false,
             reply_stops: tokio::sync::OnceCell::new(),
+            prompt_opened: tokio::sync::OnceCell::new(),
             partial_reply: PartialReply::default(),
             hand_off_emitted: 0,
             prompt_cache_hint: None,
@@ -1915,6 +1920,14 @@ impl PipelineExecutor {
             .map(|s| s.node_id.clone())
             .collect();
         let rounds_before = self.shared_state.decode_rounds_of(self.request.id);
+        // Before any path sends a token: a streamed reply's reader must know
+        // whether the prompt opened a reasoning block when its first character
+        // arrives (#392). Every path the router runs through here is covered,
+        // a hand-off and a split its head leads included, which render on
+        // another computer.
+        if let Some(tx) = &token_tx {
+            tx.note_prompt_opened(self.prompt_opened().await);
+        }
         let outcome = self.execute_attempt(token_tx).await;
         if let (Ok(out), Some(before)) = (&outcome, rounds_before) {
             self.note_split_rounds(out, before);

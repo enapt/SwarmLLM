@@ -653,8 +653,11 @@ impl PipelineExecutor {
             .collect();
         let completion_tokens = clean.len() as u32;
         let mut content = decoder.decode_tokens(&clean);
-        let finished =
-            crate::inference::finalize_reply_text(&mut content, self.reply_stops().await);
+        let finished = crate::inference::finalize_reply_text(
+            &mut content,
+            self.reply_stops().await,
+            self.prompt_opened().await,
+        );
         let matched = finished.stop;
         InferenceOutput {
             request_id,

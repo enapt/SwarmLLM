@@ -228,6 +228,33 @@ impl PipelineExecutor {
             .await
     }
 
+    /// Did this request's prompt leave the reply inside a reasoning block?
+    /// (`PromptOpened`, #392.)
+    ///
+    /// **The single answer for every finaliser and stream on a pipeline
+    /// path**, a value on the executor for `reply_stops`' reason: a parameter
+    /// is something a caller gets wrong. `build_prompt_with_header` warms it
+    /// with the render the prompt was built from — the template's turn, never
+    /// the continued reply appended after it, so a continuation reads its
+    /// first attempt's verdict. A path that has rendered nothing yet (a
+    /// hand-off, a led split: the prompt is rendered on another computer; the
+    /// stream, told before anything runs) renders it here the same way.
+    pub(super) async fn prompt_opened(&self) -> crate::inference::PromptOpened {
+        *self
+            .prompt_opened
+            .get_or_init(|| async {
+                let model_id = &self.request.model_id;
+                let header_path = self
+                    .shared_state
+                    .model_dir(&model_id.0)
+                    .join(crate::model::shard::HEADER_FILENAME);
+                let header_data = template_from_header(&header_path);
+                let prompt = self.render_messages_prompt(header_data.as_ref()).await;
+                crate::inference::PromptOpened::of(&prompt)
+            })
+            .await
+    }
+
     /// Record the stop set implied by `template` alongside the caller's own.
     /// Ignores a second call: the first one came from the prompt this reply
     /// answers, and that is the one the stops must describe.
@@ -326,6 +353,11 @@ impl PipelineExecutor {
         header_data: Option<&(Option<String>, String, String)>,
     ) -> String {
         let mut prompt = self.render_messages_prompt(header_data).await;
+        // Read off the template's own render, before a continued reply is
+        // appended below (#392). The first render stands, as for the stops.
+        let _ = self
+            .prompt_opened
+            .set(crate::inference::PromptOpened::of(&prompt));
         if prompt.contains(crate::inference::vision::MEDIA_MARKER)
             && crate::inference::vision::has_images(&self.request.messages)
         {

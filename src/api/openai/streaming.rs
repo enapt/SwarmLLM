@@ -307,6 +307,9 @@ pub fn spawn_split_stream(
     let params =
         crate::inference::chat_template::with_template_stops(params, meta.chat_template.as_deref());
     let rid = crate::api::request_uuid(request_id);
+    // This path renders its own prompt, so it says what that prompt opened
+    // (#392); `pool.generate` tells the stream's reader.
+    let opened = crate::inference::PromptOpened::of(&prompt);
     let (token_tx, token_rx) = crate::inference::router::StreamingTokenTx::channel(64);
     // Attach the caller's trace so TTFT is stamped on the first token that
     // carries text. `StreamingTokenTx` exists precisely so no emit site has to
@@ -376,6 +379,7 @@ pub fn spawn_split_stream(
             keep,
             None,
             Some(token_tx),
+            opened,
         );
         tokio::select! {
             result = generate => {
@@ -557,6 +561,8 @@ pub async fn run_split_generate(
     trace.mark_dequeued();
     mark_served_here(&state.shared_state, &trace, meta.layer_range);
 
+    // This path renders its own prompt, so it says what that prompt opened (#392).
+    let opened = crate::inference::PromptOpened::of(&prompt);
     let mut output = state
         .shared_state
         .model_process_pool
@@ -571,6 +577,7 @@ pub async fn run_split_generate(
             keep,
             None,
             None,
+            opened,
         )
         .await
         .map_err(ApiError)?;
@@ -847,6 +854,7 @@ async fn router_inference_stream(
         let mut buffered = crate::api::tool_parse::StreamingToolText::new(
             tools_requested,
             crate::api::tool_parse::ReasoningOut::Separate,
+            token_rx.prompt_opened(),
         );
         let mut client_disconnected = false;
         loop {
@@ -1213,6 +1221,7 @@ pub(super) async fn split_stream_response(
         let mut buffered = crate::api::tool_parse::StreamingToolText::new(
             tools_requested,
             crate::api::tool_parse::ReasoningOut::Separate,
+            token_rx.prompt_opened(),
         );
         loop {
             let event = tokio::select! {

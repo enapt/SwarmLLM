@@ -390,9 +390,10 @@ pub async fn messages(
                 template_vars.as_ref(),
             );
 
+            let opened = crate::inference::PromptOpened::of(&prompt);
             let mut executor = state.executor.lock().await;
             let (content, result) = executor
-                .generate(&prompt, &sampling_params)
+                .generate(&prompt, &sampling_params, opened)
                 .map_err(ApiError)?;
 
             let stop_reason = crate::api::anthropic::convert::map_finish_reason_with_match(

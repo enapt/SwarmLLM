@@ -10866,6 +10866,12 @@ impl ModelProcessPool {
     /// `keep` is the caller's instruction to keep the request on this
     /// computer (#251 (2b)): the worker saves its prompt's cache for reuse
     /// here only. Required for the same reason.
+    ///
+    /// `opened` says whether the chat prompt `prompt` was rendered from left
+    /// the reply inside a reasoning block (#392) — read by the reply's
+    /// finaliser here and told to `token_tx`'s reader before the first token.
+    /// REQUIRED, and never read off `prompt`, which may end in a continued
+    /// reply.
     #[allow(clippy::too_many_arguments)]
     pub async fn generate(
         &self,
@@ -10878,7 +10884,11 @@ impl ModelProcessPool {
         keep: crate::types::KeepAsked,
         session_id: Option<String>,
         token_tx: Option<crate::inference::router::StreamingTokenTx>,
+        opened: crate::inference::PromptOpened,
     ) -> Result<crate::inference::router::InferenceOutput, SwarmError> {
+        if let Some(tx) = &token_tx {
+            tx.note_prompt_opened(opened);
+        }
         // Track whether any token has been streamed to the caller, so a retry
         // can never duplicate output the client already saw.
         let emitted = std::sync::atomic::AtomicBool::new(false);
@@ -10894,6 +10904,7 @@ impl ModelProcessPool {
                 keep,
                 session_id.clone(),
                 token_tx.clone(),
+                opened,
                 &emitted,
             )
             .await;
@@ -10927,6 +10938,7 @@ impl ModelProcessPool {
                         keep,
                         session_id,
                         token_tx,
+                        opened,
                         &emitted_retry,
                     )
                     .await
@@ -10949,6 +10961,7 @@ impl ModelProcessPool {
         keep: crate::types::KeepAsked,
         session_id: Option<String>,
         token_tx: Option<crate::inference::router::StreamingTokenTx>,
+        opened: crate::inference::PromptOpened,
         emitted: &std::sync::atomic::AtomicBool,
     ) -> Result<crate::inference::router::InferenceOutput, SwarmError> {
         let handle = self
@@ -11119,7 +11132,7 @@ impl ModelProcessPool {
         // Also trims a COMPLETE marker: `find_stop_sequence` uses `contains`,
         // so a match can sit anywhere in the accumulated text, and the token
         // that completed it is withheld rather than the marker being removed.
-        let finished = crate::inference::finalize_reply_text(&mut content, &stop_sequences);
+        let finished = crate::inference::finalize_reply_text(&mut content, &stop_sequences, opened);
         crate::inference::report_short_reply(
             &request_id,
             completion_tokens,

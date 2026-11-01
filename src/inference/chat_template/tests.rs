@@ -2977,6 +2977,42 @@ fn a_callers_enable_thinking_reaches_each_familys_template() {
     assert!(on.ends_with("<|turn>model\n"), "{on}");
 }
 
+/// What each family's real template leaves the reply inside (#392): the Qwen
+/// 3.5 4B upload's prompt OPENS `<think>`, so its reply is read from inside
+/// the block, and the same template with thinking turned off closes an empty
+/// one, so its reply is not; Gemma 4's closed channel and a model that opens
+/// its own block (Qwen 3) leave nothing open.
+#[test]
+fn each_familys_template_says_whether_it_left_the_reply_inside_a_scratchpad() {
+    use crate::inference::{PromptOpened, REASONING_BLOCKS};
+    let opened = |template: &str, vars: Option<&TemplateVars>| {
+        PromptOpened::of(&super::build_prompt(
+            &user_only_messages(),
+            Some(template),
+            "",
+            "",
+            None,
+            None,
+            vars,
+        ))
+    };
+    let think = PromptOpened::Inside(REASONING_BLOCKS[0]);
+    let qwen35_4b = include_str!("fixtures/qwen35_4b_gguf_shipped.jinja");
+    assert_eq!(opened(qwen35_4b, None), think);
+    assert_eq!(opened(qwen35_4b, Some(&thinking(true))), think);
+    assert_eq!(
+        opened(qwen35_4b, Some(&thinking(false))),
+        PromptOpened::Nothing
+    );
+    let qwen35 = include_str!("fixtures/qwen35_gguf_shipped.jinja");
+    assert_eq!(opened(qwen35, None), PromptOpened::Nothing);
+    assert_eq!(opened(qwen35, Some(&thinking(true))), think);
+    let qwen3 = include_str!("fixtures/qwen3_gguf_shipped.jinja");
+    assert_eq!(opened(qwen3, None), PromptOpened::Nothing);
+    let gemma4 = include_str!("fixtures/gemma4_gguf_shipped.jinja");
+    assert_eq!(opened(gemma4, None), PromptOpened::Nothing);
+}
+
 /// A caller's variable never replaces the renderer's own: a request naming
 /// `messages`, `add_generation_prompt` or `bos_token` renders exactly as one
 /// that does not, and the rest of its variables still arrive.

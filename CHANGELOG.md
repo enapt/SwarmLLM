@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+**A model set up to think before it answers no longer shows its thinking as the answer.**
+Qwen3.5-4B — the copy the network holds — thinks before every answer unless asked not to, and its
+own instructions open the thinking block before the model writes a word. This server recognised
+only a thinking block the model opened itself, so the model's whole reasoning ("Thinking
+Process: …") reached you as its answer, on every API, streamed or not. It is now read the way
+llama.cpp reads it: the answer is the answer, and the reasoning goes where reasoning goes —
+`reasoning_content` on the OpenAI chat API, left out on the Anthropic API. A reply cut short while
+the model is still thinking returns that thinking as reasoning with an empty answer, as before.
+Nothing changes between computers: a computer leading a request reads the reply itself. (#392)
+
 ## [0.3.267-alpha] — 2026-11-01
 
 **You can now ask a model to answer without thinking first, or to think.** Models such as

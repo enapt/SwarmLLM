@@ -316,6 +316,7 @@ impl PipelineExecutor {
                 gen_result.reasoning = crate::inference::finalize_reply_text(
                     &mut content,
                     &self.request.sampling_params.stop,
+                    self.prompt_opened().await,
                 )
                 .reasoning;
                 return Ok(InferenceOutput::from_gen_result(
@@ -329,13 +330,14 @@ impl PipelineExecutor {
         }
 
         // Standard (non-speculative) local inference
+        let opened = self.prompt_opened().await;
         let mut executor = self.shared_state.executor.lock().await;
         if !executor.is_loaded() {
             return Err(SwarmError::NoModelLoaded);
         }
         let (content, gen_result) =
             crate::inference::executor::without_starving_the_runtime(|| {
-                executor.generate(&prompt, &self.request.sampling_params)
+                executor.generate(&prompt, &self.request.sampling_params, opened)
             })?;
 
         Ok(InferenceOutput::from_gen_result(

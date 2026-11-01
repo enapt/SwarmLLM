@@ -17122,3 +17122,44 @@ built-in keys win over a kwarg. **Check first**: whether a whole-model hand-off 
 rendered prompt or the messages — if the messages, the field crosses the wire and is gated at the
 sender like any new field. Tests: the Qwen 3.5 fixture rendered with the flag on and off; a kwarg
 naming `messages` does not replace them.
+
+### #392 — closed 2026-11-01 (the entry as it stood when closed, word for word)
+
+#### #392 — A template that opens the scratchpad in the PROMPT shows the model's reasoning as its reply
+`P1` · api · new users first · **OPEN** — 2026-11-01 · found verifying #391
+
+Qwen3.5-4B's upload (`bartowski/Qwen_Qwen3.5-4B-GGUF`, the network's) thinks by default, and its
+template's generation prompt ENDS with `<|im_start|>assistant\n<think>\n`
+(`chat_template/fixtures/qwen35_4b_gguf_shipped.jinja` ~149-152). The reply therefore starts INSIDE
+the block, with no opening tag, and both scratchpad helpers recognise a block only when the REPLY
+opens it (`inference::take_leading_reasoning_block`, `tool_parse::StreamingToolText`, one list
+`REASONING_BLOCKS`). Seen 2026-11-01 on a probe node, v0.3.266 and main alike: "What is 17 times 3?"
+→ `content` "Thinking Process:\n\n1. **Analyze the Request:** …", `reasoning_content` empty. To
+verify on a full reply: the `</think>` and the answer after it land in `content` too. Every reply of
+the family people run most (#389), unasked, on every surface.
+
+**How the reference servers do it**: llama.cpp's chat layer records `thinking_forced_open` when the
+rendered prompt ends with the family's opening tag and parses the reply as already inside the block;
+vLLM's reasoning parsers (DeepSeek-R1, Qwen3) treat text before the closing tag as reasoning when the
+opening tag is absent. Read both in source before building. **Shape**: decide it ONCE where the
+prompt is rendered (`build_prompt_with_model`, the choke point) — the prompt ends with an opener of
+`REASONING_BLOCKS` — and carry that verdict to every finaliser and streaming buffer as a REQUIRED
+argument (`architecture.md` § "One invariant, N paths": four API paths, a peer's reply finalised on
+the coordinator). A reply cut short inside the block keeps today's rule: reasoning, empty content.
+
+**Research (2026-11-01).** llama.cpp master (`common/chat.cpp` 974-994, 1459-1461) takes the generation
+prompt as the render WITH `add_generation_prompt` less the render without, and parses
+`generation_prompt + output`: the opener the template wrote is fed to the parser first, nothing else
+changes. Ours, mapped: ONE predicate (`inference::opening_reasoning_block`) behind FOUR splitters —
+`take_leading_reasoning_block` (through `finalize_reply_text`, 10 production callers),
+`tool_parse::StreamingToolText` (4 sites, all in `api/`, none of which sees the rendered prompt: the
+router renders after the stream exists), `split_unfinished_reasoning`, `leading_content`. A hand-off's
+reply is finalised once, on the coordinator, from the peer's RAW streamed pieces (`remote_generate.rs`
+~1471), so feeding the opener first cannot split a reply twice. **Shape chosen**: `PromptOpened`
+(`Nothing` / `Inside(ReasoningBlock)`), a pure function of the rendered text (its trimmed end is an
+opener; a template's closed empty block is `Nothing`), computed where the prompt is rendered and a
+REQUIRED argument of all four splitters, each reading the reply as if it began with the opener. Where
+no prompt is in scope: the executor keeps the verdict `build_prompt_with_header` computed (speculative,
+the partial keeper); a continuation reads the ORIGINAL attempt's (its prompt ends inside the reasoning,
+not on the opener); the API's streams through `StreamingTokenTx`'s shared slot, set at render and read
+at the first token. Raw completions: `Nothing`.

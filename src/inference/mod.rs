@@ -192,7 +192,17 @@ pub(crate) const REPLY_LEADING_WHITESPACE: [char; 3] = ['\n', '\r', ' '];
 /// stop set (the router applies template-derived stops that the executor never
 /// sees) — a second call finds no scratchpad, so a caller keeps the FIRST
 /// call's.
-pub(crate) fn finalize_reply_text(text: &mut String, stops: &[String]) -> FinishedReply {
+///
+/// `opened` says whether the prompt left the reply inside a reasoning block
+/// ([`PromptOpened`], #392) — REQUIRED, so no source can forget it. Only the
+/// FIRST call on raw generated text passes the prompt's verdict; a second pass
+/// over text this already finalised passes [`PromptOpened::Nothing`], or the
+/// answer would be read as an unfinished scratchpad.
+pub(crate) fn finalize_reply_text(
+    text: &mut String,
+    stops: &[String],
+    opened: PromptOpened,
+) -> FinishedReply {
     // Snapshot enough of the incoming text to identify it if the steps below
     // consume all of it. Costs one small allocation per completion — this runs
     // once per reply, never per token — and nothing at all when the model
@@ -205,6 +215,9 @@ pub(crate) fn finalize_reply_text(text: &mut String, stops: &[String]) -> Finish
     };
 
     strip_control_token_artifacts(text);
+    // After the scrub, which is for what the MODEL wrote; the opener is the
+    // template's.
+    opened.put_in_front_of(text);
     let reasoning = take_leading_reasoning_block(text);
     let mut matched = None;
     for stop in stops {
@@ -499,7 +512,7 @@ pub(crate) fn take_leading_reasoning_block(text: &mut String) -> Option<String> 
 
 /// The markers of one kind of reasoning block.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub(crate) struct ReasoningBlock {
+pub struct ReasoningBlock {
     pub open: &'static str,
     pub close: &'static str,
 }
@@ -526,6 +539,93 @@ pub(crate) fn opening_reasoning_block(text: &str) -> Option<ReasoningBlock> {
     REASONING_BLOCKS
         .into_iter()
         .find(|block| text.starts_with(block.open))
+}
+
+/// Did the rendered prompt leave the model's reply INSIDE a reasoning block?
+///
+/// A template can open the scratchpad itself: Qwen 3.5's generation prompt
+/// ends `<|im_start|>assistant\n<think>\n`, so the reply starts mid-thought
+/// with no opening tag of its own, and every splitter here — which recognise a
+/// block only when the REPLY opens it — handed the whole scratchpad, `</think>`
+/// and all, to the reader as the answer (#392: the network's most-run family,
+/// every surface, unasked).
+///
+/// llama.cpp's answer (`common/chat.cpp`, master): take the generation prompt
+/// as the render with `add_generation_prompt` less the render without, and
+/// parse `generation_prompt + output`. Ours is the same in one step: the
+/// verdict is a pure function of the rendered text, decided where it is
+/// rendered, and the opener is put back in front of the reply — by
+/// [`finalize_reply_text`] for a finished one, by `api::tool_parse::
+/// StreamingToolText` for a streamed one — so every splitter reads the reply
+/// as if the model had opened the block itself. A template's CLOSED empty
+/// block (`<think>\n\n</think>\n\n`, thinking turned off) is [`Nothing`](Self::Nothing).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum PromptOpened {
+    /// The reply starts outside any block — the model opens one if it thinks.
+    Nothing,
+    /// The prompt ends on this block's opener: the reply starts inside it.
+    Inside(ReasoningBlock),
+}
+
+impl PromptOpened {
+    /// Read off a rendered chat prompt: its end, less trailing whitespace, is
+    /// an opener of [`REASONING_BLOCKS`].
+    ///
+    /// Only ever the text a template rendered for the model's own turn — never
+    /// a prompt with a continued reply appended (`build_prompt_with_header`
+    /// reads it before the append), which ends mid-reply, not on the opener.
+    pub fn of(prompt: &str) -> Self {
+        let end = prompt.trim_end();
+        REASONING_BLOCKS
+            .into_iter()
+            .find(|block| end.ends_with(block.open))
+            .map_or(Self::Nothing, Self::Inside)
+    }
+
+    /// Put the opener back in front of `reply`, as llama.cpp parses
+    /// `generation_prompt + output` — unless the reply is blank: a model that
+    /// generated nothing answered nothing, and an opener alone would read as an
+    /// unfinished scratchpad.
+    pub(crate) fn put_in_front_of(self, reply: &mut String) {
+        if let Self::Inside(block) = self {
+            if !reply.trim().is_empty() {
+                reply.insert_str(0, block.open);
+            }
+        }
+    }
+}
+
+/// A [`PromptOpened`] shared between the code that renders a request's prompt
+/// and the code that reads its reply as it streams.
+///
+/// A streamed reply's buffer exists BEFORE anything renders: the API opens the
+/// stream, the router plans, and the prompt is rendered on whichever path
+/// serves it. So the verdict travels beside the tokens — set once where the
+/// prompt is rendered (`StreamingTokenTx::note_prompt_opened`; a second
+/// setting is ignored, so a continued reply keeps its first attempt's), read
+/// when the reply's first character arrives. Never set reads as
+/// [`PromptOpened::Nothing`], the behaviour before #392.
+#[derive(Clone, Default, Debug)]
+pub(crate) struct PromptOpenedSlot(std::sync::Arc<std::sync::OnceLock<PromptOpened>>);
+
+impl PromptOpenedSlot {
+    /// A slot that already holds `verdict`.
+    #[cfg(test)]
+    pub(crate) fn known(verdict: PromptOpened) -> Self {
+        let slot = Self::default();
+        slot.note(verdict);
+        slot
+    }
+
+    /// Record the verdict. The first one stands.
+    pub(crate) fn note(&self, verdict: PromptOpened) {
+        let _ = self.0.set(verdict);
+    }
+
+    /// The verdict, or [`PromptOpened::Nothing`] where none was recorded.
+    pub(crate) fn get(&self) -> PromptOpened {
+        self.0.get().copied().unwrap_or(PromptOpened::Nothing)
+    }
 }
 
 pub(crate) fn strip_control_token_artifacts(text: &mut String) {
@@ -884,7 +984,8 @@ mod finalize_reply_text_tests {
     #[test]
     fn marker_before_the_answer_keeps_the_answer() {
         let mut t = "<|im_end|>Red, blue and yellow.".to_string();
-        let matched = finalize_reply_text(&mut t, &stops()).stop;
+        let matched =
+            finalize_reply_text(&mut t, &stops(), crate::inference::PromptOpened::Nothing).stop;
         assert_eq!(t, "Red, blue and yellow.");
         assert_eq!(matched, None, "a scrubbed artifact is not a stop match");
     }
@@ -904,7 +1005,7 @@ mod finalize_reply_text_tests {
         use std::sync::atomic::Ordering;
         let before = EMPTY_REPLIES_TOTAL.load(Ordering::Relaxed);
         let mut t = String::from("<|im_end|>");
-        let _ = finalize_reply_text(&mut t, &stops());
+        let _ = finalize_reply_text(&mut t, &stops(), crate::inference::PromptOpened::Nothing);
         assert!(t.trim().is_empty(), "control: the reply was emptied");
         assert!(
             EMPTY_REPLIES_TOTAL.load(Ordering::Relaxed) > before,
@@ -915,14 +1016,18 @@ mod finalize_reply_text_tests {
     #[test]
     fn a_reply_of_nothing_but_a_marker_finalises_to_empty() {
         let mut t = "<|im_end|>".to_string();
-        let _ = finalize_reply_text(&mut t, &stops());
+        let _ = finalize_reply_text(&mut t, &stops(), crate::inference::PromptOpened::Nothing);
         assert!(t.trim().is_empty(), "expected the marker to leave nothing");
 
         // ...and a stop matching at position 0 does the same thing by a
         // different route, which is the prompt-fault shape rather than the
         // template-fault one.
         let mut t = "\nUser: who asked?".to_string();
-        let _ = finalize_reply_text(&mut t, &["\nUser:".to_string()]);
+        let _ = finalize_reply_text(
+            &mut t,
+            &["\nUser:".to_string()],
+            crate::inference::PromptOpened::Nothing,
+        );
         assert!(t.trim().is_empty());
     }
     /// The report has to name what was removed — that text is the entire
@@ -1049,7 +1154,7 @@ mod finalize_reply_text_tests {
         let mut t = "<|im_end|>".to_string();
         let before: String = t.chars().take(EMPTIED_REPLY_LOG_CHARS).collect();
         let had_content = !t.trim().is_empty();
-        let _ = finalize_reply_text(&mut t, &stops());
+        let _ = finalize_reply_text(&mut t, &stops(), crate::inference::PromptOpened::Nothing);
         assert!(t.is_empty(), "the marker-only reply must finalise to empty");
         assert!(
             emptied_reply_evidence(had_content, &t, &before).is_some(),
@@ -1063,12 +1168,16 @@ mod finalize_reply_text_tests {
     #[test]
     fn finalising_multibyte_text_does_not_panic() {
         let mut t = "日本語のテキストです。".repeat(40);
-        let _ = finalize_reply_text(&mut t, &stops());
+        let _ = finalize_reply_text(&mut t, &stops(), crate::inference::PromptOpened::Nothing);
         assert!(t.starts_with("日本語"), "content must survive untouched");
 
         let mut emoji = "🙂🙃".repeat(300);
         emoji.push_str("<|im_end|>");
-        let _ = finalize_reply_text(&mut emoji, &stops());
+        let _ = finalize_reply_text(
+            &mut emoji,
+            &stops(),
+            crate::inference::PromptOpened::Nothing,
+        );
         assert!(emoji.starts_with("🙂"));
     }
 
@@ -1082,12 +1191,12 @@ mod finalize_reply_text_tests {
         let s = vec!["\nUser:".to_string()];
         let mut t2 = "Answer.\nUser: next question".to_string();
         assert_eq!(
-            finalize_reply_text(&mut t2, &s).stop,
+            finalize_reply_text(&mut t2, &s, crate::inference::PromptOpened::Nothing).stop,
             Some("\nUser:".to_string())
         );
         assert_eq!(t2, "Answer.");
         // The control-token form is scrubbed rather than truncated.
-        let _ = finalize_reply_text(&mut t, &stops());
+        let _ = finalize_reply_text(&mut t, &stops(), crate::inference::PromptOpened::Nothing);
         assert_eq!(t, "Answer.trailing");
     }
 
@@ -1096,7 +1205,7 @@ mod finalize_reply_text_tests {
     #[test]
     fn strands_no_leading_newlines() {
         let mut t = "<|im_end|>\n\nHello".to_string();
-        let _ = finalize_reply_text(&mut t, &stops());
+        let _ = finalize_reply_text(&mut t, &stops(), crate::inference::PromptOpened::Nothing);
         assert_eq!(t, "Hello");
     }
 
@@ -1105,9 +1214,13 @@ mod finalize_reply_text_tests {
     #[test]
     fn is_idempotent_across_repeated_calls() {
         let mut once = "<|im_end|>\nHi there".to_string();
-        let _ = finalize_reply_text(&mut once, &[]);
+        let _ = finalize_reply_text(&mut once, &[], crate::inference::PromptOpened::Nothing);
         let mut twice = once.clone();
-        let _ = finalize_reply_text(&mut twice, &stops());
+        let _ = finalize_reply_text(
+            &mut twice,
+            &stops(),
+            crate::inference::PromptOpened::Nothing,
+        );
         assert_eq!(once, twice);
         assert_eq!(twice, "Hi there");
     }
@@ -1116,7 +1229,10 @@ mod finalize_reply_text_tests {
     #[test]
     fn empty_stops_still_scrubs() {
         let mut t = "<|eot_id|>\nAnswer".to_string();
-        assert_eq!(finalize_reply_text(&mut t, &[]).stop, None);
+        assert_eq!(
+            finalize_reply_text(&mut t, &[], crate::inference::PromptOpened::Nothing).stop,
+            None
+        );
         assert_eq!(t, "Answer");
     }
 }
@@ -1294,6 +1410,89 @@ mod reasoning_block_tests {
         assert_eq!(t, "<|channel>thought\nStill weighing");
     }
 
+    /// **#392: a template that opens the scratchpad in the PROMPT.** Qwen 3.5's
+    /// generation prompt ends `<think>\n`, so the reply starts mid-thought with
+    /// no tag of its own; read as if the reply opened it, the whole scratchpad
+    /// and its `</think>` were the answer. Told what the prompt opened, the
+    /// finaliser reads it from inside the block, as llama.cpp parses
+    /// `generation_prompt + output`.
+    #[test]
+    fn a_reply_its_prompt_opened_inside_the_scratchpad_is_read_from_inside_it() {
+        use super::{PromptOpened, REASONING_BLOCKS};
+        let think = PromptOpened::Inside(REASONING_BLOCKS[0]);
+        let reply = "Thinking Process:\n\n1. 17 × 3 = 51.\n</think>\n\n51";
+
+        let mut t = reply.to_string();
+        let finished = finalize_reply_text(&mut t, &[], think);
+        assert_eq!(t, "51");
+        assert_eq!(
+            finished.reasoning.as_deref(),
+            Some("Thinking Process:\n\n1. 17 × 3 = 51.")
+        );
+
+        // Cut short inside the block: the same shape as a reply that opened its
+        // own block and ran out — the opener is in front, so the surface with a
+        // field shows it as reasoning and the answer as empty, as before #392.
+        let mut cut = "Thinking Process:\n\n1. 17".to_string();
+        assert_eq!(finalize_reply_text(&mut cut, &[], think).reasoning, None);
+        assert_eq!(cut, "<think>Thinking Process:\n\n1. 17");
+        assert_eq!(
+            crate::api::tool_parse::split_unfinished_reasoning(cut),
+            (
+                String::new(),
+                Some("Thinking Process:\n\n1. 17".to_string())
+            )
+        );
+
+        // A reply of nothing stays nothing — an opener alone is no scratchpad.
+        for blank in ["", " ", "\n\n"] {
+            let mut t = blank.to_string();
+            let _ = finalize_reply_text(&mut t, &[], think);
+            assert_eq!(t, "", "{blank:?}");
+        }
+
+        // A second pass over a finalised reply passes `Nothing`, and keeps it.
+        let mut t = reply.to_string();
+        let _ = finalize_reply_text(&mut t, &[], think);
+        let _ = finalize_reply_text(&mut t, &[], PromptOpened::Nothing);
+        assert_eq!(t, "51");
+
+        // Gemma 4's thought channel, opened by the prompt the same way.
+        let mut t = "\nweighing it\n<channel|>Sure.".to_string();
+        let finished = finalize_reply_text(&mut t, &[], PromptOpened::Inside(REASONING_BLOCKS[1]));
+        assert_eq!(
+            (t.as_str(), finished.reasoning.as_deref()),
+            ("Sure.", Some("weighing it"))
+        );
+    }
+
+    /// The verdict is read off the END of the rendered prompt, less trailing
+    /// whitespace: an opener there is a block the reply starts inside; a
+    /// CLOSED empty block (thinking turned off) or an opener anywhere else is
+    /// not.
+    #[test]
+    fn a_prompt_opens_a_scratchpad_only_where_it_ends_on_an_opener() {
+        use super::{PromptOpened, REASONING_BLOCKS};
+        let think = PromptOpened::Inside(REASONING_BLOCKS[0]);
+        let of = PromptOpened::of;
+        assert_eq!(of("<|im_start|>assistant\n<think>\n"), think);
+        assert_eq!(of("<|im_start|>assistant\n<think>"), think);
+        assert_eq!(
+            of("<|im_start|>assistant\n<think>\n\n</think>\n\n"),
+            PromptOpened::Nothing
+        );
+        assert_eq!(of("<|im_start|>assistant\n"), PromptOpened::Nothing);
+        assert_eq!(
+            of("<|im_start|>user\nWhat is <think>?<|im_end|>\n<|im_start|>assistant\n"),
+            PromptOpened::Nothing
+        );
+        assert_eq!(
+            of("<start_of_turn>model\n<|channel>thought\n"),
+            PromptOpened::Inside(REASONING_BLOCKS[1])
+        );
+        assert_eq!(of(""), PromptOpened::Nothing);
+    }
+
     /// The ordinary case must cost nothing and change nothing.
     #[test]
     fn a_reply_without_reasoning_is_untouched() {
@@ -1310,7 +1509,11 @@ mod reasoning_block_tests {
     fn the_shared_finaliser_applies_it_before_stop_sequences() {
         let mut t =
             "<think>\nI should not say STOP here.\n</think>\n\nThe answer is 4.".to_string();
-        let finished = finalize_reply_text(&mut t, &["STOP".to_string()]);
+        let finished = finalize_reply_text(
+            &mut t,
+            &["STOP".to_string()],
+            crate::inference::PromptOpened::Nothing,
+        );
         let matched = finished.stop;
         assert_eq!(t, "The answer is 4.");
         assert_eq!(
@@ -1330,18 +1533,30 @@ mod reasoning_block_tests {
     fn the_scratchpad_is_reported_once_and_a_blank_one_not_at_all() {
         let mut t = "<think>\n  weighing it  \n</think>\n\nYes.".to_string();
         assert_eq!(
-            finalize_reply_text(&mut t, &[]).reasoning.as_deref(),
+            finalize_reply_text(&mut t, &[], crate::inference::PromptOpened::Nothing)
+                .reasoning
+                .as_deref(),
             Some("weighing it")
         );
-        assert_eq!(finalize_reply_text(&mut t, &[]).reasoning, None);
+        assert_eq!(
+            finalize_reply_text(&mut t, &[], crate::inference::PromptOpened::Nothing).reasoning,
+            None
+        );
         assert_eq!(t, "Yes.");
 
         let mut blank = "<think>\n\n</think>\n\nYes.".to_string();
-        assert_eq!(finalize_reply_text(&mut blank, &[]).reasoning, None);
+        assert_eq!(
+            finalize_reply_text(&mut blank, &[], crate::inference::PromptOpened::Nothing).reasoning,
+            None
+        );
         assert_eq!(blank, "Yes.");
 
         let mut unclosed = "<think>still going".to_string();
-        assert_eq!(finalize_reply_text(&mut unclosed, &[]).reasoning, None);
+        assert_eq!(
+            finalize_reply_text(&mut unclosed, &[], crate::inference::PromptOpened::Nothing)
+                .reasoning,
+            None
+        );
         assert_eq!(
             unclosed, "<think>still going",
             "an unclosed block stays in the text"
@@ -1349,7 +1564,9 @@ mod reasoning_block_tests {
 
         let mut gemma = "<|channel>thought\nhmm\n<channel|>Sure.".to_string();
         assert_eq!(
-            finalize_reply_text(&mut gemma, &[]).reasoning.as_deref(),
+            finalize_reply_text(&mut gemma, &[], crate::inference::PromptOpened::Nothing)
+                .reasoning
+                .as_deref(),
             Some("hmm")
         );
         assert_eq!(gemma, "Sure.");
@@ -1360,9 +1577,9 @@ mod reasoning_block_tests {
     #[test]
     fn running_it_twice_changes_nothing() {
         let mut t = "<think>\nreasoning\n</think>\n\nanswer".to_string();
-        let _ = finalize_reply_text(&mut t, &[]);
+        let _ = finalize_reply_text(&mut t, &[], crate::inference::PromptOpened::Nothing);
         let once = t.clone();
-        let _ = finalize_reply_text(&mut t, &[]);
+        let _ = finalize_reply_text(&mut t, &[], crate::inference::PromptOpened::Nothing);
         assert_eq!(t, once);
     }
 }

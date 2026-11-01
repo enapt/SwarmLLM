@@ -146,9 +146,14 @@ pub(super) async fn execute_local_batch(
                 "Executing inference locally (batched)"
             );
 
+            // Whether that prompt left the reply inside a reasoning block
+            // (#392): this path renders its own prompt, so it says so itself.
+            let opened = crate::inference::PromptOpened::of(&prompt);
+
             // Use streaming generation if the request has a token channel
             if let Some(ref tx) = token_tx {
                 let tx = tx.clone();
+                tx.note_prompt_opened(opened);
                 let session_id = request.session_id.clone();
                 let mut accumulated = String::new();
                 let stop_strings = local_stop_strings.clone();
@@ -218,7 +223,7 @@ pub(super) async fn execute_local_batch(
                 }
             } else {
                 match crate::inference::executor::without_starving_the_runtime(|| {
-                    executor.generate(&prompt, &request.sampling_params)
+                    executor.generate(&prompt, &request.sampling_params, opened)
                 }) {
                     Ok((mut content, gen_result)) => {
                         // Second pass with the TEMPLATE-derived stops, which the
@@ -229,9 +234,14 @@ pub(super) async fn execute_local_batch(
                         // Its scratchpad was taken by the executor's own
                         // pass; this one finds none, and `from_gen_result`
                         // keeps the executor's.
-                        if crate::inference::finalize_reply_text(&mut content, &local_stop_strings)
-                            .stop
-                            .is_some()
+                        if crate::inference::finalize_reply_text(
+                            &mut content,
+                            &local_stop_strings,
+                            // Already read as the prompt opened it, above.
+                            crate::inference::PromptOpened::Nothing,
+                        )
+                        .stop
+                        .is_some()
                         {
                             finish = "stop".to_string();
                         }

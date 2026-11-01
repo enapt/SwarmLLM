@@ -1690,7 +1690,8 @@ impl PipelineExecutor {
         // the peer correctly kept. What is left — the control-token scrub, the
         // leading reasoning block, the stranded newlines — is the part no peer
         // can have done on our behalf.
-        let finished = crate::inference::finalize_reply_text(&mut content, &[]);
+        let finished =
+            crate::inference::finalize_reply_text(&mut content, &[], self.prompt_opened().await);
 
         crate::inference::report_short_reply(
             &request_id,

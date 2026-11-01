@@ -58,7 +58,9 @@
 
 use serde_json::Value;
 
-use crate::inference::{opening_reasoning_block, ReasoningBlock, REASONING_BLOCKS};
+use crate::inference::{
+    opening_reasoning_block, PromptOpenedSlot, ReasoningBlock, REASONING_BLOCKS,
+};
 
 /// Build the system-prompt text that tells a local model how to call a tool.
 ///
@@ -578,6 +580,9 @@ pub struct StreamingToolText {
     /// The markers of the block the reply opened with (`<think>`'s until it
     /// is known to have opened with one).
     block: ReasoningBlock,
+    /// Whether the PROMPT left the reply inside a block (#392), until the
+    /// reply's first non-blank character is read against it — then `None`.
+    prompt_opened: Option<PromptOpenedSlot>,
 }
 
 /// A finalised reply that ended INSIDE its reasoning block, split for a
@@ -640,7 +645,18 @@ impl StreamingToolText {
     /// Requiring the answer here is what makes the mistake unrepresentable: a
     /// caller must say which kind of reply it is reading, and cannot express
     /// "do not use the buffer at all".
-    pub fn new(detect_tools: bool, reasoning_out: ReasoningOut) -> Self {
+    ///
+    /// `prompt_opened` — the stream's `StreamingTokenRx::prompt_opened` — says
+    /// whether the prompt left the reply inside a reasoning block (#392), and
+    /// is REQUIRED for the same reason: Qwen 3.5's template opens `<think>`
+    /// itself, and a buffer that looked only at the reply streamed the whole
+    /// scratchpad as the answer. It is read when the reply's first non-blank
+    /// character arrives, since the prompt is rendered after the stream exists.
+    pub(crate) fn new(
+        detect_tools: bool,
+        reasoning_out: ReasoningOut,
+        prompt_opened: PromptOpenedSlot,
+    ) -> Self {
         Self {
             text: String::new(),
             emitted: 0,
@@ -652,6 +668,7 @@ impl StreamingToolText {
             reasoning_released: 0,
             content_from: 0,
             block: REASONING_BLOCKS[0],
+            prompt_opened: Some(prompt_opened),
         }
     }
 
@@ -709,6 +726,16 @@ impl StreamingToolText {
         match self.reasoning {
             Reasoning::Absent => false,
             Reasoning::Undecided => {
+                // The reply as the prompt left it: put the template's opener
+                // back in front, as `finalize_reply_text` does (llama.cpp
+                // parses `generation_prompt + output`). Only once there is a
+                // non-blank character — a reply of nothing is not a scratchpad
+                // — and before anything is released, so no offset has moved.
+                if !self.text.trim().is_empty() {
+                    if let Some(slot) = self.prompt_opened.take() {
+                        slot.get().put_in_front_of(&mut self.text);
+                    }
+                }
                 let lead = self.text.len() - self.text.trim_start().len();
                 let rest = &self.text[lead..];
                 if let Some(block) = opening_reasoning_block(rest) {
@@ -1746,7 +1773,11 @@ mod tests {
     /// llama-3.2-3b, identical prompt, 120 content deltas without `tools` and
     /// **1** with them.
     fn deltas_for(reply: &str, token_len: usize) -> (Vec<String>, super::StreamingToolText) {
-        let mut buf = super::StreamingToolText::new(true, super::ReasoningOut::Withheld);
+        let mut buf = super::StreamingToolText::new(
+            true,
+            super::ReasoningOut::Withheld,
+            crate::inference::PromptOpenedSlot::default(),
+        );
         let mut out = Vec::new();
         let chars: Vec<char> = reply.chars().collect();
         for chunk in chars.chunks(token_len) {
@@ -2915,6 +2946,7 @@ mod streaming_reasoning_tests {
     use super::{
         scratchpads_in_order, split_unfinished_reasoning, ReasoningOut, StreamingToolText,
     };
+    use crate::inference::{PromptOpened, PromptOpenedSlot, REASONING_BLOCKS};
 
     /// Run a reply through the buffer with tool detection ON — the shape these
     /// tests have always used.
@@ -2943,7 +2975,17 @@ mod streaming_reasoning_tests {
         detect_tools: bool,
         mode: ReasoningOut,
     ) -> (String, Vec<String>, StreamingToolText) {
-        let mut b = StreamingToolText::new(detect_tools, mode);
+        stream_opened(chunks, detect_tools, mode, PromptOpened::Nothing)
+    }
+
+    /// [`stream_in`] for a reply whose prompt said `opened` (#392).
+    fn stream_opened(
+        chunks: &[&str],
+        detect_tools: bool,
+        mode: ReasoningOut,
+        opened: PromptOpened,
+    ) -> (String, Vec<String>, StreamingToolText) {
+        let mut b = StreamingToolText::new(detect_tools, mode, PromptOpenedSlot::known(opened));
         let mut out = String::new();
         let mut reasoning = Vec::new();
         for c in chunks {
@@ -2971,7 +3013,17 @@ mod streaming_reasoning_tests {
         detect_tools: bool,
         mode: ReasoningOut,
     ) -> (String, String) {
-        let (out, mut reasoning, mut b) = stream_in(chunks, detect_tools, mode);
+        streamed_reply_opened(chunks, detect_tools, mode, PromptOpened::Nothing)
+    }
+
+    /// [`streamed_reply_in`] for a reply whose prompt said `opened` (#392).
+    fn streamed_reply_opened(
+        chunks: &[&str],
+        detect_tools: bool,
+        mode: ReasoningOut,
+        opened: PromptOpened,
+    ) -> (String, String) {
+        let (out, mut reasoning, mut b) = stream_opened(chunks, detect_tools, mode, opened);
         if let Some(r) = b.finish_reasoning(false) {
             reasoning.push(r);
         }
@@ -3065,7 +3117,11 @@ mod streaming_reasoning_tests {
         // Unstreamed: the finaliser drops the channel, the call parses, and no
         // content is left beside it.
         let mut whole = reply.to_string();
-        let _ = crate::inference::finalize_reply_text(&mut whole, &[]);
+        let _ = crate::inference::finalize_reply_text(
+            &mut whole,
+            &[],
+            crate::inference::PromptOpened::Nothing,
+        );
         assert_eq!(super::parse_tool_calls(&whole).map(|c| c.len()), Some(1));
         assert_eq!(super::leading_content(&whole), None);
     }
@@ -3118,9 +3174,13 @@ mod streaming_reasoning_tests {
     /// did, on the one input neither test used. Asserting the equivalence
     /// rather than each side separately is what makes a new shape of input
     /// cover both at once.
+    ///
+    /// Run under both verdicts of the prompt (#392): a reply that starts
+    /// INSIDE the scratchpad because its template opened it must come out the
+    /// same both ways too, and so must one whose prompt opened nothing.
     #[test]
     fn streamed_and_unstreamed_replies_strip_the_same_scratchpad() {
-        let replies: &[&[&str]] = &[
+        let opened_by_the_reply: &[&[&str]] = &[
             &[" ", "<think>", "\nthinking\n", "</think>", "\n\n", "Ciao!"],
             &["<think>", "\nthinking\n", "</think>", "\n\n", "Ciao!"],
             &["\n\n", "<think>a</think>", "\n", "Answer"],
@@ -3133,12 +3193,34 @@ mod streaming_reasoning_tests {
             &["\n", " Mixed opening"],
             &[" ", "\n"],
         ];
-        for chunks in replies {
+        // Qwen 3.5's template ends its prompt `<think>\n`: the reply starts
+        // mid-thought (#392).
+        let opened_by_the_prompt: &[&[&str]] = &[
+            &[
+                "Thinking",
+                " Process:\n\n",
+                "1. 17 × 3 = 51.\n",
+                "</think>",
+                "\n\n",
+                "51",
+            ],
+            &["\n", "weighing it", "</think>\n\n", "Answer"],
+            &["</think>", "\n\n", "Straight to it"],
+            &["Still", " thinking"],
+            &[" ", "\n"],
+            &[],
+        ];
+        let think = PromptOpened::Inside(REASONING_BLOCKS[0]);
+        let cases = opened_by_the_reply
+            .iter()
+            .map(|c| (PromptOpened::Nothing, *c))
+            .chain(opened_by_the_prompt.iter().map(|c| (think, *c)));
+        for (opened, chunks) in cases {
             // The reference is the non-streamed finaliser itself, not one step
             // of it: comparing against the reasoning step alone let the opening
             // whitespace differ between the two halves unnoticed.
             let mut whole: String = chunks.concat();
-            let closed = crate::inference::finalize_reply_text(&mut whole, &[]).reasoning;
+            let closed = crate::inference::finalize_reply_text(&mut whole, &[], opened).reasoning;
 
             // BOTH ways round. A reply's content must not depend on whether the
             // caller asked to stream it, and it must not depend on whether the
@@ -3146,10 +3228,10 @@ mod streaming_reasoning_tests {
             // report #032, where it did.
             for detect_tools in [true, false] {
                 assert_eq!(
-                    streamed_reply(chunks, detect_tools),
+                    streamed_reply_opened(chunks, detect_tools, ReasoningOut::Withheld, opened).0,
                     whole,
                     "streamed (detect_tools={detect_tools}) and non-streamed \
-                     disagree on {chunks:?}"
+                     disagree on {chunks:?}, prompt {opened:?}"
                 );
             }
 
@@ -3162,17 +3244,61 @@ mod streaming_reasoning_tests {
             let scratchpad = scratchpads_in_order(closed, unfinished).unwrap_or_default();
             for detect_tools in [true, false] {
                 let (streamed, reasoning) =
-                    streamed_reply_in(chunks, detect_tools, ReasoningOut::Separate);
+                    streamed_reply_opened(chunks, detect_tools, ReasoningOut::Separate, opened);
                 assert_eq!(
                     streamed, content,
-                    "Separate (detect_tools={detect_tools}): content disagrees on {chunks:?}"
+                    "Separate (detect_tools={detect_tools}): content disagrees on {chunks:?}, \
+                     prompt {opened:?}"
                 );
                 assert_eq!(
                     reasoning, scratchpad,
-                    "Separate (detect_tools={detect_tools}): the scratchpad disagrees on {chunks:?}"
+                    "Separate (detect_tools={detect_tools}): the scratchpad disagrees on \
+                     {chunks:?}, prompt {opened:?}"
                 );
             }
         }
+    }
+
+    /// **#392: Qwen 3.5's template opens the scratchpad in the PROMPT** — its
+    /// generation prompt ends `<think>\n`, so the reply starts mid-thought with
+    /// no tag of its own. Seen on the network's Qwen3.5-4B, v0.3.266 and main
+    /// alike: "What is 17 times 3?" streamed "Thinking Process: …" as the
+    /// answer, `reasoning_content` empty. Told what the prompt opened, the
+    /// buffer reads the reply from inside the block: the scratchpad goes to
+    /// its field, the answer alone is content — on the surface with no field,
+    /// the answer alone as well.
+    #[test]
+    fn a_reply_its_prompt_opened_inside_the_scratchpad_streams_the_answer_alone() {
+        let reply = [
+            "Thinking",
+            " Process:\n\n",
+            "1. 17 × 3 = 51.\n",
+            "</think>",
+            "\n\n",
+            "51",
+        ];
+        let think = PromptOpened::Inside(REASONING_BLOCKS[0]);
+        for detect_tools in [true, false] {
+            let (content, reasoning) =
+                streamed_reply_opened(&reply, detect_tools, ReasoningOut::Separate, think);
+            assert_eq!(content, "51", "detect_tools={detect_tools}");
+            assert_eq!(reasoning, "Thinking Process:\n\n1. 17 × 3 = 51.");
+            let (withheld, _) =
+                streamed_reply_opened(&reply, detect_tools, ReasoningOut::Withheld, think);
+            assert_eq!(withheld, "51", "detect_tools={detect_tools}");
+        }
+        // Gemma 4's thought channel, opened the same way.
+        let channel = PromptOpened::Inside(REASONING_BLOCKS[1]);
+        let (content, reasoning) = streamed_reply_opened(
+            &["\nweighing it", "<channel|>", "Answer"],
+            false,
+            ReasoningOut::Separate,
+            channel,
+        );
+        assert_eq!(
+            (content.as_str(), reasoning.as_str()),
+            ("Answer", "weighing it")
+        );
     }
 
     /// **Field report 2026-09-28: a reasoning model's stream was silent until
@@ -3483,7 +3609,11 @@ mod streaming_reasoning_tests {
     /// the end.
     #[test]
     fn the_answer_still_streams_token_by_token() {
-        let mut b = StreamingToolText::new(true, ReasoningOut::Withheld);
+        let mut b = StreamingToolText::new(
+            true,
+            ReasoningOut::Withheld,
+            crate::inference::PromptOpenedSlot::default(),
+        );
         for c in ["<think>", "hmm", "</think>", "\n\n"] {
             assert_eq!(b.push(c), None, "nothing escapes while reasoning");
         }
@@ -3495,7 +3625,11 @@ mod streaming_reasoning_tests {
     /// content back waiting for a block that never comes.
     #[test]
     fn an_ordinary_reply_is_not_delayed() {
-        let mut b = StreamingToolText::new(true, ReasoningOut::Separate);
+        let mut b = StreamingToolText::new(
+            true,
+            ReasoningOut::Separate,
+            crate::inference::PromptOpenedSlot::default(),
+        );
         assert_eq!(b.push("Hello").as_deref(), Some("Hello"));
         assert_eq!(b.push(" there").as_deref(), Some(" there"));
     }

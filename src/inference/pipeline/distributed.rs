@@ -686,7 +686,11 @@ impl PipelineExecutor {
         // `finalize_reply_text`. This path previously trimmed before scrubbing
         // and skipped the leading-newline cleanup, so it could still return an
         // answer-less reply after the scrub was supposedly everywhere.
-        let finished = crate::inference::finalize_reply_text(&mut generated_text, &stop_strings);
+        let finished = crate::inference::finalize_reply_text(
+            &mut generated_text,
+            &stop_strings,
+            self.prompt_opened().await,
+        );
 
         // Batch credit write — one DB persist for the entire request instead of per-token.
         // Formula: rate * tokens (no layer multiplier — balanced with consume side).
@@ -3371,8 +3375,11 @@ impl PipelineExecutor {
             None => {
                 let (mut content, ids, prompt_tokens) =
                     partial.expect("produced_any is false without a partial");
-                let finished =
-                    crate::inference::finalize_reply_text(&mut content, self.reply_stops().await);
+                let finished = crate::inference::finalize_reply_text(
+                    &mut content,
+                    self.reply_stops().await,
+                    self.prompt_opened().await,
+                );
                 tracing::info!(
                     request_id = %request_id,
                     completion_tokens = ids.len(),
@@ -3415,8 +3422,11 @@ impl PipelineExecutor {
         }
         // Finalised like any other reply — a partial is still a reply, and the
         // text accumulated here has been through no scrub at all (gotcha #643).
-        let finished =
-            crate::inference::finalize_reply_text(&mut content, self.reply_stops().await);
+        let finished = crate::inference::finalize_reply_text(
+            &mut content,
+            self.reply_stops().await,
+            self.prompt_opened().await,
+        );
         tracing::info!(
             request_id = %request_id,
             completion_tokens = ids.len(),

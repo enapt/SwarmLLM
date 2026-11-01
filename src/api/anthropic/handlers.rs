@@ -326,6 +326,7 @@ pub(super) async fn anthropic_stream(
         let mut buffered = crate::api::tool_parse::StreamingToolText::new(
             tools_requested,
             crate::api::tool_parse::ReasoningOut::Withheld,
+            token_rx.prompt_opened(),
         );
         loop {
             let event = tokio::select! {
@@ -647,6 +648,7 @@ pub(super) async fn anthropic_split_stream(
         let mut buffered = crate::api::tool_parse::StreamingToolText::new(
             tools_requested,
             crate::api::tool_parse::ReasoningOut::Withheld,
+            token_rx.prompt_opened(),
         );
 
         loop {

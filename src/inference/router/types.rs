@@ -30,6 +30,10 @@ pub struct StreamingTokenTx {
     trace: Option<std::sync::Arc<crate::inference::trace::RequestTrace>>,
     /// The same trace, for the receiver — see [`StreamingTokenRx::route`].
     shared: TraceSlot,
+    /// Whether the prompt left the reply inside a reasoning block, told by
+    /// whatever renders it and read by the receiver's buffer (#392) — see
+    /// [`StreamingTokenTx::note_prompt_opened`].
+    opened: crate::inference::PromptOpenedSlot,
 }
 
 /// The trace a channel's sender was given, readable by its receiver.
@@ -48,6 +52,7 @@ type TraceSlot =
 pub struct StreamingTokenRx {
     inner: mpsc::Receiver<StreamingTokenEvent>,
     shared: TraceSlot,
+    opened: crate::inference::PromptOpenedSlot,
 }
 
 impl StreamingTokenRx {
@@ -68,6 +73,14 @@ impl StreamingTokenRx {
     pub fn route(&self) -> Option<crate::inference::trace::RouteSummary> {
         self.shared.get().map(|t| t.snapshot().route_summary())
     }
+
+    /// Where this reply's reader learns whether the prompt left it inside a
+    /// reasoning block (#392): handed to `tool_parse::StreamingToolText`,
+    /// which reads it when the reply's first character arrives — the prompt
+    /// is rendered after the stream exists, before any token is sent.
+    pub(crate) fn prompt_opened(&self) -> crate::inference::PromptOpenedSlot {
+        self.opened.clone()
+    }
 }
 
 impl StreamingTokenTx {
@@ -76,14 +89,35 @@ impl StreamingTokenTx {
     pub fn channel(capacity: usize) -> (Self, StreamingTokenRx) {
         let (inner, rx) = mpsc::channel(capacity);
         let shared = TraceSlot::default();
+        let opened = crate::inference::PromptOpenedSlot::default();
         (
             Self {
                 inner,
                 trace: None,
                 shared: shared.clone(),
+                opened: opened.clone(),
             },
-            StreamingTokenRx { inner: rx, shared },
+            StreamingTokenRx {
+                inner: rx,
+                shared,
+                opened,
+            },
         )
+    }
+
+    /// Tell the reader whether the prompt left the reply inside a reasoning
+    /// block (`inference::PromptOpened`, #392). Called where the prompt is
+    /// rendered, before the first token: `PipelineExecutor::execute`,
+    /// `ModelProcessPool::generate` and the in-process executor's two paths.
+    /// The first verdict stands — a continued reply keeps its first attempt's.
+    pub(crate) fn note_prompt_opened(&self, verdict: crate::inference::PromptOpened) {
+        self.opened.note(verdict);
+    }
+
+    /// What [`note_prompt_opened`](Self::note_prompt_opened) was told —
+    /// `Nothing` if nothing was. A continued reply is finalised whole with it.
+    pub(crate) fn prompt_opened(&self) -> crate::inference::PromptOpened {
+        self.opened.get()
     }
 
     /// Attach the trace whose TTFT this channel should stamp, and whose route

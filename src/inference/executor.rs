@@ -730,10 +730,15 @@ impl ModelExecutor {
     }
 
     /// Generate a complete (non-streaming) response.
+    ///
+    /// `opened`: whether the chat prompt `prompt` was rendered from left the
+    /// reply inside a reasoning block (#392). REQUIRED and not read off
+    /// `prompt`, which may carry a continued reply after the template's turn.
     pub fn generate(
         &mut self,
         prompt: &str,
         params: &SamplingParams,
+        opened: crate::inference::PromptOpened,
     ) -> Result<(String, GenerationResult), SwarmError> {
         let mut output = String::new();
         let result = self.generate_stream(prompt, params, |token| {
@@ -744,7 +749,7 @@ impl ModelExecutor {
         // `finalize_reply_text`.
         let mut result = result;
         result.reasoning =
-            crate::inference::finalize_reply_text(&mut output, &params.stop).reasoning;
+            crate::inference::finalize_reply_text(&mut output, &params.stop, opened).reasoning;
         Ok((output, result))
     }
 
@@ -1422,7 +1427,11 @@ mod tests {
     #[test]
     fn generate_without_model_fails() {
         let mut exec = ModelExecutor::new();
-        let result = exec.generate("test", &SamplingParams::default());
+        let result = exec.generate(
+            "test",
+            &SamplingParams::default(),
+            crate::inference::PromptOpened::Nothing,
+        );
         assert!(result.is_err());
     }
 

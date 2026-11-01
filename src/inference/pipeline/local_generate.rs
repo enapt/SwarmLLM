@@ -90,6 +90,7 @@ impl PipelineExecutor {
                 self.request.keep,
                 self.request.session_id.clone(),
                 token_tx,
+                self.prompt_opened().await,
             ),
             self.request.cancel.as_ref(),
         )

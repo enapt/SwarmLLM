@@ -277,6 +277,10 @@ pub(super) async fn handle_remote_generate_request(
     let serving_guard = crate::daemon::state::ServingGuard::new(&shared_state, model_id.clone());
     let gen_fut = tokio::spawn(async move {
         let _serving_guard = serving_guard;
+        // Read off the prompt the coordinator rendered. Only this node's own
+        // record of the reply reads it: the coordinator finalises the reply
+        // from the raw tokens, with its own verdict (#392).
+        let opened = crate::inference::PromptOpened::of(&req.prompt);
         pool.generate(
             &model_id,
             layer_range_u32,
@@ -290,6 +294,7 @@ pub(super) async fn handle_remote_generate_request(
             crate::types::KeepAsked::Unasked,
             req.session_id,
             Some(token_tx),
+            opened,
         )
         .await
     });

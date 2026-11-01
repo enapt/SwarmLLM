@@ -1603,8 +1603,15 @@ impl InferenceRouter {
                     // once, as a reply from one machine is.
                     let streamed = trace.streamed_so_far();
                     let mut text = streamed.text;
+                    // Read as the FIRST attempt's prompt opened it (#392):
+                    // the reply began there.
+                    let opened = token_tx
+                        .as_ref()
+                        .map_or(crate::inference::PromptOpened::Nothing, |tx| {
+                            tx.prompt_opened()
+                        });
                     whole.reasoning =
-                        crate::inference::finalize_reply_text(&mut text, &[]).reasoning;
+                        crate::inference::finalize_reply_text(&mut text, &[], opened).reasoning;
                     whole.content = text;
                     whole.completion_tokens = streamed.tokens.max(whole.completion_tokens);
                     whole.prompt_tokens = whole.prompt_tokens.saturating_sub(resume.tokens);

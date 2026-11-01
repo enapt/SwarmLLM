@@ -707,6 +707,74 @@ SentencePiece model's first token decodes to " The"; the halves used to
 disagree about it (FUTURE_WORK #103). The agreement test compares the stream
 against the WHOLE finaliser, never one step of it.
 
+### A prompt that ends INSIDE the scratchpad (2026-11-01, #392)
+
+**Qwen3.5-4B's upload (`bartowski/Qwen_Qwen3.5-4B-GGUF`, the network's) thinks by
+default, and its template's generation prompt ENDS `<|im_start|>assistant\n<think>\n`.**
+The reply begins inside the block with no opener, and both helpers recognised
+only a block the REPLY opened: "What is 17 times 3?" came back as content
+"Thinking Process: …" with `reasoning_content` empty, on every surface, v0.3.266
+and main alike (found verifying #391).
+
+**llama.cpp's answer, taken whole.** `common/chat.cpp` (master, 974-994 and
+1459-1461) takes the generation prompt as the render with `add_generation_prompt`
+less the render without, and parses `generation_prompt + output`: the opener the
+template wrote reaches the parser first, and nothing else changes. vLLM's Qwen3
+and DeepSeek-R1 parsers read text before a closer as reasoning when the opener is
+absent — a rule about the output; ours reads the prompt, as llama.cpp does.
+
+What a change here must keep:
+
+- **`inference::PromptOpened::of(prompt)` is the one verdict**: `Inside(block)`
+  where the rendered prompt's trimmed end is an opener in `REASONING_BLOCKS`,
+  else `Nothing` — a template's closed empty block (`<think>\n\n</think>\n\n`)
+  ends on the closer, so it is `Nothing`. Pure: whoever holds the rendered text
+  reads the same answer.
+- **The opener is put back in front, and nothing else changes**
+  (`PromptOpened::put_in_front_of`, a non-blank reply only): in
+  `finalize_reply_text` (a REQUIRED argument) and in `StreamingToolText` at the
+  reply's first non-blank text. After it the text has the shape the splitters
+  already read, so `take_leading_reasoning_block`, `split_unfinished_reasoning`
+  and `leading_content` take no verdict. A reply cut short inside the block is
+  reasoning with empty content, as before.
+- **It is taken where the prompt is rendered**: the pipeline executor
+  (`build_prompt_with_header`, before images or a continuation are appended;
+  `prompt_opened()` renders it where nothing built it), the router's local and
+  in-process paths, `ModelProcessPool::generate` (REQUIRED), the API's fast
+  paths and the Anthropic executor fallback. `executor.generate` takes it as an
+  argument and never reads its own prompt: the pipeline's prompt may carry a
+  continuation, which ends inside the reasoning, not on the opener.
+- **A stream learns it through `StreamingTokenTx`** (`PromptOpenedSlot`, first
+  write wins, unset reads `Nothing`): the router renders AFTER the API made the
+  stream, so sender and receiver share the slot.
+- **Only the FIRST finalise over raw text passes it.** A second pass over
+  finished text passes `Nothing` (`local_exec`'s), or it would wrap the answer
+  back into a scratchpad; a continuation's whole-reply finalise passes the first
+  attempt's (`token_tx.prompt_opened()`).
+- **Nothing crosses the wire.** A peer streams raw tokens and the coordinator
+  finalises them (`pipeline/remote_generate.rs`) with its own verdict; the
+  peer's dispatch reads `PromptOpened::of(&req.prompt)` for its own record only.
+
+Tests: `a_reply_its_prompt_opened_inside_the_scratchpad_is_read_from_inside_it`
+(closed → the answer and its reasoning; cut short → reasoning; blank stays blank;
+a second pass with `Nothing` keeps the answer; Gemma 4's channel),
+`a_reply_its_prompt_opened_inside_the_scratchpad_streams_the_answer_alone`,
+`a_prompt_opens_a_scratchpad_only_where_it_ends_on_an_opener`,
+`each_familys_template_says_whether_it_left_the_reply_inside_a_scratchpad`
+(Qwen 3.5 4B: inside by default and with thinking on, not with it off; the 0.8B:
+not by default, inside when asked; Qwen 3 and Gemma 4: not), and prompt-opened
+cases in the agreement guard. Both named tests go red with `put_in_front_of` a
+no-op; the agreement guard stays green then, by design — both halves share it.
+**Verified on the real model** (2026-11-01, a probe node off the swarm, Qwen3.5-4B
+on the processor, "What is 17 times 3? Answer with the number.", temperature 0,
+`memory/tools/s392_probe.sh`): OpenAI and Anthropic, streamed and not, each
+answered `51` with the scratchpad in `reasoning_content` (OpenAI) or left out
+(Anthropic); cut short at 40 tokens, both OpenAI forms returned empty content and
+the scratchpad as reasoning. The v0.3.266 binary on the same data directory, same
+requests, returned "Thinking Process: …" as the content of all six — the
+null control. Its raw reply (`…51.cw\n</think>\n\n51`, 258 tokens) is the same text
+the fixed build split: the `cw` before the closer is the model's own.
+
 ## A prompt that closed someone else's turn is finished for the model
 
 `chat_template::open_the_models_turn_if_the_prompt_closed_it` runs in
