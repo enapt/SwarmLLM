@@ -441,7 +441,44 @@ fn models_root(data_dir: &std::path::Path) -> std::path::PathBuf {
 /// budgeted, shown and advertised the SSD's ~18 GB free, while what it HELD was
 /// counted on the other drive.
 pub fn models_disk(data_dir: &std::path::Path) -> Option<DiskSpace> {
+    #[cfg(test)]
+    if let Some(disk) = fixture_disk::of(data_dir) {
+        return Some(disk);
+    }
     disk_space_for(&models_root(data_dir))
+}
+
+/// Tests only: the disk a test fixture's data directory is said to be on.
+///
+/// A fixture's data directory is a fresh temporary directory, but the disk
+/// under it is the machine's own, so every budget a test read depended on how
+/// full the machine running it was. Below a tenth free the budget is what is
+/// already held, and five "full node" tests failed on a CI runner left with
+/// 7.1 GB of 73 GB after the build (2026-11-01, gotcha #1019). Keyed by the
+/// directory, so a test that reads a real disk on a directory of its own
+/// (the link tests above) still does.
+#[cfg(test)]
+pub(crate) mod fixture_disk {
+    use super::DiskSpace;
+    use std::path::{Path, PathBuf};
+    use std::sync::Mutex;
+
+    static DISKS: Mutex<Vec<(PathBuf, DiskSpace)>> = Mutex::new(Vec::new());
+
+    /// Say `data_dir`'s models are on `disk` for the rest of the test run.
+    pub(crate) fn set(data_dir: &Path, disk: DiskSpace) {
+        let mut disks = DISKS.lock().unwrap_or_else(|e| e.into_inner());
+        disks.retain(|(dir, _)| dir != data_dir);
+        disks.push((data_dir.to_path_buf(), disk));
+    }
+
+    pub(super) fn of(data_dir: &Path) -> Option<DiskSpace> {
+        let disks = DISKS.lock().unwrap_or_else(|e| e.into_inner());
+        disks
+            .iter()
+            .find(|(dir, _)| dir == data_dir)
+            .map(|(_, disk)| *disk)
+    }
 }
 
 /// `canonicalize`'s answer spelled as the disk list spells a mount point. On

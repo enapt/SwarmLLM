@@ -18,6 +18,13 @@ use crate::types::{
 
 const MIB: u64 = 1024 * 1024;
 
+/// The disk every fixture is on: room enough that the configured budget, not
+/// the disk, decides — whatever the machine running the tests has free.
+pub(super) const FIXTURE_DISK: DiskSpace = DiskSpace {
+    free_bytes: 400_000 * MIB,
+    total_bytes: 1_000_000 * MIB,
+};
+
 pub(super) fn make_test_manager() -> (Arc<SharedState>, AutoShardManager) {
     make_test_manager_with_config(Config::default())
 }
@@ -37,8 +44,12 @@ pub(super) fn make_test_manager_with_config(
     // models directory, so a unit test asserting on a node "holding 14 GB"
     // silently read this machine's actual 33 GB instead. A fixture that names a
     // real directory is a test that depends on the machine it runs on.
+    //
+    // **And so does a fixture on the machine's DISK**: the budget is clamped to
+    // what the disk has free, so the fixture says which disk it is on.
     let temp = tempfile::tempdir().unwrap().keep();
     let db = Database::open(&temp).unwrap();
+    super::fixture_disk::set(&temp, FIXTURE_DISK);
     config.node.data_dir = temp;
     let executor = Arc::new(Mutex::new(ModelExecutor::new()));
     let (state, _, _) = SharedState::new(config, identity, db, executor, None);
@@ -235,10 +246,7 @@ pub(super) fn fetched_with_pool_vram(
         max_storage_mb: 100_000,
         max_disk_mb: 500_000,
         contribution: ContributionMode::Maximum,
-        disk: Some(DiskSpace {
-            free_bytes: 400_000 * MIB,
-            total_bytes: 1_000_000 * MIB,
-        }),
+        disk: Some(FIXTURE_DISK),
         held_bytes: 0,
     };
     let report = BudgetReport {
