@@ -1606,6 +1606,7 @@ mod tests {
             refusal: None,
             answers_step: None,
             prompt_blocks_stored: None,
+            served_us: None,
         };
 
         let encoded = encode_layer_result(&result).unwrap();
@@ -1634,6 +1635,7 @@ mod tests {
             refusal: None,
             answers_step: None,
             prompt_blocks_stored: None,
+            served_us: None,
         };
 
         let encoded = encode_layer_result(&result).unwrap();
@@ -1656,6 +1658,7 @@ mod tests {
             refusal: None,
             answers_step: None,
             prompt_blocks_stored: None,
+            served_us: None,
         };
 
         let encoded = encode_layer_result(&result).unwrap();
@@ -1957,6 +1960,7 @@ mod tests {
             refusal: None,
             answers_step: None,
             prompt_blocks_stored: None,
+            served_us: None,
         };
         let encoded = encode_layer_result(&result).unwrap();
         let decoded = decode_layer_result(&encoded).unwrap();
@@ -1981,6 +1985,7 @@ mod tests {
             refusal: None,
             answers_step: None,
             prompt_blocks_stored: None,
+            served_us: None,
         };
         let encoded = encode_layer_result(&result).unwrap();
         let decoded = decode_layer_result(&encoded).unwrap();
@@ -2014,6 +2019,7 @@ mod tests {
             refusal: None,
             answers_step: None,
             prompt_blocks_stored: None,
+            served_us: None,
         };
         let encoded = encode_layer_result(&result).unwrap();
         let decoded = decode_layer_result(&encoded).unwrap();
@@ -2182,6 +2188,38 @@ mod tests {
         );
     }
 
+    /// #388: the served time rides LAST, after the step, its number and the
+    /// stored blocks — a decoder that predates it reads all of those as before
+    /// and stops at `0x0A`; one cut short is refused, never read as a time.
+    #[test]
+    fn the_served_time_rides_after_every_older_trailer() {
+        let rid = uuid::Uuid::new_v4();
+        let step = crate::types::ResultStep {
+            index_pos: 9,
+            layer_range: (0, 24),
+            stream_seq: Some(3),
+        };
+        let mut without = LayerResult::error(rid, "x").answering_step(step);
+        without.prompt_blocks_stored = Some(2);
+        let mut with = without.clone();
+        with.served_us = Some(0x0A0B_0C0D);
+        let a = encode_layer_result(&without).unwrap();
+        let b = encode_layer_result(&with).unwrap();
+        assert_eq!(&b[..a.len()], &a[..]);
+        assert_eq!(&b[a.len()..], &[0x0A, 0x0D, 0x0C, 0x0B, 0x0A]);
+        let back = decode_layer_result(&b).unwrap();
+        assert_eq!(back.served_us, Some(0x0A0B_0C0D));
+        assert_eq!(back.answers_step, Some(step));
+        assert_eq!(back.prompt_blocks_stored, Some(2));
+        assert_eq!(decode_layer_result(&a).unwrap().served_us, None);
+        assert!(decode_layer_result(&b[..b.len() - 1]).is_err());
+        // Alone, too.
+        let mut bare = LayerResult::error(rid, "x");
+        bare.served_us = Some(41_000);
+        let c = encode_layer_result(&bare).unwrap();
+        assert_eq!(decode_layer_result(&c).unwrap().served_us, Some(41_000));
+    }
+
     /// A reason a newer peer knows and this build does not is read as no
     /// reason — the behaviour before the trailer existed — not as a broken
     /// result that loses the error it carries.
@@ -2221,6 +2259,7 @@ mod tests {
             refusal: None,
             answers_step: None,
             prompt_blocks_stored: None,
+            served_us: None,
         };
         let encoded = encode_layer_result(&result).unwrap();
         let decoded = decode_layer_result(&encoded).unwrap();

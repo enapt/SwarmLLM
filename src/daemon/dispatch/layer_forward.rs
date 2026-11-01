@@ -7,6 +7,31 @@ use crate::types::NetworkCommand;
 use super::super::state::SharedState;
 use super::seal_layer_result;
 
+/// `SWARMLLM_FAULT_SLOW_TURNS=<from>:<count>:<ms>`: hold each streamed
+/// forward whose turn in its stream is `from`..`from + count` for `ms` before
+/// it runs, inside its turn — this node slow on its own for a stretch of every
+/// reply, whatever the rows a forward carries: the far's spells on TH↔AU
+/// (2026-11-01) that a flow's guard read as a queue on the link (#388).
+/// Unset in production. Read once.
+fn fault_slow_turn_ms(turn: u32) -> Option<u64> {
+    static SPELL: std::sync::OnceLock<Option<(u32, u32, u64)>> = std::sync::OnceLock::new();
+    let (from, count, ms) = (*SPELL.get_or_init(|| {
+        let set = std::env::var("SWARMLLM_FAULT_SLOW_TURNS").ok()?;
+        let mut parts = set.split(':').map(str::trim);
+        let spell = (
+            parts.next()?.parse().ok()?,
+            parts.next()?.parse().ok()?,
+            parts.next()?.parse().ok()?,
+        );
+        tracing::warn!(
+            spell = %set,
+            "FAULT: streamed forwards held in a slow spell (SWARMLLM_FAULT_SLOW_TURNS)"
+        );
+        Some(spell)
+    }))?;
+    (turn >= from && turn < from.saturating_add(count)).then_some(ms)
+}
+
 pub(super) async fn handle_layer_forward(
     shared_state: Arc<SharedState>,
     network_tx: mpsc::Sender<NetworkCommand>,
@@ -120,6 +145,13 @@ pub(super) async fn handle_layer_forward(
             }
         },
     };
+    // Inside its turn, so the forwards behind it wait as behind real work.
+    if let Some(ms) = forward
+        .stream_seq
+        .and_then(|seq| fault_slow_turn_ms(crate::types::inference::stream_seq::turn(seq)))
+    {
+        tokio::time::sleep(std::time::Duration::from_millis(ms)).await;
+    }
 
     // The token positions this forward carries — what "tokens served" and the
     // serve credit are counted in (`record_peer_serve`). See

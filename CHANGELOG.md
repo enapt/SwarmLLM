@@ -2,6 +2,20 @@
 
 ## [Unreleased]
 
+**Computers now say how long they held each part of a shared reply — the groundwork for not slowing
+a split down when the far computer is busy.** When a model is split between this computer and a far
+one, this computer guesses words ahead and keeps batches of guesses on their way, and sends fewer
+when answers start coming back late, so a slow connection is not filled with guesses that will be
+thrown away. It could not tell a slow connection from a far computer busy with other work, which
+fewer guesses cannot help: on the Thailand–Australia link a far computer slow for 12 s, and once for
+37 s, cut it to the least, and each of those replies was the slowest of its run. A computer on this
+version now adds to each answer how long it held that batch, and this computer can judge the
+connection and the far computer apart. That judgement is off for now: on the one test this
+computer could run (both halves and the guessing on one processor, its graphics card unavailable
+that day) it was slower, for reasons that test has and a real split does not. It will be measured
+on the Thailand–Australia link once both ends run this version, and turned on only if it helps
+(#388).
+
 **An idle computer re-announces its place on the network only when it has moved.** Each computer
 keeps an estimate of how far, in milliseconds, it is from the others, and re-announces itself to the
 whole swarm when that changes. The estimate never sits still — it wobbles around one point — and

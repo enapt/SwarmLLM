@@ -118,13 +118,15 @@ impl NetworkManager {
     /// to one that matches by request alone, a resend landing after the first
     /// copy was in fact received would answer its NEXT step (#113).
     fn coordinator_matches_result_steps(&self, peer: &libp2p::PeerId) -> bool {
+        self.coordinator_advertises(peer, crate::types::features::RESULT_STEP)
+    }
+
+    /// Does the coordinator behind `peer` advertise `feature`?
+    fn coordinator_advertises(&self, peer: &libp2p::PeerId, feature: u64) -> bool {
         self.peer_to_node
             .get(peer)
             .map(|n| n.clone())
-            .is_some_and(|node| {
-                self.shared_state
-                    .peer_advertises_feature(&node, crate::types::features::RESULT_STEP)
-            })
+            .is_some_and(|node| self.shared_state.peer_advertises_feature(&node, feature))
     }
 
     /// Send, once more, a computed result whose delivery failed (#113).
@@ -570,6 +572,15 @@ impl NetworkManager {
         // deadline instead of the whole segment deadline — and so a chained
         // tail can answer the coordinator rather than its predecessor without a
         // second addressing rule (gotcha #354).
+        let mut result = result;
+        // How long this node held the forward, for a coordinator that reads it
+        // (#388); forgotten here either way.
+        let held = result.answers_step.and_then(|step| {
+            self.served_since
+                .answered(&peer_id, result.request_id, step, std::time::Instant::now())
+        });
+        result.served_us = held
+            .filter(|_| self.coordinator_advertises(&peer_id, crate::types::features::SERVED_TIME));
         self.send_tensor_result_as_request(&peer_id, &result, is_connected);
     }
 
@@ -692,6 +703,8 @@ impl NetworkManager {
         peer: libp2p::PeerId,
         payload: &[u8],
     ) -> Option<uuid::Uuid> {
+        // A forward's arrival, for its answer's served time (#388).
+        let arrived = std::time::Instant::now();
         let tag = payload.first().copied().unwrap_or(0);
         tracing::debug!(%peer, tag, payload_len = payload.len(), "handle_tensor_payload");
         match tag {
@@ -703,6 +716,8 @@ impl NetworkManager {
                     Ok(mut forward) => {
                         let request_id = forward.request_id;
                         let is_tp = forward.tp_meta.is_some();
+                        self.served_since
+                            .arrived(peer, request_id, forward.step(), arrived);
                         forward.sender_peer_bytes = Some(peer.to_bytes());
                         let msg = SwarmMessage::LayerForward(forward);
                         if let Err(e) = self.dispatch_authenticated(Some(&peer), msg) {
@@ -807,6 +822,11 @@ impl NetworkManager {
                 let sender_node_id = self.peer_to_node_id(&peer);
                 let request_id = forward.request_id;
                 let is_tp = forward.tp_meta.is_some();
+                // The step is in the sealed forward's clear, AAD-bound header.
+                // Stamped before the seal is opened: a forged one lands in its
+                // own sender's share only.
+                self.served_since
+                    .arrived(peer, request_id, forward.step(), arrived);
                 tracing::debug!(
                     %peer,
                     %request_id,

@@ -5414,6 +5414,7 @@ mod peer_error_recovery_tests {
             refusal: None,
             answers_step: None,
             prompt_blocks_stored: None,
+            served_us: None,
         }
     }
 

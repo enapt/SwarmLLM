@@ -119,6 +119,39 @@ fn guard_on() -> bool {
     })
 }
 
+/// Whether the guard takes the far computer's own time off an answer's delay
+/// (#388, [`believed_served_ms`]): OFF unless `SWARMLLM_FLOW_SERVED_TIME=1`
+/// (or `on` / `true`) — every delay read whole, as before. Off until it is
+/// measured where #388 came from, a card far on the real link: on a
+/// processor-only rig it lost (`docs/invariants/scheduling.md` § "A far
+/// computer's own time is not the link's"), and a far reports its time only
+/// from the release that carries `features::SERVED_TIME`.
+fn served_time_on() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| {
+        matches!(
+            std::env::var("SWARMLLM_FLOW_SERVED_TIME").ok().as_deref(),
+            Some("1") | Some("on") | Some("true")
+        )
+    })
+}
+
+/// The far computer's own time to take off an answer's delay, in ms — where
+/// it may be believed. It is a number the far chose, so it is believed only
+/// where what it leaves of the delay stays at or above the least round trip
+/// measured to that computer (`floor_ms`): RFC 9002 § 5.3's rule for a
+/// peer's `ack_delay`, which "MUST NOT" be subtracted where the result would
+/// fall under `min_rtt`. A far claiming more is read as claiming nothing —
+/// the whole delay, as from a far that says nothing. With no floor measured
+/// (a fresh node), nothing is believed. A far can still claim up to the
+/// floor's worth of a queue as its own and keep a link's queue from cutting
+/// its flow; that slows only the reply it is already serving, which it could
+/// do by being slow.
+fn believed_served_ms(delay_ms: f64, served_us: Option<u32>, floor_ms: Option<f64>) -> Option<f64> {
+    let served_ms = f64::from(served_us?) / 1000.0;
+    (delay_ms - served_ms >= floor_ms?).then_some(served_ms)
+}
+
 /// `SWARMLLM_FLOW_COPY=0|off|false`: no copied runs (`FlowRun::copy_ahead`),
 /// for an A/B inside one binary. Read once.
 fn copy_on() -> bool {
@@ -221,6 +254,31 @@ const GUARD_KEPT_FOR: std::time::Duration = std::time::Duration::from_secs(600);
 /// least delay is this reply's own: its first forward leaves into an empty
 /// queue.
 ///
+/// **Two windows, the smaller of them** (#388) — Swift's split (Kumar et al.,
+/// SIGCOMM 2020 § 3.3: a fabric window and an endpoint window, the effective
+/// one their minimum). Where the far computer reports its own time
+/// ([`believed_served_ms`]), the LINK's window reads an answer's delay less
+/// it and the FAR's window reads it alone; from a far that says nothing the
+/// link's reads the whole delay, as before. On one delay the guard took the
+/// far's own slow spells for a queue on the link: a far slow for 12 s and for
+/// 37 s (TH↔AU, 2026-11-01) cut to 2 rows a level, and those replies were
+/// their runs' slowest, though fewer rows could not shorten the far's time
+/// (forwards cut 130 → 33 KB left its spikes as long, gotcha #193). Swift
+/// cuts its endpoint window on any endpoint delay — in a datacenter that
+/// queue is the flows' own. A far here is shared with other people's work, so
+/// its window cuts only where a cut SHORTENS the far's queue: each far cut is
+/// a [`FarTrial`] — it keeps [`FAR_CUT_KEEPS`], and stands only if the far's
+/// queue on forwards sent after it falls to [`FAR_CUT_SHORTENED`] of what it
+/// was; else it is undone and the far's window holds until the far's queue is
+/// back under the target. The far's window cuts the live BUDGET first
+/// ([`Window::cut_budget_first`]): a queue our flow builds at the far is our
+/// forwards waiting there, and a smaller budget is fewer drafter calls out at
+/// once — a forward each — which shortens it whatever a forward costs a row.
+/// Fewer rows a level did not: on a processor far (2026-11-01 rig, half a 7B
+/// a forward ~350 ms) the far's time reached 5-9 s of our own forwards, and
+/// 7 of 9 width cuts were undone as "not ours" while the flow kept them all
+/// out.
+///
 /// Measured (`guardrig2.sh`, 2026-10-22, 7B split at 385 ms, warm replies):
 /// at 5 Mbit/s 7.44-7.50 tok/s against 4.73-4.80 unguarded — past every fixed
 /// setting and the tree rounds (6.8-7.1) —, at 10 Mbit/s 8.52-8.82 against
@@ -228,24 +286,135 @@ const GUARD_KEPT_FOR: std::time::Duration = std::time::Duration::from_secs(600);
 /// queue (it shares this rig's one card).
 #[derive(Debug, Clone)]
 struct FlowGuard {
-    /// Rows a level, fractional so a small rise accumulates.
-    width: f64,
     width_most: u32,
-    /// Live rows, fractional likewise.
-    live: f64,
     live_most: u32,
     guarded: bool,
-    least_delay_ms: Option<f64>,
-    recent: std::collections::VecDeque<f64>,
-    /// The last cut: a later one needs an answer to a forward sent after it.
+    /// Held down by a queue on the way, both ways: each answer's delay less
+    /// the far's own time, or the whole delay where the far says nothing.
+    link: Window,
+    link_delays: Delays,
+    /// The last link cut: a later one needs an answer to a forward sent after it.
     cut_at: Option<std::time::Instant>,
-    /// The last change, cut or rise: a rise waits a round trip after it.
+    /// The link window's last change, cut or rise: a rise waits a round trip.
     changed_at: Option<std::time::Instant>,
+    /// Held down only by a queue at the far that this flow's own rows build.
+    far: Window,
+    far_delays: Delays,
+    far_changed_at: Option<std::time::Instant>,
+    far_trial: Option<FarTrial>,
+    /// A far cut did not shorten the far's queue: no other until that queue is
+    /// back under the target.
+    far_not_ours: bool,
+    /// Cuts of the link's window.
     cuts: u32,
     least_width: u32,
     least_live: u32,
     queue_ms_most: f64,
+    /// Answers whose far time was believed and read.
+    served_read: u32,
+    far_queue_ms_most: f64,
+    far_cuts: u32,
+    far_undone: u32,
 }
+
+/// Rows a level and live rows, fractional so a small rise accumulates.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Window {
+    width: f64,
+    live: f64,
+}
+
+impl Window {
+    fn at(width: u32, live: u32) -> Self {
+        Self {
+            width: f64::from(width),
+            live: f64::from(live),
+        }
+    }
+
+    /// Keep `keep` of the rows a level, or — once they are at their least —
+    /// of the live budget.
+    fn cut(&mut self, keep: f64, width_least: f64, live_least: f64) {
+        if self.width > width_least {
+            self.width = (self.width * keep).max(width_least);
+        } else {
+            self.live = (self.live * keep).max(live_least);
+        }
+    }
+
+    /// The far's cut (#388): `keep` of the live budget, or — once it is at
+    /// its least — of the rows a level. The budget bounds the forwards out
+    /// (each drafter call's rows leave as one), and fewer forwards out is what
+    /// shortens a queue they build at the far, whatever a row costs there.
+    fn cut_budget_first(&mut self, keep: f64, width_least: f64, live_least: f64) {
+        if self.live > live_least {
+            self.live = (self.live * keep).max(live_least);
+        } else {
+            self.width = (self.width * keep).max(width_least);
+        }
+    }
+
+    /// `room` of a level's rows back on the live budget, or — once it is
+    /// whole — of a row on the levels.
+    fn rise(&mut self, room: f64, width_most: u32, live_most: u32) {
+        if self.live < f64::from(live_most) {
+            self.live = (self.live + f64::from(width_most) * room).min(f64::from(live_most));
+        } else {
+            self.width = (self.width + room).min(f64::from(width_most));
+        }
+    }
+}
+
+/// Delays as LEDBAT reads them: the least seen (the base) and the latest
+/// [`DELAY_SAMPLES`].
+#[derive(Debug, Clone, Default)]
+struct Delays {
+    least: Option<f64>,
+    recent: std::collections::VecDeque<f64>,
+}
+
+impl Delays {
+    /// Take `ms`; the queue — the least of the latest samples over the least
+    /// seen — once there are [`DELAY_SAMPLES`] of them.
+    fn queue_after(&mut self, ms: f64) -> Option<f64> {
+        let base = self.least.map_or(ms, |b| b.min(ms));
+        self.least = Some(base);
+        if self.recent.len() == DELAY_SAMPLES {
+            self.recent.pop_front();
+        }
+        self.recent.push_back(ms);
+        (self.recent.len() == DELAY_SAMPLES)
+            .then(|| self.recent.iter().copied().fold(f64::INFINITY, f64::min) - base)
+    }
+}
+
+/// A far cut on trial (#388): it stands only if the far's queue shortens.
+#[derive(Debug, Clone, Copy)]
+struct FarTrial {
+    /// Answers to forwards sent from here on judge it: by then the far has had
+    /// the queue's worth of time to work off the forwards sent before the cut.
+    judged_from: std::time::Instant,
+    /// The far window before the cut — back, if the cut did not shorten it.
+    before: Window,
+    queue_before_ms: f64,
+    /// Answers seen that judge it; the verdict waits for [`DELAY_SAMPLES`],
+    /// so the queue it reads is theirs alone.
+    answers: usize,
+}
+
+/// What a far cut keeps: half — enough that a queue our forwards build visibly
+/// shortens, so the trial tells it from a far slow on its own.
+const FAR_CUT_KEEPS: f64 = 0.5;
+
+/// The far's queue on forwards a far cut sent lighter, against before it: at
+/// most this, and the cut shortened it. A controller that moves X to hit a
+/// target checks that moving X moves the target (gotcha #193: a chunk
+/// quantum sized on a processor pinned a card at its floor, six times worse
+/// than none). Half the budget is about half the forwards waiting behind a
+/// queue they build, on a card (a forward's cost mostly per call) and on a
+/// processor alike; a far slow on its own stays as slow — there the trial
+/// undoes the cut.
+const FAR_CUT_SHORTENED: f64 = 0.75;
 
 /// Where a guard stands — what a reply leaves for the next on its run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -254,97 +423,232 @@ struct GuardAt {
     live: u32,
 }
 
+fn ms_since(then: std::time::Instant, now: std::time::Instant) -> f64 {
+    now.saturating_duration_since(then).as_secs_f64() * 1000.0
+}
+
 impl FlowGuard {
+    /// `kept`, where the last reply on this run left its guard, starts the
+    /// LINK's window: the far's starts whole, so a far that says nothing —
+    /// whose window never moves — leaves the guard as it always was.
     fn new(width_most: u32, live_most: u32, guarded: bool, kept: Option<GuardAt>) -> Self {
+        let full = Window::at(width_most, live_most);
         let mut guard = Self {
-            width: f64::from(width_most),
             width_most,
-            live: f64::from(live_most),
             live_most,
             guarded,
-            least_delay_ms: None,
-            recent: std::collections::VecDeque::with_capacity(DELAY_SAMPLES),
+            link: full,
+            link_delays: Delays::default(),
             cut_at: None,
             changed_at: None,
+            far: full,
+            far_delays: Delays::default(),
+            far_changed_at: None,
+            far_trial: None,
+            far_not_ours: false,
             cuts: 0,
             least_width: width_most,
             least_live: live_most,
             queue_ms_most: 0.0,
+            served_read: 0,
+            far_queue_ms_most: 0.0,
+            far_cuts: 0,
+            far_undone: 0,
         };
         if let Some(kept) = kept.filter(|_| guarded) {
-            guard.width = f64::from(kept.width);
-            guard.live = f64::from(kept.live);
-            let at = guard.at();
-            guard.width = f64::from(at.width);
-            guard.live = f64::from(at.live);
+            let at = guard.snap(Window::at(kept.width, kept.live));
+            guard.link = Window::at(at.width, at.live);
             guard.least_width = at.width;
             guard.least_live = at.live;
         }
         guard
     }
 
-    /// Rows a level and the live budget, now.
-    fn at(&self) -> GuardAt {
+    /// A window in whole rows, within its bounds.
+    fn snap(&self, window: Window) -> GuardAt {
         GuardAt {
-            width: (self.width.round() as u32)
+            width: (window.width.round() as u32)
                 .clamp(WIDTH_LEAST.min(self.width_most), self.width_most),
-            live: (self.live.round() as u32).clamp(LIVE_LEAST.min(self.live_most), self.live_most),
+            live: (window.live.round() as u32)
+                .clamp(LIVE_LEAST.min(self.live_most), self.live_most),
         }
     }
 
+    /// Rows a level and the live budget, now: the smaller of the two windows.
+    fn at(&self) -> GuardAt {
+        self.snap(Window {
+            width: self.link.width.min(self.far.width),
+            live: self.link.live.min(self.far.live),
+        })
+    }
+
+    /// What the next reply through the same machines starts from: the LINK's
+    /// window alone. The far's window is what the far was doing this reply —
+    /// learned again each reply — and a far cut still on trial must never
+    /// outlive its trial as a link cut, which nothing would undo (security
+    /// review of #388: a far's claims could ratchet the next replies down).
+    fn to_keep(&self) -> GuardAt {
+        self.snap(self.link)
+    }
+
+    fn width_least(&self) -> f64 {
+        f64::from(WIDTH_LEAST.min(self.width_most))
+    }
+
+    fn live_least(&self) -> f64 {
+        f64::from(LIVE_LEAST.min(self.live_most))
+    }
+
+    /// The least round trip: the link's least delay and the far's least time.
+    fn least_round_trip_ms(&self) -> f64 {
+        self.link_delays.least.unwrap_or(0.0) + self.far_delays.least.unwrap_or(0.0)
+    }
+
     /// A forward of the tree's own rows (never a rebase's), sent at `sent`,
-    /// answered `delay_ms` after it left, read at `now`.
-    fn answered(&mut self, sent: std::time::Instant, delay_ms: f64, now: std::time::Instant) {
+    /// answered `delay_ms` after it left — `served_ms` of it the far's own
+    /// time, where that is believed ([`believed_served_ms`]) — read at `now`.
+    fn answered(
+        &mut self,
+        sent: std::time::Instant,
+        delay_ms: f64,
+        served_ms: Option<f64>,
+        now: std::time::Instant,
+    ) {
         if !self.guarded || !delay_ms.is_finite() {
             return;
         }
-        let base = self.least_delay_ms.map_or(delay_ms, |b| b.min(delay_ms));
-        self.least_delay_ms = Some(base);
-        if self.recent.len() == DELAY_SAMPLES {
-            self.recent.pop_front();
+        let served_ms = served_ms.filter(|s| s.is_finite() && (0.0..=delay_ms).contains(s));
+        let link_cut = self.link_answered(sent, delay_ms - served_ms.unwrap_or(0.0), now);
+        if let Some(far_ms) = served_ms {
+            self.served_read += 1;
+            self.far_answered(sent, far_ms, link_cut, now);
         }
-        self.recent.push_back(delay_ms);
-        if self.recent.len() < DELAY_SAMPLES {
-            return;
-        }
-        let queue = self.recent.iter().copied().fold(f64::INFINITY, f64::min) - base;
+        let at = self.at();
+        self.least_width = self.least_width.min(at.width);
+        self.least_live = self.least_live.min(at.live);
+    }
+
+    /// The link's window on one answer's delay less the far's time. Whether
+    /// it cut.
+    fn link_answered(
+        &mut self,
+        sent: std::time::Instant,
+        link_ms: f64,
+        now: std::time::Instant,
+    ) -> bool {
+        let Some(queue) = self.link_delays.queue_after(link_ms) else {
+            return false;
+        };
         self.queue_ms_most = self.queue_ms_most.max(queue);
-        let width_least = f64::from(WIDTH_LEAST.min(self.width_most));
-        let live_least = f64::from(LIVE_LEAST.min(self.live_most));
         if queue > QUEUE_TARGET_MS {
             if self.cut_at.is_some_and(|c| sent <= c) {
-                return;
+                return false;
             }
             let keep = 1.0 - (queue / QUEUE_TARGET_MS - 1.0).min(0.5);
-            let before = self.at();
-            if self.width > width_least {
-                self.width = (self.width * keep).max(width_least);
-            } else {
-                self.live = (self.live * keep).max(live_least);
-            }
-            let after = self.at();
-            if after != before {
+            let before = self.snap(self.link);
+            let (width_least, live_least) = (self.width_least(), self.live_least());
+            self.link.cut(keep, width_least, live_least);
+            let cut = self.snap(self.link) != before;
+            if cut {
                 self.cuts += 1;
-                self.least_width = self.least_width.min(after.width);
-                self.least_live = self.least_live.min(after.live);
                 self.cut_at = Some(now);
             }
+            self.changed_at = Some(now);
+            cut
         } else {
             if self
                 .changed_at
-                .is_some_and(|c| now.duration_since(c).as_secs_f64() * 1000.0 < base)
+                .is_some_and(|c| ms_since(c, now) < self.least_round_trip_ms())
+            {
+                return false;
+            }
+            let room = 1.0 - queue.max(0.0) / QUEUE_TARGET_MS;
+            self.link.rise(room, self.width_most, self.live_most);
+            self.changed_at = Some(now);
+            false
+        }
+    }
+
+    /// The far's window on one answer's far time (`far_ms`). An answer the
+    /// link's window cut on cuts nothing more.
+    fn far_answered(
+        &mut self,
+        sent: std::time::Instant,
+        far_ms: f64,
+        link_cut: bool,
+        now: std::time::Instant,
+    ) {
+        let Some(queue) = self.far_delays.queue_after(far_ms) else {
+            return;
+        };
+        self.far_queue_ms_most = self.far_queue_ms_most.max(queue);
+        if queue <= QUEUE_TARGET_MS {
+            // A cut on trial stands; the far may be tried again.
+            self.far_trial = None;
+            self.far_not_ours = false;
+            if self
+                .far_changed_at
+                .is_some_and(|c| ms_since(c, now) < self.least_round_trip_ms())
             {
                 return;
             }
             let room = 1.0 - queue.max(0.0) / QUEUE_TARGET_MS;
-            if self.live < f64::from(self.live_most) {
-                self.live =
-                    (self.live + f64::from(self.width_most) * room).min(f64::from(self.live_most));
-            } else {
-                self.width = (self.width + room).min(f64::from(self.width_most));
+            self.far.rise(room, self.width_most, self.live_most);
+            self.far_changed_at = Some(now);
+            return;
+        }
+        if self.far_not_ours {
+            return;
+        }
+        if let Some(trial) = self.far_trial.as_mut() {
+            if sent < trial.judged_from {
+                return;
+            }
+            trial.answers += 1;
+            if trial.answers < DELAY_SAMPLES {
+                return;
+            }
+            if queue > trial.queue_before_ms * FAR_CUT_SHORTENED {
+                // Fewer rows did not shorten it: the far is slow on its own.
+                self.far = trial.before;
+                self.far_trial = None;
+                self.far_not_ours = true;
+                self.far_undone += 1;
+                self.far_changed_at = Some(now);
+                return;
             }
         }
-        self.changed_at = Some(now);
+        if link_cut {
+            return;
+        }
+        // Ours, or not yet tried: a cut on trial — of the window the flow runs
+        // at, so it binds. Cut from its own, a far window above the link's
+        // changed nothing and was then judged on a queue it never touched:
+        // "not ours", and no other far cut while the far stayed slow (rig,
+        // 2026-11-01: `2x32 → 2x32`, then undone).
+        let before = self.far;
+        let running = self.at();
+        let (width_least, live_least) = (self.width_least(), self.live_least());
+        self.far = Window {
+            width: self.far.width.min(self.link.width),
+            live: self.far.live.min(self.link.live),
+        };
+        self.far
+            .cut_budget_first(FAR_CUT_KEEPS, width_least, live_least);
+        if self.at() == running {
+            // At its least already: nothing to try.
+            self.far = before;
+            self.far_trial = None;
+            return;
+        }
+        self.far_cuts += 1;
+        self.far_changed_at = Some(now);
+        self.far_trial = Some(FarTrial {
+            judged_from: now + std::time::Duration::from_secs_f64(queue / 1000.0),
+            before,
+            queue_before_ms: queue,
+            answers: 0,
+        });
     }
 }
 
@@ -1050,7 +1354,7 @@ impl PipelineExecutor {
             earlier.keep(run.reply.generated, seen);
         }
         if run.guard.guarded {
-            keep_guard(guard_key, run.guard.at(), std::time::Instant::now());
+            keep_guard(guard_key, run.guard.to_keep(), std::time::Instant::now());
         }
         tracing::info!(
             request_id = %self.request.id,
@@ -1097,6 +1401,12 @@ impl PipelineExecutor {
             least_answer_ms = format_args!("{:.0}", run.least_answer_ms.unwrap_or(0.0)),
             rounds_waited,
             queue_ms_most = format_args!("{:.0}", run.guard.queue_ms_most),
+            served_time = served_time_on(),
+            served_read = run.guard.served_read,
+            far_least_ms = format_args!("{:.0}", run.guard.far_delays.least.unwrap_or(0.0)),
+            far_queue_ms_most = format_args!("{:.0}", run.guard.far_queue_ms_most),
+            far_cuts = run.guard.far_cuts,
+            far_undone = run.guard.far_undone,
             copy = run.copy.is_some(),
             copied_runs = run.copied_runs,
             copied_rows = run.copied_rows,
@@ -2004,6 +2314,9 @@ impl FlowRun<'_, '_> {
             });
         }
         let mut result = result.expect("an error answer returned above");
+        // The peer's own time with the answer (#388), before this node's
+        // layers after the peers' replace the result.
+        let served_us = result.served_us;
         let mut here_ms = 0.0;
         // A joined forward's time is shared out by rows: no clean sample of
         // what one check costs.
@@ -2076,18 +2389,46 @@ impl FlowRun<'_, '_> {
         }
         if sent.lead == 0 {
             // A rebase's forward carries the path too: its time is its size's.
+            // The far's own time (#388) is read from a run of ONE peer only:
+            // through a chain the hops before the tail are neither its time
+            // nor the link's least round trip.
+            let floor_ms = (served_time_on() && !self.shape.chained())
+                .then(|| {
+                    super::farthest_segment_round_trip_ms(
+                        &self.state,
+                        &self.exec.assignment.segments,
+                    )
+                })
+                .flatten()
+                .map(f64::from);
+            let served_ms = believed_served_ms(delay_ms, served_us, floor_ms);
             let before = self.guard.at();
+            let (cuts, far_cuts, far_undone) =
+                (self.guard.cuts, self.guard.far_cuts, self.guard.far_undone);
             self.guard
-                .answered(sent.started, delay_ms, std::time::Instant::now());
+                .answered(sent.started, delay_ms, served_ms, std::time::Instant::now());
             let after = self.guard.at();
-            if after.width < before.width || after.live < before.live {
+            let why = if self.guard.far_undone > far_undone {
+                Some("DSD: a tree that flows takes back its far cut — fewer forwards out did not shorten the far computer's time")
+            } else if self.guard.far_cuts > far_cuts {
+                Some("DSD: a tree that flows tries fewer forwards out — the far computer's queue may be its own forwards")
+            } else if self.guard.cuts > cuts {
+                Some("DSD: a tree that flows grows less ahead — its forwards queue on the way")
+            } else {
+                None
+            };
+            if let Some(why) = why {
                 tracing::debug!(
                     request_id = %self.exec.request.id,
                     from = format_args!("{}x{}", before.width, before.live),
                     to = format_args!("{}x{}", after.width, after.live),
                     delay_ms = format_args!("{delay_ms:.0}"),
-                    least_ms = format_args!("{:.0}", self.guard.least_delay_ms.unwrap_or(0.0)),
-                    "DSD: a tree that flows grows less ahead — its forwards queue on the way"
+                    served_ms = format_args!("{:.0}", served_ms.unwrap_or(-1.0)),
+                    served_us,
+                    floor_ms = format_args!("{:.0}", floor_ms.unwrap_or(-1.0)),
+                    link_least_ms = format_args!("{:.0}", self.guard.link_delays.least.unwrap_or(0.0)),
+                    far_least_ms = format_args!("{:.0}", self.guard.far_delays.least.unwrap_or(0.0)),
+                    "{why}"
                 );
             }
         }
@@ -2191,7 +2532,7 @@ mod tests {
     }
 
     fn feed(g: &mut FlowGuard, t0: Instant, sent_ms: u64, delay: f64) {
-        g.answered(at(t0, sent_ms), delay, at(t0, sent_ms + delay as u64));
+        g.answered(at(t0, sent_ms), delay, None, at(t0, sent_ms + delay as u64));
     }
 
     /// A queue past the target narrows the levels first, to the least width,
@@ -2284,6 +2625,241 @@ mod tests {
         );
     }
 
+    /// An answer `delay` ms after its forward left, `served` of it the far's
+    /// own time (#388).
+    fn feed_served(g: &mut FlowGuard, t0: Instant, sent_ms: u64, delay: f64, served: f64) {
+        g.answered(
+            at(t0, sent_ms),
+            delay,
+            Some(served),
+            at(t0, sent_ms + delay as u64),
+        );
+    }
+
+    fn calm(g: &mut FlowGuard, t0: Instant, from_ms: u64) {
+        for i in 0..4 {
+            feed_served(g, t0, from_ms + i * 10, 450.0, 40.0);
+        }
+    }
+
+    /// #388: a far slow on its own — every answer 300 ms later, all of it the
+    /// far's time — cuts nothing on the link. The far's window tries half; the
+    /// far is as slow on the forwards the cut sent lighter, so the cut is
+    /// undone and no other is tried while the far stays slow. Read whole (a
+    /// far that says nothing), the same answers cut the link's window to its
+    /// floor — the 12 s and 37 s spells of 2026-11-01.
+    #[test]
+    fn a_far_slow_on_its_own_narrows_nothing_past_one_trial() {
+        let t0 = Instant::now();
+        let full = GuardAt {
+            width: 8,
+            live: 128,
+        };
+        let mut g = FlowGuard::new(8, 128, true, None);
+        calm(&mut g, t0, 0);
+        for i in 0..4 {
+            feed_served(&mut g, t0, 1000 + i * 10, 750.0, 340.0);
+        }
+        assert_eq!((g.cuts, g.far_cuts), (0, 1), "the far's window tries a cut");
+        assert_eq!(
+            g.at(),
+            GuardAt { width: 8, live: 64 },
+            "on the budget: fewer forwards out"
+        );
+        assert_eq!(
+            g.to_keep(),
+            full,
+            "a far cut on trial is never kept for the next reply"
+        );
+        // Answers to forwards sent before the far had the queue's worth of
+        // time to work off judge nothing (the cut came at 1,780 ms with a
+        // 300 ms queue).
+        for i in 0..4 {
+            feed_served(&mut g, t0, 1100 + i * 100, 750.0, 340.0);
+        }
+        assert_eq!(g.at(), GuardAt { width: 8, live: 64 });
+        assert_eq!(g.far_undone, 0);
+        // Four sent after it, the far as slow: not ours — back, and hold.
+        for i in 0..4 {
+            feed_served(&mut g, t0, 2100 + i * 10, 750.0, 340.0);
+        }
+        assert_eq!(g.far_undone, 1);
+        assert_eq!(g.at(), full, "the cut is undone");
+        for i in 0..12 {
+            feed_served(&mut g, t0, 3000 + i * 100, 750.0, 340.0);
+        }
+        assert_eq!((g.cuts, g.far_cuts, g.at()), (0, 1, full), "and none more");
+        assert_eq!(
+            (g.least_width, g.least_live),
+            (8, 64),
+            "the trial is on record"
+        );
+        assert_eq!(g.served_read, 28);
+        // Back under the target, the far may be tried again later.
+        calm(&mut g, t0, 5000);
+        assert!(!g.far_not_ours);
+
+        // The fix toggled off: the same answers read whole.
+        let mut whole = FlowGuard::new(8, 128, true, None);
+        for i in 0..4 {
+            feed(&mut whole, t0, i * 10, 450.0);
+        }
+        let mut sent = 1000;
+        for _ in 0..24 {
+            feed(&mut whole, t0, sent, 750.0);
+            sent += 250;
+        }
+        assert!(whole.cuts >= 3, "{} cuts", whole.cuts);
+        assert_eq!(
+            whole.at(),
+            GuardAt {
+                width: 2,
+                live: LIVE_LEAST
+            }
+        );
+    }
+
+    /// #388: a queue at the far that our own forwards build — it shortens
+    /// when fewer are out — is narrowed: the trial's cut stands and the next
+    /// is tried, the budget to its least and only then the rows a level;
+    /// under the target they stay.
+    #[test]
+    fn a_far_queue_our_forwards_build_is_still_narrowed() {
+        let t0 = Instant::now();
+        let mut g = FlowGuard::new(8, 128, true, None);
+        calm(&mut g, t0, 0);
+        for i in 0..4 {
+            feed_served(&mut g, t0, 1000 + i * 10, 750.0, 340.0);
+        }
+        assert_eq!(g.at().live, 64);
+        // Sent after the cut acted, the far's queue is a third of before:
+        // ours. Still past the target, so another trial.
+        for i in 0..4 {
+            feed_served(&mut g, t0, 2100 + i * 10, 550.0, 140.0);
+        }
+        assert_eq!((g.far_cuts, g.far_undone), (2, 0));
+        assert_eq!(
+            g.at(),
+            GuardAt {
+                width: 8,
+                live: LIVE_LEAST
+            }
+        );
+        // Sent after that cut acted (its trial judges from 2,780 ms), shorter
+        // again: the budget is at its least, so the rows a level.
+        for i in 0..4 {
+            feed_served(&mut g, t0, 2800 + i * 10, 400.0, 105.0);
+        }
+        assert_eq!((g.far_cuts, g.far_undone), (3, 0));
+        assert_eq!(
+            g.at(),
+            GuardAt {
+                width: 4,
+                live: LIVE_LEAST
+            }
+        );
+        // Under the target: the cuts stand.
+        for i in 0..4 {
+            feed_served(&mut g, t0, 3600 + i * 10, 400.0, 80.0);
+        }
+        assert_eq!(g.far_undone, 0);
+        assert_eq!(g.at().width, 4);
+        assert_eq!(g.cuts, 0, "the link's window never cut");
+    }
+
+    /// #388: a far cut is taken from the window the flow runs at. With the
+    /// link's window already under the far's, a cut of the far's own would
+    /// change nothing — and be judged, and undone, on a queue it never
+    /// touched.
+    #[test]
+    fn a_far_cut_binds_under_a_link_window_already_cut() {
+        let t0 = Instant::now();
+        let mut g = FlowGuard::new(8, 128, true, Some(GuardAt { width: 8, live: 64 }));
+        // The link's window held where the last reply left it: its last
+        // change is "later", so it never rises here.
+        g.changed_at = Some(at(t0, 1_000_000));
+        calm(&mut g, t0, 0);
+        assert_eq!(
+            g.at().live,
+            64,
+            "the link's window, kept from the last reply"
+        );
+        for i in 0..4 {
+            feed_served(&mut g, t0, 1000 + i * 10, 750.0, 340.0);
+        }
+        assert_eq!(g.far_cuts, 1);
+        assert_eq!(
+            g.at(),
+            GuardAt { width: 8, live: 32 },
+            "half of what the flow ran at, not of the far's own 128"
+        );
+        // Not shortened: undone back to the far's own window; the link's
+        // still holds the flow where it was.
+        for i in 0..4 {
+            feed_served(&mut g, t0, 2100 + i * 10, 750.0, 340.0);
+        }
+        assert_eq!(g.far_undone, 1);
+        assert_eq!(g.far.live, 128.0);
+        assert_eq!(g.at().live, 64);
+        // At the least already: nothing to try, nothing counted.
+        let mut floor = FlowGuard::new(8, 128, true, Some(GuardAt { width: 2, live: 32 }));
+        floor.changed_at = Some(at(t0, 1_000_000));
+        calm(&mut floor, t0, 0);
+        for i in 0..4 {
+            feed_served(&mut floor, t0, 1000 + i * 10, 750.0, 340.0);
+        }
+        assert_eq!((floor.far_cuts, floor.far_trial.is_none()), (0, true));
+        assert_eq!(floor.far.live, 128.0, "the far's own window untouched");
+    }
+
+    /// #388: a queue on the link — the far's time steady — still cuts the
+    /// link's window, by its own LEDBAT rule, with the far's time taken off.
+    #[test]
+    fn a_queue_on_the_link_cuts_the_links_window_with_the_far_time_off() {
+        let t0 = Instant::now();
+        let mut g = FlowGuard::new(8, 128, true, None);
+        calm(&mut g, t0, 0);
+        for i in 0..4 {
+            feed_served(&mut g, t0, 1000 + i * 10, 650.0, 40.0);
+        }
+        assert_eq!((g.cuts, g.far_cuts), (1, 0));
+        assert_eq!(
+            g.at(),
+            GuardAt {
+                width: 4,
+                live: 128
+            }
+        );
+        assert_eq!(g.link_delays.least, Some(410.0));
+        assert_eq!(g.far_delays.least, Some(40.0));
+        // A far time past the delay itself is no reading.
+        let mut h = FlowGuard::new(8, 128, true, None);
+        h.answered(t0, 400.0, Some(500.0), at(t0, 400));
+        assert_eq!((h.served_read, h.far_delays.least), (0, None));
+        assert_eq!(h.link_delays.least, Some(400.0));
+    }
+
+    /// RFC 9002 § 5.3: a far's own time is taken off only where what is left
+    /// stays at or above the least round trip measured to it; a far claiming
+    /// more is read as claiming nothing, and with no round trip measured
+    /// nothing is believed.
+    #[test]
+    fn a_far_time_is_believed_only_above_the_least_round_trip() {
+        assert_eq!(
+            believed_served_ms(450.0, Some(40_000), Some(400.0)),
+            Some(40.0)
+        );
+        assert_eq!(
+            believed_served_ms(450.0, Some(50_000), Some(400.0)),
+            Some(50.0),
+            "exactly the floor"
+        );
+        assert_eq!(believed_served_ms(450.0, Some(60_000), Some(400.0)), None);
+        assert_eq!(believed_served_ms(450.0, Some(u32::MAX), Some(400.0)), None);
+        assert_eq!(believed_served_ms(450.0, Some(40_000), None), None);
+        assert_eq!(believed_served_ms(450.0, None, Some(400.0)), None);
+    }
+
     /// Below the target the budget grows back first — by up to a level's rows
     /// a round trip — then the levels, by up to a row; no further than the
     /// knobs; unguarded nothing moves.
@@ -2307,20 +2883,20 @@ mod tests {
         // Half the target's queue rises by half: once the least of the four
         // latest shows it and a round trip has passed.
         for ms in [600u64, 700, 800] {
-            g.answered(at(t0, ms - 430), 430.0, at(t0, ms));
+            g.answered(at(t0, ms - 430), 430.0, None, at(t0, ms));
         }
         assert_eq!(g.at().live, 40, "within a round trip of the last rise");
-        g.answered(at(t0, 900 - 430), 430.0, at(t0, 900));
+        g.answered(at(t0, 900 - 430), 430.0, None, at(t0, 900));
         assert_eq!(g.at().live, 44);
         let mut ms = 900;
         while g.at().live < 128 {
             ms += 450;
-            g.answered(at(t0, ms - 400), 400.0, at(t0, ms));
+            g.answered(at(t0, ms - 400), 400.0, None, at(t0, ms));
         }
         assert_eq!(g.at().width, 2, "the levels wait for the whole budget");
         for _ in 0..3 {
             ms += 450;
-            g.answered(at(t0, ms - 400), 400.0, at(t0, ms));
+            g.answered(at(t0, ms - 400), 400.0, None, at(t0, ms));
         }
         assert_eq!(
             g.at(),
@@ -2332,7 +2908,7 @@ mod tests {
         );
         for _ in 0..20 {
             ms += 450;
-            g.answered(at(t0, ms - 400), 400.0, at(t0, ms));
+            g.answered(at(t0, ms - 400), 400.0, None, at(t0, ms));
         }
         assert_eq!(
             g.at(),
@@ -2575,6 +3151,7 @@ mod tests {
             refusal: None,
             answers_step: None,
             prompt_blocks_stored: None,
+            served_us: None,
         };
         assert!(answered_whole(&Ok(ok.clone())));
         let refused = LayerResult {

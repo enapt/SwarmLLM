@@ -1261,6 +1261,7 @@ impl PipelineExecutor {
                         refusal: None,
                         answers_step: None,
                         prompt_blocks_stored: None,
+                        served_us: None,
                     });
                 } else {
                     // Intermediate segment: strip the 0x00 tag and continue

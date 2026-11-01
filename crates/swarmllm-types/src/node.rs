@@ -402,6 +402,14 @@ pub mod features {
     /// rebuild the AAD without the trailer and fail to open the forward.
     pub const STREAM_SPARES: u64 = 1 << 35;
 
+    /// Takes a result's SERVED TIME (#388): `LayerResult::served_us`, the
+    /// `0x0A` trailer after `0x09` — how long the answering node held the
+    /// forward, from its arrival there to the answer leaving. A serving node
+    /// sends it only to a coordinator advertising this; an older decoder
+    /// stops at the first marker it does not know, and `0x0A` is the last,
+    /// so nothing would hide behind it either way.
+    pub const SERVED_TIME: u64 = 1 << 36;
+
     /// The full feature set THIS build implements. Advertised by every node,
     /// with [`KV_HALF_ON_CARD`], [`KV_WINDOW_SLIDES`] and
     /// [`REQUESTER_GUESSES`] beside it where they apply.
@@ -437,7 +445,8 @@ pub mod features {
         | SHARD_BUSY
         | RECURRENT_REWIND
         | STREAM_LOOKAHEAD
-        | STREAM_SPARES;
+        | STREAM_SPARES
+        | SERVED_TIME;
 
     /// Does `advertised` include every bit in `needed`?
     pub fn supports(advertised: u64, needed: u64) -> bool {

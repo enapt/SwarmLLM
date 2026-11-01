@@ -4578,6 +4578,38 @@ as a request, an old server is never held to the ACK deadline. This also
 retired the chain-specific addressing branches from earlier the same day
 (gotcha #354): one rule now covers chained and unchained results.
 
+**A result says how long its node held the forward** (2026-11-01, #388). The receipt ACK splits a
+round trip into the way out and everything after, but on a far uplink the answer's own queue sits
+after the receipt — in quinn's send buffer, which a small receipt passes (`send_fairness`) — so a
+coordinator could not tell a far that was slow on its own from a link that queued. Swift (Kumar et
+al., SIGCOMM 2020 § 3.2) has the receiver echo its own time; QUIC's `ack_delay` (RFC 9002 § 5.3)
+is the same idea for a held ACK. Here `LayerResult::served_us` (trailer `0x0A`, after `0x09`) is the
+time from the network task's decode of the forward to the answer reaching the transport:
+dispatch, the stream's turn, the worker and the queue back are the far's; the transport's buffer
+and the wire are the link's, so a queue on the far's own uplink still reads as the link's, which is
+what the guard narrows for. Only `network/manager/served_time.rs` stamps it, and only
+`dsd_flow::believed_served_ms` reads it.
+
+The security review (Mythos, 2026-11-01) found nothing above LOW, and three changes came of it:
+
+1. **Kept per sending peer.** The first design kept one table of arrivals for every peer; a peer
+   sending forwards it never meant to see answered could push another coordinator's arrivals out,
+   and that coordinator's guard would read whole delays. Each peer now has a share of two
+   generations of 64, at most 512 peers, the stalest forgotten past that — keyed by the PeerId
+   libp2p authenticated, never an address (gotcha #888). An answer reads the share of the peer it
+   goes to, so a chain hop's answer, which goes to a coordinator that did not send its forward,
+   carries no time — a chain reads whole delays.
+2. **Rounded to the millisecond.** The guard reads milliseconds; microseconds would show a peer
+   this computer's other work to the microsecond.
+3. **A far cut is never kept.** A far cut (half the window, undone unless the far's queue falls)
+   was persisted for the next reply as if the link had been cut; `FlowGuard::to_keep` keeps the
+   link window alone.
+
+Left as they were: a forward that arrived by relay is not stamped (its answer carries no time, the
+guard reads whole delays — a gap, not a hazard); a result's integrity is the transport's, as every
+other trailer's (a result is not sealed end to end); and a result carrying an error (`finish_reason`)
+skips its trailers, served time included.
+
 ## "Is this connection direct?" — `network::relay::addr_is_direct_transport`
 
 The single answer, for BOTH layers that choose a connection. A relay-carried

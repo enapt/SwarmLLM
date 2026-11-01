@@ -2450,6 +2450,7 @@ async fn handle_forward(
                     refusal: None,
                     answers_step: None,
                     prompt_blocks_stored: None,
+                    served_us: None,
                 });
             }
             // Row i predicts the token at `index_pos + 1 + i` (the verify's
@@ -2493,6 +2494,7 @@ async fn handle_forward(
                         refusal: None,
                         answers_step: None,
                         prompt_blocks_stored: None,
+                        served_us: None,
                     });
                 }
             }
@@ -2560,6 +2562,7 @@ async fn handle_forward(
                 refusal: None,
                 answers_step: None,
                 prompt_blocks_stored: None,
+                served_us: None,
             });
         }
 
@@ -2681,6 +2684,7 @@ async fn handle_forward(
                 refusal: None,
                 answers_step: None,
                 prompt_blocks_stored: None,
+                served_us: None,
             })
         } else {
             if far_side == Some(true) {
@@ -2704,6 +2708,7 @@ async fn handle_forward(
                 refusal: None,
                 answers_step: None,
                 prompt_blocks_stored: None,
+                served_us: None,
             })
         }
     };

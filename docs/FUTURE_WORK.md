@@ -69,13 +69,11 @@ the top track (`docs/plans/large_model_splits.md`).
    far peers instead of answering locally. Its causes closed in v0.3.236 and v0.3.239; left: the
    prompt priced on the processor prior for a card/processor split, and a far hop priced at
    `net:0` (with #3). Passive: the next evidence is a field `predicted_terms` line.
-6. **#388** — the flow's guard takes a far computer's own delay for a queue on the link and
-   narrows a tree that cannot shorten it: neutral on a calm link, but the slowest reply of two
-   12-arm runs on 2026-11-01 (prose 4.26 and 5.95 tok/s) was each a far slow on its own, cut to 2
-   rows a level — and a far shared with other users is the swarm's normal case. **Next**: the far
-   reports its time from receipt to answer (a feature-gated answer field), the guard reads the
-   rest. (#369 CLOSED 2026-11-01: "Start and finish on this computer" is level with the default
-   shape at the same split.)
+6. **#388** — the flow's guard takes a far computer's own delay for a queue on the link (the
+   slowest reply of two 12-arm runs on 2026-11-01). The far now reports its own time and the guard
+   can read it apart (`SWARMLLM_FLOW_SERVED_TIME=1`, off: it lost on a processor-only rig, for
+   that rig's reasons). **Next**: the real-link A/B once the release carries bit 36 — the default
+   follows it. (#369 CLOSED 2026-11-01.)
 7. **#318** — a model no single member can hold, at a usable speed. **Llama-3.3-70B on two
    machines — this one (8 GB card + processor) and an RTX 3060 in Australia (~420 ms) — reads
    2.37-2.61 tok/s on new questions (v0.3.264, 2026-10-31 04Z) and 1.81-2.22 (v0.3.265, 12Z, the
@@ -1763,31 +1761,32 @@ the card's device-to-host read) at both speeds; whether freed snapshots' host bu
 the copy faults fresh pages (an allocation of 569 MB under WSL2 is 146K first touches).
 
 #### #388 — The flow's guard takes a far computer's own delay for a queue on the link, and narrows a tree that cannot shorten it
-`P2` · perf-split · **OPEN** — 2026-11-01 · evidence: `docs/invariants/scheduling.md` § "On the real link the guard is neutral, and its one cost is the far's own delay"; history: #369 (closed 2026-11-01, archive § "#369")
+`P2` · perf-split · **NARROWED** — 2026-11-01 · evidence: `docs/invariants/scheduling.md` § "A far computer's own time is not the link's"; history: #369 (closed 2026-11-01, archive § "#369")
 
-`FlowGuard` (LEDBAT++'s window in rows, `dsd_flow.rs`) narrows a flowing tree's rows a level
-(8 → 2), then its live budget (128 → 32), when the least of the last 4 answer delays sits 60 ms
-over the least seen. It cannot tell a queue on the link — which fewer rows shorten (a 5 Mbit
-uplink: 7.44 tok/s with it against 4.73) — from the far computer's own delay, which they do not.
-Measured on TH↔AU (Qwen2.5-14B, the 0.5B drafter, release v0.3.266 binary, ABBA × 3 a rig):
-neutral on a calm link (`guard1101`: prose 7.99 tok/s off against 7.66 on, 8.00 without its one
-slow reply; code level), and in the replies where the far turned slow on its own it cut hard and
-the reply was its run's slowest — `guard1101` arm 8 (the far slow 12 s after its receipt ACK, 5
-cuts to 2 rows a level, misses 34 against 20-27, 5.95 tok/s) and `shape1101` arm 1 (37 s slow,
-462 ms a forward over the least after the receipt, 17 cuts to 2×32, prose 4.26 against 6.6-7.5).
-On 10-30, forwards cut 130 → 33 KB left the far's spikes as long (gotcha #193). A far shared with
-other users — the swarm's normal case — is slow on its own whenever they are busy, and a cut is
-kept 10 min per (model, machines).
-**Next**: Swift's split (Kumar et al., SIGCOMM 2020: a fabric window and an endpoint window).
-(1) The far reports its time from receipt to answer sent on each answer — a new `LayerResult`
-field sent only to a requester advertising a new `features` bit; from an older far the guard
-reads the whole delay, as now. The receipt ACK alone cannot split it: quinn round-robins streams
-of one priority (`send_fairness`, on by default), so a small receipt passes answer bytes queued in
-quinn's send buffer on the far's uplink. (2) The guard reads the delay less the far's time; the
-far's time gets its own window, which cuts only where a cut shortens it (the far saturated by OUR
-rows — 12 of 48 here, 18-39 ms a row — is; outside load is not). Rig: the netns rig's far half
-sharing its card with a second request is the outside-load arm; `real_link.sh` guard on/off arms
-show whether the real link's spells still cut.
+`FlowGuard` (LEDBAT++'s window in rows, `dsd_flow.rs`) narrows a flowing tree when the least of the
+last 4 answer delays sits 60 ms over the least seen, and could not tell a queue on the link from the
+far computer's own delay: on TH↔AU a far slow on its own for 12 s (`guard1101` arm 8) and 37 s
+(`shape1101` arm 1) cut it to 2 rows a level, and each was its run's slowest reply.
+
+**Done 2026-11-01 (ships off):** Swift's split. (1) The far reports how long it held each forward —
+`LayerResult::served_us`, trailer `0x0A`, sent only to a requester advertising
+`features::SERVED_TIME` (bit 36), kept per authenticated sender (`network/manager/served_time.rs`;
+security review: nothing above LOW). (2) Behind `SWARMLLM_FLOW_SERVED_TIME=1`, the guard reads the
+link's window on the delay less that time (believed only above the least round trip,
+`believed_served_ms`) and gives the far's time a window of its own: each far cut a TRIAL — half the
+live budget first (fewer forwards out), from the window the flow runs at — kept only if the far's
+queue falls to 3/4. **Off by default**: on a processor-only rig (the card was off that boot) both
+designs lost to the whole delay, the first reply of every arm by 14-46% — on one processor every row
+costs this node's drafter and its own layers too, so the guard's pin at 2×32 is the best that rig
+can do.
+
+**Left**: (1) the A/B where #388 came from — a card far on the real link — once a release carries
+bit 36: `real_link.sh` arms `flow@SWARMLLM_FLOW_SERVED_TIME=1` against `flow`, ABBA × 3, prose and
+code, the far's slow spells counted per reply (`served_read`, `far_cuts`, `far_undone`); the
+default follows it. (2) On the rig the link's share of a delay rose ~400 ms over its least while
+the far was busy — most likely both nodes' network tasks waiting for the one processor, not
+measured apart; on the real link, check `link_least_ms` against the least round trip before
+trusting the link window's cuts.
 
 **Also** (moved from #369 (b), passive): a balance term for a cards-only chain whose reply flows,
 once a placement that saturates one side is seen on a real chain — today `plan_chain` fills each

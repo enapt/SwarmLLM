@@ -1384,6 +1384,22 @@ models' workers on the processor (`Model will run on the CPU … reason="configu
 a rig's way to keep a drafter off a card that must serve one process, as llama.cpp's
 `--gpu-layers-draft 0`.
 
+**A tree that flows** (`pipeline::dsd_flow`, #134 (b)) ends with `DSD: a tree that flowed is complete`.
+The guard's fields: `guard_at_start` / `guard_least` / `guard_at_end` (rows a level × live rows),
+`guard_cuts`, `queue_ms_most` (the most a delay stood over the least, the link's window), and since
+#388 `served_time` (the switch, `SWARMLLM_FLOW_SERVED_TIME=1`, off by default), `served_read` (answers whose far's own
+time was believed — 0 on a chain, an older far, or a far whose time left less than the least round
+trip), `far_least_ms`, `far_queue_ms_most`, `far_cuts`, `far_undone`. At DEBUG each cut logs once:
+`… grows less ahead — its forwards queue on the way` (the link's window), `… tries fewer forwards
+out — the far computer's queue may be its own forwards` (a far trial: the live budget halved, then the
+rows a level once it is at its least), `… takes back its far cut` (the trial undone: the far stayed
+slow with fewer forwards out, so ours were not why). `far_cuts` > 0 with `far_undone` equal
+to it is a far busy with something else — narrowing did not help and was taken back (gotcha #193). To
+reproduce on the far side: `SWARMLLM_FAULT_SLOW_TURNS=<from>:<count>:<ms>` holds the forwards a
+stream or flow numbers `from` to `from + count − 1` that much longer, before the worker
+(`daemon/dispatch/layer_forward.rs`); rig
+`~/swarmllm-318/flow388.sh`.
+
 **CUDA-graph decode** (on by default since 2026-09-30; `SWARMLLM_CUDA_GRAPH=0` or `SWARMLLM_CUDA_OWN_STREAM=0` turns it off; recorded in groups of `SWARMLLM_CUDA_GRAPH_GROUP` layers, default 2, `0` = one graph per step):
 
 | Level | What | Where |

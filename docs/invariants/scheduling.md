@@ -5547,6 +5547,69 @@ in quinn's send buffer, which a small receipt passes (quinn-proto 0.11.18
 turns a packet at a time; this repo sets neither fairness nor a priority) — so the honest split
 needs the far to report its time from receipt to answer sent.
 
+**A far computer's own time is not the link's** (2026-11-01, #388, `FlowGuard`'s two windows). The
+guard above reads one delay per answer, so a far slow on its own read as a queue on the link and
+cut the tree to its least (`guard1101` arm 8, `shape1101` arm 1). Swift's split (Kumar et al.,
+SIGCOMM 2020 § 3.3): the far reports how long it held each forward (`LayerResult::served_us`, from
+its network task's decode to the answer reaching its transport — `docs/invariants/network.md`
+§ "A result says how long its node held the forward"); the LINK's window reads the delay less that
+time, the FAR's window that time alone, and the guard is the smaller of the two. A far's claim is
+believed only where what it leaves is at least the least round trip measured to it
+(`believed_served_ms`, RFC 9002 § 5.3's rule for `ack_delay`); a chain reads whole delays (a hop's
+answer goes to a coordinator that did not send its forward). Swift cuts its endpoint window on any
+endpoint delay, because in a datacenter that queue is the flows' own; a far here is shared with
+other people's work, so each far cut is a TRIAL (`FarTrial`): half, kept only if the far's queue on
+forwards sent after it falls to 3/4 — the outcome the cut is for, checked (gotcha #193) — else
+undone, and none other tried while the far stays slow. The next reply starts from the link's window
+alone (`to_keep`): a far cut on trial never outlives it.
+
+**The far's lever is the forwards out, not the rows a level** (2026-11-01 rig, processor only — a
+driver stop that boot kept the card off: `flow388.sh`, one binary, A/B `SWARMLLM_FLOW_SERVED_TIME=0`,
+Qwen2.5-Coder-7B split in halves at 385 ms, the coder 0.5B drafting, 400-token replies, three an
+arm, a fault on the far `SWARMLLM_FAULT_SLOW_TURNS=60:120:90` — each reply's turns 60-179 held 90 ms
+— in two passes ABBA, and a pass without it). The first build cut the far's window as the link's
+is cut, rows a level first. Request tok/s:
+
+| pass | served time on | served time off |
+|---|---|---|
+| fault, on first | 1.30 / 1.73 / 2.30 | 1.62 / 2.12 / 2.54 |
+| fault, off first | 1.29 / 3.53 / 3.01 | 1.73 / 2.95 / 2.41 |
+| no fault, on first | 0.94 / 2.42 / 6.48 | 1.73 / 2.32 / 2.75 |
+
+Every arm's FIRST reply — the only one that starts from a whole window, the others start from the
+last reply's — was slower with it on, whatever the order (later replies level: medians 2.30 and
+2.32 over all nine). The far's time was up to 4.2-9.8 s over its least, and that queue was our own
+forwards: half a 7B on half a processor holds a forward ~350 ms, and the flow keeps up to 12 out.
+A forward of 4 rows costs that far about what one of 8 does, so the trials' width cuts never
+shortened it: 7 of 9, 6 of 8 and 2 of 2 were undone, and the flow ran wide (10.5 rows a forward,
+101 stale answers against 7) where reading whole delays had cut it to 2×32. So the far's window
+cuts the live BUDGET first (`Window::cut_budget_first`): each drafter call's rows leave as one
+forward, so half the budget is about half the forwards out, which shortens a queue they build
+whatever a row costs there — and leaves a far slow on its own as slow, so the trial still undoes
+it. Measured with it (one pass, on first; its reversed pass was stopped once the next paragraph's
+reason was plain): 1.45 / 1.86 / 1.86
+tok/s on against 1.68 / 2.44 / 2.50 off. Every far cut was still undone (3, 1 and 2 a reply), for a
+reason of the guard's own: the LINK's window had already cut below the far's, so half the far's own
+window changed nothing the flow ran at (`2x32 → 2x32` in the log), was judged on a queue it never
+touched, and barred every later far cut. So a far cut is taken from the window the flow RUNS at
+(`a_far_cut_binds_under_a_link_window_already_cut`). And the link's window cut 39-42 times a reply
+on its own: the link's share of a delay reached ~860 ms against a least of 460 — most likely each
+node's network task waiting for the one processor too (an arrival stamped late here, a forward
+decoded late there; not measured apart) — so the link's window rose and cut around its target
+where the whole
+delay had pinned 2×32 (7.3-8.3 rows a forward against 6.6-6.9, 20-26 stale answers against 0-9, the
+drafter 65-76 s a reply against 44-58).
+
+**So it is off by default** (`SWARMLLM_FLOW_SERVED_TIME=1` turns it on). Neither design won on this
+rig, and for a reason that is the rig's: every row costs THIS node's drafter and its own layers on
+the same processor as the far, which no window here measures, so the fewest rows always win and the
+whole delay's pin at the floor is the best this rig can do. A card far on the real link — where
+#388 came from: a far slow on its own for 12 s and 37 s, its forwards 21-54 ms over the least
+otherwise — has none of that, and is gotcha #193's "second device class", the whole test. The far
+reports its time only from a release carrying `features::SERVED_TIME` (bit 36); the A/B then runs
+from this node (`real_link.sh`, served time on against off, ABBA × 3, prose and code), and the
+default follows the measurement.
+
 **Copied runs** (2026-10-22, `~/swarmllm-318/copyrig.sh`, one binary, 385 ms, no rate limit, A/B
 `SWARMLLM_FLOW_COPY=0`, arms alternating, two warm 400-token replies an arm, request-level tok/s):
 

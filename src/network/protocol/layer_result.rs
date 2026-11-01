@@ -153,6 +153,15 @@ pub fn encode_layer_result(result: &LayerResult) -> Result<Vec<u8>, SwarmError> 
         buf.extend_from_slice(&n.to_le_bytes());
     }
 
+    // Optional: how long the answering node held the forward (marker 0x0A +
+    // u32 LE microseconds), see `LayerResult::served_us`. LAST, where an
+    // older decoder has already stopped; set only for a coordinator
+    // advertising `features::SERVED_TIME` (`network::manager::served_time`).
+    if let Some(us) = result.served_us {
+        buf.push(0x0A);
+        buf.extend_from_slice(&us.to_le_bytes());
+    }
+
     Ok(buf)
 }
 
@@ -453,6 +462,18 @@ pub fn decode_layer_result(data: &[u8]) -> Result<LayerResult, SwarmError> {
         prompt_blocks_stored = Some(u32::from_le_bytes([b[0], b[1], b[2], b[3]]));
         pos += 4;
     }
+    // Optional: how long the answering node held the forward (marker 0x0A +
+    // u32 LE microseconds). A number the peer chose — the coordinator weighs
+    // it against what it measured before believing it (`dsd_flow`).
+    let mut served_us = None;
+    if pos < data.len() && data[pos] == 0x0A {
+        pos += 1;
+        let Some(b) = data.get(pos..pos + 4) else {
+            return Err(SwarmError::Network("served-time trailer truncated".into()));
+        };
+        served_us = Some(u32::from_le_bytes([b[0], b[1], b[2], b[3]]));
+        pos += 4;
+    }
     // Suppress unused-assignment warning on the last pos += that has no
     // subsequent reader.
     let _ = pos;
@@ -474,6 +495,7 @@ pub fn decode_layer_result(data: &[u8]) -> Result<LayerResult, SwarmError> {
         refusal,
         answers_step,
         prompt_blocks_stored,
+        served_us,
     })
 }
 

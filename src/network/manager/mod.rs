@@ -33,6 +33,7 @@ mod loop_stall;
 mod receipts;
 mod relay;
 mod requests;
+mod served_time;
 mod shard_transfer;
 mod tensors;
 mod upload_pacer;
@@ -537,6 +538,9 @@ pub struct NetworkManager {
     /// the encoded result so it is sent once more (`resend_lost_result`, #113)
     /// instead of leaving the coordinator to wait out its segment deadline.
     pending_tensor_result_outbound: HashMap<OutboundRequestId, tensors::ResultInFlight>,
+    /// When each forward served here arrived, for its answer's served time
+    /// (#388, `features::SERVED_TIME`). See `served_time`.
+    served_since: served_time::ServedSince,
     /// Results `SWARMLLM_FAULT_RESULT` held back, resent on the sweep tick.
     /// Always empty in production.
     parked_result_resends: Vec<tensors::ParkedResultResend>,
@@ -1016,6 +1020,7 @@ impl NetworkManager {
             peer_goodput: HashMap::new(),
             hop_forwards: hop_forwards::HopForwards::default(),
             pending_tensor_result_outbound: HashMap::new(),
+            served_since: served_time::ServedSince::default(),
             parked_result_resends: Vec::new(),
             result_fault_fired: false,
             pending_rr_observability: HashMap::new(),

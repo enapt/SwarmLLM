@@ -10374,6 +10374,7 @@ impl ModelProcessPool {
                                 refusal: None,
                                 answers_step: None,
                                 prompt_blocks_stored: r.prompt_blocks_stored,
+                                served_us: None,
                             });
                         }
                         WorkerMsg::Error {
@@ -10811,6 +10812,7 @@ impl ModelProcessPool {
                             refusal: None,
                             answers_step: None,
                             prompt_blocks_stored: None,
+                            served_us: None,
                         });
                         break;
                     }

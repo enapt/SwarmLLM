@@ -1055,6 +1055,19 @@ pub struct LayerResult {
     /// resume from there. Travels as the `0x09` trailer.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt_blocks_stored: Option<u32>,
+    /// How long the answering node held the forward, in microseconds: from
+    /// its arrival there to this answer leaving for the coordinator. What a
+    /// round trip less this leaves is the LINK's, both ways — so a flow's
+    /// guard can tell a queue on the link from a far computer slow on its own
+    /// (#388; Swift's endpoint/fabric split, QUIC's `ack_delay`).
+    ///
+    /// A number another computer chose: the coordinator believes it only
+    /// where the round trip less it stays at or above the least round trip
+    /// measured to that peer (RFC 9002 § 5.3), never on its own. `None` from
+    /// a build that predates it and to a coordinator not advertising
+    /// `features::SERVED_TIME`. Travels as the `0x0A` trailer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub served_us: Option<u32>,
 }
 
 /// What a split's prompt pass tells each segment about keeping the prompt
@@ -1217,6 +1230,7 @@ impl LayerResult {
             refusal: None,
             answers_step: None,
             prompt_blocks_stored: None,
+            served_us: None,
         }
     }
 
