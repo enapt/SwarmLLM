@@ -147,6 +147,10 @@ mmproj). Never edit a count without the run behind it (`completeness.md`).
 
 ## Releases, gates and this machine
 
+- ⛔ **A release is cut only when its work is FINISHED and its gate can run NOW** (user,
+  2026-11-01): no open P0/P1 against work it carries, no follow-up it needs, never on a boot
+  after a driver stop — never a signed draft waiting on a reboot. Otherwise every fix rolls
+  into the next release (`memory/release_gate.md` step 0).
 - **Releases are SIGNED; CI leaves a DRAFT.** Read `memory/release_gate.md`
   before a release (~2 h bump → publish since 2026-10-14). ⛔ A BUILD gate is not
   a BEHAVIOUR gate (#683): `examples/release_gate.sh` runs on the DOWNLOADED
