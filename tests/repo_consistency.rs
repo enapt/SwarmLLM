@@ -6438,7 +6438,45 @@ fn readme_speed_problems(readme: &str, cargo_version: &str, released: &[String])
             stamp.as_deref().unwrap_or("<nothing>")
         ));
     }
-    let newest: Vec<&String> = released_bare.iter().take(2).collect();
+    // A release check whose absolute speeds describe the MACHINE, not the
+    // release — another program on the card, against "a rig shares the machine
+    // with nothing" (#708) — is skipped by name and reason in a
+    // `<!-- release-check:skipped v<x.y.z> — <why> -->` marker, and the table
+    // comes from the newest check before it. The marker goes once the release
+    // it names is no longer one of the two newest.
+    let mut skipped = Vec::new();
+    for (i, _) in section.match_indices("<!-- release-check:skipped") {
+        let marker = section[i..].split("-->").next().unwrap_or_default();
+        let named = cited_versions(marker);
+        let why_words = named
+            .first()
+            .and_then(|v| marker.split(&format!("v{v}")).nth(1))
+            .map(|why| {
+                why.trim_start_matches([' ', ':', '—', '-'])
+                    .split_whitespace()
+                    .count()
+            })
+            .unwrap_or(0);
+        match named.first() {
+            Some(v) if why_words >= 5 && released_bare.iter().take(2).any(|r| r == v) => {
+                skipped.push(v.clone())
+            }
+            Some(v) if why_words >= 5 => problems.push(format!(
+                "README.md skips the v{v} release check, which is no longer one of the two \
+                 newest releases: remove its `release-check:skipped` marker."
+            )),
+            _ => problems.push(
+                "A `release-check:skipped` marker names the release check it skips and says why \
+                 in five words or more: `<!-- release-check:skipped v<x.y.z> — <why> -->`."
+                    .into(),
+            ),
+        }
+    }
+    let newest: Vec<&String> = released_bare
+        .iter()
+        .filter(|v| !skipped.contains(v))
+        .take(2)
+        .collect();
     match (
         section.find("<!-- release-check:begin -->"),
         section.find("<!-- release-check:end -->"),
@@ -6448,7 +6486,9 @@ fn readme_speed_problems(readme: &str, cargo_version: &str, released: &[String])
             Some(v) => problems.push(format!(
                 "README.md's one-computer table is from the v{v} release check, but the newest \
                  releases are {newest:?}: run `python3 -I examples/readme_speeds.py \
-                 ~/swarmllm-gate/v<newest checked>/out/speed.jsonl` (it writes that block)."
+                 ~/swarmllm-gate/v<newest checked>/out/speed.jsonl` (it writes that block). \
+                 If that check shared the machine with another program, skip it by name \
+                 instead: `<!-- release-check:skipped v<x.y.z> — <why> -->`."
             )),
             None => problems.push(
                 "README.md's release-check block names no version; regenerate it with \
@@ -6532,6 +6572,29 @@ fn the_readme_speeds_guard_catches_a_release_that_did_not_refresh_them() {
     assert!(
         cited.len() == 1 && cited[0].contains("v0.3.262"),
         "{cited:?}"
+    );
+    // A check that shared the machine, skipped by name with its reason: the
+    // table may come from the check before it.
+    let skip = "<!-- release-check:skipped v0.3.261 — another program held the card through it -->";
+    let skipping = section("0.3.262-alpha", "0.3.260", skip);
+    assert_eq!(
+        readme_speed_problems(&skipping, "0.3.262-alpha", &released(262)),
+        Vec::<String>::new()
+    );
+    // A marker with no reason skips nothing: it and the old table both fail.
+    let unexplained = section(
+        "0.3.262-alpha",
+        "0.3.260",
+        "<!-- release-check:skipped v0.3.261 -->",
+    );
+    let unexplained = readme_speed_problems(&unexplained, "0.3.262-alpha", &released(262));
+    assert_eq!(unexplained.len(), 2, "{unexplained:?}");
+    // Once the release it names is not one of the two newest, the marker goes.
+    let stale = section("0.3.263-alpha", "0.3.262", skip);
+    let stale = readme_speed_problems(&stale, "0.3.263-alpha", &released(263));
+    assert!(
+        stale.len() == 1 && stale[0].contains("no longer one of the two newest"),
+        "{stale:?}"
     );
     // Markers gone.
     assert_eq!(

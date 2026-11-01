@@ -32,7 +32,11 @@ changes at release, never per change. In the bump commit, beside the counts:
 1. **One computer**: `python3 -I examples/readme_speeds.py
    ~/swarmllm-gate/v<previous release>/out/speed.jsonl` rewrites that table from
    the last release check's own records (the downloaded release; each run's best
-   repeat, the range across runs). Never type those figures.
+   repeat, the range across runs). Never type those figures. Read that check's
+   `release_gate_history.md` entry first: a check that shared the machine
+   (another program on the card, #708) is skipped by name after the block —
+   `<!-- release-check:skipped v<x.y.z> — <why> -->` — and the table stays from
+   the check before it (v0.3.266's, 2026-11-01).
 2. **Across computers**: each row names the version it was measured on. Replace
    a row when this release's CHANGELOG entry or `faster_than_local.md` carries a
    newer measurement of that setup; add a row for a setup newly measured. A

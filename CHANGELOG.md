@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.3.267-alpha] — 2026-11-01
+
 **You can now ask a model to answer without thinking first, or to think.** Models such as
 Qwen 3 and Gemma 4 can reason step by step before they answer, which takes time — minutes when a
 model is split across computers — and until now a request could not say which it wanted when the
