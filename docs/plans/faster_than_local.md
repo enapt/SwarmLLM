@@ -872,18 +872,20 @@ forwards on this node, not their rows, and not the link.
    rig `prose1030` arm 1, batched tail off): 121 of a prose reply's 257 tail forwards (2,358 rows)
    and 23 of a code reply's 105 carried only rows off the walk's way — and that counts only the
    tree's current epoch; the forwards out when it is rebased come back for rows the rebase cuts
-   on top of those. **Built without a worker change** (`dsd_flow::dead_wait_on`, opt-in
-   `SWARMLLM_FLOW_DEAD_WAIT=1`): such an answer WAITS (`reaches_the_walk`) — read in front of the
+   on top of those. **Built without a worker change** (`dsd_flow::dead_wait_on`, ON since
+   2026-11-01, A/B `SWARMLLM_FLOW_DEAD_WAIT=0`): such an answer WAITS (`reaches_the_walk`) — read in front of the
    next answer the walk can reach, in one joined forward (a forward is bound by its weights, ~3 ms
    for 23 more rows against ~19 alone), or never, where a rebase's forward cuts this node's cache
    at or below the first one waiting (`cuts_below`). Holding places instead would have needed a
    worker message, a zero write per layer and every cache layout's rules; waiting needs none.
    **Measured 2026-10-30 (rig `tailjoin1030`, item 1's numbers in FUTURE_WORK #369): item 1 ON
-   (every joined arm beat the old arm beside it, prose +13-38%); this item OFF** — the tail a
-   further ~35% cheaper and the replies no faster, every prose reply's forwards queued on their
-   way (630-923 ms) and the guard narrowed the tree to 2 rows a level. Freeing this node let its
-   sends leave in bursts — the likeliest reading, unproven; the guard narrows ROWS for a wait the
-   rows do not cause (gotcha #193). Pacing the sends comes before it is tried again.
+   (every joined arm beat the old arm beside it, prose +13-38%)**; this item looked no faster, its
+   forwards queued 630-923 ms. **Re-read and re-measured 2026-11-01 — ON**: the "freed sends leave
+   in bursts" reading was refuted from the 10-30 logs (no forward left within 5 ms of the last;
+   65-80% of the delay sat after the far's receipt; the far's spikes hit the old arm as hard — the
+   two dead-wait arms had run back to back), and ABBA × 3 on the release v0.3.266 binary
+   (`deadwait1101`) read prose 8.16 tok/s mean against 6.98 (+17%), ahead in every pair, code level
+   (17.81 against 18.01).
 3. **Bigger sends** (6 levels or 16 rows a level a drafter call, 2026-10-30 real link, one
    binary): levels 6 read 7.11 / 15.27 tok/s (prose / code, two runs) and 16 rows 6.54 / 15.12
    against the default's ONE clean run 6.65 / 14.98 — the second default run lost its drafter to

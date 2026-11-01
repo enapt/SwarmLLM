@@ -46,10 +46,10 @@
 //! the same split on TH↔AU (2026-10-29). Answers that are due together —
 //! they land in bursts — are read here in ONE forward
 //! (`FlowRun::due_together`, `tensor_util::join_positions`): this shape is
-//! bound by this node's cost a forward, not by the link. Opt-in
-//! (`dead_wait_on`, off: measured no faster), an answer none of whose rows the
-//! walk can still reach waits to be read with the next one it can, or is
-//! never read where a rebase cuts this node's cache below it first.
+//! bound by this node's cost a forward, not by the link. And
+//! (`dead_wait_on`, +17% on prose) an answer none of whose rows the walk can
+//! still reach waits to be read with the next one it can, or is never read
+//! where a rebase cuts this node's cache below it first.
 //!
 //! **Exact at any temperature.** A row's draw is the model's sample after
 //! that row's path, its shared noise keyed by position (`tree_start + 1 +
@@ -591,9 +591,8 @@ fn answered_whole(result: &Result<LayerResult, SwarmError>) -> bool {
 
 /// Answers none of whose rows the walk can reach WAIT to be read here with the
 /// next answer it can, or are never read where a rebase cuts this node's cache
-/// below them first (`FlowRun::due_together`, #369): OFF unless
-/// `SWARMLLM_FLOW_DEAD_WAIT=1` (or `on` / `true`), and only with the batched
-/// tail.
+/// below them first (`FlowRun::due_together`, #369): ON with the batched tail,
+/// off with `SWARMLLM_FLOW_DEAD_WAIT=0` (or `off` / `false`).
 ///
 /// Why it exists: a row's draw is read only along the walk, yet this node
 /// reads every answer the peers ran — to keep its cache in step with theirs.
@@ -602,25 +601,26 @@ fn answered_whole(result: &Result<LayerResult, SwarmError>) -> bool {
 /// a live answer such rows cost the joined forward a few ms; cut first,
 /// nothing.
 ///
-/// Why it is off: it cut this node's tail time by a further ~35% (rig
-/// `tailjoin1030`, 2.1-3.7 s against 4.0-4.5 joined alone) and the replies
-/// were no faster — in all three of its prose replies the forwards queued on
-/// their way (630-923 ms over the least, against 71-125 joined alone), the
-/// guard narrowed the tree to 2 rows a level, and the misses rose (24-29
-/// against 18-22). The likeliest cause, unproven: reading a dead answer takes
-/// no time, so the sends it frees leave in a burst where the tail's forwards
-/// spaced them (TCP's ACK compression, Zhang, Shenker and Clark 1991), and the
-/// transport paces a burst out (BBR, gotcha #917) — a wait on this side the
-/// guard reads as the link's queue and answers by narrowing rows, which does
-/// not shorten it (gotcha #193). Pacing the sends is the change to test
-/// before turning it on.
+/// Measured (2026-11-01, `real_link.sh` TAG=deadwait1101, one binary, TH↔AU,
+/// Qwen2.5-14B "start and finish here", the 0.5B Q8_0 drafter, arms ABBA ×3):
+/// prose 8.16 tok/s mean (7.46-8.67, 6 replies) against 6.98 (6.07-7.64, 5),
+/// faster than the arm beside it in every pair; code level (17.81 against
+/// 18.01); this node's tail time 3.6 s a prose reply against 5.2.
+///
+/// It was first measured no faster (rig `tailjoin1030`, 2026-10-30) and kept
+/// off on a guess — that the sends it frees leave in a burst the transport
+/// paces out. That run's own logs refute it: no forward left within 5 ms of
+/// the one before (0 of ~2,400), the delay sat after the far machine's
+/// receipt (65-80% of it), and the far's 2-4 s spikes hit the old arm as hard
+/// (147 against 138 ms a forward) — its two dead-wait arms ran back to back
+/// inside one.
 fn dead_wait_on() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
     *ON.get_or_init(|| {
         tail_join_on()
-            && matches!(
+            && !matches!(
                 std::env::var("SWARMLLM_FLOW_DEAD_WAIT").ok().as_deref(),
-                Some("1") | Some("on") | Some("true")
+                Some("0") | Some("off") | Some("false")
             )
     })
 }

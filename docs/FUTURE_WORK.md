@@ -72,7 +72,9 @@ the top track (`docs/plans/large_model_splits.md`).
 6. **#369** — "Start and finish on this computer" runs AUTOMATICALLY wherever a node holds both
    ends of a model, and flows since v0.3.261, but ~1.1x behind the default shape at the same split
    on prose (~1.2x on code, inside the default shape's own spread); v0.3.264's batched tail added
-   6% on prose. **Next**: the dead wait (built, off: forwards queued 630-923 ms; pace the sends).
+   6% on prose, and the dead wait (ON since 2026-11-01) +17% more on prose, code level. **Next**:
+   the flow's guard takes the far's own delay for the link's queue (one prose reply in six, 11-01,
+   cut to 2 rows a level) — the far reports its time from receipt to answer, the guard reads the rest.
    The drafter's call is NOT host-bound (measured 2026-11-01, `faster_than_local.md` § 10 item 10):
    a level is the card's own time, at llama.cpp's speed for the same 8-row forward; replaying a
    level without recording would save at most ~0.35 ms of ~4.5 (0.5B), ~0.1 of ~11.7 (3B).
@@ -1836,18 +1838,38 @@ DEGRADED through the run — the old arm's own prose went 6.88 → 5.89 → 3.90
 joined arm beat the old arm beside it — prose 7.80 / 7.27 / 5.40 tok/s against 6.88 / 5.89 / 3.90,
 code 19.39 / 18.34 / 13.44 against 17.46 / 12.68 / 9.77; the mechanism fired on every reply. On a
 CALM link the same evening (rig `tail1030b`, five arms each, ABBA): prose 8.17 tok/s mean
-(7.50-8.86) against 7.69 (7.00-8.16), +6%; code level (`docs/invariants/scheduling.md`). **Not on — an answer the walk can no longer reach waiting to be read
-with the next** (`dead_wait_on`, opt-in `SWARMLLM_FLOW_DEAD_WAIT=1`): it cut the tail a further
-~35% (2.1-3.7 s) and the replies were no faster (prose 6.82 / 5.29 / 4.55, code 16.95 / 14.98 /
-15.42) — in all three of its prose replies the forwards queued on their way (630-923 ms over the
-least, joined alone 71-125), the guard narrowed the tree to 2 rows a level and the misses rose
-(24-29 against 18-22). Likeliest cause, unproven: a dead answer is read in no time, so the sends it
-frees leave in a burst (ACK compression) that the transport paces out (BBR, gotcha #917) — a wait on
-this side the guard reads as the link's queue and answers by narrowing rows, which does not shorten
-it (gotcha #193). **Next**: log each forward's send time beside its arrival to see whether the
-dead-wait arms' delay is this side's pacing or the far's queue; if pacing, space the sends at the
-far's own time a forward (`dsd_controller::FarPace`, the stream's packet-pair reading, #375) and
-re-test the dead wait. The same guard question stands for any change that frees this node.
+(7.50-8.86) against 7.69 (7.00-8.16), +6%; code level (`docs/invariants/scheduling.md`).
+
+**ON since 2026-11-01 — an answer the walk can no longer reach waits to be read with the next**
+(`dead_wait_on`, A/B `SWARMLLM_FLOW_DEAD_WAIT=0`). On 10-30 it cut the tail a further ~35% and the
+replies were no faster, with the forwards queued 630-923 ms over the least; the written cause was
+"the freed sends leave in a burst the transport paces out". **Re-read 2026-11-01 from those logs
+(debug carries each forward's send and its round trip cut at the far's receipt ACK) — REFUTED**:
+0 of ~2,400 forwards left within 5 ms of the one before (median gap 22-31 ms, a drafter call);
+65-80% of the delay over the least sat AFTER the far's receipt; our forwards kept the far busy only
+20-36% of the time; the far's delay came in 2-4 s spikes of 300-600 ms that narrowing the forwards
+130 → 33 KB did not shorten; and the spikes hit the OLD arm as hard (147 against 138 ms a forward)
+— the two dead-wait arms had run back to back inside one. Scripts: `split_by_side.py`,
+`far_load.py`, `episodes.py`, `arm_compare.py` beside the rig in `~/swarmllm-gate/deep/fr/`.
+**Re-measured `deadwait1101`** (release v0.3.266 binary, TH↔AU, ABBA × 3, 02:24-02:45Z): prose
+**8.16 tok/s mean (7.46-8.67, n 6) against 6.98 (6.07-7.64, n 5), +17%**, the dead wait ahead of the
+arm beside it in every pair; code level (17.81 against 18.01); this node's own time a prose reply
+3.6 against 5.2 s, 108-138 dead answers waited per reply (the mechanism fired). Scored against
+llama.cpp (`score369.sh deadwait1101`): as faithful as the old arms — prose 150-156 of 160 tokens
+its first choice against 150-154, code 157 of 160 in every dead-wait reply, every other token a
+near-tie (gap ≤ 0.40 logits) in both. One default arm
+fell out — it started before the peer's round trip was measured and guessing went off for the
+reply (gotcha #1008, fixed the same day: `dsd_controller::CheckReach`).
+
+**The guard on the real link** (`guard1101`, the same binary and sitting, dead wait on in both,
+ABBA × 3, A/B `SWARMLLM_FLOW_GUARD=0`): prose 7.99 tok/s mean (7.58-8.31) off against 7.66
+(5.95-8.63) on, code level (17.99 against 18.36); without its one slow reply the guard-on prose is
+8.00 — neutral on a calm link, and kept (5 Mbit uplink: 7.44 against 4.73). That reply: the far
+slow for 12 s after its receipt ACK, the guard cut 5 times to 2 rows a level, misses 34 against
+20-27. **Next for the guard**: tell the link's queue from the far's own (Swift's fabric and
+endpoint windows, `docs/invariants/scheduling.md` § "On the real link the guard is neutral") —
+the far reports its time from receipt to answer sent, a new answer field gated on a feature bit,
+and the guard reads only what is left.
 
 **Also open here:** (b) the flow's speed depends on the load split — with this machine holding 12
 of 48 layers the peer (36 layers + the 152k-vocab head) saturated (queue up to 2.2 s, 18-39 ms a

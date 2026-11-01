@@ -26,6 +26,16 @@ computers asked that early, and one then ran its next two replies at half speed 
 second against 6-8 and 18). A check to another computer is now floored by the cheapest check the
 reply has timed until the trip itself has been.
 
+**A split that starts and finishes on this computer skips more of the work nobody will read.** On
+such a split this computer runs the model's last layers on every answer the other computers send
+back, including answers to guesses already proven wrong, so its copy of the conversation stays in
+step with theirs. Such an answer now waits to be run together with the next useful one, or is
+dropped where the guesses are cut back anyway. It was built on 2026-10-30 and left off after one test
+found it no faster; that test's own records show its two runs fell inside a slow spell on the far
+computer that hit the old behaviour just as hard. Measured again with the runs interleaved
+(Thailand–Australia, Qwen2.5-14B, 12 runs): ordinary writing 17% faster (8.2 against 7.0 tokens a
+second), code unchanged (#369).
+
 ## [0.3.266-alpha] — 2026-11-01
 
 **A conversation's saved prompt no longer pushes another conversation's out of memory.** After a

@@ -5436,11 +5436,19 @@ round costs one per check.
   9.77. On a CALM link (rig `tail1030b`, 15:38-15:55Z, same machines and drafter, five arms each
   alternating ABBA): prose 8.17 tok/s mean (7.50-8.86) against 7.69 (7.00-8.16), +6%; code level,
   18.05 (14.39-20.19) against 18.42 (17.32-19.63) — the gain is largest where the far end's answers
-  bunch up, which a slowing link makes more often. A/B `SWARMLLM_FLOW_TAIL_JOIN=0`. **An answer the walk can no longer reach is still read**:
-  holding it back to be read with the next (`dead_wait_on`, opt-in `SWARMLLM_FLOW_DEAD_WAIT=1`) cut
-  the tail a further ~35% and was no faster — every prose reply's forwards then queued on their way
-  (630-923 ms over the least, against 71-125), the guard narrowed the tree to 2 rows a level and the
-  misses rose; the freed sends likely leave in bursts the transport paces (gotchas #917, #193).
+  bunch up, which a slowing link makes more often. A/B `SWARMLLM_FLOW_TAIL_JOIN=0`. **An answer the walk can no longer reach waits to be
+  read with the next** (`dead_wait_on`, ON since 2026-11-01, A/B `SWARMLLM_FLOW_DEAD_WAIT=0`). On
+  10-30 it cut the tail a further ~35% and looked no faster, its forwards queued 630-923 ms on their
+  way; the "freed sends leave in a burst" reading was REFUTED from those logs on 11-01 — no forward
+  left within 5 ms of the last, 65-80% of the delay sat after the far's receipt ACK, and the far's
+  2-4 s spikes hit the old arm as hard (147 against 138 ms a forward): the two dead-wait arms had run
+  back to back inside one. Re-measured ABBA × 3 on the release v0.3.266 binary (`deadwait1101`,
+  02:24-02:45Z): prose 8.16 tok/s mean (7.46-8.67) against 6.98 (6.07-7.64), +17%, ahead of the arm
+  beside it in every pair; code level (17.81 against 18.01); 108-138 dead answers waited a prose
+  reply, this node's own time 3.6 against 5.2 s; scored against llama.cpp, as faithful as the old
+  arms (prose 150-156 of 160 first choices against 150-154, code 157 of 160, every other token a
+  near-tie, gap ≤ 0.40 logits). **Two arms run back to back are one sample of the
+  link, not two** — interleave, or a slow stretch reads as the change.
 
 **Measured.** *Correctness, on the processor* (2026-10-22, `flow318.sh CPU=1 LEN=64`, a 557-token
 prompt, 7B split 0-14 | 14-28 over QUIC at 385 ms, greedy, two replies an arm): the flow ran 64-65
@@ -5519,6 +5527,22 @@ did nothing there, so that gap is the arms (the guard-on arm always ran first). 
 check (`copyrig.sh`'s chat pass, below; copied runs on in both arms) found no gap: guard off
 9.19-9.82 then 8.79-9.41, guard on 9.09-9.58 then 8.83-8.98 tok/s, the guard-off arm first in
 one pair and second in the other.
+
+**On the real link the guard is neutral, and its one cost is the far's own delay** (2026-11-01,
+`guard1101`: release v0.3.266 binary, TH↔AU, a start-and-finish-here split, the dead wait on in
+both arms, ABBA × 3, A/B `SWARMLLM_FLOW_GUARD=0`): prose 7.99 tok/s mean (7.58-8.31) guard off
+against 7.66 (5.95-8.63) on, code level (17.99 against 18.36). Without its one slow reply the
+guard-on prose is 8.00. That reply is the weakness the rig's unlimited link showed above: the far
+was slow for 12 s (86 ms a forward over the least AFTER its receipt ACK, against 21-54 in the other
+replies), the guard cut 5 times to 2 rows a level and the misses rose to 34 (20-27 elsewhere). It
+read the far's own queue as the link's, and narrowing does not shorten that — on 10-30, forwards cut
+130 → 33 KB left the far's spikes as long (gotcha #193). Telling the two apart is Swift's split
+(Kumar et al., SIGCOMM 2020: a fabric window and an endpoint window, the far reporting its own
+time); the receipt ACK splits a round trip, but a far uplink's queue can sit AFTER the receipt —
+in quinn's send buffer, which a small receipt passes (quinn-proto 0.11.18
+`StreamsState::write_stream_frames`: `send_fairness` defaults on, so streams of one priority take
+turns a packet at a time; this repo sets neither fairness nor a priority) — so the honest split
+needs the far to report its time from receipt to answer sent.
 
 **Copied runs** (2026-10-22, `~/swarmllm-318/copyrig.sh`, one binary, 385 ms, no rate limit, A/B
 `SWARMLLM_FLOW_COPY=0`, arms alternating, two warm 400-token replies an arm, request-level tok/s):
