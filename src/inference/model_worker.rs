@@ -3079,10 +3079,10 @@ pub(crate) fn ngram_spec_eligible(
     ngram_cfg.num_pred_tokens > 0
         && ngram_cfg.max_ngram_size >= ngram_cfg.min_ngram_size
         && !sampling.logprobs
-        && !(swift_cfg.enabled && sampling.temperature == 0.0)
-        // A guess is drawn without the reply's grammar, and one taken back
-        // would leave its matcher ahead of the reply (#336).
-        && sampling.reply_grammar.is_none()
+        // SWIFT speculates this request instead — never a reply held to JSON,
+        // whose drafts SWIFT would draw without the grammar (#336). A held
+        // reply's own checks draw every row through it (`ngram_spec_round`).
+        && !(swift_cfg.enabled && sampling.temperature == 0.0 && sampling.reply_grammar.is_none())
 }
 
 /// The reply's grammar compiled for `model` (#336), or `None` for a reply held
@@ -3302,6 +3302,14 @@ const NGRAM_RECENT_GEN_WINDOW: usize = 500;
 /// defect here, but it must not be described as bit-identical, because someone
 /// will one day diff two replies and need to know whether they have found a
 /// bug. They have not; they have found fp addition being non-associative.
+///
+/// **A reply held to JSON (`held`, #336) is drawn through its grammar at every
+/// row**, each row masked where the rows before it left the grammar and the
+/// grammar told the token drawn — and the round stops at the first token that
+/// is not the guess, so the grammar is told exactly the tokens the reply
+/// keeps and nothing has to be taken back (llama.cpp's
+/// `common_sampler_sample_and_accept_n`). A guess the mask rules out is never
+/// drawn, so it ends the round as any miss does.
 #[allow(clippy::too_many_arguments)]
 fn ngram_spec_round(
     model: &mut crate::inference::split::SplitModel,
@@ -3315,6 +3323,7 @@ fn ngram_spec_round(
     sampling: &crate::types::SamplingParams,
     force_attn: bool,
     capture: Option<&std::collections::HashSet<usize>>,
+    mut held: Option<&mut crate::inference::reply_grammar::HeldReply>,
 ) -> Result<SpecRound, SwarmError> {
     let started = std::time::Instant::now();
     let capture = capture.map(|layers| crate::inference::split::Capture {
@@ -3337,9 +3346,8 @@ fn ngram_spec_round(
                     .map(|logits| (logits, None)),
             }
         })?;
-        // `None`: a held reply is never speculated (`ngram_spec_eligible`).
         let (tok, _) = crate::inference::tensor_util::sample_token_with_logprob_history(
-            &logits, sampling, generated, None,
+            &logits, sampling, generated, held,
         )?;
         return Ok(SpecRound {
             produced: vec![tok],
@@ -3378,7 +3386,10 @@ fn ngram_spec_round(
             .and_then(|t| t.unsqueeze(0))
             .map_err(SwarmError::internal)?;
         let (tok, _) = crate::inference::tensor_util::sample_token_with_logprob_history(
-            &row, sampling, &hist, None,
+            &row,
+            sampling,
+            &hist,
+            held.as_deref_mut(),
         )?;
         produced.push(tok);
         // The last position has no draft to check — its token is the round's
@@ -3994,6 +4005,7 @@ impl LocalSpec {
         generated: &[u32],
         sampling: &crate::types::SamplingParams,
         force_attn: bool,
+        mut held: Option<&mut crate::inference::reply_grammar::HeldReply>,
     ) -> Result<u32, SwarmError> {
         self.ctx.push(next_token);
         if let Some(card) = self.card.as_mut() {
@@ -4088,6 +4100,11 @@ impl LocalSpec {
                 card_declined = self.step_ms.median().is_some() && self.check.fit().is_some();
             }
         }
+        // A reply held to JSON checks only the guesses its grammar could take
+        // next (#336): one it rules out can never be drawn.
+        if let Some(held) = held.as_deref_mut() {
+            worth = worth.min(held.guesses_it_allows(&found[..worth]));
+        }
         let round = ngram_spec_round(
             model,
             kv_store,
@@ -4103,6 +4120,7 @@ impl LocalSpec {
                 .as_ref()
                 .and_then(|c| c.stand_in.as_ref())
                 .map(crate::inference::split::RunStandIn::capture_layers),
+            held,
         )?;
         *index_pos += round.committed;
         if let (Some(caught), Some(card)) = (round.caught.as_ref(), self.card.as_mut()) {
@@ -6063,6 +6081,7 @@ async fn handle_generate(
                         &generated,
                         &gen.sampling,
                         force_attn,
+                        held.as_mut(),
                     )?;
                     token_logprob = None;
                 } else {
@@ -9118,13 +9137,21 @@ mod local_speculation_tests {
         let mut chosen = None;
         let mut plain = (Vec::new(), 0.0, None);
         for pass in 0..2 {
-            plain = guessed_reply(&mut model, &kv, &prompt, &format!("plain-{pass}"), None);
+            plain = guessed_reply(
+                &mut model,
+                &kv,
+                &prompt,
+                &format!("plain-{pass}"),
+                None,
+                None,
+            );
             every = Some(guessed_reply(
                 &mut model,
                 &kv,
                 &prompt,
                 &format!("every-{pass}"),
                 Some(true),
+                None,
             ));
             chosen = Some(guessed_reply(
                 &mut model,
@@ -9132,6 +9159,7 @@ mod local_speculation_tests {
                 &prompt,
                 &format!("chosen-{pass}"),
                 Some(false),
+                None,
             ));
         }
         let (every, chosen) = (every.unwrap(), chosen.unwrap());
@@ -9270,6 +9298,49 @@ mod local_speculation_tests {
         }
     }
 
+    /// A record to copy: a reply held to JSON that repeats it is mostly guessed.
+    const GUESS_TEST_JSON: &str = "A record as JSON: {\"name\": \"Ada Lovelace\", \"born\": 1815, \
+         \"city\": \"London\", \"field\": \"mathematics\", \"known for\": \"the first program\"}\n\
+         The same record as JSON again: ";
+
+    /// A reply held to JSON is guessed ahead too (#336), and is the held reply
+    /// written one token at a time: every row of a check is drawn through the
+    /// grammar where the rows before it left it, and a check carries only the
+    /// guesses it allows. Red with the grammar left out of a check's draws (the
+    /// draw refuses a held request handed none). Guesses must have been taken,
+    /// or it proved nothing. Processor only: there the ids must match exactly.
+    ///
+    /// `SWARMLLM_GUESS_TEST_GGUF=~/swarmllm-ref/tinyllama-1.1b-chat-v1.0.q4-k-m.gguf
+    /// cargo dev-test --lib held_reply_guessed -- --ignored --nocapture` (2026-11-01: the JSON
+    /// record copied whole, 37 guesses kept, ids exact). Never a file in `~/swarmllm-ref/vocab/`:
+    /// those are sparse vocabulary copies whose weights are zeros (gotcha #1016).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[ignore = "needs a GGUF in SWARMLLM_GUESS_TEST_GGUF"]
+    async fn a_held_reply_guessed_ahead_is_the_held_reply_read_one_token_at_a_time() {
+        let Some(mut model) = guess_test_model() else {
+            return;
+        };
+        let prompt = model.encode_ids(GUESS_TEST_JSON);
+        let kv = crate::inference::split::KvCacheStore::new(std::time::Duration::from_secs(600));
+        let json = Some(crate::inference::reply_grammar::settle_json_object());
+        let plain = guessed_reply(&mut model, &kv, &prompt, "held-plain", None, json.clone());
+        let (ids, _, spec) =
+            guessed_reply(&mut model, &kv, &prompt, "held-every", Some(true), json);
+        let spec = spec.unwrap();
+        let text = |ids: &[u32]| {
+            let mut carry = Vec::new();
+            ids.iter()
+                .map(|&t| decode_token(&model, t, &mut carry))
+                .collect::<String>()
+        };
+        let reply = text(&plain.0);
+        eprintln!("held reply {reply:?}");
+        eprintln!("guessed: {}", spec.summary());
+        assert!(reply.trim_start().starts_with('{'), "{reply:?}");
+        assert!(spec.accepted > 0, "no guess was taken: {}", spec.summary());
+        assert_eq!(plain.0, ids, "guessed {:?}", text(&ids));
+    }
+
     const GUESSED_REPLY_STEPS: usize = 96;
 
     /// How close two logits must be for a card to pick either (2026-10-25,
@@ -9292,7 +9363,8 @@ mod local_speculation_tests {
     const CARD_NEAR_TIE_LOGITS: f32 = 0.5;
 
     /// [`GUESSED_REPLY_STEPS`] greedy tokens after `prompt` under `request`:
-    /// one at a time (`None`), or through [`LocalSpec`] (`Some(fixed)`).
+    /// one at a time (`None`), or through [`LocalSpec`] (`Some(fixed)`), held
+    /// to `held_to` where it names a grammar.
     /// Returns the ids, the seconds the reply took, and the guessing's state.
     fn guessed_reply(
         model: &mut SplitModel,
@@ -9300,18 +9372,30 @@ mod local_speculation_tests {
         prompt: &[u32],
         request: &str,
         guessing: Option<bool>,
+        held_to: Option<std::sync::Arc<crate::inference::reply_grammar::ReplyGrammar>>,
     ) -> (Vec<u32>, f64, Option<LocalSpec>) {
-        let sampling = greedy();
-        let key = model.kv_model_key().to_string();
-        let pick = |logits: &candle_core::Tensor, history: &[u32]| {
-            crate::inference::tensor_util::sample_token_with_logprob_history(
-                logits, &sampling, history, None,
-            )
-            .unwrap()
-            .0
+        let sampling = SamplingParams {
+            reply_grammar: held_to,
+            ..greedy()
         };
+        let mut held = held_reply_for(model, &sampling).unwrap();
+        let key = model.kv_model_key().to_string();
+        let pick =
+            |logits: &candle_core::Tensor,
+             history: &[u32],
+             held: Option<&mut crate::inference::reply_grammar::HeldReply>| {
+                crate::inference::tensor_util::sample_token_with_logprob_history(
+                    logits, &sampling, history, held,
+                )
+                .unwrap()
+                .0
+            };
         let input = model.tensor_from_ids(prompt).unwrap();
-        let mut next = pick(&model.forward(&input, 0, kv, request).unwrap(), &[]);
+        let mut next = pick(
+            &model.forward(&input, 0, kv, request).unwrap(),
+            &[],
+            held.as_mut(),
+        );
         // `SWARMLLM_GUESS_TEST_MOST=7`: at most that many guesses a check, so
         // on a card every check of the fixed arm is captured
         // (`cuda_graph::MAX_POSITIONS`) and its choices do not turn on timings.
@@ -9344,14 +9428,23 @@ mod local_speculation_tests {
             next = match spec.as_mut() {
                 Some(spec) => spec
                     .next(
-                        model, kv, &key, request, &mut pos, next, &reply, &sampling, false,
+                        model,
+                        kv,
+                        &key,
+                        request,
+                        &mut pos,
+                        next,
+                        &reply,
+                        &sampling,
+                        false,
+                        held.as_mut(),
                     )
                     .unwrap(),
                 None => {
                     let input = model.token_tensor(next).unwrap();
                     let logits = model.forward(&input, pos, kv, request).unwrap();
                     pos += 1;
-                    pick(&logits, &reply)
+                    pick(&logits, &reply, held.as_mut())
                 }
             };
         }
@@ -9442,7 +9535,7 @@ mod local_speculation_tests {
         let asked = std::env::var("SWARMLLM_GUESS_TEST_PROMPT").ok();
         let prompt = model.encode_ids(asked.as_deref().unwrap_or(GUESS_TEST_CODE));
         let kv = crate::inference::split::KvCacheStore::new(std::time::Duration::from_secs(600));
-        let reply = guessed_reply(&mut model, &kv, &prompt, "row-plain", None).0;
+        let reply = guessed_reply(&mut model, &kv, &prompt, "row-plain", None, None).0;
         let at: usize = std::env::var("SWARMLLM_ROW_TEST_AT")
             .ok()
             .and_then(|at| at.parse().ok())

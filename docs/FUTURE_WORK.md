@@ -3442,8 +3442,9 @@ still parsed after generation. What remains, in order:
   (one matcher walking the tree depth-first with `consume_token` / `rollback`, vLLM's pattern on
   chains), the requester's drafter masked by the same grammar. Until then such a reply is only
   ASKED for JSON in its prompt.
-- **Speculation**: a held reply runs without the n-gram or SWIFT today; a guess checked against
-  the mask (`Matcher::validate_tokens`) and rolled back with the cache would bring it back.
+- **Speculation**: the worker's n-gram checks a held reply since 2026-11-01 (each row drawn
+  through the grammar, the guesses cut by `Matcher::validate_tokens`; `docs/invariants/api-surfaces.md`
+  § "A reply held to JSON…"). SWIFT still runs without it: its drafts would need the same mask.
 - The in-process executor fallback (`executor.generate`, no worker) still only asks.
 Not a speed lever (§ 7.1: the forced tokens are 3.3% of the drafter's surprise).
 

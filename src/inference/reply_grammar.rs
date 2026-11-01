@@ -232,10 +232,11 @@ impl GrammarVocab {
 }
 
 /// One reply held to its grammar: asked before every draw, told every token
-/// drawn. Speculation never meets one — `model_worker::ngram_spec_eligible`
-/// and SWIFT's gate both refuse a request carrying a grammar, because a guess
-/// drawn without the mask and taken back would leave the matcher a token
-/// ahead of the reply.
+/// drawn. The worker's n-gram checks draw each row through it and stop at the
+/// first miss, so it is only ever told the reply's own tokens (llama.cpp's
+/// `common_sampler_sample_and_accept_n`; `model_worker::ngram_spec_round`),
+/// and a check carries only the guesses it allows ([`Self::guesses_it_allows`]).
+/// SWIFT's gate still refuses a held reply: its drafts are drawn without it.
 pub struct HeldReply {
     /// `None`: let go — a continued reply whose text so far is not the start
     /// of the JSON its format asks for ([`HeldReply::new`]).
@@ -320,6 +321,29 @@ impl HeldReply {
         matcher
             .consume_token(token)
             .map_err(|e| SwarmError::Inference(format!("the reply's JSON could not go on: {e}")))
+    }
+
+    /// How many of `guesses`, in order, the reply could take next — a
+    /// speculative check is handed only those (#336). A guess the mask rules
+    /// out can never be drawn, so checking it and every guess after it buys
+    /// positions for nothing; vLLM trims a structured request's draft the same
+    /// way (`StructuredOutputManager::trim_spec_tokens`). The matcher does not
+    /// move. The count ends at an end-of-reply token, which a check draws
+    /// rather than guesses, and at an id past the grammar's vocabulary, which
+    /// `validate_tokens` would answer by stopping the matcher for good.
+    pub fn guesses_it_allows(&mut self, guesses: &[u32]) -> usize {
+        let Some(matcher) = self.matcher.as_mut() else {
+            return guesses.len();
+        };
+        let Ok(env) = matcher.tok_env() else {
+            return 0;
+        };
+        let vocab_size = env.tok_trie().vocab_size();
+        let plain = guesses
+            .iter()
+            .take_while(|&&t| (t as usize) < vocab_size && !self.eos.contains(&t))
+            .count();
+        matcher.validate_tokens(&guesses[..plain]).unwrap_or(0)
     }
 }
 
@@ -499,6 +523,48 @@ mod tests {
             still_open, 1,
             "nothing may follow a whole object but the end"
         );
+    }
+
+    /// A check is handed the guesses the JSON could take next and no more —
+    /// and asking moves nothing, so the reply still goes on from where it was.
+    /// Red without the vocabulary bound: an id past it stops the matcher, and
+    /// the next draw fails the reply.
+    #[test]
+    fn a_check_carries_only_the_guesses_the_json_allows() {
+        let (pieces, names, eos) = vocab();
+        let gv = GrammarVocab::from_pieces(&pieces, &names, &eos).unwrap();
+        let mut held = HeldReply::new(&gv, &settle_json_object()).unwrap();
+        let ids = |text: &[&str]| -> Vec<u32> {
+            text.iter()
+                .map(|p| names.iter().position(|n| n == p).unwrap() as u32)
+                .collect()
+        };
+        let whole = ["{\"", "color", "\": ", "\"", "red", "\"}"];
+        let mut past_the_object = ids(&whole);
+        past_the_object.extend(ids(&["x"]));
+        assert_eq!(held.guesses_it_allows(&past_the_object), whole.len());
+        assert_eq!(
+            held.guesses_it_allows(&ids(&["a", "{\""])),
+            0,
+            "JSON opens with `{{`"
+        );
+        let mut then_the_end = ids(&whole);
+        then_the_end.push(eos[0]);
+        assert_eq!(
+            held.guesses_it_allows(&then_the_end),
+            whole.len(),
+            "the end is drawn, never guessed"
+        );
+        let past_the_vocabulary = names.len() as u32 + 1;
+        assert_eq!(held.guesses_it_allows(&[past_the_vocabulary]), 0);
+        // Nothing moved: the reply still opens, and still goes on.
+        assert_eq!(held.guesses_it_allows(&ids(&whole)), whole.len());
+        for id in ids(&whole) {
+            let mut scores = vec![0.0f32; names.len()];
+            held.mask(&mut scores).unwrap();
+            assert!(scores[id as usize].is_finite());
+            held.took(id).unwrap();
+        }
     }
 
     #[test]

@@ -2328,9 +2328,24 @@ engine never fetches one), no `lark`, no `rayon`.
   history-free sibling): the mask before penalties, top-k/top-p and the logprob, the matcher told
   the token after. A draw for a grammar-carrying request handed `None` is an error, so a new draw
   site that forgets it fails loudly instead of letting the reply off its JSON.
-- *Speculation is off for a held reply* (`ngram_spec_eligible`, SWIFT's gate, the batch gate's
-  SWIFT clause): a guess is drawn without the mask, and one taken back would leave the matcher
-  ahead of the reply. A held reply may batch.
+- *SWIFT is off for a held reply* (SWIFT's gate, the batch gate's SWIFT clause): its drafts are
+  drawn without the mask. A held reply may batch.
+- *The worker's n-gram checks a held reply* (2026-11-01; until then it was off with SWIFT). Each
+  row of a check is drawn through the grammar where the rows before it left it, and the grammar is
+  told each token drawn; the round stops at the first token that is not the guess, so the grammar
+  is told exactly the tokens the reply keeps and nothing is taken back — llama.cpp's
+  `common_sampler_sample_and_accept_n` (`common/sampling.cpp`), the same draw-and-accept loop.
+  vLLM v1 does it the other way round (`StructuredOutputManager.grammar_bitmask` advances through
+  the draft with `accept_tokens` for a mask per position, then one `rollback`), which needs a
+  rollback this design never does. Before the check the guesses are cut to the ones the grammar
+  allows (`HeldReply::guesses_it_allows` → llguidance's `Matcher::validate_tokens`, which does
+  not move the matcher) — vLLM's scheduler cuts a structured request's draft the same way
+  (`update_draft_token_ids` → `trim_spec_tokens`, read 2026-11-01) — so a check never pays for
+  positions the mask rules out. The count stops at an end-of-reply token (drawn, never guessed) and at an id past the
+  grammar's vocabulary: `validate_tokens` answers that by STOPPING the matcher, which would fail
+  the reply at its next draw (`a_check_carries_only_the_guesses_the_json_allows` is red without
+  the bound). Real-model check: `a_held_reply_guessed_ahead_is_the_held_reply_read_one_token_at_a_time`
+  (ignored; needs a GGUF).
 - *A matcher error FAILS the request* with its reason (llama.cpp drops the constraint silently on
   a mask failure), and a mask that leaves no finite score is an error, never an arbitrary draw.
 

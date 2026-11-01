@@ -34,6 +34,15 @@ only JSON calls, so every call such a model made came back to your app as plain 
 as llama.cpp reads it, on both APIs, streamed or not, with each argument given the type the tool
 says it has — a number arrives as a number, text as text. (#395)
 
+**A reply asked for as JSON copies text in fewer steps.** A model writes text it has already seen —
+a record in the question, a name it wrote earlier — faster by guessing several words ahead and
+checking them in one step. A reply asked for as JSON (`response_format`, or the Responses API's
+`text.format`) is held to valid JSON word by word on this computer, and that switched the guessing
+off. It now guesses as other replies do, and each guess is checked against the JSON it must stay,
+so the reply is the one it would have been without guessing. In a test that copied a record from
+the question into JSON (TinyLlama, on the processor), 37 of the reply's tokens came from guesses
+checked together instead of one step each, and the reply was the same, token for token. (#336)
+
 **Groundwork for Qwen3-Coder-Next, not yet switched on.** This engine can now read the
 Qwen3-Next family's files — its layers are Qwen 3.5's with the attention heads stored in a
 different order, which is put right as the file is read — and on test files it agrees with
