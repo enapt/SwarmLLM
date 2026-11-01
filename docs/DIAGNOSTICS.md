@@ -1475,6 +1475,30 @@ If stale channel cleanup is happening frequently, requests are timing out or bei
 
 ## Network Subsystem Diagnostics
 
+### What an idle node announces, and why (#91)
+
+Every capability broadcast logs `DIAG: capability published` at debug (`-v`,
+`health/monitor.rs`), with `why` (what changed) and `next_repeat_s`. Count them:
+
+```bash
+grep 'DIAG: capability published' node.log | grep -o 'why=[a-z_,]*' | sort | uniq -c
+```
+
+`first` and `heartbeat` are expected; a field name is that field changing. On v0.3.265 an idle
+node's broadcasts were mostly `why=coord` — its network coordinate orbiting a point, each orbit a
+whole capability. After v0.3.266 (FUTURE_WORK #91 (2k)) the capability publishes a coordinate that
+moves only when the node has moved: expect ~8 `why=coord` in the ~16 minutes after a start, while
+the coordinate converges, then about none. Each change after that logs
+`DIAG: published network coordinate moved` (debug, `daemon/state`) with `moved_ms` and
+`threshold_ms`: 5.0 is the re-centring after a change; anything larger is 0.3 of the round trip to
+the nearest peer. `SWARMLLM_COORD_FILTER=0` publishes the coordinate as it stands, for an A/B.
+
+To judge whether the published coordinate is still accurate, compare three columns per peer in
+`/api/admin/peers`. `predicted_rtt_ms` is the live coordinate's prediction and
+`predicted_rtt_published_ms` is the published one's. `measured_min_rtt_ms` is what the link
+measured. The median of `|pred - meas| / meas` over peers was 0.03-0.04 for both from minute 16
+on (2026-11-01). Before minute 16 the coordinate is still converging, so read nothing into it.
+
 ### Gossip that cannot be decrypted
 
 ```
