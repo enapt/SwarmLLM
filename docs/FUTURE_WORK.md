@@ -2819,6 +2819,12 @@ match llama.cpp** (#715, `arch-inference.md`).
 
 `deepseek2` (MLA) is loaded but not listed — a separate check.
 
+**`qwen3vl` (Qwen3-VL 2B/4B/8B: 0.2M + 0.64M + 1.4M) — text runs since 2026-11-02**: its language
+model is Qwen3's, checked on a real 4B file (a 160-token reply identical to llama.cpp master's;
+`docs/invariants/inference.md` § "Qwen3-VL"). **Left**: its image reader (`qwen3vl_merger`, a new
+projector in `vision.rs`, read off llama.cpp's `tools/mtmd/models/`), and `qwen3vlmoe`
+(30B-A3B: Qwen3-MoE's layers) once a real file is checked.
+
 #### #326 — A card newer than the release's machine code waits minutes for its first reply
 `P2` · platform · **OPEN** — 2026-10-21 · history: gotcha #928, #325 (closed)
 

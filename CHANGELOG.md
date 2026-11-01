@@ -59,6 +59,11 @@ different order, which is put right as the file is read — and on test files it
 llama.cpp. It stays turned off until one real file's replies are checked the same way: the
 smallest copy is 28 GB, more than one ordinary computer here can hold. (#390)
 
+**Qwen3-VL models now run, for text.** Qwen3-VL — among the most downloaded models on
+HuggingFace at 2B, 4B and 8B — was refused as a family this engine did not know. Its language model
+is Qwen3's, so it now runs, and its replies match llama.cpp's word for word on the 4B. Pictures are
+not read yet: a request with an image is refused with a message saying so. (#390)
+
 **Groundwork for GLM-4.5-Air, not yet switched on.** This engine can now read the GLM-4.5
 family's files. Its experts are picked with a per-expert nudge that decides which experts run but
 not how much each one counts, and this engine now reads that nudge on every path. On test files it

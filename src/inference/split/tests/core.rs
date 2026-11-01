@@ -1094,6 +1094,7 @@ fn model_arch_detection() {
     assert_eq!(ModelArch::from_gguf_arch("deepseek2"), ModelArch::DeepSeek2);
     assert_eq!(ModelArch::from_gguf_arch("glm4"), ModelArch::Glm4);
     assert_eq!(ModelArch::from_gguf_arch("glm4moe"), ModelArch::Glm4Moe);
+    assert_eq!(ModelArch::from_gguf_arch("qwen3vl"), ModelArch::Qwen2);
     assert_eq!(ModelArch::from_gguf_arch("llama4"), ModelArch::Llama4);
     assert_eq!(
         ModelArch::from_gguf_arch("starcoder2"),
@@ -1131,6 +1132,8 @@ fn model_arch_properties() {
         ("qwen3next", true),
         // GLM_4_MOE is NEOX where GLM-4 is NORM (#390, master 2026-11-02).
         ("glm4moe", true),
+        // QWEN3VL is IMROPE, which turns a text position as NEOX does.
+        ("qwen3vl", true),
     ] {
         assert_eq!(
             ModelArch::from_gguf_arch(arch).use_rope_contiguous(),

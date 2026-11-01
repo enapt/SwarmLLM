@@ -818,6 +818,12 @@ The SplitModel loader detects the model architecture from GGUF metadata
 | Special | — | NoPE every 4th layer; Q/K RMS-normalised after RoPE; sigmoid top-k, expert weighted on its INPUT | — | Hybrid SSM+attention | Embedding scaling (sqrt(d)), norm weights carry Gemma's +1 in the file, attn + final logit softcap, EOS 107, Gemma chat template | Embedding scaling (sqrt(d)); no softcap; `<end_of_turn>` (106) ends a turn; the 27B's query scale (#279) | Per-layer `layer_output_scale`; final softcap 30; `<turn\|>` (106) ends a turn; gemma4 tokenizer (`BpeTokenizer::encode_gemma4`), BOS always; E2B/E4B: per-layer inputs + shared-KV layers, whole on one computer only (#115 (3c)) | Fused QKV/FFN | — | — | Per-layer dense/MLA | Partial RoPE (50%) |
 | E2E verified | ✅ | tiny random model vs llama.cpp only (#114) | ✅ | ✅ dense vs llama.cpp (0.8B, 4B); `qwen35moe` vs llama.cpp on a 0.87B real file (#228) | ✅ (Gemma2) | ✅ 1B and 4B vs llama.cpp on the processor (#115 (1)) | ✅ 12B (#115 (3)), 26B-A4B (#115 (3b)) and E2B/E4B (#115 (3c)) vs llama.cpp master, processor and card | ✅ | — | ⛔ not supported (#118) | ⛔ not supported (#116) | ✅ |
 
+> **Qwen3-VL** (`qwen3vl`) loads as the Qwen2 column: its language model is Qwen3's, tensor for
+> tensor, and its two extras act only on pictures (a text token's deepstack inputs are zeros; IMROPE
+> turns a text position as NEOX does). Text only — its image reader (`qwen3vl_merger`) is not read.
+> Checked 2026-11-02 on `Qwen3VL-4B-Instruct-Q4_K_M` against llama.cpp master: a 160-token greedy reply
+> identical token for token (`docs/invariants/inference.md` § "Qwen3-VL").
+
 > **Phi-3 fused tensors**: Phi-3 GGUF models store `attn_qkv.weight` (Q+K+V concatenated) and `ffn_up.weight` (gate+up concatenated, no `ffn_gate.weight`). The loader dequantizes on CPU, splits by head dimensions, and re-quantizes to Q4_0 on the target device.
 
 ### DeepSeek-V2/V3 MoE + MLA Support

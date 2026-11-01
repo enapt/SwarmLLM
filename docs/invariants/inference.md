@@ -6014,6 +6014,28 @@ that check. The real file's tokenizer is `gpt2` with `qwen2` pre-splitting (read
 header, 2026-11-01), already here. The recurrent-layer marker moved from `ssm_alpha` to
 `ssm_conv1d` (`gguf_meta::recurrent_layer_marker`), which both families have.
 
+## Qwen3-VL: its language model is Qwen3's, so it runs text as Qwen3 does (2026-11-02, FUTURE_WORK #390)
+
+Qwen3-VL-8B / 4B / 2B were among the most-downloaded GGUFs on HuggingFace (1.4M, 0.64M and 0.2M
+a month, read 2026-11-02) and `qwen3vl` was refused as an unknown family. **What differs from
+Qwen3** (llama.cpp master `src/models/qwen3vl.cpp`; Qwen's own `Qwen3VL-4B-Instruct-Q4_K_M.gguf`
+header): nothing a text token meets. The tensors are Qwen3's exactly (per-head Q/K norms, no
+biases, tied output). `n_deepstack_layers` (3) adds image features to the first layers' outputs,
+read from the input embedding's extra channels, which `build_inp_embd` pads with ZEROS for a token.
+`rope.dimension_sections` [24, 20, 20, 0] make it IMROPE, which turns a text position, the same in
+every section, as NEOX does (the same reading as Qwen 3.5's, § "Qwen 3.5"). So `qwen3vl` maps to
+`ModelArch::Qwen2`, like `qwen3`.
+
+**Checked** on that real file against llama.cpp master, on the processor: logits over 24 positions
+(20 read as a prompt, 4 decoded) worst cosine 0.99967, median 0.99991; a 160-token greedy reply to
+a chat prompt ("Write a Python function that checks whether a number is prime…", 27 prompt tokens,
+the same ids both sides) identical token for token.
+
+**Not done**: pictures. Its image reader (`clip.projector_type` `qwen3vl_merger`) is not read, so
+a request with an image is a 400 naming it (`vision::load_from_mmproj_gguf`). `qwen3vlmoe`
+(Qwen3-VL-30B-A3B) is the same reading over Qwen3-MoE's layers, and stays unrecognised until a
+real file is checked (#715).
+
 ## GLM-4.5: experts CHOSEN with a bias, weighed without it, and its pre-feed-forward norm under GLM-4's sandwich name (2026-11-02, FUTURE_WORK #390)
 
 **What differs from the families here** (llama.cpp master: `src/models/glm4-moe.cpp`,

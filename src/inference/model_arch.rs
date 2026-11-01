@@ -68,7 +68,17 @@ impl ModelArch {
             // The MoE members are the same layout with routed experts in place
             // of the feed-forward, which the loader finds per layer
             // (`split::loader::load_moe_ffn`).
-            "qwen2" | "qwen3" | "qwen2moe" | "qwen3moe" => ModelArch::Qwen2,
+            //
+            // Qwen3-VL's language model (`qwen3vl`) is Qwen3's, tensor for
+            // tensor (Qwen3VL-4B-Instruct's header, read 2026-11-02). Its two
+            // extras act only on pictures: llama.cpp pads a text token's
+            // embedding with zeros for the `n_deepstack_layers` image features
+            // added after the first layers (`llama-graph.cpp`
+            // `build_inp_embd`), and its IMROPE turns a text position, the
+            // same in every section, as NEOX does. Its image reader
+            // (`qwen3vl_merger`) is not read here, so a picture is refused by
+            // name (`vision::load_from_mmproj_gguf`).
+            "qwen2" | "qwen3" | "qwen3vl" | "qwen2moe" | "qwen3moe" => ModelArch::Qwen2,
             "gemma" => ModelArch::Gemma,
             "gemma2" => ModelArch::Gemma2,
             "gemma3" => ModelArch::Gemma3,
@@ -268,6 +278,7 @@ impl ModelArch {
             "llama",
             "qwen2",
             "qwen3",
+            "qwen3vl",
             "qwen2moe",
             "qwen3moe",
             "gemma",
