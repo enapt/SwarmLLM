@@ -17089,3 +17089,36 @@ higher estimated frequency), with a trial window so a new model is not judged on
 0.5B is not held four times.
 
 **Families people run that do not load yet** → #390.
+
+### #391 — closed 2026-11-01 (the entry as it stood when closed, word for word)
+
+#### #391 — A caller cannot turn a model's thinking off: `chat_template_kwargs`, `reasoning_effort` and Anthropic's `thinking` are ignored for local models
+`P2` · api · new users first · **OPEN** — 2026-11-01
+
+Qwen 3 / 3.5 / 3.6 / 3.8 and Gemma 4 — the families people run (#389) — switch their reasoning in the
+chat template, by the variable `enable_thinking` (`fixtures/qwen35_gguf_shipped.jinja` ~149,
+`gemma4_gguf_shipped.jinja` ~180). Nothing sets it: the one render site
+(`chat_template/mod.rs:125`, `minijinja::context!`) passes `messages`, `add_generation_prompt`,
+`bos_token`, `eos_token` and `tools` only. A request's `chat_template_kwargs` and `reasoning_effort`
+land in `ChatRequest.extras` (`openai/types.rs:103-111`), forwarded to cloud providers only
+(`providers.rs:807`); Anthropic's `thinking` is forwarded to proxies only; Responses' `reasoning` is
+never read locally. So a client asking for a quick answer gets whatever the upload's template
+defaults to, and pays the reasoning tokens — on a split, minutes. Seen 2026-11-01: Qwen 3.5 4B with
+`"chat_template_kwargs":{"enable_thinking":false}` began its reply "Thinking Process:".
+
+**How the reference servers do it**: vLLM takes a request's `chat_template_kwargs` (over
+`--default-chat-template-kwargs`), and maps `reasoning_effort` to `enable_thinking`, `"none"` →
+false, an explicit `enable_thinking` winning (docs.vllm.ai `features/reasoning_outputs`); llama.cpp's
+server has `--chat-template-kwargs`, `--reasoning on|off|auto` and `--reasoning-budget` (0 ends the
+think at once); SGLang documents `enable_thinking` per family.
+
+**Design**: one optional `chat_template_kwargs` on `InferenceRequest` (the router and pipeline
+render from it, `pipeline/prompt.rs:38`, and the cached-prefix planner must render the same string),
+filled by ONE helper from the request — explicit kwargs, else `reasoning_effort: "none"` / Responses
+`reasoning.effort: "none"` / Anthropic `thinking.type: "disabled"` → `enable_thinking=false` — and
+passed to every `build_prompt` caller as a REQUIRED argument (`architecture.md`: a convenience
+wrapper passing none is how six of seven paths lost the template fallback, gotcha #171). The five
+built-in keys win over a kwarg. **Check first**: whether a whole-model hand-off to a peer sends the
+rendered prompt or the messages — if the messages, the field crosses the wire and is gated at the
+sender like any new field. Tests: the Qwen 3.5 fixture rendered with the flag on and off; a kwarg
+naming `messages` does not replace them.

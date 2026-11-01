@@ -166,6 +166,9 @@ async fn tool_chat(
         // The MCP surface exposes tools to ITS caller; it does not hand any to
         // the model it drives, which answers in prose.
         None,
+        // Nor template variables (#391): the tool takes a prompt, no
+        // `chat_template_kwargs`, so the model's template decides.
+        None,
         keep,
         // The owner's (#337): `/mcp` takes this node's key, and no pool member
         // forwards it (`openai::peer_forward` forwards the chat surfaces only).

@@ -457,24 +457,29 @@ pub(crate) fn delegation_eligible(exec: &PipelineExecutor) -> bool {
     )
 }
 
-/// What a head must advertise to lead this request: `DELEGATED_SPLIT`, and
+/// What a head must advertise to lead this request: `DELEGATED_SPLIT`;
 /// `CARRIED_ROUTE` where the request carries a `swarm_route` instruction —
-/// an older head would plan without it (#318 (b)). The one answer, asked by
-/// the hand-off ([`delegation_eligible`]) and by the planner pricing a chain
-/// as led (`PromptPlan::head_features` → `RingFacts::leads_splits`), both
-/// through `SharedState::peer_may_lead` — so a chain is never priced as led by
-/// a head the hand-off then passes over.
+/// an older head would plan without it (#318 (b)); `TEMPLATE_VARS` where it
+/// carries template variables — an older head would render without them, and
+/// a caller who turned thinking off would be sent a reply that thinks (#391).
+/// The one answer, asked by the hand-off ([`delegation_eligible`]) and by the
+/// planner pricing a chain as led (`PromptPlan::head_features` →
+/// `RingFacts::leads_splits`), both through `SharedState::peer_may_lead` — so a
+/// chain is never priced as led by a head the hand-off then passes over.
 pub(crate) fn features_a_head_needs(request: &crate::types::InferenceRequest) -> u64 {
-    use crate::types::features::{CARRIED_ROUTE, DELEGATED_SPLIT};
+    use crate::types::features::{CARRIED_ROUTE, DELEGATED_SPLIT, TEMPLATE_VARS};
+    let mut needed = DELEGATED_SPLIT;
     if request
         .route_override
         .as_ref()
         .is_some_and(|o| !o.is_noop())
     {
-        DELEGATED_SPLIT | CARRIED_ROUTE
-    } else {
-        DELEGATED_SPLIT
+        needed |= CARRIED_ROUTE;
     }
+    if request.template_vars.is_some() {
+        needed |= TEMPLATE_VARS;
+    }
+    needed
 }
 
 /// [`delegation_eligible`]'s conditions on the REQUEST — everything but the
@@ -996,6 +1001,8 @@ impl PipelineExecutor {
                         .as_ref()
                         .filter(|o| !o.is_noop())
                         .map(crate::inference::route_override::carried),
+                    // Only to a head advertising `TEMPLATE_VARS`, likewise.
+                    template_vars: self.request.template_vars.clone(),
                 }),
             ),
         };
@@ -2331,5 +2338,44 @@ mod stream_reassembly_tests {
         assert!(!super::delegated_sample_is_usable(false, 1, 16));
         assert!(!super::delegated_sample_is_usable(false, 0, 16));
         assert!(!super::delegated_sample_is_usable(false, 60, 0));
+    }
+}
+
+#[cfg(test)]
+mod head_feature_tests {
+    use crate::types::features::{supports, ALL, DELEGATED_SPLIT, TEMPLATE_VARS};
+    use crate::types::{InferenceRequest, KeepAsked, ModelId, RequestedBy, TemplateVars};
+
+    /// A request carrying template variables (#391) is led only by a head that
+    /// renders with them: an older one would drop the caller's
+    /// `enable_thinking` without a word. One without them asks nothing new.
+    #[test]
+    fn template_variables_are_handed_only_to_a_head_that_renders_them() {
+        let request = |vars: Option<TemplateVars>| {
+            InferenceRequest::local(
+                ModelId("m".into()),
+                Vec::new(),
+                Default::default(),
+                true,
+                None,
+                None,
+                None,
+                vars,
+                KeepAsked::Unasked,
+                RequestedBy::Owner,
+            )
+        };
+        let mut map = serde_json::Map::new();
+        map.insert("enable_thinking".into(), serde_json::json!(false));
+
+        let plain = super::features_a_head_needs(&request(None));
+        assert_eq!(plain, DELEGATED_SPLIT);
+        let asked = super::features_a_head_needs(&request(Some(TemplateVars(map))));
+        assert_eq!(asked, DELEGATED_SPLIT | TEMPLATE_VARS);
+
+        let older_head = ALL & !TEMPLATE_VARS;
+        assert!(supports(older_head, plain));
+        assert!(!supports(older_head, asked));
+        assert!(supports(ALL, asked));
     }
 }

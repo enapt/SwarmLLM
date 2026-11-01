@@ -2,6 +2,20 @@
 
 ## [Unreleased]
 
+**You can now ask a model to answer without thinking first, or to think.** Models such as
+Qwen 3 and Gemma 4 can reason step by step before they answer, which takes time — minutes when a
+model is split across computers — and until now a request could not say which it wanted when the
+model ran on the network. It now can, the way other servers take it: on the OpenAI chat API,
+`"chat_template_kwargs": {"enable_thinking": false}` or `"reasoning_effort": "none"`; on the
+Responses API, `reasoning.effort`; on the Anthropic API, `"thinking": {"type": "disabled"}` (or
+`"enabled"` to ask for it). A request that says nothing gets the model's own default, as before.
+The Responses API's `reasoning.effort` now also reaches a cloud model, where it used to be dropped.
+*Correction to v0.3.229's notes*, which said Qwen3.5-4B's publisher's template asks it to answer
+without reasoning: that is the 0.8B's template. The 4B's own template asks it to think unless told
+not to, which a request can now do.
+When another computer leads a split for you, the setting goes with it; a computer on an older
+release is not asked to lead such a request. (#391)
+
 **The network now keeps the models people actually use, and gives back the ones nobody does.** Until
 now a model stayed on the network once a few computers held it, whether or not anyone used it: on
 2026-11-01 it held 34 models, nearly all from 2024, several in more than one copy of the same size.

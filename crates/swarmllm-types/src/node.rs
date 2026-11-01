@@ -410,6 +410,15 @@ pub mod features {
     /// so nothing would hide behind it either way.
     pub const SERVED_TIME: u64 = 1 << 36;
 
+    /// Renders a delegated split's conversation with the caller's TEMPLATE
+    /// VARIABLES (#391): `DelegatedSplit::template_vars` — `enable_thinking`
+    /// and the rest of a request's `chat_template_kwargs`. An older head
+    /// skips the field it does not know and renders without it, so
+    /// the reply thinks where the caller turned thinking off: a coordinator
+    /// hands such a request only to a head advertising this
+    /// (`remote_generate::features_a_head_needs`).
+    pub const TEMPLATE_VARS: u64 = 1 << 37;
+
     /// The full feature set THIS build implements. Advertised by every node,
     /// with [`KV_HALF_ON_CARD`], [`KV_WINDOW_SLIDES`] and
     /// [`REQUESTER_GUESSES`] beside it where they apply.
@@ -446,7 +455,8 @@ pub mod features {
         | RECURRENT_REWIND
         | STREAM_LOOKAHEAD
         | STREAM_SPARES
-        | SERVED_TIME;
+        | SERVED_TIME
+        | TEMPLATE_VARS;
 
     /// Does `advertised` include every bit in `needed`?
     pub fn supports(advertised: u64, needed: u64) -> bool {

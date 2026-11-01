@@ -687,6 +687,9 @@ pub(super) async fn handle_delegated_split(
         req.session_id,
         None,
         delegation.tools,
+        // The requester's caller's template variables (#391), rendered here
+        // as its own router would have.
+        delegation.template_vars,
         // A peer's request: one its caller kept on their computer never
         // reaches this one (#251 (2b)).
         crate::types::KeepAsked::Unasked,

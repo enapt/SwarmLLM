@@ -59,22 +59,25 @@ the top track (`docs/plans/large_model_splits.md`).
    has not recurred since 2026-10-04. Nothing to build until it does.
 
 **P1 — silent, or broken for a whole class of users**
-3. **#1** — every Mac runs on the processor; no GPU backend is compiled for Apple Silicon (needs a
+3. **#392** — a template that opens the scratchpad in the PROMPT (Qwen3.5-4B's upload: its
+   generation prompt ends `<think>\n`) shows the model's reasoning as its reply, on every surface;
+   both scratchpad helpers recognise only a block the reply opens. Found verifying #391.
+4. **#1** — every Mac runs on the processor; no GPU backend is compiled for Apple Silicon (needs a
    Mac to verify on).
-4. **#220** — WATCH: a worker's card faulted once (illegal memory access, 2026-10-04) and the driver
+5. **#220** — WATCH: a worker's card faulted once (illegal memory access, 2026-10-04) and the driver
    took 14 minutes to reset; the kernel is still unknown. Every planned run is done (memcheck clean
    over ~27 min on two boots, FECS shown with no SwarmLLM code at 48 h, the drafter-in-one-process
    change weighed and declined); nothing to run until the illegal access recurs.
-5. **#250** — a model held whole here, which the card holds only part of, can be routed through
+6. **#250** — a model held whole here, which the card holds only part of, can be routed through
    far peers instead of answering locally. Its causes closed in v0.3.236 and v0.3.239; left: the
    prompt priced on the processor prior for a card/processor split, and a far hop priced at
    `net:0` (with #3). Passive: the next evidence is a field `predicted_terms` line.
-6. **#388** — the flow's guard takes a far computer's own delay for a queue on the link (the
+7. **#388** — the flow's guard takes a far computer's own delay for a queue on the link (the
    slowest reply of two 12-arm runs on 2026-11-01). The far now reports its own time and the guard
    can read it apart (`SWARMLLM_FLOW_SERVED_TIME=1`, off: it lost on a processor-only rig, for
    that rig's reasons). **Next**: the real-link A/B once the release carries bit 36 — the default
    follows it. (#369 CLOSED 2026-11-01.)
-7. **#318** — a model no single member can hold, at a usable speed. **Llama-3.3-70B on two
+8. **#318** — a model no single member can hold, at a usable speed. **Llama-3.3-70B on two
    machines — this one (8 GB card + processor) and an RTX 3060 in Australia (~420 ms) — reads
    2.37-2.61 tok/s on new questions (v0.3.264, 2026-10-31 04Z) and 1.81-2.22 (v0.3.265, 12Z, the
    same setup), first token ~5 s warm** (v0.3.256 on four machines: 1.29-1.47 and 9-10 s). The same
@@ -96,10 +99,10 @@ the top track (`docs/plans/large_model_splits.md`).
    third machine pays only where it holds what two cannot, which is the 70B's case. The track's
    history (near chains #192, the far chain #346, trees #134, the stream, tensor-core MMQ #325,
    requester guesses) is in the #318 entry and § "Closed".
-8. **#115** — the rest of Gemma 4: its image reader and its drafters, refused by name today,
+9. **#115** — the rest of Gemma 4: its image reader and its drafters, refused by name today,
    never loaded wrong. (Gemma 3 reads pictures as llama.cpp does since 2026-10-19; Gemma 4's
    E2B/E4B run since 2026-10-17 and fit a 4 GB / 6 GB card whole since #296.)
-9. **#91** — an idle node's upload (the complaint that uninstalls a P2P app): 5.5 KB/s on the .241
+10. **#91** — an idle node's upload (the complaint that uninstalls a P2P app): 5.5 KB/s on the .241
    fleet (6.7 on .240, 8.8 on .239), measured 2026-10-17. Manifests now arrive about once an hour
    (0.83 a minute before (2)), and a restart no longer re-gossips them ((2c), v0.3.242). The part
    that is not gossip is 2.5 KB/s on 10-18 (4.1 out), and our own direct messages are only 0.19 of it
@@ -110,7 +113,7 @@ the top track (`docs/plans/large_model_splits.md`).
    v0.3.244) read on the field 10-19: upload 2.4 KB/s, Kademlia answers 0.51 KB/s, every one a
    `find_node` — peers' routing-table refreshes. (2h) refreshes every 10 min instead of 5 (released in
    v0.3.245); next, re-read once the fleet runs it, then the answers' size.
-10. **#3**, **#180** — the routing cost model mis-prices a split by regime, which keeps partial
+11. **#3**, **#180** — the routing cost model mis-prices a split by regime, which keeps partial
     ranges off. Fit on three peers 2026-10-18: a short reply's `max_tokens` now caps the passes
     (16-token replies 0.49 → 0.97 of their price), a long one is priced at its model's mean
     reply length (160-token replies were 2.5x their price), and a chain its head leads is priced
@@ -121,18 +124,18 @@ the top track (`docs/plans/large_model_splits.md`).
     rounds it takes, a guessed token not crossing alone (#3 (d), 0.49 → 0.77 of its price on the
     drafter rig), 10-19, all in v0.3.244; next, a chain driven from here (#3 (a2)). Never tune the
     constant.
-11. **#10**, **#171** — conversation prefixes across computers (no digests gossiped, caches end at
+12. **#10**, **#171** — conversation prefixes across computers (no digests gossiped, caches end at
     the 10-minute expiry), and a split's prompt pieces chained between two peers.
-12. **#138**, **#129** — a model that does not fit the card (MoE and a split's prompt stages
+13. **#138**, **#129** — a model that does not fit the card (MoE and a split's prompt stages
     shipped in v0.3.235-v0.3.237; the entries hold what is left), and a near-fit model sent far.
-13. **#228** — Qwen 3.5 guesses ahead on one computer (processor and card) and through a split's n-gram loop (bit 33) since 2026-10-25; the drafter's paths and MTP still stay off — a checkpoint replayed across steps, #228 (5).
-14. **#336** — tool calls, and `response_format` on a split or a peer's whole-model hand-off, are
+14. **#228** — Qwen 3.5 guesses ahead on one computer (processor and card) and through a split's n-gram loop (bit 33) since 2026-10-25; the drafter's paths and MTP still stay off — a checkpoint replayed across steps, #228 (5).
+15. **#336** — tool calls, and `response_format` on a split or a peer's whole-model hand-off, are
     checked only after they are written, so an agent driving a small model meets malformed calls.
     `response_format` is held on a model run whole since v0.3.262 (llguidance); next, a feature bit
     and far-end masking for a split, then tool calls as a lazy grammar (`faster_than_local.md` § 7.1).
-15. **#30** — the plaintext-prompt trust bar sits at the score an unknown peer starts on: a policy
+16. **#30** — the plaintext-prompt trust bar sits at the score an unknown peer starts on: a policy
     decision, with research, when picked up.
-16. **#326** — on a card newer than a release's machine code (Hopper, Blackwell: RTX 50-series),
+17. **#326** — on a card newer than a release's machine code (Hopper, Blackwell: RTX 50-series),
     the first reply waits ~2 min while the driver compiles flash attention's PTX (MMQ's ~8 s a
     weight type), then it is cached. Correct since the PTX went in (before: wrong output).
 
@@ -3458,36 +3461,27 @@ live A/B on every surface (OpenAI stream / non-stream, Anthropic stream / non-st
 foreground / background, MCP). Until then: choke-point helpers (`finalize_reply_text`,
 `strip_prefix_in_body`) and `.claude/rules/architecture.md` § "One invariant, N paths".
 
-#### #391 — A caller cannot turn a model's thinking off: `chat_template_kwargs`, `reasoning_effort` and Anthropic's `thinking` are ignored for local models
-`P2` · api · new users first · **OPEN** — 2026-11-01
+#### #392 — A template that opens the scratchpad in the PROMPT shows the model's reasoning as its reply
+`P1` · api · new users first · **OPEN** — 2026-11-01 · found verifying #391
 
-Qwen 3 / 3.5 / 3.6 / 3.8 and Gemma 4 — the families people run (#389) — switch their reasoning in the
-chat template, by the variable `enable_thinking` (`fixtures/qwen35_gguf_shipped.jinja` ~149,
-`gemma4_gguf_shipped.jinja` ~180). Nothing sets it: the one render site
-(`chat_template/mod.rs:125`, `minijinja::context!`) passes `messages`, `add_generation_prompt`,
-`bos_token`, `eos_token` and `tools` only. A request's `chat_template_kwargs` and `reasoning_effort`
-land in `ChatRequest.extras` (`openai/types.rs:103-111`), forwarded to cloud providers only
-(`providers.rs:807`); Anthropic's `thinking` is forwarded to proxies only; Responses' `reasoning` is
-never read locally. So a client asking for a quick answer gets whatever the upload's template
-defaults to, and pays the reasoning tokens — on a split, minutes. Seen 2026-11-01: Qwen 3.5 4B with
-`"chat_template_kwargs":{"enable_thinking":false}` began its reply "Thinking Process:".
+Qwen3.5-4B's upload (`bartowski/Qwen_Qwen3.5-4B-GGUF`, the network's) thinks by default, and its
+template's generation prompt ENDS with `<|im_start|>assistant\n<think>\n`
+(`chat_template/fixtures/qwen35_4b_gguf_shipped.jinja` ~149-152). The reply therefore starts INSIDE
+the block, with no opening tag, and both scratchpad helpers recognise a block only when the REPLY
+opens it (`inference::take_leading_reasoning_block`, `tool_parse::StreamingToolText`, one list
+`REASONING_BLOCKS`). Seen 2026-11-01 on a probe node, v0.3.266 and main alike: "What is 17 times 3?"
+→ `content` "Thinking Process:\n\n1. **Analyze the Request:** …", `reasoning_content` empty. To
+verify on a full reply: the `</think>` and the answer after it land in `content` too. Every reply of
+the family people run most (#389), unasked, on every surface.
 
-**How the reference servers do it**: vLLM takes a request's `chat_template_kwargs` (over
-`--default-chat-template-kwargs`), and maps `reasoning_effort` to `enable_thinking`, `"none"` →
-false, an explicit `enable_thinking` winning (docs.vllm.ai `features/reasoning_outputs`); llama.cpp's
-server has `--chat-template-kwargs`, `--reasoning on|off|auto` and `--reasoning-budget` (0 ends the
-think at once); SGLang documents `enable_thinking` per family.
-
-**Design**: one optional `chat_template_kwargs` on `InferenceRequest` (the router and pipeline
-render from it, `pipeline/prompt.rs:38`, and the cached-prefix planner must render the same string),
-filled by ONE helper from the request — explicit kwargs, else `reasoning_effort: "none"` / Responses
-`reasoning.effort: "none"` / Anthropic `thinking.type: "disabled"` → `enable_thinking=false` — and
-passed to every `build_prompt` caller as a REQUIRED argument (`architecture.md`: a convenience
-wrapper passing none is how six of seven paths lost the template fallback, gotcha #171). The five
-built-in keys win over a kwarg. **Check first**: whether a whole-model hand-off to a peer sends the
-rendered prompt or the messages — if the messages, the field crosses the wire and is gated at the
-sender like any new field. Tests: the Qwen 3.5 fixture rendered with the flag on and off; a kwarg
-naming `messages` does not replace them.
+**How the reference servers do it**: llama.cpp's chat layer records `thinking_forced_open` when the
+rendered prompt ends with the family's opening tag and parses the reply as already inside the block;
+vLLM's reasoning parsers (DeepSeek-R1, Qwen3) treat text before the closing tag as reasoning when the
+opening tag is absent. Read both in source before building. **Shape**: decide it ONCE where the
+prompt is rendered (`build_prompt_with_model`, the choke point) — the prompt ends with an opener of
+`REASONING_BLOCKS` — and carry that verdict to every finaliser and streaming buffer as a REQUIRED
+argument (`architecture.md` § "One invariant, N paths": four API paths, a peer's reply finalised on
+the coordinator). A reply cut short inside the block keeps today's rule: reasoning, empty content.
 
 #### #141 (b) — The Anthropic surface never shows a reasoning model's scratchpad, even when the request enables thinking
 `P4` · api · **OPEN** — 2026-10-19 (the OpenAI half closed) · history: archive row #141
@@ -4094,6 +4088,23 @@ archive under the named heading. Reopen one only with the evidence its line name
 Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 19-28 were
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
+
+**Closed 2026-11-01, ships in the next release** (#391)
+- #391 — **A caller can turn a model's thinking on or off.** OpenAI `chat_template_kwargs` (each a
+  template variable) and `reasoning_effort` (vLLM's rule: `"none"` → `enable_thinking = false`, any
+  other effort → true, an explicit `enable_thinking` winning), the Responses API's `reasoning.effort`
+  and Anthropic's `thinking.type` are settled at the door (`chat_template::vars`) into
+  `InferenceRequest::template_vars`, which every render takes as a REQUIRED argument, the cached-prefix
+  planner's included; rendered under the renderer's own names (`vars::RESERVED`). A led split carries
+  them (`DelegatedSplit::template_vars`) only to a head advertising `features::TEMPLATE_VARS` (bit 37);
+  a whole-model hand-off sends the rendered prompt and needed nothing. Verified on a probe node off
+  the swarm, Qwen3.5-4B on the processor: `enable_thinking: false` answered "51" (26 prompt tokens)
+  where v0.3.266 began "Thinking Process:" (24) — the release binary on the same data dir is the
+  null control. Found on the way: that upload's template thinks by DEFAULT and opens `<think>` in the
+  prompt, so with nothing asked its scratchpad reaches the reader as the reply → #392 (the 0.8B's
+  template, the old fixture, is the one that answers by default). Left: the fallback renderers know
+  no variables; MCP's chat tool has no field; an Anthropic request with no `thinking` gets the
+  template's default. The entry as it stood: archive § "#391".
 
 **Closed 2026-11-01, ships in the next release** (#389)
 - #389 — **The swarm keeps the models people run and gives back the ones nobody does.** (a) Only

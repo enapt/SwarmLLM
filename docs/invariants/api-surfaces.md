@@ -1521,8 +1521,9 @@ new crates, everything else already being in the tree.
   false`, and its feature list had left out `macros`: Qwen 3.5's template opens
   with `{% macro render_content %}`, so it failed to PARSE ("unknown statement
   macro"), every request fell back to ChatML, and the empty `<think></think>`
-  its generation prompt ends with was lost — Qwen3.5-4B then reasoned at length
-  where its publisher's template asks it to answer. Nothing said why: the parse
+  its generation prompt ends with was lost. (This said Qwen3.5-4B then reasoned
+  where its publisher's template asks it to answer: wrong, corrected 2026-11-01 —
+  that is the 0.8B's template; the 4B's thinks by default, #391.) Nothing said why: the parse
   error was discarded (`add_template(..).ok()?`) and `test-split` had its own
   silent ChatML fallback, so the check meant to catch it agreed with llama.cpp
   on the fallback's text. Now `macros`, `adjacent_loop_items` and (for the
@@ -2256,6 +2257,81 @@ node does not refuse, so a caller should ask for JSON in the prompt.
 
 
 **A continued reply is held from where its text left off (pre-release review of v0.3.262).** A reply whose machine fails mid-stream is continued (#236): its prompt is rendered again with the text the reader already has appended inside the assistant turn, and the request is a clone — grammar included. The worker compiled that grammar FRESH, so after `{"a": 1, ` it allowed only the opening of a new object: the reader got `{"a": 1, {"b"…`, invalid. It reaches a held worker whenever a split or a peer (not held) fails and the re-plan runs the model whole here, or a held reply here is retried after `LocalMemoryUnavailable`. Two paths create a continuation (`router::execute` and the pipeline's own), so the text is attached where the continued PROMPT is built beside its sampling, `PipelineExecutor::build_prompt_and_stops` (`ReplyGrammar::written`), and `HeldReply::new` advances the fresh matcher over it with llguidance's `Matcher::consume_tokens`, spelled by its own vocabulary (`tok_env().tokenize_bytes`): the grammar reads bytes, so any spelling of the same text leaves it in the same place. Only an exact spelling counts — the approximate tokenizer skips a byte its vocabulary lacks (llguidance #138) — and text the grammar cannot take as a start (an unheld split wrote prose, or another layout) is LET GO: the rest of the reply is unheld, as every reply was before #336, since holding it could only append a second document to text already sent. A let-go `HeldReply` still satisfies the draw site's "handed its grammar" check. Tests `a_continued_reply_finishes_the_json_it_began` (red without the fix: the rest opened a new object), `a_continued_reply_that_is_not_json_so_far_is_let_go`, and `a_continuation_follows_the_rendered_prompt_and_nothing_else_renders_it` (the sampling carries the text).
+## A caller's template variables are settled at the door and rendered under ours (2026-11-01, #391)
+
+### What it replaced
+
+The one render site passed `messages`, `add_generation_prompt`, `bos_token`,
+`eos_token` and `tools`, nothing else. A request's `chat_template_kwargs` and
+`reasoning_effort` landed in `ChatCompletionRequest::extras` and reached cloud
+providers only; Anthropic's `thinking` reached proxies only; the Responses API's
+`reasoning` was never read for a local model. Qwen 3 / 3.5 and Gemma 4 — the
+families people run (#389) — switch their reasoning in the template, on
+`enable_thinking`, so a caller could not ask for a quick answer and paid the
+reasoning tokens (minutes on a split).
+
+### What the reference servers do, and what the research changed
+
+- **vLLM** (docs.vllm.ai `features/reasoning_outputs`): a request's
+  `chat_template_kwargs` over the server's defaults; `reasoning_effort: "none"`
+  → `enable_thinking = false`, any other effort → true, unset → nothing
+  injected; an explicit `enable_thinking` in the kwargs wins. Taken as is.
+  llama.cpp's server has `--chat-template-kwargs` and `--reasoning on|off|auto`.
+- **vLLM's advisories** (GHSA-69j4-grxj-j64p, CVE-2025-61620) were kwargs reaching
+  the render CALL's own parameters (`chat_template`, `tokenize`) — a request
+  supplying the template, a program. Here a kwarg is only ever a template
+  VARIABLE. The narrower risk that remains — a kwarg named `messages`, `tools`,
+  `bos_token` or `raise_exception` replacing ours — is closed by rendering
+  `minijinja::context!{ ..ours, ..theirs }` (minijinja 2.24's `MergeDict` takes
+  the FIRST value a key has, skipping only undefined) with `vars::RESERVED`
+  filtered out as well — and every name the ENVIRONMENT defines (minijinja's
+  `namespace`, `range`, `dict`, our `strftime_now` / `raise_exception`): a
+  context value is looked up before a global, so `{"namespace": 1}` failed
+  the real Qwen 3 template's render (security review, 2026-11-01).
+- **Read the template of the upload the network RUNS, not a fixture of the
+  family.** Reading `fixtures/qwen35_gguf_shipped.jinja` (ggml-org's 0.8B: an
+  empty `<think>\n\n</think>` unless `enable_thinking` is true) this change first
+  concluded the report's "Thinking Process:" reply could not be the missing
+  switch. The request said otherwise: the 4B's own upload
+  (`bartowski/Qwen_Qwen3.5-4B-GGUF`, now `fixtures/qwen35_4b_gguf_shipped.jinja`)
+  thinks unless `enable_thinking` is false and OPENS `<think>` in the prompt; a
+  probe node answered "51" (26 prompt tokens) with it false, where v0.3.266 —
+  same data dir, only the binary different — began "Thinking Process:" (24).
+  Qwen 3's template thinks unless false; Gemma 4's thinks only when true.
+- **The wire.** A whole-model hand-off sends a RENDERED prompt, so it needed
+  nothing. A led split (`DelegatedSplit`) carries the messages and is rendered
+  by the head, so it carries `template_vars` (`#[serde(default,
+  skip_serializing_if)]`) and `remote_generate::features_a_head_needs` adds
+  `TEMPLATE_VARS` (bit 37) when the request has any: an older head would decode
+  the split, drop the field and render the template's default — the silent
+  wrong answer the additive-protocol rule exists for. The planner asks the same
+  function, so it never prices a chain as led by a head that cannot lead it.
+
+### What a change must keep
+
+- Every render takes the variables as a REQUIRED argument — the convenience
+  wrapper passing `None` is how six of seven paths lost the template fallback
+  (gotcha #171). `None` is right only where no request is behind the render
+  (the tool-turn probe, the CLI split test, MCP's chat tool, which has no such
+  field).
+- The planner's cached-prefix render (`pipeline::render_prompt_from_header`)
+  passes the same variables, or a warm prompt is priced for a string never sent.
+- Ours first, `RESERVED` filtered — `a_callers_variable_never_replaces_the_renderers_own`
+  fails if the order is swapped (checked with the fix toggled off).
+- A non-object `chat_template_kwargs` or a non-string `reasoning_effort` is a 400
+  (`Validation`), settled once at the door.
+- `extras` still carries both fields, so a cloud provider receives them unchanged. The
+  Responses API's `reasoning.effort` now reaches a cloud model too, as the chat API's
+  `reasoning_effort` (it was dropped before); a model that does not reason may refuse
+  it, as OpenAI's own Responses API does.
+
+### Left as they are
+
+- The fallback renderers (a model whose template cannot run) know no variables.
+- An Anthropic request with no `thinking` gets the template's default, not
+  Anthropic's "off": the default of a local model is its maker's choice, and
+  vLLM injects nothing when nothing is asked.
+
 ## Single-source-of-truth helpers — API surfaces, errors and streaming
 
 Each names the ONE place a decision is made. A second implementation of any of

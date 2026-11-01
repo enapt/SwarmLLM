@@ -99,7 +99,8 @@ fn probe(template: &str) -> ToolTurnSupport {
         },
     );
     let renders = |messages: &[ChatMessage], needle: &str| {
-        super::apply_chat_template(template, messages, "", "", false, None)
+        // A probe of the template, not a request's render: no caller's variables.
+        super::apply_chat_template(template, messages, "", "", false, None, None)
             .is_some_and(|prompt| prompt.contains(needle))
     };
     ToolTurnSupport {

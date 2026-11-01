@@ -109,6 +109,12 @@ pub fn request_to_chat(
     if let Some(s) = req.seed {
         extras.insert("seed".into(), serde_json::json!(s));
     }
+    // `reasoning.effort` is this surface's `reasoning_effort` (#391): it
+    // reaches the chat door under that name, which turns "none" into
+    // `enable_thinking = false` as vLLM does (`chat_template::vars`).
+    if let Some(effort) = req.reasoning.as_ref().and_then(|r| r.effort.as_ref()) {
+        extras.insert("reasoning_effort".into(), serde_json::json!(effort));
+    }
 
     Ok(ChatCompletionRequest {
         model: req.model.clone(),
@@ -141,6 +147,8 @@ pub fn request_to_chat(
             .map(response_format_of),
         // Settled by `validate_chat_request`, as for a chat request.
         reply_grammar: None,
+        // Settled there too, from `reasoning_effort` above (#391).
+        template_vars: None,
         session_id: None,
         lora_adapter: None,
         // The Responses surface has no routing-override field of its own; the
@@ -1425,6 +1433,20 @@ mod tests {
         .unwrap();
         let chat = request_to_chat(&req, None).unwrap();
         assert_eq!(chat.messages.len(), 1);
+    }
+
+    /// `reasoning.effort` reaches the chat door as `reasoning_effort` (#391),
+    /// where "none" turns the template's thinking off; with no effort asked,
+    /// nothing is added.
+    #[test]
+    fn reasoning_effort_reaches_the_chat_door() {
+        let mut req = req_text("hi");
+        req.reasoning = Some(serde_json::from_value(json!({"effort": "none"})).unwrap());
+        let chat = request_to_chat(&req, None).unwrap();
+        assert_eq!(chat.extras.get("reasoning_effort"), Some(&json!("none")));
+
+        let chat = request_to_chat(&req_text("hi"), None).unwrap();
+        assert!(!chat.extras.contains_key("reasoning_effort"));
     }
 
     // ------------------------------------------------------------------

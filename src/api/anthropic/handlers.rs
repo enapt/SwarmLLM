@@ -232,6 +232,9 @@ pub(super) async fn anthropic_non_stream(
     // needs them to choose between this model's own template and prose.
     // `tools_requested` is derived below so the two cannot disagree.
     tools: Option<Vec<serde_json::Value>>,
+    // The caller's template variables (#391): its `thinking`, settled once
+    // in `messages` (`chat_template::vars::from_anthropic`).
+    template_vars: Option<crate::types::TemplateVars>,
     keep: crate::types::KeepAsked,
     requested_by: crate::types::RequestedBy,
 ) -> Result<axum::response::Response, ApiError> {
@@ -244,6 +247,7 @@ pub(super) async fn anthropic_non_stream(
         None,
         None,
         tools.clone(),
+        template_vars,
         keep,
         requested_by,
     );
@@ -272,6 +276,9 @@ pub(super) async fn anthropic_stream(
     // needs them to choose between this model's own template and prose.
     // `tools_requested` is derived below so the two cannot disagree.
     tools: Option<Vec<serde_json::Value>>,
+    // The caller's template variables (#391): its `thinking`, settled once
+    // in `messages` (`chat_template::vars::from_anthropic`).
+    template_vars: Option<crate::types::TemplateVars>,
     keep: crate::types::KeepAsked,
     requested_by: crate::types::RequestedBy,
 ) -> Result<axum::response::Response, ApiError> {
@@ -290,6 +297,7 @@ pub(super) async fn anthropic_stream(
         None,
         Some(cancel.clone()),
         tools,
+        template_vars,
         // `swarm_route` is a testing knob on the chat-completions surface and is
         // deliberately not part of Anthropic's `/v1/messages` contract.
         None,
@@ -520,6 +528,7 @@ pub(super) async fn anthropic_stream(
 ///
 /// Bypasses the distributed pipeline and generates tokens directly via
 /// SplitModel.forward() for maximum local inference speed.
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn anthropic_split_non_stream(
     state: &AppState,
     messages: &[ChatMessage],
@@ -531,6 +540,9 @@ pub(super) async fn anthropic_split_non_stream(
     // whether it must be told about them in prose. `tools_requested` is derived
     // below rather than passed beside them, so the two cannot disagree.
     tools: Option<Vec<serde_json::Value>>,
+    // The caller's template variables (#391): its `thinking`, settled once
+    // in `messages` (`chat_template::vars::from_anthropic`).
+    template_vars: Option<crate::types::TemplateVars>,
     keep: crate::types::KeepAsked,
 ) -> Result<axum::response::Response, ApiError> {
     let tools_requested = tools.as_ref().is_some_and(|t| !t.is_empty());
@@ -542,6 +554,7 @@ pub(super) async fn anthropic_split_non_stream(
         params.clone(),
         &request_id,
         tools.as_deref(),
+        template_vars.as_ref(),
         keep,
     )
     .await?;
@@ -558,6 +571,7 @@ pub(super) async fn anthropic_split_non_stream(
 ///
 /// Same fast path as anthropic_split_non_stream but streams tokens via SSE
 /// in Anthropic's streaming format.
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn anthropic_split_stream(
     state: &AppState,
     messages: Vec<ChatMessage>,
@@ -569,6 +583,9 @@ pub(super) async fn anthropic_split_stream(
     // whether it must be told about them in prose. `tools_requested` is derived
     // below rather than passed beside them, so the two cannot disagree.
     tools: Option<Vec<serde_json::Value>>,
+    // The caller's template variables (#391): its `thinking`, settled once
+    // in `messages` (`chat_template::vars::from_anthropic`).
+    template_vars: Option<crate::types::TemplateVars>,
     keep: crate::types::KeepAsked,
 ) -> Result<axum::response::Response, ApiError> {
     let tools_requested = tools.as_ref().is_some_and(|t| !t.is_empty());
@@ -612,6 +629,7 @@ pub(super) async fn anthropic_split_stream(
             &rid,
             Some(stream_trace.clone()),
             tools.as_deref(),
+            template_vars.as_ref(),
             keep,
         ) {
             Some(pair) => pair,
@@ -1876,6 +1894,7 @@ mod route_in_body_tests {
             crate::api::build_sampling_params(0.7, 1.0, 0, Some(8), Vec::new(), 0.0, 0.0, false, 0),
             "msg_test".into(),
             "m".into(),
+            None,
             None,
             crate::types::KeepAsked::Unasked,
             crate::types::RequestedBy::Owner,

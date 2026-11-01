@@ -275,6 +275,9 @@ pub async fn messages(
 
     let internal_messages = to_internal_messages(&req)?;
     let sampling_params = to_sampling_params(&req);
+    // The caller's `thinking`, as the template's `enable_thinking` (#391):
+    // settled once, here, and handed to every path below.
+    let template_vars = chat_template::vars::from_anthropic(req.thinking.as_ref());
 
     // Resolve model alias (display name → registry ID, "auto" → `resolve_auto`).
     let model = crate::api::openai::resolve_model_for_inference(&state, &model).await;
@@ -313,6 +316,7 @@ pub async fn messages(
                 request_id,
                 model,
                 convert::tool_definitions_for_template(&req),
+                template_vars,
                 keep,
             )
             .await;
@@ -324,6 +328,7 @@ pub async fn messages(
                 request_id,
                 model,
                 convert::tool_definitions_for_template(&req),
+                template_vars,
                 keep,
             )
             .await;
@@ -350,6 +355,7 @@ pub async fn messages(
                     request_id,
                     model,
                     convert::tool_definitions_for_template(&req),
+                    template_vars,
                     keep,
                     requested_by,
                 )
@@ -362,6 +368,7 @@ pub async fn messages(
                     request_id,
                     model,
                     convert::tool_definitions_for_template(&req),
+                    template_vars,
                     keep,
                     requested_by,
                 )
@@ -380,6 +387,7 @@ pub async fn messages(
                 &eos,
                 Some(model.as_str()),
                 tool_defs.as_deref(),
+                template_vars.as_ref(),
             );
 
             let mut executor = state.executor.lock().await;

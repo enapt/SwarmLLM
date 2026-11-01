@@ -236,6 +236,15 @@ fn validate_chat_request(
         ),
     };
 
+    // The template's variables (#391), settled once, here: the only writer of
+    // `template_vars`, so every path below renders with one answer — a
+    // caller's `enable_thinking`, or vLLM's reading of `reasoning_effort`.
+    req.template_vars = crate::inference::chat_template::vars::from_openai(
+        req.extras.get("chat_template_kwargs"),
+        req.extras.get("reasoning_effort"),
+    )
+    .map_err(ApiError)?;
+
     Ok(())
 }
 
@@ -615,6 +624,7 @@ pub async fn chat_completions(
                 params,
                 requested_mid.clone(),
                 req.tool_definitions(),
+                req.template_vars.clone(),
                 req.extras
                     .get("stream_options")
                     .and_then(|v| v.get("include_usage"))
@@ -634,6 +644,7 @@ pub async fn chat_completions(
                 params,
                 requested_mid.clone(),
                 req.tool_definitions(),
+                req.template_vars.clone(),
                 req.keep_asked(),
             )
             .await;
@@ -702,6 +713,7 @@ pub async fn chat_completions(
                 &eos,
                 Some(req.model.as_str()),
                 tool_defs.as_deref(),
+                req.template_vars.as_ref(),
             )
         };
         // Echo `req.model` (the requested id), not the manifest display name —
@@ -1135,6 +1147,54 @@ mod tests {
         assert!(serde_json::from_str::<ChatCompletionRequest>(typo).is_err());
     }
 
+    /// A caller's `chat_template_kwargs` and `reasoning_effort` become the
+    /// template's variables at the door (#391) — the only writer, so every
+    /// path renders one answer — and stay in `extras` exactly as sent, so a
+    /// cloud provider is still handed them. A malformed one is a 400.
+    #[test]
+    fn template_variables_are_settled_at_the_door_and_still_forwarded() {
+        let parse = |extra: &str| -> ChatCompletionRequest {
+            serde_json::from_str(&format!(
+                r#"{{"model":"m","messages":[{{"role":"user","content":"hi"}}]{extra}}}"#
+            ))
+            .unwrap()
+        };
+        let none = axum::http::HeaderMap::new();
+        let thinking = |req: &ChatCompletionRequest| {
+            req.template_vars
+                .as_ref()
+                .and_then(|v| v.0.get("enable_thinking").cloned())
+        };
+
+        let mut req = parse(r#","chat_template_kwargs":{"enable_thinking":false}"#);
+        assert!(validate_chat_request(&mut req, &none).is_ok());
+        assert_eq!(thinking(&req), Some(serde_json::json!(false)));
+        let forwarded = serde_json::to_value(&req).unwrap();
+        assert_eq!(
+            forwarded["chat_template_kwargs"],
+            serde_json::json!({"enable_thinking": false})
+        );
+        assert!(forwarded.get("template_vars").is_none());
+
+        let mut req = parse(r#","reasoning_effort":"none""#);
+        assert!(validate_chat_request(&mut req, &none).is_ok());
+        assert_eq!(thinking(&req), Some(serde_json::json!(false)));
+        assert_eq!(
+            serde_json::to_value(&req).unwrap()["reasoning_effort"],
+            "none"
+        );
+
+        let mut req = parse("");
+        assert!(validate_chat_request(&mut req, &none).is_ok());
+        assert!(req.template_vars.is_none());
+
+        let mut req = parse(r#","chat_template_kwargs":"enable_thinking=false""#);
+        assert!(matches!(
+            validate_chat_request(&mut req, &none),
+            Err(ApiError(crate::error::SwarmError::Validation(_)))
+        ));
+    }
+
     /// A LoRA adapter id is a plain name — it names a file under the adapter
     /// directory — so a path is refused before anything is routed.
     #[test]
@@ -1451,6 +1511,7 @@ mod tests {
             "<eos>",
             None,
             None,
+            None,
         );
         assert!(
             prompt.contains(
@@ -1500,6 +1561,7 @@ mod tests {
             top_logprobs: None,
             response_format: None,
             reply_grammar: None,
+            template_vars: None,
             session_id: None,
             lora_adapter: None,
             swarm_route: None,

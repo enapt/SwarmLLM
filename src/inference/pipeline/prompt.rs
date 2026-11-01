@@ -42,6 +42,7 @@ pub(crate) fn render_prompt_from_header(
         eos,
         Some(&request.model_id.0),
         request.tools.as_deref(),
+        request.template_vars.as_ref(),
     )
 }
 
@@ -398,6 +399,7 @@ impl PipelineExecutor {
                     &i.eos_token,
                     Some(&model_id.0),
                     self.request.tools.as_deref(),
+                    self.request.template_vars.as_ref(),
                 )
             }
             None => {
@@ -416,6 +418,7 @@ impl PipelineExecutor {
                     "",
                     Some(&model_id.0),
                     self.request.tools.as_deref(),
+                    self.request.template_vars.as_ref(),
                 )
             }
         }

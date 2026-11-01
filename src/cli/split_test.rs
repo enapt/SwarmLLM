@@ -59,8 +59,9 @@ pub async fn test_split_inference(
         }];
         let bos = model.bos_token();
         let eos = model.eos_token_str();
+        // A diagnostic's own prompt: no caller's template variables (#391).
         swarmllm::inference::chat_template::apply_chat_template(
-            template, &messages, bos, eos, true, None,
+            template, &messages, bos, eos, true, None, None,
         )
         .unwrap_or_else(|| {
             // Said out loud: a diagnostic that quietly substitutes ChatML for the

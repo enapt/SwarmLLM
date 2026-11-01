@@ -1,5 +1,53 @@
 use super::*;
-use crate::types::{ChatMessage, Role};
+use crate::types::{ChatMessage, Role, TemplateVars};
+
+// The renders below ask for no caller variables (#391), so these stand in for
+// the three render functions with `vars` = `None`; they shadow `super::*` in
+// this test module only. A test of the variables calls `super::…` itself.
+fn apply_chat_template(
+    template: &str,
+    messages: &[ChatMessage],
+    bos_token: &str,
+    eos_token: &str,
+    add_generation_prompt: bool,
+    tools: Option<&[serde_json::Value]>,
+) -> Option<String> {
+    super::apply_chat_template(
+        template,
+        messages,
+        bos_token,
+        eos_token,
+        add_generation_prompt,
+        tools,
+        None,
+    )
+}
+
+fn build_prompt(
+    messages: &[ChatMessage],
+    template: Option<&str>,
+    bos_token: &str,
+    eos_token: &str,
+    model_name: Option<&str>,
+    tools: Option<&[serde_json::Value]>,
+) -> String {
+    super::build_prompt(
+        messages, template, bos_token, eos_token, model_name, tools, None,
+    )
+}
+
+fn build_prompt_with_model(
+    messages: &[ChatMessage],
+    template: Option<&str>,
+    bos_token: &str,
+    eos_token: &str,
+    model_name: Option<&str>,
+    tools: Option<&[serde_json::Value]>,
+) -> String {
+    super::build_prompt_with_model(
+        messages, template, bos_token, eos_token, model_name, tools, None,
+    )
+}
 
 fn test_messages() -> Vec<ChatMessage> {
     vec![
@@ -852,7 +900,7 @@ fn a_template_that_ignores_the_tools_variable_still_gets_them_described() {
         images: Vec::new(),
         tool: Default::default(),
     }];
-    let prompt = super::build_prompt(&msgs, Some(phi4), "", "", Some("phi-4-mini"), Some(&tools));
+    let prompt = build_prompt(&msgs, Some(phi4), "", "", Some("phi-4-mini"), Some(&tools));
     assert!(
         prompt.contains("terminal"),
         "the model must be told its tool exists, got:\n{prompt}"
@@ -878,7 +926,7 @@ fn a_template_that_renders_tools_is_not_second_guessed() {
         images: Vec::new(),
         tool: Default::default(),
     }];
-    let prompt = super::build_prompt(
+    let prompt = build_prompt(
         &msgs,
         Some(QWEN3_OFFICIAL),
         "",
@@ -1719,10 +1767,9 @@ fn both_prompt_entry_points_go_through_the_same_renderer() {
         tool: Default::default(),
     }];
 
-    let via_wrapper =
-        super::build_prompt(&msgs, Some(closing), "<s>", "</s>", Some("qwen2.5"), None);
+    let via_wrapper = build_prompt(&msgs, Some(closing), "<s>", "</s>", Some("qwen2.5"), None);
     let via_inner =
-        super::build_prompt_with_model(&msgs, Some(closing), "<s>", "</s>", Some("qwen2.5"), None);
+        build_prompt_with_model(&msgs, Some(closing), "<s>", "</s>", Some("qwen2.5"), None);
 
     assert_eq!(
         via_wrapper, via_inner,
@@ -2620,8 +2667,10 @@ fn ensure_ascii_escapes_an_astral_character_as_a_surrogate_pair() {
 /// `ImmutableSandboxedEnvironment(trim_blocks, lstrip_blocks)` with loop
 /// controls. It opens with `{% macro render_content %}`: before the `macros`
 /// feature it failed to PARSE, every request fell back to ChatML, and the empty
-/// `<think></think>` its generation prompt ends with was lost — Qwen3.5-4B then
-/// reasoned at length where the template asks it to answer (gotcha #798).
+/// `<think></think>` its generation prompt ends with was lost (gotcha #798).
+/// (That fix's note said Qwen3.5-4B then reasoned where its template asks it
+/// to answer: wrong — this is the 0.8B's template; the 4B's thinks by
+/// default, `fixtures/qwen35_4b_gguf_shipped.jinja`, #391.)
 #[test]
 fn the_qwen35_template_renders_exactly_as_jinja2_does() {
     let tmpl = include_str!("fixtures/qwen35_gguf_shipped.jinja");
@@ -2871,5 +2920,101 @@ fn the_probe_finds_what_each_template_renders() {
             calls: false,
             responses: false
         }
+    );
+}
+
+fn thinking(on: bool) -> TemplateVars {
+    let mut map = serde_json::Map::new();
+    map.insert(vars::ENABLE_THINKING.into(), serde_json::json!(on));
+    TemplateVars(map)
+}
+
+/// A caller's `enable_thinking` reaches each family's own switch, through the
+/// choke point every prompt passes (#391), both ways: Qwen 3 and the Qwen 3.5
+/// 4B upload the network runs think unless it is false (the 4B's template
+/// OPENS `<think>` in the prompt), Qwen 3.5 0.8B and Gemma 4 only when it is
+/// true. Without the variable each renders its default, as before.
+#[test]
+fn a_callers_enable_thinking_reaches_each_familys_template() {
+    let ask = |template: &str, vars: Option<&TemplateVars>| {
+        super::build_prompt(
+            &user_only_messages(),
+            Some(template),
+            "",
+            "",
+            None,
+            None,
+            vars,
+        )
+    };
+    let empty_think = "<think>\n\n</think>\n\n";
+
+    let qwen3 = include_str!("fixtures/qwen3_gguf_shipped.jinja");
+    assert!(!ask(qwen3, None).ends_with(empty_think));
+    assert!(ask(qwen3, Some(&thinking(false))).ends_with(empty_think));
+    assert!(!ask(qwen3, Some(&thinking(true))).ends_with(empty_think));
+
+    // `ggml-org/Qwen3.5-0.8B-GGUF`'s template answers unless asked to think…
+    let qwen35 = include_str!("fixtures/qwen35_gguf_shipped.jinja");
+    assert!(ask(qwen35, None).ends_with(empty_think));
+    assert!(ask(qwen35, Some(&thinking(false))).ends_with(empty_think));
+    assert!(ask(qwen35, Some(&thinking(true))).ends_with("<|im_start|>assistant\n<think>\n"));
+    // …and `bartowski/Qwen_Qwen3.5-4B-GGUF`'s, the 4B's upload, thinks unless
+    // told not to: its own header, read 2026-11-01. A probe node answered
+    // "51" with `enable_thinking: false` where v0.3.266 began "Thinking Process:".
+    let qwen35_4b = include_str!("fixtures/qwen35_4b_gguf_shipped.jinja");
+    let opened = "<|im_start|>assistant\n<think>\n";
+    assert!(ask(qwen35_4b, None).ends_with(opened));
+    assert!(ask(qwen35_4b, Some(&thinking(true))).ends_with(opened));
+    assert!(ask(qwen35_4b, Some(&thinking(false))).ends_with(empty_think));
+
+    let gemma4 = include_str!("fixtures/gemma4_gguf_shipped.jinja");
+    let thought_closed = "<|turn>model\n<|channel>thought\n<channel|>";
+    assert!(ask(gemma4, None).ends_with(thought_closed));
+    assert!(ask(gemma4, Some(&thinking(false))).ends_with(thought_closed));
+    let on = ask(gemma4, Some(&thinking(true)));
+    assert!(on.contains("<|turn>system\n<|think|>"), "{on}");
+    assert!(on.ends_with("<|turn>model\n"), "{on}");
+}
+
+/// A caller's variable never replaces the renderer's own: a request naming
+/// `messages`, `add_generation_prompt` or `bos_token` renders exactly as one
+/// that does not, and the rest of its variables still arrive.
+#[test]
+fn a_callers_variable_never_replaces_the_renderers_own() {
+    let template = "{{ bos_token }}{% for m in messages %}[{{ m.content }}]{% endfor %}\
+                    {% if add_generation_prompt %}>>{% endif %}{{ extra | default('') }}";
+    let messages = user_only_messages();
+    let mut map = serde_json::Map::new();
+    map.insert(
+        "messages".into(),
+        serde_json::json!([{"role": "user", "content": "INJECTED"}]),
+    );
+    map.insert("add_generation_prompt".into(), serde_json::json!(false));
+    map.insert("bos_token".into(), serde_json::json!("<evil>"));
+    map.insert("extra".into(), serde_json::json!("!"));
+    let theirs = TemplateVars(map);
+
+    let plain = super::apply_chat_template(template, &messages, "<s>", "", true, None, None)
+        .expect("renders");
+    let with =
+        super::apply_chat_template(template, &messages, "<s>", "", true, None, Some(&theirs))
+            .expect("renders");
+    assert_eq!(with, format!("{plain}!"));
+    assert!(!with.contains("INJECTED") && !with.contains("<evil>"));
+
+    // Nor a function the environment gives every template: the real Qwen 3
+    // template keeps its state in `namespace()`, and a caller's `namespace`
+    // looked up first would fail the render (security review of #391).
+    let qwen3 = include_str!("fixtures/qwen3_gguf_shipped.jinja");
+    let mut shadowing = thinking(false).0;
+    shadowing.insert("namespace".into(), serde_json::json!(1));
+    let render = |vars: &TemplateVars| {
+        super::apply_chat_template(qwen3, &messages, "", "", true, None, Some(vars))
+    };
+    let expected = render(&thinking(false)).expect("renders");
+    assert_eq!(
+        render(&TemplateVars(shadowing)).as_deref(),
+        Some(expected.as_str())
     );
 }

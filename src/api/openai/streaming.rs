@@ -274,6 +274,8 @@ pub fn spawn_split_stream(
     // exists at all.
     trace: Option<std::sync::Arc<crate::inference::trace::RequestTrace>>,
     tools: Option<&[serde_json::Value]>,
+    // The caller's template variables (#391), settled at the surface's door.
+    template_vars: Option<&crate::types::TemplateVars>,
     // The caller's instruction to keep the request on this computer (#251
     // (2b)) — the worker then saves its prompt's cache for reuse here only.
     keep: crate::types::KeepAsked,
@@ -286,6 +288,7 @@ pub fn spawn_split_stream(
         &meta.eos_token_str,
         Some(model_id.0.as_str()),
         tools,
+        template_vars,
     );
 
     // Add the stop strings implied by the chat template to whatever the caller
@@ -434,6 +437,9 @@ pub async fn submit_stream_to_router(
     lora_adapter: Option<String>,
     cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     tools: Option<Vec<serde_json::Value>>,
+    // The caller's template variables (#391), settled at the surface's door —
+    // required, so neither surface can forget to pass them on.
+    template_vars: Option<crate::types::TemplateVars>,
     // A caller's `swarm_route` block, already validated by the handler. Taken
     // as a parameter rather than re-derived here because this helper is shared
     // with the Anthropic surface, which has no such field and passes `None`.
@@ -468,6 +474,7 @@ pub async fn submit_stream_to_router(
         session_id,
         lora_adapter,
         tools,
+        template_vars,
         keep,
         requested_by,
     );
@@ -495,6 +502,7 @@ pub async fn submit_stream_to_router(
 ///
 /// Shared core for both OpenAI and Anthropic split_non_stream handlers.
 /// Resolves model metadata, builds the prompt, and runs generation via subprocess.
+#[allow(clippy::too_many_arguments)]
 pub async fn run_split_generate(
     state: &AppState,
     model_id: &crate::types::ModelId,
@@ -502,6 +510,8 @@ pub async fn run_split_generate(
     params: SamplingParams,
     request_id: &str,
     tools: Option<&[serde_json::Value]>,
+    // The caller's template variables (#391), settled at the surface's door.
+    template_vars: Option<&crate::types::TemplateVars>,
     // The caller's instruction to keep the request on this computer (#251
     // (2b)) — the worker then saves its prompt's cache for reuse here only.
     keep: crate::types::KeepAsked,
@@ -516,6 +526,7 @@ pub async fn run_split_generate(
         &meta.eos_token_str,
         Some(model_id.0.as_str()),
         tools,
+        template_vars,
     );
 
     tracing::debug!(
@@ -608,6 +619,7 @@ pub(super) async fn router_inference(
         req.session_id.clone(),
         req.lora_adapter.clone(),
         req.tool_definitions(),
+        req.template_vars.clone(),
         req.keep_asked(),
         req.requested_by,
     );
@@ -784,6 +796,7 @@ async fn router_inference_stream(
         req.lora_adapter.clone(),
         Some(cancel.clone()),
         req.tool_definitions(),
+        req.template_vars.clone(),
         req.route_plan_override(),
         req.keep_asked(),
         req.requested_by,
@@ -1062,6 +1075,8 @@ pub(super) async fn split_non_stream_response(
     // whether it must be told about them in prose. `tools_requested` is derived
     // below rather than passed beside them, so the two cannot disagree.
     tools: Option<Vec<serde_json::Value>>,
+    // The caller's template variables (#391), settled at the door.
+    template_vars: Option<crate::types::TemplateVars>,
     keep: crate::types::KeepAsked,
 ) -> Result<axum::response::Response, ApiError> {
     let tools_requested = tools.as_ref().is_some_and(|t| !t.is_empty());
@@ -1072,6 +1087,7 @@ pub(super) async fn split_non_stream_response(
         params.clone(),
         &request_id,
         tools.as_deref(),
+        template_vars.as_ref(),
         keep,
     )
     .await?;
@@ -1116,6 +1132,8 @@ pub(super) async fn split_stream_response(
     // whether it must be told about them in prose. `tools_requested` is derived
     // below rather than passed beside them, so the two cannot disagree.
     tools: Option<Vec<serde_json::Value>>,
+    // The caller's template variables (#391), settled at the door.
+    template_vars: Option<crate::types::TemplateVars>,
     include_usage: bool,
     keep: crate::types::KeepAsked,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
@@ -1171,6 +1189,7 @@ pub(super) async fn split_stream_response(
             &request_id,
             Some(stream_trace.clone()),
             tools.as_deref(),
+            template_vars.as_ref(),
             keep,
         ) {
             Some(pair) => pair,
@@ -1824,6 +1843,7 @@ mod route_in_body_tests {
             SamplingParams::default(),
             "swarm-local",
             Some(trace.clone()),
+            None,
             None,
             crate::types::KeepAsked::Unasked,
         );

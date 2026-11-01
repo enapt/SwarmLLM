@@ -2041,6 +2041,7 @@ mod tests {
             session_id: None,
             lora_adapter: None,
             tools: None,
+            template_vars: None,
             cancel: None,
             route_override: None,
             continuation: None,

@@ -670,6 +670,7 @@ pub(super) async fn execute_request(
                     &i.eos_token,
                     Some(i.name.as_str()),
                     request.tools.as_deref(),
+                    request.template_vars.as_ref(),
                 ),
                 // See local_exec: the model id alone is enough for the family
                 // fallback, so don't collapse to ChatML.
@@ -680,6 +681,7 @@ pub(super) async fn execute_request(
                     "",
                     Some(request.model_id.0.as_str()),
                     request.tools.as_deref(),
+                    request.template_vars.as_ref(),
                 ),
             }
         };

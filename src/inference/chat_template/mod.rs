@@ -5,11 +5,12 @@
 //! handle the common patterns used by popular model families:
 //! ChatML, Llama, Mistral, Qwen, Gemma, Phi, TinyLlama, etc.
 
-use crate::types::{ChatMessage, Role};
+use crate::types::{ChatMessage, Role, TemplateVars};
 
 mod fallbacks;
 mod tojson;
 mod tool_turns;
+pub mod vars;
 
 use tool_turns::ToolTurnSupport;
 
@@ -47,6 +48,8 @@ const MAX_TEMPLATE_BYTES: usize = 200 * 1024;
 /// comfortably under this.
 const TEMPLATE_FUEL: u64 = 5_000_000;
 
+/// `vars` — the caller's template variables (#391) — is REQUIRED like `tools`:
+/// `None` only where no request is behind the render (a probe).
 pub fn apply_chat_template(
     template: &str,
     messages: &[ChatMessage],
@@ -54,6 +57,7 @@ pub fn apply_chat_template(
     eos_token: &str,
     add_generation_prompt: bool,
     tools: Option<&[serde_json::Value]>,
+    vars: Option<&TemplateVars>,
 ) -> Option<String> {
     let mut env = minijinja::Environment::new();
 
@@ -121,19 +125,27 @@ pub fn apply_chat_template(
         return None;
     }
     let tmpl = env.get_template("chat").ok()?;
+    let ours = minijinja::context! {
+        messages => messages,
+        add_generation_prompt => add_generation_prompt,
+        bos_token => bos_token,
+        eos_token => eos_token,
+        // Undefined when there are none, NOT an empty list: every template
+        // gates its tool section on `{%- if tools %}`, and both are falsy
+        // there, but some also do `{{ tools | length }}` or index into it
+        // once inside. Undefined is what `transformers` passes, so it is
+        // what templates are written against.
+        tools => tools,
+    };
+    // The caller's variables (#391) go UNDER ours: `context!` keeps the first
+    // value a key has, and `vars::for_render` leaves the renderer's own names
+    // out besides.
+    let context = match vars.and_then(|vars| vars::for_render(vars, &env)) {
+        Some(theirs) => minijinja::context! { ..ours, ..theirs },
+        None => ours,
+    };
     let rendered = tmpl
-        .render(minijinja::context! {
-            messages => messages,
-            add_generation_prompt => add_generation_prompt,
-            bos_token => bos_token,
-            eos_token => eos_token,
-            // Undefined when there are none, NOT an empty list: every template
-            // gates its tool section on `{%- if tools %}`, and both are falsy
-            // there, but some also do `{{ tools | length }}` or index into it
-            // once inside. Undefined is what `transformers` passes, so it is
-            // what templates are written against.
-            tools => tools,
-        })
+        .render(context)
         .map_err(|e| {
             // Not a warning: declining is a supported outcome that the caller
             // handles by falling back, and Gemma-family templates decline ON
@@ -410,7 +422,8 @@ pub(crate) fn prompt_hands_over_to_the_model(prompt: &str) -> bool {
 /// `None`, deliberately. That exact shape is how the template fallback was
 /// disabled on six of seven paths (gotcha #171): a caller reaches for the
 /// short form, and the context it silently drops is the context that made the
-/// call correct.
+/// call correct. `vars` (the caller's template variables, #391) is required
+/// for the same reason.
 pub fn build_prompt(
     messages: &[ChatMessage],
     template: Option<&str>,
@@ -418,8 +431,11 @@ pub fn build_prompt(
     eos_token: &str,
     model_name: Option<&str>,
     tools: Option<&[serde_json::Value]>,
+    vars: Option<&TemplateVars>,
 ) -> String {
-    build_prompt_with_model(messages, template, bos_token, eos_token, model_name, tools)
+    build_prompt_with_model(
+        messages, template, bos_token, eos_token, model_name, tools, vars,
+    )
 }
 
 /// Pick a fallback prompt format from the model name alone.
@@ -542,9 +558,11 @@ pub fn build_prompt_with_model(
     eos_token: &str,
     model_name: Option<&str>,
     tools: Option<&[serde_json::Value]>,
+    vars: Option<&TemplateVars>,
 ) -> String {
-    let mut prompt =
-        build_prompt_inner(messages, template, bos_token, eos_token, model_name, tools);
+    let mut prompt = build_prompt_inner(
+        messages, template, bos_token, eos_token, model_name, tools, vars,
+    );
     open_the_models_turn_if_the_prompt_closed_it(&mut prompt, model_name);
     warn_if_the_prompt_closes_the_turn(&prompt, model_name);
     prompt
@@ -766,13 +784,14 @@ fn build_prompt_inner(
     eos_token: &str,
     model_name: Option<&str>,
     tools: Option<&[serde_json::Value]>,
+    vars: Option<&TemplateVars>,
 ) -> String {
     let tools = tools.filter(|t| !t.is_empty());
     // At most two attempts, and only ever two: the model's own template, then
     // prose if that template turned out not to use the tools it was handed.
     // `force_prose` is the ONLY thing that differs between them.
     let first = build_prompt_attempt(
-        messages, template, bos_token, eos_token, model_name, tools, false,
+        messages, template, bos_token, eos_token, model_name, tools, vars, false,
     );
     let Some(t) = tools else { return first };
     if render_shows_the_tools(&first, t) {
@@ -784,7 +803,7 @@ fn build_prompt_inner(
         "DIAG: the chat template was handed this request's tools and rendered none of          them — it mentions `tools` but does not read the variable, so the model would          be told nothing about them. Describing them in prose instead."
     );
     build_prompt_attempt(
-        messages, template, bos_token, eos_token, model_name, tools, true,
+        messages, template, bos_token, eos_token, model_name, tools, vars, true,
     )
 }
 
@@ -796,6 +815,7 @@ fn build_prompt_attempt(
     eos_token: &str,
     model_name: Option<&str>,
     tools: Option<&[serde_json::Value]>,
+    vars: Option<&TemplateVars>,
     force_prose: bool,
 ) -> String {
     // The conversation's earlier calls and answers, as this renderer can show
@@ -824,9 +844,15 @@ fn build_prompt_attempt(
     let messages: &[ChatMessage] = kept.as_deref().unwrap_or(messages);
 
     if let Some(tmpl) = template {
-        if let Some(result) =
-            apply_chat_template(tmpl, messages, bos_token, eos_token, true, tools_for_render)
-        {
+        if let Some(result) = apply_chat_template(
+            tmpl,
+            messages,
+            bos_token,
+            eos_token,
+            true,
+            tools_for_render,
+            vars,
+        ) {
             if render_kept_the_last_question(&result, messages) {
                 tracing::debug!(template_matched = true, "DIAG: chat template applied");
                 return result;
@@ -853,9 +879,15 @@ fn build_prompt_attempt(
         // caller's own system message did the same on any model that refuses
         // the role.
         if let Some(folded) = fold_system_into_first_user(messages) {
-            if let Some(result) =
-                apply_chat_template(tmpl, &folded, bos_token, eos_token, true, tools_for_render)
-            {
+            if let Some(result) = apply_chat_template(
+                tmpl,
+                &folded,
+                bos_token,
+                eos_token,
+                true,
+                tools_for_render,
+                vars,
+            ) {
                 if render_kept_the_last_question(&result, &folded) {
                     tracing::debug!(
                         template_matched = true,

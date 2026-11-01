@@ -39,6 +39,11 @@ pub struct InferenceRequest {
     /// build simply does not see it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tools: Option<Vec<serde_json::Value>>,
+    /// The caller's chat-template variables ([`TemplateVars`], #391) —
+    /// rendered with the conversation on every path, so carried wherever
+    /// `messages` and `tools` are. Additive over the wire, like `tools`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub template_vars: Option<TemplateVars>,
     /// Optional cancellation flag. The router/pipeline checks this between
     /// per-token forward calls; flipping it to `true` causes the loop to
     /// stop with `finish_reason = "stop"` on the next iteration. Set by
@@ -146,7 +151,8 @@ impl InferenceRequest {
     /// carries the same note for the same reason. `keep` is required for the
     /// same reason: a caller's instruction to keep a request on this computer
     /// is exactly the context a shorter form would lose (#251 (2b)), and
-    /// `requested_by` for the same reason (#337).
+    /// `requested_by` for the same reason (#337), and `template_vars` (#391:
+    /// a caller who turned thinking off).
     #[allow(clippy::too_many_arguments)]
     pub fn local(
         model_id: ModelId,
@@ -156,6 +162,7 @@ impl InferenceRequest {
         session_id: Option<String>,
         lora_adapter: Option<String>,
         tools: Option<Vec<serde_json::Value>>,
+        template_vars: Option<TemplateVars>,
         keep: KeepAsked,
         requested_by: RequestedBy,
     ) -> Self {
@@ -171,6 +178,7 @@ impl InferenceRequest {
             session_id,
             lora_adapter,
             tools,
+            template_vars,
             cancel: None,
             route_override: None,
             continuation: None,
@@ -1358,7 +1366,23 @@ pub struct DelegatedSplit {
     /// a request with an instruction is never handed to one that does not.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub route: Option<CarriedRoute>,
+    /// The caller's chat-template variables (#391). Set only for a head
+    /// advertising `features::TEMPLATE_VARS`; a request carrying them is never
+    /// handed to one that does not.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub template_vars: Option<TemplateVars>,
 }
+
+/// Variables a caller asked its chat template to be rendered with (#391) —
+/// `chat_template_kwargs` as vLLM, SGLang and llama.cpp's server take it.
+/// `enable_thinking` is the one the families people run read (Qwen 3 / 3.5,
+/// Gemma 4). Settled once at each API's door (`chat_template::vars`), carried
+/// beside `messages` and `tools`, and given to the template UNDER the
+/// renderer's own variables (`messages`, `tools`, …), which no caller's name
+/// replaces (`chat_template::apply_chat_template`).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct TemplateVars(pub serde_json::Map<String, serde_json::Value>);
 
 /// A requester's `swarm_route` instruction as its head receives it (#318 (b)).
 /// Every part of it only SHRINKS the head's candidate set, as it shrank the
@@ -1471,6 +1495,7 @@ mod chunk_assembly_tests {
             None,
             None,
             None,
+            None,
             KeepAsked::Unasked,
             RequestedBy::Owner,
         );
@@ -1479,6 +1504,39 @@ mod chunk_assembly_tests {
         let arrived: InferenceRequest = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(request.requested_by, RequestedBy::Owner);
         assert_eq!(arrived.requested_by, RequestedBy::NotTheOwner);
+    }
+
+    /// A delegated split's template variables (#391) cross the wire as the
+    /// caller's plain object; without any, nothing new is sent, and an older
+    /// sender's delegation (no such field) arrives as "none asked".
+    #[test]
+    fn a_delegations_template_vars_cross_the_wire_and_are_absent_when_unasked() {
+        let mut vars = serde_json::Map::new();
+        vars.insert("enable_thinking".into(), serde_json::json!(false));
+        let asked = DelegatedSplit {
+            messages: Vec::new(),
+            tools: None,
+            guesses: None,
+            route: None,
+            template_vars: Some(TemplateVars(vars.clone())),
+        };
+        let json = serde_json::to_value(&asked).unwrap();
+        assert_eq!(
+            json["template_vars"],
+            serde_json::json!({"enable_thinking": false})
+        );
+        let back: DelegatedSplit = serde_json::from_value(json).unwrap();
+        assert_eq!(back.template_vars, Some(TemplateVars(vars)));
+
+        let unasked = DelegatedSplit {
+            template_vars: None,
+            ..asked
+        };
+        let json = serde_json::to_value(&unasked).unwrap();
+        assert!(json.get("template_vars").is_none());
+        let older: DelegatedSplit =
+            serde_json::from_value(serde_json::json!({"messages": []})).unwrap();
+        assert_eq!(older.template_vars, None);
     }
 
     #[test]
@@ -1764,6 +1822,7 @@ mod delegated_split_wire_tests {
                 exclude_node_prefixes: vec!["abcd".into()],
                 peer_holds: vec![("bf7b".into(), PretendLocalHolds::Shards(4, 7))],
             }),
+            template_vars: None,
         }));
         let bytes = serde_json::to_vec(&sent).unwrap();
         let back: RemoteGenerateRequest = serde_json::from_slice(&bytes).unwrap();
@@ -1797,10 +1856,12 @@ mod delegated_split_wire_tests {
             tools: None,
             guesses: None,
             route: None,
+            template_vars: None,
         }));
         let json = serde_json::to_value(&sent).unwrap();
         assert!(json["delegation"].get("guesses").is_none(), "{json}");
         assert!(json["delegation"].get("route").is_none(), "{json}");
+        assert!(json["delegation"].get("template_vars").is_none(), "{json}");
         let token = StreamingToken {
             request_id: uuid::Uuid::nil(),
             token_id: 3,

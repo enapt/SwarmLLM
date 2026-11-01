@@ -65,6 +65,13 @@ pub struct ChatCompletionRequest {
     /// carries `response_format` itself, settled again where it lands.
     #[serde(skip)]
     pub reply_grammar: Option<std::sync::Arc<crate::types::ReplyGrammar>>,
+    /// The variables the chat template is rendered with (#391): set ONLY by
+    /// `validate_chat_request` from `chat_template_kwargs` and
+    /// `reasoning_effort` (`chat_template::vars::from_openai`), which stay in
+    /// `extras` as sent so a cloud provider is handed them unchanged. Never
+    /// from the body under this name, never serialized.
+    #[serde(skip)]
+    pub template_vars: Option<crate::types::TemplateVars>,
     /// Optional session ID for multi-turn KV-cache reuse.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,

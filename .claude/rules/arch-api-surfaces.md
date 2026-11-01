@@ -113,6 +113,12 @@ Anything that removes a shard file or model MUST first check `active_pipelines` 
 
 → `docs/invariants/api-surfaces.md` § "A reply held to JSON is settled at the door and held at every worker draw"
 
+## A caller's template variables are settled at the door and rendered under ours (2026-11-01, #391)
+
+**`chat_template::vars::from_openai` / `from_anthropic`** settle a request's template variables ONCE (`validate_chat_request`; the Anthropic handler; the Responses API's `reasoning.effort` reaches the chat door as `reasoning_effort`) into `ChatCompletionRequest::template_vars` → `InferenceRequest::template_vars`, which every render takes as a REQUIRED argument (`build_prompt*`, `apply_chat_template`; `None` only where no request is behind the render). vLLM's mapping: `reasoning_effort` `"none"` → `enable_thinking = false`, any other → true, unset → nothing; an explicit `enable_thinking` wins. Rendered `context!{ ..ours, ..theirs }` with `vars::RESERVED` and every global of the environment (`namespace`, `range`, our helpers) filtered out — a variable never replaces `messages`, `tools`, a special token or a function a template calls. `extras` keeps both fields for cloud providers. A led split carries them (`DelegatedSplit::template_vars`, only to a head advertising `features::TEMPLATE_VARS`, bit 37). Tests `a_callers_enable_thinking_reaches_each_familys_template`, `a_callers_variable_never_replaces_the_renderers_own`.
+
+→ `docs/invariants/api-surfaces.md` § "A caller's template variables are settled at the door and rendered under ours"
+
 ## API errors must be readable by the caller
 
 Every failure is `{"error": {"message", "type", "param", "code"}}`: take bodies with `JsonBody<T>`, never axum's `Json<T>`; keep the router `.fallback()` (`unknown_route`). Choose the STATUS from the cause (`probe_failure_is_user_fixable`). An MCP tool that ran and failed is **`mcp::types::tool_failed`** — an `isError: true` result the model reads, the same `error_body` under `_meta` — never a JSON-RPC error, which is only for a call no tool could run (#196).
