@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #392**). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #393**). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -3482,6 +3482,23 @@ prompt is rendered (`build_prompt_with_model`, the choke point) — the prompt e
 `REASONING_BLOCKS` — and carry that verdict to every finaliser and streaming buffer as a REQUIRED
 argument (`architecture.md` § "One invariant, N paths": four API paths, a peer's reply finalised on
 the coordinator). A reply cut short inside the block keeps today's rule: reasoning, empty content.
+
+**Research (2026-11-01).** llama.cpp master (`common/chat.cpp` 974-994, 1459-1461) takes the generation
+prompt as the render WITH `add_generation_prompt` less the render without, and parses
+`generation_prompt + output`: the opener the template wrote is fed to the parser first, nothing else
+changes. Ours, mapped: ONE predicate (`inference::opening_reasoning_block`) behind FOUR splitters —
+`take_leading_reasoning_block` (through `finalize_reply_text`, 10 production callers),
+`tool_parse::StreamingToolText` (4 sites, all in `api/`, none of which sees the rendered prompt: the
+router renders after the stream exists), `split_unfinished_reasoning`, `leading_content`. A hand-off's
+reply is finalised once, on the coordinator, from the peer's RAW streamed pieces (`remote_generate.rs`
+~1471), so feeding the opener first cannot split a reply twice. **Shape chosen**: `PromptOpened`
+(`Nothing` / `Inside(ReasoningBlock)`), a pure function of the rendered text (its trimmed end is an
+opener; a template's closed empty block is `Nothing`), computed where the prompt is rendered and a
+REQUIRED argument of all four splitters, each reading the reply as if it began with the opener. Where
+no prompt is in scope: the executor keeps the verdict `build_prompt_with_header` computed (speculative,
+the partial keeper); a continuation reads the ORIGINAL attempt's (its prompt ends inside the reasoning,
+not on the opener); the API's streams through `StreamingTokenTx`'s shared slot, set at render and read
+at the first token. Raw completions: `Nothing`.
 
 #### #141 (b) — The Anthropic surface never shows a reasoning model's scratchpad, even when the request enables thinking
 `P4` · api · **OPEN** — 2026-10-19 (the OpenAI half closed) · history: archive row #141
