@@ -70,18 +70,20 @@
       });
     },
 
-    // Wire the contribution segmented control to the hidden <select>.
+    // What the contribution control says beyond its active button: which
+    // choice is checked (it is a radio group) and the line describing it.
+    // The buttons themselves are wired once, for every segmented control, by
+    // `App.settings._wireSegmented` (at start-up); wiring them here as well
+    // fired each click's `change` twice.
     _wireSegmented: function() {
       var seg = document.querySelector('.segmented[data-bound-select="setup-contribution"]');
       var sel = document.getElementById('setup-contribution');
       if (!seg || !sel) return;
       var descEl = document.getElementById('contribution-desc');
-      var sync = function() {
+      var describe = function() {
         var v = sel.value;
         seg.querySelectorAll('.segmented-btn').forEach(function(b) {
-          var on = b.getAttribute('data-value') === v;
-          b.classList.toggle('active', on);
-          b.setAttribute('aria-checked', on ? 'true' : 'false');
+          b.setAttribute('aria-checked', b.getAttribute('data-value') === v ? 'true' : 'false');
         });
         if (descEl) {
           var keys = { minimal: 'setup.contrib_minimal_desc', moderate: 'setup.contrib_moderate_desc', maximum: 'setup.contrib_maximum_desc' };
@@ -90,36 +92,8 @@
           descEl.setAttribute('data-i18n', key);
         }
       };
-      seg.querySelectorAll('.segmented-btn').forEach(function(btn) {
-        btn.addEventListener('click', function() {
-          sel.value = btn.getAttribute('data-value');
-          sel.dispatchEvent(new Event('change'));
-          sync();
-        });
-      });
-      sel.addEventListener('change', sync);
-      sync();
-
-      // Wire the contribution-mode (Auto/Manual) segmented control.
-      var modeSeg = document.querySelector('.segmented[data-bound-select="setup-contribution-mode"]');
-      var modeSel = document.getElementById('setup-contribution-mode');
-      if (modeSeg && modeSel) {
-        var modeSync = function() {
-          var v = modeSel.value;
-          modeSeg.querySelectorAll('.segmented-btn').forEach(function(b) {
-            b.classList.toggle('active', b.getAttribute('data-value') === v);
-          });
-        };
-        modeSeg.querySelectorAll('.segmented-btn').forEach(function(btn) {
-          btn.addEventListener('click', function() {
-            modeSel.value = btn.getAttribute('data-value');
-            modeSel.dispatchEvent(new Event('change'));
-            modeSync();
-          });
-        });
-        modeSel.addEventListener('change', modeSync);
-        modeSync();
-      }
+      sel.addEventListener('change', describe);
+      describe();
     },
 
     // Build the cloud-provider tile grid.

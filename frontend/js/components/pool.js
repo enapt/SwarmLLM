@@ -390,11 +390,7 @@
         return;
       }
       try {
-        var resp = await App.authFetch('/api/pool/join', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ code: parsed.code })
-        });
+        var resp = await App.authFetch('/api/pool/join', _jsonOpts('POST', { code: parsed.code }));
         var data = await resp.json();
         if (_hasError(data)) return;
         App.notifications.showToast(I18n.t('pool.join_sent'), 'success');
@@ -450,11 +446,7 @@
 
     setContribution: async function (nodeId, level) {
       try {
-        var resp = await App.authFetch('/api/pool/contribution', {
-          method: 'PUT',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ node_id: nodeId, level: level })
-        });
+        var resp = await App.authFetch('/api/pool/contribution', _jsonOpts('PUT', { node_id: nodeId, level: level }));
         var data = await resp.json();
         _hasError(data);
       } catch (e) {
@@ -561,11 +553,7 @@
 
     setPrivateMode: async function (enabled) {
       try {
-        var resp = await App.authFetch('/api/pool/private-mode', {
-          method: 'PUT',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ enabled: enabled })
-        });
+        var resp = await App.authFetch('/api/pool/private-mode', _jsonOpts('PUT', { enabled: enabled }));
         if (!resp.ok) {
           var err = await resp.json().catch(function () { return {}; });
           App.notifications.showToast(

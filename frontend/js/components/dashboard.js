@@ -785,14 +785,13 @@
         }
       }
       if (data.version) document.getElementById('version').textContent = 'v' + data.version;
-      if (data.uptime_seconds !== undefined) document.getElementById('uptime').textContent = U.formatUptime(data.uptime_seconds);
       if (data.tier) {
         U.setTierBadge('tier-badge', data.tier);
       }
 
+      // The uptime and the hardware panel are `updateStats`'s (the 2-second
+      // tick renders them too); rendering them here as well did each twice.
       App.dashboard.updateStats(data);
-
-      App.dashboard._renderHardware(data.hardware, data.network_traffic);
 
       if (data.hosted_shards !== undefined) document.getElementById('hosted-shards').textContent = data.hosted_shards;
     },
