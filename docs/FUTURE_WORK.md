@@ -2795,7 +2795,11 @@ match llama.cpp** (#715, `arch-inference.md`).
    log-sum-exp — untested); routing softmax over the top-k only (`llama-graph.cpp:2058`); swiglu_oai
    (α 1.702, limit 7, `y+1`); biases on router and expert stacks; a 128 window on even layers
    (`SlidingWindow::from_file` knows Gemma only). Harmony stops are here. Riskiest: MXFP4 through the
-   vendored kernels.
+   vendored kernels. **Mapped 2026-11-02 against the real header** (24 layers, 64 heads of 64, 32 experts
+   choosing 4, MXFP4 only on the expert stacks — every dense weight is Q8_0, so the card's MXFP4 matmul
+   can come last): two gaps beyond the above — `attn_output.bias` is read nowhere, and a reply's harmony
+   channels (analysis / final) are not split the way `<think>` is. Eight steps, processor first and
+   card last, each checked against llama.cpp on a tiny random file: `memory/gptoss_map.md`.
 3. **`glm4moe` — GLM-4.5-Air 106B-A12B** (UD-Q4_K_XL 67.7 GB: three or four cards; ~46K).
    **Loader in since 2026-11-02, refused until a real file is checked**: the selection bias is a
    REQUIRED argument of both routers (`MoeFfn::selection_bias`), `expert_weights_scale` folds into
