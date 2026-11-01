@@ -6076,6 +6076,41 @@ digits) and llama.cpp's f16 attention cache (`DUMP_KV_F32=1`: its logits bitwise
 **Not done**: pictures — its image reader (`clip.projector_type` `qwen2.5vl_merger`) is not read, so a
 request with an image is a 400 naming it (`vision::load_from_mmproj_gguf`).
 
+## IBM Granite: Llama read with its attention scale, its other multipliers refused by name (2026-11-02, FUTURE_WORK #390)
+
+IBM Granite 4.2 (`granite`; 3B 270K, 8B 268K, 30B 242K downloads a month, read 2026-11-02) was
+refused as an unknown family. **What differs from Llama** (llama.cpp master `src/models/granite.cpp`):
+four multipliers off the header — the token row × `embedding_scale`, the attention score ×
+`attention.scale` in place of 1/√d (0 or absent: the usual), both residual branches × `residual_scale`
+before their add, the logits ÷ `logit_scale` — plus `rope.scaling.finetuned` false meaning no rotation,
+optional biases, experts, and Granite Vision's `deepstack_mapping`. Every 4.2 header (3B, 8B, 30B; first
+16 MB of each) writes embedding, residual and logit scales as 1, `attention.scale` 1/64 on 64-wide
+heads (3B) or 1/128 on 128-wide ones, no biases, no experts. So `granite` maps to `ModelArch::Llama`
+(NORM rope, as llama.cpp), its attention scale is read by `split::query_scale` (scale × √d multiplied
+into the queries, which the attention's 1/√d turns into the file's scale), and anything else is refused
+with the part named (`gguf_meta::unbuilt_granite_part` → `GgufTensorMeta::unbuilt_part` →
+`refusal()`): 4.0-micro's 12 / 0.22 / 10 are "an embedding multiplier".
+
+**Checked** on `granite-4.2-3b-Q4_K_M.gguf` (IBM's own), on the processor:
+- Logits against llama.cpp master over 24 positions: worst 0.981, median 0.998. **Toggled**: with
+  `SWARMLLM_QUERY_SCALE=0` the median fell to 0.694 and the top pick agreed at 6 of 24 — the scale is
+  what makes it Granite.
+- Requantised to Q8_0 and judged against an exact float64 forward (`examples/qwen2_exact_reference.py`,
+  which reads Llama-shaped files with NORM pairs and Granite's scale): medians 0.999700 ours, 0.999710
+  llama.cpp — equal. At position 3, where the residual stream spikes, ours is further off (0.99737
+  against 0.99970; the exact top pick at 22 of 24 positions against 24 of 24). Prefill and decode give
+  the same logits there, so it is not the prompt path; open in FUTURE_WORK #390.
+- A 160-token greedy reply to a coding question in Granite's own chat format (34 prompt ids, equal on
+  both sides): identical for 79 tokens; at the 80th llama.cpp itself is split 32.002 / 31.923 between
+  the same two tokens we rank first and second (ours the other way, 32.156 / 31.584). Over those 113
+  positions: worst cosine 0.991, median 0.99931.
+
+**Its chat template did not render** until `is iterable` answered as jinja2 does: Granite's template
+asks `tools is iterable and tools | length > 0`, minijinja said `none` is iterable, and the render
+failed and fell back to ChatML — no system turn, no `<think>` opener (`docs/invariants/api-surfaces.md`
+§ "Known divergences from Jinja2", gotcha #1017). The first reply comparison was made on that wrong
+prompt; it was the prompt ids, not the logits, that showed it.
+
 ## GLM-4.5: experts CHOSEN with a bias, weighed without it, and its pre-feed-forward norm under GLM-4's sandwich name (2026-11-02, FUTURE_WORK #390)
 
 **What differs from the families here** (llama.cpp master: `src/models/glm4-moe.cpp`,

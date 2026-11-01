@@ -507,6 +507,7 @@ mod tests {
                 context_length: 131_072,
                 pooling_type: 0,
                 kv_layout: None,
+                unbuilt_part: None,
                 shared_kv_layers: 0,
             },
         );
@@ -542,6 +543,7 @@ mod tests {
                 context_length: 32_768,
                 pooling_type: 3,
                 kv_layout: None,
+                unbuilt_part: None,
                 shared_kv_layers: 0,
             },
         );

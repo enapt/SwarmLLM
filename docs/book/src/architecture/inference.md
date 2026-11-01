@@ -133,6 +133,7 @@ The RoPE column is llama.cpp's per-architecture choice (`llama_model_rope_type`)
 | Architecture | RoPE | QKV Biases | Special Handling |
 |---|---|---|---|
 | **Llama** | Interleaved | No | Default EOS=2 |
+| **IBM Granite** (`granite`) | Interleaved | No | Llama read with Granite's attention scale; Granite 4.1 and 4.2 write its other multipliers as 1, and a file that needs one (Granite 3.x) or other parts not built yet is refused, naming the part |
 | **Llama 4** | Interleaved; iRoPE (NoPE every 4th) | No | MoE FFN |
 | **Qwen2 / Qwen3** | Contiguous | Yes (Qwen2) | EOS 151643+151645; per-head q/k norm (Qwen3) |
 | **Qwen3-VL** (`qwen3vl`) | Contiguous (IMROPE; text positions only) | No | Qwen3's language model, tensor for tensor; text only — its image reader is not read, so a picture is refused by name |

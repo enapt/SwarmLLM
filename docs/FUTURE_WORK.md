@@ -2830,17 +2830,26 @@ checked on a real 3B file against llama.cpp master and an exact float64 forward 
 as the other; llama.cpp master reads this family with a norm epsilon of 0; `docs/invariants/inference.md`
 § "Qwen2.5-VL"). **Left**: its image reader (`qwen2.5vl_merger`, with Qwen3-VL's above).
 
-**Read 2026-11-02, not mapping-only** (llama.cpp `4b1a27f`): **`granite`** (IBM Granite dense, ~1.3M)
-is Llama with four multipliers off its header — the token row × `embedding_scale`, the attention
-score × `attention.scale` in place of 1/√d, BOTH residual branches (attention out, feed-forward out)
-× `residual_scale` before their add, the logits ÷ `logit_scale` — plus `rope.scaling.finetuned` =
-false meaning NO rotation at all, optional `attn_output` / feed-forward biases, and Granite Vision's
-`deepstack_mapping` (`granite.cpp`). The residual scale meets every forward path (card graphs and
-decode kernels included), so fold the scalars at load instead: 1/`logit_scale` into
+**`granite` (IBM Granite 4.2: 3B 270K, 8B 268K, 30B 242K) — runs since 2026-11-02**: Llama read with
+its attention scale (`split::query_scale`: `attention.scale` in place of 1/√d, llama.cpp `granite.cpp`);
+all three 4.2 headers write the other multipliers as 1, no biases, no experts. Checked on the real 3B
+against llama.cpp master (a 160-token reply identical for 79 tokens, parting where llama.cpp's own
+margin is 0.08) and an exact float64 forward (`docs/invariants/inference.md` § "IBM Granite"). Its
+template needed jinja2's `none is iterable` (gotcha #1017). **Left, refused by name**
+(`gguf_meta::unbuilt_granite_part`): Granite 3.x and 4.0's multipliers (4.0-micro: embedding 12,
+residual 0.22, logit 10) — the token row × `embedding_scale`, BOTH residual branches × `residual_scale`
+before their add, the logits ÷ `logit_scale`. The residual scale meets every forward path (card graphs
+and decode kernels included), so fold the scalars at load instead: 1/`logit_scale` into
 `output_norm.weight` (and 1/`embedding_scale` too when the head is the tied table and the table is
-scaled), `residual_scale` into `attn_v` and `ffn_up` (each linear in its branch's output),
-`attention.scale`·√d into `attn_q` — quantized tensors, so through their f16 block scales (Q8_0 `d`;
-Q4_K/Q5_K `d` + `dmin`; Q6_K `d`), never a requantise. Needs a card boot to check the card paths.
+scaled), `residual_scale` into `attn_v` and `ffn_up` (each linear in its branch's output) — quantized
+tensors, so through their f16 block scales (Q8_0 `d`; Q4_K/Q5_K `d` + `dmin`; Q6_K `d`), never a
+requantise; it needs a card boot to check the card paths. Also refused: `rope.scaling.finetuned` false
+(no rotation), biases, experts, Granite Vision's `deepstack_mapping`; `granitehybrid` (4.0-H, Mamba-2
+layers) and `granitemoe` are other families. ⚠ **A small residual**: at the few positions where the
+residual stream spikes, our processor forward lands further from the exact answer than llama.cpp's
+(Granite Q8 position 3: 0.99737 against 0.99970; exact top-1 22 of 24 against 24 of 24; Qwen2.5-VL
+position 4: 0.991 against 0.997) though the medians are equal — not prefill-specific, not the f16 token
+table, not the cache type. Needs a per-op comparison at such a position.
 **`spark2_5`** (~2.5M) adds a per-head sigmoid gate on the attention output (`attn_gate`), a sliding
 window by layer pattern and a GELU feed-forward (`spark2-5.cpp`) — a family, not a mapping.
 

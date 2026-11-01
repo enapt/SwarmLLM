@@ -1,4 +1,5 @@
-"""Exact (float64) forward of a Qwen2-shaped GGUF (`qwen2`, or `qwen2vl` read for text), its
+"""Exact (float64) forward of a Llama-shaped GGUF (`qwen2`, `qwen2vl` read for text, `llama`,
+`granite` with its attention scale and the other multipliers at 1), its
 weights dequantized one layer at a time, and which engine sits closer to the exact answer at each
 position. A logits comparison says two engines differ; this says which one is off.
 
@@ -31,8 +32,8 @@ def W(name, dtype=np.float64):
 
 
 def kv(key):
-    f = r.fields[key]
-    return f.parts[f.data[0]].tolist()[0] if len(f.data) == 1 else None
+    f = r.fields.get(key)
+    return f.parts[f.data[0]].tolist()[0] if f is not None and len(f.data) == 1 else None
 
 
 A = bytes(r.fields["general.architecture"].parts[-1]).decode()
@@ -42,7 +43,13 @@ emb = kv(f"{A}.embedding_length")
 hd = emb // n_head
 base = kv(f"{A}.rope.freq_base")
 eps = kv(f"{A}.attention.layer_norm_rms_epsilon")
-print(f"{A}: {n_layer} layers, {n_head}/{n_kv} heads of {hd}, rope base {base}, norm eps {eps}")
+NORM = A in ("llama", "granite")
+scale = 1 / np.sqrt(hd)
+if A == "granite":  # granite.cpp: kq_scale = attention.scale (else 1/sqrt(d)); other multipliers must be 1
+    scale = kv("granite.attention.scale") or scale
+    assert all(kv(f"granite.{k}") in (None, 0.0, 1.0) for k in ("embedding_scale", "residual_scale")), "multipliers"
+    assert kv("granite.logit_scale") == 1.0, "logit scale"
+print(f"{A}: {n_layer} layers, {n_head}/{n_kv} heads of {hd}, rope base {base}, norm eps {eps}, attention scale {scale}, {'NORM' if NORM else 'NEOX'} rotation")
 
 ids = json.load(open(ids_json))["tokens"]
 N = len(ids)
@@ -53,12 +60,22 @@ def rms(x, w):
     return x / np.sqrt((x * x).mean(-1, keepdims=True) + eps) * w
 
 
-def neox(x):  # [N, heads, hd]; MROPE with a text position in every section is the same
+def rope(x):  # [N, heads, hd]; MROPE with a text position in every section is NEOX
     half = hd // 2
     ang = pos[:, None] * (base ** (-np.arange(half) * 2.0 / hd))[None, :]
     c, s = np.cos(ang)[:, None, :], np.sin(ang)[:, None, :]
+    if NORM:  # adjacent pairs (llama.cpp's NORM: Llama, Granite)
+        a, b = x[..., 0::2], x[..., 1::2]
+        out = np.empty_like(x)
+        out[..., 0::2], out[..., 1::2] = a * c - b * s, a * s + b * c
+        return out
     a, b = x[..., :half], x[..., half:]
     return np.concatenate([a * c - b * s, a * s + b * c], axis=-1)
+
+
+def proj(x, name):  # weight, plus its bias where the file has one
+    y = x @ W(name + ".weight").T
+    return y + W(name + ".bias") if name + ".bias" in TI else y
 
 
 tok = W("token_embd.weight", np.float32)
@@ -69,16 +86,16 @@ hidden = []
 for il in range(n_layer):
     p = f"blk.{il}."
     x = rms(h, W(p + "attn_norm.weight"))
-    q = neox((x @ W(p + "attn_q.weight").T + W(p + "attn_q.bias")).reshape(N, n_head, hd))
-    k = neox((x @ W(p + "attn_k.weight").T + W(p + "attn_k.bias")).reshape(N, n_kv, hd))
-    v = (x @ W(p + "attn_v.weight").T + W(p + "attn_v.bias")).reshape(N, n_kv, hd)
+    q = rope(proj(x, p + "attn_q").reshape(N, n_head, hd))
+    k = rope(proj(x, p + "attn_k").reshape(N, n_kv, hd))
+    v = proj(x, p + "attn_v").reshape(N, n_kv, hd)
     group = n_head // n_kv
     out = np.empty((N, n_head, hd))
     for hh in range(n_head):
-        s = q[:, hh] @ k[:, hh // group].T / np.sqrt(hd) + mask
+        s = q[:, hh] @ k[:, hh // group].T * scale + mask
         s = np.exp(s - s.max(-1, keepdims=True))
         out[:, hh] = (s / s.sum(-1, keepdims=True)) @ v[:, hh // group]
-    h = h + out.reshape(N, emb) @ W(p + "attn_output.weight").T
+    h = h + proj(out.reshape(N, emb), p + "attn_output")
     x = rms(h, W(p + "ffn_norm.weight"))
     gate, up = x @ W(p + "ffn_gate.weight").T, x @ W(p + "ffn_up.weight").T
     h = h + (gate / (1 + np.exp(-gate)) * up) @ W(p + "ffn_down.weight").T

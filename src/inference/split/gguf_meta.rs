@@ -513,6 +513,17 @@ pub(crate) fn query_scale(ct: &gguf_file::Content, head_dim: usize) -> Option<f6
     if arch == "gemma4" {
         return Some((head_dim as f64).sqrt());
     }
+    // Granite scales by `attention.scale` itself, 1/sqrt(head_dim) only where
+    // that is 0 or absent (llama.cpp `granite.cpp`, `kq_scale`): Granite
+    // 4.2's 1/64 on 64-wide heads, an eighth of the usual 1/8.
+    if arch == "granite" {
+        return ct
+            .metadata
+            .get("granite.attention.scale")
+            .and_then(|v| v.to_f32().ok())
+            .filter(|&s| s != 0.0)
+            .map(|s| f64::from(s) * (head_dim as f64).sqrt());
+    }
     let read = |key: &str| {
         ct.metadata
             .get(&format!("{arch}.{key}"))
@@ -532,6 +543,51 @@ pub(crate) fn query_scale(ct: &gguf_file::Content, head_dim: usize) -> Option<f6
     let width = n_embd.checked_div(n_head)?;
     let head_dim = read("attention.key_length").unwrap_or(width);
     (width != head_dim && width > 0).then(|| (head_dim as f64 / width as f64).sqrt())
+}
+
+/// The part of a Granite file this build does not run yet, or `None` (llama.cpp
+/// `granite.cpp`, `build_inp_embd`). Granite is Llama read with four
+/// multipliers; its attention scale is read ([`query_scale`]), and Granite 4.1
+/// and 4.2 write the other three as 1. A file whose embedding, residual or
+/// logit multiplier is not 1 (Granite 3.x), that turns no position at all
+/// (`rope.scaling.finetuned` false), that takes picture inputs (Granite
+/// Vision's `deepstack_mapping`), carries biases, or has experts would run
+/// without that part and write nonsense, so it is refused with the part named.
+fn unbuilt_granite_part(ct: &gguf_file::Content) -> Option<&'static str> {
+    if gguf_arch_str(ct) != "granite" {
+        return None;
+    }
+    let value = |key: &str| ct.metadata.get(&format!("granite.{key}"));
+    let number = |key: &str| value(key).and_then(|v| v.to_f32().ok());
+    // 0 means "none" for the first two, as llama.cpp reads them; the logit
+    // scale divides, and llama.cpp requires it.
+    let multiplies = |key: &str| number(key).is_some_and(|s| s != 0.0 && s != 1.0);
+    if multiplies("embedding_scale") {
+        return Some("an embedding multiplier");
+    }
+    if multiplies("residual_scale") {
+        return Some("a residual multiplier");
+    }
+    if number("logit_scale") != Some(1.0) {
+        return Some("a logit multiplier");
+    }
+    if value("rope.scaling.finetuned").and_then(|v| v.to_bool().ok()) == Some(false) {
+        return Some("no position rotation");
+    }
+    if value("deepstack_mapping").is_some() {
+        return Some("picture inputs");
+    }
+    if value("expert_count")
+        .and_then(|v| v.to_u32().ok())
+        .unwrap_or(0)
+        > 0
+    {
+        return Some("experts");
+    }
+    ct.tensor_infos
+        .keys()
+        .any(|name| name.starts_with("blk.") && name.ends_with(".bias"))
+        .then_some("biases")
 }
 
 /// The tensor whose presence marks layer `layer_idx` as recurrent — the ONE
@@ -750,6 +806,12 @@ pub struct GgufTensorMeta {
     /// `None` there, and the bound charges the widest layer at every position.
     #[serde(skip)]
     pub(crate) kv_layout: Option<super::kv_budget::KvLayout>,
+    /// A part of this file the loader does not run yet, read off its header
+    /// ([`unbuilt_granite_part`]): the model is refused as its family with that
+    /// part named ([`Self::refusal`]). An older build's copy reads `None`; the
+    /// loader reads the header itself.
+    #[serde(default)]
+    pub(crate) unbuilt_part: Option<String>,
 }
 
 /// Why this build will not run a model to write replies, read off its header.
@@ -1065,6 +1127,7 @@ impl GgufTensorMeta {
             pooling_type,
             shared_kv_layers,
             kv_layout: None,
+            unbuilt_part: unbuilt_granite_part(ct).map(str::to_string),
         };
         meta.kv_layout =
             super::kv_budget::KvLayout::read(ct, &meta, meta.context_length.max(1)).ok();
@@ -1083,6 +1146,12 @@ impl GgufTensorMeta {
         }
         if let Some(part) = self.unbuilt_gemma4_part() {
             return Some(ModelRefusal::Architecture(format!("gemma4 with {part}")));
+        }
+        if let Some(part) = &self.unbuilt_part {
+            return Some(ModelRefusal::Architecture(format!(
+                "{} with {part}",
+                self.architecture
+            )));
         }
         self.is_embedding_model()
             .then_some(ModelRefusal::EmbeddingModel)
@@ -2088,6 +2157,7 @@ mod active_bytes_tests {
             context_length: 0,
             pooling_type: 0,
             kv_layout: None,
+            unbuilt_part: None,
             shared_kv_layers: 0,
         }
     }
@@ -2536,6 +2606,94 @@ pub(super) mod sliding_window_tests {
                 ),
                 128
             ),
+            None
+        );
+    }
+
+    /// Granite 4.2's header as IBM ships it: the attention scale is 1/64 on
+    /// 64-wide heads and every other multiplier is 1.
+    fn granite42(extra: Vec<(&str, gguf_file::Value)>) -> gguf_file::Content {
+        let mut keys = vec![
+            ("granite.attention.scale", gguf_file::Value::F32(0.015625)),
+            ("granite.embedding_scale", gguf_file::Value::F32(1.0)),
+            ("granite.residual_scale", gguf_file::Value::F32(1.0)),
+            ("granite.logit_scale", gguf_file::Value::F32(1.0)),
+        ];
+        keys.extend(extra);
+        header("granite", keys)
+    }
+
+    /// Granite's queries are scaled by its own `attention.scale` (llama.cpp
+    /// `granite.cpp`'s `kq_scale`), not 1/sqrt(head_dim): 1/64 on 64-wide
+    /// heads is 1/8 of the usual scale, so the queries carry 1/64 × 8. A scale
+    /// of 0, or none, is the usual one.
+    #[test]
+    fn granite_queries_are_scaled_by_the_files_own_attention_scale() {
+        let scale = query_scale(&granite42(vec![]), 64).expect("Granite is scaled");
+        assert!((scale - 0.125).abs() < 1e-12, "{scale}");
+        let unscaled = header(
+            "granite",
+            vec![("granite.attention.scale", gguf_file::Value::F32(0.0))],
+        );
+        assert_eq!(query_scale(&unscaled, 64), None);
+        assert_eq!(query_scale(&header("granite", vec![]), 64), None);
+    }
+
+    /// A Granite file is refused with the part this build does not run named —
+    /// Granite 3.x's multipliers, no rotation, pictures, experts, biases — and
+    /// Granite 4.2 as shipped is not refused at all.
+    #[test]
+    fn a_granite_part_not_built_is_refused_by_name() {
+        use gguf_file::Value::{Bool, F32, U32};
+        assert_eq!(unbuilt_granite_part(&granite42(vec![])), None);
+        let refused = |extra: Vec<(&str, gguf_file::Value)>| {
+            let mut ct = granite42(vec![]);
+            for (k, v) in extra {
+                ct.metadata.insert(k.to_string(), v);
+            }
+            unbuilt_granite_part(&ct)
+        };
+        assert_eq!(
+            refused(vec![("granite.embedding_scale", F32(12.0))]),
+            Some("an embedding multiplier")
+        );
+        assert_eq!(
+            refused(vec![("granite.residual_scale", F32(0.22))]),
+            Some("a residual multiplier")
+        );
+        assert_eq!(
+            refused(vec![("granite.logit_scale", F32(8.0))]),
+            Some("a logit multiplier")
+        );
+        assert_eq!(
+            refused(vec![("granite.rope.scaling.finetuned", Bool(false))]),
+            Some("no position rotation")
+        );
+        assert_eq!(
+            refused(vec![("granite.expert_count", U32(40))]),
+            Some("experts")
+        );
+        // A multiplier of 0 is llama.cpp's "none"; the logit scale is required.
+        assert_eq!(refused(vec![("granite.embedding_scale", F32(0.0))]), None);
+        let mut no_logit_scale = granite42(vec![]);
+        no_logit_scale.metadata.remove("granite.logit_scale");
+        assert_eq!(
+            unbuilt_granite_part(&no_logit_scale),
+            Some("a logit multiplier")
+        );
+        let mut biased = granite42(vec![]);
+        biased.tensor_infos.insert(
+            "blk.0.attn_q.bias".to_string(),
+            gguf_file::TensorInfo {
+                ggml_dtype: candle_core::quantized::GgmlDType::F32,
+                shape: candle_core::Shape::from(1usize),
+                offset: 0,
+            },
+        );
+        assert_eq!(unbuilt_granite_part(&biased), Some("biases"));
+        // Another family is never asked.
+        assert_eq!(
+            unbuilt_granite_part(&header("llama", vec![("llama.logit_scale", F32(8.0))])),
             None
         );
     }

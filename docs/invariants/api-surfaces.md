@@ -1665,12 +1665,31 @@ superseded the same day — `build_prompt` now takes `tools` and templates that 
 them render them natively, see "A model is told about its tools the way it was
 trained to be".)
 
-### Known divergence from Jinja2: none currently
+### Known divergences from Jinja2 — each pinned by a test
 
 The hand-rolled engine kept `<think>…</think>` in assistant HISTORY where jinja2
-strips it. minijinja + pycompat matches jinja2 there. If a future divergence is
-found, pin it explicitly in the test the way that one was, rather than leaving it
-in a comment.
+strips it. minijinja + pycompat matches jinja2 there.
+
+**`none is iterable` (2026-11-02, FUTURE_WORK #390).** minijinja's `is iterable`
+asks `Value::try_iter`, which iterates `none` and undefined alike as empty, so
+`none is iterable` was TRUE. jinja2's `tests.test_iterable` asks Python's
+`iter()`, which refuses `None` — FALSE (undefined is iterable there too, as an
+empty one). Every request without tools passes `tools` as `none`, as
+`transformers` does, so IBM Granite 4.2's template —
+`{%- if tools is iterable and tools | length > 0 %}` — took the branch, failed on
+the `length` of `none` ("cannot calculate length of value of type none (in
+chat:52)"), and the WHOLE render fell back to ChatML: no system turn and no
+`<think>` opener, a prompt the model was never trained on. Nothing showed it but a
+debug line. `apply_chat_template` registers an `iterable` test of its own (not
+`none`, and iterable to minijinja) — in the ONE environment every render uses, so
+every model's template gets jinja2's answer. Pinned by
+`none_is_not_iterable_as_in_jinja2` and the Granite row of
+`a_template_with_no_system_turn_of_its_own_is_given_none` (its shipped template,
+the expected text rendered by jinja2 as `transformers` renders it); both fail
+without the test. (pycompat prints a boolean as Python does, `False`.)
+
+If a further divergence is found, pin it the same way rather than leaving it in a
+comment.
 
 **From the rules file (moved 2026-10-02):**
 

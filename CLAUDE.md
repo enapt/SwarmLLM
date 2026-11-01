@@ -31,8 +31,8 @@ Four carry contracts, not just versions:
 
 - **minijinja 2.24 + minijinja-contrib (pycompat)** renders chat templates — the
   engine HF's TGI and SGLang use. Its `trim_blocks` / `lstrip_blocks` /
-  `keep_trailing_newline` / `pycompat` settings AND its Jinja features (`macros`,
-  #798) are part of the contract.
+  `keep_trailing_newline` / `pycompat` settings, its Jinja features (`macros`,
+  #798) AND jinja2's answers where minijinja's differ (`none is iterable`) are part of the contract.
 - **`serde_json` and `minijinja` are both built with `preserve_order`.** Drop
   either and every tool schema reaches the model alphabetised.
 - **`libp2p-gossipsub` is a DIRECT dep only to enable its `metrics` feature**

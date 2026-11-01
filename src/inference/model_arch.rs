@@ -64,7 +64,11 @@ impl ModelArch {
     /// Detect architecture from GGUF `general.architecture` metadata string.
     pub fn from_gguf_arch(arch: &str) -> Self {
         match arch {
-            "llama" => ModelArch::Llama,
+            // IBM Granite is Llama read with four multipliers (llama.cpp
+            // `granite.cpp`, NORM RoPE): its attention scale is
+            // `split::query_scale`'s, and a file with a part not read yet is
+            // refused with it named (`gguf_meta::unbuilt_granite_part`).
+            "llama" | "granite" => ModelArch::Llama,
             // The MoE members are the same layout with routed experts in place
             // of the feed-forward, which the loader finds per layer
             // (`split::loader::load_moe_ffn`).
@@ -278,6 +282,7 @@ impl ModelArch {
     pub fn supported_list() -> &'static [&'static str] {
         &[
             "llama",
+            "granite",
             "qwen2",
             "qwen2vl",
             "qwen3",

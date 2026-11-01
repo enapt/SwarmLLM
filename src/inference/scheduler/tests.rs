@@ -244,6 +244,7 @@ fn a_model_that_runs_only_whole_is_never_split_across_computers() {
                 context_length: 8192,
                 pooling_type: 0,
                 kv_layout: None,
+                unbuilt_part: None,
                 shared_kv_layers,
             },
         );
@@ -358,6 +359,7 @@ fn a_cards_room_is_charged_only_the_weights_the_card_holds() {
                 context_length: 8192,
                 pooling_type: 0,
                 kv_layout: None,
+                unbuilt_part: None,
                 shared_kv_layers: 20,
             },
         );
@@ -4987,6 +4989,7 @@ fn a_peers_room_for_a_prompt_charges_a_windowed_layer_its_window() {
     // layer at the first layer's shape, every position.
     let unread = crate::inference::split::GgufTensorMeta {
         kv_layout: None,
+        unbuilt_part: None,
         ..meta.clone()
     };
     assert_eq!(
@@ -5028,6 +5031,7 @@ fn a_prompt_position_is_priced_like_the_worker_charges_it() {
         context_length: 8192,
         pooling_type: 0,
         kv_layout: None,
+        unbuilt_part: None,
         shared_kv_layers: 0,
     };
     // GQA on a card that keeps the half cache: f16 alone → 2 bytes per element.
@@ -9052,6 +9056,7 @@ fn a_peers_count_of_what_fits_is_weighed_in_its_own_unit() {
             context_length: 8192,
             pooling_type: 0,
             kv_layout: None,
+            unbuilt_part: None,
             shared_kv_layers: 0,
         },
     );

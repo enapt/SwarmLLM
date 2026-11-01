@@ -74,6 +74,16 @@ pub fn apply_chat_template(
     // See [`tojson`] for what each of those cost.
     env.add_filter("tojson", tojson::tojson);
 
+    // `is iterable` as jinja2 answers it: whether Python's `iter()` takes the
+    // value. `none` is not iterable there (Undefined is, as an empty one);
+    // minijinja iterates both as empty, so its own test said yes for `none` —
+    // and Granite 4's `tools is iterable and tools | length > 0` failed the
+    // whole render on the `length` of the `none` every tool-less request
+    // passes (2026-11-02; jinja2 `tests.test_iterable`).
+    env.add_test("iterable", |v: minijinja::Value| {
+        !v.is_none() && v.try_iter().is_ok()
+    });
+
     // Undefined must be FALSY rather than an error. Templates guard optional
     // fields with `{% if message.reasoning_content %}` and probe for callables
     // with `is defined`, and erroring on those would decline templates that

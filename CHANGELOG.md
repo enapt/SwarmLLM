@@ -66,6 +66,17 @@ word for word on the 4B, and on Qwen2.5-VL's 3B this engine lands as close to an
 as llama.cpp does. Pictures are not read yet: a request with an image is refused with a message
 saying so. (#390)
 
+**IBM Granite 4 models now run, and get their own chat format.** Granite — IBM's open models,
+downloaded hundreds of thousands of times a month at 3B, 8B and 30B — was refused as a family this
+engine did not know. It is Llama with one extra setting, how strongly each word attends to the
+others, and this engine now reads it: on the 3B a reply matches llama.cpp's for its first 79 words
+and parts where llama.cpp itself is torn between the same two. Granite 4.2 at 3B, 8B and 30B all
+load; earlier Granite files (3.x and 4.0), which need more settings, are refused with a message
+naming what is missing. Granite's chat template also
+failed to render on every request without tools, so it was asked in a generic format it was not
+trained on; it now gets its own — as would any other model whose template checks for tools the
+same way. (#390)
+
 **Groundwork for GLM-4.5-Air, not yet switched on.** This engine can now read the GLM-4.5
 family's files. Its experts are picked with a per-expert nudge that decides which experts run but
 not how much each one counts, and this engine now reads that nudge on every path. On test files it

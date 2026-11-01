@@ -1632,10 +1632,37 @@ fn a_template_with_no_system_turn_of_its_own_is_given_none() {
             "",
             "<|im_start|>user\nHi<|im_end|>\n<|im_start|>assistant\n",
         ),
+        // IBM's Granite 4.2 3B GGUF (2026-11-02): its own empty system turn,
+        // and thinking on unless asked off. It failed to render at all until
+        // `is iterable` answered `none` as jinja2 does.
+        (
+            include_str!("fixtures/granite42_gguf_shipped.jinja"),
+            "<|end_of_text|>",
+            "<|im_start|>system\n<|im_end|>\n<|im_start|>user\nHi<|im_end|>\n<|im_start|>assistant\n<think>\n",
+        ),
     ] {
         let ours = build_prompt_with_model(&bare_user(), Some(template), bos, "", None, None);
         assert_eq!(ours, expected);
     }
+}
+
+/// `is iterable` answers as jinja2 does: `none` is not (Python's `iter(None)`
+/// raises); Undefined, strings and containers are. minijinja's own test said
+/// yes for `none`, which every tool-less request passes as `tools`, and Granite
+/// 4's `tools is iterable and tools | length > 0` failed the whole render.
+#[test]
+fn none_is_not_iterable_as_in_jinja2() {
+    let t = "{{ none is iterable }} {{ nothing is iterable }} {{ [] is iterable }} \
+             {{ 'ab' is iterable }} {{ {} is iterable }} {{ 3 is iterable }}";
+    assert_eq!(
+        apply_chat_template(t, &[], "", "", false, None).as_deref(),
+        Some("False True True True True False")
+    );
+    let guarded = "{%- if tools is iterable and tools | length > 0 %}T{% endif %}X";
+    assert_eq!(
+        apply_chat_template(guarded, &[], "", "", false, None).as_deref(),
+        Some("X")
+    );
 }
 
 /// TinyLlama's name matches none of the other families, so without a Zephyr
