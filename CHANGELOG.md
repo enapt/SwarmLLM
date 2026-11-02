@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+## [0.3.268-alpha] — 2026-11-02
+
+**Thinking models: the answer is the answer, and you can switch the thinking off or on.**
+
 **A model set up to think before it answers no longer shows its thinking as the answer.**
 Qwen3.5-4B — the copy the network holds — thinks before every answer unless asked not to, and its
 own instructions open the thinking block before the model writes a word. This server recognised
@@ -15,20 +19,34 @@ A streamed reply that ended right after its thinking, with no answer after it, n
 that thinking as the answer on the Anthropic API; any thinking model could do this, before or
 after this change.
 
-**Getting a model you already have part of no longer downloads those parts again.** Every
-download — the dashboard's Get, `swarmllm get-model`, the reference models — fetched each part it
-named from HuggingFace in full, even a part already on this computer, and replaced it with the new
-copy: asking for all of a model you held half of downloaded the whole thing. A part this computer
-already holds, checked when it arrived, is now kept and skipped; a part whose contents are in
-question is still fetched again, since that is how it is put right. (#393)
+**You can now ask a model to answer without thinking first, or to think.** Models such as
+Qwen 3 and Gemma 4 can reason step by step before they answer, which takes time — minutes when a
+model is split across computers — and until now a request could not say which it wanted when the
+model ran on the network. It now can, the way other servers take it: on the OpenAI chat API,
+`"chat_template_kwargs": {"enable_thinking": false}` or `"reasoning_effort": "none"`; on the
+Responses API, `reasoning.effort`; on the Anthropic API, `"thinking": {"type": "disabled"}` (or
+`"enabled"` to ask for it). A request that says nothing gets the model's own default, as before.
+The Responses API's `reasoning.effort` now also reaches a cloud model, where it used to be dropped.
+*Correction to v0.3.229's notes*, which said Qwen3.5-4B's publisher's template asks it to answer
+without reasoning: that is the 0.8B's template. The 4B's own template asks it to think unless told
+not to, which a request can now do.
+When another computer leads a split for you, the setting goes with it; a computer on an older
+release is not asked to lead such a request. (#391)
 
-**A model file this computer cannot read is reported as such, not as a HuggingFace failure.**
-Some files carry a few tensors in a format this engine does not read yet (MXFP4, or the IQ
-formats), whatever their name says — unsloth's Qwen3-Coder-Next "Q4_K_M" is one. Getting one from
-the dashboard answered "502 — the cloud provider returned an error, try again", advice that could
-never work; it is now a plain 400 that names the format and the builds to choose instead. The list
-of models people run no longer gets stuck on such a file: it moves to the next upload of the same
-model, and a later release, which may read the file, tries it again. (#394)
+**gpt-oss now runs.** OpenAI's gpt-oss — gpt-oss-20b is among the most downloaded open models — can
+be added and asked like any other model. On the real gpt-oss-20b its replies are llama.cpp's: one
+word for word, another for its first hundred words, until two equally likely words. An exact
+calculation over the file's own numbers puts this engine as close to the right answer as llama.cpp,
+and closer at the one place the two disagree. Its replies keep the model's reasoning apart from its
+answer, and they are read as llama.cpp reads them: the reasoning goes where a thinking model's
+reasoning goes, the answer is the answer, and a tool call arrives as a tool call, streamed or not. A
+request's reasoning effort (`reasoning_effort`: low, medium or high) reaches gpt-oss's instructions,
+as llama.cpp passes it, and reaches any model's chat template as that setting. **It runs on the
+processor for now, on a computer with a graphics card too**, and the dashboard says why: no
+graphics-card code reads its 4-bit format, MXFP4, yet, and running it there would take seconds a
+token. Files of other models that keep weights in MXFP4, such as unsloth's `MXFP4_MOE` uploads, now
+read too, and run on the processor the same way. gpt-oss-20b needs about 12 GB of memory: a
+computer with less runs it split with another computer. (#390)
 
 **Qwen models' tool calls reach your app as tool calls.** Qwen 3.5 and the Qwen models after
 it — and Qwen3-Coder — call a tool in an XML form their own instructions ask for. This server read
@@ -37,14 +55,40 @@ only JSON calls, so every call such a model made came back to your app as plain 
 as llama.cpp reads it, on both APIs, streamed or not, with each argument given the type the tool
 says it has — a number arrives as a number, text as text. (#395)
 
-**A reply asked for as JSON copies text in fewer steps.** A model writes text it has already seen —
-a record in the question, a name it wrote earlier — faster by guessing several words ahead and
-checking them in one step. A reply asked for as JSON (`response_format`, or the Responses API's
-`text.format`) is held to valid JSON word by word on this computer, and that switched the guessing
-off. It now guesses as other replies do, and each guess is checked against the JSON it must stay,
-so the reply is the one it would have been without guessing. In a test that copied a record from
-the question into JSON (TinyLlama, on the processor), 37 of the reply's tokens came from guesses
-checked together instead of one step each, and the reply was the same, token for token. (#336)
+**Getting a model you already have part of no longer downloads those parts again.** Every
+download — the dashboard's Get, `swarmllm get-model`, the reference models — fetched each part it
+named from HuggingFace in full, even a part already on this computer, and replaced it with the new
+copy: asking for all of a model you held half of downloaded the whole thing. A part this computer
+already holds, checked when it arrived, is now kept and skipped; a part whose contents are in
+question is still fetched again, since that is how it is put right. (#393)
+
+**The network now keeps the models people actually use, and gives back the ones nobody does.** Until
+now a model stayed on the network once a few computers held it, whether or not anyone used it: on
+2026-11-01 it held 34 models, nearly all from 2024, several in more than one copy of the same size.
+Once a day each computer now reads which models people run from HuggingFace's list of downloadable
+models — only families this release can run, counted per model across all of its uploads rather
+than per upload (automated test downloads otherwise top the list), the most-run three for each size
+of computer — keeps those on the network, and registers up to three a day the network has not heard
+of. A computer gives back its copy of a model only when that model is not on the list, has not been
+used on this computer for 14 days, is not wanted on the network right now, and was not chosen by
+this computer's owner: a model downloaded from the dashboard, pinned, kept on this computer or set
+as the default is never given back. A computer that cannot read the list — offline, or HuggingFace
+unreachable for three days — gives nothing back, and after this update every computer watches for
+14 days before it gives anything back. Content is not judged: a model with its safety training
+removed is kept or given back like any other, and is still never pre-selected for someone who did
+not pick it. A computer also no longer tells the others which model its owner is using: the demand
+it shares with the network now counts only the work it does for other people's requests (#389).
+
+**A split that starts and finishes on this computer skips more of the work nobody will read.** On
+such a split this computer runs the model's last layers on every answer the other computers send
+back, including answers to guesses already proven wrong, so its copy of the conversation stays in
+step with theirs. Such an answer now waits to be run together with the next useful one, or is
+dropped where the guesses are cut back anyway. It was built on 2026-10-30 and left off after one test
+found it no faster; that test's own records show its two runs fell inside a slow spell on the far
+computer that hit the old behaviour just as hard. Measured again with the runs interleaved
+(Thailand–Australia, Qwen2.5-14B, 12 runs): ordinary writing 17% faster (8.2 against 7.0 tokens a
+second), code unchanged (#369). This shape now runs as fast as the usual one at the same split (12
+interleaved runs: 6.7 against 6.9 tokens a second on writing, 18.5 against 17.2 on code).
 
 **A model on your own computer writes a reply faster when you have asked it something like it
 before.** An agent's requests repeat a great deal of what its earlier requests got back. A split
@@ -56,41 +100,41 @@ it; nothing is saved to disk or shown to another computer. Asking TinyLlama the 
 twice, on the processor: 74 of the second reply's 96 tokens came from guesses instead of 45, in
 24 checks instead of 53, and the reply was the same, token for token. (#337)
 
-**Groundwork for Qwen3-Coder-Next, not yet switched on.** This engine can now read the
-Qwen3-Next family's files — its layers are Qwen 3.5's with the attention heads stored in a
-different order, which is put right as the file is read — and on test files it agrees with
-llama.cpp. It stays turned off until one real file's replies are checked the same way: the
-smallest copy is 28 GB, more than one ordinary computer here can hold. (#390)
+**A reply asked for as JSON copies text in fewer steps.** A model writes text it has already seen —
+a record in the question, a name it wrote earlier — faster by guessing several words ahead and
+checking them in one step. A reply asked for as JSON (`response_format`, or the Responses API's
+`text.format`) is held to valid JSON word by word on this computer, and that switched the guessing
+off. It now guesses as other replies do, and each guess is checked against the JSON it must stay,
+so the reply is the one it would have been without guessing. In a test that copied a record from
+the question into JSON (TinyLlama, on the processor), 37 of the reply's tokens came from guesses
+checked together instead of one step each, and the reply was the same, token for token. (#336)
 
-**Qwen3-VL and Qwen2.5-VL models now run, for text.** Qwen3-VL — among the most downloaded models
-on HuggingFace at 2B, 4B and 8B — and Qwen2.5-VL were refused as families this engine did not know.
-Their language models are Qwen3's and Qwen2's, so they now run: Qwen3-VL's replies match llama.cpp's
-word for word on the 4B, and on Qwen2.5-VL's 3B this engine lands as close to an exact calculation
-as llama.cpp does. Pictures are not read yet: a request with an image is refused with a message
-saying so. (#390)
+**A computer's first shared reply after a start no longer turns off guessing for ten minutes.** A
+model split across computers runs faster when this computer guesses a few words ahead and the others
+check the guesses in one go. How many to guess is worked out from what each check costs, and a check
+to another computer can never cost less than the trip there and back. That floor was only applied
+once the trip had been timed, which takes the first few seconds after a start. A reply asked in those
+seconds could read one slow check as "checking costs more the more you guess", decide guessing never
+pays, and remember that for ten minutes. On the Thailand–Australia link 3 of 12 freshly started
+computers asked that early, and one then ran its next two replies at half speed (3.5 and 4.3 tokens a
+second against 6-8 and 18). A check to another computer is now floored by the cheapest check the
+reply has timed until the trip itself has been.
 
-**IBM Granite 4 models now run, and get their own chat format.** Granite — IBM's open models,
-downloaded hundreds of thousands of times a month at 3B, 8B and 30B — was refused as a family this
-engine did not know. It is Llama with one extra setting, how strongly each word attends to the
-others, and this engine now reads it: on the 3B a reply matches llama.cpp's for its first 79 words
-and parts where llama.cpp itself is torn between the same two. Granite 4.2 at 3B, 8B and 30B all
-load; earlier Granite files (3.x and 4.0), which need more settings, are refused with a message
-naming what is missing. Granite's chat template also
-failed to render on every request without tools, so it was asked in a generic format it was not
-trained on; it now gets its own — as would any other model whose template checks for tools the
-same way. (#390)
-
-**Groundwork for GLM-4.5-Air, not yet switched on.** This engine can now read the GLM-4.5
-family's files. Its experts are picked with a per-expert nudge that decides which experts run but
-not how much each one counts, and this engine now reads that nudge on every path. On test files it
-agrees with llama.cpp. Where the two part on a near-tie pick, an exact calculation shows the
-difference comes from rounding, not a mistake. Like Qwen3-Coder-Next, it stays off until one real
-file's replies are checked; the smallest copy is about 45 GB. (#390)
-
-**The model list Claude Code and other MCP clients read names a Gemma model as Gemma.** The
-`node_info` tool and the `swarmllm://models` resource called every Gemma model — and StarCoder2,
-GLM-4, DeepSeek-2 and Llama 4 — "Llama", the catalogue's catch-all for families it has no entry
-for. They now give the family the model's own file names ("gemma4") once this computer has read it.
+**An idle computer re-announces its place on the network only when it has moved.** Each computer
+keeps an estimate of how far, in milliseconds, it is from the others, and re-announces itself to the
+whole swarm when that changes. The estimate never sits still — it wobbles around one point — and
+each wobble past 5 ms re-sent the computer's full description to every peer: on 2026-10-31, 16 of
+one computer's 18 announcements in 18 minutes. The announced position now changes only when a
+window of recent estimates has moved away from an earlier one by a share of the distance to the
+nearest computer, the rule a published study of network coordinates found worked for every node
+where a fixed threshold did not (Ledlie, Pietzuch and Seltzer, 2006). On a live computer: 8
+position announcements in its first 16 minutes while it learned where it is, then one in the next
+19, where it made 15 in 25 minutes and kept going every 2-3. The announced position predicts round
+trips as well as the estimate itself (3-4% median error after the first 16 minutes). A computer
+timing a reply against yours still gets your estimate as it stands, sent with the reply. A computer
+that has just started is announced as sure enough to route by as soon as it is (about its fourth
+measurement): until 2026-11-01 its first announcement, made while it still knew nothing, could stand
+for its first 16 minutes, and the others would not plan a split that leaned on its position (#91).
 
 **A computer stops dialling old identities at addresses another computer now uses.** When a node
 reaches an address and a different computer answers, the address book kept that address under the
@@ -111,53 +155,31 @@ each peer in turn. The scores are now changed with the list locked and saved tog
 in one write, and a score that has not moved is not saved at all. A pause that is still logged now
 names the message it was handling, so the next cause can be found rather than guessed. (#314)
 
-**gpt-oss now runs.** OpenAI's gpt-oss — gpt-oss-20b is among the most downloaded open models — can
-be added and asked like any other model. On the real gpt-oss-20b its replies are llama.cpp's: one
-word for word, another for its first hundred words, until two equally likely words. An exact
-calculation over the file's own numbers puts this engine as close to the right answer as llama.cpp,
-and closer at the one place the two disagree. Its replies keep the model's reasoning apart from its
-answer, and they are read as llama.cpp reads them: the reasoning goes where a thinking model's
-reasoning goes, the answer is the answer, and a tool call arrives as a tool call, streamed or not. A
-request's reasoning effort (`reasoning_effort`: low, medium or high) reaches gpt-oss's instructions,
-as llama.cpp passes it, and reaches any model's chat template as that setting. **It runs on the
-processor for now, on a computer with a graphics card too**, and the dashboard says why: no
-graphics-card code reads its 4-bit format, MXFP4, yet, and running it there would take seconds a
-token. Files of other models that keep weights in MXFP4, such as unsloth's `MXFP4_MOE` uploads, now
-read too, and run on the processor the same way. gpt-oss-20b needs about 12 GB of memory: a
-computer with less runs it split with another computer. (#390)
+**A model file this computer cannot read is reported as such, not as a HuggingFace failure.**
+Some files carry a few tensors in a format this engine does not read yet (MXFP4, or the IQ
+formats), whatever their name says — unsloth's Qwen3-Coder-Next "Q4_K_M" is one. Getting one from
+the dashboard answered "502 — the cloud provider returned an error, try again", advice that could
+never work; it is now a plain 400 that names the format and the builds to choose instead. The list
+of models people run no longer gets stuck on such a file: it moves to the next upload of the same
+model, and a later release, which may read the file, tries it again. (#394)
 
-## [0.3.267-alpha] — 2026-11-01
+**Qwen3-VL and Qwen2.5-VL models now run, for text.** Qwen3-VL — among the most downloaded models
+on HuggingFace at 2B, 4B and 8B — and Qwen2.5-VL were refused as families this engine did not know.
+Their language models are Qwen3's and Qwen2's, so they now run: Qwen3-VL's replies match llama.cpp's
+word for word on the 4B, and on Qwen2.5-VL's 3B this engine lands as close to an exact calculation
+as llama.cpp does. Pictures are not read yet: a request with an image is refused with a message
+saying so. (#390)
 
-**You can now ask a model to answer without thinking first, or to think.** Models such as
-Qwen 3 and Gemma 4 can reason step by step before they answer, which takes time — minutes when a
-model is split across computers — and until now a request could not say which it wanted when the
-model ran on the network. It now can, the way other servers take it: on the OpenAI chat API,
-`"chat_template_kwargs": {"enable_thinking": false}` or `"reasoning_effort": "none"`; on the
-Responses API, `reasoning.effort`; on the Anthropic API, `"thinking": {"type": "disabled"}` (or
-`"enabled"` to ask for it). A request that says nothing gets the model's own default, as before.
-The Responses API's `reasoning.effort` now also reaches a cloud model, where it used to be dropped.
-*Correction to v0.3.229's notes*, which said Qwen3.5-4B's publisher's template asks it to answer
-without reasoning: that is the 0.8B's template. The 4B's own template asks it to think unless told
-not to, which a request can now do.
-When another computer leads a split for you, the setting goes with it; a computer on an older
-release is not asked to lead such a request. (#391)
-
-**The network now keeps the models people actually use, and gives back the ones nobody does.** Until
-now a model stayed on the network once a few computers held it, whether or not anyone used it: on
-2026-11-01 it held 34 models, nearly all from 2024, several in more than one copy of the same size.
-Once a day each computer now reads which models people run from HuggingFace's list of downloadable
-models — only families this release can run, counted per model across all of its uploads rather
-than per upload (automated test downloads otherwise top the list), the most-run three for each size
-of computer — keeps those on the network, and registers up to three a day the network has not heard
-of. A computer gives back its copy of a model only when that model is not on the list, has not been
-used on this computer for 14 days, is not wanted on the network right now, and was not chosen by
-this computer's owner: a model downloaded from the dashboard, pinned, kept on this computer or set
-as the default is never given back. A computer that cannot read the list — offline, or HuggingFace
-unreachable for three days — gives nothing back, and after this update every computer watches for
-14 days before it gives anything back. Content is not judged: a model with its safety training
-removed is kept or given back like any other, and is still never pre-selected for someone who did
-not pick it. A computer also no longer tells the others which model its owner is using: the demand
-it shares with the network now counts only the work it does for other people's requests (#389).
+**IBM Granite 4 models now run, and get their own chat format.** Granite — IBM's open models,
+downloaded hundreds of thousands of times a month at 3B, 8B and 30B — was refused as a family this
+engine did not know. It is Llama with one extra setting, how strongly each word attends to the
+others, and this engine now reads it: on the 3B a reply matches llama.cpp's for its first 79 words
+and parts where llama.cpp itself is torn between the same two. Granite 4.2 at 3B, 8B and 30B all
+load; earlier Granite files (3.x and 4.0), which need more settings, are refused with a message
+naming what is missing. Granite's chat template also
+failed to render on every request without tools, so it was asked in a generic format it was not
+trained on; it now gets its own — as would any other model whose template checks for tools the
+same way. (#390)
 
 **Computers now say how long they held each part of a shared reply — the groundwork for not slowing
 a split down when the far computer is busy.** When a model is split between this computer and a far
@@ -173,43 +195,23 @@ that day) it was slower, for reasons that test has and a real split does not. It
 on the Thailand–Australia link once both ends run this version, and turned on only if it helps
 (#388).
 
-**An idle computer re-announces its place on the network only when it has moved.** Each computer
-keeps an estimate of how far, in milliseconds, it is from the others, and re-announces itself to the
-whole swarm when that changes. The estimate never sits still — it wobbles around one point — and
-each wobble past 5 ms re-sent the computer's full description to every peer: on 2026-10-31, 16 of
-one computer's 18 announcements in 18 minutes. The announced position now changes only when a
-window of recent estimates has moved away from an earlier one by a share of the distance to the
-nearest computer, the rule a published study of network coordinates found worked for every node
-where a fixed threshold did not (Ledlie, Pietzuch and Seltzer, 2006). On a live computer: 8
-position announcements in its first 16 minutes while it learned where it is, then one in the next
-19, where it made 15 in 25 minutes and kept going every 2-3. The announced position predicts round
-trips as well as the estimate itself (3-4% median error after the first 16 minutes). A computer
-timing a reply against yours still gets your estimate as it stands, sent with the reply. A computer
-that has just started is announced as sure enough to route by as soon as it is (about its fourth
-measurement): until 2026-11-01 its first announcement, made while it still knew nothing, could stand
-for its first 16 minutes, and the others would not plan a split that leaned on its position (#91).
+**Groundwork for Qwen3-Coder-Next, not yet switched on.** This engine can now read the
+Qwen3-Next family's files — its layers are Qwen 3.5's with the attention heads stored in a
+different order, which is put right as the file is read — and on test files it agrees with
+llama.cpp. It stays turned off until one real file's replies are checked the same way: the
+smallest copy is 28 GB, more than one ordinary computer here can hold. (#390)
 
-**A computer's first shared reply after a start no longer turns off guessing for ten minutes.** A
-model split across computers runs faster when this computer guesses a few words ahead and the others
-check the guesses in one go. How many to guess is worked out from what each check costs, and a check
-to another computer can never cost less than the trip there and back. That floor was only applied
-once the trip had been timed, which takes the first few seconds after a start. A reply asked in those
-seconds could read one slow check as "checking costs more the more you guess", decide guessing never
-pays, and remember that for ten minutes. On the Thailand–Australia link 3 of 12 freshly started
-computers asked that early, and one then ran its next two replies at half speed (3.5 and 4.3 tokens a
-second against 6-8 and 18). A check to another computer is now floored by the cheapest check the
-reply has timed until the trip itself has been.
+**Groundwork for GLM-4.5-Air, not yet switched on.** This engine can now read the GLM-4.5
+family's files. Its experts are picked with a per-expert nudge that decides which experts run but
+not how much each one counts, and this engine now reads that nudge on every path. On test files it
+agrees with llama.cpp. Where the two part on a near-tie pick, an exact calculation shows the
+difference comes from rounding, not a mistake. Like Qwen3-Coder-Next, it stays off until one real
+file's replies are checked; the smallest copy is about 45 GB. (#390)
 
-**A split that starts and finishes on this computer skips more of the work nobody will read.** On
-such a split this computer runs the model's last layers on every answer the other computers send
-back, including answers to guesses already proven wrong, so its copy of the conversation stays in
-step with theirs. Such an answer now waits to be run together with the next useful one, or is
-dropped where the guesses are cut back anyway. It was built on 2026-10-30 and left off after one test
-found it no faster; that test's own records show its two runs fell inside a slow spell on the far
-computer that hit the old behaviour just as hard. Measured again with the runs interleaved
-(Thailand–Australia, Qwen2.5-14B, 12 runs): ordinary writing 17% faster (8.2 against 7.0 tokens a
-second), code unchanged (#369). This shape now runs as fast as the usual one at the same split (12
-interleaved runs: 6.7 against 6.9 tokens a second on writing, 18.5 against 17.2 on code).
+**The model list Claude Code and other MCP clients read names a Gemma model as Gemma.** The
+`node_info` tool and the `swarmllm://models` resource called every Gemma model — and StarCoder2,
+GLM-4, DeepSeek-2 and Llama 4 — "Llama", the catalogue's catch-all for families it has no entry
+for. They now give the family the model's own file names ("gemma4") once this computer has read it.
 
 ## [0.3.266-alpha] — 2026-11-01
 
