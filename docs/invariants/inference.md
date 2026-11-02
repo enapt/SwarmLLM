@@ -6287,6 +6287,18 @@ that rounding through four layers. Judge a quantized tiny file by the triangle, 
 refused unless `SWARMLLM_UNCHECKED_FAMILIES` names `gpt-oss`. What a test file cannot check is
 left: the harmony reply channels, the template under minijinja, the gpt-4o tokenizer — and a real
 file's reply.
+
+**Since then** (2026-11-02): the template renders as jinja2 does
+(`gpt_oss_renders_as_jinja2_renders_it`), the harmony reply is read (api-surfaces § "A harmony
+turn"), and **the tokenizer agrees with llama.cpp master on the real vocabulary** (201,088 entries,
+`gpt-4o` pre-tokenizer): 17 of 17 cases identical through `tokenizer_agrees_with_llama_cpp`, from
+`tok_cases` over the real file's header (sparse to past the file's size) — the shipped template
+rendered over three conversations and with tools at high effort, every harmony marker in a row,
+code, Cyrillic and CJK, contractions, digit runs, ligatures, `\r\n` and a no-break space.
+llama.cpp sets `clean_spaces = false` for `gpt-4o` (`llama-vocab.cpp`), and its server decodes a
+reply piece by piece, which never cleans spaces — so there is nothing to build there. The byte-level
+decode writes every control marker out as its text (`PieceDecoder::decode`), which is what the
+harmony reader reads. Left: the real 11.5 GB file's reply.
 ## Qwen 3.5's decode steps are captured too: a DeltaNet state is written into a second pair of buffers (2026-10-11, FUTURE_WORK #228 (4))
 
 **What refused it.** `decode_graph_ineligibility` let only dense layers into a
