@@ -48,7 +48,7 @@ pub use network::{
     PromptAdmissionVerdict, PruneEvent, RebalanceEvent, RegionShardSummary, RelayedEnvelope,
     RequesterGuesses, ResendTokens, SessionKeyConfirm, ShardAnnounce, ShardDownloadProgress,
     ShardRequest, ShardResponse, SwarmMessage, WishlistAnnouncement, WishlistAnnouncementEntry,
-    BUILD_TAG_UNKNOWN, MAX_REQUESTER_GUESSES,
+    BUILD_TAG_UNKNOWN, MAX_REQUESTER_GUESSES, MAX_SHARDS_PER_ANNOUNCE,
 };
 pub use node::{
     features, ContributionLevel, CpuInfo, GpuInfo, LatencyObservation, NodeCapability, NodeStats,

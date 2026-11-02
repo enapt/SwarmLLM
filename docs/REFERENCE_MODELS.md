@@ -80,8 +80,10 @@ hop becomes two. Smaller shards give that more opportunities to happen, and the
 effect is invisible until you look at segment counts.
 
 *Bookkeeping.* Every shard carries a holder record, a DHT provider record, and
-an entry in each announce. `MAX_SHARDS_PER_ANNOUNCE` is 512, so 16-shard models
-put a real ceiling on how many models one node can announce at once.
+an entry in each announce. A receiver takes at most `MAX_SHARDS_PER_ANNOUNCE`
+(512) parts a message, so a node holding more sends its list in pieces (since
+v0.3.270; before that its whole list was dropped, gotcha #1027) — more parts mean
+more messages, not a ceiling.
 
 Lower `shard_size_mb` when you are placing shards **deliberately** — the
 `3node_sharded_setup.sh` split assigns contiguous halves by hand, so

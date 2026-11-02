@@ -337,6 +337,13 @@ The router logs `DIAG: re-plan after a refusal found no other route` with the re
 error beside what it reported. "Has gone" is then true: a holder that DIED (connection closed)
 did not say no.
 
+**Or a holder nobody can SEE (before v0.3.270).** A node announcing more than 512 parts had its
+whole list dropped by every receiver (`WARN ShardAnnounce exceeds shard limit — dropping`, gotcha
+#1027): it was online and held the range, and the swarm credited it with nothing new. Compare a
+peer's `hosted_shards` in `/api/admin/peers` with what this node credits it in the registry; a gap
+is this. From v0.3.270 the sender cuts a long list into pieces of 512, each model whole —
+`DEBUG DIAG: parts list sent in pieces every receiver takes` (`parts=`, `pieces=`) on the sender.
+
 ## "Why is this route so slow?" — what prompt privacy adds (#165)
 
 With "Start and finish on this computer" on (auto-on where this node holds both ends of a

@@ -4981,6 +4981,49 @@ and served nothing while spending ~2.6 Mbit/s.
   advertising `features::MANIFEST_DIGESTS` is told the versions and pulls only
   what it lacks — § "Announce, then pull" below.
 
+## A parts list longer than a receiver takes goes in pieces, each model whole (2026-11-02)
+
+**What happened.** Every node drops a `ShardAnnounce` listing more than 512 parts
+UNREAD (`MAX_SHARDS_PER_ANNOUNCE`, a memory bound in `daemon::dispatch`, warn
+`ShardAnnounce exceeds shard limit — dropping`), and no sender ever split its list.
+The Australian RTX 3060 node `aa3d1e66` grew past it at 07:24:43Z 11-02 (513 parts;
+408 on 11-01, 565 by 13:41Z): from then on every peer ignored its whole list — 65
+drops in this node's log by 13:47Z, 67 on the Proxmox box — so its 43 models read
+as held by nobody. Measured on this node at 13:52Z: every other peer's announced
+part count equal to what the registry credited it (91/91, 85/85, 43/43, 49/49,
+50/50), `aa3d1e66` 565 announced, 2 credited (single new parts, sent alone). It
+held the only copies of gemma-4-26b/31b, qwen3.6-27b/35b, qwen3.8-27b, most of
+Ornith-1.5-122B and Ornith-1.5-9B's first layers — so the 11-02 "No reachable node
+holds layers 0-12" for an Ornith-1.5-9B split, recorded as network state, was this.
+And it moved disk: the Proxmox box, at its storage target, gave back healthy copies
+(Qwen3-30B-A3B parts with 3 holders, xLAM-8B with 5) "to make room for a part the
+swarm is short of" — parts `aa3d1e66` held (`holders=0 why="a part no computer
+holds"`, gpt-oss-20b-q4-k-m, ornith-1.5-35b), and logged hourly that nothing could
+go "without dropping a model below the number of copies the network needs".
+
+**The fix is the sender's, so old receivers need nothing.** A receiver reads
+`complete_for_models` per MESSAGE (it retracts this holder's records for a listed
+model that are missing from that message), and adds every other part. So
+`ShardAnnounce::into_pieces` (types crate) cuts a long list into pieces of at most
+512 parts with every model's parts, build tags, complete flag and checked flag in
+ONE piece; a model listed complete with no part goes with the first. Every released
+receiver takes each piece as the announcement it already understands — no wire
+change, no feature bit. It runs where a message LEAVES the node
+(`network::manager::commands::pieces_if_too_long`, asked by the gossip publish
+and the direct send), because eleven call sites build a parts list. IPFS Bitswap
+sends a large want-list the same way: several messages, each saying for itself
+whether it is the full list. The bound is one constant on both sides; raising it
+would make a new sender's lists unreadable to every older node again.
+
+What a change must keep: a piece never splits a model it lists complete (the
+second piece would retract the first's parts — test
+`every_piece_is_one_a_receiver_takes_and_together_they_say_everything` goes red with
+a naive cut, "model-27 split across pieces"); every piece fits the receiver's check
+(`fits_one_message`); a tag vector that is not parallel goes in no piece. DIAG
+(debug) `parts list sent in pieces every receiver takes` (`parts`, `pieces`).
+Verified in the field once `aa3d1e66` runs it: its credited count here equals its
+announced count.
+
 ## A counter named for an outcome may only be counting the attempt
 
 GossipSub's `sent` / `sent_bytes` count **attempts, once per recipient**:

@@ -340,6 +340,12 @@ Publish on CHANGE, never per item per tick — gate on a digest of what is ASSER
 
 → `docs/invariants/network.md` § "Gossip says what CHANGED, to everyone — and what one peer lacks, to that peer"
 
+## A parts list longer than a receiver takes goes in pieces, each model whole (2026-11-02)
+
+Every node drops a `ShardAnnounce` past **`swarmllm_types::MAX_SHARDS_PER_ANNOUNCE`** (512) unread, so a sender never sends one: **`network::manager::commands::pieces_if_too_long`** — asked by the gossip publish and the direct send, never at the eleven call sites — cuts it with **`ShardAnnounce::into_pieces`**, each model's parts, tags and flags in ONE piece (a receiver retracts per message for a model listed complete). No wire change; never raise the bound (older receivers keep it). A 565-part holder was invisible to the whole swarm for 6 h without it.
+
+→ `docs/invariants/network.md` § "A parts list longer than a receiver takes goes in pieces"
+
 ## A counter named for an outcome may only be counting the attempt
 
 GossipSub's `sent` / `sent_bytes` count ATTEMPTS per recipient, so `sum(topic.sent_bytes) <= out_bytes` must NOT be asserted — the gap is the signal. Read both drop paths (queue expiry via metrics; queue full only via `gossipsub::Event::SlowPeer`). `sent_msgs` is not a publish rate; `published_msgs` is. Before estimating a total's components, look for the counter you are not reading (gotcha #673).

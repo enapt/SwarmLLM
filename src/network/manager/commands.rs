@@ -450,8 +450,20 @@ impl NetworkManager {
         }
     }
 
-    /// Broadcast a message via GossipSub.
+    /// Broadcast a message via GossipSub — a parts list too long for one
+    /// message as the pieces every receiver takes ([`pieces_if_too_long`]).
     pub(super) async fn handle_broadcast(&mut self, msg: SwarmMessage) {
+        if let Some(pieces) = pieces_if_too_long(&msg) {
+            for piece in pieces {
+                self.publish_to_gossip(SwarmMessage::ShardAnnounce(piece))
+                    .await;
+            }
+            return;
+        }
+        self.publish_to_gossip(msg).await;
+    }
+
+    async fn publish_to_gossip(&mut self, msg: SwarmMessage) {
         let topic = match &msg {
             SwarmMessage::ShardAnnounce(_)
             | SwarmMessage::NodeCapabilityUpdate(_)
@@ -552,6 +564,33 @@ impl NetworkManager {
             }
         }
     }
+}
+
+/// A parts list longer than a receiver takes in one message
+/// (`swarmllm_types::MAX_SHARDS_PER_ANNOUNCE`), as the pieces it takes; `None`
+/// for any other message, which goes as it is.
+///
+/// Asked by the two ways a message leaves this node — the gossip publish
+/// (`handle_broadcast`) and the direct send (`handle_send_rr_message`) — so no
+/// producer of a parts list can skip it: there are eleven, from a single new
+/// part to the identify catch-up's whole list. Every receiver drops a list past
+/// the bound UNREAD, so a node holding more parts was invisible to the whole
+/// swarm (2026-11-02: 565 parts of 43 models, the only copies of several).
+pub(super) fn pieces_if_too_long(msg: &SwarmMessage) -> Option<Vec<swarmllm_types::ShardAnnounce>> {
+    let SwarmMessage::ShardAnnounce(announce) = msg else {
+        return None;
+    };
+    if announce.fits_one_message() {
+        return None;
+    }
+    let pieces = announce.clone().into_pieces();
+    tracing::debug!(
+        parts = announce.shards.len(),
+        pieces = pieces.len(),
+        most_a_piece = swarmllm_types::MAX_SHARDS_PER_ANNOUNCE,
+        "DIAG: parts list sent in pieces every receiver takes"
+    );
+    Some(pieces)
 }
 
 #[cfg(test)]

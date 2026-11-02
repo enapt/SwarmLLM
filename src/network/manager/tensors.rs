@@ -1185,6 +1185,30 @@ impl NetworkManager {
         label: &str,
         delivery_request_id: Option<uuid::Uuid>,
     ) {
+        if let Some(pieces) = super::commands::pieces_if_too_long(&msg) {
+            // A parts list is never a streamed send, so there is no delivery
+            // id to share; were there one, it goes with the first piece.
+            let mut delivery = delivery_request_id;
+            for piece in pieces {
+                self.send_one_rr_message(
+                    target_peer_bytes.clone(),
+                    SwarmMessage::ShardAnnounce(piece),
+                    label,
+                    delivery.take(),
+                );
+            }
+            return;
+        }
+        self.send_one_rr_message(target_peer_bytes, msg, label, delivery_request_id);
+    }
+
+    fn send_one_rr_message(
+        &mut self,
+        target_peer_bytes: Vec<u8>,
+        msg: SwarmMessage,
+        label: &str,
+        delivery_request_id: Option<uuid::Uuid>,
+    ) {
         let Some(peer_id) = Self::resolve_peer_id(&target_peer_bytes, label) else {
             // Notify the streaming caller immediately — otherwise it sits at
             // FIRST_TOKEN_TIMEOUT (120s) waiting for a peer we can't even

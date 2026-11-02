@@ -450,7 +450,9 @@ pub const MAX_FOREIGN_POOL_CATALOG_ENTRIES: usize = 5_000;
 /// same cadence so a pool that goes dark stops appearing in discovery.
 pub const FOREIGN_POOL_CATALOG_MAX_AGE_MS: u64 = 2 * 60 * 60 * 1000;
 /// SEC: Cap shards per ShardAnnounce to prevent shard_holders memory exhaustion.
-const MAX_SHARDS_PER_ANNOUNCE: usize = 512;
+/// The same bound every sender keeps (`ShardAnnounce::into_pieces`): one figure,
+/// on both sides of the wire.
+use swarmllm_types::MAX_SHARDS_PER_ANNOUNCE;
 /// SEC: Cap blocks per PrefixCacheAnnounce. A 7B model at 64-token blocks
 /// tops out at ~120 blocks per 8K prompt; 1024 leaves headroom for larger
 /// contexts without unbounded growth.

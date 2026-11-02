@@ -408,6 +408,123 @@ pub struct ShardAnnounce {
     pub origin_checked_models: Vec<ModelId>,
 }
 
+/// The most parts one `ShardAnnounce` may list — and the most models its
+/// `origin_checked_models` may name — before a receiver drops the WHOLE message
+/// unread (`daemon::dispatch`, a memory bound every released node enforces).
+///
+/// A wire contract, not a tuning knob: a sender never puts more than this in
+/// one message, and a node holding more parts sends its list in pieces
+/// (`ShardAnnounce::into_pieces`). Raising it would make a new sender's lists
+/// unreadable to every older node again — which is how the swarm lost sight of
+/// its largest holder on 2026-11-02: 565 parts, dropped by every peer from the
+/// moment it passed 512, so its 43 models read as held by nobody.
+pub const MAX_SHARDS_PER_ANNOUNCE: usize = 512;
+
+impl ShardAnnounce {
+    /// Does a receiver take this as one message (`MAX_SHARDS_PER_ANNOUNCE`)?
+    pub fn fits_one_message(&self) -> bool {
+        self.shards.len() <= MAX_SHARDS_PER_ANNOUNCE
+            && self.origin_checked_models.len() <= MAX_SHARDS_PER_ANNOUNCE
+    }
+
+    /// This announcement as messages a receiver takes: itself when it fits
+    /// one, else pieces of at most `MAX_SHARDS_PER_ANNOUNCE` parts.
+    ///
+    /// **Every model's parts travel in ONE piece, with that model's flags.** A
+    /// receiver reads `complete_for_models` per MESSAGE — it drops this node's
+    /// holder records for a listed model that are missing from that message —
+    /// so a model whose parts were split across two pieces would have its first
+    /// half retracted by the second. Each piece therefore carries whole models:
+    /// their parts, their build tags (still positionally parallel), their
+    /// `complete_for_models` entry and their `origin_checked_models` entry. A
+    /// model listed complete with no part here (a retraction of every part)
+    /// goes with the first piece; a model checked but with no part listed tells
+    /// a receiver nothing (it reads the flag per part) and is left out. Older
+    /// receivers need nothing new: each piece is an announcement they already
+    /// read correctly. IPFS Bitswap sends a large want-list the same way —
+    /// several messages, each saying for itself whether it is the full list.
+    ///
+    /// A model with more parts than a piece holds (none has: a part number is
+    /// under 256) still goes out, across pieces, but outside
+    /// `complete_for_models` — added to, never retracted — rather than
+    /// retracting its own parts.
+    pub fn into_pieces(self) -> Vec<ShardAnnounce> {
+        self.into_pieces_of(MAX_SHARDS_PER_ANNOUNCE)
+    }
+
+    fn into_pieces_of(self, most: usize) -> Vec<ShardAnnounce> {
+        let most = most.max(1);
+        if self.shards.len() <= most && self.origin_checked_models.len() <= most {
+            return vec![self];
+        }
+        let ShardAnnounce {
+            node_id,
+            shards,
+            timestamp,
+            complete_for_models,
+            shard_builds,
+            origin_checked_models,
+        } = self;
+        // A tag vector that is not parallel says nothing per position (the
+        // receiver discards it wholesale), so no piece carries one.
+        let builds: Option<Vec<u64>> = (shard_builds.len() == shards.len()).then_some(shard_builds);
+        // Each model's parts with their tags, models in the order they first appear.
+        type PartsAndTags = Vec<(ShardId, Option<u64>)>;
+        let mut groups: Vec<(ModelId, PartsAndTags)> = Vec::new();
+        let mut group_of: std::collections::HashMap<ModelId, usize> =
+            std::collections::HashMap::new();
+        for (i, shard) in shards.into_iter().enumerate() {
+            let tag = builds.as_ref().map(|b| b[i]);
+            let g = *group_of.entry(shard.model_id.clone()).or_insert_with(|| {
+                groups.push((shard.model_id.clone(), Vec::new()));
+                groups.len() - 1
+            });
+            groups[g].1.push((shard, tag));
+        }
+        let complete: std::collections::HashSet<&ModelId> = complete_for_models.iter().collect();
+        let checked: std::collections::HashSet<&ModelId> = origin_checked_models.iter().collect();
+        let empty = || ShardAnnounce {
+            node_id: node_id.clone(),
+            shards: Vec::new(),
+            timestamp,
+            complete_for_models: Vec::new(),
+            shard_builds: Vec::new(),
+            origin_checked_models: Vec::new(),
+        };
+        let mut pieces: Vec<ShardAnnounce> = Vec::new();
+        let mut piece = empty();
+        for (model, parts) in &groups {
+            let whole = parts.len() <= most;
+            for chunk in parts.chunks(most) {
+                if !piece.shards.is_empty() && piece.shards.len() + chunk.len() > most {
+                    pieces.push(std::mem::replace(&mut piece, empty()));
+                }
+                for (shard, tag) in chunk {
+                    piece.shards.push(shard.clone());
+                    if let Some(tag) = tag {
+                        piece.shard_builds.push(*tag);
+                    }
+                }
+                if whole && complete.contains(model) {
+                    piece.complete_for_models.push(model.clone());
+                }
+                if checked.contains(model) {
+                    piece.origin_checked_models.push(model.clone());
+                }
+            }
+        }
+        pieces.push(piece);
+        let listed: std::collections::HashSet<&ModelId> = groups.iter().map(|(m, _)| m).collect();
+        pieces[0].complete_for_models.extend(
+            complete_for_models
+                .iter()
+                .filter(|m| !listed.contains(m))
+                .cloned(),
+        );
+        pieces
+    }
+}
+
 /// "I could not say which build this is." Never compare equal to anything,
 /// including itself — an unknown tag must never *exclude* a holder, the same
 /// contract `max_hostable_layers` keeps for unknown capacity.
@@ -1256,5 +1373,175 @@ mod prompt_admission_tests {
             assert_eq!(back, newer);
         }
         let _ = OldVerdict::Proceed;
+    }
+}
+
+#[cfg(test)]
+mod shard_announce_pieces_tests {
+    use super::{ShardAnnounce, MAX_SHARDS_PER_ANNOUNCE};
+    use crate::ids::{ModelId, NodeId, ShardId};
+    use std::collections::{HashMap, HashSet};
+
+    fn id(m: usize) -> ModelId {
+        ModelId(format!("model-{m}"))
+    }
+
+    /// The shape that went unseen on 2026-11-02: one holder, 565 parts over
+    /// 43 models of 1 to 79 parts, every model listed complete, every other
+    /// one checked, a build tag per part.
+    fn big_holder() -> ShardAnnounce {
+        let sizes: Vec<usize> = (0..43).map(|m| [1, 2, 4, 9, 16, 22, 79][m % 7]).collect();
+        let mut shards = Vec::new();
+        for (m, &n) in sizes.iter().enumerate() {
+            for index in 0..n as u32 {
+                shards.push(ShardId {
+                    model_id: id(m),
+                    index,
+                });
+            }
+        }
+        assert!(
+            shards.len() > MAX_SHARDS_PER_ANNOUNCE,
+            "{} parts",
+            shards.len()
+        );
+        let shard_builds = (0..shards.len() as u64).map(|i| 1000 + i).collect();
+        ShardAnnounce {
+            node_id: NodeId([7; 32]),
+            complete_for_models: (0..43).map(id).collect(),
+            origin_checked_models: (0..43).step_by(2).map(id).collect(),
+            shards,
+            timestamp: chrono::Utc::now(),
+            shard_builds,
+        }
+    }
+
+    fn tag_of(a: &ShardAnnounce) -> HashMap<ShardId, u64> {
+        a.shards
+            .iter()
+            .cloned()
+            .zip(a.shard_builds.iter().copied())
+            .collect()
+    }
+
+    #[test]
+    fn a_list_that_fits_is_sent_as_it_is() {
+        let mut small = big_holder();
+        small.shards.truncate(MAX_SHARDS_PER_ANNOUNCE);
+        small.shard_builds.truncate(MAX_SHARDS_PER_ANNOUNCE);
+        assert!(small.fits_one_message());
+        let before = serde_json::to_value(&small).unwrap();
+        let pieces = small.into_pieces();
+        assert_eq!(pieces.len(), 1);
+        assert_eq!(serde_json::to_value(&pieces[0]).unwrap(), before);
+    }
+
+    #[test]
+    fn every_piece_is_one_a_receiver_takes_and_together_they_say_everything() {
+        let whole = big_holder();
+        assert!(!whole.fits_one_message());
+        let tags = tag_of(&whole);
+        let pieces = whole.clone().into_pieces();
+        assert!(pieces.len() >= 2);
+        let mut seen_parts = Vec::new();
+        let mut piece_of_model: HashMap<ModelId, usize> = HashMap::new();
+        for (p, piece) in pieces.iter().enumerate() {
+            // What the receiver checks before it reads a single part.
+            assert!(
+                piece.fits_one_message(),
+                "piece {p}: {} parts",
+                piece.shards.len()
+            );
+            assert_eq!(
+                piece.shard_builds.len(),
+                piece.shards.len(),
+                "tags stay parallel"
+            );
+            assert_eq!(piece.node_id, whole.node_id);
+            for (shard, tag) in piece.shards.iter().zip(&piece.shard_builds) {
+                assert_eq!(tags[shard], *tag, "{shard:?} kept its own tag");
+                // A model's parts are all in ONE piece.
+                let first = *piece_of_model.entry(shard.model_id.clone()).or_insert(p);
+                assert_eq!(first, p, "{:?} split across pieces", shard.model_id);
+            }
+            seen_parts.extend(piece.shards.iter().cloned());
+            // A model's flags go with its parts, and nowhere else.
+            let here: HashSet<&ModelId> = piece.shards.iter().map(|s| &s.model_id).collect();
+            for m in piece
+                .complete_for_models
+                .iter()
+                .chain(&piece.origin_checked_models)
+            {
+                assert!(
+                    here.contains(m),
+                    "{m:?} flagged in a piece without its parts"
+                );
+            }
+        }
+        assert_eq!(seen_parts, whole.shards, "every part, once, in order");
+        let complete: HashSet<ModelId> = pieces
+            .iter()
+            .flat_map(|p| p.complete_for_models.iter().cloned())
+            .collect();
+        let checked: HashSet<ModelId> = pieces
+            .iter()
+            .flat_map(|p| p.origin_checked_models.iter().cloned())
+            .collect();
+        assert_eq!(
+            complete,
+            whole.complete_for_models.iter().cloned().collect()
+        );
+        assert_eq!(
+            checked,
+            whole.origin_checked_models.iter().cloned().collect()
+        );
+    }
+
+    #[test]
+    fn a_model_retracted_whole_goes_with_the_first_piece() {
+        let mut whole = big_holder();
+        let gone = ModelId("deleted-here".into());
+        whole.complete_for_models.push(gone.clone());
+        let pieces = whole.into_pieces();
+        assert!(pieces[0].complete_for_models.contains(&gone));
+        assert_eq!(
+            pieces
+                .iter()
+                .filter(|p| p.complete_for_models.contains(&gone))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn a_tag_vector_that_is_not_parallel_goes_in_no_piece() {
+        let mut whole = big_holder();
+        whole.shard_builds.pop();
+        for piece in whole.into_pieces() {
+            assert!(piece.shard_builds.is_empty());
+        }
+    }
+
+    #[test]
+    fn a_model_too_big_for_one_piece_is_added_to_and_never_retracted() {
+        let mut whole = big_holder();
+        whole.shards = (0..10)
+            .map(|index| ShardId {
+                model_id: id(0),
+                index,
+            })
+            .collect();
+        whole.shard_builds = (0..10).collect();
+        let pieces = whole.clone().into_pieces_of(4);
+        assert_eq!(pieces.len(), 3);
+        for piece in &pieces {
+            assert!(piece.shards.len() <= 4);
+            assert!(!piece.complete_for_models.contains(&id(0)));
+        }
+        let all: Vec<ShardId> = pieces
+            .iter()
+            .flat_map(|p| p.shards.iter().cloned())
+            .collect();
+        assert_eq!(all, whole.shards);
     }
 }
