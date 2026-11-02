@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #396**). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #397**). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -2018,6 +2018,31 @@ processor-only 1.14-1.39x. That day's 14B processor-only gap (~312 against 278 m
 was measured against the never-repacked reference above. Not ours, and llama.cpp's too: the card
 clocks down between steps of a split (255-600 MHz between 1755 MHz bursts), and back-to-back
 runs on this laptop heat it enough to slow a split step 133 → 185 ms within 40 tokens (gotcha #825).
+
+#### #396 — A mixture-of-experts model with its experts in RAM picks its decode width by luck, and half the time decodes ~12% slower
+`P3` · perf-local · **OPEN** — 2026-11-02 · history: this entry; gotcha #1024
+
+The decode-width calibration (`cpu_pools::Calibration`) leaves the widest width only for a
+narrower one whose median is 15% faster AND whose slowest sample beats the widest's median.
+On the gate's MoE placement (qwen3-30b-a3b Q2_K, every layer on the card, the routed experts
+of 26-29 layers in RAM, `offered=4`) that test passes on noise. **16 workers across the
+.264, .265, .266 and .268 gates: 4 threads chosen 8 times, 3 threads 7, 2 threads once.**
+The widest width's calibration median read 42-109 ms. Both builds with the width PINNED
+(`SWARMLLM_DECODE_THREADS`, the gate's own arm, 8 samples each, 2026-11-02): 4 threads
+21.45 tok/s (.268) against 21.98 (.266), 3 threads ~19 for both. So 4 threads is ~12% faster
+at steady state, while in the seven runs that picked 3 the calibration's 3-thread median read 42-60 ms
+against 4's 51-109. A worker keeps its pick for its life, so on such a machine about every
+second worker decodes ~12% slower until it restarts. The .268 gate's MoE decode 0.90x was this
+alone: both of that gate's .268 workers picked 3, both of the .266 workers kept 4. The dense
+arms (cpu, split) kept 4 every time: there the gap between widths is wider than the spread.
+
+**Not established**: why the widest width's early samples are inflated on this placement.
+Each width has its own pool (`pool_for`). A step here alternates card and processor every
+layer, so the card's clock ramp in the first tokens (gotcha #825) is one untested lead.
+**Next**: log each calibration sample (step, width, ns) at debug on this arm across ~6
+workers and set them beside pinned per-step times. Then decide between (a) confirming a
+narrower pick with a short paired re-check against the widest before settling (ABAB) and
+(b) timing only the processor's share of a step.
 
 #### #295 — Gemma 4's E2B/E4B split between card and processor copies a shared layer's history every step
 `P3` · perf-local · **PARTIAL** — 2026-10-17 · history: #115 (3c); (a) captured, (b) launches fixed, 2026-10-19
