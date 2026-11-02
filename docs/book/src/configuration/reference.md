@@ -250,7 +250,7 @@ a tailnet — devices you authorised — which is why the LAN case stays opt-in.
 | `on_metered_connection` | string | `"auto"` | What this node holds back on a metered connection (a phone's hotspot, a mobile plan): downloads it would start on its own, and new work and model parts for other computers. `"auto"` pauses while the system says the connection is metered (NetworkManager on Linux, the connection's cost on Windows and under WSL2; nothing on macOS yet), `"pause"` always pauses, `"allow"` never does. Downloads you ask for, the repair of parts already held, your own requests and work already running for another computer are never paused |
 | `parallax_auto_rebalance` | boolean | `true` | Bias scoring toward Parallax allocator recommendations (C.2) |
 | `default_model_shard_cap` | integer | `0` | Max shards auto-manage acquires per model. `0` = unlimited. **Set this if you want to add capacity rather than redundancy** — see below |
-| `idle_unload_secs` | integer | `300` | Free a loaded model's GPU memory after this long with no local requests AND little demand for it elsewhere in the network. Shards stay on disk, so the model reloads on the next request |
+| `idle_unload_secs` | integer | `300` | Free a loaded model's memory after this long with no request answered — yours or another computer's — however its parts are held (downloaded, pinned or locked). Checked every 30 s. Parts stay on disk, so the model reloads on the next request; `0` keeps every loaded model resident |
 
 
 ### Contributing capacity vs. contributing redundancy

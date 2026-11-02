@@ -249,11 +249,12 @@ decides how much to free — so eviction reaches its own stop condition while
 admission is still short, every time. Measured live: eviction freed 1202 MB, then
 admission refused against a 2449 MB shortfall and the model loaded on the CPU at
 ~7 tok/s with the card at 12%.
-**Neither timer can do this job.** `try_idle_vram_unload` runs on the auto-manage
-tick, so it cannot act on the request arriving *now*, and a deliberate hold
-(pin, lock, privacy setting) keeps a model resident for up to
-`idle_hard_unload_secs` (1 hour). (Until field report #035, 2026-10-12, regional
-demand bought the same reprieve — precisely a popular 8B.)
+**Neither timer can do this job.** `try_idle_vram_unload` runs on its own
+30 s clock (`IDLE_UNLOAD_CHECK_EVERY`), so it cannot act on the request arriving
+*now*, and an idle model keeps its memory for the whole `idle_unload_secs`
+window. (Until 2026-11-02 a deliberate hold — pin, lock, privacy setting — kept
+it up to an hour, and until field report #035, 2026-10-12, regional demand
+bought the same reprieve — precisely a popular 8B.)
 Three properties a change here must keep. **Plan before destroying**: the whole
 plan is costed first and abandoned whole if it cannot succeed, because unloading
 models and still not fitting costs a cold start and buys nothing. The RAM sibling
@@ -1349,7 +1350,23 @@ figure still measured was the region in the abstract plus this node's OWN
 recent requests, an average that decays over tens of minutes — so a 14B the
 owner had stopped using sat on 9.2 GB at "graphics card idle 20m" and the owner
 unloaded it by a timer. Ollama unloads after `keep_alive` (5 min) whatever the
-demand. A deliberate hold still keeps a model under the 12× ceiling.
+demand.
+
+**A hold on a model's PARTS buys its memory nothing (2026-11-02).** The gate is
+`stays_loaded_while_idle(idle, window)` — every model alike. A pin, locked parts,
+a pool pin and the privacy setting had kept an idle model loaded 12x the window
+(`IDLE_HARD_UNLOAD_MULTIPLIER`, an hour at the default), on the reasoning that
+"a pinned model stays warm while the machine is quiet". But a download from the
+dashboard pins what it fetches (`admin_hf::shards`, `pinned_by_user`, #389 (b)),
+so EVERY model a person had downloaded held the card for an hour after its last
+reply: measured on this node, gpt-oss-20b 6.5 GB of the 8 GB card (7,376 MiB
+used) 28 minutes after the release check, the owner asking why the card was full
+with nothing running; every idle unload in that log fired at 3,648-3,898 s idle
+against `threshold_secs=300`. Each of those holds is a statement about the FILES,
+which an unload never touches; the one setting about memory is
+`idle_unload_secs` (`0` keeps models loaded). The check also moved off the
+auto-manage tick (5 min) onto a 30 s clock: a model waited up to a whole tick past
+its window. Ollama's `keep_alive` (5 min, whatever the model) is the reference.
 
 ## An admitted prompt is RECORDED, not just decided
 
@@ -2984,7 +3001,7 @@ part of each segment on its machine's disk, this node's included, fetches not co
 (`CONVERSATION_GAP_SECS`, 120 s) — `near_chain::loaded_outside_near_segment`, asked by
 `try_idle_vram_unload` — then leaves the model to the ordinary rule for 30 min, Petals'
 hysteresis, so a router that still prefers the old route (a far card faster than the near
-processors) is not fought every conversation. Never over a deliberate hold. Tests
+processors) is not fought every conversation. (It skipped a deliberately held model until 2026-11-02, when holds stopped governing memory at all.) Tests
 `layers_loaded_outside_this_computers_segment_are_given_back`,
 `a_segment_still_being_fetched_keeps_what_is_loaded`; each of the four conditions toggled off →
 red. **A peer's segment counted only once HELD** (security review, v0.3.247): the chain had been

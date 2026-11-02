@@ -247,13 +247,14 @@ start. How much it commits is set by your **contribution** level
 
 The daemon reclaims VRAM in two ways:
 
-- **Demand-driven (before pressure):** a model with no local requests for
-  `[auto_manage] idle_unload_secs` (default 5 min) **and** low network demand is
-  unloaded from GPU memory automatically. Its shards stay on disk, so it reloads
-  (one cold start) on the next request — your holder status never changes. Set
-  `idle_unload_secs = 0` to keep every loaded model resident. Deliberately-held
-  models are never idle-unloaded — reference/test models (`swarmllm get-model`),
-  pinned or locked models, and encrypted-pipeline models stay resident.
+- **When a model is idle:** a model that has answered nobody — not you, not
+  another computer — for `[auto_manage] idle_unload_secs` (default 5 min) is
+  unloaded from GPU memory automatically, checked every 30 seconds. Its parts stay
+  on disk, so it reloads (one cold start) on the next request — your holder
+  status never changes. This is the same for every model: one you downloaded,
+  pinned or locked keeps its parts on disk, not its place in memory (before
+  v0.3.270 such a model stayed loaded for up to an hour). Set
+  `idle_unload_secs = 0` to keep every loaded model resident.
 - **When another program takes the card (automatic):** if a game or a video
   editor takes graphics memory SwarmLLM's models were loaded into, the daemon
   gives back what it can — the largest model that is not answering anyone loads

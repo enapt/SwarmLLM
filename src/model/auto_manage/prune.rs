@@ -85,19 +85,25 @@ fn privacy_holds_shard(
     required_ends.is_some_and(|(first, last)| index == first || index == last)
 }
 
-/// Multiple of `idle_unload_secs` after which memory is reclaimed even for a
-/// model the owner deliberately holds (a pin, a privacy setting, locked parts,
-/// a pool pin). Those choices are about keeping the model's PARTS; without a
-/// ceiling they would hold its memory forever, which is not what any operator
-/// reads `idle_unload_secs` to mean. Twelve times the configured idle window
-/// (one hour at the 5-minute default).
-const IDLE_HARD_UNLOAD_MULTIPLIER: i64 = 12;
+/// How often the idle unload looks, on its own clock beside the auto-manage
+/// tick (5 minutes by default), so a model goes within this of its window
+/// ending — it waited up to a whole tick more.
+pub(super) const IDLE_UNLOAD_CHECK_EVERY: std::time::Duration = std::time::Duration::from_secs(30);
 
-/// Does an idle model keep its memory? Only one the owner deliberately holds,
-/// and only until [`idle_hard_unload_secs`]; everything else goes once it has
-/// been idle for `idle_unload_secs`. `idle_secs` is
+/// Does an idle model keep its memory? Only while it has been idle for less
+/// than `idle_unload_secs` — every model alike. `idle_secs` is
 /// [`effective_idle_secs`] — a request this node made OR served for a peer, or
 /// the worker's own `last_used` — and `None` (never used) is idle.
+///
+/// **A hold on a model's PARTS buys its memory nothing (2026-11-02).** A pin,
+/// locked parts, a pool pin and the privacy setting each say which files stay
+/// on this computer; they kept an idle model on the card 12x the window (an
+/// hour at the default). And a download from the dashboard pins what it
+/// fetches (#389 (b)), so every model a person had downloaded held the card an
+/// hour after its last reply — 6.5 GB of an 8 GB card here, 30 minutes after a
+/// check, with the owner asking why the card was full with nothing running.
+/// The files are untouched by an unload either way; a model that should stay
+/// loaded is `idle_unload_secs = 0`.
 ///
 /// **Regional demand no longer buys a reprieve** (field report #035,
 /// 2026-10-12: a 14B "graphics card idle 20m" still holding 9.2 GB, the owner
@@ -110,23 +116,10 @@ const IDLE_HARD_UNLOAD_MULTIPLIER: i64 = 12;
 /// node's OWN past requests, an average that decays over tens of minutes, so
 /// the owner's own burst kept a model loaded long after they stopped. Ollama
 /// unloads after its `keep_alive` (5 minutes) whatever the demand.
-fn stays_loaded_while_idle(idle_secs: Option<i64>, deliberately_held: bool, window: u64) -> bool {
-    let Some(idle) = idle_secs else {
-        return false;
-    };
-    if idle < i64::try_from(window).unwrap_or(i64::MAX) {
-        return true;
-    }
-    deliberately_held && idle < idle_hard_unload_secs(window)
-}
-
-/// Idle seconds after which a deliberate hold no longer keeps a model loaded.
-fn idle_hard_unload_secs(idle_unload_secs: u64) -> i64 {
-    // `as i64` would wrap a very large configured window to a negative number,
-    // which inverts the check and unloads immediately instead of never.
-    i64::try_from(idle_unload_secs)
-        .unwrap_or(i64::MAX)
-        .saturating_mul(IDLE_HARD_UNLOAD_MULTIPLIER)
+fn stays_loaded_while_idle(idle_secs: Option<i64>, window: u64) -> bool {
+    // `as i64` would wrap a very large window to a negative number, which
+    // inverts the check and unloads at once instead of never.
+    idle_secs.is_some_and(|idle| idle < i64::try_from(window).unwrap_or(i64::MAX))
 }
 
 /// How long a loaded model can be considered idle.
@@ -1725,11 +1718,11 @@ impl AutoShardManager {
     }
 
     /// VRAM efficiency (2026-07) — free the GPU memory of any loaded model
-    /// nobody has used for `idle_unload_secs` (a deliberate hold buys up to
-    /// [`idle_hard_unload_secs`]; [`stays_loaded_while_idle`] is the gate).
-    /// Shards stay on disk (the worker re-spawns on the next request) and our
-    /// holder status is unchanged, so this only reclaims VRAM pinned for a
-    /// model nobody is currently using. Runs every cycle, independent of
+    /// nobody has used for `idle_unload_secs`, however its parts are held
+    /// ([`stays_loaded_while_idle`] is the gate). Shards stay on disk (the
+    /// worker re-spawns on the next request) and our holder status is
+    /// unchanged, so this only reclaims VRAM pinned for a model nobody is
+    /// currently using. Runs every [`IDLE_UNLOAD_CHECK_EVERY`], independent of
     /// memory pressure. `0` disables it.
     pub(super) async fn try_idle_vram_unload(&self, idle_unload_secs: u64) {
         if idle_unload_secs == 0 {
@@ -1776,76 +1769,19 @@ impl AutoShardManager {
         }
 
         let now = chrono::Utc::now();
-        let local_id = self.shared_state.identity.node_id().clone();
         let residency: std::collections::HashMap<ModelId, u64> =
             pool.model_residency_secs().into_iter().collect();
         let worker_idle: std::collections::HashMap<ModelId, u64> =
             pool.model_idle_secs().into_iter().collect();
-        // Pool shard pins snapshot (same source the pressure-prune uses).
-        let shard_pins = super::manager::read_shard_pins_blocking(&self.shared_state).await;
 
         for model_id in loaded {
             if active_models.contains(&model_id) {
                 continue;
             }
-            // Never idle-unload a DELIBERATELY-held model: user-pinned,
-            // pool-pinned, locked, or encrypted-pipeline. Those express an
-            // explicit choice by someone.
-            //
-            // **Reference models are NOT exempt here, deliberately.** They used
-            // to be, on the reasoning that the shared cross-swarm benchmark set
-            // is "held ON PURPOSE so a consistent model stays warm". That
-            // conflates two different things: staying a HOLDER of the shards
-            // (on disk, cheap, and what actually keeps the set available to the
-            // swarm) versus keeping the model resident in VRAM (expensive, and
-            // costing exactly one reload to undo).
-            //
-            // `is_reference_model` is not consulted anywhere in the disk-prune
-            // path, so the shards were never at risk from this loop — the
-            // exemption only ever pinned memory. And because the project
-            // actively encourages fetching that set (`swarmllm get-model`), the
-            // effect was that following the project's own advice permanently
-            // cost a user their GPU: once anything touched those models they
-            // were resident for the life of the process, with no time bound at
-            // all.
-            //
-            // Observed on the development machine 2026-08-04: two of three
-            // resident models were reference models, the GPU sat at 7990 of
-            // 8192 MiB, and nothing had been released for two days. A benchmark
-            // can afford a cold load; a user's desktop cannot afford a
-            // permanently full GPU.
-            // Deliberate holds are a REPRIEVE, not a permanent exemption.
-            //
-            // Every one of these is a statement about keeping the model's
-            // SHARDS — pinned by the user, pinned by a pool owner, locked, or
-            // flagged for the encrypted pipeline. None of them says "and keep it
-            // in memory for ever", but that is what an unconditional `continue`
-            // meant: a single pin anywhere permanently removed that model's VRAM
-            // from the machine, with no time bound.
-            //
-            // Memory must always come back eventually and stay inside the
-            // configured limits, whatever the model is for. So these delay the
-            // unload, and the hard ceiling (`idle_hard_unload_secs`, 12x the
-            // idle window) overrides them. A pinned model stays warm while the machine is quiet and is
-            // still released before it can hold a card all day; the shards are
-            // untouched either way, so the pin keeps doing its actual job.
-            let deliberately_held = self
-                .shared_state
-                .models
-                .model_trust
-                .get(&model_id)
-                .map(|t| t.pinned_by_user)
-                .unwrap_or(false)
-                || self.shared_state.privacy_explicitly_enabled_for(&model_id)
-                || self
-                    .shared_state
-                    .models
-                    .locked_shards
-                    .iter()
-                    .any(|e| e.key().model_id == model_id)
-                || shard_pins
-                    .iter()
-                    .any(|p| p.model_id == model_id.0 && p.target_node_id == local_id);
+            // A pin, locked parts, a pool pin or the privacy setting keep a
+            // model's FILES here; none keeps its memory ([`stays_loaded_while_idle`]).
+            // Reference models were never exempt either: holding the shards is what
+            // keeps the benchmark set available, and an unload costs one reload.
             // Idle: no local request within the window (never-requested counts
             // as idle — it was loaded but has served nothing).
             let last_req = self
@@ -1873,15 +1809,14 @@ impl AutoShardManager {
             );
             // Layers outside this node's segment of a complete near chain go
             // once the conversation using them is over, so the router can plan
-            // the chain (Stage 3, `coverage::near_chain`). Never over a
-            // deliberate hold.
-            let off_segment = !deliberately_held && self.loaded_outside_near_segment(&model_id);
+            // the chain (Stage 3, `coverage::near_chain`).
+            let off_segment = self.loaded_outside_near_segment(&model_id);
             let window = if off_segment {
                 idle_unload_secs.min(crate::inference::process_pool::CONVERSATION_GAP_SECS)
             } else {
                 idle_unload_secs
             };
-            if stays_loaded_while_idle(since_any, deliberately_held, window) {
+            if stays_loaded_while_idle(since_any, window) {
                 continue;
             }
 
@@ -2704,105 +2639,59 @@ mod tests {
 }
 
 #[cfg(test)]
-mod idle_hard_unload_tests {
-    use super::{idle_hard_unload_secs, stays_loaded_while_idle, IDLE_HARD_UNLOAD_MULTIPLIER};
+mod idle_unload_tests {
+    use super::stays_loaded_while_idle;
 
-    /// **Memory always comes back.** A pinned, locked, pool-pinned or
-    /// encrypted-pipeline model used to `continue` unconditionally, so a single
-    /// pin anywhere removed that model's VRAM from the machine permanently.
-    /// Those flags are about keeping SHARDS, never about residency, and the
-    /// shards are untouched by this loop either way.
+    /// 2026-11-02: gpt-oss-20b held 6.5 GB of this 8 GB card half an hour
+    /// after its last reply, the owner asking why the card was full with
+    /// nothing running. It had been fetched from the dashboard, which pins what
+    /// it fetches, and a pin kept an idle model 12x the window. A pin is about
+    /// the FILES; past the window the memory comes back, whoever holds the parts.
     #[test]
-    fn a_deliberately_held_model_is_still_released_at_the_ceiling() {
+    fn a_model_idle_past_the_window_goes_however_its_parts_are_held() {
         let window = 300;
-        let past_ceiling = idle_hard_unload_secs(window) + 1;
-        assert!(
-            !stays_loaded_while_idle(Some(past_ceiling), true, window),
-            "a held model must still be released once past the hard ceiling — \
-             memory has to come back whatever the model is for"
-        );
-    }
-
-    /// The hold must still do its job while the machine is merely quiet, or
-    /// pinning a model would stop meaning anything at all.
-    #[test]
-    fn a_deliberate_hold_still_keeps_a_briefly_idle_model_warm() {
-        let window = 300;
-        let briefly_idle = 600; // past the idle window, far under the ceiling
-        assert!(
-            stays_loaded_while_idle(Some(briefly_idle), true, window),
-            "a pinned model should stay warm while the node is quiet"
-        );
+        assert!(!stays_loaded_while_idle(Some(30 * 60), window));
+        assert!(!stays_loaded_while_idle(Some(window as i64 + 1), window));
     }
 
     /// Field report #035 (2026-10-12): a 14B the owner had stopped using,
-    /// "graphics card idle 20m", still held 9.2 GB — the region's demand
-    /// figure (this node's own recent requests among it) kept buying it a
-    /// reprieve. Nothing deliberately holds it, so at 20 minutes against the
-    /// 5-minute default it goes, whatever the region wants.
+    /// "graphics card idle 20m", still held 9.2 GB. At 20 minutes against the
+    /// 5-minute default it goes, and idle for exactly the window is idle.
     #[test]
-    fn an_idle_model_nobody_holds_goes_after_the_window() {
+    fn an_idle_model_goes_after_the_window() {
         let window = 300;
-        assert!(
-            !stays_loaded_while_idle(Some(20 * 60), false, window),
-            "20 minutes idle, not held: the memory comes back"
-        );
-        assert!(
-            !stays_loaded_while_idle(Some(window as i64), false, window),
-            "the window is inclusive: idle for exactly the window is idle"
-        );
+        assert!(!stays_loaded_while_idle(Some(20 * 60), window));
+        assert!(!stays_loaded_while_idle(Some(window as i64), window));
     }
 
-    /// Inside the window nothing is unloaded — held or not.
+    /// Inside the window nothing is unloaded.
     #[test]
     fn a_model_used_inside_the_window_stays() {
         let window = 300;
-        assert!(stays_loaded_while_idle(Some(0), false, window));
-        assert!(stays_loaded_while_idle(Some(299), false, window));
+        assert!(stays_loaded_while_idle(Some(0), window));
+        assert!(stays_loaded_while_idle(Some(299), window));
     }
 
-    /// No use recorded at all is idle — the old `is_none_or` — and a hold
-    /// cannot keep a model that has no idle clock to measure against.
+    /// No use recorded at all is idle — the old `is_none_or`.
     #[test]
     fn a_model_never_used_is_idle() {
-        assert!(!stays_loaded_while_idle(None, false, 300));
-        assert!(!stays_loaded_while_idle(None, true, 300));
+        assert!(!stays_loaded_while_idle(None, 300));
     }
 
-    /// The reported case: two models resident 2h16 past their last request,
-    /// regional demand barely over the line, on a node that then hit GPU-OOM.
-    #[test]
-    fn the_reported_two_hour_case_would_now_unload() {
-        let ceiling = idle_hard_unload_secs(300);
-        assert_eq!(ceiling, 3600, "12x the 5-minute default is one hour");
-        let observed_idle_secs = 2 * 3600 + 16 * 60;
-        assert!(!stays_loaded_while_idle(
-            Some(observed_idle_secs),
-            true,
-            300
-        ));
-        assert!(!stays_loaded_while_idle(
-            Some(observed_idle_secs),
-            false,
-            300
-        ));
-    }
-
-    #[test]
-    fn the_ceiling_scales_with_the_configured_window() {
-        assert_eq!(idle_hard_unload_secs(60), 60 * IDLE_HARD_UNLOAD_MULTIPLIER);
-        assert_eq!(
-            idle_hard_unload_secs(1800),
-            1800 * IDLE_HARD_UNLOAD_MULTIPLIER
-        );
-    }
-
-    /// `idle_unload_secs = 0` disables the feature before any of this is
-    /// reached, but the arithmetic must not misbehave regardless.
+    /// `idle_unload_secs = 0` disables the unload before this is reached, but
+    /// the arithmetic must not misbehave: a huge window never inverts.
     #[test]
     fn absurd_windows_do_not_overflow() {
-        assert_eq!(idle_hard_unload_secs(0), 0);
-        assert_eq!(idle_hard_unload_secs(u64::MAX), i64::MAX);
+        assert!(stays_loaded_while_idle(Some(i64::MAX - 1), u64::MAX));
+        assert!(!stays_loaded_while_idle(Some(0), 0));
+    }
+
+    /// The idle check runs on its own clock, well inside the default window,
+    /// so a model goes within half a minute of its window ending — not up to
+    /// a whole auto-manage tick (5 minutes) later.
+    #[test]
+    fn the_idle_check_runs_well_inside_the_default_window() {
+        assert!(super::IDLE_UNLOAD_CHECK_EVERY.as_secs() <= 30);
     }
 }
 

@@ -422,6 +422,12 @@ impl AutoShardManager {
         request_reset_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         request_reset_interval.tick().await; // skip first tick
 
+        // The idle unload looks on its own clock: on the auto-manage tick a
+        // model waited up to a whole interval past its window (#249's 5 minutes
+        // became 10).
+        let mut idle_unload_check = tokio::time::interval(super::prune::IDLE_UNLOAD_CHECK_EVERY);
+        idle_unload_check.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
         // Cooldown: minimum time between evaluations triggered by notify.
         // `None` until the first one, so the first notify after launch isn't
         // throttled. This used to back-date an `Instant` by two cooldowns, which
@@ -440,6 +446,31 @@ impl AutoShardManager {
                         tracing::info!("AutoShardManager shutting down");
                         break;
                     }
+                }
+                _ = idle_unload_check.tick() => {
+                    // Reclaiming GPU memory from a model nobody is using is a
+                    // LOCAL memory concern, not a participation policy, so it runs
+                    // whatever the auto-manage toggle says.
+                    //
+                    // It used to sit inside `evaluate_and_prune`, which meant it
+                    // was gated behind BOTH `auto_manage.enabled` and
+                    // `prune_enabled` — two settings about which shard FILES this
+                    // node keeps on disk. Turning auto-manage off (a reasonable
+                    // thing to do: "stop managing my disk") therefore also pinned
+                    // every loaded model in VRAM indefinitely, against a doc
+                    // comment promising it ran "every cycle, independent of memory
+                    // pressure". Observed on an 8 GB card sitting at 7.3 GB with
+                    // three idle workers hours after its last request.
+                    //
+                    // The behaviour has its own off-switch — `idle_unload_secs = 0`
+                    // — which is the setting a user who wants models pinned should
+                    // reach for. Unloading changes nothing the swarm can see:
+                    // shards stay on disk, holder status is unchanged, and a cold
+                    // start costs one reload.
+                    self.try_idle_vram_unload(
+                        self.shared_state.cfg().auto_manage.idle_unload_secs,
+                    )
+                    .await;
                 }
                 _ = interval.tick() => {
                     // Always rescan for new shard files on disk (even if auto-manage disabled
@@ -472,30 +503,6 @@ impl AutoShardManager {
                     // with no log signal. Sweep runs every loop tick so
                     // worst-case stall window is ~one interval.
                     sweep_stalled_p2p_permits(&self.shared_state);
-
-                    // Reclaiming GPU memory from a model nobody is using is a
-                    // LOCAL memory concern, not a participation policy, so it runs
-                    // whatever the auto-manage toggle says.
-                    //
-                    // It used to sit inside `evaluate_and_prune`, which meant it
-                    // was gated behind BOTH `auto_manage.enabled` and
-                    // `prune_enabled` — two settings about which shard FILES this
-                    // node keeps on disk. Turning auto-manage off (a reasonable
-                    // thing to do: "stop managing my disk") therefore also pinned
-                    // every loaded model in VRAM indefinitely, against a doc
-                    // comment promising it ran "every cycle, independent of memory
-                    // pressure". Observed on an 8 GB card sitting at 7.3 GB with
-                    // three idle workers hours after its last request.
-                    //
-                    // The behaviour has its own off-switch — `idle_unload_secs = 0`
-                    // — which is the setting a user who wants models pinned should
-                    // reach for. Unloading changes nothing the swarm can see:
-                    // shards stay on disk, holder status is unchanged, and a cold
-                    // start costs one reload.
-                    self.try_idle_vram_unload(
-                        self.shared_state.cfg().auto_manage.idle_unload_secs,
-                    )
-                    .await;
 
                     // Finish origin fetches for shards a peer could not prove
                     // intact. Deliberately OUTSIDE the enabled gate below —
