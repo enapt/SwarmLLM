@@ -1458,8 +1458,12 @@ pub async fn pipeline_plan(
                     .shards
                     .iter()
                     .filter(|sh| {
-                        let (ss, se) = sh.layer_range;
-                        se > s && ss < e
+                        crate::inference::split::part_serves_layers(
+                            sh.layer_range,
+                            s,
+                            e,
+                            m.num_layers,
+                        )
                     })
                     .map(|sh| sh.index)
                     .collect();

@@ -34,7 +34,8 @@ pub(crate) use super::layers::{
 pub(crate) use super::model_arch::Activation;
 pub use super::model_arch::ModelArch;
 pub use super::shard_layout::{
-    available_layer_ranges_from_manifest, compute_layer_shard_layouts, LayerShardLayout,
+    available_layer_ranges_from_manifest, compute_layer_shard_layouts, part_serves_layers,
+    LayerShardLayout,
 };
 pub use super::tensor_util::{
     bytes_to_tensor, raw_f32_to_tensor_bytes, sample_token, sample_token_with_params,

@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #397**). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #399**). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -4269,6 +4269,25 @@ archive under the named heading. Reopen one only with the evidence its line name
 Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 19-28 were
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
+
+**Closed 2026-11-02, ships in the next release** (#398)
+- #398 — **A model whose file carries a next-token-prediction block runs across computers.**
+  Ornith-1.5-9B's header has 33 blocks with `nextn_predict_layers` 1; the loader runs 32, but the
+  part layout cuts `blk.32` as a layer into the LAST part beside the output head, so that part's
+  range is `[32, 33)` and overlapped no run of the model. Every "which parts does this run read"
+  skipped it: a peer holding the other parts was planned as holding the whole model and refused
+  ("holds layers 0..32 … not the end", the network's RTX 3060 peer, 2026-11-02), and no node
+  ever fetched that part (0 holders swarm-wide). Now `inference::shard_layout::part_serves_layers` is
+  the one answer — a run ending the model reads every part past its last layer, as llama.cpp
+  places nextn layers with the output (`dev_output`) — asked by the registry's
+  `shards_overlapping_layers`, the near chain's `parts_touching` / `lacks_any` / planner prices,
+  parallax's rebalancer, the listing, the scan and `is_shard_in_vram`; the held-layers bitmap
+  clears the last layer without those parts (`available_layer_ranges_from_manifest`), so every
+  router and scheduler check inherits it. The layout itself is unchanged: every holder's parts
+  are cut by it. Tests: `a_part_past_the_last_layer_serves_only_a_run_that_ends_the_model`,
+  `the_last_layer_is_held_only_with_the_part_past_it`,
+  `a_chain_that_ends_the_model_reads_the_part_past_its_last_layer` (red without the fix), null
+  control `a_model_with_no_part_past_its_end_is_read_as_before`. Gotcha #1025.
 
 **Closed 2026-11-01, ships in the next release** (#395)
 - #395 — **A Qwen model's tool call is a tool call, not text.** Qwen 3.5 and the families after

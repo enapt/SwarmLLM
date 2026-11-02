@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+**Ornith-1.5 models run across computers.** Their files (the 9B and 122B were checked) carry one
+extra layer used for guessing ahead (a "next-token prediction" block), which the model does not run
+when it answers. Any model whose file carries one had the same problem. The part of the file holding
+that layer also holds the model's last step, and no computer was ever told it needed that part: the
+swarm counted a computer holding the rest as holding the whole model, asked it, and it refused.
+Every check of "which parts does this run need" now counts that part for the run that finishes the
+model, so it is fetched and planned like any other. (#398)
+
 ## [0.3.268-alpha] — 2026-11-02
 
 **Thinking models: the answer is the answer, and you can switch the thinking off or on.**

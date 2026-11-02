@@ -4331,12 +4331,16 @@ impl SharedState {
                     if let Some(shard_info) =
                         manifest.shards.iter().find(|s| s.index == shard_index)
                     {
-                        let (sl, se) = shard_info.layer_range;
-                        let (sl, se) = (sl as usize, se as usize);
                         if let Some(ranges) = self.split_model_index.get(model_id) {
                             return ranges.iter().any(|&(ls, le)| {
-                                // Shard's layer range overlaps with this loaded segment
-                                sl < le && se > ls
+                                // A part this loaded segment reads (the output
+                                // head's too, past the last layer).
+                                crate::inference::split::part_serves_layers(
+                                    shard_info.layer_range,
+                                    ls as u32,
+                                    le as u32,
+                                    manifest.num_layers,
+                                )
                             });
                         }
                     }

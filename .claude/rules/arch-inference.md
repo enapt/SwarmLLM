@@ -389,5 +389,6 @@ Each names the ONE place a decision is made (`.claude/rules/architecture.md` § 
 - **`model_worker::wire_token_ids`** — the ONE reading of a first segment's token ids off a forward's bytes (single and fused batch): an id past the embedding table's rows (`SplitModel::embedding_rows`) is refused on the HOST. The sender chose those ids, and a card's row gather checks none — its kernel's assert ends the worker for every request on it. → § "A forward's token ids are checked against the table"
 - **`SplitModel::logits_from`** — the output head, the ONE place a forward makes logits (single, batched, captured): Gemma 2's soft cap and the file's `suppress_tokens` (`SUPPRESSED_LOGIT`, finite: a peer's check rows must be, #282). → § "The output head is one place"
 - **`GgufTensorMeta::tied_output_location`**
+- **`inference::shard_layout::part_serves_layers`** — does a part serve a run `[start, end)`? A part past the model's last layer (a next-token-prediction block, beside the output head) serves the run that ENDS the model; every overlap of a part with a run asks it, never `a < d && c < b` (#398). → § "A part past the model's last layer serves the run that ends it"
 
 → `docs/invariants/inference.md` § "Single-source-of-truth helpers — Inference kernels, caches and the tokenizer"

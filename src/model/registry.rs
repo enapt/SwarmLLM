@@ -1599,8 +1599,16 @@ impl ModelRegistry {
         manifest
             .shards
             .iter()
-            // Half-open ranges: [a,b) overlaps [c,d) iff a < d && c < b.
-            .filter(|s| s.layer_range.0 < layer_range.1 && layer_range.0 < s.layer_range.1)
+            // The parts it reads, the output head's too where that part lies
+            // past the last layer (next-token-prediction blocks).
+            .filter(|s| {
+                crate::inference::split::part_serves_layers(
+                    s.layer_range,
+                    layer_range.0,
+                    layer_range.1,
+                    manifest.num_layers,
+                )
+            })
             .map(|s| crate::types::ShardId {
                 model_id: model_id.clone(),
                 index: s.index,

@@ -7734,6 +7734,27 @@ between 3,000 and 151,000 — candle's card `argmax` read 1024 for the first; `g
 `no_reply_is_picked_by_candles_argmax` (red with the old call planted back, line 2337) and its
 self-test `the_argmax_guard_sees_every_form_and_skips_tests_and_comments`.
 
+## A part past the model's last layer serves the run that ends it (2026-11-02, #398)
+
+**What it replaced.** A part's `layer_range` was tested for overlap with a run's `[start, end)` as
+two half-open ranges (`a < d && c < b`) in seven places. A file with a next-token-prediction block
+(`nextn_predict_layers`: Ornith-1.5-9B has 33 blocks and 1 of them, the 122B 49 and 1) puts that
+block in the LAST part beside the output head, so that part reads `[32, 33)` on a 32-layer model
+and no run of the model overlaps it. A peer holding every other part was planned as holding the
+whole model and refused ("holds layers 0..32 … not the end"), and no node fetched that part: 0
+holders on the network, 2026-11-02, while every other part of the 9B had one.
+
+**The rule.** **`inference::shard_layout::part_serves_layers(part, start, end, num_layers)`** is the
+one answer: overlap as before, or a part starting at or past `num_layers` for a run ending the
+model, which is where llama.cpp places nextn layers (with the output, `dev_output`). The held-layers
+bitmap (`available_layer_ranges_from_manifest`) clears the last layer where a non-mmproj part past
+the end is not held, so every router and scheduler check that reads ranges inherits the rule. The
+part layout is unchanged: every holder's parts are cut by it, and a new cut would orphan them.
+
+**Measured.** The three new tests and parallax's new cases were red with the rule off (a `false &&`
+toggle) and green with it on, beside the null control
+`a_model_with_no_part_past_its_end_is_read_as_before`. Gotcha #1025.
+
 ## Single-source-of-truth helpers — Inference kernels, caches and the tokenizer
 
 Each names the ONE place a decision is made. A second implementation of any of

@@ -210,10 +210,30 @@ pub fn compute_layer_shard_layouts(
     layouts
 }
 
+/// Does a part whose layers are `part` (`[start, end)`) serve the run of
+/// layers `[start, end)` of a model that runs `num_layers`? Where the part
+/// holds one of the run's layers — or where the run ENDS the model and the
+/// part lies wholly past its last layer.
+///
+/// A file's next-token-prediction blocks (`nextn_predict_layers`: Ornith-1.5's
+/// `blk.32`; the loader runs 32 of its 33, `gguf_meta`) are cut as layers into
+/// the LAST part, beside the output head — the end of the model, where
+/// llama.cpp places them too (`dev_output`, after `n_layer_all`). Cut so, that
+/// part's range is `[num_layers, num_layers + k)` and overlaps no run, so every
+/// overlap test skipped the output head: a peer holding `[0, 32)` was planned
+/// whole and refused for want of it, and no node fetched that part
+/// (2026-11-02). Every "which parts does this run read" over a manifest asks
+/// this; the layout stays as it is, since every holder's parts are cut by it.
+pub fn part_serves_layers(part: (u32, u32), start: u32, end: u32, num_layers: u32) -> bool {
+    (part.0 < end && start < part.1) || (end >= num_layers && part.0 >= num_layers)
+}
+
 /// Return all contiguous layer ranges from manifest ShardInfo entries.
 ///
 /// Reads layer_range directly from each shard — manifests have accurate
-/// layer ranges computed from GGUF tensor metadata.
+/// layer ranges computed from GGUF tensor metadata. The model's last layer
+/// counts only beside every part past it ([`part_serves_layers`]): a run
+/// ending there is the last, and needs the output head they hold.
 pub fn available_layer_ranges_from_manifest(
     manifest: &crate::types::ModelManifest,
     local_shard_indices: &[u32],
@@ -227,6 +247,16 @@ pub fn available_layer_ranges_from_manifest(
             for bit in layer_bits.iter_mut().take(end).skip(start) {
                 *bit = true;
             }
+        }
+    }
+    let lacks_a_part_past_the_end = manifest.shards.iter().any(|s| {
+        s.index != crate::types::MMPROJ_SHARD_INDEX
+            && s.layer_range.0 >= manifest.num_layers
+            && !local_shard_indices.contains(&s.index)
+    });
+    if lacks_a_part_past_the_end {
+        if let Some(last) = layer_bits.last_mut() {
+            *last = false;
         }
     }
 
@@ -324,5 +354,111 @@ mod tests {
             }
             assert_eq!(total, 400, "every tensor in exactly one part");
         }
+    }
+
+    /// A manifest cut as Ornith-1.5-9B's is: 32 layers the loader runs in
+    /// eight parts of four, and a ninth holding the next-token-prediction
+    /// block (`blk.32`) beside the output head, its range `[32, 33)`.
+    fn manifest_with_a_part_past_the_end(tail_part: bool) -> crate::types::ModelManifest {
+        let mut ranges: Vec<(u32, u32)> = (0..8).map(|i| (i * 4, i * 4 + 4)).collect();
+        if tail_part {
+            ranges.push((32, 33));
+        }
+        crate::types::ModelManifest {
+            id: crate::types::ModelId("ornith-1-5-9b".into()),
+            name: "Ornith-1.5-9B".into(),
+            architecture: crate::types::ModelArchitecture::Llama,
+            num_layers: 32,
+            num_params_billions: 9.0,
+            quantization: crate::types::Quantization::Q4KM,
+            total_size_bytes: 9 * 4,
+            shard_count: ranges.len() as u32,
+            shards: ranges
+                .into_iter()
+                .enumerate()
+                .map(|(i, layer_range)| crate::types::ShardInfo {
+                    index: i as u32,
+                    layer_range,
+                    size_bytes: 4,
+                    hash: [0u8; 32],
+                    tensors: Vec::new(),
+                })
+                .collect(),
+            tokenizer_hash: [0u8; 32],
+            manifest_hash: [0u8; 32],
+            publisher: crate::types::NodeId([0u8; 32]),
+            publish_date: chrono::Utc::now(),
+            license: "MIT".into(),
+            mmproj: None,
+            context_length: None,
+        }
+    }
+
+    /// **A run that ends the model reads the part past its last layer**
+    /// (2026-11-02): Ornith-1.5's last part is `[32, 33)` — the nextn block
+    /// and the output head — and overlapped no run of a 32-layer model, so a
+    /// peer holding parts 0-7 was planned as holding the whole model and
+    /// refused ("not the end"), and no node ever fetched part 8.
+    #[test]
+    fn a_part_past_the_last_layer_serves_only_a_run_that_ends_the_model() {
+        // A part past the end serves a run ending the model, wherever it starts.
+        assert!(part_serves_layers((32, 33), 0, 32, 32));
+        assert!(part_serves_layers((32, 33), 28, 32, 32));
+        // ... and no run short of the end.
+        assert!(!part_serves_layers((32, 33), 0, 31, 32));
+        assert!(!part_serves_layers((32, 33), 16, 28, 32));
+        // An ordinary part is the plain overlap test, half-open at both ends.
+        assert!(part_serves_layers((28, 32), 31, 32, 32));
+        assert!(!part_serves_layers((28, 32), 24, 28, 32));
+        assert!(!part_serves_layers((0, 4), 4, 8, 32));
+        assert!(part_serves_layers((0, 4), 3, 8, 32));
+    }
+
+    /// **The last layer counts only beside the part past it.** Holding parts
+    /// 0-7 is layers 0-30 a run may END at — never the model's end; every
+    /// part is the whole model; the tail part alone serves no layer.
+    #[test]
+    fn the_last_layer_is_held_only_with_the_part_past_it() {
+        let manifest = manifest_with_a_part_past_the_end(true);
+        let all_but_the_tail: Vec<u32> = (0..8).collect();
+        assert_eq!(
+            available_layer_ranges_from_manifest(&manifest, &all_but_the_tail),
+            vec![(0, 31)],
+            "without the output head no run can be the model's last"
+        );
+        let every_part: Vec<u32> = (0..9).collect();
+        assert_eq!(
+            available_layer_ranges_from_manifest(&manifest, &every_part),
+            vec![(0, 32)]
+        );
+        assert_eq!(
+            available_layer_ranges_from_manifest(&manifest, &[8]),
+            Vec::<(usize, usize)>::new()
+        );
+        // A run short of the end is untouched by the tail part's absence.
+        assert_eq!(
+            available_layer_ranges_from_manifest(&manifest, &[0, 1, 2, 3]),
+            vec![(0, 16)]
+        );
+        assert_eq!(
+            available_layer_ranges_from_manifest(&manifest, &[6, 7, 8]),
+            vec![(24, 32)]
+        );
+    }
+
+    /// Null control: a model whose last part holds its last layer and the
+    /// head together reads exactly as before.
+    #[test]
+    fn a_model_with_no_part_past_its_end_is_read_as_before() {
+        let manifest = manifest_with_a_part_past_the_end(false);
+        let every_part: Vec<u32> = (0..8).collect();
+        assert_eq!(
+            available_layer_ranges_from_manifest(&manifest, &every_part),
+            vec![(0, 32)]
+        );
+        assert_eq!(
+            available_layer_ranges_from_manifest(&manifest, &[7]),
+            vec![(28, 32)]
+        );
     }
 }

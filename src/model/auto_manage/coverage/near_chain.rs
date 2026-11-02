@@ -361,8 +361,9 @@ type Step = (usize, u32, u32);
 type Best = (u64, u32, Step);
 
 /// The model's parts in layer order — when they tile `[0, num_layers)` with
-/// whole layers, as every manifest `shard_layout` builds does. Anything else is
-/// not planned for.
+/// whole layers, as every manifest `shard_layout` builds does, maybe with a
+/// part past the last layer (a file's next-token-prediction blocks beside the
+/// output head, `part_serves_layers`). Anything else is not planned for.
 fn parts_in_order(manifest: &ModelManifest) -> Option<Vec<Part>> {
     let mut parts: Vec<Part> = manifest
         .shards
@@ -383,19 +384,24 @@ fn parts_in_order(manifest: &ModelManifest) -> Option<Vec<Part>> {
         }
         at = part.end;
     }
-    (!parts.is_empty() && at == manifest.num_layers).then_some(parts)
+    (!parts.is_empty() && at >= manifest.num_layers).then_some(parts)
 }
 
 /// The parts a machine running `segment` needs: those its layers touch — the
-/// first part carries the embeddings, the last the output head.
+/// first part carries the embeddings, the last the output head
+/// (`part_serves_layers`: a part past the last layer too).
 fn parts_touching(manifest: &ModelManifest, segment: (u32, u32)) -> Vec<u32> {
     manifest
         .shards
         .iter()
         .filter(|s| {
             s.index != MMPROJ_SHARD_INDEX
-                && s.layer_range.0 < segment.1
-                && s.layer_range.1 > segment.0
+                && crate::inference::split::part_serves_layers(
+                    s.layer_range,
+                    segment.0,
+                    segment.1,
+                    manifest.num_layers,
+                )
         })
         .map(|s| s.index)
         .collect()
@@ -502,6 +508,17 @@ impl Planner<'_> {
         self.parts.partition_point(|p| p.end <= layer)
     }
 
+    /// One past the last part a run ending at `e` reads: a run ending the
+    /// model reads every part past its last layer too (the output head beside
+    /// a file's next-token-prediction blocks, `part_serves_layers`).
+    fn parts_end(&self, e: u32) -> usize {
+        if e >= self.layers {
+            self.parts.len()
+        } else {
+            self.part_at(e - 1) + 1
+        }
+    }
+
     /// Where machine `i` may end a segment it starts at `x`, furthest first.
     /// Its fetch changes only where the segment reaches a new part, and its
     /// price only where its card's layers end (`card_end`, #356): past that
@@ -529,7 +546,14 @@ impl Planner<'_> {
             {
                 last += 1;
             }
-            let end = reach.min(self.parts[last].end);
+            let mut end = reach.min(self.parts[last].end);
+            // The model's end only beside every part past it.
+            if end >= self.layers && !machine.has[last + 1..].iter().all(|&h| h) {
+                end = self.layers - 1;
+                if end <= x {
+                    return Vec::new();
+                }
+            }
             let mut ends = vec![end];
             ends.extend(card_end.filter(|&c| c < end));
             return ends;
@@ -577,7 +601,7 @@ impl Planner<'_> {
 
     /// Parts machine `i` lacks among those `[x, e)` touches, and their bytes.
     fn lacks(&self, i: usize, x: u32, e: u32) -> (u32, u64) {
-        let (lo, hi) = (self.part_at(x), self.part_at(e - 1) + 1);
+        let (lo, hi) = (self.part_at(x), self.parts_end(e));
         let (count, bytes) = &self.lacking[i];
         (count[hi] - count[lo], bytes[hi] - bytes[lo])
     }
@@ -678,12 +702,13 @@ fn near_chains_switched_off() -> bool {
     })
 }
 
-/// Does `machine` lack any part `[x, e)` touches?
-fn lacks_any(parts: &[Part], machine: &Machine, x: u32, e: u32) -> bool {
-    parts
-        .iter()
-        .zip(&machine.has)
-        .any(|(p, &has)| !has && p.start < e && p.end > x)
+/// Does `machine` lack any part `[x, e)` reads — a part past the last of a
+/// `layers`-layer model's layers too, where the run ends it
+/// (`part_serves_layers`)?
+fn lacks_any(parts: &[Part], machine: &Machine, x: u32, e: u32, layers: u32) -> bool {
+    parts.iter().zip(&machine.has).any(|(p, &has)| {
+        !has && crate::inference::split::part_serves_layers((p.start, p.end), x, e, layers)
+    })
 }
 
 impl AutoShardManager {
@@ -1035,7 +1060,7 @@ impl AutoShardManager {
             let mut stalled = None;
             for &(i, x, e) in &steps {
                 let machine = &machines[i];
-                if lacks_any(parts, machine, x, e) {
+                if lacks_any(parts, machine, x, e, manifest.num_layers) {
                     named.insert(machine.node.clone());
                     if !self.named_machine_keeps_its_place(&manifest.id, machine) {
                         stalled = Some(i);
@@ -2226,6 +2251,93 @@ mod tests {
             processor_us,
             ..machine(byte, ceiling, &vec![false; layers])
         }
+    }
+
+    /// **A chain's last run reads the part past the model's last layer**
+    /// (2026-11-02): Ornith-1.5-9B's ninth part is `[32, 33)` — its
+    /// next-token-prediction block beside the output head. A machine holding
+    /// parts 0-7 holds no complete chain (it cannot end the model), and one
+    /// asked to fetch is asked for that part too; the manifest's parts are in
+    /// order with it. Before, the chain was "complete" without the head, and
+    /// no machine ever fetched it.
+    #[test]
+    fn a_chain_that_ends_the_model_reads_the_part_past_its_last_layer() {
+        let mut with_tail = parts(&[4; 8]);
+        with_tail.push(Part {
+            index: 8,
+            start: 32,
+            end: 33,
+            size: 100,
+        });
+        let mut no_head = vec![true; 8];
+        no_head.push(false);
+        let lacking = [machine(1, 40, &no_head)];
+        assert_eq!(
+            plan(32, &with_tail, &lacking, false, None),
+            None,
+            "parts 0-7 are not a complete chain"
+        );
+        assert!(super::lacks_any(&with_tail, &lacking[0], 0, 32, 32));
+        assert!(
+            !super::lacks_any(&with_tail, &lacking[0], 0, 31, 32),
+            "a run short of the end does not read it"
+        );
+        let whole = [machine(1, 40, &[true; 9])];
+        assert_eq!(
+            plan(32, &with_tail, &whole, false, None),
+            Some(vec![(0, 0, 32)])
+        );
+        // Asked to fetch, the machine that holds the head is the one chosen:
+        // the other would fetch a part.
+        let both = [machine(1, 40, &no_head), machine(2, 40, &[true; 9])];
+        let chosen =
+            plan_chain(32, &with_tail, &both, true, None, Reach::Near.hop_us()).expect("a chain");
+        assert_eq!(chosen.steps, vec![(1, 0, 32)]);
+        let both_reversed = [machine(2, 40, &[true; 9]), machine(1, 40, &no_head)];
+        let chosen = plan_chain(
+            32,
+            &with_tail,
+            &both_reversed,
+            true,
+            None,
+            Reach::Near.hop_us(),
+        )
+        .expect("a chain");
+        assert_eq!(chosen.steps, vec![(0, 0, 32)]);
+
+        let manifest = ModelManifest {
+            id: ModelId("ornith-1-5-9b".into()),
+            name: "Ornith-1.5-9B".into(),
+            architecture: crate::types::ModelArchitecture::Llama,
+            num_layers: 32,
+            num_params_billions: 9.0,
+            quantization: crate::types::Quantization::Q4KM,
+            total_size_bytes: 900,
+            shard_count: 9,
+            shards: with_tail
+                .iter()
+                .map(|p| crate::types::ShardInfo {
+                    index: p.index,
+                    layer_range: (p.start, p.end),
+                    size_bytes: p.size,
+                    hash: [0u8; 32],
+                    tensors: Vec::new(),
+                })
+                .collect(),
+            tokenizer_hash: [0u8; 32],
+            manifest_hash: [0u8; 32],
+            publisher: NodeId([0u8; 32]),
+            publish_date: chrono::Utc::now(),
+            license: "MIT".into(),
+            mmproj: None,
+            context_length: None,
+        };
+        assert_eq!(super::parts_in_order(&manifest).map(|p| p.len()), Some(9));
+        assert_eq!(super::parts_touching(&manifest, (24, 32)), vec![6, 7, 8]);
+        assert_eq!(
+            super::parts_touching(&manifest, (0, 31)),
+            (0..8).collect::<Vec<_>>()
+        );
     }
 
     /// #356: where the cards can carry a model, its chain runs on cards alone

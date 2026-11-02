@@ -732,10 +732,13 @@ manifest.name, budget.saturating_sub(total_after)
             .shards
             .iter()
             .filter(|s| {
-                let (sl, se) = s.layer_range;
-                let (sl, se) = (sl as usize, se as usize);
-                // Shard overlaps with this segment's layer range
-                sl < layer_end && se > layer_start && local_shard_indices.contains(&s.index)
+                // A part this segment reads, the output head's too
+                crate::inference::split::part_serves_layers(
+                    s.layer_range,
+                    layer_start as u32,
+                    layer_end as u32,
+                    manifest.num_layers,
+                ) && local_shard_indices.contains(&s.index)
             })
             .filter(|s| s.index != crate::types::MMPROJ_SHARD_INDEX)
             .map(|s| s.index + 1)

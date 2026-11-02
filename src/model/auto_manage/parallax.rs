@@ -80,7 +80,7 @@ impl AutoShardManager {
             let recommended: HashSet<u32> = manifest
                 .shards
                 .iter()
-                .filter(|s| shard_overlaps_any(s.layer_range, &local_ranges))
+                .filter(|s| shard_overlaps_any(s.layer_range, &local_ranges, manifest.num_layers))
                 .map(|s| s.index)
                 .collect();
 
@@ -136,12 +136,15 @@ impl AutoShardManager {
     }
 }
 
-/// Returns true when `shard_range` overlaps any of the candidate ranges.
-/// Half-open intervals `[start, end)`.
-fn shard_overlaps_any(shard_range: (u32, u32), candidates: &[(u32, u32)]) -> bool {
+/// Returns true when a part spanning `shard_range` serves any of the
+/// candidate runs (half-open `[start, end)`) of a model of `num_layers`: it
+/// holds one of their layers, or a run ends the model and the part lies past
+/// its last layer (`part_serves_layers`: next-token-prediction blocks beside
+/// the output head).
+fn shard_overlaps_any(shard_range: (u32, u32), candidates: &[(u32, u32)], num_layers: u32) -> bool {
     candidates
         .iter()
-        .any(|c| shard_range.0 < c.1 && shard_range.1 > c.0)
+        .any(|c| crate::inference::split::part_serves_layers(shard_range, c.0, c.1, num_layers))
 }
 
 #[cfg(test)]
@@ -155,23 +158,35 @@ mod tests {
 
     #[test]
     fn overlap_detects_partial_and_full() {
-        assert!(shard_overlaps_any((0, 8), &[(0, 16)])); // full inside
-        assert!(shard_overlaps_any((8, 16), &[(0, 16)])); // full inside edge
-        assert!(shard_overlaps_any((14, 24), &[(0, 16)])); // partial overlap
-        assert!(shard_overlaps_any((0, 32), &[(10, 20)])); // range inside shard
+        assert!(shard_overlaps_any((0, 8), &[(0, 16)], 1000)); // full inside
+        assert!(shard_overlaps_any((8, 16), &[(0, 16)], 1000)); // full inside edge
+        assert!(shard_overlaps_any((14, 24), &[(0, 16)], 1000)); // partial overlap
+        assert!(shard_overlaps_any((0, 32), &[(10, 20)], 1000)); // range inside shard
     }
 
     #[test]
     fn overlap_rejects_disjoint() {
-        assert!(!shard_overlaps_any((16, 32), &[(0, 16)])); // touches boundary
-        assert!(!shard_overlaps_any((20, 30), &[(0, 16)]));
-        assert!(!shard_overlaps_any((0, 8), &[])); // no candidates
+        assert!(!shard_overlaps_any((16, 32), &[(0, 16)], 1000)); // touches boundary
+        assert!(!shard_overlaps_any((20, 30), &[(0, 16)], 1000));
+        assert!(!shard_overlaps_any((0, 8), &[], 1000)); // no candidates
     }
 
     #[test]
     fn overlap_any_of_multiple_candidates() {
-        assert!(shard_overlaps_any((10, 12), &[(0, 5), (8, 14), (20, 24)]));
-        assert!(!shard_overlaps_any((30, 40), &[(0, 5), (8, 14), (20, 24)]));
+        assert!(shard_overlaps_any(
+            (10, 12),
+            &[(0, 5), (8, 14), (20, 24)],
+            1000
+        ));
+        assert!(!shard_overlaps_any(
+            (30, 40),
+            &[(0, 5), (8, 14), (20, 24)],
+            1000
+        ));
+        // A part past a 32-layer model's last layer (a next-token-prediction
+        // block beside the output head) serves only a run that ends the model.
+        assert!(shard_overlaps_any((32, 33), &[(24, 32)], 32));
+        assert!(!shard_overlaps_any((32, 33), &[(0, 16), (20, 31)], 32));
     }
 
     #[test]
