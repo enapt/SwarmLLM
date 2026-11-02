@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #399**). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #400**). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -50,6 +50,7 @@ word for word to the archive, § "PRIORITIES re-rank log". Only OPEN work is lis
 processor), thinking models answering cleanly and switchable (#392, #391), Qwen's XML tool calls (#395), no
 re-download of held parts (#393), #394, keeping what people run (#389), #369's dead wait, #388's report (off),
 #155's fix and #91 (2k); the ranking below is otherwise unchanged. New: #396 (P3).
+Later the same day main gained gpt-oss on the card (#390 step 7) and #398 (closed); new: #397 (P4), #399 (P3).
 **2026-10-20:** #318 goes first among P2 by the user's direction: running models too large for
 any one member at a usable speed is what the swarm is for, so split speed for large models is
 the top track (`docs/plans/large_model_splits.md`).
@@ -2048,6 +2049,24 @@ layer, so the card's clock ramp in the first tokens (gotcha #825) is one unteste
 workers and set them beside pinned per-step times. Then decide between (a) confirming a
 narrower pick with a short paired re-check against the widest before settling (ABAB) and
 (b) timing only the processor's share of a step.
+
+#### #399 — The owner's decode step is held to the contribution level's width, which a model with its experts in RAM may not saturate
+`P3` · perf-local · **OPEN** — 2026-11-02 · history: this entry; #396; `docs/invariants/memory.md` § the contribution level
+
+The owner's prompt and checks run on every physical core (`owner_prefill_threads`); a one-token
+decode step keeps the calibrated width, at most what the contribution level offers (`offered=4`
+on this 8-core laptop), because dense decode is bandwidth-bound (#237: 16 threads 37% slower than
+6). A step whose routed experts sit in RAM may not be: gpt-oss-20b through the live node
+(2026-11-02, all 24 layers on the 8 GB card, the experts of 15 in RAM) calibrated `4:66ms 3:68ms`
+and wrote 14.7 tok/s; `test-split` of the same placement in one binary, `RAYON_NUM_THREADS` 4
+then 8, twice (ABAB, live node stopped): 60.7 / 50.2 ms and 83.8 / 64.3 ms a step after the first
+8 — eight threads 1.21x and 1.30x faster, while the machine drifted slower between the pairs.
+Earlier that day, quieter, its calibration read `8:47ms 6:48ms 4:50ms` (6%). **Not established**:
+whether the gain holds at steady state (the spread is as large as the effect), or for other
+experts-in-RAM models (the gate's Qwen3-30B-A3B arm decodes at `offered=4` too). **Next**: an
+A/B env giving a decode step of an experts-in-RAM worker the owner's width, ABBA × 4 on an idle
+machine on gpt-oss-20b and Qwen3-30B-A3B, each arm's `decode_threads=` read first (#396 makes
+the 4-thread arm itself a lottery). An explicit `max_cpu_threads` still binds the owner.
 
 #### #295 — Gemma 4's E2B/E4B split between card and processor copies a shared layer's history every step
 `P3` · perf-local · **PARTIAL** — 2026-10-17 · history: #115 (3c); (a) captured, (b) launches fixed, 2026-10-19

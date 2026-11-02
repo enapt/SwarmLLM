@@ -6404,6 +6404,15 @@ experts is not captured as CUDA graphs here, and llama.cpp's own lead leans on i
 FUTURE_WORK #138's gap, measured there on Qwen3-30B-A3B, with its route (a step replayed without
 re-recording).
 
+**Through the node** (the live node on the CUDA build of main, 2026-11-02 10:41-10:50Z): it fetched
+the 22 parts through the shard system (`download-shards`, never the whole file; "this node's parts
+are the canonical upload's"), placed the model as "all 24 layers there and keeping the routed experts
+of the first 16 in the machine's memory", re-read by the load to 15 (`on_card=9`), and answered two
+chats on the card — "The capital of France is Paris." with its reasoning apart, and a 344-token
+Fibonacci answer at 14.7 tok/s. Its decode width calibrated `offered=4` → 4 threads (`4:66ms`);
+`test-split` of that placement read 60.7 / 83.8 ms at 4 threads and 50.2 / 64.3 at 8 in an ABAB the
+same hour, so the node's step is the 4-thread step, not a slower path (FUTURE_WORK #399).
+
 ## The popular models of 2026-11-02, checked against llama.cpp master on the processor and the card
 
 **Which.** The HuggingFace reading of 2026-11-01 15:29Z (`HfWatcher`): Qwen3.8-27B, Qwen3.6-35B-A3B,
@@ -7870,6 +7879,12 @@ part layout is unchanged: every holder's parts are cut by it, and a new cut woul
 **Measured.** The three new tests and parallax's new cases were red with the rule off (a `false &&`
 toggle) and green with it on, beside the null control
 `a_model_with_no_part_past_its_end_is_read_as_before`. Gotcha #1025.
+
+**End to end it could not be run on 2026-11-02**: the live node on main's build fetched only parts
+8-9 (`[29, 32)`, `[32, 33)`) and asked for a split with aa3d, the morning's holder of the rest — "No
+reachable node holds layers 0-12", and the released v0.3.268 binary, asked the same, answered the
+same (null control): by 11:18Z the network knew no holder of the model's front, so the run says
+nothing about the fix either way.
 
 ## Single-source-of-truth helpers — Inference kernels, caches and the tokenizer
 
