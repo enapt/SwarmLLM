@@ -2879,10 +2879,13 @@ match llama.cpp** (#715, `arch-inference.md`).
    across the window, 120 tokens, expert picks down to a 0.0017 margin — and llama.cpp sits at
    0.99997 of it; on the quantized file (MXFP4 experts, Q8_0 rest) both engines are equally far from
    the exact answer (median 0.994 ours, 0.993 llama.cpp). So gpt-oss moved from the hard refusal to
-   the unchecked-family switch (`SWARMLLM_UNCHECKED_FAMILIES=gpt-oss`). **Left**: step 6 — the
-   harmony reply channels (`analysis` / `final`, llama.cpp `common/parsers/gpt-oss.cpp`), the
-   gpt-4o tokenizer's `clean_spaces`; then the real file's reply against llama.cpp (11.5 GB), then
-   step 7. **The template is done** (2026-11-02): the shipped one renders as jinja2 does byte for
+   the unchecked-family switch (`SWARMLLM_UNCHECKED_FAMILIES=gpt-oss`). **Left**: the gpt-4o
+   tokenizer's `clean_spaces`; then the real file's reply against llama.cpp (11.5 GB), then step 7.
+   **Step 6, the harmony reply, is done** (2026-11-02): `inference::harmony::Reply` rewrites the
+   channels — llama.cpp's `common/parsers/gpt-oss.cpp` reading — into a leading `<think>` block,
+   content and Hermes calls at both choke points, keyed on `PromptOpened::Harmony`; a call written
+   when no tools were offered stays text, as any model's (invariants api-surfaces § "A harmony
+   turn"). **The template is done** (2026-11-02): the shipped one renders as jinja2 does byte for
    byte — system turn with the date, the caller's system turn as the developer's instructions, the
    tools as a TypeScript namespace, a call and its answer on the commentary channel
    (`gpt_oss_renders_as_jinja2_renders_it`) — and `reasoning_effort` now reaches a template as that

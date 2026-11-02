@@ -14,6 +14,7 @@ pub mod draft_tree;
 pub mod dsd_controller;
 pub mod executor;
 pub mod fast_math;
+pub(crate) mod harmony;
 #[cfg(feature = "candle-cuda")]
 pub(crate) mod heads_first;
 pub mod kv_cache;
@@ -166,6 +167,9 @@ pub(crate) const REPLY_LEADING_WHITESPACE: [char; 3] = ['\n', '\r', ' '];
 /// The steps are ordered, and the order is the part that keeps being got
 /// wrong, so it lives here rather than in three comment blocks:
 ///
+/// 0. **Rewrite a harmony reply** ([`PromptOpened::Harmony`], gpt-oss) into a
+///    leading `<think>` block, content and Hermes calls ([`harmony`]) — before
+///    the scrub, which removes the `<|end|>` that ends each of its messages.
 /// 1. **Scrub control-token artifacts.** Before anything truncates, because
 ///    some models emit a stray end-of-turn marker *before* their answer
 ///    (`<|im_end|>hello`) — truncating at that match first would discard the
@@ -214,6 +218,11 @@ pub(crate) fn finalize_reply_text(
         String::new()
     };
 
+    // A harmony reply's channels, rewritten before the scrub — which removes
+    // `<|end|>`, the marker that ends each message.
+    if opened == PromptOpened::Harmony {
+        *text = harmony::rewrite(text);
+    }
     strip_control_token_artifacts(text);
     // After the scrub, which is for what the MODEL wrote; the opener is the
     // template's.
@@ -541,7 +550,8 @@ pub(crate) fn opening_reasoning_block(text: &str) -> Option<ReasoningBlock> {
         .find(|block| text.starts_with(block.open))
 }
 
-/// Did the rendered prompt leave the model's reply INSIDE a reasoning block?
+/// Did the rendered prompt leave the model's reply INSIDE a reasoning block —
+/// or hand it a harmony turn, whose reply is channels ([`Self::Harmony`])?
 ///
 /// A template can open the scratchpad itself: Qwen 3.5's generation prompt
 /// ends `<|im_start|>assistant\n<think>\n`, so the reply starts mid-thought
@@ -565,6 +575,12 @@ pub enum PromptOpened {
     Nothing,
     /// The prompt ends on this block's opener: the reply starts inside it.
     Inside(ReasoningBlock),
+    /// The prompt handed the model a harmony turn (`<|start|>assistant`,
+    /// gpt-oss): the reply is channels, rewritten by [`harmony::Reply`] into
+    /// a leading `<think>` block, content and Hermes calls BEFORE anything
+    /// else reads it (#390) — by [`finalize_reply_text`] and by
+    /// `api::tool_parse::StreamingToolText` alike.
+    Harmony,
 }
 
 impl PromptOpened {
@@ -576,6 +592,9 @@ impl PromptOpened {
     /// reads it before the append), which ends mid-reply, not on the opener.
     pub fn of(prompt: &str) -> Self {
         let end = prompt.trim_end();
+        if end.ends_with(harmony::TURN) {
+            return Self::Harmony;
+        }
         REASONING_BLOCKS
             .into_iter()
             .find(|block| end.ends_with(block.open))
@@ -1709,6 +1728,54 @@ mod reasoning_block_tests {
         );
     }
 
+    /// **gpt-oss (#390): a harmony reply is channels**, every marker a control
+    /// token a byte-level decode writes out as text. Told the prompt handed the
+    /// model a harmony turn, the finaliser reads the analysis channel as the
+    /// scratchpad, the final channel as the answer, and a `to=functions.NAME`
+    /// message as a call the tool parser reads — no marker reaches the reply.
+    #[test]
+    fn a_harmony_reply_is_read_as_scratchpad_answer_and_call() {
+        use super::PromptOpened;
+        let harmony = PromptOpened::Harmony;
+        let mut t = "<|channel|>analysis<|message|>The user greets.<|end|>\
+                     <|start|>assistant<|channel|>final<|message|>Hello!"
+            .to_string();
+        let finished = finalize_reply_text(&mut t, &[], harmony);
+        assert_eq!(t, "Hello!");
+        assert_eq!(finished.reasoning.as_deref(), Some("The user greets."));
+
+        let mut t = "<|channel|>analysis<|message|>Need weather.<|end|><|start|>assistant\
+                     <|channel|>commentary to=functions.get_weather <|constrain|>json\
+                     <|message|>{\"city\":\"Paris\"}"
+            .to_string();
+        let finished = finalize_reply_text(&mut t, &[], harmony);
+        assert_eq!(finished.reasoning.as_deref(), Some("Need weather."));
+        let tools = crate::api::tool_parse::RequestTools::untyped(true);
+        let calls = crate::api::tool_parse::parse_tool_calls(&t, &tools).expect("a call");
+        assert_eq!(calls[0].name, "get_weather");
+        assert_eq!(calls[0].arguments, "{\"city\":\"Paris\"}");
+
+        // A stop sequence inside the scratchpad leaves the answer whole, as for
+        // any other reasoning model.
+        let mut t = "<|channel|>analysis<|message|>Do not say STOP.<|end|>\
+                     <|start|>assistant<|channel|>final<|message|>Fine."
+            .to_string();
+        let finished = finalize_reply_text(&mut t, &["STOP".to_string()], harmony);
+        assert_eq!((t.as_str(), finished.stop), ("Fine.", None));
+
+        // The same text from a prompt that was NOT a harmony turn is not read
+        // as channels — only its markers are scrubbed, as before.
+        let mut t = "<|channel|>final<|message|>Hello!".to_string();
+        let _ = finalize_reply_text(&mut t, &[], PromptOpened::Nothing);
+        assert_ne!(t, "Hello!");
+
+        // A second pass over a finalised reply passes `Nothing`, and keeps it.
+        let mut t = "<|channel|>final<|message|>Hi.".to_string();
+        let _ = finalize_reply_text(&mut t, &[], harmony);
+        let _ = finalize_reply_text(&mut t, &[], PromptOpened::Nothing);
+        assert_eq!(t, "Hi.");
+    }
+
     /// The verdict is read off the END of the rendered prompt, less trailing
     /// whitespace: an opener there is a block the reply starts inside; a
     /// CLOSED empty block (thinking turned off) or an opener anywhere else is
@@ -1734,6 +1801,15 @@ mod reasoning_block_tests {
             PromptOpened::Inside(REASONING_BLOCKS[1])
         );
         assert_eq!(of(""), PromptOpened::Nothing);
+        // gpt-oss's turn, and a harmony marker anywhere else.
+        assert_eq!(
+            of("<|start|>user<|message|>Hi<|end|><|start|>assistant"),
+            PromptOpened::Harmony
+        );
+        assert_eq!(
+            of("<|start|>assistant<|channel|>final<|message|>Hi<|end|>"),
+            PromptOpened::Nothing
+        );
     }
 
     /// The ordinary case must cost nothing and change nothing.

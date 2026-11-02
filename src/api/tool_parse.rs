@@ -59,7 +59,8 @@
 use serde_json::Value;
 
 use crate::inference::{
-    opening_reasoning_block, PromptOpenedSlot, ReasoningBlock, REASONING_BLOCKS,
+    harmony, opening_reasoning_block, PromptOpened, PromptOpenedSlot, ReasoningBlock,
+    REASONING_BLOCKS,
 };
 
 /// Build the system-prompt text that tells a local model how to call a tool.
@@ -658,6 +659,19 @@ pub struct StreamingToolText {
     /// Whether the PROMPT left the reply inside a block (#392), until the
     /// reply's first non-blank character is read against it — then `None`.
     prompt_opened: Option<PromptOpenedSlot>,
+    /// A harmony reply's rewriter (gpt-oss, #390), settled at the reply's
+    /// first non-blank piece from the same verdict ([`PromptOpened::Harmony`]):
+    /// every later piece goes through it before anything here reads it, as
+    /// `finalize_reply_text` rewrites a whole reply.
+    harmony: HarmonyRead,
+}
+
+/// Whether a streamed reply is read through [`harmony::Reply`].
+enum HarmonyRead {
+    /// No non-blank piece yet: the prompt's verdict is not read.
+    Undecided,
+    Off,
+    On(harmony::Reply),
 }
 
 /// A finalised reply that ended INSIDE its reasoning block, split for a
@@ -744,6 +758,43 @@ impl StreamingToolText {
             content_from: 0,
             block: REASONING_BLOCKS[0],
             prompt_opened: Some(prompt_opened),
+            harmony: HarmonyRead::Undecided,
+        }
+    }
+
+    /// A piece of the reply as everything here reads it: through the harmony
+    /// rewriter when the prompt handed the model a harmony turn. Decided at
+    /// the first non-blank piece — the prompt is rendered before the model
+    /// writes anything, and before `withholding_reasoning` takes the verdict.
+    fn read_piece<'t>(&mut self, token: &'t str) -> std::borrow::Cow<'t, str> {
+        if matches!(self.harmony, HarmonyRead::Undecided) {
+            if self.text.trim().is_empty() && token.trim().is_empty() {
+                return std::borrow::Cow::Borrowed(token);
+            }
+            let verdict = self.prompt_opened.as_ref().map(PromptOpenedSlot::get);
+            self.harmony = if verdict == Some(PromptOpened::Harmony) {
+                HarmonyRead::On(harmony::Reply::new())
+            } else {
+                HarmonyRead::Off
+            };
+        }
+        match &mut self.harmony {
+            HarmonyRead::On(reply) => std::borrow::Cow::Owned(reply.push(token)),
+            _ => std::borrow::Cow::Borrowed(token),
+        }
+    }
+
+    /// The reply has ended: what the harmony rewriter still held (a call's
+    /// closing, a closed scratchpad's `</think>`) joins the text. Every
+    /// end-of-stream method calls it first, so no surface can forget it; a
+    /// second call adds nothing.
+    fn end_of_reply(&mut self) {
+        if let HarmonyRead::On(reply) = &mut self.harmony {
+            let rest = reply.finish();
+            if !rest.is_empty() {
+                self.text.push_str(&rest);
+                self.withholding_reasoning();
+            }
         }
     }
 
@@ -756,7 +807,8 @@ impl StreamingToolText {
 
     /// The calls the finished reply makes, read against the request's tools —
     /// `None` for a reply that never asked for one, or that makes none.
-    pub fn parsed_calls(&self) -> Option<Vec<ParsedToolCall>> {
+    pub fn parsed_calls(&mut self) -> Option<Vec<ParsedToolCall>> {
+        self.end_of_reply();
         if !self.tools.requested() {
             return None;
         }
@@ -901,7 +953,8 @@ impl StreamingToolText {
 
     /// Append a token and return whatever has just become safe to emit.
     pub fn push(&mut self, token: &str) -> Option<String> {
-        self.text.push_str(token);
+        let piece = self.read_piece(token);
+        self.text.push_str(&piece);
         if self.withholding_reasoning() {
             return None;
         }
@@ -920,6 +973,7 @@ impl StreamingToolText {
     /// Content not yet emitted that is still certainly content — flushed
     /// alongside the tool calls when the reply turned out to contain one.
     pub fn pending_content(&mut self) -> Option<String> {
+        self.end_of_reply();
         if self.withholding_reasoning() {
             return None;
         }
@@ -977,6 +1031,7 @@ impl StreamingToolText {
     /// stopped a code-heavy scratchpad streaming on every tool request, which
     /// is the silence this channel exists to end.
     pub fn finish_reasoning(&mut self, a_call_ends_it: bool) -> Option<String> {
+        self.end_of_reply();
         let limit = match (self.reasoning_to, self.reasoning_from) {
             (Some(end), _) => end,
             (None, Some(from)) if a_call_ends_it => from + content_prefix_len(&self.text[from..]),
@@ -1006,10 +1061,20 @@ impl StreamingToolText {
     /// Everything not yet emitted — the fallback for a reply that turned out
     /// to be ordinary text after all (a model given tools may simply answer).
     pub fn pending_all(&mut self) -> Option<String> {
+        self.end_of_reply();
         // A reply that ended INSIDE its scratchpad has no answer to release
         // when the scratchpad has its own field: it went out as reasoning, and
         // releasing it again here would show it twice, once as the reply.
-        if self.reasoning_out == ReasoningOut::Separate && self.reasoning == Reasoning::Inside {
+        //
+        // Nor does one whose block CLOSED with nothing but whitespace after it
+        // (`withholding_reasoning` waits there for the answer's first
+        // character) — on either surface: the finaliser drops a closed block,
+        // and this released it whole as the answer where the surface has no
+        // field for it.
+        let closed = self.reasoning_to.is_some();
+        if self.reasoning == Reasoning::Inside
+            && (closed || self.reasoning_out == ReasoningOut::Separate)
+        {
             self.emitted = self.text.len();
             return None;
         }
@@ -3481,6 +3546,9 @@ mod streaming_reasoning_tests {
             &[" ", "Just an answer"],
             &["<thi", "nking about it"],
             &["<think>", "never closed"],
+            // Closed, and nothing after it: the reply ended on its `</think>`.
+            &["<think>", "Done.", "</think>"],
+            &["<think>", "Done.", "</think>", "\n\n"],
             // A SentencePiece reply's first token decodes to " The" (#103).
             &[" The", " capital", " is Paris."],
             &[" ", " ", "Two spaces first"],
@@ -3500,7 +3568,44 @@ mod streaming_reasoning_tests {
             ],
             &["\n", "weighing it", "</think>\n\n", "Answer"],
             &["</think>", "\n\n", "Straight to it"],
+            &["weighing", "</think>"],
             &["Still", " thinking"],
+            &[" ", "\n"],
+            &[],
+        ];
+        // gpt-oss's harmony turn (#390): channels, every marker split the way
+        // a byte-level decode hands them out, and a reply that ignored its
+        // format.
+        let harmony: &[&[&str]] = &[
+            &[
+                "<|channel|>",
+                "analysis",
+                "<|message|>",
+                "The user",
+                " greets.",
+                "<|end|>",
+                "<|start|>",
+                "assistant",
+                "<|channel|>",
+                "final",
+                "<|message|>",
+                "Hello",
+                "!",
+            ],
+            &["<|channel|>final<|message|>", "Just", " this."],
+            &["<|channel|>analysis<|message|>", "Cut off mid", " thought"],
+            &["<|channel|>analysis<|message|>Done.<|end|>"],
+            &[
+                "<|channel|>commentary<|message|>Let me check.<|end|>",
+                "<|start|>assistant<|channel|>final<|message|>It is 4.",
+            ],
+            &[
+                "<|chan",
+                "nel|>analysis<|mess",
+                "age|>A<|e",
+                "nd|><|start|>assistant<|channel|>final<|message|>B",
+            ],
+            &["Plain", " text."],
             &[" ", "\n"],
             &[],
         ];
@@ -3508,7 +3613,8 @@ mod streaming_reasoning_tests {
         let cases = opened_by_the_reply
             .iter()
             .map(|c| (PromptOpened::Nothing, *c))
-            .chain(opened_by_the_prompt.iter().map(|c| (think, *c)));
+            .chain(opened_by_the_prompt.iter().map(|c| (think, *c)))
+            .chain(harmony.iter().map(|c| (PromptOpened::Harmony, *c)));
         for (opened, chunks) in cases {
             // The reference is the non-streamed finaliser itself, not one step
             // of it: comparing against the reasoning step alone let the opening
@@ -4208,6 +4314,59 @@ mod qwen_xml_tests {
             arguments(&calls[0]),
             json!({"where": {"name": "x", "arguments": {}}})
         );
+    }
+
+    /// **gpt-oss (#390): a streamed harmony reply** sends its analysis channel
+    /// as reasoning and its final channel as content, never a marker; a call
+    /// (` to=functions.NAME`, ended by the `<|call|>` stop token) is held back
+    /// and read against the request's schemas like any other.
+    #[test]
+    fn a_streamed_harmony_reply_splits_into_reasoning_answer_and_calls() {
+        let harmony = crate::inference::PromptOpened::Harmony;
+        let mut buf = StreamingToolText::new(
+            RequestTools::untyped(false),
+            ReasoningOut::Separate,
+            crate::inference::PromptOpenedSlot::known(harmony),
+        );
+        let (mut out, mut thought) = (String::new(), String::new());
+        for piece in [
+            "<|channel|>analysis<|message|>",
+            "Greeting",
+            ".",
+            "<|end|><|start|>assistant<|channel|>final<|message|>",
+            "Hi",
+            " there.",
+        ] {
+            out.push_str(&buf.push(piece).unwrap_or_default());
+            thought.push_str(&buf.take_reasoning().unwrap_or_default());
+        }
+        assert!(buf.parsed_calls().is_none());
+        thought.push_str(&buf.finish_reasoning(false).unwrap_or_default());
+        out.push_str(&buf.pending_all().unwrap_or_default());
+        assert_eq!((out.as_str(), thought.as_str()), ("Hi there.", "Greeting."));
+
+        let reply = "<|channel|>analysis<|message|>Need the forecast.<|end|>\
+                     <|start|>assistant<|channel|>commentary to=functions.get_weather \
+                     <|constrain|>json<|message|>{\"days\":2}";
+        let mut buf = StreamingToolText::new(
+            weather_tools(),
+            ReasoningOut::Separate,
+            crate::inference::PromptOpenedSlot::known(harmony),
+        );
+        let (mut out, mut thought) = (String::new(), String::new());
+        let chars: Vec<char> = reply.chars().collect();
+        for chunk in chars.chunks(3) {
+            if let Some(safe) = buf.push(&chunk.iter().collect::<String>()) {
+                out.push_str(&safe);
+            }
+            thought.push_str(&buf.take_reasoning().unwrap_or_default());
+        }
+        let calls = buf.parsed_calls().expect("a call");
+        assert_eq!(calls[0].name, "get_weather");
+        assert_eq!(arguments(&calls[0]), json!({"days": 2}));
+        thought.push_str(&buf.finish_reasoning(true).unwrap_or_default());
+        assert_eq!(thought, "Need the forecast.");
+        assert_eq!(out + &buf.pending_content().unwrap_or_default(), "");
     }
 
     /// Streamed: the prose before the call goes out, the call is held back,

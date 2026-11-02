@@ -3008,7 +3008,8 @@ fn a_callers_enable_thinking_reaches_each_familys_template() {
 /// 3.5 4B upload's prompt OPENS `<think>`, so its reply is read from inside
 /// the block, and the same template with thinking turned off closes an empty
 /// one, so its reply is not; Gemma 4's closed channel and a model that opens
-/// its own block (Qwen 3) leave nothing open.
+/// its own block (Qwen 3) leave nothing open; gpt-oss's hands the model a
+/// harmony turn, whose reply is channels (#390).
 #[test]
 fn each_familys_template_says_whether_it_left_the_reply_inside_a_scratchpad() {
     use crate::inference::{PromptOpened, REASONING_BLOCKS};
@@ -3038,6 +3039,8 @@ fn each_familys_template_says_whether_it_left_the_reply_inside_a_scratchpad() {
     assert_eq!(opened(qwen3, None), PromptOpened::Nothing);
     let gemma4 = include_str!("fixtures/gemma4_gguf_shipped.jinja");
     assert_eq!(opened(gemma4, None), PromptOpened::Nothing);
+    let gptoss = include_str!("fixtures/gptoss_gguf_shipped.jinja");
+    assert_eq!(opened(gptoss, None), PromptOpened::Harmony);
 }
 
 /// A caller's variable never replaces the renderer's own: a request naming

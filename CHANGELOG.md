@@ -11,6 +11,9 @@ llama.cpp reads it: the answer is the answer, and the reasoning goes where reaso
 `reasoning_content` on the OpenAI chat API, left out on the Anthropic API. A reply cut short while
 the model is still thinking returns that thinking as reasoning with an empty answer, as before.
 Nothing changes between computers: a computer leading a request reads the reply itself. (#392)
+A streamed reply that ended right after its thinking, with no answer after it, no longer sends
+that thinking as the answer on the Anthropic API; any thinking model could do this, before or
+after this change.
 
 **Getting a model you already have part of no longer downloads those parts again.** Every
 download — the dashboard's Get, `swarmllm get-model`, the reference models — fetched each part it
@@ -125,9 +128,10 @@ that goes to no word at all. On test files shaped like gpt-oss-20b, this engine'
 an exact calculation of llama.cpp's at every position, and its own chat template renders exactly
 as the reference renders it. A request's reasoning effort (`reasoning_effort`: low, medium or high)
 now reaches a model's template as that setting too, as llama.cpp passes it; gpt-oss is told it in
-its instructions. gpt-oss still stays off for everyone until
-a real file's replies are checked and its reply format, which keeps the model's reasoning apart
-from its answer, is read. (#390)
+its instructions. Its reply format, which keeps the model's reasoning apart from its answer, is
+read too, as llama.cpp reads it: the reasoning goes where reasoning goes, the answer is the answer,
+and a tool call arrives as a tool call, streamed or not. gpt-oss still stays off for everyone until
+a real file's replies are checked. (#390)
 
 ## [0.3.267-alpha] — 2026-11-01
 

@@ -775,6 +775,77 @@ requests, returned "Thinking Process: …" as the content of all six — the
 null control. Its raw reply (`…51.cw\n</think>\n\n51`, 258 tokens) is the same text
 the fixed build split: the `cw` before the closer is the model's own.
 
+### A harmony turn: gpt-oss's reply is channels (2026-11-02, #390 item 2 step 6)
+
+**gpt-oss writes no `<think>` block.** Its template (the real file's, fixture
+`gptoss_gguf_shipped.jinja`) ends the prompt `<|start|>assistant`, and the reply
+is a run of messages: `<|channel|>analysis<|message|>…<|end|><|start|>assistant
+<|channel|>final<|message|>…`, a call `… to=functions.NAME <|constrain|>json
+<|message|>ARGS`, the reply ended by `<|return|>` or `<|call|>` (stop tokens,
+never in the text). Every marker is a CONTROL token that a byte-level decode
+writes out as its literal text, so without a reader the scratchpad, the markers
+and the answer all reached the user as the answer, and a call was prose.
+
+**llama.cpp's reading, taken whole** (`common/parsers/gpt-oss.cpp`, master,
+read 2026-11-02): `analysis` is reasoning; a `commentary` message with no
+recipient (a preamble) and `final` are content; a header naming
+`to=functions.NAME` — in the role part or after the channel — is a call whose
+body is its arguments; a message to any other recipient (the built-in browser
+and python tools) is consumed; a stray `<|channel|>commentary [to=assistant]`
+before the real channel is tolerated. vLLM reads it with OpenAI's
+`openai_harmony` token parser; the rule is the same.
+
+What a change here must keep:
+
+- **It is a REWRITE at the two choke points, not a fifth reader.**
+  `inference::harmony::Reply` turns the reply ONCE into shapes every reader
+  already takes: the reasoning as one leading `<think>…</think>` block
+  (several analysis messages joined by a blank line; reasoning after the answer
+  began is consumed), content as written (messages joined by a blank line), a
+  call as Hermes' `<tool_call>{"name": …, "arguments": …}</tool_call>`
+  (arguments that are not JSON become a JSON string). After it,
+  `take_leading_reasoning_block`, `split_unfinished_reasoning`,
+  `parse_tool_calls` and the streaming buffer read the text as they read any
+  other model's.
+- **Keyed on the prompt, never sniffed from the reply**: `PromptOpened::of`
+  answers `Harmony` where the rendered prompt's trimmed end is
+  `harmony::TURN`, and `finalize_reply_text` rewrites BEFORE the control-token
+  scrub (which would otherwise delete the markers the rewrite reads). The
+  stream decides at its first non-blank piece (`StreamingToolText::read_piece`),
+  from the same slot, before `withholding_reasoning` takes it.
+- **Every end-of-stream method flushes it** (`end_of_reply`, idempotent):
+  `parsed_calls`, `finish_reasoning`, `pending_content`, `pending_all` — a
+  call's closing and a closed scratchpad's `</think>` are written only when the
+  reply ends, and no surface can forget to ask.
+- **Text that does not open as harmony passes untouched**, so a model that
+  ignored its format still answers, and a second pass over rewritten text
+  changes nothing (`what_is_not_harmony_passes`).
+- **A rewrite does not depend on how the stream was cut**: every module test
+  feeds its reply whole and one character at a time (`both_ways`); a body holds
+  back only a possible marker prefix.
+
+Tests: `inference::harmony::tests` (six), `a_harmony_reply_is_read_as_scratchpad_answer_and_call`
+(the finaliser: reasoning, answer, a call `parse_tool_calls` reads, a stop
+string inside the scratchpad, a non-harmony prompt's text not read as
+channels), `a_streamed_harmony_reply_splits_into_reasoning_answer_and_calls`,
+harmony cases in `streamed_and_unstreamed_replies_strip_the_same_scratchpad`,
+the gpt-oss fixture's verdict in
+`each_familys_template_says_whether_it_left_the_reply_inside_a_scratchpad`.
+Toggled: the finaliser's rewrite off turns the finaliser test and the agreement
+guard red; the stream's off, the streamed test and the guard. Known gap: a call
+written when the request offered no tools stays `<tool_call>` text, as any
+other model's does. Not yet run against the real 11.5 GB file (#390 item 2).
+
+**Found with it — a scratchpad that closed with nothing after it streamed whole
+on the surface with no field for it.** `withholding_reasoning` waits after a
+closer for the answer's first character; a reply ending there (`<think>Done.</think>`,
+or a harmony reply whose analysis ended and nothing followed) left the buffer
+`Inside`, and `pending_all` released the whole text as content where the
+surface has no reasoning field (`Withheld`: Anthropic), while the finaliser
+returned nothing. Any reasoning model, before gpt-oss. `pending_all` now treats
+a closed block as consumed on both surfaces; cases in the agreement guard, red
+without it.
+
 ## A prompt that closed someone else's turn is finished for the model
 
 `chat_template::open_the_models_turn_if_the_prompt_closed_it` runs in
