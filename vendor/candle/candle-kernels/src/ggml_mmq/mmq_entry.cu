@@ -72,11 +72,12 @@ swarm_mmq_status swarm_mmq_current_device(swarm_mmq_device & out) {
 
 using namespace swarm_ggml;
 
-// The types this build instantiates (the ones candle's own MMQ covered).
+// The types this build instantiates (the ones candle's own MMQ covered, and
+// MXFP4 — gpt-oss's experts, FUTURE_WORK #390 step 7).
 static int swarm_mmq_block_size(const int type) {
     switch (type) {
         case GGML_TYPE_Q4_0: case GGML_TYPE_Q4_1: case GGML_TYPE_Q5_0: case GGML_TYPE_Q5_1:
-        case GGML_TYPE_Q8_0:
+        case GGML_TYPE_Q8_0: case GGML_TYPE_MXFP4:
             return 32;
         case GGML_TYPE_Q2_K: case GGML_TYPE_Q3_K: case GGML_TYPE_Q4_K: case GGML_TYPE_Q5_K:
         case GGML_TYPE_Q6_K:
@@ -185,6 +186,7 @@ extern "C" int swarm_mmq_matmul(
         case GGML_TYPE_Q5_0: status = swarm_mmq_case<GGML_TYPE_Q5_0>(dev, p, fixup, fixup_floats, needed, go, s); break;
         case GGML_TYPE_Q5_1: status = swarm_mmq_case<GGML_TYPE_Q5_1>(dev, p, fixup, fixup_floats, needed, go, s); break;
         case GGML_TYPE_Q8_0: status = swarm_mmq_case<GGML_TYPE_Q8_0>(dev, p, fixup, fixup_floats, needed, go, s); break;
+        case GGML_TYPE_MXFP4: status = swarm_mmq_case<GGML_TYPE_MXFP4>(dev, p, fixup, fixup_floats, needed, go, s); break;
         case GGML_TYPE_Q2_K: status = swarm_mmq_case<GGML_TYPE_Q2_K>(dev, p, fixup, fixup_floats, needed, go, s); break;
         case GGML_TYPE_Q3_K: status = swarm_mmq_case<GGML_TYPE_Q3_K>(dev, p, fixup, fixup_floats, needed, go, s); break;
         case GGML_TYPE_Q4_K: status = swarm_mmq_case<GGML_TYPE_Q4_K>(dev, p, fixup, fixup_floats, needed, go, s); break;

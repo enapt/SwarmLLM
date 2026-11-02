@@ -1080,16 +1080,13 @@ fn only_a_card_with_types_the_grouped_kernel_reads_keeps_experts_stacked() {
         weight_before_ffn: true,
         weights_scale: 1.0,
     };
-    let fits =
-        |card, dtypes, widths, routing| StackedExperts::fit(card, dtypes, widths, routing, false);
-    // The kernel adds no expert bias (gpt-oss): such a layer keeps one matrix
-    // per expert.
-    assert!(!StackedExperts::fit(
+    let fits = StackedExperts::fit;
+    // gpt-oss's experts: MXFP4, 2880 wide, stacked (#390 step 7).
+    assert!(fits(
         true,
-        [G::Q8_0, G::Q8_0, G::Q8_0],
-        [2048, 768],
-        default,
-        true
+        [G::Mxfp4, G::Mxfp4, G::Mxfp4],
+        [2880, 2880],
+        default
     ));
     assert!(fits(true, [G::Q4K, G::Q4K, G::Q6K], [2048, 768], default));
     assert!(fits(true, [G::Q2K, G::Q2K, G::Q3K], [2048, 768], default));

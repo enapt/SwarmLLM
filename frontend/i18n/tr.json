@@ -854,7 +854,6 @@
   "placement.not_enough_vram": "Başlatıldığında boşta olandan daha fazla ekran belleği gerekiyor. Bellek boşaldığında ekran kartı yeniden kullanılacak.",
   "placement.on_cpu": "İşlemcide çalışıyor",
   "placement.tip": "Modeller ekran kartında daha hızlıdır. Bunun neden öyle olmadığı burada yazıyor.",
-  "placement.weight_format": "Bu model, bu sürümün ekran kartında henüz hızlı çalıştıramadığı bir biçimde (MXFP4) kayıtlı, bu yüzden işlemci çalıştırıyor.",
   "pool.add_device_header": "Başka bir cihaz ekle",
   "pool.add_device_settings_desc": "Bu gruba başka bir makine eklemek istediğinizde bir davet kodu oluşturun.",
   "pool.code_address_warning": "Bu kod, diğer cihazın bağlanabilmesi için cihazınızın ağ adreslerini içerir. Yalnızca güvendiğiniz kişilerle paylaşın.",

@@ -2393,6 +2393,13 @@ save. Its synthetic step did run 2.1x faster captured (52.5 vs 110-115 ms; overh
 vs 82-84), but the synthetic submits ~4,000 ops a token, far more than the real step, so it
 overstates the gain. KTransformers runs on native Linux, where a host callback costs tens of
 µs. Not built; the fixed-address replay above remains the route.
+**gpt-oss-20b shows the same gap (2026-11-02, step 7 of #390)**: 24 layers on this 8 GB card,
+the experts of 14 in RAM, min of 3 interleaved — ours 22.0 tok/s (`test-split`), llama.cpp
+4b1a27f 29.8 (`-ngl 99 --n-cpu-moe 14 -p 0 -n 128`), 0.74x. Not the MXFP4 products: ten more
+layers' experts in RAM (24 against 14) cost ours 1.56 ms a layer and llama.cpp 2.46; ours are
+24 ms of the step (741 MB a token, ~31 GB/s, flat 4-8 threads). The step is uncaptured
+(`decode_graph_ineligibility`), and llama.cpp with its graphs off read 19.2-23.8 against
+25.8-29.6 on (two rounds, ± 2-5 within each) — the same lean as the 30B's, the same route.
 
 #### #174 — CPU decode attention sits ~2× above the memory-bandwidth floor
 `P3` · perf-local · **OPEN** — 2026-08-22 · history: archive § "CPU decode attention: the kernel sits 2x above the DRAM floor"
@@ -2866,17 +2873,11 @@ match llama.cpp** (#715, `arch-inference.md`).
    multiplied on the processor (AVX2 in llama.cpp's order), giving llama.cpp's own answers bit for bit
    on fixed inputs (`examples/mxfp4_reference.c` runs its code; `mxfp4_tests` asserts the figures); the
    real header parses (`a_real_gpt_oss_header_parses_with_its_experts_mxfp4`, ignored: a 16 MB range
-   read). ⚠ **A card multiplies an MXFP4 weight correctly but very slowly** until step 7: no card kernel
-   reads it, so `QCudaStorage::fwd` sends it through `dequantize_matmul`'s host-dequantised copy on
-   EVERY call (seconds a token for a MoE) — so **a card build keeps a model holding MXFP4 OFF the card
-   since 2026-11-02** (`CpuReason::WeightFormatNeedsTheProcessor`, from the header through
-   `split::holds_weights_the_card_cannot_read`; the dashboard says why, in all 21 languages). Step 7
-   removes that reason; experts in RAM with attention on the card (`CardSplit::ExpertsInRam` for every
-   layer) is the middle road if step 7 slips, but every placement path (whole-card admission,
-   promotion, growth, guests) would have to ask it. Never add MXFP4 to `swarmllm_types::Quantization`
+   read). Until step 7 no card kernel read MXFP4 (a card multiplied it through a host-dequantised copy
+   on every call, seconds a token), so a card build kept a model holding MXFP4 off the card by a
+   placement reason of its own; step 7 removed it. Never add MXFP4 to `swarmllm_types::Quantization`
    without a feature bit (an older peer fails to decode a manifest naming a variant it lacks).
-   **Steps 2 and 3 in since 2026-11-02**: `ModelArch::GptOss` (hard-refused in `is_supported`, no
-   switch, until steps 4-5), its window (`SlidingWindow::from_file`: 128 on even layers), norm names
+   **Steps 2 and 3 in since 2026-11-02**: `ModelArch::GptOss` (refused until steps 4-5), its window (`SlidingWindow::from_file`: 128 on even layers), norm names
    (`NormNames`: `post_attention_norm` before the experts), routing (softmax over the top 4, as
    Gemma 4's), YaRN on windowed layers too (`LayerRope::read`'s default arm — no change), NEOX; its
    activation `Activation::SwigluOai` (`fast_math::swiglu_oai_mul{,_into}`) on all three paths (dense
@@ -2887,19 +2888,17 @@ match llama.cpp** (#715, `arch-inference.md`).
    its logits (`MoeFfn::router_scores`, the one place a router is read — it weighs as well as chooses),
    each expert's gate/up/down bias (`MoeFfn::expert_biases`, on the processor's one-region path and
    `expert_ffn`), `attn_output.bias` (`LayerWeights::output_projection`, both attention paths; rank 0
-   only under tensor parallelism). The card's stacked kernel adds no bias: `StackedExperts::fit` refuses
-   a biased layer (one matrix per expert on a card, never a processor layer's prompt card) — step 7
-   adds it there. Checked against a hand-written sum of llama.cpp's graph
+   only under tensor parallelism). On a card the stacked products add them since step 7. Checked against a hand-written sum of llama.cpp's graph
    (`a_biased_expert_layer_is_llama_cpps_sum`) and bit for bit across the two processor paths. Next:
    step 5 (sinks), then the end-to-end check against llama.cpp's `dump_logits` on a tiny file.
    **Step 5 in since 2026-11-02**: `attn_sinks` (`LayerWeights::attn_sinks`, `AttentionSinks`) reach
    every attention path through `standard_attention` — the processor's decode and prompt kernels
    fold each head's sink into the row's running max and sum (`attn_rows::fold_sink`, no value), the
    matmul path softmaxes a sink column beside the scores and drops it (`attn_softmax`'s
-   `composed_with_sinks`, grouped and ungrouped). No card kernel and no flash kernel reads a sink, so
-   a sink layer takes the matmul path on a card (`LayerVariant::flash_may_attend`, the tree and decode
-   kernels skipped, `tree_steps_may_be_captured` false) and its half-precision cache is widened on
-   every call — slow; step 7 adds the sink to `decode_attn_combine_f32` and an lse-returning flash.
+   `composed_with_sinks`, grouped and ungrouped). Flash and the tree kernel read no sink, so a sink
+   layer's prompt pass takes the matmul path on a card (`LayerVariant::flash_may_attend`,
+   `tree_steps_may_be_captured` false); since step 7 a decode step reads the sink in the card's
+   decode kernel.
    Under tensor parallelism each rank keeps its own heads' sinks. Checked against a float64
    reference on every processor path (`sinks_take_their_share_on_every_processor_path`); a `-inf`
    sink leaves the kernels' bits unchanged. **The whole forward matched since 2026-11-02**
@@ -2915,8 +2914,15 @@ match llama.cpp** (#715, `arch-inference.md`).
    llama.cpp (invariants inference § "gpt-oss: the whole forward"); `supported_list` names it;
    through a node, a two-node processor split gave the reference reply on both surfaces (a single
    node on 16 GB refuses its 12 GB, by the 70%-of-free rule).
-   **Left: step 7** — the card (MXFP4 kernels; then the `cpu_reason` MXFP4 arm goes; expert biases
-   in `stacked_products`; sinks in `decode_attn_combine_f32` and an lse-returning flash). **The tokenizer is checked** (2026-11-02): 17/17
+   **Step 7, the card, is done** (2026-11-02): MXFP4 card kernels (dequantize, MMVQ, MMQ, the
+   stacked MoE kernels), the expert biases after each stacked product, `swiglu_oai` in one launch,
+   the sinks in `decode_attn_combine_f32`; the `cpu_reason` MXFP4 arm is gone and gpt-oss may
+   split card/processor. On the real file, whole on this 8 GB card with 14 layers' experts in
+   RAM, ours against llama.cpp's processor reads 0.99972 median, 118/119 top-1 — nearer than
+   llama.cpp's own card build (invariants inference § "gpt-oss on a card"). **Residual**: flash
+   and the tree kernel read no sinks, so a sink layer's prompt pass and tree checks take the
+   matmul path (`LayerVariant::flash_may_attend`) — an lse-returning flash would put them back
+   on flash. **The tokenizer is checked** (2026-11-02): 17/17
    identical to llama.cpp master on the real vocabulary, and `clean_spaces` is off for `gpt-4o` there,
    so nothing to build (invariants inference § "gpt-oss: the whole forward").
    **Step 6, the harmony reply, is done** (2026-11-02): `inference::harmony::Reply` rewrites the

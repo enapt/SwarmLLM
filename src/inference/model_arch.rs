@@ -60,9 +60,11 @@ pub enum ModelArch {
     /// layer routes 4 of its experts, whose stacks are MXFP4, through
     /// [`Activation::SwigluOai`]; attention sinks, biases on the attention
     /// output and on the router and expert stacks, a 128-position window on
-    /// the even layers, NEOX RoPE with YaRN. Named so far, NOT run: refused
-    /// outright ([`Self::is_supported`]) until its sinks and biases are read
-    /// (#390 item 2, `docs/FUTURE_WORK.md`).
+    /// the even layers, NEOX RoPE with YaRN. Supported since its real-file
+    /// check ([`Self::is_supported`], #390 item 2), on the processor and on a
+    /// card (MXFP4 card kernels, the experts' biases after each stacked
+    /// product, the sinks in the decode kernel's merge); its reply channels
+    /// are read by `inference::harmony`.
     GptOss,
     /// Architecture not recognized — falls back to Llama-like behavior
     Unknown(String),

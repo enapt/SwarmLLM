@@ -344,6 +344,76 @@ typedef struct {
 } block_q8_1;
 static_assert(sizeof(block_q8_1) == 2*sizeof(ggml_fp16_t) + QK8_0, "wrong q8_1 block size/padding");
 
+// SwarmLLM patch: MXFP4 (GGML type 39 — gpt-oss's experts, unsloth's MXFP4_MOE
+// files; FUTURE_WORK #390 step 7), read as llama.cpp's CUDA backend reads it
+// (`ggml-common.h` block_mxfp4, `vecdotq.cuh` vec_dot_mxfp4_q8_1, `convert.cu`
+// dequantize_mxfp4): 32 four-bit E2M1 values sharing one power-of-two scale
+// kept as an E8M0 exponent. The low nibble of `qs[j]` is element j, the high
+// nibble element j + 16, as in Q4_0. The table holds each value DOUBLED (so it
+// fits int8) and the scale is HALVED to match — the processor's
+// `k_quants::e8m0_to_f32_half` / `MXFP4_VALUES`, so a card and the processor
+// read the same numbers. The block is 17 bytes, so `qs` has no alignment: it is
+// read a byte at a time (`get_int_b1`), as llama.cpp reads it.
+#define QK_MXFP4 32
+#define QR_MXFP4 2
+#define QI_MXFP4 (QK_MXFP4 / (4 * QR_MXFP4))
+typedef struct {
+    uint8_t e;                  // E8M0 scale exponent
+    uint8_t qs[QK_MXFP4 / 2];   // E2M1 nibbles
+} block_mxfp4;
+static_assert(sizeof(block_mxfp4) == sizeof(uint8_t) + QK_MXFP4 / 2, "wrong mxfp4 block size/padding");
+
+// llama.cpp `kvalues_mxfp4` (`kvalues_fp4`): E2M1 doubled. Read four bytes at
+// a time by `get_int_from_table_16`, so aligned.
+static __device__ __align__(16) const int8_t kvalues_mxfp4[16] = {
+    0, 1, 2, 3, 4, 6, 8, 12, 0, -1, -2, -3, -4, -6, -8, -12,
+};
+
+// llama.cpp `ggml_e8m0_to_fp32_half` (ggml-impl.h): 2^(x - 128), exact, the
+// two smallest exponents as subnormals. Equal to `ggml_cuda_e8m0_to_fp32(x) *
+// 0.5f`, the form llama.cpp's card kernels write, for every x.
+static __device__ __forceinline__ float e8m0_to_fp32_half(const uint8_t x) {
+    const uint32_t bits = x < 2 ? (0x00200000u << x) : ((uint32_t)(x - 1) << 23);
+    return __uint_as_float(bits);
+}
+
+// llama.cpp `get_int_b1`: four bytes with no alignment assumed.
+static __device__ __forceinline__ int get_int_b1(const void * x, const int & i32) {
+    const uint8_t * x8 = (const uint8_t *) x;
+    int x32  = x8[4*i32 + 0] <<  0;
+    x32     |= x8[4*i32 + 1] <<  8;
+    x32     |= x8[4*i32 + 2] << 16;
+    x32     |= x8[4*i32 + 3] << 24;
+    return x32;
+}
+
+// llama.cpp `get_int_from_table_16` (vecdotq.cuh, its CUDA branch): the eight
+// nibbles of `q4` looked up in a 16-entry int8 table; `.x` the four low
+// nibbles' values in byte order, `.y` the four high ones'.
+static __device__ __forceinline__ int2 get_int_from_table_16(const int & q4, const int8_t * table) {
+    const uint32_t * table32 = (const uint32_t *) table;
+    uint32_t tmp[2];
+    const uint32_t low_high_selection_indices = (0x32103210 | ((q4 & 0x88888888) >> 1));
+#pragma unroll
+    for (uint32_t i = 0; i < 2; ++i) {
+        const uint32_t shift = 16 * i;
+        const uint32_t low  = __byte_perm(table32[0], table32[1], q4 >> shift);
+        const uint32_t high = __byte_perm(table32[2], table32[3], q4 >> shift);
+        tmp[i] = __byte_perm(low, high, low_high_selection_indices >> shift);
+    }
+    return make_int2(__byte_perm(tmp[0], tmp[1], 0x6420), __byte_perm(tmp[0], tmp[1], 0x7531));
+}
+
+// For `dequantize_mul_mat_vec` (the forced DMMV path, `set_force_dmmv`): element
+// `iqs` and `iqs + 16` of block `ib`.
+static __device__ __forceinline__ void dequantize_mxfp4(const void * vx, const int ib, const int iqs, dfloat2 & v){
+    const block_mxfp4 * x = (const block_mxfp4 *) vx;
+    const dfloat d = e8m0_to_fp32_half(x[ib].e);
+    const int vui = x[ib].qs[iqs];
+    v.x = kvalues_mxfp4[vui & 0xF] * d;
+    v.y = kvalues_mxfp4[vui >> 4] * d;
+}
+
 typedef float (*vec_dot_q_cuda_t)(const void * __restrict__ vbq, const block_q8_1 * __restrict__ bq8_1, const int & iqs);
 typedef void (*allocate_tiles_cuda_t)(int ** x_ql, half2 ** x_dm, int ** x_qh, int ** x_sc);
 typedef void (*load_tiles_cuda_t)(
@@ -1155,6 +1225,36 @@ DEQUANTIZE(q4_1)
 DEQUANTIZE(q5_0)
 DEQUANTIZE(q5_1)
 DEQUANTIZE(q8_0)
+// SwarmLLM patch: MXFP4 laid out as `dequantize_block_q4_0` above (eight
+// blocks a CUDA block of 32 threads, four values and their +16 partners a
+// thread), each value llama.cpp's `dequantize_mxfp4`.
+template<typename dst_t>
+static __device__ void dequantize_block_mxfp4(const void * __restrict__ vx, dst_t * __restrict__ yy, int nb32) {
+
+    const int64_t i = blockIdx.x;
+
+    const int tid = threadIdx.x;
+    const int il  = tid/8;
+    const int ir  = tid%8;
+    const int64_t ib = 8*i + ir;
+    if (ib >= nb32) {
+        return;
+    }
+
+    dst_t * y = yy + 256*i + 32*ir + 4*il;
+
+    const block_mxfp4 * x = (const block_mxfp4 *)vx + ib;
+    const float d = e8m0_to_fp32_half(x->e);
+
+    const uint8_t * q = x->qs + 4*il;
+
+    for (int l = 0; l < 4; ++l) {
+        y[l+ 0] = d * kvalues_mxfp4[q[l] & 0xF];
+        y[l+16] = d * kvalues_mxfp4[q[l] >>  4];
+    }
+}
+
+DEQUANTIZE(mxfp4)
 
 template <int qk, int qr, dequantize_kernel_t dequantize_kernel>
 static __device__ void dequantize_mul_mat_vec(const void * __restrict__ vx, const dfloat * __restrict__ y, float * __restrict__ dst, const int ncols, const int nrows) {
@@ -1241,6 +1341,9 @@ extern "C" __global__ void dequantize_mul_mat_vec_q5_1_cuda(const void * vx, con
 }
 extern "C" __global__ void dequantize_mul_mat_vec_q8_0_cuda(const void * vx, const dfloat * y, float * dst, const int ncols, const int nrows) {
     dequantize_mul_mat_vec<QK8_0, QR8_0, dequantize_q8_0>(vx, y, dst, ncols, nrows);
+}
+extern "C" __global__ void dequantize_mul_mat_vec_mxfp4_cuda(const void * vx, const dfloat * y, float * dst, const int ncols, const int nrows) {
+    dequantize_mul_mat_vec<QK_MXFP4, QR_MXFP4, dequantize_mxfp4>(vx, y, dst, ncols, nrows);
 }
 
 extern "C" __global__ void dequantize_mul_mat_vec_q2_k(const void * __restrict__ vx, const float * __restrict__ yy, float * __restrict__ dst, const int ncols, int nrows) {
@@ -3344,6 +3447,49 @@ extern "C" __global__ void mul_mat_vec_q6_K_q8_1_cuda8(
     mul_mat_vec_q<8, QK_K, QI6_K, block_q6_K, VDR_Q6_K_Q8_1_MMVQ, vec_dot_q6_K_q8_1>
         (vx, vy, dst, ncols_x, nrows_x, nrows_y, nrows_dst);
 }
+
+// SwarmLLM patch: MXFP4 against a Q8_1 activation, llama.cpp's
+// `vec_dot_mxfp4_q8_1` (vecdotq.cuh) in candle's signature (`vbq` already the
+// block). `iqs` is 0 or 2 (QI 4, VDR 2): ints iqs, iqs + 1 of the nibbles meet
+// the activation's ints iqs + l (values 0-15) and iqs + l + 4 (16-31).
+#define VDR_MXFP4_Q8_1_MMVQ 2
+
+static __device__ __forceinline__ float vec_dot_mxfp4_q8_1(
+    const void * __restrict__ vbq, const block_q8_1 * __restrict__ bq8_1, const int & iqs) {
+
+    const block_mxfp4 * bq4 = (const block_mxfp4 *) vbq;
+
+    const int * q8 = (const int *) bq8_1->qs + iqs;
+
+    int sumi = 0;
+#pragma unroll
+    for (int l = 0; l < VDR_MXFP4_Q8_1_MMVQ; ++l) {
+        const int aux_q4 = get_int_b1(bq4->qs, iqs + l);
+        const int2 v = get_int_from_table_16(aux_q4, kvalues_mxfp4);
+
+        sumi = ggml_cuda_dp4a(v.x, q8[l + 0], sumi);
+        sumi = ggml_cuda_dp4a(v.y, q8[l + 4], sumi);
+    }
+
+    const float d = e8m0_to_fp32_half(bq4->e) * __low2float(bq8_1->ds);
+    return d * sumi;
+}
+
+#define MUL_MAT_VEC_MXFP4(NCOLS_Y) \
+extern "C" __global__ void mul_mat_vec_mxfp4_q8_1_cuda##NCOLS_Y( \
+    const void * vx, const void * vy, float * dst, \
+    const int ncols_x, const int nrows_x, const int nrows_y, const int nrows_dst) { \
+    mul_mat_vec_q<NCOLS_Y, QK_MXFP4, QI_MXFP4, block_mxfp4, VDR_MXFP4_Q8_1_MMVQ, vec_dot_mxfp4_q8_1> \
+        (vx, vy, dst, ncols_x, nrows_x, nrows_y, nrows_dst); \
+}
+MUL_MAT_VEC_MXFP4(1)
+MUL_MAT_VEC_MXFP4(2)
+MUL_MAT_VEC_MXFP4(3)
+MUL_MAT_VEC_MXFP4(4)
+MUL_MAT_VEC_MXFP4(5)
+MUL_MAT_VEC_MXFP4(6)
+MUL_MAT_VEC_MXFP4(7)
+MUL_MAT_VEC_MXFP4(8)
 
 extern "C" __global__ void quantize_q8_1(const float * __restrict__ x, void * __restrict__ vy, const int kx, const int kx_padded) {
     const int ix = blockDim.x*blockIdx.x + threadIdx.x;

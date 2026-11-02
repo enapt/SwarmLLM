@@ -291,7 +291,14 @@ fn composed_with_sinks(
         .broadcast_as(shape)?
         .contiguous()?;
     let both = Tensor::cat(&[&att, &column], last)?;
-    candle_nn::ops::softmax_last_dim(&both)?.narrow(last, 0, keys)
+    // Contiguous again once the column is cut off: the weights go straight
+    // into a matmul with V, and the card's matmul refuses a view whose rows
+    // are one wider than it reads (gpt-oss-20b's first card prompt, 2026-11-02;
+    // `sinks_take_their_share_on_the_cards_matmul_path`). The processor's
+    // matmul takes the view, which is why every processor check passed.
+    candle_nn::ops::softmax_last_dim(&both)?
+        .narrow(last, 0, keys)?
+        .contiguous()
 }
 
 /// Scale, optionally soft-cap, add `mask`, and softmax over the last dimension.

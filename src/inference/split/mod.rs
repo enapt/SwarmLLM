@@ -50,8 +50,6 @@ pub use self::draft::{FlowGrowth, FlowStep, TreeGrowth};
 pub use self::entry::BatchItem;
 pub use self::entry::{trim_split_model_cache, SplitModelEntry, SplitModelKey};
 pub use self::executor::{Capture, SkipBridge};
-#[cfg(any(feature = "candle-cuda", test))]
-pub(crate) use self::gguf_meta::holds_weights_the_card_cannot_read;
 pub(crate) use self::gguf_meta::tensor_byte_size;
 pub use self::gguf_meta::{
     ensure_gguf_header, explain_gguf_parse_error, gguf_arch_str, read_gguf_header,

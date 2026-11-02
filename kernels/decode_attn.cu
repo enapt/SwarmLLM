@@ -603,6 +603,12 @@ TA_ENTRY(tree_attn_tiled_f16kv_d256, 32, 16, 256)
 // KV head `h` — `past_o` [runs, rows·n_rep, n_kv_head, d] half, `past_lse`
 // [runs, n_kv_head, rows·n_rep] — FlashInfer's `merge_state`, the cascade
 // that reads a shared prefix once. A run that read no keys (L = +∞) is skipped.
+//
+// `sinks` (null = none): gpt-oss's learned per-head attention sink, [n_head]
+// f32 — one more score with no value, in the scaled-score space: it raises the
+// max and adds e^(sink - M) to the denominator only (llama.cpp's
+// `soft_max_f32` with `sinks`, `ggml_soft_max_add_sinks`). A row is a query
+// head, so `sinks[hh]`.
 extern "C" __global__ void decode_attn_combine_f32(
     const float *__restrict__ partial,
     float *__restrict__ out,
@@ -612,7 +618,8 @@ extern "C" __global__ void decode_attn_combine_f32(
     const int n_chunks,
     const __half *__restrict__ past_o,
     const float *__restrict__ past_lse,
-    const int past_runs
+    const int past_runs,
+    const float *__restrict__ sinks
 ) {
     const int bh = blockIdx.x;
     const int n_head = n_kv_head * n_rep;
@@ -626,7 +633,8 @@ extern "C" __global__ void decode_attn_combine_f32(
     const int n_sq = (gridDim.x / n_head) * n_rep;
     const int kvh = hh / n_rep;
 
-    float big_m = -INFINITY;
+    const float sink = sinks ? sinks[hh] : -INFINITY;
+    float big_m = sink;
     for (int c = 0; c < n_chunks; c++) {
         big_m = fmaxf(big_m, partial[((long long)(g * n_chunks + c) * n_rep + r) * row]);
     }
@@ -638,7 +646,7 @@ extern "C" __global__ void decode_attn_combine_f32(
     }
     for (int j = threadIdx.x; j < d; j += blockDim.x) {
         float num = 0.0f;
-        float den = 0.0f;
+        float den = sinks ? expf(sink - big_m) : 0.0f;
         for (int u = 0; u < past_runs; u++) {
             const float m = past_lse[((long long)u * n_kv_head + kvh) * n_sq + sq];
             if (!isfinite(m)) {

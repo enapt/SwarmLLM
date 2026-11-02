@@ -2,6 +2,22 @@
 
 ## [Unreleased]
 
+**gpt-oss runs on an NVIDIA graphics card.** Since 0.3.268 gpt-oss-20b ran only on the processor,
+because no graphics-card code read the 4-bit format its experts are stored in (MXFP4). The card
+now reads it, with the same arithmetic llama.cpp's CUDA build uses, along with the two other parts
+of the model no card code handled: a bias on every expert, and the attention "sinks" (a share of
+attention that goes to no word). On the real gpt-oss-20b its answers on the card are as close to
+llama.cpp's as llama.cpp's own card build is to its processor build. On an 8 GB laptop card,
+which holds the 12 GB model only by keeping some experts in the computer's memory, it writes
+about 22 tokens a second: four times the processor alone, and about three quarters of
+llama.cpp's speed on the same placement. (#390)
+
+**The popular new models were checked against llama.cpp.** One file of each family people are
+downloading this week: Qwen3.5-9B, Qwen3.8-27B, Ornith-1.5-9B and Gemma 4 31B on the processor,
+and Qwen3.5-9B, Ornith-1.5-9B, Gemma 4 12B and gpt-oss-20b on an NVIDIA card — whole, or split
+between the card and the computer's memory. On every one, this engine's answers to the same
+prompt are as close to llama.cpp's as llama.cpp's own builds are to each other.
+
 **Ornith-1.5 models run across computers.** Their files (the 9B and 122B were checked) carry one
 extra layer used for guessing ahead (a "next-token prediction" block), which the model does not run
 when it answers. Any model whose file carries one had the same problem. The part of the file holding

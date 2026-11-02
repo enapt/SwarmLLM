@@ -826,7 +826,7 @@ The SplitModel loader detects the model architecture from GGUF metadata
 | RoPE variant | Interleaved (`rope_i`) | Interleaved (iRoPE) | Contiguous (`rope`) | IMROPE, sections [11,11,10,0] over 64 of 256 dims (text positions only) | Contiguous | Contiguous; per layer (`split::rope::LayerRope`): windowed layers base 10,000 unscaled, global layers base 1,000,000 × linear factor (8 from the 4B up) | Contiguous, "proportional": windowed layers turn 256 at base 10,000 without the file factors, global layers 512 at 1,000,000 with `rope_freqs` (`split::rope::WindowedRope`) | Su/YaRN | Interleaved | Contiguous | Interleaved (MLA split; its own RoPE table, without YaRN — #116) | Interleaved (partial) | Contiguous (NEOX), YaRN ×32 from 4,096 |
 | QKV biases | None | None | Yes | None | None | None | None | Yes | None | Yes | None (MLA projections) | Yes | Yes, and on the attention output |
 | Attention | Standard MHA/GQA | Standard GQA | Standard MHA | Gated: 3 of 4 layers Gated DeltaNet (recurrent state), every 4th softmax attention with a per-head output gate | Standard MHA; Gemma 2: 4,096-position window on even layers | GQA, per-head Q/K RMS norm before RoPE; window (512 / 1,024) on 5 layers in 6 | A shape per layer (`split::attention_shapes`): 12B windowed 8 KV heads × 256 over 1,024, every 6th global 1 × 512 with V = K; Q/K normed with weights, V without; scale 1 (`split::query_scale`) | Standard MHA | Standard GQA | Standard MHA | MLA (low-rank Q/KV) | Extreme GQA (16:1) | GQA 64:8; one attention sink per head (`attn_sinks`); a 128-position window on even layers |
-| FFN | Dense | Dense + MoE (mixed) | Dense | Dense, or MoE (top-k) + sigmoid-gated shared expert (`qwen35moe`) | Dense | Dense (GELU) | Dense (GELU); 26B-A4B: a dense GELU feed-forward beside GELU top-k experts, each branch normed, per-expert output scale (`layers::DenseBeside`) | Dense | Dense | Dense | MoE (top-k) + shared | Dense | MoE, 32 experts choosing 4: a router bias that chooses AND weighs, gate/up/down biases per expert, clamped SwiGLU (`swiglu_oai`); experts in MXFP4 (processor only) |
+| FFN | Dense | Dense + MoE (mixed) | Dense | Dense, or MoE (top-k) + sigmoid-gated shared expert (`qwen35moe`) | Dense | Dense (GELU) | Dense (GELU); 26B-A4B: a dense GELU feed-forward beside GELU top-k experts, each branch normed, per-expert output scale (`layers::DenseBeside`) | Dense | Dense | Dense | MoE (top-k) + shared | Dense | MoE, 32 experts choosing 4: a router bias that chooses AND weighs, gate/up/down biases per expert, clamped SwiGLU (`swiglu_oai`); experts in MXFP4 |
 | Context length | 4096 (default) | 131072 | 32768 | 131072 | 8192 | 32768 (1B), 131072 (4B+) | 262144 | 4096 | 32768 | 16384 | 163840 | 131072 | 131072 |
 | Special | — | NoPE every 4th layer; Q/K RMS-normalised after RoPE; sigmoid top-k, expert weighted on its INPUT | — | Hybrid SSM+attention | Embedding scaling (sqrt(d)), norm weights carry Gemma's +1 in the file, attn + final logit softcap, EOS 107, Gemma chat template | Embedding scaling (sqrt(d)); no softcap; `<end_of_turn>` (106) ends a turn; the 27B's query scale (#279) | Per-layer `layer_output_scale`; final softcap 30; `<turn\|>` (106) ends a turn; gemma4 tokenizer (`BpeTokenizer::encode_gemma4`), BOS always; E2B/E4B: per-layer inputs + shared-KV layers, whole on one computer only (#115 (3c)) | Fused QKV/FFN | — | — | Per-layer dense/MLA | Partial RoPE (50%) | Reply channels read by `inference::harmony`; its end-of-message marker is not a stop |
 | E2E verified | ✅ | tiny random model vs llama.cpp only (#114) | ✅ | ✅ dense vs llama.cpp (0.8B, 4B); `qwen35moe` vs llama.cpp on a 0.87B real file (#228) | ✅ (Gemma2) | ✅ 1B and 4B vs llama.cpp on the processor (#115 (1)) | ✅ 12B (#115 (3)), 26B-A4B (#115 (3b)) and E2B/E4B (#115 (3c)) vs llama.cpp master, processor and card | ✅ | — | ⛔ not supported (#118) | ⛔ not supported (#116) | ✅ | ✅ gpt-oss-20b vs llama.cpp master and an exact forward of the file, processor (#390) |
@@ -3053,7 +3053,7 @@ Routes Claude model requests through a locally-authenticated `claude` CLI subpro
 - Cross-component calls: `App.componentName.method()`. Shared state: `App.state.*`. Utilities: `App.utils.*`.
 
 ### Frontend Features
-- **i18n**: 1426 translation keys (1428 entries per locale incl. `_lang` + `_dir`) across 21 languages (en, es, fr, de, pt, it, nl, ru, zh, ja, ko, ar, tr, pl, sv, th, hi, vi, id, uk, cs). Auto-detects browser language. `I18n.t()` + `data-i18n` DOM attributes. Interpolation via `{variable}` placeholders. Fallback chain: current language → English → raw key. "Continue in English" UX for non-English users who prefer English.
+- **i18n**: 1425 translation keys (1427 entries per locale incl. `_lang` + `_dir`) across 21 languages (en, es, fr, de, pt, it, nl, ru, zh, ja, ko, ar, tr, pl, sv, th, hi, vi, id, uk, cs). Auto-detects browser language. `I18n.t()` + `data-i18n` DOM attributes. Interpolation via `{variable}` placeholders. Fallback chain: current language → English → raw key. "Continue in English" UX for non-English users who prefer English.
 - **Theme**: Light / Dark / System toggle. `[data-theme="light"]` CSS overrides. Persisted in localStorage.
 - **Swarm background**: animated canvas flocking network behind the dashboard (`frontend/js/neural-bg.js`). Up to 90 boids (scaled by viewport area) with connecting links, feeler tendrils, gentle drift and mouse repulsion/glow. State-reactive colouring: blue (idle) → cyan (active inference) → red-orange (unhealthy/disconnected); peer count boosts vibrancy and active requests trigger firing pulses.
   **It is the one thing on the page with an ongoing power cost, so it is bounded at four levels.** It advances at 30 Hz rather than the browser's 60 while the pointer is in play; drops to 10 Hz once the pointer has been still for 4 s, which is the ordinary state of a dashboard left open; drops to 8 Hz whenever `state.active > 0` (this page is usually open on the machine running the node, so the decoration yields to the real work — the slowest applicable rate wins); and stops entirely when the tab is hidden. Users can switch it off in Settings (`App.SWARM_ANIM_KEY`), and it defaults to OFF where the device reports `prefers-reduced-motion: reduce` — a canvas loop is invisible to the CSS media query that honours that everywhere else on the page. Turning it off cancels the frame loop rather than hiding the canvas, since a hidden animation costs what a visible one does.
@@ -3104,22 +3104,26 @@ routes on the card and runs each projection for every chosen pair in one
 kernel needs the vendored candle-kernels barrier. A decode step on the same
 model, 26 layers on an 8 GB laptop card: 74-89 → 40-55 ms.
 
-### MXFP4 is read, and multiplied on the processor (2026-11-02)
+### MXFP4 is read, on the processor and on a card (2026-11-02)
 
 `vendor/candle/candle-core/src/quantized/k_quants.rs::BlockMxfp4` adds GGML type 39,
 the 4-bit format gpt-oss keeps its experts in, with llama.cpp's dequantiser,
 quantiser and processor dot (`avx.rs::vec_dot_mxfp4_q8_0`, in llama.cpp's AVX2 order):
 its answers are llama.cpp's bit for bit on fixed inputs (`mxfp4_tests`,
-`examples/mxfp4_reference.c`). No card kernel reads it yet — `QCudaStorage::fwd`
-sends a type with no dequantize kernel through `dequantize_matmul`'s host-dequantised
-copy, correct and slow (seconds a token for a mixture-of-experts model) — so a card
-build keeps a model holding one OFF the card: `ModelProcessPool::cpu_reason` answers
-`CpuReason::WeightFormatNeedsTheProcessor` from its header
-(`split::holds_weights_the_card_cannot_read`), the one answer the planner and the spawn
-both ask, until a card kernel reads the type. Metal refuses it. gpt-oss is named
+`examples/mxfp4_reference.c`). On a card (#390 step 7) the vendored kernels read it as
+llama.cpp's CUDA build does: `quantized.cu` dequantises it and multiplies one row
+(`dequantize_mul_mat_vec_mxfp4_cuda`) and up to eight (`mul_mat_vec_mxfp4_q8_1_cuda*`,
+`vec_dot_mxfp4_q8_1`); several rows go to llama.cpp's own MMQ tiles
+(`ggml_mmq/mmq_type_mxfp4.cu`), and to cuBLAS where MMQ does not run (the old dp4a MMQ
+has no MXFP4 tile). Stacked experts read it too (`moe_gguf.cu` / `moe_wmma_gguf.cu`
+type 19, `moe_card::kernel_type`), with gpt-oss's per-expert biases added after each
+product (`layers::expert_bias_rows`). Metal refuses it. Until this change a card build
+kept a model holding MXFP4 off the card (a placement reason of its own, since
+removed). gpt-oss is named
 (`ModelArch::GptOss`: its window, norm names and routing as llama.cpp's `openai-moe.cpp`;
 its activation `fast_math::swiglu_oai_mul`, llama.cpp's bits,
-`examples/swiglu_oai_reference.c`); its sinks, biases, template and reply channels are read,
+`examples/swiglu_oai_reference.c`, one launch on a card); its sinks (read on a card by the
+decode kernel's combine), biases, template and reply channels are read,
 and it runs since 2026-11-02 — checked on the real gpt-oss-20b against llama.cpp master and
 an exact forward of the file (`docs/invariants/inference.md` § "gpt-oss: the whole forward
 against llama.cpp's"; FUTURE_WORK #390).

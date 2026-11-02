@@ -104,19 +104,25 @@ pub fn swiglu_oai_mul_into(gate: &[f32], up: &[f32], out: &mut [f32]) {
 }
 
 /// [`swiglu_oai_mul_into`] over two tensors of one shape: one pass on the
-/// processor, candle's composition elsewhere (the same expression in five
-/// ops; a card's `exp` is not libm's, so a card's product is judged against
-/// llama.cpp's, never by its bits).
+/// processor, ONE launch on a card (`swiglu_oai_mul_f32`, llama.cpp's CUDA
+/// expression; a card's `exp` is not libm's, so a card's product is judged
+/// against llama.cpp's, never by its bits), candle's composition elsewhere.
+/// The composition's scalar `minimum` / `clamp` copy their scalars from the
+/// host, which a captured decode step cannot hold (#390 step 7).
 pub fn swiglu_oai_mul(gate: &Tensor, up: &Tensor) -> Result<Tensor> {
-    if gate.dtype() == DType::F32
+    let fusable = gate.dtype() == DType::F32
         && up.dtype() == DType::F32
         && gate.is_contiguous()
         && up.is_contiguous()
         && gate.dims() == up.dims()
-        && matches!(gate.device(), Device::Cpu)
-        && matches!(up.device(), Device::Cpu)
-    {
-        return gate.apply_op2_no_bwd(up, &SwigluOaiMul);
+        && up.device().same_device(gate.device());
+    if fusable {
+        match gate.device() {
+            Device::Cpu => return gate.apply_op2_no_bwd(up, &SwigluOaiMul),
+            #[cfg(feature = "candle-cuda")]
+            Device::Cuda(_) => return gate.apply_op2_no_bwd(up, &SwigluOaiMul),
+            _ => {}
+        }
     }
     swiglu_oai_composed(gate, up)
 }
@@ -168,6 +174,57 @@ impl CustomOp2 for SwigluOaiMul {
             .zip(u.par_chunks(chunk))
             .for_each(|((o, g), u)| swiglu_oai_mul_into(g, u, o));
         Ok((CpuStorage::F32(out), Shape::from_dims(l1.shape().dims())))
+    }
+
+    /// One `swiglu_oai_mul_f32` launch (`kernels/fused_decode.cu`), its output
+    /// from `alloc_fully_overwritten` as [`SiluMul`]'s is.
+    #[cfg(feature = "candle-cuda")]
+    fn cuda_fwd(
+        &self,
+        s1: &candle_core::CudaStorage,
+        l1: &Layout,
+        s2: &candle_core::CudaStorage,
+        l2: &Layout,
+    ) -> Result<(candle_core::CudaStorage, Shape)> {
+        use candle_core::cuda_backend::cudarc::driver::{LaunchConfig, PushKernelArg};
+        use candle_core::cuda_backend::WrapErr;
+
+        let dev = s1.device.clone();
+        let g = s1.as_cuda_slice::<f32>()?;
+        let u = s2.as_cuda_slice::<f32>()?;
+        let (Some((go, ge)), Some((uo, ue))) = (l1.contiguous_offsets(), l2.contiguous_offsets())
+        else {
+            candle_core::bail!("swiglu-oai-mul: inputs must be contiguous");
+        };
+        let numel = ge - go;
+        if numel != ue - uo {
+            candle_core::bail!("swiglu-oai-mul: shape mismatch {numel} vs {}", ue - uo);
+        }
+        let g = g.slice(go..ge);
+        let u = u.slice(uo..ue);
+        let out = dev.alloc_fully_overwritten::<f32>(numel)?;
+        let func = dev.get_or_load_custom_func(
+            "swiglu_oai_mul_f32",
+            "swarmllm_fused_decode",
+            FUSED_DECODE_PTX,
+        )?;
+        let cfg = LaunchConfig::for_num_elems(numel as u32);
+        let (alpha, limit) = (SWIGLU_OAI_ALPHA, SWIGLU_OAI_LIMIT);
+        let mut builder = func.builder();
+        builder.arg(&numel);
+        builder.arg(&alpha);
+        builder.arg(&limit);
+        builder.arg(&g);
+        builder.arg(&u);
+        builder.arg(&out);
+        // SAFETY: ffi. Shapes and contiguity are checked above; the kernel
+        // reads `numel` elements of each input and writes `numel` of the
+        // output, all three allocated at that length.
+        unsafe { builder.launch(cfg) }.w()?;
+        Ok((
+            candle_core::CudaStorage::wrap_cuda_slice(out, dev),
+            Shape::from_dims(l1.shape().dims()),
+        ))
     }
 }
 
@@ -545,6 +602,45 @@ mod tests {
     /// ⚠ Gated, so no default build compiles it — run
     /// `cargo test --features candle-cuda --all-targets` after touching
     /// either side (`arch-inference.md` § "Cross-feature compile checks").
+    /// The card's one-launch `swiglu_oai_mul_f32` against the processor's
+    /// llama.cpp expression: a card's `expf` is not libm's, so within a few
+    /// units in the last place, never by bits — and the gate past the limit,
+    /// `up` past both ends, are exercised (σ 6 reaches ±7 often).
+    #[cfg(feature = "candle-cuda")]
+    #[test]
+    fn cuda_swiglu_oai_matches_the_processors_expression() {
+        let dev = match Device::new_cuda(0) {
+            Ok(d) => d,
+            Err(e) => {
+                eprintln!("SKIPPED cuda_swiglu_oai: no CUDA device ({e})");
+                return;
+            }
+        };
+        for (rows, cols) in [(1usize, 2880usize), (8, 2880), (3, 1001)] {
+            let gate = Tensor::randn(0f32, 6.0, (rows, cols), &Device::Cpu).unwrap();
+            let up = Tensor::randn(0f32, 6.0, (rows, cols), &Device::Cpu).unwrap();
+            let want = swiglu_oai_mul(&gate, &up)
+                .unwrap()
+                .flatten_all()
+                .unwrap()
+                .to_vec1::<f32>()
+                .unwrap();
+            let got = swiglu_oai_mul(&gate.to_device(&dev).unwrap(), &up.to_device(&dev).unwrap())
+                .unwrap()
+                .flatten_all()
+                .unwrap()
+                .to_vec1::<f32>()
+                .unwrap();
+            assert_eq!(got.len(), want.len());
+            for (i, (g, w)) in got.iter().zip(&want).enumerate() {
+                assert!(
+                    (g - w).abs() <= 1e-5 * w.abs().max(1.0),
+                    "{rows}x{cols}: element {i}: card {g} vs processor {w}"
+                );
+            }
+        }
+    }
+
     #[cfg(feature = "candle-cuda")]
     #[test]
     fn cuda_silu_mul_is_bit_identical_to_the_composed_path() {

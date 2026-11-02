@@ -57,6 +57,31 @@ extern "C" __global__ void silu_mul_f32(
     }
 }
 
+// gpt-oss's clamped SwiGLU (`ggml_swiglu_oai`, FUTURE_WORK #390 step 7) as ONE
+// kernel: llama.cpp's CUDA `ggml_cuda_op_swiglu_oai_single` (ggml-cuda/unary.cuh,
+// master 4b1a27f) expression for expression — the gate clamped from above
+// (`fminf`), `up` both ways, a sigmoid sharpened by `alpha`, `up` lifted by one.
+// candle composes it from scalar `minimum` / `clamp`, each of which copies its
+// scalar from the host: inside a captured decode step that copy is replayed from
+// the host address, so `htod_copies_so_far` discarded every gpt-oss capture.
+// Grid-stride and assigning every element, as `silu_mul_f32` is.
+extern "C" __global__ void swiglu_oai_mul_f32(
+    const size_t numel,
+    const float alpha,
+    const float limit,
+    const float *gate,
+    const float *up,
+    float *out
+) {
+    for (unsigned int i = blockIdx.x * blockDim.x + threadIdx.x; i < numel;
+         i += blockDim.x * gridDim.x) {
+        const float x = fminf(gate[i], limit);
+        const float g = fmaxf(fminf(up[i], limit), -limit);
+        const float out_glu = x / (1.0f + expf(-x * alpha));
+        out[i] = out_glu * (1.0f + g);
+    }
+}
+
 // (a + b) and rms_norm(a + b) * alpha, as ONE kernel with TWO outputs.
 //
 // Every dense layer hands its residual stream through this pattern twice —

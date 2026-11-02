@@ -375,10 +375,17 @@ pub(crate) fn arch_supports_hybrid(arch: &crate::inference::model_arch::ModelArc
         A::Qwen35 | A::Qwen35Moe | A::Qwen3Next => true,
         // MLA attention with its own projection set; unverified.
         A::DeepSeek2 => false,
-        // gpt-oss runs the standard loop, but no layer of it has run at all
-        // yet (refused, `ModelArch::is_supported`), let alone split on a card
-        // (#390 item 2's sixth step).
-        A::GptOss => false,
+        // gpt-oss, read 2026-11-02 (#390 item 2, step 7): the standard loops
+        // (the parallel whole-file one too), its own tensors loaded through
+        // the shadowed `device` (attention sinks, the output bias, the router
+        // bias) or the experts' placement (`load_expert_biases`), its windowed
+        // layers' rotation from `rope_for`; a processor layer's prompt carries
+        // the sinks and biases to the card (`LayerOnTheCard::of`,
+        // `expert_bias_rows`). gpt-oss-20b is 12 GB, so most cards hold it
+        // only this way — llama.cpp's `--n-cpu-moe` placement. Checked split
+        // on a card against llama.cpp (docs/invariants/inference.md § "gpt-oss
+        // on a card").
+        A::GptOss => true,
         // An architecture we do not recognise is one whose loop nobody has
         // read. Deny, for the same reason the list is an allowlist.
         A::Unknown(_) => false,

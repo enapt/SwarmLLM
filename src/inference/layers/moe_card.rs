@@ -5,7 +5,9 @@
 //!
 //! This is candle-nn 0.10.1's `moe::moe_gemm_gguf`, read 2026-10-16, with the
 //! quant types of the vendored kernels: theirs stop at Q8_0 and Q2_K-Q6_K, and
-//! ours add the 32-block types (Q4_0, Q4_1, Q5_0, Q5_1). A row whose width is not
+//! ours add the 32-block types (Q4_0, Q4_1, Q5_0, Q5_1) and MXFP4 (gpt-oss's
+//! experts, FUTURE_WORK #390 step 7: llama.cpp's `vec_dot_mxfp4_q8_1` and
+//! `dequantize_mxfp4`, the activation still Q8_1). A row whose width is not
 //! a multiple of 256 cannot hold a K-quant, so llama.cpp's quantizer stores it in
 //! one of these (`tensor_type_fallback` in `llama-quant.cpp`): every Gemma 4
 //! 26B-A4B upload's down experts (704 wide) — before, each such layer ran one
@@ -31,6 +33,7 @@ pub(crate) fn kernel_type(dtype: GgmlDType) -> Option<i32> {
         GgmlDType::Q4_1 => Some(16),
         GgmlDType::Q5_0 => Some(17),
         GgmlDType::Q5_1 => Some(18),
+        GgmlDType::Mxfp4 => Some(19),
         _ => None,
     }
 }

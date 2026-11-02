@@ -854,7 +854,6 @@
   "placement.not_enough_vram": "Het heeft meer grafisch geheugen nodig dan er bij de start vrij was. Zodra er geheugen vrijkomt, wordt de grafische kaart weer gebruikt.",
   "placement.on_cpu": "Draait op de processor",
   "placement.tip": "Modellen zijn sneller op een grafische kaart. Dit legt uit waarom deze dat niet is.",
-  "placement.weight_format": "Dit model is opgeslagen in een formaat (MXFP4) dat deze versie nog niet snel op de grafische kaart kan uitvoeren, dus de processor voert het uit.",
   "pool.add_device_header": "Nog een apparaat toevoegen",
   "pool.add_device_settings_desc": "Maak een uitnodigingscode aan als je ooit nog een machine aan deze groep wilt koppelen.",
   "pool.code_address_warning": "Deze code bevat de netwerkadressen van je apparaat zodat het andere apparaat verbinding kan maken. Deel hem alleen met mensen die je vertrouwt.",

@@ -973,9 +973,9 @@ pub(crate) struct MoeFfn {
     /// it chooses AND weighs, unlike [`Self::selection_bias`]. Read only
     /// through [`Self::router_scores`]. `None`: unbiased.
     pub(crate) router_bias: Option<Tensor>,
-    /// Each expert's biases ([`ExpertBiases`]). The stacked card kernel adds
-    /// none, so [`StackedExperts::fit`] refuses a biased layer and the
-    /// processor's paths and [`expert_ffn`] add them. `None`: unbiased.
+    /// Each expert's biases ([`ExpertBiases`]), added by every path: the
+    /// processor's, [`expert_ffn`] and, beside the stacked card kernel,
+    /// [`Self::stacked_products`]. `None`: unbiased.
     pub(crate) expert_biases: Option<Box<ExpertBiases>>,
     /// A dense feed-forward run beside the experts, each branch normed on its
     /// own (Gemma 4's MoE layer). `None` for every other family.
@@ -1007,9 +1007,10 @@ impl ExpertScales {
 /// `max' = max(max, s)`, `Σ' = Σ e^(x − max') + e^(s − max')`). It meets the
 /// SCALED scores. On the host for the processor's kernels
 /// (`attn_rows::fold_sink`) and on the layer's device for the matmul path
-/// (`attn_softmax::scaled_masked_softmax`'s sink column). No card kernel reads
-/// them: a layer with sinks takes neither flash attention nor the card's
-/// decode or tree kernels ([`standard_attention`], `run_attention_windowed`).
+/// (`attn_softmax::scaled_masked_softmax`'s sink column) and the card's decode
+/// kernel (its combine folds them in, `decode_attn_combine_f32`). Flash
+/// attention and the card's tree kernel read none, so a layer with sinks
+/// takes neither ([`standard_attention`], `run_attention_windowed`).
 #[derive(Debug, Clone)]
 pub(crate) struct AttentionSinks {
     pub(crate) host: Vec<f32>,
@@ -1107,6 +1108,18 @@ fn add_column_bias(block: &mut [f32], m: usize, bias: &[f32]) {
     }
 }
 
+/// Each pair's bias row — `rows`' row `ids[r]` at row r, on `ids`' device —
+/// for [`MoeFfn::stacked_products`]. A processor layer's prompt read on the
+/// card holds its biases in RAM: they cross for the call ([`ExpertRows`] is
+/// a few hundred KB), never inside a capture, which reads card layers only.
+fn expert_bias_rows(rows: &ExpertRows, ids: &Tensor) -> CandleResult<Tensor> {
+    if rows.device.device().same_device(ids.device()) {
+        rows.device.index_select(ids, 0)
+    } else {
+        rows.device.to_device(ids.device())?.index_select(ids, 0)
+    }
+}
+
 /// Gemma 4's MoE layer (llama.cpp `gemma4.cpp`, read 2026-10-16): with `h`
 /// the residual stream after attention, its feed-forward is
 ///
@@ -1164,28 +1177,26 @@ pub(crate) struct StackedExperts {
 
 impl StackedExperts {
     /// May a layer keep its experts stacked? On a card, when the kernel reads
-    /// every stack's type ([`moe_card::kernel_type`]: Q8_0, Q2_K-Q6_K and the
-    /// 32-block Q4_0-Q5_1, #292), each product's input width is a
+    /// every stack's type ([`moe_card::kernel_type`]: Q8_0, Q2_K-Q6_K, the
+    /// 32-block Q4_0-Q5_1, #292, and MXFP4, #390), each product's input width is a
     /// multiple of 8 (the kernel asserts it), and each expert's weight applies
     /// to its OUTPUT — the kernel scales outputs; Llama 4 scales inputs
     /// (`weight_before_ffn`) and keeps one matrix per expert.
     /// `SWARMLLM_MOE_CARD=per-expert` keeps one matrix per expert everywhere
-    /// (A/B switch). A layer whose experts carry biases (`experts_biased`,
-    /// gpt-oss — [`MoeFfn::expert_biases`]) keeps one matrix per expert too:
-    /// the kernel adds no bias (#390 item 2, step 7).
+    /// (A/B switch). A layer whose experts carry biases (gpt-oss —
+    /// [`MoeFfn::expert_biases`]) stacks too: [`MoeFfn::stacked_products`]
+    /// adds each pair's bias rows beside the kernel (#390 step 7).
     pub(crate) fn fit(
         on_a_card: bool,
         dtypes: [candle_core::quantized::GgmlDType; 3],
         input_widths: [usize; 2],
         routing: MoeRoutingConfig,
-        experts_biased: bool,
     ) -> bool {
         static PER_EXPERT: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
         let per_expert = *PER_EXPERT
             .get_or_init(|| std::env::var("SWARMLLM_MOE_CARD").as_deref() == Ok("per-expert"));
         on_a_card
             && !per_expert
-            && !experts_biased
             && !routing.weight_before_ffn
             && dtypes.iter().all(|&t| moe_card::kernel_type(t).is_some())
             && input_widths.iter().all(|w| w % 8 == 0)
@@ -2176,7 +2187,6 @@ impl MoeFfn {
                 [gate.dtype(), up.dtype(), down.dtype()],
                 [width(&gate), width(&down)],
                 self.routing,
-                self.expert_biases.is_some(),
             )
     }
 
@@ -2707,11 +2717,7 @@ impl MoeFfn {
         pick: impl Fn(&Tensor, usize, usize) -> CandleResult<(Tensor, Tensor)>,
     ) -> CandleResult<Tensor> {
         const STACKED_IDS_PER_CALL: usize = 4096;
-        if self.expert_biases.is_some() {
-            candle_core::bail!(
-                "the stacked expert kernel adds no expert bias (StackedExperts::fit refuses such a layer)"
-            );
-        }
+        let biases = self.expert_biases.as_deref();
         let (num_tokens, hidden) = x_flat.dims2()?;
         let chunk = (STACKED_IDS_PER_CALL / k).max(1);
         let mut parts = Vec::with_capacity(num_tokens.div_ceil(chunk));
@@ -2724,17 +2730,34 @@ impl MoeFfn {
                     .to_dtype(candle_core::DType::F32)?,
             )?;
             let (ids, weights) = pick(&x, start, len)?;
-            let (expert_ids, token_ids) = own_storage(ids)?.flatten_all()?.sort_last_dim(true)?;
+            // Pair r = token r / k's pick r % k, in this order: each kernel
+            // writes pair r's row at r, sorted by expert only for the reading.
+            let ids = own_storage(ids)?.flatten_all()?;
+            let (expert_ids, token_ids) = ids.sort_last_dim(true)?;
             let (expert_ids, token_ids) = (own_storage(expert_ids)?, own_storage(token_ids)?);
             let prompt = len > MOE_CARD_ONE_ROW_MAX_TOKENS && prompt_on_tensor_cores();
-            let gemm = |input: &Tensor, w: &QTensor, scale: Option<Tensor>| {
-                moe_card::moe_gemm_gguf(input, w, &scale, &token_ids, &expert_ids, k, prompt)
+            // `topk` 1 reads input row r for pair r (`token_id / topk`): an
+            // unweighted down product over the pairs' own activations.
+            let gemm = |input: &Tensor, w: &QTensor, scale: Option<Tensor>, topk: usize| {
+                moe_card::moe_gemm_gguf(input, w, &scale, &token_ids, &expert_ids, topk, prompt)
             };
-            let gate = gemm(&x, &stacked.gate, None)?; // [len * k, intermediate]
-            let up = gemm(&x, &stacked.up, None)?;
+            // gpt-oss: each pair's expert's bias row, where llama.cpp's
+            // `build_moe_ffn` adds it (`ggml_add_id`) — gate and up before the
+            // activation, down before the routing weight.
+            let with_bias = |out: Tensor, rows: Option<&ExpertRows>| match rows {
+                Some(rows) => out + expert_bias_rows(rows, &ids)?,
+                None => Ok(out),
+            };
+            let gate = with_bias(gemm(&x, &stacked.gate, None, k)?, biases.map(|b| &b.gate))?; // [len * k, intermediate]
+            let up = with_bias(gemm(&x, &stacked.up, None, k)?, biases.map(|b| &b.up))?;
             let act = own_storage(gated(self.activation, &gate, &up)?)?;
             let weights = own_storage(weights.flatten_all()?)?;
-            let down = gemm(&act, &stacked.down, Some(weights))?; // [len * k, hidden]
+            let down = match biases {
+                // [len * k, hidden], weighted inside the kernel.
+                None => gemm(&act, &stacked.down, Some(weights), k)?,
+                Some(b) => with_bias(gemm(&act, &stacked.down, None, 1)?, Some(&b.down))?
+                    .broadcast_mul(&weights.reshape((len * k, 1))?)?,
+            };
             parts.push(down.reshape((len, k, hidden))?.sum(1)?);
             start += len;
         }
@@ -4570,8 +4593,9 @@ pub(crate) fn standard_attention(
     key_origin: usize,
     sinks: Option<&AttentionSinks>,
 ) -> CandleResult<Tensor> {
-    // A layer's sinks (gpt-oss) reach the processor's kernels and the matmul
-    // path; the card's tree and decode kernels read none and are passed by.
+    // A layer's sinks (gpt-oss) reach the processor's kernels, the matmul
+    // path and the card's decode kernel; the card's tree kernel reads none and
+    // is passed by.
     //
     // GQA decode: group the query heads instead of expanding the KV heads.
     //
@@ -4663,7 +4687,7 @@ pub(crate) fn standard_attention(
             );
         }
     }
-    if q.dim(2)? == 1 && q.device().is_cuda() && sinks.is_none() {
+    if q.dim(2)? == 1 && q.device().is_cuda() {
         if let Some(out) = crate::inference::decode_attn::gqa_decode_attention_cuda(
             q,
             k,
@@ -4671,6 +4695,7 @@ pub(crate) fn standard_attention(
             mask,
             crate::inference::attn_softmax::scale_from_head_dim(head_dim) as f32,
             attn_logit_softcap,
+            sinks.map(|s| &s.device),
         )? {
             return Ok(out);
         }
@@ -8734,6 +8759,9 @@ mod card_quantized_products {
             GgmlDType::Q4K,
             GgmlDType::Q5K,
             GgmlDType::Q6K,
+            // gpt-oss's experts (#390 step 7): MMVQ, llama.cpp's MMQ, and the
+            // card-dequantized cuBLAS product below either.
+            GgmlDType::Mxfp4,
         ];
         for dtype in types {
             let every_width: &[usize] = &[5, 8, 9, 16, 33, 64, 300];
@@ -9186,6 +9214,158 @@ mod attention_sink_tests {
             };
             let bits = |v: Vec<f32>| v.into_iter().map(f32::to_bits).collect::<Vec<_>>();
             assert_eq!(bits(run(Some(&none))), bits(run(None)), "{q_len} positions");
+        }
+    }
+
+    /// A sink layer's prompt pass on a card takes the matmul path (flash
+    /// reads no sink), and its weights leave the sink softmax as a view one
+    /// column narrower than its rows — which the card's matmul refuses, where
+    /// the processor's takes it. gpt-oss-20b's first card prompt failed so
+    /// (2026-11-02, `[1, 8, 888, 111]` with a row stride of 112). Each path,
+    /// over an f32 cache and a half one (a card keeps f16), against llama.cpp's
+    /// expression in f64.
+    #[cfg(feature = "candle-cuda")]
+    #[test]
+    fn sinks_take_their_share_on_the_cards_matmul_path() {
+        let card = match Device::new_cuda(0) {
+            Ok(d) => d,
+            Err(e) => {
+                eprintln!("SKIPPED card attention sinks: no CUDA device ({e})");
+                return;
+            }
+        };
+        let cpu = Device::Cpu;
+        // The unit test's shape, and gpt-oss-20b's heads over a fresh prompt.
+        for (n_head, n_kv, d, q_len, kv_len) in [
+            (4usize, 2usize, 16usize, 5usize, 20usize),
+            (64, 8, 64, 37, 37),
+        ] {
+            let n_rep = n_head / n_kv;
+            let scale = crate::inference::attn_softmax::scale_from_head_dim(d);
+            let sinks: Vec<f32> = (0..n_head)
+                .map(|h| [0.5f32, -1.0, 2.0, 0.0][h % 4])
+                .collect();
+            let q = Tensor::randn(0f32, 1.0, (1, n_head, q_len, d), &cpu).unwrap();
+            let k = Tensor::randn(0f32, 1.0, (1, n_kv, kv_len, d), &cpu).unwrap();
+            let v = Tensor::randn(0f32, 1.0, (1, n_kv, kv_len, d), &cpu).unwrap();
+            let offset = kv_len - q_len;
+            let mask_data: Vec<f32> = (0..q_len)
+                .flat_map(|i| {
+                    (0..kv_len).map(move |j| {
+                        if j > offset + i {
+                            f32::NEG_INFINITY
+                        } else {
+                            0.0
+                        }
+                    })
+                })
+                .collect();
+            let mask = Tensor::from_vec(mask_data, (q_len, kv_len), &card).unwrap();
+            for half in [false, true] {
+                // The reference reads the cache as the card holds it.
+                let (k, v) = if half {
+                    let round = |t: &Tensor| {
+                        t.to_dtype(DType::F16)
+                            .unwrap()
+                            .to_dtype(DType::F32)
+                            .unwrap()
+                    };
+                    (round(&k), round(&v))
+                } else {
+                    (k.clone(), v.clone())
+                };
+                let (qv, kv, vv) = (values_of(&q), values_of(&k), values_of(&v));
+                let mut want = Vec::new();
+                for h in 0..n_head {
+                    let g = h / n_rep;
+                    for i in 0..q_len {
+                        let row = &qv[(h * q_len + i) * d..][..d];
+                        let seen = offset + i + 1;
+                        let keys: Vec<&[f32]> = (0..seen)
+                            .map(|j| &kv[(g * kv_len + j) * d..][..d])
+                            .collect();
+                        let vals: Vec<&[f32]> = (0..seen)
+                            .map(|j| &vv[(g * kv_len + j) * d..][..d])
+                            .collect();
+                        want.extend(reference(row, &keys, &vals, scale, f64::from(sinks[h])));
+                    }
+                }
+                let cache_dtype = if half { DType::F16 } else { DType::F32 };
+                let on_card =
+                    |t: &Tensor| t.to_dtype(cache_dtype).unwrap().to_device(&card).unwrap();
+                let (qc, kc, vc) = (q.to_device(&card).unwrap(), on_card(&k), on_card(&v));
+                let sink_tensor = Tensor::from_vec(sinks.clone(), (n_head,), &card).unwrap();
+                let held = AttentionSinks::new(sinks.clone(), &card).unwrap();
+                let check = |name: &str, got: candle_core::Result<Tensor>| {
+                    let got = values_of(
+                        &got.unwrap_or_else(|e| panic!("{name}, {n_head} heads, half {half}: {e}"))
+                            .to_device(&cpu)
+                            .unwrap(),
+                    );
+                    let worst = got
+                        .iter()
+                        .zip(&want)
+                        .map(|(g, w)| (f64::from(*g) - w).abs())
+                        .fold(0f64, f64::max);
+                    assert!(
+                        worst < 1e-4,
+                        "{name}, {n_head} heads, half {half}: {worst} off llama.cpp's expression"
+                    );
+                };
+                check(
+                    "standard_attention",
+                    standard_attention(
+                        &qc,
+                        &kc,
+                        &vc,
+                        Some(&mask),
+                        d,
+                        n_head,
+                        n_kv,
+                        None,
+                        0,
+                        Some(&held),
+                    ),
+                );
+                // The matmul path reads f32: `standard_attention` widens a half
+                // cache before it, as these direct calls must.
+                let (kw, vw) = (
+                    kc.to_dtype(DType::F32).unwrap(),
+                    vc.to_dtype(DType::F32).unwrap(),
+                );
+                check(
+                    "the grouped matmul path",
+                    matmul_attention(
+                        &qc,
+                        &kw,
+                        &vw,
+                        Some(&mask),
+                        d,
+                        n_head,
+                        n_kv,
+                        None,
+                        Some(&sink_tensor),
+                    ),
+                );
+                let (ke, ve) = (
+                    candle_transformers::utils::repeat_kv(kw, n_rep).unwrap(),
+                    candle_transformers::utils::repeat_kv(vw, n_rep).unwrap(),
+                );
+                check(
+                    "the ungrouped matmul path",
+                    matmul_attention(
+                        &qc,
+                        &ke,
+                        &ve,
+                        Some(&mask),
+                        d,
+                        n_head,
+                        n_head,
+                        None,
+                        Some(&sink_tensor),
+                    ),
+                );
+            }
         }
     }
 }

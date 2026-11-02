@@ -6198,10 +6198,9 @@ added after the output projection (`wo_b`, after any adapter's delta).
 (b) `MoeFfn::expert_biases` (`ExpertBiases`: an `ExpertRows` per projection — host rows for the
 processor's one-region path, a `[n_experts, width]` tensor on the experts' device for `expert_ffn`).
 The one-region path adds them to its column-major outputs (`add_column_bias`), the same f32 sums
-`broadcast_add` makes, so it stays bit-identical to one expert at a time. The card's stacked kernel
-adds none: `StackedExperts::fit` takes `experts_biased` and refuses, so such a layer keeps one matrix
-per expert on a card and never offers its experts to a processor layer's prompt card
-(`experts_could_stack_on_a_card`); `stacked_products` refuses one outright. A projection the file
+`broadcast_add` makes, so it stays bit-identical to one expert at a time. (Until step 7 the card's
+stacked kernel added none and `StackedExperts::fit` refused a biased layer; since step 7
+`stacked_products` adds them — § "gpt-oss on a card".) A projection the file
 leaves unbiased adds zeros. An output scale beside biases is refused: folded into the routing weight
 (`ExpertScales`), it would scale the down bias too. (c) `LayerWeights::output_projection`, the one
 place both attention paths (`attend`, `forward_attn_batched`) project, adds `attention_bo`; it is
@@ -6236,14 +6235,14 @@ file without sinks keeps the kernels' bits. The matmul path concatenates a sink 
 scaled, masked scores, softmaxes and narrows it off (`composed_with_sinks`); the grouped layout
 (row `rep·q_len + t` of group g is head `g·n_rep + rep`) builds the column in that order.
 
-**What a card does.** No card kernel reads a sink — the decode/tree kernels' combine has no argument
-for it and candle's flash discards the log-sum-exp a sink needs (`out · σ(lse − s)`). A sink layer
-therefore skips flash (both arms of `run_attention_windowed`), the tree and card-decode kernels,
-and runs the matmul path; `mask_is_read` asks `LayerVariant::flash_may_attend` so the mask is built
-for it, and `tree_steps_may_be_captured` refuses a capture. Its half-precision cache is widened to
-f32 on each call — correct, slow, and moot while MXFP4 keeps gpt-oss on the processor. Step 7 adds
-the sink to `decode_attn_combine_f32` and an lse-returning flash. Tensor parallelism narrows the
-sinks to each rank's heads.
+**What a card does.** As written at step 5, no card kernel read a sink. Since step 7 the decode
+kernel does (`decode_attn_combine_f32`, § "gpt-oss on a card"). Flash and the tree kernel still
+read none: candle's flash discards the log-sum-exp a sink needs (`out · σ(lse − s)`), and the tree
+kernel's combine has no sink argument. So a sink layer's prompt pass skips flash (both arms of
+`run_attention_windowed`) and runs the matmul path, with its half-precision cache widened to f32
+on each call. `mask_is_read` asks `LayerVariant::flash_may_attend` so the mask is built for it, and
+`tree_steps_may_be_captured` refuses a capture. Tensor parallelism narrows the sinks to each rank's
+heads.
 
 **Checked.** `sinks_take_their_share_on_every_processor_path`: 4 query heads over 2 key/value heads,
 sinks `[0.5, −1, 2, 0]`, one token and five against a causal offset mask — the decode and prompt
@@ -6335,6 +6334,123 @@ computer runs gpt-oss-20b only split with another; that is the rule working, not
 Not run through a node: a tool call (the harmony call reader is unit-tested on gpt-oss's own
 call format, both placements of the recipient) and a card computer's placement (the CUDA
 release build, checked on its draft).
+## gpt-oss on a card (2026-11-02, FUTURE_WORK #390 item 2, step 7)
+
+**What the card reads.** MXFP4 (ggml type 39, the experts' format) is read on a card the way
+llama.cpp's CUDA backend reads it, in the vendored candle: dequantize to f32 / f16
+(`dequantize_block_mxfp4_f32` / `_f16`), the one-row product (`mul_mat_vec_mxfp4_q8_1_cuda`, llama.cpp's
+`vec_dot_mxfp4_q8_1`), the int8 tensor-core MMQ for several rows (`ggml_mmq/mmq_type_mxfp4.cu`,
+llama.cpp's `template-instances/mmq-instance-mxfp4.cu`, `DECL_MMQ_CASE(GGML_TYPE_MXFP4)`), and the stacked MoE kernels (`moe/gguf.cuh`: a block of
+32 values, one E8M0 scale, the `kvalues_mxfp4` table; type id 19 in `moe_card::kernel_type`).
+Each was transcribed from llama.cpp master; the products are checked against the f32 product of
+the SAME quantized weight at every width the rules send them — the vector kernel, MMQ, and the
+card-dequantized cuBLAS product — beside the other ten types
+(`many_rows_on_the_card_match_the_f32_product_of_the_same_weight`).
+
+**The biases after each stacked product.** llama.cpp's `build_moe_ffn` adds each picked expert's
+gate/up bias after its product, and its down bias after the down product but BEFORE the routing
+weight. The card's stacked path runs the down product with top-k 1 and no weights, adds the bias
+rows (`layers::expert_bias_rows`, gathered by the UNSORTED flattened picks — the kernel's output
+rows follow them, not the sorted order it computes in), then multiplies by the routing weight.
+`StackedExperts::fit` no longer refuses a biased layer. Test:
+`a_card_layer_keeps_biased_mxfp4_experts_stacked_and_reads_them_right` (a stacked card layer
+against the processor's one-region path on the same file).
+
+**`swiglu_oai` is one launch** (`fast_math::swiglu_oai_mul`): candle's scalar `minimum` /
+`clamp` copy their scalar host → device, which a CUDA graph capture refuses (gotcha #841's class).
+Test `cuda_swiglu_oai_matches_the_processors_expression`.
+
+**Sinks.** The decode kernel folds a head's sink into its merge (`decode_attn_combine_f32`: one
+more score with no value) — `cuda_decode_kernel_folds_in_attention_sinks_as_the_processor_does`.
+Flash and the tree kernel read none, so a sink layer's prompt pass takes the matmul path
+(`LayerVariant::flash_may_attend`). **That path refused gpt-oss-20b's first card prompt**:
+`composed_with_sinks` cut the sink column off a softmax by `narrow`, a view one column wider than
+it reads, and the card's matmul with V refuses a non-contiguous left side ("matmul is only
+supported for contiguous tensors"); the processor's takes the view, so every processor check
+passed. The weights are made contiguous after the cut — `sinks_take_their_share_on_the_cards_matmul_path`
+(red with the probe's own error before it, both caches, grouped and not).
+
+**What it changed.** `CpuReason::WeightFormatNeedsTheProcessor` and its dashboard reason
+(`placement.weight_format`) are gone; `hybrid::arch_supports_hybrid` lists gpt-oss, so a card
+too small for the 12 GB file keeps its experts in RAM (`--n-cpu-moe`'s rule, `process_pool::card_split`).
+
+**Results** (2026-11-02, `ggml-org/gpt-oss-20b-GGUF` `gpt-oss-20b-MXFP4.gguf`, the CUDA release
+build on this machine's RTX 3070 Laptop, 8 GB: all 24 layers on the card, the routed experts of
+14 kept in RAM; the France prompt of § "gpt-oss: the whole forward" and llama.cpp master's
+40-token greedy reply, 119 positions, the last 8 read as decode steps — the decode kernel's path):
+
+| pairing | worst / median cosine, top-1 |
+|---|---|
+| ours on the card vs llama.cpp's processor (plain) | 0.96068 / 0.99972, 118/119 |
+| ours on the card vs llama.cpp's processor (repacked) | 0.96934 / 0.99945, 116/119 |
+| ours on the card vs llama.cpp's card build (11 layers) | 0.98085 / 0.99959, 115/119 |
+| llama.cpp's card vs its processor (plain) | 0.95990 / 0.99959, 116/119 |
+| llama.cpp's processor, plain vs repacked | 0.98578 / 0.99925, 115/119 |
+
+Ours on the card is nearer llama.cpp's processor build than llama.cpp's own card build is.
+**Split by whole layers** (a card too small for the experts-in-RAM placement: 10 layers on the
+card, 14 on the processor, whose prompt pass runs on the card — `moe ffn of a processor layer,
+run on the card (prompt)` in `SWARMLLM_PROFILE=1`, so the sinks and biases went over with them):
+against llama.cpp's processor 0.98035 / 0.99962, 115/119; against its card build 0.96817 /
+0.99969. Twelve layers did not fit beside the cache on this card (refused to the processor,
+`gpu-kv-budget-exhausted`, as it should be).
+
+**Speed** (the same placement, min of 3 interleaved, live node stopped, safety kit): ours 22.0
+tok/s (`swarmllm test-split --gpu-layers 24 --cpu-moe-layers 14 --max-tokens 128`, 45.5 ms a
+step), llama.cpp master 29.8 (`llama-bench -ngl 99 --n-cpu-moe 14 -p 0 -n 128`) — 0.74x, and
+4.4x this machine's processor alone (5 tok/s). The MXFP4 products are not the gap: ten more
+layers' experts in RAM cost ours 1.56 ms a layer and llama.cpp 2.46. A step with RAM-held
+experts is not captured as CUDA graphs here, and llama.cpp's own lead leans on its graphs —
+FUTURE_WORK #138's gap, measured there on Qwen3-30B-A3B, with its route (a step replayed without
+re-recording).
+
+## The popular models of 2026-11-02, checked against llama.cpp master on the processor and the card
+
+**Which.** The HuggingFace reading of 2026-11-01 15:29Z (`HfWatcher`): Qwen3.8-27B, Qwen3.6-35B-A3B,
+Ornith-1.5-9B / 1.5-35B-A3B / 1.0-9B, Gemma 4 12B, Qwen3.5-9B / 4B, Qwen3-4B / 14B, and gpt-oss-20b
+(the largest audience of #390). Their families: `qwen35` (Qwen3.5, Qwen3.8, every Ornith dense —
+Ornith-1.0-9B's header says `qwen35` too), `qwen35moe` (Qwen3.6-35B-A3B, Ornith-1.5-35B/122B/397B),
+`gemma4`, `qwen3`, `gpt-oss`. One file per family, its own template rendering the prompt (jinja2),
+llama.cpp master's greedy reply (`ref_generate`, 40 tokens), then logits for prompt + reply: ours
+(`examples/logits_reference_probe.rs`; on a card the last 8 positions as decode steps, the decode
+kernel's path) against llama.cpp's processor build repacked and plain, and its CUDA build. **The
+yardstick is llama.cpp against itself** (gotcha #867): a gap inside the spread between its own
+builds, at the positions where they part too, is rounding.
+
+**Ornith-1.5-9B carries a next-token-prediction block** (`block_count` 33,
+`nextn_predict_layers` 1, `blk.32.nextn.*`): llama.cpp runs 32 layers, and so do we
+(`gguf_meta`'s `block_count − nextn_predict_layers`, read since #228). The raw 33 still shows in
+the admin model view, which lists the header's fields as written.
+
+| model (file) | where | ours vs llama.cpp (worst / median cosine, top-1) | llama.cpp vs itself |
+|---|---|---|---|
+| Qwen3.5-9B (unsloth Q4_K_M) | processor | 0.98884 / 0.99938, 61/61 vs repacked | plain vs repacked 0.99116 / 0.99948 |
+| Qwen3.5-9B | card, whole | 0.98388 / 0.99959, 61/61 vs its card build | its card vs repacked 0.98289 / 0.99902 |
+| Qwen3.8-27B (Q2_K) | processor | 0.93077 / 0.99784, 97/103 vs repacked | 0.93636 / 0.99766, 99/103 |
+| Ornith-1.5-9B (Q4_K_M) | processor | 0.98908 / 0.99957, 59/61 | 0.98780 / 0.99965, 61/61 |
+| Ornith-1.5-9B | card, whole | 0.97991 / 0.99949, 60/61 vs its card build | its card vs plain 0.96607 / 0.99904 |
+| Gemma 4 31B (Q2_K) | processor | 0.99168 / 0.99935, 59/63 | repacked = plain (no spread) |
+| Gemma 4 12B (unsloth Q4_K_M) | card, 34 of 48 layers | 0.98941 / 0.99975, 59/63 vs its card build (34) | its card vs plain 0.97764 / 0.99955 |
+| gpt-oss-20b (ggml-org MXFP4) | card, 24 layers, experts of 14 in RAM | 0.96068 / 0.99972, 118/119 vs plain | its card vs plain 0.95990 / 0.99959, 116/119 (§ "gpt-oss on a card") |
+
+The low positions are the same ones in every pairing (Ornith's 20-21, Gemma 4 12B's 5). The Gemma
+4 31B's four top-1 disagreements are llama.cpp's own second choice, 0.30-0.61 logits behind.
+Qwen3.5-9B through the live node on the card (v0.3.268, its template's default: no thinking): the
+reply ranks first under llama.cpp at 39 of 40 tokens and second, 0.080 behind, at the other.
+
+**On the network** (2026-11-02, every node on v0.3.268; `examples/spread_bench.py` from the
+Proxmox node, each model routed to ONE peer — an RTX 3060 12 GB — by `swarm_route`, 2 reps of 64
+tokens after a warm-up, a thinking model's reasoning timed as tokens): decode tok/s median —
+Qwen3.5-4B 94.9, Qwen3.5-9B 54.6, Qwen3.6-35B-A3B 40.4, Qwen3-14B 38.1, Gemma 4 12B 38.0,
+Gemma 4 26B-A4B 33.9, Qwen3.8-27B 4.1, Qwen3.6-27B 3.9, Gemma 4 31B 2.9 (the three dense models
+over 12 GB keep layers in that machine's RAM). gpt-oss-20b (Q4_K_M) split between the Proxmox
+node (its first two parts, processor) and that peer: 5.05 tok/s, the reasoning on its own
+channel. **Three did not run.** Ornith-1.5-9B's last part had no holder anywhere — the part past
+its last layer (§ above), which no node was ever told to fetch (FUTURE_WORK #398, fixed).
+Ornith-1.0-9B and Ornith-1.5-35B-A3B lack parts nobody holds yet (one holder each, partway
+through). The listing's `healthy` counts a holder per part across machines, so a route held to
+one peer is refused where that peer lacks one.
+
 ## Qwen 3.5's decode steps are captured too: a DeltaNet state is written into a second pair of buffers (2026-10-11, FUTURE_WORK #228 (4))
 
 **What refused it.** `decode_graph_ineligibility` let only dense layers into a

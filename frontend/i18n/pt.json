@@ -854,7 +854,6 @@
   "placement.not_enough_vram": "Precisa de mais memória gráfica do que havia livre ao iniciar. Voltará a usar a placa gráfica assim que houver memória livre.",
   "placement.on_cpu": "Executando no processador",
   "placement.tip": "Os modelos são mais rápidos numa placa gráfica. Aqui está por que este não é.",
-  "placement.weight_format": "Este modelo está guardado num formato (MXFP4) que esta versão ainda não consegue executar depressa na placa gráfica, por isso é o processador que o executa.",
   "pool.add_device_header": "Adicionar outro dispositivo",
   "pool.add_device_settings_desc": "Gere um código de convite caso queira vincular outra máquina a este grupo.",
   "pool.code_address_warning": "Este código contém os endereços de rede do seu dispositivo para que o outro possa se conectar. Compartilhe apenas com pessoas de confiança.",

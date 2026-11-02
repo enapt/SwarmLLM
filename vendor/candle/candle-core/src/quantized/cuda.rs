@@ -130,6 +130,8 @@ fn dequantize_f32(
             ceil_div(elem_count, 2 * CUDA_DEQUANTIZE_BLOCK_SIZE),
         ),
         GgmlDType::Q8_0 => ("dequantize_block_q8_0_f32", false, 32, nb),
+        // SwarmLLM patch: gpt-oss's experts (FUTURE_WORK #390 step 7).
+        GgmlDType::Mxfp4 => ("dequantize_block_mxfp4_f32", false, 32, nb),
         GgmlDType::Q2K => ("dequantize_block_q2_K_f32", true, 64, nb),
         GgmlDType::Q3K => ("dequantize_block_q3_K_f32", true, 64, nb),
         GgmlDType::Q4K => ("dequantize_block_q4_K_f32", true, 32, nb),
@@ -190,6 +192,7 @@ fn has_dequantize_kernel(dtype: GgmlDType) -> bool {
             | GgmlDType::Q5K
             | GgmlDType::Q6K
             | GgmlDType::Q8K
+            | GgmlDType::Mxfp4
     )
 }
 
@@ -228,6 +231,7 @@ fn dequantize_f16_slice(
             ceil_div(elem_count, 2 * CUDA_DEQUANTIZE_BLOCK_SIZE),
         ),
         GgmlDType::Q8_0 => ("dequantize_block_q8_0_f16", false, 32, nb),
+        GgmlDType::Mxfp4 => ("dequantize_block_mxfp4_f16", false, 32, nb),
         GgmlDType::Q2K => ("dequantize_block_q2_K_f16", true, 64, nb),
         GgmlDType::Q3K => ("dequantize_block_q3_K_f16", true, 64, nb),
         GgmlDType::Q4K => ("dequantize_block_q4_K_f16", true, 32, nb),
@@ -486,6 +490,7 @@ fn dequantize_mul_mat_vec(
         GgmlDType::Q5_0 => "dequantize_mul_mat_vec_q5_0_cuda",
         GgmlDType::Q5_1 => "dequantize_mul_mat_vec_q5_1_cuda",
         GgmlDType::Q8_0 => "dequantize_mul_mat_vec_q8_0_cuda",
+        GgmlDType::Mxfp4 => "dequantize_mul_mat_vec_mxfp4_cuda",
         GgmlDType::Q2K => "dequantize_mul_mat_vec_q2_k",
         GgmlDType::Q3K => "dequantize_mul_mat_vec_q3_k",
         GgmlDType::Q4K => "dequantize_mul_mat_vec_q4_k",
@@ -568,6 +573,7 @@ fn mul_mat_vec_via_q8_1(
         GgmlDType::Q5_0 => "mul_mat_vec_q5_0_q8_1_cuda",
         GgmlDType::Q5_1 => "mul_mat_vec_q5_1_q8_1_cuda",
         GgmlDType::Q8_0 => "mul_mat_vec_q8_0_q8_1_cuda",
+        GgmlDType::Mxfp4 => "mul_mat_vec_mxfp4_q8_1_cuda",
         GgmlDType::Q2K => "mul_mat_vec_q2_K_q8_1_cuda",
         GgmlDType::Q3K => "mul_mat_vec_q3_K_q8_1_cuda",
         GgmlDType::Q4K => "mul_mat_vec_q4_K_q8_1_cuda",
@@ -1651,9 +1657,9 @@ impl QCudaStorage {
             [b, _k] => *b,
             _ => usize::MAX,
         };
-        // SwarmLLM patch: a type with no card kernel (MXFP4, until gpt-oss's
-        // card step) never reaches the vector or MMQ kernels, which would
-        // refuse it: `dequantize_matmul` multiplies its dequantized weight.
+        // SwarmLLM patch: a type with no dequantize kernel (an unquantized
+        // F16 / BF16 / F32 copy) never reaches the vector or MMQ kernels, which
+        // would refuse it: `dequantize_matmul` multiplies its dequantized weight.
         let use_vec_kernel = has_dequantize_kernel(self.dtype)
             && rows <= max_bm
             && !mmq_takes_few_rows(self.device(), self.dtype, rows, self.data.len);
@@ -1788,9 +1794,16 @@ impl QCudaStorage {
                 },
                 None => None,
             };
+            // SwarmLLM patch: candle's old dp4a MMQ has no MXFP4 kernel, so
+            // where llama.cpp's MMQ did not run (a card without int8 tensor
+            // cores, or `SWARMLLM_QMATMUL_MMQ=dp4a`) such a weight goes through
+            // cuBLAS on its card-dequantized f16 copy at any row count.
+            let old_mmq_reads_it = self.dtype != GgmlDType::Mxfp4;
             if let Some(out) = mma {
                 out
-            } else if cublas_min_rows(self.device()).is_some_and(|min| b * m >= min) {
+            } else if !old_mmq_reads_it
+                || cublas_min_rows(self.device()).is_some_and(|min| b * m >= min)
+            {
                 mul_mat_via_f16_cublas(
                     &self.data,
                     &storage,

@@ -728,20 +728,6 @@ pub(crate) fn kv_sources(ct: &gguf_file::Content) -> Vec<Option<usize>> {
         .collect()
 }
 
-/// Whether a file holds a weight this build's card kernels cannot read: MXFP4
-/// (type 39 — unsloth's `MXFP4_MOE` uploads, gpt-oss). The vendored candle
-/// multiplies it on the processor (`BlockMxfp4`, llama.cpp's bits) and on a
-/// card only by dequantizing it in HOST memory for every product
-/// (`QCudaStorage::dequantize`'s fallback), so a model holding one is kept
-/// off the card (`process_pool::CpuReason::WeightFormatNeedsTheProcessor`)
-/// until a card kernel reads it (#390 item 2, step 7).
-#[cfg(any(feature = "candle-cuda", test))]
-pub(crate) fn holds_weights_the_card_cannot_read(ct: &gguf_file::Content) -> bool {
-    ct.tensor_infos
-        .values()
-        .any(|t| t.ggml_dtype == candle_core::quantized::GgmlDType::Mxfp4)
-}
-
 /// The bytes of layers `[start, end)`'s routed expert stacks
 /// (`ffn_{gate,up,down}_exps`, or Gemma 4's fused `ffn_gate_up_exps`), 0 for
 /// a dense layer — what keeping their

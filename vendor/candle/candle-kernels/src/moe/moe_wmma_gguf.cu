@@ -149,6 +149,18 @@ __forceinline__ __device__ void dequantize_block_warp(
             }
             break;
         }
+        // SwarmLLM patch: MXFP4 (FUTURE_WORK #390 step 7), laid out as Q4_0;
+        // each value llama.cpp's `dequantize_mxfp4`.
+        case 19: { // mxfp4
+            const int i = threadIdx.x;
+            const block_mxfp4* b = (const block_mxfp4*)quant_in;
+            if (i < QK_MXFP4) {
+                const uint8_t q = b->qs[i % (QK_MXFP4 / 2)];
+                const int v = kvalues_mxfp4[i < QK_MXFP4 / 2 ? (q & 0x0F) : (q >> 4)];
+                dequant_out[i] = T((float)v * e8m0_to_fp32_half(b->e));
+            }
+            break;
+        }
         default:
             break;
     }
@@ -430,6 +442,8 @@ __global__ void moe_gemm_gguf_prefill_kernel(
         LAUNCH_MOE_GGUF_PREFILL_32(DTYPE, QK5_0, block_q5_0);\
     } else if (gguf_type == 18) {\
         LAUNCH_MOE_GGUF_PREFILL_32(DTYPE, QK5_1, block_q5_1);\
+    } else if (gguf_type == 19) {\
+        LAUNCH_MOE_GGUF_PREFILL_32(DTYPE, QK_MXFP4, block_mxfp4);\
     }
 
 
@@ -485,6 +499,10 @@ extern "C" void moe_gemm_gguf_prefill(
     } else if (gguf_type == 18) {//Q5_1: 18,
         block_size_bytes = sizeof(block_q5_1);
         qk = QK5_1;
+    // SwarmLLM patch: MXFP4 (FUTURE_WORK #390 step 7).
+    } else if (gguf_type == 19) {//MXFP4: 19,
+        block_size_bytes = sizeof(block_mxfp4);
+        qk = QK_MXFP4;
     }
 
     // 1. A tile: [M_BLK, qk] (dequantized)

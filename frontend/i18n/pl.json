@@ -854,7 +854,6 @@
   "placement.not_enough_vram": "Potrzebuje więcej pamięci karty graficznej niż było wolne przy starcie. Gdy pamięć się zwolni, karta zostanie użyta ponownie.",
   "placement.on_cpu": "Działa na procesorze",
   "placement.tip": "Modele działają szybciej na karcie graficznej. Tu jest powód, dla którego ten nie działa.",
-  "placement.weight_format": "Ten model jest zapisany w formacie (MXFP4), którego ta wersja nie potrafi jeszcze szybko uruchamiać na karcie graficznej, więc uruchamia go procesor.",
   "pool.add_device_header": "Dodaj kolejne urządzenie",
   "pool.add_device_settings_desc": "Wygeneruj kod zaproszenia, jeśli kiedykolwiek zechcesz dodać kolejną maszynę do tej grupy.",
   "pool.code_address_warning": "Ten kod zawiera adresy sieciowe Twojego urządzenia, aby drugie urządzenie mogło się połączyć. Udostępniaj go tylko zaufanym osobom.",

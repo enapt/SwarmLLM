@@ -414,15 +414,9 @@ fn load_moe_ffn<R: std::io::Read + std::io::Seek>(
             "{prefix}: an output scale on experts that carry biases is not supported"
         )));
     }
-    let (experts, stacked) = if let Some(stacked) = load_stacked_experts(
-        ct,
-        reader,
-        prefix,
-        experts_device,
-        n_router,
-        routing,
-        expert_biases.is_some(),
-    )? {
+    let (experts, stacked) = if let Some(stacked) =
+        load_stacked_experts(ct, reader, prefix, experts_device, n_router, routing)?
+    {
         (Vec::new(), Some(stacked))
     } else {
         (
@@ -772,7 +766,6 @@ fn load_stacked_experts<R: std::io::Read + std::io::Seek>(
     device: &Device,
     n_router: usize,
     routing: MoeRoutingConfig,
-    experts_biased: bool,
 ) -> Result<Option<super::StackedExperts>, SwarmError> {
     let fused = experts_fused(ct, prefix);
     let names = if fused {
@@ -799,13 +792,7 @@ fn load_stacked_experts<R: std::io::Read + std::io::Seek>(
         infos[1].ggml_dtype,
         infos[2].ggml_dtype,
     ];
-    if !super::StackedExperts::fit(
-        device.is_cuda(),
-        dtypes,
-        [dims[0][2], dims[2][2]],
-        routing,
-        experts_biased,
-    ) {
+    if !super::StackedExperts::fit(device.is_cuda(), dtypes, [dims[0][2], dims[2][2]], routing) {
         return Ok(None);
     }
     let read = |reader: &mut R, n: &str| {
@@ -3863,6 +3850,191 @@ mod expert_stack_tests {
         assert!(failures.is_empty(), "off the reference: {failures:#?}");
     }
 
+    /// #390 step 7: gpt-oss's expert layer — MXFP4 stacks with a bias on each
+    /// expert's gate, up and down, a router bias, the clamped SwiGLU — stays
+    /// STACKED on a card and answers as the processor's exact arithmetic does.
+    /// One and five tokens (the one-row kernel) against the same layer holding
+    /// one matrix per expert on the card (candle's MMVQ, the same `vec_dot`,
+    /// biases through `expert_ffn`) within float rounding, and against the
+    /// exact answer (the experts dequantized to f32) no further off than the
+    /// processor's own 8-bit product; 40 (the tensor-core kernel, f16) against
+    /// the exact answer the same way. A bias added to the wrong pair's row, or
+    /// not at all, is off by the bias's own size — the biases here are a third
+    /// of the outputs'.
+    #[cfg(feature = "candle-cuda")]
+    #[test]
+    fn a_card_layer_keeps_biased_mxfp4_experts_stacked_and_reads_them_right() {
+        use super::MoeFfn;
+        use crate::inference::layers::{ExpertFfn, QMatMul, MOE_CARD_ONE_ROW_MAX_TOKENS};
+        use GgmlDType as G;
+        let card = super::load_device(false);
+        if !card.is_cuda() {
+            eprintln!("SKIPPED: no card");
+            return;
+        }
+        let (n, hidden, inter) = (8, 256, 128);
+        let hashed = |count: usize, salt: u64| -> Vec<f32> {
+            (0..count as u64)
+                .map(|i| {
+                    let mut z = (i ^ (salt << 32)).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+                    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+                    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+                    ((z ^ (z >> 31)) >> 40) as f32 / (1u64 << 24) as f32 - 0.5
+                })
+                .collect()
+        };
+        let f32s = |shape: (usize, usize), salt: u64, scale: f32| {
+            let v: Vec<f32> = hashed(shape.0 * shape.1, salt)
+                .iter()
+                .map(|v| v * scale)
+                .collect();
+            QTensor::quantize(&Tensor::from_vec(v, shape, &Device::Cpu).unwrap(), G::F32).unwrap()
+        };
+        let file = || {
+            let q = |shape: (usize, usize, usize), salt: u64| {
+                let v = hashed(shape.0 * shape.1 * shape.2, salt);
+                QTensor::quantize(&Tensor::from_vec(v, shape, &Device::Cpu).unwrap(), G::Mxfp4)
+                    .unwrap()
+            };
+            let router_bias = {
+                let v = hashed(n, 9);
+                QTensor::quantize(&Tensor::from_vec(v, (n,), &Device::Cpu).unwrap(), G::F32)
+                    .unwrap()
+            };
+            written(&[
+                ("blk.0.ffn_gate_inp.weight", &f32s((n, hidden), 1, 1.0)),
+                ("blk.0.ffn_gate_inp.bias", &router_bias),
+                ("blk.0.ffn_gate_exps.weight", &q((n, inter, hidden), 2)),
+                ("blk.0.ffn_up_exps.weight", &q((n, inter, hidden), 3)),
+                ("blk.0.ffn_down_exps.weight", &q((n, hidden, inter), 4)),
+                ("blk.0.ffn_gate_exps.bias", &f32s((n, inter), 6, 2.0)),
+                ("blk.0.ffn_up_exps.bias", &f32s((n, inter), 7, 2.0)),
+                ("blk.0.ffn_down_exps.bias", &f32s((n, hidden), 8, 2.0)),
+            ])
+        };
+        let load = |device: &Device| -> MoeFfn {
+            let (ct, mut reader) = file();
+            load_moe_ffn(
+                &ct,
+                &mut reader,
+                "blk.0",
+                &placed_on(device.clone(), 0),
+                0,
+                4,
+                MoeRoutingConfig::default(),
+                Activation::SwigluOai,
+            )
+            .unwrap()
+        };
+        let processor = load(&Device::Cpu);
+        let on_card = load(&card);
+        assert!(on_card.stacked.is_some(), "not stacked on the card");
+        assert!(
+            on_card.expert_biases.is_some() && on_card.router_bias.is_some(),
+            "the biases were not read"
+        );
+        let unstacked = {
+            let (ct, mut reader) = file();
+            let mut stack = |name: &str| {
+                split_expert_stack(&ct, &mut reader, &format!("blk.0.{name}.weight"), &card)
+                    .unwrap()
+                    .into_iter()
+                    .map(|q| QMatMul::from_qtensor(q).unwrap())
+            };
+            let (gate, up, down) = (
+                stack("ffn_gate_exps"),
+                stack("ffn_up_exps").collect::<Vec<_>>(),
+                stack("ffn_down_exps").collect::<Vec<_>>(),
+            );
+            MoeFfn {
+                experts: gate
+                    .zip(up)
+                    .zip(down)
+                    .map(|((gate, up), down)| ExpertFfn { gate, up, down })
+                    .collect(),
+                stacked: None,
+                ..on_card.clone()
+            }
+        };
+        let exact = MoeFfn {
+            experts: processor
+                .experts
+                .iter()
+                .map(|e| {
+                    let f = |w: &QMatMul| {
+                        let d = w
+                            .quantized_weight()
+                            .unwrap()
+                            .dequantize(&Device::Cpu)
+                            .unwrap();
+                        QMatMul::from_qtensor(QTensor::quantize(&d, G::F32).unwrap()).unwrap()
+                    };
+                    ExpertFfn {
+                        gate: f(&e.gate),
+                        up: f(&e.up),
+                        down: f(&e.down),
+                    }
+                })
+                .collect(),
+            ..processor.clone()
+        };
+        let relative_gap = |got: &Tensor, want: &Tensor| {
+            let largest = |t: Tensor| {
+                t.abs()
+                    .unwrap()
+                    .max_all()
+                    .unwrap()
+                    .to_scalar::<f32>()
+                    .unwrap()
+            };
+            let want = want.to_device(&Device::Cpu).unwrap();
+            let gap = largest((got.to_device(&Device::Cpu).unwrap() - &want).unwrap());
+            gap / largest(want)
+        };
+        let mut failures = Vec::new();
+        for tokens in [1usize, 5, 40] {
+            let x = Tensor::from_vec(
+                hashed(tokens * hidden, 5),
+                (1, tokens, hidden),
+                &Device::Cpu,
+            )
+            .unwrap();
+            let flat = x.reshape((tokens, hidden)).unwrap();
+            let picks = |routes: Vec<Vec<(usize, f32)>>| -> Vec<Vec<usize>> {
+                routes
+                    .into_iter()
+                    .map(|r| r.into_iter().map(|p| p.0).collect())
+                    .collect()
+            };
+            assert_eq!(
+                picks(on_card.route(&flat.to_device(&card).unwrap()).unwrap()),
+                picks(processor.route(&flat).unwrap()),
+                "{tokens} tokens: the card picked other experts"
+            );
+            let on = x.to_device(&card).unwrap();
+            let got = on_card.forward(&on).unwrap();
+            let truth = exact.forward(&x).unwrap();
+            let processor_gap = relative_gap(&processor.forward(&x).unwrap(), &truth);
+            let to_truth = relative_gap(&got, &truth);
+            eprintln!(
+                "{tokens} tokens: {to_truth:.2e} off the exact answer (processor {processor_gap:.2e})"
+            );
+            if to_truth.is_nan() || to_truth > 1.5 * processor_gap + 1e-6 {
+                failures.push(format!(
+                    "{tokens} tokens: {to_truth} off the exact answer, the processor {processor_gap}"
+                ));
+            }
+            if tokens <= MOE_CARD_ONE_ROW_MAX_TOKENS {
+                let gap = relative_gap(&got, &unstacked.forward(&on).unwrap());
+                eprintln!("{tokens} tokens: {gap:.2e} off one matrix per expert on the card");
+                if gap.is_nan() || gap >= 1e-4 {
+                    failures.push(format!("{tokens} tokens: {gap} off one matrix per expert"));
+                }
+            }
+        }
+        assert!(failures.is_empty(), "off the reference: {failures:#?}");
+    }
+
     /// Each expert is its own slice of the stack, still QUANTIZED, and holds
     /// exactly that slice's values. The dtype check is the point: dequantizing
     /// the stacks made a 30B-A3B model need ~116 GB where its file is 11 GB.
@@ -3970,14 +4142,6 @@ mod expert_stack_tests {
             ("blk.0.ffn_up_exps.weight", &q((n, inter, hidden), 3)),
             ("blk.0.ffn_down_exps.weight", &q((n, hidden, inter), 4)),
         ]);
-        // The pool keeps such a model off a card (`CpuReason::
-        // WeightFormatNeedsTheProcessor`); the Q8_0 stacks above it are not.
-        assert!(crate::inference::split::holds_weights_the_card_cannot_read(
-            &ct
-        ));
-        assert!(
-            !crate::inference::split::holds_weights_the_card_cannot_read(&moe_gguf(2, 64, 32).0)
-        );
         let moe = load_moe_ffn(
             &ct,
             &mut reader,
@@ -4052,8 +4216,9 @@ mod expert_stack_tests {
     /// expert's gate and up bias before the activation, its down bias before
     /// the routing weight. Checked against a hand-written sum over the
     /// dequantized weights, and the processor's one-region path against one
-    /// expert at a time, bit for bit. A card's stacked kernel adds no bias, so
-    /// the layer is never stacked.
+    /// expert at a time, bit for bit. Loaded on the processor the layer is not
+    /// stacked, but a card would stack it: since step 7 the card adds each bias
+    /// after its stacked product (`layers::expert_bias_rows`).
     #[test]
     fn a_biased_expert_layer_is_llama_cpps_sum() {
         use crate::inference::layers::QMatMul;
@@ -4125,7 +4290,7 @@ mod expert_stack_tests {
         )
         .unwrap();
         assert!(moe.router_bias.is_some() && moe.expert_biases.is_some());
-        assert!(moe.stacked.is_none() && !moe.experts_could_stack_on_a_card());
+        assert!(moe.stacked.is_none() && moe.experts_could_stack_on_a_card());
 
         let deq = |w: &QMatMul| -> Vec<Vec<f32>> {
             w.quantized_weight()

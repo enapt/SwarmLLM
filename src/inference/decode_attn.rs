@@ -396,10 +396,16 @@ pub(crate) const DECODE_ATTN_PTX: &str = include_str!(concat!(env!("OUT_DIR"), "
 /// caller keeps the matmul path. `SWARMLLM_DECODE_ATTN=standard` turns both
 /// kernels off for an A/B inside one binary.
 ///
+/// `sinks` (gpt-oss, `[n_head]` f32 on the queries' card): one more score per
+/// head with no value, folded in by the merge (`decode_attn_combine_f32`) —
+/// llama.cpp's softmax with sinks. Before 2026-11-02 a sink layer took the
+/// matmul path, widening the whole half cache to f32 on every step.
+///
 /// Not bit-identical to the matmul path (another summation order); pinned
 /// against it within float tolerance by
-/// `cuda_decode_kernel_matches_the_matmul_path`, and replies are judged against
-/// llama.cpp.
+/// `cuda_decode_kernel_matches_the_matmul_path` (sinks:
+/// `cuda_decode_kernel_folds_in_attention_sinks_as_the_processor_does`), and
+/// replies are judged against llama.cpp.
 pub fn gqa_decode_attention_cuda(
     q: &Tensor,
     k: &Tensor,
@@ -407,6 +413,7 @@ pub fn gqa_decode_attention_cuda(
     mask: Option<&Tensor>,
     scale: f32,
     softcap: Option<f32>,
+    sinks: Option<&Tensor>,
 ) -> Result<Option<Tensor>> {
     if !decode_kernel_enabled() || !q.device().is_cuda() || mask.is_some() {
         return Ok(None);
@@ -438,6 +445,15 @@ pub fn gqa_decode_attention_cuda(
             return Ok(None);
         }
     }
+    // gpt-oss's sinks: one f32 a query head, on the queries' card.
+    if let Some(s) = sinks {
+        if s.dtype() != candle_core::DType::F32
+            || s.dims() != [n_head]
+            || !s.device().same_device(q.device())
+        {
+            return Ok(None);
+        }
+    }
     #[cfg(feature = "candle-cuda")]
     {
         let q = q.contiguous()?;
@@ -447,12 +463,13 @@ pub fn gqa_decode_attention_cuda(
             combine_one_chunk: combine_every_length(),
             chunk: fixed_chunk(),
             tree: None,
+            sinks: sinks.map(Tensor::contiguous).transpose()?,
         };
         Ok(Some(q.apply_op3_no_bwd(k, v, &op)?))
     }
     #[cfg(not(feature = "candle-cuda"))]
     {
-        let _ = (scale, softcap);
+        let _ = (scale, softcap, sinks);
         Ok(None)
     }
 }
@@ -818,6 +835,7 @@ pub(crate) fn gqa_tree_attention_cuda(
                 tiled,
                 past,
             }),
+            sinks: None,
         };
         let out = q_rows.apply_op3_no_bwd(k, v, &op)?;
         if tiled {
@@ -900,6 +918,11 @@ mod cuda {
         pub(super) chunk: Option<usize>,
         /// `None`: one query row a batch, every position read (a decode step).
         pub(super) tree: Option<TreeOperands>,
+        /// gpt-oss's attention sinks, `[n_head]` f32 on the card — folded in
+        /// by the combine as one more score with no value, so a call carrying
+        /// them is always merged. A tree carries none (its kernel is skipped
+        /// for a sink layer).
+        pub(super) sinks: Option<Tensor>,
     }
 
     /// The cache's K and V as the kernel reads them — f32, or the half cache
@@ -992,6 +1015,26 @@ mod cuda {
                     Some(c.as_cuda_slice::<u32>()?.slice(o..e))
                 }
             };
+            // The sinks' view, held for the combine.
+            let sink_storage = self.sinks.as_ref().map(|t| t.storage_and_layout());
+            let sinks = match &sink_storage {
+                None => None,
+                Some((storage, layout)) => {
+                    let candle_core::Storage::Cuda(c) = &**storage else {
+                        candle_core::bail!("decode-attention: the sinks off the card");
+                    };
+                    let Some((o, e)) = layout.contiguous_offsets() else {
+                        candle_core::bail!("decode-attention: the sinks must be contiguous");
+                    };
+                    if e - o != n_head || self.tree.is_some() {
+                        candle_core::bail!(
+                            "decode-attention: {} sinks for {n_head} heads (a tree reads none)",
+                            e - o
+                        );
+                    }
+                    Some(c.as_cuda_slice::<f32>()?.slice(o..e))
+                }
+            };
             let n_rep = n_head / n_kv_head;
             let tiled = self.tree.as_ref().is_some_and(|t| t.tiled);
             let chunk = if tiled {
@@ -1028,7 +1071,8 @@ mod cuda {
             let kernel_len = s_len - skip;
             let n_chunks = kernel_len.div_ceil(chunk);
             // The tiled kernel writes partials only.
-            let merged = tiled || n_chunks > 1 || self.combine_one_chunk;
+            // The sinks are folded in by the combine only.
+            let merged = tiled || n_chunks > 1 || self.combine_one_chunk || sinks.is_some();
 
             // Each run's output and log-sum-exp, merged by the combine below.
             #[cfg(feature = "flash-attn")]
@@ -1275,11 +1319,16 @@ mod cuda {
                     }
                 };
                 builder.arg(&past_runs_i);
+                match &sinks {
+                    Some(s) => builder.arg(s),
+                    None => builder.arg(&null),
+                };
                 // SAFETY: ffi. `partial` holds `n_chunks` rows of `d + 2` per
                 // (group, head), all written above; `out` is `b * n_head * d`;
                 // flash's `past_runs` runs of `rows * n_rep` query vectors × KV
                 // heads (output × `d`), written above with the call checked to
-                // be one K/V batch's.
+                // be one K/V batch's; the sinks, when passed, `n_head` floats
+                // (checked above, `hh < n_head`).
                 unsafe { builder.launch(cfg) }.w()?;
             }
             Ok((
@@ -1525,7 +1574,7 @@ mod tests {
             let mut arms = vec![(
                 "entry point".to_string(),
                 flat(
-                    gqa_decode_attention_cuda(&qc, &kc, &vc, None, scale, softcap)
+                    gqa_decode_attention_cuda(&qc, &kc, &vc, None, scale, softcap, None)
                         .unwrap()
                         .expect("the card kernel applies to these inputs"),
                 ),
@@ -1537,6 +1586,7 @@ mod tests {
                     combine_one_chunk: true,
                     chunk: Some(chunk),
                     tree: None,
+                    sinks: None,
                 };
                 arms.push((
                     format!("{chunk}-position chunks"),
@@ -1558,6 +1608,148 @@ mod tests {
                 assert!(
                     worst_abs < 1e-5 && worst_rel < 1e-4,
                     "{arm}: b={b} heads {n_head}/{n_kv_head} S={s_len} d={d} softcap={softcap:?} cache {cache_dtype:?}: worst abs {worst_abs} rel {worst_rel}"
+                );
+            }
+        }
+    }
+
+    /// gpt-oss's attention sinks (#390 item 2, step 7) on the card's decode
+    /// kernel against the processor's kernel, which is pinned against
+    /// llama.cpp's expression in f64 (`sinks_take_their_share_on_every_processor_path`):
+    /// gpt-oss's heads (64 over 8, d 64) and a GQA/MHA pair, one chunk and
+    /// several, the f32 and the half cache, sinks small, dominant and `-inf`.
+    /// The answer must also move from the sink-less one wherever a sink is
+    /// finite — or the combine never read them. ⚠ Gated: run it on a card with
+    /// `--nocapture` and look for the SKIPPED line before believing a pass.
+    #[cfg(feature = "candle-cuda")]
+    #[test]
+    fn cuda_decode_kernel_folds_in_attention_sinks_as_the_processor_does() {
+        let card = match Device::new_cuda(0) {
+            Ok(d) => d,
+            Err(e) => {
+                eprintln!("SKIPPED cuda decode attention sinks: no CUDA device ({e})");
+                return;
+            }
+        };
+        let cpu = Device::Cpu;
+        let flat = |t: Tensor| t.flatten_all().unwrap().to_vec1::<f32>().unwrap();
+        for (n_head, n_kv_head, s_len, d) in [
+            (64usize, 8usize, 37usize, 64usize),
+            (64, 8, 700, 64),
+            (8, 8, 130, 128),
+        ] {
+            for cache_dtype in [candle_core::DType::F32, candle_core::DType::F16] {
+                let q = Tensor::randn(0f32, 1.0, (1, n_head, 1, d), &cpu).unwrap();
+                let as_stored = |t: Tensor| {
+                    t.to_dtype(cache_dtype)
+                        .unwrap()
+                        .to_dtype(candle_core::DType::F32)
+                        .unwrap()
+                };
+                let k =
+                    as_stored(Tensor::randn(0f32, 1.0, (1, n_kv_head, s_len, d), &cpu).unwrap());
+                let v =
+                    as_stored(Tensor::randn(0f32, 1.0, (1, n_kv_head, s_len, d), &cpu).unwrap());
+                let scale = 1.0 / (d as f32).sqrt();
+                // Every head its own sink: small, dominant (most of the row's
+                // weight goes to nothing) and no sink at all.
+                let sinks: Vec<f32> = (0..n_head)
+                    .map(|h| match h % 4 {
+                        0 => 0.5,
+                        1 => -1.0,
+                        2 => 6.0,
+                        _ => f32::NEG_INFINITY,
+                    })
+                    .collect();
+                let want = flat(
+                    gqa_decode_attention_cpu(&q, &k, &v, None, scale, None, 0, Some(&sinks))
+                        .unwrap()
+                        .expect("the processor kernel takes these inputs"),
+                );
+                let sinkless = flat(
+                    gqa_decode_attention_cpu(&q, &k, &v, None, scale, None, 0, None)
+                        .unwrap()
+                        .unwrap(),
+                );
+                let to_card =
+                    |t: &Tensor| t.to_dtype(cache_dtype).unwrap().to_device(&card).unwrap();
+                let sink_tensor = Tensor::from_vec(sinks.clone(), (n_head,), &card).unwrap();
+                let got = flat(
+                    gqa_decode_attention_cuda(
+                        &q.to_device(&card).unwrap(),
+                        &to_card(&k),
+                        &to_card(&v),
+                        None,
+                        scale,
+                        None,
+                        Some(&sink_tensor),
+                    )
+                    .unwrap()
+                    .expect("the card kernel takes these inputs, sinks included"),
+                );
+                assert_eq!(got.len(), want.len());
+                let worst_abs = got
+                    .iter()
+                    .zip(&want)
+                    .map(|(a, b)| (a - b).abs())
+                    .fold(0f32, nan_max);
+                let worst_rel = got
+                    .iter()
+                    .zip(&want)
+                    .map(|(a, b)| (a - b).abs() / a.abs().max(b.abs()).max(0.05))
+                    .fold(0f32, nan_max);
+                assert!(
+                    worst_abs < 1e-5 && worst_rel < 1e-4,
+                    "heads {n_head}/{n_kv_head} S={s_len} d={d} cache {cache_dtype:?}: worst abs {worst_abs} rel {worst_rel}"
+                );
+                // Each head moved from its sink-less answer as far as the
+                // processor's did — a dominant sink far, a small one at a long
+                // cache barely, `-inf` not at all.
+                let moved = |x: &[f32], h: usize| {
+                    x[h * d..(h + 1) * d]
+                        .iter()
+                        .zip(&sinkless[h * d..(h + 1) * d])
+                        .map(|(a, b)| (a - b).abs())
+                        .fold(0f32, nan_max)
+                };
+                for h in 0..n_head {
+                    let (card_moved, cpu_moved) = (moved(&got, h), moved(&want, h));
+                    assert!(
+                        (card_moved - cpu_moved).abs() <= 0.1 * cpu_moved + 1e-5,
+                        "heads {n_head}/{n_kv_head} S={s_len} head {h} (sink {}): the card moved \
+                         {card_moved}, the processor {cpu_moved}",
+                        sinks[h]
+                    );
+                    if sinks[h] == 6.0 {
+                        assert!(
+                            cpu_moved > 1e-3,
+                            "head {h}: a dominant sink moved {cpu_moved}"
+                        );
+                    }
+                }
+                // The null control: the card handed no sinks is NOT the
+                // processor's answer with them — the comparison above can fail.
+                let card_sinkless = flat(
+                    gqa_decode_attention_cuda(
+                        &q.to_device(&card).unwrap(),
+                        &to_card(&k),
+                        &to_card(&v),
+                        None,
+                        scale,
+                        None,
+                        None,
+                    )
+                    .unwrap()
+                    .unwrap(),
+                );
+                let control_off = card_sinkless
+                    .iter()
+                    .zip(&want)
+                    .map(|(a, b)| (a - b).abs())
+                    .fold(0f32, nan_max);
+                assert!(
+                    control_off > 1e-3,
+                    "the card without sinks is within {control_off} of the answer with them"
                 );
             }
         }
@@ -1792,6 +1984,7 @@ mod tests {
                             run_len: base / runs,
                         }),
                     }),
+                    sinks: None,
                 };
                 let got = q_rows
                     .apply_op3_no_bwd(&kc, &vc, &op)
@@ -2010,6 +2203,7 @@ mod tests {
                                     tiled,
                                     past: None,
                                 }),
+                                sinks: None,
                             };
                             q.transpose(1, 2)
                                 .unwrap()
@@ -2111,6 +2305,7 @@ mod tests {
                                         run_len: base / runs,
                                     }),
                                 }),
+                                sinks: None,
                             };
                             let out = q_rows.apply_op3_no_bwd(&k, &v, &op).unwrap();
                             card.synchronize().unwrap();
@@ -2182,6 +2377,7 @@ mod tests {
                             combine_one_chunk,
                             chunk: Some(CUDA_CHUNK),
                             tree: None,
+                            sinks: None,
                         };
                         q.apply_op3_no_bwd(&k, &v, &op)
                             .unwrap()

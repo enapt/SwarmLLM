@@ -158,7 +158,7 @@ extern "C" void moe_gemm_gguf(
     int size_m,         // M (num tokens to process)
     int size_n,         // N (output dim)
     int size_k,         // K (input dim)
-    int quant_type,     // Q8_0: 0, Q4K: 1, Q2K: 2, Q3k: 3,  Q5K: 4, Q6K: 5, Q4_0: 15, Q4_1: 16, Q5_0: 17, Q5_1: 18
+    int quant_type,     // Q8_0: 0, Q4K: 1, Q2K: 2, Q3k: 3,  Q5K: 4, Q6K: 5, Q4_0: 15, Q4_1: 16, Q5_0: 17, Q5_1: 18, MXFP4: 19
     cudaStream_t stream
 ) {
     const int QUANTIZE_BLOCK_SIZE = CUDA_QUANTIZE_BLOCK_SIZE;
@@ -237,6 +237,13 @@ extern "C" void moe_gemm_gguf(
         case 18: // Q5_1
         {
             LAUNCH_MOE_GGUF(QK5_1, QI5_1, block_q5_1, VDR_Q5_1_Q8_1_MMVQ, vec_dot_q5_1_q8_1);
+            break;
+        }
+        // SwarmLLM patch: MXFP4 (gpt-oss's experts, FUTURE_WORK #390 step 7),
+        // as llama.cpp's `mul_mat_vec_q` launches it (qi 4, vdr 2 — Q4_0's).
+        case 19: // MXFP4
+        {
+            LAUNCH_MOE_GGUF(QK_MXFP4, QI_MXFP4, block_mxfp4, VDR_MXFP4_Q8_1_MMVQ, vec_dot_mxfp4_q8_1);
             break;
         }
         default:
