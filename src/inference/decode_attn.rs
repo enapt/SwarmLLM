@@ -108,6 +108,7 @@ pub(crate) fn f32_planes<'a>(storage: &'a Storage, layout: &Layout) -> Option<Pl
 /// `scale` multiplies the raw score; `softcap` is Gemma-2's tanh cap;
 /// `key_origin` is the absolute position of `k`'s first key — 0, except for a
 /// windowed layer, whose keys start at its window ([`attn_rows`]).
+#[allow(clippy::too_many_arguments)]
 pub fn gqa_decode_attention_cpu(
     q: &Tensor,
     k: &Tensor,
@@ -116,6 +117,7 @@ pub fn gqa_decode_attention_cpu(
     scale: f32,
     softcap: Option<f32>,
     key_origin: usize,
+    sinks: Option<&[f32]>,
 ) -> Result<Option<Tensor>> {
     if !decode_kernel_enabled() || !matches!(q.device(), Device::Cpu) {
         return Ok(None);
@@ -213,6 +215,14 @@ pub fn gqa_decode_attention_cpu(
 
     // Pass 2, one task per (batch, kv head): each row folds its chunks in
     // order, as a prompt task folds them (`attn_rows::merge_into`).
+    // A layer's sinks (gpt-oss): one per query head — head `h * n_rep + r`
+    // of kv head `h` — folded in after the keys (`attn_rows::fold_sink`).
+    if sinks.is_some_and(|s| s.len() != n_head) {
+        candle_core::bail!(
+            "{} attention sinks for {n_head} query heads",
+            sinks.map_or(0, <[f32]>::len)
+        );
+    }
     let mut out = vec![0f32; b * n_head * d];
     out.par_chunks_mut(n_rep * d)
         .enumerate()
@@ -223,6 +233,9 @@ pub fn gqa_decode_attention_cpu(
                 for c in 0..n_chunks {
                     let at = ((g * n_chunks + c) * n_rep + r) * row;
                     attn_rows::merge_into(&mut acc, &partial[at..at + row]);
+                }
+                if let Some(s) = sinks {
+                    attn_rows::fold_sink(&mut acc, s[(g % n_kv_head) * n_rep + r]);
                 }
                 attn_rows::finish_row(&acc, o);
             }
@@ -1393,7 +1406,7 @@ mod tests {
                 .to_vec1::<f32>()
                 .unwrap();
 
-            let got = gqa_decode_attention_cpu(&q, &k, &v, mask.as_ref(), scale, softcap, 0)
+            let got = gqa_decode_attention_cpu(&q, &k, &v, mask.as_ref(), scale, softcap, 0, None)
                 .unwrap()
                 .expect("kernel applies to these inputs")
                 .flatten_all()
@@ -1650,6 +1663,7 @@ mod tests {
                 n_head,
                 n_kv_head,
                 softcap,
+                None,
             )
             .unwrap()
             .flatten_all()
@@ -1722,6 +1736,7 @@ mod tests {
                         n_kv_head,
                         softcap,
                         0,
+                        None,
                     )
                     .unwrap(),
                 )
@@ -1811,6 +1826,7 @@ mod tests {
                     n_head,
                     n_kv_head,
                     softcap,
+                    None,
                 )
                 .unwrap()
                 .flatten_all()
@@ -1899,6 +1915,7 @@ mod tests {
                 n_kv_head,
                 None,
                 0,
+                None,
             )
         };
         let (f16, f32) = (candle_core::DType::F16, candle_core::DType::F32);
@@ -2018,6 +2035,7 @@ mod tests {
                             d,
                             n_head,
                             n_kv_head,
+                            None,
                             None,
                         )
                         .unwrap()
@@ -2227,14 +2245,18 @@ mod tests {
         let dev = Device::Cpu;
         let q = Tensor::randn(0f32, 1.0, (1, 8, 2, 64), &dev).unwrap(); // q_len 2
         let k = Tensor::randn(0f32, 1.0, (1, 8, 10, 64), &dev).unwrap();
-        assert!(gqa_decode_attention_cpu(&q, &k, &k, None, 0.1, None, 0)
-            .unwrap()
-            .is_none());
+        assert!(
+            gqa_decode_attention_cpu(&q, &k, &k, None, 0.1, None, 0, None)
+                .unwrap()
+                .is_none()
+        );
         let q1 = Tensor::randn(0f32, 1.0, (1, 8, 1, 64), &dev).unwrap();
         // K whose (S, d) plane is not dense: a transposed view.
         let kt = k.transpose(2, 3).unwrap();
-        assert!(gqa_decode_attention_cpu(&q1, &kt, &kt, None, 0.1, None, 0)
-            .unwrap()
-            .is_none());
+        assert!(
+            gqa_decode_attention_cpu(&q1, &kt, &kt, None, 0.1, None, 0, None)
+                .unwrap()
+                .is_none()
+        );
     }
 }

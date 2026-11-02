@@ -120,7 +120,8 @@ the dashboard says why: the card has no code for the format yet, and running it 
 seconds a token. gpt-oss's activation (a clamped SwiGLU) is built too, giving llama.cpp's own answers
 bit for bit, and the family is known by name with its window and norms read as llama.cpp reads them.
 Its biases — on the attention's output, on the choice of experts and on every expert — are read and
-added where llama.cpp adds them. (#390)
+added where llama.cpp adds them, and so is its attention's "sink", a per-head share of attention
+that goes to no word at all. (#390)
 
 ## [0.3.267-alpha] — 2026-11-01
 

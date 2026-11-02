@@ -6217,6 +6217,39 @@ path's gate bias dropped (0.45 off) and `expert_ffn`'s down bias dropped (the tw
 `an_attention_output_bias_is_added_on_both_paths`: each output is the unbiased one plus the bias, bit
 for bit, for one request and for a batch; red with the bias dropped. The end-to-end check against
 llama.cpp's `dump_logits` waits for the sinks (step 5): without them no gpt-oss forward is llama.cpp's.
+
+## gpt-oss: attention sinks — a share of attention that goes to no key (2026-11-02, FUTURE_WORK #390 item 2, step 5)
+
+**What differs** (llama.cpp master `ggml-cpu/ops.cpp` soft_max and flash_attn_ext, `llama-graph.cpp`
+`build_attn_mha`): `blk.N.attn_sinks.weight`, one F32 per query head, is one more logit in the
+softmax, compared against the SCALED (and capped, and masked) scores: `max' = max(max, s)`,
+`Σ' = Σ e^(x−max') + e^(s−max')`. It has no value, so it only shrinks every weight. On a windowed
+layer it joins the in-window sum — the mask has already removed the rest.
+
+**What was chosen.** A REQUIRED argument, never a defaulting wrapper (gotcha #171):
+`run_attention_windowed` and `standard_attention` take `Option<&AttentionSinks>` (host floats for
+the processor's kernels, a device tensor for the matmul path), and so do both processor kernels
+(`gqa_decode_attention_cpu`, `gqa_prefill_attention_cpu`) and `scaled_masked_softmax`. The kernels
+fold the sink into a row's `[max, Σ, o…]` accumulator just before `finish_row` (`attn_rows::fold_sink`:
+the partial `[s, 1, 0…]` merged as two tiles are); a `-inf` sink returns before touching it, so a
+file without sinks keeps the kernels' bits. The matmul path concatenates a sink column onto the
+scaled, masked scores, softmaxes and narrows it off (`composed_with_sinks`); the grouped layout
+(row `rep·q_len + t` of group g is head `g·n_rep + rep`) builds the column in that order.
+
+**What a card does.** No card kernel reads a sink — the decode/tree kernels' combine has no argument
+for it and candle's flash discards the log-sum-exp a sink needs (`out · σ(lse − s)`). A sink layer
+therefore skips flash (both arms of `run_attention_windowed`), the tree and card-decode kernels,
+and runs the matmul path; `mask_is_read` asks `LayerVariant::flash_may_attend` so the mask is built
+for it, and `tree_steps_may_be_captured` refuses a capture. Its half-precision cache is widened to
+f32 on each call — correct, slow, and moot while MXFP4 keeps gpt-oss on the processor. Step 7 adds
+the sink to `decode_attn_combine_f32` and an lse-returning flash. Tensor parallelism narrows the
+sinks to each rank's heads.
+
+**Checked.** `sinks_take_their_share_on_every_processor_path`: 4 query heads over 2 key/value heads,
+sinks `[0.5, −1, 2, 0]`, one token and five against a causal offset mask — the decode and prompt
+kernels, `standard_attention`, and the matmul path grouped and ungrouped each within 1e-5 of a
+float64 reference, and `-inf` sinks equal to none bit for bit. Red with either kernel's fold or the
+sink column dropped. `a_layer_with_sinks_is_never_flashs` pins the card's refusal.
 ## Qwen 3.5's decode steps are captured too: a DeltaNet state is written into a second pair of buffers (2026-10-11, FUTURE_WORK #228 (4))
 
 **What refused it.** `decode_graph_ineligibility` let only dense layers into a

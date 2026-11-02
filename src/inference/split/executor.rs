@@ -992,14 +992,7 @@ impl SplitModel {
         {
             let flash_takes_it = self.device.is_cuda()
                 && self.layer_devices.is_empty()
-                && self.layers.iter().all(|layer| {
-                    matches!(
-                        layer,
-                        LayerVariant::Dense(_)
-                            | LayerVariant::Qwen35Attn { .. }
-                            | LayerVariant::Qwen35Ssm { .. }
-                    )
-                })
+                && self.layers.iter().all(LayerVariant::flash_may_attend)
                 && !crate::inference::attn_kernel::is_force_standard_attn()
                 && crate::inference::layers::flash_handles_offset_causal();
             !flash_takes_it
@@ -1025,7 +1018,7 @@ impl SplitModel {
             && self.layer_devices.is_empty()
             && self.layers.iter().all(|layer| {
                 matches!(layer, LayerVariant::Dense(lw)
-                if crate::inference::decode_attn::card_kernel_covers(
+                if lw.attn_sinks.is_none() && crate::inference::decode_attn::card_kernel_covers(
                     lw.n_head, lw.n_kv_head, lw.head_dim,
                 ))
             })

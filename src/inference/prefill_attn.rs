@@ -108,6 +108,7 @@ const ROWS_PER_TASK: usize = 128;
 /// multiplies the raw score; `softcap` is Gemma-2's tanh cap; `key_origin` is
 /// the absolute position of `k`'s first key — 0, except for a windowed layer,
 /// whose keys start at its window ([`attn_rows`]).
+#[allow(clippy::too_many_arguments)]
 pub fn gqa_prefill_attention_cpu(
     q: &Tensor,
     k: &Tensor,
@@ -116,6 +117,7 @@ pub fn gqa_prefill_attention_cpu(
     scale: f32,
     softcap: Option<f32>,
     key_origin: usize,
+    sinks: Option<&[f32]>,
 ) -> Result<Option<Tensor>> {
     if !prefill_kernel_enabled() || !matches!(q.device(), Device::Cpu) {
         return Ok(None);
@@ -169,6 +171,15 @@ pub fn gqa_prefill_attention_cpu(
         return Ok(None);
     };
 
+    // A layer's sinks (gpt-oss): one per query head — group g's row
+    // `rep * q_len + i` is head `g * n_rep + rep` — folded in after the keys
+    // (`attn_rows::fold_sink`).
+    if sinks.is_some_and(|s| s.len() != n_head) {
+        candle_core::bail!(
+            "{} attention sinks for {n_head} query heads",
+            sinks.map_or(0, <[f32]>::len)
+        );
+    }
     let w = attn_rows::partial_len(d);
     let mut out = vec![0f32; b * n_head * q_len * d];
     out.par_chunks_mut(rows * d)
@@ -228,7 +239,14 @@ pub fn gqa_prefill_attention_cpu(
                     attn_rows::merge_into(a, p);
                 }
             }
-            for (o_row, a) in o.chunks_exact_mut(d).zip(acc.chunks_exact(w)) {
+            for (r, (o_row, a)) in o
+                .chunks_exact_mut(d)
+                .zip(acc.chunks_exact_mut(w))
+                .enumerate()
+            {
+                if let Some(s) = sinks {
+                    attn_rows::fold_sink(a, s[g * n_rep + (r0 + r) / q_len]);
+                }
                 attn_rows::finish_row(a, o_row);
             }
         });
@@ -321,7 +339,7 @@ mod tests {
                 .to_vec1::<f32>()
                 .unwrap();
 
-            let got = gqa_prefill_attention_cpu(&q, &k, &v, mask.as_ref(), scale, softcap, 0)
+            let got = gqa_prefill_attention_cpu(&q, &k, &v, mask.as_ref(), scale, softcap, 0, None)
                 .unwrap()
                 .expect("kernel applies to these inputs")
                 .flatten_all()
@@ -383,7 +401,7 @@ mod tests {
                 let vv = v.narrow(2, cut, to - cut).unwrap();
                 let out = if q_len == 1 {
                     crate::inference::decode_attn::gqa_decode_attention_cpu(
-                        &q, &kk, &vv, None, scale, softcap, cut,
+                        &q, &kk, &vv, None, scale, softcap, cut, None,
                     )
                 } else {
                     let m: Vec<f32> = (from..to)
@@ -398,7 +416,7 @@ mod tests {
                         })
                         .collect();
                     let m = Tensor::from_vec(m, (q_len, to - cut), &dev).unwrap();
-                    gqa_prefill_attention_cpu(&q, &kk, &vv, Some(&m), scale, softcap, cut)
+                    gqa_prefill_attention_cpu(&q, &kk, &vv, Some(&m), scale, softcap, cut, None)
                 }
                 .unwrap()
                 .expect("a kernel takes these inputs");
@@ -438,21 +456,25 @@ mod tests {
         let dev = Device::Cpu;
         let q = Tensor::randn(0f32, 1.0, (1, 8, 1, 64), &dev).unwrap(); // q_len 1: decode's
         let k = Tensor::randn(0f32, 1.0, (1, 8, 10, 64), &dev).unwrap();
-        assert!(gqa_prefill_attention_cpu(&q, &k, &k, None, 0.1, None, 0)
-            .unwrap()
-            .is_none());
+        assert!(
+            gqa_prefill_attention_cpu(&q, &k, &k, None, 0.1, None, 0, None)
+                .unwrap()
+                .is_none()
+        );
         let q4 = Tensor::randn(0f32, 1.0, (1, 8, 4, 64), &dev).unwrap();
         // A per-head mask: not a shape the kernel reads.
         let m = Tensor::zeros((1, 8, 4, 10), candle_core::DType::F32, &dev).unwrap();
         assert!(
-            gqa_prefill_attention_cpu(&q4, &k, &k, Some(&m), 0.1, None, 0)
+            gqa_prefill_attention_cpu(&q4, &k, &k, Some(&m), 0.1, None, 0, None)
                 .unwrap()
                 .is_none()
         );
         // K whose (S, d) plane is not dense.
         let kt = k.transpose(2, 3).unwrap();
-        assert!(gqa_prefill_attention_cpu(&q4, &kt, &kt, None, 0.1, None, 0)
-            .unwrap()
-            .is_none());
+        assert!(
+            gqa_prefill_attention_cpu(&q4, &kt, &kt, None, 0.1, None, 0, None)
+                .unwrap()
+                .is_none()
+        );
     }
 }

@@ -36,6 +36,7 @@ fn gqa_standard_attention_llama3_ratio() {
         n_kv_head,
         None,
         0,
+        None,
     )
     .unwrap();
     assert_eq!(out.dims(), &[b, n_head, seq_len, head_dim]);
@@ -56,7 +57,8 @@ fn gqa_standard_attention_mqa_ratio() {
     let k = Tensor::randn(0f32, 0.1, (b, n_kv_head, seq_len, head_dim), &device).unwrap();
     let v = Tensor::randn(0f32, 0.1, (b, n_kv_head, seq_len, head_dim), &device).unwrap();
 
-    let out = standard_attention(&q, &k, &v, None, head_dim, n_head, n_kv_head, None, 0).unwrap();
+    let out =
+        standard_attention(&q, &k, &v, None, head_dim, n_head, n_kv_head, None, 0, None).unwrap();
     assert_eq!(out.dims(), &[b, n_head, seq_len, head_dim]);
 }
 
@@ -85,6 +87,7 @@ fn gqa_flash_vs_standard_llama3_prefill() {
         n_kv_head,
         None,
         0,
+        None,
     )
     .unwrap();
     let out_flash = run_attention(
@@ -113,7 +116,7 @@ fn gqa_flash_vs_standard_llama3_decode() {
     let v = Tensor::randn(0f32, 0.1, (b, n_kv_head, kv_len, head_dim), &device).unwrap();
 
     let out_std =
-        standard_attention(&q, &k, &v, None, head_dim, n_head, n_kv_head, None, 0).unwrap();
+        standard_attention(&q, &k, &v, None, head_dim, n_head, n_kv_head, None, 0, None).unwrap();
     let out_flash =
         run_attention(&q, &k, &v, None, n_head, n_kv_head, head_dim, None, None).unwrap();
     assert_tensors_close(&out_std, &out_flash, 1e-4, "GQA decode flash vs standard");
@@ -225,6 +228,7 @@ fn qwen2_forward_with_biases() {
         attention_bk: Some(Tensor::randn(0f32, 0.01, (kv_dim,), &device).unwrap()),
         attention_bv: Some(Tensor::randn(0f32, 0.01, (kv_dim,), &device).unwrap()),
         attention_bo: None,
+        attn_sinks: None,
         attention_norm: make_rms_norm(&norm_w),
         attn_q_norm: None,
         attn_k_norm: None,

@@ -118,6 +118,7 @@ fn grouped_long_context(kv_lens: &str) {
                     scale as f32,
                     None,
                     0,
+                    None,
                 )?
                 .expect("in scope"),
             )
@@ -139,6 +140,7 @@ fn grouped_long_context(kv_lens: &str) {
                     scale as f32,
                     None,
                     0,
+                    None,
                 )?
                 .expect("in scope"))
             },

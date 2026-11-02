@@ -224,12 +224,11 @@ impl ModelArch {
     /// (`examples/make_tiny_glm4moe_gguf.py`); the smallest real file is
     /// ~45 GB.
     ///
-    /// **gpt-oss is named, not built** (#390 item 2): its MXFP4 experts and
-    /// its activation are read as llama.cpp reads them, but a layer's attention
-    /// sinks and its biases (attention output, router, expert stacks) are not
-    /// read yet, so a reply would be wrong however it ran — refused outright,
-    /// with no switch, until they are; then it waits for its real file like
-    /// the two above.
+    /// **gpt-oss is built, not yet checked** (#390 item 2): its MXFP4 experts,
+    /// activation, biases and attention sinks are read as llama.cpp reads them,
+    /// but no whole forward has been compared with llama.cpp's even on a test
+    /// file — refused outright, with no switch, until one has; then it waits
+    /// for its real file like the two above.
     pub fn is_supported(&self) -> bool {
         !matches!(
             self,

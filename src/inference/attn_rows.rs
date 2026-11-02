@@ -361,6 +361,26 @@ pub(crate) fn merge_into(acc: &mut [f32], p: &[f32]) {
     }
 }
 
+/// Fold an attention sink into a row's merge `acc` (`[max, Σ exp, o]`): a
+/// score with no value, which takes a share of the softmax's weight —
+/// gpt-oss's `attn_sinks`, llama.cpp's `soft_max` with sinks. As
+/// [`merge_into`] folds a partial `[sink, 1, 0…]`: `m = max(m_acc, sink)`,
+/// `Σ · e^(m_acc − m) + e^(sink − m)`, `o · e^(m_acc − m)`. The sink is in the
+/// scores' units — after the scale. A sink of `-inf` leaves `acc` as it was,
+/// bit for bit.
+pub(crate) fn fold_sink(acc: &mut [f32], sink: f32) {
+    if sink == f32::NEG_INFINITY {
+        return;
+    }
+    let m = acc[0].max(sink);
+    let (a, b) = ((acc[0] - m).exp(), (sink - m).exp());
+    acc[0] = m;
+    acc[1] = acc[1] * a + b;
+    for x in &mut acc[2..] {
+        *x *= a;
+    }
+}
+
 /// The row's attention from its merge: `o / Σ`, or zeros for a row that saw
 /// no key.
 pub(crate) fn finish_row(acc: &[f32], o: &mut [f32]) {

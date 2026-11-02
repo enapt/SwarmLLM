@@ -1008,6 +1008,7 @@ fn flash_attn_cpu_vs_standard_attention() {
         n_kv_head,
         None,
         0,
+        None,
     )
     .unwrap();
 
@@ -1057,7 +1058,7 @@ fn flash_attn_cpu_decode_no_mask() {
 
     // Standard path (no mask for decode)
     let out_std =
-        standard_attention(&q, &k, &v, None, head_dim, n_head, n_kv_head, None, 0).unwrap();
+        standard_attention(&q, &k, &v, None, head_dim, n_head, n_kv_head, None, 0, None).unwrap();
 
     // Flash path
     let out_flash =

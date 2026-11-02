@@ -801,6 +801,7 @@ impl MlaWeights {
             self.n_head, // MLA: n_kv_head == n_head (full K/V per head)
             None,        // no softcap for DeepSeek
             0,           // no window: the keys start at position 0
+            None,        // no sinks for DeepSeek
         )?;
 
         // y: [b, n_head, s, key_length] but we need [b, n_head, s, value_length]
@@ -997,6 +998,43 @@ impl ExpertScales {
             device: Tensor::from_vec(host.clone(), (n,), device)?,
             host,
         })
+    }
+}
+
+/// A layer's attention sinks — gpt-oss's `attn_sinks.weight`, one logit per
+/// query head: one more score in each row's softmax, with no value, so a row
+/// can give part of its weight to nothing (llama.cpp's `soft_max` with sinks:
+/// `max' = max(max, s)`, `Σ' = Σ e^(x − max') + e^(s − max')`). It meets the
+/// SCALED scores. On the host for the processor's kernels
+/// (`attn_rows::fold_sink`) and on the layer's device for the matmul path
+/// (`attn_softmax::scaled_masked_softmax`'s sink column). No card kernel reads
+/// them: a layer with sinks takes neither flash attention nor the card's
+/// decode or tree kernels ([`standard_attention`], `run_attention_windowed`).
+#[derive(Debug, Clone)]
+pub(crate) struct AttentionSinks {
+    pub(crate) host: Vec<f32>,
+    pub(crate) device: Tensor, // [n_head] f32
+}
+
+impl AttentionSinks {
+    /// `host`, one per query head, with its copy on `device`.
+    pub(crate) fn new(host: Vec<f32>, device: &Device) -> CandleResult<Self> {
+        Ok(Self {
+            device: Tensor::from_vec(host.clone(), (host.len(),), device)?,
+            host,
+        })
+    }
+
+    /// Heads `start..start + len` — a tensor-parallel rank's share.
+    fn heads(&self, start: usize, len: usize) -> CandleResult<Self> {
+        match self.host.get(start..start + len) {
+            Some(h) => Self::new(h.to_vec(), self.device.device()),
+            None => candle_core::bail!(
+                "attention sinks for heads {start}..{} of {}",
+                start + len,
+                self.host.len()
+            ),
+        }
     }
 }
 
@@ -1488,6 +1526,16 @@ impl LayerOnTheCard {
                 attention_bk: some(&layer.attention_bk)?,
                 attention_bv: some(&layer.attention_bv)?,
                 attention_bo: some(&layer.attention_bo)?,
+                attn_sinks: layer
+                    .attn_sinks
+                    .as_ref()
+                    .map(|s| {
+                        CandleResult::Ok(AttentionSinks {
+                            host: s.host.clone(),
+                            device: sent_to_card(&s.device, card)?,
+                        })
+                    })
+                    .transpose()?,
                 attention_norm: norm(&layer.attention_norm)?,
                 attn_q_norm: some_norm(&layer.attn_q_norm)?,
                 attn_k_norm: some_norm(&layer.attn_k_norm)?,
@@ -2802,6 +2850,21 @@ impl MoeFfn {
     }
 }
 
+impl LayerVariant {
+    /// May flash attention answer this layer's prompt passes, so a forward can
+    /// leave the causal mask out (`SplitModel::mask_is_read`)? A dense layer
+    /// with no sinks and Qwen 3.5's layers. A layer with attention sinks
+    /// (gpt-oss) takes the matmul path, which reads the mask.
+    #[cfg(any(feature = "flash-attn", test))]
+    pub(crate) fn flash_may_attend(&self) -> bool {
+        match self {
+            LayerVariant::Dense(lw) => lw.attn_sinks.is_none(),
+            LayerVariant::Qwen35Attn { .. } | LayerVariant::Qwen35Ssm { .. } => true,
+            _ => false,
+        }
+    }
+}
+
 // ── Layer variant enum for supporting DeepSeek alongside dense architectures ──
 
 /// A transformer layer that is either a standard dense layer or a DeepSeek MLA+MoE layer.
@@ -3381,6 +3444,9 @@ pub(crate) struct LayerWeights {
     /// `build_attn` adds `wo_b` — in [`Self::output_projection`], the one place
     /// both attention paths project. `None` for most families.
     pub(crate) attention_bo: Option<Tensor>,
+    /// The layer's attention sinks ([`AttentionSinks`]: gpt-oss), handed to
+    /// every attention call the layer makes. `None` for most families.
+    pub(crate) attn_sinks: Option<AttentionSinks>,
     pub(crate) attention_norm: RmsNorm,
     /// Qwen3 applies RmsNorm to Q per-head after projection (before RoPE).
     pub(crate) attn_q_norm: Option<RmsNorm>,
@@ -3652,6 +3718,10 @@ impl LayerWeights {
         // layer's bias after the reduction.
         if tp_rank != 0 {
             self.attention_bo = None;
+        }
+        // Column-parallel heads: each rank keeps its own heads' sinks.
+        if let Some(s) = &self.attn_sinks {
+            self.attn_sinks = Some(s.heads(tp_rank * heads_per_rank, heads_per_rank)?);
         }
 
         // Split FFN weights
@@ -4498,7 +4568,11 @@ pub(crate) fn standard_attention(
     n_kv_head: usize,
     attn_logit_softcap: Option<f32>,
     key_origin: usize,
+    sinks: Option<&AttentionSinks>,
 ) -> CandleResult<Tensor> {
+    // A layer's sinks (gpt-oss) reach the processor's kernels and the matmul
+    // path; the card's tree and decode kernels read none and are passed by.
+    //
     // GQA decode: group the query heads instead of expanding the KV heads.
     //
     // `repeat_kv` materialises K and V at `n_head` instead of `n_kv_head`, and
@@ -4561,7 +4635,9 @@ pub(crate) fn standard_attention(
     // and widened a half cache whole on every call. `SWARMLLM_TREE_ATTN=standard`
     // keeps it for an A/B.
     if q.device().is_cuda() {
-        if let Some((seen, base)) = tree_visibility_on(q.device(), q.dim(2)?, k.dim(2)?)? {
+        if let Some((seen, base)) =
+            tree_visibility_on(q.device(), q.dim(2)?, k.dim(2)?)?.filter(|_| sinks.is_none())
+        {
             if let Some(out) = crate::inference::decode_attn::gqa_tree_attention_cuda(
                 q,
                 k,
@@ -4587,7 +4663,7 @@ pub(crate) fn standard_attention(
             );
         }
     }
-    if q.dim(2)? == 1 && q.device().is_cuda() {
+    if q.dim(2)? == 1 && q.device().is_cuda() && sinks.is_none() {
         if let Some(out) = crate::inference::decode_attn::gqa_decode_attention_cuda(
             q,
             k,
@@ -4622,6 +4698,7 @@ pub(crate) fn standard_attention(
             crate::inference::attn_softmax::scale_from_head_dim(head_dim) as f32,
             attn_logit_softcap,
             key_origin,
+            sinks.map(|s| &s.host[..]),
         )? {
             return Ok(out);
         }
@@ -4640,6 +4717,7 @@ pub(crate) fn standard_attention(
             crate::inference::attn_softmax::scale_from_head_dim(head_dim) as f32,
             attn_logit_softcap,
             key_origin,
+            sinks.map(|s| &s.host[..]),
         )? {
             return Ok(out);
         }
@@ -4653,6 +4731,7 @@ pub(crate) fn standard_attention(
         n_head,
         n_kv_head,
         attn_logit_softcap,
+        sinks.map(|s| &s.device),
     )
 }
 
@@ -4676,6 +4755,7 @@ pub(crate) fn matmul_attention(
     n_head: usize,
     n_kv_head: usize,
     attn_logit_softcap: Option<f32>,
+    sinks: Option<&Tensor>,
 ) -> CandleResult<Tensor> {
     let n_rep = n_head / n_kv_head;
     if n_rep > 1 && grouping_applies(q.dim(2)?, k.dim(2)?, n_head) {
@@ -4688,8 +4768,11 @@ pub(crate) fn matmul_attention(
             n_head,
             n_kv_head,
             attn_logit_softcap,
+            sinks,
         );
     }
+    // The sinks as a column, one per query head, every row of a head alike.
+    let sink_column = sinks.map(|s| s.reshape((1, n_head, 1, 1))).transpose()?;
 
     // A GQA call too big for one pass: block over query POSITIONS, and group
     // each block. It used to expand K and V to `n_head` instead, because the
@@ -4726,6 +4809,7 @@ pub(crate) fn matmul_attention(
                 n_head,
                 n_kv_head,
                 attn_logit_softcap,
+                sinks,
             )?);
             start += len;
         }
@@ -4749,7 +4833,15 @@ pub(crate) fn matmul_attention(
     let block = attention_query_block(q_len, k_len, n_head);
 
     if block >= q_len {
-        return attention_scores_block(q, &kt, &v, mask, head_dim, attn_logit_softcap);
+        return attention_scores_block(
+            q,
+            &kt,
+            &v,
+            mask,
+            head_dim,
+            attn_logit_softcap,
+            sink_column.as_ref(),
+        );
     }
 
     let mut parts: Vec<Tensor> = Vec::with_capacity(q_len.div_ceil(block));
@@ -4770,6 +4862,7 @@ pub(crate) fn matmul_attention(
             mask_blk.as_ref(),
             head_dim,
             attn_logit_softcap,
+            sink_column.as_ref(),
         )?);
         start += len;
     }
@@ -4851,9 +4944,20 @@ fn grouped_gqa_attention(
     n_head: usize,
     n_kv_head: usize,
     attn_logit_softcap: Option<f32>,
+    sinks: Option<&Tensor>,
 ) -> CandleResult<Tensor> {
     let (b, _, q_len, d) = q.dims4()?;
     let n_rep = n_head / n_kv_head;
+    // Group g's row `rep * q_len + t` is query head `g * n_rep + rep`: its
+    // sink, repeated over the group's positions.
+    let sink_column = sinks
+        .map(|s| {
+            s.reshape((n_kv_head, n_rep, 1))?
+                .broadcast_as((n_kv_head, n_rep, q_len))?
+                .contiguous()?
+                .reshape((1, n_kv_head, n_rep * q_len, 1))
+        })
+        .transpose()?;
 
     // `q` arrives via reshape/transpose and is generally strided; the regroup
     // is a reinterpretation of the head axis, so it has to be contiguous first.
@@ -4880,7 +4984,15 @@ fn grouped_gqa_attention(
         }
     };
 
-    let out = attention_scores_block(&qg, &kt, &v, mask_g.as_ref(), head_dim, attn_logit_softcap)?;
+    let out = attention_scores_block(
+        &qg,
+        &kt,
+        &v,
+        mask_g.as_ref(),
+        head_dim,
+        attn_logit_softcap,
+        sink_column.as_ref(),
+    )?;
     out.reshape((b, n_head, q_len, d))
 }
 
@@ -4952,6 +5064,7 @@ fn attention_scores_block(
     mask: Option<&Tensor>,
     head_dim: usize,
     attn_logit_softcap: Option<f32>,
+    sink_column: Option<&Tensor>,
 ) -> CandleResult<Tensor> {
     // Scale, soft-cap, mask and softmax are one pass over the score tensor
     // rather than four. Each of them used to materialise its own
@@ -4964,6 +5077,7 @@ fn attention_scores_block(
         mask,
         crate::inference::attn_softmax::scale_from_head_dim(head_dim),
         attn_logit_softcap,
+        sink_column,
     )?;
     att.matmul(v)
 }
@@ -5189,6 +5303,7 @@ pub(crate) fn run_attention(
         flash_kv,
         None,
         0,
+        None,
     )
 }
 
@@ -5213,6 +5328,7 @@ pub(crate) fn run_attention_windowed(
     flash_kv: FlashKv<'_>,
     window_left: Option<usize>,
     key_origin: usize,
+    sinks: Option<&AttentionSinks>,
 ) -> CandleResult<Tensor> {
     let _ = &flash_kv; // consumed only by the CUDA flash arm below
     let _ = &window_left; // likewise
@@ -5286,7 +5402,12 @@ pub(crate) fn run_attention_windowed(
             // crossover is unmeasured, but `standard_attention` blocks its score
             // matrix (ATTN_SCORE_BUDGET_ELEMS) so memory stays bounded either way.
             let use_standard_for_prefill = seq_len > 1;
-            if use_standard_for_decode || use_standard_for_prefill || force_standard {
+            // No flash kernel reads a sink (gpt-oss).
+            if use_standard_for_decode
+                || use_standard_for_prefill
+                || force_standard
+                || sinks.is_some()
+            {
                 return standard_attention(
                     q,
                     k,
@@ -5297,6 +5418,7 @@ pub(crate) fn run_attention_windowed(
                     n_kv_head,
                     attn_logit_softcap,
                     key_origin,
+                    sinks,
                 );
             }
 
@@ -5379,6 +5501,7 @@ pub(crate) fn run_attention_windowed(
             if (offset_causal && !flash_handles_offset_causal())
                 || decode_prefers_standard
                 || force_standard
+                || sinks.is_some()
             {
                 // Several positions without a mask would be attention with no
                 // causality — every position seeing the ones after it, a wrong
@@ -5403,6 +5526,7 @@ pub(crate) fn run_attention_windowed(
                     n_kv_head,
                     attn_logit_softcap,
                     key_origin,
+                    sinks,
                 );
             }
 
@@ -5506,6 +5630,7 @@ pub(crate) fn run_attention_windowed(
                 n_kv_head,
                 attn_logit_softcap,
                 key_origin,
+                sinks,
             )
         }
     }
@@ -5949,6 +6074,7 @@ impl LayerWeights {
                 mirror.as_ref().map(|(k, v)| (k, v)),
                 window_left,
                 key_origin,
+                self.attn_sinks.as_ref(),
             )
         )?;
 
@@ -6142,6 +6268,7 @@ impl LayerWeights {
                     mirror.as_ref().map(|(k, v)| (k, v)),
                     window_left,
                     key_origin,
+                    self.attn_sinks.as_ref(),
                 )
             )?);
         }
@@ -6215,6 +6342,7 @@ mod batched_attention_tests {
             attention_bk: None,
             attention_bv: None,
             attention_bo: None,
+            attn_sinks: None,
             attention_norm: rms(hidden, dev),
             attn_q_norm: None,
             attn_k_norm: None,
@@ -6296,6 +6424,17 @@ mod batched_attention_tests {
         };
         let got = batched(&with).to_vec3::<f32>().unwrap();
         assert_eq!(got, plus_bias(&batched(&plain)), "a batch");
+    }
+
+    /// A layer with attention sinks (gpt-oss) is never flash's, so a forward
+    /// builds its mask (`SplitModel::mask_is_read`).
+    #[test]
+    fn a_layer_with_sinks_is_never_flashs() {
+        let dev = Device::Cpu;
+        let mut lw = test_layer_weights(2, 1, 32, &dev);
+        assert!(LayerVariant::Dense(lw.clone()).flash_may_attend());
+        lw.attn_sinks = Some(AttentionSinks::new(vec![0.0; lw.n_head], &dev).unwrap());
+        assert!(!LayerVariant::Dense(lw).flash_may_attend());
     }
 
     /// A model whose rotary width is narrower than its head dimension must
@@ -6601,16 +6740,18 @@ mod cpu_decode_bench {
 
         // --- warm up standard path ---
         for _ in 0..3 {
-            let _ =
-                super::standard_attention(&q, &k, &v, None, head_dim, n_head, n_kv_head, None, 0)
-                    .expect("std warm");
+            let _ = super::standard_attention(
+                &q, &k, &v, None, head_dim, n_head, n_kv_head, None, 0, None,
+            )
+            .expect("std warm");
         }
 
         let t0 = std::time::Instant::now();
         for _ in 0..iters {
-            let _ =
-                super::standard_attention(&q, &k, &v, None, head_dim, n_head, n_kv_head, None, 0)
-                    .expect("std iter");
+            let _ = super::standard_attention(
+                &q, &k, &v, None, head_dim, n_head, n_kv_head, None, 0, None,
+            )
+            .expect("std iter");
         }
         let std_ms = t0.elapsed().as_secs_f64() * 1000.0 / iters as f64;
 
@@ -6755,6 +6896,7 @@ mod blocked_attention_tests {
             n_head,
             n_kv_head,
             softcap,
+            None,
         )
         .unwrap()
     }
@@ -6824,9 +6966,18 @@ mod blocked_attention_tests {
 
                 // Grouped path — what `standard_attention` takes whenever the
                 // score matrix fits in one pass.
-                let grouped =
-                    matmul_attention(&q, &k, &v, Some(&m), head_dim, n_head, n_kv_head, None)
-                        .unwrap();
+                let grouped = matmul_attention(
+                    &q,
+                    &k,
+                    &v,
+                    Some(&m),
+                    head_dim,
+                    n_head,
+                    n_kv_head,
+                    None,
+                    None,
+                )
+                .unwrap();
 
                 // Expanded path, written out explicitly — the previous behaviour.
                 let n_rep = n_head / n_kv_head;
@@ -6835,9 +6986,16 @@ mod blocked_attention_tests {
                     .unwrap()
                     .contiguous()
                     .unwrap();
-                let expanded =
-                    attention_scores_block(&q, &ke.t().unwrap(), &ve, Some(&m), head_dim, None)
-                        .unwrap();
+                let expanded = attention_scores_block(
+                    &q,
+                    &ke.t().unwrap(),
+                    &ve,
+                    Some(&m),
+                    head_dim,
+                    None,
+                    None,
+                )
+                .unwrap();
 
                 assert_eq!(
                     grouped.dims(),
@@ -6988,7 +7146,7 @@ mod blocked_attention_tests {
                     let k = reserved_cache_view(b, n_kv_head, 64, len, head_dim, 1.1);
                     let v = reserved_cache_view(b, n_kv_head, 64, len, head_dim, 2.3);
                     let viewed =
-                        matmul_attention(&q, &k, &v, None, head_dim, n_head, n_kv_head, None)
+                        matmul_attention(&q, &k, &v, None, head_dim, n_head, n_kv_head, None, None)
                             .unwrap();
                     let copied = matmul_attention(
                         &q,
@@ -6998,6 +7156,7 @@ mod blocked_attention_tests {
                         head_dim,
                         n_head,
                         n_kv_head,
+                        None,
                         None,
                     )
                     .unwrap();
@@ -7031,10 +7190,17 @@ mod blocked_attention_tests {
         let q = mk(h, 1, d, 0.0);
         let k = mk(h, k_len, d, 1.3);
         let v = mk(h, k_len, d, 2.9);
-        let got = standard_attention(&q, &k, &v, None, d, h, h, None, 0).unwrap();
-        let want =
-            attention_scores_block(&q, &k.t().unwrap(), &v.contiguous().unwrap(), None, d, None)
-                .unwrap();
+        let got = standard_attention(&q, &k, &v, None, d, h, h, None, 0, None).unwrap();
+        let want = attention_scores_block(
+            &q,
+            &k.t().unwrap(),
+            &v.contiguous().unwrap(),
+            None,
+            d,
+            None,
+            None,
+        )
+        .unwrap();
         let a = got.flatten_all().unwrap().to_vec1::<f32>().unwrap();
         let b = want.flatten_all().unwrap().to_vec1::<f32>().unwrap();
         let worst = a
@@ -7096,7 +7262,7 @@ mod blocked_attention_tests {
             .collect();
         let mask = Tensor::from_vec(m, (q_len, k_len), &dev).unwrap();
         let unblocked =
-            attention_scores_block(&q, &k.t().unwrap(), &v, Some(&mask), 16, None).unwrap();
+            attention_scores_block(&q, &k.t().unwrap(), &v, Some(&mask), 16, None, None).unwrap();
 
         let d = max_abs_diff(&blocked, &unblocked);
         assert_eq!(d, 0.0, "query blocking must be exact, max abs diff = {d}");
@@ -7136,7 +7302,8 @@ mod blocked_attention_tests {
             .collect();
         let mask = Tensor::from_vec(m, (q_len, k_len), &dev).unwrap();
         let unblocked =
-            attention_scores_block(&q, &k.t().unwrap(), &v, Some(&mask), 16, Some(50.0)).unwrap();
+            attention_scores_block(&q, &k.t().unwrap(), &v, Some(&mask), 16, Some(50.0), None)
+                .unwrap();
 
         assert_eq!(max_abs_diff(&blocked, &unblocked), 0.0);
     }
@@ -7196,7 +7363,8 @@ mod blocked_attention_tests {
             })
             .collect();
         let mask = Tensor::from_vec(m, (q_len, k_len), &dev).unwrap();
-        let want = attention_scores_block(&q, &ke.t().unwrap(), &ve, Some(&mask), d, None).unwrap();
+        let want =
+            attention_scores_block(&q, &ke.t().unwrap(), &ve, Some(&mask), d, None, None).unwrap();
         let diff = max_abs_diff(&got, &want);
         assert!(
             diff < 1e-5,
@@ -7296,7 +7464,7 @@ mod cuda_attention_memory_probe {
         let k = mk(n, 1.0);
         let v = mk(n, 2.0);
 
-        let out = standard_attention(&q, &k, &v, None, head_dim, heads, heads, None, 0)
+        let out = standard_attention(&q, &k, &v, None, head_dim, heads, heads, None, 0, None)
             .expect("attention must complete without exhausting device memory");
         assert_eq!(out.dims(), &[1, heads, n, head_dim]);
         // Force the result to be realised before we claim success.
@@ -8826,5 +8994,198 @@ mod tree_rope_rows_tests {
             tree_rope_rows(2, &cos, &sin).is_err(),
             "a forward of another length inside the tree is refused"
         );
+    }
+}
+
+#[cfg(test)]
+mod attention_sink_tests {
+    use super::*;
+
+    /// One row's attention with a sink, in f64: `softmax([scores, sink]) · [V; 0]`.
+    fn reference(q: &[f32], keys: &[&[f32]], values: &[&[f32]], scale: f64, sink: f64) -> Vec<f64> {
+        let scores: Vec<f64> = keys
+            .iter()
+            .map(|k| {
+                q.iter()
+                    .zip(*k)
+                    .map(|(a, b)| f64::from(*a) * f64::from(*b))
+                    .sum::<f64>()
+                    * scale
+            })
+            .collect();
+        let m = scores.iter().copied().fold(sink, f64::max);
+        let weights: Vec<f64> = scores.iter().map(|s| (s - m).exp()).collect();
+        let den = weights.iter().sum::<f64>() + (sink - m).exp();
+        let mut out = vec![0f64; values[0].len()];
+        for (w, v) in weights.iter().zip(values) {
+            for (o, x) in out.iter_mut().zip(*v) {
+                *o += w * f64::from(*x) / den;
+            }
+        }
+        out
+    }
+
+    fn values_of(t: &Tensor) -> Vec<f32> {
+        t.flatten_all().unwrap().to_vec1::<f32>().unwrap()
+    }
+
+    /// gpt-oss's attention sinks (#390 item 2, step 5) take their share of each
+    /// row's softmax on every path a layer's attention can take on the
+    /// processor — the decode kernel, the prompt kernel, the grouped and the
+    /// ungrouped matmul paths, and `standard_attention`'s dispatch to them —
+    /// each against llama.cpp's expression in f64. A sink of `-inf` is no sink,
+    /// bit for bit, in both kernels.
+    #[test]
+    fn sinks_take_their_share_on_every_processor_path() {
+        let dev = Device::Cpu;
+        let (n_head, n_kv, d, kv_len) = (4usize, 2usize, 16usize, 20usize);
+        let n_rep = n_head / n_kv;
+        let scale = crate::inference::attn_softmax::scale_from_head_dim(d);
+        // Large enough against the scaled scores to matter, both ways.
+        let sinks = vec![0.5f32, -1.0, 2.0, 0.0];
+        let sink_tensor = Tensor::from_vec(sinks.clone(), (n_head,), &dev).unwrap();
+        let held = AttentionSinks::new(sinks.clone(), &dev).unwrap();
+        let k = Tensor::randn(0f32, 1.0, (1, n_kv, kv_len, d), &dev).unwrap();
+        let v = Tensor::randn(0f32, 1.0, (1, n_kv, kv_len, d), &dev).unwrap();
+        let kv = (values_of(&k), values_of(&v));
+
+        for q_len in [1usize, 5] {
+            let q = Tensor::randn(0f32, 1.0, (1, n_head, q_len, d), &dev).unwrap();
+            let qv = values_of(&q);
+            // Causal over the cache's last `q_len` positions.
+            let offset = kv_len - q_len;
+            let mask_data: Vec<f32> = (0..q_len)
+                .flat_map(|i| {
+                    (0..kv_len).map(move |j| {
+                        if j > offset + i {
+                            f32::NEG_INFINITY
+                        } else {
+                            0.0
+                        }
+                    })
+                })
+                .collect();
+            let mask = Tensor::from_vec(mask_data, (q_len, kv_len), &dev).unwrap();
+            let mask = (q_len > 1).then_some(&mask);
+
+            let mut want = Vec::new();
+            for h in 0..n_head {
+                let g = h / n_rep;
+                for i in 0..q_len {
+                    let row = &qv[(h * q_len + i) * d..][..d];
+                    let seen = offset + i + 1;
+                    let keys: Vec<&[f32]> = (0..seen)
+                        .map(|j| &kv.0[(g * kv_len + j) * d..][..d])
+                        .collect();
+                    let vals: Vec<&[f32]> = (0..seen)
+                        .map(|j| &kv.1[(g * kv_len + j) * d..][..d])
+                        .collect();
+                    want.extend(reference(row, &keys, &vals, scale, f64::from(sinks[h])));
+                }
+            }
+            let check = |name: &str, got: &Tensor| {
+                let got = values_of(got);
+                let worst = got
+                    .iter()
+                    .zip(&want)
+                    .map(|(g, w)| (f64::from(*g) - w).abs())
+                    .fold(0f64, f64::max);
+                assert!(
+                    worst < 1e-5,
+                    "{q_len} positions, {name}: {worst} off llama.cpp's expression"
+                );
+            };
+
+            let kernel = if q_len == 1 {
+                crate::inference::decode_attn::gqa_decode_attention_cpu(
+                    &q,
+                    &k,
+                    &v,
+                    mask,
+                    scale as f32,
+                    None,
+                    0,
+                    Some(&sinks),
+                )
+            } else {
+                crate::inference::prefill_attn::gqa_prefill_attention_cpu(
+                    &q,
+                    &k,
+                    &v,
+                    mask,
+                    scale as f32,
+                    None,
+                    0,
+                    Some(&sinks),
+                )
+            }
+            .unwrap()
+            .expect("the processor kernel takes this call");
+            check("the processor kernel", &kernel);
+            check(
+                "standard_attention",
+                &standard_attention(&q, &k, &v, mask, d, n_head, n_kv, None, 0, Some(&held))
+                    .unwrap(),
+            );
+            check(
+                "the grouped matmul path",
+                &matmul_attention(&q, &k, &v, mask, d, n_head, n_kv, None, Some(&sink_tensor))
+                    .unwrap(),
+            );
+            // Every query head on its own key/value head: the ungrouped path.
+            let (ke, ve) = (
+                candle_transformers::utils::repeat_kv(k.clone(), n_rep).unwrap(),
+                candle_transformers::utils::repeat_kv(v.clone(), n_rep).unwrap(),
+            );
+            check(
+                "the ungrouped matmul path",
+                &matmul_attention(
+                    &q,
+                    &ke,
+                    &ve,
+                    mask,
+                    d,
+                    n_head,
+                    n_head,
+                    None,
+                    Some(&sink_tensor),
+                )
+                .unwrap(),
+            );
+
+            // A sink of -inf is no sink, bit for bit.
+            let none = vec![f32::NEG_INFINITY; n_head];
+            let run = |s: Option<&[f32]>| {
+                values_of(
+                    &if q_len == 1 {
+                        crate::inference::decode_attn::gqa_decode_attention_cpu(
+                            &q,
+                            &k,
+                            &v,
+                            mask,
+                            scale as f32,
+                            None,
+                            0,
+                            s,
+                        )
+                    } else {
+                        crate::inference::prefill_attn::gqa_prefill_attention_cpu(
+                            &q,
+                            &k,
+                            &v,
+                            mask,
+                            scale as f32,
+                            None,
+                            0,
+                            s,
+                        )
+                    }
+                    .unwrap()
+                    .unwrap(),
+                )
+            };
+            let bits = |v: Vec<f32>| v.into_iter().map(f32::to_bits).collect::<Vec<_>>();
+            assert_eq!(bits(run(Some(&none))), bits(run(None)), "{q_len} positions");
+        }
     }
 }

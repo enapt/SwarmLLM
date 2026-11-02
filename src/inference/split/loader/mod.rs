@@ -531,6 +531,20 @@ fn load_expert_biases<R: std::io::Read + std::io::Seek>(
     })))
 }
 
+/// A layer's attention sinks (`attn_sinks.weight`: gpt-oss, one per query
+/// head), where the file has them. A present tensor that fails to read is an
+/// error, never an absence.
+fn attention_sinks<R: std::io::Read + std::io::Seek>(
+    ct: &gguf_file::Content,
+    reader: &mut R,
+    prefix: &str,
+    device: &Device,
+) -> Result<Option<super::AttentionSinks>, SwarmError> {
+    read_f32s(ct, reader, &format!("{prefix}.attn_sinks.weight"))?
+        .map(|host| super::AttentionSinks::new(host, device).map_err(SwarmError::internal))
+        .transpose()
+}
+
 /// The attention output projection's bias (`attn_output.bias`: gpt-oss), where
 /// the file has one — llama.cpp reads `wo_b` wherever a file carries it. A
 /// present tensor that fails to read is an error, never an absence.
@@ -2284,6 +2298,7 @@ impl SplitModel {
                         attention_bk,
                         attention_bv,
                         attention_bo: attention_output_bias(&ct, &mut file, &prefix, &device)?,
+                        attn_sinks: attention_sinks(&ct, &mut file, &prefix, &device)?,
                         attention_norm: make_norm(attn_norm, rms_norm_eps)?,
                         attn_q_norm: None,
                         attn_k_norm: None,
@@ -2437,6 +2452,7 @@ impl SplitModel {
                     attention_bk,
                     attention_bv,
                     attention_bo: attention_output_bias(&ct, &mut file, &prefix, &device)?,
+                    attn_sinks: attention_sinks(&ct, &mut file, &prefix, &device)?,
                     attention_norm: make_norm(attn_norm, rms_norm_eps)?,
                     attn_q_norm: None,
                     attn_k_norm: None,
@@ -2987,6 +3003,12 @@ impl SplitModel {
                                             &prefix,
                                             device_ref,
                                         )?,
+                                        attn_sinks: attention_sinks(
+                                            ct_ref,
+                                            &mut cursor,
+                                            &prefix,
+                                            device_ref,
+                                        )?,
                                         attention_norm: make_norm(attn_norm, rms_norm_eps)?,
                                         attn_q_norm,
                                         attn_k_norm,
@@ -3148,6 +3170,7 @@ impl SplitModel {
                         attention_bk: bk,
                         attention_bv: bv,
                         attention_bo: attention_output_bias(&ct, file, &prefix, &device)?,
+                        attn_sinks: attention_sinks(&ct, file, &prefix, &device)?,
                         attention_norm: make_norm(attn_norm, rms_norm_eps)?,
                         attn_q_norm: attn_q_norm
                             .map(|t| make_norm(t, rms_norm_eps))

@@ -245,6 +245,16 @@ fn composed(
     scale: f64,
     softcap: Option<f32>,
 ) -> Result<Tensor> {
+    candle_nn::ops::softmax_last_dim(&scaled_masked(scores, mask, scale, softcap)?)
+}
+
+/// The scores scaled, capped and masked — what the softmax reads.
+fn scaled_masked(
+    scores: &Tensor,
+    mask: Option<&Tensor>,
+    scale: f64,
+    softcap: Option<f32>,
+) -> Result<Tensor> {
     let att = (scores * scale)?;
     let att = match softcap {
         Some(cap) => {
@@ -253,11 +263,35 @@ fn composed(
         }
         None => att,
     };
-    let att = match mask {
-        Some(m) => att.broadcast_add(m)?,
-        None => att,
-    };
-    candle_nn::ops::softmax_last_dim(&att)
+    match mask {
+        Some(m) => att.broadcast_add(m),
+        None => Ok(att),
+    }
+}
+
+/// [`composed`] with a sink column: the column joins each row as one more
+/// score, the softmax runs over both, and the column is cut off again.
+fn composed_with_sinks(
+    scores: &Tensor,
+    mask: Option<&Tensor>,
+    scale: f64,
+    softcap: Option<f32>,
+    column: &Tensor,
+) -> Result<Tensor> {
+    let att = scaled_masked(scores, mask, scale, softcap)?.contiguous()?;
+    let last = att.rank() - 1;
+    let keys = att.dim(last)?;
+    let mut shape = att.dims().to_vec();
+    shape[last] = 1;
+    // Both contiguous: candle cats a strided operand (a broadcast column is
+    // one) along a last dim by transposing to dim 0 and back, and the
+    // softmax refuses the strided result it hands back.
+    let column = column
+        .to_dtype(att.dtype())?
+        .broadcast_as(shape)?
+        .contiguous()?;
+    let both = Tensor::cat(&[&att, &column], last)?;
+    candle_nn::ops::softmax_last_dim(&both)?.narrow(last, 0, keys)
 }
 
 /// Scale, optionally soft-cap, add `mask`, and softmax over the last dimension.
@@ -265,12 +299,21 @@ fn composed(
 /// `scale` multiplies the scores — pass [`scale_from_head_dim`], not the head
 /// dimension. `mask` is ADDITIVE: `0.0` where a query may attend, `-inf` where
 /// it may not.
+///
+/// `sinks`, where the layer has them (gpt-oss): one more score per row, in the
+/// scaled scores' units, broadcast over the rows from a `[.., heads, rows or
+/// 1, 1]` column — it takes a share of the softmax's weight and is dropped
+/// after (llama.cpp's `soft_max` with sinks). Always composed.
 pub(crate) fn scaled_masked_softmax(
     scores: &Tensor,
     mask: Option<&Tensor>,
     scale: f64,
     softcap: Option<f32>,
+    sinks: Option<&Tensor>,
 ) -> Result<Tensor> {
+    if let Some(column) = sinks {
+        return composed_with_sinks(scores, mask, scale, softcap, column);
+    }
     match mask {
         Some(m) if fuse_applies(scores, m) => scores.apply_op2_no_bwd(
             m,
@@ -347,7 +390,7 @@ mod tests {
                 fuse_applies(&scores, &mask),
                 "h={h} q={q_len} kv={kv_len} must reach the fused kernel"
             );
-            let fused = scaled_masked_softmax(&scores, Some(&mask), scale, softcap).unwrap();
+            let fused = scaled_masked_softmax(&scores, Some(&mask), scale, softcap, None).unwrap();
             let reference = composed(&scores, Some(&mask), scale, softcap).unwrap();
 
             assert_eq!(fused.dims(), reference.dims());
@@ -368,7 +411,7 @@ mod tests {
         let (q_len, kv_len) = (6usize, 10usize);
         let scores = Tensor::randn(0f32, 8., (1, 2, q_len, kv_len), &dev).unwrap();
         let mask = causal(q_len, kv_len, &dev);
-        let out = scaled_masked_softmax(&scores, Some(&mask), scale_from_head_dim(64), None)
+        let out = scaled_masked_softmax(&scores, Some(&mask), scale_from_head_dim(64), None, None)
             .unwrap()
             .i(0)
             .unwrap()
@@ -444,7 +487,7 @@ mod tests {
         let dev = Device::Cpu;
         let scores = Tensor::randn(0f32, 3., (1, 2, 1, 33), &dev).unwrap();
         let scale = scale_from_head_dim(128);
-        let ours = scaled_masked_softmax(&scores, None, scale, None).unwrap();
+        let ours = scaled_masked_softmax(&scores, None, scale, None, None).unwrap();
         let reference = candle_nn::ops::softmax_last_dim(&(&scores * scale).unwrap()).unwrap();
         assert_eq!(
             ours.flatten_all().unwrap().to_vec1::<f32>().unwrap(),

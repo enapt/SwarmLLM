@@ -2862,6 +2862,17 @@ match llama.cpp** (#715, `arch-inference.md`).
    adds it there. Checked against a hand-written sum of llama.cpp's graph
    (`a_biased_expert_layer_is_llama_cpps_sum`) and bit for bit across the two processor paths. Next:
    step 5 (sinks), then the end-to-end check against llama.cpp's `dump_logits` on a tiny file.
+   **Step 5 in since 2026-11-02**: `attn_sinks` (`LayerWeights::attn_sinks`, `AttentionSinks`) reach
+   every attention path through `standard_attention` — the processor's decode and prompt kernels
+   fold each head's sink into the row's running max and sum (`attn_rows::fold_sink`, no value), the
+   matmul path softmaxes a sink column beside the scores and drops it (`attn_softmax`'s
+   `composed_with_sinks`, grouped and ungrouped). No card kernel and no flash kernel reads a sink, so
+   a sink layer takes the matmul path on a card (`LayerVariant::flash_may_attend`, the tree and decode
+   kernels skipped, `tree_steps_may_be_captured` false) and its half-precision cache is widened on
+   every call — slow; step 7 adds the sink to `decode_attn_combine_f32` and an lse-returning flash.
+   Under tensor parallelism each rank keeps its own heads' sinks. Checked against a float64
+   reference on every processor path (`sinks_take_their_share_on_every_processor_path`); a `-inf`
+   sink leaves the kernels' bits unchanged. Next: the end-to-end check on a tiny file.
 3. **`glm4moe` — GLM-4.5-Air 106B-A12B** (UD-Q4_K_XL 67.7 GB: three or four cards; ~46K).
    **Loader in since 2026-11-02, refused until a real file is checked**: the selection bias is a
    REQUIRED argument of both routers (`MoeFfn::selection_bias`), `expert_weights_scale` folds into
