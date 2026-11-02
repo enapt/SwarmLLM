@@ -169,6 +169,9 @@ pub struct AutoShardManager {
     /// the first run, which is the same log-flooding shape fixed for rr
     /// failures in v0.3.73.
     pub(super) last_over_budget_warning: std::sync::Mutex<Option<std::time::Instant>>,
+    /// When prune last said why it gave nothing back while a part asked for
+    /// room (`prune::KeptBy`).
+    pub(super) last_kept_report: std::sync::Mutex<Option<std::time::Instant>>,
     /// Each model's processor cost curve, kept a few minutes (`coverage`, #231):
     /// it parses the model's header, and prune asks about every part it holds.
     pub(super) carry_curves: dashmap::DashMap<ModelId, (std::time::Instant, Option<(u64, u64)>)>,
@@ -312,6 +315,7 @@ impl AutoShardManager {
             notify,
             download_semaphore,
             last_over_budget_warning: std::sync::Mutex::new(None),
+            last_kept_report: std::sync::Mutex::new(None),
             carry_curves: dashmap::DashMap::new(),
             carrier_leases: dashmap::DashMap::new(),
             carriers_passed_over: dashmap::DashMap::new(),

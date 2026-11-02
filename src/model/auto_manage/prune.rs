@@ -171,6 +171,68 @@ fn effective_idle_secs(
 /// prune than one that's used elsewhere in the region.
 const RECENT_REQUEST_PENALTY: f64 = 1.5;
 
+/// The replica-count and region rules' names in
+/// [`AutoShardManager::copy_kept_because`] — the two that a part asking for
+/// room may override ([`AutoShardManager::spare_for_room`]), so [`KeptBy`]
+/// asks those copies why they were not given back for it.
+const KEPT_FOR_ITS_COUNT: &str = "not more copies than the target";
+const KEPT_FOR_ITS_REGION: &str = "the last close holder in this region";
+
+/// How often prune says why it gave nothing back while a part asks for room.
+/// The download pass renews its note every cycle, so this is a rate limit.
+const KEPT_REPORT_EVERY: Duration = Duration::from_secs(600);
+
+/// What one prune pass kept of the parts this node holds, counted by the rule
+/// that kept each. A full node that frees nothing says which rule held every
+/// copy: on 2026-11-02 the Proxmox box noted room each minute for a part one
+/// computer held, beside seven copies with four to six holders, gave none
+/// back, and its only word was an hourly warning that blamed the replica
+/// count — which nothing had checked.
+#[derive(Debug, Default)]
+pub(super) struct KeptBy(std::collections::BTreeMap<String, usize>);
+
+impl KeptBy {
+    fn note(&mut self, why: impl Into<String>) {
+        *self.0.entry(why.into()).or_default() += 1;
+    }
+
+    fn note_parts(&mut self, why: &str, parts: usize) {
+        if parts > 0 {
+            *self.0.entry(why.to_string()).or_default() += parts;
+        }
+    }
+
+    /// `rule (parts); rule (parts)`, the rule that kept the most first.
+    pub(super) fn summary(&self) -> String {
+        let mut rules: Vec<(&String, &usize)> = self.0.iter().collect();
+        rules.sort_by(|a, b| b.1.cmp(a.1).then_with(|| a.0.cmp(b.0)));
+        if rules.is_empty() {
+            return "no part held here".to_string();
+        }
+        rules
+            .iter()
+            .map(|(why, parts)| format!("{why} ({parts})"))
+            .collect::<Vec<_>>()
+            .join("; ")
+    }
+}
+
+/// True once every `every`, recording now when it is: the one rate limit for
+/// prune's repeating reports. A poisoned lock stays quiet rather than spam.
+fn due_every(last: &std::sync::Mutex<Option<std::time::Instant>>, every: Duration) -> bool {
+    match last.lock() {
+        Ok(mut last) => {
+            let now = std::time::Instant::now();
+            let due = last.is_none_or(|t| now.duration_since(t) >= every);
+            if due {
+                *last = Some(now);
+            }
+            due
+        }
+        Err(_) => false,
+    }
+}
+
 /// Severe-saturation factor. Holder counts at or above this multiple of
 /// the target get a flat +1 score bonus so they always outrank just-
 /// barely-saturated shards in selection.
@@ -328,6 +390,24 @@ impl AutoShardManager {
         // snapshot — pin state can't flip mid-cycle.
         let shard_pins_cached = super::manager::read_shard_pins_blocking(&self.shared_state).await;
 
+        // Why each part held here was kept, for the reports after the pass.
+        let mut kept = KeptBy::default();
+        let room_asked = self.room_wanted_now().is_some();
+        let parts_held_here = |manifest: &crate::types::ModelManifest| {
+            manifest
+                .shards
+                .iter()
+                .filter(|s| {
+                    registry
+                        .shard_holders(&ShardId {
+                            model_id: manifest.id.clone(),
+                            index: s.index,
+                        })
+                        .contains(&local_node_id)
+                })
+                .count()
+        };
+
         // R110: snapshot the set of shards currently in flight on at least
         // one active pipeline. Pruning a shard mid-inference would cause
         // the next forward to fail (a `ShardNotFound` mid-token-loop). We
@@ -368,6 +448,10 @@ impl AutoShardManager {
                 .get(&manifest.id)
             {
                 if !policy.prune_enabled {
+                    kept.note_parts(
+                        "the model's policy turns prune off",
+                        parts_held_here(&manifest),
+                    );
                     continue;
                 }
             }
@@ -379,6 +463,10 @@ impl AutoShardManager {
                     .num_seconds()
                     .max(0) as u64;
                 if elapsed < config.prune_cooldown_secs {
+                    kept.note_parts(
+                        "its model gave a part back moments ago",
+                        parts_held_here(&manifest),
+                    );
                     continue;
                 }
             }
@@ -413,6 +501,7 @@ impl AutoShardManager {
                     .models
                     .is_shard_in_progress(&manifest.id, shard.index);
                 if is_downloading {
+                    kept.note("it is still downloading");
                     continue;
                 }
 
@@ -425,6 +514,7 @@ impl AutoShardManager {
                 // router's pipeline TTL sweeper evicts orphans within
                 // its own window.
                 if active_pipeline_shards.contains(&shard_id) {
+                    kept.note("an answer is reading it");
                     continue;
                 }
 
@@ -434,7 +524,23 @@ impl AutoShardManager {
                 // in our region — the one answer the download pass asks too, so
                 // a part it fetches is never one this sheds (gotcha #795). The
                 // pins are the cached snapshot from above — see SEC note there.
-                if !self.would_shed_copy(&shard_id, &holders, disk_pressure, &shard_pins_cached) {
+                if let Some(rule) = self.copy_kept_because(
+                    &shard_id,
+                    &holders,
+                    disk_pressure,
+                    &shard_pins_cached,
+                    true,
+                ) {
+                    // A copy only the count or the region kept was asked for
+                    // the room too: say which of that rule's conditions held it.
+                    let refused = (room_asked
+                        && (rule == KEPT_FOR_ITS_COUNT || rule == KEPT_FOR_ITS_REGION))
+                        .then(|| self.not_spare_for_room(&shard_id, &holders))
+                        .flatten();
+                    match refused {
+                        Some(why) => kept.note(format!("{rule}, not given back for room: {why}")),
+                        None => kept.note(rule),
+                    }
                     continue;
                 }
 
@@ -449,6 +555,7 @@ impl AutoShardManager {
                 // written (`SharedState::model_is_in_use`, the answer to "may I
                 // delete this model's files?").
                 if nobody_runs && self.shared_state.model_is_in_use(&manifest.id) {
+                    kept.note("its model is answering");
                     continue;
                 }
 
@@ -473,11 +580,13 @@ impl AutoShardManager {
                         config.max_holder_load_for_prune,
                     )
                 {
+                    kept.note("the other holders are busy");
                     continue;
                 }
 
                 // Skip if model actively loaded and used recently (unless pressure-urgent)
                 if !pressure_urgent && self.shard_recently_used(&manifest.id) {
+                    kept.note("its model was used recently");
                     continue;
                 }
 
@@ -485,6 +594,7 @@ impl AutoShardManager {
                 if !nobody_runs
                     && !self.can_reacquire(&manifest.id, &shard_id, &holders, &local_node_id)
                 {
+                    kept.note("no way to fetch it back");
                     continue;
                 }
 
@@ -584,6 +694,7 @@ impl AutoShardManager {
                 // landed 28 s earlier deleted it (field report 2026-10-16). A
                 // copy of a model nobody runs is still given back at once.
                 if recently_acquired && !nobody_runs && disk_pressure < PRESSURE_NORMAL {
+                    kept.note("it arrived in the last half hour");
                     continue;
                 }
                 if recently_acquired {
@@ -743,10 +854,9 @@ impl AutoShardManager {
         // Say something when the node is over its disk budget and cannot do
         // anything about it.
         //
-        // Refusing to prune here is correct — every candidate was rejected
-        // because removing it would drop a shard below the swarm's replica
-        // target, and a local disk preference is not worth under-replicating
-        // the network. But nothing said so, so a user who lowered
+        // Refusing to prune here is correct — every copy was kept by a rule
+        // (`kept` names which), and a local disk preference is not worth
+        // under-replicating the network. But nothing said so, so a user who lowered
         // `max_disk_mb` after downloading saw their setting exceeded
         // indefinitely with no explanation, which reads exactly like a setting
         // that does not work (see gotcha #236 for how that feels from outside).
@@ -758,20 +868,7 @@ impl AutoShardManager {
         const OVER_BUDGET_WARNING_EVERY: std::time::Duration = std::time::Duration::from_secs(3600);
         let should_warn_over_budget = pressure_urgent
             && prune_candidates.is_empty()
-            && match self.last_over_budget_warning.lock() {
-                Ok(mut last) => {
-                    let now = std::time::Instant::now();
-                    let due = last
-                        .map(|t| now.duration_since(t) >= OVER_BUDGET_WARNING_EVERY)
-                        .unwrap_or(true);
-                    if due {
-                        *last = Some(now);
-                    }
-                    due
-                }
-                // Contention here is not a reason to spam; stay quiet.
-                Err(_) => false,
-            };
+            && due_every(&self.last_over_budget_warning, OVER_BUDGET_WARNING_EVERY);
         if should_warn_over_budget {
             // The figures, so a pasted log says how far over and against which
             // limit. Failed-download files are not the cause by the time this
@@ -784,9 +881,10 @@ impl AutoShardManager {
                 held_mb = held_bytes / (1024 * 1024),
                 budget_mb = budget.bytes / (1024 * 1024),
                 limited_by = %budget.limited_by,
-                "Storage is over the budget, but nothing can be removed without dropping a \
-                 model below the number of copies the network needs. This node will not free \
-                 the space by itself: {remedy}."
+                kept = %kept.summary(),
+                "Storage is over the budget, and every part here is kept by a rule (`kept` \
+                 names each, with how many parts it kept). This node will not free the space \
+                 by itself: {remedy}."
             );
             self.shared_state.emit_activity(
                 crate::daemon::state::ActivityEvent::new("model", kind, toast.to_string())
@@ -1100,6 +1198,24 @@ impl AutoShardManager {
             *pruned_per_model
                 .entry(candidate.model_id.clone())
                 .or_insert(0) += 1;
+        }
+
+        // A part asked for room and nothing here was given back: say which rule
+        // kept each copy, every few minutes, so the box that frees nothing
+        // says why without a debug log.
+        if let Some(room) = room_wanted.as_ref() {
+            if room_made == 0 && due_every(&self.last_kept_report, KEPT_REPORT_EVERY) {
+                tracing::info!(
+                    for_model = %room.model,
+                    why = room.why.describe(),
+                    room_mb = room.bytes / (1024 * 1024),
+                    floor = room.floor,
+                    candidates = prune_candidates.len(),
+                    disk_pressure = %format_args!("{disk_pressure:.2}"),
+                    kept = %kept.summary(),
+                    "DIAG: a part asks for room and prune gave none back"
+                );
+            }
         }
 
         // Whatever this cycle emptied — and whatever a cancelled download left
@@ -1457,25 +1573,54 @@ impl AutoShardManager {
     /// a copy given back is not fetched straight back while the room is noted
     /// (gotcha #795).
     pub(super) fn spare_for_room(&self, shard_id: &ShardId, holders: &[NodeId]) -> bool {
+        self.not_spare_for_room(shard_id, holders).is_none()
+    }
+
+    /// Why [`Self::spare_for_room`] refuses this copy — the first condition it
+    /// fails, in the order it asks them — or `None` when it is spare. Prune's
+    /// account of what it kept ([`KeptBy`]) reads it, so a full node that frees
+    /// nothing says which condition held every copy (2026-11-02: the Proxmox
+    /// box noted room for a part one computer held, ran prune every minute
+    /// beside seven copies with four to six holders, and gave none back with
+    /// nothing in its log saying why).
+    pub(super) fn not_spare_for_room(
+        &self,
+        shard_id: &ShardId,
+        holders: &[NodeId],
+    ) -> Option<&'static str> {
         let Some(room) = self.room_wanted_now() else {
-            return false;
+            return Some("no part asks for room");
         };
-        holders.len() > room.floor
-            && shard_id.model_id != room.model
-            // The first `floor` holders every computer ranks alike keep theirs,
-            // so holders deciding at once never all give theirs back.
-            && !super::coverage::kept_by_rank(
-                shard_id,
-                holders,
-                self.shared_state.identity.node_id(),
-                room.floor,
-            )
-            && !self.model_has_holes(&shard_id.model_id)
-            && !self
-                .shared_state
-                .model_process_pool
-                .is_loaded(&shard_id.model_id)
-            && !self.completes_model_here_counting(shard_id)
+        if holders.len() <= room.floor {
+            return Some("too few other holders to give one back");
+        }
+        if shard_id.model_id == room.model {
+            return Some("a copy of the model asking for room");
+        }
+        // The first `floor` holders every computer ranks alike keep theirs,
+        // so holders deciding at once never all give theirs back.
+        if super::coverage::kept_by_rank(
+            shard_id,
+            holders,
+            self.shared_state.identity.node_id(),
+            room.floor,
+        ) {
+            return Some("this computer is among the holders that keep theirs");
+        }
+        if self.model_has_holes(&shard_id.model_id) {
+            return Some("its model is still being assembled");
+        }
+        if self
+            .shared_state
+            .model_process_pool
+            .is_loaded(&shard_id.model_id)
+        {
+            return Some("its model is loaded");
+        }
+        if self.completes_model_here_counting(shard_id) {
+            return Some("this computer holds that model whole");
+        }
+        None
     }
 
     /// [`Self::would_shed_copy`] with its reason: `None` sheds the copy,
@@ -1619,7 +1764,7 @@ impl AutoShardManager {
             live.node.contribution_auto,
             live.auto_manage.min_replicas,
         ) {
-            Some("not more copies than the target")
+            Some(KEPT_FOR_ITS_COUNT)
         } else {
             // A part of a model this node holds WHOLE, or all but a few parts of
             // (the download pass completes those) — counting this part, so the
@@ -1636,7 +1781,7 @@ impl AutoShardManager {
             }
             // Region-aware: never the last holder in our region.
             self.would_eliminate_region(shard_id, local_node_id, holders)
-                .then_some("the last close holder in this region")
+                .then_some(KEPT_FOR_ITS_REGION)
         };
         // Kept only for how many copies there are, or where they are: a part
         // the swarm is short of that lacks room here may take it.
@@ -2808,5 +2953,46 @@ mod recent_use_protection_tests {
             (0..RECENT_REQUEST_PROTECT_SECS).contains(&idle),
             "and 215s is inside the protection window"
         );
+    }
+}
+
+#[cfg(test)]
+mod kept_by_tests {
+    use super::{due_every, KeptBy};
+    use std::time::Duration;
+
+    /// 2026-11-02: the Proxmox box gave nothing back for a part one computer
+    /// held, and its warning named a rule no code had checked. The report
+    /// names every rule that kept a part, the one that kept the most first,
+    /// with how many parts each kept.
+    #[test]
+    fn the_report_names_each_rule_and_its_parts_the_largest_first() {
+        let mut kept = KeptBy::default();
+        kept.note("the user pinned the model");
+        for _ in 0..3 {
+            kept.note("not more copies than the target");
+        }
+        kept.note_parts("its model gave a part back moments ago", 2);
+        kept.note_parts("the model's policy turns prune off", 0);
+        assert_eq!(
+            kept.summary(),
+            "not more copies than the target (3); its model gave a part back moments ago (2); \
+             the user pinned the model (1)"
+        );
+    }
+
+    #[test]
+    fn a_node_holding_nothing_says_so() {
+        assert_eq!(KeptBy::default().summary(), "no part held here");
+    }
+
+    /// The report repeats only once per interval: the room note is renewed
+    /// every cycle, and a full node would otherwise log it every minute.
+    #[test]
+    fn a_report_repeats_once_per_interval() {
+        let last = std::sync::Mutex::new(None);
+        assert!(due_every(&last, Duration::from_secs(600)));
+        assert!(!due_every(&last, Duration::from_secs(600)));
+        assert!(due_every(&last, Duration::ZERO));
     }
 }

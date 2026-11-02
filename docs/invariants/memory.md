@@ -1354,6 +1354,20 @@ swarm makes a second copy sturdier, it does not make anybody wait. Test:
 `holes_first::a_part_of_a_model_people_run_held_by_one_computer_asks_for_room` (controls: no
 reading, a reading naming another model, two holders).
 
+**Prune says which rule kept each copy (2026-11-02).** After v0.3.270 the Proxmox box (43.9 of
+44 GB) noted room every minute for Ornith 1.5 35B's part 9 (one holder, `Scarce`, floor 3), held
+seven copies with four to six live holders (Llama 3.2 1B parts 0 and 2, xLAM 3B parts 0 and 3,
+Qwen2.5 14B parts 0 and 15, xLAM 8B part 1), and gave none back. Its only word was the hourly
+over-budget warning, which said nothing could go "without dropping a model below the number of
+copies the network needs" — a claim no code checked: fourteen rules keep a copy, and `spare_for_room`
+alone refuses for six reasons. Which one held these could not be read from outside (`kept_by_rank`
+needs the full 32-byte node ids, which the API does not give). Now the pass counts, per rule, the
+parts it kept (`prune::KeptBy`: every `continue` in the loop notes why, and a copy the count or
+region rule kept while room is asked also names `not_spare_for_room`'s refusal); the warning
+carries it as `kept`, and `DIAG: a part asks for room and prune gave none back` (every 10 min
+while a room note stands and the pass freed nothing) prints it beside the room asked. Tests:
+`kept_by_tests` (the summary's order and counts, the rate limit).
+
 ## `model::auto_manage::prune::effective_idle_secs` — residency is a hard UPPER BOUND on "idle since", and the worker's own `last_used` is the signal that moves
 
 (2026-09-02, gotcha #437). The idle unload used to trust
