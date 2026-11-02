@@ -14,7 +14,10 @@
 //! defaults; `reasoning_effort` (the Responses API's `reasoning.effort`) sets
 //! `enable_thinking` — `"none"` false, any other effort true, unset nothing —
 //! and an explicit `enable_thinking` in `chat_template_kwargs` wins. llama.cpp's
-//! server has `--chat-template-kwargs` and `--reasoning on|off|auto`.
+//! server has `--chat-template-kwargs` and `--reasoning on|off|auto`, and hands
+//! the effort itself to the template as [`REASONING_EFFORT`] — `"none"` leaves
+//! it out (`tools/server/server-common.cpp`, master, read 2026-11-02): the
+//! variable gpt-oss's template reads (#390).
 //!
 //! vLLM's two advisories on the field (GHSA-69j4-grxj-j64p, CVE-2025-61620)
 //! were kwargs reaching the RENDER CALL's own parameters — `tokenize`,
@@ -28,6 +31,10 @@ use crate::types::TemplateVars;
 
 /// The variable the families people run read to switch their reasoning.
 pub const ENABLE_THINKING: &str = "enable_thinking";
+
+/// The variable gpt-oss's template reads for how hard to think ("Reasoning:
+/// low / medium / high" in its system turn; medium when unset).
+pub const REASONING_EFFORT: &str = "reasoning_effort";
 
 /// The renderer's own variables and the functions it gives every template: a
 /// caller's variable of the same name is left out, so no request replaces the
@@ -68,6 +75,10 @@ pub fn from_openai(
         Some(Value::String(effort)) => {
             vars.entry(ENABLE_THINKING)
                 .or_insert(Value::Bool(effort != "none"));
+            if effort != "none" {
+                vars.entry(REASONING_EFFORT)
+                    .or_insert(Value::String(effort.clone()));
+            }
         }
         Some(_) => {
             return Err(SwarmError::Validation(
@@ -131,6 +142,11 @@ mod tests {
         assert_eq!(thinking(&none), Some(&json!(false)));
         let low = from_openai(None, Some(&json!("low"))).unwrap();
         assert_eq!(thinking(&low), Some(&json!(true)));
+        // The effort itself, as llama.cpp's server passes it — and never "none".
+        let effort =
+            |v: &Option<TemplateVars>| v.as_ref().and_then(|v| v.0.get(REASONING_EFFORT).cloned());
+        assert_eq!(effort(&low), Some(json!("low")));
+        assert_eq!(effort(&none), None);
         assert_eq!(from_openai(None, None).unwrap(), None);
         assert_eq!(from_openai(Some(&json!({})), None).unwrap(), None);
 
@@ -140,6 +156,15 @@ mod tests {
         )
         .unwrap();
         assert_eq!(thinking(&explicit), Some(&json!(true)));
+        let named = from_openai(
+            Some(&json!({"reasoning_effort": "low"})),
+            Some(&json!("high")),
+        );
+        assert_eq!(
+            effort(&named.unwrap()),
+            Some(json!("low")),
+            "the caller's own kwarg wins"
+        );
         assert_eq!(explicit.unwrap().0.get("custom"), Some(&json!(3)));
     }
 

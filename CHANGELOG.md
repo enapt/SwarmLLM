@@ -122,7 +122,10 @@ bit for bit, and the family is known by name with its window and norms read as l
 Its biases — on the attention's output, on the choice of experts and on every expert — are read and
 added where llama.cpp adds them, and so is its attention's "sink", a per-head share of attention
 that goes to no word at all. On test files shaped like gpt-oss-20b, this engine's answers now equal
-an exact calculation of llama.cpp's at every position. gpt-oss still stays off for everyone until
+an exact calculation of llama.cpp's at every position, and its own chat template renders exactly
+as the reference renders it. A request's reasoning effort (`reasoning_effort`: low, medium or high)
+now reaches a model's template as that setting too, as llama.cpp passes it; gpt-oss is told it in
+its instructions. gpt-oss still stays off for everyone until
 a real file's replies are checked and its reply format, which keeps the model's reasoning apart
 from its answer, is read. (#390)
 

@@ -2881,8 +2881,12 @@ match llama.cpp** (#715, `arch-inference.md`).
    the exact answer (median 0.994 ours, 0.993 llama.cpp). So gpt-oss moved from the hard refusal to
    the unchecked-family switch (`SWARMLLM_UNCHECKED_FAMILIES=gpt-oss`). **Left**: step 6 — the
    harmony reply channels (`analysis` / `final`, llama.cpp `common/parsers/gpt-oss.cpp`), the
-   template under minijinja (`strftime_now`, the developer role, `reasoning_effort`), the gpt-4o
-   tokenizer's `clean_spaces`; then the real file's reply against llama.cpp (11.5 GB), then step 7.
+   gpt-4o tokenizer's `clean_spaces`; then the real file's reply against llama.cpp (11.5 GB), then
+   step 7. **The template is done** (2026-11-02): the shipped one renders as jinja2 does byte for
+   byte — system turn with the date, the caller's system turn as the developer's instructions, the
+   tools as a TypeScript namespace, a call and its answer on the commentary channel
+   (`gpt_oss_renders_as_jinja2_renders_it`) — and `reasoning_effort` now reaches a template as that
+   variable (`chat_template::vars::REASONING_EFFORT`, llama.cpp's server's rule).
 3. **`glm4moe` — GLM-4.5-Air 106B-A12B** (UD-Q4_K_XL 67.7 GB: three or four cards; ~46K).
    **Loader in since 2026-11-02, refused until a real file is checked**: the selection bias is a
    REQUIRED argument of both routers (`MoeFfn::selection_bias`), `expert_weights_scale` folds into

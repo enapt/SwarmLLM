@@ -3081,3 +3081,91 @@ fn a_callers_variable_never_replaces_the_renderers_own() {
         Some(expected.as_str())
     );
 }
+
+/// gpt-oss's own template (ggml-org's `gpt-oss-20b-MXFP4.gguf`, 2026-11-02;
+/// #390 item 2) against jinja2's render of the same conversations, byte for
+/// byte (`transformers`' sandbox, `trim_blocks` + `lstrip_blocks`, its
+/// `tojson`): its own system turn with today's date, a caller's system turn
+/// as the developer's instructions, the tools as a TypeScript namespace, a
+/// call and its answer on the commentary channel, an earlier reply on the
+/// final channel. And a caller's `reasoning_effort` reaches the template as
+/// that variable, as llama.cpp's server and vLLM pass it: gpt-oss is told
+/// how hard to think in its system turn ("Reasoning: high").
+#[test]
+fn gpt_oss_renders_as_jinja2_renders_it() {
+    let template = include_str!("fixtures/gptoss_gguf_shipped.jinja");
+    let today = super::strftime_now("%Y-%m-%d".into()).unwrap();
+    let render = |messages: &[ChatMessage],
+                  tools: Option<&[serde_json::Value]>,
+                  vars: Option<&TemplateVars>| {
+        super::build_prompt_with_model(
+            messages,
+            Some(template),
+            "<|startoftext|>",
+            "<|return|>",
+            None,
+            tools,
+            vars,
+        )
+    };
+    let head = |effort: &str| {
+        format!(
+            "<|start|>system<|message|>You are ChatGPT, a large language model trained by \
+             OpenAI.\nKnowledge cutoff: 2024-06\nCurrent date: {today}\n\nReasoning: \
+             {effort}\n\n# Valid channels: analysis, commentary, final. Channel must be \
+             included for every message."
+        )
+    };
+    let tail = "<|start|>user<|message|>Hi<|end|><|start|>assistant";
+
+    assert_eq!(
+        render(&bare_user(), None, None),
+        format!("{}<|end|>{tail}", head("medium"))
+    );
+
+    let mut with_system = bare_user();
+    with_system.insert(
+        0,
+        ChatMessage {
+            role: Role::System,
+            content: "You are helpful.".into(),
+            images: vec![],
+            tool: Default::default(),
+        },
+    );
+    assert_eq!(
+        render(&with_system, None, None),
+        format!(
+            "{}<|end|><|start|>developer<|message|># Instructions\n\nYou are helpful.\n\n\
+             <|end|>{tail}",
+            head("medium")
+        )
+    );
+
+    let (messages, tools) = weather_tool_conversation();
+    assert_eq!(
+        render(&messages, Some(&tools), None),
+        format!(
+            "{}\nCalls to these tools must go to the commentary channel: 'functions'.<|end|>\
+             <|start|>developer<|message|># Tools\n\n## functions\n\nnamespace functions {{\n\n\
+             // Get the current weather for a city.\ntype get_weather = (_: {{\ncity: string,\n\
+             unit?: string,\n}}) => any;\n\n}} // namespace functions<|end|><|start|>user\
+             <|message|>What's the weather in Paris, in celsius?<|end|><|start|>assistant \
+             to=functions.get_weather<|channel|>commentary json<|message|>{{\"city\": \"Paris\", \
+             \"unit\": \"celsius\"}}<|call|><|start|>functions.get_weather to=assistant\
+             <|channel|>commentary<|message|>\"{{\\\"temperature\\\": 14, \\\"conditions\\\": \
+             \\\"light rain\\\"}}\"<|end|><|start|>assistant<|channel|>final<|message|>It is \
+             14 °C with light rain.<|end|><|start|>user<|message|>And in Rome?<|end|>\
+             <|start|>assistant",
+            head("medium")
+        )
+    );
+
+    let effort = super::vars::from_openai(None, Some(&serde_json::json!("high")))
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        render(&bare_user(), None, Some(&effort)),
+        format!("{}<|end|>{tail}", head("high"))
+    );
+}

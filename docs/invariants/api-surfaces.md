@@ -2416,6 +2416,12 @@ reasoning tokens (minutes on a split).
   → `enable_thinking = false`, any other effort → true, unset → nothing
   injected; an explicit `enable_thinking` in the kwargs wins. Taken as is.
   llama.cpp's server has `--chat-template-kwargs` and `--reasoning on|off|auto`.
+- **llama.cpp's server also hands the effort itself to the template** as
+  `reasoning_effort` (`tools/server/server-common.cpp`, master, read
+  2026-11-02; `"none"` leaves it out): gpt-oss's template reads it for its
+  system turn's "Reasoning: low / medium / high" and ignores `enable_thinking`.
+  Added the same day (`vars::REASONING_EFFORT`; a caller's own kwarg of that
+  name wins); pinned by `gpt_oss_renders_as_jinja2_renders_it` — red without it.
 - **vLLM's advisories** (GHSA-69j4-grxj-j64p, CVE-2025-61620) were kwargs reaching
   the render CALL's own parameters (`chat_template`, `tokenize`) — a request
   supplying the template, a program. Here a kwarg is only ever a template
