@@ -224,11 +224,12 @@ impl ModelArch {
     /// (`examples/make_tiny_glm4moe_gguf.py`); the smallest real file is
     /// ~45 GB.
     ///
-    /// **gpt-oss waits the same way** (#390 item 2): its loader matched
-    /// llama.cpp on test files with gpt-oss-20b's ratios
-    /// (`examples/make_tiny_gptoss_gguf.py`: MXFP4 experts, sinks, windows,
-    /// YaRN, biases); its reply channels and chat template are not read yet,
-    /// which a real file's check would show.
+    /// **gpt-oss passed its real-file check** (#390 item 2, 2026-11-02): on
+    /// `gpt-oss-20b-MXFP4.gguf` its greedy replies are llama.cpp master's —
+    /// one word for word, one for 102 tokens to a tie — and an exact float64
+    /// forward over the file's own numbers (`examples/gptoss_exact_reference.py`)
+    /// puts this engine as near as llama.cpp, nearer at the one position the
+    /// two disagree on. Its reply channels are read (`inference::harmony`).
     pub fn is_supported(&self) -> bool {
         !matches!(
             self,
@@ -239,10 +240,7 @@ impl ModelArch {
     /// A family whose loader matched llama.cpp on test files only — see
     /// [`Self::is_supported`].
     fn awaits_a_real_check(&self) -> bool {
-        matches!(
-            self,
-            ModelArch::Qwen3Next | ModelArch::Glm4Moe | ModelArch::GptOss
-        )
+        matches!(self, ModelArch::Qwen3Next | ModelArch::Glm4Moe)
     }
 
     /// Every architecture this build knows by name, `Unknown` aside — what
@@ -319,6 +317,7 @@ impl ModelArch {
             "llama4",
             "qwen35",
             "qwen35moe",
+            "gpt-oss",
         ]
     }
 

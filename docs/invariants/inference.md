@@ -6299,6 +6299,42 @@ llama.cpp sets `clean_spaces = false` for `gpt-4o` (`llama-vocab.cpp`), and its 
 reply piece by piece, which never cleans spaces — so there is nothing to build there. The byte-level
 decode writes every control marker out as its text (`PieceDecoder::decode`), which is what the
 harmony reader reads. Left: the real 11.5 GB file's reply.
+
+**The real file** (2026-11-02, `ggml-org/gpt-oss-20b-GGUF` `gpt-oss-20b-MXFP4.gguf`, sha256
+`27cd6c43…`, this engine's processor build against llama.cpp master's `ref_generate` /
+`dump_logits`, both greedy on the processor). Prompt tokens identical (79 of 79) for two
+questions rendered by the file's own template. "What is the capital of France? Answer in one
+sentence." — the reply is llama.cpp's character for character (250 of 250: an analysis message,
+then `final`: "The capital of France is Paris."). "Write a short Python function that returns
+the factorial of n." — the same for 102 tokens, then "works for non‑negative integers" against
+llama.cpp's "works for any non‑negative integer `n`": a tie, ours 0.046 ahead one way and
+llama.cpp 0.109 the other, and the exact forward over the file's numbers cannot tell them
+apart there (0.99998 both). Along llama.cpp's reply (189 positions) the two engines' logits
+agree at a median cosine of 0.99993 (0.99997 over the reply), top-1 181 of 189, every other
+disagreement a near-tie under 0.25 — except position 77, the prompt's last `<|start|>`, where
+llama.cpp scores "analysis" 4.7 above us (cosine 0.97). Our own three paths there (the prompt
+pass, a decode step among four, the one decode step) agree with each other to under 0.8, so it
+is not our arithmetic moving. **The exact forward settles it** (`gptoss_exact_reference.py`,
+now reading a quantized file one expert at a time — its answer on the tiny quantized file equals
+its answer on that file's dequantized twin): at 77, ours 0.982 of the exact answer, llama.cpp
+0.958; over all 189 positions ours 0.999898 median and 179 top-1, llama.cpp 0.999885 and 178;
+ours nearer at 102 of 189. Both quantize each product's input to Q8_0; the exact forward does
+not. Decode on this machine's processor (dev build, 8 threads): 5 tokens a second. **What it
+changed**: gpt-oss left `awaits_a_real_check` and joined `supported_list`.
+
+**Through a node** (2026-11-02, the dev build, `examples/split_rig.sh reasoning` with
+`MODELS_DIR` at a node's own shard download of that file — 22 parts by `download-shards`
+— A holding parts 0-10 and B 11-21, both on the processor, on loopback): route `distributed`,
+2 segments, 79 prompt tokens as above; the France reply is the reference's character for
+character on both surfaces — `reasoning_content` the analysis message (137 characters, equal
+streamed and not), `content` "The capital of France is Paris.", no scratchpad in either, no
+template fallback in either log. One node on this machine does NOT take it: 12,019 MB asked
+(11,536 of weights) against 9,380 MB — 70% of 13.4 GB free under WSL's 16 GB — and
+`resources.max_ram_mb` cannot lift the live headroom (`vram::live_headroom_mb`), so a 16 GB
+computer runs gpt-oss-20b only split with another; that is the rule working, not a defect.
+Not run through a node: a tool call (the harmony call reader is unit-tested on gpt-oss's own
+call format, both placements of the recipient) and a card computer's placement (the CUDA
+release build, checked on its draft).
 ## Qwen 3.5's decode steps are captured too: a DeltaNet state is written into a second pair of buffers (2026-10-11, FUTURE_WORK #228 (4))
 
 **What refused it.** `decode_graph_ineligibility` let only dense layers into a

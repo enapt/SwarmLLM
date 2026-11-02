@@ -10,9 +10,11 @@ sits nearer the exact answer where a logits comparison of the two leaves it open
 OURS.* are logits_reference_probe's output; LLAMA_CPP.f32 is
 `~/llama.cpp-ref/dump_logits MODEL.gguf LLAMA_CPP.f32 <OURS.json's tokens, comma-joined>`.
 F16_TOKEN_TABLE=1 rounds the token table to f16, as this engine holds it
-(`split::token_embedding`). Only f32 files: the weights are read as stored, so a
-quantized file's control is its DEQUANTIZED=1 twin. Results: docs/invariants/inference.md
-§ "gpt-oss: the whole forward against llama.cpp's"."""
+(`split::token_embedding`). A quantized weight is dequantized as stored — the same
+numbers both engines read, here read exactly — one tensor, one expert or one block of
+output rows at a time, so the real gpt-oss-20b runs in a few GB (it memory-maps the
+file). Results: docs/invariants/inference.md § "gpt-oss: the whole forward against
+llama.cpp's"."""
 import json
 import math
 import os
@@ -23,7 +25,31 @@ import gguf
 
 path, ids_json, ours_path, ref_path = sys.argv[1:5]
 r = gguf.GGUFReader(path)
-T = {t.name: np.asarray(t.data, dtype=np.float64).reshape([int(d) for d in reversed(t.shape)]) for t in r.tensors}
+TENSORS = {t.name: t for t in r.tensors}
+PLAIN = (gguf.GGMLQuantizationType.F32, gguf.GGMLQuantizationType.F16)
+
+
+def weight(name, rows=None):
+    """A weight as float64, numpy shape (ggml's ne reversed); `rows` picks along the
+    first axis (an expert, or some token rows) before anything is dequantized."""
+    t = TENSORS[name]
+    shape = [int(d) for d in reversed(t.shape)]
+    data = t.data if rows is None else t.data[rows]
+    if t.tensor_type in PLAIN:
+        out = np.asarray(data, dtype=np.float64)
+        return out.reshape(shape) if rows is None else out
+    return gguf.quants.dequantize(np.asarray(data), t.tensor_type).astype(np.float64)
+
+
+class Weights(dict):
+    """`T[name]` for the small tensors, read once."""
+
+    def __missing__(self, name):
+        self[name] = weight(name)
+        return self[name]
+
+
+T = Weights()
 
 
 def kv(key):
@@ -92,7 +118,7 @@ def swiglu_oai(g, u):
     return x / (1 + np.exp(-1.702 * x)) * (y + 1)
 
 
-x = T["token_embd.weight"][ids]
+x = weight("token_embd.weight", rows=np.asarray(ids))
 if os.environ.get("F16_TOKEN_TABLE") == "1":
     x = x.astype(np.float16).astype(np.float64)
 pos = np.arange(N, dtype=np.float64)
@@ -122,6 +148,7 @@ for il in range(n_layer):
     h = rms(x, T[f"{p}.post_attention_norm.weight"])
     logits = h @ T[f"{p}.ffn_gate_inp.weight"].T + T[f"{p}.ffn_gate_inp.bias"]
     y = np.zeros_like(x)
+    chosen = {}  # expert -> [(position, weight)]
     for t in range(N):
         order = np.argsort(-logits[t], kind="stable")
         picks = order[:k_used]
@@ -130,12 +157,22 @@ for il in range(n_layer):
         w = np.exp(logits[t][picks] - logits[t][picks].max())
         w = w / w.sum()
         for e_, we in zip(picks, w):
-            gate = T[f"{p}.ffn_gate_exps.weight"][e_] @ h[t] + T[f"{p}.ffn_gate_exps.bias"][e_]
-            up = T[f"{p}.ffn_up_exps.weight"][e_] @ h[t] + T[f"{p}.ffn_up_exps.bias"][e_]
-            down = T[f"{p}.ffn_down_exps.weight"][e_] @ swiglu_oai(gate, up) + T[f"{p}.ffn_down_exps.bias"][e_]
-            y[t] += we * down
+            chosen.setdefault(int(e_), []).append((t, we))
+    # One expert's three matrices at a time: a real file's stack is 6 GB a layer in f64.
+    for e_, uses in sorted(chosen.items()):
+        rows = np.asarray([t for t, _ in uses])
+        weights_ = np.asarray([we for _, we in uses])[:, None]
+        hs = h[rows]
+        gate = hs @ weight(f"{p}.ffn_gate_exps.weight", e_).T + T[f"{p}.ffn_gate_exps.bias"][e_]
+        up = hs @ weight(f"{p}.ffn_up_exps.weight", e_).T + T[f"{p}.ffn_up_exps.bias"][e_]
+        down = swiglu_oai(gate, up) @ weight(f"{p}.ffn_down_exps.weight", e_).T + T[f"{p}.ffn_down_exps.bias"][e_]
+        y[rows] += weights_ * down
     x = x + y
-logits = rms(x, T["output_norm.weight"]) @ T["output.weight"].T
+    print(f"layer {il} done", file=sys.stderr, flush=True)
+h = rms(x, T["output_norm.weight"])
+n_vocab = int(TENSORS["output.weight"].shape[1])
+logits = np.concatenate([h @ weight("output.weight", slice(a, min(a + 16384, n_vocab))).T
+                         for a in range(0, n_vocab, 16384)], axis=1)
 
 
 def cos(a, b):

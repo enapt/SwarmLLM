@@ -410,6 +410,20 @@ mod tests {
         );
         // No reasoning at all.
         assert_eq!(both_ways("<|channel|>final<|message|>Hi."), "Hi.");
+        // The real gpt-oss-20b's greedy reply (`gpt-oss-20b-MXFP4.gguf`, this
+        // engine and llama.cpp master alike, 2026-11-02) to "What is the capital
+        // of France? Answer in one sentence.", its closing `<|return|>` a stop.
+        assert_eq!(
+            both_ways(
+                "<|channel|>analysis<|message|>The user asks: \"What is the capital of France? \
+                 Answer in one sentence.\" So answer: \"The capital of France is Paris.\" That's \
+                 one sentence.<|end|><|start|>assistant<|channel|>final<|message|>The capital of \
+                 France is Paris."
+            ),
+            "<think>The user asks: \"What is the capital of France? Answer in one sentence.\" So \
+             answer: \"The capital of France is Paris.\" That's one sentence.</think>\n\nThe \
+             capital of France is Paris."
+        );
     }
 
     /// A call, in either place gpt-oss names its recipient, ends on

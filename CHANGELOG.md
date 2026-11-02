@@ -111,27 +111,20 @@ each peer in turn. The scores are now changed with the list locked and saved tog
 in one write, and a score that has not moved is not saved at all. A pause that is still logged now
 names the message it was handling, so the next cause can be found rather than guessed. (#314)
 
-**Groundwork for gpt-oss, not yet switched on: this engine reads MXFP4.** gpt-oss, among the most
-downloaded open models, keeps its expert weights in MXFP4, a 4-bit format this engine could not read,
-so its files were refused as unreadable. It reads them now, and on fixed test data it gives llama.cpp's
-own answers bit for bit. gpt-oss itself stays off until the rest of the model is built — its
-attention, its choice of experts and its activation each differ from the families here — and its
-replies are checked against llama.cpp; until then its files are refused as a family this build does
-not run. Files of other models that keep weights in MXFP4, such as unsloth's `MXFP4_MOE` uploads,
-now read too. **On a computer with a graphics card such a model runs on the processor for now**, and
-the dashboard says why: the card has no code for the format yet, and running it there would take
-seconds a token. gpt-oss's activation (a clamped SwiGLU) is built too, giving llama.cpp's own answers
-bit for bit, and the family is known by name with its window and norms read as llama.cpp reads them.
-Its biases — on the attention's output, on the choice of experts and on every expert — are read and
-added where llama.cpp adds them, and so is its attention's "sink", a per-head share of attention
-that goes to no word at all. On test files shaped like gpt-oss-20b, this engine's answers now equal
-an exact calculation of llama.cpp's at every position, and its own chat template renders exactly
-as the reference renders it. A request's reasoning effort (`reasoning_effort`: low, medium or high)
-now reaches a model's template as that setting too, as llama.cpp passes it; gpt-oss is told it in
-its instructions. Its reply format, which keeps the model's reasoning apart from its answer, is
-read too, as llama.cpp reads it: the reasoning goes where reasoning goes, the answer is the answer,
-and a tool call arrives as a tool call, streamed or not. gpt-oss still stays off for everyone until
-a real file's replies are checked. (#390)
+**gpt-oss now runs.** OpenAI's gpt-oss — gpt-oss-20b is among the most downloaded open models — can
+be added and asked like any other model. On the real gpt-oss-20b its replies are llama.cpp's: one
+word for word, another for its first hundred words, until two equally likely words. An exact
+calculation over the file's own numbers puts this engine as close to the right answer as llama.cpp,
+and closer at the one place the two disagree. Its replies keep the model's reasoning apart from its
+answer, and they are read as llama.cpp reads them: the reasoning goes where a thinking model's
+reasoning goes, the answer is the answer, and a tool call arrives as a tool call, streamed or not. A
+request's reasoning effort (`reasoning_effort`: low, medium or high) reaches gpt-oss's instructions,
+as llama.cpp passes it, and reaches any model's chat template as that setting. **It runs on the
+processor for now, on a computer with a graphics card too**, and the dashboard says why: no
+graphics-card code reads its 4-bit format, MXFP4, yet, and running it there would take seconds a
+token. Files of other models that keep weights in MXFP4, such as unsloth's `MXFP4_MOE` uploads, now
+read too, and run on the processor the same way. gpt-oss-20b needs about 12 GB of memory: a
+computer with less runs it split with another computer. (#390)
 
 ## [0.3.267-alpha] — 2026-11-01
 

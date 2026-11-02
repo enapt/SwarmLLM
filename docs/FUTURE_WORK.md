@@ -2879,8 +2879,14 @@ match llama.cpp** (#715, `arch-inference.md`).
    across the window, 120 tokens, expert picks down to a 0.0017 margin — and llama.cpp sits at
    0.99997 of it; on the quantized file (MXFP4 experts, Q8_0 rest) both engines are equally far from
    the exact answer (median 0.994 ours, 0.993 llama.cpp). So gpt-oss moved from the hard refusal to
-   the unchecked-family switch (`SWARMLLM_UNCHECKED_FAMILIES=gpt-oss`). **Left**: the real file's
-   reply against llama.cpp (11.5 GB), then step 7. **The tokenizer is checked** (2026-11-02): 17/17
+   the unchecked-family switch (`SWARMLLM_UNCHECKED_FAMILIES=gpt-oss`). **The real file is checked
+   and gpt-oss is ON** (2026-11-02): gpt-oss-20b's replies are llama.cpp master's (one word for
+   word, one for 102 tokens to a tie) and an exact forward of the file puts ours as near as
+   llama.cpp (invariants inference § "gpt-oss: the whole forward"); `supported_list` names it;
+   through a node, a two-node processor split gave the reference reply on both surfaces (a single
+   node on 16 GB refuses its 12 GB, by the 70%-of-free rule).
+   **Left: step 7** — the card (MXFP4 kernels; then the `cpu_reason` MXFP4 arm goes; expert biases
+   in `stacked_products`; sinks in `decode_attn_combine_f32` and an lse-returning flash). **The tokenizer is checked** (2026-11-02): 17/17
    identical to llama.cpp master on the real vocabulary, and `clean_spaces` is off for `gpt-4o` there,
    so nothing to build (invariants inference § "gpt-oss: the whole forward").
    **Step 6, the harmony reply, is done** (2026-11-02): `inference::harmony::Reply` rewrites the
