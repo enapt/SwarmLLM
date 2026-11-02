@@ -2,6 +2,37 @@
 
 ## [Unreleased]
 
+## [0.3.270-alpha] — 2026-11-02
+
+**A computer holding many models is seen by the swarm again, an idle model leaves the graphics card
+after five minutes, and new models people use reach computers whose storage is full.**
+
+**A computer holding more than 512 model parts is seen by the swarm again.** Each computer tells the
+others which parts it holds in one message, and every computer ignores a message listing more than
+512 parts. No computer ever split its list, so the first to hold more — one in Australia, on
+2 November, holding 43 models — dropped out of everyone's view: chats that needed its parts failed
+with "No reachable node holds layers …", and other computers gave back copies they held to fill
+gaps it had already filled. A long list is now sent in pieces of up to 512 parts, each model's parts
+together in one piece, so every computer takes all of it — computers on older versions too.
+
+**An idle model leaves the graphics card after five minutes, whether you downloaded it or not.**
+Downloading a model from the dashboard pins it, so its parts are never pruned — and that pin also
+kept the model loaded for up to an hour after its last answer: on the test laptop, 6.5 GB of an
+8 GB card with nothing running. A pin is about the files on disk. Every model now leaves memory once
+it has answered nobody — you or another computer — for five minutes (the `idle_unload_secs`
+setting), checked every 30 seconds instead of every five minutes. Its parts stay on disk, and the
+next question loads it again.
+
+**New models people use reach computers whose storage is full.** Models released lately that many
+people run — Gemma 4 12B, Qwen3.5 4B, Qwen3.6 35B-A3B and others on the day's list of what people
+run — were each held by one computer and fetched by no other. The other computers were full of
+older models that four or five computers already held, and since nobody in the swarm had asked for
+the new ones yet, nothing told a full computer to make room. A part of a model on that list held by
+only one computer can now ask a full computer for room, as a part somebody asked for already could.
+The computer gives back only a copy of an older model that at least four computers hold, so older
+models keep three or more copies and the new model gets a second. A model nobody runs is still
+never fetched.
+
 ## [0.3.269-alpha] — 2026-11-02
 
 **gpt-oss runs on NVIDIA graphics cards, and Ornith-1.5's last part is no longer left behind.**
