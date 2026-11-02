@@ -24,11 +24,7 @@
 
   // Shared helper: update progress display on a download item element.
   function _updateDlProgress(item, data) {
-    var totalBytes = data.total_bytes || 0;
-    var dlBytes = data.downloaded_bytes || 0;
-    var pct = data.overall_pct != null ? data.overall_pct :
-      (totalBytes > 0 ? Math.min(100, Math.round((dlBytes / totalBytes) * 100)) : 0);
-    var speed = data.speed_bytes_per_sec || 0;
+    var pct = U.dlPct(data);
 
     var barFill = item.querySelector('.dl-queue-bar-fill');
     if (barFill) barFill.style.width = pct + '%';
@@ -41,13 +37,8 @@
     }
 
     var rightEl = item.querySelector('.dqs-right');
-    if (rightEl) {
-      var right = U.formatBytes(dlBytes) + ' / ' + U.formatBytes(totalBytes);
-      if (speed > 0) right += ' \u00b7 ' + U.formatSpeed(speed);
-      if (data.eta_secs) right += I18n.t('dashboard.eta', { eta: U.formatEta(data.eta_secs) });
-      else if (speed > 0 && totalBytes > dlBytes) right += I18n.t('dashboard.eta', { eta: U.formatEta((totalBytes - dlBytes) / speed) });
-      rightEl.textContent = right;
-    }
+    // The percent is on the left already.
+    if (rightEl) rightEl.textContent = U.formatDlStatus(data, { pct: false });
   }
 
   App.downloads = {

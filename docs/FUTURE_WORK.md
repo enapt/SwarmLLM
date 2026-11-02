@@ -3812,6 +3812,20 @@ one. No incident is known. Next: bind a stream to the sender that opened it (the
 peer, as `requester_guesses` and `pending_prompt_admissions` are), and refuse another's forward
 for it.
 
+#### #397 — A peer's tensor-parallel rank and size reach the worker unchecked
+`P4` · network · **OPEN** — 2026-11-02 · history: the 11-02 sweep (a reviewer's below-the-bar note, read by hand)
+
+A `LayerForward`'s `tp_meta` (`tp_rank`, `tp_size`) is read straight into the worker's model key
+(`model_worker.rs` ~1892, `ensure_model_loaded`'s `(start, end, tp_rank, tp_size)`); nothing on
+the way from `handle_layer_forward` checks it, while `TpAllReduceRequest` is range-checked
+(`dispatch/mod.rs` ~2783). A rank past the size loads the range from disk and then fails in
+`pre_split_for_tp` (a narrow out of range). Each distinct valid pair loads a SEPARATE copy of the
+range, and `subsumed_segment_keys` drops only a strictly wider range, so a peer that may already
+send this node forwards could make it hold several copies of a range. No incident is known. Next:
+refuse a pair this node never agreed to — `tp_size` above 1 only for a group it joined, the rank
+below the size — before `ensure_model_loaded`, as a `Validation` error; a security review
+(CLAUDE.md: wire protocol) before it ships.
+
 #### #362 — A peer identified while the peer map is full stays "connected" after it leaves
 `P4` · network · **OPEN** — 2026-10-25 · history: #339's second security review (low), split out of #341
 

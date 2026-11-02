@@ -91,8 +91,33 @@
     return mbps.toFixed(2) + ' Mbps';
   }
 
-  function formatDlProgress(dlBytes, totalBytes, pct) {
-    return formatBytes(dlBytes) + ' / ' + formatBytes(totalBytes) + ' (' + pct + '%)';
+  // A download's percent, for an acquisition status or a download-queue entry:
+  // the daemon's `overall_pct` where it sent one, else the bytes held to the
+  // total over the total, never past 100.
+  function dlPct(s) {
+    if (s.overall_pct != null) return s.overall_pct;
+    var total = s.total_bytes || 0;
+    if (total <= 0) return 0;
+    return Math.min(100, Math.round(Math.min(s.downloaded_bytes || 0, total) / total * 100));
+  }
+
+  // The one wording of a download's progress: "X / Y (pct%) · speed · ETA t".
+  // The time left is the daemon's `eta_secs` where it sent one, else the bytes
+  // left over the speed. `opts.pct === false` leaves the percent out, for a row
+  // that shows it elsewhere. Three dashboard writers of the same element had
+  // drifted apart (one separator, one ETA, one clamp each; sweep 2026-11-02).
+  function formatDlStatus(s, opts) {
+    var total = s.total_bytes || 0;
+    // Clamped to a known total; with none yet (a download starting), the
+    // bytes so far still show.
+    var dl = total > 0 ? Math.min(s.downloaded_bytes || 0, total) : s.downloaded_bytes || 0;
+    var speed = s.speed_bytes_per_sec || 0;
+    var txt = formatBytes(dl) + ' / ' + formatBytes(total);
+    if (!opts || opts.pct !== false) txt += ' (' + dlPct(s) + '%)';
+    if (speed > 0) txt += ' · ' + formatSpeed(speed);
+    var eta = s.eta_secs || (speed > 0 && total > dl ? (total - dl) / speed : 0);
+    if (eta > 0) txt += I18n.t('dashboard.eta', { eta: formatEta(eta) });
+    return txt;
   }
 
   function resourceBarClass(pct, healthyColor) {
@@ -763,8 +788,7 @@
       return;
     }
 
-    var pct = 0;
-    if (active.total_bytes > 0) pct = Math.min(100, Math.round((active.downloaded_bytes || 0) / active.total_bytes * 100));
+    var pct = dlPct(active);
     var speed = active.speed_bytes_per_sec || 0;
     var name = formatModelDisplayName(active.model_name || active.model_id || '');
     var text = I18n.t('chat.downloading_progress', { name: name, pct: pct });
@@ -1400,7 +1424,8 @@
     formatCount: formatCount,
     formatBitrate: formatBitrate,
     formatCompact: formatCompact,
-    formatDlProgress: formatDlProgress,
+    dlPct: dlPct,
+    formatDlStatus: formatDlStatus,
     resourceBarClass: resourceBarClass,
     formatSpeed: formatSpeed,
     formatEta: formatEta,

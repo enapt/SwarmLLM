@@ -26,6 +26,9 @@ swarm counted a computer holding the rest as holding the whole model, asked it, 
 Every check of "which parts does this run need" now counts that part for the run that finishes the
 model, so it is fetched and planned like any other. (#398)
 
+**Download progress reads the same everywhere.** The dashboard and the Downloads page wrote a
+part's progress three slightly different ways (separators, the time left); they now share one.
+
 ## [0.3.268-alpha] — 2026-11-02
 
 **Thinking models: the answer is the answer, and you can switch the thinking off or on.**

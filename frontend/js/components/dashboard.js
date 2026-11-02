@@ -2072,24 +2072,13 @@
           // Update progress bar
           var progressEl = document.querySelector('[data-model-progress="' + safeId + '"]');
           if (progressEl && acq.total_bytes > 0) {
-            var dlBytes = Math.min(acq.downloaded_bytes || 0, acq.total_bytes);
-            var pct = Math.min(100, Math.round((dlBytes / acq.total_bytes) * 100));
+            var pct = U.dlPct(acq);
             var lastPct = parseInt(progressEl.getAttribute('data-last-pct') || '0', 10);
             if (pct >= lastPct) {
               progressEl.setAttribute('data-last-pct', '' + pct);
-              var speed = acq.speed_bytes_per_sec || 0;
               var shardLabel = acq.downloaded_shards !== undefined ? I18n.t('dashboard.shard_progress_label', { dl: acq.downloaded_shards, total: acq.total_shards || shardDetails.length }) : I18n.t('dashboard.downloading_label');
-              var etaStr = '';
-              if (speed > 0 && acq.total_bytes > dlBytes) {
-                etaStr = U.formatEta((acq.total_bytes - dlBytes) / speed);
-              }
               var textEl = progressEl.querySelector('.dl-progress-text');
-              if (textEl) {
-                var txt = U.formatDlProgress(dlBytes, acq.total_bytes, pct);
-                if (speed > 0) txt += ' \u00b7 ' + U.formatSpeed(speed);
-                if (etaStr) txt += I18n.t('dashboard.eta', { eta: etaStr });
-                textEl.textContent = txt;
-              }
+              if (textEl) textEl.textContent = U.formatDlStatus(acq);
               var labelEl = progressEl.querySelector('.text-muted');
               if (labelEl) labelEl.textContent = shardLabel;
               var segs = progressEl.querySelectorAll('.dl-seg');
@@ -2109,16 +2098,9 @@
           } else if (!progressEl && acq.total_bytes > 0 && acq.downloaded_bytes > 0) {
             var card = document.querySelector('[data-model-id="' + U.cssSafeAttr(modelId) + '"]');
             if (card && !card.querySelector('.dl-progress')) {
-              var dlBytes2 = Math.min(acq.downloaded_bytes, acq.total_bytes);
-              var pct2 = Math.min(100, Math.round((dlBytes2 / acq.total_bytes) * 100));
-              var speed2 = acq.speed_bytes_per_sec || 0;
               var shardLabel2 = acq.downloaded_shards !== undefined ? I18n.t('dashboard.shard_progress_label', { dl: acq.downloaded_shards, total: acq.total_shards || '?' }) : I18n.t('dashboard.downloading_label');
-              // R137: unify speed separator with the active-update branch
-              // above (line ~1706) which uses U+00B7 middle-dot. Em-dash
-              // here was inconsistent \u2014 flagged as deferred in R123 sweep.
-              var rightText2 = U.formatDlProgress(dlBytes2, acq.total_bytes, pct2) + (speed2 > 0 ? ' \u00b7 ' + U.formatSpeed(speed2) : '');
               var progWrapper = document.createElement('div');
-              progWrapper.innerHTML = _buildProgressBar({ safeId: safeId, pct: pct2, label: shardLabel2, rightText: rightText2 });
+              progWrapper.innerHTML = _buildProgressBar({ safeId: safeId, pct: U.dlPct(acq), label: shardLabel2, rightText: U.formatDlStatus(acq) });
               var progDiv = progWrapper.firstChild;
               card.appendChild(progDiv);
               if (!card.classList.contains('downloading')) {
@@ -2546,11 +2528,6 @@
         card.classList.add('downloading');
       }
 
-      var totalBytes = status.total_bytes || 0;
-      var dlBytes = status.downloaded_bytes || 0;
-      var pct = totalBytes > 0 ? Math.round((dlBytes / totalBytes) * 100) : 0;
-      var speed = status.speed_bytes_per_sec || 0;
-
       var progressEl = card.querySelector('.dl-progress');
       if (!progressEl) {
         progressEl = document.createElement('div');
@@ -2559,11 +2536,10 @@
         card.appendChild(progressEl);
       }
 
-      var speedStr = speed > 0 ? ' - ' + U.formatSpeed(speed) : '';
       var cancelBtn = '<button class="btn btn-sm" style="padding:1px 6px;font-size:0.7rem;line-height:1.2" data-cancel-download="' + U.escapeHtml(modelId) + '" title="' + U.escapeHtml(I18n.t('shard.cancel_download')) + '">&times; ' + U.escapeHtml(I18n.t('actions.cancel')) + '</button>';
-      var rightText3 = U.formatDlProgress(dlBytes, totalBytes, pct) + speedStr;
       var wrapper = document.createElement('div');
-      wrapper.innerHTML = _buildProgressBar({ safeId: safeId, pct: pct, label: U.escapeHtml(I18n.t('dashboard.downloading_data')), rightText: rightText3, cancelBtn: cancelBtn });
+      // `label` and `rightText` are text: buildProgressBar escapes them.
+      wrapper.innerHTML = _buildProgressBar({ safeId: safeId, pct: U.dlPct(status), label: I18n.t('dashboard.downloading_data'), rightText: U.formatDlStatus(status), cancelBtn: cancelBtn });
       progressEl.innerHTML = wrapper.firstChild.innerHTML;
 
       var oldPanel = document.getElementById('acq-panel-' + safeId);
