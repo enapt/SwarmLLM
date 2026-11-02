@@ -50,7 +50,8 @@ word for word to the archive, § "PRIORITIES re-rank log". Only OPEN work is lis
 processor), thinking models answering cleanly and switchable (#392, #391), Qwen's XML tool calls (#395), no
 re-download of held parts (#393), #394, keeping what people run (#389), #369's dead wait, #388's report (off),
 #155's fix and #91 (2k); the ranking below is otherwise unchanged. New: #396 (P3).
-Later the same day main gained gpt-oss on the card (#390 step 7) and #398 (closed); new: #397 (P4), #399 (P3).
+Later the same day v0.3.269 shipped gpt-oss on the card (#390 step 7) and #398 (closed); new: #397 (P4),
+#399 (P3, taken with #396: both are the decode width).
 **2026-10-20:** #318 goes first among P2 by the user's direction: running models too large for
 any one member at a usable speed is what the swarm is for, so split speed for large models is
 the top track (`docs/plans/large_model_splits.md`).
