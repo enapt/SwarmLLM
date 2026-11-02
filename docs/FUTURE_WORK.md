@@ -2067,6 +2067,11 @@ experts-in-RAM models (the gate's Qwen3-30B-A3B arm decodes at `offered=4` too).
 A/B env giving a decode step of an experts-in-RAM worker the owner's width, ABBA × 4 on an idle
 machine on gpt-oss-20b and Qwen3-30B-A3B, each arm's `decode_threads=` read first (#396 makes
 the 4-thread arm itself a lottery). An explicit `max_cpu_threads` still binds the owner.
+**Research (2026-11-02)**: llama.cpp gives a decode step every physical core by default, dense or
+MoE, `--n-cpu-moe` included — `n_threads = common_cpu_get_num_math()` (`common/common.cpp`), the
+same figure as `n_threads_batch`; its llama-bench figure beside ours here (29.8 tok/s) ran at 8.
+So our 4 is a choice made from DENSE processor decode (#237), not a measured optimum for a step
+whose experts are in RAM.
 
 #### #295 — Gemma 4's E2B/E4B split between card and processor copies a shared layer's history every step
 `P3` · perf-local · **PARTIAL** — 2026-10-17 · history: #115 (3c); (a) captured, (b) launches fixed, 2026-10-19
