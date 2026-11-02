@@ -208,9 +208,9 @@ pub struct AutoShardManager {
 /// network map listed as a gap in its region.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(super) enum RoomFor {
-    /// Of a model somebody asked for: held by one computer, or by fewer than
-    /// its replica target where only a split can run the model
-    /// (`scoring::is_scarce`).
+    /// Of a model somebody asked for or people run outside the swarm: held by
+    /// one computer — or, asked for, by fewer than its replica target where
+    /// only a split can run the model (`scoring::is_scarce`).
     Scarce,
     /// This computer's part of the chain its machines plan alike, or of the
     /// model it was chosen to carry (`coverage`, #231, #346).
@@ -227,7 +227,9 @@ impl RoomFor {
             RoomFor::Placed => {
                 "this computer's part of a chain of machines or of a model it carries"
             }
-            RoomFor::Scarce => "a part of a model somebody asked for that too few computers hold",
+            RoomFor::Scarce => {
+                "a part of a model somebody asked for or people run that too few computers hold"
+            }
         }
     }
 }

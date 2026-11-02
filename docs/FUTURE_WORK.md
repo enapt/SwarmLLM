@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #400**). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #401**). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -1139,6 +1139,23 @@ same build check `shard_holders` applies (`expected_build_tag`), withdrawn when 
 disconnects — or have the newcomer's catch-up carry the holdings point to point, as manifests
 are. Either way a capability is a peer's claim, so it may add a holder for planning and never
 remove one. Measure the newcomer's first-plan delay before and after.
+
+#### #400 — The download ring counts machines that never fetch, so a part assigned to one is fetched by nobody
+`P3` · placement · **OPEN** — 2026-11-02 · history: this entry; gotcha #1027; `docs/invariants/memory.md` § "A part of a model people run … is scarce too"
+
+`gather_candidates` gives each part short of its target to `replicas_needed` machines on a hash
+ring built from EVERY connected node (`scoring.rs`, `VIRTUAL_SLOTS` 10 each). A machine that never
+fetches — automatic downloads off (this laptop, by choice), an anchor with no storage (`bfbfeebc`,
+0 parts), a full one prune can free nothing on — still takes its share of the ring, and every other
+machine skips those parts ("not assigned on consistent hash ring", `debug!`). A model one machine
+holds part of escapes it (`already_hosting_model` lets that machine fill the rest), so a many-part
+model reaches a fetcher through any one part; a ONE- or two-part model the ring hands to a
+non-fetcher stays at one holder. **Not established**: how often this happens here — on 2026-11-02 3
+of the 9 connected machines fetched nothing (this one, the anchor, a 0.3.268 node in Russia).
+**Next**: count, from one node's view, the parts under target whose ring owner holds nothing new
+over a day. **Direction**: a machine says whether it takes parts (a `NodeCapability` field,
+`#[serde(default)]`, or the free storage it would accept — `disk_available_mb` is the filesystem's,
+not the budget's) and the ring is built from those only, an older node counted as before.
 
 ### Network and transport
 

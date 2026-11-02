@@ -393,6 +393,10 @@ impl AutoShardManager {
             // (`coverage::only_a_split_runs`). Its parts short of their target
             // may ask a full node for room (`is_scarce`, #371).
             let only_a_split_runs = asked_for && self.only_a_split_runs(&manifest);
+            // People run it outside the swarm: its part held by one computer
+            // may ask a full node for room as if asked for (`is_scarce`).
+            let run_outside =
+                self.shared_state.popular_outside_the_swarm(&manifest.id) == Some(true);
 
             // VRAM fitness: does the global pool have enough VRAM to actually run this model?
             // Don't block downloads, but deprioritize models the pool can't run yet.
@@ -763,7 +767,13 @@ impl AutoShardManager {
                     Some(RoomFor::Hole)
                 } else if carried_part || near_part {
                     Some(RoomFor::Placed)
-                } else if is_scarce(asked_for, holder_count, target_replicas, only_a_split_runs) {
+                } else if is_scarce(
+                    asked_for,
+                    run_outside,
+                    holder_count,
+                    target_replicas,
+                    only_a_split_runs,
+                ) {
                     Some(RoomFor::Scarce)
                 } else {
                     None
@@ -1159,15 +1169,29 @@ pub(super) fn fills_a_hole(assembling_an_asked_model: bool, holder_count: usize)
 /// 4050 held 14 such models and none of a 70B, 2026-10-29). Prune gives back
 /// only copies with at least three more holders for it
 /// (`prune::floor_for_room`). A part no computer holds is a hole, not this.
+///
+/// **Or of a model people run outside the swarm** (`run_outside`: the day's
+/// reading of what people run names it, `SharedState::popular_outside_the_swarm`),
+/// held by ONE computer (2026-11-02). Until then such a model, newly released
+/// and asked for by nobody in the swarm YET, could land only on a node with
+/// room to spare — and the nodes were full of copies of older models with
+/// four or five holders each: on 2026-11-02 seven of the twelve models the
+/// reading named (Gemma 4 12B, Qwen3.5 4B, Qwen3.6 35B-A3B …) were held by
+/// one computer, and no peer held a part of any of them. This is TinyLFU's admission rule (Einziger, Friedman & Manes
+/// 2017, arXiv 1512.00727): a full cache admits a newcomer only when it is
+/// worth more than the victim, ties to the incumbent — here a copy is given
+/// back only from a part three holders richer, so the newcomer reaches a
+/// second holder and no further on this reason alone.
 pub(super) fn is_scarce(
     asked_for: bool,
+    run_outside: bool,
     holder_count: usize,
     target_replicas: usize,
     only_a_split_runs: bool,
 ) -> bool {
-    asked_for
-        && holder_count > 0
-        && (holder_count == 1 || (only_a_split_runs && holder_count < target_replicas))
+    holder_count > 0
+        && (((asked_for || run_outside) && holder_count == 1)
+            || (asked_for && only_a_split_runs && holder_count < target_replicas))
 }
 
 /// Could this node ever hold a part of `bytes` — does it fit the whole storage
@@ -2283,6 +2307,83 @@ mod holes_first {
     use crate::types::{ContributionMode, ModelId};
 
     const MIB: u64 = 1024 * 1024;
+
+    /// The day's reading of what people run names exactly `models`, read now.
+    fn reading_names(state: &crate::daemon::SharedState, models: &[&ModelId]) {
+        use crate::model::huggingface::popular::{PopularBase, PopularSnapshot};
+        state
+            .models
+            .hf_popular
+            .store(std::sync::Arc::new(PopularSnapshot {
+                bases: models
+                    .iter()
+                    .map(|m| PopularBase {
+                        model_id: m.0.clone(),
+                        ..Default::default()
+                    })
+                    .collect(),
+                fetched_at: chrono::Utc::now().timestamp(),
+                ..Default::default()
+            }));
+    }
+
+    /// The live shape (2026-11-02): models people run, released lately, held
+    /// by ONE computer and asked for by nobody in the swarm yet. Every node was
+    /// full of older models' copies, and a part that gave no reason to ask
+    /// for room could land only where room was spare — so none landed. A part
+    /// of such a model held by one computer now asks as a scarce one does;
+    /// at two holders, or once the reading stops naming it, it asks nothing.
+    #[test]
+    fn a_part_of_a_model_people_run_held_by_one_computer_asks_for_room() {
+        let mut config = Config::default();
+        config.auto_manage.min_replicas = 2;
+        let (state, manager) = make_test_manager_with_config(config);
+        let local = state.identity.node_id().clone();
+        let fresh =
+            register_manifest_with_sized_shards(&state, "fresh", 8, &[(0, 4), (4, 8)], 100 * MIB);
+        let peers: Vec<_> = (2..=3)
+            .map(|byte| peer_with_disk(&state, byte, None, 100_000))
+            .collect();
+        // Part 0 here and on a peer; part 1 on one peer only. Holding part 0
+        // puts this node past the ring for part 1, so only the reason varies.
+        holds(&state, &fresh, &local, &[0]);
+        write_sparse_shards(&state, &fresh, [0], 100 * MIB);
+        holds(&state, &fresh, &peers[0], &[0, 1]);
+        let room_for_part_1 = || {
+            manager
+                .gather_candidates(&local, 0)
+                .into_iter()
+                .find(|c| c.model_id == fresh && c.shard_index == 1)
+                .map(|c| c.asks_room)
+        };
+
+        assert_eq!(
+            room_for_part_1(),
+            Some(None),
+            "the control: nobody asked for it and no reading names it — a further copy only"
+        );
+
+        let other = ModelId("another".into());
+        reading_names(&state, &[&other]);
+        assert_eq!(
+            room_for_part_1(),
+            Some(None),
+            "a reading that names another model gives this one no reason"
+        );
+
+        reading_names(&state, &[&fresh]);
+        assert_eq!(
+            room_for_part_1(),
+            Some(Some(RoomFor::Scarce)),
+            "people run it and one computer holds the part: it may ask a full node for room"
+        );
+
+        holds(&state, &fresh, &peers[1], &[1]);
+        assert!(
+            !matches!(room_for_part_1(), Some(Some(_))),
+            "two computers hold it: popularity alone asks no further room"
+        );
+    }
 
     /// The live shape (2026-10-25): a 70B somebody asked for, part of it on
     /// one machine and the rest on none, beside a small model wanting a

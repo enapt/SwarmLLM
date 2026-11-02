@@ -1328,6 +1328,32 @@ of, so full machines do not all trade for the same part. Tests:
 three holders, room noted, nothing given back), `a_copy_of_the_wanted_parts_own_model_is_never_given_back`,
 and `near_chain::a_full_node_makes_room_for_its_part_of_the_chain`.
 
+**A part of a model people run, held by one computer, is scarce too (2026-11-02).** `is_scarce`
+took only a model somebody had asked for, so a model released lately — run by many outside the
+swarm, asked for by nobody inside it yet — gave a full node no reason to make room, and could land
+only on a node with room to spare. On 2026-11-02 (14:29Z) seven of the twelve models the day's
+reading named (`SharedState::popular_outside_the_swarm`, #389 (b)) — Gemma 4 12B, Qwen3.5 4B,
+Qwen3.6 35B-A3B, Qwen3.8 27B, Ornith 1.0 9B / 1.5 9B / 1.5 122B — were held by ONE computer, and
+none of the five peers whose parts lists arrived held a part of any of them, while those peers
+held older models' copies with four or five holders each (Qwen2.5 14B 5, GLM-4 9B 5, xLAM 8B 5,
+Mistral 7B 4, Llama 3.2 3B 4, TinyLlama 4); their part counts did not move in the 50 minutes
+watched, and the one whose log could be read (the Proxmox box: 43.9 of 44 GB) noted room only for
+other reasons. The #389 give-back of a model nobody runs, which would free that room, needs 14
+quiet days after a 14-day watch, so the swarm could not follow a release for a month. Now
+`is_scarce(asked_for, run_outside, …)`: a part of a model the reading names, held by ONE computer,
+asks for room as a scarce one does — the split clause (under target where only a split runs it)
+stays for a model somebody asked for. Nothing else changes: the floor (`wanted_holders + 2`, a copy
+three holders richer) and the ring (one node per part while a model is held nowhere here) are the
+scarce rule's, so popularity alone takes a model to a second holder and no further, from copies
+with four or more. That is TinyLFU's admission rule (Einziger, Friedman & Manes 2017,
+arXiv:1512.00727; Caffeine's W-TinyLFU): a full cache admits a newcomer only when it is worth more
+than the victim it evicts, a tie going to the incumbent. A stale reading (`None`, past
+`MOST_SNAPSHOT_AGE_SECS`) gives no reason, as everywhere popularity is read. Holes are unchanged —
+a part NO computer holds asks for room only for a model somebody asked for: popularity outside the
+swarm makes a second copy sturdier, it does not make anybody wait. Test:
+`holes_first::a_part_of_a_model_people_run_held_by_one_computer_asks_for_room` (controls: no
+reading, a reading naming another model, two holders).
+
 ## `model::auto_manage::prune::effective_idle_secs` — residency is a hard UPPER BOUND on "idle since", and the worker's own `last_used` is the signal that moves
 
 (2026-09-02, gotcha #437). The idle unload used to trust
@@ -1342,8 +1368,8 @@ X existed", and must read a signal the COMMON path actually writes — grep for
 the writer before trusting a doc comment that names one.
 
 **Regional demand buys no idle reprieve (2026-10-12, field report #035).** The
-loop asks `prune::stays_loaded_while_idle(idle, deliberately_held, window)`, the
-one gate, and the tests call it rather than a copy. Regional demand once kept an
+loop asks `prune::stays_loaded_while_idle(idle, window)` (until 2026-11-02 also
+`deliberately_held`), the one gate, and the tests call it rather than a copy. Regional demand once kept an
 idle model loaded for up to an hour: it stood in for "is anyone asking US", from
 before `effective_idle_secs` read the served clock. Once it did, what the demand
 figure still measured was the region in the abstract plus this node's OWN
