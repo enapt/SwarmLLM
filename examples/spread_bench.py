@@ -260,7 +260,7 @@ def one(route, prompt):
     rec = {"error": None}
     t0 = time.perf_counter()
     t_first = t_last = None
-    text, usage, finish, chunks = [], None, None, 0
+    text, reasoning, usage, finish, chunks = [], [], None, None, 0
     with GpuSampler() as g:
         try:
             resp = urllib.request.urlopen(req, timeout=1800)
@@ -292,13 +292,21 @@ def one(route, prompt):
                 if d.get("usage"):
                     usage = d["usage"]
                 for ch in d.get("choices", []):
-                    c = ch.get("delta", {}).get("content")
-                    if c:
+                    delta = ch.get("delta", {})
+                    c = delta.get("content")
+                    # A thinking model's reasoning is tokens it generated too:
+                    # timed alike, kept apart from the answer's text (a reply
+                    # of 64 thinking tokens timed nothing, 2026-11-02).
+                    r = delta.get("reasoning_content")
+                    if c or r:
                         now = time.perf_counter()
                         t_first = t_first or now
                         t_last = now
                         chunks += 1
+                    if c:
                         text.append(c)
+                    if r:
+                        reasoning.append(r)
                     finish = ch.get("finish_reason") or finish
     wall = time.perf_counter() - t0
     util, mem = g.summary()
@@ -313,6 +321,7 @@ def one(route, prompt):
         "ms_per_token": round(1000 / decode, 1) if decode else None,
         "prompt_tps": round(pt / ttft, 1) if pt and ttft else None,
         "gpu_util_mean": util, "gpu_mem_max_mib": mem, "text": "".join(text),
+        "reasoning": "".join(reasoning),
     })
     rec.update(log_window(start))
     return rec
