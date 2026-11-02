@@ -6250,6 +6250,43 @@ sinks `[0.5, −1, 2, 0]`, one token and five against a causal offset mask — t
 kernels, `standard_attention`, and the matmul path grouped and ungrouped each within 1e-5 of a
 float64 reference, and `-inf` sinks equal to none bit for bit. Red with either kernel's fold or the
 sink column dropped. `a_layer_with_sinks_is_never_flashs` pins the card's refusal.
+
+## gpt-oss: the whole forward against llama.cpp's (2026-11-02, FUTURE_WORK #390 item 2)
+
+**The file.** `examples/make_tiny_gptoss_gguf.py` keeps the real gpt-oss-20b header's keys and
+every tensor kind (read off ggml-org's `gpt-oss-20b-MXFP4.gguf`): 8 query heads over 2 key/value
+heads whose width (128) is NOT the embedding's (64), biases on Q/K/V/O, a sink per head drawn
+wide, a window of 8 on even layers, YaRN with the real settings (factor 32 from 4,096, beta
+32/1, base 150,000), a router bias as wide as its logits, gate/up/down biases on 8 experts of
+which 4 are used, gate/up wide enough to reach swiglu_oai's clamps, an expert width (96) unequal
+to the embedding so a transposed stack fails. `QUANT=real` writes MXFP4 experts and Q8_0
+attention/embeddings as the real file; `QUANT=f32` everything f32; `DEQUANTIZED=1` the quantized
+numbers stored exactly.
+
+**Results** (`logits_reference_probe` → `examples/gptoss_exact_reference.py`, float64, llama.cpp's
+graph; llama.cpp master `dump_logits` with `DUMP_KV_F32=1`):
+
+| Run (f32 file) | ours vs exact | llama.cpp vs exact |
+|---|---|---|
+| 40 tokens (36 prompt + 4 decode) | 1.000000 at every position, 40/40 top-1 | median 0.999975, worst 0.99884 |
+| the same split at layer 2 | 1.000000 | the same |
+| 60 tokens, prompt in chunks of 8 (= the window), last 12 + 4 kept | 1.000000 | median 0.999973 |
+| the same, chunks of 5, split at layer 3 | 1.000000 | the same |
+| 120 tokens (112 + 8), expert picks down to a 0.0017 margin | 1.000000, 120/120 | median 0.999987, worst 0.99699 |
+
+The exact forward rounds the token table to f16 (`F16_TOKEN_TABLE=1`), as this engine holds it
+(`split::token_embedding`); without that rounding ours reads 0.99835 at one position (4) and
+0.99998 median — the whole gap between the two engines on the f32 file is that table, which is
+every family's, not gpt-oss's. On the QUANTIZED file the engines part (median 0.9968 at 4 of 8
+experts, 0.9955 at all 8 — so not a routing tie) and the exact answer over the same numbers
+(`DEQUANTIZED=1`) says neither is nearer: ours 0.9944 / 0.9956 median, llama.cpp 0.9931 / 0.9935
+— both quantize each product's input to Q8_0, and this deliberately wide random model amplifies
+that rounding through four layers. Judge a quantized tiny file by the triangle, never by the pair.
+
+**What it changed.** gpt-oss left `is_supported`'s hard refusal for `awaits_a_real_check`:
+refused unless `SWARMLLM_UNCHECKED_FAMILIES` names `gpt-oss`. What a test file cannot check is
+left: the harmony reply channels, the template under minijinja, the gpt-4o tokenizer — and a real
+file's reply.
 ## Qwen 3.5's decode steps are captured too: a DeltaNet state is written into a second pair of buffers (2026-10-11, FUTURE_WORK #228 (4))
 
 **What refused it.** `decode_graph_ineligibility` let only dense layers into a

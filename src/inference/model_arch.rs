@@ -224,25 +224,25 @@ impl ModelArch {
     /// (`examples/make_tiny_glm4moe_gguf.py`); the smallest real file is
     /// ~45 GB.
     ///
-    /// **gpt-oss is built, not yet checked** (#390 item 2): its MXFP4 experts,
-    /// activation, biases and attention sinks are read as llama.cpp reads them,
-    /// but no whole forward has been compared with llama.cpp's even on a test
-    /// file — refused outright, with no switch, until one has; then it waits
-    /// for its real file like the two above.
+    /// **gpt-oss waits the same way** (#390 item 2): its loader matched
+    /// llama.cpp on test files with gpt-oss-20b's ratios
+    /// (`examples/make_tiny_gptoss_gguf.py`: MXFP4 experts, sinks, windows,
+    /// YaRN, biases); its reply channels and chat template are not read yet,
+    /// which a real file's check would show.
     pub fn is_supported(&self) -> bool {
         !matches!(
             self,
-            ModelArch::Unknown(_)
-                | ModelArch::DeepSeek2
-                | ModelArch::Starcoder2
-                | ModelArch::GptOss
+            ModelArch::Unknown(_) | ModelArch::DeepSeek2 | ModelArch::Starcoder2
         ) && (!self.awaits_a_real_check() || unchecked_family_named(&self.to_string()))
     }
 
     /// A family whose loader matched llama.cpp on test files only — see
     /// [`Self::is_supported`].
     fn awaits_a_real_check(&self) -> bool {
-        matches!(self, ModelArch::Qwen3Next | ModelArch::Glm4Moe)
+        matches!(
+            self,
+            ModelArch::Qwen3Next | ModelArch::Glm4Moe | ModelArch::GptOss
+        )
     }
 
     /// Every architecture this build knows by name, `Unknown` aside — what

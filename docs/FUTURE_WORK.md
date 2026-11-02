@@ -2872,7 +2872,17 @@ match llama.cpp** (#715, `arch-inference.md`).
    every call — slow; step 7 adds the sink to `decode_attn_combine_f32` and an lse-returning flash.
    Under tensor parallelism each rank keeps its own heads' sinks. Checked against a float64
    reference on every processor path (`sinks_take_their_share_on_every_processor_path`); a `-inf`
-   sink leaves the kernels' bits unchanged. Next: the end-to-end check on a tiny file.
+   sink leaves the kernels' bits unchanged. **The whole forward matched since 2026-11-02**
+   (`examples/make_tiny_gptoss_gguf.py` with gpt-oss-20b's ratios + `examples/gptoss_exact_reference.py`):
+   on an f32 file our logits equal a float64 forward of llama.cpp's graph at every position (cosine
+   1.000000 with the token table rounded to f16, as this engine holds it) — whole, split, chunked
+   across the window, 120 tokens, expert picks down to a 0.0017 margin — and llama.cpp sits at
+   0.99997 of it; on the quantized file (MXFP4 experts, Q8_0 rest) both engines are equally far from
+   the exact answer (median 0.994 ours, 0.993 llama.cpp). So gpt-oss moved from the hard refusal to
+   the unchecked-family switch (`SWARMLLM_UNCHECKED_FAMILIES=gpt-oss`). **Left**: step 6 — the
+   harmony reply channels (`analysis` / `final`, llama.cpp `common/parsers/gpt-oss.cpp`), the
+   template under minijinja (`strftime_now`, the developer role, `reasoning_effort`), the gpt-4o
+   tokenizer's `clean_spaces`; then the real file's reply against llama.cpp (11.5 GB), then step 7.
 3. **`glm4moe` — GLM-4.5-Air 106B-A12B** (UD-Q4_K_XL 67.7 GB: three or four cards; ~46K).
    **Loader in since 2026-11-02, refused until a real file is checked**: the selection bias is a
    REQUIRED argument of both routers (`MoeFfn::selection_bias`), `expert_weights_scale` folds into

@@ -27,12 +27,15 @@ fn a_family_no_real_file_loads_is_recognised_but_not_offered() {
     assert!(!ModelArch::from_gguf_arch("starcoder2").is_supported());
     assert!(!ModelArch::supported_list().contains(&"starcoder2"));
     // gpt-oss (#390 item 2) is named, its activation and NEOX rotation read
-    // off llama.cpp, and refused with no switch until its sinks and biases
-    // are read.
+    // off llama.cpp, and refused until a real file is checked unless the
+    // operator names it.
     let gpt_oss = ModelArch::from_gguf_arch("gpt-oss");
     assert_eq!(gpt_oss, ModelArch::GptOss);
     assert_eq!(gpt_oss.to_string(), "gpt-oss");
-    assert!(!gpt_oss.is_supported());
+    assert_eq!(
+        gpt_oss.is_supported(),
+        std::env::var("SWARMLLM_UNCHECKED_FAMILIES").is_ok_and(|v| v.contains("gpt-oss"))
+    );
     assert!(!ModelArch::supported_list().contains(&"gpt-oss"));
     assert_eq!(gpt_oss.default_activation(), Activation::SwigluOai);
     assert!(gpt_oss.use_rope_contiguous(), "LLAMA_ROPE_TYPE_NEOX");
