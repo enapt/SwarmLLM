@@ -170,6 +170,13 @@ swarmllm/
 │                 the 27B's 46 layers (#279); ARCH=gemma3: Q/K norms, per-layer RoPE,
 │                 linear scaling (#115 (1)); ARCH=gemma4: a shape per layer, V = K on
 │                 global layers, proportional RoPE, output scales (#115 (3)), MOE=1;
+│                 make_tiny_qwen3next_gguf.py / make_tiny_glm4moe_gguf.py /
+│                 make_tiny_gptoss_gguf.py — random-weight files keeping each family's
+│                 real ratios (#390), for the logits probe against llama.cpp master;
+│                 qwen2_exact_reference.py (Qwen2, Qwen2.5-VL text, Llama, Granite) /
+│                 glm4moe_exact_reference.py / gptoss_exact_reference.py — a float64
+│                 forward of llama.cpp's graph, weights dequantized a layer (gpt-oss: an
+│                 expert) at a time: which engine is off where two differ;
 │                 score_against_reference.py — a reply teacher-forced through llama.cpp, rank
 │                 of every token: the test for a split reply where byte-equality is not;
 │                 `--lora` scores against llama.cpp applying an adapter, which

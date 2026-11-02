@@ -695,7 +695,9 @@ grep "Decode thread width calibrated" node.log
 
 `decode_threads=1` beside 7-13 ms samples is a guess timed as a processor token (#983); NO line
 after several replies is a loop that never takes a plain step (#984 — it now steps plainly until
-the line appears, within the first reply).
+the line appears, within the first reply). **A mixture-of-experts arm with its experts in RAM** picks 3 or 4
+threads by luck, and 3 decodes ~12% slower (FUTURE_WORK #396): when prev and cand picked differently,
+re-run that arm with `SWARMLLM_DECODE_THREADS` pinned for both before reading the ratio.
 
 **How well would the card guess for a model?** `examples/skip_agreement_probe.rs` measures it
 before any code changes: teacher-forced on the card, the full model's greedy reply is fed and at

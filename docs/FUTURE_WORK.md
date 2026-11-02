@@ -46,6 +46,10 @@ margin, refusals that name each computer's room). #369 is listed on its own (P1)
 rewritten. What each release carried is in § "Closed" and `CHANGELOG.md`; earlier rankings moved
 word for word to the archive, § "PRIORITIES re-rank log". Only OPEN work is listed here.
 `docs/plans/` holds the multi-step designs; the entries point at them.
+**2026-11-02:** v0.3.268 (0.3.267 folded in, never published) shipped gpt-oss (#390 item 2, on the
+processor), thinking models answering cleanly and switchable (#392, #391), Qwen's XML tool calls (#395), no
+re-download of held parts (#393), #394, keeping what people run (#389), #369's dead wait, #388's report (off),
+#155's fix and #91 (2k); the ranking below is otherwise unchanged. New: #396 (P3).
 **2026-10-20:** #318 goes first among P2 by the user's direction: running models too large for
 any one member at a usable speed is what the swarm is for, so split speed for large models is
 the top track (`docs/plans/large_model_splits.md`).
@@ -72,8 +76,8 @@ the top track (`docs/plans/large_model_splits.md`).
 6. **#388** — the flow's guard takes a far computer's own delay for a queue on the link (the
    slowest reply of two 12-arm runs on 2026-11-01). The far now reports its own time and the guard
    can read it apart (`SWARMLLM_FLOW_SERVED_TIME=1`, off: it lost on a processor-only rig, for
-   that rig's reasons). **Next**: the real-link A/B once the release carries bit 36 — the default
-   follows it. (#369 CLOSED 2026-11-01.)
+   that rig's reasons). **Next**: the real-link A/B — v0.3.268 carries bit 36 since 2026-11-02; the
+   default follows it. (#369 CLOSED 2026-11-01.)
 7. **#318** — a model no single member can hold, at a usable speed. **Llama-3.3-70B on two
    machines — this one (8 GB card + processor) and an RTX 3060 in Australia (~420 ms) — reads
    2.37-2.61 tok/s on new questions (v0.3.264, 2026-10-31 04Z) and 1.81-2.22 (v0.3.265, 12Z, the
@@ -1139,7 +1143,8 @@ remove one. Measure the newcomer's first-plan delay before and after.
 #### #155 — AutoNAT redials a peer this node is already connected to, and the per-peer cap denies it, every ~5 s
 `P3` · network · **PARTIAL** — 2026-10-02, narrowed 2026-10-07, recurred 2026-10-30/31, **cause found and fixed 2026-11-02** (field check left) · history: archive row #155, gotcha #774, #1020
 
-**2026-11-02: the LAN churn is stale Kademlia records, not AutoNAT — fixed; read it after the release.** It was
+**2026-11-02: the LAN churn is stale Kademlia records, not AutoNAT — fixed in v0.3.268; read it once that
+release has run 4 h on both computers** (this one and the LAN box run it since ~05:56Z 11-02). It was
 running again (this node's log, 16:42-20:33Z 11-01): 1,540 connections from the LAN box, each inbound,
 `ApplicationClosed 0` within ~0.1 ms — and this node itself made **3,148 dials that failed "Unexpected peer ID"**,
 every one to an identity that had once listened on THIS machine's port 8800 (192.168.1.60, 10.255.255.254 —
@@ -1825,8 +1830,8 @@ designs lost to the whole delay, the first reply of every arm by 14-46% — on o
 costs this node's drafter and its own layers too, so the guard's pin at 2×32 is the best that rig
 can do.
 
-**Left**: (1) the A/B where #388 came from — a card far on the real link — once a release carries
-bit 36: `real_link.sh` arms `flow@SWARMLLM_FLOW_SERVED_TIME=1` against `flow`, ABBA × 3, prose and
+**Left**: (1) the A/B where #388 came from — a card far on the real link — now that v0.3.268 carries
+bit 36 (2026-11-02): `real_link.sh` arms `flow@SWARMLLM_FLOW_SERVED_TIME=1` against `flow`, ABBA × 3, prose and
 code, the far's slow spells counted per reply (`served_read`, `far_cuts`, `far_undone`); the
 default follows it. (2) On the rig the link's share of a delay rose ~400 ms over its least while
 the far was busy — most likely both nodes' network tasks waiting for the one processor, not
@@ -2905,7 +2910,7 @@ match llama.cpp** (#715, `arch-inference.md`).
    0.99997 of it; on the quantized file (MXFP4 experts, Q8_0 rest) both engines are equally far from
    the exact answer (median 0.994 ours, 0.993 llama.cpp). So gpt-oss moved from the hard refusal to
    the unchecked-family switch (`SWARMLLM_UNCHECKED_FAMILIES=gpt-oss`). **The real file is checked
-   and gpt-oss is ON** (2026-11-02): gpt-oss-20b's replies are llama.cpp master's (one word for
+   and gpt-oss is ON** (2026-11-02, released in v0.3.268-alpha): gpt-oss-20b's replies are llama.cpp master's (one word for
    word, one for 102 tokens to a tie) and an exact forward of the file puts ours as near as
    llama.cpp (invariants inference § "gpt-oss: the whole forward"); `supported_list` names it;
    through a node, a two-node processor split gave the reference reply on both surfaces (a single
