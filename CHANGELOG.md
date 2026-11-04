@@ -26,6 +26,16 @@ a file — where another computer runs such a model, the browser said it ran loc
 are never listed, and a model this version cannot load offers no download and fits nowhere on your
 computer; where the swarm runs it, the browser offers to chat with it through the swarm.
 
+**A computer whose storage is full now makes room for a model only one other computer holds.** A
+new model held by a single computer is one that disappears from the swarm when that computer goes
+offline, so a full computer gives back a copy that plenty of others hold to take a part of it. It
+only did so for a copy at least four computers held, and in a swarm of this size nearly every part
+is held by three — so a full computer asked for room about once a minute and gave none, and new
+models stayed on one computer. Now a copy three computers hold may make way for a part one computer
+holds (two copies of each, rather than three and one); a copy with two holders is never given up
+for it. The line saying a part wants room is logged once when that part changes, then every 10
+minutes, instead of every minute (#401).
+
 ## [0.3.271-alpha] — 2026-11-04
 
 **A computer that only takes stops being served, the peer list shows what each computer does for

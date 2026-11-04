@@ -1327,22 +1327,42 @@ prune could free nothing, and any smaller part asking room, chosen beside it, hi
 lack. Measured after the choices, what prune frees covers the part whatever the tiers below took,
 so the stop is no longer what makes the room land. Prune's `spare_for_room` is the hole
 rule's with two additions: never a copy of the wanted part's own model (no gap opened in this
-node's run of it), and for `Scarce` a floor of `wanted_holders + 2` (`floor_for_room`) — a copy is
-given back only from a part with at least three more live holders than the wanted one has, so each
-such trade lowers the sum of squared holder counts by at least 4 and no run of trades between full
-machines can return to where it started. That is the hysteresis Petals gets from `balance_quality`
-(`should_choose_other_blocks` moves a server only where the swarm's weakest span gains enough); a
-hole's or a planned part's floor stays two others, since a plan decides those and the copy given
-back is wanted by neither. Several full machines deciding at once can overshoot by one round —
-each gives back down to the floor, never past it, since the first `floor` holders by rendezvous
-keep theirs — and the next trades close the gap to two; churn, bounded, not a cycle (review,
-2026-10-29). The same review asked to keep the region rule for `Scarce`; declined: on a full
-machine the region rule is what keeps its copies (21 of 28 on 10-25), so a reason held to copies
-the count keeps would seldom make room. The hash ring still spreads `Scarce` parts of a model a node holds none
-of, so full machines do not all trade for the same part. Tests:
-`a_full_node_gives_back_a_copy_three_holders_richer_for_a_part_one_computer_holds` (its control:
-three holders, room noted, nothing given back), `a_copy_of_the_wanted_parts_own_model_is_never_given_back`,
-and `near_chain::a_full_node_makes_room_for_its_part_of_the_chain`.
+node's run of it), and for `Scarce` a floor of `wanted_holders + 1` (`floor_for_room`) — a copy is
+given back only from a part with `a` live holders at least two more than the wanted part's `b`.
+That is exactly where the trade gains: the sum of squared holder counts falls by `2(a − b − 1)`,
+and with each computer leaving with probability `p` the expected parts lost, `Σ p^n`, falls by
+`(1 − p)(p^b − p^(a−1))` — positive only for `a ≥ b + 2`. It is TinyLFU's admission rule (a
+newcomer replaces the victim only when it is worth more: here the wanted part's second copy
+against the donor's third). A donor ends at `a − 1 ≥ b + 1`, above the level of the part it made
+room for, so the parts at the lowest count only ever become fewer and no run of trades between
+full machines returns to where it started, even on counts a round stale. A hole's or a planned
+part's floor stays two others, since a plan decides those and the copy given back is wanted by
+neither. Several full machines deciding at once can overshoot by one round — each gives back down
+to the floor, never past it, since the first `floor` holders by rendezvous keep theirs — and the
+next trades close the gap to two; churn, bounded, not a cycle (review, 2026-10-29). The same
+review asked to keep the region rule for `Scarce`; declined: on a full machine the region rule is
+what keeps its copies (21 of 28 on 10-25), so a reason held to copies the count keeps would seldom
+make room. The hash ring still spreads `Scarce` parts of a model a node holds none of, so full
+machines do not all trade for the same part.
+
+**#401 (2026-11-04): the margin was one holder too many.** #371 shipped the `Scarce` floor as
+`wanted_holders + 2` — a donor three holders richer than the wanted part, hysteresis like Petals'
+`balance_quality` (`should_choose_other_blocks` moves a server only where the swarm's weakest span
+gains enough). In a swarm of seven computers that traded nothing. The full Proxmox node (44,000 MB
+budget, 97 MB left) noted room for a part one computer held about once a minute (105 times in 3 h)
+and prune gave back none: `candidates=0`, `kept=` 77 "too few other holders to give one back" + 8
+"prompt privacy needs this end". Its own `/api/admin/models` agreed with the check: of the 85 parts
+it held, 78 had exactly three holders (itself, `99aafc41`, `aa3d1e66`), and the seven with four to
+six were each a model's first or last part, kept for prompt privacy. So the count was right and
+the rule was the blocker: three is what nearly every part has in a swarm this size, and the
+potential argument needs no margin beyond `a ≥ b + 2`. The download pass's line naming the part
+that asks is now written when that part changes, otherwise every `KEPT_REPORT_EVERY` (10 min) —
+prune's account beside it already was — while the note itself is still renewed every cycle.
+Tests: `a_full_node_gives_back_a_copy_two_holders_richer_for_a_part_one_computer_holds` (its
+control: two holders, room noted, nothing given back; red with the old floor),
+`a_copy_of_the_wanted_parts_own_model_is_never_given_back`,
+`near_chain::a_full_node_makes_room_for_its_part_of_the_chain` and
+`kept_by_tests::a_report_about_one_part_repeats_when_the_part_changes_or_once_per_interval`.
 
 **A part of a model people run, held by one computer, is scarce too (2026-11-02).** `is_scarce`
 took only a model somebody had asked for, so a model released lately — run by many outside the

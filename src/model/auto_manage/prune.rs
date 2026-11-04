@@ -178,9 +178,10 @@ const RECENT_REQUEST_PENALTY: f64 = 1.5;
 const KEPT_FOR_ITS_COUNT: &str = "not more copies than the target";
 const KEPT_FOR_ITS_REGION: &str = "the last close holder in this region";
 
-/// How often prune says why it gave nothing back while a part asks for room.
+/// How often prune says why it gave nothing back while a part asks for room,
+/// and the download pass repeats which part asks (`due_when_changed_or_every`).
 /// The download pass renews its note every cycle, so this is a rate limit.
-const KEPT_REPORT_EVERY: Duration = Duration::from_secs(600);
+pub(super) const KEPT_REPORT_EVERY: Duration = Duration::from_secs(600);
 
 /// What one prune pass kept of the parts this node holds, counted by the rule
 /// that kept each. A full node that frees nothing says which rule held every
@@ -226,6 +227,30 @@ fn due_every(last: &std::sync::Mutex<Option<std::time::Instant>>, every: Duratio
             let due = last.is_none_or(|t| now.duration_since(t) >= every);
             if due {
                 *last = Some(now);
+            }
+            due
+        }
+        Err(_) => false,
+    }
+}
+
+/// [`due_every`] for a report about one thing (`key`): due at once when the
+/// thing changes, otherwise once every `every`. The download pass renews its
+/// note that a part wants room here every cycle, about once a minute, and a
+/// full node that could free nothing said so 105 times in 3 h (#401).
+pub(super) fn due_when_changed_or_every<K: PartialEq>(
+    last: &std::sync::Mutex<Option<(K, std::time::Instant)>>,
+    key: K,
+    every: Duration,
+) -> bool {
+    match last.lock() {
+        Ok(mut last) => {
+            let now = std::time::Instant::now();
+            let due = last
+                .as_ref()
+                .is_none_or(|(seen, at)| *seen != key || now.duration_since(*at) >= every);
+            if due {
+                *last = Some((key, now));
             }
             due
         }
@@ -1510,13 +1535,24 @@ impl AutoShardManager {
     /// this node's copy to be given back to make room for a part that asks
     /// (`why`, held by `wanted_holders` computers): `min_replicas`, and never
     /// under two — so two other copies remain. For a SCARCE part
-    /// ([`super::manager::RoomFor::Scarce`]) also at least two more than it
-    /// will have once fetched, so every copy given back for one moves from a
-    /// part with three or more holders beyond it: each such trade lowers the
-    /// sum of the parts' squared holder counts, so no run of trades between
-    /// full machines comes back to where it started — the hysteresis Petals'
-    /// rebalance gets from `balance_quality` (`should_choose_other_blocks`:
-    /// a server moves only where the swarm's weakest span gains enough).
+    /// ([`super::manager::RoomFor::Scarce`]) also at least two more than the
+    /// part has now, so a copy given back for it moves from a part with `a`
+    /// holders to one with `b` only where `a ≥ b + 2`. That is exactly where
+    /// the trade gains: the sum of the parts' squared holder counts falls by
+    /// `2(a − b − 1)`, and the chance some part is lost when each computer
+    /// leaves with probability `p` falls too (the copy gained is worth
+    /// `p^b`, the one given up `p^(a−1)`) — TinyLFU's admission rule, a
+    /// newcomer replaces a victim only when it is worth more. A copy given
+    /// back never falls to the level of the part it makes room for, so no
+    /// run of trades between full machines comes back to where it started,
+    /// even with counts a round stale.
+    ///
+    /// #401 (2026-11-04): this asked for a THIRD holder of margin
+    /// (`a ≥ b + 3`, hysteresis like Petals' `balance_quality`), and in a
+    /// swarm of seven computers that was no trade at all — the full Proxmox
+    /// node held 85 parts, 78 of them at exactly three holders and the other
+    /// seven a model's first or last part (prompt privacy), so it noted room
+    /// for a part one computer held every minute and gave nothing back.
     /// A hole or this node's planned part needs no margin: a plan, not a
     /// count, decides those, and the copy given back is wanted by neither.
     pub(super) fn floor_for_room(
@@ -1526,7 +1562,7 @@ impl AutoShardManager {
     ) -> usize {
         let floor = (self.shared_state.cfg().auto_manage.min_replicas as usize).max(2);
         match why {
-            super::manager::RoomFor::Scarce => floor.max(wanted_holders.saturating_add(2)),
+            super::manager::RoomFor::Scarce => floor.max(wanted_holders.saturating_add(1)),
             super::manager::RoomFor::Hole | super::manager::RoomFor::Placed => floor,
         }
     }
@@ -2958,7 +2994,7 @@ mod recent_use_protection_tests {
 
 #[cfg(test)]
 mod kept_by_tests {
-    use super::{due_every, KeptBy};
+    use super::{due_every, due_when_changed_or_every, KeptBy};
     use std::time::Duration;
 
     /// 2026-11-02: the Proxmox box gave nothing back for a part one computer
@@ -2994,5 +3030,20 @@ mod kept_by_tests {
         assert!(due_every(&last, Duration::from_secs(600)));
         assert!(!due_every(&last, Duration::from_secs(600)));
         assert!(due_every(&last, Duration::ZERO));
+    }
+
+    /// #401: the download pass's line naming the part that wants room is
+    /// written when that part changes and otherwise once per interval — a
+    /// full node that could free nothing wrote it 105 times in 3 h.
+    #[test]
+    fn a_report_about_one_part_repeats_when_the_part_changes_or_once_per_interval() {
+        let last = std::sync::Mutex::new(None);
+        let every = Duration::from_secs(600);
+        assert!(due_when_changed_or_every(&last, ("a", 26), every));
+        assert!(!due_when_changed_or_every(&last, ("a", 26), every));
+        assert!(due_when_changed_or_every(&last, ("b", 0), every));
+        assert!(due_when_changed_or_every(&last, ("a", 26), every));
+        assert!(!due_when_changed_or_every(&last, ("a", 26), every));
+        assert!(due_when_changed_or_every(&last, ("a", 26), Duration::ZERO));
     }
 }

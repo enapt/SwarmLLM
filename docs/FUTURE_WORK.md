@@ -44,7 +44,7 @@ requests only for a computer that shares (two parts or more, fewer than two publ
 behind — one further behind is disconnected), a whole card placement split before its load where
 its cache would not fit (#322's spawn half), the Hugging Face search refusing files the swarm
 cannot host (#404's search half) and each computer's give and take in the peer list. New since:
-#403 (P2, closed), #367 raised to P1 (item 6, field report 2026-11-04), #401 (P2, item 9), #396 and #399 (P3, taken together: both are the decode
+#403 (P2, closed), #367 raised to P1 (item 6, field report 2026-11-04), #401 (P2, closed), #396 and #399 (P3, taken together: both are the decode
 width), #400, #402, #404 (P3), #397 (P4).
 **2026-11-04:** #403 goes first among the open work by the user's direction: the release cut-off
 and the use gate must not be passable through a relay. Closed the same day (§ "Closed"). What each release carried is in § "Closed" and `CHANGELOG.md`; earlier
@@ -106,12 +106,8 @@ the top track (`docs/plans/large_model_splits.md`).
    third machine pays only where it holds what two cannot, which is the 70B's case. The track's
    history (near chains #192, the far chain #346, trees #134, the stream, tensor-core MMQ #325,
    requester guesses) is in the #318 entry and § "Closed".
-9. **#401** — a full computer asks every minute for room for a part only one computer holds and
-   frees nothing, so a model new to the swarm can stay on one computer. Read on v0.3.271: every
-   part the full Proxmox node holds is kept, 77 because too few other computers hold them to give
-   one back, 8 for prompt privacy. **Next**: check that holder count against the node's own, then
-   an end state for an ask that finds nothing, and whether a copy at 3 holders gives way to a part
-   at 1.
+9. (#401 CLOSED 2026-11-04 — a full computer gives back a copy three computers hold for a part
+   one computer holds; ships in the next release, § "Closed".)
 10. **#115** — the rest of Gemma 4: its image reader and its drafters, refused by name today,
    never loaded wrong. (Gemma 3 reads pictures as llama.cpp does since 2026-10-19; Gemma 4's
    E2B/E4B run since 2026-10-17 and fit a 4 GB / 6 GB card whole since #296.)
@@ -1169,30 +1165,6 @@ not the budget's) and the ring is built from those only, an older node counted a
 **2026-11-04**: `NodeCapability::auto_manage` now carries the first half (v0.3.271, display only so
 far — the ring does not read it yet); the Russian node is also refused USE of the swarm now
 (`daemon::state::swarm_use`), which does not change what the ring hands it.
-
-#### #401 — A full computer asks for room for a scarce part every minute and prune gives none back
-`P2` · placement · **OPEN** — 2026-11-02, still true 2026-11-04 · history: this entry; v0.3.270's `RoomFor::Scarce`; the `kept=` report (`d3040a3c`, released in v0.3.271)
-
-The Proxmox node (`96842635`, 59 GB, 7.4 GB free) logs `a part the swarm is short of does not
-fit what storage is left — prune may give back spare copies to make room` about once a minute
-(105 times in 3 h on 2026-11-04, `qwen3-4b-q4-k-m` part 2, `holders=1`, `lacks_mb=409`; on
-11-02 it was `ornith-1.5-35b-q4-k-m` part 9) and prune frees nothing, though it holds copies
-four to six computers also hold (llama-3.2-1b, xlam-3b, qwen2.5-14b, xlam-8b on 11-02). So the
-room note v0.3.270 added for a popular-list model held by one computer reaches the full
-computers that should make room for it and changes nothing there. **Not established**: which
-rule keeps those copies — suspects `kept_by_rank`, a loaded model, a 24 h shed target.
-**Read on v0.3.271 (2026-11-04 11:12Z, the first report after the update)**: held 43,902 of a
-44,000 MB budget (`auto_manage.max_storage_mb`), asking 322 MB for a `gpt-oss-20b-q4-k-m` part,
-`candidates=0`, `kept=not more copies than the target, not given back for room: too few other
-holders to give one back (77); prompt privacy needs this end (8)`. So the rule is the donor
-check — a copy is given back for room only with ≥ 4 other live holders — and on 11-04 no part
-there passes it. **Not established**: whether those 77 really have ≤ 3 other live holders (the
-copies seen at 4-6 holders on 11-02, a smaller swarm since the 0.3.268 node was cut off) or the
-count the check reads misses some. **Next**: compare the box's holder counts for the kept parts
-(`/api/admin/models` there) with the check's; if the count is right, what is left is the end
-state — an ask that found `candidates=0` waits until holdings or holder counts change instead of
-asking every minute — and whether a copy at 3 holders may give way to a part at 1 (TinyLFU admits
-on frequency; here both sides are scarce).
 
 ### Network and transport
 
@@ -4471,7 +4443,22 @@ Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
 
-**Closed 2026-11-04, ships in the next release** (#403)
+**Closed 2026-11-04, ships in the next release** (#403, #401)
+- #401 — **A full computer now makes room for a part only one computer holds, giving back a copy
+  three computers hold.** Read on the full Proxmox node (44,000 MB budget, 97 MB left), which noted
+  room for such a part about once a minute (105 times in 3 h) and gave nothing back: its own
+  `/api/admin/models` agreed with prune's count — 78 of its 85 parts had exactly three holders and
+  the other seven were a model's first or last part, kept for prompt privacy. So the count was
+  right and the rule was the blocker: `floor_for_room` asked a donor for THREE more holders than the
+  wanted part (#371's hysteresis), which a swarm of seven computers, where three is what nearly
+  every part has, never offers. Now two more (`a ≥ b + 2`): exactly where a trade lowers both the
+  sum of squared holder counts and the expected parts lost (TinyLFU's admission rule, the wanted
+  part's second copy against the donor's third), and a donor never falls to the wanted part's
+  level, so trades still cannot cycle. The download pass's line naming the part that asks is
+  written when that part changes, otherwise every 10 min, like prune's account beside it. Tests
+  `a_full_node_gives_back_a_copy_two_holders_richer_for_a_part_one_computer_holds` (red with the
+  old floor), `a_report_about_one_part_repeats_when_the_part_changes_or_once_per_interval`;
+  evidence `docs/invariants/memory.md` § "#401 (2026-11-04): the margin was one holder too many".
 - #403 — **A computer cut off for its release, or one sharing nothing, no longer has its requests
   run here through a relay.** Traced end to end: a relayed origin is registered with no capability
   (`ensure_relayed_origin_known`), and a computer cut off here loses its registry entry with its
@@ -4863,7 +4850,8 @@ alone, sustained", v0.3.262)
   against the noted part after the cycle's choices (`scoring::room_lacked_after` — a review found a
   part held once stalling every further copy where prune could free nothing). Tests
   `a_full_node_gives_back_a_copy_three_holders_richer_for_a_part_one_computer_holds`
-  (its control: three holders, nothing given back), `a_copy_of_the_wanted_parts_own_model_is_never_given_back`,
+  (its control: three holders, nothing given back; #401 lowered the margin to two and renamed it
+  `…_two_holders_richer_…`), `a_copy_of_the_wanted_parts_own_model_is_never_given_back`,
   `near_chain::a_full_node_makes_room_for_its_part_of_the_chain`,
   `the_room_a_part_lacks_is_measured_after_what_the_cycle_chose`. Evidence:
   `docs/invariants/memory.md` § "A full node makes room for its planned part". Field check owed:

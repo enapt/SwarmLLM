@@ -172,6 +172,9 @@ pub struct AutoShardManager {
     /// When prune last said why it gave nothing back while a part asked for
     /// room (`prune::KeptBy`).
     pub(super) last_kept_report: std::sync::Mutex<Option<std::time::Instant>>,
+    /// Which part the download pass last said wants room here, and when
+    /// ([`Self::room_report_due`]).
+    last_room_report: std::sync::Mutex<Option<((ModelId, u32), std::time::Instant)>>,
     /// Each model's processor cost curve, kept a few minutes (`coverage`, #231):
     /// it parses the model's header, and prune asks about every part it holds.
     pub(super) carry_curves: dashmap::DashMap<ModelId, (std::time::Instant, Option<(u64, u64)>)>,
@@ -316,6 +319,7 @@ impl AutoShardManager {
             download_semaphore,
             last_over_budget_warning: std::sync::Mutex::new(None),
             last_kept_report: std::sync::Mutex::new(None),
+            last_room_report: std::sync::Mutex::new(None),
             carry_curves: dashmap::DashMap::new(),
             carrier_leases: dashmap::DashMap::new(),
             carriers_passed_over: dashmap::DashMap::new(),
@@ -342,6 +346,18 @@ impl AutoShardManager {
         if let Ok(mut noted) = self.room_wanted.lock() {
             *noted = room;
         }
+    }
+
+    /// Is the line saying `part` wants room here due in the log? When the
+    /// part asking changes, otherwise every [`super::prune::KEPT_REPORT_EVERY`]
+    /// — the cadence of prune's account, beside it, of what it kept. The note
+    /// itself is still renewed every cycle: only the line waits (#401).
+    fn room_report_due(&self, part: &ShardCandidate) -> bool {
+        super::prune::due_when_changed_or_every(
+            &self.last_room_report,
+            (part.model_id.clone(), part.shard_index),
+            super::prune::KEPT_REPORT_EVERY,
+        )
     }
 
     /// The room a part the swarm is short of lacks here, while the download
@@ -1076,15 +1092,17 @@ impl AutoShardManager {
             );
             self.note_room_wanted(wanting.zip(lacks));
             if let (Some(part), Some(bytes)) = (wanting, lacks) {
-                tracing::info!(
-                    model = %part.model_id,
-                    shard = part.shard_index,
-                    holders = part.holder_count,
-                    lacks_mb = bytes / MB,
-                    why = part.asks_room.map_or("a part", RoomFor::describe),
-                    "DIAG: storage is full and a part the swarm is short of wants a place here \
-                     — prune may give back spare copies to make room"
-                );
+                if self.room_report_due(part) {
+                    tracing::info!(
+                        model = %part.model_id,
+                        shard = part.shard_index,
+                        holders = part.holder_count,
+                        lacks_mb = bytes / MB,
+                        why = part.asks_room.map_or("a part", RoomFor::describe),
+                        "DIAG: storage is full and a part the swarm is short of wants a place here \
+                         — prune may give back spare copies to make room"
+                    );
+                }
             }
             return;
         }
@@ -1112,16 +1130,18 @@ impl AutoShardManager {
         let lacks = super::scoring::room_lacked_after(wanting.as_ref(), &selected, budget);
         self.note_room_wanted(wanting.as_ref().zip(lacks));
         if let (Some(part), Some(bytes)) = (&wanting, lacks) {
-            tracing::info!(
-                model = %part.model_id,
-                shard = part.shard_index,
-                holders = part.holder_count,
-                lacks_mb = bytes / (1024 * 1024),
-                budget_mb = budget / (1024 * 1024),
-                why = part.asks_room.map_or("a part", RoomFor::describe),
-                "DIAG: a part the swarm is short of does not fit what storage is left — prune \
-                 may give back spare copies to make room"
-            );
+            if self.room_report_due(part) {
+                tracing::info!(
+                    model = %part.model_id,
+                    shard = part.shard_index,
+                    holders = part.holder_count,
+                    lacks_mb = bytes / (1024 * 1024),
+                    budget_mb = budget / (1024 * 1024),
+                    why = part.asks_room.map_or("a part", RoomFor::describe),
+                    "DIAG: a part the swarm is short of does not fit what storage is left — \
+                     prune may give back spare copies to make room"
+                );
+            }
         }
         if selected.is_empty() {
             return;
@@ -2000,9 +2020,6 @@ mod room_wanted {
         BelowHereOnEveryPart,
         /// One: two holders, the floor.
         One,
-        /// Three, all ranked above this node for parts 0 and 1: four holders,
-        /// three more than a part one computer holds will have once fetched.
-        ThreeAboveHereOnPartsZeroAndOne,
     }
 
     /// Far computers chosen by [`Far`] — machine ids drawn from a fixed
@@ -2019,7 +2036,6 @@ mod room_wanted {
             (0..2).all(|i| part_rank_weight(&part(i), n) > part_rank_weight(&part(i), local))
         };
         let picked: Vec<NodeId> = match want {
-            Far::ThreeAboveHereOnPartsZeroAndOne => candidates.filter(above_here).take(3).collect(),
             Far::AboveHereOnPartsZeroAndOne => candidates.filter(above_here).take(2).collect(),
             Far::BelowHereOnEveryPart => candidates
                 .filter(|n| {
@@ -2032,7 +2048,6 @@ mod room_wanted {
         };
         let wanted = match want {
             Far::One => 1,
-            Far::ThreeAboveHereOnPartsZeroAndOne => 3,
             Far::AboveHereOnPartsZeroAndOne | Far::BelowHereOnEveryPart => 2,
         };
         assert_eq!(picked.len(), wanted, "fixture: the far computers exist");
@@ -2234,15 +2249,18 @@ mod room_wanted {
     }
 
     /// #371: a full node makes room for a part of a model somebody asked for
-    /// that ONE computer holds — but only from a copy with at least three
-    /// more holders than that part will have, so trades between full machines
-    /// cannot go round in a circle. With three holders of each copy (the
-    /// control) the room is noted and nothing is given back; with four, one
-    /// copy goes and the part is the next fetched. Before #371 a full node
-    /// noted room only for a part no computer held.
+    /// that ONE computer holds — from a copy with at least two more holders
+    /// than that part has, so a copy given back never falls to the level of
+    /// the part it makes room for and trades between full machines cannot go
+    /// round in a circle. With two holders of each copy (the control) the
+    /// room is noted and nothing is given back; with three, one copy goes
+    /// and the part is the next fetched. #401: three holders gave nothing
+    /// back until 2026-11-04 — in a swarm of seven computers, three is what
+    /// nearly every part has. Before #371 a full node noted room only for a
+    /// part no computer held.
     #[tokio::test]
-    async fn a_full_node_gives_back_a_copy_three_holders_richer_for_a_part_one_computer_holds() {
-        let control = full_node_beside_parts_held_once(Far::AboveHereOnPartsZeroAndOne);
+    async fn a_full_node_gives_back_a_copy_two_holders_richer_for_a_part_one_computer_holds() {
+        let control = full_node_beside_parts_held_once(Far::One);
         ask_for(&control.state, &control.large);
         control.manager.evaluate_and_download().await;
         let room = control
@@ -2251,17 +2269,17 @@ mod room_wanted {
             .expect("a part one computer holds asks for room");
         assert_eq!(
             (room.bytes, room.why, room.floor),
-            (PART, RoomFor::Scarce, 3),
-            "it will have two holders once here: a copy needs more than three"
+            (PART, RoomFor::Scarce, 2),
+            "a part held once: a copy needs more than two holders"
         );
         control.manager.evaluate_and_prune().await;
         assert_eq!(
             parts_here(&control.state, &control.copies),
             vec![0, 1],
-            "control: three holders of each copy — none to spare for a part held once"
+            "control: two holders of each copy — none to spare for a part held once"
         );
 
-        let shape = full_node_beside_parts_held_once(Far::ThreeAboveHereOnPartsZeroAndOne);
+        let shape = full_node_beside_parts_held_once(Far::AboveHereOnPartsZeroAndOne);
         ask_for(&shape.state, &shape.large);
         shape.manager.evaluate_and_download().await;
         assert_eq!(
@@ -2273,7 +2291,7 @@ mod room_wanted {
         assert_eq!(
             kept.len(),
             1,
-            "one copy of four holders given back ({kept:?})"
+            "one copy of three holders given back ({kept:?})"
         );
         let next = chosen(&shape);
         assert_eq!(next.len(), 1, "one part a cycle at this contribution");
