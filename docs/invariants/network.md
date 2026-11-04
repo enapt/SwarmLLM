@@ -5768,7 +5768,7 @@ none; and a computer two releases behind should not be served either.
 
 **What was chosen, and why.**
 - **A threshold on what the requester announces, judged by the SERVING node.** The book's test
-  (`security.md` § "Misuse of the Network"): a limit counts only if someone other than the party
+  (`docs/book/src/architecture/security.md` § "Misuse of the Network"): a limit counts only if someone other than the party
   it stops enforces it. The serving node sees only the requester's capability, so the rule is a
   threshold on it, not a ledger — IPFS BitSwap's debt ratio and Petals' planned points both judge
   what the serving side can observe; BitTorrent's tit-for-tat judges observed upload, which a

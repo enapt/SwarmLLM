@@ -96,6 +96,10 @@ pub const CUT_OFF_FOR: std::time::Duration = std::time::Duration::from_secs(10 *
 /// names no SwarmLLM version.
 const AGENT_PREFIX: &str = "swarmllm/";
 
+/// The longest version string taken from a peer — far past any real one
+/// (`0.3.271-alpha` is 13), so a peer cannot park a long string in the map.
+const MAX_VERSION_LEN: usize = 64;
+
 /// What this node tells every computer it meets in Identify, so a computer
 /// can be judged before anything else is sent to it.
 pub fn agent_version() -> String {
@@ -105,7 +109,7 @@ pub fn agent_version() -> String {
 /// The SwarmLLM version an Identify agent version names, if it names one.
 pub fn version_in_agent(agent: &str) -> Option<&str> {
     let version = agent.strip_prefix(AGENT_PREFIX)?;
-    (version.len() <= 64 && version_triple(version).is_some()).then_some(version)
+    (version.len() <= MAX_VERSION_LEN && version_triple(version).is_some()).then_some(version)
 }
 
 /// May a computer have other computers run its requests?
@@ -305,15 +309,11 @@ fn too_far_behind(running: &str, releases: &ReleasesKnown) -> Option<SwarmUse> {
 }
 
 impl SharedState {
-    /// The newest release this node knows of: its own, or a newer one its
-    /// update check found SIGNED (`UpdateInfo::signature_verified`). Never a
-    /// peer's claim, never a bare tag (module docs).
-    pub fn newest_release_known(&self) -> String {
-        self.releases_known().newest
-    }
-
-    /// [`Self::newest_release_known`] with the published releases the update
-    /// check listed, which [`ReleasesKnown::behind`] counts. Never waits: the
+    /// The newest release this node knows of — its own, or a newer one its
+    /// update check found SIGNED (`UpdateInfo::signature_verified`); never a
+    /// peer's claim, never a bare tag (module docs) — with the published
+    /// releases the update check listed, which [`ReleasesKnown::behind`]
+    /// counts. Never waits: the
     /// network loop asks it; a check writing the state right now reads as
     /// this node's own version and no list, which judges nobody behind.
     pub fn releases_known(&self) -> ReleasesKnown {
@@ -339,7 +339,7 @@ impl SharedState {
     /// ([`Self::forget_peers_own_version`]). Never a capability gossiped or
     /// stored in the DHT: another node can play an old one back.
     pub fn note_peers_own_version(&self, node: &NodeId, version: &str) {
-        if version.len() > 64 || version_triple(version).is_none() {
+        if version.len() > MAX_VERSION_LEN || version_triple(version).is_none() {
             return;
         }
         self.peers_own_versions

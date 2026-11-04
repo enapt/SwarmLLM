@@ -41,6 +41,12 @@ pub fn peer_id_to_node_id(peer_id: &PeerId) -> Option<NodeId> {
     Some(NodeId(bytes))
 }
 
+/// The computer behind a libp2p PeerId carried as bytes — the shape the
+/// dispatcher is handed for an inbound message's authenticated sender.
+pub fn node_id_of_peer_bytes(peer_bytes: &[u8]) -> Option<NodeId> {
+    peer_id_to_node_id(&PeerId::from_bytes(peer_bytes).ok()?)
+}
+
 /// The congestion controller this node's QUIC connections run: quinn's BBR,
 /// which paces a send by the delivery rate it has measured. quinn's default,
 /// Cubic, paces every send at window / round trip, and grows the window only

@@ -49,30 +49,7 @@ pub fn allowed_node_set(shared: &SharedState) -> Option<HashSet<NodeId>> {
         return None;
     }
 
-    let mut allowed = HashSet::new();
-
-    // Always include ourselves
-    allowed.insert(shared.identity.node_id().clone());
-
-    // Add all pool members.
-    // `try_read` avoids blocking in sync callers; on contention we'd silently
-    // fall back to the self-only set (too-restrictive, not a bypass) so at
-    // least log it so recurring contention is visible.
-    match shared.credits.pool_state.try_read() {
-        Ok(guard) => {
-            if let Some(ref ps) = *guard {
-                for m in &ps.members {
-                    allowed.insert(m.node_id.clone());
-                }
-            }
-        }
-        Err(_) => {
-            tracing::warn!(
-                "pool_state contended during allowed_node_set() — falling back to self-only; \
-                 inference scope may be briefly too restrictive"
-            );
-        }
-    }
+    let mut allowed = this_computer_and_its_pool(shared);
 
     // Optionally include LAN peers. Read LIVE (`cfg()`): this is the privacy
     // gate, and the boot snapshot kept admitting LAN peers after the owner had
@@ -87,6 +64,30 @@ pub fn allowed_node_set(shared: &SharedState) -> Option<HashSet<NodeId>> {
     }
 
     Some(allowed)
+}
+
+/// This node and its own pool's devices — the home both private mode and a
+/// computer that may not use the swarm are held to.
+///
+/// `try_read` avoids blocking in sync callers; on contention it falls back to
+/// this node alone (too restrictive, never a bypass), said out loud so
+/// recurring contention is visible.
+fn this_computer_and_its_pool(shared: &SharedState) -> HashSet<NodeId> {
+    let mut home = HashSet::from([shared.identity.node_id().clone()]);
+    match shared.credits.pool_state.try_read() {
+        Ok(guard) => {
+            if let Some(ps) = guard.as_ref() {
+                home.extend(ps.members.iter().map(|m| m.node_id.clone()));
+            }
+        }
+        Err(_) => {
+            tracing::warn!(
+                "pool_state contended while scoping a request — falling back to this computer \
+                 alone; inference scope may be briefly too restrictive"
+            );
+        }
+    }
+    home
 }
 
 /// Which computers a request for `model_id` may reach (`None` = any) — the
@@ -122,13 +123,7 @@ pub fn request_scope(
     // other people's computers too. Asked here, the one answer every path a
     // request leaves by asks, so no path can be added that forgets it.
     if !shared.swarm_use_here().is_allowed() {
-        let mut home = HashSet::from([shared.identity.node_id().clone()]);
-        if let Ok(guard) = shared.credits.pool_state.try_read() {
-            if let Some(ps) = guard.as_ref() {
-                home.extend(ps.members.iter().map(|m| m.node_id.clone()));
-            }
-        }
-        return Some(home);
+        return Some(this_computer_and_its_pool(shared));
     }
     let mut scope = allowed_node_set(shared)?;
     scope.extend(cross_pool_extras(shared, model_id));

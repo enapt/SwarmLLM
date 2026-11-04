@@ -1141,7 +1141,7 @@ are. Either way a capability is a peer's claim, so it may add a holder for plann
 remove one. Measure the newcomer's first-plan delay before and after.
 
 #### #400 — The download ring counts machines that never fetch, so a part assigned to one is fetched by nobody
-`P3` · placement · **OPEN** — 2026-11-02 · history: this entry; gotcha #1027; `docs/invariants/memory.md` § "A part of a model people run … is scarce too"
+`P3` · placement · **OPEN** — 2026-11-02 · history: this entry; gotcha #1027; `docs/invariants/memory.md`, the paragraph "A part of a model people run, held by one computer, is scarce too" under the `would_shed_copy` heading
 
 `gather_candidates` gives each part short of its target to `replicas_needed` machines on a hash
 ring built from EVERY connected node (`scoring.rs`, `VIRTUAL_SLOTS` 10 each). A machine that never

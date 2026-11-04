@@ -172,25 +172,39 @@ impl NetworkManager {
         // Anyone can mint keys that each claim an old release, so the blocks
         // are capped as `foreign_peers` is; past the cap a computer is only
         // disconnected.
-        if self.cut_off.len() < MAX_CUT_OFF || self.cut_off.contains_key(&peer_id) {
+        let cut_off_for = crate::daemon::state::swarm_use::CUT_OFF_FOR;
+        let blocked = self.cut_off.len() < MAX_CUT_OFF || self.cut_off.contains_key(&peer_id);
+        if blocked {
             self.swarm.behaviour_mut().blocked_peers.block_peer(peer_id);
-            self.cut_off.insert(
-                peer_id,
-                std::time::Instant::now() + crate::daemon::state::swarm_use::CUT_OFF_FOR,
-            );
+            self.cut_off
+                .insert(peer_id, std::time::Instant::now() + cut_off_for);
         }
         let _ = self.swarm.disconnect_peer_id(peer_id);
         self.swarm.behaviour_mut().kademlia.remove_peer(&peer_id);
-        // INFO: at most once per peer per `CUT_OFF_FOR`, and the one line that
-        // says the rule acted.
-        tracing::info!(
-            %peer_id,
-            node = %node_id,
-            running = %running,
-            newest = %newest,
-            "Disconnected a computer two or more releases behind the newest — it may \
-             connect again in 10 minutes, and stays once it has updated"
-        );
+        // INFO for a block — at most once per peer per `CUT_OFF_FOR` — the one
+        // line that says the rule acted. Past the cap a computer is only
+        // disconnected and may come straight back, so that is DEBUG, or a
+        // flood of old keys would fill the log.
+        if blocked {
+            tracing::info!(
+                %peer_id,
+                node = %node_id,
+                running = %running,
+                newest = %newest,
+                again_in_min = cut_off_for.as_secs() / 60,
+                "Disconnected a computer two or more releases behind the newest — it may \
+                 connect again after a while, and stays once it has updated"
+            );
+        } else {
+            tracing::debug!(
+                %peer_id,
+                node = %node_id,
+                running = %running,
+                newest = %newest,
+                "Disconnected a computer two or more releases behind the newest (too many \
+                 blocked already to block it too)"
+            );
+        }
     }
 
     /// The liveness tick: let back the computers whose cut-off is over, then

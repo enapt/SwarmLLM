@@ -821,11 +821,9 @@ fn requester_of(
     requester_node_id: Option<[u8; 32]>,
     sender_peer_bytes: &[u8],
 ) -> Option<crate::types::NodeId> {
-    requester_node_id.map(crate::types::NodeId).or_else(|| {
-        libp2p::PeerId::from_bytes(sender_peer_bytes)
-            .ok()
-            .and_then(|p| crate::network::transport::peer_id_to_node_id(&p))
-    })
+    requester_node_id
+        .map(crate::types::NodeId)
+        .or_else(|| crate::network::transport::node_id_of_peer_bytes(sender_peer_bytes))
 }
 
 /// The computer whose give-and-take tab a forward goes on
@@ -839,9 +837,7 @@ fn asked_by_itself(
     requester_node_id: Option<[u8; 32]>,
     sender_peer_bytes: &[u8],
 ) -> Option<crate::types::NodeId> {
-    let sender = libp2p::PeerId::from_bytes(sender_peer_bytes)
-        .ok()
-        .and_then(|p| crate::network::transport::peer_id_to_node_id(&p))?;
+    let sender = crate::network::transport::node_id_of_peer_bytes(sender_peer_bytes)?;
     requester_node_id
         .is_none_or(|claimed| claimed == sender.0)
         .then_some(sender)
@@ -919,10 +915,7 @@ fn dial_next_hop(
     if state.metered_hold_now() {
         return;
     }
-    let Some(sender) = libp2p::PeerId::from_bytes(sender_peer_bytes)
-        .ok()
-        .and_then(|p| crate::network::transport::peer_id_to_node_id(&p))
-    else {
+    let Some(sender) = crate::network::transport::node_id_of_peer_bytes(sender_peer_bytes) else {
         return;
     };
     if !state.next_hop_dial_budget.try_spend_within(

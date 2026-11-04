@@ -246,6 +246,16 @@ cryptocurrency. The only cost is your own electricity and internet while your
 computer helps others. It's a community project: the app is free and open
 source, and the computing power comes from people who leave it running.
 
+**Can someone use the swarm without helping?** Not for long. Other computers
+run your chats only while yours shares at least two parts of a model — leave
+auto-manage on and that happens by itself — and only while it stays up to date:
+a computer two or more releases behind is disconnected until it updates. A
+computer that shares nothing can still see the swarm, and still run the models
+it holds itself. The peer list on the Dashboard shows, for every computer, how
+many chats it ran for yours and how many yours ran for it, so anyone can see a
+computer that only takes. Those counts are what your own computer saw, and
+nothing is charged or paid by them.
+
 **How is this different from Ollama or LM Studio?** They run AI on one
 computer, and they're great at it. SwarmLLM does that too — and also lets
 computers pool together, your own devices or the public swarm, to run models

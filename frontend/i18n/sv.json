@@ -440,7 +440,7 @@
   "dashboard.peer_col_location": "Plats",
   "dashboard.peer_col_name": "Dator",
   "dashboard.peer_col_trust": "Förtroende",
-  "dashboard.peer_col_you_did_for_it": "Du gjort åt den",
+  "dashboard.peer_col_you_did_for_it": "Gjort åt den",
   "dashboard.peer_col_you_did_for_it_tip": "Förfrågningar som din dator har kört åt den här, räknade av din dator utifrån vad den själv såg.",
   "dashboard.peer_cpu_only_tip": "Den här datorn svarar med processorn i stället för ett grafikkort – långsammare, men den bidrar ändå.",
   "dashboard.peer_degraded": "Försämrad",

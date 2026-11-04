@@ -92,7 +92,7 @@ pub struct UpdateInfo {
     pub asset_name: Option<String>,
     /// The release's signature checked out against this build's key when the
     /// check found it (the sidecar and its `.minisig` are small, so no binary
-    /// is fetched for it). Read by `SharedState::newest_release_known`: a tag
+    /// is fetched for it). Read by `SharedState::releases_known`: a tag
     /// alone is GitHub's word, and the swarm-use gate refuses computers by
     /// how far behind it they are — an unsigned or mistyped tag must not cut
     /// the swarm off (security review, 2026-11-04). `false` from an older

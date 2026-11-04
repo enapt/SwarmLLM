@@ -222,7 +222,6 @@ fn describe_relaying(traffic: Option<&serde_json::Value>) -> Option<String> {
     ))
 }
 
-/// Bytes, in the unit a person would use.
 /// Why other computers will not run this node's requests, or `None` when they
 /// will (`daemon::state::swarm_use`). Printed only when they will not: a node
 /// that shares nothing still SEES the swarm, and without this line its owner
@@ -250,6 +249,7 @@ fn describe_swarm_use(swarm_use: Option<&serde_json::Value>) -> Option<String> {
     }
 }
 
+/// Bytes, in the unit a person would use.
 fn human_bytes(bytes: u64) -> String {
     const KB: f64 = 1024.0;
     let b = bytes as f64;

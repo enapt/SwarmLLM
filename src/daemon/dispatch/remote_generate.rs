@@ -265,9 +265,7 @@ pub(super) async fn handle_remote_generate_request(
 
     // Demand this node may gossip: a peer's request, never the owner's (#389 (a)).
     // The sender is authenticated, so it is also whose tab this goes on.
-    let requester = libp2p::PeerId::from_bytes(&sender_bytes)
-        .ok()
-        .and_then(|p| crate::network::transport::peer_id_to_node_id(&p));
+    let requester = crate::network::transport::node_id_of_peer_bytes(&sender_bytes);
     shared_state.note_request_served_for_a_peer(
         request_id,
         &model_id,
@@ -667,9 +665,7 @@ pub(super) async fn handle_delegated_split(
     // Lead it here, under what the requester asked for, read from this side
     // (#318 (b)). A route it could not have planned is declined, and the
     // requester leads the plan it has.
-    let requester = libp2p::PeerId::from_bytes(&sender_bytes)
-        .ok()
-        .and_then(|p| crate::network::transport::peer_id_to_node_id(&p));
+    let requester = crate::network::transport::node_id_of_peer_bytes(&sender_bytes);
     let route_carried = delegation.route.is_some();
     let route = match requester.as_ref().map(|requester| {
         crate::inference::route_override::led_override(

@@ -2013,13 +2013,13 @@ impl ModelRegistry {
         removed
     }
 
-    /// Get all shards held by a specific node (via reverse index).
     /// How many parts the registry credits to `node_id` — this node's own
     /// count for `SharedState::swarm_use_here`, without copying the set.
     pub fn parts_credited_to(&self, node_id: &NodeId) -> usize {
         self.node_shards.get(node_id).map_or(0, |s| s.len())
     }
 
+    /// Get all shards held by a specific node (via reverse index).
     pub fn shards_for_node(&self, node_id: &NodeId) -> Vec<ShardId> {
         self.node_shards
             .get(node_id)
