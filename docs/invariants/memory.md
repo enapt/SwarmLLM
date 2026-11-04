@@ -586,6 +586,22 @@ admission, which takes no pin. A card too old for the kernels
 Tests: `a_memory_pin_ends_after_its_hold_and_doubles_when_the_card_fails_again`
 (the clock passed in, never back-dated: a CI runner minutes old cannot express
 an `Instant` an hour ago), `a_pinned_model_returns_to_an_empty_card_once_its_hold_runs_out`.
+**A pin after a long run on the card starts over** (2026-11-04, field report on
+v0.3.271: a 14B alone on a 12 GB card was held 120, 240, 480, then 960 s over
+47 min, the last two after many minutes of clean card use — "is that
+intended?"). It was not: the doubling exists so a model the card fails AT ITS
+LOAD costs one load per hold, not one per request, and four failures of a long
+conversation (the creep, #367 (d)) read as that. The hold now doubles only when
+the failed worker had run less than `PIN_CLEAN_RUN` (3 min) since its spawn —
+`classify_worker_error` reads its age BEFORE it evicts it (`CpuPins::pin`'s
+`ran_for`, REQUIRED; no worker found reads as a failure at once, the old answer).
+Kubernetes resets CrashLoopBackOff the same way once a container has run 10 min
+without trouble; 3 min here because the creep fails a card's model after 5-7 min
+of one chat, so at 10 every one of those would still double, and a load slower
+than 3 min that then fails costs at most one load per `PIN_HOLD_FIRST`, never one
+per request. Tests `a_pin_after_a_long_run_on_the_card_starts_its_hold_over`,
+`the_worker_a_card_failed_is_timed_before_it_is_evicted` (red with the rule
+always doubling, and with `classify_worker_error` passing no run).
 ⚠ **Under traffic with no 5 s gap the promotion still waits** (its idle floor
 keeps a request from dying with the worker it was about to use); the creep that
 caused the out-of-memory is fixed separately — the driver keeps its margin

@@ -668,6 +668,18 @@ const PIN_HOLD_MOST: std::time::Duration = std::time::Duration::from_secs(30 * 6
 /// ending doubles the next hold.
 const PIN_REPEAT_WITHIN: std::time::Duration = std::time::Duration::from_secs(30 * 60);
 
+/// A worker that ran this long before its card failed it failed a long
+/// CONVERSATION, not its load: the next pin starts over at `PIN_HOLD_FIRST`
+/// instead of doubling (field report 2026-11-04: a 14B that ran 5-12 min on its
+/// card before each failure was held 120, 240, 480, then 960 s). Kubernetes
+/// resets CrashLoopBackOff the same way once a container has run 10 min without
+/// trouble; this is shorter because the failure the doubling guards against is
+/// a load that fails within its first requests, and the creep this pin meets
+/// most fails after 5-7 min of one chat (#367 (d)) — at 10 min every one of
+/// those would double. Measured from the worker's spawn, so a load slower than
+/// this costs at most one load per `PIN_HOLD_FIRST`, never one per request.
+const PIN_CLEAN_RUN: std::time::Duration = std::time::Duration::from_secs(3 * 60);
+
 /// Models sent to the processor because their card FAILED them
 /// (`classify_worker_error`), and for how long.
 ///
@@ -681,7 +693,8 @@ const PIN_REPEAT_WITHIN: std::time::Duration = std::time::Duration::from_secs(30
 /// model that fails at every load does not burn one load per request —
 /// `PIN_HOLD_FIRST`, doubled up to `PIN_HOLD_MOST` while the card keeps failing
 /// it within `PIN_REPEAT_WITHIN` of the last pin ending (the shape of
-/// `peer_outliers`) — and then it simply stops holding: `cpu_reason` no longer
+/// `peer_outliers`) and SOON after giving it back — a worker that ran
+/// `PIN_CLEAN_RUN` first starts the hold over — and then it simply stops holding: `cpu_reason` no longer
 /// reports it, so the promotion and any fresh spawn weigh the card as it stands
 /// (admission, which takes no pin). Ending in `cpu_reason`, the one place every
 /// placement asks, rather than in whichever path lifts it, is the point. A card
@@ -703,27 +716,33 @@ struct CpuPin {
 
 impl CpuPins {
     /// Pin `model_id` to the processor for `kind`; returns the hold (`None`:
-    /// for good).
+    /// for good). `ran_for` is how long the worker the card failed had been
+    /// running (`None`: no worker found — judged as one that failed at once).
     fn pin(
         &self,
         model_id: &ModelId,
         kind: crate::inference::worker_ipc::PermanentGpuFailure,
+        ran_for: Option<std::time::Duration>,
     ) -> Option<std::time::Duration> {
-        self.pin_at(model_id, kind, std::time::Instant::now())
+        self.pin_at(model_id, kind, ran_for, std::time::Instant::now())
     }
 
     fn pin_at(
         &self,
         model_id: &ModelId,
         kind: crate::inference::worker_ipc::PermanentGpuFailure,
+        ran_for: Option<std::time::Duration>,
         now: std::time::Instant,
     ) -> Option<std::time::Duration> {
         use crate::inference::worker_ipc::PermanentGpuFailure;
+        let failed_soon_after_its_load = ran_for.is_none_or(|ran| ran < PIN_CLEAN_RUN);
         let hold = match self.pins.get(model_id).map(|p| *p.value()) {
             Some(CpuPin {
                 until: Some(until),
                 hold,
-            }) if now < until + PIN_REPEAT_WITHIN => hold.saturating_mul(2).min(PIN_HOLD_MOST),
+            }) if failed_soon_after_its_load && now < until + PIN_REPEAT_WITHIN => {
+                hold.saturating_mul(2).min(PIN_HOLD_MOST)
+            }
             _ => PIN_HOLD_FIRST,
         };
         let until = (kind != PermanentGpuFailure::ArchitectureTooOld).then(|| now + hold);
@@ -11493,6 +11512,9 @@ impl ModelProcessPool {
         // well: a worker binary older than the `fatal` field always sends
         // `false`, and a stranded worker is much worse than a needless respawn.
         if fatal_flag || crate::inference::worker_ipc::worker_error_is_fatal(&message) {
+            // How long it ran, read before it goes: a pin after a long run on
+            // the card starts its hold over (`PIN_CLEAN_RUN`).
+            let ran_for = self.workers.get(model_id).map(|h| h.spawned_at.elapsed());
             // No handle in scope here, so this evicts whatever is under the key
             // — the behaviour it has always had. The release is the new part.
             self.evict_worker_where(model_id, |_| true, "fatal error");
@@ -11509,7 +11531,7 @@ impl ModelProcessPool {
             let permanent = crate::inference::worker_ipc::permanent_gpu_failure(&message);
             if let (true, Some(kind)) = (was_on_gpu, permanent) {
                 use crate::inference::worker_ipc::PermanentGpuFailure;
-                let hold = self.cpu_pins.pin(model_id, kind);
+                let hold = self.cpu_pins.pin(model_id, kind, ran_for);
                 let reason = match kind {
                     PermanentGpuFailure::OutOfMemory => "GPU out of memory",
                     PermanentGpuFailure::ArchitectureTooOld => {
@@ -11523,6 +11545,7 @@ impl ModelProcessPool {
                     model = %model_id,
                     reason,
                     card_weighed_again_after_secs = hold.map(|h| h.as_secs()),
+                    worker_ran_secs = ran_for.map(|r| r.as_secs()),
                     "Pinning this model to CPU until graphics memory frees up"
                 );
                 if let Some(tx) = self.activity_tx.get() {
@@ -13214,14 +13237,14 @@ mod tests {
         let at = |secs: u64| t0 + std::time::Duration::from_secs(secs);
         let first = PIN_HOLD_FIRST.as_secs();
 
-        assert_eq!(pins.pin_at(&m, OutOfMemory, t0), Some(PIN_HOLD_FIRST));
+        assert_eq!(pins.pin_at(&m, OutOfMemory, None, t0), Some(PIN_HOLD_FIRST));
         assert!(pins.holds_at(&m, at(first - 1)), "inside its hold");
         assert!(!pins.holds_at(&m, at(first)), "the hold has run out");
 
         // The card fails it again a minute after the pin ended: twice the hold.
         let again = first + 60;
         assert_eq!(
-            pins.pin_at(&m, NoKvCacheRoom, at(again)),
+            pins.pin_at(&m, NoKvCacheRoom, None, at(again)),
             Some(PIN_HOLD_FIRST * 2)
         );
         assert!(pins.holds_at(&m, at(again + 2 * first - 1)));
@@ -13233,7 +13256,7 @@ mod tests {
         for _ in 0..10 {
             now += hold;
             hold = pins
-                .pin_at(&m, OutOfMemory, at(now))
+                .pin_at(&m, OutOfMemory, None, at(now))
                 .expect("a memory pin ends")
                 .as_secs();
         }
@@ -13241,18 +13264,115 @@ mod tests {
 
         // Long after the last pin ended: a first failure again.
         now += hold + PIN_REPEAT_WITHIN.as_secs();
-        assert_eq!(pins.pin_at(&m, OutOfMemory, at(now)), Some(PIN_HOLD_FIRST));
+        assert_eq!(
+            pins.pin_at(&m, OutOfMemory, None, at(now)),
+            Some(PIN_HOLD_FIRST)
+        );
 
         // A card too old for the kernels never ends its pin, however long. Its
         // own set: the pins above were taken at simulated times hours ahead,
         // so in real time they still hold, and `lift_all` would rightly end them.
         let pins = CpuPins::default();
         let old = ModelId("on-a-kepler".into());
-        assert_eq!(pins.pin_at(&old, ArchitectureTooOld, t0), None);
+        assert_eq!(pins.pin_at(&old, ArchitectureTooOld, None, t0), None);
         assert!(pins.holds_at(&old, at(365 * 24 * 3600)));
         assert!(!pins.lift(&old), "freed memory does not make a card newer");
         assert_eq!(pins.lift_all(), Vec::<String>::new());
         assert!(pins.holds(&old));
+    }
+
+    /// **A pin after a long run on the card starts over** (field report
+    /// 2026-11-04): a 14B that ran 5-12 min on its card before each failure was
+    /// held 120, 240, 480, then 960 s — the doubling read four failures of a
+    /// long CONVERSATION as a card that fails the model at every load. Only a
+    /// worker that failed soon after its spawn doubles the hold; one that ran
+    /// `PIN_CLEAN_RUN` starts it over. No worker found is judged as one that
+    /// failed at once (the doubling's old, cautious answer).
+    #[test]
+    fn a_pin_after_a_long_run_on_the_card_starts_its_hold_over() {
+        use crate::inference::worker_ipc::PermanentGpuFailure::OutOfMemory;
+        let pins = CpuPins::default();
+        let m = ModelId("qwen2.5-14b".into());
+        let t0 = std::time::Instant::now();
+        let at = |secs: u64| t0 + std::time::Duration::from_secs(secs);
+        let first = PIN_HOLD_FIRST.as_secs();
+        let short = Some(std::time::Duration::from_secs(30));
+        let long = Some(PIN_CLEAN_RUN);
+
+        assert_eq!(
+            pins.pin_at(&m, OutOfMemory, short, t0),
+            Some(PIN_HOLD_FIRST)
+        );
+        // Back on the card soon after, and it fails within its first minute:
+        // the card fails it at load — the hold doubles.
+        let again = first + 60;
+        assert_eq!(
+            pins.pin_at(&m, OutOfMemory, short, at(again)),
+            Some(PIN_HOLD_FIRST * 2)
+        );
+        // Back again, and this time it ran PIN_CLEAN_RUN before failing: the
+        // card served it, so the hold starts over.
+        let later = again + 2 * first + PIN_CLEAN_RUN.as_secs();
+        assert_eq!(
+            pins.pin_at(&m, OutOfMemory, long, at(later)),
+            Some(PIN_HOLD_FIRST)
+        );
+        // Unknown run: the cautious answer, doubled from the hold just taken.
+        let unknown = later + first + 10;
+        assert_eq!(
+            pins.pin_at(&m, OutOfMemory, None, at(unknown)),
+            Some(PIN_HOLD_FIRST * 2)
+        );
+    }
+
+    /// The failure path reads the run off the worker it evicts — BEFORE it
+    /// goes. A test of `pin_at` alone would pass with `classify_worker_error`
+    /// still passing `None`.
+    #[tokio::test]
+    async fn the_worker_a_card_failed_is_timed_before_it_is_evicted() {
+        let pool = test_pool();
+        let m = ModelId("creeps".into());
+        let oom = || "Forward: Cuda(DriverError(CUDA_ERROR_OUT_OF_MEMORY, \"out of memory\"))";
+
+        pool.workers.insert(
+            m.clone(),
+            fake_worker_handle_spawned(false, None, false, std::time::Instant::now()).await,
+        );
+        pool.classify_worker_error(&m, oom().into(), true, false);
+        assert_eq!(
+            pool.cpu_pins.pins.get(&m).map(|p| p.hold),
+            Some(PIN_HOLD_FIRST)
+        );
+        pool.cpu_pins.run_out(&m);
+
+        // `Instant` counts from the machine's boot, and every runner compiles
+        // for longer than PIN_CLEAN_RUN before a test starts.
+        let ran_long = std::time::Instant::now()
+            .checked_sub(PIN_CLEAN_RUN)
+            .expect("the machine has been up longer than PIN_CLEAN_RUN");
+        pool.workers.insert(
+            m.clone(),
+            fake_worker_handle_spawned(false, None, false, ran_long).await,
+        );
+        pool.classify_worker_error(&m, oom().into(), true, false);
+        assert!(pool.workers.get(&m).is_none(), "the worker is evicted");
+        assert_eq!(
+            pool.cpu_pins.pins.get(&m).map(|p| p.hold),
+            Some(PIN_HOLD_FIRST),
+            "a worker that ran PIN_CLEAN_RUN on the card starts the hold over"
+        );
+        pool.cpu_pins.run_out(&m);
+
+        pool.workers.insert(
+            m.clone(),
+            fake_worker_handle_spawned(false, None, false, std::time::Instant::now()).await,
+        );
+        pool.classify_worker_error(&m, oom().into(), true, false);
+        assert_eq!(
+            pool.cpu_pins.pins.get(&m).map(|p| p.hold),
+            Some(PIN_HOLD_FIRST * 2),
+            "one that failed soon after its spawn doubles it"
+        );
     }
 
     /// The pin ends where every placement asks — `cpu_reason` — so the model
@@ -13268,7 +13388,7 @@ mod tests {
         // A 12 GB card with nothing else on it, as in the report.
         pool.set_vram_budget_source(Box::new(|| Some(11_000)));
         let qwen = ModelId("qwen2.5-14b".into());
-        pool.cpu_pins.pin(&qwen, OutOfMemory);
+        pool.cpu_pins.pin(&qwen, OutOfMemory, None);
 
         let a_minute_ago = std::time::Instant::now()
             .checked_sub(std::time::Duration::from_secs(60))
@@ -13802,6 +13922,7 @@ mod tests {
         kept_off.cpu_pins.pin(
             &drafter,
             crate::inference::worker_ipc::PermanentGpuFailure::OutOfMemory,
+            None,
         );
         assert_eq!(
             kept_off.max_hostable_layers_beside_guest(
@@ -16129,6 +16250,7 @@ mod tests {
         p.cpu_pins.pin(
             &pinned,
             crate::inference::worker_ipc::PermanentGpuFailure::OutOfMemory,
+            None,
         );
 
         let on_card = ModelId("held-the-card".into());
@@ -16155,6 +16277,7 @@ mod tests {
         p.cpu_pins.pin(
             &pinned,
             crate::inference::worker_ipc::PermanentGpuFailure::OutOfMemory,
+            None,
         );
 
         let on_cpu = ModelId("was-on-the-cpu".into());
@@ -16226,6 +16349,7 @@ mod tests {
         pool.cpu_pins.pin(
             &pinned,
             crate::inference::worker_ipc::PermanentGpuFailure::OutOfMemory,
+            None,
         );
 
         assert_eq!(pool.effective_gpu_layers(&pinned), 0);
@@ -16251,6 +16375,7 @@ mod tests {
         pool.cpu_pins.pin(
             &pinned,
             crate::inference::worker_ipc::PermanentGpuFailure::OutOfMemory,
+            None,
         );
         assert!(pool.is_cpu_pinned(&pinned));
 
@@ -16276,10 +16401,12 @@ mod tests {
         pool.cpu_pins.pin(
             &a,
             crate::inference::worker_ipc::PermanentGpuFailure::OutOfMemory,
+            None,
         );
         pool.cpu_pins.pin(
             &b,
             crate::inference::worker_ipc::PermanentGpuFailure::OutOfMemory,
+            None,
         );
 
         pool.unload_model(&a).await;
@@ -17281,10 +17408,12 @@ mod tests {
         pool.cpu_pins.pin(
             &ModelId("zeta".into()),
             crate::inference::worker_ipc::PermanentGpuFailure::OutOfMemory,
+            None,
         );
         pool.cpu_pins.pin(
             &ModelId("alpha".into()),
             crate::inference::worker_ipc::PermanentGpuFailure::OutOfMemory,
+            None,
         );
         assert_eq!(pool.cpu_pinned_model_ids(), vec!["alpha", "zeta"]);
         pool.cpu_pins.lift(&ModelId("alpha".into()));

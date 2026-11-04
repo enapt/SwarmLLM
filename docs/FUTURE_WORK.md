@@ -44,7 +44,7 @@ requests only for a computer that shares (two parts or more, fewer than two publ
 behind — one further behind is disconnected), a whole card placement split before its load where
 its cache would not fit (#322's spawn half), the Hugging Face search refusing files the swarm
 cannot host (#404's search half) and each computer's give and take in the peer list. New since:
-#403 (P2, item 6), #401 (P2, item 9), #396 and #399 (P3, taken together: both are the decode
+#403 (P2, closed), #367 raised to P1 (item 6, field report 2026-11-04), #401 (P2, item 9), #396 and #399 (P3, taken together: both are the decode
 width), #400, #402, #404 (P3), #397 (P4).
 **2026-11-04:** #403 goes first among the open work by the user's direction: the release cut-off
 and the use gate must not be passable through a relay. Closed the same day (§ "Closed"). What each release carried is in § "Closed" and `CHANGELOG.md`; earlier
@@ -73,9 +73,12 @@ the top track (`docs/plans/large_model_splits.md`).
    far peers instead of answering locally. Its causes closed in v0.3.236 and v0.3.239; left: the
    prompt priced on the processor prior for a card/processor split, and a far hop priced at
    `net:0` (with #3). Passive: the next evidence is a field `predicted_terms` line.
-6. *(#403 CLOSED 2026-11-04, ships in the next release: a computer this node has not heard from is
-   "allowed" only while connected, and a relayed body from a computer cut off here is refused —
-   § "Closed".)*
+6. **#367 (d)** — a long chat alone on a card grows the card's memory until it runs out: a 14B on
+   a tester's 12 GB card ran out after 5-7 min of one conversation in each of three field reports
+   (2026-10-31, 11-03, 11-04) and then ran on the processor at a fifth of its speed. The cause is
+   traced to one memory pool serving the conversation cache and each forward's scratch; **Next**:
+   the cache from a second pool (the entry's (d), fix (1)). (#403 CLOSED 2026-11-04, ships in the
+   next release — § "Closed".)
 7. **#388** — the flow's guard takes a far computer's own delay for a queue on the link (the
    slowest reply of two 12-arm runs on 2026-11-01). The far now reports its own time and the guard
    can read it apart (`SWARMLLM_FLOW_SERVED_TIME=1`, off: it lost on a processor-only rig, for
@@ -1818,7 +1821,17 @@ experts kept in RAM.
    round's average (~65-135 ms). Revisit if a check's per-position cost falls.
 
 #### #367 — A long prompt's snapshot copy costs 0.15-2.1 s where its memory traffic is ~0.1 s, and the next request waits for it
-`P2` · perf-local · **NARROWED** — 2026-10-31 · evidence: `docs/invariants/inference.md` § "One prefix-cache snapshot is sized by bytes" (the deferred-copy and room-first paragraphs); (d): `docs/invariants/memory.md` § "The driver's margin, measured"
+`P1` · perf-local · **NARROWED** — 2026-10-31, raised to P1 2026-11-04 · evidence: `docs/invariants/inference.md` § "One prefix-cache snapshot is sized by bytes" (the deferred-copy and room-first paragraphs); (d): `docs/invariants/memory.md` § "The driver's margin, measured"
+
+**Raised to P1 2026-11-04 — (d) is the field's most-repeated failure, and it is not only a slowdown.**
+A tester's RTX 3060 12 GB (the Linux CUDA build, v0.3.271, Qwen2.5-14B alone, 40 of 48 layers on
+the card) ran one back-to-back chat at 16-17 tok/s while card memory climbed 9.8 → 11.3-11.4 GB of
+11.9 with the conversation held at 13 messages, then `CUDA_ERROR_OUT_OF_MEMORY` after 5-7 min —
+in both blocks — and the model ran on the processor at 2.7 tok/s (first token ~90 s) until its pin
+ended. The same shape was reported on 2026-10-31 and 2026-11-03. On a card with its own memory the
+growth this entry traces ends in an out-of-memory, not in host-backed shared memory. (A browser held
+the card in all three runs; a control without it is still to come.) The pin's doubling across those
+failures is fixed (CHANGELOG, 2026-11-04); the growth is (d)'s fix (1) below — next in the queue.
 
 **Found 2026-10-29: the cost is first-touching fresh pages, not the copy.** With mimalloc v3 (what
 the workers link), 569 MB copied into held memory took 43 ms; into fresh memory 255 ms with memory

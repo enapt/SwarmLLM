@@ -11,6 +11,14 @@ one cut off right now is refused through a relay too. Computers connected to you
 linked devices are not affected; a computer that is turned down this way has its chat run
 elsewhere, with nothing held against either side (#403).
 
+**A model that ran out of graphics memory after a long chat goes back to the card sooner.** When
+the card runs out, the model is moved to the processor for a while (2 minutes at first) before the
+card is tried again, and that wait doubled every time it happened, up to 30 minutes, even when the
+model had been running fine on the card for many minutes in between. A tester's model sat on the
+processor at a fifth of its speed for 16 minutes this way. The wait now doubles only when the card
+fails the model soon after taking it back; after 3 minutes of running on the card it starts again
+at 2 minutes.
+
 ## [0.3.271-alpha] — 2026-11-04
 
 **A computer that only takes stops being served, the peer list shows what each computer does for

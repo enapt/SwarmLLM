@@ -144,7 +144,7 @@ Prune's soft-unload narrows a loaded model only when our CHARGED graphics memory
 
 ## A memory pin ends, and it ends in `cpu_reason` (2026-10-31)
 
-**`process_pool::CpuPins`**: a card that FAILED a model (`classify_worker_error`) holds it on the processor `PIN_HOLD_FIRST` (120 s), doubled up to 30 min while the card keeps failing it; then `cpu_reason` stops reporting it, so the promotion and a fresh spawn both weigh the card as it stands. Never end a pin in one path, and never wait for another worker to leave: the worker that ran out is evicted BEFORE its pin is taken, so on a card it had to itself the pin never ended (field report 2026-10-31). `ArchitectureTooOld` never ends.
+**`process_pool::CpuPins`**: a card that FAILED a model (`classify_worker_error`) holds it on the processor `PIN_HOLD_FIRST` (120 s), doubled up to 30 min while the card keeps failing it SOON after getting it back (a worker that ran `PIN_CLEAN_RUN`, 3 min, starts the hold over: its age is read before its eviction, field report 2026-11-04); then `cpu_reason` stops reporting it, so the promotion and a fresh spawn both weigh the card as it stands. Never end a pin in one path, and never wait for another worker to leave: the worker that ran out is evicted BEFORE its pin is taken, so on a card it had to itself the pin never ended (field report 2026-10-31). `ArchitectureTooOld` never ends.
 
 → `docs/invariants/memory.md` § "Graphics memory has ONE owner" (**A memory pin ENDS**)
 
