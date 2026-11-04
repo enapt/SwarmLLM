@@ -2255,9 +2255,9 @@ mod fetch_what_prune_keeps {
 
         let stranger = ModelId("not-in-the-registry".into());
         for _ in 0..3 {
-            state.note_request_served_for_a_peer(&mid, None);
+            state.note_request_served_for_a_peer(uuid::Uuid::new_v4(), &mid, None, None);
         }
-        state.note_request_served_for_a_peer(&stranger, None);
+        state.note_request_served_for_a_peer(uuid::Uuid::new_v4(), &stranger, None, None);
         manager.decay_request_counts();
         assert!(
             state
@@ -2280,7 +2280,12 @@ mod fetch_what_prune_keeps {
                 .get(&mid)
                 .map(|c| c.load(Relaxed))
         };
-        state.note_request_served_for_a_peer(&mid, Some(state.identity.node_id()));
+        state.note_request_served_for_a_peer(
+            uuid::Uuid::new_v4(),
+            &mid,
+            Some(state.identity.node_id()),
+            None,
+        );
         assert_eq!(
             counted(&state),
             Some(0),

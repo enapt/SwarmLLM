@@ -138,6 +138,7 @@ pub fn serialize_peer_to_json(
         .get(&peer.node_id)
         .map(|f| (f.min(), f.len()))
         .unwrap_or((None, 0));
+    let tab = state.metrics.peer_exchange.tab_of(&peer.node_id);
     let mut obj = serde_json::json!({
         "node_id": format!("{}", peer.node_id),
         "nickname": nickname,
@@ -154,6 +155,13 @@ pub fn serialize_peer_to_json(
         "decode_fixed_ms_per_visit": decode_terms.map(|(fixed, _)| fixed),
         "decode_ms_per_layer": decode_terms.map(|(_, per_layer)| per_layer),
         "trust_score": peer.trust_score,
+        // What this computer and that one did for each other, in whole
+        // requests, as THIS node counted them from authenticated traffic
+        // (`daemon::state::peer_exchange`), kept across restarts — so a
+        // computer that only takes shows. Display only: nothing reads it to
+        // serve or refuse, and it is not a balance (credits are dormant).
+        "ran_for_them": tab.ran_for_them,
+        "ran_for_us": tab.ran_for_us,
         "healthy": healthy,
         "gpu": peer.capability.as_ref().and_then(|c| c.gpu.as_ref().map(|g| &g.name)),
         // A peer without a graphics card used to be shown as the bare word
@@ -3177,6 +3185,60 @@ bootstrap_peers = ["/ip4/10.0.0.7/tcp/8810"]
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **What it is for**: the peer list shows what each computer and this one
+    /// did for each other, both ways, so a computer that only takes is seen —
+    /// counted where the work is recorded, carried by the one serializer both
+    /// the REST list and the WebSocket push use.
+    #[test]
+    fn the_peer_list_shows_what_each_computer_and_this_one_did_for_each_other() {
+        let temp = tempfile::tempdir().unwrap();
+        let db = crate::storage::db::Database::open(temp.path()).unwrap();
+        let executor = std::sync::Arc::new(tokio::sync::Mutex::new(
+            crate::inference::executor::ModelExecutor::new(),
+        ));
+        let (state, _, _) = crate::daemon::SharedState::new(
+            crate::config::Config::default(),
+            crate::identity::Identity::generate(),
+            db,
+            executor,
+            None,
+        );
+        let taker = crate::types::NodeId([7u8; 32]);
+        let peer = crate::types::PeerInfo {
+            node_id: taker.clone(),
+            addresses: vec![],
+            capability: None,
+            last_seen: chrono::Utc::now(),
+            latency_ms: Some(20),
+            trust_score: 0.5,
+            peer_id_bytes: None,
+            ack_srtt_ms: None,
+            active_request_count: 0,
+            first_seen: 0,
+            verified_transaction_count: 0,
+            is_lan_peer: false,
+            goodput_bytes_per_sec: None,
+            goodput_samples: 0,
+        };
+        let model = crate::types::ModelId("m".into());
+        let row = |s: &crate::daemon::state::SharedState| serialize_peer_to_json(&peer, s, false);
+        assert_eq!(row(&state)["ran_for_them"], 0, "a stranger reads zero");
+
+        for _ in 0..3 {
+            let request = uuid::Uuid::new_v4();
+            state.note_request_served_for_a_peer(request, &model, Some(&taker), Some(&taker));
+        }
+        // Demand from an unauthenticated name goes on nobody's tab.
+        state.note_request_served_for_a_peer(uuid::Uuid::new_v4(), &model, Some(&taker), None);
+        // A whole hand-off is reported by two paths: counted once.
+        let handed_off = uuid::Uuid::new_v4();
+        state.note_peer_completed_request(handed_off, &taker, &model);
+        state.note_peer_completed_request(handed_off, &taker, &model);
+
+        assert_eq!(row(&state)["ran_for_them"], 3);
+        assert_eq!(row(&state)["ran_for_us"], 1);
+    }
 
     /// A region is the other computer's own text; the peer list carries it
     /// only as a country code the dashboard can name.

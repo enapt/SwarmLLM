@@ -139,6 +139,12 @@ pub struct MetricsProviders {
     /// restart (FUTURE_WORK #226). Read through `SharedState::served_lifetime`,
     /// written through `persist_served_lifetime` — `daemon::state::lifetime`.
     pub lifetime_served: super::lifetime::LifetimeLedger,
+    /// What each computer and this one did for each other, in whole requests,
+    /// kept across restarts — the peer list's give and take. Written ONLY by
+    /// `SharedState::note_request_served_for_a_peer` (ran for them) and
+    /// `note_peer_completed_request` (ran for us); saved by
+    /// `persist_peer_exchange` — `daemon::state::peer_exchange`. Display only.
+    pub peer_exchange: super::peer_exchange::PeerExchange,
     pub channel_metrics: ChannelMetricsSet,
     /// Message-dispatcher liveness: when it last took a message off
     /// `network_out`, in epoch millis, and which variant that was.

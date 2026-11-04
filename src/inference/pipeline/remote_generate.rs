@@ -1608,8 +1608,11 @@ impl PipelineExecutor {
         if !stream_was_truncated {
             // The peer saw this request through: whatever it failed before is
             // forgiven (`peer_outliers`).
-            self.shared_state
-                .note_peer_completed_request(&segment.node_id, &segment.shard_id.model_id);
+            self.shared_state.note_peer_completed_request(
+                request_id,
+                &segment.node_id,
+                &segment.shard_id.model_id,
+            );
         }
 
         // What arrived is not the reply that was generated, so it must not be

@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+**The peer list shows what each computer has done for yours, and yours for it.** Two new columns —
+"Did for you" and "You did for it" — count the requests each side ran for the other, counted by your
+own computer from what it saw itself, so nobody else's word enters them and nobody can be blamed by
+someone else. A computer your computer has run 10 or more requests for, with none back, is tagged
+"Takes only" (it may still be helping other computers; only what passed between the two of you is
+counted). `swarmllm peers` shows the same two counts. They are kept across restarts and change
+nothing: no computer is served or refused by them, and the old self-counted credit balance stays
+hidden, because every computer counted its own and a computer that only takes could show as high a
+balance as anyone.
+
 **Other computers run your chats only if your computer shares, and keeps up — and a computer that
 stops updating loses the swarm.** A computer must hold at least 2 model parts and run a release at
 most one behind the newest for the swarm to run its requests. One that shares too little still sees

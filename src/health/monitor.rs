@@ -937,6 +937,9 @@ impl HealthMonitor {
                     // written only when it changed, so an idle node writes
                     // nothing, and a crash loses at most one tick of it.
                     self.shared_state.persist_served_lifetime();
+                    // …and what each computer and this one did for each
+                    // other (the peer list's give and take), the same way.
+                    self.shared_state.persist_peer_exchange();
                     // …and what it measured to price its routes (its load
                     // rate, reply lengths, split rounds), so a restart does not
                     // price its first requests at the priors.

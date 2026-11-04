@@ -213,6 +213,15 @@ Showing a meaningless number is a smaller problem than *acting* on one. So:
 the recorded figures are the only real data about what the traffic patterns
 actually look like — which is what §5's parameters have to be chosen from.
 
+**What IS shown instead (2026-11-04): a first-hand tab per computer.** The peer
+list and `swarmllm peers` show, per computer, the whole requests this node ran
+for it and the ones it saw through for this node — counted only from what this
+node observed on authenticated traffic (`daemon::state::peer_exchange`). It is
+§ 3.2's tab, unsigned and gating nothing, and not a balance: no self-minted
+figure enters it, and a computer that only takes shows as one ("Takes only").
+Evidence: `docs/invariants/state-and-config.md` § "A computer's give and take is
+counted first-hand".
+
 ---
 
 ## 5. Open decisions before this is switched back on

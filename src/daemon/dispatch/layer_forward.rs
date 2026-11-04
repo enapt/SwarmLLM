@@ -346,7 +346,8 @@ pub(super) async fn handle_layer_forward(
     let _serving_guard = crate::daemon::state::ServingGuard::new(&shared_state, model_id.clone());
     // A request a peer asked of this node, counted once — at its prompt pass's
     // first forward — toward the demand this node gossips (#389 (a)). The
-    // requester is the coordinator, never the previous hop (`requester_of`).
+    // requester is the coordinator, never the previous hop (`requester_of`);
+    // the tab goes only to a sender that asked for itself (`asked_by_itself`).
     if sequence_num == 0
         && forward
             .prompt_span
@@ -354,8 +355,10 @@ pub(super) async fn handle_layer_forward(
             .is_none_or(|span| span.starts_at(index_pos))
     {
         shared_state.note_request_served_for_a_peer(
+            request_id,
             &model_id,
             requester_of(requester_node_id, &sender_peer_bytes).as_ref(),
+            asked_by_itself(requester_node_id, &sender_peer_bytes).as_ref(),
         );
     }
 
@@ -823,6 +826,25 @@ fn requester_of(
             .ok()
             .and_then(|p| crate::network::transport::peer_id_to_node_id(&p))
     })
+}
+
+/// The computer whose give-and-take tab a forward goes on
+/// (`daemon::state::peer_exchange`): the authenticated sender, when the forward
+/// names no coordinator or names the sender itself. A chained forward naming
+/// someone else counts for nobody here — that name is cleartext the seal does
+/// not authenticate, and a forger could otherwise make any computer look like
+/// it only takes; the chain's first hop, asked by the coordinator directly,
+/// counts it.
+fn asked_by_itself(
+    requester_node_id: Option<[u8; 32]>,
+    sender_peer_bytes: &[u8],
+) -> Option<crate::types::NodeId> {
+    let sender = libp2p::PeerId::from_bytes(sender_peer_bytes)
+        .ok()
+        .and_then(|p| crate::network::transport::peer_id_to_node_id(&p))?;
+    requester_node_id
+        .is_none_or(|claimed| claimed == sender.0)
+        .then_some(sender)
 }
 
 /// The peer a `LayerResult` goes to — only ever built by [`reply_target`], so a
@@ -1390,7 +1412,7 @@ mod chaining_tests {
         assert!(!chaining_applies(&hop(), false, true));
     }
 
-    use super::{reply_target, requester_of};
+    use super::{asked_by_itself, reply_target, requester_of};
 
     /// #389 (a): the demand count asks whose request a forward serves. An
     /// unchained forward — the ordinary split — names no requester, because
@@ -1425,6 +1447,36 @@ mod chaining_tests {
 
         // Neither a claim nor a sender that is a node: nobody to exempt.
         assert_eq!(requester_of(None, b"not a peer id"), None);
+    }
+
+    /// The give-and-take tab goes only to a computer the network authenticated
+    /// as asking. A chained forward's coordinator is a cleartext name: counted,
+    /// any peer could make any computer look like it only takes.
+    #[test]
+    fn a_forward_goes_on_the_tab_of_the_computer_that_asked_for_itself() {
+        let coordinator = libp2p::identity::Keypair::generate_ed25519()
+            .public()
+            .to_peer_id();
+        let coordinator_id = crate::network::transport::peer_id_to_node_id(&coordinator).unwrap();
+        assert_eq!(
+            asked_by_itself(None, &coordinator.to_bytes()),
+            Some(coordinator_id.clone()),
+            "unchained: the authenticated sender"
+        );
+        assert_eq!(
+            asked_by_itself(Some(coordinator_id.0), &coordinator.to_bytes()),
+            Some(coordinator_id),
+            "a chain's first hop: the coordinator asked it directly"
+        );
+        let previous_hop = libp2p::identity::Keypair::generate_ed25519()
+            .public()
+            .to_peer_id();
+        assert_eq!(
+            asked_by_itself(Some([9u8; 32]), &previous_hop.to_bytes()),
+            None,
+            "further down a chain: the named coordinator is not authenticated"
+        );
+        assert_eq!(asked_by_itself(None, b"not a peer id"), None);
     }
 
     /// The bug this prevents: in a chain the previous hop hands the work along

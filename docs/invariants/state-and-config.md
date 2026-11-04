@@ -288,6 +288,55 @@ peer list ranking by a self-minted number with nothing to catch it. Comments
 are excluded, because one of them documents precisely why nothing renders the
 figure. Design and exit criteria in `docs/CREDITS_DESIGN.md`.
 
+## A computer's give and take is counted first-hand (2026-11-04)
+
+The peer list shows, per computer, how many whole requests this node ran for it
+("You did for it") and how many it saw through for this node ("Did for you"),
+and tags one this node has run 10 or more for with none back "Takes only".
+Asked for so people can SEE a computer that uses the swarm without contributing.
+
+**Why not the credit balance.** Every node mints its own (`docs/CREDITS_DESIGN.md`
+§ 1); a freeloader's balance reads as high as anyone's, so showing it would hide
+exactly the abuse it was asked to reveal — and § 6 forbids publishing it.
+
+**Why first-hand only.** Each count is one this node observed on traffic the
+network authenticated — the shape of BitTorrent's per-peer "Uploaded" /
+"Downloaded" (libtorrent `peer_info::total_upload` / `total_download`) and of
+tit-for-tat (Cohen 2003): nobody else's report enters it, so no third party can
+inflate a count or blame anyone. That decided the one non-obvious line: a
+CHAINED layer forward names its coordinator in cleartext the seal does not
+authenticate (`requester_node_id`), so it is counted only where that name is the
+sender (`layer_forward::asked_by_itself`) — the chain's first hop counts it,
+later hops count nobody. Counted by the name, any peer could make any computer
+look like it only takes. The demand count beside it keeps reading the name
+(`requester_of`): there a forger only moves a number about models.
+
+**Where it is written.** Inside the two choke points that already recorded the
+same events — `note_request_served_for_a_peer` (a whole hand-off, a led split, a
+peer split's first forward here) with `asked_by` a REQUIRED argument, and
+`note_peer_completed_request` (a segment of a split led here, a whole hand-off).
+Both take the request id, and the counter counts each (request, computer,
+direction) once (`PeerExchange::first_count_of`, the last 1,024 remembered): a
+whole hand-off is reported seen-through by `run_hand_off` AND by
+`distributed_exec`'s success loop, a plan can name one computer twice, and a
+peer re-planning a request sends its first forward again. Deduped in the
+callers, the next path to report it would have counted twice.
+
+**Bounded and kept.** `MAX_TABS` = 1024 computers; the least recently active one
+makes room. Saved as one record (hex node id → tab) on the monitor tick and at
+shutdown, only when changed — the `lifetime.rs` pattern — because an auto-update
+restarts a node about once a day and a reset count would show every freeloader
+as new. Tests: `a_restart_keeps_each_computers_tab`,
+`the_least_recent_computer_makes_room`,
+`one_request_counts_once_however_many_paths_report_it`,
+`a_forward_goes_on_the_tab_of_the_computer_that_asked_for_itself`,
+`the_peer_list_shows_what_each_computer_and_this_one_did_for_each_other`.
+
+**What a change must keep**: display only (credits are dormant — nothing may
+serve or refuse by a tab); only authenticated attribution; the "Takes only" tip
+says the computer may be helping others, because only what passed between these
+two is counted.
+
 ## A settle that cannot be written down has not happened
 
 (2026-09-10). `credit::escrow` has three paths that change an escrow's status

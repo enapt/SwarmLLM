@@ -7902,7 +7902,7 @@ fn a_peer_failing_a_model_every_time_is_left_out_unless_it_is_the_only_way() {
     state.record_peer_delivery(&d, Some(&model), false);
     assert_eq!(holders_of_part_1(), vec![c.clone(), d.clone()]);
     // A request C sees through forgives it.
-    state.note_peer_completed_request(&c, &model);
+    state.note_peer_completed_request(uuid::Uuid::new_v4(), &c, &model);
     assert!(!state.peer_ejected_from_model(&c, &model));
     assert_eq!(holders_of_part_1(), vec![c]);
 }

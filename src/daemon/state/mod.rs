@@ -28,6 +28,7 @@ mod load_rate;
 pub(crate) mod manifest_sync;
 mod metrics;
 mod models;
+pub(crate) mod peer_exchange;
 pub(crate) mod peer_models;
 mod peer_outliers;
 pub(crate) mod peer_speed;
@@ -1495,6 +1496,7 @@ impl SharedState {
                 segment_bytes_out: AtomicU64::new(0),
                 tokens_served: AtomicU64::new(0),
                 lifetime_served: lifetime::LifetimeLedger::load(&db),
+                peer_exchange: peer_exchange::PeerExchange::load(&db),
                 channel_metrics: ChannelMetricsSet::new(),
                 last_dispatch_at_ms: std::sync::atomic::AtomicI64::new(0),
                 last_dispatch_kind: parking_lot::Mutex::new("none"),
@@ -3775,11 +3777,24 @@ impl SharedState {
     /// of this node's pool (`requester`, `pool::scope::is_pool_member`) — the
     /// owner's other devices are the owner's use — and a model not in the
     /// registry, so a peer naming arbitrary ids cannot grow the map.
+    ///
+    /// `asked_by` is the computer the network AUTHENTICATED as asking — `None`
+    /// where the request names a coordinator other than its sender — and goes
+    /// on that computer's tab (`metrics.peer_exchange`, "ran for them"), pool
+    /// member or not, once per `request_id`. Required, so no path counts
+    /// demand and skips the tab.
     pub fn note_request_served_for_a_peer(
         &self,
+        request_id: uuid::Uuid,
         model_id: &crate::types::ModelId,
         requester: Option<&crate::types::NodeId>,
+        asked_by: Option<&crate::types::NodeId>,
     ) {
+        if let Some(peer) = asked_by {
+            self.metrics
+                .peer_exchange
+                .note_ran_for_them(request_id, peer);
+        }
         if self.model_registry.get_manifest(model_id).is_none()
             || requester.is_some_and(|r| crate::pool::scope::is_pool_member(self, r))
         {
@@ -3793,13 +3808,19 @@ impl SharedState {
     }
 
     /// `node_id` saw a request for `model_id` through to the end — resets its
-    /// failure count and any ejection (`peer_outliers`).
+    /// failure count and any ejection (`peer_outliers`), and goes on its tab
+    /// (`metrics.peer_exchange`, "ran for us") once per `request_id`, however
+    /// many paths report it (a whole hand-off reports it twice).
     pub fn note_peer_completed_request(
         &self,
+        request_id: uuid::Uuid,
         node_id: &crate::types::NodeId,
         model_id: &crate::types::ModelId,
     ) {
         self.metrics.peer_outliers.note_success(node_id, model_id);
+        self.metrics
+            .peer_exchange
+            .note_ran_for_us(request_id, node_id);
     }
 
     /// May `head` be handed `model`'s split to lead? It advertises `needed`

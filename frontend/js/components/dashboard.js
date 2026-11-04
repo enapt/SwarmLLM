@@ -10,6 +10,9 @@
   // have never observed carries. Kept here, not inlined, so the reason the
   // peer table hides this value is findable from the value itself.
   var DEFAULT_TRUST_PCT = 50;
+  // Requests run for a computer, none returned, before the peer list tags it
+  // "Takes only" — enough that it is not one visit's worth.
+  var TAKES_ONLY_AFTER = 10;
 
   var S = App.state;
   var U = App.utils;
@@ -2213,6 +2216,7 @@
           (p.region || '') + '|' + (p.gpu_vram_mb || 0) + '|' +
           (p.hosted_models ? p.hosted_models.length : 0) + '|' +
           (p.swarm_use || '') + '|' + p.auto_manage + '|' + p.updates_itself + '|' +
+          (p.ran_for_them || 0) + '|' + (p.ran_for_us || 0) + '|' +
           // Uptime to the minute: the row shows it no finer, so a peer_list
           // burst inside the same minute still skips the rebuild.
           Math.floor((p.uptime_seconds || 0) / 60);
@@ -2290,6 +2294,8 @@
         if (sortKey === 'latency') { va = a.latency_ms || 99999; vb = b.latency_ms || 99999; }
         else if (sortKey === 'shards') { va = a.hosted_shards || 0; vb = b.hosted_shards || 0; }
         else if (sortKey === 'trust') { va = a.trust_score || 0; vb = b.trust_score || 0; }
+        else if (sortKey === 'for_you') { va = a.ran_for_us || 0; vb = b.ran_for_us || 0; }
+        else if (sortKey === 'for_it') { va = a.ran_for_them || 0; vb = b.ran_for_them || 0; }
         else { va = a.healthy ? 1 : 0; vb = b.healthy ? 1 : 0; }
         return sortDir === 'asc' ? va - vb : vb - va;
       });
@@ -2308,6 +2314,12 @@
         '<th data-peer-sort="latency"' + _thClass('latency') + '>' + U.escapeHtml(I18n.t('dashboard.peer_col_latency')) + _sortArrow('latency') + '</th>' +
         '<th data-peer-sort="shards"' + _thClass('shards') + '>' + U.escapeHtml(I18n.t('dashboard.info_shards')) + _sortArrow('shards') + '</th>' +
         '<th data-peer-sort="trust"' + _thClass('trust') + '>' + U.escapeHtml(I18n.t('dashboard.peer_col_trust')) + _sortArrow('trust') + '</th>' +
+        // What each computer and this one did for each other, in whole
+        // requests, counted by THIS computer from what it saw itself
+        // (`daemon::state::peer_exchange`) — not a balance, and it decides
+        // nothing; it is here so a computer that only takes can be seen.
+        '<th data-peer-sort="for_you"' + _thClass('for_you') + ' title="' + U.escapeHtml(I18n.t('dashboard.peer_col_did_for_you_tip')) + '">' + U.escapeHtml(I18n.t('dashboard.peer_col_did_for_you')) + _sortArrow('for_you') + '</th>' +
+        '<th data-peer-sort="for_it"' + _thClass('for_it') + ' title="' + U.escapeHtml(I18n.t('dashboard.peer_col_you_did_for_it_tip')) + '">' + U.escapeHtml(I18n.t('dashboard.peer_col_you_did_for_it')) + _sortArrow('for_it') + '</th>' +
         '<th data-peer-sort="status"' + _thClass('status') + '>' + U.escapeHtml(I18n.t('dashboard.section_status')) + _sortArrow('status') + '</th>' +
         '</tr></thead><tbody>';
 
@@ -2349,6 +2361,17 @@
         }
         if (p.updates_itself === false) {
           _flag('badge-amber', 'dashboard.peer_updates_off', 'dashboard.peer_updates_off_tip');
+        }
+        // A computer this one has run many requests for, that has run none of
+        // this one's. Not on your own devices or an anchor (which runs nothing
+        // by design). Its tip says it may be serving others: only what passed
+        // between these two computers is counted.
+        var ranForThem = p.ran_for_them || 0;
+        var ranForUs = p.ran_for_us || 0;
+        if (!p.is_anchor && !p.is_pool_member && ranForThem >= TAKES_ONLY_AFTER && ranForUs === 0) {
+          lanBadge += ' <span class="badge badge-orange" title="' +
+            U.escapeHtml(I18n.t('dashboard.peer_takes_only_tip', { count: ranForThem })) + '">' +
+            U.escapeHtml(I18n.t('dashboard.peer_takes_only')) + '</span>';
         }
         var dotClass = p.healthy ? 'online' : 'degraded';
         var latency = p.latency_ms ? p.latency_ms + 'ms' : '\u2014';
@@ -2431,6 +2454,8 @@
           '<td class="mono">' + latency + '</td>' +
           '<td class="mono">' + shards + '</td>' +
           '<td class="mono">' + trust + '</td>' +
+          '<td class="mono">' + (ranForUs ? U.formatCount(ranForUs) : '\u2014') + '</td>' +
+          '<td class="mono">' + (ranForThem ? U.formatCount(ranForThem) : '\u2014') + '</td>' +
           '<td><span class="status-dot ' + dotClass + '" style="display:inline-block;vertical-align:middle;margin-right:4px"></span>' + U.escapeHtml(status) + '</td>' +
           '</tr>';
       });

@@ -999,7 +999,11 @@ pub(super) async fn execute_request(
                 .iter()
                 .filter(|s| s.node_id != local_node_id)
             {
-                shared_state.note_peer_completed_request(&seg.node_id, &seg.shard_id.model_id);
+                shared_state.note_peer_completed_request(
+                    request.id,
+                    &seg.node_id,
+                    &seg.shard_id.model_id,
+                );
             }
             let verdict = check_distributed_result(&assignment_ref, &local_node_id, output);
             settle_participant_trust(

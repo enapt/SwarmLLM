@@ -45,11 +45,11 @@ pub async fn query_peers(
                     println!("No connected peers.");
                 } else {
                     let header = format!(
-                        "{:<18} {:>8} {:>6} {:>7} {}",
-                        "NODE ID", "LATENCY", "TRUST", "STATUS", "MODELS"
+                        "{:<18} {:>8} {:>6} {:>7} {:>8} {:>8} {}",
+                        "NODE ID", "LATENCY", "TRUST", "STATUS", "FOR YOU", "FOR IT", "MODELS"
                     );
                     println!("{header}");
-                    println!("{}", "-".repeat(70));
+                    println!("{}", "-".repeat(88));
                     for p in &peers {
                         let node_id = p["node_id"].as_str().unwrap_or("?");
                         let latency = p["latency_ms"]
@@ -74,12 +74,28 @@ pub async fn query_peers(
                         } else {
                             models.join(", ")
                         };
+                        // What each computer and this one did for each other
+                        // (`daemon::state::peer_exchange`), in whole requests.
+                        let count = |field: &str| match p[field].as_u64() {
+                            Some(n) if n > 0 => n.to_string(),
+                            _ => "—".to_string(),
+                        };
                         println!(
-                            "{:<18} {:>8} {:>6} {:>7} {}",
-                            node_id, latency, trust, healthy, model_str
+                            "{:<18} {:>8} {:>6} {:>7} {:>8} {:>8} {}",
+                            node_id,
+                            latency,
+                            trust,
+                            healthy,
+                            count("ran_for_us"),
+                            count("ran_for_them"),
+                            model_str
                         );
                     }
                     println!("\n{} peer(s) connected.", peers.len());
+                    println!(
+                        "FOR YOU / FOR IT: requests that computer ran for yours, and yours ran \
+                         for it, as your computer counted them."
+                    );
                 }
             }
         }
