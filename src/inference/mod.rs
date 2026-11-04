@@ -1620,6 +1620,378 @@ mod mxfp4_tests {
     }
 }
 
+/// IQ4_NL and IQ4_XS (GGML types 20 and 23, #404) in the vendored candle,
+/// checked against llama.cpp's own code: `examples/iq4_reference.c` runs each
+/// type's `to_float`, the CPU `vec_dot` and `from_float_ref` on the inputs
+/// [`reference_inputs`] makes (the same xorshift32, step for step) and printed
+/// the figures asserted here (llama.cpp master 4b1a27f, AVX2 build, 2026-11-04).
+#[cfg(test)]
+mod iq4_tests {
+    use candle_core::quantized::k_quants::{BlockIq4Nl, BlockIq4Xs, BlockQ8K, BlockQ8_0, GgmlType};
+    use candle_core::quantized::{gguf_file, GgmlDType, QMatMul, QTensor};
+    use candle_core::{Device, Module, Tensor};
+
+    struct XorShift(u32);
+    impl XorShift {
+        fn next(&mut self) -> u32 {
+            let mut s = self.0;
+            s ^= s << 13;
+            s ^= s >> 17;
+            s ^= s << 5;
+            self.0 = s;
+            s
+        }
+        /// A Q8 byte as a quantizer writes one: within +-127.
+        fn q8(&mut self) -> u8 {
+            ((self.next() % 255) as i32 - 127) as i8 as u8
+        }
+    }
+
+    /// Blocks from the bytes a GGUF holds them as.
+    fn blocks<T: GgmlType>(bytes: &[u8]) -> Vec<T> {
+        let size = std::mem::size_of::<T>();
+        assert_eq!(bytes.len() % size, 0);
+        let n = bytes.len() / size;
+        let mut out = vec![T::zeros(); n];
+        // SAFETY: every block type is `repr(C)` plain data, and `out` holds
+        // exactly `bytes.len()` bytes.
+        unsafe {
+            std::ptr::copy_nonoverlapping(bytes.as_ptr(), out.as_mut_ptr() as *mut u8, bytes.len())
+        };
+        out
+    }
+
+    /// The bytes a GGUF would hold `blocks` as.
+    fn bytes_of<T: GgmlType>(blocks: &[T]) -> Vec<u8> {
+        let n = std::mem::size_of_val(blocks);
+        let mut out = vec![0u8; n];
+        // SAFETY: `repr(C)` plain data of exactly `n` bytes.
+        unsafe { std::ptr::copy_nonoverlapping(blocks.as_ptr() as *const u8, out.as_mut_ptr(), n) };
+        out
+    }
+
+    fn fnv1a(bytes: impl IntoIterator<Item = u8>) -> u64 {
+        bytes.into_iter().fold(0xcbf2_9ce4_8422_2325, |h, b| {
+            (h ^ b as u64).wrapping_mul(0x0000_0100_0000_01b3)
+        })
+    }
+
+    fn bits(v: &[f32]) -> u64 {
+        fnv1a(v.iter().flat_map(|f| f.to_bits().to_le_bytes()))
+    }
+
+    struct Inputs {
+        nl: Vec<BlockIq4Nl>,
+        q8_0: Vec<BlockQ8_0>,
+        xs: Vec<BlockIq4Xs>,
+        q8k: Vec<BlockQ8K>,
+        nl_src: Vec<f32>,
+        xs_src: Vec<f32>,
+    }
+
+    /// `n` values to quantize: a quarter spread, a quarter zeros, a quarter
+    /// small, a quarter with one large outlier.
+    fn to_quantize(r: &mut XorShift, n: usize) -> Vec<f32> {
+        let quarter = n / 4;
+        let mut src: Vec<f32> = (0..quarter)
+            .map(|_| ((r.next() % 20001) as i32 - 10000) as f32 / 997.0)
+            .collect();
+        src.extend(std::iter::repeat_n(0.0, quarter));
+        src.extend((0..quarter).map(|_| ((r.next() % 2001) as i32 - 1000) as f32 / 65536.0));
+        src.extend((0..n - 3 * quarter).map(|_| ((r.next() % 2001) as i32 - 1000) as f32 / 500.0));
+        src[3 * quarter + 5] = 37.5;
+        src
+    }
+
+    /// Nine IQ4_NL blocks (the third with a negative scale) and nine Q8_0
+    /// blocks; three IQ4_XS super-blocks (the second negative) and three Q8_K;
+    /// then 256 values for IQ4_NL's quantizer and 1,024 for IQ4_XS's.
+    fn reference_inputs() -> Inputs {
+        let mut r = XorShift(0x1234_5678);
+        let mut nl = Vec::new();
+        for b in 0..9 {
+            let mut d = (0x2000 + r.next() % 0x2000) as u16;
+            if b == 2 {
+                d |= 0x8000;
+            }
+            nl.extend_from_slice(&d.to_le_bytes());
+            nl.extend((0..16).map(|_| (r.next() & 0xFF) as u8));
+        }
+        let mut q8_0 = Vec::new();
+        for _ in 0..9 {
+            q8_0.extend_from_slice(&((0x2000 + r.next() % 0x2000) as u16).to_le_bytes());
+            q8_0.extend((0..32).map(|_| r.q8()));
+        }
+        let mut xs = Vec::new();
+        for b in 0..3 {
+            let mut d = (0x2000 + r.next() % 0x2000) as u16;
+            if b == 1 {
+                d |= 0x8000;
+            }
+            xs.extend_from_slice(&d.to_le_bytes());
+            xs.extend_from_slice(&((r.next() & 0xFFFF) as u16).to_le_bytes());
+            xs.extend((0..4 + 128).map(|_| (r.next() & 0xFF) as u8));
+        }
+        let mut q8k = Vec::new();
+        for _ in 0..3 {
+            let d = (1 + r.next() % 1000) as f32 / 16384.0;
+            q8k.extend_from_slice(&d.to_le_bytes());
+            let qs: Vec<u8> = (0..256).map(|_| r.q8()).collect();
+            q8k.extend_from_slice(&qs);
+            for g in 0..16 {
+                let sum: i16 = qs[16 * g..16 * g + 16]
+                    .iter()
+                    .map(|&q| q as i8 as i16)
+                    .sum();
+                q8k.extend_from_slice(&sum.to_le_bytes());
+            }
+        }
+        let nl_src = to_quantize(&mut r, 8 * 32);
+        let xs_src = to_quantize(&mut r, 4 * 256);
+        Inputs {
+            nl: blocks(&nl),
+            q8_0: blocks(&q8_0),
+            xs: blocks(&xs),
+            q8k: blocks(&q8k),
+            nl_src,
+            xs_src,
+        }
+    }
+
+    /// `got` is llama.cpp's figure: bit for bit where this build runs the AVX2
+    /// kernel, whose order llama.cpp's AVX2 kernel is; the scalar loop sums in
+    /// another order, so it is held to the rounding only.
+    fn agrees(got_avx: f32, got_scalar: f32, want_bits: u32) {
+        let want = f32::from_bits(want_bits);
+        #[cfg(target_feature = "avx2")]
+        assert_eq!(
+            got_avx.to_bits(),
+            want_bits,
+            "{got_avx} against llama.cpp's {want}"
+        );
+        for got in [got_avx, got_scalar] {
+            assert!(
+                (got - want).abs() <= 1e-5 * want.abs(),
+                "{got} against llama.cpp's {want}"
+            );
+        }
+    }
+
+    #[test]
+    fn iq4_nl_reads_multiplies_and_quantizes_as_llama_cpp_does() {
+        let i = reference_inputs();
+        let mut deq = vec![0f32; 9 * 32];
+        BlockIq4Nl::to_float(&i.nl, &mut deq);
+        assert_eq!(bits(&deq), 0xc2c8_7282_434c_70d0, "dequantized values");
+
+        agrees(
+            BlockIq4Nl::vec_dot(8 * 32, &i.nl[..8], &i.q8_0[..8]),
+            BlockIq4Nl::vec_dot_unopt(8 * 32, &i.nl[..8], &i.q8_0[..8]),
+            0xc697_e81a,
+        );
+        // An odd last block takes the scalar rule beside the pairs.
+        agrees(
+            BlockIq4Nl::vec_dot(9 * 32, &i.nl, &i.q8_0),
+            BlockIq4Nl::vec_dot_unopt(9 * 32, &i.nl, &i.q8_0),
+            0xc697_049b,
+        );
+
+        let mut q = vec![BlockIq4Nl::zeros(); 8];
+        BlockIq4Nl::from_float(&i.nl_src, &mut q);
+        let q = bytes_of(&q);
+        assert_eq!(
+            fnv1a(q.iter().copied()),
+            0x22c4_2f21_de27_b589,
+            "quantized bytes {:02x?}",
+            &q[..18]
+        );
+    }
+
+    #[test]
+    fn iq4_xs_reads_multiplies_and_quantizes_as_llama_cpp_does() {
+        let i = reference_inputs();
+        let mut deq = vec![0f32; 3 * 256];
+        BlockIq4Xs::to_float(&i.xs, &mut deq);
+        assert_eq!(bits(&deq), 0xdf94_72b2_45e1_a527, "dequantized values");
+
+        agrees(
+            BlockIq4Xs::vec_dot(256, &i.xs[..1], &i.q8k[..1]),
+            BlockIq4Xs::vec_dot_unopt(256, &i.xs[..1], &i.q8k[..1]),
+            0x4383_bf94,
+        );
+        agrees(
+            BlockIq4Xs::vec_dot(3 * 256, &i.xs, &i.q8k),
+            BlockIq4Xs::vec_dot_unopt(3 * 256, &i.xs, &i.q8k),
+            0x46d3_1cb6,
+        );
+
+        let mut q = vec![BlockIq4Xs::zeros(); 4];
+        BlockIq4Xs::from_float(&i.xs_src, &mut q);
+        let q = bytes_of(&q);
+        assert_eq!(
+            fnv1a(q.iter().copied()),
+            0xaccd_4877_5f81_aaa7,
+            "quantized bytes {:02x?}",
+            &q[..18]
+        );
+    }
+
+    /// The low nibble of byte `j` is element `j`, the high one element `j + 16`,
+    /// and a value is the scale times the non-linear table's entry.
+    #[test]
+    fn an_iq4_nl_block_reads_its_nibbles_in_llama_cpps_order() {
+        // d = 1.0 (f16 0x3c00).
+        let mut bytes = 0x3c00u16.to_le_bytes().to_vec();
+        bytes.extend((0..16u8).map(|j| j | ((15 - j) << 4)));
+        let x: Vec<BlockIq4Nl> = blocks(&bytes);
+        let mut out = [0f32; 32];
+        BlockIq4Nl::to_float(&x, &mut out);
+        let table = [
+            -127., -104., -83., -65., -49., -35., -22., -10., 1., 13., 25., 38., 53., 69., 89.,
+            113.,
+        ];
+        for j in 0..16 {
+            assert_eq!(out[j], table[j], "element {j}");
+            assert_eq!(out[j + 16], table[15 - j], "element {}", j + 16);
+        }
+    }
+
+    /// An IQ4_XS super-block's eight runs of 32 each read their own 6-bit
+    /// scale: the low four bits from `scales_l` (two runs a byte, the even
+    /// run's in the low nibble), the high two from `scales_h` (two bits a run,
+    /// run 0's lowest), less 32.
+    #[test]
+    fn an_iq4_xs_run_reads_its_own_scale() {
+        // Run r's scale is 33 + 3r: the multiplier (scale − 32) is 1 + 3r.
+        let ls: Vec<u16> = (0..8).map(|r| 33 + 3 * r).collect();
+        let mut bytes = 0x3c00u16.to_le_bytes().to_vec(); // d = 1.0
+        let h: u16 = (0..8).map(|r| (ls[r] >> 4) << (2 * r)).sum();
+        bytes.extend_from_slice(&h.to_le_bytes());
+        bytes.extend((0..4).map(|b| ((ls[2 * b] & 0xF) | ((ls[2 * b + 1] & 0xF) << 4)) as u8));
+        // Every nibble 8: the table's entry 1.
+        bytes.extend(std::iter::repeat_n(0x88u8, 128));
+        let x: Vec<BlockIq4Xs> = blocks(&bytes);
+        let mut out = [0f32; 256];
+        BlockIq4Xs::to_float(&x, &mut out);
+        for (j, v) in out.iter().enumerate() {
+            assert_eq!(*v, (1 + 3 * (j / 32)) as f32, "element {j}");
+        }
+    }
+
+    /// **A Q8_K block writes its largest activation at 127, never -128** — llama.cpp's
+    /// `quantize_row_q8_K_ref` (`iscale = -127/max`). The IQ kernels multiply through
+    /// `_mm256_sign_epi8`, which cannot negate -128: candle's older -128/max sent an
+    /// IQ4_XS product 30% off beside a negative weight (the matmul test below).
+    #[test]
+    fn a_q8k_block_writes_its_largest_activation_at_127_as_llama_cpp_does() {
+        for big in [1.0f32, -1.0] {
+            let mut xs = vec![0.25f32; 256];
+            xs[7] = big;
+            xs[8] = -0.75;
+            let mut q = vec![BlockQ8K::zeros(); 1];
+            BlockQ8K::from_float(&xs, &mut q);
+            let raw = bytes_of(&q);
+            let d = f32::from_le_bytes(raw[0..4].try_into().unwrap());
+            let qs: Vec<i8> = raw[4..260].iter().map(|b| *b as i8).collect();
+            // iscale = -127 / max: the largest is always written -127 (the scale carries
+            // the sign), so the old -128 / max wrote -128 in every block.
+            assert_eq!(qs[7], -127, "max {big}");
+            assert!(qs.iter().all(|v| *v != -128), "max {big}");
+            assert_eq!(d, -big / 127.0);
+            assert_eq!(qs[8], (127.0f32 * 0.75 * big.signum()).round() as i8);
+        }
+    }
+
+    /// A GGUF names IQ4_NL by type 20 and IQ4_XS by 23, and a weight stored in
+    /// either multiplies on the processor as its dequantized values do.
+    #[test]
+    fn an_iq4_weight_survives_a_gguf_and_multiplies_like_its_values() {
+        let dev = Device::Cpu;
+        let (n, k) = (48usize, 512usize);
+        for (dtype, id, block_bytes, block) in [
+            (GgmlDType::Iq4Nl, 20u32, 18, 32),
+            (GgmlDType::Iq4Xs, 23, 136, 256),
+        ] {
+            let mut r = XorShift(0x0bad_cafe);
+            let w: Vec<f32> = (0..n * k)
+                .map(|_| (r.next() % 2001) as f32 / 1000.0 - 1.0)
+                .collect();
+            let w = Tensor::from_vec(w, (n, k), &dev).unwrap();
+            let q = QTensor::quantize(&w, dtype).unwrap();
+            assert_eq!(q.storage_size_in_bytes(), n * k / block * block_bytes);
+
+            let mut file = std::io::Cursor::new(Vec::new());
+            gguf_file::write(&mut file, &[], &[("w", &q)]).unwrap();
+            // ggml's tensor-info entry: name, dims, then the type as a u32.
+            let raw = file.get_ref();
+            let at = raw.windows(1).position(|s| s == b"w").unwrap();
+            let type_at = at + 1 + 4 + 2 * 8;
+            assert_eq!(
+                u32::from_le_bytes(raw[type_at..type_at + 4].try_into().unwrap()),
+                id
+            );
+            file.set_position(0);
+            let content = gguf_file::Content::read(&mut file).unwrap();
+            assert_eq!(content.tensor_infos["w"].ggml_dtype, dtype);
+            let values = content
+                .tensor(&mut file, "w", &dev)
+                .unwrap()
+                .dequantize(&dev)
+                .unwrap();
+            let flat = |t: &Tensor| t.flatten_all().unwrap().to_vec1::<f32>().unwrap();
+            assert_eq!(
+                flat(&values),
+                flat(&q.dequantize(&dev).unwrap()),
+                "{dtype:?}"
+            );
+            // The weights quantize close to what they were: 4.25-4.5 bits a value.
+            let err = (&values - &w).unwrap().abs().unwrap().mean_all().unwrap();
+            assert!(err.to_scalar::<f32>().unwrap() < 0.05, "{dtype:?}");
+
+            for rows in [1usize, 3, 4, 9] {
+                let a: Vec<f32> = (0..rows * k)
+                    .map(|_| (r.next() % 2001) as f32 / 1000.0 - 1.0)
+                    .collect();
+                let a = Tensor::from_vec(a, (rows, k), &dev).unwrap();
+                let got = QMatMul::from_qtensor(content.tensor(&mut file, "w", &dev).unwrap())
+                    .unwrap()
+                    .forward(&a)
+                    .unwrap();
+                let want = a.matmul(&values.t().unwrap()).unwrap();
+                // The activations are rounded to Q8 on the way in: about 0.4% a
+                // value, summed over 512 products of unit size.
+                for (g, w) in flat(&got).iter().zip(flat(&want)) {
+                    assert!(
+                        (g - w).abs() <= 0.35,
+                        "{dtype:?}, {rows} rows: {g} against {w}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// A model holding IQ4 weights is one no card kernel of this build reads,
+    /// so it is kept on the processor (`CpuReason::WeightFormatNeedsTheProcessor`);
+    /// a model of K-quants is not.
+    #[test]
+    fn a_header_holding_iq4_is_one_the_card_cannot_read() {
+        let dev = Device::Cpu;
+        let w = Tensor::zeros((4, 256), candle_core::DType::F32, &dev).unwrap();
+        let header = |dtype| {
+            let q = QTensor::quantize(&w, dtype).unwrap();
+            let mut file = std::io::Cursor::new(Vec::new());
+            gguf_file::write(&mut file, &[], &[("blk.0.ffn_down.weight", &q)]).unwrap();
+            file.set_position(0);
+            gguf_file::Content::read(&mut file).unwrap()
+        };
+        use crate::inference::split::holds_weights_the_card_cannot_read as cannot;
+        assert!(cannot(&header(GgmlDType::Iq4Nl)));
+        assert!(cannot(&header(GgmlDType::Iq4Xs)));
+        assert!(!cannot(&header(GgmlDType::Q4K)));
+        assert!(!cannot(&header(GgmlDType::Mxfp4)));
+    }
+}
+
 #[cfg(test)]
 mod reasoning_block_tests {
     use super::{finalize_reply_text, take_leading_reasoning_block};

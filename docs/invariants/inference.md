@@ -6413,6 +6413,73 @@ Fibonacci answer at 14.7 tok/s. Its decode width calibrated `offered=4` → 4 th
 `test-split` of that placement read 60.7 / 83.8 ms at 4 threads and 50.2 / 64.3 at 8 in an ABAB the
 same hour, so the node's step is the 4-thread step, not a slower path (FUTURE_WORK #399).
 
+## IQ4_NL and IQ4_XS: llama.cpp's bits on the processor, kept off the card (2026-11-04, FUTURE_WORK #404)
+
+**Why these two first.** llama.cpp stores a row too narrow for a K-quant (fewer than 256 values) in
+IQ4_NL when it writes a Q2_K, Q3_K or IQ4_XS file, so files NAMED for a K-quant carry it (#394: a
+"Q4_K_M" header can hold IQ4_NL tensors; GLM-4.5-Air's down experts, #390 (3)); IQ4_XS is a common
+pick for a model too big for Q4_K_M. Before, a header holding either was refused at load.
+
+**The formats** (`ggml-common.h`): IQ4_NL is `{f16 d; u8 qs[16]}` (18 bytes, 32 values; low nibbles
+are values 0-15, high nibbles 16-31), each nibble an index into the non-linear table
+`kvalues_iq4nl` = [-127, -104, -83, -65, -49, -35, -22, -10, 1, 13, 25, 38, 53, 69, 89, 113], times
+`d`; its dot multiplies against Q8_0. IQ4_XS is `{f16 d; u16 scales_h; u8 scales_l[4]; u8 qs[128]}`
+(136 bytes, 256 values in eight runs of 32): run `ib`'s scale is
+`((scales_l[ib/2] >> 4*(ib%2)) & 0xf) | (((scales_h >> 2*ib) & 3) << 4)`, minus 32, times `d`; its
+dot multiplies against Q8_K. The vendored candle's `BlockIq4Nl` / `BlockIq4Xs` (`quantized/k_quants.rs`)
+transcribe `dequantize_row_iq4_nl` / `_xs`, `quantize_row_iq4_nl_ref` / `_xs_ref` (the reference
+quantizer's scale search, `quantize_row_iq4_nl_impl`) and `ggml_vec_dot_iq4_nl_q8_0` /
+`ggml_vec_dot_iq4_xs_q8_K` — the scalar loop and the AVX2 kernel (`quantized/avx.rs`: the table
+looked up with `_mm_shuffle_epi8`, the products by `_mm256_maddubs_epi16` on `_mm256_sign_epi8`'d
+operands — llama.cpp's `mul_add_epi8`).
+
+**Checked bit for bit.** `examples/iq4_reference.c` calls llama.cpp master `4b1a27f`'s own type traits
+(`to_float`, `from_float_ref`, the CPU `vec_dot` — AVX2 on this build) on inputs from a xorshift32 the
+Rust test repeats step for step, and prints a hash of every dequantized value's bits, the dot's bits
+and a hash of the quantizer's bytes. `inference::iq4_tests` asserts those figures on the scalar and
+AVX2 paths: IQ4_NL over 8 blocks AND 9 (llama.cpp's AVX2 loop takes blocks in pairs; an odd last
+block takes the scalar rule, which a test of 8 would never reach), IQ4_XS over 1 super-block and 3, a
+negative scale in each. Two traps the reference had to respect: **the Q8 bytes stay within ±127** —
+`_mm256_sign_epi8` cannot negate -128 (it stays -128), so beside a negative weight llama.cpp's own
+kernel disagrees with its scalar loop on a byte no quantizer writes; and the reference runs the
+CPU backend's `vec_dot`, not the scalar fallback, so the AVX2 kernel is what is judged. Beside the
+hashes: a block reads its nibbles in llama.cpp's order (low nibbles first), an IQ4_XS run reads its
+own scale, and a weight written as each type into a GGUF multiplies as its values do through
+`QMatMul` (mean error < 0.05 against the f32 product).
+
+**The activations' Q8_K scale is llama.cpp's.** The bit-for-bit tests passed while a weight written
+as IQ4_XS through a GGUF multiplied 30% off its dequantized values through `QMatMul` (-1.82 against
+-2.61, 2026-11-04): the activations, quantized to Q8_K on the way in, came from candle's
+`BlockQ8K::from_float`, which kept `iscale = -128/max` and so wrote -128 for each block's largest
+activation — the one byte the AVX2 kernel's `_mm256_sign_epi8` cannot negate. llama.cpp moved its
+quantizer to -127/max for exactly this (`quantize_row_q8_K_ref`, "We need this change for IQ2_XXS,
+else the AVX implementation becomes very awkward"), and its x86 build quantizes Q8_K through that
+function (`arch/x86/quants.c::quantize_row_q8_K`). The vendored quantizer now matches it
+(`k_quants::q8k_scale`; `a_q8k_block_writes_its_largest_activation_at_127_as_llama_cpp_does`), which
+moves every processor K-quant product, too, onto llama.cpp's activations (Q2_K-Q6_K read Q8_K; their
+kernels handle -128, so they were never wrong, only off llama.cpp's grid). A/B `SWARMLLM_Q8K_SCALE=128`.
+
+**Through a node** (2026-11-04 17:33Z, a probe node on the dev build, processor only,
+`~/swarmllm-gate/deep/cg/iq4_probe.sh`): bartowski's `Qwen2.5-0.5B-Instruct-IQ4_XS.gguf` (120 IQ4_NL
+tensors — its 896-wide rows cannot be IQ4_XS — 24 IQ4_XS, 24 Q5_1) fetched through `download-shards`
+and loaded from its part; three greedy replies scored against llama.cpp (`score_against_reference.py`):
+112 of 113 tokens rank 1, the other rank 2 at a 0.096 logit gap. Llama-3.2-3B Q4_K_M, the same three
+prompts, at -127 and at -128 (`SWARMLLM_Q8K_SCALE=128`): 133 of 134 against 135 of 135 rank 1 — the one
+parting a near-tie (0.161), as a different rounding of the activations parts at one. Every Q8_K
+quantizer of llama.cpp's x86 build reads -127 — the repacked kernels' too
+(`repack.cpp::ggml_quantize_mat_q8_K_4x8_generic`).
+
+**Kept off the card.** No card kernel of this build reads either type: candle's `QCudaStorage`
+falls back to dequantizing in HOST memory and uploading for every product — seconds a token. So a
+model whose header holds IQ4_NL or IQ4_XS is placed on the processor
+(`split::holds_weights_the_card_cannot_read` → `process_pool::CpuReason::WeightFormatNeedsTheProcessor`,
+after the owner's own setting, the truer answer where both hold), shown in the dashboard's placement
+reason and `swarmllm status`. The model browser offers such files (they are hostable,
+`model::huggingface::quant_is_unreadable` reads `READABLE_IQ_TYPES`) and recommends any other
+hostable file before them (`admin_hf::search::recommended_file`: Q4_K_M, the smallest Q4, then a file
+a card reads, then an IQ4). The card kernels are #404 (1a): the vendored MMQ headers already carry
+llama.cpp's IQ4 dot products; no instance file and no candle mat-vec or dequantise exists yet.
+
 ## The popular models of 2026-11-02, checked against llama.cpp master on the processor and the card
 
 **Which.** The HuggingFace reading of 2026-11-01 15:29Z (`HfWatcher`): Qwen3.8-27B, Qwen3.6-35B-A3B,

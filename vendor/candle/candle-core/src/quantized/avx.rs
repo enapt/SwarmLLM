@@ -1,7 +1,7 @@
 use super::k_quants::{
-    e8m0_half_bits, mxfp4_block_dot, BlockMxfp4, BlockQ2K, BlockQ3K, BlockQ4K, BlockQ4_0,
-    BlockQ4_1, BlockQ5K, BlockQ5_0, BlockQ5_1, BlockQ6K, BlockQ8K, BlockQ8_0, BlockQ8_1,
-    MXFP4_VALUES, QK8_0, QK_K,
+    e8m0_half_bits, iq4_nl_block_dot, mxfp4_block_dot, BlockIq4Nl, BlockIq4Xs, BlockMxfp4,
+    BlockQ2K, BlockQ3K, BlockQ4K, BlockQ4_0, BlockQ4_1, BlockQ5K, BlockQ5_0, BlockQ5_1, BlockQ6K,
+    BlockQ8K, BlockQ8_0, BlockQ8_1, IQ4NL_VALUES, MXFP4_VALUES, QK8_0, QK_K,
 };
 use byteorder::{ByteOrder, LittleEndian};
 use half::f16;
@@ -128,6 +128,109 @@ unsafe fn mxfp4_bytes(x: &BlockMxfp4) -> __m256i {
     let values = _mm_loadu_si128(MXFP4_VALUES.as_ptr() as *const __m128i);
     let m4b = _mm_set1_epi8(0x0F);
     let q4bits = _mm_loadu_si128(x.qs.as_ptr() as *const __m128i);
+    let low = _mm_shuffle_epi8(values, _mm_and_si128(q4bits, m4b));
+    let high = _mm_shuffle_epi8(values, _mm_and_si128(_mm_srli_epi16(q4bits, 4), m4b));
+    _mm256_set_m128i(high, low)
+}
+
+/// SwarmLLM patch: IQ4_NL against Q8_0 on AVX2 — llama.cpp's
+/// `ggml_vec_dot_iq4_nl_q8_0` (`ggml-cpu/arch/x86/quants.c`), operation for
+/// operation: MXFP4's shape ([`vec_dot_mxfp4_q8_0`]) with IQ4_NL's levels and
+/// an f16 scale — blocks in pairs into two accumulators, an odd last block by
+/// the scalar rule.
+#[inline(always)]
+pub(crate) fn vec_dot_iq4_nl_q8_0(n: usize, xs: &[BlockIq4Nl], ys: &[BlockQ8_0]) -> f32 {
+    debug_assert!(
+        n.is_multiple_of(QK8_0),
+        "vec_dot_iq4_nl_q8_0: {n} is not divisible by {QK8_0}"
+    );
+    let nb = xs.len().min(ys.len());
+    unsafe {
+        let mut accum1 = _mm256_setzero_ps();
+        let mut accum2 = _mm256_setzero_ps();
+        let mut ib = 0;
+        while ib + 1 < nb {
+            let (x0, x1) = (&xs[ib], &xs[ib + 1]);
+            let (y0, y1) = (&ys[ib], &ys[ib + 1]);
+            let by0 = _mm256_loadu_si256(y0.qs.as_ptr() as *const __m256i);
+            let by1 = _mm256_loadu_si256(y1.qs.as_ptr() as *const __m256i);
+            let p0 = mul_sum_i8_pairs_float(iq4_levels(&x0.qs), by0);
+            let p1 = mul_sum_i8_pairs_float(iq4_levels(&x1.qs), by1);
+            accum1 = _mm256_fmadd_ps(scale_product(x0.d, y0.d), p0, accum1);
+            accum2 = _mm256_fmadd_ps(scale_product(x1.d, y1.d), p1, accum2);
+            ib += 2;
+        }
+        let mut sumf = hsum_float_8(_mm256_add_ps(accum1, accum2));
+        if ib < nb {
+            sumf += iq4_nl_block_dot(&xs[ib], &ys[ib]);
+        }
+        sumf
+    }
+}
+
+/// SwarmLLM patch: IQ4_XS against Q8_K on AVX2 — llama.cpp's
+/// `ggml_vec_dot_iq4_xs_q8_K` (`ggml-cpu/arch/x86/quants.c`), operation for
+/// operation: each pair of runs' byte products summed to i16 pairs, widened by
+/// the run's scale less 32, accumulated as integers across the block, then one
+/// fused multiply-add of the block's `d × d8`.
+#[inline(always)]
+pub(crate) fn vec_dot_iq4_xs_q8k(n: usize, xs: &[BlockIq4Xs], ys: &[BlockQ8K]) -> f32 {
+    debug_assert!(
+        n.is_multiple_of(QK_K),
+        "vec_dot_iq4_xs_q8k: {n} is not divisible by {QK_K}"
+    );
+    unsafe {
+        let mut accum = _mm256_setzero_ps();
+        for (x, y) in xs.iter().zip(ys.iter()) {
+            let mut sh = x.scales_h;
+            let mut sumi1 = _mm256_setzero_si256();
+            let mut sumi2 = _mm256_setzero_si256();
+            for ib in (0..QK_K / 32).step_by(2) {
+                let q4b_1 = iq4_levels(&x.qs[16 * ib..16 * ib + 16]);
+                let q4b_2 = iq4_levels(&x.qs[16 * ib + 16..16 * ib + 32]);
+                let q8b_1 = _mm256_loadu_si256(y.qs[32 * ib..].as_ptr() as *const __m256i);
+                let q8b_2 = _mm256_loadu_si256(y.qs[32 * ib + 32..].as_ptr() as *const __m256i);
+                let p16_1 = _mm256_maddubs_epi16(
+                    _mm256_sign_epi8(q4b_1, q4b_1),
+                    _mm256_sign_epi8(q8b_1, q4b_1),
+                );
+                let p16_2 = _mm256_maddubs_epi16(
+                    _mm256_sign_epi8(q4b_2, q4b_2),
+                    _mm256_sign_epi8(q8b_2, q4b_2),
+                );
+                let ls1 = ((x.scales_l[ib / 2] & 0x0F) as i16 | ((sh << 4) & 0x30) as i16) - 32;
+                let ls2 = ((x.scales_l[ib / 2] >> 4) as i16 | ((sh << 2) & 0x30) as i16) - 32;
+                sh >>= 4;
+                let p_1 = _mm256_madd_epi16(p16_1, _mm256_set1_epi16(ls1));
+                let p_2 = _mm256_madd_epi16(p16_2, _mm256_set1_epi16(ls2));
+                sumi1 = _mm256_add_epi32(p_1, sumi1);
+                sumi2 = _mm256_add_epi32(p_2, sumi2);
+            }
+            let d = iq4_xs_scale(x.d, y.d);
+            accum = _mm256_fmadd_ps(d, _mm256_cvtepi32_ps(_mm256_add_epi32(sumi1, sumi2)), accum);
+        }
+        hsum_float_8(accum)
+    }
+}
+
+/// An IQ4_XS block's `d` times a Q8_K block's, broadcast — built in general
+/// registers and moved whole, as [`mxfp4_scale`] is (see [`scale_product`]).
+#[inline(always)]
+unsafe fn iq4_xs_scale(x: f16, y: f32) -> __m256 {
+    let xd = _mm_cvtph_ps(_mm_cvtsi32_si128(x.to_bits() as i32));
+    let yd = _mm_castsi128_ps(_mm_cvtsi32_si128(y.to_bits() as i32));
+    _mm256_broadcastss_ps(_mm_mul_ss(xd, yd))
+}
+
+/// IQ4_NL / IQ4_XS: sixteen bytes of nibbles as their levels — the low
+/// nibbles (elements 0-15) in the low lane, the high (16-31) in the high, as
+/// the Q8 block holds them.
+#[inline(always)]
+unsafe fn iq4_levels(qs: &[u8]) -> __m256i {
+    debug_assert!(qs.len() >= 16);
+    let values = _mm_loadu_si128(IQ4NL_VALUES.as_ptr() as *const __m128i);
+    let m4b = _mm_set1_epi8(0x0F);
+    let q4bits = _mm_loadu_si128(qs.as_ptr() as *const __m128i);
     let low = _mm_shuffle_epi8(values, _mm_and_si128(q4bits, m4b));
     let high = _mm_shuffle_epi8(values, _mm_and_si128(_mm_srli_epi16(q4bits, 4), m4b));
     _mm256_set_m128i(high, low)

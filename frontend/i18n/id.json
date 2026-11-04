@@ -879,6 +879,7 @@
   "placement.not_enough_vram": "Model ini butuh memori grafis lebih banyak daripada yang tersedia saat dimulai. Kartu grafis akan dipakai lagi begitu memori tersedia.",
   "placement.on_cpu": "Berjalan di prosesor",
   "placement.tip": "Model berjalan lebih cepat di kartu grafis. Ini alasan model ini tidak.",
+  "placement.weight_format": "Model ini disimpan dalam format (IQ4) yang belum bisa dijalankan cepat oleh versi ini di kartu grafis, jadi prosesor yang menjalankannya.",
   "pool.add_device_header": "Tambah perangkat lain",
   "pool.add_device_settings_desc": "Buat kode undangan jika sewaktu-waktu Anda ingin menautkan mesin lain ke grup ini.",
   "pool.code_address_warning": "Kode ini berisi alamat jaringan perangkat Anda agar perangkat lain dapat terhubung. Bagikan hanya dengan orang yang Anda percaya.",

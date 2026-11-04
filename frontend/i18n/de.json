@@ -879,6 +879,7 @@
   "placement.not_enough_vram": "Es braucht mehr Grafikspeicher, als beim Start frei war. Sobald wieder Speicher frei ist, wird die Grafikkarte erneut genutzt.",
   "placement.on_cpu": "Läuft auf dem Prozessor",
   "placement.tip": "Modelle laufen auf einer Grafikkarte schneller. Hier steht, warum dieses es nicht tut.",
+  "placement.weight_format": "Dieses Modell ist in einem Format (IQ4) gespeichert, das diese Version auf der Grafikkarte noch nicht schnell ausführen kann, daher führt der Prozessor es aus.",
   "pool.add_device_header": "Weiteres Gerät hinzufügen",
   "pool.add_device_settings_desc": "Erstellen Sie einen Einladungscode, wenn Sie eine weitere Maschine mit dieser Gruppe verknüpfen möchten.",
   "pool.code_address_warning": "Dieser Code enthält die Netzwerkadressen deines Geräts, damit das andere sich verbinden kann. Teile ihn nur mit Personen, denen du vertraust.",

@@ -1423,6 +1423,15 @@ impl QCudaStorage {
             GgmlDType::Mxfp4 => {
                 deq::<crate::quantized::BlockMxfp4>(&buffer, block_len, &mut out)
             }
+            // SwarmLLM patch: no card kernel reads IQ4_NL or IQ4_XS yet, so a
+            // model holding them is kept off the card (#404); this keeps a
+            // stray product correct.
+            GgmlDType::Iq4Nl => {
+                deq::<crate::quantized::BlockIq4Nl>(&buffer, block_len, &mut out)
+            }
+            GgmlDType::Iq4Xs => {
+                deq::<crate::quantized::BlockIq4Xs>(&buffer, block_len, &mut out)
+            }
         }
 
         self.device

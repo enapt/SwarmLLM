@@ -188,6 +188,13 @@ pub fn qtensor_from_ggml(
         GgmlDType::Mxfp4 => {
             from_raw_data::<k_quants::BlockMxfp4>(raw_data, size_in_bytes, dims, device)
         }
+        // SwarmLLM patch: IQ4_NL / IQ4_XS (#404).
+        GgmlDType::Iq4Nl => {
+            from_raw_data::<k_quants::BlockIq4Nl>(raw_data, size_in_bytes, dims, device)
+        }
+        GgmlDType::Iq4Xs => {
+            from_raw_data::<k_quants::BlockIq4Xs>(raw_data, size_in_bytes, dims, device)
+        }
         _ => crate::bail!("quantized type {ggml_dtype:?} is not supported yet"),
     }
 }

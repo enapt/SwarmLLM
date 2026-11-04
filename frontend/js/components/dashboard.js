@@ -1467,7 +1467,10 @@
             // A card reset in progress: clears by itself, so amber, not red.
             driver_not_answering:       { key: 'placement.driver_not_answering', mod: 'mce-section-state-amber', badge: 'cb-fragile' },
             gpu_stopped_responding:     { key: 'placement.gpu_unavailable',  mod: 'mce-section-state-red',   badge: 'cb-unusable' },
-            cuda_libraries_missing:     { key: 'placement.cuda_libraries_missing', mod: 'mce-section-state-red', badge: 'cb-unusable' }
+            cuda_libraries_missing:     { key: 'placement.cuda_libraries_missing', mod: 'mce-section-state-red', badge: 'cb-unusable' },
+            // A fact about this version (IQ4 has no card kernels yet), as
+            // `gpu_too_old_for_this_build` is about the card: amber.
+            weight_format_needs_the_processor: { key: 'placement.weight_format', mod: 'mce-section-state-amber', badge: 'cb-fragile' }
           };
           var r = reasonKeys[cpuReason];
           if (r) {

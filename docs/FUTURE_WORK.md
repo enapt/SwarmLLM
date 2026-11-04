@@ -2944,12 +2944,20 @@ rule the search's file list (`search::model_files`), the trending size and the d
 offers no file and fits nowhere here (`admin_hf::search::offered_here`: it said `fits_vram: true` and
 recommended a file, and a row the swarm runs read "Runs locally" in the browser). **Left, three
 gaps behind it**:
-1. **IQ/TQ types in the vendored candle** — `GgmlDType` reads none of ids 16-23, 29, 34, 35, nor
-   llama.cpp master's 40-42 (NVFP4, Q1_0, Q2_0 — the reporter's repo carried Q2_0 files)
-   (`split::UNREADABLE_GGML_TYPES`, the one list). IQ4_NL / IQ4_XS first: they are the ones a K-quant
-   upload's narrow rows fall back to (GLM-4.5-Air's down experts, #390 (3)), and the low-bit uploads
-   people pick for large models. Each type needs dequantise, a processor dot and the card kernels,
-   checked bit for bit against llama.cpp as MXFP4 was (#390 (2) step 1).
+1. **IQ/TQ types in the vendored candle** — **IQ4_NL and IQ4_XS run on the PROCESSOR since
+   2026-11-04** (`BlockIq4Nl`, `BlockIq4Xs`: dequantise, the reference quantizer, a scalar and an AVX2
+   dot — bit for bit against llama.cpp master `4b1a27f` on fixed inputs, `examples/iq4_reference.c` →
+   `inference::iq4_tests`; `split::READABLE_IQ_TYPES`). They are what a K-quant upload's narrow rows
+   fall back to (GLM-4.5-Air's down experts, #390 (3)) and a common pick for a large model. A model
+   holding either is kept OFF the card (`CpuReason::WeightFormatNeedsTheProcessor`, from the header):
+   candle's card path would dequantise in host memory for every product. The model browser offers such
+   files and recommends any other hostable file first. **Left**: (a) **their card kernels** — the
+   vendored MMQ headers already carry llama.cpp's IQ4 dot products (`ggml_mmq/src/ggml-cuda/vecdotq.cuh`)
+   but no `mmq_type_iq4_*.cu` instantiates them, and candle's `quantized.cu` has no IQ4 dequantise or
+   mat-vec; then `moe_card::kernel_type`, checked as MXFP4's were (#390 step 7), and the guard goes;
+   (b) **the other types**: ids 16-19, 21, 22, 29, 34, 35 and master's 40-42 (NVFP4, Q1_0, Q2_0 — the
+   reporter's repo carried Q2_0 files) (`split::UNREADABLE_GGML_TYPES`, the one list) — each a
+   dequantise, a processor dot and the card kernels; IQ2/IQ3 also need llama.cpp's grid tables.
 2. **A model split across files** (`*-00001-of-00003.gguf`): the shard system plans from ONE header
    and one tensor table; a split upload's tables are per file. Needs a design that keeps "no full
    download" and "one canonical upload" (`model::canonical`) — never a merge into one GGUF.

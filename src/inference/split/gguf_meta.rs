@@ -104,20 +104,19 @@ pub fn explain_gguf_parse_error(e: &candle_core::Error) -> String {
 }
 
 /// The ggml types people meet that candle cannot read (`ggml.h`, `enum
-/// ggml_type`: every `IQ*` and `TQ*`, and llama.cpp master's NVFP4, Q1_0 and
-/// Q2_0 — the vendored `GgmlDType::from_u32` reads 0-15, 30 and 39), by number
-/// and name — what [`explain_gguf_parse_error`] names a refused file's type
-/// with, and what `model::huggingface::quant_is_unreadable` reads, so a file
-/// name is judged by the same list a header is refused by.
+/// ggml_type`: every `IQ*` but [`READABLE_IQ_TYPES`], every `TQ*`, and
+/// llama.cpp master's NVFP4, Q1_0 and Q2_0 — the vendored
+/// `GgmlDType::from_u32` reads 0-15, 20, 23, 30 and 39), by number and name —
+/// what [`explain_gguf_parse_error`] names a refused file's type with, and
+/// what `model::huggingface::quant_is_unreadable` reads, so a file name is
+/// judged by the same list a header is refused by.
 pub const UNREADABLE_GGML_TYPES: &[(u32, &str)] = &[
     (16, "IQ2_XXS"),
     (17, "IQ2_XS"),
     (18, "IQ3_XXS"),
     (19, "IQ1_S"),
-    (20, "IQ4_NL"),
     (21, "IQ3_S"),
     (22, "IQ2_S"),
-    (23, "IQ4_XS"),
     (29, "IQ1_M"),
     (34, "TQ1_0"),
     (35, "TQ2_0"),
@@ -125,6 +124,30 @@ pub const UNREADABLE_GGML_TYPES: &[(u32, &str)] = &[
     (41, "Q1_0"),
     (42, "Q2_0"),
 ];
+
+/// The `IQ*` types the vendored candle reads (#404): IQ4_NL — what llama.cpp
+/// stores a row too narrow for a Q2_K / Q3_K / IQ4_XS file's K-quant in, so
+/// those files carry it — and IQ4_XS, a common pick for a large model. Both
+/// are llama.cpp's bits on the processor (`BlockIq4Nl`, `BlockIq4Xs`); no card
+/// kernel reads them yet (`holds_weights_the_card_cannot_read`). A file
+/// NAMED for one is hostable (`model::huggingface::quant_is_unreadable`); the
+/// other `IQ*` names stay refused, as a mix's name (`IQ3_M`) means its types.
+pub const READABLE_IQ_TYPES: &[(u32, &str)] = &[(20, "IQ4_NL"), (23, "IQ4_XS")];
+
+/// Whether a file holds a weight no card kernel of this build reads: IQ4_NL or
+/// IQ4_XS ([`READABLE_IQ_TYPES`]). The vendored candle multiplies them on the
+/// processor and, on a card, only by dequantizing in HOST memory for every
+/// product (`QCudaStorage::dequantize`'s fallback): seconds a token. So a model
+/// holding one is kept off the card
+/// (`process_pool::CpuReason::WeightFormatNeedsTheProcessor`) until a card
+/// kernel reads it (#404) — as MXFP4 was until its kernels landed (#390 step 7).
+#[cfg(any(feature = "candle-cuda", test))]
+pub(crate) fn holds_weights_the_card_cannot_read(ct: &gguf_file::Content) -> bool {
+    use candle_core::quantized::GgmlDType;
+    ct.tensor_infos
+        .values()
+        .any(|t| matches!(t.ggml_dtype, GgmlDType::Iq4Nl | GgmlDType::Iq4Xs))
+}
 
 /// The words [`explain_gguf_parse_error`] says a file's quantization with, and
 /// that `model::huggingface::probe_failure` recognises it by — one constant,

@@ -21,6 +21,14 @@ pub const QK8_0: usize = 32;
 pub const QK8_1: usize = 32;
 /// SwarmLLM patch: MXFP4's block (llama.cpp `QK_MXFP4`).
 pub const QK_MXFP4: usize = 32;
+/// SwarmLLM patch: IQ4_NL's block (llama.cpp `QK4_NL`).
+pub const QK4_NL: usize = 32;
+
+/// SwarmLLM patch: llama.cpp's `kvalues_iq4nl` (`ggml-common.h`) — the sixteen
+/// non-linear levels IQ4_NL and IQ4_XS share; a value is
+/// `IQ4NL_VALUES[nibble] × scale`.
+pub(crate) const IQ4NL_VALUES: [i8; 16] =
+    [-127, -104, -83, -65, -49, -35, -22, -10, 1, 13, 25, 38, 53, 69, 89, 113];
 
 /// SwarmLLM patch: llama.cpp's `kvalues_mxfp4` (`ggml-common.h`) — the sixteen
 /// E2M1 values DOUBLED, so every one is an integer. The block's scale is halved
@@ -128,6 +136,18 @@ pub(crate) fn vec_dot_rows_chosen<T: GgmlType>(
         vec_dot_rows_generic::<T>(n, xs, ys, rows, out)
     } else {
         T::vec_dot_rows(n, xs, ys, rows, out)
+    }
+}
+
+/// SwarmLLM patch (#404): the magnitude a Q8_K block's largest activation is
+/// written at — llama.cpp's 127, or the 128 candle had (`SWARMLLM_Q8K_SCALE=128`,
+/// for A/B inside one binary). See `BlockQ8K::from_float`.
+pub(crate) fn q8k_scale() -> f32 {
+    static OLD: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if *OLD.get_or_init(|| std::env::var("SWARMLLM_Q8K_SCALE").is_ok_and(|v| v == "128")) {
+        128.0
+    } else {
+        127.0
     }
 }
 
@@ -268,6 +288,33 @@ pub struct BlockMxfp4 {
     pub(crate) qs: [u8; QK_MXFP4 / 2],
 }
 const _: () = assert!(std::mem::size_of::<BlockMxfp4>() == 17);
+
+/// SwarmLLM patch: IQ4_NL (GGML type 20, llama.cpp `block_iq4_nl`): 32 values,
+/// each a nibble indexing [`IQ4NL_VALUES`], times one f16 scale. The low nibble
+/// of `qs[j]` is element `j`, the high nibble element `j + 16`, as in Q4_0.
+/// llama.cpp writes it wherever a row is too narrow for the K-quant a Q2_K,
+/// Q3_K or IQ4_XS file asks for (`llama-quant.cpp`, `convert_incompatible_tensor`).
+#[derive(Debug, Clone, PartialEq)]
+#[repr(C)]
+pub struct BlockIq4Nl {
+    pub(crate) d: f16,
+    pub(crate) qs: [u8; QK4_NL / 2],
+}
+const _: () = assert!(std::mem::size_of::<BlockIq4Nl>() == 18);
+
+/// SwarmLLM patch: IQ4_XS (GGML type 23, llama.cpp `block_iq4_xs`): 256 values
+/// in eight runs of 32, each run scaled by `d × (its six-bit scale − 32)` — the
+/// low four bits in `scales_l`, the high two in `scales_h` — and each value a
+/// nibble indexing [`IQ4NL_VALUES`], laid out per run as IQ4_NL's.
+#[derive(Debug, Clone, PartialEq)]
+#[repr(C)]
+pub struct BlockIq4Xs {
+    pub(crate) d: f16,
+    pub(crate) scales_h: u16,
+    pub(crate) scales_l: [u8; QK_K / 64],
+    pub(crate) qs: [u8; QK_K / 2],
+}
+const _: () = assert!(std::mem::size_of::<BlockIq4Xs>() == 136);
 
 impl GgmlType for BlockQ4_0 {
     const DTYPE: GgmlDType = GgmlDType::Q4_0;
@@ -475,6 +522,328 @@ impl GgmlType for BlockMxfp4 {
         let mut sumf = 0f32;
         for (x, y) in xs.iter().zip(ys.iter()) {
             sumf += mxfp4_block_dot(x, y);
+        }
+        sumf
+    }
+}
+
+/// SwarmLLM patch: one IQ4_NL block against one Q8_0 block, llama.cpp's scalar
+/// rule (`ggml_vec_dot_iq4_nl_q8_0_generic`): the integer sums of each half,
+/// times the product of the two scales. The AVX2 kernel's odd last block is
+/// this too.
+#[inline(always)]
+pub(crate) fn iq4_nl_block_dot(x: &BlockIq4Nl, y: &BlockQ8_0) -> f32 {
+    let d = f16::to_f32(y.d) * f16::to_f32(x.d);
+    let (mut sumi1, mut sumi2) = (0i32, 0i32);
+    for j in 0..QK4_NL / 2 {
+        sumi1 += y.qs[j] as i32 * IQ4NL_VALUES[(x.qs[j] & 0x0F) as usize] as i32;
+        sumi2 += y.qs[j + QK4_NL / 2] as i32 * IQ4NL_VALUES[(x.qs[j] >> 4) as usize] as i32;
+    }
+    d * (sumi1 + sumi2) as f32
+}
+
+/// An IQ4_XS block's scale for run `ib` (0..8), less 32 — llama.cpp's
+/// `dequantize_row_iq4_xs`.
+#[inline(always)]
+pub(crate) fn iq4_xs_run_scale(x: &BlockIq4Xs, ib: usize) -> i32 {
+    let low = (x.scales_l[ib / 2] >> (4 * (ib % 2))) & 0x0F;
+    let high = ((x.scales_h >> (2 * ib)) & 3) as u8;
+    (low | (high << 4)) as i32 - 32
+}
+
+/// llama.cpp's `nearest_int` (`ggml-quants.c`): round half to EVEN, by the
+/// float's own rounding — candle's `utils::nearest_int` rounds half away from
+/// zero, which would move an IQ4_XS scale that lands on a half.
+#[inline(always)]
+fn nearest_int_as_ggml(v: f32) -> i32 {
+    let val = v + 12_582_912.0;
+    (val.to_bits() as i32 & 0x007F_FFFF) - 0x0040_0000
+}
+
+/// llama.cpp's `best_index_int8`: the index of the level nearest `x`, a tie to
+/// the lower.
+fn iq4_best_index(x: f32) -> u8 {
+    let val = &IQ4NL_VALUES;
+    if x <= val[0] as f32 {
+        return 0;
+    }
+    if x >= val[15] as f32 {
+        return 15;
+    }
+    let (mut ml, mut mu) = (0usize, 15usize);
+    while mu - ml > 1 {
+        let mav = (ml + mu) / 2;
+        if x < val[mav] as f32 {
+            mu = mav;
+        } else {
+            ml = mav;
+        }
+    }
+    if x - (val[mu - 1] as f32) < (val[mu] as f32) - x {
+        (mu - 1) as u8
+    } else {
+        mu as u8
+    }
+}
+
+/// What [`quantize_iq4_impl`] writes one block of 32 or 256 values into.
+struct Iq4Out<'a> {
+    d: &'a mut f16,
+    qs: &'a mut [u8],
+    scales_h: &'a mut u16,
+    scales_l: &'a mut [u8],
+}
+
+/// llama.cpp's `quantize_row_iq4_nl_impl` (`ggml-quants.c`) with no importance
+/// weights, step for step: each run of 32 gets the scale that best fits its
+/// values to the levels — tried at `ntry` nudges either side of the largest
+/// value's, none where `ntry` is below 1 — and a block of several runs then
+/// stores each run's scale in six bits of one shared `d`. `l` carries the
+/// levels between calls, as llama.cpp's caller's stack array does: a run of
+/// zeros under `ntry < 1` keeps the levels before it (its scale is 0, so its
+/// values read 0 either way).
+fn quantize_iq4_impl(super_block: usize, x: &[f32], out: Iq4Out<'_>, l: &mut [u8], ntry: i32) {
+    const BLOCK: usize = 32;
+    const GROUP_MAX_EPS: f32 = 1e-15;
+    let values = &IQ4NL_VALUES;
+    let runs = super_block / BLOCK;
+    let mut scales = [0f32; QK_K / BLOCK];
+    let mut weight = [0f32; BLOCK];
+    out.qs[..super_block / 2].fill(0);
+    *out.d = f16::from_f32(0.0);
+    let (mut max_scale, mut amax_scale) = (0f32, 0f32);
+    for ib in 0..runs {
+        let xb = &x[ib * BLOCK..(ib + 1) * BLOCK];
+        let lb = &mut l[ib * BLOCK..(ib + 1) * BLOCK];
+        for (w, &v) in weight.iter_mut().zip(xb) {
+            *w = v * v;
+        }
+        let (mut amax, mut max) = (0f32, 0f32);
+        for &v in xb {
+            if v.abs() > amax {
+                amax = v.abs();
+                max = v;
+            }
+        }
+        if amax < GROUP_MAX_EPS {
+            scales[ib] = 0.0;
+            continue;
+        }
+        let v0 = values[0] as f32;
+        let mut d = if ntry > 0 { -max / v0 } else { max / v0 };
+        let mut id = 1.0 / d;
+        let (mut sumqx, mut sumq2) = (0f32, 0f32);
+        for j in 0..BLOCK {
+            let level = iq4_best_index(id * xb[j]);
+            lb[j] = level;
+            let q = values[level as usize] as f32;
+            let w = weight[j];
+            sumqx += w * q * xb[j];
+            sumq2 += w * q * q;
+        }
+        d = if sumq2 > 0.0 { sumqx / sumq2 } else { 0.0 };
+        let mut best = d * sumqx;
+        for itry in -ntry..=ntry {
+            id = (itry + values[0] as i32) as f32 / max;
+            sumqx = 0.0;
+            sumq2 = 0.0;
+            for j in 0..BLOCK {
+                let q = values[iq4_best_index(id * xb[j]) as usize] as f32;
+                let w = weight[j];
+                sumqx += w * q * xb[j];
+                sumq2 += w * q * q;
+            }
+            if sumq2 > 0.0 && sumqx * sumqx > best * sumq2 {
+                d = sumqx / sumq2;
+                best = d * sumqx;
+            }
+        }
+        scales[ib] = d;
+        if d.abs() > amax_scale {
+            amax_scale = d.abs();
+            max_scale = d;
+        }
+    }
+    if runs > 1 {
+        *out.scales_h = 0;
+        let d = -max_scale / 32.0;
+        *out.d = f16::from_f32(d);
+        let id = if d != 0.0 { 1.0 / d } else { 0.0 };
+        for ib in 0..runs {
+            let ls = nearest_int_as_ggml(id * scales[ib]).clamp(-32, 31);
+            let dl = d * ls as f32;
+            let idl = if dl != 0.0 { 1.0 / dl } else { 0.0 };
+            for j in 0..BLOCK {
+                l[ib * BLOCK + j] = iq4_best_index(idl * x[ib * BLOCK + j]);
+            }
+            let ls = (ls + 32) as u8;
+            if ib % 2 == 0 {
+                out.scales_l[ib / 2] = ls & 0x0F;
+            } else {
+                out.scales_l[ib / 2] |= (ls & 0x0F) << 4;
+            }
+            *out.scales_h |= ((ls >> 4) as u16) << (2 * (ib % 8));
+        }
+    } else {
+        *out.d = f16::from_f32(scales[0]);
+        if ntry > 0 {
+            let id = if scales[0] != 0.0 { 1.0 / scales[0] } else { 0.0 };
+            for j in 0..super_block {
+                l[j] = iq4_best_index(id * x[j]);
+            }
+        }
+    }
+    for i in 0..super_block / 32 {
+        for j in 0..16 {
+            out.qs[16 * i + j] = l[32 * i + j] | (l[32 * i + 16 + j] << 4);
+        }
+    }
+}
+
+impl GgmlType for BlockIq4Nl {
+    const DTYPE: GgmlDType = GgmlDType::Iq4Nl;
+    const BLCK_SIZE: usize = QK4_NL;
+    type VecDotType = BlockQ8_0;
+
+    // llama.cpp `dequantize_row_iq4_nl` (ggml-quants.c).
+    fn to_float(xs: &[Self], ys: &mut [f32]) {
+        let k = ys.len();
+        let qk = Self::BLCK_SIZE;
+        debug_assert!(
+            k.is_multiple_of(qk),
+            "dequantize_row_iq4_nl: {k} is not divisible by {qk}"
+        );
+        for (x, ys) in xs.iter().zip(ys.chunks_exact_mut(qk)) {
+            let d = x.d.to_f32();
+            for (j, &q) in x.qs.iter().enumerate() {
+                ys[j] = d * IQ4NL_VALUES[(q & 0x0F) as usize] as f32;
+                ys[j + qk / 2] = d * IQ4NL_VALUES[(q >> 4) as usize] as f32;
+            }
+        }
+    }
+
+    // llama.cpp `quantize_row_iq4_nl_ref` (ggml-quants.c): no nudged scales
+    // (`ntry` −1), the levels array carried from block to block.
+    fn from_float(xs: &[f32], ys: &mut [Self]) {
+        let qk = Self::BLCK_SIZE;
+        let k = xs.len();
+        debug_assert!(k.is_multiple_of(qk), "{k} is not divisible by {qk}");
+        debug_assert_eq!(ys.len(), k / qk, "size mismatch {} {} {}", xs.len(), ys.len(), qk);
+        let mut l = [0u8; QK4_NL];
+        let mut unused_h = 0u16;
+        for (xs, y) in xs.chunks_exact(qk).zip(ys.iter_mut()) {
+            let out = Iq4Out {
+                d: &mut y.d,
+                qs: &mut y.qs,
+                scales_h: &mut unused_h,
+                scales_l: &mut [],
+            };
+            quantize_iq4_impl(QK4_NL, xs, out, &mut l, -1);
+        }
+    }
+
+    #[allow(unreachable_code)]
+    fn vec_dot(n: usize, xs: &[Self], ys: &[Self::VecDotType]) -> f32 {
+        #[cfg(target_feature = "avx2")]
+        return super::avx::vec_dot_iq4_nl_q8_0(n, xs, ys);
+
+        Self::vec_dot_unopt(n, xs, ys)
+    }
+
+    // llama.cpp `ggml_vec_dot_iq4_nl_q8_0_generic` (ggml-cpu/quants.c).
+    fn vec_dot_unopt(n: usize, xs: &[Self], ys: &[Self::VecDotType]) -> f32 {
+        debug_assert!(
+            n.is_multiple_of(QK4_NL),
+            "vec_dot_iq4_nl_q8_0: {n} is not divisible by {QK4_NL}"
+        );
+        let mut sumf = 0f32;
+        for (x, y) in xs.iter().zip(ys.iter()) {
+            sumf += iq4_nl_block_dot(x, y);
+        }
+        sumf
+    }
+}
+
+impl GgmlType for BlockIq4Xs {
+    const DTYPE: GgmlDType = GgmlDType::Iq4Xs;
+    const BLCK_SIZE: usize = QK_K;
+    type VecDotType = BlockQ8K;
+
+    // llama.cpp `dequantize_row_iq4_xs` (ggml-quants.c).
+    fn to_float(xs: &[Self], ys: &mut [f32]) {
+        let k = ys.len();
+        debug_assert!(
+            k.is_multiple_of(QK_K),
+            "dequantize_row_iq4_xs: {k} is not divisible by {QK_K}"
+        );
+        for (x, ys) in xs.iter().zip(ys.chunks_exact_mut(QK_K)) {
+            let d = x.d.to_f32();
+            for (ib, (qs, ys)) in x.qs.chunks_exact(16).zip(ys.chunks_exact_mut(32)).enumerate() {
+                let dl = d * iq4_xs_run_scale(x, ib) as f32;
+                for (j, &q) in qs.iter().enumerate() {
+                    ys[j] = dl * IQ4NL_VALUES[(q & 0x0F) as usize] as f32;
+                    ys[j + 16] = dl * IQ4NL_VALUES[(q >> 4) as usize] as f32;
+                }
+            }
+        }
+    }
+
+    // llama.cpp `quantize_row_iq4_xs_ref` (ggml-quants.c), which quantizes as
+    // a file is quantized: scales nudged 7 levels either side.
+    fn from_float(xs: &[f32], ys: &mut [Self]) {
+        let k = xs.len();
+        debug_assert!(k.is_multiple_of(QK_K), "{k} is not divisible by {QK_K}");
+        debug_assert_eq!(ys.len(), k / QK_K, "size mismatch {} {} {}", xs.len(), ys.len(), QK_K);
+        let mut l = [0u8; QK_K];
+        for (xs, y) in xs.chunks_exact(QK_K).zip(ys.iter_mut()) {
+            let out = Iq4Out {
+                d: &mut y.d,
+                qs: &mut y.qs,
+                scales_h: &mut y.scales_h,
+                scales_l: &mut y.scales_l,
+            };
+            quantize_iq4_impl(QK_K, xs, out, &mut l, 7);
+        }
+    }
+
+    #[allow(unreachable_code)]
+    fn vec_dot(n: usize, xs: &[Self], ys: &[Self::VecDotType]) -> f32 {
+        #[cfg(target_feature = "avx2")]
+        return super::avx::vec_dot_iq4_xs_q8k(n, xs, ys);
+
+        Self::vec_dot_unopt(n, xs, ys)
+    }
+
+    // llama.cpp `ggml_vec_dot_iq4_xs_q8_K_generic` (ggml-cpu/quants.c): runs
+    // taken in pairs, each run's integer sums times `d × d8 × (scale − 32)`.
+    fn vec_dot_unopt(n: usize, xs: &[Self], ys: &[Self::VecDotType]) -> f32 {
+        debug_assert!(
+            n.is_multiple_of(QK_K),
+            "vec_dot_iq4_xs_q8_K: {n} is not divisible by {QK_K}"
+        );
+        let mut sumf = 0f32;
+        for (x, y) in xs.iter().zip(ys.iter()) {
+            let d4d8 = x.d.to_f32() * y.d;
+            let mut h = x.scales_h;
+            let mut qs = &x.qs[..];
+            let mut q8 = &y.qs[..];
+            for ib in (0..QK_K / 32).step_by(2) {
+                let ls1 = (x.scales_l[ib / 2] & 0x0F) | ((h << 4) & 0x30) as u8;
+                let ls2 = (x.scales_l[ib / 2] >> 4) | ((h << 2) & 0x30) as u8;
+                h >>= 4;
+                let d1 = d4d8 * (ls1 as i32 - 32) as f32;
+                let d2 = d4d8 * (ls2 as i32 - 32) as f32;
+                for d in [d1, d2] {
+                    let (mut sumi1, mut sumi2) = (0i32, 0i32);
+                    for j in 0..16 {
+                        sumi1 += q8[j] as i32 * IQ4NL_VALUES[(qs[j] & 0x0F) as usize] as i32;
+                        sumi2 += q8[j + 16] as i32 * IQ4NL_VALUES[(qs[j] >> 4) as usize] as i32;
+                    }
+                    sumf += d * (sumi1 + sumi2) as f32;
+                    qs = &qs[16..];
+                    q8 = &q8[32..];
+                }
+            }
         }
         sumf
     }
@@ -2530,7 +2899,15 @@ impl GgmlType for BlockQ8K {
                 y.d = 0f32;
                 y.qs.fill(0)
             } else {
-                let iscale = -128f32 / max;
+                // SwarmLLM patch (#404): llama.cpp's scale, -127/max
+                // (`quantize_row_q8_K_ref`: "We need this change for IQ2_XXS,
+                // else the AVX implementation becomes very awkward"). The IQ
+                // kernels multiply through `_mm256_sign_epi8`, which cannot
+                // negate -128, and -128/max wrote -128 for a row's largest
+                // activation: an IQ4_XS product beside a negative weight came
+                // out 30% off. Candle kept the older -128; llama.cpp's K-quant
+                // products read this quantizer too. A/B `SWARMLLM_Q8K_SCALE=128`.
+                let iscale = -q8k_scale() / max;
                 for (j, q) in y.qs.iter_mut().enumerate() {
                     // ggml uses nearest_int with bit magic here, maybe we want the same
                     // but we would have to test and benchmark it.

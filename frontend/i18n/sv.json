@@ -879,6 +879,7 @@
   "placement.not_enough_vram": "Den behöver mer grafikminne än vad som var ledigt vid start. Den använder grafikkortet igen så snart minne frigörs.",
   "placement.on_cpu": "Körs på processorn",
   "placement.tip": "Modeller går snabbare på ett grafikkort. Här står varför den här inte gör det.",
+  "placement.weight_format": "Den här modellen är sparad i ett format (IQ4) som den här versionen ännu inte kan köra snabbt på grafikkortet, så processorn kör den.",
   "pool.add_device_header": "Lägg till en annan enhet",
   "pool.add_device_settings_desc": "Generera en inbjudningskod om du någonsin vill länka en annan maskin till den här gruppen.",
   "pool.code_address_warning": "Den här koden innehåller enhetens nätverksadresser så att den andra enheten kan ansluta. Dela bara med personer du litar på.",

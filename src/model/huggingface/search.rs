@@ -50,8 +50,8 @@ pub fn extract_quant_tag(filename: &str) -> Option<String> {
 /// when it refuses one (#394). `None`: nothing in the name says it cannot.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CannotHost {
-    /// An `IQ*` / `TQ*` quantization ([`quant_is_unreadable`]): candle reads
-    /// none of them, and the header check refuses each.
+    /// An `IQ*` / `TQ*` quantization ([`quant_is_unreadable`]) but IQ4_NL and
+    /// IQ4_XS: candle reads none of the rest, and the header check refuses each.
     UnreadableQuantization,
     /// One file of an upload split across several (`-00001-of-00003`): a model
     /// is cut into parts from ONE file.
@@ -109,10 +109,17 @@ pub(super) fn model_files(siblings: Vec<HfFileInfo>) -> Vec<HfFileInfo> {
 }
 
 /// A quantization tag this engine cannot read: a type
-/// `split::UNREADABLE_GGML_TYPES` lists, or any `IQ*` / `TQ*` — a file name
-/// carries an IQ mix's name (`IQ2_M`, `IQ3_XS`) as often as a type's.
+/// `split::UNREADABLE_GGML_TYPES` lists, or any `IQ*` / `TQ*` but the IQ types
+/// candle reads (`split::READABLE_IQ_TYPES`: IQ4_NL, IQ4_XS, #404) — a file
+/// name carries an IQ mix's name (`IQ2_M`, `IQ3_XS`) as often as a type's.
 pub fn quant_is_unreadable(tag: &str) -> bool {
     let up = tag.to_ascii_uppercase();
+    if crate::inference::split::READABLE_IQ_TYPES
+        .iter()
+        .any(|&(_, name)| name == up)
+    {
+        return false;
+    }
     up.starts_with("IQ")
         || up.starts_with("TQ")
         || crate::inference::split::UNREADABLE_GGML_TYPES

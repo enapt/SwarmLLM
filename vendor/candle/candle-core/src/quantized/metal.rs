@@ -109,6 +109,14 @@ impl QMetalStorage {
                 let vec: Vec<crate::quantized::BlockMxfp4> = read_to_vec(&buffer, block_len);
                 crate::quantized::BlockMxfp4::to_float(&vec, &mut out);
             }
+            GgmlDType::Iq4Nl => {
+                let vec: Vec<crate::quantized::BlockIq4Nl> = read_to_vec(&buffer, block_len);
+                crate::quantized::BlockIq4Nl::to_float(&vec, &mut out);
+            }
+            GgmlDType::Iq4Xs => {
+                let vec: Vec<crate::quantized::BlockIq4Xs> = read_to_vec(&buffer, block_len);
+                crate::quantized::BlockIq4Xs::to_float(&vec, &mut out);
+            }
         }
 
         let buffer = self.device.new_buffer_with_data(&out)?;
@@ -198,9 +206,9 @@ impl QMetalStorage {
     ) -> Result<(MetalStorage, Shape)> {
         use crate::MetalError;
 
-        // SwarmLLM patch: no Metal kernel reads MXFP4.
-        if self.dtype == GgmlDType::Mxfp4 {
-            crate::bail!("MXFP4 has no Metal kernel")
+        // SwarmLLM patch: no Metal kernel reads MXFP4, IQ4_NL or IQ4_XS.
+        if !has_metal_kernel(self.dtype) {
+            crate::bail!("{:?} has no Metal kernel", self.dtype)
         }
         if !layout.is_contiguous() {
             crate::bail!("input tensor is not contiguous {layout:?}")
@@ -259,9 +267,9 @@ impl QMetalStorage {
     ) -> Result<(MetalStorage, Shape)> {
         use crate::MetalError;
 
-        // SwarmLLM patch: no Metal kernel reads MXFP4.
-        if self.dtype == GgmlDType::Mxfp4 {
-            crate::bail!("MXFP4 has no Metal kernel")
+        // SwarmLLM patch: no Metal kernel reads MXFP4, IQ4_NL or IQ4_XS.
+        if !has_metal_kernel(self.dtype) {
+            crate::bail!("{:?} has no Metal kernel", self.dtype)
         }
         if !layout.is_contiguous() {
             crate::bail!("input tensor is not contiguous {layout:?}")
@@ -373,6 +381,13 @@ pub fn load_quantized<T: super::GgmlType + Send + Sync + 'static>(
     }))
 }
 
+/// SwarmLLM patch: whether a Metal kernel reads `dtype` — every type but the
+/// ones this fork added (MXFP4, IQ4_NL, IQ4_XS), which only the processor and
+/// the CUDA build read. Both `fwd` and `fwd_mv` ask it first.
+fn has_metal_kernel(dtype: GgmlDType) -> bool {
+    !matches!(dtype, GgmlDType::Mxfp4 | GgmlDType::Iq4Nl | GgmlDType::Iq4Xs)
+}
+
 fn read_to_vec<T: Clone>(buffer: &Buffer, n: usize) -> Vec<T> {
     let ptr = buffer.contents() as *const T;
     assert!(!ptr.is_null());
@@ -398,8 +413,11 @@ impl From<GgmlDType> for candle_metal_kernels::GgmlDType {
             GgmlDType::F16 => candle_metal_kernels::GgmlDType::F16,
             GgmlDType::F32 => candle_metal_kernels::GgmlDType::F32,
             GgmlDType::BF16 => candle_metal_kernels::GgmlDType::F16,
-            // SwarmLLM patch: `fwd` and `fwd_mv`, the only callers, refuse MXFP4 first.
-            GgmlDType::Mxfp4 => unreachable!("MXFP4 is refused before a Metal kernel is chosen"),
+            // SwarmLLM patch: `fwd` and `fwd_mv`, the only callers, refuse these
+            // first (`has_metal_kernel`).
+            GgmlDType::Mxfp4 | GgmlDType::Iq4Nl | GgmlDType::Iq4Xs => {
+                unreachable!("{value:?} is refused before a Metal kernel is chosen")
+            }
         }
     }
 }

@@ -44,6 +44,17 @@ small model could stay on a single computer. Such computers now say so, and are 
 share-out and of the plans that ask a computer to fetch a stretch of a large model; older versions
 are counted as before (#400).
 
+**Models stored as IQ4_NL or IQ4_XS now run.** IQ4_XS is a common choice for fitting a large model
+in less memory, and many Q2_K and Q3_K files also keep some of their weights as IQ4_NL (llama.cpp
+stores a row too narrow for those formats that way), so such files were refused whole. Both formats
+now run on the processor and compute what llama.cpp computes, bit for bit. No graphics-card code
+reads them yet, so on a computer with a card such a model runs on the processor for now, and the
+dashboard and `swarmllm status` say why. The model browser offers files named IQ4_NL or IQ4_XS, and
+where a repository also has a Q4_K_M or another file a card can run, it recommends that one (#404). On
+the processor, the numbers a model's layers multiply by are now rounded exactly as llama.cpp rounds
+them for every K-quant model too (Q2_K to Q6_K), where they had been rounded on a very slightly
+different scale.
+
 ## [0.3.271-alpha] — 2026-11-04
 
 **A computer that only takes stops being served, the peer list shows what each computer does for

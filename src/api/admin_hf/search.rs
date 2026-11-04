@@ -385,6 +385,11 @@ fn recommended_file(
     use crate::model::huggingface::{cannot_host, extract_quant_tag};
     let hostable = || files.iter().filter(|f| cannot_host(&f.filename).is_none());
     let tag = |f: &crate::model::huggingface::HfModelResult| extract_quant_tag(&f.filename);
+    // An IQ4_NL / IQ4_XS file is hostable but runs only on the processor
+    // until a card kernel reads it (#404), so any other hostable file first.
+    let card_reads = |f: &&crate::model::huggingface::HfModelResult| {
+        !tag(f).is_some_and(|q| q.starts_with("IQ"))
+    };
     hostable()
         .find(|f| tag(f).as_deref() == Some("Q4_K_M"))
         .or_else(|| {
@@ -392,6 +397,7 @@ fn recommended_file(
                 .filter(|f| tag(f).is_some_and(|q| q.starts_with("Q4")))
                 .min_by_key(|f| f.size_bytes)
         })
+        .or_else(|| hostable().find(card_reads))
         .or_else(|| hostable().next())
 }
 
@@ -485,9 +491,10 @@ mod tests {
 
     /// **The search recommends only a file this node could host** (field
     /// report 2026-11-03: an IQ2_XS in a repository folder). Q4_K_M first,
-    /// then the smallest Q4, then any hostable file; an IQ quantization, one
-    /// file of a split upload or a file in a folder never — and a repo of
-    /// nothing else has no recommendation.
+    /// then the smallest Q4, then any hostable file a card reads, then IQ4_NL /
+    /// IQ4_XS (hostable since #404, processor only); any other IQ
+    /// quantization, one file of a split upload or a file in a folder never —
+    /// and a repo of nothing else has no recommendation.
     #[test]
     fn the_search_recommends_only_a_file_this_node_could_host() {
         assert_eq!(
@@ -505,16 +512,26 @@ mod tests {
             "the smallest Q4 — never IQ4_XS"
         );
         assert_eq!(
-            pick(&[("m-IQ4_NL.gguf", 1), ("m-Q3_K_M.gguf", 3)]).as_deref(),
+            pick(&[("m-IQ3_M.gguf", 1), ("m-Q3_K_M.gguf", 3)]).as_deref(),
             Some("m-Q3_K_M.gguf"),
             "the first HOSTABLE file, not the first file"
+        );
+        assert_eq!(
+            pick(&[("m-IQ4_NL.gguf", 1), ("m-Q3_K_M.gguf", 3)]).as_deref(),
+            Some("m-Q3_K_M.gguf"),
+            "a file a card reads before an IQ4"
+        );
+        assert_eq!(
+            pick(&[("m-IQ2_XS.gguf", 1), ("m-IQ4_XS.gguf", 3)]).as_deref(),
+            Some("m-IQ4_XS.gguf"),
+            "an IQ4 where nothing else is hostable"
         );
         assert_eq!(
             pick(&[
                 ("IQ2_XS/m-IQ2_XS.gguf", 1),
                 ("Q4_K_M/m-Q4_K_M.gguf", 2),
                 ("m-Q8_0-00001-of-00002.gguf", 3),
-                ("m-IQ4_NL.gguf", 4),
+                ("m-IQ3_XXS.gguf", 4),
             ]),
             None
         );

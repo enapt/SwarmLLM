@@ -342,7 +342,7 @@ fn a_repo_offers_the_quantisation_its_download_would_take() {
         Some("Q6_K")
     );
     assert_eq!(
-        offered_quant(["m-IQ4_NL.gguf", "Q4_K_M/m-Q4_K_M.gguf"]),
+        offered_quant(["m-IQ3_XXS.gguf", "Q4_K_M/m-Q4_K_M.gguf"]),
         None
     );
 }
@@ -386,9 +386,10 @@ fn the_search_lists_only_the_model_files_of_a_repo() {
 }
 
 /// **A file no node could host is known by its name** (field report
-/// 2026-11-03): an IQ / TQ quantization, one file of a split upload, a file
-/// in a repository folder. A K-quant, Q8_0 and the float files raise nothing —
-/// unsloth's dynamic names included.
+/// 2026-11-03): an IQ / TQ quantization (but IQ4_NL and IQ4_XS, read since
+/// #404), one file of a split upload, a file in a repository folder. A
+/// K-quant, Q8_0 and the float files raise nothing — unsloth's dynamic names
+/// included.
 #[test]
 fn a_file_no_node_could_host_is_known_by_its_name() {
     for (name, why) in [
@@ -396,9 +397,12 @@ fn a_file_no_node_could_host_is_known_by_its_name() {
             "Qwen3.8-Flash-Next-IQ2_XS.gguf",
             Some(CannotHost::UnreadableQuantization),
         ),
-        ("m-IQ4_NL.gguf", Some(CannotHost::UnreadableQuantization)),
-        ("m.IQ4_XS.gguf", Some(CannotHost::UnreadableQuantization)),
+        ("m-IQ3_M.gguf", Some(CannotHost::UnreadableQuantization)),
+        ("m.IQ2_M.gguf", Some(CannotHost::UnreadableQuantization)),
         ("m-UD-IQ1_S.gguf", Some(CannotHost::UnreadableQuantization)),
+        // The two IQ types candle reads (#404).
+        ("m-IQ4_NL.gguf", None),
+        ("m.IQ4_XS.gguf", None),
         ("m-TQ1_0.gguf", Some(CannotHost::UnreadableQuantization)),
         ("IQ2_XS/m-IQ2_XS.gguf", Some(CannotHost::InAFolder)),
         ("UD-Q4_K_XL/m-UD-Q4_K_XL.gguf", Some(CannotHost::InAFolder)),
@@ -433,6 +437,7 @@ fn a_file_name_is_refused_for_every_type_the_header_check_refuses() {
     }
     for name in [
         "Q2_K", "Q3_K_M", "Q4_0", "Q4_K_M", "Q5_K_M", "Q6_K", "Q8_0", "F16", "BF16", "MXFP4",
+        "IQ4_NL", "IQ4_XS",
     ] {
         assert!(!quant_is_unreadable(name), "{name}");
         assert_eq!(cannot_host(&format!("m-{name}.gguf")), None, "{name}");

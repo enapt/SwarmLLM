@@ -115,6 +115,8 @@ impl QStorage {
                 GgmlDType::Q8K => metal::load_quantized(d, as_t_slice::<BlockQ8K>(data)),
                 GgmlDType::BF16 => metal::load_quantized(d, as_t_slice::<bf16>(data)),
                 GgmlDType::Mxfp4 => metal::load_quantized(d, as_t_slice::<BlockMxfp4>(data)),
+                GgmlDType::Iq4Nl => metal::load_quantized(d, as_t_slice::<BlockIq4Nl>(data)),
+                GgmlDType::Iq4Xs => metal::load_quantized(d, as_t_slice::<BlockIq4Xs>(data)),
             },
             Device::Cuda(d) => match dtype {
                 GgmlDType::F32 => cuda::load_quantized(d, as_t_slice::<f32>(data)),
@@ -133,6 +135,8 @@ impl QStorage {
                 GgmlDType::Q8K => cuda::load_quantized(d, as_t_slice::<BlockQ8K>(data)),
                 GgmlDType::BF16 => cuda::load_quantized(d, as_t_slice::<bf16>(data)),
                 GgmlDType::Mxfp4 => cuda::load_quantized(d, as_t_slice::<BlockMxfp4>(data)),
+                GgmlDType::Iq4Nl => cuda::load_quantized(d, as_t_slice::<BlockIq4Nl>(data)),
+                GgmlDType::Iq4Xs => cuda::load_quantized(d, as_t_slice::<BlockIq4Xs>(data)),
             },
         }
     }
@@ -285,6 +289,10 @@ pub enum GgmlDType {
     Q8K,
     /// SwarmLLM patch: GGML type 39 (gpt-oss's experts), `k_quants::BlockMxfp4`.
     Mxfp4,
+    /// SwarmLLM patch: GGML type 20, `k_quants::BlockIq4Nl` (#404).
+    Iq4Nl,
+    /// SwarmLLM patch: GGML type 23, `k_quants::BlockIq4Xs` (#404).
+    Iq4Xs,
 }
 
 impl GgmlDType {
@@ -308,6 +316,9 @@ impl GgmlDType {
             30 => Self::BF16,
             // https://github.com/ggml-org/llama.cpp/blob/master/ggml/include/ggml.h (GGML_TYPE_MXFP4)
             39 => Self::Mxfp4,
+            // ggml.h `GGML_TYPE_IQ4_NL` and `GGML_TYPE_IQ4_XS`.
+            20 => Self::Iq4Nl,
+            23 => Self::Iq4Xs,
             _ => crate::bail!("unknown dtype for tensor {u}"),
         };
         Ok(dtype)
@@ -332,6 +343,8 @@ impl GgmlDType {
             // https://github.com/ggerganov/ggml/blob/29d87fc6676e7ed0cdfdec0804b06001d9c2bb44/include/ggml.h#L389
             Self::BF16 => 30,
             Self::Mxfp4 => 39,
+            Self::Iq4Nl => 20,
+            Self::Iq4Xs => 23,
         }
     }
 
@@ -354,6 +367,8 @@ impl GgmlDType {
             Self::Q8K => Box::new(vec![BlockQ8K::zeros(); elem_count / BlockQ8K::BLCK_SIZE]),
             Self::BF16 => Box::new(vec![bf16::zeros(); elem_count]),
             Self::Mxfp4 => Box::new(vec![BlockMxfp4::zeros(); elem_count / BlockMxfp4::BLCK_SIZE]),
+            Self::Iq4Nl => Box::new(vec![BlockIq4Nl::zeros(); elem_count / BlockIq4Nl::BLCK_SIZE]),
+            Self::Iq4Xs => Box::new(vec![BlockIq4Xs::zeros(); elem_count / BlockIq4Xs::BLCK_SIZE]),
         }
     }
 
@@ -375,6 +390,8 @@ impl GgmlDType {
             Self::Q8K => Box::new(as_t_slice::<BlockQ8K>(data).to_vec()),
             Self::BF16 => Box::new(as_t_slice::<bf16>(data).to_vec()),
             Self::Mxfp4 => Box::new(as_t_slice::<BlockMxfp4>(data).to_vec()),
+            Self::Iq4Nl => Box::new(as_t_slice::<BlockIq4Nl>(data).to_vec()),
+            Self::Iq4Xs => Box::new(as_t_slice::<BlockIq4Xs>(data).to_vec()),
         }
     }
 
@@ -398,6 +415,8 @@ impl GgmlDType {
             Self::Q6K => std::mem::size_of::<BlockQ6K>(),
             Self::Q8K => std::mem::size_of::<BlockQ8K>(),
             Self::Mxfp4 => std::mem::size_of::<BlockMxfp4>(),
+            Self::Iq4Nl => std::mem::size_of::<BlockIq4Nl>(),
+            Self::Iq4Xs => std::mem::size_of::<BlockIq4Xs>(),
         }
     }
 
@@ -413,7 +432,10 @@ impl GgmlDType {
             Self::Q8_0 => k_quants::QK8_0,
             Self::Q8_1 => k_quants::QK8_1,
             Self::Mxfp4 => k_quants::QK_MXFP4,
-            Self::Q2K | Self::Q3K | Self::Q4K | Self::Q5K | Self::Q6K | Self::Q8K => k_quants::QK_K,
+            Self::Iq4Nl => k_quants::QK4_NL,
+            Self::Q2K | Self::Q3K | Self::Q4K | Self::Q5K | Self::Q6K | Self::Q8K | Self::Iq4Xs => {
+                k_quants::QK_K
+            }
         }
     }
 }
