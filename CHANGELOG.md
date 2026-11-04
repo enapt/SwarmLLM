@@ -30,6 +30,15 @@ other connected computers held the same model — a long prompt to a 14B on a 12
 names both the attempt here and the computers that answered. With nobody else to ask, the message
 is unchanged.
 
+**A model that would fill your graphics card is placed partly on the processor before it loads, so
+long chats fit.** On a 12 GB card a 14B loaded whole and kept about 250 MB — some 1,300 tokens — for
+conversations, so every longer prompt was refused, even on a computer with nobody else to ask. Before
+the load the computer now reads its card as the load will, and where the model would leave less than
+a 4,096-token conversation it moves the fewest layers to the processor that make that room (the
+order llama.cpp uses: the conversation's room first, then layers). Replies are a little slower and
+long prompts are answered. A model that fits still loads whole, and one moved this way goes back to
+the card whole only once other programs have given back the memory it was short of.
+
 **A full computer that frees no room for a part the swarm is short of says why.** Its log names
 every rule that kept a part it holds, and how many parts each kept, at most every 10 minutes; the
 hourly "storage is over the budget" warning carries the same list instead of blaming the number of

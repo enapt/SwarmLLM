@@ -4339,6 +4339,46 @@ still size on the room — there is no worker to ask. Tests `a_split_spawn_fills
 `a_split_spawn_reads_the_card_its_worker_will_load_on`, `a_split_fills_the_share_its_load_reads` — each
 red with the reading ignored or never asked.
 
+**A WHOLE card placement is weighed by the same reading, and split before its load where the load
+would leave no conversation room (2026-11-04, FUTURE_WORK #322).** The room admits a model whole on
+`estimate_gpu_footprint_mb` (weights, a 4,096-token cache and 320 MB) against the budget; the loader
+then holds weights and caches to 85% of what IT reads. Where the weights fall between the two, the
+model loads whole and its cache gets what the line leaves: a tester's 12 GB card (v0.3.270,
+2026-11-03) admitted Qwen2.5-14B whole and kept ~251 MB, ~1,300 tokens, so every longer prompt was
+refused — with no other computer, for good. The 10-28 note above showed why admission cannot carry
+the line (the room is not the reading; GLM-4-9B loaded whole at 82% of its reading and 90.5% of its
+room), so the decision moved to the one place the reading exists: the spawn. `get_or_spawn_once`
+asks `whole_placement_reads_the_card` (no split, not the processor, not charged to the machine,
+never a guest — it takes only memory standing free); `spawn_worker` then asks the same
+`ReadCardFree` as a split's spawn; and **`fit_whole_placement_to_the_load`** weighs the whole
+placement on it with `whole_placement_short_by_bytes` — every layer charged as `split_for_card`
+charges it (the ends' tables up front, each layer by its own weights) plus the cache at the
+spawn's positions (`KvCharge::positions`: 4,096 for a typical tenant), against
+`weights_and_caches_room(read)`. Short, it gives back the whole charge, sizes a split on the reading
+through the ONE sizing every split uses (`split_in_room`, `SplitCard::read_by_the_load`) **with the
+context brought down to those positions** — llama.cpp's `common/fit.cpp` order: the context comes
+down to `fit_params_min_ctx` (4,096) before any layer leaves a device, so the fewest layers move
+(test: sized at the full 8,192, more leave the card) — admits the machine's added share
+(`admit_to_cpu`, the requester's cap), charges both, sets the handle's split and sends
+`PlaceRange` under a `PendingSpawnCharge`, before anything loads. Refused by the machine, or with no
+layer fitting, the model loads whole as before, said at `warn`. The processor side's caches meet the
+worker's host budget as a growth's range does (no `--kv-budget-bytes`: the grant goes on the
+command line, before the reading exists; `host_kv_budget_bytes` then reads the machine, reconciled
+at every claim). **Promotion would undo it**: the room admitted the model whole, so
+`should_return_to_gpu` alone would retire the split at its first idle request and reload it whole
+into the same reading. `SplitByTheLoad` records the shortfall and the budget when it split; the
+promotion waits until the budget (the card less OTHER programs, `vram::compute_vram_budget`, which
+never counts our own charges — so the worker's own share is not added back) has risen by the
+shortfall. **Not reproducible on this laptop**: by #365's figures (room 6,621 MB, reading 7,291 MB)
+a model is admitted whole and left short only if its weights and 4,096-token cache fall between
+6,197 and 6,301 MB; the 12 GB card's window (room 10,890, reading 11,384) is ~900 MB wide. Tests
+`a_whole_placement_its_load_leaves_no_room_for_a_conversation_is_split_first` (a 14B fixture on a
+10,500 MB room reading 10,400 MB), `a_whole_placement_stays_whole_where_its_load_reads_enough_or_the_machine_refuses`,
+`only_a_whole_card_placement_is_weighed_by_its_loads_reading`,
+`a_split_the_load_made_waits_for_the_card_to_gain_its_shortfall`. Not covered: a range GROWN whole
+onto a live card worker (`grow_worker`) is still weighed on the room — the worker's reader owns its
+connection by then (FUTURE_WORK #322's residual). A/B `SWARMLLM_WHOLE_READS_CARD=0`.
+
 **The planning curve keeps the tables spread (decided 2026-10-25, #343).** `cost_curve_of` gives
 every layer 1/L of both tables (17 MiB on the 70B), so a first or last run held wholly on a card
 is offered up to a layer more than its spawn places (the spawn splits it, priced a little slow),

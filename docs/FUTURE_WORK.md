@@ -71,10 +71,6 @@ the top track (`docs/plans/large_model_splits.md`).
    took 14 minutes to reset; the kernel is still unknown. Every planned run is done (memcheck clean
    over ~27 min on two boots, FECS shown with no SwarmLLM code at 48 h, the drafter-in-one-process
    change weighed and declined); nothing to run until the illegal access recurs.
-4a. **#322** (raised 2026-11-04) — a model admitted whole to a card can be left no room for a
-   conversation's cache: a 14B on a tester's 12 GB card refused every long prompt (2026-11-03). Since
-   2026-11-04 such a refusal is planned again with the other computers; **next**: the admission
-   itself, before the load, from the card reading (#365) — the only fix for a computer alone.
 5. **#250** — a model held whole here, which the card holds only part of, can be routed through
    far peers instead of answering locally. Its causes closed in v0.3.236 and v0.3.239; left: the
    prompt priced on the processor prior for a card/processor split, and a far hop priced at
@@ -3472,8 +3468,16 @@ the head that goes, and the card's prompt pass gathering its rows on the host. M
 it adds on the card (the copy is 32 KB a token) against the layer it frees, on a split this
 laptop leads.
 
-#### #322 — A model admitted whole to a card can be left no room for a conversation's cache
-`P1` · memory · **OPEN** — 2026-10-20, raised 2026-11-04 · history: field reports 2026-10-19 (a tester, RTX 3060 12 GB, v0.3.244, request `3acb5624`) and 2026-11-03 (a tester, 12 GB card, v0.3.270, Qwen2.5-14B)
+#### #322 — A range grown whole onto a live card worker can be left no room for a conversation's cache
+`P3` · memory · **OPEN (residual)** — 2026-10-20, raised 2026-11-04, spawn half closed 2026-11-04 (§ Closed) · history: field reports 2026-10-19 (a tester, RTX 3060 12 GB, v0.3.244, request `3acb5624`) and 2026-11-03 (a tester, 12 GB card, v0.3.270, Qwen2.5-14B)
+
+**Left (2026-11-04)**: a model SPAWNED whole is weighed against its load's own card reading and
+split before it loads (§ Closed, #322). A range GROWN whole onto a live card worker (`grow_worker`
+→ the room) is not: the worker's reader owns its connection by then, so the spawn's
+`ReadCardFree` cannot be asked, and the growth weighs the room alone. The 10-20 case below (a second
+local range, L42-48, admitted with 114 MB of headroom) may be that. A reading asked through the
+reader actor would serve it; nothing has been seen since. Also left: the refusal's advice blames
+other programs when this node's own weights fill the card.
 
 The first request after a cold load of Qwen3-30B-A3B (this node L0-14 and L42-48, a peer
 L14-42) failed after 46 s. The second local range (L42-48, 2,262 MB) was admitted to the card
@@ -3537,11 +3541,9 @@ budget, and the loader's line (85% of what the load read, less the weights) left
 conversations — a 2,588-token prompt refused in 0.2 s, `route=local`, while five connected
 computers held the model. That refusal came from the fast path, which never re-planned; it now does
 (`streaming::router_to_replan`, `docs/invariants/scheduling.md` § "A re-plan is warranted by a changed
-fact"), so such a request is served by the other computers. **Still open, and the only fix for a
-computer with no peers**: a whole placement whose weights leave the loader's line less than a
-4,096-token cache goes to the split rung BEFORE its load — the card reading #365 added, asked of a
-whole placement too (`get_or_spawn_once`), never the pool's room alone (the 10-28 paragraph: the room
-cannot carry a line this sharp).
+fact"), so such a request is served by the other computers. The fix for a computer with no peers —
+a whole placement split before its load from the card reading #365 added — closed the same day
+(§ Closed).
 
 #### #297 — Auto-manage prices a card by the file's size, so Gemma 4's E2B/E4B read heavier than they run
 `P3` · memory · **OPEN** — 2026-10-17 · history: #296's review
@@ -4406,6 +4408,27 @@ archive under the named heading. Reopen one only with the evidence its line name
 Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 19-28 were
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
+
+**Closed 2026-11-04, ships in the next release** (#322's spawn half)
+- #322 — **A model that would fill its graphics card is placed partly on the processor before it
+  loads** (field report 2026-11-03, v0.3.270: Qwen2.5-14B admitted whole on a 12 GB card's room
+  kept ~251 MB, ~1,300 tokens, for conversations, and refused every longer prompt). The spawn of a
+  whole card placement now asks its worker's card reading (`whole_placement_reads_the_card`, never a
+  guest), and `ModelProcessPool::fit_whole_placement_to_the_load` splits it before its load where
+  the weights would leave the loader's 85% line less than the spawn's 4,096-token cache — sized for
+  that cache, not the full context (llama.cpp's `common/fit.cpp` order, so the fewest layers move),
+  through the one split sizing (`split_in_room`), the machine's share admitted at the requester's
+  cap (refused → whole, as before), both charges moved and the worker told (`PlaceRange`). The
+  promotion waits for the card budget to gain the shortfall (`SplitByTheLoad`), or it would reload
+  the model whole into the same reading. Not reproducible on an 8 GB card (a ~100 MB window, the
+  12 GB card's ~900 MB). Tests
+  `a_whole_placement_its_load_leaves_no_room_for_a_conversation_is_split_first`,
+  `a_whole_placement_stays_whole_where_its_load_reads_enough_or_the_machine_refuses`,
+  `only_a_whole_card_placement_is_weighed_by_its_loads_reading`,
+  `a_split_the_load_made_waits_for_the_card_to_gain_its_shortfall`. Left: a range GROWN whole onto
+  a live card worker (#322, P3). A/B `SWARMLLM_WHOLE_READS_CARD=0`. Evidence:
+  `docs/invariants/memory.md` § "A split's processor share is charged to the machine", its
+  paragraph "A WHOLE card placement is weighed by the same reading".
 
 **Closed 2026-11-02, ships in the next release** (#398)
 - #398 — **A model whose file carries a next-token-prediction block runs across computers.**

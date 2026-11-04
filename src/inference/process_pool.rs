@@ -140,6 +140,19 @@ struct SplitRefit {
     kv: KvCharge,
 }
 
+/// What a spawn's WHOLE card placement is weighed again by
+/// (`ModelProcessPool::fit_whole_placement_to_the_load`, #322).
+#[derive(Debug, Clone, Copy)]
+struct WholeRefit {
+    /// The card's free memory as the worker's load will read it.
+    load_reads_free_bytes: u64,
+    /// The cache the spawn charges for — the one the load must leave room for.
+    kv: KvCharge,
+    /// Whose request the spawn is for: the machine's share of a split made
+    /// here meets that requester's cap.
+    requester: Requester,
+}
+
 /// How long a best-effort broadcast to one worker may wait, per step.
 ///
 /// Matches the bound the worker-reply waits already use. A fire-and-forget
@@ -492,6 +505,18 @@ fn vram_make_room_min_idle_secs() -> u64 {
     })
 }
 
+/// A whole placement its load's reading split (#322): the free graphics memory
+/// the load would have had to read more for the whole model to keep the
+/// spawn's cache inside the loader's line, and the card budget when it split.
+/// The budget is the card less what OTHER programs hold
+/// (`vram::compute_vram_budget`), so a rise in it is room another program
+/// gave back — the one thing that can make the same load read enough.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SplitByTheLoad {
+    short_by_mb: u64,
+    budget_at_split_mb: u64,
+}
+
 /// Everything the "should this worker go back to the card?" decision looks at.
 ///
 /// Pure, for the same reason [`plan_vram_reclaim`] is: the policy can then be
@@ -540,6 +565,9 @@ struct PromotionInputs {
     /// all-or-nothing), so a non-zero figure is memory the pool has already
     /// agreed it may take.
     reclaimable_mb: u64,
+    /// The worker's [`SplitByTheLoad`], when its load's reading split a
+    /// placement admission made whole.
+    split_by_the_load: Option<SplitByTheLoad>,
 }
 
 /// Should this processor-resident worker be retired so the model reloads onto
@@ -591,9 +619,23 @@ struct PromotionInputs {
 ///   admission costs a cold start and buys nothing, so the model must fit the
 ///   budget as it stands *now*. An unreadable estimate (0) or an unset budget
 ///   is not evidence, and leaves the model where it is.
+/// - **A split its load's reading made waits for the card to gain what the
+///   load lacked** ([`SplitByTheLoad`], #322). The room admitted that model
+///   whole, so on the room alone it would be retired at its first idle
+///   request, spawned whole, and split again by the same reading — a cold
+///   load paid by that request for nothing. The budget now must exceed the
+///   budget it was split at by the shortfall; the worker's own share is not
+///   added back — the budget never counted it (it is the card less OTHER
+///   programs' memory), so adding it would promote every such split at once.
 fn should_return_to_gpu(i: &PromotionInputs) -> bool {
     if !promotion_is_worth_weighing(i) || i.budget_mb == 0 {
         return false;
+    }
+    if let Some(split) = i.split_by_the_load {
+        let gained = i.budget_mb.saturating_sub(split.budget_at_split_mb);
+        if gained < split.short_by_mb {
+            return false;
+        }
     }
     let held_by_others = i
         .committed_mb
@@ -959,6 +1001,11 @@ struct WorkerHandle {
     /// true` and no placement note for a model running 13 of its 28 layers on
     /// the card, so a user could not tell why it was slower than expected.
     card_split: Option<CardSplit>,
+    /// Set when admission placed the model WHOLE on the card and its load's
+    /// own reading split it ([`ModelProcessPool::fit_whole_placement_to_the_load`],
+    /// #322) — what promotion must see the card gain before it moves the
+    /// model whole again ([`should_return_to_gpu`]).
+    split_by_the_load: Option<SplitByTheLoad>,
     /// What this worker put into the pool's reserved-memory map, in MB — its
     /// spawn's admission charge plus every additional segment charged to it.
     /// `charged_against_ram` says which of the two maps.
@@ -3278,6 +3325,42 @@ fn card_kv_bytes_of_split(inputs: &crate::model::auto_manage::vram::VramFootprin
         .bytes_for(context)
 }
 
+/// How much more free graphics memory a WHOLE card placement's load would
+/// have to read for the model's weights to leave a `positions`-token cache
+/// inside the loader's line (`kv_budget::weights_and_caches_room`); 0 when it
+/// fits (#322). Charged exactly as [`split_for_card`] charges every layer on
+/// the card — the ends' tables up front, each layer by its own weights
+/// (`layer_weights`), the cache priced as a split's
+/// (`card_kv_bytes_of_split`) at that context — so the whole placement and
+/// the split placed in its stead are weighed by one arithmetic.
+fn whole_placement_short_by_bytes(
+    inputs: &crate::model::auto_manage::vram::VramFootprintInputs,
+    layer_weights: &[u64],
+    positions: u64,
+    load_reads_free_bytes: u64,
+) -> u64 {
+    use crate::inference::split::kv_budget::{weights_and_caches_room, VRAM_HEADROOM_PCT};
+    let at_positions = crate::model::auto_manage::vram::VramFootprintInputs {
+        effective_context: inputs.effective_context.min(positions),
+        ..*inputs
+    };
+    let laid = layer_weights
+        .iter()
+        .fold(0u64, |sum, &bytes| sum.saturating_add(bytes));
+    let needs = inputs
+        .card_weight_bytes()
+        .max(laid.saturating_add(inputs.head_bytes))
+        .saturating_add(card_kv_bytes_of_split(&at_positions));
+    if needs <= weights_and_caches_room(load_reads_free_bytes) {
+        return 0;
+    }
+    // The free memory whose line holds `needs`, less what the load read.
+    needs
+        .div_ceil(VRAM_HEADROOM_PCT)
+        .saturating_mul(100)
+        .saturating_sub(load_reads_free_bytes)
+}
+
 /// Where a segment that does not fit the card whole goes instead.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CardSplit {
@@ -3412,6 +3495,50 @@ fn card_split(
     }
     split_for_card(inputs, &layers.weights, card, layers.card_may_guess)
         .map(|(on_card, total)| CardSplit::Layers { on_card, total })
+}
+
+/// Whether a spawn's placement is a WHOLE card placement, to be weighed again
+/// by the free memory its load reads (`fit_whole_placement_to_the_load`,
+/// #322): admission weighed it against the pool's room, which cannot see the
+/// loader's line. Never a guest — it takes only memory that stands free, never
+/// a split — nor a placement charged to the machine, which has no card.
+/// A/B inside one binary: `SWARMLLM_WHOLE_READS_CARD=0` loads it whole as
+/// admitted, as v0.3.270 did.
+fn whole_placement_reads_the_card(
+    card_split: Option<CardSplit>,
+    going_to_cpu: bool,
+    charge_ram: bool,
+    guest: bool,
+) -> bool {
+    card_split.is_none()
+        && !going_to_cpu
+        && !charge_ram
+        && !guest
+        && std::env::var("SWARMLLM_WHOLE_READS_CARD").as_deref() != Ok("0")
+}
+
+/// [`card_split`] in `room_mb` of the card and, for a spawn, the free memory
+/// its load reads (`SplitCard::read_by_the_load`; a plan has only the room) —
+/// the sizing every split admitted short of the card shares with a whole
+/// placement the load would leave too little (#322).
+fn split_in_room(
+    inputs: &crate::model::auto_manage::vram::VramFootprintInputs,
+    mut layers: LayerBytes,
+    room_mb: u64,
+    load_reads_free_bytes: Option<u64>,
+) -> Option<CardSplit> {
+    use crate::inference::split::hybrid::SplitCard;
+    // A/B inside one binary: `0` places a mixture-of-experts model by whole
+    // layers, as before #138 (3).
+    if std::env::var("SWARMLLM_EXPERTS_IN_RAM").as_deref() == Ok("0") {
+        layers.experts.clear();
+    }
+    let room = room_mb.saturating_mul(1024 * 1024);
+    let card = match load_reads_free_bytes {
+        Some(free) => SplitCard::read_by_the_load(room, free),
+        None => SplitCard::room(room),
+    };
+    card_split(inputs, &layers, card)
 }
 
 /// What a range grown onto a live card worker as `split` costs each device
@@ -4637,18 +4764,8 @@ impl ModelProcessPool {
         if available_mb >= estimated_mb {
             return None;
         }
-        let (inputs, mut layers) = self.segment_geometry(model_id, segment)?;
-        // A/B inside one binary: `0` places a mixture-of-experts model by
-        // whole layers, as before #138 (3).
-        if std::env::var("SWARMLLM_EXPERTS_IN_RAM").as_deref() == Ok("0") {
-            layers.experts.clear();
-        }
-        let room = available_mb.saturating_mul(1024 * 1024);
-        let card = match load_reads_free_bytes {
-            Some(free) => crate::inference::split::hybrid::SplitCard::read_by_the_load(room, free),
-            None => crate::inference::split::hybrid::SplitCard::room(room),
-        };
-        card_split(&inputs, &layers, card)
+        let (inputs, layers) = self.segment_geometry(model_id, segment)?;
+        split_in_room(&inputs, layers, available_mb, load_reads_free_bytes)
     }
 
     /// The `--gpu-layers` value a worker for `model_id` should be spawned with.
@@ -5923,6 +6040,7 @@ impl ModelProcessPool {
             budget_mb: 0,
             committed_mb: 0,
             reclaimable_mb: 0,
+            split_by_the_load: handle.split_by_the_load,
         };
         if !promotion_is_worth_weighing(&inputs) {
             return false;
@@ -6938,6 +7056,147 @@ impl ModelProcessPool {
             ram_mb: machine_mb,
         };
         Self::tell_worker_where(handle, model_id, segment, Some(sized.placement())).await;
+        pending.handed_back_to_the_caller();
+        (card_mb, machine_mb)
+    }
+
+    /// Weigh a WHOLE card placement against the free memory its worker's load
+    /// will read, before anything loads (#322), and place it across the card
+    /// and the processor where its weights would leave the loader's line less
+    /// than the spawn's cache (`KvCharge::positions`: 4,096 tokens). Returns
+    /// the spawn's charges `(card, machine)` afterwards.
+    ///
+    /// Admission weighs a whole model against the pool's ROOM, which cannot
+    /// carry the loader's line (FUTURE_WORK #322, 2026-10-28 — only the load's
+    /// own reading can): a tester's 12 GB card admitted Qwen2.5-14B whole and
+    /// its load left about 251 MB, ~1,300 tokens, for conversations, so every
+    /// longer prompt was refused (field report 2026-11-03). llama.cpp's
+    /// fitting decides in the same order (`common/fit.cpp`): the context comes
+    /// down to `fit_params_min_ctx` (4,096) first, and only then do layers
+    /// leave the card. So the split is the spawn's own placement
+    /// ([`card_split`] on the reading, `SplitCard::read_by_the_load`) sized to
+    /// keep that cache — not the full context a split admitted short of the
+    /// room is sized for — and the fewest layers leave the card.
+    ///
+    /// The machine takes the moved layers through the admission any split's
+    /// share meets ([`Self::admit_to_cpu`], the requester's cap); refused, or
+    /// with no part of the model fitting, the model loads whole as before. A
+    /// split made here is recorded ([`SplitByTheLoad`]) so promotion does not
+    /// move it whole again until the card has gained what the load lacked.
+    async fn fit_whole_placement_to_the_load(
+        &self,
+        model_id: &ModelId,
+        segment: (u32, u32),
+        handle: &mut WorkerHandle,
+        refit: WholeRefit,
+        charged: (u64, u64),
+    ) -> (u64, u64) {
+        if handle.card_split.is_some() || !handle.holds_gpu_memory() {
+            return charged;
+        }
+        let Some((mut inputs, layers)) = self.segment_geometry(model_id, Some(segment)) else {
+            return charged;
+        };
+        let WholeRefit {
+            load_reads_free_bytes,
+            kv,
+            requester,
+        } = refit;
+        let positions = kv.positions(&inputs);
+        let short_by = whole_placement_short_by_bytes(
+            &inputs,
+            &layers.weights,
+            positions,
+            load_reads_free_bytes,
+        );
+        if short_by == 0 {
+            return charged;
+        }
+        const MIB: u64 = 1024 * 1024;
+        let read_mb = load_reads_free_bytes / MIB;
+        let keep_whole = |why: &str| {
+            tracing::warn!(
+                model = %model_id,
+                load_reads_free_mb = read_mb,
+                short_by_mb = short_by.div_ceil(MIB),
+                cache_tokens = positions,
+                "Loading the model whole on the card although its load reads too little free \
+                 graphics memory to keep a conversation beside it — {why}; long prompts will be \
+                 refused here"
+            );
+        };
+        if std::env::var("SWARMLLM_HYBRID_OFFLOAD").as_deref() == Ok("0") {
+            keep_whole("placing part of a model on the processor is switched off");
+            return charged;
+        }
+        let (charged_vram_mb, charged_ram_mb) = charged;
+        // Sized with this spawn's whole charge given back: the room is the
+        // one admission weighed it against.
+        self.release_vram_charge(model_id, charged_vram_mb);
+        let budget_mb = self
+            .vram_budget_mb
+            .load(std::sync::atomic::Ordering::Relaxed);
+        let room_mb = budget_mb.saturating_sub(self.vram_committed_mb());
+        // Sized to keep the spawn's cache, not the full context (llama.cpp's
+        // order: the context comes down before layers leave the card).
+        inputs.effective_context = inputs.effective_context.min(positions);
+        let sized = split_in_room(&inputs, layers, room_mb, Some(load_reads_free_bytes));
+        let Some(sized) = sized.filter(|split| split.is_short_of_the_card()) else {
+            add_reserved(&self.vram_reserved_mb, model_id, charged_vram_mb);
+            match sized {
+                // Every layer placed: the split's own rounding found the room.
+                Some(_) => tracing::debug!(
+                    model = %model_id,
+                    load_reads_free_mb = read_mb,
+                    "The whole model's load reads just enough free graphics memory — loading \
+                     it whole"
+                ),
+                None => keep_whole("no part of it fits the card"),
+            }
+            return charged;
+        };
+        let card_mb = self.card_share_of_split_mb(model_id, segment, sized);
+        let machine_mb = self
+            .machine_charge(model_id, segment, false, Some(sized), kv)
+            .mb();
+        let more_machine_mb = machine_mb.saturating_sub(charged_ram_mb);
+        if more_machine_mb > 0 && !self.admit_to_cpu(model_id, more_machine_mb, requester) {
+            add_reserved(&self.vram_reserved_mb, model_id, charged_vram_mb);
+            keep_whole("this computer's memory cannot take the layers that would move");
+            return charged;
+        }
+        add_reserved(&self.vram_reserved_mb, model_id, card_mb);
+        // The machine was charged the whole placement's share and admitted
+        // the rest above; only a share that SHRANK has any to give back.
+        self.release_ram_charge(model_id, charged_ram_mb.saturating_sub(machine_mb));
+        handle.charged_mb.store(card_mb, Ordering::Release);
+        handle.host_share_mb.store(machine_mb, Ordering::Release);
+        handle.card_split = Some(sized);
+        handle.split_by_the_load = Some(SplitByTheLoad {
+            short_by_mb: short_by.div_ceil(MIB),
+            budget_at_split_mb: budget_mb,
+        });
+        let placement = sized.placement();
+        tracing::info!(
+            model = %model_id,
+            load_reads_free_mb = read_mb,
+            short_by_mb = short_by.div_ceil(MIB),
+            cache_tokens = positions,
+            ?placement,
+            card_mb,
+            machine_mb,
+            "The whole model would leave its card too little room for a conversation — placing \
+             part of it on the processor before it loads"
+        );
+        // Charged as placed, and dropped with the worker if this send is
+        // never finished (the request gone mid-spawn).
+        let pending = PendingSpawnCharge {
+            pool: self,
+            model_id: model_id.clone(),
+            vram_mb: card_mb,
+            ram_mb: machine_mb,
+        };
+        Self::tell_worker_where(handle, model_id, segment, Some(placement)).await;
         pending.handed_back_to_the_caller();
         (card_mb, machine_mb)
     }
@@ -9347,6 +9606,8 @@ impl ModelProcessPool {
             }
         }
 
+        let whole_reads_card =
+            whole_placement_reads_the_card(card_split, going_to_cpu, charge_ram, guest);
         // Armed only across the await, so the `Ok`/`Err` arms below keep owning
         // the charge exactly as before. It exists for the one thing they cannot
         // see: the future being dropped or the task aborted while the spawn is
@@ -9365,6 +9626,7 @@ impl ModelProcessPool {
                     SpawnCharge::decided(charge_ram, charged_vram_mb, charged_ram_mb),
                     estimated,
                     card_split,
+                    whole_reads_card,
                 )
                 .await;
             charge.handed_back_to_the_caller();
@@ -9378,21 +9640,40 @@ impl ModelProcessPool {
                 // A split is sized again by the free memory its worker's load
                 // will read, before the load (#365) — `charge_ram` never
                 // splits, so a split's charges are the card's and its share.
-                if let (Some(free), Some(budget)) = (card_free_bytes, split_budget) {
-                    (charged_vram_mb, charged_ram_mb) = self
-                        .refit_split_to_the_load(
-                            model_id,
-                            segment,
-                            &mut handle,
-                            SplitRefit {
-                                estimated_mb: estimated,
-                                budget_mb: budget,
-                                load_reads_free_bytes: free,
-                                kv: tenancy.kv_charge(),
-                            },
-                            (charged_vram_mb, charged_ram_mb),
-                        )
-                        .await;
+                // A whole placement is weighed by the same reading (#322).
+                match (card_free_bytes, split_budget) {
+                    (Some(free), Some(budget)) => {
+                        (charged_vram_mb, charged_ram_mb) = self
+                            .refit_split_to_the_load(
+                                model_id,
+                                segment,
+                                &mut handle,
+                                SplitRefit {
+                                    estimated_mb: estimated,
+                                    budget_mb: budget,
+                                    load_reads_free_bytes: free,
+                                    kv: tenancy.kv_charge(),
+                                },
+                                (charged_vram_mb, charged_ram_mb),
+                            )
+                            .await;
+                    }
+                    (Some(free), None) if whole_reads_card => {
+                        (charged_vram_mb, charged_ram_mb) = self
+                            .fit_whole_placement_to_the_load(
+                                model_id,
+                                segment,
+                                &mut handle,
+                                WholeRefit {
+                                    load_reads_free_bytes: free,
+                                    kv: tenancy.kv_charge(),
+                                    requester,
+                                },
+                                (charged_vram_mb, charged_ram_mb),
+                            )
+                            .await;
+                    }
+                    _ => {}
                 }
                 // Reset the failure counter on first success.
                 self.spawn_failures.remove(model_id);
@@ -9594,6 +9875,9 @@ impl ModelProcessPool {
         // some layers' experts in RAM. `None` is the all-or-nothing placement
         // `placed_on_cpu_because` describes.
         card_split: Option<CardSplit>,
+        // A WHOLE card placement the caller will weigh against the card as its
+        // load reads it (`fit_whole_placement_to_the_load`, #322).
+        whole_reads_card: bool,
     ) -> Result<SpawnedWorker, SwarmError> {
         use interprocess::local_socket::{tokio::prelude::*, ListenerOptions};
 
@@ -9967,16 +10251,20 @@ impl ModelProcessPool {
         // read, which only this worker can read — its own card context is part
         // of what the load finds taken (#365). Asked before anything loads.
         // A/B inside one binary: `SWARMLLM_SPLIT_READS_CARD=0` places the
-        // split as first planned on the pool's room, as v0.3.259 did.
-        let card_free_bytes = match (placed_on_cpu_because, card_split) {
-            (None, Some(_)) if std::env::var("SWARMLLM_SPLIT_READS_CARD").as_deref() != Ok("0") => {
-                read_card_free_before_the_load(&mut read_half, &mut write_half, model_id)
-                    .await
-                    .map_err(|e| {
-                        SwarmError::ServiceUnavailable(format!("read the card's free memory: {e}"))
-                    })?
-            }
-            _ => None,
+        // split as first planned on the pool's room, as v0.3.259 did. A whole
+        // placement is read too, where its caller asks (#322).
+        let reads_card = match (placed_on_cpu_because, card_split) {
+            (None, Some(_)) => std::env::var("SWARMLLM_SPLIT_READS_CARD").as_deref() != Ok("0"),
+            (None, None) => whole_reads_card,
+            (Some(_), _) => false,
+        };
+        let card_free_bytes = match reads_card {
+            true => read_card_free_before_the_load(&mut read_half, &mut write_half, model_id)
+                .await
+                .map_err(|e| {
+                    SwarmError::ServiceUnavailable(format!("read the card's free memory: {e}"))
+                })?,
+            false => None,
         };
 
         // Build a descriptive message including shard window if available
@@ -10041,6 +10329,7 @@ impl ModelProcessPool {
             // Only a split is worth recording; a worker wholly on the card
             // says so through `placed_on_cpu_because: None` alone.
             card_split: card_split.filter(|_| placed_on_cpu_because.is_none()),
+            split_by_the_load: None,
             context_fits,
             own_decode: std::sync::Mutex::new(OwnDecodeSpeed::default()),
             drafts_for_another_model: AtomicBool::new(false),
@@ -15257,6 +15546,7 @@ mod tests {
             host_share_mb: AtomicU64::new(0),
             gpu_estimate_mb: 0,
             card_split,
+            split_by_the_load: None,
             context_fits: Arc::new(std::sync::atomic::AtomicU32::new(0)),
             own_decode: std::sync::Mutex::new(OwnDecodeSpeed::default()),
             drafts_for_another_model: AtomicBool::new(false),
@@ -18362,6 +18652,224 @@ mod admission_tests {
         assert!(p.vram_committed_mb() <= 6_600, "{}", p.vram_committed_mb());
     }
 
+    /// Qwen2.5-14B-Instruct Q4_K_M's shape: 48 layers, 8 of 40 heads keeping
+    /// a cache, 8.4 GiB of weights.
+    fn fourteen_b() -> crate::model::auto_manage::vram::VramFootprintInputs {
+        use crate::inference::model_arch::ModelArch;
+        use crate::inference::split::hybrid::arch_supports_hybrid;
+        crate::model::auto_manage::vram::VramFootprintInputs {
+            quantized_weight_bytes: 8_570 * MIB,
+            host_resident_bytes: 0,
+            head_bytes: 0,
+            unquantized_bytes_per_element: None,
+            vocab_size: 152_064,
+            embedding_length: 5120,
+            segment_layers: 48,
+            kv: crate::inference::split::kv_budget::KvPrice::uniform(
+                48,
+                8,
+                40,
+                128,
+                crate::inference::layers::KvAttention::Standard,
+            ),
+            rope_dim: 128,
+            effective_context: 8192,
+            is_first: true,
+            embedding_gatherable: true,
+            splits_across_devices: arch_supports_hybrid(&ModelArch::Qwen2),
+        }
+    }
+
+    /// A 14B admitted WHOLE on a 12 GB card's room, its worker spawned and
+    /// charged as such — the field's state before its load (2026-11-03).
+    async fn fourteen_b_spawned_whole(
+        name: &str,
+        ram_budget_mb: u64,
+    ) -> (
+        ModelProcessPool,
+        ModelId,
+        WorkerHandle,
+        interprocess::local_socket::tokio::Stream,
+        (u64, u64),
+    ) {
+        let p = pool();
+        p.test_card_in_play.store(true, Ordering::Relaxed);
+        p.set_gpu_layers(-1);
+        p.set_vram_budget_mb(10_500);
+        p.set_ram_budget_mb(ram_budget_mb);
+        let m = ModelId(name.into());
+        p.test_footprint_inputs.insert(m.clone(), fourteen_b());
+        let segment = (0, 48);
+        let estimated = p.estimate_gpu_footprint_mb(&m, Some(segment), KvCharge::Typical);
+        assert!(
+            estimated <= 10_500
+                && p.partial_gpu_layers(&m, Some(segment), estimated, 10_500)
+                    .is_none(),
+            "fixture: the room admits it whole ({estimated} MB)"
+        );
+        add_reserved(&p.vram_reserved_mb, &m, estimated);
+        let (h, worker_end) = super::tests::fake_worker_handle_split_with_its_end(
+            false,
+            None,
+            false,
+            std::time::Instant::now(),
+            None,
+        )
+        .await;
+        let Ok(handle) = Arc::try_unwrap(h) else {
+            panic!("a fresh handle has one owner");
+        };
+        handle.charged_mb.store(estimated, Ordering::Release);
+        (p, m, handle, worker_end, (estimated, 0))
+    }
+
+    fn whole_refit(read_mb: u64) -> WholeRefit {
+        WholeRefit {
+            load_reads_free_bytes: read_mb * MIB,
+            kv: KvCharge::Typical,
+            requester: Requester::Owner,
+        }
+    }
+
+    /// **A whole placement its load would leave too little room for a
+    /// conversation is split before it loads** (#322). A tester's 12 GB card
+    /// admitted Qwen2.5-14B whole on the pool's room; its load then read
+    /// ~10.4 GB free, put the weights inside the loader's 85% line and left
+    /// ~251 MB — ~1,300 tokens — for conversations, so every longer prompt was
+    /// refused (field report 2026-11-03). Weighed against that reading, the
+    /// spawn moves the fewest layers to the processor that leave a 4,096-token
+    /// cache, charges each device what lands in it, records the shortfall for
+    /// the promotion, and tells the worker before anything loads. Fewer leave
+    /// the card than a split sized for the full 8,192 tokens would move —
+    /// the context comes down first, as llama.cpp's fitting does.
+    #[tokio::test]
+    async fn a_whole_placement_its_load_leaves_no_room_for_a_conversation_is_split_first() {
+        use crate::inference::split::RangePlacement;
+        let (p, m, mut h, mut worker_end, charged) =
+            fourteen_b_spawned_whole("fourteen-b-whole", 100_000).await;
+        let segment = (0, 48);
+        let (inputs, layers) = p.segment_geometry(&m, Some(segment)).unwrap();
+        let short = whole_placement_short_by_bytes(&inputs, &layers.weights, 4_096, 10_400 * MIB);
+        assert!(
+            short > 0,
+            "fixture: the load's line cannot hold 4,096 tokens beside it"
+        );
+
+        let (card_mb, machine_mb) = p
+            .fit_whole_placement_to_the_load(&m, segment, &mut h, whole_refit(10_400), charged)
+            .await;
+        let Some(CardSplit::Layers { on_card, total: 48 }) = h.card_split else {
+            panic!("split by whole layers: {:?}", h.card_split);
+        };
+        assert!(on_card < 48, "{on_card}");
+        assert_eq!(
+            placement_told(&mut worker_end).await,
+            Some((
+                (0, 48),
+                Some(RangePlacement {
+                    gpu_layers: Some(on_card),
+                    cpu_expert_layers: None,
+                })
+            )),
+            "the worker is told before its load"
+        );
+        assert_eq!(
+            h.split_by_the_load,
+            Some(SplitByTheLoad {
+                short_by_mb: short.div_ceil(MIB),
+                budget_at_split_mb: 10_500,
+            })
+        );
+        assert!(
+            card_mb < charged.0 && machine_mb > 0,
+            "{card_mb} / {machine_mb}"
+        );
+        assert_eq!(p.vram_reserved_mb.get(&m).map(|v| *v), Some(card_mb));
+        assert_eq!(p.ram_reserved_mb.get(&m).map(|v| *v), Some(machine_mb));
+        assert_eq!(h.charged_mb.load(Ordering::Acquire), card_mb);
+        assert_eq!(h.host_share_mb.load(Ordering::Acquire), machine_mb);
+        assert!(h.short_of_the_card(), "the promotion weighs it");
+
+        // The context first: sized for the full 8,192 tokens, more layers
+        // would have left the card.
+        let Some(CardSplit::Layers {
+            on_card: at_full_context,
+            ..
+        }) = split_in_room(&inputs, layers, 10_500, Some(10_400 * MIB))
+        else {
+            panic!("a split at the full context");
+        };
+        assert!(
+            at_full_context < on_card,
+            "{at_full_context} at 8,192 tokens vs {on_card} at 4,096"
+        );
+
+        p.after_worker_gone_charge(&m, DepartedWorker::from(&h), "test");
+        assert_eq!(p.vram_reserved_mb.get(&m).map(|v| *v).unwrap_or(0), 0);
+        assert_eq!(p.ram_reserved_mb.get(&m).map(|v| *v).unwrap_or(0), 0);
+    }
+
+    /// The controls: a load that reads enough keeps the model whole, and so
+    /// does a machine that cannot take the layers that would move — each
+    /// charge as admitted, nothing told, nothing recorded.
+    #[tokio::test]
+    async fn a_whole_placement_stays_whole_where_its_load_reads_enough_or_the_machine_refuses() {
+        for (name, ram_budget_mb, read_mb) in [
+            ("fourteen-b-reads-enough", 100_000, 12_000),
+            ("fourteen-b-machine-full", 100, 10_400),
+        ] {
+            let (p, m, mut h, mut worker_end, charged) =
+                fourteen_b_spawned_whole(name, ram_budget_mb).await;
+            let after = p
+                .fit_whole_placement_to_the_load(&m, (0, 48), &mut h, whole_refit(read_mb), charged)
+                .await;
+            assert_eq!(after, charged, "{name}");
+            assert_eq!(h.card_split, None, "{name}");
+            assert_eq!(h.split_by_the_load, None, "{name}");
+            assert_eq!(placement_told(&mut worker_end).await, None, "{name}");
+            assert_eq!(
+                p.vram_reserved_mb.get(&m).map(|v| *v),
+                Some(charged.0),
+                "{name}"
+            );
+            assert_eq!(
+                p.ram_reserved_mb.get(&m).map(|v| *v).unwrap_or(0),
+                0,
+                "{name}"
+            );
+            p.after_worker_gone_charge(&m, DepartedWorker::from(&h), "test");
+        }
+    }
+
+    /// Only a whole CARD placement is read again — never a guest (it takes
+    /// only memory that stands free, never a split), a split (sized by its own
+    /// reading, #365), or a placement on the processor or charged to the
+    /// machine.
+    #[test]
+    fn only_a_whole_card_placement_is_weighed_by_its_loads_reading() {
+        let split = Some(CardSplit::Layers {
+            on_card: 40,
+            total: 48,
+        });
+        assert!(whole_placement_reads_the_card(None, false, false, false));
+        assert!(
+            !whole_placement_reads_the_card(None, false, false, true),
+            "a guest"
+        );
+        assert!(
+            !whole_placement_reads_the_card(split, false, false, false),
+            "a split"
+        );
+        assert!(
+            !whole_placement_reads_the_card(None, true, false, false),
+            "the processor"
+        );
+        assert!(
+            !whole_placement_reads_the_card(None, false, true, false),
+            "the machine"
+        );
+    }
+
     /// **A spawn reads its worker's card reading straight off the connection**
     /// (#365), before the reader actor owns it: the answer, past a side-band
     /// report sent first; `None` from a worker with no card; and `None` once
@@ -19017,7 +19525,48 @@ mod admission_tests {
             budget_mb: 6141,
             committed_mb: 653,
             reclaimable_mb: 0,
+            split_by_the_load: None,
         }
+    }
+
+    /// **A split its load's reading made is moved whole only once the card
+    /// has gained what the load lacked** (#322). The room admitted it whole,
+    /// so on the room alone the promotion would retire it at the first idle
+    /// request and the next load would split it again.
+    #[test]
+    fn a_split_the_load_made_waits_for_the_card_to_gain_its_shortfall() {
+        // Its card share is charged, so in the committed figure; the budget
+        // (the card less OTHER programs) never counted it.
+        let split = PromotionInputs {
+            own_card_mb: 1_500,
+            committed_mb: 653 + 1_500,
+            budget_mb: 6_141,
+            split_by_the_load: Some(SplitByTheLoad {
+                short_by_mb: 600,
+                budget_at_split_mb: 6_141,
+            }),
+            ..promotable()
+        };
+        assert!(
+            !should_return_to_gpu(&split),
+            "the card is where it was: the room fits, the load would not"
+        );
+        assert!(
+            !should_return_to_gpu(&PromotionInputs {
+                budget_mb: 6_141 + 599,
+                ..split
+            }),
+            "a megabyte short of what the load lacked"
+        );
+        assert!(should_return_to_gpu(&PromotionInputs {
+            budget_mb: 6_141 + 600,
+            ..split
+        }));
+        // The control: without the record, the room alone moves it.
+        assert!(should_return_to_gpu(&PromotionInputs {
+            split_by_the_load: None,
+            ..split
+        }));
     }
 
     #[test]
