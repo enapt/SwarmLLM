@@ -71,6 +71,10 @@ the top track (`docs/plans/large_model_splits.md`).
    took 14 minutes to reset; the kernel is still unknown. Every planned run is done (memcheck clean
    over ~27 min on two boots, FECS shown with no SwarmLLM code at 48 h, the drafter-in-one-process
    change weighed and declined); nothing to run until the illegal access recurs.
+4a. **#322** (raised 2026-11-04) — a model admitted whole to a card can be left no room for a
+   conversation's cache: a 14B on a tester's 12 GB card refused every long prompt (2026-11-03). Since
+   2026-11-04 such a refusal is planned again with the other computers; **next**: the admission
+   itself, before the load, from the card reading (#365) — the only fix for a computer alone.
 5. **#250** — a model held whole here, which the card holds only part of, can be routed through
    far peers instead of answering locally. Its causes closed in v0.3.236 and v0.3.239; left: the
    prompt priced on the processor prior for a card/processor split, and a far hop priced at
@@ -3468,8 +3472,8 @@ the head that goes, and the card's prompt pass gathering its rows on the host. M
 it adds on the card (the copy is 32 KB a token) against the layer it frees, on a split this
 laptop leads.
 
-#### #322 — A cold load's first request was refused for a 9-token prompt, its card cache budget 0
-`P3` · memory · **OPEN** — 2026-10-20 · history: field report 2026-10-19 (a tester, RTX 3060 12 GB, v0.3.244), request `3acb5624`
+#### #322 — A model admitted whole to a card can be left no room for a conversation's cache
+`P1` · memory · **OPEN** — 2026-10-20, raised 2026-11-04 · history: field reports 2026-10-19 (a tester, RTX 3060 12 GB, v0.3.244, request `3acb5624`) and 2026-11-03 (a tester, 12 GB card, v0.3.270, Qwen2.5-14B)
 
 The first request after a cold load of Qwen3-30B-A3B (this node L0-14 and L42-48, a peer
 L14-42) failed after 46 s. The second local range (L42-48, 2,262 MB) was admitted to the card
@@ -3526,6 +3530,18 @@ the card before its load (`DaemonMsg::ReadCardFree` → `WorkerMsg::CardFree`, t
 figure) and re-sizes the split on it (`refit_split_to_the_load`). A whole placement can ask the same
 reading and go to the split rung BEFORE its load when its weights cross the loader's line, rather
 than after a refusal — the case above, decided where the charges are still the spawn's.
+
+**2026-11-04: seen in the field on every long prompt — raised to P1; the re-plan half fixed.** A
+tester's 12 GB card (report of 2026-11-03, v0.3.270): Qwen2.5-14B admitted WHOLE on the pool's
+budget, and the loader's line (85% of what the load read, less the weights) left about 251 MB for
+conversations — a 2,588-token prompt refused in 0.2 s, `route=local`, while five connected
+computers held the model. That refusal came from the fast path, which never re-planned; it now does
+(`streaming::router_to_replan`, `docs/invariants/scheduling.md` § "A re-plan is warranted by a changed
+fact"), so such a request is served by the other computers. **Still open, and the only fix for a
+computer with no peers**: a whole placement whose weights leave the loader's line less than a
+4,096-token cache goes to the split rung BEFORE its load — the card reading #365 added, asked of a
+whole placement too (`get_or_spawn_once`), never the pool's room alone (the 10-28 paragraph: the room
+cannot carry a line this sharp).
 
 #### #297 — Auto-manage prices a card by the file's size, so Gemma 4's E2B/E4B read heavier than they run
 `P3` · memory · **OPEN** — 2026-10-17 · history: #296's review
@@ -3974,15 +3990,27 @@ whether one-hop forwards carry the `0x07` reply-to trailer (feature-bit gated), 
 per-token cost. First decide whether it buys anything over link encryption — the boomerang is
 structural, not cryptographic, and peers see hidden states regardless.
 
-#### #201 — Credits for hosting parts are self-attested
-`P4` · credits · **OPEN** — 2026-07-28 · history: archive § "Shard-hosting credits are self-attested — no proof of storage"
+#### #201 — A computer's claim to hold parts is self-attested — it earns credit and, since v0.3.271, use of the swarm
+`P3` · network · **OPEN** — 2026-07-28, widened 2026-11-04 · history: archive § "Shard-hosting credits are self-attested — no proof of storage"; the swarm-use gate (`docs/invariants/network.md` § "A computer that shares nothing may look at the swarm")
 
-`credit/ledger.rs` earns hosting credit from the node's own registry; nothing challenges it, so
-a patched client can claim storage it does not hold. `docs/CREDITS_DESIGN.md` does not cover
-proof of storage. Options recorded: random-range challenge-response (`credit/anti_gaming.rs`),
-proof of retrievability / data possession, proof of replication, or paying only for observed
-service. Two adjacent gaps: a Sybil can reset its trust with a new key, and escrow token counts
-come from peers (#202). Belongs in `CREDITS_DESIGN.md` § 6's exit criteria.
+Nothing checks that a computer holds the parts it announces. Two things now rest on that word:
+hosting credit (`credit/ledger.rs`, dormant) and, since v0.3.271, whether other computers run its
+requests at all (`daemon::state::swarm_use`, ≥ 2 parts). Release signing does not close it: it
+proves a DOWNLOAD came from us, so a node updating itself installs only our builds, but no peer can
+tell which program another computer runs — the source is public, and a build with the gate's
+announcement faked speaks the same protocol. So the released program cannot take without giving;
+a modified one can, by announcing parts it does not hold.
+**Direction** (proof of data possession, a random-range challenge): a computer asked to serve a
+peer's request checks one claimed part it ALSO holds, now and then (once per peer per hour, say) —
+asks the peer for a random 64 KB of it through the ordinary part request and compares with its
+own bytes; a wrong or missing answer refuses use for a while (the gate's refusal, no penalty
+elsewhere). Mind: a metered hold answers parts as a miss (#277) and an upload limit answers BUSY
+(#335) — neither is a failed check; a peer can relay the bytes from another holder in real time
+(the known limit of a challenge without a deadline it cannot meet by fetching); and the check is
+itself upload the peer pays for, so keep it rare. Other options recorded: proof of retrievability,
+proof of replication, or paying only for observed service. Adjacent gaps: a Sybil can reset its
+trust with a new key, and escrow token counts come from peers (#202). For credits, belongs in
+`CREDITS_DESIGN.md` § 6's exit criteria.
 
 #### #202 — A serving peer's own usage figure prices the request it served
 `P4` · credits · **PARTIAL** — 2026-07-29 · history: archive § "A serving peer sets the price of the request it served"

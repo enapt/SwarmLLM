@@ -20,7 +20,7 @@
 //! (route shape, segment, peer, region) have no OTel equivalent and keep
 //! `swarm`-prefixed names.
 
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::Instant;
 
@@ -302,6 +302,11 @@ pub struct RequestTrace {
     /// from `inner` so no snapshot can ever carry reply text into diagnostics,
     /// and dropped when the request finishes.
     streamed: Mutex<crate::types::ReplyContinuation>,
+    /// Whether this request has been published (`SharedState::publish_request_trace`).
+    /// A request is counted ONCE whoever finishes it: a fast-path request
+    /// refused for memory is handed to the router with its trace, and both the
+    /// router and the stream that began it finish and publish that one record.
+    published: AtomicBool,
 }
 
 impl RequestTrace {
@@ -315,7 +320,14 @@ impl RequestTrace {
             decode_rounds: AtomicU32::new(0),
             inner: Mutex::new(TraceInner::default()),
             streamed: Mutex::new(crate::types::ReplyContinuation::default()),
+            published: AtomicBool::new(false),
         }
+    }
+
+    /// True the FIRST time it is asked, false ever after — the one test of
+    /// whether this request has been published yet.
+    pub(crate) fn first_publication(&self) -> bool {
+        !self.published.swap(true, Ordering::AcqRel)
     }
 
     /// Text the reader has been sent. Called by the token channel once a send

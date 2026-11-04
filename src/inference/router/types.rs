@@ -345,6 +345,18 @@ pub enum RouterCommand {
         result_tx: InferenceResultTx,
         token_tx: StreamingTokenTx,
     },
+    /// Plan a request this node already tried OUTSIDE the router: the local
+    /// fast path, refused by this node's memory before any token
+    /// (`api::openai::streaming::replan_after_local_refusal`). The router
+    /// continues `trace` rather than starting a record of its own, so the
+    /// reply names the attempt here and the route that served it (#302), and
+    /// the request is counted once. Streamed when `token_tx` is set.
+    Replan {
+        request: InferenceRequest,
+        result_tx: InferenceResultTx,
+        token_tx: Option<StreamingTokenTx>,
+        trace: std::sync::Arc<crate::inference::trace::RequestTrace>,
+    },
     /// A network message relevant to inference (LayerForward, LayerResult, etc.)
     NetworkMessage(SwarmMessage),
     /// Update multi-turn KV-cache token count after inference completes.

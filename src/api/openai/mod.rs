@@ -632,6 +632,7 @@ pub async fn chat_completions(
                     .unwrap_or(false),
                 req.keep_asked(),
                 req.requested_by,
+                req.route_plan_override(),
             )
             .await
             .into_response());
@@ -648,6 +649,7 @@ pub async fn chat_completions(
                 req.template_vars.clone(),
                 req.keep_asked(),
                 req.requested_by,
+                req.route_plan_override(),
             )
             .await;
         }

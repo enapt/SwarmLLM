@@ -1145,6 +1145,34 @@ segment that fails. A/B
 `a_peer_that_refused_the_whole_model_is_held_short_of_it_not_barred` (red with the
 A/B set).
 
+**The fast path's own refusal is planned again too (2026-11-04, field report of
+2026-11-03).** A model held whole here runs through `local_fast_path_for` →
+`run_split_generate` / `spawn_split_stream` (both surfaces, OpenAI and Anthropic;
+the Responses API and MCP go through the router), which never pass the router — so
+a `LocalMemoryUnavailable` from `ModelProcessPool::generate` WAS the reply.
+Qwen2.5-14B on a tester's 12 GB card: admitted whole, left ~250 MB for caches by the
+loader's 85% line, a 2,588-token prompt refused in 0.2 s with `route=local` while
+five connected computers held the model. Now **`streaming::router_to_replan`**
+hands such a refusal — before anything reached the reader, with a computer the
+request may reach connected (`SharedState::has_peers_to_ask`, the scope
+`local_fast_path_for` asks too) — to the router as `RouterCommand::Replan`: the
+refusal noted under the fast path's own request id FIRST (`note_local_memory_refusal`,
+so the first plan cannot name this node for the whole model), the fast path's
+`RequestTrace` continued (the route names the attempt here and the computers that
+served it), the caller's `swarm_route`, `KeepAsked` and `RequestedBy` carried, and a
+failed plan reported by `report_after_a_replan`, so the refusal's itemised shortfall
+still reaches a caller nobody else can serve. Envoy's retry predicate
+`previous_hosts` is the same shape — a retry that may not pick the host it just
+tried — and the recorded refusal is ours. A trace both the stream and the router
+finish is counted ONCE (`RequestTrace::first_publication`, asked by
+`publish_request_trace`); the stream forwards the router's tokens through a sender
+carrying no trace (`reader_tx`), so the continued trace records each token once.
+Tests: `a_fast_path_memory_refusal_is_planned_again_with_the_other_computers`, its
+streamed sibling, `only_a_memory_refusal_with_someone_to_ask_is_planned_again`,
+`a_request_is_published_once` (all red with `router_to_replan` answering `None` and
+the publish guard off). The admission that let a 14B in whole with no room for its
+caches is the other half, still open (FUTURE_WORK).
+
 **From the rules file (moved 2026-10-02):**
 
 **`SwarmError::LocalMemoryUnavailable`** is what this node's own loader returns

@@ -372,7 +372,28 @@ impl Drop for CancelOnDisconnect {
 /// at one point for the same reason (`entrypoints::utils::with_cancellation`).
 pub(crate) async fn submit_to_router(
     router_tx: &tokio::sync::mpsc::Sender<crate::inference::router::RouterCommand>,
+    inference_req: crate::types::InferenceRequest,
+) -> Result<crate::inference::router::InferenceOutput, crate::error::ApiError> {
+    submit(router_tx, inference_req, None).await
+}
+
+/// [`submit_to_router`] for a request this node already tried outside the
+/// router — the local fast path, refused by its memory before any token: the
+/// router continues `trace` (`RouterCommand::Replan`), so the reply names the
+/// attempt here beside the route that served it and the request is counted
+/// once. Same cancellation as every other non-streaming request.
+pub(crate) async fn submit_replan_to_router(
+    router_tx: &tokio::sync::mpsc::Sender<crate::inference::router::RouterCommand>,
+    inference_req: crate::types::InferenceRequest,
+    trace: std::sync::Arc<crate::inference::trace::RequestTrace>,
+) -> Result<crate::inference::router::InferenceOutput, crate::error::ApiError> {
+    submit(router_tx, inference_req, Some(trace)).await
+}
+
+async fn submit(
+    router_tx: &tokio::sync::mpsc::Sender<crate::inference::router::RouterCommand>,
     mut inference_req: crate::types::InferenceRequest,
+    continues: Option<std::sync::Arc<crate::inference::trace::RequestTrace>>,
 ) -> Result<crate::inference::router::InferenceOutput, crate::error::ApiError> {
     let flag = inference_req
         .cancel
@@ -383,12 +404,19 @@ pub(crate) async fn submit_to_router(
         request_id: inference_req.id,
     };
     let (result_tx, result_rx) = tokio::sync::oneshot::channel();
-    let sent = router_tx
-        .send(crate::inference::router::RouterCommand::Submit {
+    let command = match continues {
+        None => crate::inference::router::RouterCommand::Submit {
             request: inference_req,
             result_tx,
-        })
-        .await;
+        },
+        Some(trace) => crate::inference::router::RouterCommand::Replan {
+            request: inference_req,
+            result_tx,
+            token_tx: None,
+            trace,
+        },
+    };
+    let sent = router_tx.send(command).await;
     let result = match sent {
         Err(_) => Err(crate::error::ApiError(
             crate::error::SwarmError::ServiceUnavailable("Router unavailable".into()),

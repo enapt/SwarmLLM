@@ -3643,11 +3643,7 @@ impl SharedState {
         // scheduling pass could only choose here (#251) — as has a request
         // whose caller asked to keep it here (#251 (2b)). Skipped when
         // shedding, which declines the fast path whatever it says.
-        let has_peers = !shedding_load
-            && match crate::pool::scope::request_scope(self, model_id, asked) {
-                None => !self.connected_node_ids.is_empty(),
-                Some(scope) => self.connected_node_ids.iter().any(|n| scope.contains(&*n)),
-            };
+        let has_peers = !shedding_load && self.has_peers_to_ask(model_id, asked);
         // Ask the cheap questions first. `serves_on_cpu` prices the model,
         // which reads its header off disk — fine once per request, not fine
         // once per model in a listing, and this became a listing consumer when
@@ -3670,6 +3666,27 @@ impl SharedState {
             );
         }
         allowed
+    }
+
+    /// Is a computer this request may reach connected now — one a scheduling
+    /// pass could choose instead of this one?
+    ///
+    /// The peers to ask are the peers THIS request may reach
+    /// (`pool::scope::request_scope`): a model kept on this computer, a request
+    /// asked to stay here, private mode with no pool member connected, or a
+    /// computer refused use of the swarm has nobody to ask. Read by the fast
+    /// path's choice ([`Self::local_fast_path_for`]) and by its hand-over to the
+    /// router after a memory refusal, which must not send a request to a plan
+    /// that can only fail.
+    pub fn has_peers_to_ask(
+        &self,
+        model_id: &crate::types::ModelId,
+        asked: crate::types::KeepAsked,
+    ) -> bool {
+        match crate::pool::scope::request_scope(self, model_id, asked) {
+            None => !self.connected_node_ids.is_empty(),
+            Some(scope) => self.connected_node_ids.iter().any(|n| scope.contains(&*n)),
+        }
     }
 
     /// What we have measured of this peer running the whole of `model_id` for

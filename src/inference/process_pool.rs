@@ -3903,6 +3903,10 @@ pub struct ModelProcessPool {
     /// build without the CUDA feature never has.
     #[cfg(test)]
     pub(crate) test_card_in_play: std::sync::atomic::AtomicBool,
+    /// A refusal the next [`Self::generate`] returns without running — a test
+    /// of what a caller does with a worker's refusal, with no worker.
+    #[cfg(test)]
+    pub(crate) test_refuse_next_generate: std::sync::Mutex<Option<SwarmError>>,
 }
 
 /// Command into the batch scheduler task.
@@ -4119,6 +4123,8 @@ impl ModelProcessPool {
             test_layers_share_caches: dashmap::DashSet::new(),
             #[cfg(test)]
             test_card_in_play: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(test)]
+            test_refuse_next_generate: std::sync::Mutex::new(None),
         }
     }
 
@@ -10895,6 +10901,15 @@ impl ModelProcessPool {
     ) -> Result<crate::inference::router::InferenceOutput, SwarmError> {
         if let Some(tx) = &token_tx {
             tx.note_prompt_opened(opened);
+        }
+        #[cfg(test)]
+        if let Some(refused) = self
+            .test_refuse_next_generate
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take()
+        {
+            return Err(refused);
         }
         // Track whether any token has been streamed to the caller, so a retry
         // can never duplicate output the client already saw.

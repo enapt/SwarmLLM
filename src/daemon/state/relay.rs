@@ -350,6 +350,17 @@ impl super::SharedState {
     /// of [`Self::record_request_failure`], which is what made "why did that
     /// break" answerable but left "why was that slow" unanswerable.
     pub fn publish_request_trace(&self, trace: &crate::inference::trace::RequestTrace) {
+        // One request, one record: a fast-path request re-planned through the
+        // router carries its trace there, and the router and the stream that
+        // began it both reach this line for it. Asked here rather than of
+        // either caller, so no path can count a request twice.
+        if !trace.first_publication() {
+            tracing::debug!(
+                request_id = %trace.request_id,
+                "request already published — not counted again"
+            );
+            return;
+        }
         let snap = trace.snapshot();
         tracing::info!("DIAG: request complete {}", snap.log_line());
 

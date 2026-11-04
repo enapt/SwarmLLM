@@ -263,6 +263,213 @@ fn mark_served_here(
     );
 }
 
+/// What a fast-path request was asked as, kept so the router can plan it
+/// again: the messages, tools and template variables the fast path renders,
+/// its sampling as the CALLER set it (the router adds the template's stops
+/// itself), and every instruction about where it may run.
+pub(crate) struct FastPathAsk {
+    model_id: ModelId,
+    messages: Vec<ChatMessage>,
+    params: SamplingParams,
+    tools: Option<Vec<serde_json::Value>>,
+    template_vars: Option<crate::types::TemplateVars>,
+    route_override: Option<crate::inference::route_override::RoutePlanOverride>,
+    keep: crate::types::KeepAsked,
+    requested_by: crate::types::RequestedBy,
+}
+
+impl FastPathAsk {
+    /// The router's request for it, under the fast path's OWN request id:
+    /// the refusal noted for that id (`note_local_memory_refusal`) is then a
+    /// fact of the router's first plan, and the trace it continues is the
+    /// one registered under it.
+    fn request(self, rid: uuid::Uuid, stream: bool) -> InferenceRequest {
+        let mut request = InferenceRequest::local(
+            self.model_id,
+            self.messages,
+            self.params,
+            stream,
+            None,
+            None,
+            self.tools,
+            self.template_vars,
+            self.keep,
+            self.requested_by,
+        );
+        request.id = rid;
+        request.route_override = self.route_override;
+        request
+    }
+}
+
+/// The router to hand a fast-path failure to — the single answer for both
+/// fast paths, streamed and not, on both API surfaces.
+///
+/// `Some` only for this node's own memory refusal
+/// (`SwarmError::LocalMemoryUnavailable`, the one local failure the router
+/// re-plans, `router::local_memory_refused_the_load`), before anything
+/// reached the reader, while a computer this request may reach is connected
+/// (`SharedState::has_peers_to_ask`). The fast path skips the router, so its
+/// refusal used to BE the answer: a 2,588-token prompt to a 14B held whole
+/// on a card with too little room left for its cache was refused in 0.2 s,
+/// `route=local`, with five connected computers holding the model (field
+/// report 2026-11-03).
+fn router_to_replan<'a>(
+    router_tx: Option<&'a tokio::sync::mpsc::Sender<RouterCommand>>,
+    shared: &crate::daemon::SharedState,
+    err: &crate::error::SwarmError,
+    ask: &FastPathAsk,
+    reached_the_reader: bool,
+) -> Option<&'a tokio::sync::mpsc::Sender<RouterCommand>> {
+    if reached_the_reader || !crate::inference::router::local_memory_refused_the_load(err) {
+        return None;
+    }
+    if !shared.has_peers_to_ask(&ask.model_id, ask.keep) {
+        return None;
+    }
+    router_tx
+}
+
+/// Note the fast path's memory refusal as the fact the router's first plan
+/// starts from — so that plan cannot hand this node the whole model again
+/// (`local_can_hold_every_layer`), exactly as the router's own re-plan after
+/// such a refusal does.
+fn note_refusal_for_the_replan(
+    shared: &crate::daemon::SharedState,
+    refused: &crate::error::SwarmError,
+    request: &InferenceRequest,
+) {
+    tracing::warn!(
+        request_id = %request.id,
+        model = %request.model_id,
+        error = %refused,
+        "DIAG: this node's memory refused the local fast path — planning the request \
+         again with the other computers"
+    );
+    shared.note_local_memory_refusal(request.id);
+}
+
+/// Plan again, through the router, a request this node's memory refused on
+/// the non-streamed fast path ([`router_to_replan`]). The router continues the
+/// fast path's trace (`RouterCommand::Replan`). A re-plan that finds nothing
+/// better reports the refusal, by the router's own rule
+/// (`report_after_a_replan`: this node's memory shortfall names what to raise).
+async fn replan_after_local_refusal(
+    router_tx: &tokio::sync::mpsc::Sender<RouterCommand>,
+    shared: &crate::daemon::SharedState,
+    refused: crate::error::SwarmError,
+    request: InferenceRequest,
+    trace: std::sync::Arc<crate::inference::trace::RequestTrace>,
+) -> Result<crate::inference::router::InferenceOutput, ApiError> {
+    note_refusal_for_the_replan(shared, &refused, &request);
+    let model = request.model_id.0.clone();
+    crate::api::submit_replan_to_router(router_tx, request, trace)
+        .await
+        .map_err(|ApiError(later)| {
+            ApiError(crate::inference::router::report_after_a_replan(
+                refused, later, &model, None,
+            ))
+        })
+}
+
+/// [`replan_after_local_refusal`] for the streamed fast path: the router's
+/// tokens are handed to the reader the fast path already opened, so neither
+/// surface's stream changes shape. `reader` carries no trace — the router's
+/// own sender stamps the continued trace once.
+#[allow(clippy::too_many_arguments)]
+async fn stream_replan_after_local_refusal(
+    router_tx: &tokio::sync::mpsc::Sender<RouterCommand>,
+    shared: &crate::daemon::SharedState,
+    refused: crate::error::SwarmError,
+    mut request: InferenceRequest,
+    trace: std::sync::Arc<crate::inference::trace::RequestTrace>,
+    reader: &crate::inference::router::StreamingTokenTx,
+    usage: &SplitStreamUsage,
+    failure: &SplitStreamFailure,
+) {
+    note_refusal_for_the_replan(shared, &refused, &request);
+    let model = request.model_id.0.clone();
+    // What a long wait inside the pipeline watches (`inference::cancel`);
+    // set the moment the reader leaves, as `router_inference_stream` does.
+    let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    request.cancel = Some(cancel.clone());
+    let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+    let (replan_tx, mut replan_rx) = crate::inference::router::StreamingTokenTx::channel(64);
+    let sent = router_tx
+        .send(RouterCommand::Replan {
+            request,
+            result_tx,
+            token_tx: Some(replan_tx),
+            trace,
+        })
+        .await;
+    let set_failure = |e: &crate::error::SwarmError| {
+        if let Ok(mut slot) = failure.lock() {
+            *slot = Some(StreamFailure::from_error(e));
+        }
+    };
+    if sent.is_err() {
+        set_failure(&refused);
+        return;
+    }
+    let mut finished = false;
+    let mut forwarded_text = false;
+    loop {
+        tokio::select! {
+            biased;
+            _ = reader.closed() => {
+                cancel.store(true, std::sync::atomic::Ordering::Release);
+                return;
+            }
+            event = replan_rx.recv() => match event {
+                Some(event) => {
+                    finished |= event.finish_reason.is_some();
+                    forwarded_text |= !event.text.is_empty();
+                    if reader.send(event).await.is_err() {
+                        cancel.store(true, std::sync::atomic::Ordering::Release);
+                        return;
+                    }
+                }
+                None => break,
+            },
+        }
+    }
+    match result_rx.await {
+        Ok(Ok(out)) => {
+            if let Ok(mut slot) = usage.lock() {
+                *slot = Some((out.prompt_tokens, out.completion_tokens));
+            }
+            // A route that answered without a finish event: the reply is the
+            // result (`router_inference_stream`'s fallback) — sent only if no
+            // text went before it, so nothing is shown twice.
+            if !finished {
+                if !forwarded_text && !out.content.is_empty() {
+                    let _ = reader
+                        .send(crate::inference::router::StreamingTokenEvent {
+                            text: out.content,
+                            finish_reason: None,
+                            matched_stop_sequence: None,
+                        })
+                        .await;
+                }
+                let _ = reader
+                    .send(crate::inference::router::StreamingTokenEvent {
+                        text: String::new(),
+                        finish_reason: Some(out.finish_reason),
+                        matched_stop_sequence: None,
+                    })
+                    .await;
+            }
+        }
+        Ok(Err(later)) => set_failure(&crate::inference::router::report_after_a_replan(
+            refused, later, &model, None,
+        )),
+        Err(_) => set_failure(&crate::error::SwarmError::Internal(
+            "the inference pipeline stopped without reporting a result".into(),
+        )),
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn spawn_split_stream(
     state: &AppState,
@@ -284,8 +491,22 @@ pub fn spawn_split_stream(
     // Whether the owner asked (#337): only then may the worker's guesses
     // copy from the owner's earlier replies.
     requested_by: crate::types::RequestedBy,
+    // The caller's `swarm_route` instruction, for a re-plan after this node's
+    // memory refuses (`router_to_replan`) — `None` on the Anthropic surface,
+    // which has no such field.
+    route_override: Option<crate::inference::route_override::RoutePlanOverride>,
 ) -> Option<SplitStream> {
     let meta = get_split_model_meta(&state.shared_state, model_id)?;
+    let ask = FastPathAsk {
+        model_id: model_id.clone(),
+        messages: messages.to_vec(),
+        params: params.clone(),
+        tools: tools.map(<[_]>::to_vec),
+        template_vars: template_vars.cloned(),
+        route_override,
+        keep,
+        requested_by,
+    };
     let prompt = crate::inference::chat_template::build_prompt(
         messages,
         meta.chat_template.as_deref(),
@@ -316,15 +537,29 @@ pub fn spawn_split_stream(
     // (#392); `pool.generate` tells the stream's reader.
     let opened = crate::inference::PromptOpened::of(&prompt);
     let (token_tx, token_rx) = crate::inference::router::StreamingTokenTx::channel(64);
-    // Attach the caller's trace so TTFT is stamped on the first token that
-    // carries text. `StreamingTokenTx` exists precisely so no emit site has to
-    // remember this — but the sender still has to be TOLD which trace it
-    // belongs to, and this path never did, so every locally-streamed request
-    // reported no first-token time.
-    let token_tx = match trace.as_ref() {
-        Some(t) => token_tx.with_trace(t.clone()),
-        None => token_tx,
-    };
+    // The reader's sender with no trace, for a re-plan's tokens: the router's
+    // own sender stamps the trace, and a second stamp would double the text a
+    // continuation resumes from (`RequestTrace::note_streamed`).
+    let reader_tx = token_tx.clone();
+    // Reuse the caller's trace when it supplied one, rather than making a
+    // second object for the same request id. Both would register under `rid`,
+    // so the later one silently displaced the earlier and only one of them
+    // could ever be published — leaving progress reports landing on an object
+    // nothing would go on to record.
+    let served = trace.unwrap_or_else(|| {
+        std::sync::Arc::new(crate::inference::trace::RequestTrace::new(
+            rid,
+            model_id.0.clone(),
+            "chat",
+        ))
+    });
+    // Attach it so TTFT is stamped on the first token that carries text.
+    // `StreamingTokenTx` exists precisely so no emit site has to remember this
+    // — but the sender still has to be TOLD which trace it belongs to, and
+    // this path never did, so every locally-streamed request reported no
+    // first-token time. Always attached: whether a token reached the reader is
+    // what decides if a refusal may be re-planned.
+    let token_tx = token_tx.with_trace(served.clone());
     // Records why generation stopped when it produced nothing. Without this the
     // channel simply closes and the client sees an empty-but-successful stream,
     // so the dashboard had to *guess* a reason ("the model might still be
@@ -355,22 +590,12 @@ pub fn spawn_split_stream(
     //
     // Guarded by `TraceGuard` rather than removed at the end of the happy path,
     // because this task can also exit through the disconnect branch below.
-    // Reuse the caller's trace when it supplied one, rather than making a
-    // second object for the same request id. Both would register under `rid`,
-    // so the later one silently displaced the earlier and only one of them
-    // could ever be published — leaving progress reports landing on an object
-    // nothing would go on to record.
-    let served = trace.unwrap_or_else(|| {
-        std::sync::Arc::new(crate::inference::trace::RequestTrace::new(
-            rid,
-            model_id.0.clone(),
-            "chat",
-        ))
-    });
     // Here, inside the one function both streamed surfaces call, so neither
     // caller can forget it.
     mark_served_here(&state.shared_state, &served, layer_range);
-    let trace_guard = TraceGuard::register(&state.shared_state, rid, served);
+    let trace_guard = TraceGuard::register(&state.shared_state, rid, served.clone());
+    let router_tx = state.router_tx.clone();
+    let shared = state.shared_state.clone();
     tokio::spawn(async move {
         let _trace_guard = trace_guard;
         let generate = pool.generate(
@@ -388,13 +613,38 @@ pub fn spawn_split_stream(
             opened,
         );
         tokio::select! {
-            result = generate => {
-                if let Ok(ref out) = result {
+            result = generate => match result {
+                Ok(out) => {
                     if let Ok(mut slot) = usage_sink.lock() {
                         *slot = Some((out.prompt_tokens, out.completion_tokens));
                     }
                 }
-                if let Err(e) = result {
+                // This node's memory refused before any token, and another
+                // computer may take the request: the router plans it again.
+                Err(e) if router_to_replan(
+                    router_tx.as_ref(),
+                    &shared,
+                    &e,
+                    &ask,
+                    served.snapshot().ttft_ms.is_some(),
+                )
+                .is_some() =>
+                {
+                    if let Some(router_tx) = router_tx.as_ref() {
+                        stream_replan_after_local_refusal(
+                            router_tx,
+                            &shared,
+                            e,
+                            ask.request(rid, true),
+                            served.clone(),
+                            &reader_tx,
+                            &usage_sink,
+                            &failure_sink,
+                        )
+                        .await;
+                    }
+                }
+                Err(e) => {
                     // Streaming channel closes when this scope ends. Without the
                     // log the SSE stream silently truncates with no operator-
                     // visible diagnostic — workers crashing mid-stream looked
@@ -412,7 +662,7 @@ pub fn spawn_split_stream(
                         *slot = Some(StreamFailure::from_error(&e));
                     }
                 }
-            }
+            },
             // Nobody is reading any more. Selecting this branch DROPS the
             // `generate` future, which drops its armed `ResponseGuard`, which
             // tells the worker to stop — the whole point of the cancellation
@@ -527,9 +777,21 @@ pub async fn run_split_generate(
     keep: crate::types::KeepAsked,
     // Whether the owner asked (#337), as for `spawn_split_stream`.
     requested_by: crate::types::RequestedBy,
+    // The caller's `swarm_route` instruction, as for `spawn_split_stream`.
+    route_override: Option<crate::inference::route_override::RoutePlanOverride>,
 ) -> Result<crate::inference::router::InferenceOutput, ApiError> {
     let meta = get_split_model_meta(&state.shared_state, model_id)
         .ok_or(ApiError(crate::error::SwarmError::NoModelLoaded))?;
+    let ask = FastPathAsk {
+        model_id: model_id.clone(),
+        messages: messages.to_vec(),
+        params: params.clone(),
+        tools: tools.map(<[_]>::to_vec),
+        template_vars: template_vars.cloned(),
+        route_override,
+        keep,
+        requested_by,
+    };
 
     let prompt = chat_template::build_prompt(
         messages,
@@ -571,7 +833,7 @@ pub async fn run_split_generate(
 
     // This path renders its own prompt, so it says what that prompt opened (#392).
     let opened = crate::inference::PromptOpened::of(&prompt);
-    let mut output = state
+    let generated = state
         .shared_state
         .model_process_pool
         .generate(
@@ -588,8 +850,32 @@ pub async fn run_split_generate(
             None,
             opened,
         )
-        .await
-        .map_err(ApiError)?;
+        .await;
+    let mut output = match generated {
+        Ok(output) => output,
+        // Nothing is streamed here, so nothing has reached the reader.
+        Err(refused) => {
+            return match router_to_replan(
+                state.router_tx.as_ref(),
+                &state.shared_state,
+                &refused,
+                &ask,
+                false,
+            ) {
+                Some(router_tx) => {
+                    replan_after_local_refusal(
+                        router_tx,
+                        &state.shared_state,
+                        refused,
+                        ask.request(rid, false),
+                        trace.clone(),
+                    )
+                    .await
+                }
+                None => Err(ApiError(refused)),
+            };
+        }
+    };
 
     trace.mark_finished(
         crate::inference::trace::Outcome::Ok,
@@ -1097,6 +1383,7 @@ pub(super) async fn split_non_stream_response(
     template_vars: Option<crate::types::TemplateVars>,
     keep: crate::types::KeepAsked,
     requested_by: crate::types::RequestedBy,
+    route_override: Option<crate::inference::route_override::RoutePlanOverride>,
 ) -> Result<axum::response::Response, ApiError> {
     let reply_tools = crate::api::tool_parse::RequestTools::from_definitions(tools.as_deref());
     let output = run_split_generate(
@@ -1109,6 +1396,7 @@ pub(super) async fn split_non_stream_response(
         template_vars.as_ref(),
         keep,
         requested_by,
+        route_override,
     )
     .await?;
     let trace = output.trace.clone();
@@ -1157,6 +1445,7 @@ pub(super) async fn split_stream_response(
     include_usage: bool,
     keep: crate::types::KeepAsked,
     requested_by: crate::types::RequestedBy,
+    route_override: Option<crate::inference::route_override::RoutePlanOverride>,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
     let reply_tools = crate::api::tool_parse::RequestTools::from_definitions(tools.as_deref());
     // Captured before `state` is moved into the generation task. This is the
@@ -1213,6 +1502,7 @@ pub(super) async fn split_stream_response(
             template_vars.as_ref(),
             keep,
             requested_by,
+            route_override,
         ) {
             Some(pair) => pair,
             None => {
@@ -1870,6 +2160,7 @@ mod route_in_body_tests {
             None,
             crate::types::KeepAsked::Unasked,
             crate::types::RequestedBy::Owner,
+            None,
         );
         assert!(spawned.is_some(), "the model is held whole here");
         let route = trace.snapshot().route_summary();
@@ -1878,6 +2169,316 @@ mod route_in_body_tests {
         assert_eq!(route.segments, 1, "{route:?}");
         assert_eq!(route.peers, 0, "{route:?}");
         assert_eq!(route.nodes, vec![me], "{route:?}");
+    }
+
+    /// Register `model` as held whole here, as the scan does for a model whose
+    /// every part is on disk.
+    fn hold_whole_here(app: &crate::api::route_test_support::TestApp, model: &ModelId) {
+        app.state.shared_state.split_models.insert(
+            (model.clone(), 0, 22),
+            crate::inference::split::SplitModelEntry {
+                last_used: std::sync::atomic::AtomicU64::new(0),
+                estimated_vram_mb: 0,
+                is_complete: true,
+                eos_tokens: vec![],
+                eos_token_str: String::new(),
+                bos_token: String::new(),
+                cached_chat_template: None,
+                vocab: None,
+                layer_start: 0,
+                layer_end: 22,
+            },
+        );
+    }
+
+    /// A router that answers ONE `RouterCommand::Replan` as the real one does:
+    /// it CONTINUES the trace it is handed (a plan over two computers), streams
+    /// `reply` when given a sender, and returns the output with that trace's
+    /// snapshot. The test is handed the request and the trace it got.
+    fn fake_replan_router(
+        reply: &'static str,
+    ) -> (
+        tokio::sync::mpsc::Sender<RouterCommand>,
+        tokio::sync::oneshot::Receiver<(
+            InferenceRequest,
+            std::sync::Arc<crate::inference::trace::RequestTrace>,
+        )>,
+    ) {
+        let (router_tx, mut router_rx) = tokio::sync::mpsc::channel::<RouterCommand>(4);
+        let (seen_tx, seen_rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            let Some(RouterCommand::Replan {
+                request,
+                result_tx,
+                token_tx,
+                trace,
+            }) = router_rx.recv().await
+            else {
+                return;
+            };
+            let planned = two_computer_trace(request.id).snapshot().segments;
+            trace.mark_assembled(crate::inference::trace::Route::Distributed, planned, 0);
+            if let Some(token_tx) = token_tx {
+                let token_tx = token_tx.with_trace(trace.clone());
+                for (text, finish) in [(reply, None), ("", Some("stop".to_string()))] {
+                    let _ = token_tx
+                        .send(crate::inference::router::StreamingTokenEvent {
+                            text: text.to_string(),
+                            finish_reason: finish,
+                            matched_stop_sequence: None,
+                        })
+                        .await;
+                }
+            }
+            let _ = result_tx.send(Ok(crate::inference::router::InferenceOutput {
+                request_id: request.id,
+                content: reply.to_string(),
+                reasoning: None,
+                prompt_tokens: 3,
+                completion_tokens: 1,
+                finish_reason: "stop".into(),
+                session_id: None,
+                token_logprobs: Vec::new(),
+                matched_stop_sequence: None,
+                trace: Some(trace.snapshot()),
+            }));
+            let _ = seen_tx.send((request, trace));
+        });
+        (router_tx, seen_rx)
+    }
+
+    /// A node holding a model whole, refused by its own memory, with another
+    /// computer connected — the field report's shape (2026-11-03: a
+    /// 2,588-token prompt to a 14B on a card left with ~250 MB for caches,
+    /// refused in 0.2 s, `route=local`, five connected computers holding it).
+    fn refused_here_with_a_peer_to_ask(
+        reply: &'static str,
+    ) -> (
+        crate::api::route_test_support::TestApp,
+        tokio::sync::oneshot::Receiver<(
+            InferenceRequest,
+            std::sync::Arc<crate::inference::trace::RequestTrace>,
+        )>,
+    ) {
+        let mut app = test_app();
+        hold_whole_here(&app, &ModelId("m".into()));
+        let shared = &app.state.shared_state;
+        shared.shares_enough_to_use_the_swarm();
+        shared
+            .connected_node_ids
+            .insert(crate::types::NodeId([9u8; 32]));
+        *shared
+            .model_process_pool
+            .test_refuse_next_generate
+            .lock()
+            .unwrap() = Some(crate::error::SwarmError::LocalMemoryUnavailable(
+            "Not enough free memory for this conversation".into(),
+        ));
+        let (router_tx, seen) = fake_replan_router(reply);
+        app.state.router_tx = Some(router_tx);
+        (app, seen)
+    }
+
+    fn hi() -> Vec<ChatMessage> {
+        vec![serde_json::from_value(serde_json::json!({"role": "user", "content": "hi"})).unwrap()]
+    }
+
+    /// **A request the fast path's memory refused is planned again with the
+    /// other computers**, not answered with the refusal — and the router's
+    /// first plan starts from the refusal (`note_local_memory_refusal`), under
+    /// the fast path's own id, continuing its trace, so the reply names the
+    /// attempt here AND the computers that served it.
+    #[tokio::test]
+    async fn a_fast_path_memory_refusal_is_planned_again_with_the_other_computers() {
+        let (app, seen) = refused_here_with_a_peer_to_ask("from the other computers");
+        let over = crate::inference::route_override::RoutePlanOverride {
+            exclude_node_prefixes: vec!["abcd".into()],
+            ..Default::default()
+        };
+        let output = run_split_generate(
+            &app.state,
+            &ModelId("m".into()),
+            &hi(),
+            SamplingParams::default(),
+            "swarm-refused",
+            None,
+            None,
+            crate::types::KeepAsked::Unasked,
+            crate::types::RequestedBy::Owner,
+            Some(over),
+        )
+        .await
+        .unwrap_or_else(|e| panic!("refused, not planned again: {}", e.0));
+        assert_eq!(output.content, "from the other computers");
+
+        let (request, trace) = seen.await.expect("the router was asked");
+        let rid = crate::api::request_uuid("swarm-refused");
+        assert_eq!(request.id, rid, "planned under the fast path's own id");
+        assert!(
+            app.state.shared_state.local_memory_refused_for_request(rid),
+            "the first plan starts from this node's refusal"
+        );
+        assert!(
+            request
+                .route_override
+                .as_ref()
+                .is_some_and(|o| o.exclude_node_prefixes == ["abcd"]),
+            "the caller's route instruction goes with it"
+        );
+        assert_eq!(request.requested_by, crate::types::RequestedBy::Owner);
+        let route = output.trace.expect("a route").route_summary();
+        assert_eq!(route.route, "distributed", "{route:?}");
+        assert_eq!(
+            route.attempts, 2,
+            "the attempt here and the plan: {route:?}"
+        );
+        let me = trace_short_id(app.state.shared_state.identity.node_id());
+        assert!(route.all_nodes.contains(&me), "{route:?}");
+        assert_eq!(
+            trace.request_id, rid,
+            "the router continued the fast path's trace"
+        );
+    }
+
+    /// The streamed sibling, through the OpenAI surface's SSE: the other
+    /// computers' reply reaches the stream the fast path opened, its finish
+    /// chunk names the route that served it and the attempt here, and the
+    /// request is published ONCE although the router and the stream both
+    /// finish it.
+    #[tokio::test]
+    async fn a_streamed_fast_path_memory_refusal_is_planned_again_with_the_other_computers() {
+        let (app, seen) = refused_here_with_a_peer_to_ask("from the other computers");
+        let response = split_stream_response(
+            app.state.clone(),
+            "swarm-refused-stream".into(),
+            0,
+            "m".into(),
+            hi(),
+            SamplingParams::default(),
+            ModelId("m".into()),
+            None,
+            None,
+            false,
+            crate::types::KeepAsked::Unasked,
+            crate::types::RequestedBy::Owner,
+            None,
+        )
+        .await
+        .into_response();
+        let chunks: Vec<serde_json::Value> = sse_payloads(response)
+            .await
+            .into_iter()
+            .filter(|p| p != "[DONE]")
+            .map(|p| serde_json::from_str(&p).unwrap())
+            .collect();
+        let text: String = chunks
+            .iter()
+            .filter_map(|c| c["choices"][0]["delta"]["content"].as_str())
+            .collect();
+        assert_eq!(text, "from the other computers", "{chunks:?}");
+        assert!(
+            chunks.iter().all(|c| c.get("error").is_none()),
+            "no error: {chunks:?}"
+        );
+        let finish: Vec<_> = chunks
+            .iter()
+            .filter(|c| c["choices"][0]["finish_reason"].is_string())
+            .collect();
+        assert_eq!(finish.len(), 1, "{chunks:?}");
+        assert_eq!(finish[0]["choices"][0]["finish_reason"], "stop");
+        let route = &finish[0]["swarmllm"]["route"];
+        assert_eq!(route["route"], "distributed", "{chunks:?}");
+        assert_eq!(route["attempts"], 2, "{chunks:?}");
+
+        let (request, trace) = seen.await.expect("the router was asked");
+        assert!(request.stream);
+        // What the router does at its end; the stream already published.
+        app.state.shared_state.publish_request_trace(&trace);
+        let counted: u64 = app
+            .state
+            .shared_state
+            .metrics
+            .requests_by_route
+            .iter()
+            .map(|e| *e.value())
+            .sum();
+        assert_eq!(counted, 1, "one request, counted once");
+    }
+
+    /// Only THIS node's memory refusal, before anything reached the reader,
+    /// with a computer the request may reach connected, goes to the router —
+    /// anything else is answered as before.
+    #[tokio::test]
+    async fn only_a_memory_refusal_with_someone_to_ask_is_planned_again() {
+        let app = test_app();
+        let shared = &app.state.shared_state;
+        shared.shares_enough_to_use_the_swarm();
+        let (router_tx, _router_rx) = tokio::sync::mpsc::channel::<RouterCommand>(1);
+        let ask = |keep| FastPathAsk {
+            model_id: ModelId("m".into()),
+            messages: Vec::new(),
+            params: SamplingParams::default(),
+            tools: None,
+            template_vars: None,
+            route_override: None,
+            keep,
+            requested_by: crate::types::RequestedBy::Owner,
+        };
+        let unasked = crate::types::KeepAsked::Unasked;
+        let memory = crate::error::SwarmError::LocalMemoryUnavailable("full".into());
+        let replans = |err: &crate::error::SwarmError, keep, reached, router| {
+            router_to_replan(router, shared, err, &ask(keep), reached).is_some()
+        };
+        assert!(
+            !replans(&memory, unasked, false, Some(&router_tx)),
+            "nobody connected: the refusal is the answer"
+        );
+        shared
+            .connected_node_ids
+            .insert(crate::types::NodeId([9u8; 32]));
+        assert!(replans(&memory, unasked, false, Some(&router_tx)));
+        assert!(
+            !replans(&memory, unasked, true, Some(&router_tx)),
+            "a token reached the reader"
+        );
+        assert!(
+            !replans(
+                &crate::error::SwarmError::ServiceUnavailable("worker is dead".into()),
+                unasked,
+                false,
+                Some(&router_tx)
+            ),
+            "not a memory refusal"
+        );
+        assert!(
+            !replans(
+                &memory,
+                crate::types::KeepAsked::OnThisComputer,
+                false,
+                Some(&router_tx)
+            ),
+            "kept on this computer"
+        );
+        assert!(!replans(&memory, unasked, false, None), "no router");
+    }
+
+    /// **A request is counted once, whoever finishes it** — the router and
+    /// the stream a re-planned fast path began both publish its one trace.
+    #[tokio::test]
+    async fn a_request_is_published_once() {
+        let app = test_app();
+        let shared = &app.state.shared_state;
+        let trace = crate::inference::trace::RequestTrace::new(uuid::Uuid::new_v4(), "m", "chat");
+        trace.mark_finished(crate::inference::trace::Outcome::Ok, 1, 1);
+        shared.publish_request_trace(&trace);
+        shared.publish_request_trace(&trace);
+        let counted: u64 = shared
+            .metrics
+            .requests_by_route
+            .iter()
+            .map(|e| *e.value())
+            .sum();
+        assert_eq!(counted, 1);
     }
 
     /// The short id a route names a computer by.

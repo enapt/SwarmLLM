@@ -1273,6 +1273,7 @@ async fn an_embedding_model_is_refused_before_it_is_queued() {
         make_request_with_model(PriorityTier::Bronze, &model.0),
         tx,
         None,
+        None,
     );
     // Answered at once, or not at all: a queued request answers only once it
     // runs, which this test never lets it do.
@@ -1293,6 +1294,7 @@ async fn an_embedding_model_is_refused_before_it_is_queued() {
     router.handle_submit(
         make_request_with_model(PriorityTier::Bronze, &model.0),
         tx,
+        None,
         None,
     );
     assert_eq!(router.queue.len(), 1, "a chat model is queued as before");

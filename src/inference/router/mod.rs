@@ -297,7 +297,7 @@ fn refusal_in_the_holders_words(err: &SwarmError) -> String {
 /// the re-plan's own `SwarmShortOfMemory` included, which weighs the refusing
 /// holder at what fit that one prompt. A re-plan that failed some OTHER way
 /// (a peer went silent) is a different failure and is reported as itself.
-fn report_after_a_replan(
+pub(crate) fn report_after_a_replan(
     first: SwarmError,
     later: SwarmError,
     model_id: &str,
@@ -679,11 +679,15 @@ impl InferenceRouter {
                 cmd = self.command_rx.recv() => {
                     match cmd {
                         Some(RouterCommand::Submit { request, result_tx }) => {
-                            self.handle_submit(request, result_tx, None);
+                            self.handle_submit(request, result_tx, None, None);
                             self.drain_queue().await;
                         }
                         Some(RouterCommand::StreamSubmit { request, result_tx, token_tx }) => {
-                            self.handle_submit(request, result_tx, Some(token_tx));
+                            self.handle_submit(request, result_tx, Some(token_tx), None);
+                            self.drain_queue().await;
+                        }
+                        Some(RouterCommand::Replan { request, result_tx, token_tx, trace }) => {
+                            self.handle_submit(request, result_tx, token_tx, Some(trace));
                             self.drain_queue().await;
                         }
                         Some(RouterCommand::NetworkMessage(msg)) => {
@@ -799,6 +803,9 @@ impl InferenceRouter {
         request: InferenceRequest,
         result_tx: InferenceResultTx,
         token_tx: Option<StreamingTokenTx>,
+        // The trace of an attempt this node already made outside the router
+        // (`RouterCommand::Replan`) — continued, never replaced.
+        continues: Option<std::sync::Arc<crate::inference::trace::RequestTrace>>,
     ) {
         // Calculate priority tier from credit balance and network percentile.
         // Per spec: "Credit errors: degrade priority tier, never block"
@@ -997,11 +1004,16 @@ impl InferenceRouter {
         // Trace starts at admission, so `queue_ms` measures real user-visible
         // wait rather than time since dispatch. Attaching it to the token
         // channel is what stamps TTFT — every emit path funnels through there.
-        let trace = std::sync::Arc::new(crate::inference::trace::RequestTrace::new(
-            adjusted_request.id,
-            adjusted_request.model_id.to_string(),
-            "chat",
-        ));
+        //
+        // A request handed over after an attempt here keeps that attempt's
+        // trace: its route then names both, and it is published once.
+        let trace = continues.unwrap_or_else(|| {
+            std::sync::Arc::new(crate::inference::trace::RequestTrace::new(
+                adjusted_request.id,
+                adjusted_request.model_id.to_string(),
+                "chat",
+            ))
+        });
         let token_tx = token_tx.map(|tx| tx.with_trace(trace.clone()));
 
         self.queue.push(QueuedRequest {
@@ -1197,14 +1209,22 @@ impl InferenceRouter {
         loop {
             match self.command_rx.try_recv() {
                 Ok(RouterCommand::Submit { request, result_tx }) => {
-                    self.handle_submit(request, result_tx, None);
+                    self.handle_submit(request, result_tx, None, None);
                 }
                 Ok(RouterCommand::StreamSubmit {
                     request,
                     result_tx,
                     token_tx,
                 }) => {
-                    self.handle_submit(request, result_tx, Some(token_tx));
+                    self.handle_submit(request, result_tx, Some(token_tx), None);
+                }
+                Ok(RouterCommand::Replan {
+                    request,
+                    result_tx,
+                    token_tx,
+                    trace,
+                }) => {
+                    self.handle_submit(request, result_tx, token_tx, Some(trace));
                 }
                 Ok(RouterCommand::NetworkMessage(msg)) => {
                     self.handle_network_message(msg).await;

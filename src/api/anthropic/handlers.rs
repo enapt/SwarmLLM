@@ -559,6 +559,8 @@ pub(super) async fn anthropic_split_non_stream(
         template_vars.as_ref(),
         keep,
         requested_by,
+        // This surface has no `swarm_route` field.
+        None,
     )
     .await?;
 
@@ -636,6 +638,8 @@ pub(super) async fn anthropic_split_stream(
             template_vars.as_ref(),
             keep,
             requested_by,
+            // This surface has no `swarm_route` field.
+            None,
         ) {
             Some(pair) => pair,
             None => {

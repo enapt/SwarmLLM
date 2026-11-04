@@ -16,6 +16,13 @@ off at once; an old announcement played back by another computer cannot get your
 modified program can still claim parts it does not hold — this stops the released program from
 taking without giving.
 
+**A chat this computer has no memory left for goes to the other computers instead of failing.**
+A model held whole here used to answer "not enough free memory for this conversation" even when
+other connected computers held the same model — a long prompt to a 14B on a 12 GB card did, in
+0.2 s. It is now planned again with them before any of the reply is written, and the reply's route
+names both the attempt here and the computers that answered. With nobody else to ask, the message
+is unchanged.
+
 **A full computer that frees no room for a part the swarm is short of says why.** Its log names
 every rule that kept a part it holds, and how many parts each kept, at most every 10 minutes; the
 hourly "storage is over the budget" warning carries the same list instead of blaming the number of
