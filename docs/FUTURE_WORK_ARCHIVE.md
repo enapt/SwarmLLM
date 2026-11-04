@@ -16844,6 +16844,121 @@ the top track (`docs/plans/large_model_splits.md`).
 Everything else is ranked in its own entry. **P3** is narrow or cosmetic, **P4** is process,
 maintenance or an idea with no user waiting on it.
 
+The PRIORITIES section as it stood from the 2026-10-31 re-rank (v0.3.265) to the 2026-11-04
+one (v0.3.271), word for word.
+
+Re-ranked 2026-10-31 after v0.3.265 (released 2026-10-31). Since the 2026-10-29 ranking
+(v0.3.261), v0.3.262 shipped the split stream's chunk width (#374/#375, ~7% off a 70B reply), the
+small drafter on the processor (#373), `response_format` held on a model run whole (#336), a saved
+prompt making room before its copy (#367), spare copies for parts of large models (#371) and a head
+passed over only for its own refusal (#372); v0.3.264 a whole-model refusal held to N−1 layers
+(#378), the boomerang's batched tail (#369), swarm checks on the contribution width (#379), the far
+end told the look-ahead (#382), the drafter's room priced on the first range (#376) and spare
+restarts, measured even on the 70B and left off (#381); v0.3.265 the 2026-10-31 field report
+(#384-#387: a processor pin that ends, a card pool that gives idle memory back under the driver's
+margin, refusals that name each computer's room). #369 is listed on its own (P1) and item 7 is
+rewritten. What each release carried is in § "Closed" and `CHANGELOG.md`; earlier rankings moved
+word for word to the archive, § "PRIORITIES re-rank log". Only OPEN work is listed here.
+`docs/plans/` holds the multi-step designs; the entries point at them.
+**2026-11-02:** v0.3.268 (0.3.267 folded in, never published) shipped gpt-oss (#390 item 2, on the
+processor), thinking models answering cleanly and switchable (#392, #391), Qwen's XML tool calls (#395), no
+re-download of held parts (#393), #394, keeping what people run (#389), #369's dead wait, #388's report (off),
+#155's fix and #91 (2k); the ranking below is otherwise unchanged. New: #396 (P3).
+Later the same day v0.3.269 shipped gpt-oss on the card (#390 step 7) and #398 (closed); new: #397 (P4),
+#399 (P3, taken with #396: both are the decode width).
+**2026-10-20:** #318 goes first among P2 by the user's direction: running models too large for
+any one member at a usable speed is what the swarm is for, so split speed for large models is
+the top track (`docs/plans/large_model_splits.md`).
+
+**P0 — wrong answers, silently**
+1. *(none open since #156 closed on 2026-10-03: a mixed copy is refused at load, a part that is
+   not the upload's bytes is deleted and re-fetched, and every part entering from a peer is
+   byte-checked — `docs/invariants/network.md` § "One upload per model id".)*
+2. **#217** — WATCH: a node kept parts the checked holders disagreed with until it restarted
+   (v0.3.224); the mechanism that kept wrong HuggingFace replacements closed in v0.3.225 and it
+   has not recurred since 2026-10-04. Nothing to build until it does.
+
+**P1 — silent, or broken for a whole class of users**
+3. **#1** — every Mac runs on the processor; no GPU backend is compiled for Apple Silicon (needs a
+   Mac to verify on).
+4. **#220** — WATCH: a worker's card faulted once (illegal memory access, 2026-10-04) and the driver
+   took 14 minutes to reset; the kernel is still unknown. Every planned run is done (memcheck clean
+   over ~27 min on two boots, FECS shown with no SwarmLLM code at 48 h, the drafter-in-one-process
+   change weighed and declined); nothing to run until the illegal access recurs.
+5. **#250** — a model held whole here, which the card holds only part of, can be routed through
+   far peers instead of answering locally. Its causes closed in v0.3.236 and v0.3.239; left: the
+   prompt priced on the processor prior for a card/processor split, and a far hop priced at
+   `net:0` (with #3). Passive: the next evidence is a field `predicted_terms` line.
+6. **#388** — the flow's guard takes a far computer's own delay for a queue on the link (the
+   slowest reply of two 12-arm runs on 2026-11-01). The far now reports its own time and the guard
+   can read it apart (`SWARMLLM_FLOW_SERVED_TIME=1`, off: it lost on a processor-only rig, for
+   that rig's reasons). **Next**: the real-link A/B — v0.3.268 carries bit 36 since 2026-11-02; the
+   default follows it. (#369 CLOSED 2026-11-01.)
+7. **#318** — a model no single member can hold, at a usable speed. **Llama-3.3-70B on two
+   machines — this one (8 GB card + processor) and an RTX 3060 in Australia (~420 ms) — reads
+   2.37-2.61 tok/s on new questions (v0.3.264, 2026-10-31 04Z) and 1.81-2.22 (v0.3.265, 12Z, the
+   same setup), first token ~5 s warm** (v0.3.256 on four machines: 1.29-1.47 and 9-10 s). The same
+   setup moves ~25% with the hour, so a 70B figure is compared only inside one interleaved sitting.
+   The stream checks the 3B drafter's guesses on this machine's processor (the card is full of the
+   70B) and keeps 78-88% of them; trees and the flow need every segment and the drafter on a card,
+   so the 70B never flows. Not levers for it: a larger or smaller guesser (the Llama 1B, 3B and 8B
+   match its first choice 81%, 85%, 86%, `examples/drafter_ranks.py`) and spare restarts at the far
+   end (#381: 2.46 against 2.49 tok/s, left off); the stream's guesses a chunk was one (3 or 5 a
+   chunk, #374/#375, ~7% off a reply). **What is left is where its layers sit: the far side runs ~44
+   of its 64 layers on a processor (~70 ms a row, `faster_than_local.md` § 8).** **Next**: a third
+   CARD — a swarm peer's RTX 3080 Ti in the US (12 GB, joined 2026-10-31) could take ~20-25 of them
+   if it holds those parts (#371 gives spare copies back for a large model too few computers hold);
+   then tokens a round past the drafter (`large_model_splits.md` step 4). Its planning residuals: a
+   head holding it whole declining to lead (#372), the drafter's room on a near-full card (#376).
+   On a 14B: split evenly between this machine's card and the 3060 the flow runs 29.2-29.9 tok/s on
+   code, twice this machine's whole-14B speed (13.6-15.4), and 9.2-10.0 on prose; three cards (+ an
+   RTX 4050 in Europe, ~230 ms) 12.4-14.3 and 4.4-4.9 against 15.7-20.9 and 6.1-7.3 for two — a
+   third machine pays only where it holds what two cannot, which is the 70B's case. The track's
+   history (near chains #192, the far chain #346, trees #134, the stream, tensor-core MMQ #325,
+   requester guesses) is in the #318 entry and § "Closed".
+8. **#115** — the rest of Gemma 4: its image reader and its drafters, refused by name today,
+   never loaded wrong. (Gemma 3 reads pictures as llama.cpp does since 2026-10-19; Gemma 4's
+   E2B/E4B run since 2026-10-17 and fit a 4 GB / 6 GB card whole since #296.)
+9. **#91** — an idle node's upload (the complaint that uninstalls a P2P app): 5.5 KB/s on the .241
+   fleet (6.7 on .240, 8.8 on .239), measured 2026-10-17. Manifests now arrive about once an hour
+   (0.83 a minute before (2)), and a restart no longer re-gossips them ((2c), v0.3.242). The part
+   that is not gossip is 2.5 KB/s on 10-18 (4.1 out), and our own direct messages are only 0.19 of it
+   ((2d), `direct_by_kind`): the rest is libp2p's protocols. `by_protocol` ((2e)) named the largest:
+   Kademlia answering other nodes' lookups, ~2.1 KB/s; (2f) republishes provider records every 4 h
+   instead of 20 min (v0.3.243). Field re-read 10-18: upload 2.7 KB/s, but the Kademlia answers
+   fell to 0.90 KB/s, 2.3x, not the 12x the republication alone predicted. `kad_inbound` ((2g),
+   v0.3.244) read on the field 10-19: upload 2.4 KB/s, Kademlia answers 0.51 KB/s, every one a
+   `find_node` — peers' routing-table refreshes. (2h) refreshes every 10 min instead of 5 (released in
+   v0.3.245); next, re-read once the fleet runs it, then the answers' size.
+10. **#3**, **#180** — the routing cost model mis-prices a split by regime, which keeps partial
+    ranges off. Fit on three peers 2026-10-18: a short reply's `max_tokens` now caps the passes
+    (16-token replies 0.49 → 0.97 of their price), a long one is priced at its model's mean
+    reply length (160-token replies were 2.5x their price), and a chain its head leads is priced
+    by its own hops (network term 57.9 s → 3.6 s, same peers and passes), all in v0.3.243; two
+    peers whose workers already chain are planned that chain (#3 (e)) and a led chain's peers are
+    priced by their own published decode time (#3 (f)), and a peer handed a prompt is priced for
+    its cached opening on the next turn (#3 (c)), all fixed 10-18, and a split is priced for the
+    rounds it takes, a guessed token not crossing alone (#3 (d), 0.49 → 0.77 of its price on the
+    drafter rig), 10-19, all in v0.3.244; next, a chain driven from here (#3 (a2)). Never tune the
+    constant.
+11. **#10**, **#171** — conversation prefixes across computers (no digests gossiped, caches end at
+    the 10-minute expiry), and a split's prompt pieces chained between two peers.
+12. **#138**, **#129** — a model that does not fit the card (MoE and a split's prompt stages
+    shipped in v0.3.235-v0.3.237; the entries hold what is left), and a near-fit model sent far.
+13. **#228** — Qwen 3.5 guesses ahead on one computer (processor and card) and through a split's n-gram loop (bit 33) since 2026-10-25; the drafter's paths and MTP still stay off — a checkpoint replayed across steps, #228 (5).
+14. **#336** — tool calls, and `response_format` on a split or a peer's whole-model hand-off, are
+    checked only after they are written, so an agent driving a small model meets malformed calls.
+    `response_format` is held on a model run whole since v0.3.262 (llguidance); next, a feature bit
+    and far-end masking for a split, then tool calls as a lazy grammar (`faster_than_local.md` § 7.1).
+15. **#30** — the plaintext-prompt trust bar sits at the score an unknown peer starts on: a policy
+    decision, with research, when picked up.
+16. **#326** — on a card newer than a release's machine code (Hopper, Blackwell: RTX 50-series),
+    the first reply waits ~2 min while the driver compiles flash attention's PTX (MMQ's ~8 s a
+    weight type), then it is cached. Correct since the PTX went in (before: wrong output).
+
+Everything else is ranked in its own entry. **P3** is narrow or cosmetic, **P4** is process,
+maintenance or an idea with no user waiting on it.
+
 ### #334 — closed 2026-10-27 (the entry as it stood when closed, word for word)
 
 #### #334 — Four rules are computed in several places, and the copies already differ

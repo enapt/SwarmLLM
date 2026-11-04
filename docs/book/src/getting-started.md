@@ -42,6 +42,14 @@ day just staying in touch with the swarm, and more while it shares model
 parts, so it is not a good fit for a capped connection. It doesn't start with
 your computer.
 
+**The swarm helps the computers that help it.** Other computers run your chats
+only while yours shares at least two parts of a model — leave auto-manage on
+and that happens by itself — and only while it stays up to date: a computer two
+or more releases behind is disconnected until it updates. A model your
+computer holds whole always runs on it, sharing or not. The peer list on the Dashboard shows,
+for every computer, how many chats it ran for yours and how many yours ran for
+it; nothing is charged or paid by those counts.
+
 ## Chapters
 
 - [Installation](./getting-started/installation.md) — Download and run SwarmLLM on your computer

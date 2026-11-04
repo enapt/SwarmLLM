@@ -33,25 +33,21 @@ residual).
 
 ## ▶ PRIORITIES — read this first
 
-Re-ranked 2026-10-31 after v0.3.265 (released 2026-10-31). Since the 2026-10-29 ranking
-(v0.3.261), v0.3.262 shipped the split stream's chunk width (#374/#375, ~7% off a 70B reply), the
-small drafter on the processor (#373), `response_format` held on a model run whole (#336), a saved
-prompt making room before its copy (#367), spare copies for parts of large models (#371) and a head
-passed over only for its own refusal (#372); v0.3.264 a whole-model refusal held to N−1 layers
-(#378), the boomerang's batched tail (#369), swarm checks on the contribution width (#379), the far
-end told the look-ahead (#382), the drafter's room priced on the first range (#376) and spare
-restarts, measured even on the 70B and left off (#381); v0.3.265 the 2026-10-31 field report
-(#384-#387: a processor pin that ends, a card pool that gives idle memory back under the driver's
-margin, refusals that name each computer's room). #369 is listed on its own (P1) and item 7 is
-rewritten. What each release carried is in § "Closed" and `CHANGELOG.md`; earlier rankings moved
-word for word to the archive, § "PRIORITIES re-rank log". Only OPEN work is listed here.
-`docs/plans/` holds the multi-step designs; the entries point at them.
-**2026-11-02:** v0.3.268 (0.3.267 folded in, never published) shipped gpt-oss (#390 item 2, on the
-processor), thinking models answering cleanly and switchable (#392, #391), Qwen's XML tool calls (#395), no
-re-download of held parts (#393), #394, keeping what people run (#389), #369's dead wait, #388's report (off),
-#155's fix and #91 (2k); the ranking below is otherwise unchanged. New: #396 (P3).
-Later the same day v0.3.269 shipped gpt-oss on the card (#390 step 7) and #398 (closed); new: #397 (P4),
-#399 (P3, taken with #396: both are the decode width).
+Re-ranked 2026-11-04 after v0.3.271 (released 2026-11-04). Since the 2026-10-31 ranking
+(v0.3.265): v0.3.268 (0.3.267 folded in, never published) shipped gpt-oss on the processor (#390
+item 2), thinking models answering cleanly and switchable (#392, #391), Qwen's XML tool calls
+(#395), no re-download of held parts (#393), #394, keeping what people run (#389), #369's dead
+wait, #388's report (off), #155's fix and #91 (2k); v0.3.269 gpt-oss on the card (#390 step 7) and
+#398; v0.3.270 a parts list over 512 sent in pieces, an idle model off the card whoever pinned it,
+and a popular model held by one computer asking full ones for room; v0.3.271 the swarm running
+requests only for a computer that shares (two parts or more, fewer than two published releases
+behind — one further behind is disconnected), a whole card placement split before its load where
+its cache would not fit (#322's spawn half), the Hugging Face search refusing files the swarm
+cannot host (#404's search half) and each computer's give and take in the peer list. New since:
+#401 (P2, item 8), #396 and #399 (P3, taken together: both are the decode width), #400, #402,
+#403, #404 (P3), #397 (P4). What each release carried is in § "Closed" and `CHANGELOG.md`; earlier
+rankings moved word for word to the archive, § "PRIORITIES re-rank log". Only OPEN work is listed
+here. `docs/plans/` holds the multi-step designs; the entries point at them.
 **2026-10-20:** #318 goes first among P2 by the user's direction: running models too large for
 any one member at a usable speed is what the swarm is for, so split speed for large models is
 the top track (`docs/plans/large_model_splits.md`).
@@ -102,10 +98,16 @@ the top track (`docs/plans/large_model_splits.md`).
    third machine pays only where it holds what two cannot, which is the 70B's case. The track's
    history (near chains #192, the far chain #346, trees #134, the stream, tensor-core MMQ #325,
    requester guesses) is in the #318 entry and § "Closed".
-8. **#115** — the rest of Gemma 4: its image reader and its drafters, refused by name today,
+8. **#401** — a full computer asks every minute for room for a part only one computer holds and
+   frees nothing, so a model new to the swarm can stay on one computer. Read on v0.3.271: every
+   part the full Proxmox node holds is kept, 77 because too few other computers hold them to give
+   one back, 8 for prompt privacy. **Next**: check that holder count against the node's own, then
+   an end state for an ask that finds nothing, and whether a copy at 3 holders gives way to a part
+   at 1.
+9. **#115** — the rest of Gemma 4: its image reader and its drafters, refused by name today,
    never loaded wrong. (Gemma 3 reads pictures as llama.cpp does since 2026-10-19; Gemma 4's
    E2B/E4B run since 2026-10-17 and fit a 4 GB / 6 GB card whole since #296.)
-9. **#91** — an idle node's upload (the complaint that uninstalls a P2P app): 5.5 KB/s on the .241
+10. **#91** — an idle node's upload (the complaint that uninstalls a P2P app): 5.5 KB/s on the .241
    fleet (6.7 on .240, 8.8 on .239), measured 2026-10-17. Manifests now arrive about once an hour
    (0.83 a minute before (2)), and a restart no longer re-gossips them ((2c), v0.3.242). The part
    that is not gossip is 2.5 KB/s on 10-18 (4.1 out), and our own direct messages are only 0.19 of it
@@ -116,7 +118,7 @@ the top track (`docs/plans/large_model_splits.md`).
    v0.3.244) read on the field 10-19: upload 2.4 KB/s, Kademlia answers 0.51 KB/s, every one a
    `find_node` — peers' routing-table refreshes. (2h) refreshes every 10 min instead of 5 (released in
    v0.3.245); next, re-read once the fleet runs it, then the answers' size.
-10. **#3**, **#180** — the routing cost model mis-prices a split by regime, which keeps partial
+11. **#3**, **#180** — the routing cost model mis-prices a split by regime, which keeps partial
     ranges off. Fit on three peers 2026-10-18: a short reply's `max_tokens` now caps the passes
     (16-token replies 0.49 → 0.97 of their price), a long one is priced at its model's mean
     reply length (160-token replies were 2.5x their price), and a chain its head leads is priced
@@ -127,18 +129,18 @@ the top track (`docs/plans/large_model_splits.md`).
     rounds it takes, a guessed token not crossing alone (#3 (d), 0.49 → 0.77 of its price on the
     drafter rig), 10-19, all in v0.3.244; next, a chain driven from here (#3 (a2)). Never tune the
     constant.
-11. **#10**, **#171** — conversation prefixes across computers (no digests gossiped, caches end at
+12. **#10**, **#171** — conversation prefixes across computers (no digests gossiped, caches end at
     the 10-minute expiry), and a split's prompt pieces chained between two peers.
-12. **#138**, **#129** — a model that does not fit the card (MoE and a split's prompt stages
+13. **#138**, **#129** — a model that does not fit the card (MoE and a split's prompt stages
     shipped in v0.3.235-v0.3.237; the entries hold what is left), and a near-fit model sent far.
-13. **#228** — Qwen 3.5 guesses ahead on one computer (processor and card) and through a split's n-gram loop (bit 33) since 2026-10-25; the drafter's paths and MTP still stay off — a checkpoint replayed across steps, #228 (5).
-14. **#336** — tool calls, and `response_format` on a split or a peer's whole-model hand-off, are
+14. **#228** — Qwen 3.5 guesses ahead on one computer (processor and card) and through a split's n-gram loop (bit 33) since 2026-10-25; the drafter's paths and MTP still stay off — a checkpoint replayed across steps, #228 (5).
+15. **#336** — tool calls, and `response_format` on a split or a peer's whole-model hand-off, are
     checked only after they are written, so an agent driving a small model meets malformed calls.
     `response_format` is held on a model run whole since v0.3.262 (llguidance); next, a feature bit
     and far-end masking for a split, then tool calls as a lazy grammar (`faster_than_local.md` § 7.1).
-15. **#30** — the plaintext-prompt trust bar sits at the score an unknown peer starts on: a policy
+16. **#30** — the plaintext-prompt trust bar sits at the score an unknown peer starts on: a policy
     decision, with research, when picked up.
-16. **#326** — on a card newer than a release's machine code (Hopper, Blackwell: RTX 50-series),
+17. **#326** — on a card newer than a release's machine code (Hopper, Blackwell: RTX 50-series),
     the first reply waits ~2 min while the driver compiles flash attention's PTX (MMQ's ~8 s a
     weight type), then it is cached. Correct since the PTX went in (before: wrong output).
 
@@ -1161,7 +1163,7 @@ far — the ring does not read it yet); the Russian node is also refused USE of 
 (`daemon::state::swarm_use`), which does not change what the ring hands it.
 
 #### #401 — A full computer asks for room for a scarce part every minute and prune gives none back
-`P2` · placement · **OPEN** — 2026-11-02, still true 2026-11-04 · history: this entry; v0.3.270's `RoomFor::Scarce`; the `kept=` report on main (`d3040a3c`)
+`P2` · placement · **OPEN** — 2026-11-02, still true 2026-11-04 · history: this entry; v0.3.270's `RoomFor::Scarce`; the `kept=` report (`d3040a3c`, released in v0.3.271)
 
 The Proxmox node (`96842635`, 59 GB, 7.4 GB free) logs `a part the swarm is short of does not
 fit what storage is left — prune may give back spare copies to make room` about once a minute
@@ -1171,9 +1173,18 @@ four to six computers also hold (llama-3.2-1b, xlam-3b, qwen2.5-14b, xlam-8b on 
 room note v0.3.270 added for a popular-list model held by one computer reaches the full
 computers that should make room for it and changes nothing there. **Not established**: which
 rule keeps those copies — suspects `kept_by_rank`, a loaded model, a 24 h shed target.
-**Next**: once a release carries `d3040a3c`, read `DIAG: a part asks for room and prune gave
-none back` (`kept=`) on that node and fix the rule it names; the ask logging every minute
-for days is itself a sign the loop has no end state.
+**Read on v0.3.271 (2026-11-04 11:12Z, the first report after the update)**: held 43,902 of a
+44,000 MB budget (`auto_manage.max_storage_mb`), asking 322 MB for a `gpt-oss-20b-q4-k-m` part,
+`candidates=0`, `kept=not more copies than the target, not given back for room: too few other
+holders to give one back (77); prompt privacy needs this end (8)`. So the rule is the donor
+check — a copy is given back for room only with ≥ 4 other live holders — and on 11-04 no part
+there passes it. **Not established**: whether those 77 really have ≤ 3 other live holders (the
+copies seen at 4-6 holders on 11-02, a smaller swarm since the 0.3.268 node was cut off) or the
+count the check reads misses some. **Next**: compare the box's holder counts for the kept parts
+(`/api/admin/models` there) with the check's; if the count is right, what is left is the end
+state — an ask that found `candidates=0` waits until holdings or holder counts change instead of
+asking every minute — and whether a copy at 3 holders may give way to a part at 1 (TinyLFU admits
+on frequency; here both sides are scarce).
 
 ### Network and transport
 
@@ -4434,7 +4445,7 @@ Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
 
-**Closed 2026-11-04, ships in the next release** (#322's spawn half)
+**Closed 2026-11-04, released in v0.3.271** (#322's spawn half)
 - #322 — **A model that would fill its graphics card is placed partly on the processor before it
   loads** (field report 2026-11-03, v0.3.270: Qwen2.5-14B admitted whole on a 12 GB card's room
   kept ~251 MB, ~1,300 tokens, for conversations, and refused every longer prompt). The spawn of a
@@ -4455,7 +4466,7 @@ grep `^| N |`).
   `docs/invariants/memory.md` § "A split's processor share is charged to the machine", its
   paragraph "A WHOLE card placement is weighed by the same reading".
 
-**Closed 2026-11-02, ships in the next release** (#398)
+**Closed 2026-11-02, released in v0.3.269** (#398)
 - #398 — **A model whose file carries a next-token-prediction block runs across computers.**
   Ornith-1.5-9B's header has 33 blocks with `nextn_predict_layers` 1; the loader runs 32, but the
   part layout cuts `blk.32` as a layer into the LAST part beside the output head, so that part's
@@ -4474,7 +4485,7 @@ grep `^| N |`).
   `a_chain_that_ends_the_model_reads_the_part_past_its_last_layer` (red without the fix), null
   control `a_model_with_no_part_past_its_end_is_read_as_before`. Gotcha #1025.
 
-**Closed 2026-11-01, ships in the next release** (#395)
+**Closed 2026-11-01, released in v0.3.268** (#395)
 - #395 — **A Qwen model's tool call is a tool call, not text.** Qwen 3.5 and the families after
   it, and Qwen3-Coder, answer a tool request in an XML form their templates ask for
   (`<tool_call><function=NAME><parameter=KEY>…`); the reader knew only JSON bodies, so every such
@@ -4485,7 +4496,7 @@ grep `^| N |`).
   path can read a reply knowing that tools were asked for but not what they take. Evidence:
   `docs/invariants/api-surfaces.md` § "A reply is read against the tools the prompt carried".
 
-**Closed 2026-11-01, ships in the next release** (#394)
+**Closed 2026-11-01, released in v0.3.268** (#394)
 - #394 — **A file this engine cannot read is the file's fault, wherever a probe meets it.**
   Found working #390: unsloth's `Qwen3-Coder-Next-Q4_K_M.gguf` keeps two tensors a layer as
   MXFP4 (its header, read 2026-11-01), which candle cannot read, though its name says Q4_K_M.
@@ -4505,7 +4516,7 @@ grep `^| N |`).
   model `200` on both. Tests `a_file_in_an_unreadable_quantization_is_the_files_fault`,
   `a_file_this_build_cannot_hold_is_passed_over_for_the_next_upload`, each red with its fix off.
 
-**Closed 2026-11-01, ships in the next release** (#393)
+**Closed 2026-11-01, released in v0.3.268** (#393)
 - #393 — **A download of a model this computer holds in part no longer fetches the parts it has.**
   Found pinning the rigs' models for #389 (b): `/api/admin/hf/download-shards` — the dashboard's
   Get, `swarmllm get-model`, the reference models — never looked at the disk, so every part named
@@ -4519,7 +4530,7 @@ grep `^| N |`).
   copy fetched 314 MB and replaced the file. Test `a_part_already_here_is_not_fetched_again`, red
   with the skip off and with the dispute rule off.
 
-**Closed 2026-11-01, ships in the next release** (#392)
+**Closed 2026-11-01, released in v0.3.268** (#392)
 - #392 — **A model whose template starts its reply inside the scratchpad answers with the
   answer.** Qwen3.5-4B's upload ends its prompt `<think>\n`, so the reply began inside the block
   with no opener and both splitters, which recognised only a block the reply opens, returned the
@@ -4535,7 +4546,7 @@ grep `^| N |`).
   returned "Thinking Process: …" as the content of all six — the null control. The entry as it
   stood: archive § "#392".
 
-**Closed 2026-11-01, ships in the next release** (#391)
+**Closed 2026-11-01, released in v0.3.268** (#391)
 - #391 — **A caller can turn a model's thinking on or off.** OpenAI `chat_template_kwargs` (each a
   template variable) and `reasoning_effort` (vLLM's rule: `"none"` → `enable_thinking = false`, any
   other effort → true, an explicit `enable_thinking` winning), the Responses API's `reasoning.effort`
@@ -4552,7 +4563,7 @@ grep `^| N |`).
   no variables; MCP's chat tool has no field; an Anthropic request with no `thinking` gets the
   template's default. The entry as it stood: archive § "#391".
 
-**Closed 2026-11-01, ships in the next release** (#389)
+**Closed 2026-11-01, released in v0.3.268** (#389)
 - #389 — **The swarm keeps the models people run and gives back the ones nobody does.** (a) Only
   work served FOR PEERS is gossiped as demand (`models.requests_served_for_peers`); the owner's own
   requests stay on this computer. (b) Once a day the HuggingFace watcher reads what people run —
@@ -4569,7 +4580,7 @@ grep `^| N |`).
   an API key). Families people run that do not load yet: #390. The entry as it stood: archive
   § "#389".
 
-**Closed 2026-11-01, ships in the next release** (#369)
+**Closed 2026-11-01, released in v0.3.268** (#369)
 - #369 — **"Start and finish on this computer" caught up with the default split.** v0.3.261 made
   it flow, ~1.1-1.2x behind the default shape at the same split; v0.3.264's batched tail (+6% on
   prose) and 2026-11-01's dead wait (+17% on prose, `dsd_flow::dead_wait_on`) closed the gap.
@@ -4578,7 +4589,7 @@ grep `^| N |`).
   shape, code 18.52 against 17.20. Left: the flow's guard (#388). The entry as it stood: archive
   § "#369".
 
-**Closed 2026-10-31, ships in the next release** (#384, #385, #386, #387 — one field report, "shared vs
+**Closed 2026-10-31, released in v0.3.265** (#384, #385, #386, #387 — one field report, "shared vs
 alone, sustained", v0.3.262)
 - #384 — **A model whose graphics card ran out of memory stayed on the processor until it was
   unloaded by hand.** A 14B alone on a 12 GB card ran out after ~5 min of one back-to-back chat,
@@ -4626,7 +4637,7 @@ alone, sustained", v0.3.262)
   `Shortfall::TakenSinceLoad`). What held that card is not known from here (the reporter's log
   did not travel). Test `a_device_short_since_the_load_is_not_a_prompt_too_long`.
 
-**Closed 2026-10-30, ships in the next release** (#382, #379, #378)
+**Closed 2026-10-30, released in v0.3.264** (#382, #379, #378)
 - #382 — **A split's far end ran checks the reply had already thrown away after a wrong look-ahead.**
   A streamed check carries its guesses but not the last one, the look-ahead the next chunk starts
   from. Where the far end kept every guess but chose another token there, the coordinator
@@ -4675,7 +4686,7 @@ alone, sustained", v0.3.262)
   refusal in 1.7 s. Evidence:
   `docs/invariants/scheduling.md` § "A re-plan is warranted by a changed fact".
 
-**Closed 2026-10-30, ships in the next release** (#375)
+**Closed 2026-10-30, released in v0.3.262** (#375)
 - #375 — **The stream's choice of width was made from a price it could not measure.** #374 priced a
   chunk's two extra guesses from whole checks sent alone; on the 70B split their spread (~190 ms)
   buried the two rows' ~82 ms, and the fitted price read 208, 3.7, 55 and 0 ms a row after four
@@ -4696,7 +4707,7 @@ alone, sustained", v0.3.262)
   `docs/invariants/scheduling.md` § "A chunk is as wide as it pays", the #375 paragraphs; per-chunk
   analysis `examples/stream_chunk_noise.py`.
 
-**Closed 2026-10-30, ships in the next release** (#374)
+**Closed 2026-10-30, released in v0.3.262** (#374)
 - #374 — **The continuous stream chooses each chunk's width instead of always sending 3 guesses.**
   On the 70B split (this node [0,16) + the Australian RTX 3060 [16,80), route pinned, 3B drafter,
   six arms alternating, one binary) 5 guesses a chunk decoded three 96-token replies 5% faster than
@@ -4713,7 +4724,7 @@ alone, sustained", v0.3.262)
   `docs/invariants/scheduling.md` § "A chunk is as wide as it pays". The pre-draft gained nothing at
   5 either and stays out.
 
-**Closed 2026-10-30, ships in the next release** (#373)
+**Closed 2026-10-30, released in v0.3.262** (#373)
 - #373 — **A drafter that guesses on the processor is the small one, not the largest that fits.**
   The drafter is chosen by size — the largest held within a fraction of its target (a quarter, or
   half for a small one where a card is in play) — a rule measured with the drafter on the CARD, in
@@ -4732,7 +4743,7 @@ alone, sustained", v0.3.262)
   the window was full (Speculative Speculative Decoding, arXiv 2603.03251) fired with the 3B but
   gained ~1% at 3 guesses a chunk (136.3 against 137.7 s, two arms each) — not shipped.
 
-**Closed 2026-10-29, ships in the next release** (#368, #370, #371, #312, #3 (g), #3 (h) network half, #3 (i))
+**Closed 2026-10-29, released in v0.3.262** (#368, #370, #371, #312, #3 (g), #3 (h) network half, #3 (i))
 - #3 (i) — **A machine's back-to-back segments are priced as the one run its card loads.** The
   search cuts a node's range wherever another holder's range begins or ends — at every split point
   under prompt privacy, on by default for a model a node holds whole — and priced each piece as if
@@ -4838,7 +4849,7 @@ alone, sustained", v0.3.262)
   folder on C:, `models` a junction to D:): v0.3.259 reported C:'s 541,181 MB free, the fix D:'s
   19,162. macOS not run here. Evidence: `docs/invariants/memory.md` § "…and the disk the MODELS are on".
 
-**Closed 2026-10-28, ships in the next release** (#365)
+**Closed 2026-10-28, released in v0.3.260** (#365)
 - #365 — **A card/processor split puts on the card what its load can hold** (v0.3.259's #364
   left 3 of a 14B's 48 layers off this 8 GB card: decode 0.92x against v0.3.258). #364 filled
   `hybrid::split_room_bytes` on the pool's ROOM, which stands in for the free memory the load
