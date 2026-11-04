@@ -3,6 +3,10 @@ use crate::types::{ModelId, NodeId, ShardId};
 use super::manager::{hash_ring_position, AutoShardManager, RoomFor, ShardCandidate};
 use super::vram::estimate_model_vram_mb;
 
+/// Positions each machine takes on the download ring
+/// ([`AutoShardManager::download_ring`]).
+const VIRTUAL_SLOTS: u32 = 10;
+
 /// How much more a shard is worth when it EXTENDS a run this node already
 /// holds, and when it CLOSES A HOLE in one.
 ///
@@ -90,6 +94,44 @@ impl AutoShardManager {
         }
     }
 
+    /// The consistent hash ring that splits further copies between machines:
+    /// [`VIRTUAL_SLOTS`] positions for this node and each connected machine
+    /// that fetches parts for the swarm ([`AutoShardManager::fetches_parts`]),
+    /// sorted for binary search. A machine with automatic downloads off — an
+    /// anchor, a computer whose owner turned them off — took its share of the
+    /// ring and every other machine skipped those parts, so a one- or
+    /// two-part model the ring handed it stayed at one holder (#400).
+    ///
+    /// SEC: built from `connected_node_ids` rather than `peer_registry`. Per
+    /// gotcha #86 (scheduler liveness oracle), `peer_registry` is
+    /// intentionally preserved across mid-pipeline disconnects for reconnect
+    /// attempts; counting those entries here gives stale shard ownership,
+    /// possibly causing this node to skip a shard it should claim while the
+    /// "other holder" is offline.
+    pub(super) fn download_ring(
+        &self,
+        local_node_id: &NodeId,
+        pool_size: usize,
+    ) -> Vec<(u32, NodeId)> {
+        let mut ring = Vec::with_capacity(pool_size * VIRTUAL_SLOTS as usize);
+        for vn in 0..VIRTUAL_SLOTS {
+            ring.push((
+                hash_ring_position(&local_node_id.0, vn),
+                local_node_id.clone(),
+            ));
+        }
+        for peer in self.shared_state.connected_node_ids.iter() {
+            if peer.key() == local_node_id || !self.fetches_parts(peer.key()) {
+                continue;
+            }
+            for vn in 0..VIRTUAL_SLOTS {
+                ring.push((hash_ring_position(&peer.key().0, vn), peer.key().clone()));
+            }
+        }
+        ring.sort_by_key(|(pos, _)| *pos);
+        ring
+    }
+
     /// Gather all candidate shards we don't already hold, scored by value.
     ///
     /// Scoring factors:
@@ -121,33 +163,7 @@ impl AutoShardManager {
         let shard_pins = super::manager::read_shard_pins(&self.shared_state);
 
         // Build consistent hash ring ONCE for the entire evaluation cycle.
-        // Each node gets VIRTUAL_SLOTS positions. Ring is sorted for binary search.
-        //
-        // SEC: build the ring from `connected_node_ids` rather than
-        // `peer_registry`. Per gotcha #86 (scheduler liveness oracle),
-        // `peer_registry` is intentionally preserved across mid-pipeline
-        // disconnects for reconnect attempts; counting those entries here
-        // gives stale shard ownership, possibly causing this node to skip
-        // a shard it should claim while the "other holder" is offline.
-        const VIRTUAL_SLOTS: u32 = 10;
-        let hash_ring: Vec<(u32, NodeId)> = {
-            let mut ring = Vec::with_capacity(pool_size * VIRTUAL_SLOTS as usize);
-            for vn in 0..VIRTUAL_SLOTS {
-                let pos = hash_ring_position(&local_node_id.0, vn);
-                ring.push((pos, local_node_id.clone()));
-            }
-            for peer in self.shared_state.connected_node_ids.iter() {
-                if peer.key() == local_node_id {
-                    continue; // local already added above
-                }
-                for vn in 0..VIRTUAL_SLOTS {
-                    let pos = hash_ring_position(&peer.key().0, vn);
-                    ring.push((pos, peer.key().clone()));
-                }
-            }
-            ring.sort_by_key(|(pos, _)| *pos);
-            ring
-        };
+        let hash_ring = self.download_ring(local_node_id, pool_size);
 
         for manifest in registry.models() {
             // Never acquire a backup-copy model (`<model>.FULLBACKUP`). Even if a

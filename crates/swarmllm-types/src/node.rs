@@ -635,13 +635,18 @@ pub struct NodeCapability {
 
     /// Does this node fetch parts for the swarm on its own (auto-manage on)?
     ///
-    /// For DISPLAY only: a peer list shows "Auto-manage off" so a computer
-    /// that shares only what its owner downloaded by hand — or nothing — can
-    /// be told from one still fetching its first parts. Never a routing or
-    /// admission input: whether a computer may use the swarm is judged on the
-    /// parts it HOLDS (`hosted_shards`), which a setting cannot fake for a
-    /// released build (`daemon::state::swarm_use`). `None` = an older build,
-    /// which says nothing (`#[serde(default)]`, the additive rule).
+    /// A peer list shows "Auto-manage off" so a computer that shares only
+    /// what its owner downloaded by hand — or nothing — can be told from one
+    /// still fetching its first parts. And a computer that says `false` is
+    /// handed no part to FETCH (2026-11-04, #400: no download-ring positions,
+    /// no carrier's lease, no chain segment it lacks —
+    /// `auto_manage::coverage::fetches_parts`); saying so falsely only takes
+    /// it out of that share. Never a routing or admission input: whether a
+    /// computer may use the swarm is judged on the parts it HOLDS
+    /// (`hosted_shards`), which a setting cannot fake for a released build
+    /// (`daemon::state::swarm_use`). `None` = an older build, which says
+    /// nothing (`#[serde(default)]`, the additive rule) and is handed parts
+    /// as before.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auto_manage: Option<bool>,
 

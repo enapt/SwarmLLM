@@ -869,9 +869,9 @@ impl AutoShardManager {
             let held_layers = layers_marked(&held);
             let has_layers = layers_marked(&has);
             let fetching_now = fetching.iter().any(|f| f.contains(&node));
-            let disk_bytes = self
-                .advertised(&node)
-                .map_or(0, |(_, mb)| mb.saturating_mul(1024 * 1024));
+            // What it may be handed to fetch: none where it does not fetch
+            // parts (#400) — it still serves the segment it holds.
+            let disk_bytes = self.room_to_fetch_bytes(&node);
             let devices = self
                 .advertised_devices(&node, manifest.num_layers, card_curve, layer_work)
                 .unwrap_or_default();
@@ -1333,7 +1333,7 @@ impl AutoShardManager {
         // chain is assumed.
         let largest_ceiling_mb = in_scope
             .iter()
-            .map(|node| self.advertised(node).and_then(|(ceiling, _)| ceiling))
+            .map(|node| self.advertised_ceiling_mb(node))
             .collect::<Option<Vec<u64>>>()
             .and_then(|ceilings| ceilings.into_iter().max());
         let registry = &self.shared_state.model_registry;

@@ -1146,25 +1146,21 @@ disconnects — or have the newcomer's catch-up carry the holdings point to poin
 are. Either way a capability is a peer's claim, so it may add a holder for planning and never
 remove one. Measure the newcomer's first-plan delay before and after.
 
-#### #400 — The download ring counts machines that never fetch, so a part assigned to one is fetched by nobody
-`P3` · placement · **OPEN** — 2026-11-02 · history: this entry; gotcha #1027; `docs/invariants/memory.md`, the paragraph "A part of a model people run, held by one computer, is scarce too" under the `would_shed_copy` heading
+#### #400 — A full computer still takes its places on the download ring, so a part assigned to it is fetched by nobody
+`P3` · placement · **PARTIAL** — 2026-11-02, narrowed 2026-11-04 · history: this entry; gotcha #1027; `docs/invariants/memory.md` § "A computer that does not fetch is handed no part to fetch"
 
 `gather_candidates` gives each part short of its target to `replicas_needed` machines on a hash
-ring built from EVERY connected node (`scoring.rs`, `VIRTUAL_SLOTS` 10 each). A machine that never
-fetches — automatic downloads off (this laptop, by choice), an anchor with no storage (`bfbfeebc`,
-0 parts), a full one prune can free nothing on — still takes its share of the ring, and every other
-machine skips those parts ("not assigned on consistent hash ring", `debug!`). A model one machine
-holds part of escapes it (`already_hosting_model` lets that machine fill the rest), so a many-part
-model reaches a fetcher through any one part; a ONE- or two-part model the ring hands to a
-non-fetcher stays at one holder. **Not established**: how often this happens here — on 2026-11-02 3
-of the 9 connected machines fetched nothing (this one, the anchor, a 0.3.268 node in Russia).
-**Next**: count, from one node's view, the parts under target whose ring owner holds nothing new
-over a day. **Direction**: a machine says whether it takes parts (a `NodeCapability` field,
-`#[serde(default)]`, or the free storage it would accept — `disk_available_mb` is the filesystem's,
-not the budget's) and the ring is built from those only, an older node counted as before.
-**2026-11-04**: `NodeCapability::auto_manage` now carries the first half (v0.3.271, display only so
-far — the ring does not read it yet); the Russian node is also refused USE of the swarm now
-(`daemon::state::swarm_use`), which does not change what the ring hands it.
+ring (`scoring::download_ring`, `VIRTUAL_SLOTS` 10 each), and every other machine skips those parts.
+**Done 2026-11-04**: a computer whose capability says it does not fetch (`auto_manage: false` —
+downloads off, an anchor) takes no place on the ring and is planned no fetch as a carrier or a
+chain segment (`coverage::fetches_parts`, `room_to_fetch_bytes`); an older build is counted as
+before. **Left**: a FULL machine prune can free nothing on still takes its places, and a one- or
+two-part model the ring hands it stays at one holder (a many-part model escapes through
+`already_hosting_model`). It cannot say so yet — `disk_available_mb` is the filesystem's, not the
+storage budget's. **Direction**: the capability carries the room its budget would take (a new
+`#[serde(default)]` field), `fetches_parts` / `room_to_fetch_bytes` read it, and a full machine
+leaves the ring until it has room. **Not established**: how often it bites — count, from one
+node's view, the parts under target whose ring owner holds nothing new over a day.
 
 ### Network and transport
 

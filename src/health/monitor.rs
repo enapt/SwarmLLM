@@ -1481,8 +1481,9 @@ impl HealthMonitor {
             // starting again, the dispatcher resuming, the connection no
             // longer metered.
             can_serve_inference: outage.is_none() && !metered_hold,
-            // Shown in peer lists, never judged on (`NodeCapability::auto_manage`):
-            // the live switch, which `--anchor` holds off.
+            // Shown in peer lists, and a peer hands this node no part to fetch
+            // while it is off (`NodeCapability::auto_manage`, #400): the live
+            // switch, which `--anchor` holds off.
             auto_manage: Some(
                 self.shared_state
                     .models

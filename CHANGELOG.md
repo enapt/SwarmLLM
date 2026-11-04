@@ -36,6 +36,14 @@ holds (two copies of each, rather than three and one); a copy with two holders i
 for it. The line saying a part wants room is logged once when that part changes, then every 10
 minutes, instead of every minute (#401).
 
+**A computer with automatic downloads turned off is no longer given parts to fetch.** When the
+swarm shares out who fetches the next copy of a part, it counted every connected computer —
+including ones that never download anything on their own, such as anchors and computers whose
+owner turned automatic downloads off. A part given to one of those was fetched by nobody, so a
+small model could stay on a single computer. Such computers now say so, and are left out of the
+share-out and of the plans that ask a computer to fetch a stretch of a large model; older versions
+are counted as before (#400).
+
 ## [0.3.271-alpha] — 2026-11-04
 
 **A computer that only takes stops being served, the peer list shows what each computer does for

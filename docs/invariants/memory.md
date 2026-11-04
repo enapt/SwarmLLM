@@ -1378,10 +1378,10 @@ other reasons. The #389 give-back of a model nobody runs, which would free that 
 quiet days after a 14-day watch, so the swarm could not follow a release for a month. Now
 `is_scarce(asked_for, run_outside, …)`: a part of a model the reading names, held by ONE computer,
 asks for room as a scarce one does — the split clause (under target where only a split runs it)
-stays for a model somebody asked for. Nothing else changes: the floor (`wanted_holders + 2`, a copy
-three holders richer) and the ring (one node per part while a model is held nowhere here) are the
-scarce rule's, so popularity alone takes a model to a second holder and no further, from copies
-with four or more. That is TinyLFU's admission rule (Einziger, Friedman & Manes 2017,
+stays for a model somebody asked for. Nothing else changes: the floor (`wanted_holders + 1` since
+#401 — a copy two holders richer; `+ 2` when this was written) and the ring (one node per part while
+a model is held nowhere here) are the scarce rule's, so popularity alone takes a model to a second
+holder and no further, from copies with three or more. That is TinyLFU's admission rule (Einziger, Friedman & Manes 2017,
 arXiv:1512.00727; Caffeine's W-TinyLFU): a full cache admits a newcomer only when it is worth more
 than the victim it evicts, a tie going to the incumbent. A stale reading (`None`, past
 `MOST_SNAPSHOT_AGE_SECS`) gives no reason, as everywhere popularity is read. Holes are unchanged —
@@ -1389,6 +1389,30 @@ a part NO computer holds asks for room only for a model somebody asked for: popu
 swarm makes a second copy sturdier, it does not make anybody wait. Test:
 `holes_first::a_part_of_a_model_people_run_held_by_one_computer_asks_for_room` (controls: no
 reading, a reading naming another model, two holders).
+
+**A computer that does not fetch is handed no part to fetch (2026-11-04, #400).** The download ring
+(`scoring::download_ring`) gave every connected computer ten places, and a part short of its target
+went to the `replicas_needed` machines its positions named — every other machine skipped it ("not
+assigned on consistent hash ring", `debug!`). A machine that never fetches took its places all the
+same: automatic downloads off (this laptop, by choice), an anchor (`--anchor` holds them off;
+`bfbfeebc` held 0 parts), so a one- or two-part model the ring handed one stayed at one holder (a
+many-part model escapes: `already_hosting_model` lets whoever holds one part fill the rest). On
+2026-11-02 two of the nine connected machines were such (why the third that fetched nothing, a
+0.3.268 node, did not was never read). The same mistake had two more doors: carrying's carrier (`carrier_for`) and a
+chain's segment (`near_chain`'s `disk_bytes`) are handed to a machine by the free disk it advertises,
+so a computer with room and downloads off could hold a carrier's lease for `CARRIER_PATIENCE`
+(20 min) or a chain's place, fetching nothing. Since v0.3.271 a capability says whether its computer
+fetches (`NodeCapability::auto_manage`, display only until now), and **`coverage::fetches_parts`** is
+the one reading: the ring leaves out a machine saying `false`, and **`room_to_fetch_bytes`** — the
+only disk reading either planner has (`advertised` now takes a closure, and the ceiling has its own
+`advertised_ceiling_mb`) — is 0 for one, so it is planned only what it HOLDS. An older build says
+nothing and is counted as before; a false `false` only takes a machine out of its own share (the
+others fetch it), a false `true` is what every machine was. What is left: a FULL machine prune can
+free nothing on still takes its places (it cannot say so yet — `disk_available_mb` is the
+filesystem's, not the budget's). Tests:
+`coverage::tests::a_computer_that_does_not_fetch_takes_no_place_on_the_download_ring`,
+`coverage::tests::a_computer_that_does_not_fetch_is_never_handed_a_part_to_fetch` (control: the same
+machine saying nothing is the carrier, `a_model_its_holders_cannot_carry_gets_a_carrier_that_can`).
 
 **Prune says which rule kept each copy (2026-11-02).** After v0.3.270 the Proxmox box (43.9 of
 44 GB) noted room every minute for Ornith 1.5 35B's part 9 (one holder, `Scarce`, floor 3), held

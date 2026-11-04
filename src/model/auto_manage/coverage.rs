@@ -102,21 +102,60 @@ impl AutoShardManager {
         curve
     }
 
-    /// The capability `node` advertises — this node's own last broadcast for
-    /// itself, so every node judges every machine from the same figures.
-    fn advertised(&self, node: &NodeId) -> Option<(Option<u64>, u64)> {
+    /// What `read` takes from the capability `node` advertises — this node's
+    /// own last broadcast for itself, so every node judges every machine from
+    /// the same figures. `None`: no capability heard from it yet.
+    fn advertised<R>(
+        &self,
+        node: &NodeId,
+        read: impl FnOnce(&crate::types::NodeCapability) -> R,
+    ) -> Option<R> {
         if node == self.shared_state.identity.node_id() {
             return self
                 .shared_state
                 .local_capability
                 .load_full()
-                .map(|c| (c.model_memory_ceiling_mb, c.disk_available_mb));
+                .map(|c| read(&c));
         }
-        self.shared_state.peer_registry.get(node).and_then(|p| {
-            p.capability
-                .as_ref()
-                .map(|c| (c.model_memory_ceiling_mb, c.disk_available_mb))
-        })
+        self.shared_state
+            .peer_registry
+            .get(node)
+            .and_then(|p| p.capability.as_ref().map(read))
+    }
+
+    /// The memory `node` advertises it could ever give one model, MB.
+    fn advertised_ceiling_mb(&self, node: &NodeId) -> Option<u64> {
+        self.advertised(node, |c| c.model_memory_ceiling_mb)
+            .flatten()
+    }
+
+    /// Does `node` fetch parts for the swarm on its own — may a part be handed
+    /// to it to FETCH? What its capability says (`NodeCapability::auto_manage`):
+    /// a computer with automatic downloads off — an anchor, one whose owner
+    /// turned them off — fetches nothing, and a part handed to it was fetched
+    /// by nobody (#400). An older build, or one not heard from yet, says
+    /// nothing and is counted as fetching, as every computer was before. A
+    /// computer that says so falsely can only take itself out (others fetch
+    /// its share) or stay in, as before. The one answer, asked by both ways a
+    /// part is handed to a machine: the download ring
+    /// (`scoring::gather_candidates`) and the room it may fetch into
+    /// ([`Self::room_to_fetch_bytes`] — carrying's carrier, a chain's segment).
+    pub(super) fn fetches_parts(&self, node: &NodeId) -> bool {
+        self.advertised(node, |c| c.auto_manage != Some(false))
+            .unwrap_or(true)
+    }
+
+    /// The bytes of parts `node` may be handed to FETCH — a carrier's plan, a
+    /// chain's segment: the free disk it advertises, nothing where it does not
+    /// fetch parts ([`Self::fetches_parts`]; planned a fetch, such a machine
+    /// held a carrier's lease for [`CARRIER_PATIENCE`] or a chain's segment
+    /// open, fetching nothing) and nothing where no capability was heard.
+    fn room_to_fetch_bytes(&self, node: &NodeId) -> u64 {
+        if !self.fetches_parts(node) {
+            return 0;
+        }
+        self.advertised(node, |c| c.disk_available_mb.saturating_mul(1024 * 1024))
+            .unwrap_or(0)
     }
 
     /// How many of `manifest`'s layers `node` could ever hold. `None`: cannot
@@ -127,7 +166,7 @@ impl AutoShardManager {
         manifest: &ModelManifest,
         curve: (u64, u64),
     ) -> Option<u32> {
-        let ceiling_mb = self.advertised(node)?.0?;
+        let ceiling_mb = self.advertised_ceiling_mb(node)?;
         crate::inference::process_pool::layers_that_fit(ceiling_mb, curve.0, curve.1)
             .map(|layers| layers.min(manifest.num_layers))
     }
@@ -356,10 +395,7 @@ impl AutoShardManager {
             .filter(|node| {
                 let plan = self.parts_to_carry(manifest, node, curve, &holdings, shortfall);
                 let bytes: u64 = plan.iter().map(|(_, size)| size).sum();
-                !plan.is_empty()
-                    && self
-                        .advertised(node)
-                        .is_some_and(|(_, disk_mb)| disk_mb.saturating_mul(1024 * 1024) > bytes)
+                !plan.is_empty() && self.room_to_fetch_bytes(node) > bytes
             })
             .collect();
         ranked.sort_by_key(|node| std::cmp::Reverse(rendezvous(&manifest.id, node)));
@@ -848,6 +884,53 @@ mod tests {
 
         state.credits.private_mode.store(true, Relaxed);
         assert!(!manager.needs_carrier(&manifest));
+        assert_eq!(manager.carrier_for(&manifest), None);
+    }
+
+    /// Set what `node`'s capability says of its automatic downloads.
+    fn says_it_fetches(state: &Arc<SharedState>, node: &NodeId, fetches: Option<bool>) {
+        let mut peer = state.peer_registry.get_mut(node).expect("a peer");
+        peer.capability.as_mut().expect("a capability").auto_manage = fetches;
+    }
+
+    /// #400: a computer that says it does not fetch parts takes no place on
+    /// the download ring — every place it took was a part every other
+    /// machine skipped — while one that says it does, and an older build
+    /// that says nothing, keep theirs.
+    #[test]
+    fn a_computer_that_does_not_fetch_takes_no_place_on_the_download_ring() {
+        let (state, manager, _mid, small) = the_reported_shape(0);
+        let off = peer(&state, 3, None);
+        let on = peer(&state, 4, None);
+        says_it_fetches(&state, &off, Some(false));
+        says_it_fetches(&state, &on, Some(true));
+        let local = state.identity.node_id().clone();
+        let ring = manager.download_ring(&local, 4);
+        let places = |n: &NodeId| ring.iter().filter(|(_, m)| m == n).count();
+        assert_eq!(places(&off), 0, "a computer with downloads off");
+        assert_eq!(
+            (places(&local), places(&small), places(&on)),
+            (10, 10, 10),
+            "this node, an older build and one fetching keep theirs"
+        );
+        assert!(ring.windows(2).all(|w| w[0].0 <= w[1].0), "sorted");
+    }
+
+    /// #400: nor is it chosen to carry a model, nor handed room to fetch a
+    /// chain's segment into, whatever disk it advertises — chosen, it held
+    /// the carrier's lease for 20 minutes fetching nothing. The control is
+    /// `a_model_its_holders_cannot_carry_gets_a_carrier_that_can`: the same
+    /// machine, saying nothing, is the carrier.
+    #[test]
+    fn a_computer_that_does_not_fetch_is_never_handed_a_part_to_fetch() {
+        let (state, manager, mid, _small) = the_reported_shape(0);
+        let manifest = state.model_registry.get_manifest(&mid).unwrap();
+        let big = peer(&state, 3, Some(ceiling_for(32)));
+        assert_eq!(manager.room_to_fetch_bytes(&big), 100_000 * MIB);
+        says_it_fetches(&state, &big, Some(false));
+        assert!(!manager.fetches_parts(&big));
+        assert_eq!(manager.room_to_fetch_bytes(&big), 0);
+        assert!(manager.needs_carrier(&manifest));
         assert_eq!(manager.carrier_for(&manifest), None);
     }
 }
