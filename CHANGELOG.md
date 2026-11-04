@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [0.3.272-alpha] — 2026-11-05
+
+**Models stored as IQ4_NL or IQ4_XS now run, your own chats with a model whose experts stay in
+memory are faster, and a computer that is cut off or shares nothing can no longer get its chats run
+on yours through a relay.**
+
 **A computer that is cut off, or shares nothing, can no longer get its chats run on yours by going
 through a third computer.** Until now a computer reaching yours only through another one (a relay)
 was let in before yours had heard what it shares — so one disconnected for running a release two
