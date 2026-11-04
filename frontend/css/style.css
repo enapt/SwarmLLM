@@ -1466,8 +1466,10 @@ a:hover { color: var(--accent-hover); }
 .network-status-lan { border-left-color: rgba(56, 139, 253, 0.75); }
 .network-status-lan .netstatus-dot { background: #388bfd; }
 
-.network-status-solo { border-left-color: rgba(210, 153, 34, 0.75); }
-.network-status-solo .netstatus-dot { background: #d29922; }
+.network-status-solo,
+.network-status-viewonly { border-left-color: rgba(210, 153, 34, 0.75); }
+.network-status-solo .netstatus-dot,
+.network-status-viewonly .netstatus-dot { background: #d29922; }
 
 .network-status-offline,
 .network-status-unreachable { border-left-color: rgba(190, 50, 50, 0.75); }

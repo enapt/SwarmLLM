@@ -90,6 +90,15 @@ pub struct UpdateInfo {
     /// one asset being replayed onto another.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub asset_name: Option<String>,
+    /// The release's signature checked out against this build's key when the
+    /// check found it (the sidecar and its `.minisig` are small, so no binary
+    /// is fetched for it). Read by `SharedState::newest_release_known`: a tag
+    /// alone is GitHub's word, and the swarm-use gate refuses computers by
+    /// how far behind it they are — an unsigned or mistyped tag must not cut
+    /// the swarm off (security review, 2026-11-04). `false` from an older
+    /// build's saved record, until the next check.
+    #[serde(default)]
+    pub signature_verified: bool,
     /// Whether the update binary has been downloaded and is ready to apply.
     #[serde(default)]
     pub downloaded: bool,
@@ -822,7 +831,7 @@ impl UpdateChecker {
         }
 
         let blocker = self.self_update_blocker().await;
-        let info = UpdateInfo {
+        let mut info = UpdateInfo {
             latest_version: latest_tag,
             current_version: current.to_string(),
             download_url,
@@ -832,6 +841,7 @@ impl UpdateChecker {
             sidecar_body,
             signature_minisig,
             asset_name: Some(asset_name.clone()),
+            signature_verified: false,
             downloaded: false,
             // One probe, three fields: whether it can, why not, and where. A
             // second call to `can_self_update` here would create and delete
@@ -842,6 +852,9 @@ impl UpdateChecker {
                 .as_ref()
                 .map(|b| b.install_dir.display().to_string()),
         };
+        // Checked here, once per check, by the one authenticity answer the
+        // install asks too — the trusted comment names this version and asset.
+        info.signature_verified = self.verify_release_authenticity(&info).is_ok();
 
         Ok(Some(info))
     }
@@ -2549,6 +2562,7 @@ mod tests {
                 "untrusted comment: x\nAAAA\ntrusted comment: y\nBBBB\n".into(),
             ),
             asset_name: Some("swarmllm-linux-x86_64".into()),
+            signature_verified: false,
             downloaded: false,
             self_update_supported: true,
             self_update_blocked: None,
@@ -2583,6 +2597,7 @@ mod tests {
             sidecar_body: None,
             signature_minisig: None,
             asset_name: None,
+            signature_verified: false,
             downloaded: false,
             self_update_supported,
             self_update_blocked: None,
@@ -2645,6 +2660,7 @@ mod tests {
             sidecar_body: None,
             signature_minisig: None,
             asset_name: None,
+            signature_verified: false,
             downloaded: true,
             self_update_supported: true,
             self_update_blocked: None,
@@ -2697,6 +2713,7 @@ mod staged_reuse_tests {
             sidecar_body: Some(sig::STAGED_SIDECAR.to_string()),
             signature_minisig: Some(sig::STAGED_SIGNATURE.to_string()),
             asset_name: Some(sig::STAGED_ASSET.to_string()),
+            signature_verified: false,
             downloaded: false,
             self_update_supported: true,
             self_update_blocked: None,

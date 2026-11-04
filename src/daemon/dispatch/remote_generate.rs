@@ -32,7 +32,24 @@ pub(crate) const REMOTE_GENERATE_NOT_HOSTED: &str = "model not hosted on target"
 /// told "this computer's copy is mixed up" about a computer that was fine
 /// (`split_rig.sh mixed`, 2026-10-03). Translated here rather than recognised
 /// there, so a coordinator still on an older release reacts correctly too.
+///
+/// And a second: this node's own swarm-use refusal (`swarm_use` — it shares too
+/// little, or runs too far behind, for other computers to run ITS work) says
+/// "this computer" and names the fix for its owner. Sent raw, the requester
+/// read it as a 500 from this node, blamed it, and showed its own owner advice
+/// about another machine (security review, 2026-11-04). It goes as a plain
+/// "cannot serve", which bars this node from the request with no penalty.
 fn worker_failure_for_the_coordinator(e: &crate::error::SwarmError) -> String {
+    if matches!(
+        e,
+        crate::error::SwarmError::TooFewPartsToUseTheSwarm { .. }
+            | crate::error::SwarmError::TooFarBehindToUseTheSwarm { .. }
+    ) {
+        return crate::error::SwarmError::ServiceUnavailable(
+            "this machine cannot reach the other computers this model needs right now".into(),
+        )
+        .to_string();
+    }
     let text = e.to_string();
     let mixed = matches!(e, crate::error::SwarmError::MixedModelCopy(_))
         || matches!(
@@ -893,6 +910,31 @@ mod worker_failure_tests {
         );
         let ctx = SwarmError::Validation("prompt is 9000 tokens, this node serves 8192".into());
         assert_eq!(worker_failure_for_the_coordinator(&ctx), ctx.to_string());
+    }
+
+    /// A head's own swarm-use refusal is about the HEAD: the requester is told
+    /// only that it cannot serve, in the words it bars a peer for with no
+    /// penalty — never the head's advice to its own owner.
+    #[test]
+    fn a_heads_own_swarm_use_refusal_reaches_the_requester_as_cannot_serve() {
+        for e in [
+            SwarmError::TooFewPartsToUseTheSwarm {
+                model_id: "m".into(),
+                parts_held: 0,
+            },
+            SwarmError::TooFarBehindToUseTheSwarm {
+                model_id: "m".into(),
+                running: "0.3.268-alpha".into(),
+                newest: "0.3.270-alpha".into(),
+            },
+        ] {
+            let sent = worker_failure_for_the_coordinator(&e);
+            assert!(
+                crate::inference::router::message_means_peer_cannot_serve(&sent),
+                "{sent:?}"
+            );
+            assert!(!sent.contains("this one"), "{sent:?}");
+        }
     }
 }
 

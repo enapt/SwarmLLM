@@ -327,6 +327,20 @@ consumed by one party. What serving nodes enforce on requesters today:
 - **The owner's contribution level bounds what the swarm can take**: processor
   threads and memory are capped by it, so demand from the swarm can keep this
   node busy but cannot take more of the machine than its owner offered.
+- **A requester must share, and keep up** (since 0.3.271). A node starts a
+  peer's request only if that peer announces at least 2 model parts and runs a
+  release at most one behind the newest this node's own signed update check
+  found — never the newest a peer claims. A computer that fails either may still
+  see the swarm: gossip, parts and updates still reach it (fetching parts is how
+  it starts sharing), its own pool's devices still serve it, and models it holds
+  whole still run. Its dashboard and `swarmllm status` say why its chats stay on
+  that computer, and the peer list marks it. The serving node answers the
+  refusal at once, so a requester on an older release re-plans elsewhere
+  instead of waiting. This reads what the requester announces about ITSELF, so a
+  modified build can claim parts it does not hold: it stops the released
+  program, used as released, from taking without giving — the case seen on
+  2026-11-04, a computer holding no parts and two releases behind with its
+  updates off, chosen to carry models it never fetched.
 
 What is **not** enforced today:
 

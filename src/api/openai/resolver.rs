@@ -751,6 +751,8 @@ mod tests {
                     relay_reservations: vec![],
                     anchor_mode: false,
                     can_serve_inference: true,
+                    auto_manage: None,
+                    updates_itself: None,
                     resident_layers: Vec::new(),
                     context_ceiling_tokens: None,
                     model_load_ms_per_gib: None,

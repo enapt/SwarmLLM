@@ -230,6 +230,14 @@ left open:
    The economy is worth building only if free-riding turns out to be a real
    problem in a real network — which we have no evidence of yet, having never
    run one at a size where it could be.
+   **2026-11-04: the first case.** A computer holding no parts, two releases
+   behind with its updates off, used the swarm's models. It was answered
+   without credits: since v0.3.271 serving nodes start a peer's request only if
+   it announces at least 2 parts and runs at most one release behind
+   (`daemon::state::swarm_use`, `docs/invariants/network.md` § "A computer that
+   shares nothing may look at the swarm, not use it"). That gates USE on what a
+   requester announces, not on a balance; credits stay dormant, and the
+   serving-side criterion in § 6 is still open (an announcement costs nothing).
 3. **Exposure cap and settlement thresholds.** Should come from measured traffic
    once there is enough of it, not from a guess.
 

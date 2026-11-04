@@ -85,11 +85,19 @@ fn max_forwards_per_peer(contribution: &swarmllm_types::ContributionMode) -> usi
 /// evicted to admit a waiting one. A forward that claims to continue a request
 /// is sender-chosen, so claiming it only reaches the reserve; the per-peer cap
 /// and the node-wide cap still bound it.
+///
+/// And only for a requester that may use the swarm — shares at least two
+/// parts and runs a recent release (`requester`, from
+/// `SharedState::swarm_use_of_peer`; `daemon::state::swarm_use`). REQUIRED for
+/// the metered answer's reason: no path that starts a peer's request here can
+/// be added without answering it.
 fn admits_a_new_request(
     available: usize,
     total: usize,
     metered_hold: bool,
+    requester: &SwarmUse,
 ) -> Result<(), ForwardRefused> {
+    may_use_the_swarm(requester)?;
     if metered_hold {
         return Err(ForwardRefused::ConnectionMetered);
     }
@@ -99,6 +107,23 @@ fn admits_a_new_request(
         Err(ForwardRefused::KeptForRunning)
     }
 }
+
+/// The swarm-use half of [`admits_a_new_request`], on its own for the one
+/// start that skips the rest: a tensor-parallel layer's prompt pass, whose
+/// slot rules are deliberately not applied (`admit_own_forward`) but whose
+/// requester is judged like any other.
+fn may_use_the_swarm(requester: &SwarmUse) -> Result<(), ForwardRefused> {
+    if requester.is_allowed() {
+        Ok(())
+    } else {
+        Err(ForwardRefused::RequesterMayNotUseTheSwarm(
+            requester.clone(),
+        ))
+    }
+}
+
+use crate::daemon::state::swarm_use::SwarmUse;
+
 /// Per-peer counts of work in flight here, keyed by the authenticated sender.
 type PeerWorkCounts = Arc<dashmap::DashMap<crate::types::NodeId, std::sync::atomic::AtomicUsize>>;
 
@@ -173,6 +198,9 @@ struct StreamHold {
 enum ForwardRefused {
     /// A new request while this node holds back on a metered connection (#277).
     ConnectionMetered,
+    /// A new request from a computer that may not use the swarm: too few parts
+    /// shared, or too far behind (`swarm_use`).
+    RequesterMayNotUseTheSwarm(SwarmUse),
     /// The sender already holds `max_forwards_per_peer` pieces of work here.
     PeerLimit,
     /// A request not yet started would take the slots kept for running ones.
@@ -188,7 +216,40 @@ impl ForwardRefused {
     fn refusal(&self) -> String {
         match self {
             Self::ConnectionMetered => metered_refusal(),
+            Self::RequesterMayNotUseTheSwarm(why) => why.peer_refusal(),
             _ => peer_work_refusal(),
+        }
+    }
+
+    /// Logs the refusal of a peer's `kind` of work ("LayerForward",
+    /// "RemoteGenerateRequest", "VisionEncodeRequest").
+    fn log_for(&self, kind: &str, sender: &crate::types::NodeId, per_peer_limit: usize) {
+        if let Self::RequesterMayNotUseTheSwarm(why) = self {
+            // INFO, not WARN: a policy doing its job, at most once per request.
+            tracing::info!(
+                sender = %sender,
+                kind,
+                why = why.key(),
+                detail = ?why,
+                "DIAG: a peer's request refused — it may not use the swarm (too few parts shared, or too far behind)"
+            );
+            return;
+        }
+        if kind == "LayerForward" {
+            return self.log(sender, per_peer_limit);
+        }
+        if *self == Self::ConnectionMetered {
+            tracing::info!(
+                sender = %sender,
+                kind,
+                "request refused — this connection is metered, so no new work is taken for other machines"
+            );
+        } else {
+            tracing::warn!(
+                sender = %sender,
+                kind,
+                "request rejected — the rest is kept for requests already running here"
+            );
         }
     }
 
@@ -198,6 +259,9 @@ impl ForwardRefused {
                 sender = %sender,
                 "LayerForward refused — this connection is metered, so no new work is taken for other machines"
             ),
+            Self::RequesterMayNotUseTheSwarm(_) => {
+                self.log_for("LayerForward", sender, per_peer_limit)
+            }
             Self::PeerLimit => tracing::warn!(
                 sender = %sender,
                 max = per_peer_limit,
@@ -229,14 +293,29 @@ fn admit_own_forward(
     semaphore: &Arc<tokio::sync::Semaphore>,
     forward_limit: usize,
     metered_hold: bool,
+    // Asked only for a forward that starts a request: a decode step does not
+    // pay for the verdict on every token.
+    requester: impl FnOnce() -> SwarmUse,
 ) -> Result<(PeerWork, Option<tokio::sync::OwnedSemaphorePermit>), ForwardRefused> {
     let slot = slot.ok_or(ForwardRefused::PeerLimit)?;
     // A tensor-parallel prompt pass keeps `sequence_num == 0` for EVERY layer,
     // and its coordinator waits on the AllReduce, not on a LayerResult — a
     // refusal here would be unread and cost a 10 s AllReduce timeout per layer.
-    // It is one request's layers, not new ones: never held back.
-    if forward.sequence_num == 0 && forward.tp_meta.is_none() {
-        admits_a_new_request(semaphore.available_permits(), forward_limit, metered_hold)?;
+    // It is one request's layers, not new ones: never held back by the slot
+    // rules. Its requester is still judged: a computer that may not use the
+    // swarm pays that timeout, nobody else does.
+    if forward.sequence_num == 0 {
+        let requester = requester();
+        if forward.tp_meta.is_none() {
+            admits_a_new_request(
+                semaphore.available_permits(),
+                forward_limit,
+                metered_hold,
+                &requester,
+            )?;
+        } else {
+            may_use_the_swarm(&requester)?;
+        }
     }
     let permit = semaphore
         .clone()
@@ -939,6 +1018,7 @@ pub(crate) async fn dispatch_network_messages(
                                                 &forward_semaphore,
                                                 forward_limit,
                                                 shared_state.metered_hold_now(),
+                                                || shared_state.swarm_use_of_peer(&peer_sender),
                                             ),
                                         };
                                         let (peer_slot, permit) = match admitted {
@@ -1134,24 +1214,16 @@ pub(crate) async fn dispatch_network_messages(
                                             remote_generate::refuse_request(network_tx.clone(), &req, peer_work_refusal());
                                             continue;
                                         };
-                                        // A whole-model generation always starts a request.
+                                        // A whole-model generation always starts a request — a
+                                        // led split's too, which arrives here.
                                         if let Err(why) = admits_a_new_request(
                                             forward_semaphore.available_permits(),
                                             forward_limit,
                                             shared_state.metered_hold_now(),
+                                            &shared_state.swarm_use_of_peer(&peer_sender),
                                         ) {
                                             drop(peer_slot);
-                                            if why == ForwardRefused::ConnectionMetered {
-                                                tracing::info!(
-                                                    sender = %peer_sender,
-                                                    "RemoteGenerateRequest refused — this connection is metered, so no new work is taken for other machines"
-                                                );
-                                            } else {
-                                                tracing::warn!(
-                                                    sender = %peer_sender,
-                                                    "RemoteGenerateRequest rejected — the rest is kept for requests already running here"
-                                                );
-                                            }
+                                            why.log_for("RemoteGenerateRequest", &peer_sender, per_peer_limit);
                                             remote_generate::refuse_request(network_tx.clone(), &req, why.refusal());
                                             continue;
                                         }
@@ -1216,19 +1288,10 @@ pub(crate) async fn dispatch_network_messages(
                                             forward_semaphore.available_permits(),
                                             forward_limit,
                                             shared_state.metered_hold_now(),
+                                            &shared_state.swarm_use_of_peer(&peer_sender),
                                         ) {
                                             drop(peer_slot);
-                                            if why == ForwardRefused::ConnectionMetered {
-                                                tracing::info!(
-                                                    sender = %peer_sender,
-                                                    "VisionEncodeRequest refused — this connection is metered, so no new work is taken for other machines"
-                                                );
-                                            } else {
-                                                tracing::warn!(
-                                                    sender = %peer_sender,
-                                                    "VisionEncodeRequest rejected — the rest is kept for requests already running here"
-                                                );
-                                            }
+                                            why.log_for("VisionEncodeRequest", &peer_sender, per_peer_limit);
                                             continue;
                                         }
                                         let permit = match forward_semaphore.clone().try_acquire_owned() {
@@ -2039,8 +2102,22 @@ pub(crate) async fn dispatch_network_messages(
                                             );
                                         }
                                         if let Some(mut peer) = shared_state.peer_registry.get_mut(&cap.node_id) {
-                                            peer.capability = Some(cap.clone());
-                                            peer.last_seen = chrono::Utc::now();
+                                            // A frame naming an older version than
+                                            // the one installed is a recording played
+                                            // back, not news (`swarm_use`).
+                                            if crate::daemon::state::swarm_use::capability_may_replace(
+                                                peer.capability.as_ref(),
+                                                &cap,
+                                            ) {
+                                                peer.capability = Some(cap.clone());
+                                                peer.last_seen = chrono::Utc::now();
+                                            } else {
+                                                tracing::debug!(
+                                                    peer = %cap.node_id,
+                                                    replayed = %cap.version,
+                                                    "A capability naming an older version than the one held was not installed"
+                                                );
+                                            }
                                         }
                                         // A newer version on enough peers brings
                                         // our next update check forward; it never
@@ -3626,7 +3703,7 @@ mod rejected_manifest_tests {
 
 #[cfg(test)]
 mod inbound_forward_slot_tests {
-    use super::{InboundForwardSlot, PeerWork, PeerWorkSlot, StreamWorkSlot};
+    use super::{InboundForwardSlot, PeerWork, PeerWorkSlot, StreamWorkSlot, SwarmUse};
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::Arc;
 
@@ -3742,8 +3819,9 @@ mod inbound_forward_slot_tests {
     /// one, stays free for them, at every contribution level.
     #[test]
     fn a_new_request_leaves_a_reserve_for_running_ones() {
-        let admits =
-            |available, total| super::admits_a_new_request(available, total, false).is_ok();
+        let admits = |available, total| {
+            super::admits_a_new_request(available, total, false, &SwarmUse::Allowed).is_ok()
+        };
         // Minimal: 8 slots, 2 kept.
         assert!(admits(8, 8));
         assert!(admits(3, 8));
@@ -3805,7 +3883,7 @@ mod inbound_forward_slot_tests {
     fn a_metered_connection_refuses_new_work_and_lets_running_work_finish() {
         use super::{admit_own_forward, admits_a_new_request, ForwardRefused};
         assert_eq!(
-            admits_a_new_request(8, 8, true),
+            admits_a_new_request(8, 8, true, &SwarmUse::Allowed),
             Err(ForwardRefused::ConnectionMetered),
             "every slot free, and still no new request"
         );
@@ -3818,6 +3896,7 @@ mod inbound_forward_slot_tests {
                 &permits,
                 8,
                 metered,
+                || SwarmUse::Allowed,
             )
             .map(|_| ())
         };
@@ -3839,6 +3918,66 @@ mod inbound_forward_slot_tests {
         assert!(counts.get(&peer()).is_none(), "a refusal holds no slot");
         let told = ForwardRefused::ConnectionMetered.refusal();
         assert!(told.contains("metered"), "{told}");
+        assert!(
+            crate::inference::router::message_means_peer_cannot_serve(&told),
+            "the coordinator must bar this node and re-plan, not retract its parts: {told}"
+        );
+    }
+
+    /// A computer that may not use the swarm (`swarm_use`) is refused every
+    /// request it STARTS here — a prompt pass, a tensor-parallel layer's prompt
+    /// pass, a whole-model generation — however free this node is, in the
+    /// words its coordinator reads as "re-plan elsewhere"; a step of a request
+    /// already running goes on, and the verdict is not even asked for it.
+    #[test]
+    fn a_computer_that_may_not_use_the_swarm_is_refused_the_requests_it_starts() {
+        use super::{admit_own_forward, admits_a_new_request, ForwardRefused};
+        let shares_nothing = SwarmUse::TooFewParts { held: 0 };
+        assert_eq!(
+            admits_a_new_request(8, 8, false, &shares_nothing),
+            Err(ForwardRefused::RequesterMayNotUseTheSwarm(
+                shares_nothing.clone()
+            )),
+            "every slot free, and still no request it starts"
+        );
+        let counts: super::PeerWorkCounts = Arc::new(dashmap::DashMap::new());
+        let permits = Arc::new(tokio::sync::Semaphore::new(8));
+        let asked = std::cell::Cell::new(0);
+        let admit = |forward: &crate::types::LayerForward| {
+            admit_own_forward(
+                forward,
+                PeerWorkSlot::try_take(&counts, &peer(), 4),
+                &permits,
+                8,
+                false,
+                || {
+                    asked.set(asked.get() + 1);
+                    shares_nothing.clone()
+                },
+            )
+            .map(|_| ())
+        };
+        assert!(
+            admit(&a_forward(0)).is_err(),
+            "a prompt pass starts a request"
+        );
+        let mut tensor_parallel = a_forward(0);
+        tensor_parallel.tp_meta = Some(crate::types::TensorParallelMeta {
+            tp_rank: 1,
+            tp_size: 2,
+            single_layer: 0,
+            phase: Default::default(),
+        });
+        assert!(
+            admit(&tensor_parallel).is_err(),
+            "a tensor-parallel prompt pass skips the slot rules, not the requester's standing"
+        );
+        assert_eq!(asked.get(), 2);
+        assert_eq!(admit(&a_forward(7)), Ok(()), "a running request goes on");
+        assert_eq!(asked.get(), 2, "a decode step does not ask for the verdict");
+        assert!(counts.get(&peer()).is_none(), "a refusal holds no slot");
+        let told = ForwardRefused::RequesterMayNotUseTheSwarm(shares_nothing).refusal();
+        assert!(told.contains("Auto-Download Models"), "{told}");
         assert!(
             crate::inference::router::message_means_peer_cannot_serve(&told),
             "the coordinator must bar this node and re-plan, not retract its parts: {told}"

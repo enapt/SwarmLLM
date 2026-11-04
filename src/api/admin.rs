@@ -188,6 +188,17 @@ pub fn serialize_peer_to_json(
             .as_ref()
             .map(|c| c.anchor_mode)
             .unwrap_or(false),
+        // May this peer have THIS node run its requests (`swarm_use`):
+        // "allowed", "too_few_parts" or "too_far_behind" — the verdict the
+        // dispatcher applies, so the label and the refusal cannot disagree.
+        "swarm_use": state.swarm_use_of_entry(peer).key(),
+        // Releases behind the newest this node knows of (`null` unreadable).
+        "releases_behind": peer_version.as_deref().and_then(|v| {
+            crate::daemon::state::swarm_use::releases_behind(v, &state.newest_release_known())
+        }),
+        // Its own settings, for display only; `null` from an older build.
+        "auto_manage": peer.capability.as_ref().and_then(|c| c.auto_manage),
+        "updates_itself": peer.capability.as_ref().and_then(|c| c.updates_itself),
     });
     if include_addresses {
         if let Some(o) = obj.as_object_mut() {
@@ -568,6 +579,21 @@ pub async fn diagnostics(
             out,
             "metered connection: {said}  setting: {setting}  holding back downloads and work for peers: {}",
             ss.models.metered.holding_back()
+        );
+    }
+    // Whether other computers run this node's requests, and the facts the
+    // verdict read (`daemon::state::swarm_use`) — "the swarm never answers my
+    // chats" is otherwise a report nobody can read the cause from.
+    {
+        let u = ss.swarm_use_json();
+        let _ = writeln!(
+            out,
+            "swarm use: {}  parts shared: {} (needs {})  running {}  newest known {}",
+            u["verdict"].as_str().unwrap_or("?"),
+            u["parts_held"],
+            u["parts_needed"],
+            u["running"].as_str().unwrap_or("?"),
+            u["newest"].as_str().unwrap_or("?"),
         );
     }
 
@@ -1375,6 +1401,8 @@ pub async fn stats(State(state): State<AppState>) -> Json<serde_json::Value> {
         "network_traffic": crate::api::metrics::network_traffic_json(&state.shared_state),
         "inference": inference_perf,
         "swarm_spec": swarm_spec_metrics,
+        // May this node's chats use other computers — `daemon::state::swarm_use`.
+        "swarm_use": state.shared_state.swarm_use_json(),
     }))
 }
 

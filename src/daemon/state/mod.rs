@@ -42,6 +42,7 @@ pub(crate) mod requester_guesses;
 pub(crate) mod retained_activations;
 pub(crate) mod retained_replies;
 pub(crate) mod split_rounds;
+pub(crate) mod swarm_use;
 mod tp_allreduce;
 
 pub use activity::{ActivityEvent, DashboardSignal, LoadedModelInfo};

@@ -1172,6 +1172,9 @@ pub(super) fn failure_is_penalty_worthy(err: &SwarmError, had_remote_segment: bo
         | SwarmError::ModelNotAvailable(_)
         | SwarmError::InsufficientCapacity(_)
         | SwarmError::PrivateModeUnavailable { .. }
+        // This computer's own standing with the swarm (`swarm_use`).
+        | SwarmError::TooFewPartsToUseTheSwarm { .. }
+        | SwarmError::TooFarBehindToUseTheSwarm { .. }
         | SwarmError::KeptOnThisComputer { .. }
         | SwarmError::RequestKeptOnThisComputer { .. }
         | SwarmError::PromptPrivacyUnavailable { .. }

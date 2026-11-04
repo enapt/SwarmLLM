@@ -608,6 +608,26 @@ metered connection: yes  setting: auto  holding back downloads and work for peer
   node.log`. A download the owner asked for, a repair, the owner's own
   requests, work already running and gossip are never paused.
 
+## "Why won't other computers run my chats?" / "Why did this node refuse a peer?" (v0.3.271)
+
+Other computers run a computer's requests only if it shares at least 2 model
+parts and runs at most one release behind the newest (`daemon::state::swarm_use`).
+The diagnostics report's first block says where THIS node stands:
+
+```
+swarm use: too_few_parts  parts shared: 0 (needs 2)  running 0.3.271-alpha  newest known 0.3.271-alpha
+```
+
+`newest known` is this node's own signed update check, never a peer's claim.
+While it is not `allowed`, a request that needs another computer is refused
+here with "needs other computers, and they run requests only for a computer
+that shares …" (503, `sharing_required_error` / `update_required_error`); models
+held whole here and the pool's devices still serve. The serving side logs each
+refusal at info: `grep "it may not use the swarm" node.log` — `why` is
+`too_few_parts` or `too_far_behind`, `detail` the peer's own figures. A coordinator
+on any release reads the answer as "this peer cannot serve" and re-plans without
+a penalty. The peer list (`/api/admin/peers`) carries each peer's `swarm_use`.
+
 ## "Why is this node talking to a stranger?"
 
 ```

@@ -137,6 +137,10 @@ fn print_summary(json: &serde_json::Value) {
         println!("Relaying:  {line}");
     }
 
+    if let Some(line) = describe_swarm_use(json.get("swarm_use")) {
+        println!("Swarm use: {line}");
+    }
+
     let downloading = list("models_downloading");
     if !downloading.is_empty() {
         println!("Fetching:  {}", downloading.join(", "));
@@ -219,6 +223,33 @@ fn describe_relaying(traffic: Option<&serde_json::Value>) -> Option<String> {
 }
 
 /// Bytes, in the unit a person would use.
+/// Why other computers will not run this node's requests, or `None` when they
+/// will (`daemon::state::swarm_use`). Printed only when they will not: a node
+/// that shares nothing still SEES the swarm, and without this line its owner
+/// meets the reason only as a refused chat.
+fn describe_swarm_use(swarm_use: Option<&serde_json::Value>) -> Option<String> {
+    let u = swarm_use?.as_object()?;
+    let text = |k: &str| u.get(k).and_then(|v| v.as_str()).unwrap_or("?");
+    let count = |k: &str| u.get(k).and_then(|v| v.as_u64()).unwrap_or(0);
+    match u.get("verdict").and_then(|v| v.as_str())? {
+        "too_few_parts" => Some(format!(
+            "off — other computers run requests only for one that shares at least {} model \
+             parts, and this one shares {}. Turn on auto-manage (auto_manage.enabled = true) \
+             and give it room on disk; models held whole here still run.",
+            count("parts_needed"),
+            count("parts_held"),
+        )),
+        "too_far_behind" => Some(format!(
+            "off — other computers run requests only for one at most one release behind, and \
+             this one runs {} while {} is out. Update it (`swarmllm update`); models held \
+             whole here still run.",
+            text("running"),
+            text("newest"),
+        )),
+        _ => None,
+    }
+}
+
 fn human_bytes(bytes: u64) -> String {
     const KB: f64 = 1024.0;
     let b = bytes as f64;
@@ -485,5 +516,31 @@ mod tests {
             "gpu_layers_on_card": null, "layers_total": null
         });
         assert!(!describe_worker(&whole).contains("layers"));
+    }
+
+    /// A node the swarm will not serve says why and what lifts it; one it will
+    /// serve prints nothing.
+    #[test]
+    fn a_node_that_may_not_use_the_swarm_says_why_and_how_to_lift_it() {
+        let few = serde_json::json!({
+            "verdict": "too_few_parts", "parts_held": 0, "parts_needed": 2,
+            "running": "0.3.271-alpha", "newest": "0.3.271-alpha", "auto_manage": false
+        });
+        let line = describe_swarm_use(Some(&few)).unwrap();
+        assert!(line.contains("at least 2"), "{line}");
+        assert!(line.contains("auto_manage.enabled = true"), "{line}");
+        let behind = serde_json::json!({
+            "verdict": "too_far_behind", "parts_held": 40, "parts_needed": 2,
+            "running": "0.3.268-alpha", "newest": "0.3.270-alpha", "auto_manage": true
+        });
+        let line = describe_swarm_use(Some(&behind)).unwrap();
+        assert!(
+            line.contains("0.3.268-alpha") && line.contains("0.3.270-alpha"),
+            "{line}"
+        );
+        assert!(line.contains("swarmllm update"), "{line}");
+        let fine = serde_json::json!({"verdict": "allowed"});
+        assert_eq!(describe_swarm_use(Some(&fine)), None);
+        assert_eq!(describe_swarm_use(None), None);
     }
 }

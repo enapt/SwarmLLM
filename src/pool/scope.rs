@@ -109,6 +109,21 @@ pub fn request_scope(
     if kept_here(shared, model_id, asked).is_some() {
         return Some(HashSet::from([shared.identity.node_id().clone()]));
     }
+    // A computer that may not use the swarm — too few parts shared, or too far
+    // behind (`daemon::state::swarm_use`) — reaches only itself and its own
+    // pool's devices, whatever private mode says: other people's computers
+    // would refuse it (`dispatch::admits_a_new_request`). Foreign pools are
+    // other people's computers too. Asked here, the one answer every path a
+    // request leaves by asks, so no path can be added that forgets it.
+    if !shared.swarm_use_here().is_allowed() {
+        let mut home = HashSet::from([shared.identity.node_id().clone()]);
+        if let Ok(guard) = shared.credits.pool_state.try_read() {
+            if let Some(ps) = guard.as_ref() {
+                home.extend(ps.members.iter().map(|m| m.node_id.clone()));
+            }
+        }
+        return Some(home);
+    }
     let mut scope = allowed_node_set(shared)?;
     scope.extend(cross_pool_extras(shared, model_id));
     Some(scope)
@@ -323,7 +338,30 @@ mod tests {
         let db = Database::open(temp.path()).unwrap();
         let executor = Arc::new(Mutex::new(ModelExecutor::new()));
         let (state, _, _) = SharedState::new(config, identity, db, executor, None);
+        state.shares_enough_to_use_the_swarm();
         state
+    }
+
+    /// **A computer that may not use the swarm reaches only itself** — the
+    /// gate's one choke point for where a request may go (`swarm_use`): a
+    /// node that announced too few parts gets this node alone, whatever
+    /// private mode says, and sharing enough restores the node-wide answer.
+    #[test]
+    fn a_computer_that_shares_too_little_reaches_only_itself() {
+        let state = make_state(Config::default());
+        let me = state.identity.node_id().clone();
+        let model = crate::types::ModelId("any".into());
+        assert!(
+            request_scope(&state, &model, KeepAsked::Unasked).is_none(),
+            "the control: sharing enough, private mode off → unrestricted"
+        );
+        state.models.own_shard_announce.store(None);
+        assert_eq!(
+            request_scope(&state, &model, KeepAsked::Unasked),
+            Some(HashSet::from([me]))
+        );
+        state.shares_enough_to_use_the_swarm();
+        assert!(request_scope(&state, &model, KeepAsked::Unasked).is_none());
     }
 
     /// **Trust for handing over a credential must be a positive act.**

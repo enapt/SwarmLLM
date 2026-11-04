@@ -633,6 +633,25 @@ pub struct NodeCapability {
     #[serde(default = "serving_inference_unless_told_otherwise")]
     pub can_serve_inference: bool,
 
+    /// Does this node fetch parts for the swarm on its own (auto-manage on)?
+    ///
+    /// For DISPLAY only: a peer list shows "Auto-manage off" so a computer
+    /// that shares only what its owner downloaded by hand — or nothing — can
+    /// be told from one still fetching its first parts. Never a routing or
+    /// admission input: whether a computer may use the swarm is judged on the
+    /// parts it HOLDS (`hosted_shards`), which a setting cannot fake for a
+    /// released build (`daemon::state::swarm_use`). `None` = an older build,
+    /// which says nothing (`#[serde(default)]`, the additive rule).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_manage: Option<bool>,
+
+    /// Does this node install updates on its own (`[updates] mode = "install"`,
+    /// the default)? For DISPLAY only, beside `version`: a peer list shows
+    /// "Updates off" so a computer falling behind by choice can be told from
+    /// one an update has not reached yet. `None` = an older build.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub updates_itself: Option<bool>,
+
     /// Layers of each model this node currently has LOADED, by model id.
     ///
     /// `hosted_shards` says what is on disk; this says what is in memory right

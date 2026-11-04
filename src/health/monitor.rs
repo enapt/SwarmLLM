@@ -1478,6 +1478,18 @@ impl HealthMonitor {
             // starting again, the dispatcher resuming, the connection no
             // longer metered.
             can_serve_inference: outage.is_none() && !metered_hold,
+            // Shown in peer lists, never judged on (`NodeCapability::auto_manage`):
+            // the live switch, which `--anchor` holds off.
+            auto_manage: Some(
+                self.shared_state
+                    .models
+                    .auto_manage_enabled
+                    .load(std::sync::atomic::Ordering::Relaxed),
+            ),
+            updates_itself: Some(
+                self.shared_state.cfg().updates.effective_mode()
+                    == crate::config::UpdateMode::Install,
+            ),
             // What is LOADED, as distinct from what is on disk above. A peer
             // pricing our spare capacity needs to know how much of a model we
             // have already paid for; without it the only signal is "did this
@@ -3036,6 +3048,8 @@ mod tests {
             ],
             anchor_mode: false,
             can_serve_inference: true,
+            auto_manage: None,
+            updates_itself: None,
             resident_layers: Vec::new(),
             context_ceiling_tokens: Some(8192),
             model_load_ms_per_gib: Some(900),

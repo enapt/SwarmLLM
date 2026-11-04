@@ -49,6 +49,7 @@ fn make_shared_state_on(
     let db = Database::open(temp.path()).unwrap();
     let executor = Arc::new(Mutex::new(ModelExecutor::new()));
     let (state, _, _) = SharedState::new(config, identity, db, executor, card);
+    state.shares_enough_to_use_the_swarm();
     state
 }
 
@@ -1802,6 +1803,8 @@ fn slow_peer_capability(node: &NodeId) -> crate::types::NodeCapability {
         relay_reservations: vec![],
         anchor_mode: false,
         can_serve_inference: true,
+        auto_manage: None,
+        updates_itself: None,
         resident_layers: Vec::new(),
         context_ceiling_tokens: None,
         model_load_ms_per_gib: None,
@@ -2256,6 +2259,7 @@ fn parallax_flag_picks_low_latency_peer_end_to_end() {
     let db = Database::open(temp.path()).unwrap();
     let executor = Arc::new(Mutex::new(ModelExecutor::new()));
     let (state, _, _) = SharedState::new(config, identity, db, executor, None);
+    state.shares_enough_to_use_the_swarm();
     let local_id = state.identity.node_id().clone();
 
     let shards = vec![ShardInfo {
@@ -4386,6 +4390,8 @@ fn capability_with_gpu(free_mb: Option<u64>) -> crate::types::NodeCapability {
         relay_reservations: vec![],
         anchor_mode: false,
         can_serve_inference: true,
+        auto_manage: None,
+        updates_itself: None,
         resident_layers: Vec::new(),
         context_ceiling_tokens: None,
         model_load_ms_per_gib: None,

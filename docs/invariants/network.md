@@ -5756,6 +5756,91 @@ Wiring the hold into relaying found the relay switch did less than it said:
 network switch drops both with the connection; only a link that turns metered
 in place (Windows "set as metered", or `pause`) leaves one to run out.
 
+## A computer that shares nothing may look at the swarm, not use it (2026-11-04)
+
+**What happened.** A node in Russia (`54c49961`, v0.3.268, 2026-11-02 → 11-04) held no parts,
+ran two releases behind with its updates off, and used the swarm's models; the download ring
+twice handed it parts it never fetched (FUTURE_WORK #400). Nothing stopped it: the dispatcher's
+caps (`admits_a_new_request`, `PeerWorkSlot`) limit how MUCH a peer runs here, never WHO. The
+user's direction (2026-11-04): a computer that does not contribute may SEE the swarm but not
+use its models; once it holds a couple of parts, use works; the anchor is the only node with
+none; and a computer two releases behind should not be served either.
+
+**What was chosen, and why.**
+- **A threshold on what the requester announces, judged by the SERVING node.** The book's test
+  (`security.md` § "Misuse of the Network"): a limit counts only if someone other than the party
+  it stops enforces it. The serving node sees only the requester's capability, so the rule is a
+  threshold on it, not a ledger — IPFS BitSwap's debt ratio and Petals' planned points both judge
+  what the serving side can observe; BitTorrent's tit-for-tat judges observed upload, which a
+  swarm with dormant credits has no record of (`docs/CREDITS_DESIGN.md`).
+- **2 parts, not 1** (the user's "1-2 shards"): one small part kept by hand is a token.
+- **Auto-manage is NOT the gate.** This project's own laptop node runs with automatic downloads
+  off by choice and shares 231 parts; what a computer SHARES is the fact, how it got there is not.
+  `NodeCapability::auto_manage` is shown, never judged.
+- **Version: two releases behind, against THIS node's signed update check.** One behind is the
+  normal state for the minutes an update takes. A peer's advertised version never sets "newest":
+  one peer claiming 9.9.9 would make every node refuse itself — the rule `update::PeerVersionWatch`
+  already keeps. Patch numbers are counted, so an unpublished number (.263, .267) counts as a
+  release: at worst a node is asked to update a few minutes early.
+- **Nothing but USE is withheld.** Not communication by version: cutting older releases off splits
+  the swarm at every release for the minutes auto-update takes, and drops their parts out of
+  everyone's splits (`architecture.md` § "Additive Protocol Evolution"). Parts keep flowing to a
+  refused computer — fetching is how it starts to share — and updates reach it.
+- **The refusal reaches an older coordinator correctly**: `ServiceUnavailable`-worded, which
+  `router::message_means_peer_cannot_serve` reads as "bar this peer, re-plan, no penalty, no
+  retraction" on every release. A new coordinator also refuses ITSELF up front (`request_scope`
+  keeps the request on self + pool; the scheduler answers the typed error when the plan needs
+  parts outside that), so it does not ask peers that would say no.
+- **No LAN exemption**: `is_lan_peer` cannot tell the same Wi-Fi from a VPN (the metered hold's
+  reason, § "A metered connection holds back what this node uploads for others"). A household
+  that wants its machines to serve each other links them in a pool.
+
+**What the pre-release security review changed (2026-11-04, five findings).**
+1. *A recorded capability played back got an honest peer refused swarm-wide.* The capability
+   carries no stamp, and gossip's freshness filter covers pings, part announcements and credit
+   gossip only, so any member could republish a peer's frame from its first boot (no parts) or
+   from before it updated. Now a capability naming an OLDER version than the one held is never
+   installed (`swarm_use::capability_may_replace`, at both installers — gossip and the DHT
+   record): a node's version changes only across a restart, and a restart drops its registry
+   entry, so within one entry's life an older version is a recording. Parts are judged as the
+   MORE of the capability's list and the parts its announcements credited it here
+   (freshness-checked), so fewer parts in a replay do not count. Replay still degrades ROUTING
+   as it did before (a stale `hosted_shards`) — FUTURE_WORK #402 stamps the capability.
+2. *A tag on the release page decided "newest" before any signature was checked*, and a new
+   minor version counted as infinitely far: a mistyped `v0.4.0` (or a hijacked publisher) would
+   have had every node refuse itself and every peer. Now only a release whose signature verifies
+   at check time counts (`UpdateInfo::signature_verified`, set by `check_for_update` through the
+   install's own `verify_release_authenticity` — the sidecar and its `.minisig` are small, no
+   binary is fetched), and a new series' first release is ONE release, each patch one more
+   (`releases_behind`, erring toward letting a computer in).
+3. *A head's own refusal crossed the wire with the wrong subject.* The scheduler raised it for a
+   split led here for a peer; the requester read the text as a 500 from the head, blamed it, and
+   showed its owner advice about another machine. Now the scheduler raises it only for the
+   owner's requests (`route_plan_override(..).lead_here` skips it), and the hand-off's one
+   failure translator (`worker_failure_for_the_coordinator`) sends it as plain "cannot serve".
+4. *This node's own count disagreed with its peers'.* It counted the registry's credit, which
+   includes withheld copies and parts failing their checks; peers count what it ANNOUNCES. Now
+   `swarm_use_here` reads `own_shard_announce` (the registry only before the first announcement).
+   Left: a host for which no update asset is published (#246's missing baseline) records no
+   update, so it believes itself level while updated peers refuse it — their refusal tells its
+   owner to update.
+5. *A refused vision encode is silent* (the requester waits out its timeout) — the pre-existing
+   shape of FUTURE_WORK #123, unchanged.
+
+**Limits.** A modified build can announce parts and a version it does not have, and a node key is
+free: this stops the released program, used as released, from taking without giving. A refused
+computer's whole-held models still run there.
+
+**What a change must keep.** The verdict is asked inside `admits_a_new_request` with the
+requester's verdict REQUIRED (no path starts a peer's request without it), only at a request's
+FIRST forward (`sequence_num == 0`) so a reply under way is never cut off; "newest" is never a
+peer's claim nor an unsigned tag; an older-version capability never replaces a newer one; the
+owner's refusal never reaches a peer as itself; gossip, parts and updates are never gated on it.
+Tests: `swarm_use::tests::*`, `a_computer_that_shares_too_little_reaches_only_itself`,
+`a_heads_own_swarm_use_refusal_reaches_the_requester_as_cannot_serve`,
+`a_computer_that_may_not_use_the_swarm_is_refused_the_requests_it_starts`,
+`cli::status::tests::a_node_that_may_not_use_the_swarm_says_why_and_how_to_lift_it`.
+
 ## Every part this node serves shares ONE upload limit (2026-10-24, FUTURE_WORK #335)
 
 **What it replaced.** `ResourceConfig::shard_upload_mbps` (`Minimal`, the default, 10 Mbps;

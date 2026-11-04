@@ -3449,6 +3449,31 @@ impl PipelineScheduler {
             if !missing_shards.is_empty() {
                 return Err(kept.refusal(manifest.name.clone(), missing_shards));
             }
+        } else if let Some(refusal) = self
+            .shared_state
+            .swarm_use_here()
+            .refusal(manifest.name.clone())
+            // Its OWNER's request only: a split led here for a peer is planned
+            // in the same scope, but this refusal speaks of this computer, and
+            // the peer would read it as the head's failure (security review,
+            // 2026-11-04). Such a plan fails as any narrow scope's does.
+            .filter(|_| {
+                !self
+                    .shared_state
+                    .route_plan_override(request_id)
+                    .is_some_and(|o| o.lead_here)
+            })
+        {
+            // A computer that may not use the swarm (`swarm_use`) reaches only
+            // itself and its pool (`request_scope`). Told so up front when
+            // they do not hold all of the model — every plan would need a
+            // computer that refuses it — instead of a "no reachable node" for
+            // a swarm that is there.
+            if !crate::pool::scope::parts_outside_scope(&self.shared_state, &manifest, keep)
+                .is_empty()
+            {
+                return Err(refusal);
+            }
         }
 
         // Per-model choice, then explicit global, then on automatically when this

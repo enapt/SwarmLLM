@@ -171,8 +171,8 @@
 
   // --- Network Status panel ---
   // Single source of truth for "what state is this node in?". Replaces the
-  // old swarm-capacity-banner + mode-indicator strip. Seven named states:
-  //   unreachable | connecting | global | private | lan | solo | offline
+  // old swarm-capacity-banner + mode-indicator strip. Eight named states:
+  //   unreachable | connecting | global | viewonly | private | lan | solo | offline
   // Cloud-provider count + capacity facts fold in as supporting detail.
   App.networkStatus = {
     update: function(statsData, providerData) {
@@ -202,6 +202,7 @@
       var offlineMode = !!netMode.offline_mode;
       var allowLan = !!netMode.private_mode_allow_lan;
       var capacity = stats ? stats.swarm_capacity : null;
+      var swarmUse = stats ? stats.swarm_use : null;
 
       // Healthy cloud provider count (configured + reachable).
       var cloudCount = 0;
@@ -254,6 +255,15 @@
         stateDetail = allowLan
           ? I18n.t('netstatus.detail_private_with_lan')
           : I18n.t('netstatus.detail_private');
+      } else if (peers > 0 && swarmUse && swarmUse.verdict && swarmUse.verdict !== 'allowed') {
+        // Connected, but other computers will not run this node's chats
+        // (`daemon::state::swarm_use`): it can look at the swarm, not use it.
+        // After the private branches — there only pool devices are asked.
+        stateKey = 'viewonly';
+        stateName = I18n.t('netstatus.viewonly');
+        stateDetail = swarmUse.verdict === 'too_far_behind'
+          ? I18n.t('netstatus.detail_viewonly_behind', { running: swarmUse.running, newest: swarmUse.newest })
+          : I18n.t('netstatus.detail_viewonly_parts', { held: swarmUse.parts_held, needed: swarmUse.parts_needed });
       } else if (peers > 0) {
         stateKey = 'global';
         stateName = I18n.t('netstatus.global');
@@ -284,7 +294,7 @@
           c.innerHTML = html;
           chipsEl.appendChild(c);
         };
-        if (stateKey === 'global' && peers > 0) {
+        if ((stateKey === 'global' || stateKey === 'viewonly') && peers > 0) {
           // One chip per non-empty peer type so the header spells out exactly
           // who's connected: internet peers, same-network peers, pool devices.
           if (remotePeers > 0) addChip('<strong>' + remotePeers + '</strong> ' + U.escapeHtml(I18n.t(remotePeers === 1 ? 'netstatus.chip_remote_one' : 'netstatus.chip_remote_other')));

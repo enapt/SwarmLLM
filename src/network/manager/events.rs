@@ -826,7 +826,14 @@ impl NetworkManager {
                                         if let Some(mut entry) =
                                             self.shared_state.peer_registry.get_mut(&node_id)
                                         {
-                                            entry.capability = Some(cap);
+                                            // A record left from before the peer
+                                            // updated never replaces what it now says.
+                                            if crate::daemon::state::swarm_use::capability_may_replace(
+                                                entry.capability.as_ref(),
+                                                &cap,
+                                            ) {
+                                                entry.capability = Some(cap);
+                                            }
                                         }
                                     }
                                 }

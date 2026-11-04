@@ -689,6 +689,9 @@ async fn build_stats_message(state: &SharedState) -> String {
             "offline_mode": offline_mode,
             "private_mode_allow_lan": allow_lan,
         },
+        // May this node's chats use other computers — the same object as
+        // `GET /api/admin/stats` carries (`SharedState::swarm_use_json`).
+        "swarm_use": state.swarm_use_json(),
     });
 
     data["shard_registry"] = shard_registry_val;

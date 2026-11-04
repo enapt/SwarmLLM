@@ -1191,6 +1191,8 @@ pub fn error_kind(err: &crate::error::SwarmError) -> &'static str {
         E::SegmentFailoverExhausted(_) => "SegmentFailoverExhausted",
         E::ReplyTruncated(_) => "ReplyTruncated",
         E::PrivateModeUnavailable { .. } => "PrivateModeUnavailable",
+        E::TooFewPartsToUseTheSwarm { .. } => "TooFewPartsToUseTheSwarm",
+        E::TooFarBehindToUseTheSwarm { .. } => "TooFarBehindToUseTheSwarm",
         E::KeptOnThisComputer { .. } => "KeptOnThisComputer",
         E::RequestKeptOnThisComputer { .. } => "RequestKeptOnThisComputer",
         E::PromptPrivacyUnavailable { .. } => "PromptPrivacyUnavailable",

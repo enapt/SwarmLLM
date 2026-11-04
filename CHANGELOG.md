@@ -2,6 +2,20 @@
 
 ## [Unreleased]
 
+**Other computers run your chats only if your computer shares, and keeps up.** A computer must hold
+at least 2 model parts and run a release at most one behind the newest for the swarm to run its
+requests. One that does not still sees the swarm, still fetches parts and updates, still runs the
+models it holds whole, and its own linked devices still serve it — its dashboard and
+`swarmllm status` say why its chats stay on that computer and what lifts it (turn on Auto-Download
+Models, or update). The peer list marks computers that share too little, are out of date, or have
+automatic downloads or updates turned off. Nothing changes for a computer that shares and updates;
+computers on older releases are judged by what they announce, and their requests are refused at
+once so they re-plan elsewhere. "Newest" is only a release whose signature checks out, and the
+first release of a new series counts as one release, so a new version number never cuts anyone
+off at once; an old announcement played back by another computer cannot get yours refused. A
+modified program can still claim parts it does not hold — this stops the released program from
+taking without giving.
+
 **A full computer that frees no room for a part the swarm is short of says why.** Its log names
 every rule that kept a part it holds, and how many parts each kept, at most every 10 minutes; the
 hourly "storage is over the budget" warning carries the same list instead of blaming the number of

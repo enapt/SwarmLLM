@@ -1111,6 +1111,9 @@ pub async fn status(State(state): State<AppState>) -> Json<serde_json::Value> {
         // nothing, because `describe_traffic` was tested against a hand-made
         // object and the wiring never was.
         "network_traffic": crate::api::metrics::network_traffic_json(&state.shared_state),
+        // Whether other computers run this node's requests — `swarmllm status`
+        // prints why when they do not (`cli::status::describe_swarm_use`).
+        "swarm_use": state.shared_state.swarm_use_json(),
     }))
 }
 

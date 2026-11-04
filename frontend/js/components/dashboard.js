@@ -2212,6 +2212,7 @@
           (p.nickname || '') + '|' + (p.gpu || '') + '|' + (p.version || '') + '|' +
           (p.region || '') + '|' + (p.gpu_vram_mb || 0) + '|' +
           (p.hosted_models ? p.hosted_models.length : 0) + '|' +
+          (p.swarm_use || '') + '|' + p.auto_manage + '|' + p.updates_itself + '|' +
           // Uptime to the minute: the row shows it no finer, so a peer_list
           // burst inside the same minute still skips the rebuild.
           Math.floor((p.uptime_seconds || 0) / 60);
@@ -2329,6 +2330,25 @@
           lanBadge += ' <span class="badge badge-amber" title="' +
             U.escapeHtml(I18n.t('dashboard.peer_anchor_tip')) + '">' +
             U.escapeHtml(I18n.t('dashboard.peer_type_anchor')) + '</span>';
+        }
+        // Why the swarm will not run this computer's requests
+        // (`daemon::state::swarm_use`), and the owner's settings behind it.
+        // Not on an anchor: it holds no parts by design and its tag says so.
+        function _flag(cls, label, tip) {
+          lanBadge += ' <span class="badge ' + cls + '" title="' +
+            U.escapeHtml(I18n.t(tip)) + '">' + U.escapeHtml(I18n.t(label)) + '</span>';
+        }
+        if (!p.is_anchor && p.swarm_use === 'too_few_parts') {
+          _flag('badge-orange', 'dashboard.peer_shares_too_little', 'dashboard.peer_shares_too_little_tip');
+        }
+        if (p.swarm_use === 'too_far_behind') {
+          _flag('badge-orange', 'dashboard.peer_out_of_date', 'dashboard.peer_out_of_date_tip');
+        }
+        if (!p.is_anchor && p.auto_manage === false) {
+          _flag('badge-amber', 'dashboard.peer_auto_manage_off', 'dashboard.peer_auto_manage_off_tip');
+        }
+        if (p.updates_itself === false) {
+          _flag('badge-amber', 'dashboard.peer_updates_off', 'dashboard.peer_updates_off_tip');
         }
         var dotClass = p.healthy ? 'online' : 'degraded';
         var latency = p.latency_ms ? p.latency_ms + 'ms' : '\u2014';

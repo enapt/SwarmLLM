@@ -234,6 +234,28 @@ pub enum SwarmError {
         missing_shards: Vec<u32>,
     },
 
+    /// A request this computer cannot run on its own, refused before any peer
+    /// is asked because this computer shares too few model parts for other
+    /// computers to run its requests (`daemon::state::swarm_use`). A POLICY
+    /// refusal for this node's own owner: retrying cannot help, sharing can —
+    /// so its own variant and hint, never `ServiceUnavailable`'s "try
+    /// another". Never sent to a peer as itself: a head's hand-off failure
+    /// becomes a plain "cannot serve" (`dispatch::remote_generate::
+    /// worker_failure_for_the_coordinator`), and a split led for a peer never
+    /// raises it (the scheduler's up-front refusal).
+    #[error("{model_id} needs other computers, and they run requests only for a computer that shares at least {} model parts — this one shares {parts_held}", crate::daemon::state::swarm_use::PARTS_TO_USE_THE_SWARM)]
+    TooFewPartsToUseTheSwarm { model_id: String, parts_held: usize },
+
+    /// The same refusal for a computer two or more releases behind the newest
+    /// its update check found. A second variant because the fix differs: an
+    /// update, not sharing.
+    #[error("{model_id} needs other computers, and they run requests only for a computer at most one release behind — this one runs {running} while {newest} is out")]
+    TooFarBehindToUseTheSwarm {
+        model_id: String,
+        running: String,
+        newest: String,
+    },
+
     /// Prompt privacy (`inference.encrypted_pipeline`) is on for this model, but
     /// this node does not hold shard 0 — the embedding table that has to stay
     /// local for the prompt's TEXT to stay here. Peers still receive the
@@ -955,6 +977,19 @@ pub fn classify_error(err: &SwarmError) -> (StatusCode, String, &'static str) {
             err.to_string(),
             "private_mode_error",
         ),
+        // A policy refusal about THIS computer (`swarm_use`): its own types,
+        // as private mode's, so a client can tell "share more" and "update"
+        // from a busy swarm.
+        SwarmError::TooFewPartsToUseTheSwarm { .. } => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            err.to_string(),
+            "sharing_required_error",
+        ),
+        SwarmError::TooFarBehindToUseTheSwarm { .. } => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            err.to_string(),
+            "update_required_error",
+        ),
         // Its own type: the owner's per-model choice, not private mode, and
         // the caller's fix is a different one (#251).
         SwarmError::KeptOnThisComputer { .. } => (
@@ -1532,6 +1567,20 @@ pub fn error_hint_with_key(err: &SwarmError) -> Option<(&'static str, &'static s
              and none of those computers has all of this model. Either download it here from the model's card on the \
              Dashboard, or add the device that has it to your pool. You can also turn private mode off on the My Devices page \
              — but then your prompts can be sent to other people's machines to run.",
+        )),
+        SwarmError::TooFewPartsToUseTheSwarm { .. } => Some((
+            "too_few_parts_to_use_the_swarm",
+            "The swarm runs on what its computers share. Turn on Auto-Download Models in Settings \
+             and leave it room on disk: once this computer holds 2 model parts, other computers \
+             will run your requests. Models this computer holds whole still run here. Retrying \
+             as-is won't help.",
+        )),
+        SwarmError::TooFarBehindToUseTheSwarm { .. } => Some((
+            "too_far_behind_to_use_the_swarm",
+            "Other computers run requests only for computers on a recent release. Update this \
+             computer (Apply & Restart on the update notice), or set Software updates to install \
+             automatically in Settings. Models this computer holds whole still run here. Retrying \
+             as-is won't help.",
         )),
         SwarmError::InferenceTimeout(_) => Some((
             "inference_timeout",

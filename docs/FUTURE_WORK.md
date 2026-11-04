@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #402**). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #403**). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -1156,6 +1156,9 @@ of the 9 connected machines fetched nothing (this one, the anchor, a 0.3.268 nod
 over a day. **Direction**: a machine says whether it takes parts (a `NodeCapability` field,
 `#[serde(default)]`, or the free storage it would accept — `disk_available_mb` is the filesystem's,
 not the budget's) and the ring is built from those only, an older node counted as before.
+**2026-11-04**: `NodeCapability::auto_manage` now carries the first half (v0.3.271, display only so
+far — the ring does not read it yet); the Russian node is also refused USE of the swarm now
+(`daemon::state::swarm_use`), which does not change what the ring hands it.
 
 #### #401 — A full computer asks for room for a scarce part every minute and prune gives none back
 `P2` · placement · **OPEN** — 2026-11-02, still true 2026-11-04 · history: this entry; v0.3.270's `RoomFor::Scarce`; the `kept=` report on main (`d3040a3c`)
@@ -1173,6 +1176,21 @@ none back` (`kept=`) on that node and fix the rule it names; the ask logging eve
 for days is itself a sign the loop has no end state.
 
 ### Network and transport
+
+#### #402 — A peer's capability can be played back by anyone, and the receiver installs it
+`P3` · network · **OPEN** — 2026-11-04 · history: the swarm-use security review (`docs/invariants/network.md` § "A computer that shares nothing may look at the swarm")
+
+A `NodeCapabilityUpdate` is sealed by its sender but carries no stamp the receiver compares, and
+gossip's freshness filter (`network::manager::events`) covers health pings, part announcements and
+credit gossip only — so any member can republish a peer's old capability every ~90 s, and every
+node installs it. Since v0.3.271 that can no longer get the peer refused USE of the swarm (an older
+version is never installed, `swarm_use::capability_may_replace`; parts are read beside the
+freshness-checked announcements), but a replay of the SAME version with an older `hosted_shards`,
+`resident_layers` or memory figures still misleads routing until the peer's next change or its
+quiet repeat (5 → 40 min). **Direction** (the reviewer's): stamp the capability — wall-clock
+issue time, or boot id + sequence — and refuse one not newer than the installed one; additive
+(`#[serde(default)]`, an older peer's unstamped capability accepted as now). Mind a peer's clock:
+a stamp far ahead must not lock out its later updates.
 
 #### #155 — AutoNAT redials a peer this node is already connected to, and the per-peer cap denies it, every ~5 s
 `P3` · network · **PARTIAL** — 2026-10-02, narrowed 2026-10-07, recurred 2026-10-30/31, **cause found and fixed 2026-11-02** (field check left) · history: archive row #155, gotcha #774, #1020
