@@ -1920,7 +1920,15 @@ can do.
 **Left**: (1) the A/B where #388 came from — a card far on the real link — now that v0.3.268 carries
 bit 36 (2026-11-02): `real_link.sh` arms `flow@SWARMLLM_FLOW_SERVED_TIME=1` against `flow`, ABBA × 3, prose and
 code, the far's slow spells counted per reply (`served_read`, `far_cuts`, `far_undone`); the
-default follows it. (2) On the rig the link's share of a delay rose ~400 ms over its least while
+default follows it. **Tried 2026-11-04, VOID** (`~/swarmllm-gate/deep/fr/real_link.sh`, `TAG=388`, ABBA × 3, one
+build = main `042f3dcc`): `aa3d1e66`'s least round trip had fallen to 117-156 ms (it read ~420 ms
+through October), and at that distance all 24 replies decoded by streamed checks (`dsd_stream`,
+shape `peer-last`) — 0 `a tree that flowed is complete` lines — so `FlowGuard` and the switch never
+ran; the arms' prose 11.97 against 11.22 tok/s and code 34.22 against 34.15 are noise. The A/B
+needs a far whose round trip makes the tree flow (or the shape forced). Same run: a reply's third
+token at temperature 0 differed between asks of one arm ("In the quiet town" / "In the heart"),
+the shape of a near-tie under reassociation (gotcha #709's test: off-rank would be sampling) — not
+scored against llama.cpp, no 14B reference here. (2) On the rig the link's share of a delay rose ~400 ms over its least while
 the far was busy — most likely both nodes' network tasks waiting for the one processor, not
 measured apart; on the real link, check `link_least_ms` against the least round trip before
 trusting the link window's cuts.
