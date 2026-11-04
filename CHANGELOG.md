@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+**A full computer that frees no room for a part the swarm is short of says why.** Its log names
+every rule that kept a part it holds, and how many parts each kept, at most every 10 minutes; the
+hourly "storage is over the budget" warning carries the same list instead of blaming the number of
+copies the network needs, which nothing had checked. Log only — no part is kept or given back
+differently.
+
 ## [0.3.270-alpha] — 2026-11-02
 
 **A computer holding many models is seen by the swarm again, an idle model leaves the graphics card

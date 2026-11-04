@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #401**). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #402**). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -1156,6 +1156,21 @@ of the 9 connected machines fetched nothing (this one, the anchor, a 0.3.268 nod
 over a day. **Direction**: a machine says whether it takes parts (a `NodeCapability` field,
 `#[serde(default)]`, or the free storage it would accept — `disk_available_mb` is the filesystem's,
 not the budget's) and the ring is built from those only, an older node counted as before.
+
+#### #401 — A full computer asks for room for a scarce part every minute and prune gives none back
+`P2` · placement · **OPEN** — 2026-11-02, still true 2026-11-04 · history: this entry; v0.3.270's `RoomFor::Scarce`; the `kept=` report on main (`d3040a3c`)
+
+The Proxmox node (`96842635`, 59 GB, 7.4 GB free) logs `a part the swarm is short of does not
+fit what storage is left — prune may give back spare copies to make room` about once a minute
+(105 times in 3 h on 2026-11-04, `qwen3-4b-q4-k-m` part 2, `holders=1`, `lacks_mb=409`; on
+11-02 it was `ornith-1.5-35b-q4-k-m` part 9) and prune frees nothing, though it holds copies
+four to six computers also hold (llama-3.2-1b, xlam-3b, qwen2.5-14b, xlam-8b on 11-02). So the
+room note v0.3.270 added for a popular-list model held by one computer reaches the full
+computers that should make room for it and changes nothing there. **Not established**: which
+rule keeps those copies — suspects `kept_by_rank`, a loaded model, a 24 h shed target.
+**Next**: once a release carries `d3040a3c`, read `DIAG: a part asks for room and prune gave
+none back` (`kept=`) on that node and fix the rule it names; the ask logging every minute
+for days is itself a sign the loop has no end state.
 
 ### Network and transport
 
