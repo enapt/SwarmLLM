@@ -55,6 +55,16 @@
 //! one that is merely behind sync; both decide before anything else is sent,
 //! which is why a node's version rides in Identify from v0.3.271.
 //!
+//! **A computer this node has not heard from is not judged "allowed" unless
+//! it is connected** ([`SharedState::swarm_use_of_peer`]'s `unheard`): a
+//! relayed request's origin arrives with no capability on record, and a
+//! computer cut off for its release loses its record with its connection —
+//! read as "allowed", a computer cut off here, or one sharing nothing, had
+//! its requests run here through any relay that had not judged it (#403). A
+//! relayed body from a computer cut off right now is refused before dispatch
+//! (`NetworkManager::handle_relayed_envelope` / `_tensor`): losing contact
+//! means through a relay too.
+//!
 //! **What the parts gate does NOT withhold**: gossip, parts and updates. A
 //! computer that shares too few parts still fetches parts (which is how it
 //! starts to share) and hears the swarm. Its owner's models held whole still
@@ -125,6 +135,10 @@ pub enum SwarmUse {
         running: String,
         newest: String,
     },
+    /// It has not said what it shares — no capability on record — and is not
+    /// connected here to say it: a computer reaching this node only through a
+    /// relay (FUTURE_WORK #403). Never this node's own verdict.
+    NotHeardFrom,
 }
 
 impl SwarmUse {
@@ -138,6 +152,7 @@ impl SwarmUse {
             Self::Allowed => "allowed",
             Self::TooFewParts { .. } => "too_few_parts",
             Self::TooFarBehind { .. } => "too_far_behind",
+            Self::NotHeardFrom => "not_heard_from",
         }
     }
 
@@ -155,6 +170,9 @@ impl SwarmUse {
                 running: running.clone(),
                 newest: newest.clone(),
             }),
+            // Only ever a PEER's verdict: this node always knows what it
+            // shares itself ([`SharedState::swarm_use_here`]).
+            Self::NotHeardFrom => None,
         }
     }
 
@@ -177,6 +195,11 @@ impl SwarmUse {
             Self::TooFarBehind { running, newest } => format!(
                 "this machine runs requests for computers at most one release behind, and \
                  yours runs {running} while {newest} is out — update it"
+            ),
+            Self::NotHeardFrom => format!(
+                "this machine runs requests for computers that share at least \
+                 {PARTS_TO_USE_THE_SWARM} model parts, and has not yet heard what yours shares — \
+                 it reached this machine only through another computer; try again in a few minutes"
             ),
         };
         SwarmError::ServiceUnavailable(why).to_string()
@@ -470,13 +493,44 @@ impl SharedState {
     /// a tensor-parallel layer's prompt pass) and shown in the peer list.
     ///
     /// A device of this node's pool always may — the owner admitted it. A
-    /// peer whose capability has not arrived yet may too: silence is no
-    /// reason to think otherwise (`NodeCapability::can_serve_inference`'s
-    /// rule), and a released node sends its capability when it connects.
+    /// peer with no capability on record is judged by [`Self::unheard`].
     pub fn swarm_use_of_peer(&self, peer: &NodeId) -> SwarmUse {
         match self.peer_registry.get(peer) {
             Some(entry) => self.swarm_use_of_entry(&entry),
-            None => SwarmUse::Allowed,
+            None => self.unheard(peer),
+        }
+    }
+
+    /// A computer that has not said what it shares. CONNECTED, it may: a
+    /// released node sends its capability as it connects, so the silence is
+    /// the moments before that arrives — and a program that never sends it is
+    /// the modified build the gate does not stop (module docs). NOT
+    /// connected, it may not ([`SwarmUse::NotHeardFrom`]) until its capability
+    /// arrives: such a computer reaches this node only through a relay, whose
+    /// registry entry starts with none (`ensure_relayed_origin_known`), and a
+    /// node this one cut off for its release loses its entry with the
+    /// connection — so "unknown" was "allowed" for exactly the computers the
+    /// gate refuses (FUTURE_WORK #403). The wait ends by itself: a gossiped
+    /// capability is installed into the relayed origin's entry (dispatch's
+    /// `NodeCapabilityUpdate` arm), at most `QuietRepeat`'s 40 min away. A
+    /// coordinator's registry drops a computer with its connection
+    /// (`handle_connection_closed`), so an honest one asks this node while
+    /// not connected to it only across a dropped connection or a relay, and
+    /// a refusal costs it a re-plan without a penalty. go-libp2p reasons the
+    /// same way about a relayed connection: "limited", and no protocol runs
+    /// over one it did not opt in to (`WithAllowLimitedConn`, go-libp2p-swarm
+    /// #236); Saltzer and Schroeder's fail-safe default.
+    ///
+    /// THIS node may — `pool_membership` counts it its own pool's device: a
+    /// split that starts and finishes here hands its last prompt pass back
+    /// naming it as the coordinator (`layer_forward::judged_as`), and it is in
+    /// no registry and connected to nobody as itself.
+    fn unheard(&self, peer: &NodeId) -> SwarmUse {
+        if crate::pool::scope::is_pool_member(self, peer) || self.connected_node_ids.contains(peer)
+        {
+            SwarmUse::Allowed
+        } else {
+            SwarmUse::NotHeardFrom
         }
     }
 
@@ -519,7 +573,7 @@ impl SharedState {
                 &c.version,
                 &self.releases_known(),
             ),
-            None => SwarmUse::Allowed,
+            None => self.unheard(&peer.node_id),
         }
     }
 }
@@ -853,8 +907,82 @@ mod tests {
                 running: "0.3.268-alpha".into(),
                 newest: "0.3.270-alpha".into(),
             },
+            SwarmUse::NotHeardFrom,
         ] {
             assert!(refused.peer_refusal().starts_with(prefix.trim_end()));
+            assert!(
+                refused.peer_refusal().len() > prefix.len(),
+                "{refused:?} says why"
+            );
         }
+    }
+
+    /// The registry entry a relayed origin gets (`ensure_relayed_origin_known`):
+    /// known by key, nothing said.
+    fn entry_with_nothing_said(node: &NodeId) -> crate::types::PeerInfo {
+        crate::types::PeerInfo {
+            node_id: node.clone(),
+            addresses: vec![],
+            capability: None,
+            last_seen: chrono::Utc::now(),
+            latency_ms: None,
+            trust_score: 0.5,
+            peer_id_bytes: None,
+            ack_srtt_ms: None,
+            active_request_count: 0,
+            first_seen: 0,
+            verified_transaction_count: 0,
+            is_lan_peer: false,
+            goodput_bytes_per_sec: None,
+            goodput_samples: 0,
+        }
+    }
+
+    /// **A computer that has said nothing of what it shares may use the swarm
+    /// only while connected** (FUTURE_WORK #403). A relayed request's origin
+    /// is registered with no capability, and a computer cut off here loses its
+    /// entry with its connection — both read "allowed", so either had its
+    /// requests run here through a relay that had not judged it.
+    #[tokio::test]
+    async fn a_computer_not_heard_from_may_use_the_swarm_only_while_connected() {
+        let state = state();
+        let relayed = NodeId([0x45; 32]);
+        assert_eq!(
+            state.swarm_use_of_peer(&relayed),
+            SwarmUse::NotHeardFrom,
+            "cut off here: its entry went with its connection"
+        );
+        state
+            .peer_registry
+            .insert(relayed.clone(), entry_with_nothing_said(&relayed));
+        assert_eq!(
+            state.swarm_use_of_peer(&relayed),
+            SwarmUse::NotHeardFrom,
+            "a relayed origin's entry"
+        );
+        assert_eq!(SwarmUse::NotHeardFrom.key(), "not_heard_from");
+        assert!(
+            SwarmUse::NotHeardFrom.refusal("m".into()).is_none(),
+            "never this node's owner's"
+        );
+        // Connected, its capability is on its way (sent as it connects).
+        state.connected_node_ids.insert(relayed.clone());
+        assert!(state.swarm_use_of_peer(&relayed).is_allowed());
+        // This node, named as the coordinator of its own split's last pass —
+        // its own pool's device (`pool_membership`), never refused.
+        assert!(
+            state
+                .swarm_use_of_peer(state.identity.node_id())
+                .is_allowed(),
+            "a split that starts and finishes here"
+        );
+        // A device of this node's pool may, connected or not, entry or not.
+        let device = NodeId([0x46; 32]);
+        make_pool_member(&state, &device).await;
+        assert!(state.swarm_use_of_peer(&device).is_allowed());
+        state
+            .peer_registry
+            .insert(device.clone(), entry_with_nothing_said(&device));
+        assert!(state.swarm_use_of_peer(&device).is_allowed());
     }
 }

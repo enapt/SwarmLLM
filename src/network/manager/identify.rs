@@ -49,11 +49,17 @@ impl NetworkManager {
     /// The `peer_registry` entries that can go without touching a connection:
     /// nodes this node is not connected to — a proven relayed origin, or a peer
     /// gone and not yet swept — never a LAN peer, a node in a running pipeline
-    /// or `keep`. How many there are, and the one unseen longest.
+    /// or `keep`. How many there are, and the one to give up: one that has
+    /// said nothing of itself (no capability) before one that has, then the
+    /// one unseen longest. A relayed origin's entry is where its gossiped
+    /// capability lands, and without one the use gate refuses it
+    /// (`swarm_use::unheard`), so a stranger minting origins — each a signed
+    /// relayed body, blank — must not push out an honest relay-only
+    /// computer's entry and keep it refused (security review of #403).
     pub(super) fn unconnected_registry_entries(&self, keep: &NodeId) -> (usize, Option<NodeId>) {
         let in_pipelines = self.active_pipeline_nodes();
         let mut count = 0;
-        let mut oldest: Option<(chrono::DateTime<chrono::Utc>, NodeId)> = None;
+        let mut first_to_go: Option<((bool, chrono::DateTime<chrono::Utc>), NodeId)> = None;
         for entry in self.shared_state.peer_registry.iter() {
             if entry.is_lan_peer
                 || entry.key() == keep
@@ -63,14 +69,13 @@ impl NetworkManager {
                 continue;
             }
             count += 1;
-            if oldest
-                .as_ref()
-                .is_none_or(|(seen, _)| entry.last_seen < *seen)
-            {
-                oldest = Some((entry.last_seen, entry.key().clone()));
+            // `false` sorts first: nothing said goes before something said.
+            let rank = (entry.capability.is_some(), entry.last_seen);
+            if first_to_go.as_ref().is_none_or(|(held, _)| rank < *held) {
+                first_to_go = Some((rank, entry.key().clone()));
             }
         }
-        (count, oldest.map(|(_, id)| id))
+        (count, first_to_go.map(|(_, id)| id))
     }
 
     /// Drop one `peer_registry` entry to stay under [`MAX_PEER_REGISTRY`]: a

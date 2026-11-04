@@ -231,7 +231,7 @@ impl ForwardRefused {
                 kind,
                 why = why.key(),
                 detail = ?why,
-                "DIAG: a peer's request refused — it may not use the swarm (too few parts shared, or too far behind)"
+                "DIAG: a peer's request refused — it may not use the swarm (too few parts shared, too far behind, or not heard from)"
             );
             return;
         }

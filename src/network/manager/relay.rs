@@ -31,6 +31,9 @@ use super::NetworkManager;
 const UNSIGNED: &str =
     "it is unsigned, so its origin cannot be proven (a sender older than RELAY_SIGNED, or a forgery)";
 
+/// Why a relayed body from a computer cut off for its release is refused.
+const CUT_OFF: &str = "its origin is cut off for running a release two or more behind the newest";
+
 impl NetworkManager {
     /// Whether a `SwarmMessage` is eligible to be routed through a relay. Only
     /// the remote-generate inference fast path — the prompt request, streamed
@@ -432,6 +435,10 @@ impl NetworkManager {
                 self.refuse_relayed(immediate_peer, &env.origin, "envelope", &why);
                 return;
             }
+            if self.origin_is_cut_off(&env.origin) {
+                self.refuse_relayed(immediate_peer, &env.origin, "envelope", &CUT_OFF);
+                return;
+            }
             if let Err(why) = self.admit_relayed(&env.origin, &immediate_peer, digest, sent_at_ms) {
                 self.refuse_relayed(immediate_peer, &env.origin, "envelope", &why);
                 return;
@@ -537,6 +544,10 @@ impl NetworkManager {
                         return;
                     }
                 };
+            if self.origin_is_cut_off(&rt.origin) {
+                self.refuse_relayed(immediate_peer, &rt.origin, "tensor", &CUT_OFF);
+                return;
+            }
             if let Err(why) = self.admit_relayed(&rt.origin, &immediate_peer, digest, sent_at_ms) {
                 self.refuse_relayed(immediate_peer, &rt.origin, "tensor", &why);
                 return;
@@ -649,6 +660,18 @@ impl NetworkManager {
                 "refusing a relayed {what}: {why}"
             );
         }
+    }
+
+    /// Is the PROVEN origin of a relayed body a computer this node cut off for
+    /// its release (`cut_off_peer`), still blocked? Losing contact means
+    /// through a relay too: another computer that has not cut it — an older
+    /// release — would otherwise carry its requests here (FUTURE_WORK #403).
+    /// Asked after the proof, so a forger naming a cut-off origin is refused
+    /// as unproven, and before the replay memory and the registry, so such a
+    /// body takes neither.
+    fn origin_is_cut_off(&self, origin: &NodeId) -> bool {
+        crate::network::transport::node_id_to_peer_id(origin)
+            .is_some_and(|peer| self.cut_off.contains_key(&peer))
     }
 
     /// Take a proven relayed body into the replay memory, counted against the
@@ -912,13 +935,9 @@ mod tests {
         assert!(target.dispatched.try_recv().is_err(), "a replay is refused");
     }
 
-    #[tokio::test]
-    async fn a_relayed_tensor_is_dispatched_only_when_its_origin_is_proven() {
-        let mut target = Target::new();
-        let origin = Identity::generate();
-        let relay = PeerId::random();
-        let request_id = uuid::Uuid::new_v4();
-        let forward = crate::types::LayerForward {
+    /// A tensor forward a relayed origin might send: the frame, not the work.
+    fn relayed_forward(request_id: uuid::Uuid) -> crate::types::LayerForward {
+        crate::types::LayerForward {
             request_id,
             sequence_num: 1,
             index_pos: 0,
@@ -949,7 +968,16 @@ mod tests {
             draft_tree_from: None,
             stream_lookahead: None,
             stream_branch: None,
-        };
+        }
+    }
+
+    #[tokio::test]
+    async fn a_relayed_tensor_is_dispatched_only_when_its_origin_is_proven() {
+        let mut target = Target::new();
+        let origin = Identity::generate();
+        let relay = PeerId::random();
+        let request_id = uuid::Uuid::new_v4();
+        let forward = relayed_forward(request_id);
         let encoded = crate::network::protocol::encode_layer_forward(&forward).unwrap();
         let target_id = target.id();
         let tensor = |signed, is_result| {
@@ -1003,6 +1031,66 @@ mod tests {
 
         target.manager.handle_relayed_tensor(relay, proven);
         assert!(target.dispatched.try_recv().is_err(), "a replay is refused");
+    }
+
+    /// FUTURE_WORK #403: a computer this node cut off for its release loses
+    /// contact through a relay too — an older release that has not cut it
+    /// would otherwise carry its requests here. Nothing is learned from the
+    /// refused body, and it takes no place in the replay memory: once the
+    /// block ends, the same body is taken.
+    #[tokio::test]
+    async fn a_relayed_body_from_a_computer_cut_off_here_is_refused() {
+        let mut target = Target::new();
+        let origin = Identity::generate();
+        let origin_peer = crate::network::transport::node_id_to_peer_id(origin.node_id()).unwrap();
+        let relay = PeerId::random();
+        let target_id = target.id();
+        let request_id = uuid::Uuid::new_v4();
+        let envelope =
+            seal_relayed_message(&origin, target_id.clone(), request_id, &cancel()).unwrap();
+        let encoded =
+            crate::network::protocol::encode_layer_forward(&relayed_forward(request_id)).unwrap();
+        let (ephemeral_pub, sealed) = seal_relayed_tensor(
+            &origin,
+            &target_id,
+            &request_id,
+            RelayedKind::of_tensor(false),
+            &encoded,
+        )
+        .unwrap();
+        let tensor = crate::network::protocol::RelayedTensor {
+            relay_to: target_id.clone(),
+            origin: origin.node_id().clone(),
+            request_id,
+            is_result: false,
+            ephemeral_pub,
+            sealed,
+        };
+
+        target.manager.cut_off.insert(
+            origin_peer,
+            std::time::Instant::now() + crate::daemon::state::swarm_use::CUT_OFF_FOR,
+        );
+        target
+            .manager
+            .handle_relayed_envelope(relay, envelope.clone());
+        target.manager.handle_relayed_tensor(relay, tensor.clone());
+        assert!(
+            target.dispatched.try_recv().is_err(),
+            "cut off: neither body is dispatched"
+        );
+        assert!(!target.learned_about(origin.node_id()));
+
+        target.manager.cut_off.clear();
+        target.manager.handle_relayed_envelope(relay, envelope);
+        target.manager.handle_relayed_tensor(relay, tensor);
+        for kind in ["envelope", "tensor"] {
+            let taken = target
+                .dispatched
+                .try_recv()
+                .unwrap_or_else(|_| panic!("the block ended: the {kind} is taken"));
+            assert_eq!(taken.sender.as_ref(), Some(origin.node_id()));
+        }
     }
 
     /// A peer that cannot read signed bodies is never relayed to: it could not
@@ -1265,6 +1353,73 @@ mod tests {
                 .ensure_relayed_origin_known(Identity::generate().node_id());
         }
         assert!(state.peer_registry.contains_key(honest.node_id()));
+        assert_eq!(state.peer_registry.len(), cap);
+    }
+
+    /// A capability, as a relayed origin's gossip installs into its entry.
+    fn a_capability(node: &NodeId) -> crate::types::NodeCapability {
+        crate::types::NodeCapability {
+            coord: None,
+            node_id: node.clone(),
+            gpu: None,
+            cpu: None,
+            ram_total_mb: 0,
+            ram_available_mb: 0,
+            ram_model_budget_mb: None,
+            disk_available_mb: 0,
+            bandwidth_mbps: 0.0,
+            hosted_shards: vec![],
+            max_contribution: crate::types::ContributionLevel::Moderate,
+            uptime_seconds: 0,
+            version: env!("CARGO_PKG_VERSION").into(),
+            region: None,
+            est_tokens_per_sec_7b: 0.0,
+            os: None,
+            observed_latencies: vec![],
+            relay_capable: false,
+            protocol_version: 0,
+            features: 0,
+            relay_reservations: vec![],
+            anchor_mode: false,
+            can_serve_inference: true,
+            auto_manage: None,
+            updates_itself: None,
+            resident_layers: Vec::new(),
+            context_ceiling_tokens: None,
+            model_load_ms_per_gib: None,
+            model_memory_ceiling_mb: None,
+            machine_room_beside_card_mb: None,
+            processor_tokens_per_sec_7b: None,
+        }
+    }
+
+    /// Security review of #403: an entry with nothing said goes before one
+    /// whose capability arrived, however long that one has gone unseen — a
+    /// relay-only computer refreshed only by its pings is otherwise pushed out
+    /// by origins minted seconds ago, its capability goes with the entry, and
+    /// the use gate refuses it (`swarm_use::unheard`) for as long as the
+    /// stranger keeps minting.
+    #[tokio::test]
+    async fn minted_origins_never_push_out_an_entry_whose_capability_arrived() {
+        let target = Target::new();
+        let state = target.manager.shared_state.clone();
+        let cap = super::super::identify::MAX_UNCONNECTED_REGISTERED;
+        let honest = Identity::generate();
+        target.manager.ensure_relayed_origin_known(honest.node_id());
+        {
+            let mut entry = state.peer_registry.get_mut(honest.node_id()).unwrap();
+            entry.capability = Some(a_capability(honest.node_id()));
+            entry.last_seen = chrono::Utc::now() - chrono::Duration::seconds(100);
+        }
+        for _ in 0..cap * 3 {
+            target
+                .manager
+                .ensure_relayed_origin_known(Identity::generate().node_id());
+        }
+        assert!(
+            state.peer_registry.contains_key(honest.node_id()),
+            "the oldest, but the only one that has said what it shares"
+        );
         assert_eq!(state.peer_registry.len(), cap);
     }
 

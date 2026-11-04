@@ -5930,10 +5930,9 @@ release pipeline publishes every asset, and the update notice says "no build for
 While the swarm moves to v0.3.271, a computer on an older release that still talks to a cut one
 may forward its gossip (GossipSub forwards without our validation): harmless, since nothing plans
 with or fetches from a computer it is not connected to (`connected_node_ids`, § "Scheduler
-Liveness Oracle"), and once every computer cuts it nobody forwards it. The same transition lets a
-cut computer's request reach this node RELAYED by a computer that has not cut it: the relayed
-origin has no capability here, and the use gate lets an unknown computer in (security review,
-2026-11-04, plausible, not traced end to end; FUTURE_WORK #403). A block is enforced only once the connection is
+Liveness Oracle"), and once every computer cuts it nobody forwards it. The same transition let a
+cut computer's request reach this node RELAYED by a computer that had not cut it — closed in
+§ "A computer this node has not heard from is not judged allowed" below (#403). A block is enforced only once the connection is
 up, so the cut computer — whose older release does not know it was cut — re-dials every 2-5 s
 for the 10 minutes, each attempt a Noise handshake here (logged at `debug`); measured on the
 live swarm, 0 connections were let through in the 2.5 min watched. An older release's capability
@@ -5958,6 +5957,95 @@ Tests: `a_computer_two_releases_behind_is_cut_off_and_a_pool_device_never_is`,
 `the_liveness_tick_cuts_a_computer_whose_own_capability_names_an_old_release` (all red with
 `cut_off_for` answering `None` / the list ignored), `computers_cut_off_are_blocked_only_up_to_a_cap`,
 `update::a_withdrawn_release_is_forgotten_at_the_next_check`.
+
+## A computer this node has not heard from is not judged allowed — unless it is connected (2026-11-04, #403)
+
+**What happened.** The use gate answered "allowed" for a peer with no capability on record —
+"silence is no reason to think otherwise", since a released node sends its capability as it
+connects. Traced end to end after v0.3.271 (FUTURE_WORK #403, the cut-off's security review had
+called it plausible): a relayed request's origin is registered by the network manager with
+`capability: None` (`ensure_relayed_origin_known`), and a computer this node cuts off loses its
+registry entry with its connection (`handle_connection_closed` removes it), so its next request
+RELAYED by a computer that had not cut it — an older release, one behind — re-created a blank
+entry and passed both `RemoteGenerateRequest`'s "known peer" check and the gate at once. The
+same held for a CURRENT computer sharing nothing: relayed, it was "allowed" until its gossiped
+capability next landed in that entry (a gossiped capability is installed only into an entry that
+exists — dispatch's `NodeCapabilityUpdate` arm — at most `QuietRepeat`'s 40 min away), and again
+after each eviction of the entry (`MAX_UNCONNECTED_REGISTERED`, the stale sweep). A chained
+forward naming a coordinator with no entry here (`layer_forward::judged_as`) was "allowed" the
+same way.
+
+**Prior art.** go-libp2p marks a relayed connection "limited" and opens no stream over one unless
+the protocol opted in (`network.WithAllowLimitedConn`; go-libp2p-swarm #236: "many protocols may
+not be prepared to deal with transient connections"), and over a libp2p circuit the destination
+still judges the source from the source's OWN handshake, carried end to end. This relay carries
+no handshake — the capability is what a computer says of itself, and a relayed one has not said
+it — so the safe answer is Saltzer and Schroeder's fail-safe default: no permission until it is
+heard.
+
+**What was chosen.**
+- **One rule, at the gate's one place** (`SharedState::swarm_use_of_peer` /
+  `swarm_use_of_entry` → `unheard`): no capability on record is "allowed" only for a pool device
+  or a computer CONNECTED here (`connected_node_ids`); otherwise `SwarmUse::NotHeardFrom`, a
+  `ServiceUnavailable`-worded refusal, so a coordinator on any release bars this node for the
+  request and re-plans without a penalty. Connected keeps the old answer: its capability is on
+  its way, and a program that never sends one is the modified build no rule keyed on a peer's own
+  word stops (§ above, Limits).
+- **What it costs an honest computer.** A coordinator's registry drops a computer with its
+  connection too, so an honest one asks this node while not connected to it only across a
+  dropped connection or a relay, for a NEW request (a reply under way is never re-judged —
+  `sequence_num == 0` only). Such a request is refused until the origin's capability arrives by
+  gossip. No new message carries a capability over the relay: the case is rare, the refusal is a
+  re-plan, and a wire change would need a feature bit and a review for a path the cut-off already
+  makes rarer.
+- **A relayed body from a computer cut off RIGHT NOW is refused before dispatch**
+  (`NetworkManager::origin_is_cut_off`, both relayed handlers, after the proof — a forger naming a
+  cut-off origin is refused as unproven — and before the replay memory and the registry, so the
+  body takes neither): the user's "if they dont update they lose communication" includes a relay.
+  After its 10 min block the gate refuses it again — `NotHeardFrom`, then `TooFarBehind` once its
+  gossiped capability lands.
+- **A stranger cannot empty an honest computer's entry to keep it refused** (security review of
+  this change, MEDIUM). Relayed origins are held at `MAX_UNCONNECTED_REGISTERED` (64) and a key
+  costs nothing, so 64 minted origins pushed out the unconnected entry unseen longest — an honest
+  relay-tier coordinator, whose `last_seen` only its 30 s pings refresh — and its gossiped
+  capability then had no entry to land in (dispatch's `NodeCapabilityUpdate` arm installs into an
+  existing one only): refused again on every burst. Before #403 that eviction cost nothing at the
+  gate; now it would. `identify::unconnected_registry_entries` gives up a BLANK entry (no
+  capability) before any that holds one, oldest first within each — a minted origin never sends a
+  capability, so it only displaces its own kind. Test
+  `relay::tests::minted_origins_never_push_out_an_entry_whose_capability_arrived` (red with the
+  rank back to `last_seen` alone).
+- **First contact over a relay waits for a repeat** (review, LOW — accepted). A capability gossiped
+  before the origin's first body here found no entry and was dropped, so the wait is the origin's
+  next `QuietRepeat` (5, 10, 20, then 40 min) or a change; each request meanwhile is a re-plan
+  elsewhere. The blank entry survives the 90 s stale sweep only because the origin's gossiped
+  `HealthPing` / `ShardAnnounce` refresh `last_seen` on an existing entry. The cure — the origin's
+  capability carried over the relay, behind a feature bit — is FUTURE_WORK #405.
+- **A pool device is read through `is_pool_member`** (review, LOW — kept). It answers "no" while
+  the pool state is being written (`try_read`), so a pool device that is not connected here can be
+  refused `NotHeardFrom` for the length of that write — a re-plan. `cut_off_for` treats a busy
+  pool state as "do not act" because its action costs a connection; here the busy answer stays on
+  the refusing side, the fail-safe default this rule is built on. This node itself never contends
+  (`pool_membership` answers for it before the lock).
+
+**Limits.** A forward carrying `stream_seq` takes the `StreamWorkSlot` path and never asks the
+use gate; a released coordinator never STARTS work with a stream chunk, so only a modified build
+reaches it (pre-existing, outside the gate's stated reach — the last rule's Limits). Past
+`MAX_CUT_OFF` (1024) a computer is disconnected but not in `cut_off`, so `origin_is_cut_off`
+misses its relayed body; the gate still refuses it (`NotHeardFrom`, then `TooFarBehind`), it only
+takes a replay slot and a blank entry first. The blank-first eviction raises the cost, not the
+bar: gossip is signed by its author (`ValidationMode::Strict`), so a stranger that ALSO gossips a
+capability for every key it mints competes on `last_seen` again — at a gossip publish per key that
+every node hears. The full answer is #299's: bound unconnected entries per delivering `NetGroup`
+(FUTURE_WORK #405).
+
+**What a change must keep.** "Unknown" is never "allowed" for a computer that is not connected
+here (pool devices aside); the refusal stays `ServiceUnavailable`-worded; the cut-off check runs
+after the proof and before anything is learned; a blank registry entry is given up before one a
+capability landed in. Tests:
+`swarm_use::tests::a_computer_not_heard_from_may_use_the_swarm_only_while_connected` (red with
+`unheard` answering `Allowed`), `relay::tests::a_relayed_body_from_a_computer_cut_off_here_is_refused`
+(red without `origin_is_cut_off`).
 
 ## Every part this node serves shares ONE upload limit (2026-10-24, FUTURE_WORK #335)
 

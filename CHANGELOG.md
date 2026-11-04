@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+**A computer that is cut off, or shares nothing, can no longer get its chats run on yours by going
+through a third computer.** Until now a computer reaching yours only through another one (a relay)
+was let in before yours had heard what it shares — so one disconnected for running a release two
+behind, or one sharing nothing, could still have its requests run by passing them through a
+computer on an older release. Now such a computer waits until yours has heard what it shares, and
+one cut off right now is refused through a relay too. Computers connected to yours and your own
+linked devices are not affected; a computer that is turned down this way has its chat run
+elsewhere, with nothing held against either side (#403).
+
 ## [0.3.271-alpha] — 2026-11-04
 
 **A computer that only takes stops being served, the peer list shows what each computer does for

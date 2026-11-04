@@ -624,7 +624,12 @@ here with "needs other computers, and they run requests only for a computer
 that shares …" (503, `sharing_required_error` / `update_required_error`); models
 held whole here and the pool's devices still serve. The serving side logs each
 refusal at info: `grep "it may not use the swarm" node.log` — `why` is
-`too_few_parts` or `too_far_behind`, `detail` the peer's own figures. A coordinator
+`too_few_parts`, `too_far_behind` or `not_heard_from` (a computer not connected
+here, reaching it through a relay, whose capability has not arrived yet — it ends
+when its gossiped capability does, #403), `detail` the peer's own figures. A
+relayed body from a computer cut off right now is refused before that, at warn
+once a window per relay: `refusing a relayed envelope: its origin is cut off`
+(or `tensor`). A coordinator
 on any release reads the answer as "this peer cannot serve" and re-plans without
 a penalty. The peer list (`/api/admin/peers`) carries each peer's `swarm_use`.
 

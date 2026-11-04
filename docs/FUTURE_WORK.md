@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #405**). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #406**). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -47,7 +47,7 @@ cannot host (#404's search half) and each computer's give and take in the peer l
 #403 (P2, item 6), #401 (P2, item 9), #396 and #399 (P3, taken together: both are the decode
 width), #400, #402, #404 (P3), #397 (P4).
 **2026-11-04:** #403 goes first among the open work by the user's direction: the release cut-off
-and the use gate must not be passable through a relay. What each release carried is in § "Closed" and `CHANGELOG.md`; earlier
+and the use gate must not be passable through a relay. Closed the same day (§ "Closed"). What each release carried is in § "Closed" and `CHANGELOG.md`; earlier
 rankings moved word for word to the archive, § "PRIORITIES re-rank log". Only OPEN work is listed
 here. `docs/plans/` holds the multi-step designs; the entries point at them.
 **2026-10-20:** #318 goes first among P2 by the user's direction: running models too large for
@@ -73,12 +73,9 @@ the top track (`docs/plans/large_model_splits.md`).
    far peers instead of answering locally. Its causes closed in v0.3.236 and v0.3.239; left: the
    prompt priced on the processor prior for a card/processor split, and a far hop priced at
    `net:0` (with #3). Passive: the next evidence is a field `predicted_terms` line.
-6. **#403** — a computer cut off for its release may still have a request run here through a
-   relay that has not cut it: the relayed origin arrives with no capability on record, and the use
-   gate lets an unknown computer in. **Next**: trace the relayed path through `admits_a_new_request`
-   (and whether a current computer that shares nothing passes the same way), then decide whether
-   an unknown relayed origin waits for its capability or is judged by the relay's word; the fix
-   goes to the security reviewer.
+6. *(#403 CLOSED 2026-11-04, ships in the next release: a computer this node has not heard from is
+   "allowed" only while connected, and a relayed body from a computer cut off here is refused —
+   § "Closed".)*
 7. **#388** — the flow's guard takes a far computer's own delay for a queue on the link (the
    slowest reply of two 12-arm runs on 2026-11-01). The far now reports its own time and the guard
    can read it apart (`SWARMLLM_FLOW_SERVED_TIME=1`, off: it lost on a processor-only rig, for
@@ -1608,6 +1605,22 @@ application-relay path with an uncompressed, very long prompt reaches it; no cas
 measured. Reuse `pipeline_stream::chunk_layer_forward` and the `pending_activation_chunks`
 receiver on the relayed path (each chunk sealed separately) when a dropped relayed forward is
 reported.
+
+#### #405 — A computer that reaches this node only through a relay waits for a gossip repeat before its first request runs
+`P4` · network · **OPEN** — 2026-11-04 · history: #403's security review (`docs/invariants/network.md` § "A computer this node has not heard from is not judged allowed")
+
+Since #403 a relayed origin with no capability on record is refused `NotHeardFrom` (a re-plan, no
+penalty). A capability it gossiped BEFORE its first relayed body here found no registry entry and
+was dropped (dispatch's `NodeCapabilityUpdate` arm installs into an existing entry only), so the
+first request it can have run here waits for its next `QuietRepeat` (5, 10, 20, then 40 min) or a
+change. Honest cases are rare (a coordinator's own registry drops a peer with its connection, so it
+plans through a relay only across a drop or for a relay-tier peer), and no field report names it.
+The cure: on the first `NotHeardFrom` for a relayed origin, ask it for its capability over the same
+relay — `NodeCapabilityUpdate` made relay-eligible behind a new feature bit (an older target cannot
+decode the kind), signed like every relayed kind, rate-limited per origin. With it, bound the
+unconnected registry entries per delivering `NetGroup` (#299's rule for the replay memory): the
+blank-first eviction #403 added stops a stranger minting origins, but not one that also gossips a
+capability for each key it mints. Wait for a report of a relay-tier peer being refused.
 
 ### Speed on one computer
 
@@ -3935,23 +3948,6 @@ Credits are DORMANT — they gate nothing, and `credits_stay_dormant` fails the 
 starts. Read `docs/CREDITS_DESIGN.md` before touching them; the credit items below are
 preconditions for ever switching enforcement on, not work for now.
 
-#### #403 — A computer cut off for its release may still reach this node through a relay
-`P2` (raised from P3 and ranked first among the open work by the user's direction, 2026-11-04) · network · **OPEN** — 2026-11-04 · history: the version cut-off's security review (plausible, not traced end to end)
-
-A computer two releases behind is disconnected by every updated computer
-(`SharedState::cut_off_for`, `docs/invariants/network.md` § "A computer two releases behind loses
-contact"), but a computer that has NOT cut it — an older release, while the swarm moves to
-v0.3.271 — can relay its `RemoteGenerateRequest` here. The relayed origin arrives proven with no
-capability on record, and the use gate lets an unknown computer in (`swarm_use_of_entry`: no
-capability → allowed; `swarm_use_of_peer`: not in the registry at all → allowed), so the request
-is run until the origin's gossiped capability lands. The same unknown-is-allowed answer may let a
-CURRENT computer that shares nothing have a relayed request run in that window — not
-established. Next: trace the relayed path through `admits_a_new_request` to confirm both, then
-decide whether a relayed origin with no capability here waits for one (a new computer's first
-request would wait too) or is judged by the relay's word; the fix goes to `security-reviewer`.
-Shrinks by itself as older releases go: an updated relay cuts the origin too — on 2026-11-04
-every connected computer ran v0.3.271, so it is closed before it can matter.
-
 #### #383 — A serving node's stream of checks is not tied to the peer that opened it
 `P4` · network · **OPEN** — 2026-10-30 · history: #382's security review (low, pre-existing)
 
@@ -4455,6 +4451,31 @@ archive under the named heading. Reopen one only with the evidence its line name
 Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 19-28 were
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
+
+**Closed 2026-11-04, ships in the next release** (#403)
+- #403 — **A computer cut off for its release, or one sharing nothing, no longer has its requests
+  run here through a relay.** Traced end to end: a relayed origin is registered with no capability
+  (`ensure_relayed_origin_known`), and a computer cut off here loses its registry entry with its
+  connection, so its next request relayed by a computer that had not cut it (an older release)
+  re-created a blank entry and the use gate answered "allowed" for a computer with nothing on
+  record; a current computer sharing nothing passed the same way until its gossiped capability next
+  landed (≤ 40 min), and again after each eviction of the entry; a chained forward naming an unknown
+  coordinator too. Now nothing on record is "allowed" only for a pool device or a computer
+  CONNECTED here (`SharedState::swarm_use_of_peer`'s `unheard` → `SwarmUse::NotHeardFrom`, a
+  `ServiceUnavailable`-worded refusal: the coordinator re-plans, no penalty); the wait ends when the
+  origin's gossiped capability lands in its entry. A relayed body whose proven origin is cut off now
+  is refused before dispatch (`NetworkManager::origin_is_cut_off`, both relayed handlers, before the
+  replay memory and the registry). go-libp2p's "limited" relayed connections (no protocol runs over
+  one unless it opted in) and the fail-safe default decided it over trusting the relay's word, which
+  an older relay does not give. Tests
+  `a_computer_not_heard_from_may_use_the_swarm_only_while_connected`,
+  `a_relayed_body_from_a_computer_cut_off_here_is_refused` (each red without its half). Its
+  security review found a stranger could keep an honest relay-tier computer refused by minting 64
+  relayed origins, pushing its entry out before its capability landed: a blank entry is now given
+  up before one a capability landed in (`identify::unconnected_registry_entries`, test
+  `minted_origins_never_push_out_an_entry_whose_capability_arrived`, red without it). The first
+  contact's wait over a relay is #405.
+  `docs/invariants/network.md` § "A computer this node has not heard from is not judged allowed".
 
 **Closed 2026-11-04, released in v0.3.271** (#322's spawn half)
 - #322 — **A model that would fill its graphics card is placed partly on the processor before it
