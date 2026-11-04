@@ -93,3 +93,13 @@ In a unit-test build `config::node::default_data_dir()` is one temp directory pe
 builds a `SharedState` sets `config.node.data_dir` to a temporary one first (`spawn_test_server_with_data_dir` says
 which); guard `every_integration_test_node_has_a_data_dir_of_its_own`. Three leaks before it: the API key (#226), a
 33 GB disk reading (09-17), two "shards" of a model `ours-q4` the live node logged on every scan.
+
+## A rig's asking node shares, as a real user's computer does (2026-11-04, gotcha #1030)
+
+Since v0.3.271 a computer has others run its requests only if it shares ≥ 2 model parts (`swarm_use`,
+`PARTS_TO_USE_THE_SWARM`). A rig coordinator holding 1 part, a header or nothing answers 503
+`sharing_required_error` before any peer is asked — `split_rig.sh split` did, and the release gate runs it. Every
+multi-node script sources **`examples/rig_share.sh`** (`rig_share_init` once, `rig_share <node dir>` for each node
+that asks — in `split_rig.sh`, any node holding < 2 parts): the node also holds a small model of another vocabulary
+whole, so the topology under test is unchanged. `SHARE_MODEL=none` shows the refusal. A new rule about WHO may use
+the swarm is checked against every rig's asking node the day it lands.

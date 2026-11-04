@@ -40,6 +40,8 @@ ip link set lo up || { echo "cannot bring up loopback"; exit 2; }
 
 MODEL="${MODEL:-tinyllama-1.1b-chat-v1.0.q4-k-m}"
 SRC="$HOME/.local/share/swarmllm/models/$MODEL"
+. "$(dirname "${BASH_SOURCE[0]}")/rig_share.sh"  # the asking node must share (swarm_use)
+rig_share_init "$MODEL" "$(dirname "$SRC")"
 DELAY="${DELAY:-200}"
 LEAVE_AFTER="${LEAVE_AFTER:-20}"
 SP=8895; CP=8896
@@ -99,6 +101,7 @@ start_server() { # arm [load delay, default DELAY]
 
 start_client() { # arm
   C="$BASE/$1-client"; mkdir -p "$C"
+  rig_share "$C"
   config "$C" "\"$ADDR\""
   SWARMLLM_NODE_DATA_DIR="$C" "$CLIENT_BIN" run -p $CP -v >> "$C/log" 2>&1 &
   CPID=$!; PIDS="$PIDS $CPID"

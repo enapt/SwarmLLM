@@ -57,6 +57,8 @@ ip link set lo up || { echo "cannot bring up loopback"; exit 2; }
 
 MODEL="${MODEL:-tinyllama-1.1b-chat-v1.0.q4-k-m}"
 SRC="$HOME/.local/share/swarmllm/models/$MODEL"
+. "$(dirname "${BASH_SOURCE[0]}")/rig_share.sh"  # the asking node must share (swarm_use)
+rig_share_init "$MODEL" "$(dirname "$SRC")"
 WAIT_SECS="${WAIT_SECS:-1500}"
 REPLY_TOKENS="${REPLY_TOKENS:-160}"
 FAR_MS="${FAR_MS:-200}"
@@ -194,6 +196,7 @@ config "$BASE/B" "\"$ADDR_F\", \"$ADDR_G\", \"$ADDR_A\"" TH "$CAP" true
 start B "$AB_BIN" $BP
 mkdir -p "$BASE/K/models/$MODEL"
 for f in manifest.json gguf_header.bin; do cp "$SRC/$f" "$BASE/K/models/$MODEL/"; done
+rig_share "$BASE/K"
 config "$BASE/K" "\"$ADDR_F\", \"$ADDR_G\", \"$ADDR_A\", \"$ADDR_B\"" BE 64 false
 start K "$NEW_BIN" $KP
 echo "nodes up ($(date -u +%T)); letting capabilities and round trips settle"; sleep 60

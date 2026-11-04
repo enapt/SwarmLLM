@@ -15,10 +15,13 @@ set -u
 BIN="${1:-./target/debug/swarmllm}"
 MODEL=llama-3.2-3b-instruct-q4-k-m
 SRC="$HOME/.local/share/swarmllm/models/$MODEL"
+. "$(dirname "${BASH_SOURCE[0]}")/rig_share.sh"  # the asking node must share (swarm_use)
+rig_share_init "$MODEL" "$(dirname "$SRC")"
 SP=8895; CP=8896
 DROP_AT=5
 BASE=$(mktemp -d); S="$BASE/server"; C="$BASE/client"
 mkdir -p "$S/models/$MODEL" "$C"
+rig_share "$C"
 echo "base=$BASE"
 # The server holds the WHOLE model; the client holds nothing, so its only
 # route is the remote-generate fast path (single remote segment).
@@ -120,7 +123,7 @@ kill -9 $CPID 2>/dev/null; sleep 1
 cp "$C/log" "$BASE/client_fix.log" 2>/dev/null
 
 echo "=== ARM 2: control (SWARMLLM_RESEND_TOKENS=0 on the requester — the old behaviour) ==="
-rm -rf "$C"; mkdir -p "$C"; cat > "$C/config.toml" <<CFG
+rm -rf "$C"; mkdir -p "$C"; rig_share "$C"; cat > "$C/config.toml" <<CFG
 [network]
 bootstrap_peers = ["$ADDR"]
 disable_default_bootstrap = true

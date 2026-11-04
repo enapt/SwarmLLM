@@ -32,6 +32,8 @@ set -e
 # SWARM_BENCH_MODEL for a deeper split. See docs/REFERENCE_MODELS.md.
 MODEL_NAME="${SWARM_BENCH_MODEL:-tinyllama-1.1b-chat-v1.0.q4-k-m}"
 SRC_MODEL=~/.local/share/swarmllm/models/$MODEL_NAME
+. "$(dirname "${BASH_SOURCE[0]}")/rig_share.sh"  # the asking node must share (swarm_use)
+rig_share_init "$MODEL_NAME" "$(dirname "$SRC_MODEL")"
 
 if [ ! -f "$SRC_MODEL/manifest.json" ]; then
     echo "No model at $SRC_MODEL" >&2
@@ -83,6 +85,7 @@ done
 cp "$SRC_MODEL/manifest.json" "/tmp/swarm_bench_a/models/$MODEL_NAME/"
 cp "$SRC_MODEL/gguf_header.bin" "/tmp/swarm_bench_a/models/$MODEL_NAME/"
 cp "$SRC_MODEL/hf_source.json" "/tmp/swarm_bench_a/models/$MODEL_NAME/" 2>/dev/null || true
+rig_share /tmp/swarm_bench_a
 
 # Nodes B and C: split the shard list in half, B taking the earlier layers.
 # Done by enumeration rather than naming shard_000/shard_001 so the script

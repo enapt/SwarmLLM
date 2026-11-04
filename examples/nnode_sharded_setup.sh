@@ -41,6 +41,8 @@ BASE_PORT="${BASE_PORT:-8890}"
 GPU_LAYERS="${GPU_LAYERS:-0}"
 MODEL_NAME="${SWARM_BENCH_MODEL:-llama-3.2-3b-instruct-q4-k-m}"
 SRC_MODEL=~/.local/share/swarmllm/models/$MODEL_NAME
+. "$(dirname "${BASH_SOURCE[0]}")/rig_share.sh"  # the asking node must share (swarm_use)
+rig_share_init "$MODEL_NAME" "$(dirname "$SRC_MODEL")"
 BINARY="${BINARY:-$(cd "$(dirname "$0")/.." && pwd)/target/release/swarmllm}"
 PREFIX=/tmp/swarm_nnode
 
@@ -78,6 +80,8 @@ for i in $(seq 0 "$HOLDERS"); do
     # Weight-tied models keep the LM head in shard 0; a node serving the LAST
     # segment needs it even though it does not hold that shard (gotcha #178).
     cp "$SRC_MODEL/tied_output_weight.bin" "${PREFIX}_$i/models/$MODEL_NAME/" 2>/dev/null || true
+    # The coordinator holds no part of the model; it must share another.
+    [ "$i" = 0 ] && rig_share "${PREFIX}_0"
     cat > "${PREFIX}_$i/config.toml" <<CFG
 [auto_manage]
 enabled = false

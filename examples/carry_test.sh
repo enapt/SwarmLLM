@@ -39,6 +39,8 @@ ip link set lo up || { echo "cannot bring up loopback"; exit 2; }
 
 MODEL="${MODEL:-tinyllama-1.1b-chat-v1.0.q4-k-m}"
 SRC="$HOME/.local/share/swarmllm/models/$MODEL"
+. "$(dirname "${BASH_SOURCE[0]}")/rig_share.sh"  # the asking node must share (swarm_use)
+rig_share_init "$MODEL" "$(dirname "$SRC")"
 WAIT_SECS="${WAIT_SECS:-1200}"
 SP=8895; CP=8897; KP=8899
 export SWARMLLM_CANONICAL_UPLOADS=0 SWARMLLM_INFERENCE_GPU_LAYERS=0
@@ -132,6 +134,7 @@ config "$BASE/C" "\"$ADDR_S\"" TH 0 true
 start C "$C_BIN" $CP
 mkdir -p "$BASE/K/models/$MODEL"
 for f in manifest.json gguf_header.bin; do cp "$SRC/$f" "$BASE/K/models/$MODEL/"; done
+rig_share "$BASE/K"
 config "$BASE/K" "\"$ADDR_S\", \"$ADDR_C\"" BE 64 false
 start K "$NEW_BIN" $KP
 echo "nodes up ($(date -u +%T)); letting capabilities settle"; sleep 45

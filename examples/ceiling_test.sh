@@ -33,6 +33,8 @@ ip link set lo up || { echo "cannot bring up loopback"; exit 2; }
 
 MODEL="${MODEL:-tinyllama-1.1b-chat-v1.0.q4-k-m}"
 SRC="$HOME/.local/share/swarmllm/models/$MODEL"
+. "$(dirname "${BASH_SOURCE[0]}")/rig_share.sh"  # the asking node must share (swarm_use)
+rig_share_init "$MODEL" "$(dirname "$SRC")"
 SP=8895; CP=8896
 export SWARMLLM_CANONICAL_UPLOADS=0 SWARMLLM_INFERENCE_GPU_LAYERS=0
 ls "$SRC"/shard_*.bin >/dev/null 2>&1 || { echo "no parts of $MODEL in $SRC"; exit 2; }
@@ -99,6 +101,7 @@ start_client() { # arm
   # header a connected node would have — no part of the model.
   C="$BASE/$1-client"; mkdir -p "$C/models/$MODEL"
   cp "$SRC/gguf_header.bin" "$C/models/$MODEL/"
+  rig_share "$C"
   config "$C" "\"$ADDR\"" 0
   SWARMLLM_NODE_DATA_DIR="$C" "$CLIENT_BIN" run -p $CP -v >> "$C/log" 2>&1 &
   CPID=$!; PIDS="$PIDS $CPID"

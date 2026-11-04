@@ -657,9 +657,14 @@ OUT="${OUT:-$BASE/out}"
 mkdir -p "$OUT"
 export LD_LIBRARY_PATH=/usr/local/cuda/lib64:/usr/lib/wsl/lib
 
+# The asking node must SHARE (`swarm_use`, v0.3.271): a node holding fewer than
+# 2 parts of MODEL also holds SHARE_MODEL whole (`rig_share.sh`).
+. "$(dirname "${BASH_SOURCE[0]}")/rig_share.sh"
+rig_share_init "$MODEL" "$MODELS_DIR"
 make_node() { # dir shards bootstrap
   local d="$1" m="$1/models/$MODEL"
   mkdir -p "$m"
+  [ "$(echo "$2" | tr ',' '\n' | command grep -c .)" -lt 2 ] && rig_share "$d"
   # No node runs the HuggingFace watcher: the rig must not fetch anything, and
   # since #389 the watcher registers the models people run. softunload: A runs
   # auto-manage as a default install does, on a short cycle.

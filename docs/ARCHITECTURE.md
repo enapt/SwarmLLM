@@ -140,6 +140,9 @@ swarmllm/
 │                 own Hugging Face tokenizer.json, where llama.cpp is no authority (SPM whitespace);
 │                 reply_ab.sh — greedy replies from one binary, for a two-binary diff; it
 │                 found #93, and byte-identical to the last release is NOT correctness (#96);
+│                 rig_share.sh — sourced by every multi-node rig: a node that asks holds a
+│                 small model of another vocabulary whole, so it SHARES 2+ parts (`swarm_use`,
+│                 v0.3.271) and is not refused before any peer is asked (gotcha #1030);
 │                 split_rig.sh — two isolated nodes holding chosen shards of one model, so a
 │                 request MUST split; `split` asks through it, `kill` breaks one side
 │                 mid-reply (KILL=A|B|B_UNLOAD) — the release gate's split check (#93);

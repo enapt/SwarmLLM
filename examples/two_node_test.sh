@@ -28,6 +28,8 @@ set -u
 BIN="${1:-./target/release/swarmllm}"
 MODEL="${SWARM_TWONODE_MODEL:-llama-3.2-3b-instruct-q4-k-m}"
 MODELS_DIR="${SWARM_TWONODE_MODELS_DIR:-$HOME/.local/share/swarmllm/models}"
+. "$(dirname "${BASH_SOURCE[0]}")/rig_share.sh"  # the asking node must share (swarm_use)
+rig_share_init "$MODEL" "$MODELS_DIR"
 SERVER_PORT="${SWARM_TWONODE_SERVER_PORT:-8894}"
 CLIENT_PORT="${SWARM_TWONODE_CLIENT_PORT:-8893}"
 
@@ -37,6 +39,7 @@ CLIENT_PORT="${SWARM_TWONODE_CLIENT_PORT:-8893}"
 BASE=$(mktemp -d)
 S="$BASE/server"; C="$BASE/client"
 mkdir -p "$S" "$C/models"
+rig_share "$C"
 ln -s "$MODELS_DIR" "$S/models"
 
 # Kill only what this script started. A broad `pkill swarmllm` takes down any
