@@ -99,11 +99,22 @@ fn drafter_vocabulary(state: &SharedState, target: &ModelId, drafter: &ModelId) 
     let (t, d) = (meta(target)?, meta(drafter)?);
     let answer = compatible_vocabularies(&t, &d);
     if answer.is_none() {
-        tracing::info!(
-            target_model = %target,
-            drafter = %drafter,
-            "the configured drafter does not share the target's vocabulary — not drafting with it"
-        );
+        // Said to the owner only for the drafter they named: with none named,
+        // every held model is asked here, and a 70B split logged five such
+        // lines naming none of them configured (2026-11-04).
+        if state.cfg().inference.draft_model.as_deref() == Some(drafter.0.as_str()) {
+            tracing::info!(
+                target_model = %target,
+                drafter = %drafter,
+                "the configured drafter does not share the target's vocabulary — not drafting with it"
+            );
+        } else {
+            tracing::debug!(
+                target_model = %target,
+                model = %drafter,
+                "a held model does not share the target's vocabulary — not a drafter for it"
+            );
+        }
     }
     vocabulary_matches().insert(key, answer);
     answer
