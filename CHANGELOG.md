@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+## [0.3.271-alpha] — 2026-11-04
+
+**A computer that only takes stops being served, the peer list shows what each computer does for
+yours, and long chats fit on a nearly full graphics card.**
+
 **The peer list shows what each computer has done for yours, and yours for it.** Two new columns —
 "Did for you" and "You did for it" — count the requests each side ran for the other, counted by your
 own computer from what it saw itself, so nobody else's word enters them and nobody can be blamed by
