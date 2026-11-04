@@ -826,6 +826,27 @@ fn requester_of(
         .or_else(|| crate::network::transport::node_id_of_peer_bytes(sender_peer_bytes))
 }
 
+/// The computer a forward that starts a request is judged as by the swarm-use
+/// gate (`SharedState::swarm_use_of_peer`): the coordinator, by
+/// [`requester_of`]'s rule. A prompt pass between two peers is chained
+/// straight from one to the other (`pipeline::distributed`), so its sender
+/// here is only the hop before — a computer serving its own range of the
+/// split, which may share a single part — and judging it refused the honest
+/// coordinator's request and got this node barred (pre-release review of
+/// v0.3.271). The name is cleartext the seal does not authenticate, so a
+/// modified program can name a computer in good standing; it can as easily
+/// claim parts it does not have, which the gate already does not stop
+/// (`daemon::state::swarm_use`). This node itself — a boomerang's tail — is in
+/// no registry, and its own request is never refused.
+pub(super) fn judged_as(
+    requester_node_id: Option<[u8; 32]>,
+    sender: &crate::types::NodeId,
+) -> crate::types::NodeId {
+    requester_node_id
+        .map(crate::types::NodeId)
+        .unwrap_or_else(|| sender.clone())
+}
+
 /// The computer whose give-and-take tab a forward goes on
 /// (`daemon::state::peer_exchange`): the authenticated sender, when the forward
 /// names no coordinator or names the sender itself. A chained forward naming
@@ -1405,7 +1426,7 @@ mod chaining_tests {
         assert!(!chaining_applies(&hop(), false, true));
     }
 
-    use super::{asked_by_itself, reply_target, requester_of};
+    use super::{asked_by_itself, judged_as, reply_target, requester_of};
 
     /// #389 (a): the demand count asks whose request a forward serves. An
     /// unchained forward — the ordinary split — names no requester, because
@@ -1470,6 +1491,27 @@ mod chaining_tests {
             "further down a chain: the named coordinator is not authenticated"
         );
         assert_eq!(asked_by_itself(None, b"not a peer id"), None);
+    }
+
+    /// A chained prompt pass reaches the second peer from the FIRST peer, a
+    /// computer serving its own range that may share a single part: the
+    /// swarm-use gate judges the coordinator the forward names, never that
+    /// hop — judged as the hop, an honest coordinator's split was refused and
+    /// the refusing node barred (pre-release review of v0.3.271).
+    #[test]
+    fn a_chained_prompt_pass_is_judged_as_its_coordinator_not_the_hop_before() {
+        let coordinator = crate::types::NodeId([0xC0; 32]);
+        let previous_hop = crate::types::NodeId([0x11; 32]);
+        assert_eq!(
+            judged_as(Some(coordinator.0), &previous_hop),
+            coordinator,
+            "chained: the coordinator the forward names"
+        );
+        assert_eq!(
+            judged_as(None, &previous_hop),
+            previous_hop,
+            "unchained: the sender IS the coordinator"
+        );
     }
 
     /// The bug this prevents: in a chain the previous hop hands the work along

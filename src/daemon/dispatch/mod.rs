@@ -1018,7 +1018,12 @@ pub(crate) async fn dispatch_network_messages(
                                                 &forward_semaphore,
                                                 forward_limit,
                                                 shared_state.metered_hold_now(),
-                                                || shared_state.swarm_use_of_peer(&peer_sender),
+                                                || {
+                                                    shared_state.swarm_use_of_peer(&layer_forward::judged_as(
+                                                        forward.requester_node_id,
+                                                        &peer_sender,
+                                                    ))
+                                                },
                                             ),
                                         };
                                         let (peer_slot, permit) = match admitted {

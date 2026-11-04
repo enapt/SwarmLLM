@@ -5773,6 +5773,13 @@ none; and a computer two releases behind should not be served either.
   threshold on it, not a ledger — IPFS BitSwap's debt ratio and Petals' planned points both judge
   what the serving side can observe; BitTorrent's tit-for-tat judges observed upload, which a
   swarm with dormant credits has no record of (`docs/CREDITS_DESIGN.md`).
+- **A forward is judged as the coordinator it names, not the hop that sent it** (`layer_forward::judged_as`,
+  pre-release review of v0.3.271). A prompt pass between two peers is chained straight from one to the
+  other (`pipeline::distributed`), so the second peer's sender is the first — a computer serving its own
+  range, which can share a single part. Judged by the sender, it refused an honest coordinator's split and
+  got itself barred. The name is cleartext the seal does not authenticate; a modified program naming a
+  computer in good standing gains nothing it could not get by claiming parts it lacks, which this gate
+  never claimed to stop. Test `a_chained_prompt_pass_is_judged_as_its_coordinator_not_the_hop_before`.
 - **2 parts, not 1** (the user's "1-2 shards"): one small part kept by hand is a token.
 - **Auto-manage is NOT the gate.** This project's own laptop node runs with automatic downloads
   off by choice and shares 231 parts; what a computer SHARES is the fact, how it got there is not.
