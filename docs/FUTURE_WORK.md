@@ -44,8 +44,10 @@ requests only for a computer that shares (two parts or more, fewer than two publ
 behind — one further behind is disconnected), a whole card placement split before its load where
 its cache would not fit (#322's spawn half), the Hugging Face search refusing files the swarm
 cannot host (#404's search half) and each computer's give and take in the peer list. New since:
-#401 (P2, item 8), #396 and #399 (P3, taken together: both are the decode width), #400, #402,
-#403, #404 (P3), #397 (P4). What each release carried is in § "Closed" and `CHANGELOG.md`; earlier
+#403 (P2, item 6), #401 (P2, item 9), #396 and #399 (P3, taken together: both are the decode
+width), #400, #402, #404 (P3), #397 (P4).
+**2026-11-04:** #403 goes first among the open work by the user's direction: the release cut-off
+and the use gate must not be passable through a relay. What each release carried is in § "Closed" and `CHANGELOG.md`; earlier
 rankings moved word for word to the archive, § "PRIORITIES re-rank log". Only OPEN work is listed
 here. `docs/plans/` holds the multi-step designs; the entries point at them.
 **2026-10-20:** #318 goes first among P2 by the user's direction: running models too large for
@@ -71,12 +73,18 @@ the top track (`docs/plans/large_model_splits.md`).
    far peers instead of answering locally. Its causes closed in v0.3.236 and v0.3.239; left: the
    prompt priced on the processor prior for a card/processor split, and a far hop priced at
    `net:0` (with #3). Passive: the next evidence is a field `predicted_terms` line.
-6. **#388** — the flow's guard takes a far computer's own delay for a queue on the link (the
+6. **#403** — a computer cut off for its release may still have a request run here through a
+   relay that has not cut it: the relayed origin arrives with no capability on record, and the use
+   gate lets an unknown computer in. **Next**: trace the relayed path through `admits_a_new_request`
+   (and whether a current computer that shares nothing passes the same way), then decide whether
+   an unknown relayed origin waits for its capability or is judged by the relay's word; the fix
+   goes to the security reviewer.
+7. **#388** — the flow's guard takes a far computer's own delay for a queue on the link (the
    slowest reply of two 12-arm runs on 2026-11-01). The far now reports its own time and the guard
    can read it apart (`SWARMLLM_FLOW_SERVED_TIME=1`, off: it lost on a processor-only rig, for
    that rig's reasons). **Next**: the real-link A/B — v0.3.268 carries bit 36 since 2026-11-02; the
    default follows it. (#369 CLOSED 2026-11-01.)
-7. **#318** — a model no single member can hold, at a usable speed. **Llama-3.3-70B on two
+8. **#318** — a model no single member can hold, at a usable speed. **Llama-3.3-70B on two
    machines — this one (8 GB card + processor) and an RTX 3060 in Australia (~420 ms) — reads
    2.37-2.61 tok/s on new questions (v0.3.264, 2026-10-31 04Z) and 1.81-2.22 (v0.3.265, 12Z, the
    same setup), first token ~5 s warm** (v0.3.256 on four machines: 1.29-1.47 and 9-10 s). The same
@@ -98,16 +106,16 @@ the top track (`docs/plans/large_model_splits.md`).
    third machine pays only where it holds what two cannot, which is the 70B's case. The track's
    history (near chains #192, the far chain #346, trees #134, the stream, tensor-core MMQ #325,
    requester guesses) is in the #318 entry and § "Closed".
-8. **#401** — a full computer asks every minute for room for a part only one computer holds and
+9. **#401** — a full computer asks every minute for room for a part only one computer holds and
    frees nothing, so a model new to the swarm can stay on one computer. Read on v0.3.271: every
    part the full Proxmox node holds is kept, 77 because too few other computers hold them to give
    one back, 8 for prompt privacy. **Next**: check that holder count against the node's own, then
    an end state for an ask that finds nothing, and whether a copy at 3 holders gives way to a part
    at 1.
-9. **#115** — the rest of Gemma 4: its image reader and its drafters, refused by name today,
+10. **#115** — the rest of Gemma 4: its image reader and its drafters, refused by name today,
    never loaded wrong. (Gemma 3 reads pictures as llama.cpp does since 2026-10-19; Gemma 4's
    E2B/E4B run since 2026-10-17 and fit a 4 GB / 6 GB card whole since #296.)
-10. **#91** — an idle node's upload (the complaint that uninstalls a P2P app): 5.5 KB/s on the .241
+11. **#91** — an idle node's upload (the complaint that uninstalls a P2P app): 5.5 KB/s on the .241
    fleet (6.7 on .240, 8.8 on .239), measured 2026-10-17. Manifests now arrive about once an hour
    (0.83 a minute before (2)), and a restart no longer re-gossips them ((2c), v0.3.242). The part
    that is not gossip is 2.5 KB/s on 10-18 (4.1 out), and our own direct messages are only 0.19 of it
@@ -118,7 +126,7 @@ the top track (`docs/plans/large_model_splits.md`).
    v0.3.244) read on the field 10-19: upload 2.4 KB/s, Kademlia answers 0.51 KB/s, every one a
    `find_node` — peers' routing-table refreshes. (2h) refreshes every 10 min instead of 5 (released in
    v0.3.245); next, re-read once the fleet runs it, then the answers' size.
-11. **#3**, **#180** — the routing cost model mis-prices a split by regime, which keeps partial
+12. **#3**, **#180** — the routing cost model mis-prices a split by regime, which keeps partial
     ranges off. Fit on three peers 2026-10-18: a short reply's `max_tokens` now caps the passes
     (16-token replies 0.49 → 0.97 of their price), a long one is priced at its model's mean
     reply length (160-token replies were 2.5x their price), and a chain its head leads is priced
@@ -129,18 +137,18 @@ the top track (`docs/plans/large_model_splits.md`).
     rounds it takes, a guessed token not crossing alone (#3 (d), 0.49 → 0.77 of its price on the
     drafter rig), 10-19, all in v0.3.244; next, a chain driven from here (#3 (a2)). Never tune the
     constant.
-12. **#10**, **#171** — conversation prefixes across computers (no digests gossiped, caches end at
+13. **#10**, **#171** — conversation prefixes across computers (no digests gossiped, caches end at
     the 10-minute expiry), and a split's prompt pieces chained between two peers.
-13. **#138**, **#129** — a model that does not fit the card (MoE and a split's prompt stages
+14. **#138**, **#129** — a model that does not fit the card (MoE and a split's prompt stages
     shipped in v0.3.235-v0.3.237; the entries hold what is left), and a near-fit model sent far.
-14. **#228** — Qwen 3.5 guesses ahead on one computer (processor and card) and through a split's n-gram loop (bit 33) since 2026-10-25; the drafter's paths and MTP still stay off — a checkpoint replayed across steps, #228 (5).
-15. **#336** — tool calls, and `response_format` on a split or a peer's whole-model hand-off, are
+15. **#228** — Qwen 3.5 guesses ahead on one computer (processor and card) and through a split's n-gram loop (bit 33) since 2026-10-25; the drafter's paths and MTP still stay off — a checkpoint replayed across steps, #228 (5).
+16. **#336** — tool calls, and `response_format` on a split or a peer's whole-model hand-off, are
     checked only after they are written, so an agent driving a small model meets malformed calls.
     `response_format` is held on a model run whole since v0.3.262 (llguidance); next, a feature bit
     and far-end masking for a split, then tool calls as a lazy grammar (`faster_than_local.md` § 7.1).
-16. **#30** — the plaintext-prompt trust bar sits at the score an unknown peer starts on: a policy
+17. **#30** — the plaintext-prompt trust bar sits at the score an unknown peer starts on: a policy
     decision, with research, when picked up.
-17. **#326** — on a card newer than a release's machine code (Hopper, Blackwell: RTX 50-series),
+18. **#326** — on a card newer than a release's machine code (Hopper, Blackwell: RTX 50-series),
     the first reply waits ~2 min while the driver compiles flash attention's PTX (MMQ's ~8 s a
     weight type), then it is cached. Correct since the PTX went in (before: wrong output).
 
@@ -3928,18 +3936,21 @@ starts. Read `docs/CREDITS_DESIGN.md` before touching them; the credit items bel
 preconditions for ever switching enforcement on, not work for now.
 
 #### #403 — A computer cut off for its release may still reach this node through a relay
-`P3` · network · **OPEN** — 2026-11-04 · history: the version cut-off's security review (plausible, not traced end to end)
+`P2` (raised from P3 and ranked first among the open work by the user's direction, 2026-11-04) · network · **OPEN** — 2026-11-04 · history: the version cut-off's security review (plausible, not traced end to end)
 
 A computer two releases behind is disconnected by every updated computer
 (`SharedState::cut_off_for`, `docs/invariants/network.md` § "A computer two releases behind loses
 contact"), but a computer that has NOT cut it — an older release, while the swarm moves to
 v0.3.271 — can relay its `RemoteGenerateRequest` here. The relayed origin arrives proven with no
 capability on record, and the use gate lets an unknown computer in (`swarm_use_of_entry`: no
-capability → allowed), so the request is run until the origin's gossiped capability lands. Next:
-trace the relayed path through `admits_a_new_request` to confirm, then decide whether a relayed
-origin with no capability here waits for one (a new computer's first request would wait too) or
-is judged by the relay's word. Shrinks by itself as older releases go: an updated relay cuts the
-origin too.
+capability → allowed; `swarm_use_of_peer`: not in the registry at all → allowed), so the request
+is run until the origin's gossiped capability lands. The same unknown-is-allowed answer may let a
+CURRENT computer that shares nothing have a relayed request run in that window — not
+established. Next: trace the relayed path through `admits_a_new_request` to confirm both, then
+decide whether a relayed origin with no capability here waits for one (a new computer's first
+request would wait too) or is judged by the relay's word; the fix goes to `security-reviewer`.
+Shrinks by itself as older releases go: an updated relay cuts the origin too — on 2026-11-04
+every connected computer ran v0.3.271, so it is closed before it can matter.
 
 #### #383 — A serving node's stream of checks is not tied to the peer that opened it
 `P4` · network · **OPEN** — 2026-10-30 · history: #382's security review (low, pre-existing)
