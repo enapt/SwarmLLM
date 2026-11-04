@@ -85,6 +85,29 @@ pub fn cannot_host(filename: &str) -> Option<CannotHost> {
         .map(|_| CannotHost::UnreadableQuantization)
 }
 
+/// Is `filename` the model itself — not a vision projector (`mmproj`) or a
+/// multi-token-prediction head (`mtp-`) uploaded beside it? The one answer for
+/// every path that offers a repo's files: the search's file list
+/// (`model_files`, so its recommendation and its variants), the trending list's
+/// size (`offered_quant`) and the daily list of what people run
+/// (`popular::pick_file`). Two of the three asked it in their own words and the
+/// search did not, so it recommended an `mmproj` file as the model (field
+/// report 2026-11-04). Judged by the file's own name, a folder aside.
+pub fn is_the_model_file(filename: &str) -> bool {
+    let lower = filename.to_ascii_lowercase();
+    let name = lower.rsplit(['/', '\\']).next().unwrap_or(&lower);
+    !name.contains("mmproj") && !name.starts_with("mtp-")
+}
+
+/// The files of a repo's listing the search offers: GGUF files that are the
+/// model itself ([`is_the_model_file`]).
+pub(super) fn model_files(siblings: Vec<HfFileInfo>) -> Vec<HfFileInfo> {
+    siblings
+        .into_iter()
+        .filter(|f| f.rfilename.ends_with(".gguf") && is_the_model_file(&f.rfilename))
+        .collect()
+}
+
 /// A quantization tag this engine cannot read: a type
 /// `split::UNREADABLE_GGML_TYPES` lists, or any `IQ*` / `TQ*` — a file name
 /// carries an IQ mix's name (`IQ2_M`, `IQ3_XS`) as often as a type's.
@@ -191,12 +214,7 @@ async fn fetch_gguf_files(
         .await
         .map_err(|e| format!("Failed to parse file list: {e}"))?;
 
-    let gguf_files: Vec<HfFileInfo> = detail
-        .siblings
-        .unwrap_or_default()
-        .into_iter()
-        .filter(|f| f.rfilename.ends_with(".gguf"))
-        .collect();
+    let gguf_files = model_files(detail.siblings.unwrap_or_default());
     let architecture = detail.gguf.and_then(|g| g.architecture);
 
     tracing::debug!(

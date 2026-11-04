@@ -2968,7 +2968,13 @@ pick shares it. The browser shows why per file and offers nothing for such a rep
 build has no loader for is said too (`family_unsupported`: `gguf.architecture` from the same
 file-list reply, `ModelArch::is_supported`; the reporter's model was `qwen4exp`, #390 (4)). The
 "Trending this week" strip still lists such repos — a click runs this search, which says why. The
-header probe is still the real check (#394: a K-quant name can hide IQ4_NL tensors). **Left, three
+header probe is still the real check (#394: a K-quant name can hide IQ4_NL tensors). **Since the
+same day's .271 report**: a vision projector (`mmproj`) or a multi-token-prediction head (`mtp-`) is
+never listed, recommended or offered as the model — `model::huggingface::is_the_model_file`, the one
+rule the search's file list (`search::model_files`), the trending size and the daily pick all ask
+(two had their own words for it and the search had none) — and a family this build cannot load
+offers no file and fits nowhere here (`admin_hf::search::offered_here`: it said `fits_vram: true` and
+recommended a file, and a row the swarm runs read "Runs locally" in the browser). **Left, three
 gaps behind it**:
 1. **IQ/TQ types in the vendored candle** — `GgmlDType` reads none of ids 16-23, 29, 34, 35, nor
    llama.cpp master's 40-42 (NVFP4, Q1_0, Q2_0 — the reporter's repo carried Q2_0 files)

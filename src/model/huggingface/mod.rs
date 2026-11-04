@@ -15,7 +15,8 @@ pub use probe::{
     ProbeFailure,
 };
 pub use search::{
-    cannot_host, extract_quant_tag, quant_is_unreadable, search_gguf_models, CannotHost,
+    cannot_host, extract_quant_tag, is_the_model_file, quant_is_unreadable, search_gguf_models,
+    CannotHost,
 };
 pub use shards::{download_shard, parse_retry_after, DownloadedPart};
 pub use watcher::{
@@ -139,13 +140,13 @@ pub fn is_embedding_repo(pipeline_tag: Option<&str>, tags: &[String]) -> bool {
 /// by the search's rule (`api::admin_hf::search`): Q4_K_M, else a Q4, else —
 /// with no sizes to compare — the lightest offered (`capacity_plan::
 /// bits_per_weight`), of the files this node could host ([`cannot_host`]).
-/// A projector file (`mmproj`) is not a quantisation of the model. The
+/// A projector file is not a quantisation of the model ([`is_the_model_file`]). The
 /// trending list estimated every repo as Q4_K_M, so a repo offering only Q8_0
 /// read 337 MB there and 609.5 MB in the search (field report 2026-10-15).
 pub fn offered_quant<'a>(filenames: impl IntoIterator<Item = &'a str>) -> Option<String> {
     let quants: Vec<String> = filenames
         .into_iter()
-        .filter(|f| f.ends_with(".gguf") && !f.to_ascii_lowercase().contains("mmproj"))
+        .filter(|f| f.ends_with(".gguf") && is_the_model_file(f))
         .filter(|f| cannot_host(f).is_none())
         .filter_map(extract_quant_tag)
         .collect();

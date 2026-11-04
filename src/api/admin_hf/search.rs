@@ -154,7 +154,7 @@ pub async fn hf_search(
                 })
                 .collect();
 
-            let recommended = recommended_file(&files);
+            let (recommended, runs_here) = offered_here(&files);
 
             let recommended_variant = recommended
                 .and_then(|f| crate::model::huggingface::extract_quant_tag(&f.filename))
@@ -174,7 +174,10 @@ pub async fn hf_search(
             // Unknown must not exclude: a node whose memory could not be read
             // is not a node with no room, and reporting "nothing fits" there
             // empties the browser for a user who cannot tell why.
-            let fits = |size: u64| node_budget_bytes.is_none_or(|budget| size < budget);
+            // Nothing fits where nothing loads: a family this build has no
+            // loader for is "fits nowhere here" (`offered_here`).
+            let fits =
+                |size: u64| runs_here && node_budget_bytes.is_none_or(|budget| size < budget);
             let fits_full = fits(rec_size);
             let fits_boomerang = fits(est_boomerang_size);
             let fits_shard = fits(est_shard_size);
@@ -241,13 +244,17 @@ pub async fn hf_search(
                 // Downloading it is refused (`GgufTensorMeta::refusal`), and
                 // nothing on the swarm can chat with it.
                 "not_chat"
-            } else if family_unsupported(&files) && swarm_model_id.is_none() {
+            } else if !runs_here {
                 // HuggingFace names a family this build has no loader for —
                 // every file of it is refused at the header, whatever its
                 // quantization (Qwen3.8-Flash-Next's `qwen4exp`, field report
-                // 2026-11-03). Where the swarm already runs it, the row below
-                // offers Chat instead.
-                "family_unsupported"
+                // 2026-11-03). Where the swarm already runs it (a computer
+                // with a newer loader), the row offers Chat through it.
+                if swarm_model_id.is_some() {
+                    "swarm_serveable"
+                } else {
+                    "family_unsupported"
+                }
             } else if recommended.is_none() {
                 // Every file is one no node could host (an IQ quantization, a
                 // split upload, a file in a folder): the row offers nothing
@@ -388,6 +395,21 @@ fn recommended_file(
         .or_else(|| hostable().next())
 }
 
+/// What a search row offers THIS node: the file to fetch, and whether
+/// anything of the repo can run here. A family this build has no loader for
+/// offers neither — the search flagged one `family_unsupported` and still said
+/// `fits_vram: true` and recommended a file, sometimes a projector (field
+/// report 2026-11-04); a row the swarm runs said "Runs locally" in the browser.
+fn offered_here(
+    files: &[crate::model::huggingface::HfModelResult],
+) -> (Option<&crate::model::huggingface::HfModelResult>, bool) {
+    if family_unsupported(files) {
+        (None, false)
+    } else {
+        (recommended_file(files), true)
+    }
+}
+
 /// HuggingFace names a model family this build has no loader for — the
 /// loader's own answer (`ModelArch::is_supported`), read before any header is
 /// fetched. A repo HuggingFace named no family for is not judged.
@@ -402,7 +424,7 @@ fn family_unsupported(files: &[crate::model::huggingface::HfModelResult]) -> boo
 
 #[cfg(test)]
 mod tests {
-    use super::{family_unsupported, recommended_file};
+    use super::{family_unsupported, offered_here, recommended_file};
     use crate::model::huggingface::HfModelResult;
 
     fn files(names: &[(&str, u64)]) -> Vec<HfModelResult> {
@@ -437,6 +459,24 @@ mod tests {
         assert!(!family_unsupported(&of_family(Some("qwen2"))));
         assert!(!family_unsupported(&of_family(Some("llama"))));
         assert!(!family_unsupported(&of_family(None)));
+    }
+
+    /// **A family this build cannot load is offered nothing here** (field
+    /// report 2026-11-04: flagged `family_unsupported`, yet `fits_vram: true`
+    /// and a recommended file). No file, and no fit; a family it runs, or one
+    /// HuggingFace did not name, keeps both.
+    #[test]
+    fn a_family_this_build_cannot_load_offers_no_file_and_fits_nowhere_here() {
+        let unknown = of_family(Some("qwen4exp"));
+        let (file, runs_here) = offered_here(&unknown);
+        assert!(file.is_none(), "no file is recommended");
+        assert!(!runs_here, "and nothing of it fits here");
+        for arch in [Some("qwen2"), None] {
+            let repo = of_family(arch);
+            let (file, runs_here) = offered_here(&repo);
+            assert_eq!(file.map(|f| f.filename.as_str()), Some("m-Q4_K_M.gguf"));
+            assert!(runs_here, "{arch:?}");
+        }
     }
 
     fn pick(names: &[(&str, u64)]) -> Option<String> {

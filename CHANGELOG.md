@@ -19,6 +19,13 @@ processor at a fifth of its speed for 16 minutes this way. The wait now doubles 
 fails the model soon after taking it back; after 3 minutes of running on the card it starts again
 at 2 minutes.
 
+**The model browser no longer recommends a file that is not the model, or one this version cannot
+run.** A repository's vision add-on file (`mmproj`) could be recommended as the model to download,
+and a kind of model this version has no loader for still said it fit your graphics card and offered
+a file — where another computer runs such a model, the browser said it ran locally. Now add-on files
+are never listed, and a model this version cannot load offers no download and fits nowhere on your
+computer; where the swarm runs it, the browser offers to chat with it through the swarm.
+
 ## [0.3.271-alpha] — 2026-11-04
 
 **A computer that only takes stops being served, the peer list shows what each computer does for

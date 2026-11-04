@@ -347,6 +347,44 @@ fn a_repo_offers_the_quantisation_its_download_would_take() {
     );
 }
 
+/// **The search lists only files that are the model itself** (field report
+/// 2026-11-04: it recommended an `mmproj` file). A projector or a
+/// multi-token-prediction head never reaches the recommendation or the
+/// variants, whatever its case or folder; the model's own files all do — and
+/// the daily list's picker answers the same.
+#[test]
+fn the_search_lists_only_the_model_files_of_a_repo() {
+    let listing = [
+        "mmproj-Qwen_Qwen3.5-4B-f16.gguf",
+        "MMPROJ-model-Q8_0.gguf",
+        "mtp-Qwen_Qwen3.5-4B-Q4_K_M.gguf",
+        "Qwen_Qwen3.5-4B-Q4_K_M.gguf",
+        "Q8_0/Qwen_Qwen3.5-4B-Q8_0.gguf",
+        "README.md",
+    ];
+    let siblings = listing
+        .iter()
+        .map(|name| super::private_types::HfFileInfo {
+            rfilename: name.to_string(),
+            size: Some(1),
+        })
+        .collect();
+    let kept: Vec<String> = super::search::model_files(siblings)
+        .into_iter()
+        .map(|f| f.rfilename)
+        .collect();
+    assert_eq!(
+        kept,
+        [
+            "Qwen_Qwen3.5-4B-Q4_K_M.gguf",
+            "Q8_0/Qwen_Qwen3.5-4B-Q8_0.gguf"
+        ]
+    );
+    assert!(!is_the_model_file("sub/mmproj-m-F16.gguf"));
+    assert!(!is_the_model_file("sub\\mtp-m-Q4_K_M.gguf"));
+    assert!(is_the_model_file("m-Q4_K_M.gguf"));
+}
+
 /// **A file no node could host is known by its name** (field report
 /// 2026-11-03): an IQ / TQ quantization, one file of a split upload, a file
 /// in a repository folder. A K-quant, Q8_0 and the float files raise nothing —
