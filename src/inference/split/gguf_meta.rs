@@ -92,27 +92,39 @@ pub fn explain_gguf_parse_error(e: &candle_core::Error) -> String {
     else {
         return text;
     };
-    // ggml's type numbers (`ggml.h`, `enum ggml_type`) for the ones people meet.
-    let name = match code {
-        16 => "IQ2_XXS",
-        17 => "IQ2_XS",
-        18 => "IQ3_XXS",
-        19 => "IQ1_S",
-        20 => "IQ4_NL",
-        21 => "IQ3_S",
-        22 => "IQ2_S",
-        23 => "IQ4_XS",
-        29 => "IQ1_M",
-        34 => "TQ1_0",
-        35 => "TQ2_0",
-        _ => "a type this build does not know",
-    };
+    let name = UNREADABLE_GGML_TYPES
+        .iter()
+        .find(|&&(id, _)| id == code)
+        .map_or("a type this build does not know", |&(_, name)| name);
     format!(
         "this GGUF stores its weights as {name} (ggml type {code}), {UNREADABLE_QUANTIZATION}. \
          Choose a K-quant build of the model instead — Q2_K, Q3_K_M, Q4_K_M, Q5_K_M, Q6_K or \
          Q8_0"
     )
 }
+
+/// The ggml types people meet that candle cannot read (`ggml.h`, `enum
+/// ggml_type`: every `IQ*` and `TQ*`, and llama.cpp master's NVFP4, Q1_0 and
+/// Q2_0 — the vendored `GgmlDType::from_u32` reads 0-15, 30 and 39), by number
+/// and name — what [`explain_gguf_parse_error`] names a refused file's type
+/// with, and what `model::huggingface::quant_is_unreadable` reads, so a file
+/// name is judged by the same list a header is refused by.
+pub const UNREADABLE_GGML_TYPES: &[(u32, &str)] = &[
+    (16, "IQ2_XXS"),
+    (17, "IQ2_XS"),
+    (18, "IQ3_XXS"),
+    (19, "IQ1_S"),
+    (20, "IQ4_NL"),
+    (21, "IQ3_S"),
+    (22, "IQ2_S"),
+    (23, "IQ4_XS"),
+    (29, "IQ1_M"),
+    (34, "TQ1_0"),
+    (35, "TQ2_0"),
+    (40, "NVFP4"),
+    (41, "Q1_0"),
+    (42, "Q2_0"),
+];
 
 /// The words [`explain_gguf_parse_error`] says a file's quantization with, and
 /// that `model::huggingface::probe_failure` recognises it by — one constant,

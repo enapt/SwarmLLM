@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #404**). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #405**). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -2912,6 +2912,31 @@ reply whose peers changed (failover) is not kept (`PipelineExecutor::exposure_of
 - Field measurement on an agent's replayed session (the rig measures the mechanism, below).
 
 ### Model families and platforms
+
+#### #404 — IQ/TQ quantizations, split uploads and files in a repo folder cannot be hosted
+`P3` · models · **OPEN** — 2026-11-04 · field report 2026-11-03 (the model browser recommended an IQ2_XS inside a repo folder)
+
+**The search half is done (2026-11-04)**: `model::huggingface::cannot_host` reads a file's NAME and the
+search recommends only a file it passes (`admin_hf::search::recommended_file`), marks the rest
+(`cannot_host` per variant; `swarm_cta_status: "cannot_host"` when none passes) and the daily popular
+pick shares it. The browser shows why per file and offers nothing for such a repo. A family this
+build has no loader for is said too (`family_unsupported`: `gguf.architecture` from the same
+file-list reply, `ModelArch::is_supported`; the reporter's model was `qwen4exp`, #390 (4)). The
+"Trending this week" strip still lists such repos — a click runs this search, which says why. The
+header probe is still the real check (#394: a K-quant name can hide IQ4_NL tensors). **Left, three
+gaps behind it**:
+1. **IQ/TQ types in the vendored candle** — `GgmlDType` reads none of ids 16-23, 29, 34, 35, nor
+   llama.cpp master's 40-42 (NVFP4, Q1_0, Q2_0 — the reporter's repo carried Q2_0 files)
+   (`split::UNREADABLE_GGML_TYPES`, the one list). IQ4_NL / IQ4_XS first: they are the ones a K-quant
+   upload's narrow rows fall back to (GLM-4.5-Air's down experts, #390 (3)), and the low-bit uploads
+   people pick for large models. Each type needs dequantise, a processor dot and the card kernels,
+   checked bit for bit against llama.cpp as MXFP4 was (#390 (2) step 1).
+2. **A model split across files** (`*-00001-of-00003.gguf`): the shard system plans from ONE header
+   and one tensor table; a split upload's tables are per file. Needs a design that keeps "no full
+   download" and "one canonical upload" (`model::canonical`) — never a merge into one GGUF.
+3. **A file in a repo folder** (`Q4_K_M/model-Q4_K_M.gguf`): `is_valid_hf_filename` refuses `/` for
+   path safety. Most such uploads are split files too, so this waits for (2); the fix is a vetted
+   repo-relative path, never a raw join.
 
 #### #390 — Families people run that this build cannot load: Qwen3-Coder-Next, gpt-oss, GLM-4.5-Air, Qwen3.8-Flash-Next, GLM-5.3-Flash
 `P2` · models · **OPEN** — 2026-11-01 · user-raised with #389 ("add models we can run and work towards as per the list")

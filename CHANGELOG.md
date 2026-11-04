@@ -39,6 +39,16 @@ order llama.cpp uses: the conversation's room first, then layers). Replies are a
 long prompts are answered. A model that fits still loads whole, and one moved this way goes back to
 the card whole only once other programs have given back the memory it was short of.
 
+**The model browser recommends only a file your computer can run.** Searching for a model could
+recommend — and download — a file no computer on the swarm can run: an "IQ" format this version
+cannot read yet, one piece of a model split across several files, or a file kept in a folder of the
+model's page. The recommendation now skips those and picks the usual 4-bit file where there is one.
+In the size list each such file is greyed out with the reason, and a model with no usable file says
+"None of these files can run yet" instead of offering Download. A type of model this version cannot
+run at all (Qwen3.8-Flash-Next, for one) now says so in the results, instead of offering a download
+that is refused once it starts. The daily list of popular models follows the same rule. Support for
+those formats and layouts is planned.
+
 **A full computer that frees no room for a part the swarm is short of says why.** Its log names
 every rule that kept a part it holds, and how many parts each kept, at most every 10 minutes; the
 hourly "storage is over the budget" warning carries the same list instead of blaming the number of

@@ -146,27 +146,15 @@ pub async fn hf_search(
                         "filename": f.filename,
                         "size_bytes": f.size_bytes,
                         "quant": quant,
+                        // Why no node could host this file, by its name
+                        // (`huggingface::cannot_host`); null when nothing says so.
+                        "cannot_host": crate::model::huggingface::cannot_host(&f.filename)
+                            .map(|why| why.as_str()),
                     })
                 })
                 .collect();
 
-            // Recommended variant: prefer Q4_K_M, else smallest Q4+, else first
-            let recommended = files
-                .iter()
-                .find(|f| {
-                    crate::model::huggingface::extract_quant_tag(&f.filename)
-                        .is_some_and(|q| q == "Q4_K_M")
-                })
-                .or_else(|| {
-                    files
-                        .iter()
-                        .filter(|f| {
-                            crate::model::huggingface::extract_quant_tag(&f.filename)
-                                .is_some_and(|q| q.starts_with("Q4"))
-                        })
-                        .min_by_key(|f| f.size_bytes)
-                })
-                .or(files.first());
+            let recommended = recommended_file(&files);
 
             let recommended_variant = recommended
                 .and_then(|f| crate::model::huggingface::extract_quant_tag(&f.filename))
@@ -253,6 +241,18 @@ pub async fn hf_search(
                 // Downloading it is refused (`GgufTensorMeta::refusal`), and
                 // nothing on the swarm can chat with it.
                 "not_chat"
+            } else if family_unsupported(&files) && swarm_model_id.is_none() {
+                // HuggingFace names a family this build has no loader for —
+                // every file of it is refused at the header, whatever its
+                // quantization (Qwen3.8-Flash-Next's `qwen4exp`, field report
+                // 2026-11-03). Where the swarm already runs it, the row below
+                // offers Chat instead.
+                "family_unsupported"
+            } else if recommended.is_none() {
+                // Every file is one no node could host (an IQ quantization, a
+                // split upload, a file in a folder): the row offers nothing
+                // to press, and each variant says why.
+                "cannot_host"
             } else if !fits_full && !fits_boomerang && !fits_shard {
                 if swarm_model_id.is_some() {
                     "swarm_serveable"
@@ -275,6 +275,11 @@ pub async fn hf_search(
                 "likes": likes,
                 "variants": variants,
                 "recommended_variant": recommended_variant,
+                // The file itself: two files can carry one quantization (one
+                // in a folder), so the browser selects by name.
+                "recommended_filename": recommended.map(|f| f.filename.as_str()),
+                // The family HuggingFace read off the header; null if none.
+                "architecture": files.iter().find_map(|f| f.architecture.as_deref()),
                 "fits_vram": fits_vram,
                 // Whether the WHOLE recommended file fits this node's memory
                 // budget — the only fit that makes "Runs locally" true, and
@@ -360,4 +365,118 @@ fn infer_task_tags_from_repo_name(repo_id: &str) -> Vec<String> {
         tags.push("chat".to_string());
     }
     tags
+}
+
+/// The file of a repo the search recommends: Q4_K_M, else the smallest Q4,
+/// else the first — of the files this node could host only
+/// (`huggingface::cannot_host`). The fallback took the first file whatever it
+/// was, and a tester was recommended an IQ2_XS in a repository folder that no
+/// node could take (field report 2026-11-03). `None`: no file can be hosted.
+fn recommended_file(
+    files: &[crate::model::huggingface::HfModelResult],
+) -> Option<&crate::model::huggingface::HfModelResult> {
+    use crate::model::huggingface::{cannot_host, extract_quant_tag};
+    let hostable = || files.iter().filter(|f| cannot_host(&f.filename).is_none());
+    let tag = |f: &crate::model::huggingface::HfModelResult| extract_quant_tag(&f.filename);
+    hostable()
+        .find(|f| tag(f).as_deref() == Some("Q4_K_M"))
+        .or_else(|| {
+            hostable()
+                .filter(|f| tag(f).is_some_and(|q| q.starts_with("Q4")))
+                .min_by_key(|f| f.size_bytes)
+        })
+        .or_else(|| hostable().next())
+}
+
+/// HuggingFace names a model family this build has no loader for — the
+/// loader's own answer (`ModelArch::is_supported`), read before any header is
+/// fetched. A repo HuggingFace named no family for is not judged.
+fn family_unsupported(files: &[crate::model::huggingface::HfModelResult]) -> bool {
+    files
+        .iter()
+        .find_map(|f| f.architecture.as_deref())
+        .is_some_and(|arch| {
+            !crate::inference::split::ModelArch::from_gguf_arch(arch).is_supported()
+        })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{family_unsupported, recommended_file};
+    use crate::model::huggingface::HfModelResult;
+
+    fn files(names: &[(&str, u64)]) -> Vec<HfModelResult> {
+        names
+            .iter()
+            .map(|&(filename, size_bytes)| HfModelResult {
+                repo_id: "someone/model-GGUF".into(),
+                filename: filename.into(),
+                size_bytes,
+                downloads: 0,
+                likes: 0,
+                embedding: false,
+                architecture: None,
+            })
+            .collect()
+    }
+
+    fn of_family(arch: Option<&str>) -> Vec<HfModelResult> {
+        let mut repo = files(&[("m-Q4_K_M.gguf", 1)]);
+        repo[0].architecture = arch.map(String::from);
+        repo
+    }
+
+    /// **A family this build cannot load is said up front** (field report
+    /// 2026-11-03: Qwen3.8-Flash-Next is `qwen4exp`, so even its K-quant
+    /// would be refused at the header after the click). A family the loader
+    /// runs, or one HuggingFace did not name, is not.
+    #[test]
+    fn a_family_this_build_cannot_load_is_known_before_the_download() {
+        assert!(family_unsupported(&of_family(Some("qwen4exp"))));
+        assert!(family_unsupported(&of_family(Some("no-such-family"))));
+        assert!(!family_unsupported(&of_family(Some("qwen2"))));
+        assert!(!family_unsupported(&of_family(Some("llama"))));
+        assert!(!family_unsupported(&of_family(None)));
+    }
+
+    fn pick(names: &[(&str, u64)]) -> Option<String> {
+        recommended_file(&files(names)).map(|f| f.filename.clone())
+    }
+
+    /// **The search recommends only a file this node could host** (field
+    /// report 2026-11-03: an IQ2_XS in a repository folder). Q4_K_M first,
+    /// then the smallest Q4, then any hostable file; an IQ quantization, one
+    /// file of a split upload or a file in a folder never — and a repo of
+    /// nothing else has no recommendation.
+    #[test]
+    fn the_search_recommends_only_a_file_this_node_could_host() {
+        assert_eq!(
+            pick(&[("m-IQ2_XS.gguf", 1), ("m-Q4_K_M.gguf", 9)]).as_deref(),
+            Some("m-Q4_K_M.gguf")
+        );
+        assert_eq!(
+            pick(&[
+                ("m-IQ4_XS.gguf", 1),
+                ("m-Q4_K_S.gguf", 5),
+                ("m-Q4_0.gguf", 4)
+            ])
+            .as_deref(),
+            Some("m-Q4_0.gguf"),
+            "the smallest Q4 — never IQ4_XS"
+        );
+        assert_eq!(
+            pick(&[("m-IQ4_NL.gguf", 1), ("m-Q3_K_M.gguf", 3)]).as_deref(),
+            Some("m-Q3_K_M.gguf"),
+            "the first HOSTABLE file, not the first file"
+        );
+        assert_eq!(
+            pick(&[
+                ("IQ2_XS/m-IQ2_XS.gguf", 1),
+                ("Q4_K_M/m-Q4_K_M.gguf", 2),
+                ("m-Q8_0-00001-of-00002.gguf", 3),
+                ("m-IQ4_NL.gguf", 4),
+            ]),
+            None
+        );
+    }
 }

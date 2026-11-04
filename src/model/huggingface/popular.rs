@@ -359,9 +359,10 @@ pub(crate) fn choose(
 /// The file of an upload the swarm holds: Q4_K_M, or Q8_0 for a model of
 /// `Q8_AT_MOST_PARAMS` or fewer — one quantisation per model, so the 0.5B is
 /// not held four times (#389 (e)). Never a projector (`mmproj`), a multi-token
-/// prediction head (`mtp-`), one part of a split upload, or a file in a folder
-/// — the download path takes a bare file name only (`is_valid_hf_filename`:
-/// letters, digits, `-`, `_`, `.`); of several matches, the shortest name.
+/// prediction head (`mtp-`), nor a file no node could host by its name
+/// (`search::cannot_host`: one file of a split upload, a file in a folder);
+/// only a name the download path takes (`is_valid_hf_filename`: letters,
+/// digits, `-`, `_`, `.`); of several matches, the shortest name.
 pub(crate) fn pick_file<'a>(
     filenames: impl IntoIterator<Item = &'a str>,
     parameters: u64,
@@ -382,7 +383,7 @@ pub(crate) fn pick_file<'a>(
                 && lower.ends_with(".gguf")
                 && !lower.contains("mmproj")
                 && !lower.starts_with("mtp-")
-                && !lower.contains("-of-0")
+                && super::search::cannot_host(f).is_none()
                 && super::search::extract_quant_tag(f).as_deref() == Some(wanted)
         })
         .min_by_key(|f| (f.len(), f.to_string()))

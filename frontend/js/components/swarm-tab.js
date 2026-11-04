@@ -531,6 +531,18 @@
     if (_localHfRepos.has((repo.repo_id || '').toLowerCase())) {
       return { key: 'already', text: I18n.t('browse.fit_already') };
     }
+    // Every file is one no computer could take (a format this version cannot
+    // read, a model split across files, a file in a folder): nothing to press,
+    // and the size list says why for each. The fit filter keeps the row, so a
+    // search for this model learns why rather than finding nothing.
+    if (repo.swarm_cta_status === 'cannot_host') {
+      return { key: 'cannot-host', text: I18n.t('browse.fit_cannot_host') };
+    }
+    // A kind of model this version has no loader for: every file of it is
+    // refused once downloaded, so it offers nothing either.
+    if (repo.swarm_cta_status === 'family_unsupported') {
+      return { key: 'cannot-host', text: I18n.t('browse.fit_family_unsupported') };
+    }
     // "Runs locally" only when the WHOLE file fits — it used to follow the
     // first-and-last-parts estimate, which leaves the middle to other computers.
     if (repo.fits_full) {
@@ -765,8 +777,8 @@
     // nothing at all — there is no way to add to the wishlist, which is
     // computed from what the swarm asks for. The row's own pill already says
     // why nothing can be done here. The same for a model that is not a chat
-    // model.
-    if (fit.key !== 'too-large' && fit.key !== 'not-chat') {
+    // model, or one with no file a computer could take.
+    if (fit.key !== 'too-large' && fit.key !== 'not-chat' && fit.key !== 'cannot-host') {
       var actionBtn = document.createElement('button');
       actionBtn.type = 'button';
       actionBtn.className = 'browse-result-action';
@@ -845,9 +857,14 @@
         var opt = document.createElement('option');
         opt.value = v.filename;
         var label = v.quant + (v.size_bytes ? ' — ' + U.formatBytes(v.size_bytes) : '');
-        if (v.quant === repo.recommended_variant) {
+        // By file name: two files can carry one quantization (one in a folder).
+        if (v.filename === repo.recommended_filename) {
           label += ' ' + I18n.t('models.hf_recommended');
           opt.selected = true;
+        }
+        if (v.cannot_host) {
+          label += ' ' + I18n.t('browse.cannot_host.' + v.cannot_host);
+          opt.disabled = true;
         }
         opt.textContent = label;
         sel.appendChild(opt);
@@ -866,11 +883,12 @@
   }
 
   // The variant a download is for: the one with this filename, else the
-  // recommended one, else the first.
+  // recommended one, else the first a computer could take — never a file the
+  // daemon marked `cannot_host` (it used to fall back to the first file).
   function _browseVariant(repo, filename) {
-    var variants = repo.variants || [];
+    var variants = (repo.variants || []).filter(function (v) { return !v.cannot_host; });
     return variants.find(function (v) { return filename && v.filename === filename; }) ||
-      variants.find(function (v) { return v.quant === repo.recommended_variant; }) ||
+      variants.find(function (v) { return v.filename === repo.recommended_filename; }) ||
       variants[0] || null;
   }
 

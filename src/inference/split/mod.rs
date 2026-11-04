@@ -54,7 +54,7 @@ pub(crate) use self::gguf_meta::tensor_byte_size;
 pub use self::gguf_meta::{
     ensure_gguf_header, explain_gguf_parse_error, gguf_arch_str, read_gguf_header,
     save_gguf_header, CachedHeader, GgufTensorMeta, GgufTokenizerMeta, HeaderCache, ModelRefusal,
-    SidecarSpec, TensorLocation, ROPE_FREQS_FILENAME, TIED_OUTPUT_FILENAME,
+    SidecarSpec, TensorLocation, ROPE_FREQS_FILENAME, TIED_OUTPUT_FILENAME, UNREADABLE_GGML_TYPES,
     UNREADABLE_QUANTIZATION,
 };
 pub(crate) use self::gguf_meta::{

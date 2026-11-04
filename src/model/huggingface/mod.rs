@@ -14,7 +14,9 @@ pub use probe::{
     probe_failure_is_user_fixable, probe_gguf_file, probe_public_upload, read_public_range,
     ProbeFailure,
 };
-pub use search::{extract_quant_tag, search_gguf_models};
+pub use search::{
+    cannot_host, extract_quant_tag, quant_is_unreadable, search_gguf_models, CannotHost,
+};
 pub use shards::{download_shard, parse_retry_after, DownloadedPart};
 pub use watcher::{
     is_trusted_publisher, trusted_publisher_count, trusted_publisher_position, HfTrendingEntry,
@@ -97,6 +99,10 @@ pub struct HfModelResult {
     /// The repo's own metadata says it holds an embedding or ranking model
     /// ([`is_embedding_repo`]).
     pub embedding: bool,
+    /// The model family HuggingFace read off the repo's GGUF header
+    /// (`gguf.architecture`, the same reply that lists the files); `None`
+    /// where it named none.
+    pub architecture: Option<String>,
 }
 
 /// HuggingFace tasks a model that cannot write replies is filed under:
@@ -132,14 +138,15 @@ pub fn is_embedding_repo(pipeline_tag: Option<&str>, tags: &[String]) -> bool {
 /// The quantisation a download of a repo offering `filenames` would take,
 /// by the search's rule (`api::admin_hf::search`): Q4_K_M, else a Q4, else —
 /// with no sizes to compare — the lightest offered (`capacity_plan::
-/// bits_per_weight`). A projector file (`mmproj`) is not a quantisation of
-/// the model. The trending list estimated every repo as Q4_K_M, so a repo
-/// offering only Q8_0 read 337 MB there and 609.5 MB in the search (field
-/// report 2026-10-15).
+/// bits_per_weight`), of the files this node could host ([`cannot_host`]).
+/// A projector file (`mmproj`) is not a quantisation of the model. The
+/// trending list estimated every repo as Q4_K_M, so a repo offering only Q8_0
+/// read 337 MB there and 609.5 MB in the search (field report 2026-10-15).
 pub fn offered_quant<'a>(filenames: impl IntoIterator<Item = &'a str>) -> Option<String> {
     let quants: Vec<String> = filenames
         .into_iter()
         .filter(|f| f.ends_with(".gguf") && !f.to_ascii_lowercase().contains("mmproj"))
+        .filter(|f| cannot_host(f).is_none())
         .filter_map(extract_quant_tag)
         .collect();
     let lightest = || {

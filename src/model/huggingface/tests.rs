@@ -336,4 +336,67 @@ fn a_repo_offers_the_quantisation_its_download_would_take() {
         Some("Q6_K")
     );
     assert_eq!(offered_quant(["config.json"]), None);
+    // Of the files a node could host: the lightest is IQ2_XS, which none can.
+    assert_eq!(
+        offered_quant(["m-IQ2_XS.gguf", "m-Q6_K.gguf"]).as_deref(),
+        Some("Q6_K")
+    );
+    assert_eq!(
+        offered_quant(["m-IQ4_NL.gguf", "Q4_K_M/m-Q4_K_M.gguf"]),
+        None
+    );
+}
+
+/// **A file no node could host is known by its name** (field report
+/// 2026-11-03): an IQ / TQ quantization, one file of a split upload, a file
+/// in a repository folder. A K-quant, Q8_0 and the float files raise nothing —
+/// unsloth's dynamic names included.
+#[test]
+fn a_file_no_node_could_host_is_known_by_its_name() {
+    for (name, why) in [
+        (
+            "Qwen3.8-Flash-Next-IQ2_XS.gguf",
+            Some(CannotHost::UnreadableQuantization),
+        ),
+        ("m-IQ4_NL.gguf", Some(CannotHost::UnreadableQuantization)),
+        ("m.IQ4_XS.gguf", Some(CannotHost::UnreadableQuantization)),
+        ("m-UD-IQ1_S.gguf", Some(CannotHost::UnreadableQuantization)),
+        ("m-TQ1_0.gguf", Some(CannotHost::UnreadableQuantization)),
+        ("IQ2_XS/m-IQ2_XS.gguf", Some(CannotHost::InAFolder)),
+        ("UD-Q4_K_XL/m-UD-Q4_K_XL.gguf", Some(CannotHost::InAFolder)),
+        (
+            "m-Q4_K_M-00001-of-00002.gguf",
+            Some(CannotHost::SplitAcrossFiles),
+        ),
+        ("m-Q4_K_M.gguf", None),
+        ("m-UD-Q2_K_XL.gguf", None),
+        ("m-Q8_0.gguf", None),
+        ("m-F16.gguf", None),
+        ("m-BF16.gguf", None),
+        ("Qwen2.5-Coder-7B-Instruct-Q4_K_M.gguf", None),
+        ("phi-of-thought-7b-Q4_K_M.gguf", None),
+    ] {
+        assert_eq!(cannot_host(name), why, "{name}");
+    }
+}
+
+/// The name rule and the header check agree: every type the engine refuses
+/// a header for (`split::UNREADABLE_GGML_TYPES`, the list its refusal names)
+/// is a quantization a file's name is refused for — and none it reads is.
+#[test]
+fn a_file_name_is_refused_for_every_type_the_header_check_refuses() {
+    for &(_, name) in crate::inference::split::UNREADABLE_GGML_TYPES {
+        assert!(quant_is_unreadable(name), "{name}");
+        assert_eq!(
+            cannot_host(&format!("m-{name}.gguf")),
+            Some(CannotHost::UnreadableQuantization),
+            "{name}"
+        );
+    }
+    for name in [
+        "Q2_K", "Q3_K_M", "Q4_0", "Q4_K_M", "Q5_K_M", "Q6_K", "Q8_0", "F16", "BF16", "MXFP4",
+    ] {
+        assert!(!quant_is_unreadable(name), "{name}");
+        assert_eq!(cannot_host(&format!("m-{name}.gguf")), None, "{name}");
+    }
 }

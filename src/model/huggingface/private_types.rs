@@ -16,6 +16,17 @@ pub(super) struct HfRepoInfo {
 #[derive(Deserialize)]
 pub(super) struct HfModelDetail {
     pub siblings: Option<Vec<HfFileInfo>>,
+    /// What HuggingFace read off the repo's GGUF header; absent for a repo
+    /// it did not parse.
+    #[serde(default)]
+    pub gguf: Option<HfGgufSummary>,
+}
+
+#[derive(Deserialize)]
+pub(super) struct HfGgufSummary {
+    /// `general.architecture` (`qwen2`, `qwen4exp`, …).
+    #[serde(default)]
+    pub architecture: Option<String>,
 }
 
 #[derive(Deserialize, Clone)]
