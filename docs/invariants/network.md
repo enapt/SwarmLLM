@@ -5024,6 +5024,25 @@ a naive cut, "model-27 split across pieces"); every piece fits the receiver's ch
 Verified in the field once `aa3d1e66` runs it: its credited count here equals its
 announced count.
 
+**The models named complete are bounded too (2026-11-04).** The receiver capped the
+parts and `origin_checked_models` at 512 and their model ids at 256 bytes, but read
+`complete_for_models` as sent — a list the other computer sized
+(`architecture.md` § "A size the other computer chose is checked before it sizes
+anything"), each name a pass over the message's parts and a
+`retain_node_shards_for_model` call on the dispatch loop, so a gossip message of
+tens of thousands of names cost that many passes. Now `fits_one_message` checks all
+three lists and is what the receiver asks (`daemon::dispatch`, beside the id-length
+check, which covers the third list too) — the same predicate the sender's
+`pieces_if_too_long` asks, so the two ends cannot disagree on a new list. No
+released sender is refused by it: every sender names complete only models it lists
+parts of (the periodic re-announce, the rescan, a deletion's one model), so the
+list is never longer than its parts list. `into_pieces` keeps a piece within it
+too: a model named complete with no part listed (a whole retraction) goes in the
+first piece with room, and in pieces of its own past that — before, every such name
+went in the first piece, and a short parts list was never cut however many it
+named. Bitcoin Core bounds its inventory lists the same way, at the message
+(`MAX_INV_SZ`). Test `a_long_list_of_models_retracted_whole_goes_in_pieces_a_receiver_takes`.
+
 ## A counter named for an outcome may only be counting the attempt
 
 GossipSub's `sent` / `sent_bytes` count **attempts, once per recipient**:

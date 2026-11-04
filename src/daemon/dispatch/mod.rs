@@ -1480,12 +1480,16 @@ pub(crate) async fn dispatch_network_messages(
                                             tracing::debug!("Dropping unauthenticated ShardAnnounce");
                                             continue;
                                         }
-                                        if announce.shards.len() > MAX_SHARDS_PER_ANNOUNCE
-                                            || announce.origin_checked_models.len() > MAX_SHARDS_PER_ANNOUNCE
-                                        {
+                                        // Every list here is one the other computer sized,
+                                        // so each is bounded before anything reads it — the
+                                        // models named complete too (2026-11-04): each costs a
+                                        // pass over the parts and a registry write below.
+                                        if !announce.fits_one_message() {
                                             tracing::warn!(
                                                 node_id = %announce.node_id,
                                                 shards = announce.shards.len(),
+                                                complete_for = announce.complete_for_models.len(),
+                                                checked = announce.origin_checked_models.len(),
                                                 max = MAX_SHARDS_PER_ANNOUNCE,
                                                 "ShardAnnounce exceeds shard limit — dropping"
                                             );
@@ -1493,7 +1497,11 @@ pub(crate) async fn dispatch_network_messages(
                                         }
                                         // Reject oversized model_id strings (memory DoS prevention)
                                         if announce.shards.iter().any(|s| s.model_id.0.len() > 256)
-                                            || announce.origin_checked_models.iter().any(|m| m.0.len() > 256)
+                                            || announce
+                                                .origin_checked_models
+                                                .iter()
+                                                .chain(&announce.complete_for_models)
+                                                .any(|m| m.0.len() > 256)
                                         {
                                             tracing::warn!(
                                                 node_id = %announce.node_id,

@@ -409,8 +409,11 @@ pub struct ShardAnnounce {
 }
 
 /// The most parts one `ShardAnnounce` may list — and the most models its
-/// `origin_checked_models` may name — before a receiver drops the WHOLE message
-/// unread (`daemon::dispatch`, a memory bound every released node enforces).
+/// `origin_checked_models` or `complete_for_models` may name — before a
+/// receiver drops the WHOLE message unread (`daemon::dispatch`, a memory bound
+/// every released node enforces; `complete_for_models` since 2026-11-04 — every
+/// sender lists there only models it lists parts of, so no released sender's
+/// message passes it).
 ///
 /// A wire contract, not a tuning knob: a sender never puts more than this in
 /// one message, and a node holding more parts sends its list in pieces
@@ -423,8 +426,14 @@ pub const MAX_SHARDS_PER_ANNOUNCE: usize = 512;
 impl ShardAnnounce {
     /// Does a receiver take this as one message (`MAX_SHARDS_PER_ANNOUNCE`)?
     pub fn fits_one_message(&self) -> bool {
-        self.shards.len() <= MAX_SHARDS_PER_ANNOUNCE
-            && self.origin_checked_models.len() <= MAX_SHARDS_PER_ANNOUNCE
+        self.lists_fit(MAX_SHARDS_PER_ANNOUNCE)
+    }
+
+    /// Is every list this message carries within `most`?
+    fn lists_fit(&self, most: usize) -> bool {
+        self.shards.len() <= most
+            && self.origin_checked_models.len() <= most
+            && self.complete_for_models.len() <= most
     }
 
     /// This announcement as messages a receiver takes: itself when it fits
@@ -438,8 +447,9 @@ impl ShardAnnounce {
     /// their parts, their build tags (still positionally parallel), their
     /// `complete_for_models` entry and their `origin_checked_models` entry. A
     /// model listed complete with no part here (a retraction of every part)
-    /// goes with the first piece; a model checked but with no part listed tells
-    /// a receiver nothing (it reads the flag per part) and is left out. Older
+    /// goes in the first piece with room for it, and in pieces of its own once
+    /// none has; a model checked but with no part listed tells a receiver
+    /// nothing (it reads the flag per part) and is left out. Older
     /// receivers need nothing new: each piece is an announcement they already
     /// read correctly. IPFS Bitswap sends a large want-list the same way —
     /// several messages, each saying for itself whether it is the full list.
@@ -454,7 +464,7 @@ impl ShardAnnounce {
 
     fn into_pieces_of(self, most: usize) -> Vec<ShardAnnounce> {
         let most = most.max(1);
-        if self.shards.len() <= most && self.origin_checked_models.len() <= most {
+        if self.lists_fit(most) {
             return vec![self];
         }
         let ShardAnnounce {
@@ -514,13 +524,20 @@ impl ShardAnnounce {
             }
         }
         pieces.push(piece);
+        // A model listed complete with no part here says "none of its parts":
+        // any piece may carry it, so each goes in the first piece with room,
+        // and in pieces of their own past that — never more than `most`.
         let listed: std::collections::HashSet<&ModelId> = groups.iter().map(|(m, _)| m).collect();
-        pieces[0].complete_for_models.extend(
-            complete_for_models
-                .iter()
-                .filter(|m| !listed.contains(m))
-                .cloned(),
-        );
+        let mut with_room = 0;
+        for model in complete_for_models.iter().filter(|m| !listed.contains(m)) {
+            while with_room < pieces.len() && pieces[with_room].complete_for_models.len() >= most {
+                with_room += 1;
+            }
+            if with_room == pieces.len() {
+                pieces.push(empty());
+            }
+            pieces[with_room].complete_for_models.push(model.clone());
+        }
         pieces
     }
 }
@@ -1513,6 +1530,47 @@ mod shard_announce_pieces_tests {
         );
     }
 
+    /// The models named complete are a list the receiver bounds too
+    /// (2026-11-04): past `MAX_SHARDS_PER_ANNOUNCE` names, a list goes in
+    /// pieces — every name once, none more than the bound in a piece — whether
+    /// its parts list is long or short. Before, a short parts list went as one
+    /// message however many models it retracted.
+    #[test]
+    fn a_long_list_of_models_retracted_whole_goes_in_pieces_a_receiver_takes() {
+        let gone: Vec<ModelId> = (0..MAX_SHARDS_PER_ANNOUNCE + 700)
+            .map(|m| ModelId(format!("deleted-{m}")))
+            .collect();
+        let mut short = big_holder();
+        short.shards.truncate(3);
+        short.shard_builds.truncate(3);
+        short.complete_for_models = vec![id(0)];
+        for mut whole in [big_holder(), short] {
+            whole.complete_for_models.extend(gone.iter().cloned());
+            assert!(!whole.fits_one_message());
+            let pieces = whole.clone().into_pieces();
+            for (p, piece) in pieces.iter().enumerate() {
+                assert!(
+                    piece.fits_one_message(),
+                    "piece {p}: {} parts, {} models named complete",
+                    piece.shards.len(),
+                    piece.complete_for_models.len()
+                );
+            }
+            let named: Vec<&ModelId> = pieces.iter().flat_map(|p| &p.complete_for_models).collect();
+            assert_eq!(
+                named.len(),
+                whole.complete_for_models.len(),
+                "each name once"
+            );
+            assert_eq!(
+                named.into_iter().collect::<HashSet<_>>(),
+                whole.complete_for_models.iter().collect::<HashSet<_>>()
+            );
+            let parts: Vec<ShardId> = pieces.iter().flat_map(|p| p.shards.clone()).collect();
+            assert_eq!(parts, whole.shards, "every part, once, in order");
+        }
+    }
+
     #[test]
     fn a_tag_vector_that_is_not_parallel_goes_in_no_piece() {
         let mut whole = big_holder();
@@ -1532,6 +1590,9 @@ mod shard_announce_pieces_tests {
             })
             .collect();
         whole.shard_builds = (0..10).collect();
+        // Named complete alone: `big_holder`'s other 42 names, with no part
+        // listed, would go in pieces of their own past 4 to a piece.
+        whole.complete_for_models = vec![id(0)];
         let pieces = whole.clone().into_pieces_of(4);
         assert_eq!(pieces.len(), 3);
         for piece in &pieces {

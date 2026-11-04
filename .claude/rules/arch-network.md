@@ -354,7 +354,7 @@ Publish on CHANGE, never per item per tick — gate on a digest of what is ASSER
 
 ## A parts list longer than a receiver takes goes in pieces, each model whole (2026-11-02)
 
-Every node drops a `ShardAnnounce` past **`swarmllm_types::MAX_SHARDS_PER_ANNOUNCE`** (512) unread, so a sender never sends one: **`network::manager::commands::pieces_if_too_long`** — asked by the gossip publish and the direct send, never at the eleven call sites — cuts it with **`ShardAnnounce::into_pieces`**, each model's parts, tags and flags in ONE piece (a receiver retracts per message for a model listed complete). No wire change; never raise the bound (older receivers keep it). A 565-part holder was invisible to the whole swarm for 6 h without it.
+Every node drops a `ShardAnnounce` past **`swarmllm_types::MAX_SHARDS_PER_ANNOUNCE`** (512) unread, so a sender never sends one: **`network::manager::commands::pieces_if_too_long`** — asked by the gossip publish and the direct send, never at the eleven call sites — cuts it with **`ShardAnnounce::into_pieces`**, each model's parts, tags and flags in ONE piece (a receiver retracts per message for a model listed complete). No wire change; never raise the bound (older receivers keep it). **Every list in it is bounded, by ONE predicate on both sides** — `ShardAnnounce::fits_one_message`: parts, `origin_checked_models` AND `complete_for_models` (2026-11-04: the last was read unbounded, a pass over the parts and a registry write per name); a new list in the message joins it. A 565-part holder was invisible to the whole swarm for 6 h without it.
 
 → `docs/invariants/network.md` § "A parts list longer than a receiver takes goes in pieces"
 
