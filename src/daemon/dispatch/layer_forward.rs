@@ -847,6 +847,41 @@ pub(super) fn judged_as(
         .unwrap_or_else(|| sender.clone())
 }
 
+/// The swarm-use verdict on a forward that starts a request: the gate's
+/// answer for the computer it is [`judged_as`] — except a chained pass naming
+/// a coordinator this node has NOT heard from, which takes the word of the hop
+/// that handed it on where that hop advertises
+/// `features::JUDGES_THE_COORDINATOR`: it judged the coordinator by the same
+/// rule before chaining. Without this, #403's rule refused an honest split:
+/// the scheduler plans a holder it reaches only through a relay, and such a
+/// later hop is connected to nobody it would recognise as the coordinator, so
+/// it has no record of it (a gossiped capability installs only into an entry
+/// that exists) — every chain through it was refused (pre-release review of
+/// v0.3.272). The sender is the authenticated one, and its bit is its own
+/// signed word. A modified sender gains nothing it did not have: it can as
+/// easily name a coordinator in good standing (see [`judged_as`]). A
+/// coordinator ON RECORD as refused stays refused; an older hop's word is not
+/// taken, since it judged an unheard coordinator allowed.
+pub(super) fn swarm_use_of_forward(
+    state: &SharedState,
+    requester_node_id: Option<[u8; 32]>,
+    sender: &crate::types::NodeId,
+) -> crate::daemon::state::swarm_use::SwarmUse {
+    use crate::daemon::state::swarm_use::SwarmUse;
+    let coordinator = judged_as(requester_node_id, sender);
+    let verdict = state.swarm_use_of_peer(&coordinator);
+    if verdict == SwarmUse::NotHeardFrom
+        && coordinator != *sender
+        && state.peer_advertises_feature(
+            sender,
+            swarmllm_types::node::features::JUDGES_THE_COORDINATOR,
+        )
+    {
+        return SwarmUse::Allowed;
+    }
+    verdict
+}
+
 /// The computer whose give-and-take tab a forward goes on
 /// (`daemon::state::peer_exchange`): the authenticated sender, when the forward
 /// names no coordinator or names the sender itself. A chained forward naming
@@ -1873,6 +1908,133 @@ mod tests {
             None,
         );
         state
+    }
+
+    /// A registry entry whose capability advertises `features` and lists
+    /// `parts` parts.
+    fn entry_saying(
+        node: &crate::types::NodeId,
+        features: u64,
+        parts: u32,
+    ) -> crate::types::PeerInfo {
+        let capability = crate::types::NodeCapability {
+            coord: None,
+            node_id: node.clone(),
+            gpu: None,
+            cpu: None,
+            ram_total_mb: 0,
+            ram_available_mb: 0,
+            ram_model_budget_mb: None,
+            disk_available_mb: 0,
+            bandwidth_mbps: 0.0,
+            hosted_shards: (0..parts)
+                .map(|index| crate::types::ShardId {
+                    model_id: crate::types::ModelId("m".into()),
+                    index,
+                })
+                .collect(),
+            max_contribution: crate::types::ContributionLevel::Moderate,
+            uptime_seconds: 0,
+            version: env!("CARGO_PKG_VERSION").into(),
+            region: None,
+            est_tokens_per_sec_7b: 0.0,
+            os: None,
+            observed_latencies: vec![],
+            relay_capable: false,
+            protocol_version: 0,
+            features,
+            relay_reservations: vec![],
+            anchor_mode: false,
+            can_serve_inference: true,
+            auto_manage: None,
+            updates_itself: None,
+            resident_layers: Vec::new(),
+            context_ceiling_tokens: None,
+            model_load_ms_per_gib: None,
+            model_memory_ceiling_mb: None,
+            machine_room_beside_card_mb: None,
+            processor_tokens_per_sec_7b: None,
+        };
+        crate::types::PeerInfo {
+            node_id: node.clone(),
+            addresses: vec![],
+            capability: Some(capability),
+            last_seen: chrono::Utc::now(),
+            latency_ms: None,
+            trust_score: 0.5,
+            peer_id_bytes: None,
+            ack_srtt_ms: None,
+            active_request_count: 0,
+            first_seen: 0,
+            verified_transaction_count: 0,
+            is_lan_peer: false,
+            goodput_bytes_per_sec: None,
+            goodput_samples: 0,
+        }
+    }
+
+    /// **A later hop of a chain takes the hop before's word for a coordinator
+    /// it has not heard from** (pre-release review of v0.3.272). The scheduler
+    /// plans a holder it reaches only through a relay, and such a hop is
+    /// connected to nobody it would recognise as the coordinator, so #403's
+    /// rule alone refused every chain through it. The word is taken only from
+    /// a sender advertising `JUDGES_THE_COORDINATOR` — an older one judged an
+    /// unheard coordinator allowed — and never over a refusal on record.
+    #[test]
+    fn a_chained_pass_naming_an_unheard_coordinator_takes_the_judging_hops_word() {
+        use crate::daemon::state::swarm_use::SwarmUse;
+        use crate::types::NodeId;
+        use swarmllm_types::node::features::{ALL, JUDGES_THE_COORDINATOR};
+        let state = test_state();
+        let coordinator = NodeId([0xC0; 32]);
+        let judging_hop = NodeId([0x11; 32]);
+        let older_hop = NodeId([0x12; 32]);
+        state
+            .peer_registry
+            .insert(judging_hop.clone(), entry_saying(&judging_hop, ALL, 0));
+        state.peer_registry.insert(
+            older_hop.clone(),
+            entry_saying(&older_hop, ALL & !JUDGES_THE_COORDINATOR, 0),
+        );
+        assert_eq!(
+            swarm_use_of_forward(&state, Some(coordinator.0), &judging_hop),
+            SwarmUse::Allowed,
+            "the hop before judged it by #403's rule before chaining"
+        );
+        assert_eq!(
+            swarm_use_of_forward(&state, Some(coordinator.0), &older_hop),
+            SwarmUse::NotHeardFrom,
+            "an older hop judged an unheard coordinator allowed: no word taken"
+        );
+        let stranger = NodeId([0x13; 32]);
+        assert_eq!(
+            swarm_use_of_forward(&state, Some(coordinator.0), &stranger),
+            SwarmUse::NotHeardFrom,
+            "a sender with nothing on record says nothing"
+        );
+        // Unchained, the sender IS the coordinator: there is no hop before.
+        assert_eq!(
+            swarm_use_of_forward(&state, None, &stranger),
+            SwarmUse::NotHeardFrom
+        );
+        assert_eq!(
+            swarm_use_of_forward(&state, Some(stranger.0), &stranger),
+            SwarmUse::NotHeardFrom,
+            "a forward naming its own sender is unchained"
+        );
+        // A coordinator on record as refused stays refused, whoever chained it.
+        state
+            .peer_registry
+            .insert(coordinator.clone(), entry_saying(&coordinator, ALL, 0));
+        assert_eq!(
+            swarm_use_of_forward(&state, Some(coordinator.0), &judging_hop),
+            SwarmUse::TooFewParts { held: 0 }
+        );
+        // And one on record as allowed is allowed from any hop.
+        state
+            .peer_registry
+            .insert(coordinator.clone(), entry_saying(&coordinator, 0, 2));
+        assert!(swarm_use_of_forward(&state, Some(coordinator.0), &older_hop).is_allowed());
     }
 
     fn fresh_peer() -> libp2p::PeerId {

@@ -1019,10 +1019,11 @@ pub(crate) async fn dispatch_network_messages(
                                                 forward_limit,
                                                 shared_state.metered_hold_now(),
                                                 || {
-                                                    shared_state.swarm_use_of_peer(&layer_forward::judged_as(
+                                                    layer_forward::swarm_use_of_forward(
+                                                        shared_state,
                                                         forward.requester_node_id,
                                                         &peer_sender,
-                                                    ))
+                                                    )
                                                 },
                                             ),
                                         };

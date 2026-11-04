@@ -1591,7 +1591,12 @@ relay — `NodeCapabilityUpdate` made relay-eligible behind a new feature bit (a
 decode the kind), signed like every relayed kind, rate-limited per origin. With it, bound the
 unconnected registry entries per delivering `NetGroup` (#299's rule for the replay memory): the
 blank-first eviction #403 added stops a stranger minting origins, but not one that also gossips a
-capability for each key it mints. Wait for a report of a relay-tier peer being refused.
+capability for each key it mints. The same cure covers a chain hop this node hears only through a
+relay (v0.3.272's pre-release security review, LOW): a later hop takes the hop before's word for an
+unheard coordinator only where that hop's capability on record advertises
+`features::JUDGES_THE_COORDINATOR` (`layer_forward::swarm_use_of_forward`), and a relayed hop's
+entry is blank until its capability lands — a relayed body proves only the relay bits
+(`record_relay_proven_features`). Wait for a report of a relay-tier peer being refused.
 
 ### Speed on one computer
 
@@ -4487,7 +4492,12 @@ grep `^| N |`).
   relayed origins, pushing its entry out before its capability landed: a blank entry is now given
   up before one a capability landed in (`identify::unconnected_registry_entries`, test
   `minted_origins_never_push_out_an_entry_whose_capability_arrived`, red without it). The first
-  contact's wait over a relay is #405.
+  contact's wait over a relay is #405. The release's pre-release review found the rule refused an
+  honest chain through a holder reached only through a relay (connected to no coordinator, so no
+  record of it): a chained pass naming an unheard coordinator now takes its authenticated sender's
+  word where the sender advertises `features::JUDGES_THE_COORDINATOR` (bit 38) —
+  `layer_forward::swarm_use_of_forward`, test
+  `a_chained_pass_naming_an_unheard_coordinator_takes_the_judging_hops_word`.
   `docs/invariants/network.md` § "A computer this node has not heard from is not judged allowed".
 
 **Closed 2026-11-04, released in v0.3.271** (#322's spawn half)

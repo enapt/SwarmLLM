@@ -8,8 +8,10 @@ was let in before yours had heard what it shares — so one disconnected for run
 behind, or one sharing nothing, could still have its requests run by passing them through a
 computer on an older release. Now such a computer waits until yours has heard what it shares, and
 one cut off right now is refused through a relay too. Computers connected to yours and your own
-linked devices are not affected; a computer that is turned down this way has its chat run
-elsewhere, with nothing held against either side (#403).
+linked devices are not affected, nor is a chat split across several computers where one is
+reached only through a relay — each computer along the split vouches for the one that started it.
+A computer that is turned down this way has its chat run elsewhere, with nothing held against
+either side (#403).
 
 **A model that ran out of graphics memory after a long chat goes back to the card sooner.** When
 the card runs out, the model is moved to the processor for a while (2 minutes at first) before the

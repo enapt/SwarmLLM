@@ -419,6 +419,18 @@ pub mod features {
     /// (`remote_generate::features_a_head_needs`).
     pub const TEMPLATE_VARS: u64 = 1 << 37;
 
+    /// Judges a chained prompt pass's coordinator by FUTURE_WORK #403's rule
+    /// before it runs the pass or hands it on (the dispatcher's admission, at
+    /// `sequence_num == 0`): a coordinator with no capability on record is
+    /// refused unless connected or a pool device. So a later hop with no
+    /// record of that coordinator — one it reaches only through a relay, or
+    /// not at all — takes the authenticated sender's word for it
+    /// (`layer_forward::swarm_use_of_forward`) where the sender advertises
+    /// this. An older hop judged an unheard coordinator allowed, so its word
+    /// is not taken. A streamed check's chunks are judged at no hop, this one
+    /// or the next. Nothing on the wire changes.
+    pub const JUDGES_THE_COORDINATOR: u64 = 1 << 38;
+
     /// The full feature set THIS build implements. Advertised by every node,
     /// with [`KV_HALF_ON_CARD`], [`KV_WINDOW_SLIDES`] and
     /// [`REQUESTER_GUESSES`] beside it where they apply.
@@ -456,7 +468,8 @@ pub mod features {
         | STREAM_LOOKAHEAD
         | STREAM_SPARES
         | SERVED_TIME
-        | TEMPLATE_VARS;
+        | TEMPLATE_VARS
+        | JUDGES_THE_COORDINATOR;
 
     /// Does `advertised` include every bit in `needed`?
     pub fn supports(advertised: u64, needed: u64) -> bool {

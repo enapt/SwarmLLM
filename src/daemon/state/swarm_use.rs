@@ -521,6 +521,12 @@ impl SharedState {
     /// over one it did not opt in to (`WithAllowLimitedConn`, go-libp2p-swarm
     /// #236); Saltzer and Schroeder's fail-safe default.
     ///
+    /// A chained prompt pass naming such a coordinator is the one exception,
+    /// decided where the pass is judged (`layer_forward::swarm_use_of_forward`):
+    /// the hop that handed it on judged that coordinator by this same rule,
+    /// where it advertises `features::JUDGES_THE_COORDINATOR`, so its word is
+    /// taken — a holder reached only through a relay hears from no coordinator.
+    ///
     /// THIS node may — `pool_membership` counts it its own pool's device: a
     /// split that starts and finishes here hands its last prompt pass back
     /// naming it as the coordinator (`layer_forward::judged_as`), and it is in

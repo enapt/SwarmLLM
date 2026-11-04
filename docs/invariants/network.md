@@ -6034,6 +6034,24 @@ heard.
   capability, so it only displaces its own kind. Test
   `relay::tests::minted_origins_never_push_out_an_entry_whose_capability_arrived` (red with the
   rank back to `last_seen` alone).
+- **A later hop of a chain takes the hop before's word for a coordinator it has not heard from**
+  (pre-release review of v0.3.272, a regression this rule made). A chained prompt pass is judged as
+  the coordinator it names (`judged_as`), and the scheduler plans a holder that is connected OR
+  reachable only through a relay (`peer_reachable_via_relay`): such a hop at the second place or
+  later is connected to no coordinator it would recognise, and a gossiped capability installs only
+  into an entry that exists, so it had no record of the coordinator and refused every chain through
+  it — `NotHeardFrom` for an honest split that v0.3.271 ran. Now `layer_forward::swarm_use_of_forward`
+  answers `Allowed` for exactly that verdict when the forward names someone other than its
+  authenticated sender and the sender's capability on record advertises
+  `features::JUDGES_THE_COORDINATOR` (bit 38, in `ALL`): the hop before judged the coordinator by
+  this rule before running or handing on the pass (`admit_own_forward`, `sequence_num == 0`), so
+  the chain's word is rooted at the first hop, which the coordinator asked directly. A hop without
+  the bit (an older release judged an unheard coordinator allowed) is not taken at its word; a
+  coordinator ON RECORD as refused stays refused whoever chained it. What a modified sender gains is
+  nothing new: it could already name a coordinator in good standing (the name is cleartext the seal
+  does not authenticate — the rule above). No wire change: the bit is the only negotiation. Test
+  `a_chained_pass_naming_an_unheard_coordinator_takes_the_judging_hops_word` (red with the helper
+  back to `swarm_use_of_peer(judged_as(..))`).
 - **First contact over a relay waits for a repeat** (review, LOW — accepted). A capability gossiped
   before the origin's first body here found no entry and was dropped, so the wait is the origin's
   next `QuietRepeat` (5, 10, 20, then 40 min) or a change; each request meanwhile is a re-plan
