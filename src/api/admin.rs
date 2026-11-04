@@ -193,9 +193,9 @@ pub fn serialize_peer_to_json(
         // dispatcher applies, so the label and the refusal cannot disagree.
         "swarm_use": state.swarm_use_of_entry(peer).key(),
         // Releases behind the newest this node knows of (`null` unreadable).
-        "releases_behind": peer_version.as_deref().and_then(|v| {
-            crate::daemon::state::swarm_use::releases_behind(v, &state.newest_release_known())
-        }),
+        "releases_behind": peer_version
+            .as_deref()
+            .and_then(|v| state.releases_known().behind(v)),
         // Its own settings, for display only; `null` from an older build.
         "auto_manage": peer.capability.as_ref().and_then(|c| c.auto_manage),
         "updates_itself": peer.capability.as_ref().and_then(|c| c.updates_itself),

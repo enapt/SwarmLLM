@@ -171,8 +171,8 @@
 
   // --- Network Status panel ---
   // Single source of truth for "what state is this node in?". Replaces the
-  // old swarm-capacity-banner + mode-indicator strip. Eight named states:
-  //   unreachable | connecting | global | viewonly | private | lan | solo | offline
+  // old swarm-capacity-banner + mode-indicator strip. Nine named states:
+  //   unreachable | connecting | global | behind | viewonly | private | lan | solo | offline
   // Cloud-provider count + capacity facts fold in as supporting detail.
   App.networkStatus = {
     update: function(statsData, providerData) {
@@ -255,15 +255,21 @@
         stateDetail = allowLan
           ? I18n.t('netstatus.detail_private_with_lan')
           : I18n.t('netstatus.detail_private');
+      } else if (swarmUse && swarmUse.verdict === 'too_far_behind') {
+        // Two or more releases behind: computers on newer releases disconnect
+        // this one (`swarm_use::cut_off_for`), so the panel says so whether or
+        // not any computer is still connected — with none, "Solo" or
+        // "Offline" would hide the reason and the fix.
+        stateKey = 'behind';
+        stateName = I18n.t('netstatus.behind');
+        stateDetail = I18n.t('netstatus.detail_behind', { running: swarmUse.running, newest: swarmUse.newest });
       } else if (peers > 0 && swarmUse && swarmUse.verdict && swarmUse.verdict !== 'allowed') {
         // Connected, but other computers will not run this node's chats
         // (`daemon::state::swarm_use`): it can look at the swarm, not use it.
         // After the private branches — there only pool devices are asked.
         stateKey = 'viewonly';
         stateName = I18n.t('netstatus.viewonly');
-        stateDetail = swarmUse.verdict === 'too_far_behind'
-          ? I18n.t('netstatus.detail_viewonly_behind', { running: swarmUse.running, newest: swarmUse.newest })
-          : I18n.t('netstatus.detail_viewonly_parts', { held: swarmUse.parts_held, needed: swarmUse.parts_needed });
+        stateDetail = I18n.t('netstatus.detail_viewonly_parts', { held: swarmUse.parts_held, needed: swarmUse.parts_needed });
       } else if (peers > 0) {
         stateKey = 'global';
         stateName = I18n.t('netstatus.global');
@@ -294,7 +300,7 @@
           c.innerHTML = html;
           chipsEl.appendChild(c);
         };
-        if ((stateKey === 'global' || stateKey === 'viewonly') && peers > 0) {
+        if ((stateKey === 'global' || stateKey === 'viewonly' || stateKey === 'behind') && peers > 0) {
           // One chip per non-empty peer type so the header spells out exactly
           // who's connected: internet peers, same-network peers, pool devices.
           if (remotePeers > 0) addChip('<strong>' + remotePeers + '</strong> ' + U.escapeHtml(I18n.t(remotePeers === 1 ? 'netstatus.chip_remote_one' : 'netstatus.chip_remote_other')));

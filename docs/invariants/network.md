@@ -5780,12 +5780,12 @@ none; and a computer two releases behind should not be served either.
 - **Version: two releases behind, against THIS node's signed update check.** One behind is the
   normal state for the minutes an update takes. A peer's advertised version never sets "newest":
   one peer claiming 9.9.9 would make every node refuse itself — the rule `update::PeerVersionWatch`
-  already keeps. Patch numbers are counted, so an unpublished number (.263, .267) counts as a
-  release: at worst a node is asked to update a few minutes early.
-- **Nothing but USE is withheld.** Not communication by version: cutting older releases off splits
-  the swarm at every release for the minutes auto-update takes, and drops their parts out of
-  everyone's splits (`architecture.md` § "Additive Protocol Evolution"). Parts keep flowing to a
-  refused computer — fetching is how it starts to share — and updates reach it.
+  already keeps. Counted in PUBLISHED releases since the same day (§ below): an unpublished
+  number (.263, .267) no longer counts.
+- **The parts gate withholds only USE.** Parts keep flowing to a computer that shares too few —
+  fetching is how it starts to share — and it hears the swarm. The VERSION half was widened the
+  same day to cost a computer its connections too (§ "A computer two releases behind loses
+  contact", below).
 - **The refusal reaches an older coordinator correctly**: `ServiceUnavailable`-worded, which
   `router::message_means_peer_cannot_serve` reads as "bar this peer, re-plan, no penalty, no
   retraction" on every release. A new coordinator also refuses ITSELF up front (`request_scope`
@@ -5835,11 +5835,112 @@ computer's whole-held models still run there.
 requester's verdict REQUIRED (no path starts a peer's request without it), only at a request's
 FIRST forward (`sequence_num == 0`) so a reply under way is never cut off; "newest" is never a
 peer's claim nor an unsigned tag; an older-version capability never replaces a newer one; the
-owner's refusal never reaches a peer as itself; gossip, parts and updates are never gated on it.
+owner's refusal never reaches a peer as itself; the parts half gates nothing but use.
 Tests: `swarm_use::tests::*`, `a_computer_that_shares_too_little_reaches_only_itself`,
 `a_heads_own_swarm_use_refusal_reaches_the_requester_as_cannot_serve`,
 `a_computer_that_may_not_use_the_swarm_is_refused_the_requests_it_starts`,
 `cli::status::tests::a_node_that_may_not_use_the_swarm_says_why_and_how_to_lift_it`.
+
+## A computer two releases behind loses contact, not only use (2026-11-04)
+
+**What happened.** The swarm-use gate (above) refused the requests of a computer two releases
+behind and kept talking to it — gossip, parts and the DHT — for the stated reason that cutting
+older releases off splits the swarm at every release. The user's direction the same day: *"we
+need to protect the system against freeloaders, through version releases. if they dont update
+they lose communication."* The Russian node (`54c49961`) was then two releases behind with its
+updates off.
+
+**Why two behind does not split the swarm at a release.** One behind keeps EVERYTHING: that is
+where every node is for the minutes auto-update takes after a release, so no release separates
+an updating node from anyone. A node two behind has missed a whole release — it is not updating.
+The constant is the use gate's (`RELEASES_BEHIND_TO_LOSE_USE`): one rule, two consequences.
+
+**Prior art.** Bitcoin Core disconnects a peer below `MIN_PEER_PROTO_VERSION` at the version
+handshake ("using obsolete version …; disconnecting") — no ban, it may come back. Ethereum's fork
+identifier (EIP-2124) is checked at the handshake too: a peer on a fork this node has passed is
+rejected as STALE, while one merely behind on the current fork is accepted as SYNCING — our one
+behind. Both decide BEFORE anything else is sent, which is why this build names its release in
+libp2p Identify (`swarm_use::agent_version`, `swarmllm/<version>`; older releases send
+`rust-libp2p/…`).
+
+**What was chosen.**
+- **Judged on the computer's OWN word only** (`SharedState::note_peers_own_version` →
+  `peers_own_versions`): its Identify agent version, or a capability it sent DIRECT while
+  connected (`note_capability_heard`). Never a gossiped or DHT-stored capability: they carry no
+  stamp, so another node can play an old one back (the first security finding above) — and a
+  disconnect is harsher than a refusal. The newest it states wins; the note goes with its last
+  connection (`forget_peers_own_version`). A replayed DIRECT message is impossible: a direct
+  sender is the connection's own peer, a relayed one is proven and replay-guarded (§ "A relayed
+  body is its origin's only once its origin is PROVEN").
+- **Acted on in ONE place, the network loop** (`NetworkManager::cut_off_peer`): at Identify,
+  before the computer is registered or caught up, when its Identify names a release; else on the
+  30 s liveness tick (`cut_off_peers_too_far_behind`), for an older release's capability and for
+  any connected computer a newly published release has put two behind. The cut blocks the peer
+  (libp2p `allow_block_list`: its connections close and new ones in either direction are refused),
+  drops it from Kademlia's table, and `dial_checked` and `try_enqueue_redial` skip it.
+- **At most `MAX_CUT_OFF` (1024) blocked at once** — keys are free, and each claiming an old
+  release would hold a block and an entry for 10 min; past the cap a computer is disconnected,
+  not blocked (the cap `foreign_peers` has, for the same reason).
+- **For `CUT_OFF_FOR` (10 min), then judged again** on what it says on its next connection. An
+  old computer costs one connection and Identify per 10 min per computer that cut it — and, while
+  it runs a release older than v0.3.271, this node's catch-up (capability and parts list), since
+  its version arrives only after. A computer that updated waits out at most the rest of 10 min at
+  each computer that cut it. Bitcoin Core's plain disconnect would be re-dialled within seconds
+  (libp2p re-dialled foreign peers every 20 s-4 min, § "Completing libp2p Identify").
+- **Behind is counted in PUBLISHED releases** (`ReleasesKnown::behind`): the update check already
+  lists `/releases?per_page=30`; it now keeps the versions listed (`UpdateState::releases_listed`).
+  .266 when .268 came out was ONE release behind (.267 was folded into .268, never published) —
+  counted by numbers, a disconnect a release early. The list is unsigned, so it may only LOWER the
+  count of version numbers, never raise it. **No list, nobody is judged behind** — before the
+  first update check (30 s after start), with checks off or GitHub unreachable, and while the
+  check writes the state: the first version counted numbers there, which the security review
+  showed cuts a computer one published release behind across a skipped number, every such peer
+  at once on the tick that met the write. A release held from an earlier check that the next
+  check no longer finds was withdrawn (.199) and is forgotten (`update::forget_a_withdrawn_update`):
+  it stayed the "newest" until a restart.
+- **A pool device is never cut** — the owner admitted it — and while the pool state is being
+  written nobody is (`pool::scope::pool_membership` answers `None`; `is_pool_member`'s "not a
+  member" on contention is the safe direction for trust and the wrong one here). Judged next tick.
+- **Updates still reach a cut computer**: they come from GitHub (`update::check_for_update`),
+  never from peers, so an unmodified install with updates on comes back by itself; with updates
+  off its dashboard says why (`netstatus.behind`, shown with no peers too — "Solo" or "Offline"
+  would have hidden the reason) and so does `swarmllm status`.
+
+**Limits.** The version is the computer's own claim: a modified build can claim the newest (the
+same limit as the parts gate). A host for which no update asset is published (#246's missing
+baseline) cannot update, believes itself level (its check records no update) and is cut — the
+release pipeline publishes every asset, and the update notice says "no build for this computer".
+While the swarm moves to v0.3.271, a computer on an older release that still talks to a cut one
+may forward its gossip (GossipSub forwards without our validation): harmless, since nothing plans
+with or fetches from a computer it is not connected to (`connected_node_ids`, § "Scheduler
+Liveness Oracle"), and once every computer cuts it nobody forwards it. The same transition lets a
+cut computer's request reach this node RELAYED by a computer that has not cut it: the relayed
+origin has no capability here, and the use gate lets an unknown computer in (security review,
+2026-11-04, plausible, not traced end to end; FUTURE_WORK #403). A block is enforced only once the connection is
+up, so the cut computer — whose older release does not know it was cut — re-dials every 2-5 s
+for the 10 minutes, each attempt a Noise handshake here (logged at `debug`); measured on the
+live swarm, 0 connections were let through in the 2.5 min watched. An older release's capability
+that arrives before this node has finished its Identify is dropped by the sender check, and it is
+sent direct only once, so such a computer goes unjudged until it reconnects — gone once older
+releases are.
+
+**Seen on the live swarm (2026-11-04, a probe node of this build, auto-manage off):** of eight
+computers, the one on 0.3.268 (`54c49961`, `releases_behind=2`) was disconnected at the first
+liveness tick, 33 s after it connected, from the capability it sent as it connected; the seven on
+0.3.270 stayed (`releases_behind=0`), and it did not get back in over the 2.5 min watched.
+
+**What a change must keep.** One judgment (`SharedState::cut_off_for`) and one actor (the network
+loop); never a gossiped or DHT capability as the evidence; one release behind keeps everything;
+"newest" signed, never a peer's claim; a pool device exempt; the list only lowers the count, and
+no list judges nobody.
+Tests: `a_computer_two_releases_behind_is_cut_off_and_a_pool_device_never_is`,
+`a_computer_is_judged_on_the_release_it_stated_itself`,
+`a_release_number_never_published_does_not_count_as_a_release`,
+`this_build_names_its_release_in_identify_and_older_ones_do_not`,
+`a_computer_two_releases_behind_is_cut_off_at_identify`,
+`the_liveness_tick_cuts_a_computer_whose_own_capability_names_an_old_release` (all red with
+`cut_off_for` answering `None` / the list ignored), `computers_cut_off_are_blocked_only_up_to_a_cap`,
+`update::a_withdrawn_release_is_forgotten_at_the_next_check`.
 
 ## Every part this node serves shares ONE upload limit (2026-10-24, FUTURE_WORK #335)
 

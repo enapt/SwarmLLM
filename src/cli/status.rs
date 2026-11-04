@@ -240,9 +240,9 @@ fn describe_swarm_use(swarm_use: Option<&serde_json::Value>) -> Option<String> {
             count("parts_held"),
         )),
         "too_far_behind" => Some(format!(
-            "off — other computers run requests only for one at most one release behind, and \
-             this one runs {} while {} is out. Update it (`swarmllm update`); models held \
-             whole here still run.",
+            "off — computers on newer releases disconnect one two or more releases behind, \
+             and this one runs {} while {} is out. Update it (`swarmllm update`) to rejoin \
+             the swarm; models held whole here still run.",
             text("running"),
             text("newest"),
         )),

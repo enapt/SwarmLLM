@@ -18,17 +18,23 @@ use crate::types::{KeepAsked, ModelId, NodeId};
 /// authenticated boundary — the same reasoning that keeps `dashboard_trust_lan`
 /// off by default (gotcha #195).
 pub fn is_pool_member(shared: &SharedState, node_id: &NodeId) -> bool {
-    if node_id == shared.identity.node_id() {
-        return true;
-    }
     // `try_read` matches `allowed_node_set`: on contention fall back to "not a
     // member", which is the safe direction for a trust check.
-    match shared.credits.pool_state.try_read() {
-        Ok(guard) => guard
-            .as_ref()
-            .is_some_and(|ps| ps.members.iter().any(|m| m.node_id == *node_id)),
-        Err(_) => false,
+    pool_membership(shared, node_id).unwrap_or(false)
+}
+
+/// [`is_pool_member`], or `None` when the pool state is being written right
+/// now — for a decision where "not a member" is NOT the safe direction:
+/// cutting a computer off (`swarm_use::cut_off_for`) waits for an answer.
+pub fn pool_membership(shared: &SharedState, node_id: &NodeId) -> Option<bool> {
+    if node_id == shared.identity.node_id() {
+        return Some(true);
     }
+    shared.credits.pool_state.try_read().ok().map(|guard| {
+        guard
+            .as_ref()
+            .is_some_and(|ps| ps.members.iter().any(|m| m.node_id == *node_id))
+    })
 }
 
 /// Returns the set of NodeIds allowed for inference and shard management.

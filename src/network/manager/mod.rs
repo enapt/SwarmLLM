@@ -642,6 +642,12 @@ pub struct NetworkManager {
     /// on the assumption it disconnected before Identify). See
     /// `identify::peer_speaks_swarmllm`. Capped at `MAX_FOREIGN_PEERS`.
     foreign_peers: std::collections::HashSet<libp2p::PeerId>,
+    /// Computers cut off for running a release too far behind
+    /// (`swarm_use::cut_off_for`), blocked until the instant named, then let
+    /// back to be judged again. Written only by `cut_off_peer`, emptied by
+    /// `cut_off_peers_too_far_behind` (the liveness tick); `dial_checked` and
+    /// `try_enqueue_redial` skip a peer in it.
+    cut_off: HashMap<libp2p::PeerId, std::time::Instant>,
     /// Consecutive request/response failures per peer, with when that peer last
     /// answered anything. Both are reset by any success. See
     /// `MAX_CONSECUTIVE_RR_FAILURES` and `RR_FAILURES_AFTER_SILENCE`.
@@ -1037,6 +1043,7 @@ impl NetworkManager {
             redial_attempts: HashMap::new(),
             departed_peer_nodes: HashMap::new(),
             foreign_peers: std::collections::HashSet::new(),
+            cut_off: HashMap::new(),
             rr_failures: HashMap::new(),
             dht_query_rx,
             pending_provider_queries: HashMap::new(),
@@ -1780,6 +1787,7 @@ impl NetworkManager {
                     for peer_id in &connected {
                         self.refresh_peer_last_seen(peer_id);
                     }
+                    self.cut_off_peers_too_far_behind();
                     // Belt-and-suspenders relay fallback: if, well after startup,
                     // this node still has NO internet-reachable address (no public
                     // listener, no UPnP/AutoNAT-confirmed external addr, no relay

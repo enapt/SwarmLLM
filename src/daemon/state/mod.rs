@@ -701,6 +701,13 @@ pub struct SharedState {
     /// the network manager beside `connected_node_ids` (Identify, the last
     /// close); read ONLY by [`SharedState::holder_standing`] (#339).
     pub connected_networks: DashMap<NodeId, crate::network::helpers::NetGroup>,
+    /// The release each connected node said it runs ITSELF — its Identify
+    /// agent version, or a capability it sent direct; the newest wins. Written
+    /// ONLY by `note_peers_own_version` (the identify handler, dispatch's
+    /// capability arm while connected), removed ONLY by
+    /// `forget_peers_own_version` (the network manager, on the last close);
+    /// read ONLY by `cut_off_verdict` (`swarm_use`).
+    pub peers_own_versions: DashMap<NodeId, String>,
     /// NETWORKING_PLAN Phase 1 — learned reverse relay routes, keyed by the
     /// TARGET's libp2p peer-id bytes. When an inference message for us arrives
     /// wrapped in a `RelayedEnvelope` via relay R, we record "to reach the
@@ -1729,6 +1736,7 @@ impl SharedState {
             peer_id_map: DashMap::new(),
             connected_node_ids: dashmap::DashSet::new(),
             connected_networks: DashMap::new(),
+            peers_own_versions: DashMap::new(),
             relay_routes: DashMap::new(),
             relay_forward_counters: DashMap::new(),
             relay_proven_features: DashMap::new(),

@@ -1472,8 +1472,10 @@ a:hover { color: var(--accent-hover); }
 .network-status-viewonly .netstatus-dot { background: #d29922; }
 
 .network-status-offline,
+.network-status-behind,
 .network-status-unreachable { border-left-color: rgba(190, 50, 50, 0.75); }
 .network-status-offline .netstatus-dot,
+.network-status-behind .netstatus-dot,
 .network-status-unreachable .netstatus-dot { background: #e25c5c; }
 
 /* Chips on the right side of the primary row */

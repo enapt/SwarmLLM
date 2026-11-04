@@ -176,6 +176,7 @@ deserialize on the other side. The rule that fixes this:
   it plus the bits only its settings make true.
   The Phase-1 relay (`features::RELAY`) is the reference example: see
   `network/manager/relay.rs::target_speaks`.
+- **The one deliberate partition is two releases** (2026-11-04): a node disconnects a computer two or more published releases behind (`swarm_use::cut_off_for`, `arch-network.md`); vN±1 always talk.
 - **`PROTOCOL_VERSION`** (`swarmllm_types`) is the wire epoch — bump ONLY on a
   genuinely breaking change (which the first rule forbids without a fallback),
   NOT for additive feature bits. Adding a `features` bit does not bump it.

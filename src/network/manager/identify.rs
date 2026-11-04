@@ -24,6 +24,11 @@ pub(super) const MAX_UNCONNECTED_REGISTERED: usize = 64;
 /// `peer_id_map` (NET-C4).
 pub(super) const MAX_PEER_TO_NODE: usize = 10_000;
 
+/// The most computers blocked at once for running a release too far behind
+/// ([`NetworkManager::cut_off_peer`]) — the cap `MAX_FOREIGN_PEERS` puts on
+/// the other list a stranger's key can grow.
+pub(super) const MAX_CUT_OFF: usize = 1024;
+
 impl NetworkManager {
     /// The nodes in a pipeline this node is running, which keep their registry
     /// entry whatever the cap.
@@ -105,6 +110,15 @@ impl NetworkManager {
             if let Some(pid) = evict_peer {
                 self.peer_to_node.remove(&pid);
                 let _ = self.swarm.disconnect_peer_id(pid);
+                // The close path finds nothing to clean once `peer_to_node`
+                // has gone, so what it would have dropped is dropped here.
+                if self.forget_connected_node(&evict_id) {
+                    tracing::info!(
+                        node = %evict_id,
+                        peers = self.shared_state.connected_node_ids.len(),
+                        "Peer disconnected — the farthest, to stay under the peer list's cap"
+                    );
+                }
             }
             tracing::debug!(
                 evicted = %evict_id,
@@ -134,6 +148,74 @@ impl NetworkManager {
             }
         }
         map.insert(node_id.clone(), peer_bytes);
+    }
+}
+
+impl NetworkManager {
+    /// Stop talking to a computer running a release too far behind
+    /// (`swarm_use::cut_off_for`): block it for `CUT_OFF_FOR` — its
+    /// connections close and new ones in either direction are refused — and
+    /// drop it from the DHT's table, so this node neither dials it nor names
+    /// it to others. Gossip, parts and requests go with the connection. When
+    /// the time is up it may connect again and is judged on what it says then
+    /// (`cut_off_peers_too_far_behind`).
+    pub(super) fn cut_off_peer(
+        &mut self,
+        peer_id: libp2p::PeerId,
+        node_id: &NodeId,
+        verdict: &crate::daemon::state::swarm_use::SwarmUse,
+    ) {
+        let crate::daemon::state::swarm_use::SwarmUse::TooFarBehind { running, newest } = verdict
+        else {
+            return;
+        };
+        // Anyone can mint keys that each claim an old release, so the blocks
+        // are capped as `foreign_peers` is; past the cap a computer is only
+        // disconnected.
+        if self.cut_off.len() < MAX_CUT_OFF || self.cut_off.contains_key(&peer_id) {
+            self.swarm.behaviour_mut().blocked_peers.block_peer(peer_id);
+            self.cut_off.insert(
+                peer_id,
+                std::time::Instant::now() + crate::daemon::state::swarm_use::CUT_OFF_FOR,
+            );
+        }
+        let _ = self.swarm.disconnect_peer_id(peer_id);
+        self.swarm.behaviour_mut().kademlia.remove_peer(&peer_id);
+        // INFO: at most once per peer per `CUT_OFF_FOR`, and the one line that
+        // says the rule acted.
+        tracing::info!(
+            %peer_id,
+            node = %node_id,
+            running = %running,
+            newest = %newest,
+            "Disconnected a computer two or more releases behind the newest — it may \
+             connect again in 10 minutes, and stays once it has updated"
+        );
+    }
+
+    /// The liveness tick: let back the computers whose cut-off is over, then
+    /// cut any connected computer whose own stated release is now too far
+    /// behind — an older release states it in the capability it sends as it
+    /// connects, and a release published since can put one behind.
+    pub(super) fn cut_off_peers_too_far_behind(&mut self) {
+        let now = std::time::Instant::now();
+        let swarm = &mut self.swarm;
+        self.cut_off.retain(|peer_id, until| {
+            let keep = *until > now;
+            if !keep {
+                swarm.behaviour_mut().blocked_peers.unblock_peer(*peer_id);
+            }
+            keep
+        });
+        let connected: Vec<libp2p::PeerId> = self.swarm.connected_peers().cloned().collect();
+        for peer_id in connected {
+            let Some(node_id) = self.peer_to_node.get(&peer_id).map(|n| n.clone()) else {
+                continue;
+            };
+            if let Some(verdict) = self.shared_state.cut_off_verdict(&node_id) {
+                self.cut_off_peer(peer_id, &node_id, &verdict);
+            }
+        }
     }
 }
 
@@ -311,6 +393,20 @@ impl NetworkManager {
             crate::types::NodeId(*hash.as_bytes())
         };
 
+        // A computer too far behind is cut off here, before it is registered
+        // or caught up — when its Identify names its release (v0.3.271 on).
+        // An older one names it in the capability it sends as it connects,
+        // and the liveness tick cuts it then (`cut_off_peers_too_far_behind`).
+        if let Some(running) =
+            crate::daemon::state::swarm_use::version_in_agent(&info.agent_version)
+        {
+            if let Some(verdict) = self.shared_state.cut_off_for(&node_id, running) {
+                self.cut_off_peer(peer_id, &node_id, &verdict);
+                return;
+            }
+            self.shared_state.note_peers_own_version(&node_id, running);
+        }
+
         // Establish encryption session from the peer's Ed25519 public key
         if let Ok(ed_key) = info.public_key.clone().try_into_ed25519() {
             if let Some(x25519_pub) =
@@ -482,6 +578,9 @@ impl NetworkManager {
         // NET-C4: Populate reverse PeerId → NodeId lookup (capped)
         if self.peer_to_node.len() < MAX_PEER_TO_NODE || self.peer_to_node.contains_key(&peer_id) {
             self.peer_to_node.insert(peer_id, node_id.clone());
+        } else {
+            // Its close is never mapped back to it, so nothing would forget it.
+            self.shared_state.forget_peers_own_version(&node_id);
         }
         // Ground-truth connection set — consumed by HealthMonitor to skip eviction.
         // Populated here (not at ConnectionEstablished) because we only learn
@@ -747,5 +846,203 @@ mod foreign_peer_tests {
             "totally/swarmllm/id/1.0.0",
             Vec::<&str>::new()
         ));
+    }
+}
+
+#[cfg(test)]
+mod cut_off_tests {
+    use super::*;
+    use libp2p::swarm::ConnectionId;
+    use std::sync::Arc;
+    use tokio::sync::{mpsc, watch};
+
+    fn manager() -> NetworkManager {
+        let dir = tempfile::tempdir().unwrap().keep();
+        let db = crate::storage::db::Database::open(&dir).unwrap();
+        let config = crate::config::Config::default();
+        let (state, _, _) = crate::daemon::SharedState::new(
+            config.clone(),
+            crate::identity::Identity::generate(),
+            db,
+            Arc::new(tokio::sync::Mutex::new(
+                crate::inference::executor::ModelExecutor::new(),
+            )),
+            None,
+        );
+        crate::daemon::state::swarm_use::list_every_release_up_to_this_one(&state);
+        let (command_tx, command_rx) = mpsc::channel(8);
+        let (out_tx, _dispatched) = mpsc::channel(64);
+        let (_shutdown_tx, shutdown_rx) = watch::channel(false);
+        let (_dht_tx, dht_rx) = mpsc::channel(8);
+        NetworkManager::new(
+            state.clone(),
+            &state.identity,
+            &config,
+            command_rx,
+            command_tx,
+            out_tx,
+            shutdown_rx,
+            None,
+            dht_rx,
+        )
+        .unwrap()
+    }
+
+    /// This build's version with its patch number moved by `delta`.
+    fn own_patch(delta: i64) -> String {
+        let core = env!("CARGO_PKG_VERSION").split('-').next().unwrap();
+        let mut parts = core.split('.').map(|p| p.parse::<i64>().unwrap());
+        let (major, minor, patch) = (
+            parts.next().unwrap(),
+            parts.next().unwrap(),
+            parts.next().unwrap(),
+        );
+        format!("{major}.{minor}.{}-alpha", patch + delta)
+    }
+
+    fn identify_from(key: &libp2p::identity::Keypair, agent: String) -> libp2p::identify::Info {
+        libp2p::identify::Info {
+            public_key: key.public(),
+            protocol_version: "/swarmllm/id/1.0.0".into(),
+            agent_version: agent,
+            listen_addrs: vec![],
+            protocols: vec![],
+            observed_addr: "/ip4/127.0.0.1/tcp/1".parse().unwrap(),
+            signed_peer_record: None,
+        }
+    }
+
+    fn node_of(key: &libp2p::identity::Keypair) -> NodeId {
+        NodeId(key.public().try_into_ed25519().unwrap().to_bytes())
+    }
+
+    /// **A computer whose Identify names a release two behind is cut off
+    /// there**: blocked, never registered, never dialled — and let back when
+    /// its time is up, to be judged on what it says then. One on this release
+    /// is registered as before, its release noted.
+    #[tokio::test]
+    async fn a_computer_two_releases_behind_is_cut_off_at_identify() {
+        let mut manager = manager();
+        let old = libp2p::identity::Keypair::generate_ed25519();
+        let old_peer = old.public().to_peer_id();
+        manager.handle_identify_received(
+            old_peer,
+            identify_from(&old, format!("swarmllm/{}", own_patch(-2))),
+            ConnectionId::new_unchecked(1),
+        );
+        assert!(manager.cut_off.contains_key(&old_peer));
+        assert!(manager
+            .swarm
+            .behaviour()
+            .blocked_peers
+            .blocked_peers()
+            .contains(&old_peer));
+        assert!(!manager
+            .shared_state
+            .peer_registry
+            .contains_key(&node_of(&old)));
+        assert!(manager.shared_state.peers_own_versions.is_empty());
+
+        // Its time is up: let back, to be judged again.
+        *manager.cut_off.get_mut(&old_peer).unwrap() = std::time::Instant::now();
+        manager.cut_off_peers_too_far_behind();
+        assert!(manager.cut_off.is_empty());
+        assert!(!manager
+            .swarm
+            .behaviour()
+            .blocked_peers
+            .blocked_peers()
+            .contains(&old_peer));
+
+        // THE CONTROL: one release behind, and an older release's Identify
+        // that names none, are registered as before.
+        for (n, agent) in [
+            (2, format!("swarmllm/{}", own_patch(-1))),
+            (3, "rust-libp2p/0.47.0".to_string()),
+        ] {
+            let key = libp2p::identity::Keypair::generate_ed25519();
+            let peer = key.public().to_peer_id();
+            manager.handle_identify_received(
+                peer,
+                identify_from(&key, agent),
+                ConnectionId::new_unchecked(n),
+            );
+            assert!(!manager.cut_off.contains_key(&peer));
+            assert!(manager
+                .shared_state
+                .peer_registry
+                .contains_key(&node_of(&key)));
+        }
+        assert_eq!(
+            manager.shared_state.peers_own_versions.len(),
+            1,
+            "only the Identify that named a release noted one"
+        );
+    }
+
+    /// **The liveness tick cuts a connected computer on the release it
+    /// stated itself** — an older release states it in the capability it
+    /// sends as it connects, after Identify.
+    #[tokio::test]
+    async fn the_liveness_tick_cuts_a_computer_whose_own_capability_names_an_old_release() {
+        let mut manager = manager();
+        let key = libp2p::identity::Keypair::generate_ed25519();
+        let peer = key.public().to_peer_id();
+        let node = node_of(&key);
+        manager.handle_identify_received(
+            peer,
+            identify_from(&key, "rust-libp2p/0.47.0".into()),
+            ConnectionId::new_unchecked(1),
+        );
+        assert!(manager.peer_to_node.contains_key(&peer));
+        manager
+            .shared_state
+            .note_peers_own_version(&node, &own_patch(-2));
+        // No real connection in a unit test: cut it as the tick would, on
+        // the tick's own verdict.
+        let verdict = manager
+            .shared_state
+            .cut_off_verdict(&node)
+            .expect("two behind");
+        manager.cut_off_peer(peer, &node, &verdict);
+        assert!(manager.cut_off.contains_key(&peer));
+        manager.try_enqueue_redial(peer, vec![], 0);
+        assert!(
+            !manager.pending_redial.iter().any(|(p, _, _)| *p == peer),
+            "never re-dialled while cut off"
+        );
+    }
+
+    /// **The blocks are capped**: keys are free, and each that claims an old
+    /// release would otherwise hold a block for 10 minutes. Past the cap a
+    /// computer is disconnected, not blocked.
+    #[tokio::test]
+    async fn computers_cut_off_are_blocked_only_up_to_a_cap() {
+        let mut manager = manager();
+        let until = std::time::Instant::now() + crate::daemon::state::swarm_use::CUT_OFF_FOR;
+        for _ in 0..MAX_CUT_OFF {
+            manager.cut_off.insert(libp2p::PeerId::random(), until);
+        }
+        let key = libp2p::identity::Keypair::generate_ed25519();
+        let peer = key.public().to_peer_id();
+        manager.handle_identify_received(
+            peer,
+            identify_from(&key, format!("swarmllm/{}", own_patch(-2))),
+            ConnectionId::new_unchecked(1),
+        );
+        assert_eq!(manager.cut_off.len(), MAX_CUT_OFF);
+        assert!(!manager
+            .swarm
+            .behaviour()
+            .blocked_peers
+            .blocked_peers()
+            .contains(&peer));
+        assert!(
+            !manager
+                .shared_state
+                .peer_registry
+                .contains_key(&node_of(&key)),
+            "still cut: never registered"
+        );
     }
 }

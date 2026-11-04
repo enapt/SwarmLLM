@@ -295,10 +295,13 @@ pub fn build_behaviour(
     );
 
     // Identify protocol
-    let identify = identify::Behaviour::new(identify::Config::new(
-        "/swarmllm/id/1.0.0".to_string(),
-        local_key.public(),
-    ));
+    // The agent version names this build's release, so a computer too far
+    // behind can be judged at Identify, before anything else is sent to it
+    // (`swarm_use::cut_off_for`). Older releases send `rust-libp2p/…`.
+    let identify = identify::Behaviour::new(
+        identify::Config::new("/swarmllm/id/1.0.0".to_string(), local_key.public())
+            .with_agent_version(crate::daemon::state::swarm_use::agent_version()),
+    );
 
     // AutoNAT v2 for NAT detection (toggleable — disable on WSL2). v2 replaces
     // v1: it tests reachability on ONE specific address at a time (driven by

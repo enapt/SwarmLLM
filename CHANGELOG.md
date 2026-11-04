@@ -2,19 +2,26 @@
 
 ## [Unreleased]
 
-**Other computers run your chats only if your computer shares, and keeps up.** A computer must hold
-at least 2 model parts and run a release at most one behind the newest for the swarm to run its
-requests. One that does not still sees the swarm, still fetches parts and updates, still runs the
-models it holds whole, and its own linked devices still serve it — its dashboard and
-`swarmllm status` say why its chats stay on that computer and what lifts it (turn on Auto-Download
+**Other computers run your chats only if your computer shares, and keeps up — and a computer that
+stops updating loses the swarm.** A computer must hold at least 2 model parts and run a release at
+most one behind the newest for the swarm to run its requests. One that shares too little still sees
+the swarm, still fetches parts (which is how it starts to share), still runs the models it holds
+whole, and its own linked devices still serve it. One that is two or more releases behind is
+disconnected by every updated computer and let back ten minutes later only if it has updated —
+updates come from GitHub, so it can still update, and its dashboard shows "Out of date" with the fix
+even when no computer is left connected. One release behind keeps everything: that is where every
+computer is for the minutes an update takes, so a new release never splits the swarm. Releases are
+counted as published, so a version number that was never released does not count, and a computer
+that has not yet read the list of releases (just started, or updates turned off) disconnects nobody.
+A release that is withdrawn stops being the newest at the next update check. The dashboard and
+`swarmllm status` say why chats stay on that computer and what lifts it (turn on Auto-Download
 Models, or update). The peer list marks computers that share too little, are out of date, or have
-automatic downloads or updates turned off. Nothing changes for a computer that shares and updates;
-computers on older releases are judged by what they announce, and their requests are refused at
-once so they re-plan elsewhere. "Newest" is only a release whose signature checks out, and the
-first release of a new series counts as one release, so a new version number never cuts anyone
-off at once; an old announcement played back by another computer cannot get yours refused. A
-modified program can still claim parts it does not hold — this stops the released program from
-taking without giving.
+automatic downloads or updates turned off. Nothing changes for a computer that shares and updates,
+and linked devices of your own are never disconnected. "Newest" is only a release whose signature
+checks out, and the first release of a new series counts as one release, so a new version number
+never cuts anyone off at once; an old announcement played back by another computer cannot get yours
+refused or disconnected. A modified program can still claim parts or a version it does not have —
+this stops the released program from taking without giving.
 
 **A chat this computer has no memory left for goes to the other computers instead of failing.**
 A model held whole here used to answer "not enough free memory for this conversation" even when

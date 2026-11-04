@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #403**). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #404**). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -3888,6 +3888,20 @@ endpoints. `candle-*` stays on 0.10 deliberately (§ "Decided").
 Credits are DORMANT — they gate nothing, and `credits_stay_dormant` fails the build if one
 starts. Read `docs/CREDITS_DESIGN.md` before touching them; the credit items below are
 preconditions for ever switching enforcement on, not work for now.
+
+#### #403 — A computer cut off for its release may still reach this node through a relay
+`P3` · network · **OPEN** — 2026-11-04 · history: the version cut-off's security review (plausible, not traced end to end)
+
+A computer two releases behind is disconnected by every updated computer
+(`SharedState::cut_off_for`, `docs/invariants/network.md` § "A computer two releases behind loses
+contact"), but a computer that has NOT cut it — an older release, while the swarm moves to
+v0.3.271 — can relay its `RemoteGenerateRequest` here. The relayed origin arrives proven with no
+capability on record, and the use gate lets an unknown computer in (`swarm_use_of_entry`: no
+capability → allowed), so the request is run until the origin's gossiped capability lands. Next:
+trace the relayed path through `admits_a_new_request` to confirm, then decide whether a relayed
+origin with no capability here waits for one (a new computer's first request would wait too) or
+is judged by the relay's word. Shrinks by itself as older releases go: an updated relay cuts the
+origin too.
 
 #### #383 — A serving node's stream of checks is not tied to the peer that opened it
 `P4` · network · **OPEN** — 2026-10-30 · history: #382's security review (low, pre-existing)

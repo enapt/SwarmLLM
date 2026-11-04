@@ -188,6 +188,15 @@ pub struct UpdateState {
     /// reads as "the project lost its stars".
     #[serde(default)]
     pub github_stars: Option<u64>,
+    /// The versions of the published releases the last check's list named
+    /// (`/releases?per_page=30`, drafts left out), newest first. Read only by
+    /// `SharedState::releases_known`, so "how many releases behind" counts
+    /// releases that were PUBLISHED — a number never published (.263, .267)
+    /// does not count. Unsigned, so it may only LOWER that count
+    /// (`swarm_use::ReleasesKnown::behind`). Kept from the last check that
+    /// listed any.
+    #[serde(default)]
+    pub releases_listed: Vec<String>,
 }
 
 /// A newer version is installed on disk than the one running.
@@ -335,6 +344,31 @@ async fn fetch_release_text(assets: &[GitHubAsset], want: &str) -> Option<String
             None
         }
     }
+}
+
+/// An update held from an earlier check that is newer than `newest_published`
+/// — the newest release the check finds now — was WITHDRAWN (.199): it is no
+/// longer offered, nor the newest release this node judges peers by
+/// (`swarm_use::releases_known`; security review, 2026-11-04). It stayed until
+/// a restart.
+fn forget_a_withdrawn_update(state: &mut UpdateState, newest_published: &str) {
+    if state
+        .update_available
+        .as_ref()
+        .is_some_and(|held| is_newer_version(newest_published, &held.latest_version))
+    {
+        state.update_available = None;
+    }
+}
+
+/// The versions of the published releases in a list (drafts left out), as
+/// listed: newest first.
+fn releases_listed(releases: &[GitHubRelease]) -> Vec<String> {
+    releases
+        .iter()
+        .filter(|r| !r.draft)
+        .map(|r| r.tag_name.trim_start_matches('v').to_string())
+        .collect()
 }
 
 /// Pick the newest applicable release from a `/releases` list (GitHub returns
@@ -693,6 +727,10 @@ impl UpdateChecker {
             .json()
             .await
             .map_err(|e| SwarmError::Network(format!("Failed to parse releases JSON: {e}")))?;
+        let listed = releases_listed(&releases);
+        if !listed.is_empty() {
+            self.state.write().await.releases_listed = listed;
+        }
 
         // Defaults true: every release this project publishes is tagged
         // `-alpha`, so filtering pre-releases out means finding nothing, ever.
@@ -716,6 +754,7 @@ impl UpdateChecker {
             let mut state = self.state.write().await;
             state.last_checked = Some(chrono::Utc::now().to_rfc3339());
             state.last_error = None;
+            forget_a_withdrawn_update(&mut state, &latest_tag);
             return Ok(None);
         }
 
@@ -2154,6 +2193,42 @@ mod tests {
             prerelease,
             draft,
         }
+    }
+
+    /// **A withdrawn release is forgotten at the next check** — no longer
+    /// offered, nor the newest release peers are judged by. It stayed until a
+    /// restart (security review, 2026-11-04). A held update the check still
+    /// finds, or one older than it, is kept.
+    #[test]
+    fn a_withdrawn_release_is_forgotten_at_the_next_check() {
+        let held = |version: &str| UpdateState {
+            update_available: Some(UpdateInfo {
+                latest_version: version.into(),
+                current_version: "0.3.270-alpha".into(),
+                download_url: String::new(),
+                changelog: String::new(),
+                published_at: String::new(),
+                checksum_sha256: None,
+                sidecar_body: None,
+                signature_minisig: None,
+                asset_name: None,
+                signature_verified: true,
+                downloaded: false,
+                self_update_supported: true,
+                self_update_blocked: None,
+                install_dir: None,
+            }),
+            ..Default::default()
+        };
+        let mut withdrawn = held("0.3.272-alpha");
+        forget_a_withdrawn_update(&mut withdrawn, "0.3.271-alpha");
+        assert!(withdrawn.update_available.is_none());
+        let mut still_out = held("0.3.271-alpha");
+        forget_a_withdrawn_update(&mut still_out, "0.3.271-alpha");
+        assert!(still_out.update_available.is_some());
+        let mut nothing = UpdateState::default();
+        forget_a_withdrawn_update(&mut nothing, "0.3.271-alpha");
+        assert!(nothing.update_available.is_none());
     }
 
     /// #107's residual: with updates off, turning them on must be noticed in

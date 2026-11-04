@@ -2123,6 +2123,11 @@ pub(crate) async fn dispatch_network_messages(
                                         // our next update check forward; it never
                                         // chooses what to install.
                                         shared_state.events.note_peer_version(&cap.node_id, &cap.version);
+                                        // Sent by the node itself (the sender
+                                        // check above): direct, it is its own
+                                        // word on the release it runs, which the
+                                        // network loop judges.
+                                        shared_state.note_capability_heard(&cap.node_id, &cap.version, transport);
                                     }
                                     // Nickname gossip from peers
                                     SwarmMessage::NicknameGossip(gossip) => {

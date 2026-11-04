@@ -110,6 +110,17 @@ fn redial_backoff_ms(attempts_so_far: u32) -> Option<u64> {
 }
 
 impl NetworkManager {
+    /// Drop what this node keeps about `nid` only while it is connected: the
+    /// network it connects from, the release it stated, its place in the
+    /// connected set. `true` when it was in that set. Asked by the last close
+    /// and by a registry eviction that disconnects — which removes
+    /// `peer_to_node` first, so the close finds nothing to clean.
+    pub(super) fn forget_connected_node(&self, nid: &crate::types::NodeId) -> bool {
+        self.shared_state.connected_networks.remove(nid);
+        self.shared_state.forget_peers_own_version(nid);
+        self.shared_state.connected_node_ids.remove(nid).is_some()
+    }
+
     /// Handle new peer connection — track address, send PEX request.
     pub(super) fn handle_connection_established(
         &mut self,
@@ -429,8 +440,7 @@ impl NetworkManager {
             if let Some(ref nid) = node_id_for_cleanup {
                 // Remove from libp2p-connected ground-truth set so HealthMonitor
                 // can now evict the peer_registry entry if it goes stale.
-                self.shared_state.connected_networks.remove(nid);
-                if self.shared_state.connected_node_ids.remove(nid).is_some() {
+                if self.forget_connected_node(nid) {
                     // Pairs with "Peer connected" in identify.rs. Between them,
                     // every change to the peer count an operator sees has a
                     // line, which it did not before.
@@ -618,6 +628,10 @@ impl NetworkManager {
                     // Active pipeline needs this peer — reconnect immediately.
                     self.try_enqueue_redial(peer_id, redial_addrs, 500);
                 }
+            } else if self.cut_off.contains_key(&peer_id) {
+                // Cut off at Identify for running too old a release, before it
+                // was registered: no entry BY DECISION, as for a foreign peer.
+                tracing::trace!(%peer_id, "Not re-dialling a computer cut off for its release");
             } else if self.foreign_peers.contains(&peer_id) {
                 // Identify succeeded and told us this peer does not speak
                 // SwarmLLM, so it has no registry entry BY DECISION rather than
@@ -698,6 +712,13 @@ impl NetworkManager {
                 tracing::debug!(
                     %peer_id, site,
                     "Not dialling a peer that does not speak SwarmLLM"
+                );
+                return Ok(());
+            }
+            if self.cut_off.contains_key(&peer_id) {
+                tracing::debug!(
+                    %peer_id, site,
+                    "Not dialling a computer cut off for running too old a release"
                 );
                 return Ok(());
             }
@@ -783,12 +804,17 @@ impl NetworkManager {
     /// behaviours supply the addresses. An empty list is NOT a reason to skip
     /// the re-dial — that gate is what left two LAN peers mutually invisible
     /// (see the note in `handle_connection_closed`).
-    fn try_enqueue_redial(
+    pub(super) fn try_enqueue_redial(
         &mut self,
         peer_id: libp2p::PeerId,
         addrs: Vec<libp2p::Multiaddr>,
         delay_ms: u64,
     ) {
+        // A computer cut off for its release is let back by the liveness
+        // tick, and dials US when it has updated; a re-dial would be refused.
+        if self.cut_off.contains_key(&peer_id) {
+            return;
+        }
         let already_queued = self
             .pending_redial
             .iter()
