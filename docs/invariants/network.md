@@ -5901,6 +5901,16 @@ libp2p Identify (`swarm_use::agent_version`, `swarmllm/<version>`; older release
 - **A pool device is never cut** — the owner admitted it — and while the pool state is being
   written nobody is (`pool::scope::pool_membership` answers `None`; `is_pool_member`'s "not a
   member" on contention is the safe direction for trust and the wrong one here). Judged next tick.
+- **Nor is a computer this node bootstraps from** (`SharedState::bootstraps_from`, added the same
+  day): its `/p2p/` id in the live `network.bootstrap_peers` — the built-in anchor unless the
+  owner opted out. Every fresh install joins through the anchor, and its updater is a separate
+  root timer (`deploy/anchor/`) that had been hourly while its operator updated it by hand; two
+  releases close together with that timer stalled would have had every updated computer drop it,
+  and new installs could then join nobody. The id is the connection's authenticated key, so no
+  other computer can claim the exemption. Bitcoin Core's `noban` permission for a peer its operator
+  configured (`-whitelist`), and geth's trusted nodes, are the same exemption. The anchor's timer
+  now checks every 4 minutes (a conditional request: GitHub's 304 costs no quota), so it is
+  behind for minutes, not hours. Test `a_computer_this_node_bootstraps_from_is_never_cut_off`.
 - **Updates still reach a cut computer**: they come from GitHub (`update::check_for_update`),
   never from peers, so an unmodified install with updates on comes back by itself; with updates
   off its dashboard says why (`netstatus.behind`, shown with no peers too — "Solo" or "Offline"

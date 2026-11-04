@@ -379,15 +379,37 @@ impl SharedState {
     /// published releases behind the newest this node knows. Never a device of
     /// this node's pool — the owner admitted it — and not while the pool state
     /// cannot be read (judged again on the next tick: cutting is the harsh
-    /// direction). Acted on only by the network loop: at Identify, and every
-    /// liveness tick over [`Self::peers_own_versions`].
+    /// direction). Never a computer this node bootstraps from
+    /// ([`Self::bootstraps_from`]): an anchor whose updater lagged would
+    /// otherwise be dropped by every updated computer, and every fresh install
+    /// joins through it. Acted on only by the network loop: at Identify, and
+    /// every liveness tick over [`Self::peers_own_versions`].
     pub fn cut_off_for(&self, node: &NodeId, running: &str) -> Option<SwarmUse> {
         let releases = self.releases_known();
         let behind = too_far_behind(running, &releases)?;
+        if self.bootstraps_from(node) {
+            return None;
+        }
         match crate::pool::scope::pool_membership(self, node) {
             Some(false) => Some(behind),
             Some(true) | None => None,
         }
+    }
+
+    /// Is `node` one this node bootstraps from — named by its `/p2p/` id in
+    /// the live `network.bootstrap_peers`, which holds the built-in anchor
+    /// unless the owner opted out? The id is the connection's authenticated
+    /// key, so no other computer can claim it. Bitcoin Core's `noban`
+    /// permission for a peer its operator configured, and geth's trusted
+    /// nodes, are the precedent.
+    pub fn bootstraps_from(&self, node: &NodeId) -> bool {
+        self.cfg().network.bootstrap_peers.iter().any(|addr| {
+            addr.parse::<libp2p::Multiaddr>()
+                .ok()
+                .and_then(|addr| crate::network::helpers::target_peer_from_address(&addr))
+                .and_then(|peer| crate::network::transport::peer_id_to_node_id(&peer))
+                .is_some_and(|id| &id == node)
+        })
     }
 
     /// [`Self::cut_off_for`] on the version `node` last stated itself; `None`
@@ -681,6 +703,38 @@ mod tests {
         let writing = state.credits.pool_state.write().await;
         assert!(state.cut_off_for(&stranger, &own_patch(-5)).is_none());
         drop(writing);
+        assert!(state.cut_off_for(&stranger, &own_patch(-5)).is_some());
+    }
+
+    /// **A computer this node bootstraps from is never cut off** — an anchor
+    /// whose updater lagged two releases would be dropped by every updated
+    /// computer, and fresh installs join through it. Named by its `/p2p/` id
+    /// in the live bootstrap list; any other computer is judged as before.
+    #[test]
+    fn a_computer_this_node_bootstraps_from_is_never_cut_off() {
+        let anchor_id = crate::identity::Identity::generate().node_id().clone();
+        let anchor_peer = crate::network::transport::node_id_to_peer_id(&anchor_id).unwrap();
+        let mut config = crate::config::Config::default();
+        config.network.bootstrap_peers =
+            vec![format!("/dns4/anchor.example/tcp/8810/p2p/{anchor_peer}")];
+        let dir = tempfile::tempdir().unwrap().keep();
+        let (state, _, _) = SharedState::new(
+            config,
+            crate::identity::Identity::generate(),
+            crate::storage::db::Database::open(&dir).unwrap(),
+            std::sync::Arc::new(tokio::sync::Mutex::new(
+                crate::inference::executor::ModelExecutor::new(),
+            )),
+            None,
+        );
+        list_every_release_up_to_this_one(&state);
+        assert!(state.bootstraps_from(&anchor_id));
+        assert!(
+            state.cut_off_for(&anchor_id, &own_patch(-5)).is_none(),
+            "the anchor, five releases behind"
+        );
+        let stranger = NodeId([0x44; 32]);
+        assert!(!state.bootstraps_from(&stranger));
         assert!(state.cut_off_for(&stranger, &own_patch(-5)).is_some());
     }
 

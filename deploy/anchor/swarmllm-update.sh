@@ -29,8 +29,36 @@ command -v jq >/dev/null || { log "jq not installed"; exit 1; }
 CUR=$("$BIN" --version 2>/dev/null | awk '{print $NF}')   # e.g. 0.3.1-alpha
 [[ -n "$CUR" ]] || { log "could not read current version"; exit 1; }
 
+# The release list, asked CONDITIONALLY. The timer checks every few minutes so
+# a new release reaches the anchor within ~5 (every fresh install bootstraps
+# from it, and computers two releases behind are disconnected); unauthenticated,
+# GitHub allows 60 API calls an hour per address. A request carrying the last
+# answer's ETag is answered 304 while nothing changed, with no body, and a 304
+# does not count against that limit (GitHub's REST best practices, "Use
+# conditional requests"), so the frequent check costs nothing until a release
+# is published.
+STATE_DIR="/var/lib/swarmllm-update"
+mkdir -p "$STATE_DIR"
+etag_file="$STATE_DIR/releases.etag"
+body_file="$STATE_DIR/releases.json"
+hdr=()
+[[ -s "$etag_file" && -s "$body_file" ]] && hdr=(-H "If-None-Match: $(cat "$etag_file")")
+code=$(curl -sS --retry 3 --retry-delay 10 --connect-timeout 30 --max-time 120 \
+  ${hdr[@]+"${hdr[@]}"} -D "$STATE_DIR/releases.headers" -o "$STATE_DIR/releases.new" \
+  -w '%{http_code}' "https://api.github.com/repos/${REPO}/releases?per_page=10") \
+  || { log "release list request failed"; rm -f "$STATE_DIR/releases.new"; exit 1; }
+case "$code" in
+  200)
+    mv -f "$STATE_DIR/releases.new" "$body_file"
+    tr -d '\r' < "$STATE_DIR/releases.headers" \
+      | sed -n 's/^[Ee][Tt][Aa][Gg]: *//p' | tail -1 > "$etag_file"
+    ;;
+  304) rm -f "$STATE_DIR/releases.new" ;;
+  *)   log "release list answered HTTP $code"; rm -f "$STATE_DIR/releases.new"; exit 1 ;;
+esac
+
 # Newest non-draft release (pre-release inclusive; GitHub returns newest-first).
-META=$(dl "https://api.github.com/repos/${REPO}/releases" | jq '[.[] | select(.draft==false)][0]')
+META=$(jq '[.[] | select(.draft==false)][0]' "$body_file")
 LATEST=$(echo "$META" | jq -r '.tag_name // empty' | sed 's/^v//')
 [[ -n "$LATEST" ]] || { log "no release found"; exit 0; }
 

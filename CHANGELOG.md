@@ -23,6 +23,13 @@ never cuts anyone off at once; an old announcement played back by another comput
 refused or disconnected. A modified program can still claim parts or a version it does not have —
 this stops the released program from taking without giving.
 
+**The computer new installs join through is never disconnected for its version, and it now updates
+within about five minutes of a release.** A computer is never cut off by one that bootstraps from it
+(the built-in anchor, or any address in your own bootstrap list), so an anchor that falls behind can
+never leave new installs with nobody to join. The anchor's own updater checks every 4 minutes
+instead of every hour; an anchor already running picks the new timer up with the one-time refresh in
+`deploy/anchor/README.md`.
+
 **A chat this computer has no memory left for goes to the other computers instead of failing.**
 A model held whole here used to answer "not enough free memory for this conversation" even when
 other connected computers held the same model — a long prompt to a 14B on a 12 GB card did, in

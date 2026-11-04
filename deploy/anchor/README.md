@@ -124,7 +124,10 @@ become discoverable to each other.
 - Default-deny firewall; only TCP 8810 + UDP 8800 exposed.
 - Inference surface **not running at all** (`--anchor`).
 - OS auto-patched (`unattended-upgrades`).
-- **swarmllm auto-updated by a root-run timer** (`swarmllm-update.timer`, hourly),
+- **swarmllm auto-updated by a root-run timer** (`swarmllm-update.timer`, every
+  4 minutes, so a release reaches the anchor within ~5; each check is a
+  conditional request GitHub answers 304 while nothing changed, which costs no
+  API quota),
   *not* by the daemon. The sandboxed non-root daemon deliberately can't rewrite
   its own binary, so a separate root-privileged updater checks for a newer
   release, verifies the SHA256, swaps the binary and restarts the service — the
@@ -145,22 +148,27 @@ often the anchor checks for updates, or to how it runs, never reach an anchor
 that is already deployed.** The binary keeps updating; everything around it
 stays as installed.
 
-Concretely, the check interval moved from daily to hourly in v0.3.44. An anchor
-installed before that keeps checking daily however many times its binary
-updates. During alpha, when several releases can ship in a day, that means it is
-usually running something other than the current build.
+Concretely, the check interval moved from daily to hourly in v0.3.44, and from
+hourly to every 4 minutes in v0.3.271. An anchor installed before either keeps
+its old cadence however many times its binary updates. During alpha, when
+several releases can ship in a day, an hourly anchor is usually running
+something other than the current build — and it is the node every fresh
+install joins through.
 
-To pick up unit changes on an existing anchor, refresh them once:
+To pick up unit changes on an existing anchor, refresh them once (as root):
 
 ```bash
 RAW=https://raw.githubusercontent.com/enapt/SwarmLLM/main/deploy/anchor
-curl -fsSL "$RAW/swarmllm-update.sh"    -o /usr/local/bin/swarmllm-update.sh
+curl -fsSL "$RAW/swarmllm-update.sh"      -o /usr/local/bin/swarmllm-update.sh
 chmod +x /usr/local/bin/swarmllm-update.sh
-curl -fsSL "$RAW/swarmllm-update.timer" -o /etc/systemd/system/swarmllm-update.timer
+curl -fsSL "$RAW/swarmllm-update.timer"   -o /etc/systemd/system/swarmllm-update.timer
+curl -fsSL "$RAW/swarmllm-update.service" -o /etc/systemd/system/swarmllm-update.service
 curl -fsSL "$RAW/swarmllm-anchor.service" -o /etc/systemd/system/swarmllm-anchor.service
+command -v jq >/dev/null || apt-get install -y jq
 systemctl daemon-reload
 systemctl restart swarmllm-update.timer swarmllm-anchor.service
-systemctl list-timers swarmllm-update.timer   # confirm the new cadence
+systemctl list-timers swarmllm-update.timer   # NEXT should be under 5 minutes away
+systemctl start swarmllm-update.service && journalctl -u swarmllm-update -n 5
 ```
 
 Check what an anchor is actually running with `swarmllm --version`, and when it
@@ -169,7 +177,7 @@ last looked with `journalctl -u swarmllm-update --since -1d`.
 ## Maintenance
 
 - **Status / logs**: `systemctl status swarmllm-anchor`, `journalctl -u swarmllm-anchor -f`
-- **Update binary now** (instead of waiting for the hourly timer):
+- **Update binary now** (instead of waiting for the timer):
   `sudo systemctl start swarmllm-update.service` then `journalctl -u swarmllm-update`.
 - **Check the auto-updater**: `systemctl list-timers swarmllm-update.timer`.
 - **Back up** `/var/lib/swarmllm` (holds the node identity keypair) and snapshot the VM so you can roll back cleanly.

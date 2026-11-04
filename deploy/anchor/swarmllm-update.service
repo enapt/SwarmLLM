@@ -9,3 +9,9 @@ Type=oneshot
 # Runs as root (default) — it must write /usr/local/bin and restart the service,
 # which the sandboxed non-root daemon deliberately cannot do itself.
 ExecStart=/usr/local/bin/swarmllm-update.sh
+# Where the updater keeps the release list's last answer and its ETag, so a
+# check while nothing changed is a 304 that costs no API quota.
+StateDirectory=swarmllm-update
+# A download stalled past this is killed and retried on the next tick, rather
+# than holding the timer (a oneshot that never exits is never re-triggered).
+TimeoutStartSec=40min

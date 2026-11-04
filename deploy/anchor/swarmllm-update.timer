@@ -1,19 +1,24 @@
 [Unit]
-Description=Check hourly for SwarmLLM anchor updates
+Description=Check every few minutes for SwarmLLM anchor updates
 
 [Timer]
-# Hourly, not daily: during alpha several releases can ship in a single day, so
-# a once-a-day check leaves the anchor — the node every fresh install bootstraps
-# from — running yesterday's build most of the time, and its operator updating
-# by hand to compensate.
+# Every 4 minutes, so a published release reaches the anchor within ~5. The
+# anchor is the node every fresh install bootstraps from, and since v0.3.271 a
+# computer two releases behind is disconnected by updated ones (the anchor is
+# exempt where it is a bootstrap peer, but a lagging anchor still serves new
+# installs an old build's view). Hourly left the operator updating by hand.
 #
-# The jitter matters as the anchor count grows: without it every anchor wakes on
-# the same boundary and hits the GitHub API together. 10 minutes spreads them
-# while keeping the worst-case lag near an hour. The updater itself is a no-op
-# when already current, so a frequent check is cheap.
-OnBootSec=2min
-OnUnitActiveSec=1h
-RandomizedDelaySec=10min
+# The check is a conditional request (`swarmllm-update.sh`): GitHub answers 304
+# while the release list is unchanged, which does not count against its
+# 60-an-hour unauthenticated limit, so 15 checks an hour cost nothing.
+#
+# The jitter spreads anchors that would otherwise wake on the same boundary;
+# AccuracySec is lowered from systemd's default minute so the jitter, not
+# timer coalescing, bounds the lag: worst case ~4 min 40 s plus the download.
+OnBootSec=1min
+OnUnitActiveSec=4min
+RandomizedDelaySec=30s
+AccuracySec=10s
 Persistent=true
 
 [Install]
