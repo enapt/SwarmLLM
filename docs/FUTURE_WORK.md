@@ -1799,7 +1799,8 @@ in both blocks — and the model ran on the processor at 2.7 tok/s (first token 
 ended. The same shape was reported on 2026-10-31 and 2026-11-03. On a card with its own memory the
 growth this entry traces ends in an out-of-memory, not in host-backed shared memory. (A browser held
 the card in all three runs; a control without it is still to come.) The pin's doubling across those
-failures is fixed (CHANGELOG, 2026-11-04); the growth is (d)'s fix (1) below — next in the queue.
+failures is fixed (CHANGELOG, 2026-11-04). (d)'s fix (1), two pools, was built and measured on
+2026-11-04 and NOT adopted: the hand-backs did not fall (below).
 
 **Found 2026-10-29: the cost is first-touching fresh pages, not the copy.** With mimalloc v3 (what
 the workers link), 569 MB copied into held memory took 43 ms; into fresh memory 255 ms with memory
@@ -1862,6 +1863,27 @@ dips bottomed at margin − growth), at the price of a layer on the card. Judge 
 hand-back count and the deepest driver free per arm (the `ab367f` summary), never by first tokens
 alone — the second pair loaded 16 layers instead of 15 (`load_reads_free_mb` 5,205 vs 5,161) and
 ran fastest of all where it did not dip (3.6-4.1 s).
+**(1) built and measured 2026-11-04 — NOT adopted.** The patch is kept outside the repo
+(`~/swarmllm-gate/deep/cg/pool367_unshipped.patch`): a second `CUmemoryPool` per device and a
+per-thread `allocating_long_lived` scope in the vendored candle around `SeqCache::append`, Qwen 3.5's
+state and a card-held saved prompt (A/B `SWARMLLM_CUDA_CACHE_POOL=0`). The mechanism fired — the
+cache pool held the conversation (140-160 MB used on the split), and the forward pool's idle use fell
+to the weights — and the outcome did not move:
+- the 14B split (`ab367pool.sh`, CUDA release build, beside a 1.8 GB hog, both arms 16 card layers):
+  18 hand-backs against 12 with one pool, 2,368 MB handed back against 1,920, deepest driver free 148
+  against 151 MB, first token 4.25 against 4.22 s;
+- the field's shape (`creep_repro_ab.sh`, Llama-3.1-8B whole on the card, saved prompts ON the card,
+  ~3,100-token prompts, ABBA, 8 min an arm, 0 driver events): 47 and 47 hand-backs against 50 and
+  51; 2,144-2,304 MB handed back against 5,632-6,176; first token median 1.92-1.98 s against
+  1.92-1.93, p90 2.33 against 2.13-2.14; decode 67.1-68.9 against 70.5-71.8 tok/s; the memory Windows
+  lends the card flat at 95-105 MB in every arm.
+So the regrowth is not two lifetimes sharing one pool: the forward's own working set is larger than
+the room above the margin, and every forward grows it back (the hand-back COUNT is the same with the
+cache out of the way). Neither rig reproduces the field's out-of-memory error (native Linux, a 12 GB
+card, 40 of 48 layers): under WSL2 an overflow is memory lent from the host, never an error.
+**Next**: (2) above, judged by the hand-back count; and the field's own shape on native Linux — a
+Linux card peer through `swarm_route` (never a rented machine), or the next field diagnostics export,
+reading `cuda_pool`'s DIAG lines per forward.
 
 The same 1,800-token prompt's snapshot (Qwen2.5-14B Q4_K_M, 15 of 48 on the card: 569 MB, 486 of it
 the processor layers' f32 cache, all kept in host RAM under WSL2) was copied in 155-680 ms in one pair
