@@ -925,49 +925,56 @@ impl SplitModel {
         // Whose prompt this is decides how many cores may read it — the
         // owner's on every one, the swarm's within the contribution level.
         let for_the_owner = kv_cache_store.serves_the_owner(request_id);
-        crate::inference::cpu_pools::in_phase_pool(seq_len, cpu_layers, for_the_owner, || {
-            // One position, the whole model's own weights: a decode step,
-            // which may go to the card as one CUDA graph.
-            // A decode step, or a speculative check of a few positions — the
-            // latter only where no causal mask is read, since the mask is
-            // built on the host (`mask_is_read`) — or a level of a tree's rows
-            // where the card's tree attention reads their visibility on every
-            // layer (#134).
-            let shape_may_be_captured = match &self.draft_tree {
-                None => seq_len == 1 || !self.mask_is_read(),
-                Some(_) => self.tree_steps_may_be_captured(),
-            };
-            if seq_len <= crate::inference::cuda_graph::MAX_POSITIONS
-                && shape_may_be_captured
-                && self.image_spans.is_empty()
-                && lora_adapter.is_none()
-                && capture_layers.is_none()
-                && skip_mask.is_none()
-            {
-                if let Some(out) = self.forward_decode_as_graph(
+        let experts_in_ram = self.processor_works_only_on_experts();
+        crate::inference::cpu_pools::in_phase_pool(
+            seq_len,
+            cpu_layers,
+            for_the_owner,
+            experts_in_ram,
+            || {
+                // One position, the whole model's own weights: a decode step,
+                // which may go to the card as one CUDA graph.
+                // A decode step, or a speculative check of a few positions — the
+                // latter only where no causal mask is read, since the mask is
+                // built on the host (`mask_is_read`) — or a level of a tree's rows
+                // where the card's tree attention reads their visibility on every
+                // layer (#134).
+                let shape_may_be_captured = match &self.draft_tree {
+                    None => seq_len == 1 || !self.mask_is_read(),
+                    Some(_) => self.tree_steps_may_be_captured(),
+                };
+                if seq_len <= crate::inference::cuda_graph::MAX_POSITIONS
+                    && shape_may_be_captured
+                    && self.image_spans.is_empty()
+                    && lora_adapter.is_none()
+                    && capture_layers.is_none()
+                    && skip_mask.is_none()
+                {
+                    if let Some(out) = self.forward_decode_as_graph(
+                        input,
+                        index_pos,
+                        kv_cache_store,
+                        request_id,
+                        skip_embedding,
+                        all_positions,
+                    )? {
+                        return Ok((out, HashMap::new()));
+                    }
+                }
+                self.forward_inner_body(
                     input,
                     index_pos,
                     kv_cache_store,
                     request_id,
+                    lora_adapter,
+                    capture_layers,
                     skip_embedding,
                     all_positions,
-                )? {
-                    return Ok((out, HashMap::new()));
-                }
-            }
-            self.forward_inner_body(
-                input,
-                index_pos,
-                kv_cache_store,
-                request_id,
-                lora_adapter,
-                capture_layers,
-                skip_embedding,
-                all_positions,
-                skip_mask,
-                None,
-            )
-        })
+                    skip_mask,
+                    None,
+                )
+            },
+        )
     }
 
     /// Whether a forward of several positions on this segment reads the causal
@@ -2288,9 +2295,14 @@ impl SplitModel {
         let for_the_owner = items
             .iter()
             .any(|i| kv_cache_store.serves_the_owner(i.request_id));
-        crate::inference::cpu_pools::in_phase_pool(seq_len, cpu_layers, for_the_owner, || {
-            self.forward_batch_body(items, kv_cache_store)
-        })
+        let experts_in_ram = self.processor_works_only_on_experts();
+        crate::inference::cpu_pools::in_phase_pool(
+            seq_len,
+            cpu_layers,
+            for_the_owner,
+            experts_in_ram,
+            || self.forward_batch_body(items, kv_cache_store),
+        )
     }
 
     fn forward_batch_body(

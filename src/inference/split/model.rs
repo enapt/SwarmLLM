@@ -290,9 +290,27 @@ impl SplitModel {
 
     /// Has this segment's plain decode step settled on its processor width
     /// (`cpu_pools::decode_width_settled` at [`Self::cpu_layer_count`])? A
-    /// speculating loop steps plainly until it has (gotcha #984).
-    pub(crate) fn decode_width_settled(&self) -> bool {
-        crate::inference::cpu_pools::decode_width_settled(self.cpu_layer_count())
+    /// speculating loop steps plainly until it has (gotcha #984). The owner's
+    /// step of a segment whose processor work is only experts in RAM settles a
+    /// calibration of its own (#399), so whose request it is is REQUIRED.
+    pub(crate) fn decode_width_settled(&self, for_the_owner: bool) -> bool {
+        crate::inference::cpu_pools::decode_width_settled(
+            self.cpu_layer_count(),
+            for_the_owner && self.processor_works_only_on_experts(),
+        )
+    }
+
+    /// Is this segment's processor work ONLY the routed experts of layers held
+    /// on the card, kept in the machine's memory (#138 (3), llama.cpp's
+    /// `--n-cpu-moe`) — no layer itself on the processor? The decode step of
+    /// such a forward is calibrated up to the owner's width for the owner's
+    /// requests (`cpu_pools::in_phase_pool`'s `experts_in_ram`, #399): its
+    /// step reads experts scattered across RAM, not one dense layer after
+    /// another, and llama.cpp decodes it on every physical core.
+    pub(super) fn processor_works_only_on_experts(&self) -> bool {
+        !self.device.is_cpu()
+            && !self.layer_devices.iter().any(|d| d.is_cpu())
+            && self.layers.iter().any(|l| l.experts_on_the_processor())
     }
 
     /// How many layers THIS forward runs on the processor: [`Self::cpu_layer_count`]

@@ -2343,6 +2343,44 @@ pool the work RAN on; fails with the branch disabled),
 `an_owner_request_is_marked_per_request_and_released_with_it`,
 `the_owners_prompt_is_read_on_every_core_unless_the_operator_said_otherwise`.
 
+**The owner's decode step of experts in RAM, and every width confirmed side by side** (2026-11-04,
+`cpu_pools`, FUTURE_WORK #399 and #396). A one-token step whose processor work is ONLY routed
+experts of card-held layers (`SplitModel::processor_works_only_on_experts`: the card is the main
+device, no layer runs on the processor, one or more keep their experts there) is not dense decode's
+bandwidth-bound shape, and llama.cpp gives every decode step `common_cpu_get_num_math()` threads,
+`--n-cpu-moe` included. For the OWNER's request such a step calibrates among widths up to
+`owner_decode_threads` (the owner's prompt width on physical cores, never below the contribution's)
+in a calibration of its own, whose DEFAULT is the contribution's width (`Calibration::base`). Every
+calibration now ends the same way: a width other than the default is taken only after a paired
+re-check against it — default, pick, pick, default, `CONFIRM_SAMPLES` = 5 each — 15% faster to go
+narrower, `WIDEN_MARGIN_PCT` = 5% to go wider. The search alone could not be trusted with either:
+the widest always takes a worker's first decode step, which on a step alternating card and
+processor reads slow (58-128 ms against a steady 36-57), so one sample moved the choice. On the
+gate's MoE arm 16 workers had picked 4 threads 8 times, 3 threads 7 and 2 once, while 4 pinned
+decoded ~12% faster than 3.
+
+Measured on this 8-core laptop at the default contribution (offered 4), one CUDA build, ABBA, live
+node stopped, 0 driver events, 4 replies of 256 tokens an arm (`~/swarmllm-gate/deep/cg/ab399v.sh`,
+then `ab399w.sh` for the final rule); the old arm is `SWARMLLM_OWNER_DECODE=contribution
+SWARMLLM_DECODE_CONFIRM=0`:
+
+| model (placement) | before | widest as the owner's default | contribution's width as default |
+|---|---|---|---|
+| gpt-oss-20b MXFP4 (24 layers on the card, experts of 16 in RAM) | 4 threads 14.4 tok/s median (12 replies); a worker that drew 3: 11.0 | 8 threads, 16.2 (14.1-20.2) | 8 threads: re-checked 44/55 and 45/50 ms (4 vs 8), 19.4 median of 8 |
+| Qwen3-30B-A3B Q2_K (every layer on the card, experts of 26-29 in RAM) | 4 threads 21.2 decode median | 8 threads: re-checked 8 = 4 (38/38, 36/36 ms), the tie kept 8 — 19.8 | 4 threads (re-checked 36/37 against 6, or chosen outright), 21.4 |
+| Qwen2.5-14B Q4_K_M (dense, part on the processor; control) | — | 4 threads, `for_the_owner=false`, early settle | unchanged |
+
+gpt-oss's rate is the reply's whole rate (its tokens arrive as reasoning, which `stream_bench` does
+not time as decode). **Why the default is the contribution's width, not the widest:** the first rule
+let the widest stand on a tie, and Qwen3-30B's tie was not a steady-state tie — 8 decoded ~7%
+slower than 4, over 8 replies each. Why a paired re-check reads equal widths that decode apart is
+NOT established (the re-check samples 5 steps early in a reply; a reply runs 256). So a wider width
+has to WIN, by a margin above the re-check's own spread (0-4% across six near-equal pairs). Tests:
+`a_tie_keeps_the_contributions_width` (asserts the widest-default rule keeps 8 on the same timings,
+so it is red without `base`), `a_wider_width_that_wins_side_by_side_is_taken` (red at a 15% widen
+margin), `a_narrower_width_than_the_contributions_still_needs_the_full_margin`,
+`a_narrower_pick_is_taken_only_when_it_wins_side_by_side` (#396, red with the re-check off).
+
 **The swarm's checks at the contribution width** (2026-10-30, `cpu_pools::swarm_check_threads`,
 FUTURE_WORK #379). The change above widened only the OWNER's checks; a machine checking another's
 guesses — every processor peer of a split, and the owner's own where the owner's pool is no wider

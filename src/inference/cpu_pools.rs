@@ -202,6 +202,42 @@ const ELIMINATION_RATIO: (u64, u64) = (3, 2);
 /// this never fires and the full comparison runs.
 const EARLY_SETTLE_SAMPLES: usize = 2;
 
+/// Timings per width in the paired re-check that confirms a narrower pick
+/// before decode leaves the widest (#396). Taken in alternation — widest,
+/// pick, pick, widest, … — so both widths are timed at the same cache lengths
+/// and the same moment of the machine's day, after the first steps; odd, so
+/// the median is a timing, robust to two bad ones of five.
+///
+/// The search above compares widths timed at DIFFERENT moments: the widest
+/// always takes a worker's first decode step, and a step that alternates card
+/// and processor every layer reads slower for its first tokens (the card's
+/// clock ramp is one lead, gotcha #825), and one slow first sample is enough
+/// for [`ELIMINATION_RATIO`] to drop the widest after one look. On the gate's
+/// mixture-of-experts arm 16 workers chose 4 threads 8 times, 3 threads 7 and 2
+/// once, while 4 threads pinned decoded ~12% faster than 3. Ten more of the
+/// user's tokens, paid only when the search would move off the widest.
+///
+/// The re-check is against the calibration's DEFAULT width
+/// (`Calibration::base`): the widest for a contribution's calibration, the
+/// contribution's own width for the owner's decode of experts in RAM (#399).
+const CONFIRM_SAMPLES: usize = 5;
+
+/// How much faster, timed side by side, a width WIDER than the default must
+/// be before the owner's decode of experts in RAM takes it (#399).
+///
+/// Smaller than [`CALIBRATION_MARGIN_PCT`] because the paired re-check is far
+/// quieter than the search: its two medians differed by 0-4% in the six
+/// re-checks of 2026-11-04 where both widths were equal or near it. Not zero:
+/// a tie goes to the contribution's width. Measured on an 8-core laptop at the
+/// default contribution (4), one binary, ABBA, live node stopped
+/// (`cg/ab399v.sh`, `cg/ab399w.sh`): gpt-oss-20b, experts of 16 layers in RAM,
+/// re-checked 8 threads 10% and 20% faster than 4 (45/50, 44/55 ms) and
+/// decoded 16.2 tok/s median at 8 against 14.4 at 4 (20 and 12 replies);
+/// Qwen3-30B-A3B Q2_K re-checked 8 and 4 EQUAL (38/38, 36/36 ms). With the
+/// widest as the default that tie kept 8, at 19.8 tok/s; with this rule it
+/// keeps 4, at 21.4 — level with the build before (21.2).
+const WIDEN_MARGIN_PCT: u64 = 5;
+
 /// How many threads decode should use, given what the owner offered and what
 /// the machine has.
 ///
@@ -256,6 +292,30 @@ struct Calibration {
     /// Decided width, or 0 while still measuring.
     chosen: AtomicUsize,
     state: Mutex<CalibrationState>,
+    /// Whether a narrower pick is re-checked against the widest before it is
+    /// taken ([`CONFIRM_SAMPLES`]; `SWARMLLM_DECODE_CONFIRM=0` is the off arm).
+    confirm: bool,
+    /// The owner's decode of experts kept in RAM ([`owner_decode_threads`]),
+    /// for the log line only.
+    for_the_owner: bool,
+    /// Index of the DEFAULT width — what decode keeps unless another width
+    /// beats it side by side: `0`, the widest, for a contribution's
+    /// calibration; the widest candidate within the contribution's own width
+    /// for the owner's ([`calibration_for`]), so a wider width earns its cores
+    /// ([`WIDEN_MARGIN_PCT`]).
+    base: usize,
+}
+
+/// A pick's paired re-check against the default width ([`CONFIRM_SAMPLES`]).
+struct Confirming {
+    /// The default's candidate index (`Calibration::base`).
+    base: usize,
+    /// The candidate index under re-check.
+    pick: usize,
+    /// Timings: `[0]` the default's, `[1]` the pick's.
+    ns: [Vec<u64>; 2],
+    /// Steps handed out so far, for the alternation.
+    step: usize,
 }
 
 struct CalibrationState {
@@ -275,6 +335,9 @@ struct CalibrationState {
     counts: Vec<usize>,
     /// Candidates that lost their first cycle badly enough not to be re-timed.
     eliminated: Vec<bool>,
+    /// Set once the search has chosen a narrower width and the paired re-check
+    /// is running; the search's own samples are no longer added to.
+    confirming: Option<Confirming>,
 }
 
 /// Median of a set of timings, or `None` when there are none.
@@ -297,7 +360,7 @@ impl Calibration {
         self.chosen.load(Ordering::Relaxed) != 0 || self.state.is_poisoned()
     }
 
-    fn new(candidates: Vec<usize>) -> Self {
+    fn new(candidates: Vec<usize>, confirm: bool) -> Self {
         let n = candidates.len();
         Self {
             candidates,
@@ -307,12 +370,41 @@ impl Calibration {
                 samples_ns: vec![Vec::new(); n],
                 counts: vec![0; n],
                 eliminated: vec![false; n],
+                confirming: None,
             }),
+            confirm,
+            for_the_owner: false,
+            base: 0,
         }
     }
 
+    /// Settle on the search's choice `idx`, or — where it is not the default
+    /// width and the re-check is on — start the paired re-check of the two.
+    fn conclude(&self, st: &mut CalibrationState, idx: usize, medians: &[Option<u64>]) {
+        if idx != self.base && self.confirm {
+            st.confirming = Some(Confirming {
+                base: self.base,
+                pick: idx,
+                ns: [Vec::new(), Vec::new()],
+                step: 0,
+            });
+            return;
+        }
+        self.chosen.store(self.candidates[idx], Ordering::Relaxed);
+        self.announce(st, idx, medians, None);
+    }
+
     /// Report the decision once, the same way from either exit.
-    fn announce(&self, st: &CalibrationState, final_idx: usize, medians: &[Option<u64>]) {
+    ///
+    /// `paired` is the re-check's outcome where one ran: the default's and the
+    /// pick's indices and the medians they read, in that order.
+    fn announce(
+        &self,
+        st: &CalibrationState,
+        final_idx: usize,
+        medians: &[Option<u64>],
+        paired: Option<(usize, usize, u64, u64)>,
+    ) {
         let _ = st;
         let table: Vec<String> = self
             .candidates
@@ -320,17 +412,31 @@ impl Calibration {
             .zip(medians.iter())
             .map(|(t, ns)| format!("{t}:{}ms", ns.map(|v| v / 1_000_000).unwrap_or(0)))
             .collect();
+        let rechecked = paired
+            .map(|(base, pick, b, p)| {
+                format!(
+                    "{}:{}ms against {}:{}ms side by side",
+                    self.candidates[base],
+                    b / 1_000_000,
+                    self.candidates[pick],
+                    p / 1_000_000
+                )
+            })
+            .unwrap_or_default();
         tracing::info!(
             decode_threads = self.candidates[final_idx],
             offered = self.candidates[0],
+            default = self.candidates[self.base],
+            for_the_owner = self.for_the_owner,
             measured = %table.join(" "),
+            rechecked = %rechecked,
             "Decode thread width calibrated on this machine from real tokens"
         );
         // The benches run without a tracing subscriber, and a calibration you
         // cannot see is a calibration you cannot check.
         if std::env::var("SWARMLLM_DECODE_CALIBRATE_VERBOSE").is_ok() {
             eprintln!(
-                "CALIB chose {} of {} — {}",
+                "CALIB chose {} of {} — {} {rechecked}",
                 self.candidates[final_idx],
                 self.candidates[0],
                 table.join(" ")
@@ -351,9 +457,19 @@ impl Calibration {
             }
         };
         let step = self.cursor.fetch_add(1, Ordering::Relaxed);
-        let Ok(st) = self.state.lock() else {
+        let Ok(mut st) = self.state.lock() else {
             return raw(step);
         };
+        if let Some(c) = st.confirming.as_mut() {
+            // Default, pick, pick, default: neither width owns the earlier slots.
+            let i = c.step;
+            c.step += 1;
+            return if matches!(i % 4, 0 | 3) {
+                c.base
+            } else {
+                c.pick
+            };
+        }
         if st.eliminated.iter().all(|e| !e) {
             return raw(step);
         }
@@ -376,6 +492,10 @@ impl Calibration {
             // calibration is not worth propagating that: keep the widest.
             Err(_) => return,
         };
+        if st.confirming.is_some() {
+            self.record_confirming(&mut st, idx, ns);
+            return;
+        }
         st.counts[idx] += 1;
         st.samples_ns[idx].push(ns);
         // Once every candidate has been seen once, drop the hopeless ones so
@@ -417,8 +537,7 @@ impl Calibration {
                 .min();
             if let (Some(w), Some(b)) = (medians[0], best_live) {
                 if b * 100 > w * (100 - CALIBRATION_MARGIN_PCT) {
-                    self.chosen.store(self.candidates[0], Ordering::Relaxed);
-                    self.announce(&st, 0, &medians);
+                    self.conclude(&mut st, 0, &medians);
                     return;
                 }
             }
@@ -467,9 +586,45 @@ impl Calibration {
             _ => true,
         };
         let final_idx = if keep_widest { 0 } else { pick_idx };
+        self.conclude(&mut st, final_idx, &medians);
+    }
+
+    /// One timing of the paired re-check; once both widths have
+    /// [`CONFIRM_SAMPLES`], take the pick only where its median is still a
+    /// margin faster than the default's, timed side by side: the search's
+    /// margin to go narrower, [`WIDEN_MARGIN_PCT`] to go wider.
+    fn record_confirming(&self, st: &mut CalibrationState, idx: usize, ns: u64) {
+        let Some(c) = st.confirming.as_mut() else {
+            return;
+        };
+        let slot = if idx == c.base {
+            0
+        } else if idx == c.pick {
+            1
+        } else {
+            // A step handed out before the re-check began.
+            return;
+        };
+        c.ns[slot].push(ns);
+        if c.ns.iter().any(|v| v.len() < CONFIRM_SAMPLES) {
+            return;
+        }
+        let (base, pick) = (c.base, c.pick);
+        let (b, p) = (
+            median_ns(&c.ns[0]).unwrap_or(0),
+            median_ns(&c.ns[1]).unwrap_or(u64::MAX),
+        );
+        let margin = if self.candidates[pick] > self.candidates[base] {
+            WIDEN_MARGIN_PCT
+        } else {
+            CALIBRATION_MARGIN_PCT
+        };
+        let take = p.saturating_mul(100) <= b.saturating_mul(100 - margin);
+        let final_idx = if take { pick } else { base };
         self.chosen
             .store(self.candidates[final_idx], Ordering::Relaxed);
-        self.announce(&st, final_idx, &medians);
+        let medians: Vec<Option<u64>> = st.samples_ns.iter().map(|v| median_ns(v)).collect();
+        self.announce(st, final_idx, &medians, Some((base, pick, b, p)));
     }
 }
 
@@ -563,13 +718,20 @@ fn pool_for(threads: usize) -> Option<Arc<rayon::ThreadPool>> {
 /// model's layer count.
 struct Calibrations {
     candidates: Vec<usize>,
+    confirm: bool,
+    for_the_owner: bool,
+    /// Each depth's `Calibration::base`.
+    base: usize,
     by_depth: Mutex<HashMap<usize, Arc<Calibration>>>,
 }
 
 impl Calibrations {
-    fn new(candidates: Vec<usize>) -> Self {
+    fn new(candidates: Vec<usize>, for_the_owner: bool, confirm: bool) -> Self {
         Self {
             candidates,
+            confirm,
+            for_the_owner,
+            base: 0,
             by_depth: Mutex::new(HashMap::new()),
         }
     }
@@ -583,7 +745,12 @@ impl Calibrations {
         let mut map = self.by_depth.lock().ok()?;
         Some(
             map.entry(cpu_layers)
-                .or_insert_with(|| Arc::new(Calibration::new(self.candidates.clone())))
+                .or_insert_with(|| {
+                    let mut c = Calibration::new(self.candidates.clone(), self.confirm);
+                    c.for_the_owner = self.for_the_owner;
+                    c.base = self.base;
+                    Arc::new(c)
+                })
                 .clone(),
         )
     }
@@ -592,21 +759,45 @@ impl Calibrations {
 /// The calibrator for this processor depth, or `None` when there is nothing
 /// to choose between (an explicit width, calibration switched off, one core,
 /// or no processor layers at all).
-fn calibration_for(cpu_layers: usize) -> Option<Arc<Calibration>> {
-    static CALIBS: OnceLock<Option<Calibrations>> = OnceLock::new();
-    CALIBS
-        .get_or_init(|| {
-            // An explicit width (or an explicit 0) is a decision already made.
-            if env_decode_threads().is_some() || !env_calibration_enabled() {
-                return None;
-            }
-            let candidates =
-                decode_candidates(rayon::current_num_threads(), num_cpus::get_physical());
-            if candidates.len() < 2 {
-                return None;
-            }
-            Some(Calibrations::new(candidates))
-        })
+///
+/// `owner_wide` is the owner's decode of a forward whose processor work is
+/// only routed experts kept in RAM: its candidates reach
+/// [`owner_decode_threads`], so it has a calibration of its own — unless that
+/// is no wider than the contribution's (a node at Maximum), where the two are
+/// one and nothing is timed twice. Its default is the widest candidate within
+/// the contribution's width: a wider one is taken only where it wins side by
+/// side ([`WIDEN_MARGIN_PCT`]).
+fn calibration_for(cpu_layers: usize, owner_wide: bool) -> Option<Arc<Calibration>> {
+    static SWARM: OnceLock<Option<Calibrations>> = OnceLock::new();
+    static OWNER: OnceLock<Option<Calibrations>> = OnceLock::new();
+    let offered = rayon::current_num_threads();
+    let build = |cap: usize, for_the_owner: bool| {
+        // An explicit width (or an explicit 0) is a decision already made.
+        if env_decode_threads().is_some() || !env_calibration_enabled() {
+            return None;
+        }
+        let physical = num_cpus::get_physical();
+        let candidates = decode_candidates(cap, physical);
+        if candidates.len() < 2 {
+            return None;
+        }
+        let mut c = Calibrations::new(candidates, for_the_owner, env_confirm_enabled());
+        if for_the_owner {
+            c.base = owner_default_index(&c.candidates, decode_threads(offered, physical));
+        }
+        Some(c)
+    };
+    if owner_wide {
+        let owner = owner_decode_threads();
+        if owner > decode_threads(offered, num_cpus::get_physical()) {
+            return OWNER
+                .get_or_init(|| build(owner, true))
+                .as_ref()?
+                .for_depth(cpu_layers);
+        }
+    }
+    SWARM
+        .get_or_init(|| build(offered, false))
         .as_ref()?
         .for_depth(cpu_layers)
 }
@@ -625,8 +816,11 @@ fn calibration_for(cpu_layers: usize) -> Option<Arc<Calibration>> {
 /// calibration whose lock is poisoned never settles (`Calibration::record`
 /// gives up on it), so it counts as settled: otherwise that worker would
 /// never speculate again.
-pub(crate) fn decode_width_settled(cpu_layers: usize) -> bool {
-    calibration_for(cpu_layers).is_none_or(|c| c.settled())
+///
+/// `owner_wide` as for [`calibration_for`]: the owner's decode of experts kept
+/// in RAM settles on a calibration of its own.
+pub(crate) fn decode_width_settled(cpu_layers: usize, owner_wide: bool) -> bool {
+    calibration_for(cpu_layers, owner_wide).is_none_or(|c| c.settled())
 }
 
 /// `SWARMLLM_DECODE_INSTALL=0` runs decode at the global pool's width from the
@@ -651,6 +845,64 @@ fn env_calibration_enabled() -> bool {
             Some("0")
         )
     })
+}
+
+/// `SWARMLLM_DECODE_CONFIRM=0` takes a narrower width as soon as the search
+/// picks it, without the paired re-check ([`CONFIRM_SAMPLES`]) — the
+/// behaviour before #396, for A/B inside one binary.
+fn env_confirm_enabled() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| {
+        !matches!(
+            std::env::var("SWARMLLM_DECODE_CONFIRM").ok().as_deref(),
+            Some("0")
+        )
+    })
+}
+
+/// How wide the OWNER's decode step may go when the forward's processor work
+/// is only routed experts kept in RAM (#399): the owner's prompt width — every
+/// physical core, or an explicit `max_cpu_threads` ([`owner_prefill_threads`])
+/// — never past the physical cores and never narrower than the contribution's.
+/// `SWARMLLM_OWNER_DECODE=contribution` keeps it at the contribution's width,
+/// the behaviour before, for A/B inside one binary.
+///
+/// Dense decode keeps the contribution's width: there the calibrated optimum
+/// was measured at or below it (#237: 16 threads 37% slower than 6), and a
+/// wider widest would make a flat machine's default the slower width. A step
+/// whose experts sit in RAM is not that shape. llama.cpp decodes on every
+/// physical core, dense or MoE, `--n-cpu-moe` included (`common_cpu_get_num_math`),
+/// and gpt-oss-20b with the experts of 15 layers in RAM stepped 1.21-1.30x
+/// faster at 8 threads than 4 in `test-split` (2026-11-02).
+fn owner_decode_threads() -> usize {
+    static OFF: OnceLock<bool> = OnceLock::new();
+    let physical = num_cpus::get_physical();
+    let offered = rayon::current_num_threads();
+    let off = *OFF.get_or_init(|| {
+        matches!(
+            std::env::var("SWARMLLM_OWNER_DECODE").ok().as_deref(),
+            Some("contribution")
+        )
+    });
+    owner_decode_width(offered, owner_prefill_threads(), physical, off)
+}
+
+/// [`owner_decode_threads`]' rule, pure: the owner's prompt width (0 = none
+/// wider than the contribution's) within the physical cores, never narrower
+/// than the contribution's decode width; that width alone when `off`.
+fn owner_decode_width(offered: usize, owner_prefill: usize, physical: usize, off: bool) -> usize {
+    let base = decode_threads(offered, physical);
+    if off {
+        return base;
+    }
+    decode_threads(owner_prefill.max(offered), physical).max(base)
+}
+
+/// The owner's calibration's default (`Calibration::base`): the widest of its
+/// `candidates` (widest first) within the contribution's decode width
+/// `within`, or the widest where none is.
+fn owner_default_index(candidates: &[usize], within: usize) -> usize {
+    candidates.iter().position(|&t| t <= within).unwrap_or(0)
 }
 
 /// The decode pool when calibration is not choosing one (a pinned width, or
@@ -784,9 +1036,11 @@ fn with_the_callers_scope<R>(f: impl FnOnce() -> R + Send) -> impl FnOnce() -> R
 /// from the swarm" (the Settings page), and it had been capping the owner's
 /// own prompts too: a default node read them on half its cores, where
 /// llama.cpp uses all of them — most of a reported 3x gap (FUTURE_WORK #119:
-/// 28.8 → 41.6 tok/s at 6,911 tokens on a Ryzen 7 5800H). Decode is left
-/// alone: it is bandwidth-bound and its calibrated optimum sits at or below
-/// the cap. It is REQUIRED so no caller can forget whose request it is.
+/// 28.8 → 41.6 tok/s at 6,911 tokens on a Ryzen 7 5800H). Dense decode is
+/// left alone: it is bandwidth-bound and its calibrated optimum sits at or
+/// below the cap; a step whose processor work is experts kept in RAM is
+/// calibrated up to the owner's width (`experts_in_ram` below). It is REQUIRED
+/// so no caller can forget whose request it is.
 ///
 /// `cpu_layers` is how many of the forward's layers run on the processor. It is
 /// what the decode pool is FOR — the quantized matmuls of those layers — so a
@@ -794,10 +1048,17 @@ fn with_the_callers_scope<R>(f: impl FnOnce() -> R + Send) -> impl FnOnce() -> R
 /// global pool and is never timed: it has nothing to calibrate and its tokens
 /// would mislead the calibration for a forward that does. See
 /// [`Calibrations`] for the case that made this a parameter.
+///
+/// `experts_in_ram` says the forward's processor work is only the routed
+/// experts of card-held layers (`SplitModel::processor_works_only_on_experts`).
+/// The owner's one-token step of such a forward is calibrated up to every
+/// physical core ([`owner_decode_threads`], #399) — the one decode the owner's
+/// width reaches.
 pub(crate) fn in_phase_pool<R: Send>(
     seq_len: usize,
     cpu_layers: usize,
     for_the_owner: bool,
+    experts_in_ram: bool,
     f: impl FnOnce() -> R + Send,
 ) -> R {
     let f = with_the_callers_scope(f);
@@ -826,7 +1087,7 @@ pub(crate) fn in_phase_pool<R: Send>(
     if seq_len > DECODE_SHAPED_MAX_TOKENS || cpu_layers == 0 {
         return f();
     }
-    let Some(calib) = calibration_for(cpu_layers) else {
+    let Some(calib) = calibration_for(cpu_layers, for_the_owner && experts_in_ram) else {
         // Pinned width, or nothing to choose between: the original path.
         return match decode_pool() {
             Some(pool) => pool.install(f),
@@ -1023,7 +1284,7 @@ mod tests {
     /// position rather than width. Direction alternates to cancel that.
     #[test]
     fn the_rotation_alternates_so_a_growing_cache_cannot_pick_the_winner() {
-        let c = Calibration::new(vec![8, 6, 4, 2]);
+        let c = Calibration::new(vec![8, 6, 4, 2], false);
         let seen: Vec<usize> = (0..8).map(|_| c.next_index()).collect();
         assert_eq!(seen, vec![0, 1, 2, 3, 3, 2, 1, 0]);
         for i in 0..4 {
@@ -1046,7 +1307,7 @@ mod tests {
     /// model — and cost real speed. The median ignores it.
     #[test]
     fn one_lucky_sample_cannot_decide_a_flat_machine() {
-        let c = Calibration::new(vec![6, 4]);
+        let c = Calibration::new(vec![6, 4], false);
         // 6 is genuinely a touch faster; 4 gets one outlier far below its norm.
         c.record(0, 44_000_000);
         c.record(1, 33_000_000); // the lucky one
@@ -1066,7 +1327,7 @@ mod tests {
     /// width within a few ms of the six it was offered.
     #[test]
     fn a_machine_with_nothing_to_find_stops_looking() {
-        let c = Calibration::new(vec![6, 4, 3, 1]);
+        let c = Calibration::new(vec![6, 4, 3, 1], false);
         for _ in 0..EARLY_SETTLE_SAMPLES {
             c.record(0, 45_000_000);
             c.record(1, 42_000_000);
@@ -1091,7 +1352,7 @@ mod tests {
     /// runs to completion and takes it.
     #[test]
     fn a_real_optimum_is_not_settled_away_early() {
-        let c = Calibration::new(vec![8, 4]);
+        let c = Calibration::new(vec![8, 4], false);
         for _ in 0..EARLY_SETTLE_SAMPLES {
             c.record(0, 129_000_000);
             c.record(1, 60_000_000);
@@ -1115,7 +1376,7 @@ mod tests {
     /// like. It must keep the width its owner offered.
     #[test]
     fn a_gap_no_bigger_than_the_noise_does_not_move_the_width() {
-        let c = Calibration::new(vec![6, 3]);
+        let c = Calibration::new(vec![6, 3], false);
         for v in [52_000_000, 48_000_000, 52_000_000, 36_000_000, 52_000_000] {
             c.record(0, v);
         }
@@ -1134,7 +1395,7 @@ mod tests {
     /// by far more than any margin, so being strict costs nothing.
     #[test]
     fn a_machine_with_a_real_optimum_still_finds_it() {
-        let c = Calibration::new(vec![8, 4]);
+        let c = Calibration::new(vec![8, 4], false);
         // The Ryzen's actual figures, including their real run-to-run spread:
         // 4 reproduced at 59/60/62 ms against 8's 125-129.
         for v in [
@@ -1160,7 +1421,7 @@ mod tests {
     /// candidate that lost its first cycle badly is not timed again.
     #[test]
     fn a_hopeless_candidate_is_dropped_after_one_look() {
-        let c = Calibration::new(vec![8, 6, 4, 2]);
+        let c = Calibration::new(vec![8, 6, 4, 2], false);
         // One cycle: 2 threads is more than 1.5x off the best and is hopeless.
         c.record(0, 90_000_000);
         c.record(1, 76_000_000);
@@ -1217,7 +1478,7 @@ mod tests {
     /// alone rather than chasing noise.
     #[test]
     fn calibration_takes_a_real_gain_and_ignores_a_marginal_one() {
-        let c = Calibration::new(vec![8, 4]);
+        let c = Calibration::new(vec![8, 4], false);
         for _ in 0..SAMPLES_PER_CANDIDATE {
             c.record(0, 100_000_000);
             c.record(1, 50_000_000);
@@ -1228,7 +1489,7 @@ mod tests {
             "twice as fast at half the width and it was not taken"
         );
 
-        let tie = Calibration::new(vec![8, 4]);
+        let tie = Calibration::new(vec![8, 4], false);
         for _ in 0..SAMPLES_PER_CANDIDATE {
             tie.record(0, 100_000_000);
             tie.record(1, 91_000_000);
@@ -1318,7 +1579,7 @@ mod tests {
     /// all, and one processor depth must never settle another's verdict.
     #[test]
     fn a_card_only_forward_is_not_timed_and_cannot_decide_a_deeper_ones_width() {
-        let set = Calibrations::new(vec![4, 3, 2, 1]);
+        let set = Calibrations::new(vec![4, 3, 2, 1], false, false);
         assert!(
             set.for_depth(0).is_none(),
             "a forward with no processor layers has nothing to calibrate"
@@ -1362,7 +1623,7 @@ mod tests {
     /// speculates again.
     #[test]
     fn a_width_is_settled_once_chosen_or_once_it_never_can_be() {
-        let calib = Calibration::new(vec![4, 3, 2, 1]);
+        let calib = Calibration::new(vec![4, 3, 2, 1], false);
         assert!(!calib.settled(), "nothing timed yet, nothing chosen");
         for _ in 0..SAMPLES_PER_CANDIDATE {
             for (idx, ms) in [5u64, 2, 2, 1].iter().enumerate() {
@@ -1371,7 +1632,7 @@ mod tests {
         }
         assert!(calib.settled(), "a chosen width is settled");
 
-        let poisoned = Arc::new(Calibration::new(vec![4, 3, 2, 1]));
+        let poisoned = Arc::new(Calibration::new(vec![4, 3, 2, 1], false));
         let holder = poisoned.clone();
         let _ = std::thread::spawn(move || {
             let _held = holder.state.lock();
@@ -1403,7 +1664,8 @@ mod tests {
         );
         // A processor depth no other test uses (calibration state is shared).
         assert!(
-            in_phase_pool(1, 9_998, false, || rayon::current_thread_index().is_some()),
+            in_phase_pool(1, 9_998, false, false, || rayon::current_thread_index()
+                .is_some()),
             "a decode step with processor layers ran on the calling thread"
         );
     }
@@ -1458,7 +1720,7 @@ mod tests {
         );
         let _forced = crate::inference::attn_kernel::ForceStandardAttnGuard::new(true);
         // A processor depth no other test uses (calibration state is shared).
-        let (on_a_pool, seen) = in_phase_pool(1, 9_997, false, || {
+        let (on_a_pool, seen) = in_phase_pool(1, 9_997, false, false, || {
             (
                 rayon::current_thread_index().is_some(),
                 crate::inference::attn_kernel::is_force_standard_attn(),
@@ -1474,6 +1736,7 @@ mod tests {
         let seen = in_phase_pool(
             1,
             9_997,
+            false,
             false,
             crate::inference::attn_kernel::is_force_standard_attn,
         );
@@ -1496,7 +1759,7 @@ mod tests {
         // A processor depth no other test uses: the decode-shaped call below
         // touches that depth's calibration entry, which is shared state.
         let width = |seq_len, for_owner| {
-            in_phase_pool(seq_len, 9_999, for_owner, rayon::current_num_threads)
+            in_phase_pool(seq_len, 9_999, for_owner, false, rayon::current_num_threads)
         };
         assert_eq!(width(128, true), wide, "the owner's prompt: every core");
         assert_eq!(
@@ -1516,7 +1779,7 @@ mod tests {
             "the swarm's check: the contribution level"
         );
         assert_eq!(
-            in_phase_pool(128, 0, true, rayon::current_num_threads),
+            in_phase_pool(128, 0, true, false, rayon::current_num_threads),
             global,
             "a forward with no processor layers has no prompt to read here"
         );
@@ -1532,8 +1795,9 @@ mod tests {
         // A processor depth no other test uses (calibration state is shared).
         const DEPTH: usize = 9_997;
         let contribution = swarm_check_threads();
-        let width = |seq_len| in_phase_pool(seq_len, DEPTH, false, rayon::current_num_threads);
-        let Some(calib) = calibration_for(DEPTH) else {
+        let width =
+            |seq_len| in_phase_pool(seq_len, DEPTH, false, false, rayon::current_num_threads);
+        let Some(calib) = calibration_for(DEPTH, false) else {
             // One core, or a pinned width: decode has no narrower width to
             // fall to, and the check still runs at the contribution width.
             assert_eq!(width(4), contribution.min(rayon::current_num_threads()));
@@ -1553,5 +1817,173 @@ mod tests {
                 && contribution <= num_cpus::get_physical(),
             "never past what the owner offered, never on an SMT sibling"
         );
+    }
+
+    /// Drive a calibration the way `in_phase_pool` does — `next_index`, then
+    /// `record` — with each width's step time from `ns`, until it settles.
+    fn run_until_settled(c: &Calibration, ns: impl Fn(usize, usize) -> u64) -> usize {
+        for step in 0..200 {
+            let idx = c.next_index();
+            c.record(idx, ns(c.candidates[idx], step));
+            let chosen = c.chosen.load(Ordering::Relaxed);
+            if chosen != 0 {
+                return chosen;
+            }
+        }
+        panic!("never settled");
+    }
+
+    /// **A narrower pick is taken only where it wins side by side** (#396).
+    /// The gate's MoE arm: 4 threads decode faster than 3 at steady state, but
+    /// a worker's first decode step reads slow and always falls on the widest
+    /// — one such sample is enough to drop it as hopeless after the first
+    /// cycle, and the search alone then settles on 3. Timed in alternation once
+    /// the steps are steady, 4 is faster and is kept. Without the re-check the
+    /// search's pick stands (the off arm, `confirm: false`).
+    #[test]
+    fn a_narrower_pick_is_taken_only_when_it_wins_side_by_side() {
+        let moe_arm = |threads: usize, step: usize| match (threads, step) {
+            (4, 0..=5) => 120_000_000,
+            (4, _) => 47_000_000,
+            _ => 53_000_000,
+        };
+        let off = Calibration::new(vec![4, 3], false);
+        assert_eq!(
+            run_until_settled(&off, moe_arm),
+            3,
+            "the search alone picks 3"
+        );
+        let on = Calibration::new(vec![4, 3], true);
+        assert_eq!(
+            run_until_settled(&on, moe_arm),
+            4,
+            "the side-by-side re-check keeps the faster widest"
+        );
+    }
+
+    /// The re-check does not talk decode out of a real win: the Ryzen's dense
+    /// 3B, 4 of 8 at 60 ms against 129, still moves to 4.
+    #[test]
+    fn a_real_win_survives_the_side_by_side_recheck() {
+        let ryzen = |threads: usize, _step: usize| match threads {
+            8 => 129_000_000,
+            6 => 78_000_000,
+            4 => 60_000_000,
+            _ => 88_000_000,
+        };
+        let on = Calibration::new(vec![8, 6, 4, 2], true);
+        assert_eq!(run_until_settled(&on, ryzen), 4);
+        // The re-check alternates the widest and the pick, never another.
+        let st = on.state.lock().unwrap();
+        let c = st.confirming.as_ref().expect("the re-check ran");
+        assert_eq!(c.pick, 2);
+        assert_eq!(c.ns[0].len(), CONFIRM_SAMPLES);
+        assert_eq!(c.ns[1].len(), CONFIRM_SAMPLES);
+    }
+
+    /// **The owner's decode of experts in RAM may use every physical core**
+    /// (#399), never more, never fewer than the contribution's width, and
+    /// none wider where no owner width was passed or the A/B switch is off.
+    #[test]
+    fn the_owners_experts_in_ram_decode_reaches_every_physical_core() {
+        // The 8-core laptop at the default contribution (4 offered).
+        assert_eq!(owner_decode_width(4, 8, 8, false), 8);
+        assert_eq!(
+            owner_decode_width(4, 8, 8, true),
+            4,
+            "SWARMLLM_OWNER_DECODE=contribution"
+        );
+        assert_eq!(
+            owner_decode_width(4, 0, 8, false),
+            4,
+            "no owner width passed"
+        );
+        // An owner width counting SMT siblings stays on physical cores.
+        assert_eq!(owner_decode_width(4, 16, 8, false), 8);
+        // A node at Maximum: the owner's width is the contribution's.
+        assert_eq!(owner_decode_width(8, 8, 8, false), 8);
+        // An explicit max_cpu_threads below the contribution never narrows it.
+        assert_eq!(owner_decode_width(6, 4, 8, false), 6);
+        // Its candidates reach the owner's width and keep the measured optima.
+        assert_eq!(
+            decode_candidates(owner_decode_width(4, 8, 8, false), 8),
+            vec![8, 6, 4, 2]
+        );
+        // Its default is the contribution's width, or the widest candidate
+        // within it where that width is not a candidate.
+        assert_eq!(owner_default_index(&[8, 6, 4, 2], 4), 2);
+        assert_eq!(owner_default_index(&[8, 6, 4, 2], 5), 2);
+        assert_eq!(owner_default_index(&[12, 9, 6, 3], 6), 2);
+        assert_eq!(owner_default_index(&[8, 6, 4, 2], 8), 0);
+    }
+
+    /// The owner's calibration of experts in RAM: 8 of 8 cores offered, 4 the
+    /// contribution's width (`base` 2), the widest's first steps slow.
+    fn owner_calibration() -> Calibration {
+        let mut c = Calibration::new(vec![8, 6, 4, 2], true);
+        c.for_the_owner = true;
+        c.base = 2;
+        c
+    }
+
+    /// **A width wider than the contribution's must WIN side by side** (#399).
+    /// Qwen3-30B-A3B Q2_K on 2026-11-04 (`cg/ab399v.sh`): the search read
+    /// `8:82ms 6:39ms 4:35ms 2:43ms` — 8 slow only in its first steps — and the
+    /// re-check against the widest read 8 and 4 equal, so the widest stayed and
+    /// decoded 20.1 tok/s where 4 decoded 21.9. Against the contribution's
+    /// width as the default, the tie keeps 4.
+    #[test]
+    fn a_tie_keeps_the_contributions_width() {
+        let qwen3_30b = |threads: usize, step: usize| match (threads, step) {
+            (8, 0..=5) => 82_000_000,
+            (8, _) => 36_000_000,
+            (6, _) => 39_000_000,
+            (4, _) => 36_000_000,
+            _ => 43_000_000,
+        };
+        let mut widest_default = owner_calibration();
+        widest_default.base = 0;
+        assert_eq!(
+            run_until_settled(&widest_default, qwen3_30b),
+            8,
+            "the widest as the default keeps 8 on the tie"
+        );
+        assert_eq!(run_until_settled(&owner_calibration(), qwen3_30b), 4);
+    }
+
+    /// The other half: gpt-oss-20b, experts of 16 layers in RAM, where 8
+    /// threads re-checked ~11% faster than 4 and decoded 16.2 tok/s against
+    /// 14.2 — the wider width is still taken, after a side-by-side win against
+    /// the contribution's.
+    #[test]
+    fn a_wider_width_that_wins_side_by_side_is_taken() {
+        let gpt_oss = |threads: usize, step: usize| match (threads, step) {
+            (8, 0..=3) => 73_000_000,
+            (8, _) => 49_000_000,
+            (6, _) => 52_000_000,
+            (4, _) => 55_000_000,
+            _ => 85_000_000,
+        };
+        let c = owner_calibration();
+        assert_eq!(run_until_settled(&c, gpt_oss), 8);
+        let st = c.state.lock().unwrap();
+        let r = st.confirming.as_ref().expect("the re-check ran");
+        assert_eq!((r.base, r.pick), (2, 0), "8 timed against 4, not 6");
+        assert_eq!(r.ns[0].len(), CONFIRM_SAMPLES);
+        assert_eq!(r.ns[1].len(), CONFIRM_SAMPLES);
+    }
+
+    /// Narrower than the default still needs the search's margin: a 2-thread
+    /// win of ~9% over the contribution's 4 is noise on a flat machine.
+    #[test]
+    fn a_narrower_width_than_the_contributions_still_needs_the_full_margin() {
+        let flat = |threads: usize, step: usize| match (threads, step) {
+            (8, 0..=5) => 90_000_000,
+            (8, _) => 60_000_000,
+            (6, _) => 58_000_000,
+            (4, _) => 55_000_000,
+            _ => 50_000_000,
+        };
+        assert_eq!(run_until_settled(&owner_calibration(), flat), 4);
     }
 }

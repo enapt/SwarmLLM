@@ -55,6 +55,18 @@ the processor, the numbers a model's layers multiply by are now rounded exactly 
 them for every K-quant model too (Q2_K to Q6_K), where they had been rounded on a very slightly
 different scale.
 
+**Models whose experts stay in your computer's memory answer your own chats faster, and at the same
+speed every time.** When a mixture-of-experts model such as gpt-oss-20b does not fit the graphics
+card, the card holds every layer and the computer's memory holds the experts of some of them. Each
+new word of your own chat then used only as many processor cores for those experts as the
+contribution level gives the swarm: 4 of 8 on an 8-core laptop at the default. Your own chats may
+now use every core for that step, but only after it has been timed against the contribution's width
+on your computer and found faster. On an 8 GB card, gpt-oss-20b went from 14.4 to 16.2 tokens a
+second; Qwen3-30B-A3B, which gains nothing from more cores, keeps 4 (#399). The number of cores
+also no longer depends on luck. A model's first few words run slowly on the most cores, and that
+alone made about every second start settle on fewer cores and run ~12% slower for as long as the
+model stayed loaded. Fewer cores are now chosen only when they win when timed side by side (#396).
+
 ## [0.3.271-alpha] — 2026-11-04
 
 **A computer that only takes stops being served, the peer list shows what each computer does for

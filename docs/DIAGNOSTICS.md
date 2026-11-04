@@ -722,14 +722,18 @@ width is calibrated from plain steps, once per worker; guessing arms have had it
 
 ```bash
 grep "Decode thread width calibrated" node.log
-# … decode_threads=4 offered=4 measured=4:144ms 3:148ms 2:166ms 1:318ms   — compare across arms
+# … decode_threads=4 offered=4 default=4 for_the_owner=false measured=4:144ms 3:148ms 2:166ms 1:318ms rechecked=   — compare across arms
 ```
 
 `decode_threads=1` beside 7-13 ms samples is a guess timed as a processor token (#983); NO line
 after several replies is a loop that never takes a plain step (#984 — it now steps plainly until
-the line appears, within the first reply). **A mixture-of-experts arm with its experts in RAM** picks 3 or 4
-threads by luck, and 3 decodes ~12% slower (FUTURE_WORK #396): when prev and cand picked differently,
-re-run that arm with `SWARMLLM_DECODE_THREADS` pinned for both before reading the ratio.
+the line appears, within the first reply). `rechecked=4:36ms against 6:37ms side by side` is the
+paired re-check that any width other than `default` must win (#396; empty when the search chose the
+default). **The owner's mixture-of-experts arm with its experts in RAM** reads `for_the_owner=true`
+and `offered=` every physical core: it may settle wider than `default` (gpt-oss-20b: 8 of 8), never
+on a tie (#399). A build before v0.3.272 picked 3 or 4 there by luck, 3 ~12% slower: when prev and
+cand picked differently, re-run that arm with `SWARMLLM_DECODE_THREADS` pinned for both before
+reading the ratio.
 
 **How well would the card guess for a model?** `examples/skip_agreement_probe.rs` measures it
 before any code changes: teacher-forced on the card, the full model's greedy reply is fed and at

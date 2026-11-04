@@ -44,7 +44,7 @@ requests only for a computer that shares (two parts or more, fewer than two publ
 behind — one further behind is disconnected), a whole card placement split before its load where
 its cache would not fit (#322's spawn half), the Hugging Face search refusing files the swarm
 cannot host (#404's search half) and each computer's give and take in the peer list. New since:
-#403 (P2, closed), #367 raised to P1 (item 6, field report 2026-11-04), #401 (P2, closed), #396 and #399 (P3, taken together: both are the decode
+#403 (P2, closed), #367 raised to P1 (item 6, field report 2026-11-04), #401 (P2, closed), #396 and #399 (P3, closed together: both were the decode
 width), #400, #402, #404 (P3), #397 (P4).
 **2026-11-04:** #403 goes first among the open work by the user's direction: the release cut-off
 and the use gate must not be passable through a relay. Closed the same day (§ "Closed"). What each release carried is in § "Closed" and `CHANGELOG.md`; earlier
@@ -2110,54 +2110,6 @@ processor-only 1.14-1.39x. That day's 14B processor-only gap (~312 against 278 m
 was measured against the never-repacked reference above. Not ours, and llama.cpp's too: the card
 clocks down between steps of a split (255-600 MHz between 1755 MHz bursts), and back-to-back
 runs on this laptop heat it enough to slow a split step 133 → 185 ms within 40 tokens (gotcha #825).
-
-#### #396 — A mixture-of-experts model with its experts in RAM picks its decode width by luck, and half the time decodes ~12% slower
-`P3` · perf-local · **OPEN** — 2026-11-02 · history: this entry; gotcha #1024
-
-The decode-width calibration (`cpu_pools::Calibration`) leaves the widest width only for a
-narrower one whose median is 15% faster AND whose slowest sample beats the widest's median.
-On the gate's MoE placement (qwen3-30b-a3b Q2_K, every layer on the card, the routed experts
-of 26-29 layers in RAM, `offered=4`) that test passes on noise. **16 workers across the
-.264, .265, .266 and .268 gates: 4 threads chosen 8 times, 3 threads 7, 2 threads once.**
-The widest width's calibration median read 42-109 ms. Both builds with the width PINNED
-(`SWARMLLM_DECODE_THREADS`, the gate's own arm, 8 samples each, 2026-11-02): 4 threads
-21.45 tok/s (.268) against 21.98 (.266), 3 threads ~19 for both. So 4 threads is ~12% faster
-at steady state, while in the seven runs that picked 3 the calibration's 3-thread median read 42-60 ms
-against 4's 51-109. A worker keeps its pick for its life, so on such a machine about every
-second worker decodes ~12% slower until it restarts. The .268 gate's MoE decode 0.90x was this
-alone: both of that gate's .268 workers picked 3, both of the .266 workers kept 4. The dense
-arms (cpu, split) kept 4 every time: there the gap between widths is wider than the spread.
-
-**Not established**: why the widest width's early samples are inflated on this placement.
-Each width has its own pool (`pool_for`). A step here alternates card and processor every
-layer, so the card's clock ramp in the first tokens (gotcha #825) is one untested lead.
-**Next**: log each calibration sample (step, width, ns) at debug on this arm across ~6
-workers and set them beside pinned per-step times. Then decide between (a) confirming a
-narrower pick with a short paired re-check against the widest before settling (ABAB) and
-(b) timing only the processor's share of a step.
-
-#### #399 — The owner's decode step is held to the contribution level's width, which a model with its experts in RAM may not saturate
-`P3` · perf-local · **OPEN** — 2026-11-02 · history: this entry; #396; `docs/invariants/memory.md` § the contribution level
-
-The owner's prompt and checks run on every physical core (`owner_prefill_threads`); a one-token
-decode step keeps the calibrated width, at most what the contribution level offers (`offered=4`
-on this 8-core laptop), because dense decode is bandwidth-bound (#237: 16 threads 37% slower than
-6). A step whose routed experts sit in RAM may not be: gpt-oss-20b through the live node
-(2026-11-02, all 24 layers on the 8 GB card, the experts of 15 in RAM) calibrated `4:66ms 3:68ms`
-and wrote 14.7 tok/s; `test-split` of the same placement in one binary, `RAYON_NUM_THREADS` 4
-then 8, twice (ABAB, live node stopped): 60.7 / 50.2 ms and 83.8 / 64.3 ms a step after the first
-8 — eight threads 1.21x and 1.30x faster, while the machine drifted slower between the pairs.
-Earlier that day, quieter, its calibration read `8:47ms 6:48ms 4:50ms` (6%). **Not established**:
-whether the gain holds at steady state (the spread is as large as the effect), or for other
-experts-in-RAM models (the gate's Qwen3-30B-A3B arm decodes at `offered=4` too). **Next**: an
-A/B env giving a decode step of an experts-in-RAM worker the owner's width, ABBA × 4 on an idle
-machine on gpt-oss-20b and Qwen3-30B-A3B, each arm's `decode_threads=` read first (#396 makes
-the 4-thread arm itself a lottery). An explicit `max_cpu_threads` still binds the owner.
-**Research (2026-11-02)**: llama.cpp gives a decode step every physical core by default, dense or
-MoE, `--n-cpu-moe` included — `n_threads = common_cpu_get_num_math()` (`common/common.cpp`), the
-same figure as `n_threads_batch`; its llama-bench figure beside ours here (29.8 tok/s) ran at 8.
-So our 4 is a choice made from DENSE processor decode (#237), not a measured optimum for a step
-whose experts are in RAM.
 
 #### #295 — Gemma 4's E2B/E4B split between card and processor copies a shared layer's history every step
 `P3` · perf-local · **PARTIAL** — 2026-10-17 · history: #115 (3c); (a) captured, (b) launches fixed, 2026-10-19
@@ -4469,7 +4421,28 @@ Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
 
-**Closed 2026-11-04, ships in the next release** (#403, #401)
+**Closed 2026-11-04, ships in the next release** (#403, #401, #399, #396)
+- #399 — **The owner's decode step of experts kept in RAM may use every physical core, where it is
+  faster.** A one-token step whose processor work is only routed experts of card-held layers
+  (`SplitModel::processor_works_only_on_experts`) calibrates, for the owner's request, among widths
+  up to the owner's prompt width (`cpu_pools::owner_decode_threads`) in a calibration of its own,
+  whose default is the contribution's width: a wider width is taken only where it is 5% faster side
+  by side (`WIDEN_MARGIN_PCT`). gpt-oss-20b on the 8 GB card (experts of 16 layers in RAM): 8
+  threads, 16.2 tok/s median against 14.4 at 4 (20 and 12 replies, ABBA, one binary).
+  Qwen3-30B-A3B Q2_K re-checked 8 and 4 equal, and keeps 4: 21.4 against 21.2 before. A first rule
+  that let the widest stand on that tie decoded it at 19.8 — why a paired re-check reads equal
+  widths that decode ~7% apart is not established. A/B `SWARMLLM_OWNER_DECODE=contribution`.
+  `docs/invariants/memory.md` § "The owner's decode step of experts in RAM".
+- #396 — **A decode width other than the default is taken only where it wins side by side.** The
+  search times widths at different moments, and the widest always takes a worker's first decode
+  step, which on a step alternating card and processor reads slow (58-128 ms against a steady
+  36-57): 16 gate workers on Qwen3-30B-A3B had picked 4 threads 8 times, 3 threads 7 and 2 once,
+  while 4 decoded ~12% faster. The entry's option (a): before settling off the default, the two are
+  re-timed in alternation (`CONFIRM_SAMPLES` = 5 each) and the pick is kept only if still 15%
+  faster (5% to go wider, #399). In the two rigs of 2026-11-04 every worker with the re-check on
+  settled on one width per model and rule (10 workers, 7 re-checks), where the off arm drew 3 threads in 2
+  of 8. A/B `SWARMLLM_DECODE_CONFIRM=0`. Option (b), timing only the processor's share, was not
+  needed. Same evidence section.
 - #401 — **A full computer now makes room for a part only one computer holds, giving back a copy
   three computers hold.** Read on the full Proxmox node (44,000 MB budget, 97 MB left), which noted
   room for such a part about once a minute (105 times in 3 h) and gave nothing back: its own

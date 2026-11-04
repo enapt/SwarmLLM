@@ -4041,7 +4041,8 @@ impl LocalSpec {
         // calibration learns only from plain steps, and a step taken at a width
         // under trial is not the step the guesses are priced against
         // (`cpu_pools::decode_width_settled`).
-        let settling = !self.fixed && !model.decode_width_settled();
+        let settling =
+            !self.fixed && !model.decode_width_settled(kv_store.serves_the_owner(req_id_str));
         #[cfg(test)]
         let settling = settling && self.script.is_none();
         let room = if settling { 0 } else { self.room() };
