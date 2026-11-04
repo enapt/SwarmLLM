@@ -6457,8 +6457,19 @@ fn readme_speed_problems(readme: &str, cargo_version: &str, released: &[String])
     // release — another program on the card, against "a rig shares the machine
     // with nothing" (#708) — is skipped by name and reason in a
     // `<!-- release-check:skipped v<x.y.z> — <why> -->` marker, and the table
-    // comes from the newest check before it. The marker goes once the release
-    // it names is no longer one of the two newest.
+    // comes from the newest check before it. A marker stands while the table is
+    // OLDER than the release it names — it says why the table is not from that
+    // check, and two checks in a row can share the machine (.269 and .270 did)
+    // — and goes once the table is from that check or a newer one.
+    let block = match (
+        section.find("<!-- release-check:begin -->"),
+        section.find("<!-- release-check:end -->"),
+    ) {
+        (Some(b), Some(e)) if b < e => Some(&section[b..e]),
+        _ => None,
+    };
+    let table_check = block.and_then(|b| cited_versions(b).into_iter().next());
+    let triple = |v: &str| -> Vec<u64> { v.split('.').map(|p| p.parse().unwrap_or(0)).collect() };
     let mut skipped = Vec::new();
     for (i, _) in section.match_indices("<!-- release-check:skipped") {
         let marker = section[i..].split("-->").next().unwrap_or_default();
@@ -6472,13 +6483,15 @@ fn readme_speed_problems(readme: &str, cargo_version: &str, released: &[String])
                     .count()
             })
             .unwrap_or(0);
+        let newer_than_the_table =
+            |v: &String| table_check.as_ref().is_none_or(|t| triple(v) > triple(t));
         match named.first() {
-            Some(v) if why_words >= 5 && released_bare.iter().take(2).any(|r| r == v) => {
+            Some(v) if why_words >= 5 && released_bare.contains(v) && newer_than_the_table(v) => {
                 skipped.push(v.clone())
             }
             Some(v) if why_words >= 5 => problems.push(format!(
-                "README.md skips the v{v} release check, which is no longer one of the two \
-                 newest releases: remove its `release-check:skipped` marker."
+                "README.md skips the v{v} release check, but the table is not older than it \
+                 (or v{v} was never released): remove its `release-check:skipped` marker."
             )),
             _ => problems.push(
                 "A `release-check:skipped` marker names the release check it skips and says why \
@@ -6492,11 +6505,8 @@ fn readme_speed_problems(readme: &str, cargo_version: &str, released: &[String])
         .filter(|v| !skipped.contains(v))
         .take(2)
         .collect();
-    match (
-        section.find("<!-- release-check:begin -->"),
-        section.find("<!-- release-check:end -->"),
-    ) {
-        (Some(b), Some(e)) if b < e => match cited_versions(&section[b..e]).first() {
+    match block {
+        Some(b) => match cited_versions(b).first() {
             Some(v) if newest.contains(&v) => {}
             Some(v) => problems.push(format!(
                 "README.md's one-computer table is from the v{v} release check, but the newest \
@@ -6511,7 +6521,7 @@ fn readme_speed_problems(readme: &str, cargo_version: &str, released: &[String])
                     .into(),
             ),
         },
-        _ => problems.push(
+        None => problems.push(
             "README.md's speed section has lost its `<!-- release-check:begin/end -->` \
              markers, which examples/readme_speeds.py writes between."
                 .into(),
@@ -6537,8 +6547,9 @@ fn readme_speed_problems(readme: &str, cargo_version: &str, released: &[String])
 /// carries the version it was last reviewed for, and a bump that changes
 /// `Cargo.toml`'s version without reviewing it fails here; the commit gate
 /// runs this file on any commit touching `Cargo.toml` or `README.md`. The
-/// one-computer table must come from one of the two newest release checks
-/// (`examples/readme_speeds.py` writes it from the gate's own records), and
+/// one-computer table must come from one of the two newest release checks not
+/// skipped by a marker (`examples/readme_speeds.py` writes it from the gate's
+/// own records), and
 /// no row may cite a version that was never released.
 #[test]
 fn the_readme_speeds_are_reviewed_at_every_release() {
@@ -6604,12 +6615,27 @@ fn the_readme_speeds_guard_catches_a_release_that_did_not_refresh_them() {
     );
     let unexplained = readme_speed_problems(&unexplained, "0.3.262-alpha", &released(262));
     assert_eq!(unexplained.len(), 2, "{unexplained:?}");
-    // Once the release it names is not one of the two newest, the marker goes.
+    // Once the table is from a check as new as the release it names, the marker goes.
     let stale = section("0.3.263-alpha", "0.3.262", skip);
     let stale = readme_speed_problems(&stale, "0.3.263-alpha", &released(263));
     assert!(
-        stale.len() == 1 && stale[0].contains("no longer one of the two newest"),
+        stale.len() == 1 && stale[0].contains("remove its `release-check:skipped` marker"),
         "{stale:?}"
+    );
+    // Two checks in a row that shared the machine, each skipped with its
+    // reason: the table may come from the check before both. With only the
+    // newer one skipped, the older one is still owed.
+    let skip_262 = "<!-- release-check:skipped v0.3.262 — another program held the card again -->";
+    let both = section("0.3.263-alpha", "0.3.260", &format!("{skip}\n{skip_262}"));
+    assert_eq!(
+        readme_speed_problems(&both, "0.3.263-alpha", &released(263)),
+        Vec::<String>::new()
+    );
+    let one = section("0.3.263-alpha", "0.3.260", skip_262);
+    let one = readme_speed_problems(&one, "0.3.263-alpha", &released(263));
+    assert!(
+        one.len() == 1 && one[0].contains("v0.3.260 release check"),
+        "{one:?}"
     );
     // Markers gone.
     assert_eq!(

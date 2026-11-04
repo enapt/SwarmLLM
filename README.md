@@ -159,6 +159,7 @@ model reads a 1,800-token document and writes 128 tokens about it.
 | Llama 3.2 3B | the processor only | 15.5–15.7 | 70 |
 <!-- release-check:end -->
 <!-- release-check:skipped v0.3.269 — other programs held about 200 MiB more of the card (1,022-1,118 MiB before each run vs 863 at v0.3.268) and v0.3.268 itself wrote the 14B split at 14.1 tok/s there against 18.3 at its own check -->
+<!-- release-check:skipped v0.3.270 — other programs held about 280 MiB more of the card (1,142 MiB with the live node stopped vs 863 at v0.3.268) and v0.3.269 itself wrote the 14B split at 12.6-14.5 tok/s there; the processor-only row fell with it (12.8-13.2 vs 15.5-15.7), the machine's share, not the build's -->
 
 **Across computers**: the same laptop in Thailand, teamed up with volunteers'
 computers: one with an RTX 3060 card in Australia, about 400–460 ms there and

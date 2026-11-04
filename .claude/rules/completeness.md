@@ -36,7 +36,10 @@ changes at release, never per change. In the bump commit, beside the counts:
    `release_gate_history.md` entry first: a check that shared the machine
    (another program on the card, #708) is skipped by name after the block —
    `<!-- release-check:skipped v<x.y.z> — <why> -->` — and the table stays from
-   the check before it (v0.3.266's, 2026-11-01).
+   the check before it (v0.3.266's, 2026-11-01). Checks in a row can each be
+   skipped (.269 and .270 were, 2026-11-04); a marker goes once the table is from
+   a check as new as the one it names. Compare the card's memory with the live
+   node stopped against the last clean check's before writing one.
 2. **Across computers**: each row names the version it was measured on. Replace
    a row when this release's CHANGELOG entry or `faster_than_local.md` carries a
    newer measurement of that setup; add a row for a setup newly measured. A
