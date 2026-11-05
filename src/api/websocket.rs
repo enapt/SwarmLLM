@@ -717,16 +717,14 @@ async fn build_stats_message(state: &SharedState) -> String {
 
     // Region summary for network map — includes demand rates and coverage gaps
     {
+        // Counted as the full map counts them (`api::admin::network_map`):
+        // this computer and every peer, each placed by `map_region_of`.
         let mut region_counts: HashMap<String, u64> = HashMap::new();
-        if let Some(region) = state.effective_region().await {
-            *region_counts.entry(region.to_uppercase()).or_insert(0) += 1;
-        }
+        let self_region = crate::api::admin::map_region_of_this_computer(state).await;
+        *region_counts.entry(self_region.clone()).or_insert(0) += 1;
         for peer in state.peer_registry.iter() {
-            if let Some(ref cap) = peer.value().capability {
-                if let Some(ref region) = cap.region {
-                    *region_counts.entry(region.to_uppercase()).or_insert(0) += 1;
-                }
-            }
+            let code = crate::api::admin::map_region_of(peer.value(), &self_region);
+            *region_counts.entry(code).or_insert(0) += 1;
         }
         if !region_counts.is_empty() {
             data["region_summary"] = serde_json::to_value(&region_counts).unwrap_or_default();

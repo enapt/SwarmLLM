@@ -1405,7 +1405,7 @@ impl UpdateChecker {
         }
         // A stop asked by now is honoured inside `restart_into`, which logs it.
         if let crate::update_restart::NotRestarted::Failed(err) =
-            crate::update_restart::restart_into(shared, &self.binary_path)
+            crate::update_restart::restart_into(shared, &self.binary_path).await
         {
             // exec only returns on failure. The binary IS updated at this point,
             // so the node keeps running the old image until something restarts

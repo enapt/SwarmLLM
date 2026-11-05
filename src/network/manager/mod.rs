@@ -51,6 +51,16 @@ const MAX_TENSOR_FORWARD_SECS: u64 = behaviour::RR_REQUEST_TIMEOUT_SECS;
 /// that took it (see the check at the bottom of `run`).
 const NETWORK_LOOP_STALL_WARN: std::time::Duration = std::time::Duration::from_millis(100);
 
+/// Why `NetworkManager::close_every_connection` runs, which decides whether
+/// the closes it waits for are handled or only waited out.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Closing {
+    /// A restart into an update; the node runs on if the exec fails.
+    BeforeRestart,
+    /// The node is stopping.
+    AtStop,
+}
+
 /// Per-message ACK deadline for streaming-tracked rr sends (`SendDirectMessage`
 /// with `delivery_request_id = Some(_)`). When elapsed without a Response or
 /// OutboundFailure event, treat as silent-drop and close the streaming
@@ -1390,6 +1400,48 @@ impl NetworkManager {
         tracing::info!("UPnP: asked the router to release this node's port mappings");
     }
 
+    /// Close every connection this node holds, wait at most
+    /// `update_restart::CLOSE_CONNECTIONS_WITHIN` for each to report closed,
+    /// then give quinn's connection drivers `CLOSE_FRAMES_FLUSH` to send the
+    /// close frames (2026-11-05). Before a restart into an update
+    /// (`update_restart::CloseBeforeRestart`) and at a stop: a QUIC peer is told
+    /// nothing otherwise and holds the dead connection until its idle timeout,
+    /// and a node that restarted meanwhile reconnected beside it.
+    ///
+    /// Before a restart the closes are handled like any other event, so the
+    /// registry is right if the exec fails and the node runs on (its peers and
+    /// its discovery tick re-dial). At a stop they are only waited for: the
+    /// loop is ending, and the subsystems the handlers talk to are stopping.
+    async fn close_every_connection(&mut self, closing: Closing) {
+        let peers: Vec<libp2p::PeerId> = self.swarm.connected_peers().copied().collect();
+        if peers.is_empty() {
+            return;
+        }
+        for peer in &peers {
+            let _ = self.swarm.disconnect_peer_id(*peer);
+        }
+        let deadline =
+            tokio::time::Instant::now() + crate::update_restart::CLOSE_CONNECTIONS_WITHIN;
+        while self.swarm.connected_peers().next().is_some() {
+            let Ok(event) = tokio::time::timeout_at(deadline, self.swarm.select_next_some()).await
+            else {
+                break;
+            };
+            if closing == Closing::BeforeRestart {
+                self.handle_swarm_event(event).await;
+            }
+        }
+        let still_open = self.swarm.connected_peers().count();
+        tracing::info!(
+            target: "swarmllm::network::manager",
+            computers = peers.len(),
+            still_open,
+            ?closing,
+            "Closed this node's connections so other computers drop it now, not at their timeout"
+        );
+        tokio::time::sleep(crate::update_restart::CLOSE_FRAMES_FLUSH).await;
+    }
+
     /// Start the network manager event loop. Listens for inbound libp2p
     /// `SwarmEvent`s, daemon `NetworkCommand`s, internal commands, and
     /// `dht_query_rx` model IDs, dispatching each to the appropriate
@@ -1634,6 +1686,11 @@ impl NetworkManager {
             "NetworkManager running"
         );
 
+        // A restart into an update is answered only while this loop runs.
+        let shared = self.shared_state.clone();
+        let close_before_restart = &shared.events.close_before_restart;
+        let _answering_close = close_before_restart.listen();
+
         // Set as the first statement of every `select!` arm below; read after it.
         let mut arm_started: loop_stall::ArmStart;
         let mut last_arm: std::borrow::Cow<'static, str>;
@@ -1645,11 +1702,23 @@ impl NetworkManager {
                     arm_started = loop_stall::ArmStart::now();
                     if *self.shutdown_rx.borrow() {
                         // Waited for: the cache is what the next start dials.
+                        // Saved BEFORE the close, which empties the connected
+                        // peers the cache puts first.
                         let _ = self.save_peer_cache().await;
                         tracing::info!(target: "swarmllm::network::manager", "NetworkManager shutting down");
+                        self.close_every_connection(Closing::AtStop).await;
                         self.release_upnp_mappings().await;
                         break;
                     }
+                }
+                // A restart into an update asks every connection to close
+                // first (`update_restart::CloseBeforeRestart`). A deliberate
+                // wait of at most ~1.2 s right before the process is replaced,
+                // so it skips the stall tripwire below.
+                _ = close_before_restart.asked() => {
+                    self.close_every_connection(Closing::BeforeRestart).await;
+                    close_before_restart.closed();
+                    continue;
                 }
                 // Periodic discovery — skip when tensor forwards are in-flight to avoid
                 // Kademlia event bursts that create back-pressure in the connection task's

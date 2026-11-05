@@ -200,7 +200,7 @@
         if (count > 0) {
           counts[code] = count;
           totalNodes += count;
-          totalRegions++;
+          if (App.networkMap.isPlaced(code)) totalRegions++;
           if (count > maxCount) maxCount = count;
         }
       }
@@ -296,6 +296,12 @@
     // drawn from these, so a predicted hop and a real one land on the same
     // pixels — otherwise the map would show the plan bending one way and
     // history bending another between the same two countries.
+    // "??" is a computer whose country is not known (`api::admin::map_region_of`):
+    // counted among the computers, never as a region, and drawn nowhere.
+    isPlaced: function(code) {
+      return code !== '??';
+    },
+
     regionCenter: function(code) {
       if (!code) return null;
       var el = document.getElementById('region-' + code);
@@ -501,7 +507,7 @@
         var count = regionSummary[codes[i]];
         if (count > 0) {
           totalNodes += count;
-          totalRegions++;
+          if (App.networkMap.isPlaced(codes[i])) totalRegions++;
           if (count > maxCount) maxCount = count;
         }
       }

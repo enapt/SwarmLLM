@@ -188,26 +188,63 @@ pub(super) fn open_browser(url: &str) -> Result<(), String> {
     }
 }
 
-/// Best-effort IP geolocation using a free API (ip-api.com).
-/// Returns an ISO 3166-1 alpha-2 country code (e.g. "US", "DE") or None on failure.
-/// Timeout: 5 seconds. No API key required.
+/// Best-effort IP geolocation: this computer's country as an ISO 3166-1
+/// alpha-2 code ("US", "DE"), or `None` when no service answered with one.
+///
+/// Asks ip-api.com, then Cloudflare's trace page — a second, unrelated
+/// service, so one that is blocked on this network, down, or rate-limited on a
+/// shared address does not leave the node without a country. It used to be one
+/// ip-api.com call at start-up and nothing after a failure (2026-11-05). 5 s
+/// each, no key; the caller asks again on a backoff
+/// (`background::region_retry_after`).
 pub(super) async fn detect_region_from_ip() -> Option<String> {
     let client = crate::http::client_with_timeout(std::time::Duration::from_secs(5));
+    if let Some(code) = ask_ip_api(&client).await {
+        return Some(code);
+    }
+    ask_cloudflare_trace(&client).await
+}
 
-    // ip-api.com returns JSON with a "countryCode" field for free, no key needed.
-    // Rate limit: 45 requests/min (we only call once at startup).
+/// ip-api.com's free endpoint (plain HTTP; 45 requests a minute an address).
+async fn ask_ip_api(client: &reqwest::Client) -> Option<String> {
     let resp = client
         .get("http://ip-api.com/json/?fields=status,countryCode")
         .send()
         .await
         .ok()?;
-
     let json: serde_json::Value = resp.json().await.ok()?;
-    if json.get("status")?.as_str()? == "success" {
-        json.get("countryCode")?.as_str().map(|s| s.to_string())
-    } else {
-        None
+    country_from_ip_api(&json)
+}
+
+/// Cloudflare's trace page (HTTPS, no key): `key=value` lines, the caller's
+/// country in `loc`.
+async fn ask_cloudflare_trace(client: &reqwest::Client) -> Option<String> {
+    let body = client
+        .get("https://www.cloudflare.com/cdn-cgi/trace")
+        .send()
+        .await
+        .ok()?
+        .text()
+        .await
+        .ok()?;
+    country_from_cloudflare_trace(&body)
+}
+
+/// Each answer is read by `api::admin::country_code`, the one reading of a
+/// country: two letters, never Cloudflare's `XX` ("not known"; its `T1`, Tor,
+/// fails the letters already).
+fn country_from_ip_api(json: &serde_json::Value) -> Option<String> {
+    if json.get("status")?.as_str()? != "success" {
+        return None;
     }
+    crate::api::admin::country_code(json.get("countryCode")?.as_str())
+}
+
+fn country_from_cloudflare_trace(body: &str) -> Option<String> {
+    crate::api::admin::country_code(
+        body.lines()
+            .find_map(|line| line.trim().strip_prefix("loc=")),
+    )
 }
 
 #[cfg(test)]
@@ -225,5 +262,34 @@ mod tests {
     #[test]
     fn max_noncritical_failures_is_five() {
         assert_eq!(MAX_NONCRITICAL_FAILURES, 5);
+    }
+
+    /// Each service's answer is read as the country it names, and nothing
+    /// else reaches the capability peers are told.
+    #[test]
+    fn a_location_service_answer_is_read_as_a_two_letter_country_or_nothing() {
+        let ip_api = |v: serde_json::Value| country_from_ip_api(&v);
+        assert_eq!(
+            ip_api(serde_json::json!({"status": "success", "countryCode": "au"})),
+            Some("AU".to_string())
+        );
+        assert_eq!(
+            ip_api(serde_json::json!({"status": "fail", "countryCode": "AU"})),
+            None
+        );
+        assert_eq!(ip_api(serde_json::json!({"status": "success"})), None);
+
+        // Cloudflare's trace page, as it answered on 2026-11-05.
+        let trace = "fl=1\nh=www.cloudflare.com\nip=192.0.2.1\nts=1.2\nvisit_scheme=https\n\
+                     loc=TH\ntls=TLSv1.3\n";
+        assert_eq!(country_from_cloudflare_trace(trace), Some("TH".to_string()));
+        assert_eq!(
+            country_from_cloudflare_trace("h=x\nloc=XX\n"),
+            None,
+            "unknown"
+        );
+        assert_eq!(country_from_cloudflare_trace("h=x\nloc=T1\n"), None, "Tor");
+        assert_eq!(country_from_cloudflare_trace("h=x\n"), None);
+        assert_eq!(country_from_cloudflare_trace("<html>blocked</html>"), None);
     }
 }

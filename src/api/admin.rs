@@ -24,14 +24,43 @@ const MAX_BATCH_TIMEOUT_MS: u64 = 60_000;
 /// Maximum bytes accepted for the `status` filter on `list_responses`.
 const MAX_STATUS_FILTER_BYTES: usize = 256;
 
-/// A peer's announced region as the ISO 3166-1 alpha-2 code it is meant to be
-/// (`IdentityConfig::region`, else the country its own address was located
-/// in), upper-cased; anything else is `None`. The text is the other
-/// computer's, so the peer list is handed nothing but a two-letter code.
-fn country_code(region: Option<&str>) -> Option<String> {
+/// A region as the ISO 3166-1 alpha-2 code it is meant to be
+/// (`IdentityConfig::region`, else the country an address was located in),
+/// upper-cased; anything else is `None`, and so is `XX`, "not known" in the
+/// location services' answers. The ONE reading of a country: a peer's text
+/// for the peer list and the network map, and this computer's own lookup
+/// (`daemon::helpers::detect_region_from_ip`) — so nothing reaches a peer, a
+/// list or the map but a two-letter code.
+pub(crate) fn country_code(region: Option<&str>) -> Option<String> {
     let code = region?.trim();
-    (code.len() == 2 && code.bytes().all(|b| b.is_ascii_alphabetic()))
-        .then(|| code.to_ascii_uppercase())
+    (code.len() == 2
+        && code.bytes().all(|b| b.is_ascii_alphabetic())
+        && !code.eq_ignore_ascii_case("XX"))
+    .then(|| code.to_ascii_uppercase())
+}
+
+/// Where the network map puts a peer: the country it names, else — on this
+/// computer's own network — ours (`self_region`, already a code or `??`),
+/// else `??`, which the map counts but draws nowhere. The ONE placement for
+/// both map paths, the full topology (`network_map`) and the live summary
+/// (`websocket.rs`'s `region_summary`). A peer whose country had not reached
+/// us was put in OUR country — a computer in Australia drawn as a second dot
+/// in Thailand (2026-11-05) — and the live path left it out, so the count
+/// changed between refreshes.
+pub(crate) fn map_region_of(peer: &crate::types::PeerInfo, self_region: &str) -> String {
+    country_code(peer.capability.as_ref().and_then(|c| c.region.as_deref())).unwrap_or_else(|| {
+        if peer.is_lan_peer {
+            self_region.to_string()
+        } else {
+            "??".into()
+        }
+    })
+}
+
+/// Where the network map puts THIS computer: its country
+/// (`SharedState::effective_region`, read by `country_code`), else `??`.
+pub(crate) async fn map_region_of_this_computer(state: &crate::daemon::SharedState) -> String {
+    country_code(state.effective_region().await.as_deref()).unwrap_or_else(|| "??".into())
 }
 
 /// Serialize a peer registry entry to JSON. Used by both REST and WebSocket.
@@ -2437,16 +2466,12 @@ pub async fn network_map(State(state): State<AppState>) -> Json<serde_json::Valu
 
     let mut regions: HashMap<String, (u64, HashMap<String, u64>)> = HashMap::new();
 
-    // Always include our own node on the map.
-    // Use auto-detected region (IP geolocation), configured region, or "??" as fallback.
+    // Always include our own node on the map (`map_region_of_this_computer`).
+    let self_region = map_region_of_this_computer(&state.shared_state).await;
     {
-        let code = state
-            .shared_state
-            .effective_region()
-            .await
-            .unwrap_or_else(|| "??".into())
-            .to_uppercase();
-        let entry = regions.entry(code).or_insert_with(|| (0, HashMap::new()));
+        let entry = regions
+            .entry(self_region.clone())
+            .or_insert_with(|| (0, HashMap::new()));
         entry.0 += 1;
         // Add our hosted models (never a backup-copy name).
         let node_id = state.shared_state.identity.node_id();
@@ -2459,23 +2484,14 @@ pub async fn network_map(State(state): State<AppState>) -> Json<serde_json::Valu
         }
     }
 
-    // Aggregate peer regions from capabilities.
-    // Peers without capability/region info are placed in our own region (most peers
-    // on a LAN share the same region) or "??" as fallback.
-    let self_region = state
-        .shared_state
-        .effective_region()
-        .await
-        .unwrap_or_else(|| "??".into())
-        .to_uppercase();
+    // Aggregate peer regions from capabilities (`map_region_of`).
     for peer in state.shared_state.peer_registry.iter() {
-        let (region_code, hosted_shards) = match peer.value().capability {
-            Some(ref cap) => {
-                let code = cap.region.as_deref().unwrap_or(&self_region).to_uppercase();
-                (code, &cap.hosted_shards[..])
-            }
-            None => (self_region.clone(), &[][..]),
-        };
+        let region_code = map_region_of(peer.value(), &self_region);
+        let hosted_shards = peer
+            .value()
+            .capability
+            .as_ref()
+            .map_or(&[][..], |c| &c.hosted_shards[..]);
         let entry = regions
             .entry(region_code)
             .or_insert_with(|| (0, HashMap::new()));
@@ -3248,6 +3264,9 @@ mod tests {
         assert_eq!(country_code(Some(" DE ")).as_deref(), Some("DE"));
         assert_eq!(country_code(Some("asia")), None);
         assert_eq!(country_code(Some("<b")), None);
+        assert_eq!(country_code(Some("DEU")), None);
+        assert_eq!(country_code(Some("D1")), None);
+        assert_eq!(country_code(Some("xx")), None, "not known");
         assert_eq!(country_code(Some("")), None);
         assert_eq!(country_code(None), None);
     }

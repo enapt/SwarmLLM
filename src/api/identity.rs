@@ -175,7 +175,7 @@ fn capability_summary(cap: Option<&crate::types::NodeCapability>) -> serde_json:
         // never has to re-derive it from a nullable nested object.
         "accelerator": if c.gpu.is_some() { "gpu" } else { "cpu" },
         "os": c.os.clone(),
-        "region": c.region.clone(),
+        "region": crate::api::admin::country_code(c.region.as_deref()),
         "ram_total_mb": c.ram_total_mb,
         "est_tokens_per_sec_7b": c.est_tokens_per_sec_7b,
         "uptime_seconds": c.uptime_seconds,

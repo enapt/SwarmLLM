@@ -1173,7 +1173,7 @@ pub async fn apply_update(
         tracing::info!(drained_cleanly = idle, version = %version, "Restarting into applied update");
         // A node asked to stop while this drained stops (`restart_into` says so).
         if let crate::update_restart::NotRestarted::Failed(err) =
-            crate::update_restart::restart_into(&shared, &binary_path)
+            crate::update_restart::restart_into(&shared, &binary_path).await
         {
             tracing::error!(
                 error = %err,

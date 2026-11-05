@@ -607,8 +607,21 @@ pub(super) fn spawn_shard_verification(
     });
 }
 
-/// Auto-detect region via IP geolocation (non-blocking, best-effort). If the
-/// user configured a region explicitly, apply that instead.
+/// How long the country lookup waits before asking again after `failures`
+/// failed rounds (each round asks every service, `detect_region_from_ip`): 30 s,
+/// doubling, at most an hour — and it keeps asking. One failed call at start-up
+/// used to leave a computer with no country until its next restart: one that
+/// started before its network was up, or whose first service was blocked.
+fn region_retry_after(failures: u32) -> std::time::Duration {
+    let doublings = failures.saturating_sub(1).min(7);
+    std::time::Duration::from_secs((30u64 << doublings).min(3600))
+}
+
+/// Auto-detect region via IP geolocation (non-blocking, best-effort), asking
+/// again on [`region_retry_after`] until a service answers. If the user
+/// configured a region explicitly, apply that instead. The capability carries
+/// the region from the next health round, and a change of it is news to peers
+/// (`health::monitor::capability_news`).
 pub(super) fn spawn_region_detection(
     tasks: &mut BackgroundTasks,
     shared_state: Arc<SharedState>,
@@ -617,20 +630,35 @@ pub(super) fn spawn_region_detection(
     if shared_state.config.identity.region.is_none() {
         let geo_state = shared_state.clone();
         tasks.spawn(async move {
-            tokio::select! {
-                result = detect_region_from_ip() => {
-                    match result {
-                        Some(code) => {
-                            tracing::info!(region = %code, "Auto-detected region via IP geolocation");
-                            *geo_state.detected_region.write().await = Some(code);
-                        }
-                        None => {
-                            tracing::debug!(
-                                "IP geolocation unavailable — network map will show unknown region"
-                            );
-                        }
+            let lookup = async {
+                let mut failures = 0u32;
+                loop {
+                    if let Some(code) = detect_region_from_ip().await {
+                        tracing::info!(region = %code, "Auto-detected region via IP geolocation");
+                        *geo_state.detected_region.write().await = Some(code);
+                        return;
                     }
+                    failures += 1;
+                    let wait = region_retry_after(failures);
+                    if failures == 1 {
+                        tracing::info!(
+                            retry_in_s = wait.as_secs(),
+                            "Could not learn this computer's country from ip-api.com or \
+                             Cloudflare — asking again later; peers see no country until then \
+                             (set `region` under `[identity]` in config.toml to state it)"
+                        );
+                    } else {
+                        tracing::debug!(
+                            failures,
+                            retry_in_s = wait.as_secs(),
+                            "Country lookup failed again"
+                        );
+                    }
+                    tokio::time::sleep(wait).await;
                 }
+            };
+            tokio::select! {
+                () = lookup => {}
                 _ = async {
                     loop {
                         if shutdown_rx.changed().await.is_err() { return; }
@@ -2026,5 +2054,23 @@ mod dashboard_on_start_tests {
         assert!(!hint.exists());
         note_dashboard_open(&hint, false).await;
         assert!(!hint.exists());
+    }
+}
+
+#[cfg(test)]
+mod region_retry_tests {
+    use super::region_retry_after;
+
+    /// The lookup keeps asking, at a wait that doubles from 30 s and stops
+    /// growing at an hour — never a give-up after the first failure.
+    #[test]
+    fn a_failed_country_lookup_is_asked_again_on_a_capped_backoff() {
+        let secs = |n| region_retry_after(n).as_secs();
+        assert_eq!(secs(1), 30);
+        assert_eq!(secs(2), 60);
+        assert_eq!(secs(3), 120);
+        assert_eq!(secs(7), 1920);
+        assert_eq!(secs(8), 3600);
+        assert_eq!(secs(u32::MAX), 3600);
     }
 }

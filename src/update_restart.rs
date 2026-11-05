@@ -301,14 +301,127 @@ pub enum NotRestarted {
 /// 10 s shutdown grace after it — used to `exec` anyway: the live node did,
 /// three seconds after a SIGTERM, and the deploy that sent it found the
 /// database held (`exec` keeps the pid, gotcha #277).
-pub fn restart_into(state: &SharedState, exe: &std::path::Path) -> NotRestarted {
-    if *state.shutdown_rx().borrow() {
-        tracing::info!(
-            "Stopping as asked rather than restarting into the update — the next start runs it"
-        );
+///
+/// Before it restarts, the network manager closes every connection
+/// ([`CloseBeforeRestart`]), for at most [`CLOSE_BEFORE_RESTART_WAIT`]; the stop
+/// is asked about again after that wait.
+pub async fn restart_into(state: &SharedState, exe: &std::path::Path) -> NotRestarted {
+    if stop_asked(state) {
+        return NotRestarted::StopAsked;
+    }
+    state
+        .events
+        .close_before_restart
+        .close_and_wait(CLOSE_BEFORE_RESTART_WAIT)
+        .await;
+    if stop_asked(state) {
         return NotRestarted::StopAsked;
     }
     NotRestarted::Failed(exec_into(exe))
+}
+
+fn stop_asked(state: &SharedState) -> bool {
+    let asked = *state.shutdown_rx().borrow();
+    if asked {
+        tracing::info!(
+            "Stopping as asked rather than restarting into the update — the next start runs it"
+        );
+    }
+    asked
+}
+
+/// The longest a restart waits for the network manager to close this node's
+/// connections: its own bound ([`CLOSE_CONNECTIONS_WITHIN`] plus
+/// [`CLOSE_FRAMES_FLUSH`]) with a second to spare for a busy loop.
+pub const CLOSE_BEFORE_RESTART_WAIT: Duration = Duration::from_secs(3);
+
+/// How long the network manager waits for every connection it closed to
+/// report closed. Peers re-dial no sooner than 2 s after a close
+/// (`REDIAL_JITTER_MIN_MS`), so a peer's redial does not hold it open.
+pub const CLOSE_CONNECTIONS_WITHIN: Duration = Duration::from_secs(1);
+
+/// After the closes are reported, time for quinn's connection drivers to send
+/// the CONNECTION_CLOSE frames: libp2p reports a QUIC connection closed as soon
+/// as the close is ASKED (`closed()` resolves `LocallyClosed`), and the frame
+/// goes out on the driver task's next poll.
+pub const CLOSE_FRAMES_FLUSH: Duration = Duration::from_millis(200);
+
+/// A node closes its connections before it restarts into an update
+/// (2026-11-05).
+///
+/// `exec` replaces the process without closing anything. A TCP socket is
+/// closed by the kernel (close-on-exec) and the peer sees it go, but QUIC runs
+/// over UDP: the peer is told nothing and holds the dead connection until its
+/// idle timeout — quinn's own docs: exiting without closing "could force them
+/// to wait out the idle timeout period" (`Endpoint::wait_idle`). Meanwhile the
+/// restarted node reconnects beside that dead connection, and gossipsub told
+/// it nothing (`vendor/libp2p-gossipsub`, `Behaviour::send_our_subscriptions`):
+/// an updated computer's capability reached nobody for hours. go-libp2p's
+/// `Host::Close` closes every connection for the same reason.
+///
+/// [`restart_into`] asks ([`Self::close_and_wait`]); the network manager, the
+/// only holder of the connections, answers on its loop
+/// (`NetworkManager::close_every_connection`) and says when it is done. With
+/// no network manager running nothing is asked and nothing waits.
+#[derive(Default)]
+pub struct CloseBeforeRestart {
+    listening: std::sync::atomic::AtomicBool,
+    asked: tokio::sync::Notify,
+    closed: tokio::sync::Notify,
+}
+
+/// Held by the network manager while its loop runs: a restart asks it to close
+/// only while it can answer.
+pub struct ListeningForClose<'a>(&'a CloseBeforeRestart);
+
+impl Drop for ListeningForClose<'_> {
+    fn drop(&mut self) {
+        self.0
+            .listening
+            .store(false, std::sync::atomic::Ordering::Release);
+    }
+}
+
+impl CloseBeforeRestart {
+    /// The network manager answers from now until the guard drops.
+    pub fn listen(&self) -> ListeningForClose<'_> {
+        self.listening
+            .store(true, std::sync::atomic::Ordering::Release);
+        ListeningForClose(self)
+    }
+
+    /// Resolves when a restart has asked for every connection to close. A
+    /// request made while the loop was busy elsewhere is kept until it asks.
+    pub async fn asked(&self) {
+        self.asked.notified().await
+    }
+
+    /// The network manager has closed what it held.
+    pub fn closed(&self) {
+        self.closed.notify_waiters();
+    }
+
+    /// Ask the network manager to close every connection and wait for it, at
+    /// most `wait`. `true` when it said it was done; `false` when nothing was
+    /// listening or it did not answer in time (the restart goes ahead).
+    pub async fn close_and_wait(&self, wait: Duration) -> bool {
+        if !self.listening.load(std::sync::atomic::Ordering::Acquire) {
+            return false;
+        }
+        let done = self.closed.notified();
+        tokio::pin!(done);
+        // Registered before the ask, so an answer that comes at once is heard.
+        done.as_mut().enable();
+        self.asked.notify_one();
+        let answered = tokio::time::timeout(wait, done).await.is_ok();
+        if !answered {
+            tracing::warn!(
+                wait_ms = wait.as_millis() as u64,
+                "Connections not closed in time before the restart — restarting anyway"
+            );
+        }
+        answered
+    }
 }
 
 /// Replace this process with the binary at `exe`, keeping the original argv.
@@ -654,15 +767,110 @@ mod tests {
         let missing = dir.path().join("no-such-swarmllm");
 
         assert!(
-            matches!(restart_into(&state, &missing), NotRestarted::Failed(_)),
+            matches!(
+                restart_into(&state, &missing).await,
+                NotRestarted::Failed(_)
+            ),
             "a node not asked to stop must still try to restart into its update"
         );
         state.shutdown();
-        let outcome = restart_into(&state, &missing);
+        let outcome = restart_into(&state, &missing).await;
         assert!(
             matches!(outcome, NotRestarted::StopAsked),
             "a node asked to stop tried to restart into its update: {outcome:?}"
         );
+    }
+
+    fn restart_test_state() -> (tempfile::TempDir, Arc<SharedState>) {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = crate::config::Config::default();
+        config.node.data_dir = dir.path().to_path_buf();
+        let db = crate::storage::db::Database::open(dir.path()).unwrap();
+        let executor = Arc::new(tokio::sync::Mutex::new(
+            crate::inference::executor::ModelExecutor::new(),
+        ));
+        let (state, _, _) = SharedState::new(
+            config,
+            crate::identity::Identity::generate(),
+            db,
+            executor,
+            None,
+        );
+        (dir, state)
+    }
+
+    /// Stands in for the network manager: listens, and when asked runs
+    /// `on_ask` and says the connections are closed.
+    fn answer_the_close(
+        state: &Arc<SharedState>,
+        on_ask: impl FnOnce(&SharedState) + Send + 'static,
+    ) -> (
+        Arc<std::sync::atomic::AtomicBool>,
+        tokio::sync::oneshot::Receiver<()>,
+    ) {
+        let asked = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (listening_tx, listening_rx) = tokio::sync::oneshot::channel();
+        let (state, flag) = (state.clone(), asked.clone());
+        tokio::spawn(async move {
+            let close = &state.events.close_before_restart;
+            let _listening = close.listen();
+            let _ = listening_tx.send(());
+            close.asked().await;
+            flag.store(true, std::sync::atomic::Ordering::SeqCst);
+            on_ask(&state);
+            close.closed();
+        });
+        (asked, listening_rx)
+    }
+
+    /// A restart asks the network manager to close every connection BEFORE it
+    /// execs, and waits for it (2026-11-05): without it a QUIC peer held the
+    /// dead connection until its idle timeout and the restarted node's gossip
+    /// reached nobody holding one.
+    #[tokio::test]
+    async fn a_restart_closes_every_connection_before_it_execs() {
+        let (dir, state) = restart_test_state();
+        let (asked, listening) = answer_the_close(&state, |_| {});
+        listening.await.unwrap();
+
+        let outcome = restart_into(&state, &dir.path().join("no-such-swarmllm")).await;
+        assert!(matches!(outcome, NotRestarted::Failed(_)), "{outcome:?}");
+        assert!(
+            asked.load(std::sync::atomic::Ordering::SeqCst),
+            "the restart went ahead without asking for the connections to close"
+        );
+    }
+
+    /// A stop that lands while the connections close is still a stop (#271).
+    #[tokio::test]
+    async fn a_stop_asked_while_connections_close_is_not_a_restart() {
+        let (dir, state) = restart_test_state();
+        let (_, listening) = answer_the_close(&state, |state| state.shutdown());
+        listening.await.unwrap();
+
+        let outcome = restart_into(&state, &dir.path().join("no-such-swarmllm")).await;
+        assert!(
+            matches!(outcome, NotRestarted::StopAsked),
+            "a stop asked while the connections closed became a restart: {outcome:?}"
+        );
+    }
+
+    /// Nothing listening: nothing is asked and nothing waits. A listener that
+    /// never answers holds the restart only for the wait it was given.
+    #[tokio::test]
+    async fn a_close_nobody_answers_never_holds_a_restart_past_its_wait() {
+        let close = CloseBeforeRestart::default();
+        let started = Instant::now();
+        assert!(!close.close_and_wait(Duration::from_secs(60)).await);
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "waited with nobody listening"
+        );
+
+        let _listening = close.listen();
+        let started = Instant::now();
+        assert!(!close.close_and_wait(Duration::from_millis(50)).await);
+        assert!(started.elapsed() < Duration::from_secs(5));
     }
 
     /// The process an update execs into is told an update started it, so it

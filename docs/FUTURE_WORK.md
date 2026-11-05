@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #407**). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #408**). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -4437,7 +4437,28 @@ Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
 
-**Closed 2026-11-05, ships in the next release** (#406)
+**Closed 2026-11-05, ships in the next release** (#407, #406)
+- #407 — **What else let #406 hide a computer, and what it showed in its place.** (a) A restart
+  into an update `exec`s without closing anything: TCP peers see the kernel close the socket, QUIC
+  peers are told nothing and hold the dead connection until their idle timeout — the window #406's
+  computer reconnected into. `update_restart::restart_into` (now async) asks the network manager to
+  close every connection first and waits at most `CLOSE_BEFORE_RESTART_WAIT` (3 s) —
+  `state.events.close_before_restart` (`CloseBeforeRestart`), answered by
+  `NetworkManager::close_every_connection` (disconnect each peer, wait ≤ 1 s for the closes, 200 ms
+  for quinn's drivers to send the frames); the stop is asked again after the wait (#271). The
+  shutdown arm closes the same way. Sources: quinn's `Endpoint::wait_idle` ("exiting immediately
+  could force them to wait out the idle timeout period"), go-libp2p `Host::Close`. (b) The country
+  lookup was ONE ip-api.com call at start-up: a failure (blocked, rate-limited on a shared address,
+  no network yet) left the node without a country until its next restart. Now ip-api.com, then
+  Cloudflare's `cdn-cgi/trace` (`loc=`, `XX` = unknown), asked again on a backoff
+  (`background::region_retry_after`: 30 s doubling, capped at 1 h). (c) The network map put a peer
+  that named no country in OUR country (the AU computer drew as a second dot in Thailand), and its
+  live path (`websocket.rs` `region_summary`) left such a peer out, so the count changed between
+  refreshes: both now place through `api::admin::map_region_of` (its country; ours only for a LAN
+  peer; else `??`, counted, drawn nowhere, not a region). (d) A country is read in ONE place,
+  `api::admin::country_code` (two letters, never `XX`): the peer list, the map, swarm capacity's
+  region count, a route's regions, the MCP peer list, the identity card and this node's own lookup
+  — four of those passed a peer's raw text on.
 - #406 — **A computer that restarted is heard again by every computer it was connected to.** One
   that came back before its peers' old connections had timed out (a few seconds — an update's
   restart does it) was never told what they subscribe to: libp2p-gossipsub tells only a peer's

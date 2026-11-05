@@ -131,12 +131,14 @@ async fn resource_peers(state: &AppState, id: Option<Value>) -> JsonRpcResponse 
     let mut peers = Vec::new();
     for entry in state.shared_state.peer_registry.iter() {
         let mut p = mcp_peer_json(&entry);
-        let region = entry
-            .value()
-            .capability
-            .as_ref()
-            .and_then(|c| c.region.as_deref())
-            .unwrap_or("unknown");
+        let region = crate::api::admin::country_code(
+            entry
+                .value()
+                .capability
+                .as_ref()
+                .and_then(|c| c.region.as_deref()),
+        )
+        .unwrap_or_else(|| "unknown".into());
         if let Some(obj) = p.as_object_mut() {
             obj.insert("region".into(), json!(region));
         }

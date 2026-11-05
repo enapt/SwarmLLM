@@ -6988,3 +6988,24 @@ fails instead (and checks both calls are there). The crate's
 `test_subscriptions_resent_to_a_peer_that_reconnects_beside_an_old_connection` was red with each
 call removed in turn (2026-11-05); the crate's 152 tests run in CI `vendored.yml`. The fix acts on
 the side HOLDING the old connection, so a mixed swarm heals as its nodes update.
+
+**What let it happen, and what it showed in its place (#407).** Three more defects stood behind
+the one above. (1) A restart into an update `exec`s without closing anything. TCP peers see the
+kernel close the socket (close-on-exec); QUIC runs over UDP, so a QUIC peer is told nothing and
+holds the dead connection until its idle timeout — exactly the window the restarted node
+reconnects into. quinn's own `Endpoint::wait_idle` documents it: *"exiting immediately could force
+them to wait out the idle timeout period"*; go-libp2p's `Host::Close` closes every connection for
+the same reason. `update_restart::restart_into` now asks the network manager
+(`state.events.close_before_restart`) and waits at most 3 s; `NetworkManager::close_every_connection`
+disconnects every peer, waits ≤ 1 s for the closes (handled as events before a restart, so an exec
+that fails leaves a right registry; only waited out at a stop), then 200 ms, because libp2p reports
+a QUIC connection closed when the close is ASKED and quinn's driver sends the frame on its next
+poll. Peers re-dial no sooner than 2 s after a close, so a redial cannot hold the wait open. The
+shutdown arm closes the same way, after the peer cache is saved (the cache puts connected peers
+first). (2) The country lookup was one ip-api.com call at start-up, and a failure left the node
+with no country until its next restart — the first suspect here, wrongly: #406's computer HAD its
+country. It now asks ip-api.com, then Cloudflare's `cdn-cgi/trace` (`loc=XX` is "not known"), again
+on a backoff of 30 s doubling to 1 h. (3) The network map put a peer that named no country in OUR
+country — #406's computer drew as a second dot in Thailand — and the live path
+(`region_summary`) left such a peer out, so the count changed between refreshes. Both paths place
+through `api::admin::map_region_of`; a country anywhere is read by `api::admin::country_code`.

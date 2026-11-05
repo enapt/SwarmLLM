@@ -168,10 +168,8 @@ pub fn compute_swarm_capacity(state: &SharedState, model_budget_mb: Option<u64>)
                     gpu_nodes += 1;
                 }
             }
-            if let Some(ref region) = cap.region {
-                if !region.is_empty() {
-                    regions.insert(region.clone());
-                }
+            if let Some(code) = crate::api::admin::country_code(cap.region.as_deref()) {
+                regions.insert(code);
             }
         }
     }

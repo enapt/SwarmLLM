@@ -31,6 +31,11 @@ pub struct EventBus {
     /// `Notify`, not a broadcast channel: there is one listener and the
     /// signal carries nothing — the checker decides what, if anything, is new.
     pub update_nudge: tokio::sync::Notify,
+    /// A restart into an update asks the network manager to close every
+    /// connection first, and waits for it (`update_restart::restart_into`).
+    /// Asked ONLY by `restart_into`; answered ONLY by the network manager's
+    /// loop (`NetworkManager::close_every_connection`).
+    pub close_before_restart: crate::update_restart::CloseBeforeRestart,
 }
 
 impl EventBus {

@@ -13,6 +13,15 @@ computer what we listen for again whenever it connects beside an older connectio
 go-libp2p-pubsub does. Seen on 2026-11-05 on a computer that had updated itself. The repair takes
 hold as computers update (#406).
 
+**A computer that restarts for an update, or stops, closes its connections first**, so the others
+drop it at once instead of holding a dead connection until their timeout — the situation that hid
+the computer above. **A computer whose country lookup fails asks again**, and has a second service
+to ask: it asked ip-api.com once at start-up and, when that failed, showed no country until its next
+restart; it now also asks Cloudflare, and asks again after 30 s, doubling to at most once an hour.
+**The network map no longer draws a computer whose country it has not heard in yours** — it is
+counted, with no place on the map, unless it is on your own network — and the live map and the full
+map now count the same computers. Every list now reads a computer's country the same way (#407).
+
 ## [0.3.272-alpha] — 2026-11-05
 
 **Models stored as IQ4_NL or IQ4_XS now run, your own chats with a model whose experts stay in

@@ -1479,10 +1479,11 @@ pub async fn pipeline_plan(
         .map(|seg| {
             let peer = state.shared_state.peer_registry.get(&seg.node_id);
             let peer_latency = peer.as_ref().and_then(|p| p.latency_ms);
-            let region = peer
-                .as_ref()
-                .and_then(|p| p.capability.as_ref())
-                .and_then(|c| c.region.clone());
+            let region = crate::api::admin::country_code(
+                peer.as_ref()
+                    .and_then(|p| p.capability.as_ref())
+                    .and_then(|c| c.region.as_deref()),
+            );
             let is_local = seg.node_id == local_node_id;
             let nickname = state
                 .shared_state

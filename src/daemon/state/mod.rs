@@ -1715,6 +1715,7 @@ impl SharedState {
                 ws_tickets: DashMap::new(),
                 peer_versions: parking_lot::Mutex::new(crate::update::PeerVersionWatch::default()),
                 update_nudge: tokio::sync::Notify::new(),
+                close_before_restart: crate::update_restart::CloseBeforeRestart::default(),
             },
             // Root-level fields (not sub-structed)
             executor,

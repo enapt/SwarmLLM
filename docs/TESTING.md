@@ -56,7 +56,7 @@ Tracked in the [open GitHub issues](https://github.com/enapt/SwarmLLM/issues). B
 
 ## Privacy notes
 
-- SwarmLLM sends no telemetry to the project, and nothing crash-reports automatically — we rely on you to share logs. It does contact other services: GitHub (the hourly update check), Hugging Face (model downloads and popularity lists), and ip-api.com once at start-up to learn your country (skipped if you set `region` under `[identity]` in `config.toml`). Other computers in the swarm are told your computer's hardware summary, country, and which model parts it holds.
+- SwarmLLM sends no telemetry to the project, and nothing crash-reports automatically — we rely on you to share logs. It does contact other services: GitHub (the hourly update check), Hugging Face (model downloads and popularity lists), and ip-api.com — or, when it does not answer, Cloudflare's `cdn-cgi/trace` page — to learn your country: once at start-up, asked again later if neither answered (skipped if you set `region` under `[identity]` in `config.toml`). Other computers in the swarm are told your computer's hardware summary, country, and which model parts it holds.
 - Bug reports on GitHub are public. Strip API keys, server addresses, and personal-data prompts before pasting.
 - Your peer-id is public anyway (gossip), so including it is fine and helps us correlate reports.
 
