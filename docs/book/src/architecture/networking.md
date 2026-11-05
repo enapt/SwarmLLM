@@ -118,6 +118,14 @@ network layer until a two-daemon run flushed it out.
 
 Messages older than 5 minutes are rejected (replay protection).
 
+Gossip runs on a patched copy of `libp2p-gossipsub` 0.49.5 (`vendor/libp2p-gossipsub`): a
+computer that connects again beside an old connection — one that restarted before this node
+noticed — is told this node's subscriptions again. Upstream tells only a peer's first
+connection, and since 0.49.5 a node ignores an offer to link up on a topic the other never
+said it subscribes to, so a restarted computer's gossip reached nobody still holding its old
+connection (#406). A node also closes every connection before it restarts into an update and
+when it stops, so a peer drops it at once instead of at its QUIC idle timeout (#407).
+
 ## Cross-Node Prefix KV Sharing Dispatch
 
 The cross-node prefix-cache fetch path uses the `request_response`

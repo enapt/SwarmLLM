@@ -45,7 +45,9 @@ behind — one further behind is disconnected), a whole card placement split bef
 its cache would not fit (#322's spawn half), the Hugging Face search refusing files the swarm
 cannot host (#404's search half) and each computer's give and take in the peer list. New since:
 #403 (P2, closed), #367 raised to P1 (item 6, field report 2026-11-04), #401 (P2, closed), #396 and #399 (P3, closed together: both were the decode
-width), #400, #402, #404 (P3), #397 (P4).
+width), #400, #402, #404 (P3), #397 (P4). v0.3.272 (2026-11-05) carried #403, #401, #399/#396, #404's processor half
+and #400's fetch half; after it, #406 and #407 (a restarted computer heard again; connections closed before a restart,
+the country lookup and the map) closed on 2026-11-05 for the next release.
 **2026-11-04:** #403 goes first among the open work by the user's direction: the release cut-off
 and the use gate must not be passable through a relay. Closed the same day (§ "Closed"). What each release carried is in § "Closed" and `CHANGELOG.md`; earlier
 rankings moved word for word to the archive, § "PRIORITIES re-rank log". Only OPEN work is listed
@@ -85,8 +87,10 @@ the top track (`docs/plans/large_model_splits.md`).
 7. **#388** — the flow's guard takes a far computer's own delay for a queue on the link (the
    slowest reply of two 12-arm runs on 2026-11-01). The far now reports its own time and the guard
    can read it apart (`SWARMLLM_FLOW_SERVED_TIME=1`, off: it lost on a processor-only rig, for
-   that rig's reasons). **Next**: the real-link A/B — v0.3.268 carries bit 36 since 2026-11-02; the
-   default follows it. (#369 CLOSED 2026-11-01.)
+   that rig's reasons). The real-link A/B was VOID on 2026-11-04: the Australian card's round trip
+   had fallen to 117-156 ms, every reply streamed and the guard never ran. **Next**: the same A/B
+   on a far whose round trip makes the tree flow, or with the flow shape forced; the default
+   follows it. (#369 CLOSED 2026-11-01.)
 8. **#318** — a model no single member can hold, at a usable speed. **Llama-3.3-70B on two
    machines — this one (8 GB card + processor) and an RTX 3060 in Australia (~420 ms) — reads
    2.37-2.61 tok/s on new questions (v0.3.264, 2026-10-31 04Z) and 1.81-2.22 (v0.3.265, 12Z, the

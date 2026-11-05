@@ -633,6 +633,28 @@ once a window per relay: `refusing a relayed envelope: its origin is cut off`
 on any release reads the answer as "this peer cannot serve" and re-plans without
 a penalty. The peer list (`/api/admin/peers`) carries each peer's `swarm_use`.
 
+## "A computer shows no location" / "its figures never change" (2026-11-05, #406 #407)
+
+Read the peer TWICE, a minute or more apart (`/api/admin/peers`, `swarmllm peers`). A computer whose
+`uptime_seconds` does not advance is not getting its gossip to this node: every field of its
+capability (location, free memory, what it has loaded, its coordinate) is the copy it sent
+directly when it connected, often from its first second, before its own location lookup
+finished. Its location is then a symptom, not the fault. Up to v0.3.272 the usual cause was a
+restart (an update) inside this node's QUIC idle timeout: the restarted computer was never told
+our subscriptions and dropped our offers to link up (`vendor/libp2p-gossipsub`,
+`send_our_subscriptions`). This node's own log shows the shape:
+
+```
+DIAG: connection established peer_id=<it> … count=2      (INFO: a new connection beside the old one)
+Closed this node's connections so other computers drop it now …   (INFO, at a stop or before an update restart)
+Could not learn this computer's country from ip-api.com or Cloudflare — asking again later   (INFO, once)
+```
+
+When the uptime DOES advance and the location is still empty, the lookup on that computer is
+what failed: it asks ip-api.com, then Cloudflare's trace page, again after 30 s, doubling to once
+an hour (`region` under `[identity]` states it instead). The network map counts such a computer
+under `??` and draws it nowhere, unless it is on this computer's own network.
+
 ## "Why is this node talking to a stranger?"
 
 ```

@@ -389,6 +389,22 @@ network".
 - A model also earns trust when people send it requests, or when many
   computers host it.
 
+## A computer in the peer list shows no country, or its figures never change
+
+Look at the same computer twice, a minute or more apart. If its **uptime does not go
+up**, its updates are not reaching you, and everything shown for it — country, free
+memory, what it has loaded — is what it said the moment it connected. Up to v0.3.272
+this happened when a computer restarted (for an update, say) before your computer had
+noticed it go: it came back unheard by you until the old connection dropped. Updating
+**your** computer fixes it; nothing is needed on theirs.
+
+If its uptime does go up and the country is still empty, its own location lookup
+failed. It asks again on its own (after 30 seconds, then less often, at most once an
+hour); its owner can also state it with `region = "AU"` (a two-letter country code)
+under `[identity]` in `config.toml`. On the network map a computer with no known country
+is counted but not drawn. The log lines are in `docs/DIAGNOSTICS.md` § "A computer shows no
+location".
+
 ## Chat dropdown shows "No models available yet"
 
 This is the cold-start state. Click **Get shared test model** in the Chat tab
