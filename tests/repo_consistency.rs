@@ -14866,6 +14866,124 @@ fn the_zstd_cap_guard_catches_every_uncapped_form() {
     );
 }
 
+/// Lines in `src` (test code and comments skipped) that compute a part's
+/// NUMBER as `shard_count` less one — the last part — in any spelling
+/// rustfmt leaves: a wrapped chain, a cast, `checked_sub`.
+fn last_part_by_number_sites(src: &str) -> Vec<usize> {
+    let mut masked: Vec<char> = src.chars().collect();
+    let char_at: Vec<usize> = src.char_indices().map(|(i, _)| i).collect();
+    for (s, e) in cfg_test_spans(src) {
+        for (k, c) in masked.iter_mut().enumerate() {
+            if (s..e).contains(&char_at[k]) && *c != '\n' {
+                *c = ' ';
+            }
+        }
+    }
+    let masked: String = masked.into_iter().collect();
+    let mut out = Vec::new();
+    for (line, stmt) in statements(&masked) {
+        let flat = stmt.replace(char::is_whitespace, "");
+        let mut from = 0usize;
+        while let Some(k) = flat[from..].find("shard_count") {
+            let at = from + k;
+            from = at + "shard_count".len();
+            let starts_a_name = flat[..at]
+                .chars()
+                .next_back()
+                .is_none_or(|c| !(c.is_alphanumeric() || c == '_'));
+            if !starts_a_name {
+                continue;
+            }
+            let mut tail = &flat[from..];
+            for cast in ["asusize", "asu32", "asu64", "asi64"] {
+                tail = tail.strip_prefix(cast).unwrap_or(tail);
+            }
+            tail = tail.strip_prefix(')').unwrap_or(tail);
+            let less_one = [".saturating_sub(1)", ".checked_sub(1)", ".wrapping_sub(1)"]
+                .iter()
+                .any(|p| tail.starts_with(p))
+                || tail
+                    .strip_prefix("-1")
+                    .is_some_and(|rest| !rest.starts_with(|c: char| c.is_ascii_digit()));
+            if less_one {
+                out.push(line);
+            }
+        }
+    }
+    out.sort_unstable();
+    out.dedup();
+    out
+}
+
+/// No production code judges "the end of a model" by part NUMBER (#408). A
+/// model's last part may hold only its output head and a next-token block,
+/// with the last LAYER in the part before it — the 27B's part 31 is [64, 65)
+/// and layer 63 is in part 30, Ornith-1.5 is cut the same way — so "holds part
+/// `shard_count - 1`" said the 27B could finish a reply here while part 30 was
+/// on another computer, and prompt privacy read ON. The ends are read off the
+/// layer ranges in ONE place, `inference::shard_layout`
+/// (`parts_that_finish`, `parts_at_the_ends`, and `head_part` where the
+/// question really is "which part holds the head").
+#[test]
+fn no_production_code_judges_a_models_end_by_part_number() {
+    let root = repo_root();
+    let mut offenders = Vec::new();
+    let sources = rust_sources_under("src")
+        .into_iter()
+        .chain(rust_sources_under("crates"));
+    for path in sources {
+        if module_file_is_test_only(&path) {
+            continue;
+        }
+        let rel = path
+            .strip_prefix(&root)
+            .unwrap_or(&path)
+            .to_string_lossy()
+            .replace('\\', "/");
+        if rel == "src/inference/shard_layout.rs" {
+            continue;
+        }
+        let src = std::fs::read_to_string(&path).expect("read source");
+        let sites = last_part_by_number_sites(&src);
+        if !sites.is_empty() {
+            offenders.push(format!("{rel}: lines {sites:?}"));
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "the last part's NUMBER read as the end of a model — it may hold only \
+         the head, with the last layer in the part before it (#408); ask \
+         `split::parts_that_finish` / `parts_at_the_ends`, or `head_part` for \
+         the head's part: {offenders:#?}"
+    );
+}
+
+#[test]
+fn the_last_part_guard_catches_every_spelling() {
+    let planted = "fn a(m: &M) -> u32 {\n    \
+                   m.shard_count.saturating_sub(1)\n}\n\
+                   fn b(m: &M) -> bool {\n    \
+                   held.contains(&(m.shard_count - 1))\n}\n\
+                   fn c(m: &M) -> u32 {\n    \
+                   let last = manifest\n        .shard_count\n        .saturating_sub(1);\n    last\n}\n\
+                   fn d(m: &M) -> usize {\n    \
+                   (m.shard_count as usize) - 1\n}\n\
+                   fn e(shard_count: u32) -> Option<u32> {\n    \
+                   shard_count.checked_sub(1)\n}\n";
+    assert_eq!(last_part_by_number_sites(planted), vec![2, 5, 8, 14, 17]);
+    let fine = "fn a(m: &M) -> u32 {\n    head_part(m.shard_count)\n}\n\
+                fn b() {\n    // `shard_count - 1` was the bug\n}\n\
+                fn c(m: &M) -> u32 {\n    m.shard_count - 10\n}\n\
+                fn d(m: &M) -> u32 {\n    m.max_shard_count - 1 + m.num_layers.saturating_sub(1)\n}\n\
+                #[cfg(test)]\nmod tests {\n    fn t(m: &M) {\n        \
+                let _ = m.shard_count - 1;\n    }\n}\n";
+    assert!(
+        last_part_by_number_sites(fine).is_empty(),
+        "{:?}",
+        last_part_by_number_sites(fine)
+    );
+}
+
 /// The free space of a disk is read in ONE place, `auto_manage::disk_space_for`
 /// (#334 (4)): the disk the path is really on, by the filesystem itself on
 /// Linux. sysinfo's disk list leaves out network and tmpfs mounts and matches a

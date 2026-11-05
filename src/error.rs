@@ -289,7 +289,7 @@ pub enum SwarmError {
     /// two situations need DIFFERENT next steps: one says fetch the start of
     /// the model, the other the end. A shared variant would have to pick one
     /// hint for both, and half its readers would be sent after the wrong piece.
-    #[error("“Start and finish on this computer” is on for {model_id}, but this computer does not hold the model's last part (the output head), where every request for it has to finish")]
+    #[error("“Start and finish on this computer” is on for {model_id}, but this computer does not hold the parts it finishes on (its last layer and the output head), where every request for it has to finish")]
     PromptPrivacyNeedsFinalShard { model_id: String },
 
     /// The config-file setting `inference.local_embedding_privacy` is on, and

@@ -11,6 +11,17 @@ and processor wrote 7.2-7.9 tokens a second instead of 12.2-15.6. Those first wo
 out of the reckoning, and a reply too short to show what guessing pays leaves the decision as it
 was (#409).
 
+**"Start and finish on this computer" no longer refuses every request for Qwen3.8 27B and
+Ornith 1.5 on a computer holding their first and last parts.** These models are cut so that their
+last part holds only the output head (and a block used for guessing ahead); the last layer is in
+the part before it. The setting judged "the end of the model" by the last part's number, so a
+computer holding parts first and last was told it could finish a reply there and switched the
+setting on by itself. Every request then failed with a message saying the output head was
+missing, which was not true. The end of a model is now read from what each part holds, wherever
+it is asked: the setting and its automatic default, the parts it downloads (for these models, the
+last two), what is kept on disk and on the graphics card for it, the warning before a part is
+deleted, and routing (#408).
+
 ## [0.3.273-alpha] — 2026-11-05
 
 **A computer that restarts (for an update, say) is heard again by every computer it was connected

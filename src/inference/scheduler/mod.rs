@@ -4907,8 +4907,12 @@ impl PipelineScheduler {
             let can_be_first = shard_indices.contains(&0)
                 && (node_id == *local_node_id
                     || route_override.as_ref().is_none_or(|o| o.lets_peer_lead()));
-            let last_shard_idx = manifest.shard_count.saturating_sub(1);
-            let can_be_last = shard_indices.contains(&last_shard_idx);
+            // Every part a reply finishes on: the last layer's AND the head's,
+            // which may be two (#408 — the 27B's last part holds only the head
+            // and a next-token block; layer 63 is in the part before it).
+            let can_be_last = crate::inference::split::parts_that_finish(manifest)
+                .iter()
+                .all(|index| shard_indices.contains(index));
 
             // Use the most up-to-date load info: for local node, use active_pipelines
             // directly. For remote nodes, take the max of health-ping report and local
@@ -6070,7 +6074,8 @@ impl PipelineScheduler {
     /// - The first segment (layer 0) must be assigned to a node with `can_be_first`
     ///   (has shard 0 for token_embd.weight)
     /// - The last segment (ending at num_layers) must be assigned to a node with
-    ///   `can_be_last` (has the final shard for output.weight)
+    ///   `can_be_last` (holds every part the model finishes on —
+    ///   `split::parts_that_finish`: the last layer's and the output head's)
     /// - When `encrypted_pipeline` is true, both first AND last segments must be
     ///   the local (requesting) node — ensures no remote node sees plaintext.
     ///

@@ -673,10 +673,12 @@ manifest.name, budget.saturating_sub(total_after)
         }
 
         // is_first requires shard 0 (token_embd.weight is always at tensor offset 0)
-        // is_last requires the final shard (output.weight spans to the end of the file)
+        // is_last requires the head's part (output.weight spans to the end of
+        // the file) AND `layer_end` reaching the last layer, whose part may be
+        // the one before it (#408).
         let has_shard_0 = local_shard_indices.contains(&0);
-        let last_shard_idx = manifest.shard_count.saturating_sub(1);
-        let has_last_shard = local_shard_indices.contains(&last_shard_idx);
+        let has_last_shard =
+            local_shard_indices.contains(&crate::inference::split::head_part(manifest.shard_count));
         let is_first = layer_start == 0 && has_shard_0;
         let is_last = layer_end >= manifest.num_layers as usize && has_last_shard;
 

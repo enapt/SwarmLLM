@@ -222,17 +222,19 @@ pub async fn delete_shard(
     // the model failing at pipeline assembly. Refuse and name the setting, so
     // turning it off stays the user's explicit choice rather than a side effect
     // of freeing disk. See `SharedState::privacy_required_shards`.
-    if let Some((first, last)) = shared.privacy_required_shards(&mid) {
-        if shard_index == first || shard_index == last {
-            let which = if shard_index == first && shard_index == last {
-                "only shard".to_string()
-            } else if shard_index == first {
-                "first shard".to_string()
+    if let Some(ends) = shared.privacy_required_shards(&mid) {
+        if ends.contains(&shard_index) {
+            // The parts a reply finishes on are the last layer's AND the
+            // head's, which may be two (#408).
+            let which = if ends.len() == 1 {
+                "the only shard"
+            } else if shard_index == 0 {
+                "the first shard"
             } else {
-                "last shard".to_string()
+                "a shard the model finishes on"
             };
             return Err(ApiError(crate::error::SwarmError::Validation(format!(
-                "Shard {model_id}/{shard_index} is the {which} of a model with prompt \
+                "Shard {model_id}/{shard_index} is {which} of a model with prompt \
                  privacy switched on, which needs both ends of the model on this node. \
                  Deleting it would make every request for {model_id} fail. Turn prompt \
                  privacy off for this model first if you want to remove the shard."

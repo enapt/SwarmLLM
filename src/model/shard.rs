@@ -85,8 +85,10 @@ pub fn compute_first_last(
     total_layers: usize,
 ) -> (bool, bool) {
     let has_shard_0 = local_shard_indices.contains(&0);
-    let last_shard_idx = shard_count.saturating_sub(1);
-    let has_last_shard = local_shard_indices.contains(&last_shard_idx);
+    // The head's part. Paired with `layer_end >= total_layers` below, which
+    // needs the last layer's part too — they may be two (#408).
+    let has_last_shard =
+        local_shard_indices.contains(&crate::inference::split::head_part(shard_count));
     let is_first = layer_start == 0 && has_shard_0;
     let is_last = layer_end >= total_layers && has_last_shard;
     (is_first, is_last)

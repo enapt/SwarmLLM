@@ -68,21 +68,22 @@ const RECENT_REQUEST_PROTECT_SECS: i64 = 3600;
 ///   shard strands the setting — it stays on, nothing satisfies it, and every
 ///   request for the model fails. `required_ends` comes from
 ///   `SharedState::privacy_required_shards`, the same answer `delete_shard`
-///   refuses on.
+///   refuses on: part 0 and every part that finishes the model, which may be
+///   two (a head cut apart from the last layer, #408).
 /// - **Every shard, when the USER asked for privacy explicitly.** Privacy needs
 ///   only the ends, so this is not required for correctness; it is the older,
 ///   broader protection, and narrowing a protection a user deliberately asked
 ///   for is a privacy-affecting change that does not belong in a fix for the
 ///   automatic case.
 fn privacy_holds_shard(
-    required_ends: Option<(u32, u32)>,
+    required_ends: Option<&[u32]>,
     explicitly_enabled: bool,
     index: u32,
 ) -> bool {
     if explicitly_enabled {
         return true;
     }
-    required_ends.is_some_and(|(first, last)| index == first || index == last)
+    required_ends.is_some_and(|parts| parts.contains(&index))
 }
 
 /// How often the idle unload looks, on its own clock beside the auto-manage
@@ -507,6 +508,7 @@ impl AutoShardManager {
             let contribution_auto = live.node.contribution_auto;
             // Once per model: every part of one nobody runs goes (#389 (d)).
             let nobody_runs = self.nobody_runs(&manifest.id);
+            let ends = crate::inference::split::parts_at_the_ends(&manifest);
 
             for shard in &manifest.shards {
                 let shard_id = ShardId {
@@ -666,8 +668,9 @@ impl AutoShardManager {
                 // Resource pressure bonus
                 score += 0.5 * (disk_pressure + schedule_pressure);
 
-                // Pipeline completeness penalty
-                if shard.index == 0 || shard.index == manifest.shard_count.saturating_sub(1) {
+                // Pipeline completeness penalty: a part a reply starts or
+                // finishes on (the last layer's AND the head's, #408).
+                if ends.contains(&shard.index) {
                     score -= 0.5;
                 }
 
@@ -1729,7 +1732,8 @@ impl AutoShardManager {
         // shared rule, and `delete_shard` refuses on the same answer.
         if privacy_holds_shard(
             self.shared_state
-                .privacy_required_shards(&shard_id.model_id),
+                .privacy_required_shards(&shard_id.model_id)
+                .as_deref(),
             self.shared_state
                 .privacy_explicitly_enabled_for(&shard_id.model_id),
             shard_id.index,
@@ -2110,6 +2114,7 @@ impl AutoShardManager {
         let shard_card_mb = held_mb.div_ceil(u64::from(manifest.shard_count));
         let Some(window) = super::vram::compute_optimal_shard_window(
             manifest.shard_count,
+            &crate::inference::split::parts_at_the_ends(&manifest),
             shard_card_mb,
             may_keep_mb,
         ) else {
@@ -2326,16 +2331,21 @@ mod tests {
     /// request for that model would then fail at pipeline assembly.
     #[test]
     fn the_ends_are_held_when_privacy_is_on_without_an_explicit_toggle() {
-        assert!(privacy_holds_shard(Some((0, 3)), false, 0), "first shard");
-        assert!(privacy_holds_shard(Some((0, 3)), false, 3), "last shard");
+        assert!(privacy_holds_shard(Some(&[0, 3]), false, 0), "first shard");
+        assert!(privacy_holds_shard(Some(&[0, 3]), false, 3), "last shard");
+        // A head cut apart from the last layer: both of the finishing parts.
+        assert!(
+            privacy_holds_shard(Some(&[0, 2, 3]), false, 2),
+            "the last layer's part"
+        );
     }
 
     /// But only the ends. The middle of a boomerang comes from peers by design,
     /// so holding it back would stop prune freeing disk for no privacy gain.
     #[test]
     fn the_middle_is_prunable_when_privacy_was_not_asked_for_explicitly() {
-        assert!(!privacy_holds_shard(Some((0, 3)), false, 1));
-        assert!(!privacy_holds_shard(Some((0, 3)), false, 2));
+        assert!(!privacy_holds_shard(Some(&[0, 3]), false, 1));
+        assert!(!privacy_holds_shard(Some(&[0, 3]), false, 2));
     }
 
     /// An explicit choice keeps the older, broader hold on every shard. Privacy
@@ -2345,7 +2355,7 @@ mod tests {
     #[test]
     fn an_explicit_choice_still_holds_every_shard() {
         for index in 0..4 {
-            assert!(privacy_holds_shard(Some((0, 3)), true, index));
+            assert!(privacy_holds_shard(Some(&[0, 3]), true, index));
         }
         // ...even where the rule reports no required ends, which is what a model
         // with no manifest yet looks like.
@@ -2364,7 +2374,7 @@ mod tests {
     /// A one-shard model's single piece is both ends at once.
     #[test]
     fn a_single_shard_model_holds_its_only_piece() {
-        assert!(privacy_holds_shard(Some((0, 0)), false, 0));
+        assert!(privacy_holds_shard(Some(&[0]), false, 0));
     }
 
     /// The reported failure: a model loaded 7s ago, with no request history

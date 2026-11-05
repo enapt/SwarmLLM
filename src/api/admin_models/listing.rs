@@ -289,29 +289,11 @@ pub async fn list_models(State(state): State<AppState>) -> Json<Vec<serde_json::
         // Same answer the scheduler acts on, including the automatic-on case.
         let privacy = state.shared_state.prompt_privacy_status(&mid);
         let flag = privacy.on;
-        let local_node_id = state.shared_state.identity.node_id();
-        let has_first = state
-            .shared_state
-            .model_registry
-            .shard_holders(&crate::types::ShardId {
-                model_id: mid.clone(),
-                index: 0,
-            })
-            .contains(local_node_id);
-        let has_last = if let Some(manifest) = state.shared_state.model_registry.get_manifest(&mid)
-        {
-            let last_idx = manifest.shard_count.saturating_sub(1);
-            state
-                .shared_state
-                .model_registry
-                .shard_holders(&crate::types::ShardId {
-                    model_id: mid,
-                    index: last_idx,
-                })
-                .contains(local_node_id)
-        } else {
-            false
-        };
+        // Part 0, and every part a reply finishes on — the last layer's AND
+        // the head's, which may be two (#408).
+        let ends = state.shared_state.model_ends_held(&mid);
+        let has_first = ends.as_ref().is_some_and(|e| e.first);
+        let has_last = ends.as_ref().is_some_and(|e| e.finish());
         let effective = flag && has_first && has_last;
         let blocked = flag && !(has_first && has_last);
         (

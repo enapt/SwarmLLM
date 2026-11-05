@@ -228,6 +228,53 @@ pub fn part_serves_layers(part: (u32, u32), start: u32, end: u32, num_layers: u3
     (part.0 < end && start < part.1) || (end >= num_layers && part.0 >= num_layers)
 }
 
+/// The part that holds the output head: the last, where
+/// [`compute_layer_shard_layouts`] cuts every `output*` tensor. Holding it is
+/// NOT holding the end of the model — see [`parts_that_finish`].
+pub fn head_part(shard_count: u32) -> u32 {
+    shard_count.saturating_sub(1)
+}
+
+/// **Every part a run that FINISHES the model reads**: the part holding its
+/// last layer, every part past it ([`part_serves_layers`]: next-token-prediction
+/// blocks) and the head's part — in index order, the vision encoder's never.
+///
+/// Usually that is the last part alone. Not when the head is cut with a
+/// next-token-prediction block and no layer the loader runs: Qwen3.8-27B's part
+/// 31 is `[64, 65)`, its layer 63 in part 30, and holding parts 0 and 31 read
+/// as holding "both ends" — prompt privacy switched itself on and refused every
+/// request, and nothing kept part 30 (2026-11-05, #408). Ornith-1.5 is cut the
+/// same way. Every "does this node hold the end" asks this.
+pub fn parts_that_finish(manifest: &crate::types::ModelManifest) -> Vec<u32> {
+    let n = manifest.num_layers;
+    let head = head_part(manifest.shard_count);
+    let mut parts: Vec<u32> = manifest
+        .shards
+        .iter()
+        .filter(|s| s.index != crate::types::MMPROJ_SHARD_INDEX)
+        .filter(|s| part_serves_layers(s.layer_range, n.saturating_sub(1), n, n))
+        .map(|s| s.index)
+        .collect();
+    // The head's part always, listed or not: a manifest that leaves it out
+    // (malformed, a peer's) must read as "this node lacks the head", never as
+    // a model whose last layer is enough (security review, 2026-11-05).
+    parts.push(head);
+    parts.sort_unstable();
+    parts.dedup();
+    parts
+}
+
+/// The parts that must be on THIS node for a reply to start and finish here —
+/// part 0 (the token table is cut into it) and [`parts_that_finish`]: what
+/// prompt privacy needs, keeps from pruning and fetches.
+pub fn parts_at_the_ends(manifest: &crate::types::ModelManifest) -> Vec<u32> {
+    let mut parts = parts_that_finish(manifest);
+    parts.push(0);
+    parts.sort_unstable();
+    parts.dedup();
+    parts
+}
+
 /// Return all contiguous layer ranges from manifest ShardInfo entries.
 ///
 /// Reads layer_range directly from each shard — manifests have accurate
@@ -444,6 +491,111 @@ mod tests {
             available_layer_ranges_from_manifest(&manifest, &[6, 7, 8]),
             vec![(24, 32)]
         );
+    }
+
+    /// Qwen3.8-27B as cut on 2026-11-05: 64 layers in 32 parts, part 30 is
+    /// `[63, 64)` and part 31 `[64, 65)` — the output head and `blk.64.nextn`.
+    fn manifest_cut_as_the_27b_is() -> crate::types::ModelManifest {
+        let mut m = manifest_with_a_part_past_the_end(false);
+        // The live node's `manifest.json` for qwen3.8-27b-q4-k-m, part by part.
+        let ranges: Vec<(u32, u32)> = vec![
+            (0, 1),
+            (1, 3),
+            (3, 5),
+            (5, 7),
+            (7, 9),
+            (9, 11),
+            (11, 13),
+            (13, 15),
+            (15, 18),
+            (18, 21),
+            (21, 24),
+            (24, 27),
+            (27, 30),
+            (30, 33),
+            (33, 35),
+            (35, 37),
+            (37, 39),
+            (39, 41),
+            (41, 43),
+            (43, 45),
+            (45, 47),
+            (47, 49),
+            (49, 51),
+            (51, 53),
+            (53, 55),
+            (55, 57),
+            (57, 59),
+            (59, 61),
+            (61, 62),
+            (62, 63),
+            (63, 64),
+            (64, 65),
+        ];
+        m.num_layers = 64;
+        m.shard_count = 32;
+        m.shards = ranges
+            .into_iter()
+            .enumerate()
+            .map(|(i, layer_range)| crate::types::ShardInfo {
+                index: i as u32,
+                layer_range,
+                size_bytes: 4,
+                hash: [0u8; 32],
+                tensors: Vec::new(),
+            })
+            .collect();
+        m
+    }
+
+    /// **The end of a model is the parts holding its last layer and its head**
+    /// (#408): for the 27B that is parts 30 AND 31, so a node holding 0 and 31
+    /// does not hold both ends. Each case fails with `[head_part]` alone.
+    #[test]
+    fn the_parts_that_finish_a_model_are_read_off_its_layer_ranges() {
+        let the_27b = manifest_cut_as_the_27b_is();
+        assert_eq!(parts_that_finish(&the_27b), vec![30, 31]);
+        assert_eq!(parts_at_the_ends(&the_27b), vec![0, 30, 31]);
+        let ornith = manifest_with_a_part_past_the_end(true);
+        assert_eq!(parts_that_finish(&ornith), vec![7, 8]);
+        assert_eq!(parts_at_the_ends(&ornith), vec![0, 7, 8]);
+        // Null control: the last part holds the last layer and the head.
+        let plain = manifest_with_a_part_past_the_end(false);
+        assert_eq!(parts_that_finish(&plain), vec![7]);
+        assert_eq!(parts_at_the_ends(&plain), vec![0, 7]);
+        assert_eq!(head_part(plain.shard_count), 7);
+    }
+
+    /// A one-part model is both ends at once; the vision encoder is neither.
+    #[test]
+    fn a_single_part_is_both_ends_and_the_image_reader_is_neither() {
+        let mut one = manifest_with_a_part_past_the_end(false);
+        one.shards.truncate(1);
+        one.shards[0].layer_range = (0, 32);
+        one.shard_count = 1;
+        assert_eq!(parts_at_the_ends(&one), vec![0]);
+        let mut with_vision = manifest_with_a_part_past_the_end(false);
+        with_vision.shards.push(crate::types::ShardInfo {
+            index: crate::types::MMPROJ_SHARD_INDEX,
+            layer_range: (32, 33),
+            size_bytes: 4,
+            hash: [0u8; 32],
+            tensors: Vec::new(),
+        });
+        assert_eq!(parts_that_finish(&with_vision), vec![7]);
+    }
+
+    /// A manifest that does not list the head's part (malformed, a peer's)
+    /// still needs it: holding the last layer's part alone never reads as
+    /// holding the end (security review, 2026-11-05).
+    #[test]
+    fn the_heads_part_is_needed_even_where_the_manifest_leaves_it_out() {
+        let mut cut = manifest_with_a_part_past_the_end(true);
+        let head = head_part(cut.shard_count);
+        cut.shards.retain(|s| s.index != head);
+        let finish = parts_that_finish(&cut);
+        assert!(finish.contains(&head), "{finish:?}");
+        assert!(finish.len() >= 2, "the last layer's part too: {finish:?}");
     }
 
     /// Null control: a model whose last part holds its last layer and the

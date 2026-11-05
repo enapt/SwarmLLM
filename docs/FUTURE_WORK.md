@@ -3984,36 +3984,6 @@ Credits are DORMANT — they gate nothing, and `credits_stay_dormant` fails the 
 starts. Read `docs/CREDITS_DESIGN.md` before touching them; the credit items below are
 preconditions for ever switching enforcement on, not work for now.
 
-#### #408 — A model whose last part holds only its output head is refused on the computer that holds both "ends"
-`P2` · privacy / routing · **OPEN** — 2026-11-05 · history: the v0.3.273 README sitting (gotcha #1039)
-
-The live node held parts 0 and 31 of Qwen3.8-27B (32 parts, 64 layers). Part 31's manifest range is
-[64,65]: `output.weight`, `output_norm` and the MTP block `blk.64.nextn.*`; layer 63 is in part 30.
-Prompt privacy's automatic default asks `SharedState::holds_both_model_ends_under`
-(`daemon/state/mod.rs`), which is `holds(0) && holds(shard_count - 1)` BY PART NUMBER → on
-(`decided_by: "automatic"`, `"ready": true`). The planner's encrypted branch needs a local range
-reaching the last layer (`available_layer_ranges_from_manifest` gave [(0,1)]) → every request is
-`PromptPrivacyNeedsFinalShard`, whose message ("does not hold the output head") is false.
-`privacy_required_shards_inner` pins (0, last) by number too, so prune never keeps part 30 for it and
-the node never fetches it. The workaround for a run was the per-model choice set off
-(`PUT /api/admin/models/{id}/encrypted-pipeline`), restored to automatic afterwards.
-
-"The parts that finish a model" is judged by `shard_count - 1` at 13 production sites (a code
-search, 2026-11-05): `daemon/state` `holds_both_model_ends_under`, `privacy_required_shards_inner`
-(prune's privacy pin and the shard-delete refusal), `override_keeps_whole_model`; scheduler
-`can_be_last` (whole-model hand-off, the encrypted local-last filter); `model/shard.rs`
-`compute_first_last` and `scan.rs`'s segment registration (both `layer_end >= num_layers &&
-has_last_shard` — right only where the head's part also holds the last layer); `local_generate`'s
-whole-range fallback; `admin_models/lifecycle.rs` (the privacy-enable fetch of `[0, last]`, the
-status's `has_last_shard`/`ready`, the toggle's check); `listing.rs`'s privacy info; prune's
-completeness score; `vram::compute_optimal_shard_window`. So this is `architecture.md` § "One
-invariant, N paths". The pieces to build on: `split::part_serves_layers` (written for Ornith-1.5's
-MTP block cut beside the head) and `available_layer_ranges_from_manifest`, which already reads
-a head-only part correctly. Next: ONE helper that reads the manifest's layer
-ranges — the part holding layer `num_layers - 1` plus every part holding the head — asked by every
-site, with a guard that no consumer compares to `shard_count - 1`; a security review (prompt
-privacy's boundary), and a live check on the 27B with automatic privacy.
-
 #### #383 — A serving node's stream of checks is not tied to the peer that opened it
 `P4` · network · **OPEN** — 2026-10-30 · history: #382's security review (low, pre-existing)
 
@@ -4518,7 +4488,32 @@ Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
 
-**Closed 2026-11-05, ships in the next release** (#409)
+**Closed 2026-11-05, ships in the next release** (#408, #409)
+- #408 — **"The end of a model" was judged by part NUMBER.** Qwen3.8-27B's part 31 is `[64, 65)` —
+  `output*` and the MTP block `blk.64.nextn` — with layer 63 in part 30 (Ornith-1.5 is cut the same
+  way, #398); a node holding parts 0 and 31 read prompt privacy's automatic default ON, its status
+  `ready`, and refused every request with `PromptPrivacyNeedsFinalShard` ("does not hold the output
+  head" — false), while its pin kept 0 and 31 and nothing fetched part 30 (gotcha #1039).
+  `inference::shard_layout::parts_that_finish` (every part `part_serves_layers` says serves the
+  last layer, plus the head's — always, listed or not: the security review's one Low) and
+  `parts_at_the_ends` (+ part 0) are the one reading, `head_part` the one place the last part's
+  number is named; asked by `SharedState::model_ends_held` (→ `ModelEndsHeld`: the automatic
+  default, the status, the toggle, the model list), `privacy_required_shards` (now a set: prune's
+  pin and the delete refusal), prune's completeness score, `vram::compute_optimal_shard_window`
+  (every end first), the enable-privacy fetch, the scheduler's `can_be_last` (every finishing part
+  held) and `local_generate`'s whole-range fallback; `compute_first_last` / the scan's `is_last`
+  keep `layer_end >= num_layers` and ask `head_part`. `override_keeps_whole_model` compares an
+  inclusive part RANGE with the count ("every part") and stays. Guard
+  `no_production_code_judges_a_models_end_by_part_number` + self-test. With the old reading put
+  back, `the_parts_that_finish_a_model_are_read_off_its_layer_ranges` and
+  `privacy_pins_the_last_layers_part_beside_a_head_only_part` failed and the guard named a planted
+  file at its line. Security review (Mythos): no path under privacy hands a peer the last
+  segment; a normal model reads `[shard_count - 1]` exactly as before. **Live** (2026-11-05 20:18-20:21Z,
+  `~/swarmllm-gate/deep/fr/ends408_check.sh`: a probe node holding the live node's parts 0 and 31,
+  auto-manage off, joined to the swarm): v0.3.273 read `encrypted_pipeline: true`, `ready: true`,
+  `has_last_shard: true` and refused the chat (`PromptPrivacyNeedsFinalShard`, 0 s); main read
+  `false` / `ready: false` / `has_last_shard: false` (`decided_by: automatic` both) and answered in
+  19 s, handed whole to AU `aa3d1e66` (`route=distributed`, 16 tokens).
 - #409 — **A short first reply switched a worker's local guessing off for the next ~25.** While the
   processor's decode width settles (`cpu_pools::decode_width_settled`, #396/#399), every round of
   `LocalSpec::next` is a plain step, and those rounds counted toward `record_spec_payoff`'s tokens a

@@ -1152,13 +1152,16 @@ pub fn node_tokens_per_sec_7b(gpu_name: Option<&str>) -> Option<f32> {
 
 /// Compute the optimal shard window for a model given VRAM budget.
 ///
-/// Returns `(start, end)` inclusive shard indices that fit within the budget.
-/// Always prefers shard 0 (embeddings) and the last shard (output head) for
-/// "boomerang" local inference. Fills remaining budget with contiguous middle shards.
+/// Returns the shard indices that fit within the budget, in order. Always
+/// prefers `ends` — the parts a reply starts and finishes on
+/// (`split::parts_at_the_ends`: part 0, the last layer's and the head's, which
+/// may be two parts, #408) — for "boomerang" local inference, then fills the
+/// remaining budget with the parts after the first.
 ///
-/// Returns None if even 2 shards don't fit.
+/// Returns None if not even one part fits.
 pub fn compute_optimal_shard_window(
     shard_count: u32,
+    ends: &[u32],
     shard_vram_each_mb: u64,
     vram_budget_mb: u64,
 ) -> Option<Vec<u32>> {
@@ -1176,28 +1179,28 @@ pub fn compute_optimal_shard_window(
         return Some((0..shard_count).collect());
     }
 
-    let last_shard = shard_count - 1;
-    let mut selected = Vec::new();
-
     if shard_count == 1 {
         return Some(vec![0]);
     }
 
-    // Always include shard 0 (embeddings) and last shard (output head)
-    selected.push(0);
-    if shards_that_fit >= 2 {
-        selected.push(last_shard);
-    }
-
-    // Fill remaining budget with contiguous middle shards starting from shard 1
-    for i in 1..last_shard {
+    // The ends first, as far as they fit (part 0 leads them), then the parts
+    // after the first.
+    let mut selected: Vec<u32> = Vec::new();
+    let candidates = ends
+        .iter()
+        .copied()
+        .filter(|&i| i < shard_count)
+        .chain(1..shard_count);
+    for i in candidates {
         if selected.len() as u32 >= shards_that_fit {
             break;
         }
-        selected.push(i);
+        if !selected.contains(&i) {
+            selected.push(i);
+        }
     }
 
-    selected.sort();
+    selected.sort_unstable();
     Some(selected)
 }
 
@@ -2150,28 +2153,38 @@ mod tests {
 
     #[test]
     fn shard_window_all_fit() {
-        let result = compute_optimal_shard_window(4, 500, 3000);
+        let result = compute_optimal_shard_window(4, &[0, 3], 500, 3000);
         assert_eq!(result, Some(vec![0, 1, 2, 3]));
     }
 
     #[test]
     fn shard_window_partial_prefers_first_last() {
         // 8 shards, 500MB each, budget for 3
-        let result = compute_optimal_shard_window(8, 500, 1500).unwrap();
+        let result = compute_optimal_shard_window(8, &[0, 7], 500, 1500).unwrap();
         assert!(result.contains(&0), "Must include shard 0");
         assert!(result.contains(&7), "Must include last shard");
         assert_eq!(result.len(), 3);
     }
 
+    /// A head cut apart from the last layer (#408): both parts a reply finishes
+    /// on stay with part 0, or the window could start a reply but never end it.
+    #[test]
+    fn shard_window_keeps_every_part_a_reply_finishes_on() {
+        let result = compute_optimal_shard_window(8, &[0, 6, 7], 500, 1500);
+        assert_eq!(result, Some(vec![0, 6, 7]));
+        let result = compute_optimal_shard_window(8, &[0, 6, 7], 500, 2000);
+        assert_eq!(result, Some(vec![0, 1, 6, 7]));
+    }
+
     #[test]
     fn shard_window_too_small() {
-        let result = compute_optimal_shard_window(8, 500, 100);
+        let result = compute_optimal_shard_window(8, &[0, 7], 500, 100);
         assert_eq!(result, None);
     }
 
     #[test]
     fn shard_window_single_shard() {
-        let result = compute_optimal_shard_window(1, 500, 1000);
+        let result = compute_optimal_shard_window(1, &[0], 500, 1000);
         assert_eq!(result, Some(vec![0]));
     }
 }

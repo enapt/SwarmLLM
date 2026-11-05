@@ -7953,6 +7953,35 @@ reachable node holds layers 0-12", and the released v0.3.268 binary, asked the s
 same (null control): by 11:18Z the network knew no holder of the model's front, so the run says
 nothing about the fix either way.
 
+## The parts a model finishes on are read off its layer ranges, never its last part's number (2026-11-05, #408)
+
+**What it replaced.** "The end of a model" was "holds part `shard_count - 1`" at 13 production
+sites. The cutter puts `output*` in the last part, and a file with a next-token-prediction block
+puts that block there too (§ above), so the last part may hold ONLY the head: Qwen3.8-27B's part 31
+is `[64, 65)` and layer 63 is in part 30; Ornith-1.5 is cut the same way. A node holding parts 0
+and 31 of the 27B read prompt privacy's automatic default as ON (`holds_both_model_ends_under`) and
+then refused every request with `PromptPrivacyNeedsFinalShard` ("does not hold the output head" —
+false), and its pin (`privacy_required_shards_inner`) kept 0 and 31, so part 30 was never kept or
+fetched for it. Found on the live node during the v0.3.273 README run (gotcha #1039).
+
+**The rule.** **`inference::shard_layout::parts_that_finish(manifest)`** — every part that
+`part_serves_layers` says serves the model's last layer, plus the head's part (`head_part`, the one
+place the last part's NUMBER is named) — and **`parts_at_the_ends`** (that plus part 0) are the one
+reading. The privacy default and its status (`SharedState::model_ends_held` → `ModelEndsHeld`), its
+pin and prune's completeness score, a delete's refusal, the privacy-enable fetch, the card window
+(`vram::compute_optimal_shard_window` keeps every end first), the scheduler's `can_be_last` and the
+whole-range fallback (`local_generate`) ask them. `compute_first_last` and the scan's `is_last`
+pair the head's part with `layer_end >= num_layers`, which already needs the last layer's part, so
+they ask only `head_part`. `override_keeps_whole_model` compares an inclusive part RANGE with the
+part count — "every part", not an end — and stays. Guard
+`no_production_code_judges_a_models_end_by_part_number` (self-test
+`the_last_part_guard_catches_every_spelling`). A part past the model's end exists because llama.cpp
+keeps MTP blocks as the file's last `nextn_predict_layers` blocks and skips them at decode; no other
+system cuts a model into numbered parts, so the rule is our own, built on #398's.
+
+**Measured.** See FUTURE_WORK § Closed #408 for the tests red with the old reading and the live
+check on the 27B.
+
 ## Single-source-of-truth helpers — Inference kernels, caches and the tokenizer
 
 Each names the ONE place a decision is made. A second implementation of any of

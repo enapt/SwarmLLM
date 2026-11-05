@@ -165,8 +165,12 @@ impl PipelineExecutor {
         let registry = &self.shared_state.model_registry;
         let manifest = registry.get_manifest(&self.request.model_id)?;
         let held = registry.local_shard_indices_in(&manifest, self.shared_state.identity.node_id());
-        let last_shard = manifest.shard_count.saturating_sub(1);
-        if !held.contains(&0) || !held.contains(&last_shard) {
+        // Part 0 and every part the model finishes on (the last layer's AND
+        // the head's, which may be two — #408).
+        if !crate::inference::split::parts_at_the_ends(&manifest)
+            .iter()
+            .all(|index| held.contains(index))
+        {
             return None;
         }
         let total_layers = manifest.num_layers;

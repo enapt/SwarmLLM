@@ -394,7 +394,6 @@ pub async fn enable_model_privacy(
         state.shared_state.set_prompt_privacy_choice(&mid, None);
     }
 
-    let last_index = manifest.shard_count.saturating_sub(1);
     let me = state.shared_state.identity.node_id();
     // Confirm on disk, not just in the registry.
     //
@@ -421,12 +420,12 @@ pub async fn enable_model_privacy(
             .contains(me)
             && store.shard_file_present(&shard_id)
     };
-    let mut needed: Vec<u32> = Vec::new();
-    for index in [0u32, last_index] {
-        if !holds(index) && !needed.contains(&index) {
-            needed.push(index);
-        }
-    }
+    // Part 0 and every part a reply finishes on — the last layer's AND the
+    // head's, which may be two (#408).
+    let needed: Vec<u32> = crate::inference::split::parts_at_the_ends(&manifest)
+        .into_iter()
+        .filter(|&index| !holds(index))
+        .collect();
 
     if needed.is_empty() {
         return Ok(Json(serde_json::json!({
@@ -514,31 +513,13 @@ pub async fn get_model_encrypted_pipeline(
     let privacy = state.shared_state.prompt_privacy_status(&mid);
     let cfg = state.shared_state.cfg();
 
-    // Check if the local node has the required shards (first + last)
+    // Does the local node hold both ends: part 0, and every part a reply
+    // finishes on (the last layer's AND the head's, #408).
     let manifest = state.shared_state.model_registry.get_manifest(&mid);
-    let local_node_id = state.shared_state.identity.node_id();
-    let (has_first, has_last, shard_count) = if let Some(m) = &manifest {
-        let has_first = state
-            .shared_state
-            .model_registry
-            .shard_holders(&crate::types::ShardId {
-                model_id: mid.clone(),
-                index: 0,
-            })
-            .contains(local_node_id);
-        let last_idx = m.shard_count.saturating_sub(1);
-        let has_last = state
-            .shared_state
-            .model_registry
-            .shard_holders(&crate::types::ShardId {
-                model_id: mid.clone(),
-                index: last_idx,
-            })
-            .contains(local_node_id);
-        (has_first, has_last, m.shard_count)
-    } else {
-        (false, false, 0)
-    };
+    let shard_count = manifest.as_ref().map_or(0, |m| m.shard_count);
+    let ends = state.shared_state.model_ends_held(&mid);
+    let has_first = ends.as_ref().is_some_and(|e| e.first);
+    let has_last = ends.as_ref().is_some_and(|e| e.finish());
 
     Json(serde_json::json!({
         "model_id": model_id,
@@ -606,32 +587,22 @@ pub async fn set_model_encrypted_pipeline(
     if enabled {
         let manifest = state.shared_state.model_registry.get_manifest(&mid);
         if let Some(m) = &manifest {
-            let local_node_id = state.shared_state.identity.node_id();
-            let has_first = state
-                .shared_state
-                .model_registry
-                .shard_holders(&crate::types::ShardId {
-                    model_id: mid.clone(),
-                    index: 0,
-                })
-                .contains(local_node_id);
-            let last_idx = m.shard_count.saturating_sub(1);
-            let has_last = state
-                .shared_state
-                .model_registry
-                .shard_holders(&crate::types::ShardId {
-                    model_id: mid.clone(),
-                    index: last_idx,
-                })
-                .contains(local_node_id);
+            let ends = state.shared_state.model_ends_held(&mid);
+            let has_first = ends.as_ref().is_some_and(|e| e.first);
+            let missing_to_finish = ends.map(|e| e.missing_to_finish).unwrap_or_default();
 
-            if !has_first || !has_last {
+            if !has_first || !missing_to_finish.is_empty() {
                 let mut missing = Vec::new();
                 if !has_first {
                     missing.push("first shard (shard 0, embedding table)".to_string());
                 }
-                if !has_last {
-                    missing.push(format!("last shard (shard {last_idx}, output head)"));
+                if !missing_to_finish.is_empty() {
+                    // The last layer's part AND the head's, which may be two (#408).
+                    let parts: Vec<String> = missing_to_finish.iter().map(u32::to_string).collect();
+                    missing.push(format!(
+                        "the shard(s) the model finishes on ({}, last layer and output head)",
+                        parts.join(", ")
+                    ));
                 }
                 // Record the preference anyway, and say it is not yet
                 // deliverable.

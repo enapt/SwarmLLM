@@ -581,6 +581,30 @@ pub enum MemoryScope {
     AllResident,
 }
 
+/// Which ends of a model this node holds (`SharedState::model_ends_held`):
+/// part 0, and the parts a reply finishes on (`split::parts_that_finish`,
+/// the last layer's AND the head's, #408).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ModelEndsHeld {
+    /// Part 0: the token table and the first layer.
+    pub first: bool,
+    /// The parts a reply finishes on that this node lacks — empty when it can
+    /// finish one here.
+    pub missing_to_finish: Vec<u32>,
+}
+
+impl ModelEndsHeld {
+    /// Every part the model finishes on is here.
+    pub fn finish(&self) -> bool {
+        self.missing_to_finish.is_empty()
+    }
+
+    /// Both ends: what prompt privacy needs.
+    pub fn both(&self) -> bool {
+        self.first && self.finish()
+    }
+}
+
 /// Which rule decided "start and finish on this computer" (prompt privacy)
 /// for a model — the precedence of [`SharedState::encrypted_pipeline_for`],
 /// named.
@@ -2685,10 +2709,12 @@ impl SharedState {
         (holds_both_ends(), PrivacyDecidedBy::Automatic)
     }
 
-    /// Whether this node holds BOTH the first and last shard of a model — the
-    /// precondition for prompt privacy (`encrypted_pipeline`), which forces the
-    /// first and last pipeline segments to run locally so no peer ever sees the
-    /// prompt or the sampled tokens.
+    /// Whether this node holds every part at BOTH ends of a model
+    /// (`split::parts_at_the_ends`: part 0, the part holding the last layer and
+    /// every part past it) — the precondition for prompt privacy
+    /// (`encrypted_pipeline`), which forces the first and last pipeline
+    /// segments to run locally so no peer ever sees the prompt or the sampled
+    /// tokens.
     pub fn holds_both_model_ends(&self, model_id: &crate::types::ModelId) -> bool {
         self.holds_both_model_ends_under(model_id, None)
     }
@@ -2741,9 +2767,23 @@ impl SharedState {
         model_id: &crate::types::ModelId,
         over: Option<&crate::inference::route_override::RoutePlanOverride>,
     ) -> bool {
-        let Some(manifest) = self.model_registry.get_manifest(model_id) else {
-            return false;
-        };
+        self.model_ends_held_under(model_id, over)
+            .is_some_and(|ends| ends.both())
+    }
+
+    /// Which ends of a model this node holds — the privacy status, its toggle
+    /// and the model list report it; [`Self::holds_both_model_ends`] is its
+    /// `both()`. `None` without a manifest.
+    pub fn model_ends_held(&self, model_id: &crate::types::ModelId) -> Option<ModelEndsHeld> {
+        self.model_ends_held_under(model_id, None)
+    }
+
+    fn model_ends_held_under(
+        &self,
+        model_id: &crate::types::ModelId,
+        over: Option<&crate::inference::route_override::RoutePlanOverride>,
+    ) -> Option<ModelEndsHeld> {
+        let manifest = self.model_registry.get_manifest(model_id)?;
         let me = self.identity.node_id();
         let holds = |index: u32| {
             if over.is_some_and(|o| !o.local_holds(index)) {
@@ -2756,8 +2796,17 @@ impl SharedState {
                 })
                 .contains(me)
         };
-        // A single-shard model has one piece that is both ends at once.
-        holds(0) && holds(manifest.shard_count.saturating_sub(1))
+        // Read off the layer ranges (#408): the last part may hold only the
+        // head, and the last layer sit in the one before it. A single-part
+        // model has one piece that is both ends at once.
+        let missing_to_finish = crate::inference::split::parts_that_finish(&manifest)
+            .into_iter()
+            .filter(|&index| !holds(index))
+            .collect();
+        Some(ModelEndsHeld {
+            first: holds(0),
+            missing_to_finish,
+        })
     }
 
     /// Is `inference.local_embedding_privacy` on — must this node turn every
@@ -2926,8 +2975,9 @@ impl SharedState {
         }
     }
 
-    /// The shard indices prompt privacy needs this node to keep, or `None` when
-    /// the setting is off for this model.
+    /// The parts prompt privacy needs this node to keep
+    /// (`split::parts_at_the_ends`), or `None` when the setting is off for this
+    /// model.
     ///
     /// Prompt privacy ("boomerang") works by handling the FIRST segment (the
     /// embedding) and the LAST (sampling) locally, so losing either end strands
@@ -2946,10 +2996,10 @@ impl SharedState {
     /// privacy off to let a delete through is the worst of the available
     /// outcomes. The refusal names the setting, so the user can turn it off and
     /// repeat the delete if that is what they meant.
-    pub fn privacy_required_shards(&self, model_id: &crate::types::ModelId) -> Option<(u32, u32)> {
+    pub fn privacy_required_shards(&self, model_id: &crate::types::ModelId) -> Option<Vec<u32>> {
         Self::privacy_required_shards_inner(
             self.encrypted_pipeline_for(model_id),
-            self.model_registry.get_manifest(model_id)?.shard_count,
+            &self.model_registry.get_manifest(model_id)?,
         )
     }
 
@@ -3052,14 +3102,14 @@ impl SharedState {
     /// Pure rule behind [`SharedState::privacy_required_shards`], split out so
     /// the decision is testable without a registry — same shape as
     /// [`SharedState::resolve_encrypted_pipeline_inner`] above.
-    fn privacy_required_shards_inner(enabled: bool, shard_count: u32) -> Option<(u32, u32)> {
-        if !enabled {
-            return None;
-        }
-        // The same ends `holds_both_model_ends` checks. A single-shard model has
-        // one piece that is both ends at once, so first == last and that piece is
-        // pinned once rather than not at all.
-        Some((0, shard_count.saturating_sub(1)))
+    fn privacy_required_shards_inner(
+        enabled: bool,
+        manifest: &crate::types::ModelManifest,
+    ) -> Option<Vec<u32>> {
+        // The same ends `holds_both_model_ends` checks, read off the layer
+        // ranges (#408). A single-part model has one piece that is both ends at
+        // once, so that piece is pinned once rather than not at all.
+        enabled.then(|| crate::inference::split::parts_at_the_ends(manifest))
     }
 
     /// R136 Layer 1 / Layer 3 follow-on: get or lazy-load a standalone
@@ -6098,10 +6148,48 @@ mod encrypted_pipeline_precedence_tests {
         );
     }
 
+    /// A model cut into these layer ranges, one part each.
+    fn cut(num_layers: u32, ranges: &[(u32, u32)]) -> crate::types::ModelManifest {
+        use crate::types::*;
+        ModelManifest {
+            id: ModelId("cut".into()),
+            name: "Cut".into(),
+            architecture: ModelArchitecture::Llama,
+            num_layers,
+            num_params_billions: 0.001,
+            quantization: Quantization::Q4KM,
+            total_size_bytes: ranges.len() as u64,
+            shard_count: ranges.len() as u32,
+            shards: ranges
+                .iter()
+                .enumerate()
+                .map(|(i, &layer_range)| ShardInfo {
+                    index: i as u32,
+                    layer_range,
+                    size_bytes: 1,
+                    hash: [0u8; 32],
+                    tensors: vec![],
+                })
+                .collect(),
+            tokenizer_hash: [0u8; 32],
+            manifest_hash: [0u8; 32],
+            publisher: NodeId([0u8; 32]),
+            publish_date: chrono::Utc::now(),
+            license: "MIT".into(),
+            mmproj: None,
+            context_length: None,
+        }
+    }
+
+    /// Four parts of one layer each, the last holding the last layer and the head.
+    fn four_parts() -> crate::types::ModelManifest {
+        cut(4, &[(0, 1), (1, 2), (2, 3), (3, 4)])
+    }
+
     /// Does prompt privacy pin this shard against deletion?
-    fn pins(enabled: bool, shard_count: u32, index: u32) -> bool {
-        SharedState::privacy_required_shards_inner(enabled, shard_count)
-            .is_some_and(|(first, last)| index == first || index == last)
+    fn pins(enabled: bool, manifest: &crate::types::ModelManifest, index: u32) -> bool {
+        SharedState::privacy_required_shards_inner(enabled, manifest)
+            .is_some_and(|parts| parts.contains(&index))
     }
 
     /// Removing either END of a privacy-enabled model strands the setting: it
@@ -6111,16 +6199,35 @@ mod encrypted_pipeline_precedence_tests {
     /// to clear and removed the shard anyway.
     #[test]
     fn privacy_pins_both_ends_of_the_model() {
-        assert!(pins(true, 4, 0), "first shard carries the embedding");
-        assert!(pins(true, 4, 3), "last shard carries the output head");
+        assert!(
+            pins(true, &four_parts(), 0),
+            "first shard carries the embedding"
+        );
+        assert!(
+            pins(true, &four_parts(), 3),
+            "last shard carries the output head"
+        );
+    }
+
+    /// **The end is the last LAYER's part as well as the head's** (#408):
+    /// Qwen3.8-27B's last part holds only the head and a next-token-prediction
+    /// block, so privacy keeps the part before it too — pinned by index alone,
+    /// prune gave that part away and the setting could never be met again.
+    #[test]
+    fn privacy_pins_the_last_layers_part_beside_a_head_only_part() {
+        let head_apart = cut(4, &[(0, 1), (1, 2), (2, 4), (4, 5)]);
+        assert!(pins(true, &head_apart, 0));
+        assert!(pins(true, &head_apart, 2), "holds layer 3, the last");
+        assert!(pins(true, &head_apart, 3), "holds the output head");
+        assert!(!pins(true, &head_apart, 1));
     }
 
     /// ...but only the ends. Prompt privacy says nothing about the middle, and
     /// refusing those would block freeing disk for no reason.
     #[test]
     fn privacy_does_not_pin_the_middle_shards() {
-        assert!(!pins(true, 4, 1));
-        assert!(!pins(true, 4, 2));
+        assert!(!pins(true, &four_parts(), 1));
+        assert!(!pins(true, &four_parts(), 2));
     }
 
     /// With the setting off nothing is pinned — the guard must not become a
@@ -6128,7 +6235,7 @@ mod encrypted_pipeline_precedence_tests {
     #[test]
     fn nothing_is_pinned_when_privacy_is_off() {
         for index in 0..4 {
-            assert!(!pins(false, 4, index));
+            assert!(!pins(false, &four_parts(), index));
         }
     }
 
@@ -6136,7 +6243,7 @@ mod encrypted_pipeline_precedence_tests {
     /// once rather than falling between the two comparisons.
     #[test]
     fn a_single_shard_model_pins_its_only_piece() {
-        assert!(pins(true, 1, 0));
+        assert!(pins(true, &cut(4, &[(0, 4)]), 0));
     }
 
     /// The point of the change: privacy applies automatically wherever it can,
