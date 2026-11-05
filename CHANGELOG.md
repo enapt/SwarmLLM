@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.3.274-alpha] — 2026-11-06
+
 **A short first reply no longer slows the replies after it.** When a model runs partly or wholly
 on the processor, the first 15-25 words of its life are written plainly while it times how many
 processor cores to use, with no guessing ahead. A first reply that short — a greeting, or the title
