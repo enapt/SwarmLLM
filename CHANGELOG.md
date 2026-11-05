@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.3.273-alpha] — 2026-11-05
+
 **A computer that restarts (for an update, say) is heard again by every computer it was connected
 to.** Until now one that came back before its old connections had timed out — a few seconds — was
 not told what the others listen for, turned away their offers to link up, and its news reached none
@@ -21,6 +23,27 @@ restart; it now also asks Cloudflare, and asks again after 30 s, doubling to at 
 **The network map no longer draws a computer whose country it has not heard in yours** — it is
 counted, with no place on the map, unless it is on your own network — and the live map and the full
 map now count the same computers. Every list now reads a computer's country the same way (#407).
+
+**A very large model split across distant computers can now take in more graphics cards.** When no
+nearby computers can run a model between them, every computer plans the same chain across all of
+them and fetches its own part. That plan priced every link between distant computers at a flat
+300 ms — even for a computer running the model on its own — tried at most one computer more than
+memory strictly needed, and moved to a better chain only for a quarter off its time per word. So
+Llama 3.3 70B stayed on two computers with most of the far one's layers on its processor, while a computer
+with a free RTX 3080 Ti held none of it. Links are now priced as the request router prices them,
+from the measured distance between the two computers; every graphics card may join the chain; and
+a chain moves when it is faster per word AND its slowest computer is at least a quarter faster —
+the measure Petals uses, and the pace a stream of checks runs at. On 2026-11-05 this computer's
+planner, by the speeds each computer states, chose four computers (the US card and a fast
+processor-only computer added) over the two the 70B ran on: about 725 ms a word against 984, its slowest computer 161 ms against 875.
+That is a plan, not yet a measured reply: the computers in the new chain fetch their parts once
+they run this release, and the speed of real replies on it is measured then (#318).
+
+A network position a computer publishes that this software could never produce (a negative link
+cost, a position past its limit) is no longer believed when routing or planning.
+
+The log no longer says "the configured drafter does not share the target's vocabulary" when no
+drafter is configured; each held model that cannot guess ahead for a split is now noted at debug.
 
 ## [0.3.272-alpha] — 2026-11-05
 

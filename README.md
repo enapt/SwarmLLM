@@ -140,7 +140,7 @@ idea, applied to running AI instead of sharing files.)
 
 ## How fast is it?
 
-<!-- speeds:begin, reviewed for 0.3.272-alpha. Refreshed at every release: .claude/rules/completeness.md § "README speeds" -->
+<!-- speeds:begin, reviewed for 0.3.273-alpha. Refreshed at every release: .claude/rules/completeness.md § "README speeds" -->
 Speed here is **tokens a second**. A token is a word or part of one, and most
 people read about 5 a second. Every figure below comes from this project's
 test computer, a laptop with an 8 GB NVIDIA RTX 3070 graphics card and an
@@ -161,6 +161,7 @@ model reads a 1,800-token document and writes 128 tokens about it.
 <!-- release-check:skipped v0.3.269 — other programs held about 200 MiB more of the card (1,022-1,118 MiB before each run vs 863 at v0.3.268) and v0.3.268 itself wrote the 14B split at 14.1 tok/s there against 18.3 at its own check -->
 <!-- release-check:skipped v0.3.270 — other programs held about 280 MiB more of the card (1,142 MiB with the live node stopped vs 863 at v0.3.268) and v0.3.269 itself wrote the 14B split at 12.6-14.5 tok/s there; the processor-only row fell with it (12.8-13.2 vs 15.5-15.7), the machine's share, not the build's -->
 <!-- release-check:skipped v0.3.271 — other programs held about 120 MiB more of the card (983 MiB before the run vs 863 at v0.3.268) and BOTH builds wrote the 14B split at 12.4-17.5 tok/s there (a slow middle in each), the machine's share, not the build's -->
+<!-- release-check:skipped v0.3.272 — other programs held about 50 MiB more of the card (916 MiB before the run vs 863 at v0.3.268) and v0.3.271 itself wrote the 14B split at 12.5-16.1 tok/s there (v0.3.268 at its own check: 17.3-18.3), the machine's share, not the build's; its mixture-of-experts row's gain (21.9-22.0, #399) waits for a clean check -->
 
 **Across computers**: the same laptop in Thailand, teamed up with volunteers'
 computers: one with an RTX 3060 card in Australia, about 400–460 ms there and
@@ -374,7 +375,7 @@ SwarmLLM is built by a human developer working with Claude Code, an AI
 programming assistant: the human sets the direction, tests and reviews, and
 Claude writes the code. We say so openly so you can judge the project on its
 merits. Every change is checked by thousands of automated tests
-(4338 lib tests + 80 integration tests) before it ships, and regular
+(4345 lib tests + 80 integration tests) before it ships, and regular
 automated audits are logged in the repository. Scrutiny and contributions are
 welcome.
 
