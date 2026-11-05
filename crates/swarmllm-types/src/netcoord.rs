@@ -249,8 +249,20 @@ impl NetworkCoord {
     /// threshold is deliberately generous — Vivaldi's own reported median is
     /// 0.11, so 0.5 admits coordinates that are rough but still separate "same
     /// city" from "other hemisphere", which is the only question asked of it.
+    ///
+    /// It must also be a coordinate this code could have produced: a height
+    /// under `MIN_HEIGHT_MS` or a position past `MAX_COORD_MS` never comes out
+    /// of [`NetworkCoord::observe`], and a peer publishing a negative height
+    /// would make every hop to it look cheaper than free — a router or a
+    /// chain planner would then prefer it for nothing (#318).
     pub fn is_usable(&self) -> bool {
-        self.error < 0.5 && self.x.is_finite() && self.y.is_finite() && self.height.is_finite()
+        self.error < 0.5
+            && self.x.is_finite()
+            && self.y.is_finite()
+            && self.height.is_finite()
+            && self.height >= MIN_HEIGHT_MS
+            && self.x.abs() <= MAX_COORD_MS
+            && self.y.abs() <= MAX_COORD_MS
     }
 
     /// Fold in one measured round trip to a peer whose coordinate we know.
@@ -822,6 +834,40 @@ mod tests {
             c.height >= MIN_HEIGHT_MS,
             "height must start strictly positive"
         );
+    }
+
+    /// A peer publishes its own coordinate. One this code could never produce —
+    /// a height under the floor (a negative one prices every hop to the peer
+    /// below free) or a position past the clamp — is not routed or planned on.
+    #[test]
+    fn a_coordinate_this_code_could_never_produce_is_not_usable() {
+        let honest = NetworkCoord {
+            x: 100.0,
+            y: -40.0,
+            height: 2.0,
+            error: 0.1,
+        };
+        assert!(honest.is_usable());
+        for forged in [
+            NetworkCoord {
+                height: -500.0,
+                ..honest
+            },
+            NetworkCoord {
+                height: 0.0,
+                ..honest
+            },
+            NetworkCoord {
+                x: MAX_COORD_MS * 2.0,
+                ..honest
+            },
+            NetworkCoord {
+                y: -MAX_COORD_MS * 2.0,
+                ..honest
+            },
+        ] {
+            assert!(!forged.is_usable(), "{forged:?} must not be usable");
+        }
     }
 
     /// The property the whole thing exists for: after gossip, the distance

@@ -450,6 +450,15 @@ fn attempts(c: &NodeCandidate) -> f32 {
     }
 }
 
+/// The one-way delay of a hop between two machines, ms: half the round trip
+/// their coordinates predict. The ONE price of a hop between two other
+/// machines — a chain its head leads here ([`led_hop_ms`]) and the far chain
+/// auto-manage places parts for (`coverage::near_chain`, #318), so placement
+/// plans the chains the router will choose.
+pub(crate) fn hop_one_way_ms(from: &NetworkCoord, to: &NetworkCoord) -> f32 {
+    from.distance_ms(to) / 2.0
+}
+
 /// What the hop from `from` into `to` costs a chain its head leads, over the
 /// whole reply: the one-way delay between them, once per pass, scaled by
 /// `to`'s attempts as the rest of its vertex is. Also the hop from the tail
@@ -470,7 +479,7 @@ pub(super) fn led_hop_ms(from: &NodeCandidate, to: &NodeCandidate) -> Option<f32
     let one_way = if from.node_id == to.node_id {
         0.0
     } else {
-        from.ring.coord?.distance_ms(&to.ring.coord?) / 2.0
+        hop_one_way_ms(&from.ring.coord?, &to.ring.coord?)
     };
     Some(one_way * to.forward_passes() * attempts(to))
 }

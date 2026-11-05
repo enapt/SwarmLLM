@@ -108,8 +108,11 @@ the top track (`docs/plans/large_model_splits.md`).
    **Why it holds none (measured 2026-11-05)**: the far planner weighs it (ceiling 46, card 22, 790 GB
    room) but prices every far segment a flat 300 ms and searches at most one segment past the fewest
    the ceilings allow — the Australian machine now carries all 80 alone, so a third card is never
-   tried, and US 0-21 + AU 21-80 (1349 ms) is 93% of AU alone (1448), short of the 3/4 bar. Fix in
-   progress: hops from the published coordinates, every card in the search (entry body);
+   tried, and US 0-21 + AU 21-80 (1349 ms) is 93% of AU alone (1448), short of the 3/4 bar.
+   **Planner fixed on main (2026-11-05)**: far hops priced as the router prices them, from the
+   published coordinates; every card in the search; a move judged on the slowest machine (Petals'
+   bottleneck) — by the stated speeds the US card takes 22 layers, 786 ms a token against 1018
+   (entry body). **Left**: the US machine fetching its parts once it runs a release with this, and a measured reply on three cards;
    then tokens a round past the drafter (`large_model_splits.md` step 4). Its planning residuals: a
    head holding it whole declining to lead (#372), the drafter's room on a near-full card (#376).
    On a 14B: split evenly between this machine's card and the 3060 the flow runs 29.2-29.9 tok/s on
@@ -2603,6 +2606,21 @@ to the head included (`parallax::led_hop_ms`); (2) the search allows one segment
 ceilings allow (here 1 + 1), so where the cards cannot carry the model, "cards first" (#356) never
 gets to use them all. By the stated speeds this machine 0-15 + the US card 15-37 + AU 37-80 is ~790
 ms against ~1148 for AU alone priced as a ring (69%).
+
+**Fixed in the planner (main, 2026-11-05)**: (1) a far chain's hops are the router's —
+`scheduler::hop_one_way_ms`, shared with `led_hop_ms`, each hop from the machine before, the
+tail's back to the head included, none for a lone machine, `FAR_HOP_MS` only without a usable
+coordinate; (2) where the cards cannot carry the model, every card may join (`MOST_CARD_SEGMENTS`
+3, plus one); (3) a complete chain moves for a lower price AND a slowest machine at most 3/4 as
+slow — Petals' `should_choose_other_blocks` compares `throughputs.min()`, the bottleneck, and the
+3/4 bar had been laid on the sum. Under the new prices the held chain is here 0-15 + AU (~1018 ms,
+the route the router ran), and the best takes the US card for 22 layers (~786 ms; slowest machine
+447 against 855) → it moves. `NetworkCoord::is_usable` now refuses a coordinate our Vivaldi could
+never produce (negative height, position past the clamp), which the router read too. Evidence:
+`docs/invariants/memory.md` § "Cards first", amended. **Left**: every machine plans alike and
+fetches only its own segment, so the US machine fetches its 22 layers only once it runs a release
+carrying this (until then it is passed over when its 30 min place lapses, as any machine that does
+not fetch); then measure a reply on three cards against two in one interleaved sitting.
 
 #### #10 — Conversation prefixes across computers: a cache this node did not fill is invisible
 `P2` · perf-split · **PARTIAL** — 2026-09-07 · absorbs #139 and archive § "Speeding up inference BETWEEN nodes" idea 1 (prefix-keyed remote KV); history: archive row #10 and § "A conversation's later turns do not seek out the peer holding its prefix"
@@ -5145,11 +5163,11 @@ alone, sustained", v0.3.262)
   plus the memory beside it — with the fewest segments, never asking which device a layer
   would run on; the 70B's split here ran 12 of this node's 21 layers on its processor. A
   chain is now priced by the speeds its machines state, each segment's hop and each layer on
-  the card or processor it runs on (`near_chain::Planner::step_us`, `Devices::of`): where
+  the card or processor it runs on (`near_chain::Planner::{compute_us, hop_into_us}`, `Devices::of`): where
   the cards can carry the model a card-only chain wins once the processor layers it saves
   outweigh its extra hops, and a complete chain moves onto cards only for a quarter off its
-  price (`worth_moving`, Petals' `balance_quality`). Machines stating no speeds plan as
-  before. Evidence: `docs/invariants/memory.md` § "Cards first".
+  price (`worth_moving`, Petals' `balance_quality`; of the slowest machine since #318). Machines
+  stating no speeds plan as before. Evidence: `docs/invariants/memory.md` § "Cards first".
 - #355 — **A large model split across the graphics card and the processor takes idle
   models' card memory first.** The reclaim before a load freed nothing unless the model then
   fit the card WHOLE, so a split was sized on the free memory alone with an idle model kept

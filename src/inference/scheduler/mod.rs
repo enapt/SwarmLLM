@@ -7054,6 +7054,7 @@ impl PipelineScheduler {
 pub(crate) mod cached_prefix;
 mod parallax;
 pub mod parallax_allocator;
+pub(crate) use parallax::hop_one_way_ms;
 
 /// Estimate how many layers the local node can reasonably host for `manifest`.
 /// Uses the shards already on disk for this model as the primary signal — the

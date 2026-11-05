@@ -3231,7 +3231,8 @@ loss or load imbalance; Helix (arXiv 2406.01566) solves placement once as a max-
 and llama.cpp's RPC split by memory. None has a processor share beside a card to weigh, so the
 trade between processor layers and extra hops is ours.
 
-**The rule** (`near_chain::plan_chain`, `Planner::step_us`, `Devices::of`, `worth_moving`).
+**The rule** (`near_chain::plan_chain`, `Planner::{compute_us, hop_into_us}`, `Devices::of`,
+`worth_moving`; the hop, the segment allowance and the move bar as amended by #318 below).
 Each machine's devices come from what it advertises: a card where its models run on one
 (`models_run_on_card`), holding `layers_that_fit(gpu.vram_total_mb)` on the model's CARD curve
 (the same card figure its ceiling counts), the card's layers the first of any run it is given as
@@ -3255,7 +3256,8 @@ download, and the 24 h part hold already stops a flapping set re-fetching.
 **Evidence.** Tests `a_chain_runs_on_cards_where_the_cards_can_carry_it` (cards 10/12/10 of 32
 layers: three card segments, 154 ms, against two segments with 10 processor layers, 304 ms;
 controls: at a far hop the two-machine chain wins, and machines stating no speeds plan the
-fewest segments), `a_complete_chain_moves_only_onto_cards_and_only_for_a_quarter_off`, and
+fewest segments), `a_complete_chain_moves_only_onto_cards_and_only_for_a_quarter_off` (since
+#318 `…_its_slowest`), and
 `a_complete_chain_moves_onto_cards_that_can_carry_it` (this node and the near peer complete the
 chain with 4 processor layers each at 1 token/s: planned onto three cards, 108 ms against 323,
 the third machine fetching the two parts between; control at 6.3 tokens/s, 108 against 113: kept).
@@ -3269,6 +3271,38 @@ gains `price_ms` and `processor_layers` (DIAGNOSTICS.md). **Left**: within the s
 leaves, layers are not spread in proportion to speed (Parallax's water-filling) — the router
 already chooses the fastest route among holders at request time, which is where that spread
 pays.
+
+**Amended by #318 (2026-11-05): a far chain is priced as the router prices it, every card may
+join, and a move is judged on the slowest machine.** Measured on the live node at `-v` with one
+70B request (`~/swarmllm-gate/deep/fr/s318/`): the US 3080 Ti (`ceiling=46, card=22`) was WEIGHED,
+never filtered, and lost for three reasons. (1) Every far segment cost a flat 300 ms, a lone
+machine's too — so the Australian 3060, holding all 80 layers, was "held" alone at 1448 ms, though
+the router ran here 0-15 + AU (a whole-model hand-off pays the network once a request, not a
+token). (2) The search allowed one segment past the fewest the CEILINGS allow — AU's 80 made that
+1 + 1 — so where the cards cannot carry the model a third card was never tried. (3) The 3/4 bar
+was laid on the SUM of a token's price; Petals' `block_selection.py::should_choose_other_blocks`
+(read 2026-11-05) compares `throughputs.min()` before and after — the BOTTLENECK, which is what a
+stream of checks runs at (each machine works on a different chunk). Now: (1) a far chain's hops are
+the router's own — `scheduler::hop_one_way_ms` (half the coordinates' round trip; `led_hop_ms`
+calls it too), each segment's hop from the one before, the tail's back to the head included, none
+for a lone machine; a machine with no usable coordinate pays `FAR_HOP_MS`; a near chain keeps 30
+ms a segment (`Hops`, the memo keyed by the previous machine and the head). (2) Where the cards
+cannot carry the model, the allowance counts every card, up to `MOST_CARD_SEGMENTS` (3), plus one.
+(3) A complete chain moves only to fewer processor layers, a lower price, AND a slowest machine at
+most 3/4 as slow (`ChainPrice::slowest_us`): the price keeps every reply from getting slower, the
+bottleneck keeps a move for a gain worth a download. A published coordinate is the peer's own
+word: `NetworkCoord::is_usable` refuses one our Vivaldi could never produce (a height under
+`MIN_HEIGHT_MS`, a position past `MAX_COORD_MS`), and a forged one inside those bounds cannot make
+a hop through it cheaper than the direct one by more than its height — the planar distance obeys
+the triangle inequality. Evidence: `a_far_chain_prices_its_hops_by_the_coordinates_and_takes_in_a_third_card`
+(the live figures: held = here 0-15 + AU, ~1018 ms, against AU alone 1448; best takes the US card
+for 22 layers, ~786 ms, slowest machine 447 against 855 ms → moves; control without coordinates:
+the three-card chain is not the cheapest), `where_the_cards_cannot_carry_a_model_every_card_may_join_its_chain`,
+`a_complete_chain_moves_only_onto_cards_and_only_for_a_quarter_off_its_slowest`, and
+`a_complete_chain_moves_onto_cards_that_can_carry_it`, whose old control (6.3 tokens/s, 108
+against 113 ms, kept) now moves — its slowest machine 27 → 7 ms — and whose new control (20
+tokens/s: the complete chain the cheaper a token) is kept; `netcoord`'s
+`a_coordinate_this_code_could_never_produce_is_not_usable`.
 
 ## A split with no drafter fetches one (2026-10-22, #134)
 
