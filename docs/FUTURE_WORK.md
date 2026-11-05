@@ -111,8 +111,10 @@ the top track (`docs/plans/large_model_splits.md`).
    tried, and US 0-21 + AU 21-80 (1349 ms) is 93% of AU alone (1448), short of the 3/4 bar.
    **Planner fixed on main (2026-11-05)**: far hops priced as the router prices them, from the
    published coordinates; every card in the search; a move judged on the slowest machine (Petals'
-   bottleneck) — by the stated speeds the US card takes 22 layers, 786 ms a token against 1018
-   (entry body). **Left**: the US machine fetching its parts once it runs a release with this, and a measured reply on three cards;
+   bottleneck). Live on this node (`b269449d` at `-v`, 05:58Z): held here 0-13 + AU 13-80, 984 ms
+   a token (the router's route); planned here 0-13, AU 13-36, the US card 36-59 and a fast
+   card-less processor 59-80 — 725 ms, slowest machine 161 against 875, `moving=true` (entry
+   body). **Left**: those machines fetch their parts once they run a release with this; then a measured reply;
    then tokens a round past the drafter (`large_model_splits.md` step 4). Its planning residuals: a
    head holding it whole declining to lead (#372), the drafter's room on a near-full card (#376).
    On a 14B: split evenly between this machine's card and the 3060 the flow runs 29.2-29.9 tok/s on
@@ -2617,10 +2619,17 @@ slow — Petals' `should_choose_other_blocks` compares `throughputs.min()`, the 
 the route the router ran), and the best takes the US card for 22 layers (~786 ms; slowest machine
 447 against 855) → it moves. `NetworkCoord::is_usable` now refuses a coordinate our Vivaldi could
 never produce (negative height, position past the clamp), which the router read too. Evidence:
-`docs/invariants/memory.md` § "Cards first", amended. **Left**: every machine plans alike and
-fetches only its own segment, so the US machine fetches its 22 layers only once it runs a release
-carrying this (until then it is passed over when its 30 min place lapses, as any machine that does
-not fetch); then measure a reply on three cards against two in one interleaved sitting.
+`docs/invariants/memory.md` § "Cards first", amended. **Live check** (`b269449d`'s CUDA build as the
+live node at `-v`, one 70B request, 05:54-06:00Z; `~/swarmllm-gate/deep/fr/s318/out2/`): seven
+machines weighed, none filtered; held = this node 0-13 + AU 13-80, 984 ms by the stated speeds
+(the reply's route, `nodes: 225e6fe7, aa3d1e66`); best = this node 0-13, AU 13-36, the US 3080
+Ti `a661155f` 36-59 and `99aafc41` 59-80 (no card, 7.7 ms a layer on its processor, holding 17
+parts already) — 725 ms, 21 processor layers against 44, slowest machine 161 ms against 875:
+`moving=true`. Four segments, not the tests' three: `MOST_CARD_SEGMENTS` plus the one extra, and a
+fast processor beats a card's spill. **Left**: every machine plans alike and fetches only its own
+segment, so those machines fetch only once they run a release carrying this (until then each is
+passed over when its 30 min place lapses, as any machine that does not fetch); then measure the
+reply on the new chain against the old in one interleaved sitting.
 
 #### #10 — Conversation prefixes across computers: a cache this node did not fill is invisible
 `P2` · perf-split · **PARTIAL** — 2026-09-07 · absorbs #139 and archive § "Speeding up inference BETWEEN nodes" idea 1 (prefix-keyed remote KV); history: archive row #10 and § "A conversation's later turns do not seek out the peer holding its prefix"
