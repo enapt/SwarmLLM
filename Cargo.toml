@@ -4,15 +4,16 @@ members = [".", "crates/swarmllm-frontend", "crates/swarmllm-types"]
 exclude = [
     "vendor/candle-flash-attn",
     "vendor/candle-paged-attention",
+    "vendor/libp2p-gossipsub",
     "vendor/libp2p-quic",
     "vendor/libp2p-request-response",
     "vendor/libp2p-upnp",
     "vendor/rayon-core",
     "vendor/candle",
 ]
-# Note: vendor/libp2p-gossipsub was removed in libp2p 0.55→0.56 upgrade —
-# upstream libp2p-gossipsub 0.49.4 ships the CVE-2026-33040 + CVE-2026-34219
-# fixes our backport carried, so the vendor is no longer needed.
+# vendor/libp2p-gossipsub is back (2026-11-05) for a different patch — see
+# `[patch.crates-io]`. The CVE-2026-33040 + CVE-2026-34219 backport it once
+# carried is upstream since 0.49.4.
 
 [package]
 name = "swarmllm"
@@ -445,6 +446,16 @@ path = "examples/swarm_spec_bench.rs"
 
 [patch.crates-io]
 libp2p-request-response = { path = "vendor/libp2p-request-response" }
+# libp2p-gossipsub 0.49.5 with ONE change: our subscriptions are told again to a
+# peer that connects beside an old connection, and again when a connection
+# closes beside a live one (src/behaviour.rs `send_our_subscriptions`). Upstream
+# tells only a peer's first connection, so a computer that restarted before its
+# old connections timed out never heard what its peers subscribe to, dropped
+# their GRAFTs, and its gossip reached none of them (2026-11-05: an updated
+# computer's location and figures stayed at its first second everywhere).
+# go-libp2p-pubsub re-sends its hello packet the same way. Guard:
+# `gossip_runs_on_the_vendored_copy_that_tells_a_reconnected_peer_our_subscriptions`.
+libp2p-gossipsub = { path = "vendor/libp2p-gossipsub" }
 # libp2p-quic 0.13.1 with ONE addition: `Config::congestion` (src/config.rs), so
 # our QUIC connections run quinn's BBR instead of the Cubic upstream hard-codes
 # — a split's bursts of hidden states never fill Cubic's window, and quinn paces

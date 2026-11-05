@@ -506,7 +506,9 @@ libp2p Swarm
 │   └── /swarm/relay-service/v1        → "I relay" (`start_providing_relay_service`)
 │   (a signed `/swarm/node/…` record found by a query is still verified and read — see § DHT Records)
 │
-├── GossipSub (pub/sub, mesh_n/mesh_n_low/mesh_n_high/mesh_outbound_min auto-scale with the PEERS the node has met — distinct peers in its cache, not their addresses (#91): 2/1/4/1 at <10 peers up to 8/6/16/4 at 10k+)
+├── GossipSub (pub/sub, mesh_n/mesh_n_low/mesh_n_high/mesh_outbound_min auto-scale with the PEERS the node has met — distinct peers in its cache, not their addresses (#91): 2/1/4/1 at <10 peers up to 8/6/16/4 at 10k+;
+│   vendor/libp2p-gossipsub: our subscriptions are told again to a peer that connects beside an old connection and when
+│   one closes beside a live one — upstream tells only the first, and a restarted computer's gossip reached nobody, 2026-11-05)
 │   ├── swarm/models                  → ShardAnnounce, capacity, manifests (ONE topic for every model; a custom `gossip_network_id` appends `/<id>`)
 │   ├── swarm/credits                 → CreditGossip
 │   ├── swarm/health                  → trust summaries

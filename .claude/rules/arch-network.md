@@ -358,6 +358,12 @@ Every node drops a `ShardAnnounce` past **`swarmllm_types::MAX_SHARDS_PER_ANNOUN
 
 → `docs/invariants/network.md` § "A parts list longer than a receiver takes goes in pieces"
 
+## A peer that reconnects beside an old connection is told our subscriptions again (2026-11-05)
+
+Gossip runs on the VENDORED `libp2p-gossipsub` 0.49.5 (`vendor/libp2p-gossipsub`, `[patch.crates-io]`): **`Behaviour::send_our_subscriptions`** re-sends every topic we subscribe to when a connection opens beside another (`other_established > 0`) AND when one closes beside a live one — a peer's connections share ONE send queue, so the copy queued while a dead connection's handler ran can be lost into it. Upstream tells only the first connection; since 0.49.5 a node drops a GRAFT for a topic the peer never SUBSCRIBEd to, so a computer that restarted before our old connection timed out never heard us and its gossip reached nobody holding one — an updated AU node's capability (location, memory, residency) stayed at its first second on every peer for hours. Never drop the patch on a re-vendor; guard `gossip_runs_on_the_vendored_copy_that_tells_a_reconnected_peer_our_subscriptions`; the crate's own test runs in CI `vendored.yml`. A peer whose `uptime_seconds` does not advance between two reads is the symptom.
+
+→ `docs/invariants/network.md` § "A peer that reconnects beside an old connection is told our subscriptions again"
+
 ## A counter named for an outcome may only be counting the attempt
 
 GossipSub's `sent` / `sent_bytes` count ATTEMPTS per recipient, so `sum(topic.sent_bytes) <= out_bytes` must NOT be asserted — the gap is the signal. Read both drop paths (queue expiry via metrics; queue full only via `gossipsub::Event::SlowPeer`). `sent_msgs` is not a publish rate; `published_msgs` is. Before estimating a total's components, look for the counter you are not reading (gotcha #673).

@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+**A computer that restarts (for an update, say) is heard again by every computer it was connected
+to.** Until now one that came back before its old connections had timed out — a few seconds — was
+not told what the others listen for, turned away their offers to link up, and its news reached none
+of them: its location, its free memory and what it had loaded stayed as they were in its first
+second, so the peer list showed no country for it and the swarm planned splits from its old
+figures, until each connection happened to drop. The cause is in the libp2p messaging library this
+project uses (since its September update, which turns such offers away); our copy now tells a
+computer what we listen for again whenever it connects beside an older connection, as
+go-libp2p-pubsub does. Seen on 2026-11-05 on a computer that had updated itself. The repair takes
+hold as computers update (#406).
+
 ## [0.3.272-alpha] — 2026-11-05
 
 **Models stored as IQ4_NL or IQ4_XS now run, your own chats with a model whose experts stay in

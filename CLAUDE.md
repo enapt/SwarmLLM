@@ -35,9 +35,11 @@ Four carry contracts, not just versions:
   #798) AND jinja2's answers where minijinja's differ (`none is iterable`) are part of the contract.
 - **`serde_json` and `minijinja` are both built with `preserve_order`.** Drop
   either and every tool schema reaches the model alphabetised.
-- **`libp2p-gossipsub` is a DIRECT dep only to enable its `metrics` feature**
-  (the facade's does not). If it drifts from libp2p's pin, cargo builds two
-  copies and the traffic split reads as silently absent. Guarded.
+- **`libp2p-gossipsub` is a DIRECT dep to enable its `metrics` feature** (the
+  facade's does not; drift from libp2p's pin builds two copies and the traffic
+  split reads as absent) **and VENDORED for one patch**: a peer reconnecting
+  beside an old connection is told our subscriptions again — without it a
+  restarted computer's gossip reached nobody (2026-11-05). Both guarded.
 - **`rayon-core` is vendored for ONE patch**: idle workers spin 200 µs before they
   sleep (8-thread processor decode 172 → 123-127 ms, #137). A `rayon` needing a newer
   core leaves the `[patch]` unused with only a warning. Guarded.
@@ -98,7 +100,7 @@ request-response patch, 5 in the libp2p-quic one and 20 in the libp2p-upnp one �
 nowhere else). They are refreshed at release (`memory/release_gate.md`), not
 per change, so a higher count since then is expected. The types crate and the
 vendored patches are **not** run by a bare `cargo test`: `cargo test --manifest-path
-vendor/<crate>/Cargo.toml --lib` (request-response; libp2p-quic and libp2p-upnp add `--features tokio`). Two VLM
+vendor/<crate>/Cargo.toml --lib` (request-response, libp2p-gossipsub; libp2p-quic and libp2p-upnp add `--features tokio`). Two VLM
 targets need model files: `llava_e2e` (`#[ignore]`) and `vlm_mmproj_e2e` (skips without an
 mmproj). Never edit a count without the run behind it (`completeness.md`).
 

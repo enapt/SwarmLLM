@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #406**). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #407**). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -75,10 +75,13 @@ the top track (`docs/plans/large_model_splits.md`).
    `net:0` (with #3). Passive: the next evidence is a field `predicted_terms` line.
 6. **#367 (d)** — a long chat alone on a card grows the card's memory until it runs out: a 14B on
    a tester's 12 GB card ran out after 5-7 min of one conversation in each of three field reports
-   (2026-10-31, 11-03, 11-04) and then ran on the processor at a fifth of its speed. The cause is
-   traced to one memory pool serving the conversation cache and each forward's scratch; **Next**:
-   the cache from a second pool (the entry's (d), fix (1)). (#403 CLOSED 2026-11-04, ships in the
-   next release — § "Closed".)
+   (2026-10-31, 11-03, 11-04) and then ran on the processor at a fifth of its speed. A second pool
+   for the conversation cache (the entry's (d), fix (1)) was built and measured on 2026-11-04 and
+   NOT adopted: the hand-backs did not fall, so every forward's own working set grows past the room
+   above the margin. **Next**: fix (2), a margin that covers one forward's growth, judged by the
+   hand-back count; and the field's shape on native Linux (a Linux card peer through `swarm_route`,
+   or the next field export's `cuda_pool` DIAG lines). (#403 CLOSED 2026-11-04, released in
+   v0.3.272 — § "Closed".)
 7. **#388** — the flow's guard takes a far computer's own delay for a queue on the link (the
    slowest reply of two 12-arm runs on 2026-11-01). The far now reports its own time and the guard
    can read it apart (`SWARMLLM_FLOW_SERVED_TIME=1`, off: it lost on a processor-only rig, for
@@ -107,7 +110,7 @@ the top track (`docs/plans/large_model_splits.md`).
    history (near chains #192, the far chain #346, trees #134, the stream, tensor-core MMQ #325,
    requester guesses) is in the #318 entry and § "Closed".
 9. (#401 CLOSED 2026-11-04 — a full computer gives back a copy three computers hold for a part
-   one computer holds; ships in the next release, § "Closed".)
+   one computer holds; released in v0.3.272, § "Closed".)
 10. **#115** — the rest of Gemma 4: its image reader and its drafters, refused by name today,
    never loaded wrong. (Gemma 3 reads pictures as llama.cpp does since 2026-10-19; Gemma 4's
    E2B/E4B run since 2026-10-17 and fit a 4 GB / 6 GB card whole since #296.)
@@ -4434,7 +4437,24 @@ Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
 
-**Closed 2026-11-04, ships in the next release** (#403, #401, #399, #396)
+**Closed 2026-11-05, ships in the next release** (#406)
+- #406 — **A computer that restarted is heard again by every computer it was connected to.** One
+  that came back before its peers' old connections had timed out (a few seconds — an update's
+  restart does it) was never told what they subscribe to: libp2p-gossipsub tells only a peer's
+  first connection, and since 0.49.5 (in this repo since 2026-09-02) a node drops a GRAFT for a
+  topic the peer never subscribed to. Its gossip reached none of them, so its capability stayed at
+  its first second everywhere — the AU node (`aa3d1e66`, updated at 01:22:28Z) showed no location
+  and `uptime_seconds: 1` for 30 min while every other peer's advanced; a clean reconnect showed
+  `region AU` at once (its own lookup had worked). Vendored 0.49.5 with `send_our_subscriptions`:
+  our subscriptions again on a connection opening beside another and on one closing beside a live
+  one (one shared send queue per peer — the copy queued while a dead handler runs can be lost into
+  it), as go-libp2p-pubsub's `handleDeadPeers` does; not to a peer that speaks no gossipsub. The
+  crate's test was red with each call removed; guard
+  `gossip_runs_on_the_vendored_copy_that_tells_a_reconnected_peer_our_subscriptions`; security
+  review: nothing above LOW. → `docs/invariants/network.md` § "A peer that reconnects beside an old
+  connection is told our subscriptions again", gotcha #1035.
+
+**Closed 2026-11-04, released in v0.3.272** (#403, #401, #399, #396)
 - #399 — **The owner's decode step of experts kept in RAM may use every physical core, where it is
   faster.** A one-token step whose processor work is only routed experts of card-held layers
   (`SplitModel::processor_works_only_on_experts`) calibrates, for the owner's request, among widths

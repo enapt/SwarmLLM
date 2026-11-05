@@ -6948,3 +6948,43 @@ the reverse index, no empty list left), `a_registered_node_that_is_not_connected
 (not counted, aged out though connected, confirmed by the holder's word, no refresh of a holder's
 own record), `a_dht_record_naming_a_connected_peer_takes_no_place_on_a_full_list` (the claimant a
 stranger), `a_dht_only_record_is_given_up_before_a_holders_own` (the holder a stranger).
+
+## A peer that reconnects beside an old connection is told our subscriptions again (2026-11-05)
+
+**What was seen.** On 2026-11-05 the AU node (`aa3d1e66`, RTX 3060) showed no location in the
+peer list, with `uptime_seconds` stuck at `1` while every other peer's advanced between two reads.
+The network map put it under this node's own country — its capability carried no region. It had
+updated itself to v0.3.272 and restarted at 01:22:28Z; our log showed its new QUIC connection
+opening while the OLD one still stood (closed `TimedOut` at 01:22:38, ten seconds later), plus a
+burst of duplicates closed at once. Its parts list (sent point to point at identify) arrived; no
+capability after its first second did. A clean reconnect (this node restarted at 01:52:46) brought
+`uptime 1831, region AU` at once — its location lookup had worked all along.
+
+**The mechanism** (libp2p-gossipsub 0.49.5, `behaviour.rs`). `on_connection_established` sends our
+SUBSCRIBEs only when `other_established == 0` — upstream: *"Not our first connection to this peer,
+hence nothing to do."* The restarted peer's NEW session had never heard what we subscribe to. And
+0.49.5 (GHSA-g3g5-x568-qvqx, in this repo since a8ae18ab, 2026-09-02) made `handle_graft` discard a
+GRAFT for a topic the peer has not SUBSCRIBEd to — so it dropped every GRAFT we sent, never meshed
+with us, and its flood-publish skipped us. Every peer holding such a connection went the same way,
+so a computer whose restart outran its peers' idle timeouts went silent on gossip until each of
+them reconnected in full: its capability (memory, residency, coordinate, location) frozen at its
+first second, the planner reading figures from before its update. Before 0.49.5 the GRAFT was
+taken and the mesh repaired the gap.
+
+**The fix.** Vendored 0.49.5 with `send_our_subscriptions`: on a connection opening beside another,
+and on one closing beside a live one. Both, because a peer's connections share ONE MPMC send
+queue (`rpc::Sender::new_receiver`): what is queued while the dead connection's handler still
+runs may be written into the dead link and lost; the copy queued at its close reaches a live one.
+A re-sent SUBSCRIBE for a topic the receiver already holds for us changes nothing there.
+**Reference**: go-libp2p-pubsub `pubsub.go` `handleDeadPeers` — *"still connected, must be a
+duplicate connection being closed. we respawn the writer as we need to ensure there is a stream
+active"* — and every new outbound stream opens with `getHelloPacket()`, the full subscription
+list. No upstream rust-libp2p issue names it (searched 2026-11-05).
+
+**What a change must keep.** The patch is ONE function and two calls; it adds no API, so a
+`libp2p` needing a newer gossipsub would leave `[patch.crates-io]` unused with only a cargo
+warning — `gossip_runs_on_the_vendored_copy_that_tells_a_reconnected_peer_our_subscriptions`
+fails instead (and checks both calls are there). The crate's
+`test_subscriptions_resent_to_a_peer_that_reconnects_beside_an_old_connection` was red with each
+call removed in turn (2026-11-05); the crate's 152 tests run in CI `vendored.yml`. The fix acts on
+the side HOLDING the old connection, so a mixed swarm heals as its nodes update.

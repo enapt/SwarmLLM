@@ -12541,23 +12541,74 @@ fn the_gossip_counters_come_from_the_same_crate_libp2p_uses() {
     );
 }
 
-/// The resolved `rayon-core` packages that are NOT the vendored copy under
-/// `vendor/rayon-core` — `(version, source)` of each. Pure, so the planted
+/// The resolved packages named `name` that are NOT the vendored copy under
+/// `vendor/<name>` — `(version, source)` of each. Pure, so the planted
 /// violation below can check it.
-fn rayon_cores_outside_vendor(packages: &[serde_json::Value]) -> Vec<String> {
+fn copies_outside_vendor(packages: &[serde_json::Value], name: &str) -> Vec<String> {
+    let vendored = format!("vendor/{name}/Cargo.toml");
     packages
         .iter()
-        .filter(|p| p["name"].as_str() == Some("rayon-core"))
+        .filter(|p| p["name"].as_str() == Some(name))
         .filter(|p| {
             !p["source"].is_null()
                 || !p["manifest_path"]
                     .as_str()
                     .unwrap_or("")
                     .replace('\\', "/")
-                    .ends_with("vendor/rayon-core/Cargo.toml")
+                    .ends_with(&vendored)
         })
         .map(|p| format!("{} from {}", p["version"], p["source"]))
         .collect()
+}
+
+/// The resolved tree, as `cargo metadata` lists its packages.
+fn resolved_packages() -> Vec<serde_json::Value> {
+    let out = std::process::Command::new(env!("CARGO"))
+        .args(["metadata", "--format-version", "1"])
+        .current_dir(repo_root())
+        .output()
+        .expect("cargo metadata");
+    assert!(out.status.success(), "cargo metadata failed");
+    let meta: serde_json::Value =
+        serde_json::from_slice(&out.stdout).expect("cargo metadata is not JSON");
+    meta["packages"].as_array().expect("packages array").clone()
+}
+
+/// Gossip runs on the vendored `libp2p-gossipsub`, which tells a peer our
+/// subscriptions again when it reconnects beside an old connection — the
+/// connection a peer that restarted leaves behind until it times out. Upstream
+/// tells only the first connection, so a restarted peer dropped our GRAFTs and
+/// its gossip reached nobody holding such a connection (2026-11-05: an
+/// updated computer's location and figures stayed at its first second on
+/// every peer). The patch adds no API, so a `libp2p` needing a newer gossipsub
+/// would leave it unused with only cargo's "patch was not used" warning.
+#[test]
+fn gossip_runs_on_the_vendored_copy_that_tells_a_reconnected_peer_our_subscriptions() {
+    let packages = resolved_packages();
+    let outside = copies_outside_vendor(&packages, "libp2p-gossipsub");
+    assert!(
+        outside.is_empty(),
+        "libp2p-gossipsub resolves outside vendor/libp2p-gossipsub: {outside:?}. Re-vendor \
+         the gossipsub `libp2p` now requires and carry `send_our_subscriptions` over \
+         (vendor/libp2p-gossipsub/src/behaviour.rs, its CHANGELOG's SwarmLLM entry)."
+    );
+    assert!(
+        packages
+            .iter()
+            .any(|p| p["name"].as_str() == Some("libp2p-gossipsub")),
+        "no libp2p-gossipsub in the resolved tree at all — this guard is reading the wrong tree"
+    );
+    let behaviour =
+        std::fs::read_to_string(repo_root().join("vendor/libp2p-gossipsub/src/behaviour.rs"))
+            .expect("vendor/libp2p-gossipsub/src/behaviour.rs");
+    assert!(
+        behaviour
+            .matches("self.send_our_subscriptions(peer_id)")
+            .count()
+            >= 2,
+        "the vendored gossipsub no longer tells a reconnected peer our subscriptions on both \
+         events (a connection opening beside another, one closing beside another)"
+    );
 }
 
 /// Every rayon pool in this binary — candle's, the decode pool, the prompt
@@ -12569,16 +12620,8 @@ fn rayon_cores_outside_vendor(packages: &[serde_json::Value]) -> Vec<String> {
 /// copy — the speed goes and nothing fails. This does.
 #[test]
 fn rayon_core_is_the_vendored_copy_that_spins_before_sleeping() {
-    let out = std::process::Command::new(env!("CARGO"))
-        .args(["metadata", "--format-version", "1"])
-        .current_dir(repo_root())
-        .output()
-        .expect("cargo metadata");
-    assert!(out.status.success(), "cargo metadata failed");
-    let meta: serde_json::Value =
-        serde_json::from_slice(&out.stdout).expect("cargo metadata is not JSON");
-    let packages = meta["packages"].as_array().expect("packages array");
-    let outside = rayon_cores_outside_vendor(packages);
+    let packages = resolved_packages();
+    let outside = copies_outside_vendor(&packages, "rayon-core");
     assert!(
         outside.is_empty(),
         "rayon-core resolves outside vendor/rayon-core: {outside:?}. The vendored copy's \
@@ -12600,10 +12643,27 @@ fn rayon_core_is_the_vendored_copy_that_spins_before_sleeping() {
     );
 }
 
-/// The planted violation: a registry `rayon-core` beside (or instead of) the
-/// vendored one is reported, the vendored one alone is not.
+/// The planted violation: a registry copy beside (or instead of) the vendored
+/// one is reported, the vendored one alone is not — for each crate asked about.
 #[test]
-fn the_rayon_core_guard_sees_a_registry_copy() {
+fn the_vendored_crate_guard_sees_a_registry_copy() {
+    let gossip_vendored = serde_json::json!({
+        "name": "libp2p-gossipsub", "version": "0.49.5", "source": null,
+        "manifest_path": "/repo/vendor/libp2p-gossipsub/Cargo.toml"
+    });
+    let gossip_registry = serde_json::json!({
+        "name": "libp2p-gossipsub", "version": "0.49.6",
+        "source": "registry+https://github.com/rust-lang/crates.io-index",
+        "manifest_path": "/home/u/.cargo/registry/src/x/libp2p-gossipsub-0.49.6/Cargo.toml"
+    });
+    assert!(
+        copies_outside_vendor(std::slice::from_ref(&gossip_vendored), "libp2p-gossipsub")
+            .is_empty()
+    );
+    assert_eq!(
+        copies_outside_vendor(&[gossip_vendored, gossip_registry], "libp2p-gossipsub").len(),
+        1
+    );
     let vendored = serde_json::json!({
         "name": "rayon-core", "version": "1.13.0", "source": null,
         "manifest_path": "/repo/vendor/rayon-core/Cargo.toml"
@@ -12616,12 +12676,12 @@ fn the_rayon_core_guard_sees_a_registry_copy() {
     let other = serde_json::json!({
         "name": "rayon", "version": "1.12.0", "source": "registry+x", "manifest_path": "/x"
     });
-    assert!(rayon_cores_outside_vendor(&[vendored.clone(), other.clone()]).is_empty());
+    assert!(copies_outside_vendor(&[vendored.clone(), other.clone()], "rayon-core").is_empty());
     assert_eq!(
-        rayon_cores_outside_vendor(&[vendored, registry.clone(), other]).len(),
+        copies_outside_vendor(&[vendored, registry.clone(), other], "rayon-core").len(),
         1
     );
-    assert_eq!(rayon_cores_outside_vendor(&[registry]).len(), 1);
+    assert_eq!(copies_outside_vendor(&[registry], "rayon-core").len(), 1);
 }
 
 /// The oldest quinn-proto whose stream receive assembler does not refuse a
