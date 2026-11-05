@@ -447,8 +447,9 @@ impl ModelRegistry {
             return;
         }
         // A layer count past any model llama.cpp loads sizes a flag per layer
-        // on every plan — refused here too, so a manifest stored before the
-        // network door's bound cannot come back in at start-up.
+        // on every plan — refused here too, so no path that adopts a manifest
+        // past the network door takes one. A STORED one comes back through
+        // `load_from_db`, which repeats this check.
         if crate::model::manifest::declares_more_layers_than_any_model(&manifest) {
             tracing::warn!(
                 model = %manifest.id,
@@ -2085,23 +2086,37 @@ impl ModelRegistry {
 
         // Load model manifests from the "model_meta" tree
         let entries = db.iter_raw("model_meta")?;
-        let mut purge_backup_ids: Vec<String> = Vec::new();
+        let mut purge_ids: Vec<String> = Vec::new();
         for (_key, value) in entries {
             match serde_json::from_slice::<ModelManifest>(&value) {
                 Ok(manifest) => {
+                    // This is the one manifest-entry path that bypasses
+                    // register_manifest, so its refusals are repeated here, and
+                    // the stale row is purged so it stops coming back.
+                    //
                     // A backup-copy id (`<model>.FULLBACKUP`, `<model>.old`)
                     // persisted before the register_manifest guard existed must
                     // NOT be re-adopted on reload — otherwise the phantom model
-                    // resurrects on every restart. This is the one manifest-entry
-                    // path that bypasses register_manifest, so it needs its own
-                    // guard. Skip it and purge the stale row so it stops coming
-                    // back. See `manifest::is_backup_artifact_id`.
+                    // resurrects on every restart. See
+                    // `manifest::is_backup_artifact_id`.
                     if crate::model::manifest::is_backup_artifact_id(&manifest.id.0) {
                         tracing::warn!(
                             model = %manifest.id,
                             "Dropping backup-copy manifest from DB on load (and purging the row)"
                         );
-                        purge_backup_ids.push(manifest.id.0.clone());
+                        purge_ids.push(manifest.id.0.clone());
+                        continue;
+                    }
+                    // A layer count past any model sizes a flag per layer on
+                    // every plan (#410): one stored before the bound existed
+                    // must not come back in at start-up.
+                    if crate::model::manifest::declares_more_layers_than_any_model(&manifest) {
+                        tracing::warn!(
+                            model = %manifest.id,
+                            num_layers = manifest.num_layers,
+                            "Dropping manifest from DB on load: it declares more layers than any model can have (and purging the row)"
+                        );
+                        purge_ids.push(manifest.id.0.clone());
                         continue;
                     }
                     registry.manifests.insert(manifest.id.clone(), manifest);
@@ -2111,9 +2126,9 @@ impl ModelRegistry {
                 }
             }
         }
-        for id in purge_backup_ids {
+        for id in purge_ids {
             if let Err(e) = db.remove("model_meta", &id) {
-                tracing::debug!(model = %id, error = %e, "Failed to purge backup-copy manifest row");
+                tracing::debug!(model = %id, error = %e, "Failed to purge refused manifest row");
             }
         }
 
@@ -4365,6 +4380,29 @@ mod servability_tests {
         assert!(registry
             .get_manifest(&ModelId("at-the-ceiling".into()))
             .is_some());
+    }
+
+    /// A manifest stored before the layer bound existed is not loaded back at
+    /// start-up — `load_from_db` bypasses `register_manifest` — and its row is
+    /// purged; a real model's stored manifest still loads (null control).
+    #[test]
+    fn a_stored_manifest_declaring_more_layers_than_any_model_is_not_loaded() {
+        let db = Database::open_temp().unwrap();
+        let registry = ModelRegistry::new();
+        registry
+            .persist_manifest(&db, &manifest("billions", 2, u32::MAX))
+            .unwrap();
+        registry
+            .persist_manifest(&db, &manifest("deep", 2, 126))
+            .unwrap();
+        let loaded = ModelRegistry::load_from_db(&db).unwrap();
+        assert!(loaded.get_manifest(&ModelId("billions".into())).is_none());
+        assert!(loaded.get_manifest(&ModelId("deep".into())).is_some());
+        assert_eq!(
+            db.iter_raw("model_meta").unwrap().len(),
+            1,
+            "the refused row is purged"
+        );
     }
 
     /// The 404's "Available models" list and `/v1/models` must answer the same

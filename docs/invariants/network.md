@@ -6723,9 +6723,12 @@ how much memory this node used, or where a slice began:
   `available_layer_ranges_from_manifest` allocates a flag per layer on every plan (and on the
   scan of a model with a part here) — a manifest naming 4 billion layers cost 4 GB a plan. Now
   `manifest::declares_more_layers_than_any_model` (llama.cpp's `LLAMA_MAX_LAYERS`, 512) is asked
-  at the network door beside the part-number bound AND in `ModelRegistry::register_manifest`,
-  which every adoption path passes (a stored manifest reloads through it). Test
-  `a_manifest_declaring_more_layers_than_any_model_is_refused`.
+  at the network door beside the part-number bound, in `ModelRegistry::register_manifest`,
+  which every adoption path passes, AND in `ModelRegistry::load_from_db`, which does not pass it:
+  a stored manifest reloads straight into the map, so its refusals are repeated there and the row
+  purged (the pre-release review of v0.3.274 found the first version's comment claiming
+  otherwise). Tests `a_manifest_declaring_more_layers_than_any_model_is_refused`,
+  `a_stored_manifest_declaring_more_layers_than_any_model_is_not_loaded`.
 - **Adjacent**: rank 0's AllReduce partial of the wrong size was skipped in silence
   (`daemon::state::tp_allreduce`), so a zero sum went out as the reduction while the other
   ranks' partials were refused.

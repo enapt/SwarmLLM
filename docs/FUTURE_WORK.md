@@ -4494,10 +4494,12 @@ grep `^| N |`).
   layer on every plan and on the scan of a model with a part here — a manifest naming 4 billion
   layers cost 4 GB a plan. Found by #408's security review. `manifest::declares_more_layers_than_any_model`
   (llama.cpp's `LLAMA_MAX_LAYERS`, 512 — `llama-hparams.h`; its loader asserts `n_layer_all` within
-  it) is asked at the network door beside the part-number bound AND in
-  `ModelRegistry::register_manifest`, which every adoption path passes. Test
+  it) is asked at the network door beside the part-number bound, in
+  `ModelRegistry::register_manifest`, which every adoption path passes, and in
+  `ModelRegistry::load_from_db`, which reloads stored manifests without passing it (row purged;
+  the v0.3.274 pre-release review). Tests
   `servability_tests::a_manifest_declaring_more_layers_than_any_model_is_refused` (405B's 126 and
-  512 itself still register). `docs/invariants/network.md` § "A size the other computer chose".
+  512 itself still register), `a_stored_manifest_declaring_more_layers_than_any_model_is_not_loaded`. `docs/invariants/network.md` § "A size the other computer chose".
 - #408 — **"The end of a model" was judged by part NUMBER.** Qwen3.8-27B's part 31 is `[64, 65)` —
   `output*` and the MTP block `blk.64.nextn` — with layer 63 in part 30 (Ornith-1.5 is cut the same
   way, #398); a node holding parts 0 and 31 read prompt privacy's automatic default ON, its status
