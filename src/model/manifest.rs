@@ -16,6 +16,28 @@ pub const MAX_TENSORS_PER_SHARD: usize = 16_384;
 /// activity feed and the INFO log. Real names are under 100 bytes.
 pub const MAX_NAME_BYTES: usize = 512;
 
+/// The most layers a model may declare: llama.cpp's `LLAMA_MAX_LAYERS` (512,
+/// `llama-hparams.h`; its loader asserts `n_layer_all`, next-token blocks
+/// included, within it), so no model it can load is refused. A manifest's
+/// `num_layers` SIZES things here — `available_layer_ranges_from_manifest`
+/// allocates a flag per layer on every plan — and a peer's is only its word: one
+/// naming 4 billion layers cost 4 GB per plan (security review, 2026-11-05).
+pub const MAX_LAYERS_PER_MANIFEST: u32 = 512;
+
+/// Does this manifest declare more layers than any model llama.cpp loads — in
+/// its count, or a part's layer range past it? Asked at the network door
+/// (`daemon::dispatch`, beside the part-number bound) AND by
+/// `ModelRegistry::register_manifest`, the point every adoption path passes
+/// (a manifest stored before the bound reloads through it at start-up).
+pub fn declares_more_layers_than_any_model(manifest: &ModelManifest) -> bool {
+    manifest.num_layers > MAX_LAYERS_PER_MANIFEST
+        || manifest
+            .shards
+            .iter()
+            .filter(|s| s.index != crate::types::MMPROJ_SHARD_INDEX)
+            .any(|s| s.layer_range.1 > MAX_LAYERS_PER_MANIFEST)
+}
+
 /// Backup-copy artifacts a file manager (or a stray `cp`) leaves on disk.
 /// A model id whose final dotted segment is one of these — or that ends in a
 /// `~` / " copy" marker — is a local copy of a model, not a real upstream

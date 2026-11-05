@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #410**). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #411**). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -4488,7 +4488,16 @@ Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
 
-**Closed 2026-11-05, ships in the next release** (#408, #409)
+**Closed 2026-11-05, ships in the next release** (#410, #408, #409)
+- #410 — **A peer manifest's layer count sized allocations unchecked.** `num_layers` and each part's
+  `layer_range` were the peer's u32s; `available_layer_ranges_from_manifest` allocates a flag per
+  layer on every plan and on the scan of a model with a part here — a manifest naming 4 billion
+  layers cost 4 GB a plan. Found by #408's security review. `manifest::declares_more_layers_than_any_model`
+  (llama.cpp's `LLAMA_MAX_LAYERS`, 512 — `llama-hparams.h`; its loader asserts `n_layer_all` within
+  it) is asked at the network door beside the part-number bound AND in
+  `ModelRegistry::register_manifest`, which every adoption path passes. Test
+  `servability_tests::a_manifest_declaring_more_layers_than_any_model_is_refused` (405B's 126 and
+  512 itself still register). `docs/invariants/network.md` § "A size the other computer chose".
 - #408 — **"The end of a model" was judged by part NUMBER.** Qwen3.8-27B's part 31 is `[64, 65)` —
   `output*` and the MTP block `blk.64.nextn` — with layer 63 in part 30 (Ornith-1.5 is cut the same
   way, #398); a node holding parts 0 and 31 read prompt privacy's automatic default ON, its status

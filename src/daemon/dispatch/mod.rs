@@ -1804,16 +1804,21 @@ pub(crate) async fn dispatch_network_messages(
                                         // and forgetting a model clears only the numbers
                                         // a manifest can have; the name reaches the
                                         // activity feed and the log (#333).
+                                        // Its layer count sizes allocations on every plan.
                                         if manifest
                                             .shards
                                             .iter()
                                             .any(|s| s.index as usize >= MAX_SHARDS_PER_MANIFEST)
                                             || manifest.name.len() > MAX_NAME_BYTES
+                                            || crate::model::manifest::declares_more_layers_than_any_model(
+                                                &manifest,
+                                            )
                                         {
                                             tracing::warn!(
                                                 model = %manifest.id,
                                                 name_bytes = manifest.name.len(),
-                                                "Rejecting peer manifest: a part number or the name is out of range"
+                                                num_layers = manifest.num_layers,
+                                                "Rejecting peer manifest: a part number, the name or the layer count is out of range"
                                             );
                                             continue;
                                         }

@@ -22,6 +22,11 @@ it is asked: the setting and its automatic default, the parts it downloads (for 
 last two), what is kept on disk and on the graphics card for it, the warning before a part is
 deleted, and routing (#408).
 
+**A model description from another computer that names more layers than any model has is turned
+away.** The number of layers a description gives decides how much memory this computer sets
+aside each time it plans a reply for that model, and nothing checked it. Descriptions are now
+held to llama.cpp's own limit (512 layers), so no real model is affected (#410).
+
 ## [0.3.273-alpha] — 2026-11-05
 
 **A computer that restarts (for an update, say) is heard again by every computer it was connected

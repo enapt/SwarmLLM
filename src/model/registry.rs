@@ -446,6 +446,17 @@ impl ModelRegistry {
             );
             return;
         }
+        // A layer count past any model llama.cpp loads sizes a flag per layer
+        // on every plan — refused here too, so a manifest stored before the
+        // network door's bound cannot come back in at start-up.
+        if crate::model::manifest::declares_more_layers_than_any_model(&manifest) {
+            tracing::warn!(
+                model = %manifest.id,
+                num_layers = manifest.num_layers,
+                "Refusing manifest: it declares more layers than any model can have"
+            );
+            return;
+        }
         // Every hash this manifest carries is heard, whatever the merges below
         // keep: an origin-derived hash outranks a peer's in the manifest, and the
         // peer's is still what a node fetches against when the peers that
@@ -4331,6 +4342,29 @@ mod servability_tests {
             mmproj: None,
             context_length: None,
         }
+    }
+
+    /// A manifest naming more layers than any model llama.cpp loads is never
+    /// registered: its count sizes a flag per layer on every plan, and a peer's
+    /// count is only its word. Llama-3.1-405B's 126, and llama.cpp's own
+    /// ceiling of 512, still are (null controls).
+    #[test]
+    fn a_manifest_declaring_more_layers_than_any_model_is_refused() {
+        let registry = ModelRegistry::new();
+        registry.register_manifest(manifest("billions", 2, u32::MAX));
+        let mut range_past = manifest("range-past", 2, 8);
+        range_past.shards[1].layer_range = (1, 1 << 30);
+        registry.register_manifest(range_past);
+        registry.register_manifest(manifest("deep", 2, 126));
+        registry.register_manifest(manifest("at-the-ceiling", 2, 512));
+        assert!(registry.get_manifest(&ModelId("billions".into())).is_none());
+        assert!(registry
+            .get_manifest(&ModelId("range-past".into()))
+            .is_none());
+        assert!(registry.get_manifest(&ModelId("deep".into())).is_some());
+        assert!(registry
+            .get_manifest(&ModelId("at-the-ceiling".into()))
+            .is_some());
     }
 
     /// The 404's "Available models" list and `/v1/models` must answer the same

@@ -6718,6 +6718,14 @@ how much memory this node used, or where a slice began:
 - **A peer's streamed reply** (`remote_generate::StreamReassembler`): the reorder buffer was
   keyed by the PEER's sequence number. A peer that skipped 0 and streamed 1, 2, 3, … grew it
   without end, because nothing was ever released from it.
+- **A peer manifest's layer count** (2026-11-05, found by #408's security review): `num_layers`
+  and each part's `layer_range` were the peer's unchecked u32s, and
+  `available_layer_ranges_from_manifest` allocates a flag per layer on every plan (and on the
+  scan of a model with a part here) — a manifest naming 4 billion layers cost 4 GB a plan. Now
+  `manifest::declares_more_layers_than_any_model` (llama.cpp's `LLAMA_MAX_LAYERS`, 512) is asked
+  at the network door beside the part-number bound AND in `ModelRegistry::register_manifest`,
+  which every adoption path passes (a stored manifest reloads through it). Test
+  `a_manifest_declaring_more_layers_than_any_model_is_refused`.
 - **Adjacent**: rank 0's AllReduce partial of the wrong size was skipped in silence
   (`daemon::state::tp_allreduce`), so a zero sum went out as the reduction while the other
   ranks' partials were refused.
