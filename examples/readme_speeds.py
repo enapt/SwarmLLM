@@ -13,7 +13,10 @@ on the PREVIOUS release's records — the newest the gate has measured
 
 usage: python3 -I examples/readme_speeds.py ~/swarmllm-gate/v0.3.260-alpha/out/speed.jsonl [README.md]
 
-The version is read from the path: the gate writes under `v<version>/`.
+The version is read from the path: the gate writes under `v<version>/`. A check that
+shared the card with another program is timed again on the published release, the
+step's candidate arms only, into `v<version>-alpha-rebench/out/` (completeness.md §
+"README speeds"); from a `-rebench` path the block says it is a re-run.
 """
 
 import json
@@ -48,7 +51,7 @@ def span(values, step):
     return lo if lo == hi else f"{lo}–{hi}"
 
 
-def block(records, version):
+def block(records, version, rerun=False):
     arms = {}
     for r in records:
         place, who, _ = (r["label"].split("/") + ["", ""])[:3]
@@ -61,10 +64,20 @@ def block(records, version):
     every = [r for p in PLACES for r in arms[p]]
     prompt = round(statistics.median(r["prompt_tokens"] for r in every), -2)
     written = int(statistics.median(r["completion_tokens"] for r in every))
+    if rerun:
+        source = [
+            f"**On one computer**: the v{version} release check's speed step, run again on the",
+            "downloaded release because the check itself shared the graphics card with other",
+            f"programs. Each model reads a {int(prompt):,}-token document and writes {written} tokens about it.",
+        ]
+    else:
+        source = [
+            f"**On one computer**: the v{version} release check, run on the downloaded release. Each",
+            f"model reads a {int(prompt):,}-token document and writes {written} tokens about it.",
+        ]
     lines = [
         BEGIN,
-        f"**On one computer**: the v{version} release check, run on the downloaded release. Each",
-        f"model reads a {int(prompt):,}-token document and writes {written} tokens about it.",
+        *source,
         "",
         "| Model | Runs on | Writing (tokens a second) | Reading (tokens a second) |",
         "|---|---|---|---|",
@@ -102,9 +115,10 @@ def main():
     start, end = text.find(BEGIN), text.find(END)
     if start < 0 or end < start:
         sys.exit(f"{readme}: the {BEGIN} … {END} markers are missing")
-    new = text[:start] + block(records, found.group(1)) + text[end + len(END):]
+    rerun = "-rebench" in str(source)
+    new = text[:start] + block(records, found.group(1), rerun) + text[end + len(END):]
     readme.write_text(new)
-    print(block(records, found.group(1)))
+    print(block(records, found.group(1), rerun))
 
 
 if __name__ == "__main__":

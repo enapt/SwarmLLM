@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #408**). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #409**). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -3983,6 +3983,36 @@ endpoints. `candle-*` stays on 0.10 deliberately (§ "Decided").
 Credits are DORMANT — they gate nothing, and `credits_stay_dormant` fails the build if one
 starts. Read `docs/CREDITS_DESIGN.md` before touching them; the credit items below are
 preconditions for ever switching enforcement on, not work for now.
+
+#### #408 — A model whose last part holds only its output head is refused on the computer that holds both "ends"
+`P2` · privacy / routing · **OPEN** — 2026-11-05 · history: the v0.3.273 README sitting (gotcha #1039)
+
+The live node held parts 0 and 31 of Qwen3.8-27B (32 parts, 64 layers). Part 31's manifest range is
+[64,65]: `output.weight`, `output_norm` and the MTP block `blk.64.nextn.*`; layer 63 is in part 30.
+Prompt privacy's automatic default asks `SharedState::holds_both_model_ends_under`
+(`daemon/state/mod.rs`), which is `holds(0) && holds(shard_count - 1)` BY PART NUMBER → on
+(`decided_by: "automatic"`, `"ready": true`). The planner's encrypted branch needs a local range
+reaching the last layer (`available_layer_ranges_from_manifest` gave [(0,1)]) → every request is
+`PromptPrivacyNeedsFinalShard`, whose message ("does not hold the output head") is false.
+`privacy_required_shards_inner` pins (0, last) by number too, so prune never keeps part 30 for it and
+the node never fetches it. The workaround for a run was the per-model choice set off
+(`PUT /api/admin/models/{id}/encrypted-pipeline`), restored to automatic afterwards.
+
+"The parts that finish a model" is judged by `shard_count - 1` at 13 production sites (a code
+search, 2026-11-05): `daemon/state` `holds_both_model_ends_under`, `privacy_required_shards_inner`
+(prune's privacy pin and the shard-delete refusal), `override_keeps_whole_model`; scheduler
+`can_be_last` (whole-model hand-off, the encrypted local-last filter); `model/shard.rs`
+`compute_first_last` and `scan.rs`'s segment registration (both `layer_end >= num_layers &&
+has_last_shard` — right only where the head's part also holds the last layer); `local_generate`'s
+whole-range fallback; `admin_models/lifecycle.rs` (the privacy-enable fetch of `[0, last]`, the
+status's `has_last_shard`/`ready`, the toggle's check); `listing.rs`'s privacy info; prune's
+completeness score; `vram::compute_optimal_shard_window`. So this is `architecture.md` § "One
+invariant, N paths". The pieces to build on: `split::part_serves_layers` (written for Ornith-1.5's
+MTP block cut beside the head) and `available_layer_ranges_from_manifest`, which already reads
+a head-only part correctly. Next: ONE helper that reads the manifest's layer
+ranges — the part holding layer `num_layers - 1` plus every part holding the head — asked by every
+site, with a guard that no consumer compares to `shard_count - 1`; a security review (prompt
+privacy's boundary), and a live check on the 27B with automatic privacy.
 
 #### #383 — A serving node's stream of checks is not tied to the peer that opened it
 `P4` · network · **OPEN** — 2026-10-30 · history: #382's security review (low, pre-existing)

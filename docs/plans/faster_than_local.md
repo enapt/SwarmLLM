@@ -1096,6 +1096,72 @@ answer. What was measured or ruled out:
    the replay that promised 1.07-1.10x reads ~1.0x live, so the restart cycle is not where the
    next 10% of the 70B is.
 
+## 12. The published v0.3.273 over the real swarm, 2026-11-05
+
+The downloaded v0.3.273 cuda binary on this machine (RTX 3070 Laptop 8 GB, Ryzen 7 5800H, WSL
+with 16 GB; processor boost ON, gotcha #1037), every peer on v0.3.273: AU's RTX 3060
+(`aa3d1e66`, least round trip measured 128 ms — its route has changed since § 9's ~420 ms), a
+second Thai computer on this network (`96842635`, i5-10500T, ~1 ms) and a Mac mini M4 in Italy
+(`99aafc41`, ~378 ms). 160 greedy tokens a reply, the § 9 prose and code prompts
+(`~/swarmllm-gate/deep/fr/r18/prompts.txt`), each arm a fresh node, every result's route checked
+in its log (`~/swarmllm-gate/deep/fr/real_link{,27}.sh`, results under `real_link_readme273*`).
+
+**Qwen2.5-14B Q4_K_M, the 0.5B Q8_0 drafter on this card** (arms alternating, one binary):
+
+| shape | code tok/s | prose tok/s |
+|---|---|---|
+| default shape, the flow, this node 24 of 48 (`flowhalf`, 4 runs) | 31.41-32.67 | 11.56-13.89 |
+| starts and finishes here, 3 segments (`dsdw`, 4 runs) | 29.83-30.23 | 11.09-12.69 |
+| this machine alone, the whole 14B (card + processor, card guesses; 6 runs code, 3 prose) | 15.12-15.63 | 12.24-12.67 |
+
+Code runs 2.0-2.1x local; prose is level (0.9-1.1x). Two traps nearly put a wrong local figure in
+the README:
+1. **A short first reply latched local guessing off** (gotcha #1038, fixed after this sitting):
+   an 8-token warm-up spent every round while the processor's decode width settled (#396), read
+   1.0 tokens a round, and every later solo reply decoded in the batch without guessing —
+   7.18-7.92 tok/s, half the real local figure. A 160-token warm-up gives the table's figures.
+2. **A warm-up asking the measured prompt hands the measured reply its guesses**: the owner's
+   earlier replies (#337) answered 12 of a prose reply's lookups, and local prose read
+   14.22-21.99. The harnesses' long warm-up now asks a question of its own.
+
+**Qwen3.8-27B Q4_K_M** (64 layers, hybrid, no drafter on a split, #228 (5)) does not fit this
+machine alone: ~6 GB on the card and ~12 GB for the processor against its 10.6 GB cap. From a
+fresh rig node only AU was a candidate (the other holders were not reachable from it):
+
+| shape | code tok/s | prose tok/s |
+|---|---|---|
+| the planner's own choice: the whole model handed to AU (its 3060 and processor) | 2.61-2.62 | 2.58 |
+| this node 27 layers (20 on the card, 7 on the processor), AU 37 | 2.73-2.75 | 2.74 |
+| this node ~20 layers, all on the card, AU 44 | 2.47-2.71 | 2.23-2.68 |
+
+AU's segment took ~239 ms a token against the 128 ms round trip, and giving it more layers was
+slower, so AU's processor share binds the split: its card was likely still holding the 70B's
+layers from the asks below. The far-run n-gram wire stood aside (it kept 1.09 tokens a round).
+
+**The 27B through the live node** (connected to every holder; `~/swarmllm-27b/ask27{live,chain}.sh`,
+results under `~/swarmllm-27b/{live,chain}1105/`). Holding parts 0 and 31 switched "Start and finish
+on this computer" on automatically and refused every request (#408, gotcha #1039), so it was set off
+for the sitting and put back to automatic after. The planner's own choice was again the whole model
+handed to AU: **3.54-3.59 tok/s**, prose and code alike, first token 3.1-3.2 s (2 rounds; the
+warm-ups, another question, 3.56-3.75).
+Without AU there is no chain at all — the other holders have room for 53 of the 64 layers (Italy 48
+of the 64 it holds, the Thai i5 the one layer of its part 29, this node its 1). Forced through every
+holder with `pretend_peer_holds`:
+
+| chain (forced) | tok/s, 160 tokens |
+|---|---|
+| 4 computers: here [0,1) → AU [1,62) → the Thai i5 [62,63) → Italy [63,64) + head | 0.66-0.83 (3 asks) |
+| 3 computers: here [0,1) → AU [1,62) → Italy [62,64) + head | 0.79-0.86 (2 asks) |
+
+The planner priced the 4-computer chain at 400 s for a 160-token reply where it took 250 s, and the
+hand-off at ~48 s, so declining the chain was right: every token crosses the ~380 ms link to Italy
+on top of AU's. The second round was stopped as adding nothing.
+
+**Llama-3.3-70B Q4_K_M through the live node**, new questions (`~/swarmllm-70b/ask70novel1105.sh`),
+the planner's own chains: four computers (this node, Italy, AU, the Thai i5) 1.51 tok/s with a
+106 s first token while this node's worker loaded; then three (this node, AU, Thailand) 1.98 and
+1.43, first tokens 11.5 s and 7.5 s.
+
 ## Sources
 
 Petals 2312.08361 · Pope et al. 2211.05102 · StagFormer 2501.15665 · Layer

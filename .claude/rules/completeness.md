@@ -39,7 +39,12 @@ changes at release, never per change. In the bump commit, beside the counts:
    the check before it (v0.3.266's, 2026-11-01). Checks in a row can each be
    skipped (.269 and .270 were, 2026-11-04); a marker goes once the table is from
    a check as new as the one it names. Compare the card's memory with the live
-   node stopped against the last clean check's before writing one.
+   node stopped against the last clean check's before writing one. Rather than
+   skip, time the step again on the published release:
+   `~/swarmllm-gate-common/rebench.sh v<x.y.z>-alpha` (the candidate's arms; it
+   refuses with the card busy or the processor's boost off, gotcha #1037) writes
+   `v<x.y.z>-alpha-rebench/out/`, which `readme_speeds.py` words as a re-run
+   (first for v0.3.273, 2026-11-05).
 2. **Across computers**: each row names the version it was measured on. Replace
    a row when this release's CHANGELOG entry or `faster_than_local.md` carries a
    newer measurement of that setup; add a row for a setup newly measured. A
