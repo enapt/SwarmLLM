@@ -104,7 +104,12 @@ the top track (`docs/plans/large_model_splits.md`).
    chunk, #374/#375, ~7% off a reply). **What is left is where its layers sit: the far side runs ~44
    of its 64 layers on a processor (~70 ms a row, `faster_than_local.md` § 8).** **Next**: a third
    CARD — a swarm peer's RTX 3080 Ti in the US (12 GB, joined 2026-10-31) could take ~20-25 of them
-   if it holds those parts (#371 gives spare copies back for a large model too few computers hold);
+   if it holds those parts (#371 gives spare copies back for a large model too few computers hold).
+   **Why it holds none (measured 2026-11-05)**: the far planner weighs it (ceiling 46, card 22, 790 GB
+   room) but prices every far segment a flat 300 ms and searches at most one segment past the fewest
+   the ceilings allow — the Australian machine now carries all 80 alone, so a third card is never
+   tried, and US 0-21 + AU 21-80 (1349 ms) is 93% of AU alone (1448), short of the 3/4 bar. Fix in
+   progress: hops from the published coordinates, every card in the search (entry body);
    then tokens a round past the drafter (`large_model_splits.md` step 4). Its planning residuals: a
    head holding it whole declining to lead (#372), the drafter's room on a near-full card (#376).
    On a 14B: split evenly between this machine's card and the 3060 the flow runs 29.2-29.9 tok/s on
@@ -2583,6 +2588,21 @@ machine's load), not a build. Compare a 70B figure only inside one interleaved s
 restarts (#381) measured even and stay off. **Next: a third card for the far side's ~44
 processor-held layers** — a swarm peer's RTX 3080 Ti in the US (12 GB, joined 2026-10-31), if it
 holds those parts; read its holdings and its round trip from both ends first.
+
+**2026-11-05 — why the far chain never names the US card** (main + two debug lines,
+`the machines a chain is planned over …` and `a chain over what is held …`, run as the live node at
+`-v` with one 70B request; `~/swarmllm-gate/deep/fr/s318/`). It is weighed, not filtered:
+`a661155f:ceiling=46,card=22,card_us=1044,processor_us=21252,has=0,disk_mb=790353`. The Australian
+3060 now holds all 80 layers (`ceiling=80,card=22`), so the chain over what is held is that machine
+alone (1448 ms a token by the stated speeds, 59 layers on its processor); the cheapest with fetches
+is US 0-21 + AU 21-80 (1349 ms, 36) — 93%, short of the 3/4 bar (`moving=false`). Two limits keep
+the better chain out of the comparison: (1) every far segment costs a flat 300 ms, whichever two
+machines it joins — and a lone machine pays it too, though a whole-model hand-off pays the network
+once a request; the router prices the same hops at half the coordinates' round trip, the tail's back
+to the head included (`parallax::led_hop_ms`); (2) the search allows one segment past the fewest the
+ceilings allow (here 1 + 1), so where the cards cannot carry the model, "cards first" (#356) never
+gets to use them all. By the stated speeds this machine 0-15 + the US card 15-37 + AU 37-80 is ~790
+ms against ~1148 for AU alone priced as a ring (69%).
 
 #### #10 — Conversation prefixes across computers: a cache this node did not fill is invisible
 `P2` · perf-split · **PARTIAL** — 2026-09-07 · absorbs #139 and archive § "Speeding up inference BETWEEN nodes" idea 1 (prefix-keyed remote KV); history: archive row #10 and § "A conversation's later turns do not seek out the peer holding its prefix"

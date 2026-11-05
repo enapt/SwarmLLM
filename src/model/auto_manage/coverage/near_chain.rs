@@ -292,6 +292,34 @@ struct Machine {
     disk_bytes: u64,
 }
 
+impl Machine {
+    /// `node:ceiling/card/card_us/processor_us/has/disk_mb` — what the plan
+    /// weighs it by, for the log.
+    fn describe(&self) -> String {
+        format!(
+            "{}:ceiling={},card={},card_us={},processor_us={},has={},disk_mb={}",
+            self.node,
+            self.ceiling,
+            self.card
+                .map_or_else(|| "none".to_string(), |c| c.to_string()),
+            self.card_us,
+            self.processor_us,
+            self.has_layers,
+            self.disk_bytes / (1024 * 1024),
+        )
+    }
+}
+
+/// `node:start-end` for each step of `chain` over `machines` — for the log.
+fn describe_steps(chain: &ChosenChain, machines: &[Machine]) -> String {
+    chain
+        .steps
+        .iter()
+        .map(|&(i, start, end)| format!("{}:{start}-{end}", machines[i].node))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 /// What a machine's devices give a chain of one model (#356).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 struct Devices {
@@ -818,7 +846,20 @@ impl AutoShardManager {
             }
             Reach::Far => self.machines_in_scope(),
         };
-        nodes.retain(|n| !self.passed_over_for_chain(&manifest.id, n));
+        // Every machine left out is named with its reason at debug — the
+        // planner's choice cannot otherwise be read from outside (#318: a
+        // card the 70B's chain never used, for reasons nothing logged). The
+        // scheduler's pattern: kube-scheduler keeps a status per filtered
+        // node (`framework.Diagnosis`, "0/5 nodes are available: …").
+        let mut passed_over = Vec::new();
+        nodes.retain(|n| {
+            let keep = !self.passed_over_for_chain(&manifest.id, n);
+            if !keep {
+                passed_over.push(n.to_string());
+            }
+            keep
+        });
+        let mut no_ceiling = Vec::new();
         let sid = |index| ShardId {
             model_id: manifest.id.clone(),
             index,
@@ -858,6 +899,7 @@ impl AutoShardManager {
                 {
                     return None;
                 }
+                no_ceiling.push(node.to_string());
                 continue;
             };
             let held: Vec<bool> = holders.iter().map(|h| h.contains(&node)).collect();
@@ -901,8 +943,22 @@ impl AutoShardManager {
                 .then(b.ceiling.cmp(&a.ceiling))
                 .then_with(|| rank(b).cmp(&rank(a)))
         });
+        let cut: Vec<String> = machines
+            .iter()
+            .skip(MOST_MACHINES)
+            .map(|m| m.node.to_string())
+            .collect();
         machines.truncate(MOST_MACHINES);
         machines.sort_by_key(|m| std::cmp::Reverse(rank(m)));
+        tracing::debug!(
+            model = %manifest.id,
+            reach = ?reach,
+            weighed = %machines.iter().map(Machine::describe).collect::<Vec<_>>().join(" "),
+            passed_over = %passed_over.join(","),
+            no_ceiling = %no_ceiling.join(","),
+            cut = %cut.join(","),
+            "the machines a chain is planned over, and those left out (Stage 3, #318)"
+        );
         Some(machines)
     }
 
@@ -1038,19 +1094,34 @@ impl AutoShardManager {
             if whole_us.is_some_and(|w| chain_us.is_none_or(|c| w <= c)) {
                 return Some(Planned::OneRunsItWhole);
             }
+            // Both chains and the verdict, whichever way it goes: a chain that
+            // stays where it is says why as plainly as one that moves (#318).
+            let moving = matches!(
+                (&held, &best),
+                (Some(h), Some(b)) if worth_moving(h.price, b.price)
+            );
+            let ms = |c: &Option<ChosenChain>| c.as_ref().map(|c| c.price.total_us / 1000);
+            let on_processors =
+                |c: &Option<ChosenChain>| c.as_ref().map(|c| c.price.processor_layers);
+            let plan = |c: &Option<ChosenChain>| {
+                c.as_ref()
+                    .map_or_else(|| "none".to_string(), |c| describe_steps(c, &machines))
+            };
+            tracing::debug!(
+                model = %manifest.id,
+                reach = ?reach,
+                held_ms = ?ms(&held),
+                held_processor_layers = ?on_processors(&held),
+                held_plan = %plan(&held),
+                best_ms = ?ms(&best),
+                best_processor_layers = ?on_processors(&best),
+                best_plan = %plan(&best),
+                moving,
+                "a chain over what is held, against the cheapest with fetches — a complete \
+                 one moves only onto cards, at most 3/4 of its price (#356)"
+            );
             let (chosen, complete) = match (held, best) {
-                (Some(held), Some(best)) if worth_moving(held.price, best.price) => {
-                    tracing::debug!(
-                        model = %manifest.id,
-                        held_ms = held.price.total_us / 1000,
-                        held_processor_layers = held.price.processor_layers,
-                        moving_to_ms = best.price.total_us / 1000,
-                        moving_to_processor_layers = best.price.processor_layers,
-                        "a complete chain runs layers on processors that cards could run — \
-                         planning it onto the cards (#356)"
-                    );
-                    (best, false)
-                }
+                (Some(_), Some(best)) if moving => (best, false),
                 (Some(held), _) => (held, true),
                 (None, Some(best)) => (best, false),
                 (None, None) => return Some(Planned::CannotCarry),
