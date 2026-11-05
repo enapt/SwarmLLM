@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+**A short first reply no longer slows the replies after it.** When a model runs partly or wholly
+on the processor, the first 15-25 words of its life are written plainly while it times how many
+processor cores to use, with no guessing ahead. A first reply that short — a greeting, or the title
+a chat app asks for — was read as "guessing ahead pays nothing here", and about the next 25 replies
+were then written without guessing: on this project's test laptop, Qwen2.5 14B on its graphics card
+and processor wrote 7.2-7.9 tokens a second instead of 12.2-15.6. Those first words are now left
+out of the reckoning, and a reply too short to show what guessing pays leaves the decision as it
+was (#409).
+
 ## [0.3.273-alpha] — 2026-11-05
 
 **A computer that restarts (for an update, say) is heard again by every computer it was connected

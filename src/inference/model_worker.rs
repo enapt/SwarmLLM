@@ -3135,6 +3135,32 @@ fn blend_spec_payoff(prev_x100: u32, tokens_per_round: f64) -> u32 {
     next.max(1)
 }
 
+/// Guessing rounds a reply needs before its tokens a round are recorded: by
+/// then a plain step and a check have both been timed and the card has made
+/// its first guesses, so the figure is the guessers', not their start-up's.
+const ROUNDS_TO_JUDGE_A_PAYOFF: u64 = 16;
+
+/// What one finished reply says guessing pays, in tokens a round, or `None`
+/// where it cannot say — the sample [`record_spec_payoff`] takes.
+///
+/// **A round with no chance to guess is not a sample of guessing** (Karn's
+/// rule for round-trip estimates: an ambiguous sample is left out, never
+/// averaged in). While the processor's decode width settles every round is a
+/// plain step (`LocalSpec::next`, `cpu_pools::decode_width_settled`) — about
+/// the first 15-25 of a worker's life. Counted, they made a short first reply
+/// read 1.0 a round: on 2026-11-05 an 8-token first reply, all settling, put
+/// the payoff under the bar, and the next replies of a 14B split between this
+/// card and the processor decoded in the batch without guessing at 7.2-7.9
+/// tok/s against 12.2-15.6 guessing (`drift_toward_retrying` would have
+/// measured again only at the 25th). A reply with fewer than
+/// [`ROUNDS_TO_JUDGE_A_PAYOFF`] rounds that could guess records nothing either:
+/// one short reply should not decide the next 25.
+fn payoff_sample(rounds: u64, produced: u64, settling_rounds: u64) -> Option<f64> {
+    let guessing = rounds.saturating_sub(settling_rounds);
+    (guessing >= ROUNDS_TO_JUDGE_A_PAYOFF)
+        .then(|| produced.saturating_sub(settling_rounds) as f64 / guessing as f64)
+}
+
 /// Is speculation paying well enough to justify taking a request OUT of the
 /// batched decode path to get it?
 ///
@@ -3515,6 +3541,10 @@ struct LocalSpec {
     /// replayed. Left out of the timings, or one such round prices every
     /// check of the reply.
     one_offs: u64,
+    /// Rounds stepped plainly while the processor's decode width settled —
+    /// no chance to guess, so no evidence of what guessing pays
+    /// ([`payoff_sample`]).
+    settling_rounds: u64,
     /// Rounds of guesses declined since the last check.
     declined_run: u32,
     /// Declined rounds after which found guesses are checked anyway.
@@ -3871,6 +3901,7 @@ impl LocalSpec {
             rejected: 0,
             declined: 0,
             one_offs: 0,
+            settling_rounds: 0,
             declined_run: 0,
             probe_after: Self::FIRST_PROBE_AFTER,
             probes: 0,
@@ -4182,6 +4213,7 @@ impl LocalSpec {
             produced: round.produced.clone(),
         });
         self.rounds += 1;
+        self.settling_rounds += u64::from(settling);
         self.produced += round.produced.len() as u64;
         self.accepted += round.accepted as u64;
         self.rejected += u64::from(round.accepted < round.proposed);
@@ -6155,8 +6187,12 @@ async fn handle_generate(
             if let Some(spec) = spec.as_ref().filter(|s| s.rounds > 0) {
                 let tokens_per_round = spec.produced as f64 / spec.rounds as f64;
                 // Steers the next admission decision — see
-                // `spec_payoff_justifies_diverting`.
-                record_spec_payoff(tokens_per_round);
+                // `spec_payoff_justifies_diverting` — where the reply could
+                // show it (`payoff_sample`).
+                let judged = payoff_sample(spec.rounds, spec.produced, spec.settling_rounds);
+                if let Some(sample) = judged {
+                    record_spec_payoff(sample);
+                }
                 tracing::debug!(
                     request_id = %request_id,
                     rounds = spec.rounds,
@@ -6164,6 +6200,8 @@ async fn handle_generate(
                     accepted = spec.accepted,
                     rejected = spec.rejected,
                     paused_rounds = spec.backoff.paused_rounds,
+                    settling_rounds = spec.settling_rounds,
+                    payoff_recorded = judged.is_some(),
                     tokens_per_round,
                     learned = %spec.summary(),
                     "DIAG: local n-gram speculation complete"
@@ -9823,6 +9861,37 @@ mod spec_payoff_tests {
     #[test]
     fn unknown_payoff_lets_one_request_find_out() {
         assert!(payoff_justifies_diverting(0));
+    }
+
+    /// 2026-11-05: a worker's first reply, 8 tokens long, stepped every round
+    /// plainly while the processor's decode width settled — 8 rounds, 8 tokens.
+    /// Recorded, it read 1.0 a round and every later solo reply decoded in the
+    /// batch without guessing (7.2-7.9 tok/s against 12.2-15.6).
+    #[test]
+    fn a_reply_that_only_settled_says_nothing_about_guessing() {
+        assert_eq!(payoff_sample(8, 8, 8), None);
+        // The case as it ran: recorded, the next reply is refused.
+        assert!(!payoff_justifies_diverting(blend_spec_payoff(0, 1.0)));
+    }
+
+    /// Settling rounds are left out of a reply long enough to judge, so they
+    /// cannot drag a paying reply under the bar: 20 settling rounds then 40
+    /// rounds of 3 tokens reads 3.0, where counting them read 2.33.
+    #[test]
+    fn settling_rounds_are_left_out_of_the_tokens_a_round() {
+        let sample = payoff_sample(60, 20 + 40 * 3, 20).expect("40 rounds could guess");
+        assert!((sample - 3.0).abs() < 1e-9, "{sample}");
+    }
+
+    /// A short reply is too small a sample to steer the next 25 requests,
+    /// whatever it read; one with enough rounds is recorded as it reads,
+    /// a poor one included — the bar still has its workload to catch.
+    #[test]
+    fn too_few_guessing_rounds_record_nothing() {
+        let short = ROUNDS_TO_JUDGE_A_PAYOFF - 1;
+        assert_eq!(payoff_sample(short + 20, short + 20, 20), None);
+        let poor = payoff_sample(ROUNDS_TO_JUDGE_A_PAYOFF, ROUNDS_TO_JUDGE_A_PAYOFF, 0);
+        assert_eq!(poor, Some(1.0));
     }
 
     /// It has to be able to change its mind. A session that turns copy-heavy

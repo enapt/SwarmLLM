@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #409**). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #410**). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -4518,7 +4518,23 @@ Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
 
-**Closed 2026-11-05, ships in the next release** (#407, #406)
+**Closed 2026-11-05, ships in the next release** (#409)
+- #409 — **A short first reply switched a worker's local guessing off for the next ~25.** While the
+  processor's decode width settles (`cpu_pools::decode_width_settled`, #396/#399), every round of
+  `LocalSpec::next` is a plain step, and those rounds counted toward `record_spec_payoff`'s tokens a
+  round: an 8-token first reply read 1.0, under `SPEC_PAYOFF_WORTH_DIVERTING_X100` (1.50), and the
+  later solo replies decoded in the batch without guessing until `drift_toward_retrying` (#985)
+  came back to measure. Found re-measuring the README on v0.3.273: the 14B alone read 7.2-7.9 tok/s
+  against 12.2-15.6 (gotcha #1038). `model_worker::payoff_sample` leaves the settling rounds out
+  (`LocalSpec::settling_rounds`) and records nothing from a reply with fewer than
+  `ROUNDS_TO_JUDGE_A_PAYOFF` (16) rounds that could guess — Karn's rule for round-trip samples
+  (Karn & Partridge 1987: an ambiguous sample is dropped, never averaged in). Tests:
+  `spec_payoff_tests::{a_reply_that_only_settled_says_nothing_about_guessing,
+  settling_rounds_are_left_out_of_the_tokens_a_round, too_few_guessing_rounds_record_nothing}`, red
+  with the old sample; the DIAG `local n-gram speculation complete` carries `settling_rounds` and
+  `payoff_recorded`.
+
+**Closed 2026-11-05, released in v0.3.273** (#407, #406)
 - #407 — **What else let #406 hide a computer, and what it showed in its place.** (a) A restart
   into an update `exec`s without closing anything: TCP peers see the kernel close the socket, QUIC
   peers are told nothing and hold the dead connection until their idle timeout — the window #406's
