@@ -7009,3 +7009,13 @@ on a backoff of 30 s doubling to 1 h. (3) The network map put a peer that named 
 country — #406's computer drew as a second dot in Thailand — and the live path
 (`region_summary`) left such a peer out, so the count changed between refreshes. Both paths place
 through `api::admin::map_region_of`; a country anywhere is read by `api::admin::country_code`.
+
+**Measured end to end (2026-11-05, `~/swarmllm-gate/deep/fr/gossip406.sh`).** Two nodes over QUIC only, in a private
+network namespace; B `kill -9`ed and restarted at once (back in 0.5 s; A logged B's new connection `count=2`, beside
+the old one), B on the v0.3.272 release in both arms. A's view of B's `uptime_seconds` 2 / 4 / 6 / 6.5 min after the
+restart: A on v0.3.272 **0 / 0 / 0 / 0**; A on main **0 / 0 / 330 / 330** — B's first repeated capability (its
+`QuietRepeat`, ~5 min) reached A only with the patch, and with B still on the old release. A stop closed the
+connection at once in BOTH arms (B logged `ApplicationClosed` 0.0 s after A's SIGTERM): dropping the swarm at the end
+of `run` already let quinn close; main also logged `Closed this node's connections … still_open=0 closing=AtStop`. The
+rig cannot run an update's `exec`, the path the close was added for; the unit tests
+(`a_restart_closes_every_connection_before_it_execs`, red without the close) are its evidence.

@@ -4472,8 +4472,10 @@ grep `^| N |`).
   it), as go-libp2p-pubsub's `handleDeadPeers` does; not to a peer that speaks no gossipsub. The
   crate's test was red with each call removed; guard
   `gossip_runs_on_the_vendored_copy_that_tells_a_reconnected_peer_our_subscriptions`; security
-  review: nothing above LOW. → `docs/invariants/network.md` § "A peer that reconnects beside an old
-  connection is told our subscriptions again", gotcha #1035.
+  review: nothing above LOW. **Measured end to end** (2026-11-05, two nodes over QUIC, B restarted beside A's old
+  connection, B on v0.3.272 both arms): A's view of B's uptime 6.5 min later — v0.3.272 0, main 330. →
+  `docs/invariants/network.md` § "A peer that reconnects beside an old connection is told our subscriptions
+  again", gotcha #1035.
 
 **Closed 2026-11-04, released in v0.3.272** (#403, #401, #399, #396)
 - #399 — **The owner's decode step of experts kept in RAM may use every physical core, where it is
