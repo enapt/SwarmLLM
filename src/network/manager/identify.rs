@@ -706,6 +706,26 @@ impl NetworkManager {
                     );
                 }
             }
+            // And the name this computer's owner gave it, while it is shown
+            // (#417): a rename is gossiped once, so a computer that connected
+            // after it showed only our node id, for good. The existing variant
+            // over the same direct path, taken by an older peer's dispatcher
+            // as a gossiped one. Like the two above, it reaches every peer that
+            // passes Identify, outside `gossip_network_id`'s topics too — which
+            // isolate nothing (CLAUDE.md); gate the three together if that
+            // ever changes.
+            if let Some(record) =
+                crate::identity::nickname::own_record_for_a_newcomer(&self.shared_state)
+            {
+                self.handle_send_rr_message(
+                    peer_id.to_bytes(),
+                    crate::types::SwarmMessage::NicknameGossip(crate::types::NicknameGossip {
+                        record,
+                    }),
+                    "NicknameCatchUp",
+                    None,
+                );
+            }
         }
         // What the peer sent before this Identify was handled — its own
         // catch-up, above all — goes on now that it is mapped, registered and

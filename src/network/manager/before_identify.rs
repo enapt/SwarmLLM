@@ -183,6 +183,10 @@ fn is_a_catch_up(msg: &SwarmMessage) -> bool {
     match msg {
         SwarmMessage::NodeCapabilityUpdate(cap) => crate::daemon::dispatch::capability_fits(cap),
         SwarmMessage::ShardAnnounce(announce) => announce.fits_one_message(),
+        // A name the dispatcher would take is at most 32 characters (#417).
+        SwarmMessage::NicknameGossip(gossip) => {
+            crate::identity::nickname::validate_nickname(&gossip.record.nickname).is_ok()
+        }
         _ => false,
     }
 }
@@ -282,6 +286,36 @@ mod tests {
         let too_long = announce_of(shards, 0);
         assert!(held
             .hold(PeerId::random(), None, too_long, Instant::now())
+            .is_some());
+    }
+
+    /// #417: a peer's name, sent with its catch-up, waits for its Identify like
+    /// the rest of it — and a name the dispatcher would refuse does not.
+    #[test]
+    fn a_peers_name_is_held_and_one_the_dispatcher_refuses_is_not() {
+        let mut held = HeldUntilIdentified::default();
+        let name = |nickname: &str| {
+            SwarmMessage::NicknameGossip(crate::types::NicknameGossip {
+                record: crate::types::NicknameRecord {
+                    node_id: crate::types::NodeId([1u8; 32]),
+                    nickname: nickname.into(),
+                    timestamp: chrono::Utc::now(),
+                    signature: vec![0u8; 64],
+                },
+            })
+        };
+        let peer = PeerId::random();
+        assert!(held
+            .hold(peer, None, name("kitchen-pc"), Instant::now())
+            .is_none());
+        assert_eq!(held.release(&peer).len(), 1);
+        assert!(held
+            .hold(
+                PeerId::random(),
+                None,
+                name(&"x".repeat(33)),
+                Instant::now()
+            )
             .is_some());
     }
 

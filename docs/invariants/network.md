@@ -7190,6 +7190,18 @@ newest own stamp in memory or on disk; one past the 5 min orders nothing, every 
 libp2p's rule for routing records (RFC 0003: `seq` MUST increase; the clock MAY be it). Test
 `a_rename_is_stamped_after_the_previous_record_even_when_the_clock_went_back`.
 
+**A newcomer is sent our name** (2026-11-07, #417). The rename was gossiped once and `verify` refuses
+a record past 24 h, so a computer connecting later never learned it — verified on three nodes (C
+joining 60 s after the rename, past gossipsub's 50 s history): never on .276, in 5 s with the fix.
+The identify catch-up sends `identity::nickname::own_record_for_a_newcomer`: the held record while
+under 12 h, else one signed afresh after it (only the owner's key can extend a record — IPNS's
+republish rule), persisted off the loop. The registry holds this computer's own record ONLY while its
+name is shown — `SharedState::new` skips it for an anonymous owner — so the catch-up reads memory and
+can never send a hidden name. `verify` checks the name too (`validate_nickname`): the signature is the
+named computer's own, so it vouches for nothing it said about itself. ⚠ Testing it on two nodes proves
+nothing: a rename with no gossip peer is buffered (`buffered_gossip`) and replayed to the first that
+connects, so the old build passes too.
+
 **What a change must keep.** Both bounds explicit and one-sided; a kind joins this gate only if it is
 kept per sender; test `gossip_from_a_clock_a_minute_fast_is_heard_and_one_far_off_is_not` (33, 60
 and 300 s ahead heard; 301 s ahead, an hour ahead and 301 s old dropped) fails at the old 30 s.

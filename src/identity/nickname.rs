@@ -94,6 +94,10 @@ impl NicknameRecordExt for NicknameRecord {
     /// Verify the Ed25519 signature on this record.
     /// SEC-I3: Also rejects records older than 24 hours to prevent stale replay.
     fn verify(&self) -> Result<(), SwarmError> {
+        // The name itself, as `new_signed` checks it: a peer signs its own
+        // record, so the signature says nothing about what it named itself
+        // (#417's review of the arm: any text, any length, was taken).
+        validate_nickname(&self.nickname)?;
         // Timestamp freshness — one-sided per gotcha #44: separate
         // (now - ts) > MAX_AGE and (ts - now) > SKEW checks. Do NOT
         // collapse to (now - ts).abs() > MAX_AGE: that doubles the
@@ -254,6 +258,74 @@ pub fn display_name(
     }
 }
 
+/// A record of this computer's name younger than this is sent to a newcomer as
+/// held; an older one is signed afresh first, so it arrives well inside the
+/// 24 h a peer takes (`verify`).
+const SIGN_AGAIN_AFTER_HOURS: i64 = 12;
+
+/// The record of this computer's name to send a newly connected peer (#417), or
+/// `None` when it shows none (anonymous, or never named — the registry holds
+/// this computer's record only while its name is shown). A rename is gossiped
+/// once, so without this a computer that connected later never learned the
+/// name. Signed afresh — stamped after the held record — once that is older
+/// than [`SIGN_AGAIN_AFTER_HOURS`]; the new record replaces the held one here
+/// and is written to disk off the caller's thread, since the network loop asks.
+/// Prior art: IPNS records, which the owner republishes well inside their
+/// validity (Kubo: every 4 h, valid 48 h) because only the owner's key can
+/// extend them.
+pub fn own_record_for_a_newcomer(
+    state: &std::sync::Arc<crate::daemon::state::SharedState>,
+) -> Option<NicknameRecord> {
+    let own_id = state.identity.node_id();
+    let held = state.nickname_registry.get(own_id).map(|r| r.clone())?;
+    let now = chrono::Utc::now();
+    // Young, and not further ahead than a peer takes: a record stamped before
+    // this computer's clock was set back would be refused everywhere until the
+    // clock caught up (the security review's note), so it is signed afresh.
+    if now - held.timestamp < chrono::Duration::hours(SIGN_AGAIN_AFTER_HOURS)
+        && held.timestamp <= now + chrono::Duration::minutes(NICKNAME_MAX_AHEAD_MINUTES)
+    {
+        return Some(held);
+    }
+    let fresh = match NicknameRecord::new_signed(
+        &state.identity,
+        held.nickname.clone(),
+        Some(&held.timestamp),
+    ) {
+        Ok(fresh) => fresh,
+        Err(e) => {
+            tracing::debug!(error = %e, "Could not sign this computer's name again");
+            return None;
+        }
+    };
+    state
+        .nickname_registry
+        .insert(own_id.clone(), fresh.clone());
+    persist_off_the_loop(state, own_id.clone());
+    Some(fresh)
+}
+
+/// Write the registry's CURRENT record for `node_id` to disk on the blocking
+/// pool — a redb write waits for any other writer, and the callers are the
+/// message and network loops (#90). The record is read when the task runs, not
+/// when it was spawned: two spawned for one node run in no set order, and
+/// re-reading the registry (newest wins) makes whichever runs last write the
+/// newest.
+pub fn persist_off_the_loop(
+    state: &std::sync::Arc<crate::daemon::state::SharedState>,
+    node_id: NodeId,
+) {
+    let state = state.clone();
+    tokio::task::spawn_blocking(move || {
+        let Some(current) = state.nickname_registry.get(&node_id).map(|r| r.clone()) else {
+            return;
+        };
+        if let Err(e) = NicknameStore::new(state.db.clone()).put_record(&current) {
+            tracing::warn!(error = %e, "Failed to persist nickname");
+        }
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -305,6 +377,125 @@ mod tests {
         let renamed = NicknameRecord::new_signed(&id, "bob".into(), Some(&refused_by_all)).unwrap();
         assert!(renamed.timestamp < refused_by_all);
         assert!(renamed.verify().is_ok());
+    }
+
+    /// A record `id` signed for `nickname`, stamped `hours_ago`.
+    fn signed_at(id: &Identity, nickname: &str, hours_ago: i64) -> NicknameRecord {
+        signed_at_stamp(
+            id,
+            nickname,
+            chrono::Utc::now() - chrono::Duration::hours(hours_ago),
+        )
+    }
+
+    /// A record `id` signed for `nickname`, stamped `timestamp`.
+    fn signed_at_stamp(
+        id: &Identity,
+        nickname: &str,
+        timestamp: chrono::DateTime<chrono::Utc>,
+    ) -> NicknameRecord {
+        let payload = NicknameRecord::signing_payload(id.node_id(), nickname, &timestamp);
+        NicknameRecord {
+            node_id: id.node_id().clone(),
+            nickname: nickname.into(),
+            timestamp,
+            signature: id.sign(&payload),
+        }
+    }
+
+    fn state_on(db: Database, id: Identity) -> std::sync::Arc<crate::daemon::state::SharedState> {
+        let (state, _, _) = crate::daemon::state::SharedState::new(
+            crate::config::Config::default(),
+            id,
+            db,
+            std::sync::Arc::new(tokio::sync::Mutex::new(
+                crate::inference::executor::ModelExecutor::new(),
+            )),
+            None,
+        );
+        state
+    }
+
+    /// #417's review: a peer signs its own record, so its signature says nothing
+    /// about the name — one no rename could set is refused.
+    #[test]
+    fn a_record_naming_its_computer_with_any_text_is_refused() {
+        let id = Identity::generate();
+        assert!(signed_at(&id, "kitchen-pc", 0).verify().is_ok());
+        assert!(signed_at(&id, "<b>me</b>", 0).verify().is_err());
+        assert!(signed_at(&id, &"x".repeat(4096), 0).verify().is_err());
+    }
+
+    /// #417: a newcomer is sent this computer's name — as held while it is
+    /// young, signed afresh (later than the held one) once it is old enough
+    /// that a peer would soon refuse it, and nothing while no name is shown.
+    #[tokio::test]
+    async fn a_newcomer_is_sent_this_computers_name_signed_afresh_once_it_is_old() {
+        let id = Identity::generate();
+        let state = state_on(Database::open_temp().unwrap(), id.clone());
+        assert!(own_record_for_a_newcomer(&state).is_none(), "no name shown");
+
+        let young = signed_at(&id, "kitchen-pc", 1);
+        state
+            .nickname_registry
+            .insert(id.node_id().clone(), young.clone());
+        let sent = own_record_for_a_newcomer(&state).unwrap();
+        assert_eq!(
+            sent.timestamp, young.timestamp,
+            "a young record goes as held"
+        );
+
+        let old = signed_at(&id, "kitchen-pc", 13);
+        state
+            .nickname_registry
+            .insert(id.node_id().clone(), old.clone());
+        let sent = own_record_for_a_newcomer(&state).unwrap();
+        assert!(sent.timestamp > old.timestamp + chrono::Duration::hours(12));
+        assert_eq!(sent.nickname, "kitchen-pc");
+        assert!(sent.verify().is_ok());
+        assert_eq!(
+            state.nickname_registry.get(id.node_id()).unwrap().timestamp,
+            sent.timestamp,
+            "the fresh record replaces the held one"
+        );
+
+        // Stamped before this computer's clock was set back by more than a
+        // peer takes: signed afresh at now, not sent to be refused.
+        let ahead = signed_at_stamp(
+            &id,
+            "kitchen-pc",
+            chrono::Utc::now() + chrono::Duration::minutes(10),
+        );
+        state
+            .nickname_registry
+            .insert(id.node_id().clone(), ahead.clone());
+        let sent = own_record_for_a_newcomer(&state).unwrap();
+        assert!(sent.timestamp < ahead.timestamp);
+        assert!(sent.verify().is_ok());
+    }
+
+    /// #417: a computer whose owner went anonymous keeps its record on disk
+    /// but does not start with it as its name — a newcomer would be sent it.
+    #[tokio::test]
+    async fn an_anonymous_computer_does_not_start_with_its_old_name() {
+        for (visibility, shown) in [
+            (VisibilityMode::Anonymous, false),
+            (VisibilityMode::Nickname, true),
+        ] {
+            let id = Identity::generate();
+            let db = Database::open_temp().unwrap();
+            let store = NicknameStore::new(db.clone());
+            store.put_record(&signed_at(&id, "kitchen-pc", 1)).unwrap();
+            store
+                .put_prefs(&IdentityPrefs {
+                    nickname: Some("kitchen-pc".into()),
+                    visibility,
+                })
+                .unwrap();
+            let state = state_on(db, id.clone());
+            assert_eq!(state.nickname_registry.contains_key(id.node_id()), shown);
+            assert_eq!(own_record_for_a_newcomer(&state).is_some(), shown);
+        }
     }
 
     #[test]

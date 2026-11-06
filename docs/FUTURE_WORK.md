@@ -1203,21 +1203,6 @@ node's view, the parts under target whose ring owner holds nothing new over a da
 
 ### Network and transport
 
-#### #417 — A computer's name reaches only the computers connected when it was given
-`P3` · network · **OPEN** — 2026-11-07 · history: #416's nickname review
-
-A rename goes out once, on gossip (`api::identity::set_nickname`), and nothing sends it again; a
-peer refuses a record more than 24 h old (`NicknameRecordExt::verify`), so even a resend of the held
-record would be refused a day later. A computer that connects after the rename never learns the
-name and shows the node id. **Direction**: catch a newcomer up point to point at Identify, as the
-capability and the parts list are (`arch-network.md` § "Gossip says what CHANGED"; the kind joins
-`before_identify::is_a_catch_up`), with the record signed afresh — stamped after the previous one
-(`new_signed`'s `after`), which only the owner's key can do. It needs the visibility in MEMORY (the
-network loop never reads the disk), and one existing fault goes with it: `set_nickname` with
-anonymous visibility still stores the record and only removes it from the registry, and the next
-start fills the registry from the store — so a computer that chose anonymous shows its old name
-here after a restart, and a catch-up read from the registry would send it. Fix both together.
-
 #### #402 — A peer's capability can be played back by anyone, and the receiver installs it
 `P3` · network · **OPEN** — 2026-11-04 · history: the swarm-use security review (`docs/invariants/network.md` § "A computer that shares nothing may look at the swarm")
 
@@ -4698,7 +4683,27 @@ Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
 
-**Closed 2026-11-06, unreleased** (#416's nicknames)
+**Closed 2026-11-06/07, unreleased** (#416's nicknames, #417)
+- #417 — **A computer's name reached only the computers connected when it was given.** A rename
+  goes out once on gossip and a peer refuses a record more than 24 h old, so a computer that
+  connected later showed our node id for good. Now a newcomer is sent the name point to point at
+  Identify, beside the capability and the parts list (`identity::nickname::own_record_for_a_newcomer`):
+  the held record while under 12 h old, else one signed afresh (stamped after it) that replaces it
+  and is written to disk off the loop (`persist_off_the_loop`, the dispatcher's too); one that lands
+  before its sender's Identify is held (`before_identify::is_a_catch_up`, within `validate_nickname`).
+  Existing variant over the existing direct path, so no feature bit; an older peer takes it as a
+  gossiped one. Two faults went with it: `verify` never checked the NAME — a computer signs its own
+  record, so any text of any length was taken (now `validate_nickname`, as `new_signed` does) — and an
+  owner who went anonymous through `PUT` kept the record on disk and got it back as this computer's
+  name at the next start, which the catch-up would have sent (`SharedState::new` now loads its own
+  record only while the name is shown). **Verified live** (three nodes, C joining 60 s after the
+  rename, past gossipsub's 50 s history): A on the published .276, C never saw the name in 30 s; A on
+  the fix, C showed it in 5 s. ⚠ A two-node rig shows the name on BOTH builds: a rename with no
+  gossip peer is buffered and replayed to the first that connects (`commands.rs` `buffered_gossip`).
+  Prior art: IPNS — only the owner's key extends a record, so the owner republishes well inside its
+  validity (Kubo: every 4 h, valid 48 h). Tests `a_newcomer_is_sent_this_computers_name_signed_afresh_once_it_is_old`,
+  `an_anonymous_computer_does_not_start_with_its_old_name`, `a_record_naming_its_computer_with_any_text_is_refused`,
+  `a_peers_name_is_held_and_one_the_dispatcher_refuses_is_not` — each red with its part switched off.
 - #416 (nicknames) — **A computer whose clock ran half a minute fast had its name shown to nobody.**
   The message loop checked a nickname record's stamp at 30 s ahead in front of the record's own
   `verify`, which allows 5 min (and 24 h old). The loop now asks only `verify`

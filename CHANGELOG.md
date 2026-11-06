@@ -8,6 +8,12 @@ is now accepted up to 5 minutes ahead, like the rest of what a computer tells th
 v0.3.276. A new name is also stamped after the previous one, so renaming right after Windows set
 the clock back is no longer lost.
 
+**A computer that joins later now sees the name you gave yours** (#417). A name was sent only when
+you set it, so only the computers connected at that moment ever showed it; every other one showed a
+string of letters and numbers. Each computer now tells a newly connected one its name, as it
+already tells it what it can run. A name that you hid (anonymous) stays hidden after a restart too,
+and a name another computer sends is checked like one you type (1-32 letters, digits, `-` or `_`).
+
 ## [0.3.276-alpha] — 2026-11-07
 
 **A computer that has just started hears what each computer it connects to holds, at once.** When

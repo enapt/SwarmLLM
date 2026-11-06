@@ -615,27 +615,9 @@ fn take_nickname_gossip(
     shared_state
         .nickname_registry
         .insert(record.node_id.clone(), record.clone());
-    // Persist OFF the loop — a redb write waits for any other writer, in the
-    // only consumer of `network_out` (#90). The registry insert above is what
-    // readers consult.
-    //
-    // What is written is the registry's CURRENT record for the node, read when
-    // the task runs — not the one this message carried. Two gossips for one
-    // node spawn two unordered blocking tasks, and the older record's task can
-    // run last; re-reading the registry (timestamp-wins, above) makes whichever
-    // runs last write the newest.
-    let db = shared_state.db.clone();
-    let registry = shared_state.clone();
-    let node_id = record.node_id.clone();
-    tokio::task::spawn_blocking(move || {
-        let Some(current) = registry.nickname_registry.get(&node_id).map(|r| r.clone()) else {
-            return;
-        };
-        let store = crate::identity::nickname::NicknameStore::new(db);
-        if let Err(e) = store.put_record(&current) {
-            tracing::warn!(error = %e, "Failed to persist nickname");
-        }
-    });
+    // Persist OFF the loop (#90), the registry's current record — the insert
+    // above is what readers consult.
+    crate::identity::nickname::persist_off_the_loop(shared_state, record.node_id.clone());
     true
 }
 

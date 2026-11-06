@@ -2424,9 +2424,12 @@ described signed capability/shard records under per-node keys
 
 ## Identity & Nicknames
 
-- Ed25519-signed nickname records with timestamp-wins conflict resolution
-- Timestamp freshness check: rejects records older than 1 hour or >5min in future
-- GossipSub topic `swarm/identity` for network-wide propagation
+- Ed25519-signed nickname records with timestamp-wins conflict resolution; a new record is stamped after
+  the computer's previous one (`new_signed`'s `after`)
+- `NicknameRecordExt::verify` is the one check: the name (`validate_nickname`), at most 24 h old and
+  5 min ahead (#416), the signature
+- GossipSub topic `swarm/identity` for a rename; a newcomer is sent the name at Identify
+  (`own_record_for_a_newcomer`, #417); an anonymous owner's record stays on disk, out of the registry
 - Collision handling: `nickname#ab12` suffix from node ID prefix
 - redb tables: `"nicknames"`, `"identity_prefs"`
 

@@ -1357,11 +1357,23 @@ impl SharedState {
         let mut model_registry = ModelRegistry::load_from_db(&db).unwrap_or_default();
         model_registry.set_local_node_id(identity.node_id().clone());
 
-        // Hydrate nickname registry from DB
+        // Hydrate nickname registry from DB. This computer's own record only
+        // while its owner shows the name: an anonymous owner's record stays on
+        // disk (it orders the next rename's stamp) but is not this computer's
+        // name here, nor what a newcomer is sent (#417).
         let nickname_registry = DashMap::new();
         let nick_store = crate::identity::nickname::NicknameStore::new(db.clone());
+        let own_name_shown = nick_store.get_prefs().is_ok_and(|p| {
+            matches!(
+                p.visibility,
+                crate::identity::nickname::VisibilityMode::Nickname
+            )
+        });
         if let Ok(records) = nick_store.load_all() {
             for record in records {
+                if &record.node_id == identity.node_id() && !own_name_shown {
+                    continue;
+                }
                 nickname_registry.insert(record.node_id.clone(), record);
             }
         }
