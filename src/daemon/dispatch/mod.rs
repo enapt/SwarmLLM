@@ -536,14 +536,108 @@ use swarmllm_types::MAX_SHARDS_PER_ANNOUNCE;
 /// tops out at ~120 blocks per 8K prompt; 1024 leaves headroom for larger
 /// contexts without unbounded growth.
 const MAX_BLOCKS_PER_ANNOUNCE: usize = 1024;
-/// Maximum age (s) for nickname gossip before rejection. Paired with
-/// `GOSSIP_SKEW_MS` for the future-side check — kept in seconds because
-/// nickname records carry `chrono::DateTime<Utc>` (not the `u64`-ms epoch
-/// the other gossip helpers use). One-sided per gotcha #44.
-const NICK_GOSSIP_MAX_AGE_SECS: i64 = 24 * 60 * 60;
-/// Future-side skew tolerance (s) for nickname gossip. Same value as
-/// `GOSSIP_SKEW_MS` but in seconds to match the i64-seconds age math.
-const NICK_GOSSIP_SKEW_SECS: i64 = 30;
+/// Take a peer's nickname record if it may be taken, and say whether it was:
+/// sent by the computer it names (`authenticated_sender`), passing its own
+/// [`NicknameRecordExt::verify`] — the ONE check of its stamp (at most 24 h old,
+/// at most 5 min ahead, one-sided per gotcha #44) and of its signature — with
+/// room in the registry, and newer than the record held for that computer.
+///
+/// #416: this arm used to check the stamp a second time in front of `verify`,
+/// at 30 s ahead, so a computer whose clock ran half a minute fast — an ordinary
+/// home computer between its weekly time syncs — had its name shown to nobody.
+/// A record stamped ahead outlasts only its OWN computer's later records: the
+/// newest wins per computer, and a name two computers share is told apart by
+/// `identity::nickname::display_name`'s suffix, so 5 min ahead squats nothing.
+fn take_nickname_gossip(
+    shared_state: &Arc<SharedState>,
+    authenticated_sender: Option<&crate::types::NodeId>,
+    record: &crate::types::NicknameRecord,
+) -> bool {
+    // SEC: Verify gossip sender matches the record's node_id.
+    // Prevents peers from injecting nicknames for other nodes.
+    match authenticated_sender {
+        Some(sender) if sender != &record.node_id => {
+            tracing::warn!(
+                sender = %sender,
+                claimed = %record.node_id,
+                "Nickname gossip rejected: sender mismatch"
+            );
+            return false;
+        }
+        Some(_) => {}
+        None => {
+            tracing::debug!("Dropping unauthenticated NicknameGossip");
+            return false;
+        }
+    }
+    if let Err(e) = record.verify() {
+        if matches!(e, crate::error::SwarmError::InvalidSignature) {
+            tracing::warn!(
+                node_id = %record.node_id,
+                "Rejecting nickname gossip with invalid signature"
+            );
+        } else {
+            tracing::debug!(
+                node_id = %record.node_id,
+                stamp = %record.timestamp,
+                error = %e,
+                "Rejecting nickname gossip"
+            );
+        }
+        return false;
+    }
+    // SEC: Only accept nicknames from peers we've seen to prevent
+    // Sybil memory exhaustion via pre-generated Ed25519 keypairs.
+    // Hard cap as secondary defense.
+    if !shared_state.peer_registry.contains_key(&record.node_id)
+        && !shared_state.nickname_registry.contains_key(&record.node_id)
+        && shared_state.nickname_registry.len() >= MAX_NICKNAME_REGISTRY
+    {
+        tracing::debug!(
+            node_id = %record.node_id,
+            "Rejecting nickname from unknown peer (registry cap)"
+        );
+        return false;
+    }
+    // Timestamp-wins: only update if newer
+    let should_insert = match shared_state.nickname_registry.get(&record.node_id) {
+        Some(existing) => record.timestamp > existing.timestamp,
+        None => true,
+    };
+    if !should_insert {
+        return false;
+    }
+    tracing::info!(
+        node_id = %record.node_id,
+        nickname = %record.nickname,
+        "Accepted nickname from peer"
+    );
+    shared_state
+        .nickname_registry
+        .insert(record.node_id.clone(), record.clone());
+    // Persist OFF the loop — a redb write waits for any other writer, in the
+    // only consumer of `network_out` (#90). The registry insert above is what
+    // readers consult.
+    //
+    // What is written is the registry's CURRENT record for the node, read when
+    // the task runs — not the one this message carried. Two gossips for one
+    // node spawn two unordered blocking tasks, and the older record's task can
+    // run last; re-reading the registry (timestamp-wins, above) makes whichever
+    // runs last write the newest.
+    let db = shared_state.db.clone();
+    let registry = shared_state.clone();
+    let node_id = record.node_id.clone();
+    tokio::task::spawn_blocking(move || {
+        let Some(current) = registry.nickname_registry.get(&node_id).map(|r| r.clone()) else {
+            return;
+        };
+        let store = crate::identity::nickname::NicknameStore::new(db);
+        if let Err(e) = store.put_record(&current) {
+            tracing::warn!(error = %e, "Failed to persist nickname");
+        }
+    });
+    true
+}
 
 /// Generic one-sided staleness check (gotcha #44). Returns `true` when
 /// the timestamp is within `[now - max_age, now + skew]`; `false` (with a
@@ -2138,103 +2232,11 @@ pub(crate) async fn dispatch_network_messages(
                                     }
                                     // Nickname gossip from peers
                                     SwarmMessage::NicknameGossip(gossip) => {
-                                        let record = &gossip.record;
-                                        // SEC: Verify gossip sender matches the record's node_id.
-                                        // Prevents peers from injecting nicknames for other nodes.
-                                        if let Some(ref sender) = authenticated_sender {
-                                            if sender != &record.node_id {
-                                                tracing::warn!(
-                                                    sender = %sender,
-                                                    claimed = %record.node_id,
-                                                    "Nickname gossip rejected: sender mismatch"
-                                                );
-                                                continue;
-                                            }
-                                        } else {
-                                            tracing::debug!("Dropping unauthenticated NicknameGossip");
-                                            continue;
-                                        }
-                                        // Age check: one-sided per gotcha #44. Without the future-dated
-                                        // rejection, an attacker can pre-sign with `timestamp = now+23.9h`
-                                        // and the record will win the timestamp-tiebreaker for the next day,
-                                        // squatting any peer's nickname.
-                                        let age_secs = (chrono::Utc::now() - record.timestamp).num_seconds();
-                                        if age_secs < -NICK_GOSSIP_SKEW_SECS {
-                                            tracing::debug!(
-                                                node_id = %record.node_id,
-                                                age_secs,
-                                                "Rejecting future-dated nickname gossip"
-                                            );
-                                        } else if age_secs > NICK_GOSSIP_MAX_AGE_SECS {
-                                            tracing::debug!(
-                                                node_id = %record.node_id,
-                                                age_secs,
-                                                "Rejecting stale nickname gossip (>24h old)"
-                                            );
-                                        } else if record.verify().is_err() {
-                                            tracing::warn!(
-                                                node_id = %record.node_id,
-                                                "Rejecting nickname gossip with invalid signature"
-                                            );
-                                        } else {
-                                            // SEC: Only accept nicknames from peers we've seen to prevent
-                                            // Sybil memory exhaustion via pre-generated Ed25519 keypairs.
-                                            // Hard cap as secondary defense.
-                                            if !shared_state.peer_registry.contains_key(&record.node_id)
-                                                && !shared_state.nickname_registry.contains_key(&record.node_id)
-                                                && shared_state.nickname_registry.len() >= MAX_NICKNAME_REGISTRY
-                                            {
-                                                tracing::debug!(
-                                                    node_id = %record.node_id,
-                                                    "Rejecting nickname from unknown peer (registry cap)"
-                                                );
-                                                continue;
-                                            }
-                                            // Timestamp-wins: only update if newer
-                                            let should_insert = match shared_state
-                                                .nickname_registry
-                                                .get(&record.node_id)
-                                            {
-                                                Some(existing) => record.timestamp > existing.timestamp,
-                                                None => true,
-                                            };
-                                            if should_insert {
-                                                tracing::info!(
-                                                    node_id = %record.node_id,
-                                                    nickname = %record.nickname,
-                                                    "Accepted nickname from peer"
-                                                );
-                                                shared_state
-                                                    .nickname_registry
-                                                    .insert(record.node_id.clone(), record.clone());
-                                                // Persist OFF the loop — a redb write waits for
-                                                // any other writer, in the only consumer of
-                                                // `network_out` (#90). The registry insert above
-                                                // is what readers consult.
-                                                //
-                                                // What is written is the registry's CURRENT record
-                                                // for the node, read when the task runs — not the
-                                                // one this message carried. Two gossips for one
-                                                // node spawn two unordered blocking tasks, and the
-                                                // older record's task can run last; re-reading the
-                                                // registry (timestamp-wins, above) makes whichever
-                                                // runs last write the newest.
-                                                let db = shared_state.db.clone();
-                                                let registry = shared_state.clone();
-                                                let node_id = record.node_id.clone();
-                                                tokio::task::spawn_blocking(move || {
-                                                    let Some(current) =
-                                                        registry.nickname_registry.get(&node_id).map(|r| r.clone())
-                                                    else {
-                                                        return;
-                                                    };
-                                                    let store = crate::identity::nickname::NicknameStore::new(db);
-                                                    if let Err(e) = store.put_record(&current) {
-                                                        tracing::warn!(error = %e, "Failed to persist nickname");
-                                                    }
-                                                });
-                                            }
-                                        }
+                                        take_nickname_gossip(
+                                            shared_state,
+                                            authenticated_sender.as_ref(),
+                                            &gossip.record,
+                                        );
                                     }
                                     // Route pool messages to the PoolManager
                                     SwarmMessage::PoolMessage(pool_msg) => {
@@ -4182,5 +4184,78 @@ mod inbound_forward_slot_tests {
         );
         drop((held, theirs));
         assert!(streams.is_empty() && counts.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod nickname_clock_tests {
+    use super::*;
+    use crate::identity::Identity;
+    use crate::types::NicknameRecord;
+
+    fn test_state() -> Arc<SharedState> {
+        let (state, _, _) = SharedState::new(
+            crate::config::Config::default(),
+            Identity::generate(),
+            crate::storage::db::Database::open_temp().unwrap(),
+            Arc::new(tokio::sync::Mutex::new(
+                crate::inference::executor::ModelExecutor::new(),
+            )),
+            None,
+        );
+        state
+    }
+
+    /// A record `id` signed, stamped `ahead_secs` from now.
+    fn record_at(id: &Identity, ahead_secs: i64) -> NicknameRecord {
+        let timestamp = chrono::Utc::now() + chrono::Duration::seconds(ahead_secs);
+        let nickname = "fastclock".to_string();
+        let payload = NicknameRecord::signing_payload(id.node_id(), &nickname, &timestamp);
+        NicknameRecord {
+            node_id: id.node_id().clone(),
+            nickname,
+            timestamp,
+            signature: id.sign(&payload),
+        }
+    }
+
+    /// #416: a computer whose clock is a minute fast has its name taken — it was
+    /// refused at 30 s ahead — while one ten minutes ahead, one sent by another
+    /// computer, and one with a broken signature are still refused.
+    #[tokio::test]
+    async fn a_nickname_from_a_clock_a_minute_fast_is_taken_and_one_far_ahead_is_not() {
+        let state = test_state();
+
+        let fast = Identity::generate();
+        assert!(take_nickname_gossip(
+            &state,
+            Some(fast.node_id()),
+            &record_at(&fast, 60)
+        ));
+        assert!(state.nickname_registry.contains_key(fast.node_id()));
+
+        let far = Identity::generate();
+        assert!(!take_nickname_gossip(
+            &state,
+            Some(far.node_id()),
+            &record_at(&far, 600)
+        ));
+
+        let named = Identity::generate();
+        let other = Identity::generate();
+        assert!(!take_nickname_gossip(
+            &state,
+            Some(other.node_id()),
+            &record_at(&named, 0)
+        ));
+
+        let mut forged = record_at(&named, 0);
+        forged.nickname = "forged".into();
+        assert!(!take_nickname_gossip(
+            &state,
+            Some(named.node_id()),
+            &forged
+        ));
+        assert!(!state.nickname_registry.contains_key(named.node_id()));
     }
 }

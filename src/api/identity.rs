@@ -39,11 +39,32 @@ pub async fn set_nickname(
     State(state): State<AppState>,
     JsonBody(body): JsonBody<SetNicknameRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let record = NicknameRecord::new_signed(&state.shared_state.identity, body.nickname.clone())
-        .map_err(ApiError::from)?;
+    let store = NicknameStore::new(state.db.clone());
+    // The newest record this computer has stamped — in memory, or on disk when
+    // it went anonymous since — so the rename is stamped after it (#416).
+    let own_id = state.shared_state.identity.node_id();
+    let previous = store
+        .load_all()
+        .map_err(ApiError::from)?
+        .into_iter()
+        .filter(|r| &r.node_id == own_id)
+        .map(|r| r.timestamp)
+        .chain(
+            state
+                .shared_state
+                .nickname_registry
+                .get(own_id)
+                .map(|r| r.timestamp),
+        )
+        .max();
+    let record = NicknameRecord::new_signed(
+        &state.shared_state.identity,
+        body.nickname.clone(),
+        previous.as_ref(),
+    )
+    .map_err(ApiError::from)?;
 
     // Persist locally
-    let store = NicknameStore::new(state.db.clone());
     store.put_record(&record).map_err(ApiError::from)?;
 
     let visibility = body.visibility.unwrap_or(VisibilityMode::Nickname);

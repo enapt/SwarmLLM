@@ -368,7 +368,10 @@ Every node drops a `ShardAnnounce` past **`swarmllm_types::MAX_SHARDS_PER_ANNOUN
 
 ## A peer's clock may run minutes fast; gossip's gate allows 5 (2026-11-06, #416)
 
-**`network::manager::events::gossip_out_of_time`** gates timed gossip (health pings, parts lists, credit gossip): at most `GOSSIP_MAX_AGE_SECS` (300) old and `GOSSIP_AHEAD_SECS` (300) ahead — credit gossip the ledger's `CLOCK_SKEW_TOLERANCE_SECS` (30), which `verify_balance_report` enforces anyway — one-sided (gotcha #44). At 30 s ahead a computer a week's clock drift fast (a standalone Windows PC syncs weekly) had every message dropped by every peer. A kind joins the gate only if it is kept per sender; the other timed checks (pool, nicknames, demand gossip, relayed bodies) guard a replay memory or a shared slot and are weighed one by one (FUTURE_WORK #416) — never one shared constant raised for all. The owner is told at 20 s off GitHub's `Date` (+ `Age`) header by the release check (`update::note_clock`, `CLOCK_OFF_TELL_SECS`) — never by peers' stamps, which they could move.
+**`network::manager::events::gossip_out_of_time`** gates timed gossip (health pings, parts lists, credit gossip): at most `GOSSIP_MAX_AGE_SECS` (300) old and `GOSSIP_AHEAD_SECS` (300) ahead — credit gossip the ledger's `CLOCK_SKEW_TOLERANCE_SECS` (30), which `verify_balance_report` enforces anyway — one-sided (gotcha #44). At 30 s ahead a computer a week's clock drift fast (a standalone Windows PC syncs weekly) had every message dropped by every peer. A kind joins the gate only if it is kept per sender; the other timed checks (pool, nicknames, demand gossip, relayed bodies) guard a replay memory or a shared slot and are weighed one by one (FUTURE_WORK #416) — never one shared constant raised for all. The owner is told at 20 s off GitHub's `Date` (+ `Age`) header by the release check (`update::note_clock`, `CLOCK_OFF_TELL_SECS`) — never by peers' stamps, which they could move. A nickname's stamp is checked ONLY by
+`NicknameRecordExt::verify` (5 min ahead, 24 h old; `dispatch::take_nickname_gossip`) — never a second,
+tighter check in front of it; and a new record is stamped after the computer's previous one
+(`new_signed`'s REQUIRED `after`): a rename is sent once.
 
 → `docs/invariants/network.md` § "A peer's clock may run minutes fast"
 

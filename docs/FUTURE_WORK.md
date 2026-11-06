@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #417**). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #418**). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -73,10 +73,10 @@ the top track (`docs/plans/large_model_splits.md`).
    took 14 minutes to reset; the kernel is still unknown. Every planned run is done (memcheck clean
    over ~27 min on two boots, FECS shown with no SwarmLLM code at 48 h, the drafter-in-one-process
    change weighed and declined); nothing to run until the illegal access recurs.
-5. **#250** — a model held whole here, which the card holds only part of, can be routed through
-   far peers instead of answering locally. Its causes closed in v0.3.236 and v0.3.239; left: the
-   prompt priced on the processor prior for a card/processor split, and a far hop priced at
-   `net:0` (with #3). Passive: the next evidence is a field `predicted_terms` line.
+5. **#250** — LOWERED to P3 on 2026-11-06 (the entry): a model held whole here, which the card
+   holds only part of, routed through far peers. Its causes closed in v0.3.236 and v0.3.239, the
+   prompt has been priced per device since 2026-10-25, and the reported detour was prompt privacy
+   working as designed; a far hop at `net:0` is #3's. Passive: a field `predicted_terms` line.
 6. **#367 (d)** — a long chat alone on a card grows the card's memory until it runs out: a 14B on
    a tester's 12 GB card ran out after 5-7 min of one conversation in each of three field reports
    (2026-10-31, 11-03, 11-04) and then ran on the processor at a fifth of its speed. A second pool
@@ -610,7 +610,7 @@ frame, then add a receipt ACK or a per-frame read deadline mirroring request-res
 ### Routing and placement
 
 #### #250 — A model held whole here, which the card holds only part of, can be routed through peers at a fraction of local speed
-`P1` · routing · **PARTIAL** — 2026-10-12 · history: report #035 (a tester, RTX 3060 12 GB, v0.3.232-.234)
+`P3` · routing · **NARROWED** — 2026-11-06 (was P1 PARTIAL since 2026-10-12; every contributor named below is fixed or the setting working as designed, the prompt price since 10-25) · history: report #035 (a tester, RTX 3060 12 GB, v0.3.232-.234)
 
 Qwen3-30B-A3B Q4_K_M, every part held here, 18 of 48 layers on the card: a 2,728-token prompt
 was planned through two peers in Italy and Belgium (`predicted_ms=278167`, `cold:100339`,
@@ -656,7 +656,14 @@ answers in ~5 s. Several contributors (diagnosis rule 6). Each is a hypothesis u
   it: `a_peer_measured_on_one_model_is_unmeasured_for_another`.
 - **The prompt is priced on the processor prior** for a hybrid local route even with layers on the
   card, while #138 made a mixture-of-experts prompt 3.5-4.7× faster on both. (#129 points here:
-  this is the one place it is worked.)
+  this is the one place it is worked.) **Done since 2026-10-25** (re-read 2026-11-06, not updated
+  here then): `parallax::prefill_ms_per_layer`'s prior prices a range PER DEVICE
+  (`NodeCandidate::layers_by_device`: the card's layers at `PREFILL_SPEEDUP_GPU`, the rest at the
+  processor's `PREFILL_SPEEDUP_CPU`), and a measured prompt rate (`prompt_ms_per_layer_byte`) replaces
+  the prior once this node has read a long enough prompt; test
+  `a_range_split_across_card_and_processor_is_priced_per_device` ("A prompt reads at each device's own
+  rate"). Not modelled: a mixture-of-experts prompt's own ratio to its decode (the prior scales both
+  by `layer_work`) — the measured rate is what corrects it.
 - **An idle model held the card** (#249, closed): a 14B "idle 20m" still had 9.2 GB, which is what
   left the 30B 18 layers.
 - **The planner weighed a card reading the last admission had stored, and never weighed a fresh
@@ -697,8 +704,8 @@ alone under both prices, the same reply — no route moved. A far split of the 1
 could not be built on this machine (the peer holds 30 of its 48 layers: `SwarmShortOfMemory` in
 both arms). The v0.3.236 gate repeated both shapes on the released build (steps 12ax and 12bb),
 with the same plans and the same `layer_work`. Left: the report's own shape (a 12 GB card, peers
-abroad, a 2,728-token prompt) has not been reproduced, and the prompt-pricing bullet above is
-untouched.
+abroad, a 2,728-token prompt) has not been reproduced; the prompt-pricing bullet above has been
+done since 2026-10-25.
 **The detour's ROUTE is "start and finish on this computer" (2026-10-15, from report #036's
 `DIAG: pipeline candidate` lines, sent by the tester).** The re-plan offered `7c10ea04` holding all
 48 layers (est 7.27 tok/s, 349 ms) and `96842635` holding `[(19,27),(33,39),(42,43)]` (4.88, 303 ms),
@@ -717,8 +724,8 @@ why the rest went to a middle instead of to one peer whole. Not confirmed from t
 plaintext-prompt trust bar (`trusted_with_the_plaintext_prompt`), is not excluded by these lines.
 Dropping privacy because a route is slow was researched and rejected (`privacy_cost_ms`: a
 downgrade an adversary triggers by being slow, RFC 7507); the owner is told the cost instead (#165).
-So this detour is the setting working as designed. What stays open here: the prompt-pricing bullet,
-and whether #165's notice reached this owner (nothing in the report mentions it).
+So this detour is the setting working as designed. What stays open here: whether #165's notice
+reached this owner (nothing in the report mentions it) — the prompt-pricing bullet is done (above).
 
 #### #237 — A peer's room for a conversation is not advertised, and the hand-off counts the prompt only
 `P3` · routing · **OPEN** — 2026-10-08 · history: report #005 (a tester, v0.3.230 code); related #194
@@ -1196,6 +1203,21 @@ node's view, the parts under target whose ring owner holds nothing new over a da
 
 ### Network and transport
 
+#### #417 — A computer's name reaches only the computers connected when it was given
+`P3` · network · **OPEN** — 2026-11-07 · history: #416's nickname review
+
+A rename goes out once, on gossip (`api::identity::set_nickname`), and nothing sends it again; a
+peer refuses a record more than 24 h old (`NicknameRecordExt::verify`), so even a resend of the held
+record would be refused a day later. A computer that connects after the rename never learns the
+name and shows the node id. **Direction**: catch a newcomer up point to point at Identify, as the
+capability and the parts list are (`arch-network.md` § "Gossip says what CHANGED"; the kind joins
+`before_identify::is_a_catch_up`), with the record signed afresh — stamped after the previous one
+(`new_signed`'s `after`), which only the owner's key can do. It needs the visibility in MEMORY (the
+network loop never reads the disk), and one existing fault goes with it: `set_nickname` with
+anonymous visibility still stores the record and only removes it from the registry, and the next
+start fills the registry from the store — so a computer that chose anonymous shows its old name
+here after a restart, and a catch-up read from the registry would send it. Fix both together.
+
 #### #402 — A peer's capability can be played back by anyone, and the receiver installs it
 `P3` · network · **OPEN** — 2026-11-04 · history: the swarm-use security review (`docs/invariants/network.md` § "A computer that shares nothing may look at the swarm")
 
@@ -1639,18 +1661,26 @@ week — `SpecialPollInterval` 604,800 s, Microsoft KB 3205089 — and 20-50 ppm
 week; a WSL2 clock falls behind after the host sleeps). On 2026-11-06 a computer 33 s fast was heard
 by nobody: this node dropped all 150 of its health pings, parts lists and credit messages in its
 hour online. **Fixed for health pings and parts lists** (§ "Closed"): the network loop's gate takes
-them 5 min ahead. **Left, each on its own protection, so weighed one by one** (a security review
+them 5 min ahead; **and for nicknames** (§ "Closed"), checked only by the record's own `verify` (5 min).
+**Left, each on its own protection, so weighed one by one** (a security review
 each, CLAUDE.md's routing): credit gossip (the gate keeps the ledger's 30 s for it, since
 `verify_balance_report` refuses past that anyway; credits are dormant), pool notices
-(`credit::ledger::CLOCK_SKEW_TOLERANCE_SECS`,
-30 s — a fast pool member's join would be dropped by the owner, and `JoinResend` resends it until
-its window ends), nicknames (`NICK_GOSSIP_SKEW_SECS`, 30 s, timestamp-wins per node), demand gossip
+(`credit::ledger::CLOCK_SKEW_TOLERANCE_SECS`, 30 s, on credit forwards and removals, each behind a
+replay table — `TREE_POOL_FORWARDS` by id, `TREE_POOL_REMOVAL_REPLAYS` swept at 300 s — and a
+member-left notice's own `now + 30`; a widening must keep each table covering the whole window — a JOIN carries no
+sender stamp, only the invite's expiry, set and read on the owner's own clock: re-read 11-06), the
+owner's roster diffs (`pool/manager/gossip.rs::handle_pool_state_diff_gossip`, **5 s** ahead — but
+diffs are opt-in, `pool.state_diff_gossip` default off, and a member that drops one has the full
+state at the next periodic broadcast, ≤ `gossip_interval_secs` 600 s: a delay, P4; diffs are
+owner-signed and generation-ordered, so widening it is safe when someone needs it), demand gossip
 (`GOSSIP_SKEW_MS`, 30 s, gotcha #73's cross-sender slot) and relayed messages
 (`relay_seal::RELAYED_SKEW_MS`, 60 s, behind `RelayReplayGuard`, whose memory a wider window
 lengthens). **The owner is now told** (§ "Closed"): the release check reads GitHub's `Date` header
 and the dashboard says so at 20 s off, which helps against every receiver, older releases included.
-A node with update checks off reads no clock and is told nothing. **Next**: each check above,
-starting with the pool's.
+A node with update checks off reads no clock and is told nothing. **Next**: none is cheap now —
+demand gossip needs its shared slot keyed per sender first (gotcha #73), relayed messages a replay
+memory as long as the wider window, pool notices each replay table checked against it; the owner's
+warning covers all three meanwhile.
 
 ### Speed on one computer
 
@@ -4668,7 +4698,25 @@ Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
 
-**Closed 2026-11-06, unreleased** (#416's gossip half and owner warning, #415, #414, #413, #388)
+**Closed 2026-11-06, unreleased** (#416's nicknames)
+- #416 (nicknames) — **A computer whose clock ran half a minute fast had its name shown to nobody.**
+  The message loop checked a nickname record's stamp at 30 s ahead in front of the record's own
+  `verify`, which allows 5 min (and 24 h old). The loop now asks only `verify`
+  (`daemon::dispatch::take_nickname_gossip`, the arm's whole decision): one check of the stamp, in
+  the type. 5 min ahead squats nothing — the newest record wins per computer, and a name two
+  computers share is told apart by `display_name`'s suffix — and replay was already bounded by the
+  24 h. A stamp out of range is a debug line now, a bad signature still a warning. Prior art: MIT
+  Kerberos's 300 s `clockskew`. Test
+  `a_nickname_from_a_clock_a_minute_fast_is_taken_and_one_far_ahead_is_not`, red at the old 30 s.
+  **And a rename is stamped after the computer's previous record** (the review's finding: a rename
+  is sent once, so one stamped earlier than the name peers hold — a clock set back by a time sync
+  inside the 5 min — was dropped everywhere): `NicknameRecordExt::new_signed`'s REQUIRED `after`,
+  which `set_nickname` fills with the newest own stamp in memory or on disk; a previous stamp past
+  the 5 min every peer refuses orders nothing. Prior art: libp2p's routing records (RFC 0003 — `seq`
+  MUST increase, a receiver takes only a greater one, the clock MAY be the `seq`). Test
+  `a_rename_is_stamped_after_the_previous_record_even_when_the_clock_went_back`, red without it.
+
+**Closed 2026-11-06, in v0.3.276-alpha (tagged 17:10Z 11-06; published once signed)** (#416's gossip half and owner warning, #415, #414, #413, #388)
 - #416 (gossip half) — **Gossip from a computer whose clock runs a little fast was dropped by every
   peer.** The network loop's gate on health pings, parts lists and credit gossip took a message at
   most 30 s ahead of the receiver's clock; `773a3e85` (33 s fast) had all 150 of its messages dropped

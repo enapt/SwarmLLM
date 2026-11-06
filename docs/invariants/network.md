@@ -7176,6 +7176,20 @@ anything. Bitcoin Core reads its outbound peers' median offset for the same warn
 computers and could be moved by them. A node with update checks off reads nothing. Test
 `a_clock_off_githubs_is_read_from_the_date_header_and_told_once`.
 
+**Nicknames: one check of the stamp, in the type** (2026-11-06). The message loop checked a nickname
+record at 30 s ahead in front of `NicknameRecordExt::verify`, which allows 5 min ahead and 24 h old —
+two checks of one field (gotcha #1055), the tighter one hiding a fast computer's name from everyone.
+`daemon::dispatch::take_nickname_gossip` asks only `verify`. Safe for the same reason as the gate:
+the newest record wins PER computer, and two computers sharing a name are told apart by
+`identity::nickname::display_name`'s suffix, so a stamp ahead outlasts only its own computer's later
+records. Test `a_nickname_from_a_clock_a_minute_fast_is_taken_and_one_far_ahead_is_not`. The review
+found the other half: a rename is sent ONCE, so one stamped earlier than the record peers hold (the
+clock set back by a time sync, inside the window) was dropped everywhere, not delayed. A new record is
+stamped after the computer's previous one — `NicknameRecordExt::new_signed`'s REQUIRED `after`, the
+newest own stamp in memory or on disk; one past the 5 min orders nothing, every peer refused it —
+libp2p's rule for routing records (RFC 0003: `seq` MUST increase; the clock MAY be it). Test
+`a_rename_is_stamped_after_the_previous_record_even_when_the_clock_went_back`.
+
 **What a change must keep.** Both bounds explicit and one-sided; a kind joins this gate only if it is
 kept per sender; test `gossip_from_a_clock_a_minute_fast_is_heard_and_one_far_off_is_not` (33, 60
 and 300 s ahead heard; 301 s ahead, an hour ahead and 301 s old dropped) fails at the old 30 s.

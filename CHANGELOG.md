@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+**The name you give your computer is shown to the others even when its clock runs a little fast**
+(#416). It was ignored by every other computer once your clock ran more than 30 seconds fast; it
+is now accepted up to 5 minutes ahead, like the rest of what a computer tells the others since
+v0.3.276. A new name is also stamped after the previous one, so renaming right after Windows set
+the clock back is no longer lost.
+
 ## [0.3.276-alpha] — 2026-11-07
 
 **A computer that has just started hears what each computer it connects to holds, at once.** When

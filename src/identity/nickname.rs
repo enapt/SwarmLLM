@@ -22,9 +22,15 @@ pub trait NicknameRecordExt {
     fn new_signed(
         identity: &crate::identity::Identity,
         nickname: String,
+        after: Option<&chrono::DateTime<chrono::Utc>>,
     ) -> Result<NicknameRecord, SwarmError>;
     fn verify(&self) -> Result<(), SwarmError>;
 }
+
+/// How far ahead of the reader's clock a record's stamp may be
+/// ([`NicknameRecordExt::verify`]): a home computer's clock runs this far fast
+/// between its time syncs (#416).
+const NICKNAME_MAX_AHEAD_MINUTES: i64 = 5;
 
 impl NicknameRecordExt for NicknameRecord {
     /// Build the signing payload: `"swarmllm-nickname|{hex_node_id}|{nickname}|{timestamp}"`
@@ -43,12 +49,33 @@ impl NicknameRecordExt for NicknameRecord {
     }
 
     /// Create a new signed nickname record using the node's identity.
+    ///
+    /// `after` is the stamp of this computer's previous record, where it has
+    /// one: the new record is stamped later than it, whatever the clock says
+    /// now. Peers keep only the newest record per computer and a rename is
+    /// sent once, so a clock stepped back by a time sync would stamp a rename
+    /// older than the name peers hold, and peers would drop it (#416's review).
+    /// A previous stamp further ahead than [`NICKNAME_MAX_AHEAD_MINUTES`] was
+    /// refused by every peer, so it orders nothing and is not followed.
+    /// Prior art: libp2p's routing records (specs RFC 0003) — `seq` MUST
+    /// increase with every new record, a receiver takes only a greater one,
+    /// and a sender MAY use the clock for it so nothing is kept across restarts.
     fn new_signed(
         identity: &crate::identity::Identity,
         nickname: String,
+        after: Option<&chrono::DateTime<chrono::Utc>>,
     ) -> Result<NicknameRecord, SwarmError> {
         validate_nickname(&nickname)?;
-        let timestamp = chrono::Utc::now();
+        let now = chrono::Utc::now();
+        let timestamp = match after {
+            Some(previous)
+                if *previous >= now
+                    && *previous <= now + chrono::Duration::minutes(NICKNAME_MAX_AHEAD_MINUTES) =>
+            {
+                *previous + chrono::Duration::milliseconds(1)
+            }
+            _ => now,
+        };
         let payload = Self::signing_payload(identity.node_id(), &nickname, &timestamp);
         let signature = identity.sign(&payload);
         tracing::debug!(
@@ -80,7 +107,9 @@ impl NicknameRecordExt for NicknameRecord {
                 "Nickname record is stale (older than 24 hours)".into(),
             ));
         }
-        if self.timestamp > chrono::Utc::now() + chrono::Duration::minutes(5) {
+        if self.timestamp
+            > chrono::Utc::now() + chrono::Duration::minutes(NICKNAME_MAX_AHEAD_MINUTES)
+        {
             return Err(SwarmError::InvalidNickname(
                 "Nickname record has future timestamp".into(),
             ));
@@ -253,14 +282,35 @@ mod tests {
     #[test]
     fn sign_and_verify_record() {
         let id = Identity::generate();
-        let record = NicknameRecord::new_signed(&id, "alice".into()).unwrap();
+        let record = NicknameRecord::new_signed(&id, "alice".into(), None).unwrap();
         assert!(record.verify().is_ok());
+    }
+
+    /// #416's review: a rename after a clock stepped back is stamped later than
+    /// the name peers hold, and still verifies; a previous stamp past what any
+    /// peer took orders nothing.
+    #[test]
+    fn a_rename_is_stamped_after_the_previous_record_even_when_the_clock_went_back() {
+        let id = Identity::generate();
+        let held = chrono::Utc::now() + chrono::Duration::minutes(2);
+        let renamed = NicknameRecord::new_signed(&id, "bob".into(), Some(&held)).unwrap();
+        assert!(renamed.timestamp > held);
+        assert!(renamed.verify().is_ok());
+
+        let older = chrono::Utc::now() - chrono::Duration::minutes(2);
+        let renamed = NicknameRecord::new_signed(&id, "bob".into(), Some(&older)).unwrap();
+        assert!(renamed.timestamp > older + chrono::Duration::minutes(1));
+
+        let refused_by_all = chrono::Utc::now() + chrono::Duration::minutes(10);
+        let renamed = NicknameRecord::new_signed(&id, "bob".into(), Some(&refused_by_all)).unwrap();
+        assert!(renamed.timestamp < refused_by_all);
+        assert!(renamed.verify().is_ok());
     }
 
     #[test]
     fn tampered_record_fails_verify() {
         let id = Identity::generate();
-        let mut record = NicknameRecord::new_signed(&id, "alice".into()).unwrap();
+        let mut record = NicknameRecord::new_signed(&id, "alice".into(), None).unwrap();
         record.nickname = "bob".into(); // tamper
         assert!(record.verify().is_err());
     }
@@ -269,7 +319,7 @@ mod tests {
     fn wrong_signer_fails_verify() {
         let id1 = Identity::generate();
         let id2 = Identity::generate();
-        let mut record = NicknameRecord::new_signed(&id1, "alice".into()).unwrap();
+        let mut record = NicknameRecord::new_signed(&id1, "alice".into(), None).unwrap();
         record.node_id = id2.node_id().clone(); // wrong identity
         assert!(record.verify().is_err());
     }
@@ -286,7 +336,7 @@ mod tests {
     fn display_name_no_collision() {
         let id = Identity::generate();
         let registry = dashmap::DashMap::new();
-        let record = NicknameRecord::new_signed(&id, "alice".into()).unwrap();
+        let record = NicknameRecord::new_signed(&id, "alice".into(), None).unwrap();
         registry.insert(id.node_id().clone(), record);
         assert_eq!(display_name(id.node_id(), &registry), "alice");
     }
@@ -297,8 +347,8 @@ mod tests {
         let id2 = Identity::generate();
         let registry = dashmap::DashMap::new();
 
-        let r1 = NicknameRecord::new_signed(&id1, "alice".into()).unwrap();
-        let mut r2 = NicknameRecord::new_signed(&id2, "alice".into()).unwrap();
+        let r1 = NicknameRecord::new_signed(&id1, "alice".into(), None).unwrap();
+        let mut r2 = NicknameRecord::new_signed(&id2, "alice".into(), None).unwrap();
         // Force same nickname for collision test
         r2.nickname = "alice".into();
 
@@ -321,7 +371,7 @@ mod tests {
         let store = NicknameStore::new(db);
 
         let id = Identity::generate();
-        let record = NicknameRecord::new_signed(&id, "bob".into()).unwrap();
+        let record = NicknameRecord::new_signed(&id, "bob".into(), None).unwrap();
         store.put_record(&record).unwrap();
 
         let all = store.load_all().unwrap();
@@ -335,7 +385,7 @@ mod tests {
         let store = NicknameStore::new(db);
 
         let id = Identity::generate();
-        let record = NicknameRecord::new_signed(&id, "charlie".into()).unwrap();
+        let record = NicknameRecord::new_signed(&id, "charlie".into(), None).unwrap();
         store.put_record(&record).unwrap();
         store.remove_record(id.node_id()).unwrap();
 
