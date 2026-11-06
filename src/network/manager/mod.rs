@@ -25,6 +25,7 @@ mod commands;
 mod connections;
 mod dht;
 mod events;
+pub(crate) use events::GOSSIP_AHEAD_SECS;
 mod hop_forwards;
 /// Shared with `network::peer_cache` so the advertise path and the cache path
 /// apply one reachability predicate rather than two that can drift.

@@ -2159,47 +2159,59 @@ pub(crate) async fn dispatch_network_messages(
                                             observed_latencies = cap.observed_latencies.len(),
                                             "Received capability update from peer"
                                         );
-                                        // Merge the sender's observed-latency snapshot into
-                                        // our local EMA before installing the capability (so
-                                        // the snapshot doesn't have to survive the clone).
-                                        // Trust-weighted: weight = sender's trust score; a
-                                        // zero-trust sender is a no-op. Own-node observations
-                                        // are skipped — we already have direct samples.
-                                        let sender_trust = shared_state
+                                        // A frame older than the capability held —
+                                        // an older version, or this version built
+                                        // earlier — is a recording played back,
+                                        // not news (`swarm_use`, #402): nothing in
+                                        // it is used, its latency readings either.
+                                        let played_back = shared_state
                                             .peer_registry
                                             .get(&cap.node_id)
-                                            .map(|p| p.trust_score)
-                                            .unwrap_or(0.5);
-                                        let own_id = shared_state.identity.node_id();
-                                        for obs in &cap.observed_latencies {
-                                            if &obs.peer == own_id || obs.peer == cap.node_id {
-                                                continue;
-                                            }
-                                            shared_state.merge_peer_segment_latency(
-                                                &obs.peer,
-                                                obs.ms_per_layer,
-                                                obs.layer_work,
-                                                sender_trust,
+                                            .is_some_and(|p| {
+                                                !crate::daemon::state::swarm_use::capability_may_replace(
+                                                    p.capability.as_ref(),
+                                                    &cap,
+                                                    transport,
+                                                )
+                                            });
+                                        if played_back {
+                                            tracing::debug!(
+                                                peer = %cap.node_id,
+                                                replayed = %cap.version,
+                                                issued_at_ms = cap.issued_at_ms,
+                                                "A capability older than the one held was not installed"
                                             );
-                                        }
-                                        if let Some(mut peer) = shared_state.peer_registry.get_mut(&cap.node_id) {
-                                            // A frame naming an older version than
-                                            // the one installed is a recording played
-                                            // back, not news (`swarm_use`).
-                                            if crate::daemon::state::swarm_use::capability_may_replace(
-                                                peer.capability.as_ref(),
-                                                &cap,
-                                            ) {
+                                        } else {
+                                            // Merge the sender's observed-latency snapshot into
+                                            // our local EMA before installing the capability (so
+                                            // the snapshot doesn't have to survive the clone).
+                                            // Trust-weighted: weight = sender's trust score; a
+                                            // zero-trust sender is a no-op. Own-node observations
+                                            // are skipped — we already have direct samples.
+                                            let sender_trust = shared_state
+                                                .peer_registry
+                                                .get(&cap.node_id)
+                                                .map(|p| p.trust_score)
+                                                .unwrap_or(0.5);
+                                            let own_id = shared_state.identity.node_id();
+                                            for obs in &cap.observed_latencies {
+                                                if &obs.peer == own_id || obs.peer == cap.node_id {
+                                                    continue;
+                                                }
+                                                shared_state.merge_peer_segment_latency(
+                                                    &obs.peer,
+                                                    obs.ms_per_layer,
+                                                    obs.layer_work,
+                                                    sender_trust,
+                                                );
+                                            }
+                                            if let Some(mut peer) =
+                                                shared_state.peer_registry.get_mut(&cap.node_id)
+                                            {
                                                 peer.capability = Some(
                                                     crate::api::admin::capability_as_kept(cap.clone()),
                                                 );
                                                 peer.last_seen = chrono::Utc::now();
-                                            } else {
-                                                tracing::debug!(
-                                                    peer = %cap.node_id,
-                                                    replayed = %cap.version,
-                                                    "A capability naming an older version than the one held was not installed"
-                                                );
                                             }
                                         }
                                         // A newer version on enough peers brings

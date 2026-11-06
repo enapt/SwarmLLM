@@ -1918,6 +1918,7 @@ mod tests {
         parts: u32,
     ) -> crate::types::PeerInfo {
         let capability = crate::types::NodeCapability {
+            issued_at_ms: 0,
             coord: None,
             node_id: node.clone(),
             gpu: None,

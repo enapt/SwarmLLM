@@ -725,6 +725,7 @@ mod tests {
                 node_id: peer.clone(),
                 addresses: vec!["/ip4/203.0.113.7/udp/8800/quic-v1".into()],
                 capability: Some(NodeCapability {
+                    issued_at_ms: 0,
                     coord: None,
                     node_id: peer.clone(),
                     gpu: None,

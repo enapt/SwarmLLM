@@ -66,8 +66,9 @@ const GOSSIP_MAX_AGE_SECS: u64 = 300;
 /// removed adjusting the clock by them). The other timed checks — pool notices,
 /// nicknames, demand gossip (30 s) and relayed messages (60 s) — each sit on a
 /// replay memory or a slot shared between senders and are weighed one by one
-/// (`docs/FUTURE_WORK.md` #416).
-const GOSSIP_AHEAD_SECS: u64 = 300;
+/// (`docs/FUTURE_WORK.md` #416). A peer's capability stamp is kept no further
+/// ahead than this (`swarm_use::issued_at_as_kept`, #402).
+pub(crate) const GOSSIP_AHEAD_SECS: u64 = 300;
 
 /// Is this gossip message's own timestamp outside what is accepted — older than
 /// [`GOSSIP_MAX_AGE_SECS`] or further ahead of `now_secs` than its kind allows
@@ -838,53 +839,6 @@ impl NetworkManager {
             )) => {
                 use libp2p::kad::QueryResult;
                 match result {
-                    QueryResult::GetRecord(Ok(libp2p::kad::GetRecordOk::FoundRecord(
-                        peer_record,
-                    ))) => {
-                        // Verify Ed25519 signature on DHT records before trusting
-                        match crate::network::discovery::verify_dht_value(&peer_record.record.value)
-                        {
-                            Ok((pubkey, payload)) => {
-                                tracing::debug!(
-                                    key = ?peer_record.record.key,
-                                    signer = %hex::encode(&pubkey[..8]),
-                                    payload_len = payload.len(),
-                                    "DHT record verified"
-                                );
-                                // Process verified payload: deserialize NodeCapability
-                                // and update peer registry with the advertised capabilities.
-                                let key_bytes = peer_record.record.key.as_ref();
-                                let key_str = String::from_utf8_lossy(key_bytes);
-                                if key_str.starts_with("/swarm/node/") {
-                                    if let Ok(cap) = serde_json::from_slice::<
-                                        crate::types::NodeCapability,
-                                    >(payload)
-                                    {
-                                        let node_id = crate::types::NodeId(pubkey);
-                                        if let Some(mut entry) =
-                                            self.shared_state.peer_registry.get_mut(&node_id)
-                                        {
-                                            // A record left from before the peer
-                                            // updated never replaces what it now says.
-                                            if crate::daemon::state::swarm_use::capability_may_replace(
-                                                entry.capability.as_ref(),
-                                                &cap,
-                                            ) {
-                                                entry.capability =
-                                                    Some(crate::api::admin::capability_as_kept(cap));
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                            Err(_) => {
-                                tracing::warn!(
-                                    key = ?peer_record.record.key,
-                                    "DHT record failed signature verification — ignoring"
-                                );
-                            }
-                        }
-                    }
                     // S5: DHT provider query results — merge discovered holders
                     // into the bounded shard_holders cache.
                     QueryResult::GetProviders(Ok(

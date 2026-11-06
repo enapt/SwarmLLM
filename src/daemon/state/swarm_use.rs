@@ -24,8 +24,10 @@
 //! peer's old signed capability to get it refused. A capability naming an
 //! older version than the one installed is not installed
 //! ([`capability_may_replace`] — a node's version changes only across a
-//! restart, which drops its registry entry); fewer parts in a replayed one do
-//! not count while its announcements say more (freshness-checked gossip). Nor
+//! restart, which drops its registry entry) — nor one of the same version
+//! built earlier (`NodeCapability::issued_at_ms`, #402); fewer parts in a
+//! replayed one do not count while its announcements say more
+//! (freshness-checked gossip). Nor
 //! can a tag on the release page alone cut the swarm: an unsigned tag is not
 //! "newest", and a new minor version counts as one release, not as infinitely
 //! far ahead.
@@ -294,13 +296,43 @@ impl ReleasesKnown {
 /// a restart drops its registry entry (`network::manager::connections`), so
 /// within one entry's life an older version is a recorded frame played back —
 /// which, read by the swarm-use gate, would have every node refuse an honest
-/// peer (security review, 2026-11-04). Asked by every place a peer's
-/// capability is installed (gossip, the DHT record).
+/// peer (security review, 2026-11-04). A NEWER version always may. The SAME
+/// version over gossip may only when it was built LATER than the one held
+/// (`NodeCapability::issued_at_ms`): a replayed frame of this release carried
+/// old parts, residency and memory figures that misled routing until the
+/// peer's next change or quiet repeat, up to 40 min (#402) — and an equal stamp
+/// on gossip is the same frame again, which only a replay delivers (gossipsub
+/// drops a repeat it has seen). Sent DIRECT, it is the peer's own word — no
+/// third party can send it (the connection's peer is the sender, and the kind
+/// is never relayed) — so it may whatever its stamp: a peer whose clock was
+/// set back would otherwise be refused for as long as the step, and its
+/// catch-up at the next connection puts it right (#402's review). A node
+/// predating the stamp sends `0`, and two unstamped ones are taken as before.
+/// Asked where a peer's capability is installed (the dispatcher).
 pub(crate) fn capability_may_replace(
     held: Option<&crate::types::NodeCapability>,
     incoming: &crate::types::NodeCapability,
+    transport: crate::types::MessageTransport,
 ) -> bool {
-    version_may_replace(held.map(|held| held.version.as_str()), &incoming.version)
+    let Some(held) = held else {
+        return true;
+    };
+    if !version_may_replace(Some(held.version.as_str()), &incoming.version) {
+        return false;
+    }
+    crate::update::is_newer_version(&held.version, &incoming.version)
+        || transport == crate::types::MessageTransport::Direct
+        || (incoming.issued_at_ms == 0 && held.issued_at_ms == 0)
+        || incoming.issued_at_ms > held.issued_at_ms
+}
+
+/// The stamp a peer's capability is KEPT with: no later than this node's clock
+/// plus the gossip gate's [`GOSSIP_AHEAD_SECS`](crate::network::manager::GOSSIP_AHEAD_SECS).
+/// Kept as sent, a stamp from a clock an hour fast would refuse the same
+/// peer's every capability for that hour once its clock was corrected; held to
+/// 5 min ahead here, it refuses them for at most 5 min (#402).
+pub(crate) fn issued_at_as_kept(issued_at_ms: u64, now_ms: u64) -> u64 {
+    issued_at_ms.min(now_ms.saturating_add(crate::network::manager::GOSSIP_AHEAD_SECS * 1000))
 }
 
 /// [`capability_may_replace`] on the two versions.
@@ -894,6 +926,86 @@ mod tests {
         assert!(version_may_replace(held, "0.3.271-alpha"));
         assert!(version_may_replace(held, "0.3.272-alpha"));
         assert!(version_may_replace(None, "0.3.270-alpha"));
+    }
+
+    /// #402: a capability of the version held arriving on gossip is installed
+    /// only when it was built later than the held one — a replayed frame of
+    /// this release is not — while one sent direct (the peer's own word) and a
+    /// newer version always are, and two from a node predating the stamp (it
+    /// sends none: `0`) are taken as before.
+    #[test]
+    fn a_capability_built_before_the_one_held_never_replaces_it() {
+        let cap = |version: &str, issued_at_ms: Option<u64>| -> crate::types::NodeCapability {
+            let mut sent = serde_json::json!({
+                "node_id": vec![7u8; 32],
+                "ram_total_mb": 0,
+                "ram_available_mb": 0,
+                "disk_available_mb": 0,
+                "bandwidth_mbps": 0.0,
+                "hosted_shards": [],
+                "max_contribution": "Moderate",
+                "uptime_seconds": 0,
+                "version": version,
+            });
+            if let Some(at) = issued_at_ms {
+                sent["issued_at_ms"] = at.into();
+            }
+            serde_json::from_value(sent).expect("a capability as a peer sends it")
+        };
+        use crate::types::MessageTransport::{Direct, Gossip};
+        let held = cap("0.3.277-alpha", Some(2_000));
+        let may = |incoming| capability_may_replace(Some(&held), &incoming, Gossip);
+        assert!(!may(cap("0.3.277-alpha", Some(1_999))), "played back");
+        assert!(
+            !may(cap("0.3.277-alpha", Some(2_000))),
+            "the same frame again on gossip is a replay"
+        );
+        assert!(may(cap("0.3.277-alpha", Some(2_001))), "built later");
+        // The peer's own word, whatever its stamp — a clock set back (review).
+        assert!(capability_may_replace(
+            Some(&held),
+            &cap("0.3.277-alpha", Some(1_000)),
+            Direct
+        ));
+        assert!(
+            !capability_may_replace(Some(&held), &cap("0.3.276-alpha", Some(9_999)), Direct),
+            "an older version even direct"
+        );
+        assert!(
+            may(cap("0.3.278-alpha", Some(5))),
+            "a newer version, whatever its stamp"
+        );
+        assert!(
+            !may(cap("0.3.276-alpha", Some(9_999))),
+            "an older version, whatever its stamp"
+        );
+        assert!(
+            !may(cap("0.3.277-alpha", None)),
+            "this version always stamps"
+        );
+        let older_peer = cap("0.3.276-alpha", None);
+        assert_eq!(older_peer.issued_at_ms, 0);
+        assert!(
+            capability_may_replace(Some(&older_peer), &cap("0.3.276-alpha", None), Gossip),
+            "an older node's gossip is taken as before"
+        );
+        assert!(capability_may_replace(
+            None,
+            &cap("0.3.277-alpha", Some(1)),
+            Gossip
+        ));
+    }
+
+    /// #402: a stamp from a clock far ahead is kept at most the gossip gate's
+    /// 5 min past ours, so once that clock is set right the peer's next
+    /// capability is refused for at most 5 min, not for as long as it was fast.
+    #[test]
+    fn a_stamp_far_ahead_is_kept_at_most_five_minutes_past_our_clock() {
+        let now = 1_800_000_000_000u64;
+        assert_eq!(issued_at_as_kept(now - 60_000, now), now - 60_000);
+        assert_eq!(issued_at_as_kept(now + 60_000, now), now + 60_000);
+        assert_eq!(issued_at_as_kept(now + 3_600_000, now), now + 300_000);
+        assert_eq!(issued_at_as_kept(u64::MAX, u64::MAX - 1), u64::MAX);
     }
 
     #[test]

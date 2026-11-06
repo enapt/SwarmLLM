@@ -5850,12 +5850,32 @@ none; and a computer two releases behind should not be served either.
    carries no stamp, and gossip's freshness filter covers pings, part announcements and credit
    gossip only, so any member could republish a peer's frame from its first boot (no parts) or
    from before it updated. Now a capability naming an OLDER version than the one held is never
-   installed (`swarm_use::capability_may_replace`, at both installers — gossip and the DHT
-   record): a node's version changes only across a restart, and a restart drops its registry
+   installed (`swarm_use::capability_may_replace`, at the installer in the dispatcher): a
+   node's version changes only across a restart, and a restart drops its registry
    entry, so within one entry's life an older version is a recording. Parts are judged as the
    MORE of the capability's list and the parts its announcements credited it here
    (freshness-checked), so fewer parts in a replay do not count. Replay still degrades ROUTING
    as it did before (a stale `hosted_shards`) — FUTURE_WORK #402 stamps the capability.
+   **Stamped since 2026-11-07 (#402):** `NodeCapability::issued_at_ms` (the sender's clock when it
+   built the capability, `#[serde(default)]`, `0` from an older node) — a capability of the version
+   held arriving on GOSSIP is installed only when built LATER than the held one (an equal stamp is
+   the same frame again, which gossipsub never repeats — only a replay does; two unstamped ones are
+   taken as before), and a refused one's latency readings are not merged either. One sent DIRECT
+   is taken whatever its stamp: only the peer itself can send it (the connection's peer is the
+   sender; the kind is never relayed), and the security review found a peer whose clock was SET
+   BACK would otherwise be refused for as long as the step — its catch-up at the next connection
+   now puts it right, and its gossip is ordered from there. libp2p's rule for routing records (RFC 0003: a receiver takes
+   only a greater `seq`; the clock MAY be it, so nothing is kept across a restart — a restarted
+   node's capability is newer by its clock, where a boot counter would need the disk). Never news
+   (`capability_news` carries it over like uptime, or every round would broadcast). A stamp is
+   kept at most `GOSSIP_AHEAD_SECS` (5 min) past our clock (`swarm_use::issued_at_as_kept`, in
+   `capability_as_kept`): kept as sent, a clock an hour fast that was then set right would have its
+   computer's capabilities refused for that hour; for such a computer (> 5 min fast) replay is
+   ordered no better than before. The DHT installer went in the same change — no node ever wrote
+   a `/swarm/node/` record, so it never ran. Tests
+   `a_capability_built_before_the_one_held_never_replaces_it`,
+   `a_stamp_far_ahead_is_kept_at_most_five_minutes_past_our_clock`, and the stamp in
+   `an_idle_nodes_capability_is_not_news_round_after_round` — each red with its part off.
 2. *A tag on the release page decided "newest" before any signature was checked*, and a new
    minor version counted as infinitely far: a mistyped `v0.4.0` (or a hijacked publisher) would
    have had every node refuse itself and every peer. Now only a release whose signature verifies
@@ -7104,9 +7124,9 @@ records of a route's regions. Traced, most were harmless, because both sides of 
 were already upper-cased — but the scheduler scored a peer whose region was padded (` de `) or not
 a country (`asia`, `eu-west`) as a FAR country (0.2) where an unknown one is 0.7, and the relay
 copied the text whole into its records. Seven readers, one rule: the fix is the choke point, not
-seven calls. **`api::admin::capability_as_kept`** reads the region through `country_code` at both
-places a peer's capability is installed (gossip in `daemon::dispatch`, the DHT record in
-`network::manager::events`), so the registry holds two letters or nothing and every reader inherits
+seven calls. **`api::admin::capability_as_kept`** reads the region through `country_code` where a
+peer's capability is installed (`daemon::dispatch`; a DHT installer in `network::manager::events`
+went with #402 — nothing ever wrote the record), so the registry holds two letters or nothing and every reader inherits
 it — guard `every_peer_capability_is_installed_with_its_region_read_as_a_country` (with a planted
 self-test). This node's own region went the same way: `effective_region` / `effective_region_sync`
 read the BOOT snapshot's `identity.region` raw (a reload's change never applied, and `eu-west` was

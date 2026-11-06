@@ -139,6 +139,7 @@ pub(super) fn register_manifest_with_sized_shards(
 /// free — the two figures the shard manager judges a machine by.
 pub(super) fn capability(ceiling_mb: Option<u64>, disk_mb: u64) -> NodeCapability {
     NodeCapability {
+        issued_at_ms: 0,
         coord: None,
         node_id: NodeId([0u8; 32]),
         gpu: None,

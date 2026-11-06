@@ -1203,21 +1203,6 @@ node's view, the parts under target whose ring owner holds nothing new over a da
 
 ### Network and transport
 
-#### #402 — A peer's capability can be played back by anyone, and the receiver installs it
-`P3` · network · **OPEN** — 2026-11-04 · history: the swarm-use security review (`docs/invariants/network.md` § "A computer that shares nothing may look at the swarm")
-
-A `NodeCapabilityUpdate` is sealed by its sender but carries no stamp the receiver compares, and
-gossip's freshness filter (`network::manager::events`) covers health pings, part announcements and
-credit gossip only — so any member can republish a peer's old capability every ~90 s, and every
-node installs it. Since v0.3.271 that can no longer get the peer refused USE of the swarm (an older
-version is never installed, `swarm_use::capability_may_replace`; parts are read beside the
-freshness-checked announcements), but a replay of the SAME version with an older `hosted_shards`,
-`resident_layers` or memory figures still misleads routing until the peer's next change or its
-quiet repeat (5 → 40 min). **Direction** (the reviewer's): stamp the capability — wall-clock
-issue time, or boot id + sequence — and refuse one not newer than the installed one; additive
-(`#[serde(default)]`, an older peer's unstamped capability accepted as now). Mind a peer's clock:
-a stamp far ahead must not lock out its later updates.
-
 #### #155 — AutoNAT redials a peer this node is already connected to, and the per-peer cap denies it, every ~5 s
 `P3` · network · **PARTIAL** — 2026-10-02, narrowed 2026-10-07, recurred 2026-10-30/31, **cause found and fixed 2026-11-02** (field check left) · history: archive row #155, gotcha #774, #1020
 
@@ -4683,7 +4668,25 @@ Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
 
-**Closed 2026-11-06/07, unreleased** (#416's nicknames, #417)
+**Closed 2026-11-06/07, unreleased** (#416's nicknames, #417, #402)
+- #402 — **A peer's capability could be played back by anyone, and every node installed it.** A
+  capability is signed only as a gossip message, so any member could republish a recorded one;
+  since v0.3.271 an older VERSION was refused, but a replay of the same version put back old parts,
+  residency and memory figures (and re-merged its latency readings) until the peer's next change or
+  quiet repeat, up to 40 min. Now `NodeCapability::issued_at_ms` (the sender's clock when built,
+  `#[serde(default)]`, so an older node's `0` is taken as before) orders capabilities of one version:
+  `swarm_use::capability_may_replace` installs one from gossip only when built later than the held
+  one (one sent direct is the peer's own word and goes whatever its stamp — the security review: a
+  clock set back would otherwise freeze it for the step), and the dispatcher decides that BEFORE
+  anything in it is used. Never news (`capability_news` carries
+  it over). Kept at most 5 min past our clock (`issued_at_as_kept`, in `capability_as_kept`), so a
+  clock set right after running fast is refused for at most 5 min. The DHT installer went too:
+  nothing ever wrote a `/swarm/node/` record (ARCHITECTURE § DHT Records), so it never ran. Prior
+  art: libp2p's routing records (RFC 0003 — a receiver takes only a greater `seq`; the clock MAY be
+  it, so a restart needs no disk), which the entry's "boot id + sequence" option would have needed.
+  Tests `a_capability_built_before_the_one_held_never_replaces_it`,
+  `a_stamp_far_ahead_is_kept_at_most_five_minutes_past_our_clock`, the stamp in
+  `an_idle_nodes_capability_is_not_news_round_after_round` — each red with its part off.
 - #417 — **A computer's name reached only the computers connected when it was given.** A rename
   goes out once on gossip and a peer refuses a record more than 24 h old, so a computer that
   connected later showed our node id for good. Now a newcomer is sent the name point to point at

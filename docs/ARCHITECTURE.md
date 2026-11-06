@@ -510,7 +510,6 @@ libp2p Swarm
 ├── Kademlia (DHT) — PROVIDER records only (`network::discovery`); no node writes a value record
 │   ├── /swarm/provide/{model}/{index} → "I hold this shard" (`start_providing_shards`, `get_providers`)
 │   └── /swarm/relay-service/v1        → "I relay" (`start_providing_relay_service`)
-│   (a signed `/swarm/node/…` record found by a query is still verified and read — see § DHT Records)
 │
 ├── GossipSub (pub/sub, mesh_n/mesh_n_low/mesh_n_high/mesh_outbound_min auto-scale with the PEERS the node has met — distinct peers in its cache, not their addresses (#91): 2/1/4/1 at <10 peers up to 8/6/16/4 at 10k+;
 │   vendor/libp2p-gossipsub: our subscriptions are told again to a peer that connects beside an old connection and when
@@ -2416,9 +2415,9 @@ that peer trust (`ShardVerificationFail`).
 - Provider TTL: 12 hours, republication: 4 hours (#91 (2f); see Tier 2 above)
 - PeerId→NodeId via `peer_id_to_node_id()` in `transport.rs` (production); the reverse direction is test-only since libp2p derives PeerIds from keypairs directly
 
-`verify_dht_value()` in `src/network/discovery.rs` would check a
-`[32B pubkey][64B signature][payload]` value on a `GetRecord` result, but this
-build issues no `GetRecord` queries. (An earlier version of this section
+No `GetRecord` result is read either: the reader of signed `/swarm/node/…`
+capability records (and `verify_dht_value`) went on 2026-11-07 (#402) — nothing
+ever wrote one. (An earlier version of this section
 described signed capability/shard records under per-node keys
 `/swarm/shards/{model_id}/{node_id_hex}`; neither exists in the code.)
 

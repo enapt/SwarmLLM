@@ -76,7 +76,7 @@ The Kademlia DHT holds only **provider records** (`start_providing` / `get_provi
 - `start_providing_shards()` announces a shard key; it signs nothing
 - A provider record is only as trustworthy as the peer that announced it — which is why every shard fetched from a provider is BLAKE3-verified on arrival, and a failed check costs that peer 0.20 trust (`ShardVerificationFail`)
 - Provider records expire after 12 hours and are republished every 4 hours (since 0.3.243; they were 1 hour and 20 minutes)
-- `verify_dht_value()` would check `[32B pubkey][64B signature][payload]` values on a `GetRecord` result, but this build issues no `GetRecord` queries, so it never runs
+- No value records at all: nothing is written with `put_record` or read with `get_record` (a reader of signed capability records that nothing ever wrote went in 0.3.277)
 
 ## Identity
 

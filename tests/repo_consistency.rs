@@ -15036,9 +15036,10 @@ fn every_peer_capability_is_installed_with_its_region_read_as_a_country() {
         }
     }
     assert!(
-        installs >= 2,
-        "the scan found {installs} capability installers — gossip's and the DHT \
-         record's are two; the scanner no longer sees them"
+        installs >= 1,
+        "the scan found {installs} capability installers — the dispatcher's is one \
+         (the DHT record's went with #402: nothing ever wrote one); the scanner no \
+         longer sees it"
     );
     assert!(
         offenders.is_empty(),

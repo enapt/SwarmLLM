@@ -402,6 +402,8 @@ fn capability_news(
     let sent = as_sets(sent.clone());
     let mut now = as_sets(now.clone());
     now.uptime_seconds = sent.uptime_seconds;
+    // A new stamp every round orders capabilities; it says nothing new (#402).
+    now.issued_at_ms = sent.issued_at_ms;
     now.observed_latencies = sent.observed_latencies.clone();
     // Free RAM is the host's reading, so it moves with every other program on
     // the machine; on the two-node rig (2026-10-10) it was the only field that
@@ -1435,6 +1437,9 @@ impl HealthMonitor {
             crate::model::auto_manage::vram::node_machine_room_beside_card_mb(&self.shared_state);
 
         let cap = crate::types::NodeCapability {
+            // When this capability was built, so a replay of an older one is not
+            // installed over it (#402). Not news by itself (`capability_news`).
+            issued_at_ms: u64::try_from(chrono::Utc::now().timestamp_millis()).unwrap_or(0),
             // OS family only — see the field docs on why not a version string.
             os: Some(std::env::consts::OS.to_string()),
             // `None` until it has settled — see `network_coord_for_publication`.
@@ -3003,6 +3008,7 @@ pub(crate) mod tests {
     /// network manager's `cut_off_tests`).
     pub(crate) fn capability_for_test() -> crate::types::NodeCapability {
         crate::types::NodeCapability {
+            issued_at_ms: 0,
             coord: Some(swarmllm_types::netcoord::NetworkCoord {
                 x: 10.0,
                 y: -4.0,
@@ -3074,6 +3080,7 @@ pub(crate) mod tests {
         let sent = capability_for_test();
         let mut now = capability_for_test();
         now.uptime_seconds += 90;
+        now.issued_at_ms += 90_000; // a new stamp every round (#402)
         now.ram_available_mb -= 200;
         now.ram_model_budget_mb = Some(6_000 + 150);
         now.disk_available_mb -= 700;

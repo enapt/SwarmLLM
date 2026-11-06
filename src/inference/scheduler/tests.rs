@@ -1780,6 +1780,7 @@ fn assert_local_holds_the_first_segment(
 /// scenery, and it should be scenery that cannot fall over.
 fn slow_peer_capability(node: &NodeId) -> crate::types::NodeCapability {
     crate::types::NodeCapability {
+        issued_at_ms: 0,
         coord: None,
         node_id: node.clone(),
         cpu: None,
@@ -4361,6 +4362,7 @@ fn a_plan_reports_which_segments_have_no_standby_not_just_how_many_it_found() {
 /// A capability announcement carrying a card with `free_mb` free.
 fn capability_with_gpu(free_mb: Option<u64>) -> crate::types::NodeCapability {
     crate::types::NodeCapability {
+        issued_at_ms: 0,
         coord: None,
         node_id: NodeId([0u8; 32]),
         gpu: free_mb.map(|free| crate::types::GpuInfo {

@@ -771,6 +771,24 @@ pub struct NodeCapability {
     /// and `None` wherever it is.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub processor_tokens_per_sec_7b: Option<f32>,
+
+    /// When the node built this capability, in Unix milliseconds by ITS clock.
+    /// A capability is signed by its sender only as a gossip message, and any
+    /// peer can publish a recorded one again; a receiver holding a capability
+    /// of the same version stamped later keeps it (`swarm_use::
+    /// capability_may_replace`), so a replay cannot put back old parts,
+    /// residency or memory figures (FUTURE_WORK #402). Never news by itself
+    /// (`health::monitor::capability_news`), and only compared with the same
+    /// node's own stamps — never read as a time.
+    ///
+    /// Prior art: libp2p's routing records (specs RFC 0003) — `seq` MUST
+    /// increase with each new record, a receiver takes only one greater than
+    /// it holds, and the clock MAY be the `seq` so nothing is kept across
+    /// restarts.
+    ///
+    /// `0` from a node predating the field: unordered, taken as before.
+    #[serde(default)]
+    pub issued_at_ms: u64,
 }
 
 /// The serde default for [`NodeCapability::can_serve_inference`].
@@ -1212,6 +1230,7 @@ mod version_compat_tests {
 
         // A speed that is not a number a processor could run at states nothing.
         let mut card = NodeCapability {
+            issued_at_ms: 0,
             ram_model_budget_mb: None,
             ..cap
         };

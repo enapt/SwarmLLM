@@ -3420,6 +3420,7 @@ mod tests {
             node_id: node.clone(),
             addresses: vec![],
             capability: Some(NodeCapability {
+                issued_at_ms: 0,
                 coord: None,
                 node_id: node.clone(),
                 gpu: None,

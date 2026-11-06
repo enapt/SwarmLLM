@@ -43,14 +43,20 @@ pub(crate) fn country_code(region: Option<&str>) -> Option<String> {
 /// [`country_code`] as it ARRIVES, so every reader of the registry — the
 /// scheduler's region score, a route's regions, the relay's records — sees
 /// two letters or nothing, never the text a peer chose (#407's residual).
-/// Both installers call it (gossip in `daemon::dispatch`, the DHT record in
-/// `network::manager::events`); a new one does too. Normalised at the door,
+/// The installer calls it (gossip and the direct catch-up, `daemon::dispatch`);
+/// a new one does too. Normalised at the door,
 /// not by each reader: the scheduler read a padded or made-up region as a
-/// FAR country (0.2) instead of an unknown one (0.7).
+/// FAR country (0.2) instead of an unknown one (0.7). Its build stamp is kept
+/// no further ahead than this node's clock allows
+/// (`swarm_use::issued_at_as_kept`, #402).
 pub(crate) fn capability_as_kept(
     mut cap: crate::types::NodeCapability,
 ) -> crate::types::NodeCapability {
     cap.region = country_code(cap.region.as_deref());
+    cap.issued_at_ms = crate::daemon::state::swarm_use::issued_at_as_kept(
+        cap.issued_at_ms,
+        u64::try_from(chrono::Utc::now().timestamp_millis()).unwrap_or(0),
+    );
     cap
 }
 

@@ -14,6 +14,12 @@ string of letters and numbers. Each computer now tells a newly connected one its
 already tells it what it can run. A name that you hid (anonymous) stays hidden after a restart too,
 and a name another computer sends is checked like one you type (1-32 letters, digits, `-` or `_`).
 
+**An old copy of what a computer said about itself can no longer be passed off as new** (#402). Any
+computer in the swarm could send around an earlier copy of another computer's description — which
+model parts it holds, what it has loaded, how much memory it has free — and every computer took it,
+so requests could be planned on figures up to 40 minutes old. Each description now carries when it
+was made, and an older one than the one already held is ignored.
+
 ## [0.3.276-alpha] — 2026-11-07
 
 **A computer that has just started hears what each computer it connects to holds, at once.** When

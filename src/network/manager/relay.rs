@@ -1359,6 +1359,7 @@ mod tests {
     /// A capability, as a relayed origin's gossip installs into its entry.
     fn a_capability(node: &NodeId) -> crate::types::NodeCapability {
         crate::types::NodeCapability {
+            issued_at_ms: 0,
             coord: None,
             node_id: node.clone(),
             gpu: None,

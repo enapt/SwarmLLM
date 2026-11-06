@@ -164,24 +164,6 @@ pub fn subscribe_topics(
     Ok(())
 }
 
-/// Verify a signed DHT record value. Returns (node_id_bytes, payload) on success.
-pub fn verify_dht_value(signed: &[u8]) -> Result<([u8; 32], &[u8]), SwarmError> {
-    if signed.len() < 32 + 64 {
-        return Err(SwarmError::InvalidSignature);
-    }
-    let pubkey_bytes: [u8; 32] = signed[..32]
-        .try_into()
-        .map_err(|_| SwarmError::InvalidSignature)?;
-    let sig_bytes = &signed[32..96];
-    let payload = &signed[96..];
-
-    let vk = ed25519_dalek::VerifyingKey::from_bytes(&pubkey_bytes)
-        .map_err(|_| SwarmError::InvalidSignature)?;
-    crate::crypto::verify_ed25519_sig(sig_bytes, payload, &vk)?;
-
-    Ok((pubkey_bytes, payload))
-}
-
 /// Discovery interval for periodic peer discovery.
 pub const DISCOVERY_INTERVAL: Duration = Duration::from_secs(300);
 
