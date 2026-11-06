@@ -3075,7 +3075,12 @@ run again; and both forwards refuse an emptied entry before taking anything
 index it either. llama.cpp's `llama_context::decode` removes a failed ubatch's positions per
 sequence, and its recurrent memory refuses a partial rollback, the server failing the slot — the
 same two outcomes. Tests: `a_forward_refused_before_its_first_layer_gives_the_caches_back`,
-`a_forward_on_caches_a_failed_step_could_not_put_back_is_refused`. Nothing kept beside the live caches (WSL2 keeps them in host RAM) → no
+`a_forward_on_caches_a_failed_step_could_not_put_back_is_refused`. The second review of that fix found
+one more step after the layers and before the write-back: the output's move to the primary device, on a
+card/processor split a copy the card can refuse. It returned with `?`, dropping the lists (no panic —
+the entry read `None` — but no rerun and the conversation gone); it now runs inside the layers' closure,
+so it shares their put-back, as the batched path's `stepped` closure did. Unreachable on the processor
+and by the fault switch (it refuses only a first ask), so no red test. Nothing kept beside the live caches (WSL2 keeps them in host RAM) → no
 rerun. INFO "The graphics card ran out of memory in a forward; its saved prompts were let go and the
 forward run again" (`saved_prompts_let_go_mb`, `ran_again`, `first_error`).
 

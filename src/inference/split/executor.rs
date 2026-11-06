@@ -2032,7 +2032,11 @@ impl SplitModel {
                     hidden = (recording.at_layer_end)(layer_idx, hidden)?;
                 }
             }
-            Ok(hidden)
+            // Inside the closure: on a card/processor split this is a copy the
+            // card can refuse, after every layer has written its cache. Outside
+            // it, a refusal dropped the taken-out lists and emptied the entry
+            // (the batched path's `stepped` closure already did this).
+            self.output_on_primary_device(hidden)
         })();
         let hidden = match layers_run {
             Ok(hidden) => hidden,
@@ -2055,8 +2059,6 @@ impl SplitModel {
                 return Err(e);
             }
         };
-
-        let hidden = self.output_on_primary_device(hidden)?;
 
         // Write the updated KV-caches and SSM states back to the store.
         {
