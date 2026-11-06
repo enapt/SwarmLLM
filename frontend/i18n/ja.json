@@ -16,6 +16,8 @@
   "actions.saving": "保存中...",
   "actions.unlock": "ロック解除",
   "activity.card_slow_restart_windows": "グラフィックカードのメモリ確保が遅くなっています（{detail} 秒、通常は数ミリ秒）。Windows を再起動せずに長く使うほど悪化します。Windows を再起動すると、本来の速度と安定性が戻ります。",
+  "activity.clock_fast": "あなたのコンピューターの時計が {detail} 秒進んでいます。ずれが30秒を超えると、ほかのコンピューターがあなたのコンピューターからの情報の一部を無視することがあります。コンピューターの日付と時刻の設定で、時刻の自動設定をオンにしてください。",
+  "activity.clock_slow": "あなたのコンピューターの時計が {detail} 秒遅れています。ずれが30秒を超えると、あなたのコンピューターがほかのコンピューターからの情報の一部を無視することがあります。コンピューターの日付と時刻の設定で、時刻の自動設定をオンにしてください。",
   "activity.config_updated": "設定が更新されました",
   "activity.connected": "SwarmLLM に接続しました",
   "activity.count": "{count} 件のイベント",

@@ -37,6 +37,70 @@ const RELAY_RETRY_MIN_SECS: u64 = 20;
 /// Ten seconds already loses every comparison against a healthy peer.
 const ACK_SRTT_ROUTING_CAP_MS: f64 = 10_000.0;
 
+/// How old a timed gossip message may be when it arrives (NET-M10).
+const GOSSIP_MAX_AGE_SECS: u64 = 300;
+
+/// How far AHEAD of this computer's clock a timed gossip message may be
+/// stamped (#416). It was 30 s, which a home computer's clock passes between
+/// two of its time syncs: a standalone Windows PC sets its clock once a week
+/// (`SpecialPollInterval` 604,800 s, Microsoft KB 3205089), and a clock off by
+/// 20-50 parts per million drifts 12-30 s in that week. Past it EVERY peer
+/// dropped what that computer gossiped — a computer 33 s fast had all 150 of
+/// its health pings, parts lists and credit messages dropped here in its hour
+/// online (2026-11-06), so the swarm never heard its parts change.
+///
+/// Health pings and parts lists are each kept per SENDER (a holder's own record,
+/// its own health), and nothing reads their stamps past this gate, so a message
+/// stamped ahead can win no slot another sender holds (gotcha #73's squat needs
+/// one); only an author whose own clock is ahead gains replay life by it — the
+/// honest case this lets in. Gotcha #44 still holds: the bound is one-sided and
+/// explicit, never `.abs()`. Credit gossip keeps the ledger's own bound
+/// ([`crate::credit::ledger::CLOCK_SKEW_TOLERANCE_SECS`], which signed credit
+/// messages and pool notices share, gotcha #82): `verify_balance_report` refuses
+/// past it anyway, with a warning for each message, so it is dropped here as
+/// quietly as before. Credits are dormant; widening that bound is #416's residual.
+///
+/// Prior art: MIT Kerberos accepts 300 s of skew by default (`clockskew`);
+/// Bitcoin Core accepts a block stamped up to 2 h ahead and reads its peers'
+/// clock offsets only to WARN its owner (`node/timeoffsets.cpp`, PR #28956
+/// removed adjusting the clock by them). The other timed checks — pool notices,
+/// nicknames, demand gossip (30 s) and relayed messages (60 s) — each sit on a
+/// replay memory or a slot shared between senders and are weighed one by one
+/// (`docs/FUTURE_WORK.md` #416).
+const GOSSIP_AHEAD_SECS: u64 = 300;
+
+/// Is this gossip message's own timestamp outside what is accepted — older than
+/// [`GOSSIP_MAX_AGE_SECS`] or further ahead of `now_secs` than its kind allows
+/// ([`GOSSIP_AHEAD_SECS`]; credit gossip the ledger's bound)? Kinds that carry
+/// no timestamp are never out of time here.
+fn gossip_out_of_time(msg: &SwarmMessage, now_secs: u64) -> bool {
+    let fresh = |ts: u64, ahead_secs: u64, kind: &'static str| {
+        crate::daemon::dispatch::timestamp_fresh_one_sided(
+            ts,
+            now_secs,
+            GOSSIP_MAX_AGE_SECS,
+            ahead_secs,
+            kind,
+        )
+    };
+    match msg {
+        SwarmMessage::HealthPing { timestamp, .. } | SwarmMessage::HealthPong { timestamp, .. } => {
+            !fresh(*timestamp, GOSSIP_AHEAD_SECS, "gossip_health")
+        }
+        SwarmMessage::ShardAnnounce(ann) => !fresh(
+            ann.timestamp.timestamp() as u64,
+            GOSSIP_AHEAD_SECS,
+            "gossip_shard_announce",
+        ),
+        SwarmMessage::CreditGossip(gossip) => !fresh(
+            gossip.timestamp.timestamp() as u64,
+            crate::credit::ledger::CLOCK_SKEW_TOLERANCE_SECS.unsigned_abs(),
+            "gossip_credit",
+        ),
+        _ => false,
+    }
+}
+
 impl NetworkManager {
     pub(super) async fn handle_swarm_event(&mut self, event: SwarmEvent<SwarmBehaviourEvent>) {
         tracing::debug!(event_type = %swarm_event_name(&event), "DIAG: processing swarm event");
@@ -99,39 +163,13 @@ impl NetworkManager {
                             .metrics
                             .gossip_by_kind
                             .note_recv(msg.kind_name(), message.data.len());
-                        // NET-M10: Reject gossip messages with timestamps older than 5 minutes
-                        // or more than 30s in the future. Routed through the centralised
-                        // one-sided helper (gotcha #44) so the .abs()-style replay-window
-                        // doubling can't sneak back in.
-                        let now_secs = chrono::Utc::now().timestamp() as u64;
-                        const SKEW_TOLERANCE_SECS: u64 = 30;
-                        const MAX_AGE_SECS: u64 = 300;
-                        let fresh = |ts: u64, kind: &'static str| -> bool {
-                            crate::daemon::dispatch::timestamp_fresh_one_sided(
-                                ts,
-                                now_secs,
-                                MAX_AGE_SECS,
-                                SKEW_TOLERANCE_SECS,
-                                kind,
-                            )
-                        };
-                        let too_old = match &msg {
-                            SwarmMessage::HealthPing { timestamp, .. }
-                            | SwarmMessage::HealthPong { timestamp, .. } => {
-                                !fresh(*timestamp, "gossip_health")
-                            }
-                            SwarmMessage::ShardAnnounce(ann) => {
-                                !fresh(ann.timestamp.timestamp() as u64, "gossip_shard_announce")
-                            }
-                            SwarmMessage::CreditGossip(gossip) => {
-                                !fresh(gossip.timestamp.timestamp() as u64, "gossip_credit")
-                            }
-                            _ => false,
-                        };
+                        let too_old =
+                            gossip_out_of_time(&msg, chrono::Utc::now().timestamp() as u64);
                         if too_old {
                             tracing::debug!(
                                 source = %propagation_source,
-                                "Dropping stale gossip message (>5 min old)"
+                                sender = %sender_node_id,
+                                "Dropping gossip stamped more than 5 min from this computer's clock"
                             );
                         } else {
                             tracing::debug!(
@@ -1720,5 +1758,78 @@ mod listen_filter_tests {
         ];
         let list = build_reachable_multiaddr_list(candidates.into_iter(), pid);
         assert_eq!(list.len(), 1);
+    }
+}
+
+#[cfg(test)]
+mod gossip_clock_tests {
+    use super::*;
+
+    fn ping_at(timestamp: u64) -> SwarmMessage {
+        SwarmMessage::HealthPing {
+            nonce: 1,
+            timestamp,
+            node_id: Some(crate::types::NodeId([7u8; 32])),
+            active_request_count: 0,
+        }
+    }
+
+    fn parts_list_at(secs: i64) -> SwarmMessage {
+        let mut announce = crate::model::manifest::shard_announce(
+            &crate::model::registry::ModelRegistry::new(),
+            crate::types::NodeId([7u8; 32]),
+            vec![],
+            vec![],
+        );
+        announce.timestamp = chrono::DateTime::from_timestamp(secs, 0).unwrap();
+        SwarmMessage::ShardAnnounce(announce)
+    }
+
+    /// #416: a computer whose clock is a week's drift fast (33 s, measured on
+    /// the live swarm) is heard — its parts list and its health ping alike —
+    /// while one stamped past the bound, either way, is still dropped.
+    #[test]
+    fn gossip_from_a_clock_a_minute_fast_is_heard_and_one_far_off_is_not() {
+        let now: u64 = 1_793_967_820;
+        for ahead in [0, 33, 60, GOSSIP_AHEAD_SECS] {
+            assert!(
+                !gossip_out_of_time(&ping_at(now + ahead), now),
+                "{ahead} s ahead"
+            );
+            assert!(
+                !gossip_out_of_time(&parts_list_at((now + ahead) as i64), now),
+                "a parts list {ahead} s ahead"
+            );
+        }
+        assert!(gossip_out_of_time(
+            &ping_at(now + GOSSIP_AHEAD_SECS + 1),
+            now
+        ));
+        assert!(gossip_out_of_time(
+            &parts_list_at((now + 3_600) as i64),
+            now
+        ));
+        assert!(!gossip_out_of_time(
+            &ping_at(now - GOSSIP_MAX_AGE_SECS),
+            now
+        ));
+        assert!(gossip_out_of_time(
+            &ping_at(now - GOSSIP_MAX_AGE_SECS - 1),
+            now
+        ));
+
+        // Credit gossip keeps the ledger's bound, which refuses past it anyway
+        // (with a warning per message) — so it is still dropped quietly here.
+        let credit_at = |secs: u64| {
+            SwarmMessage::CreditGossip(crate::types::CreditGossip {
+                node_id: crate::types::NodeId([7u8; 32]),
+                balance_bucket: 0,
+                timestamp: chrono::DateTime::from_timestamp(secs as i64, 0).unwrap(),
+                signature: vec![1],
+            })
+        };
+        let ledger_ahead = crate::credit::ledger::CLOCK_SKEW_TOLERANCE_SECS.unsigned_abs();
+        assert!(!gossip_out_of_time(&credit_at(now + ledger_ahead), now));
+        assert!(gossip_out_of_time(&credit_at(now + 33), now));
     }
 }

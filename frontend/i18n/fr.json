@@ -16,6 +16,8 @@
   "actions.saving": "Enregistrement...",
   "actions.unlock": "Déverrouiller",
   "activity.card_slow_restart_windows": "Votre carte graphique met de plus en plus de temps à réserver de la mémoire ({detail} s, contre quelques millièmes de seconde normalement). Cela s'aggrave tant que Windows tourne sans redémarrage. Redémarrez Windows pour retrouver toute la vitesse et la stabilité.",
+  "activity.clock_fast": "L'horloge de votre ordinateur avance de {detail} secondes. Quand elle s'écarte de plus d'une demi-minute, les autres ordinateurs peuvent ignorer une partie de ce que le vôtre leur dit. Activez le réglage automatique de l'heure dans les paramètres de date et d'heure de votre ordinateur.",
+  "activity.clock_slow": "L'horloge de votre ordinateur retarde de {detail} secondes. Quand elle s'écarte de plus d'une demi-minute, votre ordinateur peut ignorer une partie de ce que les autres ordinateurs lui disent. Activez le réglage automatique de l'heure dans les paramètres de date et d'heure de votre ordinateur.",
   "activity.config_updated": "Configuration mise à jour",
   "activity.connected": "Connecté à SwarmLLM",
   "activity.count": "{count} événements",

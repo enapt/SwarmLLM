@@ -16,6 +16,8 @@
   "actions.saving": "Wird gespeichert...",
   "actions.unlock": "Entsperren",
   "activity.card_slow_restart_windows": "Ihre Grafikkarte braucht inzwischen lange, um Speicher bereitzustellen ({detail} s, normalerweise wenige Tausendstelsekunden). Das nimmt zu, je länger Windows ohne Neustart läuft. Starten Sie Windows neu, um die volle Geschwindigkeit und Stabilität zurückzubekommen.",
+  "activity.clock_fast": "Die Uhr Ihres Computers geht {detail} Sekunden vor. Weicht sie um mehr als eine halbe Minute ab, können andere Computer einen Teil dessen ignorieren, was Ihr Computer ihnen mitteilt. Schalten Sie in den Datums- und Uhrzeiteinstellungen Ihres Computers die automatische Uhrzeit ein.",
+  "activity.clock_slow": "Die Uhr Ihres Computers geht {detail} Sekunden nach. Weicht sie um mehr als eine halbe Minute ab, kann Ihr Computer einen Teil dessen ignorieren, was andere Computer ihm mitteilen. Schalten Sie in den Datums- und Uhrzeiteinstellungen Ihres Computers die automatische Uhrzeit ein.",
   "activity.config_updated": "Konfiguration aktualisiert",
   "activity.connected": "Mit SwarmLLM verbunden",
   "activity.count": "{count} Ereignisse",

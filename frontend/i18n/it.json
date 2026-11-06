@@ -16,6 +16,8 @@
   "actions.saving": "Salvataggio...",
   "actions.unlock": "Sblocca",
   "activity.card_slow_restart_windows": "La scheda grafica è diventata lenta nel riservare memoria ({detail} s, di norma pochi millesimi di secondo). Il rallentamento cresce quanto più a lungo Windows resta acceso senza riavvio. Riavvia Windows per ripristinare piena velocità e stabilità.",
+  "activity.clock_fast": "L'orologio del tuo computer è avanti di {detail} secondi. Quando si discosta di più di mezzo minuto, gli altri computer possono ignorare parte di ciò che il tuo comunica loro. Attiva l'ora automatica nelle impostazioni di data e ora del tuo computer.",
+  "activity.clock_slow": "L'orologio del tuo computer è indietro di {detail} secondi. Quando si discosta di più di mezzo minuto, il tuo computer può ignorare parte di ciò che gli altri computer gli comunicano. Attiva l'ora automatica nelle impostazioni di data e ora del tuo computer.",
   "activity.config_updated": "Configurazione aggiornata",
   "activity.connected": "Connesso a SwarmLLM",
   "activity.count": "{count} eventi",

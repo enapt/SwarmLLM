@@ -16,6 +16,8 @@
   "actions.saving": "Guardando...",
   "actions.unlock": "Desbloquear",
   "activity.card_slow_restart_windows": "Tu tarjeta gráfica tarda cada vez más en reservar memoria ({detail} s; lo normal son unas milésimas de segundo). Esto se acumula cuanto más tiempo lleva Windows encendido sin reiniciarse. Reinicia Windows para recuperar toda la velocidad y la estabilidad.",
+  "activity.clock_fast": "El reloj de tu ordenador va {detail} segundos adelantado. Cuando se desvía más de medio minuto, otros ordenadores pueden ignorar parte de lo que el tuyo les dice. Activa la hora automática en los ajustes de fecha y hora de tu ordenador.",
+  "activity.clock_slow": "El reloj de tu ordenador va {detail} segundos atrasado. Cuando se desvía más de medio minuto, tu ordenador puede ignorar parte de lo que otros ordenadores le dicen. Activa la hora automática en los ajustes de fecha y hora de tu ordenador.",
   "activity.config_updated": "Configuración actualizada",
   "activity.connected": "Conectado a SwarmLLM",
   "activity.count": "{count} eventos",

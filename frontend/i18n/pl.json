@@ -16,6 +16,8 @@
   "actions.saving": "Zapisywanie...",
   "actions.unlock": "Odblokuj",
   "activity.card_slow_restart_windows": "Karta graficzna zaczęła wolno przydzielać pamięć ({detail} s, zwykle kilka tysięcznych sekundy). Narasta to, im dłużej Windows działa bez ponownego uruchomienia. Uruchom Windows ponownie, aby przywrócić pełną szybkość i stabilność.",
+  "activity.clock_fast": "Zegar Twojego komputera spieszy się o {detail} s. Gdy różnica przekracza pół minuty, inne komputery mogą ignorować część tego, co przekazuje im Twój. Włącz automatyczne ustawianie czasu w ustawieniach daty i godziny komputera.",
+  "activity.clock_slow": "Zegar Twojego komputera spóźnia się o {detail} s. Gdy różnica przekracza pół minuty, Twój komputer może ignorować część tego, co przekazują mu inne komputery. Włącz automatyczne ustawianie czasu w ustawieniach daty i godziny komputera.",
   "activity.config_updated": "Konfiguracja zaktualizowana",
   "activity.connected": "Połączono ze SwarmLLM",
   "activity.count": "{count} zdarzeń",

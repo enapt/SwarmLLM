@@ -16,6 +16,8 @@
   "actions.saving": "Menyimpan...",
   "actions.unlock": "Buka kunci",
   "activity.card_slow_restart_windows": "Kartu grafis Anda menjadi lambat saat menyediakan memori ({detail} dtk, biasanya hanya beberapa milidetik). Ini makin parah semakin lama Windows berjalan tanpa dimulai ulang. Mulai ulang Windows untuk mengembalikan kecepatan penuh dan kestabilan.",
+  "activity.clock_fast": "Jam komputer Anda lebih cepat {detail} detik. Jika selisihnya lebih dari setengah menit, komputer lain dapat mengabaikan sebagian dari apa yang dikirim komputer Anda. Aktifkan waktu otomatis di pengaturan tanggal dan waktu komputer Anda.",
+  "activity.clock_slow": "Jam komputer Anda lebih lambat {detail} detik. Jika selisihnya lebih dari setengah menit, komputer Anda dapat mengabaikan sebagian dari apa yang dikirim komputer lain. Aktifkan waktu otomatis di pengaturan tanggal dan waktu komputer Anda.",
   "activity.config_updated": "Konfigurasi diperbarui",
   "activity.connected": "Terhubung ke SwarmLLM",
   "activity.count": "{count} peristiwa",

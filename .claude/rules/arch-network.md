@@ -366,6 +366,12 @@ Every node drops a `ShardAnnounce` past **`swarmllm_types::MAX_SHARDS_PER_ANNOUN
 
 → `docs/invariants/network.md` § "A parts list longer than a receiver takes goes in pieces"
 
+## A peer's clock may run minutes fast; gossip's gate allows 5 (2026-11-06, #416)
+
+**`network::manager::events::gossip_out_of_time`** gates timed gossip (health pings, parts lists, credit gossip): at most `GOSSIP_MAX_AGE_SECS` (300) old and `GOSSIP_AHEAD_SECS` (300) ahead — credit gossip the ledger's `CLOCK_SKEW_TOLERANCE_SECS` (30), which `verify_balance_report` enforces anyway — one-sided (gotcha #44). At 30 s ahead a computer a week's clock drift fast (a standalone Windows PC syncs weekly) had every message dropped by every peer. A kind joins the gate only if it is kept per sender; the other timed checks (pool, nicknames, demand gossip, relayed bodies) guard a replay memory or a shared slot and are weighed one by one (FUTURE_WORK #416) — never one shared constant raised for all. The owner is told at 20 s off GitHub's `Date` (+ `Age`) header by the release check (`update::note_clock`, `CLOCK_OFF_TELL_SECS`) — never by peers' stamps, which they could move.
+
+→ `docs/invariants/network.md` § "A peer's clock may run minutes fast"
+
 ## A peer that reconnects beside an old connection is told our subscriptions again (2026-11-05)
 
 Gossip runs on the VENDORED `libp2p-gossipsub` 0.49.5 (`vendor/libp2p-gossipsub`, `[patch.crates-io]`): **`Behaviour::send_our_subscriptions`** re-sends every topic we subscribe to when a connection opens beside another (`other_established > 0`) AND when one closes beside a live one — a peer's connections share ONE send queue, so the copy queued while a dead connection's handler ran can be lost into it. Upstream tells only the first connection; since 0.49.5 a node drops a GRAFT for a topic the peer never SUBSCRIBEd to, so a computer that restarted before our old connection timed out never heard us and its gossip reached nobody holding one — an updated AU node's capability (location, memory, residency) stayed at its first second on every peer for hours. Never drop the patch on a re-vendor; guard `gossip_runs_on_the_vendored_copy_that_tells_a_reconnected_peer_our_subscriptions`; the crate's own test runs in CI `vendored.yml`. A peer whose `uptime_seconds` does not advance between two reads is the symptom. **And a node closes every connection before it restarts into an update or stops** (`NetworkManager::close_every_connection`, #407): `exec` closes nothing, and a QUIC peer holds the dead connection until its idle timeout.

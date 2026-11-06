@@ -7123,3 +7123,59 @@ connection at once in BOTH arms (B logged `ApplicationClosed` 0.0 s after A's SI
 of `run` already let quinn close; main also logged `Closed this node's connections … still_open=0 closing=AtStop`. The
 rig cannot run an update's `exec`, the path the close was added for; the unit tests
 (`a_restart_closes_every_connection_before_it_execs`, red without the close) are its evidence.
+
+## A peer's clock may run minutes fast; gossip's gate allows 5 (2026-11-06, #416)
+
+**The rule.** The network loop's gate on timed gossip — health pings and pongs, parts lists, credit
+gossip — is **`network::manager::events::gossip_out_of_time`**: a message at most
+`GOSSIP_MAX_AGE_SECS` (300) old and at most `GOSSIP_AHEAD_SECS` (300) ahead of this computer's clock
+— credit gossip at most the ledger's `CLOCK_SKEW_TOLERANCE_SECS` (30) ahead, because
+`verify_balance_report` refuses past that anyway, with a warning per message — each bound explicit
+and one-sided (gotcha #44, never `.abs()`). Other kinds pass this gate untimed.
+
+**What it replaced, and what it cost.** The ahead bound was 30 s, inline in the gossip arm. On
+2026-11-06 this node logged 150 `Dropping future-dated gossip` lines (125 health, 13 credit, 12 parts
+lists), every one 32-33 s ahead, from 12:23:40Z to 13:25Z — exactly the hour `773a3e85`
+(2.89.46.208) was connected (12:23:41 → 13:25:53, `TimedOut`). This node's clock was right to the
+second (three HTTPS `Date` headers, `timedatectl`: synchronized), so that computer ran 33 s fast,
+and every peer dropped everything it gossiped: its parts list was heard only in the catch-up sent
+point to point at connect, never a change after.
+
+**Why 30 s was too tight.** A standalone Windows PC sets its clock once a week by default
+(`SpecialPollInterval` 604,800 s, Microsoft KB 3205089); a quartz clock off by 20-50 ppm drifts
+12-30 s in that week, so an ordinary home computer reaches 30 s before its next sync. A WSL2 clock
+falls behind after the host sleeps (a slow receiver drops everyone's gossip the same way).
+**Prior art:** MIT Kerberos accepts 300 s of skew by default (`clockskew`); Bitcoin Core accepts a
+block stamped up to 2 h ahead and reads its peers' clock offsets only to warn its owner
+(`node/timeoffsets.cpp`; PR #28956 removed adjusting the clock by them).
+
+**Why widening it here is safe, and why the others are not widened with it.** (Reviewed 11-06 by the
+security reviewer: no exploitable path. Nothing reads a ping's or a parts list's stamp past this gate,
+and the same kinds arriving over request-response were never timed at all, so the bound only ever
+limited how long a captured gossip frame can be replayed by a third party: the author's stamp + 300 s,
+longer only for an author whose own clock is ahead.) The three kinds are
+each kept PER SENDER (a holder's own record, its own health and credit), so a message stamped ahead
+can win no slot another sender holds — gotcha #73's squat needs a slot shared between senders — and
+only a sender whose own clock is ahead gains replay life by it (an honest computer's message is
+still dropped 300 s after it was stamped). No replay memory is sized by this window. The other timed
+checks each guard something else: pool notices (`credit::ledger::CLOCK_SKEW_TOLERANCE_SECS`, 30 s,
+signed replay window), nicknames (30 s, timestamp-wins per node), demand gossip (`GOSSIP_SKEW_MS`,
+30 s, the cross-sender slot of gotcha #73) and relayed bodies (`relay_seal::RELAYED_SKEW_MS`, 60 s,
+`RelayReplayGuard`, whose memory a wider window lengthens). Each is weighed on its own
+(`docs/FUTURE_WORK.md` #416), never by raising one shared constant.
+
+**The owner is told, from one reading no peer can move.** The release check reads its HTTPS answer's
+`Date` header (plus `Age`, RFC 9111 § 4.2.3, so a cached answer is not read as a fast clock) against
+the request's MIDPOINT, and skips an answer that took over 5 s (`update::clock_ahead_over_trip`,
+NTP's midpoint and long-delay discard — read at arrival, a slow answer read a correct clock fast):
+20 s or more off (`update::CLOCK_OFF_TELL_SECS`) puts `activity.clock_fast` / `activity.clock_slow`
+on the dashboard, once each time the clock goes off (`update::clock_news`, `UpdateChecker::note_clock`).
+20, not 30, so the owner hears before the 30 s checks above — and older releases' gossip gate — drop
+anything. Bitcoin Core reads its outbound peers' median offset for the same warning
+(`node/timeoffsets.cpp`; PR #28956 made it warn-only); peers' stamps here would need five connected
+computers and could be moved by them. A node with update checks off reads nothing. Test
+`a_clock_off_githubs_is_read_from_the_date_header_and_told_once`.
+
+**What a change must keep.** Both bounds explicit and one-sided; a kind joins this gate only if it is
+kept per sender; test `gossip_from_a_clock_a_minute_fast_is_heard_and_one_far_off_is_not` (33, 60
+and 300 s ahead heard; 301 s ahead, an hour ahead and 301 s old dropped) fails at the old 30 s.

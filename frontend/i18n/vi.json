@@ -16,6 +16,8 @@
   "actions.saving": "Đang lưu...",
   "actions.unlock": "Mở khóa",
   "activity.card_slow_restart_windows": "Card đồ họa của bạn đã trở nên chậm khi cấp phát bộ nhớ ({detail} giây, bình thường chỉ vài phần nghìn giây). Tình trạng này tăng dần khi Windows chạy lâu mà không khởi động lại. Hãy khởi động lại Windows để lấy lại tốc độ và độ ổn định.",
+  "activity.clock_fast": "Đồng hồ của máy bạn đang nhanh {detail} giây. Khi lệch quá nửa phút, các máy khác có thể bỏ qua một phần những gì máy bạn gửi cho chúng. Hãy bật chế độ đặt giờ tự động trong phần cài đặt ngày và giờ của máy.",
+  "activity.clock_slow": "Đồng hồ của máy bạn đang chậm {detail} giây. Khi lệch quá nửa phút, máy bạn có thể bỏ qua một phần những gì các máy khác gửi cho nó. Hãy bật chế độ đặt giờ tự động trong phần cài đặt ngày và giờ của máy.",
   "activity.config_updated": "Cấu hình đã được cập nhật",
   "activity.connected": "Đã kết nối tới SwarmLLM",
   "activity.count": "{count} sự kiện",

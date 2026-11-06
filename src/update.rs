@@ -60,6 +60,86 @@ static UPDATE_DOWNLOAD_CLIENT: std::sync::LazyLock<reqwest::Client> =
         })
     });
 
+/// How far this computer's clock may be from GitHub's, either way, before its
+/// owner is told (#416). A peer drops a pool notice stamped more than 30 s ahead
+/// of its own clock, and peers on v0.3.275 and older drop gossip past 30 s too:
+/// told at 20, the owner can set the clock before either. A `Date` header is
+/// whole seconds and the reading includes the request's own trip, so a reading
+/// is good to a second or two.
+///
+/// Prior art: Bitcoin Core tells its owner when the clock is out of sync and
+/// changes nothing (`node/timeoffsets.cpp`: the median of outbound peers'
+/// offsets; PR #28956 stopped adjusting the clock by it); `htpdate` reads time
+/// from HTTP `Date` headers. Here the one reading is GitHub's answer over HTTPS
+/// — no peer can move it — and only where updates are checked at all.
+const CLOCK_OFF_TELL_SECS: i64 = 20;
+
+/// How many seconds this computer's clock is AHEAD of the server that answered,
+/// from its `Date` header (`now` read as the answer arrived) — negative when it
+/// runs slow; `None` when the header is missing or unreadable. A cache that
+/// answered from its copy says how old the copy is in `Age`, and the server's
+/// time now is `Date` plus that (RFC 9111 § 4.2.3) — without it, a correct
+/// clock behind such a cache would read as fast.
+fn clock_ahead_of(
+    headers: &reqwest::header::HeaderMap,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Option<i64> {
+    let date = headers.get(reqwest::header::DATE)?.to_str().ok()?;
+    let server = chrono::DateTime::parse_from_rfc2822(date).ok()?;
+    let age = headers
+        .get(reqwest::header::AGE)
+        .and_then(|v| v.to_str().ok()?.trim().parse::<u32>().ok())
+        .unwrap_or(0);
+    Some(now.timestamp() - server.timestamp() - i64::from(age))
+}
+
+/// The longest request trip a clock reading is taken from. The server stamped
+/// its answer somewhere inside the trip; read at the trip's midpoint, the
+/// reading is off by at most half the trip plus the header's lost fraction of
+/// a second — under 4 s here, against a 20 s line.
+const CLOCK_READ_MAX_TRIP: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// [`clock_ahead_of`] for an answer asked for at `asked_at` that took `trip`
+/// to arrive: read against the trip's MIDPOINT, and not at all when the trip
+/// was longer than [`CLOCK_READ_MAX_TRIP`] — a slow answer would otherwise read
+/// a correct clock as fast by its return leg. Prior art: NTP/SNTP's offset is
+/// taken at the round trip's midpoint, and a sample with a long delay is the
+/// one discarded (RFC 5905 § 8 clock filter, RFC 4330 § 5).
+fn clock_ahead_over_trip(
+    headers: &reqwest::header::HeaderMap,
+    asked_at: chrono::DateTime<chrono::Utc>,
+    trip: std::time::Duration,
+) -> Option<i64> {
+    if trip > CLOCK_READ_MAX_TRIP {
+        return None;
+    }
+    clock_ahead_of(
+        headers,
+        asked_at + chrono::Duration::from_std(trip / 2).ok()?,
+    )
+}
+
+/// What a clock reading tells the owner: only that the clock has just gone
+/// [`CLOCK_OFF_TELL_SECS`] or more off — the first reading of a run, or one
+/// after a reading inside the line. A clock that stays off is told once.
+#[derive(Debug, PartialEq, Eq)]
+enum ClockNews {
+    Fast(i64),
+    Slow(i64),
+}
+
+fn clock_news(before: Option<i64>, ahead: i64) -> Option<ClockNews> {
+    let off = |a: i64| a.abs() >= CLOCK_OFF_TELL_SECS;
+    if !off(ahead) || before.is_some_and(off) {
+        return None;
+    }
+    Some(if ahead > 0 {
+        ClockNews::Fast(ahead)
+    } else {
+        ClockNews::Slow(-ahead)
+    })
+}
+
 /// Information about an available update.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct UpdateInfo {
@@ -197,6 +277,12 @@ pub struct UpdateState {
     /// listed any.
     #[serde(default)]
     pub releases_listed: Vec<String>,
+    /// How many seconds this computer's clock was AHEAD of GitHub's at the last
+    /// release check (negative: behind), read off the answer's `Date` header
+    /// (`clock_ahead_of`, #416). Written only by `UpdateChecker::note_clock`;
+    /// `None` until a check has read one.
+    #[serde(default)]
+    pub clock_ahead_secs: Option<i64>,
 }
 
 /// A newer version is installed on disk than the one running.
@@ -699,6 +785,53 @@ impl UpdateChecker {
             .ok_or_else(|| SwarmError::Network("no stargazers_count in response".into()))
     }
 
+    /// Keep the clock reading a release check took, and tell the owner when it
+    /// has just gone [`CLOCK_OFF_TELL_SECS`] or more off GitHub's (#416): a
+    /// computer whose clock is off has what it says ignored by its peers, or
+    /// ignores theirs, without a word anywhere else.
+    async fn note_clock(&self, ahead: Option<i64>) {
+        let Some(ahead) = ahead else {
+            return;
+        };
+        let before = self.state.write().await.clock_ahead_secs.replace(ahead);
+        let Some(news) = clock_news(before, ahead) else {
+            return;
+        };
+        let (kind, secs, message) = match news {
+            ClockNews::Fast(secs) => (
+                "clock_fast",
+                secs,
+                format!(
+                    "Your computer's clock is {secs} seconds fast. When it is more than half \
+                     a minute off, other computers can ignore some of what yours tells them. \
+                     Turn on automatic time in your computer's date and time settings."
+                ),
+            ),
+            ClockNews::Slow(secs) => (
+                "clock_slow",
+                secs,
+                format!(
+                    "Your computer's clock is {secs} seconds slow. When it is more than half \
+                     a minute off, your computer can ignore some of what other computers tell \
+                     it. Turn on automatic time in your computer's date and time settings."
+                ),
+            ),
+        };
+        tracing::warn!(
+            clock_ahead_secs = ahead,
+            "This computer's clock is {} s off GitHub's (read from its answer's Date \
+             header): {message}",
+            ahead
+        );
+        if let Some(shared) = &self.shared {
+            shared.emit_activity(
+                crate::daemon::state::ActivityEvent::new("system", kind, message)
+                    .with_detail_str(secs.to_string())
+                    .with_toast("warning", 20000),
+            );
+        }
+    }
+
     /// Check GitHub for a newer release. Returns `Some(UpdateInfo)` if an update is available.
     pub async fn check_for_update(&self) -> Result<Option<UpdateInfo>, SwarmError> {
         tracing::debug!("DIAG: check_for_update starting");
@@ -712,16 +845,21 @@ impl UpdateChecker {
             self.repo
         );
 
+        let asked_at = chrono::Utc::now();
+        let asked = std::time::Instant::now();
         let resp = UPDATE_CHECK_CLIENT
             .get(&url)
             .send()
             .await
             .map_err(|e| SwarmError::Network(format!("GitHub API request failed: {e}")))?;
+        let trip = asked.elapsed();
 
         if !resp.status().is_success() {
             let status = resp.status();
             return Err(SwarmError::Network(format!("GitHub API returned {status}")));
         }
+        self.note_clock(clock_ahead_over_trip(resp.headers(), asked_at, trip))
+            .await;
 
         let releases: Vec<GitHubRelease> = resp
             .json()
@@ -2756,6 +2894,56 @@ mod tests {
             kinds.is_empty(),
             "a stopping node announced or attempted an install: {kinds:?}"
         );
+    }
+
+    /// #416: the clock is read off the answer's `Date` header — fast is positive,
+    /// slow negative, no header nothing — and the owner hears of it once, when
+    /// it goes off, not at every check while it stays off.
+    #[test]
+    fn a_clock_off_githubs_is_read_from_the_date_header_and_told_once() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(
+            reqwest::header::DATE,
+            "Fri, 06 Nov 2026 12:23:07 GMT".parse().unwrap(),
+        );
+        let at = |s: &str| chrono::DateTime::parse_from_rfc3339(s).unwrap().to_utc();
+        assert_eq!(
+            clock_ahead_of(&headers, at("2026-11-06T12:23:40Z")),
+            Some(33)
+        );
+        assert_eq!(
+            clock_ahead_of(&headers, at("2026-11-06T12:22:07Z")),
+            Some(-60)
+        );
+        assert_eq!(
+            clock_ahead_of(
+                &reqwest::header::HeaderMap::new(),
+                at("2026-11-06T12:23:40Z")
+            ),
+            None
+        );
+        // A cached answer 40 s old: the server's time is Date + Age, so the
+        // clock 33 s past Date is 7 s slow, not 33 s fast.
+        headers.insert(reqwest::header::AGE, "40".parse().unwrap());
+        assert_eq!(
+            clock_ahead_of(&headers, at("2026-11-06T12:23:40Z")),
+            Some(-7)
+        );
+        headers.remove(reqwest::header::AGE);
+
+        // Read at the trip's midpoint: asked at :38, a 4 s trip, the server's
+        // :07 — 33 s ahead, not the 35 s the arrival alone would read. A trip
+        // longer than CLOCK_READ_MAX_TRIP is not read at all.
+        let asked = at("2026-11-06T12:23:38Z");
+        let secs = std::time::Duration::from_secs;
+        assert_eq!(clock_ahead_over_trip(&headers, asked, secs(4)), Some(33));
+        assert_eq!(clock_ahead_over_trip(&headers, asked, secs(6)), None);
+
+        assert_eq!(clock_news(None, 33), Some(ClockNews::Fast(33)));
+        assert_eq!(clock_news(Some(2), -60), Some(ClockNews::Slow(60)));
+        assert_eq!(clock_news(Some(33), 35), None, "still off: told already");
+        assert_eq!(clock_news(None, CLOCK_OFF_TELL_SECS - 1), None);
+        assert_eq!(clock_news(Some(-1), 1), None);
     }
 }
 

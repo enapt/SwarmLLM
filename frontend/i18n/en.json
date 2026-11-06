@@ -16,6 +16,8 @@
   "actions.saving": "Saving...",
   "actions.unlock": "Unlock",
   "activity.card_slow_restart_windows": "Your graphics card has become slow to set aside memory ({detail} s — normally a few thousandths of a second). This builds up the longer Windows runs without a restart. Restart Windows to bring back full speed and stability.",
+  "activity.clock_fast": "Your computer's clock is {detail} seconds fast. When it is more than half a minute off, other computers can ignore some of what yours tells them. Turn on automatic time in your computer's date and time settings.",
+  "activity.clock_slow": "Your computer's clock is {detail} seconds slow. When it is more than half a minute off, your computer can ignore some of what other computers tell it. Turn on automatic time in your computer's date and time settings.",
   "activity.config_updated": "Configuration updated",
   "activity.connected": "Connected to SwarmLLM",
   "activity.count": "{count} events",

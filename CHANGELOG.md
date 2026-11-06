@@ -27,6 +27,15 @@ identities as its computers update.
 the country you had set stayed in use until a restart. A country you state is still never looked
 up over the internet; once it is removed, the lookup runs.
 
+**A computer whose clock runs a little fast is heard again** (#416). Each computer stamps what it
+tells the others with its own clock, and the others ignored any message stamped more than 30
+seconds ahead of theirs. A home computer's clock can drift that far between its weekly time syncs:
+one computer 33 seconds fast had every update it sent ignored by the whole network, so nobody heard
+when its model parts changed. Messages up to 5 minutes ahead are now accepted. And the dashboard now
+tells you when your own clock is 20 seconds or more fast or slow (read from GitHub's answer when
+SwarmLLM checks for a new release), because computers on older versions still ignore a clock half a
+minute off. Turning on automatic time in your computer's date and time settings fixes it.
+
 **The README says near the top to keep automatic updates on.** While SwarmLLM is being built, new
 versions come out often, and a computer two or more releases behind is disconnected from the
 network until it updates. The note shows where the setting is (Settings → Software updates,

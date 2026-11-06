@@ -16,6 +16,8 @@
   "actions.saving": "Salvando...",
   "actions.unlock": "Desbloquear",
   "activity.card_slow_restart_windows": "A sua placa gráfica está demorando para reservar memória ({detail} s; o normal são alguns milésimos de segundo). Isso piora quanto mais tempo o Windows fica ligado sem reiniciar. Reinicie o Windows para recuperar toda a velocidade e a estabilidade.",
+  "activity.clock_fast": "O relógio do seu computador está {detail} segundos adiantado. Quando a diferença passa de meio minuto, outros computadores podem ignorar parte do que o seu informa a eles. Ative o horário automático nas configurações de data e hora do seu computador.",
+  "activity.clock_slow": "O relógio do seu computador está {detail} segundos atrasado. Quando a diferença passa de meio minuto, seu computador pode ignorar parte do que outros computadores informam a ele. Ative o horário automático nas configurações de data e hora do seu computador.",
   "activity.config_updated": "Configuração atualizada",
   "activity.connected": "Ligado ao SwarmLLM",
   "activity.count": "{count} eventos",

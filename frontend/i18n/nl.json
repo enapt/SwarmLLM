@@ -16,6 +16,8 @@
   "actions.saving": "Opslaan...",
   "actions.unlock": "Ontgrendelen",
   "activity.card_slow_restart_windows": "Je videokaart is traag geworden bij het reserveren van geheugen ({detail} s, normaal een paar duizendsten van een seconde). Dit wordt erger naarmate Windows langer draait zonder herstart. Start Windows opnieuw op voor volle snelheid en stabiliteit.",
+  "activity.clock_fast": "De klok van jouw computer loopt {detail} seconden voor. Als die meer dan een halve minuut afwijkt, kunnen andere computers een deel negeren van wat jouw computer hun vertelt. Zet automatische tijd aan in de datum- en tijdinstellingen van je computer.",
+  "activity.clock_slow": "De klok van jouw computer loopt {detail} seconden achter. Als die meer dan een halve minuut afwijkt, kan jouw computer een deel negeren van wat andere computers hem vertellen. Zet automatische tijd aan in de datum- en tijdinstellingen van je computer.",
   "activity.config_updated": "Configuratie bijgewerkt",
   "activity.connected": "Verbonden met SwarmLLM",
   "activity.count": "{count} gebeurtenissen",

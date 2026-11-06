@@ -16,6 +16,8 @@
   "actions.saving": "Kaydediliyor...",
   "actions.unlock": "Kilidi aç",
   "activity.card_slow_restart_windows": "Ekran kartınız bellek ayırmakta yavaşladı ({detail} sn; normalde saniyenin birkaç binde biri). Windows yeniden başlatılmadan ne kadar uzun çalışırsa bu o kadar artar. Tam hız ve kararlılık için Windows'u yeniden başlatın.",
+  "activity.clock_fast": "Bilgisayarınızın saati {detail} saniye ileri. Fark yarım dakikayı aştığında diğer bilgisayarlar sizinkinin onlara söylediklerinin bir kısmını yok sayabilir. Bilgisayarınızın tarih ve saat ayarlarında otomatik saati açın.",
+  "activity.clock_slow": "Bilgisayarınızın saati {detail} saniye geri. Fark yarım dakikayı aştığında bilgisayarınız diğer bilgisayarların ona söylediklerinin bir kısmını yok sayabilir. Bilgisayarınızın tarih ve saat ayarlarında otomatik saati açın.",
   "activity.config_updated": "Yapılandırma güncellendi",
   "activity.connected": "SwarmLLM'ye bağlanıldı",
   "activity.count": "{count} olay",

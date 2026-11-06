@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #416**). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #417**). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -1629,6 +1629,28 @@ unheard coordinator only where that hop's capability on record advertises
 `features::JUDGES_THE_COORDINATOR` (`layer_forward::swarm_use_of_forward`), and a relayed hop's
 entry is blank until its capability lands — a relayed body proves only the relay bits
 (`record_relay_proven_features`). Wait for a report of a relay-tier peer being refused.
+
+#### #416 — A computer whose clock runs fast is not heard: the checks besides gossip's
+`P2` · network · **NARROWED** — 2026-11-06 · history: the live node's log 12:23-13:25Z 11-06 (`773a3e85`, 33 s fast)
+
+A message stamped more than a check's tolerance ahead of the receiver's clock is dropped, and a
+home computer's clock passes 30 s between two of its syncs (a standalone Windows PC syncs once a
+week — `SpecialPollInterval` 604,800 s, Microsoft KB 3205089 — and 20-50 ppm drifts 12-30 s in that
+week; a WSL2 clock falls behind after the host sleeps). On 2026-11-06 a computer 33 s fast was heard
+by nobody: this node dropped all 150 of its health pings, parts lists and credit messages in its
+hour online. **Fixed for health pings and parts lists** (§ "Closed"): the network loop's gate takes
+them 5 min ahead. **Left, each on its own protection, so weighed one by one** (a security review
+each, CLAUDE.md's routing): credit gossip (the gate keeps the ledger's 30 s for it, since
+`verify_balance_report` refuses past that anyway; credits are dormant), pool notices
+(`credit::ledger::CLOCK_SKEW_TOLERANCE_SECS`,
+30 s — a fast pool member's join would be dropped by the owner, and `JoinResend` resends it until
+its window ends), nicknames (`NICK_GOSSIP_SKEW_SECS`, 30 s, timestamp-wins per node), demand gossip
+(`GOSSIP_SKEW_MS`, 30 s, gotcha #73's cross-sender slot) and relayed messages
+(`relay_seal::RELAYED_SKEW_MS`, 60 s, behind `RelayReplayGuard`, whose memory a wider window
+lengthens). **The owner is now told** (§ "Closed"): the release check reads GitHub's `Date` header
+and the dashboard says so at 20 s off, which helps against every receiver, older releases included.
+A node with update checks off reads no clock and is told nothing. **Next**: each check above,
+starting with the pool's.
 
 ### Speed on one computer
 
@@ -4646,7 +4668,29 @@ Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
 
-**Closed 2026-11-06, unreleased** (#415, #414, #413, #388)
+**Closed 2026-11-06, unreleased** (#416's gossip half and owner warning, #415, #414, #413, #388)
+- #416 (gossip half) — **Gossip from a computer whose clock runs a little fast was dropped by every
+  peer.** The network loop's gate on health pings, parts lists and credit gossip took a message at
+  most 30 s ahead of the receiver's clock; `773a3e85` (33 s fast) had all 150 of its messages dropped
+  here in its hour online, so its parts never changed for this node. The gate is now
+  `network::manager::events::gossip_out_of_time`: health pings and parts lists 5 min ahead
+  (`GOSSIP_AHEAD_SECS`; MIT Kerberos's default `clockskew`), still one-sided (gotcha #44): each is kept
+  per sender and nothing reads its stamp past the gate, so a stamp ahead wins no slot another sender
+  holds (gotcha #73) and adds replay life only to an author whose clock is ahead (security review
+  11-06: no exploitable path; a request-response delivery was never timed at all). Credit gossip
+  keeps the ledger's 30 s there — `verify_balance_report` refuses past it with a warning per message,
+  so widening the gate alone only moved the drop into a warning. Test
+  `gossip_from_a_clock_a_minute_fast_is_heard_and_one_far_off_is_not`, red at the old 30 s. The other
+  checks stay open (#416 above).
+- #416 (owner warning) — **A computer whose clock was off told its owner nothing.** The release check
+  now reads the answer's `Date` header (plus any `Age`, RFC 9111 § 4.2.3) at the request's midpoint,
+  and not at all after a trip over 5 s (NTP's rule; `update::clock_ahead_over_trip`): at 20 s or more off
+  (`update::CLOCK_OFF_TELL_SECS`) the dashboard says the clock is N seconds fast or slow and to turn
+  on automatic time, once each time it goes off (`update::clock_news`, `UpdateChecker::note_clock`;
+  keys `activity.clock_fast` / `activity.clock_slow`, 21 languages). Prior art: Bitcoin Core's
+  CLOCK_OUT_OF_SYNC warning (`node/timeoffsets.cpp`, warn only, PR #28956), `htpdate`. One HTTPS
+  server's answer, not peers' stamps: no peer can move it, and it needs no five connected computers.
+  Test `a_clock_off_githubs_is_read_from_the_date_header_and_told_once`.
 - #413 — **Dead identities kept being dialled at addresses another computer now holds.** The LAN
   box (`96842635`) opened bursts of hundreds of connections here, each closed by it at once. Cause,
   measured with that node at `-v` through a restart (15:03Z 11-06): 418 dials in 25 s that failed
