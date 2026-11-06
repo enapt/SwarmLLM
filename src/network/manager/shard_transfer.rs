@@ -48,6 +48,18 @@ impl NetworkManager {
         }
     }
 
+    /// Is a transfer of this part waiting on an answer — an ask still out, or
+    /// a busy holder it will ask again? A record with neither moves no
+    /// further: nothing will answer it (an ask the pending cap dropped, a busy
+    /// entry the map's bound pushed out).
+    fn part_transfer_waits_on_an_answer(&self, shard_id: &crate::types::ShardId) -> bool {
+        self.shard_busy_holders.contains_key(shard_id)
+            || self
+                .pending_shard_requests
+                .values()
+                .any(|(_, sid)| sid == shard_id)
+    }
+
     /// Forget this node's record of a part's peer transfer: where it stands,
     /// its clocks, retries and busy holders, and its asks still out — an answer
     /// to one of those finds no record and is dropped.
@@ -643,14 +655,17 @@ impl NetworkManager {
             PartAsk::Starts => {
                 // One transfer per part: a second start (the button pressed
                 // twice) would write the same file from two chains. A record
-                // whose slot is gone is a transfer ended out of this map's
-                // reach (the stall sweep): forgotten, it blocks nothing.
-                if self.shard_download_progress.contains_key(&shard_id) {
-                    if self
-                        .shared_state
+                // nothing will answer, or whose slot the stall sweep released
+                // out of this map's reach, is forgotten and blocks nothing.
+                match earlier_transfer(
+                    self.shard_download_progress.contains_key(&shard_id),
+                    self.part_transfer_waits_on_an_answer(&shard_id),
+                    self.shared_state
                         .models
-                        .p2p_transfer_still_owns_the_file(&shard_id)
-                    {
+                        .p2p_transfer_still_owns_the_file(&shard_id),
+                ) {
+                    EarlierTransfer::None => {}
+                    EarlierTransfer::UnderWay => {
                         tracing::info!(
                             model = %shard_id.model_id,
                             shard = shard_id.index,
@@ -658,7 +673,7 @@ impl NetworkManager {
                         );
                         return;
                     }
-                    self.forget_part_transfer(&shard_id);
+                    EarlierTransfer::Stranded => self.forget_part_transfer(&shard_id),
                 }
                 // Every transfer owns its file from its first ask (#418).
                 if !self.shared_state.models.hold_for_a_peer_transfer(&shard_id) {
@@ -711,6 +726,30 @@ impl NetworkManager {
 /// the `on_disk` bytes its partial file holds; 0 with no record (#191).
 fn resume_from(record: Option<&PartTransfer>, on_disk: u64) -> u64 {
     record.map_or(0, |t| t.next_offset).min(on_disk)
+}
+
+/// What a starting transfer finds of an earlier one of the same part.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EarlierTransfer {
+    /// No record: start.
+    None,
+    /// It waits on an answer and holds the part's file: refuse the start.
+    UnderWay,
+    /// A record nothing will answer, or one whose slot was released: forget
+    /// it and start, or it would refuse every start of this part for good.
+    Stranded,
+}
+
+fn earlier_transfer(
+    has_record: bool,
+    waits_on_an_answer: bool,
+    holds_its_file: bool,
+) -> EarlierTransfer {
+    match (has_record, waits_on_an_answer && holds_its_file) {
+        (false, _) => EarlierTransfer::None,
+        (true, true) => EarlierTransfer::UnderWay,
+        (true, false) => EarlierTransfer::Stranded,
+    }
 }
 
 /// Whether a part request starts a transfer or carries one on (#191) — a
@@ -972,6 +1011,29 @@ mod tests {
     /// #191: a transfer that lost its computer carries on from its record,
     /// never past what its file holds — and resuming there writes the part
     /// whole, byte for byte, keeping what the first computer sent.
+    /// The review of #418: the automatic pass parks its slot BEFORE it asks,
+    /// so a record nothing would answer (its ask dropped at the pending cap,
+    /// its busy entry pushed out) found a slot every time and refused every
+    /// later start of that part.
+    #[test]
+    fn a_start_is_refused_only_by_a_transfer_that_waits_on_an_answer_and_holds_its_file() {
+        assert_eq!(earlier_transfer(false, false, false), EarlierTransfer::None);
+        assert_eq!(
+            earlier_transfer(true, true, true),
+            EarlierTransfer::UnderWay
+        );
+        assert_eq!(
+            earlier_transfer(true, false, true),
+            EarlierTransfer::Stranded,
+            "a slot parked for this start does not make a silent record live"
+        );
+        assert_eq!(
+            earlier_transfer(true, true, false),
+            EarlierTransfer::Stranded,
+            "a transfer whose slot was released is over, an ask out or not"
+        );
+    }
+
     #[test]
     fn a_part_resumed_on_another_computer_keeps_its_bytes_and_ends_whole() {
         let dir = std::env::temp_dir().join(format!(

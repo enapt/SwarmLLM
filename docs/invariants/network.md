@@ -1842,10 +1842,16 @@ the one-holder 40 Mbit/s run completes, the kill run completes byte-identical at
   parked. It used to answer `true` for an UNCLAIMED shard (for the paths that
   took none), which also let a transfer the stall sweep had released write on
   with no claim. A transfer whose slot is gone stops, claimed by another or not.
-- A record whose slot is gone (the stall sweep cannot reach the network
-  manager's map) does not refuse a new start; it is forgotten
-  (`forget_part_transfer`, which drops the answers still out). A record WITH its
-  slot refuses a second start: two chains would write one file.
+- A record refuses a second start only while it waits on an answer (an ask
+  out, a busy holder to ask again) AND holds its slot (`earlier_transfer`): two
+  chains would write one file. Any other record is forgotten
+  (`forget_part_transfer`, which drops the answers still out) — one whose slot
+  the stall sweep released out of the network manager's reach, or one nothing
+  will answer (an ask the pending cap dropped, a busy entry pushed out). The
+  automatic pass parks its slot BEFORE it asks, so "a slot is parked" alone
+  made such a record refuse every later start of its part (the commit's
+  review). A holder naming a part size past the limit goes to the next holder
+  (`retry_shard_or_fallback`) instead of leaving the slot parked.
 - A part that failed its check, or that goes to its origin with no hash to
   check, releases its slot at once; parked until the 180 s stall sweep, its
   claim held off the very re-fetch the failure asked for.

@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #420**). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #421**). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -1597,9 +1597,25 @@ check and the loader look for — unreachable today: nothing in this build sets
 `HfSource::mmproj_filename` to a name (every local writer writes `None`; gossip copies a peer's).
 Cure at the choke point: while the daemon runs, the pass removes only staging files it can tie to
 a part with no claim and leaves other names to the startup sweep (`cleanup_tmp_files_in_dir`, no
-writers then) — check first that a cancelled whole-file download removes its own `.tmp`. Then
+writers then). That needs the whole-file download to tidy up after itself first (re-read 11-07):
+`download_model` removes its `.tmp` only past the size cap — a chunk, write or flush error leaves
+it — and the handler never reads its cancel flag (`_hf_cancel_flag`), so today Cancel works only by
+this sweep deleting the file under it while the transfer streams on until its rename fails. Only
+the raw API route starts it (`POST /api/admin/hf/download`; no dashboard or CLI caller). Then
 either give the vision-encoder fetch a filename source and rename its result to `mmproj.gguf`, or
 delete it as unreachable (`completeness.md`).
+
+#### #420 — A model added from the swarm can show a part as downloading for good while another download fetches it
+`P4` · storage · **OPEN** — 2026-11-07 · history: #418's review
+
+The acquisition job (`model/acquisition.rs`, `/api/admin/models/{id}/add`) learns a part's progress
+only from `AcquisitionCommand::ShardDataReceived`, which the network manager sends per chunk it
+writes. Since #418 a part another download is writing (the automatic pass fetching it from
+HuggingFace when the model is added) refuses the job's peer start (`hold_for_a_peer_transfer`), and
+nothing tells the job: it counts the ask as sent and shows the part downloading while the other
+download lands it. Before #418 both wrote the same file. The model itself loads (a part landing
+reloads it, `spawn_check_and_load`); only the job's progress stays. Cure: the job reads parts that
+landed on disk (`SharedState::parts_servable_here`) on a tick, or the refusal is sent back to it.
 
 #### #168 — A relayed tensor forward over 32 MB is refused instead of chunked
 `P4` · network · **OPEN** — 2026-07-24 · history: archive § "Tensor-relay large-forward chunking (post-plan follow-on, deferred)"

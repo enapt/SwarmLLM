@@ -741,10 +741,10 @@ impl NetworkManager {
                             max = max_shard_bytes,
                             "Rejecting shard download — total_size exceeds limit"
                         );
-                        self.shard_download_progress.remove(&shard_id);
-                        self.shard_last_progress_at.remove(&shard_id);
-                        self.shard_p2p_retries.remove(&shard_id);
-                        self.shard_busy_holders.remove(&shard_id);
+                        // The next holder, or the origin — the slot and its
+                        // claim go only with the transfer (#418's review: they
+                        // stayed parked until the 180 s sweep, at a peer's will).
+                        self.retry_shard_or_fallback(shard_id, peer, "total size past the limit");
                         return;
                     }
                     let offset = self
