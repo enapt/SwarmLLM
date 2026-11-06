@@ -80,8 +80,11 @@ the top track (`docs/plans/large_model_splits.md`).
    (2026-10-31, 11-03, 11-04) and then ran on the processor at a fifth of its speed. A second pool
    for the conversation cache (the entry's (d), fix (1)) was built and measured on 2026-11-04 and
    NOT adopted: the hand-backs did not fall, so every forward's own working set grows past the room
-   above the margin. **Next**: fix (2), a margin that covers one forward's growth, judged by the
-   hand-back count; and the field's shape on native Linux (a Linux card peer through `swarm_route`,
+   above the margin. Fix (2), a margin split into the driver's floor and one forward's room, was
+   built and NOT adopted on 2026-11-06 (no fewer hand-backs, the same dips; held in the driver too,
+   four times the hand-backs and saved prompts refused on a full card). **Next**: (3) shed and
+   retry where the card says no (trim and ask again; then let saved prompts go and rerun the
+   forward); and the field's shape on native Linux (a Linux card peer through `swarm_route`,
    or the next field export's `cuda_pool` DIAG lines). (#403 CLOSED 2026-11-04, released in
    v0.3.272 — § "Closed".)
 7. **#388** — the flow's guard takes a far computer's own delay for a queue on the link (the
@@ -1903,9 +1906,33 @@ So the regrowth is not two lifetimes sharing one pool: the forward's own working
 the room above the margin, and every forward grows it back (the hand-back COUNT is the same with the
 cache out of the way). Neither rig reproduces the field's out-of-memory error (native Linux, a 12 GB
 card, 40 of 48 layers): under WSL2 an overflow is memory lent from the host, never an error.
-**Next**: (2) above, judged by the hand-back count; and the field's own shape on native Linux — a
-Linux card peer through `swarm_route` (never a rented machine), or the next field diagnostics export,
-reading `cuda_pool`'s DIAG lines per forward.
+**(2) built and measured 2026-11-06 — NOT adopted** (`~/swarmllm-gate/deep/cg/room367_unshipped.patch`,
+A/B `SWARMLLM_CARD_FORWARD_ROOM=0`). The margin's two roles split: room for one forward
+(`max(margin, 1.25 × the split's measured prompt take)`) beside the driver's floor, read from ONE
+budget reading two ways — conversations to the margin, saved prompts to margin + room (admission
+evicts them down to it, refusing nothing new). The mechanism fired (`forward_room_mb=409` on both
+rigs) and the outcome did not move:
+- the field's shape (`creep_repro_ab.sh`, Llama-3.1-8B whole on the card, saved prompts on the card,
+  ABBA 8 min an arm, 0 driver events): 51 and 51 hand-backs against 61 and 53; the deepest driver
+  free before a hand-back 182 MB in ALL four arms, medians 307-310 against 278-310; first token
+  2.24-2.25 s against 2.03-2.27; 0 refusals. Why: the budget counts the pool's idle memory as room,
+  and the hold trims only to the margin, so the room sat in the pool as pieces no forward could use.
+- so the hold was given margin + room as its target too (the room free in the DRIVER), and the 14B
+  split (`ab367room.sh`, beside a 1.8 GB hog): 53 and 42 hand-backs against 12 and 16, 15-17 GB
+  handed back against 4-6, driver free still down to 181 and 0 MB; and with 17 card layers the
+  saved prompts' room left none for a snapshot ("not snapshotting — no room for the copy",
+  `budget_mb=3`), so every later turn re-read its prompt: 3.46 s first token against 1.37-1.58.
+  The arms loaded 17, 17, 18 and 21 card layers, so the split's figures compare loosely; the
+  snapshot refusal is its own mechanism, read in the log.
+A margin, however split, does not bound a forward's growth here; every forward grows past it, and a
+higher floor only trims more often. **Next**: (3) shed and retry where the card says no, as llama.cpp,
+vLLM and SGLang do (they pin nothing): an allocation the driver refuses synchronizes, trims the
+pool's idle chunks and asks once more — PyTorch's `cudaMallocAsync` backend
+(`c10/cuda/CUDAMallocAsyncAllocator.cpp`), in the vendored candle allocator — and a forward that still
+fails lets the card's saved prompts go and runs again from its start (its caches cut back), before
+the worker reports out of memory. Testable here only by a fault switch failing the n-th growth as the
+driver would; the field's shape on native Linux after a release (the AU 3060, `aa3d1e66`), or the
+next field diagnostics export, reading `cuda_pool`'s DIAG lines per forward.
 
 The same 1,800-token prompt's snapshot (Qwen2.5-14B Q4_K_M, 15 of 48 on the card: 569 MB, 486 of it
 the processor layers' f32 cache, all kept in host RAM under WSL2) was copied in 155-680 ms in one pair
