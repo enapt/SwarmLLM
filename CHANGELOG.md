@@ -25,7 +25,11 @@ between computers far apart, this computer guesses the next words and the far co
 From 150 ms apart each check carried several alternative guesses, a tree of them; closer than that,
 a single line. On the same Thailand–Australia split, 126-133 ms apart, the tree made stories and
 explanations 15-26% faster on three prompts and code 2-3% slower. The tree now starts at 120 ms;
-`SWARMLLM_DRAFT_TREES=0` keeps a single line everywhere (#411).
+`SWARMLLM_DRAFT_TREES=0` keeps a single line everywhere (#411). This is for the usual split, where
+the far computer finishes each check. With "Start and finish on this computer" turned on, this
+computer finishes every check itself, and there the single line was faster on the same link:
+1.45-1.9 times as fast at the median of three runs on each of three prompts (code 26 tokens a
+second against 14). That setting keeps the single line until computers are 300 ms apart.
 
 **A graphics card that refuses memory is asked once more before a request fails.** SwarmLLM keeps
 graphics memory a model has finished with, so the next request can reuse it quickly. When the card

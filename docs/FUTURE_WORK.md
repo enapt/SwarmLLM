@@ -2065,6 +2065,26 @@ and another at 14.0-14.1, every tree arm a third (`docs/DIAGNOSTICS.md` § Bench
 flow's slowest prose3 reply beat the stream's fastest. The CUDA build of the change, no switch set,
 flowed every measured reply at 125-130 ms (`real_link_411mech/`, 4 of 4).
 
+**Only where the FAR END draws — corrected before release, 2026-11-06.** Every figure above is the
+default shape's. The README re-measure (`real_link_readme275/`) read "Start and finish on this
+computer" at 13.7-14.0 code / 6.1-6.4 prose against v0.3.273's 30 / 11.1-12.7: under the new line
+that shape FLOWED at 127-133 ms, where it had streamed. One binary, ABBA × 3, three prose prompts
+and code (`real_link_dsdw275ab/`, every flow arm 4 of 4 replies flowed, every stream arm none):
+
+| prompt | flow drawn here (default) | chain stream (`SWARMLLM_DRAFT_TREES=0`) | stream ÷ flow |
+|---|---|---|---|
+| prose2 | 6.56-8.05 (7.42) | 11.93-12.38 (12.09) | 1.63 |
+| prose3 | 7.38-7.90 (7.51) | 10.09-11.62 (10.87) | 1.45 |
+| code | 13.72-13.89 (13.76) | 25.86-26.25 (26.00) | 1.89 |
+
+(prose's lighthouse wrote two stories, left out.) This node's last layers read every row of every
+answer beside the drafter on one card, and the far's queue cut the flow back 8-16 times a reply.
+So the line is per shape (`dsd_tree::FlowDraws`): 120 ms where the far end draws, the tree rounds'
+300 where this node does — there the flow replaces the rounds, which it beat 1.2x at 420 ms
+(`faster_than_local.md` § 9); pinned by `a_tree_drawn_here_keeps_the_tree_rounds_line`. (c) **where
+a tree drawn here starts to pay between 133 and 300 ms** is unmeasured (it flowed from 150 ms in
+v0.3.259-.274, never compared with the stream there).
+
 **What is left**: (a) **under 120 ms** — the one-card rig put the flow at 0.94x at 100 ms (a rig
 that leans against it); no real link with a card far at 100-120 ms has been measured. (b) **code
 at the line gives back 2-3%** — a per-reply or per-step switch by the drafter's confidence

@@ -58,13 +58,14 @@ use crate::inference::draft_tree::{
 /// is short: the chain stream was measured on every link it runs on.
 ///
 /// `flows`: this reply's tree would FLOW (`dsd_flow::flow_possible` on its
-/// stream shape), which pays over a shorter link than tree rounds do — the
-/// line is [`least_round_trip_ms`].
+/// stream shape), and who draws its rows ([`FlowDraws`]) — a tree the far end
+/// draws pays over a shorter link than tree rounds do; the line is
+/// [`least_round_trip_ms`].
 pub(super) fn trees_wanted(
     every_segment_on_a_card: bool,
     drafter_on_a_card: bool,
     farthest_round_trip_ms: Option<u32>,
-    flows: bool,
+    flows: Option<FlowDraws>,
 ) -> bool {
     trees_wanted_given(
         std::env::var("SWARMLLM_DRAFT_TREES").ok().as_deref(),
@@ -92,16 +93,37 @@ pub(super) fn trees_wanted(
 /// 14.62 / 16.65 / 16.67 tok/s against 11.91 / 14.43 / 13.27, and gave back
 /// 2-3% on code (32.31 against 33.45). So the line is 120 ms: the old rig's
 /// tie, under the shortest real link the flow was measured winning on.
+///
+/// Only for a tree the FAR END draws ([`FlowDraws::AtTheFarEnd`]): every figure
+/// above is that shape's. A tree drawn by this node's own last layers ("Start
+/// and finish on this computer", #369) lost to the chain stream on the same
+/// link — the stream 1.45-1.9x the flow in every alternating block of three
+/// prose prompts and a code one (2026-11-06, `real_link_dsdw275ab`, 127-133 ms;
+/// code 26.0 against 13.8 tok/s): this node's last layers read every row of
+/// every answer beside the drafter on one card, and the far computer's queue
+/// cut the flow back 8-16 times a reply. It keeps the tree rounds' line, where
+/// the flow takes the rounds' place and beat them 1.2x (420 ms, 2026-10-29).
 pub(super) const FLOW_LEAST_ROUND_TRIP_MS: u32 = 120;
 
-/// The line a reply's trees are the default from: the flow's where its tree
-/// would flow, the tree rounds' otherwise — a peer without the flow's feature
-/// bit gets the rounds, which lose to the stream under 300 ms.
-pub(super) fn least_round_trip_ms(flows: bool) -> u32 {
-    if flows {
-        FLOW_LEAST_ROUND_TRIP_MS
-    } else {
-        TREES_LEAST_ROUND_TRIP_MS
+/// Who draws a flowing tree's rows — what decides the link it pays over.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum FlowDraws {
+    /// The run's tail at the far end (`StreamShape::far_walks`): the default
+    /// shape, the flow's own line.
+    AtTheFarEnd,
+    /// This node's layers after the run (`dsd_flow::FlowRun::finish_here`):
+    /// the tree rounds' line.
+    Here,
+}
+
+/// The line a reply's trees are the default from: the flow's where the far end
+/// draws its flowing tree, the tree rounds' otherwise — a tree drawn here, and
+/// a peer without the flow's feature bit (which gets the rounds, losing to the
+/// stream under 300 ms).
+pub(super) fn least_round_trip_ms(flows: Option<FlowDraws>) -> u32 {
+    match flows {
+        Some(FlowDraws::AtTheFarEnd) => FLOW_LEAST_ROUND_TRIP_MS,
+        Some(FlowDraws::Here) | None => TREES_LEAST_ROUND_TRIP_MS,
     }
 }
 
@@ -124,7 +146,7 @@ fn trees_wanted_given(
     every_segment_on_a_card: bool,
     drafter_on_a_card: bool,
     farthest_round_trip_ms: Option<u32>,
-    flows: bool,
+    flows: Option<FlowDraws>,
 ) -> bool {
     match setting.map(str::trim) {
         Some("1") => true,
@@ -682,7 +704,7 @@ mod tests {
     /// leaves the choice to the plan.
     #[test]
     fn trees_are_wanted_on_cards_unless_the_setting_says_otherwise() {
-        for flows in [false, true] {
+        for flows in [None, Some(FlowDraws::Here), Some(FlowDraws::AtTheFarEnd)] {
             assert!(trees_wanted_given(None, true, true, FAR, flows));
             assert!(!trees_wanted_given(None, false, true, FAR, flows));
             assert!(trees_wanted_given(Some("1"), false, false, None, flows));
@@ -698,7 +720,7 @@ mod tests {
     /// over 400-token replies on the real link (2026-10-21).
     #[test]
     fn trees_are_not_the_default_where_the_drafter_runs_on_the_processor() {
-        for flows in [false, true] {
+        for flows in [None, Some(FlowDraws::Here), Some(FlowDraws::AtTheFarEnd)] {
             assert!(!trees_wanted_given(None, true, false, FAR, flows));
             assert!(
                 trees_wanted_given(Some("1"), true, false, FAR, flows),
@@ -713,22 +735,22 @@ mod tests {
     /// segment is measured far away, and an unmeasured one is not.
     #[test]
     fn trees_are_the_default_only_over_a_long_measured_link() {
-        assert!(!trees_wanted_given(None, true, true, Some(20), false));
+        assert!(!trees_wanted_given(None, true, true, Some(20), None));
         assert!(!trees_wanted_given(
             None,
             true,
             true,
             Some(TREES_LEAST_ROUND_TRIP_MS - 1),
-            false
+            None
         ));
         assert!(trees_wanted_given(
             None,
             true,
             true,
             Some(TREES_LEAST_ROUND_TRIP_MS),
-            false
+            None
         ));
-        for flows in [false, true] {
+        for flows in [None, Some(FlowDraws::Here), Some(FlowDraws::AtTheFarEnd)] {
             assert!(
                 !trees_wanted_given(None, true, true, None, flows),
                 "unmeasured"
@@ -740,21 +762,22 @@ mod tests {
         }
     }
 
-    /// A tree that FLOWS pays over a shorter link than tree rounds: on the rig
-    /// it beat the chain stream at 150, 220 and 300 ms, where the rounds' line
-    /// had handed every one of those links to the stream (2026-10-23), and on
-    /// the real TH↔AU link at 126-132 ms (#411, 2026-11-06). A reply whose
-    /// tree cannot flow keeps the rounds' line.
+    /// A tree that FLOWS from the far end pays over a shorter link than tree
+    /// rounds: on the rig it beat the chain stream at 150, 220 and 300 ms, where
+    /// the rounds' line had handed every one of those links to the stream
+    /// (2026-10-23), and on the real TH↔AU link at 126-132 ms (#411,
+    /// 2026-11-06). A reply whose tree cannot flow keeps the rounds' line.
     #[test]
     fn a_tree_that_flows_is_the_default_over_a_shorter_link_than_tree_rounds() {
+        let far_draws = Some(FlowDraws::AtTheFarEnd);
         assert!(
-            trees_wanted_given(None, true, true, Some(126), true),
+            trees_wanted_given(None, true, true, Some(126), far_draws),
             "the shortest real link the flow was measured winning on flows"
         );
         let between = Some(FLOW_LEAST_ROUND_TRIP_MS + 70);
-        assert!(trees_wanted_given(None, true, true, between, true));
+        assert!(trees_wanted_given(None, true, true, between, far_draws));
         assert!(
-            !trees_wanted_given(None, true, true, between, false),
+            !trees_wanted_given(None, true, true, between, None),
             "rounds keep their own line"
         );
         assert!(trees_wanted_given(
@@ -762,22 +785,54 @@ mod tests {
             true,
             true,
             Some(FLOW_LEAST_ROUND_TRIP_MS),
-            true
+            far_draws
         ));
         assert!(!trees_wanted_given(
             None,
             true,
             true,
             Some(FLOW_LEAST_ROUND_TRIP_MS - 1),
-            true
+            far_draws
         ));
         assert!(
-            !trees_wanted_given(None, false, true, between, true),
+            !trees_wanted_given(None, false, true, between, far_draws),
             "a segment off the card still keeps the stream"
         );
         assert!(
-            !trees_wanted_given(None, true, false, between, true),
+            !trees_wanted_given(None, true, false, between, far_draws),
             "a drafter off the card still keeps the stream"
+        );
+    }
+
+    /// A tree drawn HERE ("Start and finish on this computer") lost to the
+    /// chain stream 1.45-1.9x on the real link at 127-133 ms, the stream
+    /// winning every alternating block (2026-11-06) — under the far end's
+    /// line it flowed there, and halved that setting's speed. It keeps the
+    /// tree rounds' line, where it takes the rounds' place.
+    #[test]
+    fn a_tree_drawn_here_keeps_the_tree_rounds_line() {
+        let here = Some(FlowDraws::Here);
+        assert!(
+            !trees_wanted_given(None, true, true, Some(131), here),
+            "the link it lost on streams"
+        );
+        assert!(!trees_wanted_given(
+            None,
+            true,
+            true,
+            Some(TREES_LEAST_ROUND_TRIP_MS - 1),
+            here
+        ));
+        assert!(trees_wanted_given(
+            None,
+            true,
+            true,
+            Some(TREES_LEAST_ROUND_TRIP_MS),
+            here
+        ));
+        assert!(
+            trees_wanted_given(Some("1"), true, true, Some(131), here),
+            "the switch still forces it"
         );
     }
 

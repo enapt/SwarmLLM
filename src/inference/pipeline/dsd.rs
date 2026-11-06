@@ -432,9 +432,10 @@ impl PipelineExecutor {
             if self.shared_state.model_process_pool.runs_whole_on_the_card(e.model_id()));
         let farthest_round_trip_ms =
             super::farthest_segment_round_trip_ms(&self.shared_state, &self.assignment.segments);
-        // Whether this reply's tree would FLOW (`dsd_flow`): asked BEFORE the
-        // distance line, because the flow pays over a shorter link than tree
-        // rounds (`dsd_tree::least_round_trip_ms`). `SWARMLLM_TREE_FLOW=0`
+        // Whether this reply's tree would FLOW (`dsd_flow`), and who draws its
+        // rows: asked BEFORE the distance line, because a tree the far end
+        // draws pays over a shorter link than tree rounds, and one drawn here
+        // does not (`dsd_tree::least_round_trip_ms`). `SWARMLLM_TREE_FLOW=0`
         // keeps the tree rounds, and their line.
         let flow_shape_if_trees = (matches!(&drafter, Drafter::Engine(_))
             && super::dsd_flow::flow_requested())
@@ -457,7 +458,13 @@ impl PipelineExecutor {
             ),
             drafter_on_card,
             farthest_round_trip_ms,
-            flow_shape_if_trees.is_some(),
+            flow_shape_if_trees.as_ref().map(|shape| {
+                if shape.far_walks() {
+                    super::dsd_tree::FlowDraws::AtTheFarEnd
+                } else {
+                    super::dsd_tree::FlowDraws::Here
+                }
+            }),
         ) && matches!(&drafter, Drafter::Engine(e) if reads_trees(e.model_id()))
             && reads_trees(&self.request.model_id);
         let mut trees = super::dsd_tree::TreeRounds::new();

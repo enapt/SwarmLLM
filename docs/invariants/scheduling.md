@@ -6057,6 +6057,18 @@ a forward (`far_least_ms=894`, against 23-54 ms on its card that morning) with t
 135-163 ms: the far was slow at its end, and the guard's trial said so ("fewer forwards out did not
 shorten the far computer's time").
 
+**Only where the far end draws** (2026-11-06, before release). Every figure above is the default
+shape's; a tree drawn by this node's own last layers ("Start and finish on this computer", #369)
+flowed under the new line too, and lost: one binary, ABBA × 3 at 127-133 ms
+(`real_link_dsdw275ab/`, each arm's replies flowed 4 of 4 or none), the chain stream 1.63x the flow
+on prose2 (12.09 against 7.42 tok/s, medians), 1.45x on prose3 (10.87 against 7.51), 1.89x on code
+(26.00 against 13.76), every block. This node's last layers read every row of every answer beside
+the drafter on its one card, and the far's queue cut the flow back 8-16 times a reply. So
+**`dsd_tree::FlowDraws`** says who draws, and `least_round_trip_ms` gives a tree drawn here the tree
+rounds' 300 ms — where it takes the rounds' place (1.2x them at 420 ms, 2026-10-29). Between 133 and
+300 ms a drawn-here tree has never been compared with the stream (it flowed from 150 in
+v0.3.259-.274). Test: `a_tree_drawn_here_keeps_the_tree_rounds_line`.
+
 **What a change must keep.** The draw at a row must not depend on the forward that carried it
 (noise by position, the row's own ancestors in its mask); the three trees change only by the
 ordered ops; a rebase's forward goes out at once, before any proposal, so path + kept never
