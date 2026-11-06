@@ -59,15 +59,46 @@ pub fn download_url(repo_id: &str, filename: &str) -> Result<String, String> {
     ))
 }
 
+/// A download's staging file, removed when this goes out of scope unless the
+/// file `landed` (was renamed into place) — so an error, a cancel or the size
+/// cap takes its partial file with it on every return path, and no sweep has to
+/// guess whose it is (#419). Prior art: tempfile's `TempPath`, removed on drop
+/// unless kept or persisted.
+struct StagingFile {
+    path: std::path::PathBuf,
+    armed: bool,
+}
+
+impl StagingFile {
+    fn new(path: std::path::PathBuf) -> Self {
+        Self { path, armed: true }
+    }
+
+    fn landed(mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for StagingFile {
+    fn drop(&mut self) {
+        if self.armed {
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
+}
+
 /// Download a GGUF file from HuggingFace with progress reporting.
 ///
 /// Supports HTTP range requests for partial/shard downloads.
-/// Returns the path to the downloaded file.
+/// Returns the path to the downloaded file. `cancel` is read per chunk; a set
+/// flag ends the download and its staging file goes (the caller reads the
+/// flag, never this error's text, to tell a cancel from a failure).
 pub async fn download_model(
     repo_id: &str,
     filename: &str,
     dest_dir: &std::path::Path,
     progress_tx: Option<tokio::sync::mpsc::Sender<DownloadProgress>>,
+    cancel: Option<&std::sync::atomic::AtomicBool>,
 ) -> Result<std::path::PathBuf, String> {
     let client = &*HF_DOWNLOAD_CLIENT;
 
@@ -105,6 +136,9 @@ pub async fn download_model(
         .unwrap_or_else(|| std::ffi::OsStr::new("model.gguf"));
     let dest_path = dest_dir.join(safe_filename);
     let tmp_path = dest_path.with_extension("gguf.tmp");
+    // Declared before the file, so it drops after it: the file is closed
+    // before this removes it.
+    let staging = StagingFile::new(tmp_path.clone());
     let mut file = tokio::fs::File::create(&tmp_path)
         .await
         .map_err(|e| format!("Failed to create temp file: {e}"))?;
@@ -117,6 +151,9 @@ pub async fn download_model(
     use futures::StreamExt;
 
     while let Some(chunk) = stream.next().await {
+        if cancel.is_some_and(|c| c.load(std::sync::atomic::Ordering::Acquire)) {
+            return Err("Download cancelled".into());
+        }
         let chunk = chunk.map_err(|e| format!("Download chunk error: {e}"))?;
         downloaded = downloaded.saturating_add(chunk.len() as u64);
         // SEC: enforce the file-size cap on every chunk so a response
@@ -125,8 +162,6 @@ pub async fn download_model(
         // pre-flight check at the top of this function only triggers
         // when `total_size > 0`; this is the streaming-time guard.
         if downloaded > MAX_MODEL_FILE_BYTES {
-            drop(file);
-            let _ = tokio::fs::remove_file(&tmp_path).await;
             return Err(format!(
                 "Download exceeded size cap {MAX_MODEL_FILE_BYTES} (at {downloaded} bytes) — aborting"
             ));
@@ -152,6 +187,7 @@ pub async fn download_model(
     tokio::fs::rename(&tmp_path, &dest_path)
         .await
         .map_err(|e| format!("Failed to rename temp file: {e}"))?;
+    staging.landed();
 
     tracing::info!(
         repo = %repo_id,
@@ -161,4 +197,27 @@ pub async fn download_model(
     );
 
     Ok(dest_path)
+}
+
+#[cfg(test)]
+mod staging_file_tests {
+    use super::StagingFile;
+
+    /// #419: every early return of a download takes its partial file with it.
+    #[test]
+    fn a_staging_file_goes_unless_it_landed() {
+        let dir = tempfile::tempdir().unwrap();
+        let failed = dir.path().join("a.gguf.tmp");
+        std::fs::write(&failed, b"partial").unwrap();
+        drop(StagingFile::new(failed.clone()));
+        assert!(
+            !failed.exists(),
+            "a download that did not land leaves no partial file"
+        );
+
+        let landed = dir.path().join("b.gguf.tmp");
+        std::fs::write(&landed, b"whole").unwrap();
+        StagingFile::new(landed.clone()).landed();
+        assert!(landed.exists(), "a landed file is the caller's");
+    }
 }

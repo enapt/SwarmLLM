@@ -787,7 +787,10 @@ pub fn cleanup_orphaned_model_files(
 /// it is told to stop, which is the only place that pair can be moved as a unit.
 ///
 /// `claims` is `ModelMgmt::shard_download_claims` — a shard with a claim has a
-/// writer, and is left alone.
+/// writer, and is left alone. A staging file it cannot tie to a part (a
+/// header or side file being written, a whole-file download) is left to the
+/// startup sweep: no claim says whether its writer is alive, and each such
+/// writer removes its own file when it fails (#419).
 pub fn cleanup_tmp_files_no_one_is_writing(
     dir: &std::path::Path,
     model_id: &ModelId,
@@ -822,19 +825,27 @@ pub fn cleanup_tmp_files_no_one_is_writing(
         // runs every 10 minutes (`daemon::background::spawn_failed_download_reclaim`),
         // not only at startup, a live mmproj download must be found by its
         // claim too — it used to be swept as a name with no index. A staging
-        // name with no claim to look up is swept.
-        if let Some(index) = claim_index_from_tmp_name(name) {
-            let sid = crate::types::ShardId {
-                model_id: model_id.clone(),
-                index,
-            };
-            if claims.contains(&sid) {
-                tracing::debug!(
-                    path = %path.display(),
-                    "Leaving a partial shard alone — a download is writing it"
-                );
-                continue;
-            }
+        // name no part owns has no claim to ask, so it is not this sweep's to
+        // judge (#419): `gguf_header.bin.tmp` and the side files are written in
+        // one go and renamed, a whole-file download streams for minutes, and
+        // either was deleted from under its writer here.
+        let Some(index) = claim_index_from_tmp_name(name) else {
+            tracing::debug!(
+                path = %path.display(),
+                "Leaving a staging file no part owns to the startup sweep"
+            );
+            continue;
+        };
+        let sid = crate::types::ShardId {
+            model_id: model_id.clone(),
+            index,
+        };
+        if claims.contains(&sid) {
+            tracing::debug!(
+                path = %path.display(),
+                "Leaving a partial shard alone — a download is writing it"
+            );
+            continue;
         }
         tracing::info!(path = %path.display(), "Cleaning up leftover .tmp shard file");
         if std::fs::remove_file(&path).is_ok() {
@@ -1650,6 +1661,37 @@ mod cancel_cleanup_tests {
         let removed = cleanup_tmp_files_no_one_is_writing(dir.path(), &mid, &claims);
         assert_eq!(removed, 1, "only the shard partial should have gone");
         assert!(dir.path().join("manifest.json.4242.7.tmp").exists());
+    }
+
+    /// #419: a staging file no part owns has no claim to ask, so the sweep
+    /// that meets live writers leaves it — a header written and renamed, or a
+    /// whole-file download streaming for minutes, was deleted under its writer.
+    #[test]
+    fn a_staging_file_no_part_owns_is_left_to_the_startup_sweep() {
+        let dir = tempfile::tempdir().unwrap();
+        let mid = ModelId("llava-v1.5-7b".to_string());
+        let claims: dashmap::DashSet<ShardId> = dashmap::DashSet::new();
+        touch(dir.path(), "gguf_header.bin.tmp");
+        touch(dir.path(), "tied_output_weight.bin.tmp");
+        touch(dir.path(), "llava-v1.5-7b-Q4_K_M.gguf.tmp");
+        touch(dir.path(), "mmproj-model-f16.gguf.tmp");
+        touch(dir.path(), "shard_004.bin.tmp"); // the control: a part's, unclaimed
+
+        let removed = cleanup_tmp_files_no_one_is_writing(dir.path(), &mid, &claims);
+
+        assert_eq!(removed, 1, "only the unclaimed part's partial goes");
+        assert!(!dir.path().join("shard_004.bin.tmp").exists());
+        for kept in [
+            "gguf_header.bin.tmp",
+            "tied_output_weight.bin.tmp",
+            "llava-v1.5-7b-Q4_K_M.gguf.tmp",
+            "mmproj-model-f16.gguf.tmp",
+        ] {
+            assert!(
+                dir.path().join(kept).exists(),
+                "{kept} has a writer this sweep cannot see"
+            );
+        }
     }
 
     #[test]

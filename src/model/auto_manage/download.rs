@@ -1158,8 +1158,10 @@ impl AutoShardManager {
         tokio::spawn(async move {
             let _permit = permit;
             let _claim = claim;
-            match crate::model::huggingface::download_model(&repo_id, &filename, &model_dir, None)
-                .await
+            match crate::model::huggingface::download_model(
+                &repo_id, &filename, &model_dir, None, None,
+            )
+            .await
             {
                 Ok(path) => {
                     tracing::info!(

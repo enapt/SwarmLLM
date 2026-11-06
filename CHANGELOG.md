@@ -35,6 +35,10 @@ next computer used to be asked for the whole part again: losing one 90 MB into a
 longer counts against any one of them, and a part this computer cannot write (a full disk) stops
 instead of being fetched into a file with a gap in it.
 
+**Cancelling a whole-file download started through the API now stops it**, and the clean-up that
+runs when the disk is nearly full no longer deletes files other than model parts while they are
+being written (#419). Before, Cancel only removed the file while the download carried on.
+
 ## [0.3.276-alpha] — 2026-11-07
 
 **A computer that has just started hears what each computer it connects to holds, at once.** When

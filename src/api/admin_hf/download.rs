@@ -43,7 +43,7 @@ pub async fn hf_download(
         "user",
         format!("Downloading {} from HuggingFace...", filename),
     );
-    let (_hf_cancel_flag, _already) = shared.models.begin_download(mid.clone(), status);
+    let (hf_cancel_flag, _already) = shared.models.begin_download(mid.clone(), status);
 
     tokio::spawn(async move {
         let mut shutdown_rx = shared.shutdown_rx();
@@ -61,6 +61,7 @@ pub async fn hf_download(
                 &filename,
                 &dest_dir,
                 Some(ptx),
+                Some(&hf_cancel_flag),
             ) => Some(result),
             _ = shutdown_rx.wait_for(|v| *v) => {
                 tracing::info!(model = %download_mid, "Download cancelled by shutdown");
@@ -143,6 +144,18 @@ pub async fn hf_download(
                         );
                     }
                 }
+            }
+            // Cancel pressed: asked of the FLAG, never the error's text — a
+            // cancel recorded as a failure is a red toast for doing what was
+            // meant (the auto-manage arm's rule).
+            Err(_) if hf_cancel_flag.load(std::sync::atomic::Ordering::Acquire) => {
+                tracing::info!(model = %download_mid, "Download cancelled");
+                download_shared
+                    .models
+                    .update_acquisition(&download_mid, |s| {
+                        s.state = crate::model::acquisition::AcquisitionState::Cancelled;
+                        s.log_push("Cancelled".into());
+                    });
             }
             Err(e) => {
                 crate::log_at_level!(

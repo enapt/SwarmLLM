@@ -1860,8 +1860,18 @@ the one-holder 40 Mbit/s run completes, the kill run completes byte-identical at
 (`piece_picker::mark_as_downloading`), not when its bytes land — the mark the
 claim plays here.
 
+**A staging file no part owns is not the mid-life sweep's (#419).** A header
+or side file between its write and its rename, and a whole-file download, have
+no claim to ask, and were deleted under their writers. The sweep that meets live
+writers now judges only names `claim_index_from_tmp_name` ties to a part; any
+other is the startup sweep's, and its writer removes it on every failure
+(`huggingface::download::StagingFile`, removed on drop unless it landed —
+tempfile's `TempPath` shape). The whole-file download reads its cancel flag
+per chunk; before, Cancel stopped it only by deleting its file under it.
+
 **What a change must keep.** A new way to start a peer transfer goes through
-`PartAsk::Starts`; a new writer of any `.tmp` claims before its first byte; a
+`PartAsk::Starts`; a new writer of any `.tmp` claims before its first byte, or —
+for a name no part owns — removes its own file on failure; a
 sweep that skips "files someone is writing" must be checked against EVERY
 writer, not the one in view (gotcha #1058). Tests
 `an_owner_started_peer_transfer_keeps_its_partial_file_from_the_reclaim_pass`,

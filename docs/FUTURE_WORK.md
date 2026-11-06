@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #421**). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #422**). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -1580,30 +1580,16 @@ score at the default (`docs/invariants/network.md` § "The network loop never wa
 A request-response stall line now names its message (`swarm_event:RequestResponse:in:<kind>`), so
 the next one is attributable. Next: the running count on .268 (field and live node), read by kind.
 
-#### #419 — A half-written file the clean-up pass cannot tie to a part is deleted while it is written
-`P4` · storage · **OPEN** — 2026-11-07 · history: #418's audit (gotcha #1058)
+#### #421 — The vision encoder's HuggingFace fetch is unreachable, and would land under a name nothing reads
+`P4` · models · **OPEN** — 2026-11-07 · history: #419's audit
 
-`cleanup_tmp_files_no_one_is_writing` (the reclaim pass every 10 min while over the storage
-budget, and a model's Cancel) spares a `.tmp` only when `claim_index_from_tmp_name` ties it to a
-CLAIMED part (`shard_NNN…`, `mmproj.gguf.tmp…`); any other staging name is deleted whoever writes
-it. Writers it can catch mid-write: the one-shot `atomic_write_blocking` of `gguf_header.bin`,
-`tied_output_weight.bin`, `rope_freqs.bin` (`huggingface/probe.rs`, from the download paths) and
-`save_gguf_header` (`gguf_meta.rs`, the load path) — a window of milliseconds; the rename then
-fails and the next pass fetches again. The explicit whole-file download (`admin_hf/download.rs` →
-`download_model`, `<name>.gguf.tmp`, unclaimed, minutes long) when its folder is a registered
-model's. And the vision encoder's HuggingFace download (`trigger_mmproj_download`), written under
-its HuggingFace name (`mmproj-….gguf.tmp`) and never renamed to `mmproj.gguf`, the name its own
-check and the loader look for — unreachable today: nothing in this build sets
-`HfSource::mmproj_filename` to a name (every local writer writes `None`; gossip copies a peer's).
-Cure at the choke point: while the daemon runs, the pass removes only staging files it can tie to
-a part with no claim and leaves other names to the startup sweep (`cleanup_tmp_files_in_dir`, no
-writers then). That needs the whole-file download to tidy up after itself first (re-read 11-07):
-`download_model` removes its `.tmp` only past the size cap — a chunk, write or flush error leaves
-it — and the handler never reads its cancel flag (`_hf_cancel_flag`), so today Cancel works only by
-this sweep deleting the file under it while the transfer streams on until its rename fails. Only
-the raw API route starts it (`POST /api/admin/hf/download`; no dashboard or CLI caller). Then
-either give the vision-encoder fetch a filename source and rename its result to `mmproj.gguf`, or
-delete it as unreachable (`completeness.md`).
+`auto_manage::download::trigger_mmproj_download` fetches `HfSource::mmproj_filename` with
+`download_model`, which writes it under its HuggingFace name (`mmproj-….gguf`) and never renames it
+to `mmproj.gguf`, the name the trigger's own "already here" check and the loader look for. It never
+runs: nothing in this build sets `mmproj_filename` to a name (every local writer writes `None`;
+gossip and inheritance copy one). Either give it a source (the repo listing's mmproj file) and land
+the result as `mmproj.gguf`, or delete it as unreachable (`completeness.md`); a vision encoder
+reaches a node today as the sentinel part from a peer, or by hand.
 
 #### #420 — A model added from the swarm can show a part as downloading for good while another download fetches it
 `P4` · storage · **OPEN** — 2026-11-07 · history: #418's review
@@ -4693,7 +4679,22 @@ Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
 
-**Closed 2026-11-06/07, unreleased** (#416's nicknames, #417, #402, #191, #418)
+**Closed 2026-11-06/07, unreleased** (#416's nicknames, #417, #402, #191, #418, #419)
+- #419 — **The clean-up deleted half-written files that are not model parts from under their
+  writers, and Cancel never stopped a whole-file download.** `cleanup_tmp_files_no_one_is_writing`
+  (the reclaim pass every 10 min while over the storage budget, and a model's Cancel) spared a
+  `.tmp` only when it could tie it to a claimed part, so a header or side file between its write and
+  its rename (`atomic_write_blocking`, `save_gguf_header`) and a whole-file download streaming for
+  minutes (`POST /api/admin/hf/download` → `download_model`) were deleted under their writers. And
+  that download never read its cancel flag (`_hf_cancel_flag`): Cancel worked only by the sweep
+  deleting its file while it streamed on until its rename failed. Now the sweep that meets live
+  writers judges only a part's staging file and leaves any other name to the startup sweep (no
+  writers then); `download_model` removes its own `.tmp` on every failure (`StagingFile`, dropped
+  unless it landed — it removed it only past the size cap) and reads a cancel flag per chunk; the
+  whole-file download passes its flag and records a cancel as cancelled, asked of the flag. Prior
+  art: tempfile's `TempPath`, removed on drop unless kept or persisted. Tests
+  `a_staging_file_no_part_owns_is_left_to_the_startup_sweep`, `a_staging_file_goes_unless_it_landed`
+  — each red with its part off. The vision encoder's fetch, unreachable, is #421.
 - #418 — **A model part fetched from another computer was spoiled when the disk was over its
   storage budget.** Since v0.3.213 a clean-up pass (60 s after start, then every 10 min, only while
   over the budget) deletes partial files no download is writing, told apart by the writer claim
