@@ -210,7 +210,8 @@ def rounds(truth, tokens, link, drafter, regrow="fixed", send_most=64, seed_most
     return tokens / t * 1000.0
 
 
-def flow(truth, tokens, link, drafter, per_step=32, tree_most=1024, head=(13.0, 0.33), tail=(13.0, 0.33)):
+def flow(truth, tokens, link, drafter, per_step=32, tree_most=1024, head=(13.0, 0.33), tail=(13.0, 0.33),
+         merge=True, out_most=None):
     """A continuous tree stream, the tail walking (FlowSpec's shape over a long
     link): the drafter grows best-first under the root it last HEARD of, each
     forward's rows go through the head and over the link as soon as they are
@@ -222,29 +223,42 @@ def flow(truth, tokens, link, drafter, per_step=32, tree_most=1024, head=(13.0, 
     round trip, where a round pays one for every check. `head` / `tail` are a
     forward's (fixed, per row) ms on each segment's card (the 7B's 14-layer
     halves on an RTX 3070 Laptop / 3060, `prefill_bench`
-    `SWARM_BENCH_SPEC_TREE=1`: 23.4 ms at 32 rows over 16 layers)."""
+    `SWARM_BENCH_SPEC_TREE=1`: 23.4 ms at 32 rows over 16 layers).
+
+    `merge`: the tail reads everything queued as ONE forward (one fixed cost).
+    The real far computer serves the flow's forwards one at a time (2026-11-06,
+    `examples/far_queue_from_log.py`: an answer's delay +~30 ms a forward queued
+    ahead), so `merge=False` is what runs today and `merge=True` is #412.
+
+    `out_most`: forwards sent and not yet answered, at most — the guard's part
+    (it holds the flow down while its forwards queue). None sends without limit,
+    and a far slower than the near then queues without bound."""
     one_way = link["rtt"] / 2
     t, R, m, depth = 0.0, 0, 0, 0
     tail_f, tail_free = 0, 0.0
     verdicts = []  # (heard at the requester, confirmed position)
     pending = []  # (arrives at the tail, rows, the position its rows let the walk reach)
+    answers = []  # when the requester hears each forward answered
 
-    def advance_tail(until):
-        # The tail reads everything that has arrived by the time it is free in
-        # ONE forward (one fixed cost), as a worker reads its queue.
+    def advance_tail(until, once=False):
+        # The tail reads what has arrived by the time it is free — all of it in
+        # ONE forward with `merge`, else the first only.
         nonlocal tail_free, tail_f
         while pending:
             start = max(tail_free, pending[0][0])
             if start > until:
                 return
-            rows, reach = 0, 0
-            while pending and pending[0][0] <= start:
+            rows, reach, n = 0, 0, 0
+            while pending and pending[0][0] <= start and (merge or rows == 0):
                 _, add, f = pending.pop(0)
-                rows, reach = rows + add, max(reach, f)
+                rows, reach, n = rows + add, max(reach, f), n + 1
             tail_free = start + tail[0] + tail[1] * rows
+            answers.extend([tail_free + one_way] * n)
             if reach > tail_f:
                 tail_f = reach
                 heapq.heappush(verdicts, (tail_free + one_way, reach))
+            if once:
+                return
 
     while True:
         advance_tail(pending[-1][0] if pending else t)
@@ -260,6 +274,16 @@ def flow(truth, tokens, link, drafter, per_step=32, tree_most=1024, head=(13.0, 
             advance_tail(float("inf"))
             t = verdicts[0][0] if verdicts else t + 1.0
             continue
+        if out_most is not None:
+            answers[:] = [a for a in answers if a > t]
+            if len(pending) + len(answers) >= out_most:
+                # Held down: wait for the next answer. Only the far's next read is
+                # decided now — a later one may still take what is sent meanwhile.
+                if answers:
+                    t = min(answers)
+                else:
+                    advance_tail(float("inf"), once=True)
+                continue
         add = min(per_step, tree_most - m)
         t += drafter["call"] + drafter["step32_ms"] * add / 32 + head[0] + head[1] * add
         m += add
@@ -366,6 +390,39 @@ def main():
                 f"  flow 16/step {mean(flow, per_step=16):6.2f}  flow 64/step {mean(flow, per_step=64):6.2f}"
                 f"  flow ≤512 rows {mean(flow, tree_most=512):6.2f}"
             )
+    # #412: the far card served one forward at a time (today) against its queue read as one. The far's
+    # price is the 14B's 36 layers on the AU RTX 3060 as it reported them (2026-11-06: ~21 ms at ~23
+    # rows, ~26 at 56); the near's is this card's with the drafter on it.
+    # Two prices for each end. "model": the defaults above (the near ~42 ms a forward, the far ~21, so
+    # no queue can form). "measured": the real link's logs (2026-11-06, `real_link_388b`): the near made a
+    # forward every ~26 ms (drafting 3.0 s + its layers 2.9 s over 226 forwards of ~21 rows), and a
+    # forward queued at the far cost ~30 ms more (`far_queue_from_log.py`; its least 23-54 ms).
+    # "far 40/60": the measured near with a far whose forward costs more (a far holding most of a large
+    # model's layers, a weaker card) — where the merge pays (`faster_than_local.md` § 13).
+    near = dict(DRAFTERS["card"], call=3.0, step32_ms=13.3)
+    prices = {
+        "model": (DRAFTERS["card"], (13.0, 0.33), (17.5, 0.15)),
+        "measured": (near, (8.0, 0.2), (26.5, 0.15)),
+        "far 40": (near, (8.0, 0.2), (40.0, 0.15)),
+        "far 60": (near, (8.0, 0.2), (60.0, 0.15)),
+    }
+    caps = (3, 4, 6, 8, 12, 16, None)
+    for name, (drafter, head, far) in prices.items():
+        for rtt in (130, 425):
+            link = dict(LINKS["far 425 ms"], rtt=rtt)
+
+            def mean(**kw):
+                return statistics.mean(
+                    flow(Truth(s), tokens, link, drafter, per_step=24, head=head, tail=far, **kw) for s in seeds)
+            # Each held to at most W forwards out (the guard's part); the best W of each is the claim.
+            one = {w: mean(merge=False, out_most=w) for w in caps}
+            merged = {w: mean(merge=True, out_most=w) for w in caps}
+            b1, bm = max(one, key=one.get), max(merged, key=merged.get)
+            print(f"#412 {name:8s} {rtt:3d} ms, 24 rows a forward, W = 3/4/6/8/12/16/none:"
+                  f" one at a time {' '.join(f'{one[w]:5.2f}' for w in caps)}"
+                  f" | queue as one {' '.join(f'{merged[w]:5.2f}' for w in caps)}"
+                  f"  best {merged[bm]:5.2f} (W={bm}) against {one[b1]:5.2f} (W={b1}),"
+                  f" {merged[bm] / one[b1]:4.2f}x")
 
 
 if __name__ == "__main__":

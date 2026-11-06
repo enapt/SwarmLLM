@@ -1202,7 +1202,24 @@ guard narrowed the ROWS to 2 a level and still kept 8-11 forwards out, each payi
 fixed ~30 ms — which is why narrowing never shortened that queue. (2) The merge's price on this
 card: the 14B's far range at 20 / 40 / 60 tree rows a forward (`prefill_bench`, live node stopped,
 nothing else on the card). (3) The gain on the flow's own timeline, replayed with merged service
-(`examples/tree_schedule_sim.py`): only then build, behind `SWARMLLM_FLOW_FAR_MERGE=0`. The far
+(`examples/tree_schedule_sim.py`): only then build, behind `SWARMLLM_FLOW_FAR_MERGE=0`. **(3)
+replayed 2026-11-06**: the model's flow had ALWAYS read the far's queue as one forward, and at its
+default prices (the near ~42 ms a forward, the far ~21) no queue formed, so it could not see this.
+With `merge=False` and a hold on the forwards out (`out_most`, the guard's part), at the measured
+prices (the near ~26 ms a forward of ~24 rows: drafting 3.0 s + its layers 2.9 s over 226 forwards;
+the far ~26.5 fixed + 0.15 a row), each shape at its best hold, 20 replies of 400 tokens:
+
+| far's fixed cost a forward | 130 ms: one at a time / as one | 425 ms: one at a time / as one |
+|---|---|---|
+| 26.5 ms (the 14B pair as measured) | 20.68 / 20.68 (1.00x) | 10.74 / 10.74 (1.00x) |
+| 40 ms | 15.61 / 19.46 (1.25x) | 9.49 / 10.14 (1.07x) |
+| 60 ms | 12.68 / 17.36 (1.37x) | 8.57 / 9.66 (1.13x) |
+
+Where the far keeps pace with the near, the right hold (6 forwards out at 130 ms) already reaches
+the ceiling — a flow advances E a round trip — and the merge only forgives a hold set too loose
+(12 out: 13.9 against 20.6). It pays where a far forward costs ~1.5x the near's or more: a far
+holding most of a large model's layers, a weaker far card. The acceptance is the model's (Sequoia's
+positional, a 7B's ranks), so the ratios transfer better than the speeds. The far
 must run it, so the real-link A/B waits for a release to reach the far card. Before that, a rig
 with this card as the far and the Proxmox node as the near end over a delayed link. Prior art
 (2026-11-06): no system found merges one request's QUEUED forwards at a stage. FlowSpec

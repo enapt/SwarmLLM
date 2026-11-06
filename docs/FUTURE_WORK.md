@@ -95,8 +95,10 @@ the top track (`docs/plans/large_model_splits.md`).
    v0.3.272 — § "Closed".)
 7. **#412** (conceptual) — a busy far card is busy with our own forwards: run its backlog as one
    (`faster_than_local.md` § 13; an answer's delay rises ~30 ms a forward queued ahead past ~5;
-   no published system merges one request's queued forwards). **Next**: the far range's forward
-   at 20/40/60 rows on this card, then the gain replayed in `examples/tree_schedule_sim.py`.
+   no published system merges one request's queued forwards). Replayed in the schedule model:
+   1.00x where the far keeps pace with the near (the 14B pair), 1.25-1.37x at 130 ms where a far
+   forward costs 40-60 ms — so it is for large models' far segments. **Next**: the far's price a
+   forward in a 70B chain's debug log (#318).
    (#388 CLOSED 2026-11-06: the far's own time read apart, on by default. #411 narrowed the same
    day: the flow's line moved from 150 to 120 ms — on the real link at 126-133 ms the flow beat the
    chain stream 1.15-1.26x on prose in every block, 0.97x on code.)
@@ -2076,8 +2078,16 @@ forwards waiting could run them as one forward and answer each on its own — no
 pair, for a processor far: drop rows its own walk has already killed (`large_model_splits.md`
 § "What is new here" item 2). Checked from the run's debug logs (`examples/far_queue_from_log.py`): an
 answer's delay is flat to ~5 forwards out, then +~30 ms a forward ahead (385 ms at 9) — a serial
-queue of our own. **Next**, before code: the far range's forward at 20/40/60 rows on this card; the gain replayed on the
-flow's timeline (`examples/tree_schedule_sim.py`). **Prior art** (searched 2026-11-06, full texts
+queue of our own. **Replayed in the schedule model** (2026-11-06, `examples/tree_schedule_sim.py`
+`flow(merge=, out_most=)`, each shape held to its best number of forwards out, 20 replies): the gain
+is set by the far's fixed cost a forward against the near's pace (~26 ms a forward of ~24 rows,
+measured). Where the two are level — the 14B pair as measured, far 26.5 ms — 1.00x at 130 and
+425 ms: the guard's right hold (6 out at 130 ms) already reaches the ceiling, and the merge only
+forgives a hold set too loose (12 out: 13.9 against 20.6 tok/s). A far at 40 ms a forward: 1.25x at
+130 ms, 1.07x at 425; at 60 ms: 1.37x and 1.13x. So it is for a far that holds the bigger share of a
+LARGE model's layers (#318's 70B), not the 14B pair. **Next**, before code: the far's price a
+forward on such a split (its served time in a 70B chain's debug log), and the 14B pair's own rows
+at 20/40/60 on this card (`prefill_bench`). **Prior art** (searched 2026-11-06, full texts
 unless noted): none found merges one request's queued forwards at a stage — FlowSpec (2507.02620
 § III) serves its segments serially and prunes each stage's rows after a verify; PipeInfer
 (2407.11798 § IV-A/D) keeps a FIFO of runs and CANCELS invalid ones, a node mid-run polling a flag
