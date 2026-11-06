@@ -680,6 +680,7 @@ pub(crate) fn device_free_and_total_bytes(device: &candle_core::Device) -> Optio
                 "DIAG: card memory reading"
             );
         }
+        crate::inference::cuda_pool::report_allocations_asked_again();
         let kept = pool.map_or(0, crate::inference::cuda_pool::PoolUsage::reusable);
         return reading.map(|(free, total)| (free.saturating_add(kept).min(total), total));
     }

@@ -2952,7 +2952,9 @@ allocation.
 does, and synchronizes and trims the pool to 0 before it reports out of memory
 (`c10/cuda/CUDAMallocAsyncAllocator.cpp`). A retry at the allocation would need cudarc patched
 (its `result::malloc_async` is the one choke point); the hold at the reading prevents the dry
-driver instead, and needs no vendored crate.
+driver instead, and needs no vendored crate. (Since 2026-11-06 the retry is in the vendored candle
+allocator, one level above cudarc — § "A refused allocation is asked again after the pool gives back
+its idle memory" below; the hold stays.)
 
 **What a change must keep.** Hold the margin against the DRIVER's figure, not the sum; give back
 only the shortfall; read again after a hand-back. A/B `SWARMLLM_CUDA_POOL_MARGIN=0`. Test
@@ -2972,6 +2974,69 @@ driver lends a pool's spare memory only within its own process and the daemon's
 Any reading of "free for this process" adds `cuda_pool::reusable_bytes`. Guard:
 `every_split_model_reaches_the_card_through_load_device`; A/B:
 `SWARMLLM_CUDA_POOL_KEEP=0`.
+
+### A refused allocation is asked again after the pool gives back its idle memory (2026-11-06, FUTURE_WORK #367 (d) fix (3a))
+
+**Why.** Fixes (1) and (2) of #367 (d) — a second pool for the conversation cache, then a margin
+split into the driver's floor and one forward's room — were each measured and not adopted: a
+forward's working set grows past any room the budget leaves, because the budget counts the pool's
+idle memory as room, and that memory sits in pieces no request of another size can use while they
+stay mapped (gotcha #1043). Where the card then says no, a native driver answers
+`CUDA_ERROR_OUT_OF_MEMORY`, the worker ends (`worker_ipc::worker_error_is_fatal` reads "out of
+memory" as fatal) and the model is pinned to the processor (`permanent_gpu_failure`) — the field's
+failure, at a fifth of the speed.
+
+**What others do.** PyTorch's `cudaMallocAsync` backend (`c10/cuda/CUDAMallocAsyncAllocator.cpp`,
+`mallocAsync`), which keeps the same release threshold `keep_freed_memory` sets: on
+`cudaErrorMemoryAllocation`, "Before declaring OOM, reclaim freed-but-cached pool backing and retry
+once", synchronizing the stream first because "cudaMemPoolTrimTo only releases backing whose frees
+have completed"; "a true peak-live OOM has nothing to reclaim and falls through to the error".
+SGLang evicts cached prefixes BEFORE it allocates, from its own count of free slots
+(`mem_cache/common.py`, `_evict_until_allocatable`) — this node's admission does the same
+(`PrefixCache::release` before a prompt is refused); neither sees a refusal the driver makes out of
+fragmented memory.
+
+**The change.** The vendored candle `CudaDevice::ask_again_after_a_refusal` wraps every allocation
+of the device's own buffers — `alloc`, `alloc_zeros`, `clone_htod`'s buffer (cudarc's `clone_htod` is
+an allocation and then a copy, so it is now made as one through `alloc`; left direct, it was the one
+upload path a retry missed) and `clone_htod_beside`'s three — and, on `CUDA_ERROR_OUT_OF_MEMORY`
+outside a capture, synchronizes the device's stream, trims its CURRENT pool (the one
+`cuMemAllocAsync` takes from; PyTorch names the default pool — the same pool here, SwarmLLM sets no
+other) to its live buffers and asks once more. Inside a capture a synchronize would end it, so a
+refusal stands there. Counts: `candle_core::cuda_backend::allocations_asked_again()`, reported at the
+card's one memory reading (`kv_budget::device_free_and_total_bytes` →
+`cuda_pool::report_allocations_asked_again`: INFO "The graphics card refused memory; its pool gave
+back what it held idle and asked again", `asked_again` / `granted` / `still_refused`, totals for the
+worker's life, logged when they grow). Not covered: a card-to-card copy (`transfer_to_device`, two
+cards) and `cuda_pool::prime`'s own growth, a request the pool may refuse.
+
+**Measured.** Under WSL2 the driver never refuses — Windows lends the card host memory instead — so
+a fault switch refuses every n-th first ask outside a capture as the driver would
+(`SWARMLLM_FAULT_CARD_OOM=1000`). One CUDA release build, the live node stopped, Windows up ~17 h,
+0 driver events; Llama-3.1-8B Q4_K_M whole on the 8 GB RTX 3070 Laptop, saved prompts on the card,
+the field's ~3,100-token prompts (`~/swarmllm-gate/deep/fr/creep_repro_ab.sh`, `PAD=130`), 3 min an
+arm (`creep_out/1106_0415`):
+
+| | refused, asked again | refused, `SWARMLLM_CUDA_ASK_AGAIN=0` | no refusals |
+|---|---|---|---|
+| refusals asked again / granted | 132 / 132 | — | the line never logged |
+| turns (failed) | 22 (0) | 6 (2) | 22 (0) |
+| worker ended, model pinned to the processor | 0 | 2 (120 s, then 240 s) | 0 |
+| decode | 32.9 tok/s (median from turn 10) | 7.5-7.8 on the processor | 32.9 |
+| refused graph captures | 3 | — | 3 |
+
+The middle arm is the field report's failure, made by the switch: the worker ended on
+`CUDA_ERROR_OUT_OF_MEMORY` (in "Token tensor", then "attn") and the chat ran on the processor at a
+fifth of the card's speed. Replies (`~/swarmllm-gate/deep/fr/greedy_fault_ab.sh`: one ~1,500-token
+question at temperature 0, three times an arm, the first cold and the rest restored from the saved
+prompt, `SWARMLLM_FAULT_CARD_OOM=200`): 41 asked again, 41 granted, all six replies the same bytes as
+the arm without refusals. A build that still allocated `clone_htod`'s buffer directly read 126 / 126
+over 22 turns and six identical replies.
+
+**What a change must keep.** Ask again ONCE, after a synchronize, only on out-of-memory, never
+inside a capture; count both outcomes. A refusal with nothing idle to give back stands — the next
+rung is the worker's (FUTURE_WORK #367 (d), (3b)). A/B `SWARMLLM_CUDA_ASK_AGAIN=0`; the fault switch
+is for a machine whose driver never refuses.
 
 ## The daemon holds no CUDA context (2026-10-05)
 

@@ -10,6 +10,15 @@ read as a far-away country. Every computer's location is now read as a two-lette
 it arrives, and a `region` setting that is not one is looked up from the internet address instead,
 as if it were unset (#407).
 
+**A graphics card that refuses memory is asked once more before a request fails.** SwarmLLM keeps
+graphics memory a model has finished with, so the next request can reuse it quickly. When the card
+refused a new piece of memory, that kept memory could be in the way: the request failed, and the
+model moved to the processor for a while at a fraction of its speed. Now the kept memory is given
+back first and the card is asked again — what PyTorch does. On this project's test laptop, with the
+card made to refuse memory on purpose, every refusal was then granted and replies were unchanged
+word for word. This is one part of the work on long chats running a 12 GB card out of memory
+(#367); a card with room to spare is unaffected.
+
 ## [0.3.274-alpha] — 2026-11-06
 
 **A short first reply no longer slows the replies after it.** When a model runs partly or wholly

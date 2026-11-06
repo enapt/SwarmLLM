@@ -24,6 +24,8 @@ pub use device::{CudaDevice, DeviceId};
 pub use device::{
     counting_kernels, htod_copies_so_far, take_htod_copy_counts, take_kernel_launch_counts,
 };
+// SwarmLLM patch (#367 (d)): refused allocations asked again after a trim.
+pub use device::allocations_asked_again;
 pub use error::{CudaError, WrapErr};
 pub use utils::{Map1, Map1Any, Map2, Map2Any, Map2InPlace, Map3, S};
 

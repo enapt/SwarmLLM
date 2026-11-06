@@ -375,6 +375,25 @@ pub(crate) const SLOW_CARD_NOTICE_EVERY: Duration = Duration::from_secs(12 * 360
 static PROBE: OnceLock<Option<Duration>> = OnceLock::new();
 static PROBE_REPORTED: AtomicBool = AtomicBool::new(false);
 
+/// Say so once each time the card has refused more memory: the vendored
+/// candle allocator asks a refused allocation once more after the pool gives
+/// back what it holds idle (`CudaDevice::ask_again_after_a_refusal`, PyTorch's
+/// `cudaMallocAsync` rule, FUTURE_WORK #367 (d)), and this is the only trace
+/// of a refusal the second ask saved. Called by the card's budget reading.
+#[cfg(feature = "candle-cuda")]
+pub(crate) fn report_allocations_asked_again() {
+    static TOLD: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let (asked, granted) = candle_core::cuda_backend::allocations_asked_again();
+    if asked > TOLD.swap(asked, Ordering::Relaxed) {
+        tracing::info!(
+            asked_again = asked,
+            granted,
+            still_refused = asked - granted,
+            "The graphics card refused memory; its pool gave back what it held idle and asked again"
+        );
+    }
+}
+
 /// Whether the probe runs (on unless `SWARMLLM_CARD_PROBE=0`).
 #[cfg(feature = "candle-cuda")]
 fn probe_enabled() -> bool {

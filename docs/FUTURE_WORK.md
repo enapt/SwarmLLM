@@ -82,10 +82,12 @@ the top track (`docs/plans/large_model_splits.md`).
    NOT adopted: the hand-backs did not fall, so every forward's own working set grows past the room
    above the margin. Fix (2), a margin split into the driver's floor and one forward's room, was
    built and NOT adopted on 2026-11-06 (no fewer hand-backs, the same dips; held in the driver too,
-   four times the hand-backs and saved prompts refused on a full card). **Next**: (3) shed and
-   retry where the card says no (trim and ask again; then let saved prompts go and rerun the
-   forward); and the field's shape on native Linux (a Linux card peer through `swarm_route`,
-   or the next field export's `cuda_pool` DIAG lines). (#403 CLOSED 2026-11-04, released in
+   four times the hand-backs and saved prompts refused on a full card). Fix (3), shed and retry:
+   (3a) a refused allocation asked again after the pool trims, built and checked with a fault
+   switch on 2026-11-06 (132 of 132 granted; without it the worker ended and the model was
+   pinned). **Next**: (3b) let saved prompts go and rerun the forward once; and the field's shape
+   on native Linux (a Linux card peer through `swarm_route`, or the next field export's
+   `cuda_pool` DIAG lines and the new "refused memory" line). (#403 CLOSED 2026-11-04, released in
    v0.3.272 — § "Closed".)
 7. **#388** — the flow's guard takes a far computer's own delay for a queue on the link (the
    slowest reply of two 12-arm runs on 2026-11-01). The far now reports its own time and the guard
@@ -1933,6 +1935,27 @@ fails lets the card's saved prompts go and runs again from its start (its caches
 the worker reports out of memory. Testable here only by a fault switch failing the n-th growth as the
 driver would; the field's shape on native Linux after a release (the AU 3060, `aa3d1e66`), or the
 next field diagnostics export, reading `cuda_pool`'s DIAG lines per forward.
+
+**(3a) built and checked 2026-11-06**: the vendored candle allocator asks a refused allocation once
+more after synchronizing and trimming the pool to its live buffers (`CudaDevice::ask_again_after_a_refusal`,
+every allocation of the device's own buffers, `clone_htod`'s included; never inside a capture). The
+fault switch (`SWARMLLM_FAULT_CARD_OOM=1000`, the field's shape, 3 min an arm): asked again, 132 of
+132 granted, 22 turns, 0 failed; `SWARMLLM_CUDA_ASK_AGAIN=0`, the field's failure — the worker ended
+twice and the chat ran on the processor at 7.5 tok/s against 32.9; no refusals, the line never
+logged. Greedy replies the same bytes with and without refusals (41 asked again).
+`docs/invariants/memory.md` § "A refused allocation is asked again after the pool gives back its idle
+memory". It cannot help a refusal with nothing idle to give back. **Next: (3b)** — a forward the
+retry did not save lets the card's saved prompts go and runs again ONCE, before the worker reports
+out of memory (today ANY forward error naming "out of memory" ends the worker and pins the model:
+`worker_ipc::worker_error_is_fatal`, `permanent_gpu_failure`). Where: `SplitModel::forward_inner_impl`
+(every single forward passes it) and `forward_batch`, not the worker's five call sites; the saved
+prompts go through the store's evictor (`KvCacheStore::set_external_evictor`, the worker's closure
+over `PrefixCache::release(.., SnapshotHome::BesideLive)` + `set_external_reserved`). Rerun only
+where the request's caches stand where the forward began: the layer loop's error arm cuts them back
+(`forward_inner_body`), but an error after the write-back (the output head) leaves them advanced,
+and a recurrent state that cannot rewind is dropped. Under WSL2 saved prompts live in host RAM, so
+(3b) frees nothing here unless `SWARMLLM_PREFIX_CACHE_HOME=card`; check it with the fault switch and
+`SWARMLLM_CUDA_ASK_AGAIN=0`, which make a forward fail as the field's did.
 
 The same 1,800-token prompt's snapshot (Qwen2.5-14B Q4_K_M, 15 of 48 on the card: 569 MB, 486 of it
 the processor layers' f32 cache, all kept in host RAM under WSL2) was copied in 155-680 ms in one pair

@@ -2216,6 +2216,18 @@ report's RATIO of a saved prompt to the margin, not just a long chat (gotcha #10
 ~3,100-token prompts on Llama-3.1-8B, 8 GB card, took driver free 721 → 64 MB with it off and
 held 384-416 MB with it on (`docs/invariants/memory.md` § "The driver's margin, measured (2026-10-31, FUTURE_WORK #385)").
 
+**Did the card refuse memory, and did asking again save it?** (FUTURE_WORK #367 (d), fix (3a).)
+An allocation the driver refuses is asked again once, after the pool gives back what it holds
+idle, and the card's memory reading then logs at INFO `The graphics card refused memory; its pool
+gave back what it held idle and asked again` — `asked_again`, `granted`, `still_refused`, totals
+for the worker's life, logged when they grow. `still_refused` above 0 is a refusal with nothing
+idle to give back: that forward still ends the worker with `CUDA_ERROR_OUT_OF_MEMORY` and the
+model is pinned to the processor (`Pinning this model to CPU`). Under WSL2 the driver lends host
+memory instead of refusing, so the line never appears on its own there; to run the path,
+`SWARMLLM_FAULT_CARD_OOM=<n>` refuses every n-th first ask outside a CUDA graph capture as the
+driver would, and `SWARMLLM_CUDA_ASK_AGAIN=0` lets a refusal stand (the behaviour before). With
+both, the field's failure appears on this laptop within a minute.
+
 ## Attention-kernel A/B — `SWARMLLM_FORCE_STANDARD_ATTN=1`
 
 Forces every attention call in the process onto `standard_attention`, so the

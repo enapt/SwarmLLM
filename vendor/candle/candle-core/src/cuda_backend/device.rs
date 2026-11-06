@@ -189,6 +189,29 @@ fn own_cuda_stream_requested() -> bool {
 /// Read once and cached: this sits inside the per-op allocation path, which a
 /// decoded token walks ~700 times, so a `getenv` per call would be its own
 /// measurable cost.
+/// SwarmLLM patch (#367 (d)): allocations the driver refused and the device
+/// asked again after its pool gave back idle memory — `[still refused,
+/// granted]` (`CudaDevice::ask_again_after_a_refusal`).
+static ASKED_AGAIN: [std::sync::atomic::AtomicU64; 2] =
+    [std::sync::atomic::AtomicU64::new(0), std::sync::atomic::AtomicU64::new(0)];
+
+/// SwarmLLM patch (#367 (d)): `SWARMLLM_CUDA_ASK_AGAIN=0` lets a refused
+/// allocation stand, as before the patch — the A/B of
+/// `CudaDevice::ask_again_after_a_refusal`.
+fn asks_again_after_a_refusal() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("SWARMLLM_CUDA_ASK_AGAIN").as_deref() != Ok("0"))
+}
+
+/// SwarmLLM patch: how many refused allocations this process asked again,
+/// and how many of those the second ask was granted.
+pub fn allocations_asked_again() -> (u64, u64) {
+    use std::sync::atomic::Ordering::Relaxed;
+    let refused = ASKED_AGAIN[0].load(Relaxed);
+    let granted = ASKED_AGAIN[1].load(Relaxed);
+    (refused + granted, granted)
+}
+
 fn zero_fully_overwritten_buffers() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| {
@@ -366,14 +389,104 @@ impl CudaDevice {
         &self,
         len: usize,
     ) -> Result<cudarc::driver::CudaSlice<T>> {
-        self.stream.alloc::<T>(len).w()
+        self.ask_again_after_a_refusal(|| unsafe { self.stream.alloc::<T>(len) })
+            .w()
     }
 
     pub fn alloc_zeros<T: cudarc::driver::DeviceRepr + cudarc::driver::ValidAsZeroBits>(
         &self,
         len: usize,
     ) -> Result<cudarc::driver::CudaSlice<T>> {
-        self.stream.alloc_zeros::<T>(len).w()
+        self.ask_again_after_a_refusal(|| self.stream.alloc_zeros::<T>(len))
+            .w()
+    }
+
+    /// SwarmLLM patch (FUTURE_WORK #367 (d)): an allocation the driver refuses
+    /// for want of memory is asked once more, after the device's pool gives
+    /// back what it holds idle — PyTorch's `cudaMallocAsync` backend
+    /// (`c10/cuda/CUDAMallocAsyncAllocator.cpp`, `mallocAsync`): "Before
+    /// declaring OOM, reclaim freed-but-cached pool backing and retry once",
+    /// synchronizing first because `cuMemPoolTrimTo` releases only blocks
+    /// whose frees have completed. The pool keeps freed memory (SwarmLLM sets
+    /// its release threshold to the maximum), and pieces of it no request can
+    /// use while they stay mapped; given back, the driver can map one block
+    /// the request fits. A refusal with nothing idle to give back stands, as
+    /// before. Never while the stream is captured (a synchronize would end
+    /// the capture) or without the stream-ordered allocator. Every allocation
+    /// of the device's own buffers goes through here; the counts are
+    /// [`allocations_asked_again`]. `SWARMLLM_FAULT_CARD_OOM=<n>` refuses
+    /// every n-th first ask (outside a capture), so the path can be run where
+    /// the driver never refuses — under WSL2 an overflow is lent host memory.
+    /// PyTorch trims the device's DEFAULT pool; this trims its CURRENT one,
+    /// the pool `cuMemAllocAsync` takes from (the same pool here: SwarmLLM
+    /// sets no other). A/B `SWARMLLM_CUDA_ASK_AGAIN=0`: a refusal stands.
+    fn ask_again_after_a_refusal<R>(
+        &self,
+        mut ask: impl FnMut() -> std::result::Result<R, cudarc::driver::DriverError>,
+    ) -> std::result::Result<R, cudarc::driver::DriverError> {
+        use cudarc::driver::sys::CUresult::CUDA_ERROR_OUT_OF_MEMORY;
+        let first = if self.refused_for_a_fault() {
+            Err(cudarc::driver::DriverError(CUDA_ERROR_OUT_OF_MEMORY))
+        } else {
+            ask()
+        };
+        match first {
+            Err(e)
+                if e.0 == CUDA_ERROR_OUT_OF_MEMORY
+                    && asks_again_after_a_refusal()
+                    && self.give_back_idle_memory() =>
+            {
+                let again = ask();
+                ASKED_AGAIN[usize::from(again.is_ok())]
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                again
+            }
+            other => other,
+        }
+    }
+
+    /// Synchronize the device's stream and trim its pool to what live buffers
+    /// hold. `false` where it could not: no stream-ordered allocator, a
+    /// capture under way, or a driver call failed.
+    fn give_back_idle_memory(&self) -> bool {
+        use cudarc::driver::{result, sys};
+        let ctx = self.stream.context();
+        if !ctx.has_async_alloc()
+            || !matches!(
+                self.stream.capture_status(),
+                Ok(sys::CUstreamCaptureStatus::CU_STREAM_CAPTURE_STATUS_NONE)
+            )
+            || self.stream.synchronize().is_err()
+            || ctx.bind_to_thread().is_err()
+        {
+            return false;
+        }
+        // SAFETY: `cu_device` comes from the live context the stream belongs
+        // to; a trim releases only memory no live buffer holds.
+        match unsafe { result::device::get_mem_pool(ctx.cu_device()) } {
+            Ok(pool) => unsafe { result::mem_pool::trim_to(pool, 0) }.is_ok(),
+            Err(_) => false,
+        }
+    }
+
+    /// `SWARMLLM_FAULT_CARD_OOM=<n>`: whether this first ask is refused as
+    /// the driver would — every n-th outside a capture; never when unset.
+    fn refused_for_a_fault(&self) -> bool {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static EVERY: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+        static ASKS: AtomicU64 = AtomicU64::new(0);
+        let every = *EVERY.get_or_init(|| {
+            std::env::var("SWARMLLM_FAULT_CARD_OOM")
+                .ok()
+                .and_then(|v| v.trim().parse().ok())
+                .unwrap_or(0)
+        });
+        every > 0
+            && matches!(
+                self.stream.capture_status(),
+                Ok(cudarc::driver::sys::CUstreamCaptureStatus::CU_STREAM_CAPTURE_STATUS_NONE)
+            )
+            && (ASKS.fetch_add(1, Ordering::Relaxed) + 1) % every == 0
     }
 
     /// SwarmLLM patch: allocate a buffer whose every element the NEXT kernel
@@ -459,13 +572,18 @@ impl CudaDevice {
     }
 
     // SwarmLLM patch: `#[track_caller]` + the count — see `count_htod_copy`.
+    // Its buffer is taken through `Self::alloc`, so a refusal is asked again
+    // as every other allocation of the device's is (#367 (d)); cudarc's own
+    // `clone_htod` is that allocation and then this copy.
     #[track_caller]
     pub fn clone_htod<T: cudarc::driver::DeviceRepr, Src: cudarc::driver::HostSlice<T> + ?Sized>(
         &self,
         src: &Src,
     ) -> Result<cudarc::driver::CudaSlice<T>> {
         count_htod_copy(std::panic::Location::caller());
-        self.stream.clone_htod(src).w()
+        let mut dst = unsafe { self.alloc::<T>(src.len()) }?;
+        self.stream.memcpy_htod(src, &mut dst).w()?;
+        Ok(dst)
     }
 
     /// SwarmLLM patch: [`Self::clone_htod`] on the device's COPY stream, so the
@@ -552,7 +670,7 @@ impl CudaDevice {
             _ => {
                 // SAFETY: every element is written by `fill` before anything
                 // reads the buffer.
-                let mut buf = unsafe { self.stream.alloc::<T>(len) }.w()?;
+                let mut buf = unsafe { self.alloc::<T>(len) }?;
                 fill(&self.stream, &mut buf, src, zeroed_tail)?;
                 return Ok(buf);
             }
@@ -561,7 +679,7 @@ impl CudaDevice {
         let mut ring = side.ring.lock().unwrap_or_else(|p| p.into_inner());
         if ring.buf.is_none() {
             // SAFETY: the ring is only ever written by copies into it.
-            ring.buf = Some(unsafe { self.stream.alloc::<u8>(COPY_RING_BYTES) }.w()?);
+            ring.buf = Some(unsafe { self.alloc::<u8>(COPY_RING_BYTES) }?);
             ring.head = 0;
             ring.in_flight.clear();
             // Allocated on the device's stream: the copy stream follows it.
@@ -584,7 +702,7 @@ impl CudaDevice {
         self.stream.wait(&copied).w()?;
         // SAFETY: the first `bytes` are copied from the region below and the
         // tail zeroed, before anything the device's stream queues reads it.
-        let buf = unsafe { self.stream.alloc::<T>(len) }.w()?;
+        let buf = unsafe { self.alloc::<T>(len) }?;
         {
             let (dst, _record) = buf.device_ptr(&self.stream);
             // SAFETY: both ranges lie inside their buffers; the device's
