@@ -44,6 +44,11 @@ in both cases.
 3. Known traps in that solution. The per-keypair replay counter is exactly this
    kind of finding: obvious once read, easy to miss otherwise.
 
+Search for how others handle the FAILURE, not only how they avoid the cause you
+suspect: #367 (d)'s research into its guessed cause found ways to avoid
+fragmentation, and missed that PyTorch, vLLM and SGLang answer a card's refusal
+by trimming, shedding and asking again (`workflow.md` item 1, "Prior art:").
+
 **Do not let research replace measurement.** It tells you what is likely and
 what to watch for; it does not tell you what YOUR system is doing. Rules 1-6
 below still apply in full — a mechanism that is correct in the literature and

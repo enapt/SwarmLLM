@@ -8,11 +8,22 @@ evidence; this is the scope: **there is no task small enough to skip it.**
 
 What "research" means here, in order:
 
-1. **How do the systems with more scars than ours do it?** vLLM, llama.cpp,
-   TGI/SGLang, libp2p, WireGuard — the failure mode usually has a NAME there,
-   and the one detail you would otherwise get wrong is usually in the
-   rationale. Fetch the actual source when the reference behaviour is a
+1. **Has the PROBLEM been solved before? Find the prior art before designing
+   anything** (user, 2026-11-06: "saves you reinventing the wheel"). vLLM,
+   llama.cpp, TGI/SGLang, PyTorch, libp2p, WireGuard — the failure mode usually
+   has a NAME there, and the one detail you would otherwise get wrong is usually
+   in the rationale. Fetch the actual source when the reference behaviour is a
    line of code (minja's `ordered_json`, WireGuard's per-keypair counter).
+   **Search by what the user SEES, not only by the cause you suspect**: research
+   into your own hypothesis finds ways to build your design, never that the
+   problem was solved another way. #367 (d) asked how others avoid the
+   fragmentation we had guessed; two designs of ours were built and dropped
+   (11-04, 11-06) before the answer to the failure itself turned up — PyTorch's
+   `mallocAsync` trims and asks again, vLLM/SGLang shed saved prompts, none pins.
+   **Write a `Prior art:` line before building**, in the FUTURE_WORK entry or the
+   code comment: what was looked up, what it does, what we take or why not — or
+   `none found: searched <where>` (the Rust RFC template's "Prior art" section).
+   **A design dropped after measuring sends you back to the prior art** before the next.
 2. **What is the CURRENT API of the crate you are about to call?** Read the
    registry source under `~/.cargo/registry/src/`, not memory of it — the
    method may be feature-gated, renamed, or absent in the pinned version.
@@ -48,7 +59,14 @@ reading something. `research-gate.sh` refuses a change to a file when:
 3. **the task consulted nothing this repo already knows** — per task
    (`prompt_id`): `gotchas.md`, `closed_findings.md`, `open_cautions.md`,
    `docs/invariants/`, `FUTURE_WORK.md`, `DIAGNOSTICS.md`, `ARCHITECTURE.md`,
-   the sweep log, or a web search satisfies it.
+   the sweep log, or a web search satisfies it. **And PRODUCT code** (`src/`,
+   `crates/`, `vendor/`, `frontend/`) needs a look OUTSIDE the repo in the task
+   (item 1, 2026-11-06): a WebSearch/WebFetch, a reference source tree
+   (`~/.cargo/registry/src/`, `~/llama.cpp-ref/`), an agent asked for prior art,
+   or a `Prior art: <what>` line in a TOOL CALL — written into its entry, grepped
+   back from it, or `echo`ed for a mechanical change. Never only in the reply's
+   text: before a tool call it often reaches the transcript as an empty thinking
+   record (gotcha #1045).
 
 ⚠ It reads any path NAMED in a mutating Bash command as a target, heredoc
 bodies included. For a multi-file edit script, write it to the scratchpad and

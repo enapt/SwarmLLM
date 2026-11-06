@@ -35,8 +35,14 @@
 #   3. per TASK (`prompt_id`) — the first code mutation of a task is denied
 #      unless the session consulted what this repo already knows (gotchas,
 #      docs/invariants, FUTURE_WORK, sweep-log, closed_findings) or searched the
-#      web. This is .claude/rules/workflow.md § "Research EVERY task" item 3,
-#      which is the only one of its three items a machine can check.
+#      web (.claude/rules/workflow.md § "Research EVERY task" item 3). And the
+#      first PRODUCT-code mutation (src/, crates/, vendor/, frontend/) is denied
+#      unless the task also looked OUTSIDE the repo for prior art — a web
+#      lookup, a reference source tree, an agent asked for prior art — or a
+#      tool call carries a `Prior art:` line (item 1, user 2026-11-06). #367's
+#      research read only our own notes and the literature on the cause we had
+#      guessed; two designs of our own were built and dropped before PyTorch's
+#      answer to the failure itself turned up.
 #
 # Fails OPEN on any parse error: a hook that cannot read its payload must not
 # become a hook that blocks everything (the lesson a since-removed edit hook was
@@ -168,6 +174,17 @@ KNOWLEDGE = ("docs/invariants/", "docs/FUTURE_WORK", "gotchas.md",
              "sweep-log.jsonl", "closed_findings.md", "docs/DIAGNOSTICS.md",
              "open_cautions.md", "docs/ARCHITECTURE.md")
 this_task_seen, this_task_web, this_task_knowledge = set(), False, False
+# Prior art: an outward look (a web lookup is one; so is a reference source tree
+# or an agent asked for it) or a `Prior art: <what>` line in a TOOL CALL — written
+# into the entry it belongs to, read back from it, or echoed for a change none
+# applies to. Never the reply's text: before a tool call it often reaches the
+# transcript as an empty thinking record, not a text one (gotcha #1045), so a
+# line the user saw read as absent. An `api-request-blob` record replays older
+# messages at a later point in the file and is skipped, or one task's lookups
+# would count for the next.
+OUTWARD_TREES = (".cargo/registry/src/", ".cargo/git/checkouts/", "llama.cpp-ref/")
+PRIOR_ART_LINE = re.compile(r"(?i)prior art[*_]*\s*:[*_]*\s*\S.{10,}")
+outward, declared, this_task_outward, this_task_declared = False, False, False, False
 cur_prompt = None
 prompt_seen_in_transcript = False
 # A SUBAGENT's tool call carries `agent_id`, but `transcript_path` is still the
@@ -194,6 +211,8 @@ try:
                 cur_prompt = pid
                 if pid == prompt_id:
                     prompt_seen_in_transcript = True
+            if r.get("type") == "api-request-blob":
+                continue      # a replay of earlier messages, not something done here
             msg = r.get("message") or {}
             content = msg.get("content")
             if not isinstance(content, list):
@@ -224,6 +243,15 @@ try:
                     searched_web = True
                     if in_task:
                         this_task_web = True
+                if (name in ("Read", "Grep", "Glob", "Bash") and any(k in blob for k in OUTWARD_TREES)) \
+                        or (name in ("Agent", "Task") and "prior art" in blob.lower()):
+                    outward = True
+                    if in_task:
+                        this_task_outward = True
+                if any(isinstance(v, str) and PRIOR_ART_LINE.search(v) for v in inp.values()):
+                    declared = True
+                    if in_task:
+                        this_task_declared = True
                 if name in ("Read", "NotebookRead"):
                     p = rel(inp.get("file_path") or inp.get("notebook_path"))
                     if p:
@@ -328,6 +356,33 @@ if any(t.startswith(GOVERNED) for t in watched):
             "  - or WebSearch/WebFetch how a system with more scars solves it\n\n"
             "Then retry. Research that changed nothing is still worth one line "
             "saying so."
+        )
+
+# ---------------------------------- 3b. prior art, once per task, on product code
+PRODUCT = ("src/", "crates/", "vendor/", "frontend/")
+if any(t.startswith(PRODUCT) for t in watched):
+    looked_out = (this_task_web or this_task_outward or this_task_declared) \
+        if prompt_seen_in_transcript else (searched_web or outward or declared)
+    if not looked_out:
+        deny(
+            "First change to product code in this task, and nothing in it looked "
+            "OUTSIDE this repo for prior art.\n\n"
+            ".claude/rules/workflow.md § \"Research EVERY task before touching code\" "
+            "item 1 (user, 2026-11-06): before building a fix, find out whether the "
+            "PROBLEM has been solved elsewhere — named by what the user sees, not "
+            "only by the cause you suspect. #367 built two designs of its own before "
+            "PyTorch's answer to the failure itself (trim the pool, ask once more) "
+            "turned up. Any one of these, in this task:\n"
+            "  - WebSearch / WebFetch how vLLM, llama.cpp, PyTorch, libp2p, WireGuard... handle it\n"
+            "  - read a reference source tree (~/.cargo/registry/src/, "
+            "~/.cargo/git/checkouts/, ~/llama.cpp-ref/)\n"
+            "  - an Agent whose prompt asks for prior art\n"
+            "  - a `Prior art: <what>` line in a tool call: written into the FUTURE_WORK "
+            "entry or code comment it belongs to (what was looked up, what it changed), "
+            "read back from the entry an earlier task of this work wrote (grep it), or "
+            "`echo \"Prior art: none applies — <why>\"` for a mechanical change. Not in "
+            "your reply text: the transcript often drops it (gotcha #1045).\n\n"
+            "Then retry."
         )
 
 allow()

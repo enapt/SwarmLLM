@@ -87,9 +87,12 @@ def run(cmd, transcript, tool="Bash", tool_input=None):
 
 
 def transcript_with(records):
+    return transcript_of([{"promptId": "PROBE-PROMPT",
+                           "message": {"role": "user", "content": []}}] + list(records))
+
+
+def transcript_of(records):
     tf = tempfile.NamedTemporaryFile("w", suffix=".jsonl", delete=False)
-    tf.write(json.dumps({"promptId": "PROBE-PROMPT",
-                         "message": {"role": "user", "content": []}}) + "\n")
     for r in records:
         tf.write(json.dumps(r) + "\n")
     tf.close()
@@ -118,6 +121,79 @@ SEEN_CASES = [
     ("unseen file, empty transcript", [], True),
     ("a successful Write opens it", write_then_result(False), False),
     ("a DENIED Write does not", write_then_result(True), True),
+]
+
+
+# Check 3b (prior art): the first PRODUCT-code change of a task needs a look
+# outside the repo, or a `Prior art:` line in the reply. The targets are NEW
+# files (check 2 does not apply) whose rules file the transcript Reads (check 1
+# passes), and every case reads a gotcha (check 3's own half passes), so only
+# 3b can decide.
+PRODUCT_TARGET = "/".join(["src", "zz_prior_art_probe.rs"])
+TEST_TARGET = "/".join(["tests", "zz_prior_art_probe.rs"])
+
+
+def tool(name, inp, record_type=None):
+    r = {"message": {"role": "assistant", "content": [
+        {"type": "tool_use", "id": f"probe-{name}", "name": name, "input": inp}]}}
+    if record_type:
+        r["type"] = record_type
+    return r
+
+
+def said(text):
+    return {"message": {"role": "assistant", "content": [{"type": "text", "text": text}]}}
+
+
+def echo(line):
+    return tool("Bash", {"command": f'echo "{line}"'})
+
+
+def task_records(*records, earlier=()):
+    """An earlier task's records, then this task's: its rules read, a gotcha read."""
+    out = []
+    if earlier:
+        out.append({"promptId": "EARLIER-PROMPT", "message": {"role": "user", "content": []}})
+        out.extend(earlier)
+    out.append({"promptId": "PROBE-PROMPT", "message": {"role": "user", "content": []}})
+    for rules in ("arch-errors.md", "arch-guards-and-tests.md"):
+        out.append(tool("Read", {"file_path": os.path.join(ROOT, ".claude", "rules", rules)}))
+    out.append(tool("Bash", {"command": "grep -n card ~/.claude/memory/gotchas.md"}))
+    out.extend(records)
+    return out
+
+
+PRIOR_ART_CASES = [
+    # (description, target, records, must be denied)
+    ("no look outside", PRODUCT_TARGET, task_records(), True),
+    ("a WebSearch", PRODUCT_TARGET,
+     task_records(tool("WebSearch", {"query": "cudaMallocAsync out of memory retry"})), False),
+    ("a reference source tree", PRODUCT_TARGET,
+     task_records(tool("Bash", {"command": "grep -rn trim ~/.cargo/registry/src/x/cudarc/src/driver"})), False),
+    ("an agent asked for prior art", PRODUCT_TARGET,
+     task_records(tool("Agent", {"prompt": "Find the prior art for a refused card allocation"})), False),
+    ("a `Prior art:` line written into its entry", PRODUCT_TARGET,
+     task_records(tool("Edit", {"file_path": os.path.join(ROOT, "docs", "FUTURE_WORK.md"),
+                                "old_string": "a", "new_string":
+                                "**Prior art:** PyTorch's mallocAsync trims the pool and asks once more."})),
+     False),
+    ("the entry's line read back", PRODUCT_TARGET,
+     task_records(tool("Bash", {"command": 'grep -n "Prior art:" docs/FUTURE_WORK.md'})), False),
+    ("an echoed `none applies`", PRODUCT_TARGET,
+     task_records(echo("Prior art: none applies — renaming a local")), False),
+    ("a `Prior art:` line with nothing in it", PRODUCT_TARGET,
+     task_records(echo("Prior art: none")), True),
+    # The reply's text is ignored on purpose: before a tool call it often reaches
+    # the transcript as an empty thinking record (gotcha #1045).
+    ("a line only in the reply's text", PRODUCT_TARGET,
+     task_records(said("Prior art: PyTorch's mallocAsync trims and retries.")), True),
+    ("a lookup only in a replayed request", PRODUCT_TARGET,
+     task_records(tool("WebSearch", {"query": "cudaMallocAsync retry"}, "api-request-blob")), True),
+    ("a line in an EARLIER task", PRODUCT_TARGET,
+     task_records(earlier=[echo("Prior art: PyTorch's mallocAsync trims and retries.")]), True),
+    ("a web lookup in an EARLIER task", PRODUCT_TARGET,
+     task_records(earlier=[tool("WebSearch", {"query": "x y z"})]), True),
+    ("a test file needs only the repo's own knowledge", TEST_TARGET, task_records(), False),
 ]
 
 
@@ -156,6 +232,19 @@ def main():
             print(f"  {('denied' if denied else 'allowed') if ok else ('DENIED' if denied else 'ALLOWED'):<12} {desc}")
             if not ok:
                 failures.append(f"look-before-you-cut: {desc}")
+
+        print("\nprior art (a new file's first Write of a task, by what the transcript shows):")
+        for desc, target, records, must_deny in PRIOR_ART_CASES:
+            t = transcript_of(records)
+            try:
+                denied = run(None, t, tool="Write",
+                             tool_input={"file_path": os.path.join(ROOT, target), "content": "x"})
+            finally:
+                os.unlink(t)
+            ok = denied == must_deny
+            print(f"  {('denied' if denied else 'allowed') if ok else ('DENIED' if denied else 'ALLOWED'):<12} {desc}")
+            if not ok:
+                failures.append(f"prior art: {desc}")
 
         # A probe that cannot fire proves nothing (gotcha #502/#525). If the
         # gate were inert every line above would read "allowed", which the
