@@ -4571,11 +4571,25 @@ impl SharedState {
     /// asked for a file within 10% of its size, the same without the download
     /// check, and the file's existence alone.
     pub fn parts_servable_here(&self, manifest: &crate::types::ModelManifest) -> Vec<u32> {
+        self.parts_landed_here(manifest)
+            .into_iter()
+            .filter(|&index| !self.models.shard_marked_in_progress(&manifest.id, index))
+            .collect()
+    }
+
+    /// The parts that have LANDED here: credited to this node (a credit is a
+    /// passed check), the file exactly its manifest size, and nobody writing
+    /// it now — a writer claim is exact. [`Self::parts_servable_here`] also
+    /// waits out the progress map's marks, which are advisory; the acquisition
+    /// job asks this one, because the marks it would wait out there are its
+    /// own (#420: it showed a part downloading for good while another download
+    /// landed it).
+    pub fn parts_landed_here(&self, manifest: &crate::types::ModelManifest) -> Vec<u32> {
         let held = self
             .model_registry
             .local_shard_indices_in(manifest, self.identity.node_id());
         let store = self.shard_store();
-        let mut servable: Vec<u32> = manifest
+        let mut landed: Vec<u32> = manifest
             .shards
             .iter()
             .filter(|s| {
@@ -4584,12 +4598,15 @@ impl SharedState {
                         &store.shard_path(&manifest.id, s.index),
                         s.size_bytes,
                     )
-                    && !self.models.is_shard_in_progress(&manifest.id, s.index)
+                    && !self.models.shard_download_claimed(&crate::types::ShardId {
+                        model_id: manifest.id.clone(),
+                        index: s.index,
+                    })
             })
             .map(|s| s.index)
             .collect();
-        servable.sort_unstable();
-        servable
+        landed.sort_unstable();
+        landed
     }
 
     pub fn has_complete_split_model(&self, model_id: &crate::types::ModelId) -> bool {

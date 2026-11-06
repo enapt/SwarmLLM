@@ -187,6 +187,17 @@ pub enum AcquisitionState {
     Cancelled,
 }
 
+/// How often a job reads which of its parts are on disk (#420).
+const RECONCILE_EVERY: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// A job that has ended — finished, failed or cancelled — is never reconciled.
+fn job_is_over(state: &AcquisitionState) -> bool {
+    matches!(
+        state,
+        AcquisitionState::Complete | AcquisitionState::Failed { .. } | AcquisitionState::Cancelled
+    )
+}
+
 /// Command sent to the AcquisitionManager.
 #[derive(Debug)]
 pub enum AcquisitionCommand {
@@ -249,8 +260,13 @@ impl AcquisitionManager {
     pub async fn run(mut self) -> Result<(), SwarmError> {
         tracing::info!(target: "swarmllm::model::acquisition", "AcquisitionManager running");
 
+        let mut reconcile = tokio::time::interval(RECONCILE_EVERY);
+        reconcile.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             tokio::select! {
+                // Commands before the tick, so the chunks already queued are
+                // counted before the disk is read.
+                biased;
                 _ = self.shutdown_rx.changed() => {
                     if *self.shutdown_rx.borrow() {
                         tracing::info!(target: "swarmllm::model::acquisition", "AcquisitionManager shutting down");
@@ -270,10 +286,98 @@ impl AcquisitionManager {
                         None => break,
                     }
                 }
+                _ = reconcile.tick() => self.reconcile_parts_on_disk(),
             }
         }
 
         Ok(())
+    }
+
+    /// A job learns a part's progress from the chunks the network manager
+    /// sends it, and a part another download writes sends it none: refused a
+    /// second writer (#418), the job showed the part downloading for good while
+    /// the other download — the automatic pass from HuggingFace, or one handed
+    /// on after this job's peers failed — landed it (#420). So each tick reads
+    /// the parts whole and credited here, whoever wrote them (Kubernetes'
+    /// level-triggered reconcile: the next pass converges whatever message was
+    /// missed). A job the owner cancelled is dropped: Cancel writes only the
+    /// published entry, and the job would otherwise call the model ready.
+    fn reconcile_parts_on_disk(&mut self) {
+        let progress_map = &self.shared_state.models.acquisition_progress;
+        let mut cancelled = Vec::new();
+        let mut changed = Vec::new();
+        for (model_id, job) in self.jobs.iter_mut() {
+            if job_is_over(&job.status.state) {
+                continue;
+            }
+            if progress_map
+                .get(model_id)
+                .is_some_and(|s| s.state == AcquisitionState::Cancelled)
+            {
+                cancelled.push(model_id.clone());
+                continue;
+            }
+            // Every part not yet settled, tracked or not: a part handed to the
+            // automatic pass is no longer in `shard_progress` at all.
+            let unsettled: Vec<u32> = job
+                .manifest
+                .shards
+                .iter()
+                .map(|s| s.index)
+                .filter(|index| {
+                    !job.status.shard_progress.get(index).is_some_and(|sp| {
+                        matches!(
+                            sp.state,
+                            ShardState::Verifying | ShardState::Complete | ShardState::Failed
+                        )
+                    })
+                })
+                .collect();
+            if unsettled.is_empty() {
+                continue;
+            }
+            let here = self.shared_state.parts_landed_here(&job.manifest);
+            let landed: Vec<u32> = unsettled
+                .into_iter()
+                .filter(|index| here.contains(index))
+                .collect();
+            if landed.is_empty() {
+                continue;
+            }
+            for index in landed {
+                let total = job
+                    .manifest
+                    .shards
+                    .iter()
+                    .find(|s| s.index == index)
+                    .map(|s| s.size_bytes)
+                    .unwrap_or(0);
+                let sp = job
+                    .status
+                    .shard_progress
+                    .entry(index)
+                    .or_insert_with(|| ShardProgress {
+                        index,
+                        total_bytes: total,
+                        downloaded_bytes: 0,
+                        state: ShardState::Pending,
+                    });
+                sp.downloaded_bytes = total;
+                sp.state = ShardState::Complete;
+                job.status.downloaded_shards += 1;
+                job.status.verified_shards += 1;
+                job.status
+                    .log_push(format!("Shard {index} arrived through another download"));
+            }
+            progress_map.insert(model_id.clone(), job.status.clone());
+            changed.push(model_id.clone());
+        }
+        for model_id in cancelled {
+            self.jobs.remove(&model_id);
+        }
+        for model_id in changed {
+            self.finish_if_all_done(&model_id);
+        }
     }
 
     /// Start acquiring a model from the network.
@@ -696,6 +800,17 @@ impl AcquisitionManager {
             tracing::debug!(model = %model_id, "Received shard chunk for unknown job — ignoring");
             return;
         };
+        // A part already settled — verified, failed, or found on disk by
+        // `reconcile_parts_on_disk` — has nothing more to say: a late chunk set
+        // it back to downloading and verified it, and counted it, again (#420).
+        if job
+            .status
+            .shard_progress
+            .get(&shard_index)
+            .is_some_and(|sp| matches!(sp.state, ShardState::Complete | ShardState::Failed))
+        {
+            return;
+        }
 
         // Track progress. A part is as far along as the end of its latest
         // chunk on disk, not the sum of what this run received (#191): a
@@ -847,69 +962,82 @@ impl AcquisitionManager {
             // Publish updated progress
             progress_map.insert(model_id.clone(), job.status.clone());
 
-            // Check if all shards are done
-            // Guard: don't declare completion when total_shards is 0 (dummy/placeholder manifest)
-            let all_done = job.status.total_shards > 0
-                && job.status.verified_shards + job.status.failed_shards >= job.status.total_shards;
-            if all_done {
-                if job.status.failed_shards == 0 {
-                    job.status.state = AcquisitionState::Complete;
-                    job.status.speed_bytes_per_sec = 0;
-                    let elapsed = job
-                        .status
-                        .started_at
-                        .map(|s| (chrono::Utc::now() - s).num_seconds().max(1) as u64)
-                        .unwrap_or(1);
-                    let avg_speed = job.status.total_bytes / elapsed;
-                    job.status.log_push(format!(
-                        "Acquisition complete! {} in {}s (avg {})",
-                        format_bytes_short(job.status.total_bytes),
-                        elapsed,
-                        format_speed(avg_speed)
-                    ));
-                    progress_map.insert(model_id.clone(), job.status.clone());
-                    let manifest = job.manifest.clone();
-                    tracing::info!(model = %model_id, "Model acquisition complete");
-                    self.register_model(&model_id, &manifest);
-                    let display = self.shared_state.model_registry.display_name(&model_id);
-                    self.shared_state.emit_activity(
-                        crate::daemon::state::ActivityEvent::new(
-                            "download",
-                            "model_download_complete",
-                            format!(
-                                "All parts of {} downloaded and verified — model ready",
-                                display
-                            ),
-                        )
-                        .with_model(model_id.0.clone())
-                        .with_detail_str("p2p".to_string())
-                        .with_toast("success", 8000),
-                    );
-                    self.shared_state
-                        .schedule_acquisition_cleanup(model_id.clone());
-                } else {
-                    let reason = format!(
-                        "{} of {} shards failed verification",
-                        job.status.failed_shards, job.status.total_shards
-                    );
-                    job.status.log_push(format!("FAILED: {}", reason));
-                    job.status.state = AcquisitionState::Failed {
-                        reason: reason.clone(),
-                    };
-                    progress_map.insert(model_id.clone(), job.status.clone());
-                    let display = self.shared_state.model_registry.display_name(&model_id);
-                    self.shared_state.emit_activity(
-                        crate::daemon::state::ActivityEvent::new(
-                            "download",
-                            "model_acquisition_failed",
-                            format!("Acquisition of {} failed: {}", display, reason),
-                        )
-                        .with_model(model_id.0.clone())
-                        .with_toast("error", 8000),
-                    );
-                    self.shared_state
-                        .schedule_acquisition_cleanup(model_id.clone());
-                }
+            self.finish_if_all_done(&model_id);
+        }
+    }
+
+    /// Declare a job finished once every part is verified or failed — from a
+    /// chunk's verdict or a part found on disk (#420).
+    fn finish_if_all_done(&mut self, model_id: &ModelId) {
+        let progress_map = &self.shared_state.models.acquisition_progress;
+        let Some(job) = self.jobs.get_mut(model_id) else {
+            return;
+        };
+        if job_is_over(&job.status.state) {
+            return;
+        }
+        // Check if all shards are done
+        // Guard: don't declare completion when total_shards is 0 (dummy/placeholder manifest)
+        let all_done = job.status.total_shards > 0
+            && job.status.verified_shards + job.status.failed_shards >= job.status.total_shards;
+        if all_done {
+            if job.status.failed_shards == 0 {
+                job.status.state = AcquisitionState::Complete;
+                job.status.speed_bytes_per_sec = 0;
+                let elapsed = job
+                    .status
+                    .started_at
+                    .map(|s| (chrono::Utc::now() - s).num_seconds().max(1) as u64)
+                    .unwrap_or(1);
+                let avg_speed = job.status.total_bytes / elapsed;
+                job.status.log_push(format!(
+                    "Acquisition complete! {} in {}s (avg {})",
+                    format_bytes_short(job.status.total_bytes),
+                    elapsed,
+                    format_speed(avg_speed)
+                ));
+                progress_map.insert(model_id.clone(), job.status.clone());
+                let manifest = job.manifest.clone();
+                tracing::info!(model = %model_id, "Model acquisition complete");
+                self.register_model(model_id, &manifest);
+                let display = self.shared_state.model_registry.display_name(model_id);
+                self.shared_state.emit_activity(
+                    crate::daemon::state::ActivityEvent::new(
+                        "download",
+                        "model_download_complete",
+                        format!(
+                            "All parts of {} downloaded and verified — model ready",
+                            display
+                        ),
+                    )
+                    .with_model(model_id.0.clone())
+                    .with_detail_str("p2p".to_string())
+                    .with_toast("success", 8000),
+                );
+                self.shared_state
+                    .schedule_acquisition_cleanup(model_id.clone());
+            } else {
+                let reason = format!(
+                    "{} of {} shards failed verification",
+                    job.status.failed_shards, job.status.total_shards
+                );
+                job.status.log_push(format!("FAILED: {}", reason));
+                job.status.state = AcquisitionState::Failed {
+                    reason: reason.clone(),
+                };
+                progress_map.insert(model_id.clone(), job.status.clone());
+                let display = self.shared_state.model_registry.display_name(model_id);
+                self.shared_state.emit_activity(
+                    crate::daemon::state::ActivityEvent::new(
+                        "download",
+                        "model_acquisition_failed",
+                        format!("Acquisition of {} failed: {}", display, reason),
+                    )
+                    .with_model(model_id.0.clone())
+                    .with_toast("error", 8000),
+                );
+                self.shared_state
+                    .schedule_acquisition_cleanup(model_id.clone());
             }
         }
     }
@@ -981,6 +1109,144 @@ fn format_speed(bytes_per_sec: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #420: a part another download writes sends the job no chunks (#418
+    /// refuses the job's peer start while it has another writer), and the job
+    /// showed it downloading for good while that download landed it. The job
+    /// reads what is on disk on its tick; a late chunk for a settled part is
+    /// not counted again.
+    #[tokio::test]
+    async fn a_part_another_download_landed_completes_the_job() {
+        let dir = tempfile::tempdir().unwrap().keep();
+        let mut config = crate::config::Config::default();
+        config.node.data_dir = dir.clone();
+        let db = crate::storage::db::Database::open(&dir).unwrap();
+        let executor = Arc::new(tokio::sync::Mutex::new(
+            crate::inference::executor::ModelExecutor::new(),
+        ));
+        let (state, _, _) = SharedState::new(
+            config,
+            crate::identity::Identity::generate(),
+            db,
+            executor,
+            None,
+        );
+        let (net_tx, _net_rx) = mpsc::channel(4);
+        let (_cmd_tx, cmd_rx) = mpsc::channel(4);
+        let (_shutdown_tx, shutdown_rx) = watch::channel(false);
+        let mut manager = AcquisitionManager::new(state.clone(), net_tx, cmd_rx, shutdown_rx);
+
+        const PART: u64 = 4096;
+        let id = ModelId("landed-elsewhere".into());
+        let shards: Vec<crate::types::ShardInfo> = (0..2u32)
+            .map(|index| crate::types::ShardInfo {
+                index,
+                layer_range: (index * 2, index * 2 + 2),
+                size_bytes: PART,
+                hash: [0u8; 32],
+                tensors: vec![],
+            })
+            .collect();
+        let manifest = ModelManifest {
+            id: id.clone(),
+            name: "Landed elsewhere".into(),
+            architecture: crate::types::ModelArchitecture::Llama,
+            num_layers: 4,
+            num_params_billions: 0.001,
+            quantization: crate::types::Quantization::Q4KM,
+            total_size_bytes: 2 * PART,
+            shard_count: 2,
+            shards,
+            tokenizer_hash: [0u8; 32],
+            manifest_hash: [0u8; 32],
+            publisher: NodeId([0u8; 32]),
+            publish_date: chrono::Utc::now(),
+            license: "MIT".into(),
+            mmproj: None,
+            context_length: None,
+        };
+        state.model_registry.register_manifest(manifest.clone());
+        let mut status =
+            AcquisitionStatus::new_downloading(id.clone(), 2, 2 * PART, "peers", "user", "start");
+        for index in 0..2u32 {
+            status.shard_progress.insert(
+                index,
+                ShardProgress {
+                    index,
+                    total_bytes: PART,
+                    downloaded_bytes: 0,
+                    state: ShardState::Downloading,
+                },
+            );
+        }
+        manager.jobs.insert(
+            id.clone(),
+            AcquisitionJob {
+                manifest,
+                status,
+                shard_bytes: HashMap::new(),
+                speed_samples: vec![],
+            },
+        );
+        // Another download lands a part: its file whole, this node credited.
+        let land = |index: u32| {
+            let path = state.shard_store().shard_path(&id, index);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::File::create(&path).unwrap().set_len(PART).unwrap();
+            state.model_registry.record_shard_holder(
+                ShardId {
+                    model_id: id.clone(),
+                    index,
+                },
+                state.identity.node_id().clone(),
+            );
+        };
+        let job_state = |m: &AcquisitionManager| m.jobs[&id].status.clone();
+
+        manager.reconcile_parts_on_disk();
+        assert_eq!(
+            job_state(&manager).verified_shards,
+            0,
+            "control: nothing landed yet"
+        );
+
+        land(0);
+        manager.reconcile_parts_on_disk();
+        let s = job_state(&manager);
+        assert_eq!(s.shard_progress[&0].state, ShardState::Complete);
+        assert_eq!(s.verified_shards, 1);
+        assert_eq!(
+            s.state,
+            AcquisitionState::Downloading,
+            "one part still to come"
+        );
+
+        // A chunk of part 0 still queued from its transfer is not counted again.
+        manager
+            .handle_shard_data(
+                ShardId {
+                    model_id: id.clone(),
+                    index: 0,
+                },
+                0,
+                &[0u8; PART as usize],
+                PART,
+            )
+            .await;
+        let s = job_state(&manager);
+        assert_eq!(s.shard_progress[&0].state, ShardState::Complete);
+        assert_eq!((s.verified_shards, s.failed_shards), (1, 0));
+
+        land(1);
+        manager.reconcile_parts_on_disk();
+        let s = job_state(&manager);
+        assert_eq!(s.verified_shards, 2);
+        assert_eq!(
+            s.state,
+            AcquisitionState::Complete,
+            "every part is here: the job is done"
+        );
+    }
 
     #[test]
     fn acquisition_state_serializes() {

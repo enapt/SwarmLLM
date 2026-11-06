@@ -1596,18 +1596,6 @@ hash — never from HuggingFace by a name a peer gave. Prior art: BitTorrent BEP
 supplies is taken only once it hashes to the info-hash the user chose, so a peer cannot add a file
 to a download.
 
-#### #420 — A model added from the swarm can show a part as downloading for good while another download fetches it
-`P4` · storage · **OPEN** — 2026-11-07 · history: #418's review
-
-The acquisition job (`model/acquisition.rs`, `/api/admin/models/{id}/add`) learns a part's progress
-only from `AcquisitionCommand::ShardDataReceived`, which the network manager sends per chunk it
-writes. Since #418 a part another download is writing (the automatic pass fetching it from
-HuggingFace when the model is added) refuses the job's peer start (`hold_for_a_peer_transfer`), and
-nothing tells the job: it counts the ask as sent and shows the part downloading while the other
-download lands it. Before #418 both wrote the same file. The model itself loads (a part landing
-reloads it, `spawn_check_and_load`); only the job's progress stays. Cure: the job reads parts that
-landed on disk (`SharedState::parts_servable_here`) on a tick, or the refusal is sent back to it.
-
 #### #168 — A relayed tensor forward over 32 MB is refused instead of chunked
 `P4` · network · **OPEN** — 2026-07-24 · history: archive § "Tensor-relay large-forward chunking (post-plan follow-on, deferred)"
 
@@ -4690,7 +4678,19 @@ Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
 
-**Closed 2026-11-06/07, unreleased** (#416's nicknames, #417, #402, #191, #418, #419, #421)
+**Closed 2026-11-06/07, unreleased** (#416's nicknames, #417, #402, #191, #418, #419, #421, #420)
+- #420 — **A model added from the swarm showed a part as downloading for good while another download
+  fetched it.** The acquisition job (`model/acquisition.rs`) learns a part's progress only from the
+  chunks the network manager sends it, and has no timer; a part another download writes sends it
+  none (#418 refuses its peer start then), nor does one handed to the automatic pass after its peers
+  failed. Now the job reads, every 10 s, the parts credited here, whole and written by nobody
+  (`SharedState::parts_landed_here` — `parts_servable_here` also waits out the progress map's
+  marks, and those are the job's own: the test's first run caught it), whoever wrote them, and finishes through the same decision
+  a chunk's verdict takes (`finish_if_all_done`); a late chunk for a settled part is ignored (it set
+  the part back to downloading and counted it twice), and a job the owner cancelled is dropped
+  rather than called ready. Prior art: Kubernetes controllers are level-triggered — the reconcile
+  reads the current state, so the next pass converges whatever event was missed. Test
+  `a_part_another_download_landed_completes_the_job` — red with the reading off.
 - #421 — **A vision encoder was a download candidate whose one fetch was a whole file from
   HuggingFace that another computer named.** The download pass made a candidate of any manifest's
   `mmproj` (at five times a part's score) and fetched it with `download_model` by

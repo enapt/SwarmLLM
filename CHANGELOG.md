@@ -44,6 +44,10 @@ only if another computer's announcements named a vision encoder, and then fetche
 the model's HuggingFace repository they named. A vision encoder still reaches a computer only when
 placed there by hand (#422).
 
+**A model added from the swarm no longer shows a part as downloading for ever when another download
+fetched that part** (#420): the download checks every 10 seconds which parts have arrived, however
+they came.
+
 ## [0.3.276-alpha] — 2026-11-07
 
 **A computer that has just started hears what each computer it connects to holds, at once.** When
