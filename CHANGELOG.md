@@ -2,6 +2,31 @@
 
 ## [Unreleased]
 
+**A computer that has just started hears what each computer it connects to holds, at once.** When
+two computers connect, each tells the other what it can do and which model parts it holds. That
+message could arrive a moment before the receiving computer had finished recognising the sender,
+and was then thrown away — so a computer that had just started, or just updated, could go without
+a peer's parts list until that peer repeated it, 5 to 40 minutes later, and planned splits without
+it. It is now kept for a few seconds and read as soon as the sender is recognised (#415). The same
+lost message was also the only way a computer on v0.3.270 or older says which release it runs, so
+such a computer could stay connected after a restart although it is two or more releases behind;
+it is now disconnected as intended. The log no longer prints a warning for each message that was
+waiting to go to a computer disconnected for running an old release.
+
+**Computers stop dialling identities that no longer exist** (#413). A computer that restarts with
+a new identity, or a test that runs one, leaves its old identity in the address book of every
+computer it met. Those books kept it for good, handed it to everyone who asked, and each computer
+that heard of it dialled it: a computer on the same network opened 400 connections in a minute to
+the one now living at that address, closing each at once. An identity is now forgotten for an
+address the moment someone else answers there — on disk too, where it used to come back at every
+start — and one nobody has reached for an hour leaves the address book on its next failed dial.
+A computer that comes back is added again as soon as it connects. The swarm sheds the old
+identities as its computers update.
+
+**Removing your country from the settings while SwarmLLM runs now takes effect at once** (#414):
+the country you had set stayed in use until a restart. A country you state is still never looked
+up over the internet; once it is removed, the lookup runs.
+
 **The README says near the top to keep automatic updates on.** While SwarmLLM is being built, new
 versions come out often, and a computer two or more releases behind is disconnected from the
 network until it updates. The note shows where the setting is (Settings → Software updates,

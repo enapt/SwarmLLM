@@ -97,6 +97,10 @@ impl NetworkManager {
             .remove_address(&peer, address)
             .is_some();
         let registry = forget_in_registry(&self.shared_state.peer_registry, peer, address);
+        // And out of the peer cache, which merges what it stored into every save
+        // and so brought the pair back at every start (#413).
+        self.proven_wrong
+            .note(peer, address, std::time::Instant::now());
         tracing::debug!(
             %peer,
             %address,
@@ -104,6 +108,43 @@ impl NetworkManager {
             registry,
             "Another computer answered at this address — forgetting it for this peer"
         );
+    }
+
+    /// A dial to `peer` failed: if nothing has reached it for
+    /// [`stale_peers::UNREACHABLE_FOR`], it leaves Kademlia's table, so lookups
+    /// stop dialling it and stop handing it to every node that asks (#413).
+    /// Only a failure that reached the address or tried every one counts — a
+    /// transport error or another computer answering — never a dial this node
+    /// refused or abandoned. A connection puts the peer back (identify).
+    ///
+    /// [`stale_peers::UNREACHABLE_FOR`]: super::stale_peers::UNREACHABLE_FOR
+    pub(super) fn leave_the_table_if_out_of_reach(
+        &mut self,
+        peer: PeerId,
+        error: &libp2p::swarm::DialError,
+        now: std::time::Instant,
+    ) {
+        use libp2p::swarm::DialError;
+        if !matches!(
+            error,
+            DialError::Transport(_) | DialError::WrongPeerId { .. }
+        ) || self.swarm.is_connected(&peer)
+            || !self.last_reached.out_of_reach_long(&peer, now)
+        {
+            return;
+        }
+        if self
+            .swarm
+            .behaviour_mut()
+            .kademlia
+            .remove_peer(&peer)
+            .is_some()
+        {
+            tracing::debug!(
+                %peer,
+                "Out of reach for an hour — leaving the routing table"
+            );
+        }
     }
 
     /// Who owns this address, according to our own peer registry?
@@ -486,6 +527,94 @@ mod proven_wrong_tests {
             kept,
             vec![elsewhere.to_string()],
             "only the address proven wrong goes"
+        );
+    }
+
+    /// #413 (A): a pair another computer answered at leaves the PEER CACHE too
+    /// — it merged the pair back into every save, so it returned at every start
+    /// and was seeded into Kademlia again — and only that pair goes.
+    #[tokio::test]
+    async fn a_pair_another_computer_answered_at_leaves_the_peer_cache() {
+        let mut manager = manager();
+        let stale = PeerId::random();
+        let lan: Multiaddr = "/ip4/192.168.1.60/udp/8800/quic-v1".parse().unwrap();
+        let wrong_entry = format!("{lan}/p2p/{stale}");
+        let other_entry = format!("/ip4/192.168.1.61/tcp/8810/p2p/{stale}");
+        crate::network::peer_cache::save_peer_cache(
+            &manager.shared_state.db,
+            &[wrong_entry.clone(), other_entry.clone()],
+        );
+        assert!(manager.dialable_peer_cache().contains(&wrong_entry));
+
+        manager
+            .handle_swarm_event(SwarmEvent::OutgoingConnectionError {
+                connection_id: ConnectionId::new_unchecked(1),
+                peer_id: Some(stale),
+                error: DialError::WrongPeerId {
+                    obtained: PeerId::random(),
+                    address: lan.clone().with_p2p(stale).unwrap(),
+                },
+            })
+            .await;
+
+        let dialable = manager.dialable_peer_cache();
+        assert!(
+            !dialable.contains(&wrong_entry),
+            "not dialled from the cache again"
+        );
+        assert!(
+            dialable.contains(&other_entry),
+            "the peer elsewhere still is"
+        );
+        manager.save_peer_cache().await.unwrap();
+        let stored = crate::network::peer_cache::load_peer_cache(&manager.shared_state.db);
+        assert!(!stored.contains(&wrong_entry), "and not stored again");
+        assert!(stored.contains(&other_entry));
+    }
+
+    /// #413 (B): a peer out of reach for an hour leaves Kademlia's table on its
+    /// next failed dial; one reached within the hour stays, nothing goes in the
+    /// node's first hour, and a dial this node abandoned proves nothing.
+    #[tokio::test]
+    async fn a_peer_out_of_reach_for_an_hour_leaves_the_routing_table() {
+        use super::super::stale_peers::{LastReached, UNREACHABLE_FOR};
+        let mut manager = manager();
+        let started = std::time::Instant::now();
+        manager.last_reached = LastReached::new(started);
+        let gone = PeerId::random();
+        let recent = PeerId::random();
+        for peer in [gone, recent] {
+            manager
+                .swarm
+                .behaviour_mut()
+                .kademlia
+                .add_address(&peer, "/ip4/203.0.113.7/udp/8800/quic-v1".parse().unwrap());
+        }
+        manager
+            .last_reached
+            .reached(recent, started + UNREACHABLE_FOR / 2);
+        let failed = DialError::Transport(Vec::new());
+        let later = started + UNREACHABLE_FOR;
+
+        manager.leave_the_table_if_out_of_reach(gone, &DialError::Aborted, later);
+        assert!(
+            in_the_table(&mut manager, &gone),
+            "an abandoned dial proves nothing"
+        );
+        manager.leave_the_table_if_out_of_reach(gone, &failed, started + UNREACHABLE_FOR / 2);
+        assert!(
+            in_the_table(&mut manager, &gone),
+            "not in the node's first hour"
+        );
+        manager.leave_the_table_if_out_of_reach(recent, &failed, later);
+        assert!(
+            in_the_table(&mut manager, &recent),
+            "reached within the hour"
+        );
+        manager.leave_the_table_if_out_of_reach(gone, &failed, later);
+        assert!(
+            !in_the_table(&mut manager, &gone),
+            "out of reach for an hour"
         );
     }
 

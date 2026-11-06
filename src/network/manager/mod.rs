@@ -20,6 +20,7 @@ use crate::network::relay::RelayServerConfig;
 use crate::network::transport;
 use crate::types::{NetworkCommand, SwarmMessage};
 
+mod before_identify;
 mod commands;
 mod connections;
 mod dht;
@@ -35,6 +36,7 @@ mod relay;
 mod requests;
 mod served_time;
 mod shard_transfer;
+mod stale_peers;
 mod tensors;
 mod upload_pacer;
 mod upnp_watch;
@@ -658,6 +660,15 @@ pub struct NetworkManager {
     /// `cut_off_peers_too_far_behind` (the liveness tick); `dial_checked` and
     /// `try_enqueue_redial` skip a peer in it.
     cut_off: HashMap<libp2p::PeerId, std::time::Instant>,
+    /// A peer's catch-up that arrived before its Identify was handled, held to
+    /// be handed on once it has been (`before_identify`).
+    held_until_identified: before_identify::HeldUntilIdentified,
+    /// (peer, address) pairs another computer answered at this run, kept out
+    /// of the peer cache (#413, `stale_peers`).
+    proven_wrong: stale_peers::ProvenWrong,
+    /// When each peer was last reached, so one out of reach for an hour leaves
+    /// Kademlia's table on its next failed dial (#413, `stale_peers`).
+    last_reached: stale_peers::LastReached,
     /// Consecutive request/response failures per peer, with when that peer last
     /// answered anything. Both are reset by any success. See
     /// `MAX_CONSECUTIVE_RR_FAILURES` and `RR_FAILURES_AFTER_SILENCE`.
@@ -1054,6 +1065,9 @@ impl NetworkManager {
             departed_peer_nodes: HashMap::new(),
             foreign_peers: std::collections::HashSet::new(),
             cut_off: HashMap::new(),
+            held_until_identified: before_identify::HeldUntilIdentified::default(),
+            proven_wrong: stale_peers::ProvenWrong::default(),
+            last_reached: stale_peers::LastReached::new(std::time::Instant::now()),
             rr_failures: HashMap::new(),
             dht_query_rx,
             pending_provider_queries: HashMap::new(),
@@ -1134,14 +1148,65 @@ impl NetworkManager {
     }
 
     /// Send a SwarmMessage to the dispatcher with transport-authenticated sender.
+    ///
+    /// A peer whose Identify has not been handled yet has no NodeId here, so
+    /// its catch-up is HELD and handed on by the Identify handler
+    /// (`before_identify`) instead of reaching the dispatcher with no sender —
+    /// where it was dropped. Anything else from such a peer goes on as before.
     #[allow(clippy::result_large_err)]
     fn dispatch_authenticated(
-        &self,
+        &mut self,
         sender_peer: Option<&libp2p::PeerId>,
         msg: SwarmMessage,
     ) -> Result<(), mpsc::error::TrySendError<crate::types::AuthenticatedMessage>> {
         let sender = sender_peer.and_then(|p| self.peer_to_node_id(p));
+        let msg = match (sender_peer, &sender) {
+            (Some(peer), None) => {
+                let network = self.peer_remote_addrs.get(peer).map(|remote| remote.group);
+                match self.held_until_identified.hold(
+                    *peer,
+                    network,
+                    msg,
+                    std::time::Instant::now(),
+                ) {
+                    None => {
+                        tracing::debug!(
+                            %peer,
+                            "Holding a message that arrived before the peer's Identify"
+                        );
+                        return Ok(());
+                    }
+                    Some(msg) => msg,
+                }
+            }
+            _ => msg,
+        };
         self.dispatch_authenticated_as(sender, msg)
+    }
+
+    /// Hand on what `peer` sent before its Identify, now that the Identify
+    /// handler has mapped it to `node` and counted it connected — in the
+    /// order it came, with its sender.
+    fn release_held_until_identified(
+        &mut self,
+        peer: &libp2p::PeerId,
+        node: &crate::types::NodeId,
+    ) {
+        let held = self.held_until_identified.release(peer);
+        if held.is_empty() {
+            return;
+        }
+        tracing::debug!(
+            %peer,
+            node = %node,
+            messages = held.len(),
+            "Handing on the messages that arrived before the peer's Identify"
+        );
+        for msg in held {
+            if let Err(e) = self.dispatch_authenticated_as(Some(node.clone()), msg) {
+                tracing::warn!(%peer, error = %e, "Could not hand on a message held for Identify");
+            }
+        }
     }
 
     /// Inject a message into the dispatch feed with an EXPLICIT logical sender.
@@ -1857,6 +1922,16 @@ impl NetworkManager {
                         self.refresh_peer_last_seen(peer_id);
                     }
                     self.cut_off_peers_too_far_behind();
+                    let expired = self
+                        .held_until_identified
+                        .expire(std::time::Instant::now());
+                    if expired > 0 {
+                        tracing::debug!(
+                            messages = expired,
+                            "Dropped messages whose sender's Identify never came"
+                        );
+                    }
+                    self.last_reached.prune(std::time::Instant::now());
                     // Belt-and-suspenders relay fallback: if, well after startup,
                     // this node still has NO internet-reachable address (no public
                     // listener, no UPnP/AutoNAT-confirmed external addr, no relay
@@ -2387,8 +2462,12 @@ impl NetworkManager {
     /// write) is what repairs a cache poisoned by an older build — the write
     /// path is skipped entirely while no peers are connected, so a bad cache
     /// would otherwise outlive every restart.
+    ///
+    /// A (peer, address) pair another computer answered at this run is left out
+    /// too: the stored cache still holds it until the next save (#413).
     fn dialable_peer_cache(&self) -> Vec<String> {
-        let cached = crate::network::peer_cache::load_peer_cache(&self.shared_state.db);
+        let mut cached = crate::network::peer_cache::load_peer_cache(&self.shared_state.db);
+        cached.retain(|entry| !self.proven_wrong.names(entry));
         let local_addrs = self.shared_state.listen_multiaddrs.load();
         crate::network::peer_cache::filter_dialable(
             &cached,
@@ -2439,8 +2518,12 @@ impl NetworkManager {
         // not live ones. `filter_storable` still runs over the union, so a bad
         // address is evicted on the next save exactly as before — merging keeps
         // stale-but-valid entries, it does not make the cache unpurgeable.
-        self.peer_cache_writer
-            .save(&self.shared_state.db, addrs, *self.swarm.local_peer_id())
+        self.peer_cache_writer.save(
+            &self.shared_state.db,
+            addrs,
+            *self.swarm.local_peer_id(),
+            self.proven_wrong.pairs(),
+        )
     }
 }
 

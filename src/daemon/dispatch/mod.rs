@@ -2068,21 +2068,7 @@ pub(crate) async fn dispatch_network_messages(
                                             tracing::debug!("Dropping unauthenticated NodeCapabilityUpdate");
                                             continue;
                                         }
-                                        // SEC: cap inbound vec sizes before iterating. Each
-                                        // observed_latencies entry inserts into a shared
-                                        // DashMap via merge_peer_segment_latency — without
-                                        // a length cap a malicious peer can drive memory
-                                        // growth via a single capability update. Mirrors the
-                                        // ShardAnnounce/PrefixCacheAnnounce/RegionShardSummary
-                                        // pattern (already capped at 512/1024/512). Same
-                                        // concern for hosted_shards (bounded already by the
-                                        // single peer.capability slot, but a 100k-entry vec
-                                        // would still OOM the deserialiser).
-                                        const MAX_OBSERVED_LATENCIES: usize = 256;
-                                        const MAX_HOSTED_SHARDS_IN_CAP: usize = 1024;
-                                        if cap.observed_latencies.len() > MAX_OBSERVED_LATENCIES
-                                            || cap.hosted_shards.len() > MAX_HOSTED_SHARDS_IN_CAP
-                                        {
+                                        if !capability_fits(&cap) {
                                             tracing::warn!(
                                                 node_id = %cap.node_id,
                                                 obs = cap.observed_latencies.len(),
@@ -3489,6 +3475,23 @@ pub(crate) async fn dispatch_network_messages(
                 }
     }
 }
+
+/// Is a peer's capability within what this node takes? Its lists are capped
+/// before anything iterates them: each `observed_latencies` entry is merged
+/// into a shared map (`merge_peer_segment_latency`), so an uncapped list is
+/// memory growth from one message — the ShardAnnounce / PrefixCacheAnnounce
+/// pattern (512 / 1024). `hosted_shards` is bounded by the one capability
+/// slot per peer, but a 100k-entry list would still cost the decode. Asked by
+/// the dispatcher's `NodeCapabilityUpdate` arm, and by the network manager
+/// before it holds one that arrived ahead of its sender's Identify
+/// (`network::manager::before_identify`).
+pub(crate) fn capability_fits(cap: &crate::types::NodeCapability) -> bool {
+    const MAX_OBSERVED_LATENCIES: usize = 256;
+    const MAX_HOSTED_SHARDS_IN_CAP: usize = 1024;
+    cap.observed_latencies.len() <= MAX_OBSERVED_LATENCIES
+        && cap.hosted_shards.len() <= MAX_HOSTED_SHARDS_IN_CAP
+}
+
 pub(crate) mod layer_forward;
 mod manifest_sync;
 mod prompt_admission;

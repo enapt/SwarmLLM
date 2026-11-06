@@ -332,6 +332,7 @@ impl NetworkManager {
             // negotiation.
             self.swarm.behaviour_mut().blocked_peers.block_peer(peer_id);
             let _ = self.swarm.disconnect_peer_id(peer_id);
+            self.held_until_identified.forget(&peer_id);
             return;
         }
         // Add ONLY the connected address to Kademlia — not all listen_addrs.
@@ -399,6 +400,7 @@ impl NetworkManager {
                 announced = %announced_peer_id,
                 "Peer announced mismatched public key in Identify — ignoring"
             );
+            self.held_until_identified.forget(&peer_id);
             return;
         }
 
@@ -421,6 +423,7 @@ impl NetworkManager {
         {
             if let Some(verdict) = self.shared_state.cut_off_for(&node_id, running) {
                 self.cut_off_peer(peer_id, &node_id, &verdict);
+                self.held_until_identified.forget(&peer_id);
                 return;
             }
             self.shared_state.note_peers_own_version(&node_id, running);
@@ -704,6 +707,15 @@ impl NetworkManager {
                 }
             }
         }
+        // What the peer sent before this Identify was handled — its own
+        // catch-up, above all — goes on now that it is mapped, registered and
+        // connected, which is what each handler assumes (`before_identify`).
+        // Unmapped (the reverse map is full), it has no sender to go with.
+        if self.peer_to_node.contains_key(&peer_id) {
+            self.release_held_until_identified(&peer_id, &node_id);
+        } else {
+            self.held_until_identified.forget(&peer_id);
+        }
         // R110: refresh swarm-capacity snapshot so the dashboard banner
         // reflects the new contributor without waiting for the next ~1.5s
         // stats-cache tick.
@@ -876,6 +888,14 @@ mod cut_off_tests {
     use tokio::sync::{mpsc, watch};
 
     fn manager() -> NetworkManager {
+        manager_and_dispatch().0
+    }
+
+    /// The manager and the dispatcher's end of what it dispatches.
+    fn manager_and_dispatch() -> (
+        NetworkManager,
+        mpsc::Receiver<crate::types::AuthenticatedMessage>,
+    ) {
         let dir = tempfile::tempdir().unwrap().keep();
         let db = crate::storage::db::Database::open(&dir).unwrap();
         let config = crate::config::Config::default();
@@ -890,10 +910,10 @@ mod cut_off_tests {
         );
         crate::daemon::state::swarm_use::list_every_release_up_to_this_one(&state);
         let (command_tx, command_rx) = mpsc::channel(8);
-        let (out_tx, _dispatched) = mpsc::channel(64);
+        let (out_tx, dispatched) = mpsc::channel(64);
         let (_shutdown_tx, shutdown_rx) = watch::channel(false);
         let (_dht_tx, dht_rx) = mpsc::channel(8);
-        NetworkManager::new(
+        let manager = NetworkManager::new(
             state.clone(),
             &state.identity,
             &config,
@@ -904,7 +924,96 @@ mod cut_off_tests {
             None,
             dht_rx,
         )
-        .unwrap()
+        .unwrap();
+        (manager, dispatched)
+    }
+
+    /// The capabilities the dispatcher was handed, with their senders.
+    fn capabilities_dispatched(
+        dispatched: &mut mpsc::Receiver<crate::types::AuthenticatedMessage>,
+    ) -> Vec<(
+        Option<NodeId>,
+        crate::types::NodeCapability,
+        crate::types::MessageTransport,
+    )> {
+        let mut out = Vec::new();
+        while let Ok(msg) = dispatched.try_recv() {
+            if let crate::types::SwarmMessage::NodeCapabilityUpdate(cap) = msg.message {
+                out.push((msg.sender, cap, msg.transport));
+            }
+        }
+        out
+    }
+
+    /// **A capability that lands before its sender's Identify is handed on
+    /// AFTER it, with its sender** — so a computer before v0.3.271, whose
+    /// Identify names no release, is judged on the release its capability
+    /// names. On 2026-11-06 a v0.3.268 computer stayed connected to the live
+    /// node after a restart: its catch-up came first, had no sender, and was
+    /// dropped (`before_identify`).
+    #[tokio::test]
+    async fn a_capability_that_arrives_before_identify_is_handed_on_after_it() {
+        let (mut manager, mut dispatched) = manager_and_dispatch();
+        let key = libp2p::identity::Keypair::generate_ed25519();
+        let peer = key.public().to_peer_id();
+        let node = node_of(&key);
+        let mut cap = crate::health::monitor::tests::capability_for_test();
+        cap.node_id = node.clone();
+        cap.version = own_patch(-2);
+        manager
+            .dispatch_authenticated(
+                Some(&peer),
+                crate::types::SwarmMessage::NodeCapabilityUpdate(cap),
+            )
+            .unwrap();
+        assert!(
+            capabilities_dispatched(&mut dispatched).is_empty(),
+            "held until its Identify"
+        );
+        manager.handle_identify_received(
+            peer,
+            identify_from(&key, "rust-libp2p/0.47.0".into()),
+            ConnectionId::new_unchecked(1),
+        );
+        let handed_on = capabilities_dispatched(&mut dispatched);
+        assert_eq!(handed_on.len(), 1, "handed on once Identify was handled");
+        let (sender, cap, transport) = &handed_on[0];
+        assert_eq!(sender.as_ref(), Some(&node), "with its sender");
+        assert!(manager.shared_state.connected_node_ids.contains(&node));
+        // What the dispatcher's arm does with it, then the tick's verdict.
+        manager
+            .shared_state
+            .note_capability_heard(&node, &cap.version, *transport);
+        assert!(
+            manager.shared_state.cut_off_verdict(&node).is_some(),
+            "judged on the release it named"
+        );
+    }
+
+    /// **A computer refused at Identify has nothing it sent handed on** —
+    /// one cut off there for the release its Identify names.
+    #[tokio::test]
+    async fn what_a_computer_cut_off_at_identify_sent_first_is_dropped() {
+        let (mut manager, mut dispatched) = manager_and_dispatch();
+        let key = libp2p::identity::Keypair::generate_ed25519();
+        let peer = key.public().to_peer_id();
+        let mut cap = crate::health::monitor::tests::capability_for_test();
+        cap.node_id = node_of(&key);
+        cap.version = own_patch(-2);
+        manager
+            .dispatch_authenticated(
+                Some(&peer),
+                crate::types::SwarmMessage::NodeCapabilityUpdate(cap),
+            )
+            .unwrap();
+        manager.handle_identify_received(
+            peer,
+            identify_from(&key, format!("swarmllm/{}", own_patch(-2))),
+            ConnectionId::new_unchecked(1),
+        );
+        assert!(manager.cut_off.contains_key(&peer), "cut off at Identify");
+        assert!(capabilities_dispatched(&mut dispatched).is_empty());
+        assert!(manager.held_until_identified.release(&peer).is_empty());
     }
 
     /// This build's version with its patch number moved by `delta`.

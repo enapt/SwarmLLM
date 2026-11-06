@@ -1132,6 +1132,9 @@ impl NetworkManager {
                     let address = address.clone();
                     self.forget_address_answered_by_another(peer, &address);
                 }
+                if let Some(peer) = peer_id {
+                    self.leave_the_table_if_out_of_reach(peer, &error, std::time::Instant::now());
+                }
                 // A dial that fails raises THIS event, not `ConnectionClosed`,
                 // so the re-dial scheduled when the peer dropped is not
                 // re-enqueued by anything. One attempt is not enough: it lands

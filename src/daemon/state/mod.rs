@@ -4296,7 +4296,7 @@ impl SharedState {
     }
 
     /// The country `identity.region` names now, if it names one.
-    fn configured_country(&self) -> Option<String> {
+    pub(crate) fn configured_country(&self) -> Option<String> {
         crate::api::admin::country_code(self.cfg().identity.region.as_deref())
     }
 

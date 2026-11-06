@@ -129,6 +129,11 @@ impl NetworkManager {
         num_established: std::num::NonZeroU32,
         endpoint: &libp2p::core::ConnectedPoint,
     ) {
+        // Reached: out of reach counts again from its next close, and what a
+        // wrong answer proved about it no longer holds (`stale_peers`, #413).
+        self.last_reached
+            .reached(peer_id, std::time::Instant::now());
+        self.proven_wrong.reached(&peer_id);
         let remote_addr = endpoint.get_remote_address();
         let is_loopback = remote_addr.iter().any(|proto| {
             matches!(proto, libp2p::multiaddr::Protocol::Ip4(ip) if ip.is_loopback())
@@ -292,6 +297,11 @@ impl NetworkManager {
         // remote-generate that is still returnable over the surviving connection.
         if num_established == 0 && !self.swarm.is_connected(&peer_id) {
             self.peer_remote_addrs.remove(&peer_id);
+            // Gone before its Identify was handled: nothing it sent goes on.
+            self.held_until_identified.forget(&peer_id);
+            // Out of reach is counted from here (`stale_peers`, #413).
+            self.last_reached
+                .reached(peer_id, std::time::Instant::now());
             // Abort any inbound remote-generations we were running for this
             // coordinator. With their last connection gone there is no route to
             // stream tokens back — a NAT'd coordinator can't be re-dialed (the
@@ -758,11 +768,20 @@ impl NetworkManager {
                     if self.swarm.is_connected(&peer_id) {
                         continue;
                     }
-                    for addr in &entry.addrs {
-                        self.swarm
-                            .behaviour_mut()
-                            .kademlia
-                            .add_address(&peer_id, addr.clone());
+                    // Seeding Kademlia puts the peer in its table, which hands it
+                    // to every node that asks. One out of reach for an hour left
+                    // the table on a failed dial and is not seeded back: it is
+                    // still dialled, and a connection puts it back (#413).
+                    if !self
+                        .last_reached
+                        .out_of_reach_long(&peer_id, std::time::Instant::now())
+                    {
+                        for addr in &entry.addrs {
+                            self.swarm
+                                .behaviour_mut()
+                                .kademlia
+                                .add_address(&peer_id, addr.clone());
+                        }
                     }
                     libp2p::swarm::dial_opts::DialOpts::peer_id(peer_id)
                         .addresses(entry.addrs.clone())

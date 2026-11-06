@@ -1229,11 +1229,23 @@ impl NetworkManager {
                 return;
             }
             if !connected {
-                tracing::warn!(
-                    %peer_id,
-                    label,
-                    "Dropping rr message — peer not connected and no relay path"
-                );
+                if self.cut_off.contains_key(&peer_id) {
+                    // Cut off here for its release (`cut_off_peer`): what was
+                    // queued to it goes with it, and saying so per message
+                    // put dozens of WARN lines after each cut (41 at once,
+                    // 2026-11-06), every 10 minutes per old computer.
+                    tracing::debug!(
+                        %peer_id,
+                        label,
+                        "Dropping a message to a computer cut off for its release"
+                    );
+                } else {
+                    tracing::warn!(
+                        %peer_id,
+                        label,
+                        "Dropping rr message — peer not connected and no relay path"
+                    );
+                }
                 if let Some(uuid) = delivery_request_id {
                     self.shared_state.streaming_token_txs.remove(&uuid);
                 }

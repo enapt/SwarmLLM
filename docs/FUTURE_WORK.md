@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #415**). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #416**). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -1488,35 +1488,6 @@ bootstrap / DHT / PEX dials only if a reproduction on distinct hosts shows a sta
 and optionally retry once on a different connection before failing over. The root cause of
 the one-way-dead connection (suspected TCP port-reuse 4-tuple collision) is unproven. The
 same-host churn the example scripts detect and name is environmental.
-
-#### #414 — Removing `region` while the node runs keeps the old country until a restart
-`P3` · network · **OPEN** — 2026-11-06 · evidence: below; neighbours: #407
-
-`daemon::background::spawn_region_detection` decides once, at startup, from the boot settings (a
-startup decision, so the boot snapshot is the right read): a `region` naming a country is written into
-`detected_region` and the internet lookup never starts. `SharedState::effective_region` reads the LIVE
-setting first, so a reload that SETS a region takes effect at once — but one that REMOVES it falls back to
-`detected_region`, which still holds the removed setting, until the node restarts. Found by the v0.3.275
-pre-release review; not a change of that release (the decision predates #407). **Next**: start the lookup
-when a reload leaves no country set, or leave `detected_region` unset in the configured branch — the
-lookup is an outside request a user who stated their country may not want, so only on that reload.
-
-#### #413 — A LAN neighbour's connections arrive in bursts of hundreds a minute, each closed by it at once
-`P3` · network · **OPEN** (cause unknown) — 2026-11-06 · evidence: below; neighbours: #169, gotcha #353
-
-Seen in a rig's node log (`real_link_411b/H_10_flowstream.log`, 08:05:56Z) and verified there: the
-Proxmox node on this LAN (`96842635`, 192.168.1.200, v0.3.274) opened 237 connections to this node
-in ~80 s, all INBOUND here (`is_dialer=false`; the one this node dialled stayed up), most QUIC,
-122 in one second — and each was closed from its side (`ApplicationClosed { error_code: 0 }`)
-while two other connections to it stayed up. The other eleven arms logged 2-14. The live node's `logs/swarmllm.log*` (from 11-01)
-shows the same peer at 681, 413, 286 and 280 connections in a single minute (00:06, 20:09, 00:09,
-05:57) and other peers in bursts of 75-195. That node's own journal logs `DIAG: connection
-established` normally (122 since 07:00) but NONE in 08:05:50-08:06:03, so its side never counted
-these as connections. No request failed. Hypothesis, unproven: its dials are refused by its own
-connection limit (3 a peer) after the handshake, and it dials again; this node's 624 + 484
-`Incoming connection failed … Local peer ID` (its own WSL and LAN addresses dialled back to it) in
-the same log may be one mechanism. **Next**: the Proxmox node at `-v` through a burst — which dial
-(PEX, DHT, bootstrap, the redial) it is, and whether its limit refuses it.
 
 #### #195 — A node cannot test whether its LAN neighbours can reach it
 `P3` · network · **PARTIAL** — 2026-08-18 · history: archive § "A node cannot test its own inbound reachability"
@@ -4675,7 +4646,70 @@ Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
 
-**Closed 2026-11-06, unreleased** (#388)
+**Closed 2026-11-06, unreleased** (#415, #414, #413, #388)
+- #413 — **Dead identities kept being dialled at addresses another computer now holds.** The LAN
+  box (`96842635`) opened bursts of hundreds of connections here, each closed by it at once. Cause,
+  measured with that node at `-v` through a restart (15:03Z 11-06): 418 dials in 25 s that failed
+  "Unexpected peer ID" — 29 identities that had once run on THIS machine's ports (test nodes with
+  fresh keys), every one answered by the live node (258 at UDP 8800, 160 at TCP 8810); this node
+  logged 396 inbound connections that minute. No dial was ours (`dial_checked` names none):
+  Kademlia's lookups. Only 8 of the 29 came from that node's own peer cache; 21 from other nodes'
+  lookup answers — and a fresh node with an EMPTY cache dialled 33-48 such identities 67-74 times in
+  its first 90 s. Two gaps behind #155's fix (which forgets a wrong pair in Kademlia and the
+  registry): (A) the peer cache merges what it stored into every save, so the pair returned from
+  disk at every start and was seeded into Kademlia again; (B) libp2p-kad 0.48 evicts nobody unless a
+  bucket is full and keeps a peer's LAST address, so a node that cannot reach a LAN address (every
+  internet peer) keeps the dead identity forever and hands it to every node that asks. **Fixed**
+  (`network::manager::stale_peers`): (A) the pairs a dial proved wrong this run are left out of the
+  cache on read and on save — exactly the pair, never the peer (#155's rule); (B) a peer out of
+  reach for an hour (since its last connection closed, or since the node started) leaves Kademlia's
+  table on its next failed dial — a transport error or another computer answering, never a dial
+  this node abandoned — and the cache stops seeding it back (it is still dialled; a connection puts
+  it back through Identify). Prior art: Kademlia's stale contacts (Maymounkov & Mazières 2002);
+  go-libp2p-kad-dht's refresh evicts the peers that fail (#283 "missing" → "dead"); go-libp2p backs
+  off per (peer, address) (`DialBackoff`) — out of reach here because Kademlia supplies its own
+  addresses inside the swarm and the builder wraps no transport but the bandwidth meter. Tests
+  `a_pair_another_computer_answered_at_leaves_the_peer_cache`,
+  `a_peer_out_of_reach_for_an_hour_leaves_the_routing_table` (+ `stale_peers::tests`), each red with its
+  part switched off. The pre-commit review found two defects, fixed before commit: a connection now clears
+  its peer's pairs, and `forget` applies to the stored entries only (a returned peer's live address was
+  dropped from every save); the bounded last-reached table counts a dropped peer from the cut, not the
+  start (it could evict a peer reached minutes before). **Left**: the
+  swarm sheds the dead identities only as its nodes update — re-count "Unexpected peer ID" on a
+  fresh probe node a day after the release (baseline above: 67-74 in 90 s).
+- #415 — **A peer's own catch-up was dropped when it arrived before its Identify.** A node tells a
+  newly connected peer its capability and its parts list point to point (#120, #359), sent as soon
+  as IT has handled the peer's Identify. Identify is its own substream with no order against
+  request-response, so the pair could land before the receiver had handled the sender's Identify —
+  no NodeId mapped yet, so it reached the dispatcher with no sender and was dropped ("Dropping
+  unauthenticated NodeCapabilityUpdate / ShardAnnounce", debug only). In a real-link rig the IT
+  peer's pair went 345 ms before its Identify (`real_link_flow3/H_3_flowhalf.log`, 2026-10-29; 11
+  capability and 8 parts-list drops across the rig logs), leaving a node that had just started
+  without that peer's parts until its next gossip repeat (5-40 min, `QuietRepeat`). And for a
+  computer before v0.3.271, whose Identify names no release, that capability is the only word on
+  its release the cut-off takes (`peers_own_versions`): after the live node's two starts on
+  2026-11-06 (14:01Z, 14:14Z, it dialled each peer in its first second) a v0.3.268 computer
+  (`54c49961`, seven releases behind) stayed connected, where at 13:27Z and 13:38Z — dialling in to
+  a node up for hours — it was cut 28 s after connecting. Now the catch-up kinds that arrive early
+  are HELD (`network::manager::before_identify`: within the dispatcher's own bounds —
+  `dispatch::capability_fits`, `ShardAnnounce::fits_one_message` — 8 messages and 1 MiB a peer,
+  8 MiB in all, 32 peers and 4 a network, 10 s; the bytes and the network share from its security review) at the
+  one choke point, `NetworkManager::dispatch_authenticated`, and handed on in order by the Identify
+  handler once the peer is mapped, registered and connected; a peer refused at Identify or gone has
+  them dropped, as before. Any other kind goes on as before. No wire change. Prior art: Bitcoin Core
+  can call a message before `VERACK` a violation because one ordered stream carries both; go-libp2p
+  starts protocols before Identify finishes (#2551), so the order is the application's to keep.
+  Tests `a_capability_that_arrives_before_identify_is_handed_on_after_it` (fails without the hold:
+  the capability reaches the dispatcher at once, with no sender),
+  `what_a_computer_cut_off_at_identify_sent_first_is_dropped`, `before_identify::tests`.
+- #414 — **A country removed while the node runs was kept until a restart.** The country lookup
+  was decided once from the boot settings, and with a country stated it copied that country into
+  `detected_region` — which `effective_region` falls back to, so removing the setting left the old
+  country in place. Now one task judges the LIVE setting before every ask
+  (`background::spawn_region_detection`): stated, it never asks the outside service and looks
+  again every `STATED_COUNTRY_RECHECK` (60 s); removed, it starts the lookup; nothing stated is
+  copied anywhere. Found by the v0.3.275 pre-release review. Test
+  `a_country_removed_while_the_node_runs_is_not_kept` (fails on the old copy).
 - #388 — **A flowing tree's guard took a far computer's own busy spells for a queue on the link.**
   The far reports how long it held each forward (`LayerResult::served_us`, bit 36, since v0.3.268)
   and the guard reads the link's window on the delay less that time (Swift's two windows, believed
@@ -4766,7 +4800,9 @@ grep `^| N |`).
   0.7). Now normalised where it ARRIVES — `api::admin::capability_as_kept` at both capability
   installers (guard `every_peer_capability_is_installed_with_its_region_read_as_a_country`) — and
   this node's own `identity.region` is read live through `country_code`, a value naming no
-  country looked up as if unset.
+  country looked up as if unset. Verified 2026-11-06 (after v0.3.275): each of the seven reads takes
+  the registry's capability, written only by those two installers in production code; this node's
+  own region reaches them through `effective_region_sync`.
 - #406 — **A computer that restarted is heard again by every computer it was connected to.** One
   that came back before its peers' old connections had timed out (a few seconds — an update's
   restart does it) was never told what they subscribe to: libp2p-gossipsub tells only a peer's

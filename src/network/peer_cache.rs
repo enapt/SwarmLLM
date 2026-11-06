@@ -228,11 +228,16 @@ impl CacheWriter {
     /// Merge `connected` (the connected peers' addresses, first) with the cache
     /// as stored, keep what is storable, and write it — on the blocking pool.
     /// The handle finishes when the save has been written or dropped.
+    ///
+    /// `forget` is the (peer, address) pairs another computer answered at
+    /// (`manager::stale_peers::ProvenWrong`): merged back from the stored cache,
+    /// they returned at every start (#413).
     pub fn save(
         &self,
         db: &Database,
         connected: Vec<String>,
         local_peer_id: PeerId,
+        forget: Vec<(PeerId, Multiaddr)>,
     ) -> tokio::task::JoinHandle<()> {
         let number = self
             .issued
@@ -244,7 +249,17 @@ impl CacheWriter {
             if number <= *last {
                 return; // a newer snapshot is already written
             }
-            let merged = merge_for_save(connected, load_peer_cache(&db));
+            // `forget` applies to what the disk held, never to `connected`: an
+            // address a connected peer is known by now is live, whatever was
+            // proven of it earlier (review of #413).
+            let mut stored = load_peer_cache(&db);
+            if !forget.is_empty() {
+                let forget: std::collections::HashSet<_> = forget.into_iter().collect();
+                stored.retain(|entry| {
+                    peer_and_address(entry).is_none_or(|pair| !forget.contains(&pair))
+                });
+            }
+            let merged = merge_for_save(connected, stored);
             // Storable, not dialable: keep a peer's LAN addresses even when this
             // node currently has no use for them. Whether they are worth
             // dialling is a question about where we are now, and that is asked
@@ -255,6 +270,17 @@ impl CacheWriter {
             }
             *last = number;
         })
+    }
+}
+
+/// The peer a cache entry names and its address without the `/p2p/` part —
+/// `None` for an entry that names no peer (an invite code's bare address) or
+/// does not parse.
+pub fn peer_and_address(entry: &str) -> Option<(PeerId, Multiaddr)> {
+    let mut address: Multiaddr = entry.parse().ok()?;
+    match address.pop()? {
+        Protocol::P2p(peer) => Some((peer, address)),
+        _ => None,
     }
 }
 
@@ -302,7 +328,10 @@ mod tests {
         let newer = format!("/ip4/2.2.2.2/udp/8800/quic-v1/p2p/{}", pid(3));
         let writer = CacheWriter::default();
 
-        writer.save(&db, vec![older.clone()], me).await.unwrap();
+        writer
+            .save(&db, vec![older.clone()], me, Vec::new())
+            .await
+            .unwrap();
         assert_eq!(
             load_peer_cache(&db),
             vec![older.clone()],
@@ -314,14 +343,22 @@ mod tests {
             .issued
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
             + 1;
-        writer.save(&db, vec![newer.clone()], me).await.unwrap();
+        writer
+            .save(&db, vec![newer.clone()], me, Vec::new())
+            .await
+            .unwrap();
         let late = CacheWriter {
             issued: Arc::new(std::sync::atomic::AtomicU64::new(first - 1)),
             written: writer.written.clone(),
         };
-        late.save(&db, vec!["/ip4/3.3.3.3/udp/8800/quic-v1".into()], me)
-            .await
-            .unwrap();
+        late.save(
+            &db,
+            vec!["/ip4/3.3.3.3/udp/8800/quic-v1".into()],
+            me,
+            Vec::new(),
+        )
+        .await
+        .unwrap();
         assert_eq!(
             load_peer_cache(&db).first(),
             Some(&newer),

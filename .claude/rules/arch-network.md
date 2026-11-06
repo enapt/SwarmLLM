@@ -243,7 +243,9 @@ order — the cap dropped a 12-address peer's public QUIC address at random
 
 ## An address another computer answered at is forgotten for the peer it named (2026-11-02, #155)
 
-A dial that fails `WrongPeerId` proves the (peer, address) pair wrong: **`NetworkManager::forget_address_answered_by_another`** (from `dht::pair_proven_wrong`, in the `OutgoingConnectionError` arm) removes exactly that pair from Kademlia's table and the peer registry. libp2p-kad 0.48 forgets only after a transport error, never a last address — stale identities were dialled 3,148 times in 4 h. Never back off a PEER on it: whoever answers at an address can name any peer.
+A dial that fails `WrongPeerId` proves the (peer, address) pair wrong: **`NetworkManager::forget_address_answered_by_another`** (from `dht::pair_proven_wrong`, in the `OutgoingConnectionError` arm) removes exactly that pair from Kademlia's table and the peer registry — and from the peer cache, which merges its stored entries into every save (`stale_peers::ProvenWrong`, read by `dialable_peer_cache` and `CacheWriter::save`, #413). libp2p-kad 0.48 forgets only after a transport error, never a last address — stale identities were dialled 3,148 times in 4 h. Never back off a PEER on it: whoever answers at an address can name any peer.
+
+A peer evicts only on its OWN unreachability: out of reach for `stale_peers::UNREACHABLE_FOR` (since its last connection closed, or the node started — `LastReached`), its next failed dial (a transport error or `WrongPeerId`, never `Aborted`/`Denied`) takes it out of Kademlia's table (`leave_the_table_if_out_of_reach`) and `dial_bootstrap_peers` stops seeding it; Identify puts a connected peer back (#413: dead identities in every node's table, handed to every lookup).
 
 → `docs/invariants/network.md` § "An address another computer answered at is forgotten"
 
@@ -308,6 +310,12 @@ A gossip publish that succeeded says nothing about who received it. A pool join 
 **`SharedState::cut_off_for`** is the one judgment (the use gate's version half; never a pool device, never a computer this node bootstraps from — `SharedState::bootstraps_from`, its `/p2p/` id in the live `bootstrap_peers`, Bitcoin Core's `noban` — nobody while the pool state is busy) and **`NetworkManager::cut_off_peer`** the one actor, on the network loop: at Identify, before registering or catching up, when the agent version names a release (`swarm_use::agent_version`, `swarmllm/<version>` from v0.3.271); else on the liveness tick (`cut_off_peers_too_far_behind`) over **`peers_own_versions`** — only what the computer stated ITSELF (Identify, or a capability sent DIRECT while connected: `note_capability_heard`), never a gossiped or DHT one, which can be a recording. The cut blocks it (`allow_block_list`), drops it from Kademlia, and `dial_checked` / `try_enqueue_redial` skip it, for `CUT_OFF_FOR` (10 min), at most `MAX_CUT_OFF` (1024) blocked at once (keys are free; past it, only disconnected); then it is judged again. A relayed body whose PROVEN origin is cut off now is refused before dispatch (`NetworkManager::origin_is_cut_off`: after the proof, before the replay memory and the registry). One release behind keeps everything (no split at a release); updates come from GitHub, so a cut computer still updates. Bitcoin Core's `MIN_PEER_PROTO_VERSION` and EIP-2124 decide at the handshake too.
 
 → `docs/invariants/network.md` § "A computer two releases behind loses contact, not only use"
+
+## A peer's catch-up that lands before its Identify is held, not dropped (2026-11-06, #415)
+
+A message carries an authenticated sender only once the Identify handler has mapped its peer, and nothing orders Identify against request-response. **`NetworkManager::dispatch_authenticated`** (the one choke point) HOLDS a catch-up kind from an unmapped peer — `NodeCapabilityUpdate` within `dispatch::capability_fits`, `ShardAnnounce` within `fits_one_message`; 8 messages and 1 MiB a peer, 8 MiB in all, 32 peers and 4 a `NetGroup`, 10 s (`network::manager::before_identify`) — and the Identify handler hands them on in order once the peer is mapped, registered and connected; a peer refused at Identify, or gone, has them dropped. Before, they went with no sender and were dropped: a restarted node lost a peer's parts list until its next repeat, and a pre-.271 computer was never cut off. A new kind a peer sends as it identifies us joins `is_a_catch_up`; never hold a forward or anything unbounded.
+
+→ `docs/invariants/network.md` § "A peer's catch-up that lands before its Identify is held, not dropped"
 
 ## Every part this node serves shares ONE upload limit (2026-10-24, #335)
 

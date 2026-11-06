@@ -2894,7 +2894,7 @@ impl HealthMonitor {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     /// The regression this whole scheme exists for. A manifest carries the full
@@ -2999,8 +2999,9 @@ mod tests {
         );
     }
 
-    /// An idle card node's capability as one round builds it.
-    fn capability_for_test() -> crate::types::NodeCapability {
+    /// An idle card node's capability as one round builds it (also the
+    /// network manager's `cut_off_tests`).
+    pub(crate) fn capability_for_test() -> crate::types::NodeCapability {
         crate::types::NodeCapability {
             coord: Some(swarmllm_types::netcoord::NetworkCoord {
                 x: 10.0,

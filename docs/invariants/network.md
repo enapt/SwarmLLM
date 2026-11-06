@@ -786,9 +786,33 @@ THAT address. The opposite design — backing off the PEER after a wrong answer 
 an address they control could name any peer there and block our dials to it. go-libp2p backs off per (peer,
 address) (`DialBackoff`), which is the shape a further step would take.
 
-**What it does not reach.** A node that cannot reach the address (any internet peer, for a LAN address) sees a
-transport error and keeps it as the peer's last address, and can hand it to a LAN node in a lookup answer; that
-lookup dials it once more. Measure after a release carries the fix on every LAN node (FUTURE_WORK #155).
+**What it did not reach — measured, and closed by #413 (2026-11-06, `network::manager::stale_peers`).** Through
+a restart of the LAN box at `-v`: 418 "Unexpected peer ID" dials in 25 s to 29 dead identities (all answered by
+this machine's live node), only 8 from that node's own cache and 21 from other nodes' lookup answers; a fresh
+node with an EMPTY cache dialled 33-48 of them 67-74 times in 90 s. Two gaps:
+- **The forget never reached the disk.** `peer_cache::merge_for_save` carries every stored entry into each save,
+  so a pair forgotten in the registry came back at every start, and `dial_bootstrap_peers` seeded it into
+  Kademlia again. Now the pairs proven wrong this run (`ProvenWrong`) are dropped on read
+  (`dialable_peer_cache`) and on save (`CacheWriter::save`'s `forget`, applied to the STORED entries only — an
+  address a connected peer is known by is live). Still per (peer, address). A connection clears its peer's pairs
+  (`ProvenWrong::reached`, as go-libp2p clears a peer's dial backoff): kept, a pair dropped a returned peer's live
+  address from every save (pre-commit review). `LastReached` stays bounded by dropping its older half and counting
+  a peer without a time from the newest dropped one (`floor`), never from the start — so a dropped time only ever
+  delays an eviction.
+- **Nobody evicted the dead.** libp2p-kad 0.48 evicts only when a bucket is full and keeps a last address, so an
+  internet peer that cannot reach a LAN address keeps the identity for good and answers lookups with it. Now a
+  peer out of reach for `UNREACHABLE_FOR` (1 h, since its last connection closed or the node started —
+  `LastReached`) leaves the table on its next failed dial (`leave_the_table_if_out_of_reach`: a transport error
+  or `WrongPeerId`, never `Aborted`/`Denied`), and the cache stops seeding it (it is still dialled; Identify puts a
+  connected peer back). This evicts a PEER, but on its own unreachability over an hour — something a third party
+  answering at one address cannot fake while the peer connects to us, and cannot extend past what its answers
+  already did (they already failed the dials). Prior art: Kademlia's stale contacts; go-libp2p-kad-dht's refresh
+  evicts failing peers (#283). The per-(peer, address) dial backoff go-libp2p has is out of reach: Kademlia
+  supplies its addresses inside the swarm (`handle_pending_outbound_connection`, invisible to another behaviour)
+  and the swarm builder wraps no transport but the bandwidth meter.
+
+Re-count a fresh probe node's "Unexpected peer ID" a day after the release carrying #413: the swarm sheds the
+dead identities only as its nodes update.
 
 Test: `an_address_another_computer_answered_at_is_forgotten_for_the_peer_it_meant` (feeds the real event through
 `handle_swarm_event`; red with the call removed).
@@ -5976,6 +6000,58 @@ Tests: `a_computer_two_releases_behind_is_cut_off_and_a_pool_device_never_is`,
 `the_liveness_tick_cuts_a_computer_whose_own_capability_names_an_old_release` (all red with
 `cut_off_for` answering `None` / the list ignored), `computers_cut_off_are_blocked_only_up_to_a_cap`,
 `update::a_withdrawn_release_is_forgotten_at_the_next_check`.
+
+## A peer's catch-up that lands before its Identify is held, not dropped (2026-11-06, #415)
+
+**The rule.** A message a peer sends point to point reaches the dispatcher with an authenticated
+sender only once this node has handled the peer's Identify — `peer_to_node` is filled there, with
+the registry entry and `connected_node_ids`. Identify is its own substream, and nothing orders it
+against request-response, so a peer that handled OUR Identify first can have messages land before
+its own is handled here. **`NetworkManager::dispatch_authenticated` is the one choke point**: a
+message from a peer with no NodeId yet is HELD (`network::manager::before_identify::HeldUntilIdentified`)
+when it is a catch-up kind — `NodeCapabilityUpdate` within `dispatch::capability_fits`,
+`ShardAnnounce` within `fits_one_message` — at most `HOLD_PER_PEER` (8) messages and
+`HOLD_BYTES_PER_PEER` (1 MiB, counted as JSON) a peer, `HOLD_BYTES_IN_ALL` (8 MiB), `HOLD_PEERS` (32)
+peers and `HOLD_PEERS_PER_NETWORK` (4) from one `NetGroup` (#299: keys are free, networks are not),
+`HOLD_FOR` (10 s); the Identify handler hands them on in the order they came once the peer is
+mapped, registered and connected (`release_held_until_identified`), and forgets them on every path
+that refuses the peer (foreign, a forged key, cut off at Identify) and at the last close; the
+liveness tick expires the rest. Anything else from such a peer is dispatched as before, with no
+sender.
+
+**What it replaced.** Every such message was dispatched with `sender: None`, and the dispatcher's
+arms that require a sender dropped it at `debug!` ("Dropping unauthenticated …"). The newcomer
+catch-up is exactly the pair sent at that moment (#120 the capability, #359 the parts list), so the
+fix for "a restarted node plans splits blind" lost its race whenever the receiver's Identify
+handling was the slower: on a busy start, or when the receiver dialled (as a QUIC client it is
+established half a round trip before the peer, which then requests its Identify, gets it and sends
+the catch-up while the receiver is still handling the peer's).
+
+**Measured.** Real-link rig logs at `-v` (2026-10-29): 11 capability and 8 parts-list drops, each
+seconds after a start; in `real_link_flow3/H_3_flowhalf.log` the IT peer `9594e1ff`'s pair was
+dropped at 12:09:54.547 and its Identify handled at 12:09:54.892. On the live node (`info`, so only
+the outcome): a v0.3.268 computer (`54c49961`, Russia, ~312 ms) was cut 28 s after each of two
+connections it DIALLED to a node up for hours (13:27Z, 13:38Z), and never after either of the live
+node's two STARTS (14:01Z, 14:14Z; connection ids 7 and 1, this node dialling in its first second;
+its Identify handled 800 ms after the connection) — an older release names its release only in that
+capability, and the cut-off takes no gossiped one (`peers_own_versions`, next section).
+
+**Prior art.** Bitcoin Core rejects a message before `VERACK` — sound only because its handshake and
+its messages share one ordered TCP stream. go-libp2p deliberately starts protocols before Identify
+finishes to save a round trip (go-libp2p #2551), so the order is the application's to restore. The
+hold is TCP's out-of-order queue in miniature: bounded, released in order, dropped with the
+connection. Deriving the sender from the connection's key alone (it IS authenticated by the
+handshake) was weighed and not taken: the handlers also assume the registry entry and the connected
+set Identify creates — a capability with no registry entry is not installed, and the cut-off's note
+needs the peer connected — and a peer cut off AT Identify would have had its early messages acted on.
+
+**What a change must keep.** Hold only what a peer sends as it identifies us, within the bounds the
+dispatcher applies to it; never hold a tensor forward or anything unbounded. Release only after the
+mapping, the registry entry and `connected_node_ids` are in place, in arrival order; never release
+for a peer refused at Identify. A new early-sent kind joins `before_identify::is_a_catch_up`. Tests
+`a_capability_that_arrives_before_identify_is_handed_on_after_it` (red without the hold: the
+capability reaches the dispatcher at once with no sender),
+`what_a_computer_cut_off_at_identify_sent_first_is_dropped`, `before_identify::tests`.
 
 ## A computer this node has not heard from is not judged allowed — unless it is connected (2026-11-04, #403)
 

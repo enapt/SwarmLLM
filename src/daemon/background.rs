@@ -618,8 +618,8 @@ fn region_retry_after(failures: u32) -> std::time::Duration {
 }
 
 /// Auto-detect region via IP geolocation (non-blocking, best-effort), asking
-/// again on [`region_retry_after`] until a service answers. If the user
-/// configured a region explicitly, apply that instead. The capability carries
+/// again on [`region_retry_after`] until a service answers — never while the
+/// owner states a country, read live. The capability carries
 /// the region from the next health round, and a change of it is news to peers
 /// (`health::monitor::capability_news`).
 pub(super) fn spawn_region_detection(
@@ -627,59 +627,65 @@ pub(super) fn spawn_region_detection(
     shared_state: Arc<SharedState>,
     mut shutdown_rx: watch::Receiver<bool>,
 ) {
-    // A configured value that names no country (`eu-west`) is looked up as if
-    // unset — `effective_region` reads it as nothing (#407).
-    let configured =
-        crate::api::admin::country_code(shared_state.config.identity.region.as_deref());
-    if configured.is_none() {
-        let geo_state = shared_state.clone();
-        tasks.spawn(async move {
-            let lookup = async {
-                let mut failures = 0u32;
-                loop {
-                    if let Some(code) = detect_region_from_ip().await {
-                        tracing::info!(region = %code, "Auto-detected region via IP geolocation");
-                        *geo_state.detected_region.write().await = Some(code);
-                        return;
-                    }
-                    failures += 1;
-                    let wait = region_retry_after(failures);
-                    if failures == 1 {
-                        tracing::info!(
-                            retry_in_s = wait.as_secs(),
-                            "Could not learn this computer's country from ip-api.com or \
-                             Cloudflare — asking again later; peers see no country until then \
-                             (set `region` under `[identity]` in config.toml to state it)"
-                        );
-                    } else {
-                        tracing::debug!(
-                            failures,
-                            retry_in_s = wait.as_secs(),
-                            "Country lookup failed again"
-                        );
-                    }
-                    tokio::time::sleep(wait).await;
+    let geo_state = shared_state;
+    tasks.spawn(async move {
+        let lookup = async {
+            let mut failures = 0u32;
+            loop {
+                // A country the owner states is never looked up — the lookup
+                // is a request to an outside service someone who stated it may
+                // not want — and `effective_region` reads the LIVE setting
+                // first. Judged live, here, before every ask: a setting
+                // REMOVED while the node runs starts the lookup within
+                // `STATED_COUNTRY_RECHECK`. It used to be decided once from
+                // the boot settings, and the configured branch copied the
+                // country into `detected_region`, where it outlived its
+                // removal until a restart (#414). A value that names no
+                // country (`eu-west`) counts as unset (#407).
+                if geo_state.configured_country().is_some() {
+                    tokio::time::sleep(STATED_COUNTRY_RECHECK).await;
+                    continue;
                 }
-            };
-            tokio::select! {
-                () = lookup => {}
-                _ = async {
-                    loop {
-                        if shutdown_rx.changed().await.is_err() { return; }
-                        if *shutdown_rx.borrow() { return; }
-                    }
-                } => {}
+                if let Some(code) = detect_region_from_ip().await {
+                    tracing::info!(region = %code, "Auto-detected region via IP geolocation");
+                    *geo_state.detected_region.write().await = Some(code);
+                    return;
+                }
+                failures += 1;
+                let wait = region_retry_after(failures);
+                if failures == 1 {
+                    tracing::info!(
+                        retry_in_s = wait.as_secs(),
+                        "Could not learn this computer's country from ip-api.com or \
+                         Cloudflare — asking again later; peers see no country until then \
+                         (set `region` under `[identity]` in config.toml to state it)"
+                    );
+                } else {
+                    tracing::debug!(
+                        failures,
+                        retry_in_s = wait.as_secs(),
+                        "Country lookup failed again"
+                    );
+                }
+                tokio::time::sleep(wait).await;
             }
-            "region_detection_geo"
-        });
-    } else {
-        let state = shared_state.clone();
-        tasks.spawn(async move {
-            *state.detected_region.write().await = configured;
-            "region_detection_configured"
-        });
-    }
+        };
+        tokio::select! {
+            () = lookup => {}
+            _ = async {
+                loop {
+                    if shutdown_rx.changed().await.is_err() { return; }
+                    if *shutdown_rx.borrow() { return; }
+                }
+            } => {}
+        }
+        "region_detection"
+    });
 }
+
+/// How often the country lookup looks again at whether the owner still states
+/// a country (`spawn_region_detection`, #414).
+const STATED_COUNTRY_RECHECK: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// Broadcast shard announcements and manifests shortly after startup so peers
 /// discover our shards quickly (don't wait for the 30s health tick).
@@ -2076,5 +2082,52 @@ mod region_retry_tests {
         assert_eq!(secs(7), 1920);
         assert_eq!(secs(8), 3600);
         assert_eq!(secs(u32::MAX), 3600);
+    }
+}
+
+#[cfg(test)]
+mod region_detection_tests {
+    use std::sync::Arc;
+
+    /// **A country removed while the node runs is not kept** (#414): the
+    /// stated country was copied into `detected_region` at start-up and
+    /// outlived its removal until a restart. Stated, it is never looked up;
+    /// removed, nothing stale is left (the lookup then starts within
+    /// `STATED_COUNTRY_RECHECK` — never reached here, so no network).
+    #[tokio::test]
+    async fn a_country_removed_while_the_node_runs_is_not_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = crate::storage::db::Database::open(dir.path()).unwrap();
+        let mut config = crate::config::Config::default();
+        config.identity.region = Some("de".into());
+        let (state, _, _) = crate::daemon::SharedState::new(
+            config.clone(),
+            crate::identity::Identity::generate(),
+            db,
+            Arc::new(tokio::sync::Mutex::new(
+                crate::inference::executor::ModelExecutor::new(),
+            )),
+            None,
+        );
+        let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+        let mut tasks: super::BackgroundTasks = tokio::task::JoinSet::new();
+        super::spawn_region_detection(&mut tasks, state.clone(), shutdown_rx);
+        for _ in 0..20 {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(state.effective_region().await.as_deref(), Some("DE"));
+        assert_eq!(
+            *state.detected_region.read().await,
+            None,
+            "a stated country is not a looked-up one"
+        );
+        config.identity.region = None;
+        state.make_config_live(config);
+        assert_eq!(
+            state.effective_region_sync(),
+            None,
+            "the removed country is gone at once"
+        );
+        tasks.abort_all();
     }
 }
