@@ -750,8 +750,7 @@ impl NetworkManager {
                     let offset = self
                         .shard_download_progress
                         .get(&shard_id)
-                        .copied()
-                        .unwrap_or(0);
+                        .map_or(0, |t| t.next_offset);
                     let chunk_len = data.data.len() as u64;
 
                     // Empty response = peer doesn't have the shard — retry with next peer or HF
@@ -764,18 +763,6 @@ impl NetworkManager {
                         );
                         self.retry_shard_or_fallback(shard_id, peer, "empty response");
                         return;
-                    }
-
-                    // Forward to AcquisitionManager if it has a job for this model
-                    // (user-initiated downloads via the "Download" button).
-                    // Auto-manage P2P downloads don't have jobs, so we also write directly.
-                    if let Some(ref acq_tx) = self.acquisition_tx {
-                        let _ = acq_tx.try_send(AcquisitionCommand::ShardDataReceived {
-                            shard_id: shard_id.clone(),
-                            offset,
-                            data: data.data.clone(),
-                            total_size: data.total_size,
-                        });
                     }
 
                     // Stop here if the user cancelled this model's download.
@@ -837,6 +824,29 @@ impl NetworkManager {
                             .with_detail_num(shard_id.index as i64)
                             .with_toast("error", 6000),
                         );
+                        // Asking for the rest would write it past a hole (#191).
+                        self.end_transfer_after_a_write_failure(&shard_id);
+                        return;
+                    }
+                    // Written: the record moves past it, noting who sent it —
+                    // a failed check may blame only a part's one sender (#191).
+                    self.shard_download_progress
+                        .entry(shard_id.clone())
+                        .or_insert_with(|| super::shard_transfer::PartTransfer::starting_at(offset))
+                        .landed(peer, offset, chunk_len);
+
+                    // Forward to AcquisitionManager if it has a job for this model
+                    // (user-initiated downloads via the "Download" button) — a
+                    // chunk that reached the disk, at the offset it reached.
+                    // Auto-manage P2P downloads don't have jobs; this node writes
+                    // every chunk itself either way.
+                    if let Some(ref acq_tx) = self.acquisition_tx {
+                        let _ = acq_tx.try_send(AcquisitionCommand::ShardDataReceived {
+                            shard_id: shard_id.clone(),
+                            offset,
+                            data: data.data.clone(),
+                            total_size: data.total_size,
+                        });
                     }
 
                     // How long this chunk actually took: `shard_last_progress_at`
@@ -900,8 +910,6 @@ impl NetworkManager {
                                 "pending_shard_requests at cap on continuation",
                             );
                         } else {
-                            self.shard_download_progress
-                                .insert(shard_id.clone(), new_offset);
                             self.shard_last_progress_at
                                 .insert(shard_id.clone(), std::time::Instant::now());
                             // A holder that served a chunk is not busy, and
@@ -926,8 +934,12 @@ impl NetworkManager {
                                 .insert(new_req_id, (peer, shard_id));
                         }
                     } else {
-                        // Download complete for this shard
-                        self.shard_download_progress.remove(&shard_id);
+                        // Download complete for this shard. Who sent it decides
+                        // whom a failed check may blame (#191).
+                        let sole_sender = self
+                            .shard_download_progress
+                            .remove(&shard_id)
+                            .and_then(|t| t.sole_sender());
                         self.shard_p2p_retries.remove(&shard_id);
                         self.shard_busy_holders.remove(&shard_id);
                         self.note_chunk_landed_from(&peer);
@@ -1113,6 +1125,12 @@ impl NetworkManager {
                                     .with_detail_num(shard_id.index as i64)
                                     .with_detail_str("hf_fallback".to_string()),
                                 );
+                                // The origin fetch needs the claim this
+                                // transfer holds.
+                                self.shared_state
+                                    .models
+                                    .p2p_download_permits
+                                    .remove(&shard_id);
                                 self.shared_state.models.auto_manage_notify.notify_one();
                                 return;
                             }
@@ -1235,6 +1253,7 @@ impl NetworkManager {
                                         .send(ShardVerdict {
                                             shard_id,
                                             peer,
+                                            sole_sender,
                                             outcome,
                                             another_upload,
                                         })
@@ -1243,7 +1262,7 @@ impl NetworkManager {
                             }
                             // Nothing to check against and no origin to fetch
                             // from: accepted unchecked, as logged just above.
-                            None => self.finish_p2p_shard(shard_id, peer, Ok(())),
+                            None => self.finish_p2p_shard(shard_id, peer, sole_sender, Ok(())),
                         }
                     }
                 } else {
@@ -1311,7 +1330,12 @@ impl NetworkManager {
 /// A peer-served shard's hash verdict, computed off the event loop (#108).
 pub(super) struct ShardVerdict {
     pub(super) shard_id: crate::types::ShardId,
+    /// The computer that sent the last chunk (for the log and the activity
+    /// line).
     pub(super) peer: libp2p::PeerId,
+    /// The computer every byte came from, if one did (#191) — the only one a
+    /// failed check may blame.
+    pub(super) sole_sender: Option<libp2p::PeerId>,
     pub(super) outcome: Result<(), crate::error::SwarmError>,
     /// The bytes matched the manifest's hash but are not the swarm's upload
     /// (`auto_manage::canonical::part_is_from`) — the hash was another
@@ -1412,6 +1436,7 @@ impl NetworkManager {
         &mut self,
         shard_id: crate::types::ShardId,
         peer: libp2p::PeerId,
+        sole_sender: Option<libp2p::PeerId>,
         outcome: Result<(), crate::error::SwarmError>,
     ) {
         // The model may have been deleted while the hash ran off the loop, and
@@ -1486,20 +1511,41 @@ impl NetworkManager {
             // one. Shares the one repair path with the
             // background sweep and the rescan.
             self.shared_state.mark_shard_for_repair(&shard_id);
+            // The transfer is over, and its claim goes with it: parked until the
+            // 180 s stall sweep, it held off the very fetch asked for here.
+            self.shared_state
+                .models
+                .p2p_download_permits
+                .remove(&shard_id);
             // Our own hashing task failing, or our own disk refusing to read
             // or sync the file, is nobody's fault but ours.
             let ours = matches!(
                 e,
                 crate::error::SwarmError::Internal(_) | crate::error::SwarmError::Io(_)
             );
-            if !incomplete && !ours {
-                if let Some(node) = self.peer_to_node.get(&peer).map(|n| n.clone()) {
-                    self.shared_state.credits.trust_manager.update_trust(
-                        &self.shared_state.peer_registry,
-                        &node,
-                        crate::credit::trust::TrustEvent::ShardVerificationFail,
+            // A part several computers sent blames none of them (#191): its one
+            // hash cannot say whose bytes differed, and docking the one that
+            // sent the last chunk would dock an honest computer for another's
+            // bytes. The re-fetch below asks for it whole, from one.
+            match sole_sender {
+                Some(sender) if !incomplete && !ours => {
+                    if let Some(node) = self.peer_to_node.get(&sender).map(|n| n.clone()) {
+                        self.shared_state.credits.trust_manager.update_trust(
+                            &self.shared_state.peer_registry,
+                            &node,
+                            crate::credit::trust::TrustEvent::ShardVerificationFail,
+                        );
+                    }
+                }
+                None if !incomplete && !ours => {
+                    tracing::info!(
+                        model = %shard_id.model_id,
+                        shard = shard_id.index,
+                        last_sender = %peer,
+                        "The part came from more than one computer — not blaming any of them"
                     );
                 }
+                _ => {}
             }
             self.shared_state.emit_activity(
                 crate::daemon::state::ActivityEvent::new(

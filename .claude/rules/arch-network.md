@@ -57,7 +57,7 @@ A database commit waits for `fdatasync`. **`storage::Database::with_write_table`
 
 ## One writer per shard file, and finishing one shard says nothing about the others
 
-One writer per `shard_NNN.bin.tmp`: **`ModelMgmt::claim_shard_download`** is the RAII exclusion; **`SharedState::remove_acquisition_if_idle`** is the only tidy-up removal of a progress entry (`a_finished_download_does_not_delete_the_progress_of_one_still_running`); **`ModelMgmt::live_cancel_flag`** is the one source of a cancel flag. Only a download itself deletes its partial file (`cleanup_tmp_files_no_one_is_writing` skips claimed shards).
+One writer per `shard_NNN.bin.tmp`: **`ModelMgmt::claim_shard_download`** is the RAII exclusion; **`SharedState::remove_acquisition_if_idle`** is the only tidy-up removal of a progress entry (`a_finished_download_does_not_delete_the_progress_of_one_still_running`); **`ModelMgmt::live_cancel_flag`** is the one source of a cancel flag. Only a download itself deletes its partial file (`cleanup_tmp_files_no_one_is_writing` skips claimed shards) — so EVERY writer claims from its first byte: a peer transfer through `handle_send_shard_request`'s REQUIRED `PartAsk` (`Starts` → **`ModelMgmt::hold_for_a_peer_transfer`**; a second start is refused while the first holds its slot), and it writes only while its slot is parked (**`p2p_transfer_still_owns_the_file`**, claimed by another or by nobody); a failed verdict releases the slot (#418). A transfer carries on from its bytes (`PartTransfer`, `resume_from` — never past the partial file's length) and a failed check blames only a SOLE sender (`PartTransfer::sole_sender`, #191).
 
 → `docs/invariants/network.md` § "One writer per shard file, and finishing one shard says nothing about the others"
 

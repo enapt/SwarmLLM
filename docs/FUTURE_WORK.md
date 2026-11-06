@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #418**). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #420**). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -1580,17 +1580,26 @@ score at the default (`docs/invariants/network.md` § "The network loop never wa
 A request-response stall line now names its message (`swarm_event:RequestResponse:in:<kind>`), so
 the next one is attributable. Next: the running count on .268 (field and live node), read by kind.
 
-#### #191 — A part download that loses its peer restarts from byte 0 on the next one
-`P3` · storage · **OPEN** — 2026-09-03 · history: archive § "A multi-megabyte forward over ONE QUIC stream can kill the connection" (its banner: the cause was quinn-proto, #112)
+#### #419 — A half-written file the clean-up pass cannot tie to a part is deleted while it is written
+`P4` · storage · **OPEN** — 2026-11-07 · history: #418's audit (gotcha #1058)
 
-The connection-killing cause is fixed (#112, v0.3.206); the section's mitigations (TCP ranked
-above QUIC by size, chunked forwards) are moot. What remains true: `handle_shard_transfer_retry`
-(`network/manager/shard_transfer.rs`) retries with `chunk_offset: 0`, so a peer dying late in a
-part re-fetches everything already received in 8 MiB chunks. Pass the offset recorded in
-`shard_download_progress` instead (`handle_send_shard_request` already seeds the partial `.tmp`
-from a non-zero offset). Check first that the replacement peer serves the SAME upload (near
-certain since #151; the final BLAKE3 check is the backstop) and gotcha #424 (an unflushed-length
-truncation race in exactly this code).
+`cleanup_tmp_files_no_one_is_writing` (the reclaim pass every 10 min while over the storage
+budget, and a model's Cancel) spares a `.tmp` only when `claim_index_from_tmp_name` ties it to a
+CLAIMED part (`shard_NNN…`, `mmproj.gguf.tmp…`); any other staging name is deleted whoever writes
+it. Writers it can catch mid-write: the one-shot `atomic_write_blocking` of `gguf_header.bin`,
+`tied_output_weight.bin`, `rope_freqs.bin` (`huggingface/probe.rs`, from the download paths) and
+`save_gguf_header` (`gguf_meta.rs`, the load path) — a window of milliseconds; the rename then
+fails and the next pass fetches again. The explicit whole-file download (`admin_hf/download.rs` →
+`download_model`, `<name>.gguf.tmp`, unclaimed, minutes long) when its folder is a registered
+model's. And the vision encoder's HuggingFace download (`trigger_mmproj_download`), written under
+its HuggingFace name (`mmproj-….gguf.tmp`) and never renamed to `mmproj.gguf`, the name its own
+check and the loader look for — unreachable today: nothing in this build sets
+`HfSource::mmproj_filename` to a name (every local writer writes `None`; gossip copies a peer's).
+Cure at the choke point: while the daemon runs, the pass removes only staging files it can tie to
+a part with no claim and leaves other names to the startup sweep (`cleanup_tmp_files_in_dir`, no
+writers then) — check first that a cancelled whole-file download removes its own `.tmp`. Then
+either give the vision-encoder fetch a filename source and rename its result to `mmproj.gguf`, or
+delete it as unreachable (`completeness.md`).
 
 #### #168 — A relayed tensor forward over 32 MB is refused instead of chunked
 `P4` · network · **OPEN** — 2026-07-24 · history: archive § "Tensor-relay large-forward chunking (post-plan follow-on, deferred)"
@@ -4668,7 +4677,43 @@ Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
 
-**Closed 2026-11-06/07, unreleased** (#416's nicknames, #417, #402)
+**Closed 2026-11-06/07, unreleased** (#416's nicknames, #417, #402, #191, #418)
+- #418 — **A model part fetched from another computer was spoiled when the disk was over its
+  storage budget.** Since v0.3.213 a clean-up pass (60 s after start, then every 10 min, only while
+  over the budget) deletes partial files no download is writing, told apart by the writer claim
+  (`cleanup_tmp_files_no_one_is_writing`). The automatic pass's peer downloads claimed their file; a
+  part's Download button and adding a model from the swarm did not, so a transfer that outlasted the
+  pass's first minute lost its partial file mid-way — the rest was written past a hole of zeros, the
+  part failed its check and was fetched again (a 452 MB part at 40 Mbit/s failed in all four runs
+  here without the fix). Now every peer transfer holds the claim from its first ask
+  (`ModelMgmt::hold_for_a_peer_transfer`, from `handle_send_shard_request`'s `PartAsk::Starts`; the
+  owner's spends none of the automatic pass's permits); a transfer whose slot was released stops
+  writing whether or not anyone took the claim (`p2p_transfer_still_owns_the_file`, the one answer
+  — it let an unclaimed transfer write on after the stall sweep); and a part that failed its check, or goes to its origin, releases its slot at once — it
+  held up that re-fetch for up to 3 min (the 180 s stall sweep). Found by #191's rig: its control arm
+  on the published v0.3.276 failed the same way, a one-holder baseline (no computer lost) failed at
+  40 Mbit/s and passed unlimited, and the clean-up line fired only in the failing runs. Prior art:
+  libtorrent marks a block downloading when it is requested, not when it lands.
+  Tests `an_owner_started_peer_transfer_keeps_its_partial_file_from_the_reclaim_pass`,
+  `a_transfer_whose_slot_was_released_no_longer_owns_its_file` — each red with its part off; rig
+  `rig191b.sh` (one holder, 40 Mbit/s): the dev build completes, v0.3.276 fails its check.
+- #191 — **A part download whose computer stopped answering started again from byte 0 on the next
+  one.** The retry asked the next holder from 0 — where `write_chunk` truncates — so a part lost late
+  fetched everything again. Now a transfer carries on from where it stands (`PartTransfer::next_offset`,
+  never past the bytes its partial file holds — `resume_from`; the file's length is what reached the
+  system, gotcha #424) on every carrying-on path: the retry, a busy holder asked again, the
+  not-connected failover (the record is made before that check). A chunk moves the record only once
+  it is WRITTEN, and a write that fails ends the transfer (`end_transfer_after_a_write_failure`;
+  libtorrent pauses a torrent on a disk error) instead of asking the rest into a file with a hole and
+  blaming the sender for our disk. A part whose bytes came from more than one computer and fails its
+  check blames none of them (`PartTransfer::sole_sender`; libtorrent's smart ban hashes each block to
+  attribute, which a whole-part BLAKE3 check cannot); one from a single sender docks it as before. The
+  progress bar reads the end of the latest chunk, so a carried-on part is not counted twice. Measured
+  (`rig191.sh`: three local computers at 40 Mbit/s, the first holder killed 20 s in, at 92 MB of a
+  452 MB part): the dev build asked the other holder from 92,274,688 and took in 452,444,160 bytes
+  (1.00x), the part byte-identical to the source; v0.3.276 asked from 0 and took in 544,718,848
+  (1.20x). Tests `a_part_resumed_on_another_computer_keeps_its_bytes_and_ends_whole`,
+  `a_part_names_its_sender_only_while_every_byte_came_from_it` — red with resume or attribution off.
 - #402 — **A peer's capability could be played back by anyone, and every node installed it.** A
   capability is signed only as a gossip message, so any member could republish a recorded one;
   since v0.3.271 an older VERSION was refused, but a replay of the same version put back old parts,

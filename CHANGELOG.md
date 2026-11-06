@@ -20,6 +20,21 @@ model parts it holds, what it has loaded, how much memory it has free — and ev
 so requests could be planned on figures up to 40 minutes old. Each description now carries when it
 was made, and an older one than the one already held is ignored.
 
+**A model part you download from another computer is no longer spoiled when your disk is nearly
+full** (#418). Since v0.3.213, while a computer uses more disk than its storage limit allows, a
+clean-up every 10 minutes removes half-finished downloads that nothing is writing. A part fetched
+with its Download button, or as part of a model added from the swarm, was not marked as being
+written, so the clean-up could delete it half-way: the rest arrived, the part failed its check and
+was fetched again — on a slow connection every time. Every download from another computer is now
+marked from its first byte. A part that fails its check is also fetched again straight away,
+instead of after up to 3 minutes.
+
+**A part whose computer stops answering is finished by another from where it stopped** (#191). The
+next computer used to be asked for the whole part again: losing one 90 MB into a 452 MB part cost
+545 MB of download, now 452 MB. A part that came from several computers and fails its check no
+longer counts against any one of them, and a part this computer cannot write (a full disk) stops
+instead of being fetched into a file with a gap in it.
+
 ## [0.3.276-alpha] — 2026-11-07
 
 **A computer that has just started hears what each computer it connects to holds, at once.** When

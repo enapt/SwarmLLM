@@ -527,8 +527,7 @@ impl NetworkManager {
                     let progress = self
                         .shard_download_progress
                         .get(&shard_id)
-                        .copied()
-                        .unwrap_or(0);
+                        .map_or(0, |t| t.next_offset);
                     // Self-healing path — retry_shard_or_fallback tries up to
                     // MAX_P2P_RETRIES other peers and only then falls back to HF.
                     // The exhausted-all-peers case surfaces its own error-level

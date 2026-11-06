@@ -490,8 +490,9 @@ pub struct NetworkManager {
     shard_store: ShardStore,
     /// Maps OutboundRequestId → (PeerId, ShardId) for in-flight shard download requests.
     pending_shard_requests: HashMap<OutboundRequestId, (libp2p::PeerId, crate::types::ShardId)>,
-    /// Tracks bytes downloaded so far per shard for chunked transfers.
-    shard_download_progress: HashMap<crate::types::ShardId, u64>,
+    /// Each part's peer transfer as it stands: the next byte to ask for, and
+    /// who sent the bytes before it (#191). Removed when the transfer ends.
+    shard_download_progress: HashMap<crate::types::ShardId, shard_transfer::PartTransfer>,
     /// P2P retry count per shard (max 5 before HF fallback).
     shard_p2p_retries: HashMap<crate::types::ShardId, u32>,
     /// Last time a shard download made forward progress (chunk received or request dispatched).
@@ -2379,7 +2380,12 @@ impl NetworkManager {
                     if verdict.another_upload {
                         self.refuse_part_of_another_upload(verdict.shard_id, verdict.peer);
                     } else {
-                        self.finish_p2p_shard(verdict.shard_id, verdict.peer, verdict.outcome);
+                        self.finish_p2p_shard(
+                            verdict.shard_id,
+                            verdict.peer,
+                            verdict.sole_sender,
+                            verdict.outcome,
+                        );
                     }
                     // The success path queues its ShardAnnounce here, as it
                     // did inside a swarm event; flush it the same way.

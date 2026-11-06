@@ -1792,7 +1792,9 @@ was deleting the whole model's entry.
 `cleanup_tmp_files_no_one_is_writing` skips any shard holding a claim; the
 writer removes its own `.tmp` and layout sidecar together, which a directory
 sweep cannot do. The startup sweep is the one unconditional one, and is correct
-because at startup there are no writers.
+because at startup there are no writers. ⚠ **The skip protects only a writer
+that CLAIMED**: two of the three ways a peer transfer started took no claim
+until #418 (§ "Every peer transfer holds its file from its first ask").
 
 **`ModelMgmt::live_cancel_flag` is the one source of a model's cancel flag**,
 and every path that starts a download takes its flag from there — auto-manage
@@ -1801,6 +1803,91 @@ transfer HOLDS its flag (`P2pDownloadSlot.cancel`) rather than looking the model
 up, because the map's entry is replaced when a download starts after a cancel.
 
 → `docs/invariants/network.md`
+
+## Every peer transfer holds its file from its first ask (2026-11-07, #418)
+
+*Rule: `.claude/rules/arch-network.md` § "One writer per shard file…". Found by
+#191's rig, not field-reported; reachable since v0.3.213.*
+
+**What it was.** Three things start a peer transfer: the automatic pass
+(`auto_manage/download.rs`, which claims, parks a slot and then asks), a part's
+Download button (`/api/admin/models/{id}/shards/{index}/download`) and adding a
+model from the swarm (`/api/admin/models/{id}/add` → the acquisition manager).
+The last two sent `NetworkCommand::SendShardRequest` and nothing claimed the
+file. The reclaim pass (`daemon::background::spawn_failed_download_reclaim`: 60 s
+after start, then every `FAILED_DOWNLOAD_RECLAIM_EVERY_SECS`, only while over
+the storage budget, since v0.3.213) runs `cleanup_tmp_files_no_one_is_writing`,
+which takes an unclaimed `.tmp` for an abandoned one. On a computer over its
+budget it deleted the partial file of any button-started transfer older than a
+minute; `write_chunk` opened a new file and wrote the next chunk at its offset —
+past a hole of zeros — and the part failed its BLAKE3 check, was quarantined and
+fetched again, with the sender docked for it.
+
+**How it was separated from #191's change under test.** #191's rig failed the
+hash in BOTH arms, the fix and the published control. A one-holder baseline on
+v0.3.276 with no computer lost failed at 40 Mbit/s and passed unlimited (the
+fast transfer finished inside the pass's first minute); `Cleaning up leftover
+.tmp shard file` fired in each failing run and in none that passed. After the fix:
+the one-holder 40 Mbit/s run completes, the kill run completes byte-identical at
+1.00x, and the v0.3.276 control still fails with the line.
+
+**The rule now.**
+- `handle_send_shard_request` takes a REQUIRED `PartAsk`. `Starts` asks
+  **`ModelMgmt::hold_for_a_peer_transfer`**: a parked slot (the automatic pass's)
+  is used, else the claim is taken and a slot parked with `_permit: None` — the
+  owner's transfer spends none of `max_concurrent_downloads`, which bounds the
+  automatic pass. A claim held elsewhere refuses the start.
+- **`ModelMgmt::p2p_transfer_still_owns_the_file`** is the one answer, asked on
+  every chunk and retry through `abandon_shard_transfer_if_not_ours`: a slot is
+  parked. It used to answer `true` for an UNCLAIMED shard (for the paths that
+  took none), which also let a transfer the stall sweep had released write on
+  with no claim. A transfer whose slot is gone stops, claimed by another or not.
+- A record whose slot is gone (the stall sweep cannot reach the network
+  manager's map) does not refuse a new start; it is forgotten
+  (`forget_part_transfer`, which drops the answers still out). A record WITH its
+  slot refuses a second start: two chains would write one file.
+- A part that failed its check, or that goes to its origin with no hash to
+  check, releases its slot at once; parked until the 180 s stall sweep, its
+  claim held off the very re-fetch the failure asked for.
+
+**Prior art.** libtorrent marks a block downloading when it is REQUESTED
+(`piece_picker::mark_as_downloading`), not when its bytes land — the mark the
+claim plays here.
+
+**What a change must keep.** A new way to start a peer transfer goes through
+`PartAsk::Starts`; a new writer of any `.tmp` claims before its first byte; a
+sweep that skips "files someone is writing" must be checked against EVERY
+writer, not the one in view (gotcha #1058). Tests
+`an_owner_started_peer_transfer_keeps_its_partial_file_from_the_reclaim_pass`,
+`a_transfer_whose_slot_was_released_no_longer_owns_its_file`.
+
+## A transfer carries on from its bytes, and a failed check blames only a sole sender (2026-11-07, #191)
+
+*Rule: `.claude/rules/arch-network.md` § "One writer per shard file…".*
+
+A retry asked the next holder from byte 0, so a part lost late was fetched
+again whole (`write_chunk` truncates at 0). The record is now a
+`PartTransfer` (`shard_transfer.rs`): the next byte to ask for and who sent the
+bytes before it. Every carrying-on ask (`PartAsk::Continues`: the retry, a busy
+holder asked again, the not-connected failover) asks from
+`resume_from(record, tmp_size)` — never past the partial file's length, which
+is what reached the system because `write_chunk` writes through `std::fs` with no
+buffer of its own (gotcha #424 was a buffered `tokio::fs::File`). The record
+moves only after a chunk is WRITTEN; a failed write ends the transfer
+(`end_transfer_after_a_write_failure` — no other computer can fix our disk, and
+asking on would write past a hole and blame the sender; libtorrent pauses a
+torrent on a disk error).
+
+A part from more than one computer that fails its check blames none
+(`PartTransfer::sole_sender` is `None` once a second sender, or bytes from before
+the record, are in it). libtorrent's smart ban hashes each block to name the
+sender of a bad one; a whole-part BLAKE3 check cannot, and irontide's parole
+(re-fetch from one uninvolved peer) is the cure if blame across senders is ever
+needed. Measured (`rig191.sh`, three local computers at 40 Mbit/s, the first
+holder killed at 92 MB of a 452 MB part): 452,444,160 bytes taken in (1.00x),
+byte-identical; v0.3.276 took in 544,718,848 (1.20x). Tests
+`a_part_resumed_on_another_computer_keeps_its_bytes_and_ends_whole`,
+`a_part_names_its_sender_only_while_every_byte_came_from_it`.
 
 ## Cancel means the same thing on both transports, and never takes a file from a live writer
 

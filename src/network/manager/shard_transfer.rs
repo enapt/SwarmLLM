@@ -31,26 +31,33 @@ impl NetworkManager {
     ///
     /// The rule is the one the HuggingFace path already follows: one writer per
     /// shard file. A transfer owns the file while its slot is parked in
-    /// `p2p_download_permits` (the slot holds the claim); if the claim is held
-    /// and the slot is gone, the claim belongs to somebody else and this
-    /// transfer is over.
+    /// `p2p_download_permits` (the slot holds the claim, from the first ask —
+    /// #418); once the slot is gone the transfer is over, whether the claim
+    /// went to somebody else or to nobody (`p2p_transfer_still_owns_the_file`).
     fn shard_transfer_lost_its_file(
         &self,
         shard_id: &crate::types::ShardId,
     ) -> Option<&'static str> {
-        let claimed = self.shared_state.models.shard_download_claimed(shard_id);
-        if !claimed {
-            return None;
+        let models = &self.shared_state.models;
+        if models.p2p_transfer_still_owns_the_file(shard_id) {
+            None
+        } else if models.shard_download_claimed(shard_id) {
+            Some("another download owns this shard's file")
+        } else {
+            Some("this transfer was released — it stalled or was stopped")
         }
-        if self
-            .shared_state
-            .models
-            .p2p_download_permits
-            .contains_key(shard_id)
-        {
-            return None;
-        }
-        Some("another download owns this shard's file")
+    }
+
+    /// Forget this node's record of a part's peer transfer: where it stands,
+    /// its clocks, retries and busy holders, and its asks still out — an answer
+    /// to one of those finds no record and is dropped.
+    fn forget_part_transfer(&mut self, shard_id: &crate::types::ShardId) {
+        self.shard_download_progress.remove(shard_id);
+        self.shard_last_progress_at.remove(shard_id);
+        self.shard_p2p_retries.remove(shard_id);
+        self.shard_busy_holders.remove(shard_id);
+        self.pending_shard_requests
+            .retain(|_, (_, sid)| sid != shard_id);
     }
 
     /// End a P2P transfer whose file now belongs to somebody else.
@@ -70,12 +77,7 @@ impl NetworkManager {
             reason,
             "Stopping a peer transfer — this shard is being fetched another way"
         );
-        self.shard_download_progress.remove(shard_id);
-        self.shard_last_progress_at.remove(shard_id);
-        self.shard_p2p_retries.remove(shard_id);
-        self.shard_busy_holders.remove(shard_id);
-        self.pending_shard_requests
-            .retain(|_, (_, sid)| sid != shard_id);
+        self.forget_part_transfer(shard_id);
         true
     }
 
@@ -118,12 +120,7 @@ impl NetworkManager {
             "P2P shard transfer cancelled by user — stopping"
         );
 
-        self.shard_download_progress.remove(shard_id);
-        self.shard_last_progress_at.remove(shard_id);
-        self.shard_p2p_retries.remove(shard_id);
-        self.shard_busy_holders.remove(shard_id);
-        self.pending_shard_requests
-            .retain(|_, (_, sid)| sid != shard_id);
+        self.forget_part_transfer(shard_id);
 
         // Remove the partial file, then release the permit and the writer
         // claim — in that order, so nothing can start writing this shard
@@ -196,10 +193,6 @@ impl NetworkManager {
             return false;
         }
 
-        // Clear any partial progress — restarting from offset 0 with a fresh peer.
-        self.shard_download_progress.remove(&shard_id);
-        self.shard_last_progress_at.remove(&shard_id);
-
         // Cap shard_p2p_retries map: every retry adds at most one entry per
         // unique ShardId. On a seeder serving many distinct shards under
         // hostile churn the map can grow without bound. Soft-evict the
@@ -270,12 +263,22 @@ impl NetworkManager {
                         .with_detail_num(shard_id.index as i64)
                         .with_detail_str("retry".to_string()),
                     );
+                    // The next computer carries on where the last one stopped
+                    // (#191): the bytes on disk are kept, never fetched again.
+                    let resume_at = self.resume_offset(&shard_id);
+                    tracing::info!(
+                        model = %shard_id.model_id,
+                        shard = shard_id.index,
+                        %failed_peer,
+                        resume_at,
+                        "Asking another computer for the rest of a part"
+                    );
                     let retry_req = crate::types::ShardRequest {
                         shard_id: shard_id.clone(),
-                        chunk_offset: 0,
+                        chunk_offset: resume_at,
                         chunk_size: crate::network::protocol::SHARD_CHUNK_SIZE,
                     };
-                    self.handle_send_shard_request(next_bytes, retry_req);
+                    self.handle_send_shard_request(next_bytes, retry_req, PartAsk::Continues);
                     return true;
                 }
             }
@@ -285,6 +288,8 @@ impl NetworkManager {
         // Release the P2P semaphore permit so the HF path (which acquires
         // its own permit in a separate trigger_download call) doesn't
         // starve behind the dead P2P request.
+        self.shard_download_progress.remove(&shard_id);
+        self.shard_last_progress_at.remove(&shard_id);
         self.shard_p2p_retries.remove(&shard_id);
         self.shard_busy_holders.remove(&shard_id);
         self.shared_state
@@ -464,7 +469,7 @@ impl NetworkManager {
         let offset = self
             .shard_download_progress
             .get(&shard_id)
-            .copied()
+            .map(|t| t.next_offset)
             .unwrap_or(0);
         let (candidates, at) = match ask {
             NextAsk::Now(free) => (free, None),
@@ -497,7 +502,7 @@ impl NetworkManager {
             chunk_size: crate::network::protocol::SHARD_CHUNK_SIZE,
         };
         match at {
-            None => self.handle_send_shard_request(target_peer_bytes, request),
+            None => self.handle_send_shard_request(target_peer_bytes, request, PartAsk::Continues),
             Some(when) => {
                 let tx = self.internal_cmd_tx.clone();
                 tokio::spawn(async move {
@@ -524,7 +529,11 @@ impl NetworkManager {
     ) {
         let shard_id = &request.shard_id;
         let still_waiting = self.shard_busy_holders.contains_key(shard_id)
-            && self.shard_download_progress.get(shard_id) == Some(&request.chunk_offset)
+            && self
+                .shard_download_progress
+                .get(shard_id)
+                .map(|t| t.next_offset)
+                == Some(request.chunk_offset)
             && !self
                 .pending_shard_requests
                 .values()
@@ -540,14 +549,65 @@ impl NetworkManager {
             );
             return;
         }
-        self.handle_send_shard_request(target_peer_bytes, request);
+        self.handle_send_shard_request(target_peer_bytes, request, PartAsk::Continues);
     }
 
-    /// Send a shard transfer request to a specific peer.
+    /// Where a transfer that lost its computer carries on (#191): the next
+    /// byte its record asks for, or the end of the partial file where that is
+    /// shorter (a file removed or cut under it) — never past the bytes the disk
+    /// holds. `write_chunk` writes with `std::fs` and no buffer of its own, so
+    /// the file's length is what reached the system (gotcha #424 was a buffered
+    /// `tokio::fs::File` on the origin path).
+    fn resume_offset(&self, shard_id: &crate::types::ShardId) -> u64 {
+        resume_from(
+            self.shard_download_progress.get(shard_id),
+            self.shard_store
+                .tmp_size(&shard_id.model_id, shard_id.index),
+        )
+    }
+
+    /// This node could not write a chunk it was sent (#191): its disk is full
+    /// or refusing. No other computer can fix that, so the transfer ends —
+    /// libtorrent pauses a torrent on a disk error — instead of fetching the
+    /// rest of the part into a file with a hole in it, whose failed check
+    /// would then have blamed the sender for our disk. The bytes written stay
+    /// for the next attempt (which resumes from the file), the slot and the
+    /// writer claim go, and the part backs off like any failed download.
+    pub(super) fn end_transfer_after_a_write_failure(&mut self, shard_id: &crate::types::ShardId) {
+        self.forget_part_transfer(shard_id);
+        self.shared_state
+            .models
+            .p2p_download_permits
+            .remove(shard_id);
+        let (fails, backoff_secs) = self
+            .shared_state
+            .models
+            .record_shard_download_failure(shard_id);
+        if let Some(mut entry) = self
+            .shared_state
+            .models
+            .acquisition_progress
+            .get_mut(&shard_id.model_id)
+        {
+            entry.shard_progress.remove(&shard_id.index);
+        }
+        tracing::warn!(
+            model = %shard_id.model_id,
+            shard = shard_id.index,
+            fails,
+            backoff_secs,
+            "Stopped a part download this computer could not write — keeping what it wrote"
+        );
+    }
+
+    /// Send a shard transfer request to a specific peer. `ask` says whether
+    /// it starts a transfer (a new record) or carries one on — a retry, or an
+    /// ask after a busy answer — keeping who sent the bytes before it.
     pub(super) fn handle_send_shard_request(
         &mut self,
         target_peer_bytes: Vec<u8>,
         request: crate::types::ShardRequest,
+        ask: PartAsk,
     ) {
         let Some(peer_id) = Self::resolve_peer_id(&target_peer_bytes, "shard request") else {
             return;
@@ -571,6 +631,55 @@ impl NetworkManager {
             return;
         }
 
+        let shard_id = request.shard_id.clone();
+        let chunk_offset = request.chunk_offset;
+        // Resume support: seed the per-shard write offset from the request's
+        // chunk_offset so the first received chunk lands at the resume position
+        // (and write_chunk's truncate-on-zero-offset path doesn't wipe an
+        // existing partial .tmp file). Recorded BEFORE the connection check
+        // below: its failover resumes from this record, and with none it
+        // would ask from 0 and truncate the partial file (#191).
+        match ask {
+            PartAsk::Starts => {
+                // One transfer per part: a second start (the button pressed
+                // twice) would write the same file from two chains. A record
+                // whose slot is gone is a transfer ended out of this map's
+                // reach (the stall sweep): forgotten, it blocks nothing.
+                if self.shard_download_progress.contains_key(&shard_id) {
+                    if self
+                        .shared_state
+                        .models
+                        .p2p_transfer_still_owns_the_file(&shard_id)
+                    {
+                        tracing::info!(
+                            model = %shard_id.model_id,
+                            shard = shard_id.index,
+                            "A peer download of this part is already under way — not starting another"
+                        );
+                        return;
+                    }
+                    self.forget_part_transfer(&shard_id);
+                }
+                // Every transfer owns its file from its first ask (#418).
+                if !self.shared_state.models.hold_for_a_peer_transfer(&shard_id) {
+                    tracing::info!(
+                        model = %shard_id.model_id,
+                        shard = shard_id.index,
+                        "Another download is writing this part — not starting a peer transfer"
+                    );
+                    return;
+                }
+                self.shard_download_progress
+                    .insert(shard_id.clone(), PartTransfer::starting_at(chunk_offset));
+            }
+            PartAsk::Continues => {
+                self.shard_download_progress
+                    .entry(shard_id.clone())
+                    .and_modify(|t| t.next_offset = chunk_offset)
+                    .or_insert_with(|| PartTransfer::starting_at(chunk_offset));
+            }
+        }
+
         // Pre-check: if libp2p has no live connection, send_request would
         // queue into a dead ConnectionId and silently hang for 600s (gotcha
         // #14). Fail fast via the retry path so the next peer (or HF
@@ -584,8 +693,6 @@ impl NetworkManager {
             self.retry_shard_or_fallback(request.shard_id, peer_id, "peer not connected");
             return;
         }
-        let shard_id = request.shard_id.clone();
-        let chunk_offset = request.chunk_offset;
         let req = SwarmRequest::ShardTransfer(request);
         // NET-C1: Track by OutboundRequestId for correct request-response correlation
         let outbound_id = self
@@ -595,14 +702,88 @@ impl NetworkManager {
             .send_request(&peer_id, req);
         self.pending_shard_requests
             .insert(outbound_id, (peer_id, shard_id.clone()));
-        // Resume support: seed the per-shard write offset from the request's
-        // chunk_offset so the first received chunk lands at the resume position
-        // (and write_chunk's truncate-on-zero-offset path doesn't wipe an
-        // existing partial .tmp file).
-        self.shard_download_progress
-            .insert(shard_id.clone(), chunk_offset);
         self.shard_last_progress_at
             .insert(shard_id, std::time::Instant::now());
+    }
+}
+
+/// The offset a transfer carries on from: its record's next byte, never past
+/// the `on_disk` bytes its partial file holds; 0 with no record (#191).
+fn resume_from(record: Option<&PartTransfer>, on_disk: u64) -> u64 {
+    record.map_or(0, |t| t.next_offset).min(on_disk)
+}
+
+/// Whether a part request starts a transfer or carries one on (#191) — a
+/// REQUIRED argument of `handle_send_shard_request`, because only a transfer
+/// that carries on may keep the record of who sent the bytes before it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum PartAsk {
+    /// A download starting (the auto-manage pass, a "download" button): a
+    /// new record — and bytes before its offset came from nobody on record.
+    Starts,
+    /// The same transfer asking again: after a busy answer, or of another
+    /// computer once one stopped answering.
+    Continues,
+}
+
+/// One part's peer transfer as it stands (#191): the byte the next chunk is
+/// asked for, and who sent the bytes before it.
+///
+/// Prior art: BitTorrent keeps the blocks of a piece whichever peers sent
+/// them, and a piece that fails its hash implicates every peer that took
+/// part — libtorrent's smart ban hashes each block to find the one that
+/// differed ("smart ban", blog.libtorrent.org, 2011). A part here has one
+/// hash, of the whole file, so a part with several senders blames none: a
+/// failed check implicates a computer only when every byte came from it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct PartTransfer {
+    /// The offset the next chunk is asked for; the bytes before it are on disk.
+    pub(super) next_offset: u64,
+    senders: PartSenders,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PartSenders {
+    /// Nothing written yet, and nothing before the transfer's start.
+    Nobody,
+    /// Every byte from this one computer.
+    Only(libp2p::PeerId),
+    /// Several computers — or bytes from before the transfer started, which
+    /// nobody recorded (a partial file an earlier attempt or run left).
+    Several,
+}
+
+impl PartTransfer {
+    /// A transfer starting at `offset`.
+    pub(super) fn starting_at(offset: u64) -> Self {
+        Self {
+            next_offset: offset,
+            senders: if offset == 0 {
+                PartSenders::Nobody
+            } else {
+                PartSenders::Several
+            },
+        }
+    }
+
+    /// `len` bytes from `peer` were written at `offset`. A write at 0
+    /// truncates the file first, so whoever sent it is then the only sender.
+    pub(super) fn landed(&mut self, peer: libp2p::PeerId, offset: u64, len: u64) {
+        self.senders = match self.senders {
+            _ if offset == 0 => PartSenders::Only(peer),
+            PartSenders::Only(only) if only == peer => PartSenders::Only(only),
+            _ => PartSenders::Several,
+        };
+        self.next_offset = offset.saturating_add(len);
+    }
+
+    /// The one computer every byte came from — the only one a failed check
+    /// may blame.
+    pub(super) fn sole_sender(&self) -> Option<libp2p::PeerId> {
+        match self.senders {
+            PartSenders::Only(peer) => Some(peer),
+            PartSenders::Nobody | PartSenders::Several => None,
+        }
     }
 }
 
@@ -754,6 +935,84 @@ pub(super) fn next_ask(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #191: a part names its sender only while every byte came from one
+    /// computer; a second sender, or bytes from before the transfer began,
+    /// name none — and a write at 0, which truncates, starts over.
+    #[test]
+    fn a_part_names_its_sender_only_while_every_byte_came_from_it() {
+        let (a, b) = (libp2p::PeerId::random(), libp2p::PeerId::random());
+        let mut t = PartTransfer::starting_at(0);
+        assert_eq!(t.sole_sender(), None, "nothing written yet");
+        t.landed(a, 0, 8);
+        t.landed(a, 8, 8);
+        assert_eq!((t.sole_sender(), t.next_offset), (Some(a), 16));
+        t.landed(b, 16, 8);
+        assert_eq!(
+            (t.sole_sender(), t.next_offset),
+            (None, 24),
+            "a second sender"
+        );
+        t.landed(a, 24, 8);
+        assert_eq!(t.sole_sender(), None, "several stays several");
+        t.landed(b, 0, 8);
+        assert_eq!(
+            (t.sole_sender(), t.next_offset),
+            (Some(b), 8),
+            "a write at 0 truncates the file first"
+        );
+
+        // Resumed from a partial file an earlier attempt left: its first
+        // bytes came from nobody on record.
+        let mut resumed = PartTransfer::starting_at(16);
+        resumed.landed(a, 16, 8);
+        assert_eq!(resumed.sole_sender(), None);
+    }
+
+    /// #191: a transfer that lost its computer carries on from its record,
+    /// never past what its file holds — and resuming there writes the part
+    /// whole, byte for byte, keeping what the first computer sent.
+    #[test]
+    fn a_part_resumed_on_another_computer_keeps_its_bytes_and_ends_whole() {
+        let dir = std::env::temp_dir().join(format!(
+            "swarmllm-resume-test-{}-{}",
+            std::process::id(),
+            line!()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let store = crate::model::shard::ShardStore::new(&dir);
+        let model = crate::types::ModelId("resume-test".to_string());
+        let part: Vec<u8> = (0..40_000u32).map(|i| (i % 251) as u8).collect();
+        let (a, b) = (libp2p::PeerId::random(), libp2p::PeerId::random());
+
+        // The first computer sends two chunks, then stops answering.
+        let mut t = PartTransfer::starting_at(0);
+        for (at, len) in [(0usize, 16_000usize), (16_000, 16_000)] {
+            store
+                .write_chunk(&model, 3, at as u64, &part[at..at + len])
+                .unwrap();
+            t.landed(a, at as u64, len as u64);
+        }
+        let on_disk = store.tmp_size(&model, 3);
+        assert_eq!(resume_from(Some(&t), on_disk), 32_000);
+        assert_eq!(resume_from(None, on_disk), 0, "no record: from the start");
+        assert_eq!(
+            resume_from(Some(&t), 10_000),
+            10_000,
+            "a file cut short is resumed from its end"
+        );
+
+        // The next computer sends the rest from there.
+        let at = resume_from(Some(&t), on_disk);
+        store
+            .write_chunk(&model, 3, at, &part[at as usize..])
+            .unwrap();
+        t.landed(b, at, part.len() as u64 - at);
+        let written = std::fs::read(store.shard_tmp_path(&model, 3)).unwrap();
+        assert!(written == part, "the resumed part is not the part");
+        assert_eq!(t.sole_sender(), None, "two senders");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     /// After a busy answer the downloader asks a holder that is not busy at
     /// once; when every holder is busy it waits for the FIRST to come free —

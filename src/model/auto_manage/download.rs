@@ -1060,7 +1060,7 @@ impl AutoShardManager {
                     self.shared_state.models.p2p_download_permits.insert(
                         sid.clone(),
                         crate::daemon::state::P2pDownloadSlot {
-                            _permit: p2p_permit,
+                            _permit: Some(p2p_permit),
                             _claim: p2p_claim,
                             cancel: self
                                 .shared_state

@@ -174,7 +174,11 @@ impl NetworkManager {
                 target_peer_bytes,
                 request,
             } => {
-                self.handle_send_shard_request(target_peer_bytes, request);
+                self.handle_send_shard_request(
+                    target_peer_bytes,
+                    request,
+                    super::shard_transfer::PartAsk::Starts,
+                );
             }
             NetworkCommand::ResumeShardAfterBusy {
                 target_peer_bytes,

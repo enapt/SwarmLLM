@@ -438,7 +438,10 @@ pub(crate) fn shard_state_is_in_flight(state: &crate::model::acquisition::ShardS
 /// its own release sites to keep in step.
 pub struct P2pDownloadSlot {
     /// Bounds `max_concurrent_downloads`. Released by dropping this slot.
-    pub _permit: tokio::sync::OwnedSemaphorePermit,
+    /// `None` for a transfer the owner started (a part's or a model's
+    /// download button): the network manager parks its slot for the claim
+    /// alone, and the automatic pass's bound is not its to spend.
+    pub _permit: Option<tokio::sync::OwnedSemaphorePermit>,
     /// Exclusive right to write this shard's `.tmp`. Released the same way.
     pub _claim: ShardDownloadClaim,
     /// The cancel flag this transfer STARTED under, held rather than looked up.
@@ -545,16 +548,47 @@ impl ModelMgmt {
 
     /// Does a P2P transfer of this shard still own the file it would write?
     ///
-    /// A transfer owns the file while its slot is parked in
-    /// `p2p_download_permits` — the slot holds the writer claim. If the claim
-    /// is held and the slot is gone, the claim has passed to somebody else
-    /// (in practice the HuggingFace fallback, after the stall sweep released
-    /// this transfer's slot) and the transfer is over.
-    ///
-    /// An unclaimed shard answers `true`: the P2P paths that take no claim at
-    /// all (a user-initiated acquisition) are left exactly as they were.
+    /// Only while its slot is parked in `p2p_download_permits` — the slot holds
+    /// the writer claim, and every peer transfer parks one from its first ask
+    /// (`hold_for_a_peer_transfer`, #418). A slot that is gone was released
+    /// where the network manager's own records are out of reach (the stall
+    /// sweep): the claim has passed to somebody else (the HuggingFace
+    /// fallback), or to nobody — and a write then would be unclaimed, a file
+    /// the reclaim pass may delete under it.
     pub fn p2p_transfer_still_owns_the_file(&self, shard: &crate::types::ShardId) -> bool {
-        !self.shard_download_claimed(shard) || self.p2p_download_permits.contains_key(shard)
+        self.p2p_download_permits.contains_key(shard)
+    }
+
+    /// Make a peer transfer that is starting hold this part's file (#418):
+    /// `true` when a slot is already parked — the automatic pass parks its
+    /// own, permit and claim inside, before it asks — or when the claim was
+    /// free and a slot is parked here with it. A part's or a model's download
+    /// button spends no permit: `max_concurrent_downloads` bounds the
+    /// automatic pass, not the owner. `false` when another download is
+    /// writing the file.
+    ///
+    /// The button's transfers used to write with no claim, so on a computer
+    /// over its storage budget the reclaim pass took the partial file for
+    /// nobody's and deleted it mid-transfer: the rest landed past a hole of
+    /// zeros and the part failed its check, every time the transfer outlasted
+    /// the pass's first minute.
+    pub fn hold_for_a_peer_transfer(&self, shard: &crate::types::ShardId) -> bool {
+        if self.p2p_download_permits.contains_key(shard) {
+            return true;
+        }
+        let Some(claim) = self.claim_shard_download(shard) else {
+            return false;
+        };
+        self.p2p_download_permits.insert(
+            shard.clone(),
+            P2pDownloadSlot {
+                _permit: None,
+                _claim: claim,
+                cancel: self.live_cancel_flag(&shard.model_id),
+                last_progress_at: std::time::Instant::now(),
+            },
+        );
+        true
     }
 
     /// Whether a download task is writing this shard's `.tmp` right now.
@@ -1841,7 +1875,7 @@ mod shard_download_claim_tests {
         m.p2p_download_permits.insert(
             sid.clone(),
             crate::daemon::state::P2pDownloadSlot {
-                _permit: sem.try_acquire_owned().unwrap(),
+                _permit: Some(sem.try_acquire_owned().unwrap()),
                 _claim: claim,
                 cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
                 last_progress_at: std::time::Instant::now(),
@@ -1910,13 +1944,69 @@ mod shard_download_claim_tests {
         assert!(m.p2p_download_permits.is_empty());
     }
 
-    /// The P2P paths that take no claim at all (a user-initiated acquisition)
-    /// must be left exactly as they were.
+    /// #418: a transfer whose slot the stall sweep released owns nothing, even
+    /// while nobody else has claimed the part — a write then would be
+    /// unclaimed, and the reclaim pass may delete the file under it.
     #[test]
-    fn an_unclaimed_shard_leaves_a_p2p_transfer_alone() {
+    fn a_transfer_whose_slot_was_released_no_longer_owns_its_file() {
         let m = mgmt();
         let sid = shard("llama-3.2-3b", 1);
-        assert!(m.p2p_transfer_still_owns_the_file(&sid));
+        let claim = m.claim_shard_download(&sid).unwrap();
+        park_slot(&m, &sid, claim);
+        m.p2p_download_permits.remove(&sid);
+        assert!(
+            !m.shard_download_claimed(&sid),
+            "the claim went with the slot"
+        );
+        assert!(
+            !m.p2p_transfer_still_owns_the_file(&sid),
+            "a released transfer must stop writing, claimed by another or not"
+        );
+    }
+
+    /// #418: a peer download the owner starts (a part's or a model's download
+    /// button) holds its file from the start, so the reclaim pass leaves its
+    /// partial alone — and a part another download is writing is refused.
+    #[test]
+    fn an_owner_started_peer_transfer_keeps_its_partial_file_from_the_reclaim_pass() {
+        let m = mgmt();
+        let dir = tempfile::tempdir().unwrap();
+        let model = ModelId("llama-3.2-1b".to_string());
+        let ours = shard("llama-3.2-1b", 1);
+        let left = shard("llama-3.2-1b", 2);
+        for s in [&ours, &left] {
+            let name = format!("{}.tmp", crate::model::shard::shard_filename(s.index));
+            std::fs::write(dir.path().join(name), vec![7u8; 4096]).unwrap();
+        }
+
+        assert!(m.hold_for_a_peer_transfer(&ours));
+        let removed = crate::model::shard::cleanup_tmp_files_no_one_is_writing(
+            dir.path(),
+            &model,
+            &m.shard_download_claims,
+        );
+
+        assert!(
+            dir.path().join("shard_001.bin.tmp").exists(),
+            "the transfer's partial file must survive the reclaim pass"
+        );
+        assert!(
+            !dir.path().join("shard_002.bin.tmp").exists(),
+            "the control: a partial nobody writes is reclaimed"
+        );
+        assert_eq!(removed, 1);
+        assert!(m.p2p_transfer_still_owns_the_file(&ours));
+        assert!(
+            m.p2p_download_permits.get(&ours).unwrap()._permit.is_none(),
+            "the owner's transfer spends none of the automatic pass's permits"
+        );
+
+        let _hf = m.claim_shard_download(&left).unwrap();
+        assert!(
+            !m.hold_for_a_peer_transfer(&left),
+            "a part another download writes is not started again from a peer"
+        );
+        assert!(!m.p2p_download_permits.contains_key(&left));
     }
 
     #[test]

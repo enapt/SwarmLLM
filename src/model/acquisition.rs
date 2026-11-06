@@ -222,7 +222,7 @@ pub struct AcquisitionManager {
 struct AcquisitionJob {
     manifest: ModelManifest,
     status: AcquisitionStatus,
-    /// Tracks raw bytes received per shard (for multi-chunk downloads).
+    /// How far along each part is on disk: the end of its latest chunk.
     shard_bytes: HashMap<u32, u64>,
     /// For speed calculation: (timestamp, cumulative_bytes) samples.
     speed_samples: Vec<(std::time::Instant, u64)>,
@@ -689,7 +689,6 @@ impl AcquisitionManager {
         // writes and ran finalize_shard on a partial `.tmp`, it clobbered the
         // already-finalized `.bin` with mostly-zero content. AcquisitionManager now
         // just tracks progress and verifies the file that manager.rs produced.
-        let _ = offset;
         let progress_map = &self.shared_state.models.acquisition_progress;
         let node_id = self.shared_state.identity.node_id().clone();
 
@@ -698,9 +697,13 @@ impl AcquisitionManager {
             return;
         };
 
-        // Track progress
+        // Track progress. A part is as far along as the end of its latest
+        // chunk on disk, not the sum of what this run received (#191): a
+        // transfer resumed from a partial file — an earlier run's, or a
+        // computer that stopped answering — starts past 0, and summed it never
+        // reached the part's size, while a restart from 0 counted twice.
         let received = job.shard_bytes.entry(shard_index).or_insert(0);
-        *received += data.len() as u64;
+        *received = offset.saturating_add(data.len() as u64);
         job.status.downloaded_bytes += data.len() as u64;
 
         // Update per-shard progress
