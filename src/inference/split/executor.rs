@@ -2016,43 +2016,20 @@ impl SplitModel {
         let hidden = match layers_run {
             Ok(hidden) => hidden,
             Err(e) => {
-                // Put the caches back, cut to the length they had before
-                // this step, so a failed step costs the step and not the
-                // conversation. Dropping them with the error left the store
-                // holding an entry with no layers at all; a refused CUDA
-                // graph capture re-runs its step on what is put back here
-                // (`forward_decode_as_graph`). A recurrent state is put back
-                // to where the step began when every layer's can be — a card
-                // keeps the state each step read (`SsmState`); otherwise a
-                // segment holding any drops it all as before. Both go back to
-                // ONE position — the caches' own length where the segment
-                // holds any — because `index_pos` and `kv_offset` have
-                // disagreed before (`docs/invariants/inference.md`), and two
-                // targets here would leave the state and the caches apart.
-                let back_to = if layer_kv_caches.iter().any(Option::is_some) {
-                    kv_offset
-                } else {
-                    index_pos
-                };
-                if layer_ssm_states
-                    .iter()
-                    .flatten()
-                    .all(|s| s.can_rewind_to(back_to))
-                {
-                    // To the step's start: a swap, never a replay.
-                    for state in layer_ssm_states.iter_mut().flatten() {
-                        if let Err(lost) = state.rewind_to(back_to) {
-                            return Err(SwarmError::Internal(format!(
-                                "{e}; the recurrent state was not put back: {lost}"
-                            )));
-                        }
-                    }
-                    for cache in layer_kv_caches.iter_mut().flatten() {
-                        cache.truncate(kv_offset);
-                    }
-                    let mut entry = kv_cache_store.get_or_create_keyed(&cache_key, num_layers);
-                    entry.layers = layer_kv_caches;
-                    entry.ssm_states = layer_ssm_states;
+                // The caches go back cut to where this step began — the one
+                // error arm both forwards share.
+                if let Err(lost) = put_back_where_the_step_began(
+                    kv_cache_store,
+                    &cache_key,
+                    num_layers,
+                    layer_kv_caches,
+                    layer_ssm_states,
+                    kv_offset,
+                    index_pos,
+                ) {
+                    return Err(SwarmError::Internal(format!(
+                        "{e}; the recurrent state was not put back: {lost}"
+                    )));
                 }
                 return Err(e);
             }
@@ -2355,13 +2332,77 @@ impl SplitModel {
         }
 
         // Single-item fast path: no stacking benefit. Goes via `forward`, so it
-        // picks up the phase pool at the usual choke point.
+        // picks up the phase pool at the usual choke point — and its own run
+        // again after the card's saved prompts go.
         if items.len() == 1 {
             let item = &items[0];
             let out = self.forward(item.input, item.index_pos, kv_cache_store, item.request_id)?;
             return Ok(vec![out]);
         }
 
+        // A step the card ran out of memory for, with every item's caches put
+        // back where it began, is run again — llama.cpp's server order
+        // (`server-context.cpp`, a decode with no room: `try_clear_idle_slots()`,
+        // else `n_batch /= 2`, then retry): the saved prompts go first and the
+        // step runs once more; still refused, it runs as two halves, each by
+        // this same rule, down to single forwards, which have their own rerun.
+        // SGLang's `retract_decode` sheds requests from the batch instead; here
+        // every request keeps its place (FUTURE_WORK #367 (d) (3c)).
+        let model_key = self.kv_model_key.clone();
+        let positions_held = |kv: &KvCacheStore| -> Vec<usize> {
+            items
+                .iter()
+                .map(|i| kv.request_positions(&model_key, i.request_id))
+                .collect()
+        };
+        let held_before = positions_held(kv_cache_store);
+        let on_card = self.device.is_cuda();
+        let worth_it = |e: &SwarmError, held_now: Vec<usize>| {
+            held_before
+                .iter()
+                .zip(held_now)
+                .all(|(&before, now)| worth_running_again(e, on_card, before, now))
+        };
+        let e = match self.forward_batch_once(items, kv_cache_store) {
+            Err(e) if worth_it(&e, positions_held(kv_cache_store)) => e,
+            other => return other,
+        };
+        let freed = kv_cache_store.let_saved_prompts_go();
+        let e = if freed > 0 {
+            let again = self.forward_batch_once(items, kv_cache_store);
+            tracing::info!(
+                batch_size = items.len(),
+                saved_prompts_let_go_mb = freed >> 20,
+                ran_again = again.is_ok(),
+                first_error = %e,
+                "The graphics card ran out of memory in a batched step; its saved prompts were let \
+                 go and the step run again"
+            );
+            match again {
+                Err(e) if worth_it(&e, positions_held(kv_cache_store)) => e,
+                other => return other,
+            }
+        } else {
+            e
+        };
+        tracing::info!(
+            batch_size = items.len(),
+            first_error = %e,
+            "The graphics card ran out of memory in a batched step; it is run again as two halves"
+        );
+        let (first_half, second_half) = items.split_at(items.len() / 2);
+        let mut outputs = self.forward_batch(first_half, kv_cache_store)?;
+        outputs.extend(self.forward_batch(second_half, kv_cache_store)?);
+        Ok(outputs)
+    }
+
+    /// One batched step, bound to its phase's thread pool — the body of
+    /// [`Self::forward_batch`], which may run it again or in halves.
+    fn forward_batch_once(
+        &mut self,
+        items: &[BatchItem<'_>],
+        kv_cache_store: &KvCacheStore,
+    ) -> Result<Vec<Tensor>, SwarmError> {
         // A batch is a decode step only when EVERY item contributes one query
         // position — batched prefill chunks come through here too, and they
         // want the wide pool. `max` rather than `any`: one prefill item in the
@@ -2594,228 +2635,281 @@ impl SplitModel {
             }
             return Ok(results);
         }
-        // `mut` for the same reason as the single-request path: a split
-        // segment carries the mask across the device boundary with the batch.
-        let mut masks = self
-            .attention_masks(seq_len, first_kv_offset, &[])
-            .map_err(SwarmError::internal)?;
+        // Where each request's caches stand before the step — the single
+        // path's `kv_offset`, per item: a failed step puts them back there.
+        let kv_offsets: Vec<usize> = all_kv_caches
+            .iter()
+            .map(|slot| {
+                slot.iter()
+                    .find_map(|c| c.as_ref())
+                    .map(|c| c.current_seq_len())
+                    .unwrap_or(0)
+            })
+            .collect();
+        // The step runs as one closure so that ANY failure in it reaches the
+        // one error arm below with every item's caches still in hand.
+        let stepped = (|| -> Result<Tensor, SwarmError> {
+            // `mut` for the same reason as the single-request path: a split
+            // segment carries the mask across the device boundary with the batch.
+            let mut masks = self
+                .attention_masks(seq_len, first_kv_offset, &[])
+                .map_err(SwarmError::internal)?;
 
-        // Stack all hidden states into a single batch tensor:
-        // [batch, seq_len, hidden_dim] (seq_len is 1 for decode, >1 for prefill chunks).
-        let batch_refs: Vec<&Tensor> = per_request.iter().collect();
-        let batched = Tensor::cat(&batch_refs, 0)
-            .map_err(|e| SwarmError::Internal(format!("Batch stack: {e}")))?;
-        // The items' per-layer inputs stacked the same way, row for row.
-        let per_layer_inputs = (!per_layer_per_request.is_empty())
-            .then(|| Tensor::cat(&per_layer_per_request, 0))
-            .transpose()
-            .map_err(|e| SwarmError::Internal(format!("Batch per-layer stack: {e}")))?;
-        // Carried between norm points exactly as in `forward_inner_impl`, so
-        // the batched path fuses the same add+norm pairs.
-        let mut hidden = Residual::Ready(batched);
+            // Stack all hidden states into a single batch tensor:
+            // [batch, seq_len, hidden_dim] (seq_len is 1 for decode, >1 for prefill chunks).
+            let batch_refs: Vec<&Tensor> = per_request.iter().collect();
+            let batched = Tensor::cat(&batch_refs, 0)
+                .map_err(|e| SwarmError::Internal(format!("Batch stack: {e}")))?;
+            // The items' per-layer inputs stacked the same way, row for row.
+            let per_layer_inputs = (!per_layer_per_request.is_empty())
+                .then(|| Tensor::cat(&per_layer_per_request, 0))
+                .transpose()
+                .map_err(|e| SwarmError::Internal(format!("Batch per-layer stack: {e}")))?;
+            // Carried between norm points exactly as in `forward_inner_impl`, so
+            // the batched path fuses the same add+norm pairs.
+            let mut hidden = Residual::Ready(batched);
 
-        // Process through layers
-        for (layer_idx, layer) in self.layers.iter().enumerate() {
-            // Hybrid placement, same contract as the single-request loop: the
-            // batch and its mask follow the layer. Empty `layer_devices` means
-            // an unsplit segment and this costs one `get` per layer.
-            //
-            // The batched path needs this independently — a segment can be
-            // split across devices whichever loop is running it, and a missing
-            // transition here would fail only under concurrency, which is the
-            // hardest kind of device bug to attribute.
-            if let Some(target) = self.layer_devices.get(layer_idx) {
-                if !hidden.device().same_device(target) {
-                    let moved = hidden
-                        .into_tensor()
-                        .and_then(|t| t.to_device(target))
-                        .map_err(|e| {
-                            SwarmError::Internal(format!(
-                                "batch to device at layer {layer_idx}: {e}"
-                            ))
+            // Process through layers
+            for (layer_idx, layer) in self.layers.iter().enumerate() {
+                // Hybrid placement, same contract as the single-request loop: the
+                // batch and its mask follow the layer. Empty `layer_devices` means
+                // an unsplit segment and this costs one `get` per layer.
+                //
+                // The batched path needs this independently — a segment can be
+                // split across devices whichever loop is running it, and a missing
+                // transition here would fail only under concurrency, which is the
+                // hardest kind of device bug to attribute.
+                if let Some(target) = self.layer_devices.get(layer_idx) {
+                    if !hidden.device().same_device(target) {
+                        let moved = hidden
+                            .into_tensor()
+                            .and_then(|t| t.to_device(target))
+                            .map_err(|e| {
+                                SwarmError::Internal(format!(
+                                    "batch to device at layer {layer_idx}: {e}"
+                                ))
+                            })?;
+                        hidden = Residual::Ready(moved);
+                        masks = masks.to_device(target).map_err(|e| {
+                            SwarmError::Internal(format!("batch mask to device: {e}"))
                         })?;
-                    hidden = Residual::Ready(moved);
-                    masks = masks
-                        .to_device(target)
-                        .map_err(|e| SwarmError::Internal(format!("batch mask to device: {e}")))?;
+                    }
+                }
+                match layer {
+                    LayerVariant::Dense(lw) => {
+                        let (residual, normed) = hidden
+                            .add_norm(&lw.attention_norm)
+                            .map_err(|e| SwarmError::Internal(format!("attn_norm: {e}")))?;
+
+                        // One call for the whole batch: the qkv projections, RoPE
+                        // and the output projection share their weights across
+                        // requests and are done ONCE, while the KV append and the
+                        // attention still loop per conversation. Every item here
+                        // shares `index_pos` (checked above — a mixed batch fell
+                        // back to sequential `forward` before reaching this loop),
+                        // which is what makes a single RoPE call correct.
+                        let slot = lw.kv_slot(layer_idx);
+                        let mut layer_caches: Vec<&mut Option<LayerKv>> = all_kv_caches
+                            .iter_mut()
+                            .map(|per_req| &mut per_req[slot])
+                            .collect();
+                        let item_positions: Vec<usize> =
+                            items.iter().map(|i| i.index_pos).collect();
+                        let mut attn_batched = lw
+                            .forward_attn_batched(
+                                &normed,
+                                masks.for_layer(lw),
+                                &item_positions,
+                                &mut layer_caches,
+                                max_seq_len,
+                                &kv_reserves,
+                                None,
+                            )
+                            .map_err(|e| SwarmError::Internal(format!("attn batched: {e}")))?;
+                        if let Some(ref post_norm) = lw.post_attention_norm {
+                            attn_batched = post_norm.forward(&attn_batched).map_err(|e| {
+                                SwarmError::Internal(format!("post_attn_norm: {e}"))
+                            })?;
+                        }
+                        let (residual2, x) = Residual::pending(attn_batched, residual)
+                            .add_norm(&lw.ffn_norm)
+                            .map_err(|e| SwarmError::Internal(format!("ffn_norm: {e}")))?;
+                        let mut x = lw
+                            .ffn
+                            .forward(&x, &residual2, None)
+                            .map_err(|e| SwarmError::Internal(format!("ffn: {e}")))?;
+                        if let Some(ref post_norm) = lw.post_ffw_norm {
+                            x = post_norm
+                                .forward(&x)
+                                .map_err(|e| SwarmError::Internal(format!("post_ffw_norm: {e}")))?;
+                        }
+                        let input = per_layer_input(
+                            per_layer_inputs.as_ref(),
+                            self.layer_start + layer_idx,
+                        )?;
+                        hidden =
+                            scaled_output(lw, Residual::pending(x, residual2), input.as_ref())?;
+                    }
+                    LayerVariant::DeepSeek {
+                        attention,
+                        ffn,
+                        attention_norm,
+                        ffn_norm,
+                    } => {
+                        // DeepSeek batch: per-request attention (MLA), batched FFN
+                        let (residual, normed) = hidden
+                            .add_norm(attention_norm)
+                            .map_err(|e| SwarmError::Internal(format!("ds_attn_norm: {e}")))?;
+
+                        let mut attn_outputs: Vec<Tensor> = Vec::with_capacity(batch_size);
+                        for (req_idx, item) in items.iter().enumerate() {
+                            let x_i = normed
+                                .narrow(0, req_idx, 1)
+                                .map_err(|e| SwarmError::Internal(format!("narrow: {e}")))?;
+                            let attn_out = attention
+                                .forward_mla(
+                                    &x_i,
+                                    masks.causal.as_ref(),
+                                    item.index_pos,
+                                    &mut all_kv_caches[req_idx][layer_idx],
+                                    max_seq_len,
+                                    kv_reserves[req_idx],
+                                )
+                                .map_err(|e| SwarmError::Internal(format!("mla_batch: {e}")))?;
+                            attn_outputs.push(attn_out);
+                        }
+
+                        let attn_refs: Vec<&Tensor> = attn_outputs.iter().collect();
+                        let attn_batched = Tensor::cat(&attn_refs, 0)
+                            .map_err(|e| SwarmError::Internal(format!("mla restack: {e}")))?;
+                        let (residual, normed) = Residual::pending(attn_batched, residual)
+                            .add_norm(ffn_norm)
+                            .map_err(|e| SwarmError::Internal(format!("ds_ffn_norm: {e}")))?;
+                        let ffn_out = ffn
+                            .forward(&normed, &residual, None)
+                            .map_err(|e| SwarmError::Internal(format!("ds_ffn: {e}")))?;
+                        hidden = Residual::pending(ffn_out, residual);
+                    }
+                    LayerVariant::Qwen35Attn {
+                        ref weights,
+                        ref ffn,
+                        ref attention_norm,
+                        ref post_attention_norm,
+                    } => {
+                        // Qwen 3.5 attention: per-request attention + batched FFN (same as Dense pattern)
+                        let (residual, normed) = hidden
+                            .add_norm(attention_norm)
+                            .map_err(|e| SwarmError::Internal(format!("q35b_attn_norm: {e}")))?;
+
+                        let mut attn_outputs: Vec<Tensor> = Vec::with_capacity(batch_size);
+                        for (req_idx, item) in items.iter().enumerate() {
+                            let x_i = normed
+                                .narrow(0, req_idx, 1)
+                                .map_err(|e| SwarmError::Internal(format!("narrow: {e}")))?;
+                            let attn_out = weights
+                                .forward_attn(
+                                    &x_i,
+                                    masks.causal.as_ref(),
+                                    item.index_pos,
+                                    &mut all_kv_caches[req_idx][layer_idx],
+                                    max_seq_len,
+                                    kv_reserves[req_idx],
+                                )
+                                .map_err(|e| SwarmError::Internal(format!("q35b_attn: {e}")))?;
+                            attn_outputs.push(attn_out);
+                        }
+                        let attn_refs: Vec<&Tensor> = attn_outputs.iter().collect();
+                        let attn_batched = Tensor::cat(&attn_refs, 0)
+                            .map_err(|e| SwarmError::Internal(format!("q35b_attn_restack: {e}")))?;
+                        let (residual2, normed2) = Residual::pending(attn_batched, residual)
+                            .add_norm(post_attention_norm)
+                            .map_err(|e| {
+                                SwarmError::Internal(format!("q35b_post_attn_norm: {e}"))
+                            })?;
+                        let ffn_out = ffn
+                            .forward(&normed2, &residual2, None)
+                            .map_err(|e| SwarmError::Internal(format!("q35b_ffn: {e}")))?;
+                        hidden = Residual::pending(ffn_out, residual2);
+                    }
+                    LayerVariant::Qwen35Ssm {
+                        ref weights,
+                        ref ffn,
+                        ref attention_norm,
+                        ref post_attention_norm,
+                    } => {
+                        // Qwen 3.5 SSM: per-request DeltaNet (SSM state is per-request) + batched FFN
+                        let (residual, normed) = hidden
+                            .add_norm(attention_norm)
+                            .map_err(|e| SwarmError::Internal(format!("q35b_ssm_norm: {e}")))?;
+
+                        let mut ssm_outputs: Vec<Tensor> = Vec::with_capacity(batch_size);
+                        for (req_idx, req_ssm) in
+                            all_ssm_states.iter_mut().enumerate().take(batch_size)
+                        {
+                            let x_i = normed
+                                .narrow(0, req_idx, 1)
+                                .map_err(|e| SwarmError::Internal(format!("narrow: {e}")))?;
+                            let ssm_out = weights
+                                .forward_deltanet(
+                                    &x_i,
+                                    &mut req_ssm[layer_idx],
+                                    items[req_idx].index_pos,
+                                )
+                                .map_err(|e| SwarmError::Internal(format!("q35b_deltanet: {e}")))?;
+                            ssm_outputs.push(ssm_out);
+                        }
+                        let ssm_refs: Vec<&Tensor> = ssm_outputs.iter().collect();
+                        let ssm_batched = Tensor::cat(&ssm_refs, 0)
+                            .map_err(|e| SwarmError::Internal(format!("q35b_ssm_restack: {e}")))?;
+                        let (residual2, normed2) = Residual::pending(ssm_batched, residual)
+                            .add_norm(post_attention_norm)
+                            .map_err(|e| {
+                                SwarmError::Internal(format!("q35b_post_ssm_norm: {e}"))
+                            })?;
+                        let ffn_out = ffn
+                            .forward(&normed2, &residual2, None)
+                            .map_err(|e| SwarmError::Internal(format!("q35b_ssm_ffn: {e}")))?;
+                        hidden = Residual::pending(ffn_out, residual2);
+                    }
                 }
             }
-            match layer {
-                LayerVariant::Dense(lw) => {
-                    let (residual, normed) = hidden
-                        .add_norm(&lw.attention_norm)
-                        .map_err(|e| SwarmError::Internal(format!("attn_norm: {e}")))?;
-
-                    // One call for the whole batch: the qkv projections, RoPE
-                    // and the output projection share their weights across
-                    // requests and are done ONCE, while the KV append and the
-                    // attention still loop per conversation. Every item here
-                    // shares `index_pos` (checked above — a mixed batch fell
-                    // back to sequential `forward` before reaching this loop),
-                    // which is what makes a single RoPE call correct.
-                    let slot = lw.kv_slot(layer_idx);
-                    let mut layer_caches: Vec<&mut Option<LayerKv>> = all_kv_caches
-                        .iter_mut()
-                        .map(|per_req| &mut per_req[slot])
-                        .collect();
-                    let item_positions: Vec<usize> = items.iter().map(|i| i.index_pos).collect();
-                    let mut attn_batched = lw
-                        .forward_attn_batched(
-                            &normed,
-                            masks.for_layer(lw),
-                            &item_positions,
-                            &mut layer_caches,
-                            max_seq_len,
-                            &kv_reserves,
-                            None,
-                        )
-                        .map_err(|e| SwarmError::Internal(format!("attn batched: {e}")))?;
-                    if let Some(ref post_norm) = lw.post_attention_norm {
-                        attn_batched = post_norm
-                            .forward(&attn_batched)
-                            .map_err(|e| SwarmError::Internal(format!("post_attn_norm: {e}")))?;
+            // The per-request split and final norm below read the whole batch, so
+            // the last layer's closing add is taken here (once per forward, not
+            // per layer — not worth a fused path of its own).
+            self.output_on_primary_device(hidden)?
+                .into_tensor()
+                .map_err(SwarmError::internal)
+        })();
+        let batched = match stepped {
+            Ok(batched) => batched,
+            Err(e) => {
+                // Every item's caches go back cut to where its step began (the
+                // single path's error arm, per item) — dropped, they ended
+                // every conversation in the batch, and `forward_batch` could
+                // not run the step again (#367 (d) (3c)).
+                let mut lost = None;
+                for (req_idx, item) in items.iter().enumerate() {
+                    let key = KvCacheStore::cache_key(&model_key, item.request_id);
+                    if let Err(why) = put_back_where_the_step_began(
+                        kv_cache_store,
+                        &key,
+                        num_layers,
+                        std::mem::take(&mut all_kv_caches[req_idx]),
+                        std::mem::take(&mut all_ssm_states[req_idx]),
+                        kv_offsets[req_idx],
+                        item.index_pos,
+                    ) {
+                        lost.get_or_insert(why);
                     }
-                    let (residual2, x) = Residual::pending(attn_batched, residual)
-                        .add_norm(&lw.ffn_norm)
-                        .map_err(|e| SwarmError::Internal(format!("ffn_norm: {e}")))?;
-                    let mut x = lw
-                        .ffn
-                        .forward(&x, &residual2, None)
-                        .map_err(|e| SwarmError::Internal(format!("ffn: {e}")))?;
-                    if let Some(ref post_norm) = lw.post_ffw_norm {
-                        x = post_norm
-                            .forward(&x)
-                            .map_err(|e| SwarmError::Internal(format!("post_ffw_norm: {e}")))?;
-                    }
-                    let input =
-                        per_layer_input(per_layer_inputs.as_ref(), self.layer_start + layer_idx)?;
-                    hidden = scaled_output(lw, Residual::pending(x, residual2), input.as_ref())?;
                 }
-                LayerVariant::DeepSeek {
-                    attention,
-                    ffn,
-                    attention_norm,
-                    ffn_norm,
-                } => {
-                    // DeepSeek batch: per-request attention (MLA), batched FFN
-                    let (residual, normed) = hidden
-                        .add_norm(attention_norm)
-                        .map_err(|e| SwarmError::Internal(format!("ds_attn_norm: {e}")))?;
-
-                    let mut attn_outputs: Vec<Tensor> = Vec::with_capacity(batch_size);
-                    for (req_idx, item) in items.iter().enumerate() {
-                        let x_i = normed
-                            .narrow(0, req_idx, 1)
-                            .map_err(|e| SwarmError::Internal(format!("narrow: {e}")))?;
-                        let attn_out = attention
-                            .forward_mla(
-                                &x_i,
-                                masks.causal.as_ref(),
-                                item.index_pos,
-                                &mut all_kv_caches[req_idx][layer_idx],
-                                max_seq_len,
-                                kv_reserves[req_idx],
-                            )
-                            .map_err(|e| SwarmError::Internal(format!("mla_batch: {e}")))?;
-                        attn_outputs.push(attn_out);
-                    }
-
-                    let attn_refs: Vec<&Tensor> = attn_outputs.iter().collect();
-                    let attn_batched = Tensor::cat(&attn_refs, 0)
-                        .map_err(|e| SwarmError::Internal(format!("mla restack: {e}")))?;
-                    let (residual, normed) = Residual::pending(attn_batched, residual)
-                        .add_norm(ffn_norm)
-                        .map_err(|e| SwarmError::Internal(format!("ds_ffn_norm: {e}")))?;
-                    let ffn_out = ffn
-                        .forward(&normed, &residual, None)
-                        .map_err(|e| SwarmError::Internal(format!("ds_ffn: {e}")))?;
-                    hidden = Residual::pending(ffn_out, residual);
-                }
-                LayerVariant::Qwen35Attn {
-                    ref weights,
-                    ref ffn,
-                    ref attention_norm,
-                    ref post_attention_norm,
-                } => {
-                    // Qwen 3.5 attention: per-request attention + batched FFN (same as Dense pattern)
-                    let (residual, normed) = hidden
-                        .add_norm(attention_norm)
-                        .map_err(|e| SwarmError::Internal(format!("q35b_attn_norm: {e}")))?;
-
-                    let mut attn_outputs: Vec<Tensor> = Vec::with_capacity(batch_size);
-                    for (req_idx, item) in items.iter().enumerate() {
-                        let x_i = normed
-                            .narrow(0, req_idx, 1)
-                            .map_err(|e| SwarmError::Internal(format!("narrow: {e}")))?;
-                        let attn_out = weights
-                            .forward_attn(
-                                &x_i,
-                                masks.causal.as_ref(),
-                                item.index_pos,
-                                &mut all_kv_caches[req_idx][layer_idx],
-                                max_seq_len,
-                                kv_reserves[req_idx],
-                            )
-                            .map_err(|e| SwarmError::Internal(format!("q35b_attn: {e}")))?;
-                        attn_outputs.push(attn_out);
-                    }
-                    let attn_refs: Vec<&Tensor> = attn_outputs.iter().collect();
-                    let attn_batched = Tensor::cat(&attn_refs, 0)
-                        .map_err(|e| SwarmError::Internal(format!("q35b_attn_restack: {e}")))?;
-                    let (residual2, normed2) = Residual::pending(attn_batched, residual)
-                        .add_norm(post_attention_norm)
-                        .map_err(|e| SwarmError::Internal(format!("q35b_post_attn_norm: {e}")))?;
-                    let ffn_out = ffn
-                        .forward(&normed2, &residual2, None)
-                        .map_err(|e| SwarmError::Internal(format!("q35b_ffn: {e}")))?;
-                    hidden = Residual::pending(ffn_out, residual2);
-                }
-                LayerVariant::Qwen35Ssm {
-                    ref weights,
-                    ref ffn,
-                    ref attention_norm,
-                    ref post_attention_norm,
-                } => {
-                    // Qwen 3.5 SSM: per-request DeltaNet (SSM state is per-request) + batched FFN
-                    let (residual, normed) = hidden
-                        .add_norm(attention_norm)
-                        .map_err(|e| SwarmError::Internal(format!("q35b_ssm_norm: {e}")))?;
-
-                    let mut ssm_outputs: Vec<Tensor> = Vec::with_capacity(batch_size);
-                    for (req_idx, req_ssm) in all_ssm_states.iter_mut().enumerate().take(batch_size)
-                    {
-                        let x_i = normed
-                            .narrow(0, req_idx, 1)
-                            .map_err(|e| SwarmError::Internal(format!("narrow: {e}")))?;
-                        let ssm_out = weights
-                            .forward_deltanet(
-                                &x_i,
-                                &mut req_ssm[layer_idx],
-                                items[req_idx].index_pos,
-                            )
-                            .map_err(|e| SwarmError::Internal(format!("q35b_deltanet: {e}")))?;
-                        ssm_outputs.push(ssm_out);
-                    }
-                    let ssm_refs: Vec<&Tensor> = ssm_outputs.iter().collect();
-                    let ssm_batched = Tensor::cat(&ssm_refs, 0)
-                        .map_err(|e| SwarmError::Internal(format!("q35b_ssm_restack: {e}")))?;
-                    let (residual2, normed2) = Residual::pending(ssm_batched, residual)
-                        .add_norm(post_attention_norm)
-                        .map_err(|e| SwarmError::Internal(format!("q35b_post_ssm_norm: {e}")))?;
-                    let ffn_out = ffn
-                        .forward(&normed2, &residual2, None)
-                        .map_err(|e| SwarmError::Internal(format!("q35b_ssm_ffn: {e}")))?;
-                    hidden = Residual::pending(ffn_out, residual2);
-                }
+                return Err(match lost {
+                    Some(lost) => SwarmError::Internal(format!(
+                        "{e}; the recurrent state was not put back: {lost}"
+                    )),
+                    None => e,
+                });
             }
-        }
-        // The per-request split and final norm below read the whole batch, so
-        // the last layer's closing add is taken here (once per forward, not
-        // per layer — not worth a fused path of its own).
-        let batched = self
-            .output_on_primary_device(hidden)?
-            .into_tensor()
-            .map_err(SwarmError::internal)?;
+        };
 
         // Write updated KV-caches and SSM states back (take instead of clone to avoid copying)
         for (req_idx, item) in items.iter().enumerate() {
@@ -3428,6 +3522,122 @@ fn worth_running_again(
         && held_before == held_after
         && *ON.get_or_init(|| std::env::var("SWARMLLM_FORWARD_RERUN").as_deref() != Ok("0"))
         && permanent_gpu_failure(&e.to_string()) == Some(PermanentGpuFailure::OutOfMemory)
+}
+
+/// Put one request's caches back into the store, cut to where a failed step
+/// began, so the step costs the step and not the conversation — the ONE error
+/// arm of both forwards (`forward_inner_body`, and `forward_batch_body` per
+/// item). Dropping them with the error left the store holding an entry with no
+/// layers at all; a refused CUDA graph capture re-runs its step on what is put
+/// back here (`forward_decode_as_graph`), and so does a forward the card ran
+/// out of memory for ([`worth_running_again`]).
+///
+/// `kv_offset` is the caches' own length before the step (the first cache the
+/// segment holds), `index_pos` the step's position, the target only where the
+/// segment holds no cache. A recurrent state is put back to that ONE position
+/// when every layer's can be — a card keeps the state each step read
+/// (`SsmState`) — because `index_pos` and `kv_offset` have disagreed before
+/// (`docs/invariants/inference.md`), and two targets would leave the state and
+/// the caches apart. A sliding-window cache the step slid past that position
+/// cannot be cut back to it (`LayerKv::can_truncate_to`). Either way, nothing is
+/// put back: the store's entry stays empty, the request's positions read
+/// differently, and no rerun reads a history it no longer holds. `Err` carries
+/// a recurrent state's own failure to rewind.
+fn put_back_where_the_step_began(
+    kv_cache_store: &KvCacheStore,
+    cache_key: &str,
+    num_layers: usize,
+    mut layer_kv_caches: Vec<Option<LayerKv>>,
+    mut layer_ssm_states: Vec<Option<SsmState>>,
+    kv_offset: usize,
+    index_pos: usize,
+) -> Result<(), String> {
+    let back_to = if layer_kv_caches.iter().any(Option::is_some) {
+        kv_offset
+    } else {
+        index_pos
+    };
+    let states_rewind = layer_ssm_states
+        .iter()
+        .flatten()
+        .all(|s| s.can_rewind_to(back_to));
+    let caches_cut = layer_kv_caches
+        .iter()
+        .flatten()
+        .all(|c| c.can_truncate_to(kv_offset));
+    if !(states_rewind && caches_cut) {
+        return Ok(());
+    }
+    // To the step's start: a swap, never a replay.
+    for state in layer_ssm_states.iter_mut().flatten() {
+        state.rewind_to(back_to).map_err(|lost| lost.to_string())?;
+    }
+    for cache in layer_kv_caches.iter_mut().flatten() {
+        cache.truncate(kv_offset);
+    }
+    let mut entry = kv_cache_store.get_or_create_keyed(cache_key, num_layers);
+    entry.layers = layer_kv_caches;
+    entry.ssm_states = layer_ssm_states;
+    Ok(())
+}
+
+#[cfg(test)]
+mod put_back_tests {
+    use super::{put_back_where_the_step_began, KvCacheStore, LayerKv};
+    use crate::inference::layers::append_to_cache;
+    use crate::inference::split::kv_cache::KvStorage;
+    use candle_core::{DType, Device, Tensor};
+
+    /// A cache fed `positions`, `chunk` at a time — windowed (and sliding) if asked.
+    fn cache(positions: usize, chunk: usize, window: Option<usize>) -> LayerKv {
+        let mut slot = None;
+        let mut pos = 0;
+        while pos < positions {
+            let len = chunk.min(positions - pos);
+            let k = Tensor::zeros((1usize, 1, len, 4), DType::F32, &Device::Cpu).unwrap();
+            // A 128-position context, as the cache's own window tests: the
+            // slide is sized against it.
+            append_to_cache(&mut slot, &k, &k, pos, KvStorage::F32, 128, 0, window).unwrap();
+            pos += len;
+        }
+        slot.unwrap()
+    }
+
+    fn store() -> KvCacheStore {
+        KvCacheStore::new(std::time::Duration::from_secs(60))
+    }
+
+    /// A failed step's caches go back cut to where the step began — what a
+    /// refused capture and a forward run again (#367 (d) (3b), (3c)) read.
+    #[test]
+    fn a_failed_steps_caches_go_back_cut_to_where_it_began() {
+        let store = store();
+        let key = KvCacheStore::cache_key("m", "r");
+        let layers = vec![Some(cache(10, 1, None)), Some(cache(10, 1, None))];
+        put_back_where_the_step_began(&store, &key, 2, layers, vec![None, None], 9, 9).unwrap();
+        assert_eq!(store.request_positions("m", "r"), 9);
+    }
+
+    /// A window the step slid past where it began cannot be cut back there:
+    /// nothing goes back, so the request's positions read differently and no
+    /// rerun reads keys the window has lost. A start it still answers goes back.
+    #[test]
+    fn a_window_slid_past_the_steps_start_is_not_put_back() {
+        let slid = cache(400, 7, Some(4));
+        let serves = slid.serves_from();
+        assert!(serves > 0, "the window slid");
+        let store = store();
+        let key = KvCacheStore::cache_key("m", "r");
+        put_back_where_the_step_began(&store, &key, 1, vec![Some(slid)], vec![None], serves - 1, 0)
+            .unwrap();
+        assert_eq!(store.request_positions("m", "r"), 0, "nothing put back");
+
+        let slid = cache(400, 7, Some(4));
+        let serves = slid.serves_from();
+        put_back_where_the_step_began(&store, &key, 1, vec![Some(slid)], vec![None], serves, 0)
+            .unwrap();
+        assert_eq!(store.request_positions("m", "r"), serves);
+    }
 }
 
 #[cfg(test)]

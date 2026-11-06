@@ -3064,9 +3064,8 @@ cannot rewind is dropped. Nothing kept beside the live caches (WSL2 keeps them i
 rerun. INFO "The graphics card ran out of memory in a forward; its saved prompts were let go and the
 forward run again" (`saved_prompts_let_go_mb`, `ran_again`, `first_error`).
 
-**Not covered.** The batched step (`forward_batch`): its layer loop takes every item's caches out of
-the store and a failed step does not put them back, so it cannot be run again — it ends the worker as
-before. An allocation outside a forward: the worker's token uploads (`tokenize`, `token_tensor`,
+**Not covered.** The batched step (`forward_batch`) — covered since (3c), the next section. An
+allocation outside a forward: the worker's token uploads (`tokenize`, `token_tensor`,
 `tensor_from_ids`) and a saved prompt's copy (whose failure is already only a skipped save).
 
 **Measured.** Saved prompts are kept on the card for the arms (`SWARMLLM_PREFIX_CACHE_HOME=card` —
@@ -3099,6 +3098,62 @@ caches stand where the forward began; the saved prompts go, never a conversation
 `SWARMLLM_FORWARD_RERUN=0`. Tests `forward_rerun_tests::*`,
 `letting_saved_prompts_go_asks_for_all_of_them_and_only_when_some_are_kept` (each red without its
 guard, checked).
+
+### A batched step the card ran out of memory for is put back and run again, then in halves (2026-11-06, FUTURE_WORK #367 (d) fix (3c))
+
+**Why.** Two conversations answered together decode through `forward_batch`, and its layer loop takes
+every item's caches out of the store; a refused step put none back, so (3b) could not run it again and
+the worker ended — the batched decode step is never graph-captured, so on a card its allocations are
+asked fresh every step and a refusal lands there more often than anywhere else (15 of 16 forced
+refusals below).
+
+**What others do.** llama.cpp's server, a decode with no room (`server-context.cpp`): first
+`try_clear_idle_slots()`, else `n_batch /= 2`, and the step is tried again. SGLang's `retract_decode`
+sheds requests from the batch (the fewest generated tokens first) until the next step fits, and the
+shed ones start over. Here every request keeps its place: llama.cpp's order, with the saved prompts as
+its idle slots.
+
+**The change.** On an error inside the step (`forward_batch_body`'s `stepped` closure: the masks
+through the output head), each item's caches go back cut to where the step began
+(`executor::put_back_where_the_step_began` — the single path's error arm calls the same function), and
+a recurrent state that cannot rewind or a cache slid past the step's start is left out, which makes
+`worth_running_again` fail and the error stand. `forward_batch` then, where `worth_running_again` holds
+for EVERY item: lets the saved prompts go and runs the step once more (`forward_batch_once`); still
+refused or nothing let go, runs it as two halves, each half by the same rule — a half of one is a
+single forward, with (3b)'s own rerun. INFO "The graphics card ran out of memory in a batched step;
+its saved prompts were let go and the step run again" (`batch_size`, `saved_prompts_let_go_mb`,
+`ran_again`, `first_error`) and "…; it is run again as two halves".
+
+**Measured.** As (3b)'s, with two conversations at once so decode steps batch (`CHATS=2`), the fault
+switch every 100,000th ask of at least 64 KiB (below (3b)'s 1 MiB: a two-row step's logits, its
+largest output, are 1.0 MB),
+5 min an arm, the live node stopped, Windows up ~19 h, 0 driver events (`creep_out/1106_0615`):
+
+| | no refusals | refused, run again | refused, `SWARMLLM_FORWARD_RERUN=0` |
+|---|---|---|---|
+| batched steps run again (ran again) | — | 15 (15): 122-708 MB let go | — |
+| single forwards run again | — | 1 (1) | — |
+| turns, both chats (failed) | 22 + 21 (0) | 22 + 22 (0) | 7 + 5 (0) |
+| decode from turn 10, median | 19.5 tok/s | 19.9 tok/s | — |
+| worker ended, model pinned to the processor | 0 | 0 | 1, the first refusal (a batched step, 1 min in): 4.6-8.8 tok/s after |
+
+Halves, with the saved prompts in host RAM (WSL2's default — nothing on the card to let go;
+`creep_out/1106_0638`): one batched step was refused, run as two halves, and both ran; 12 s later a
+single prompt chunk was refused with nothing to let go and the worker ended — (3b)'s limit, and with
+(3a) on (it was off, as the field's refusals were) a one-off refusal is asked again before either
+runs. A one-off forced refusal shows the halves are put back and run correctly; it cannot show a
+half fits where the whole did not. Every reply of every arm was screened: no loop (at most 4 repeats
+of any four words), no stray control character, no error. A batched reply is not byte-comparable
+between runs — which steps pair depends on timing — so the bytes rest on the tests:
+`put_back_tests::*` (a failed step's caches cut back to its start; a window slid past it left out),
+each red with its guard removed (checked).
+
+**What a change must keep.** Every item's caches put back before any rerun; a rerun only where every
+item stands where the step began; once with the saved prompts gone, then halves, never a loop at one
+size. A/B `SWARMLLM_FORWARD_RERUN=0` (both (3b) and (3c)).
+
+**Not covered.** A half that still fails fails the whole tick (`decode tick failed`, every slot
+answered with the error) — a request is never shed from the batch as SGLang's `retract_decode` would.
 
 ## The daemon holds no CUDA context (2026-10-05)
 

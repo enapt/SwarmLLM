@@ -87,8 +87,10 @@ the top track (`docs/plans/large_model_splits.md`).
    switch on 2026-11-06 (132 of 132 granted; without it the worker ended and the model was
    pinned); (3b) a forward still refused lets the card's saved prompts go and runs once more,
    built and checked the same day (a 36-turn chat stayed on the card through 2 forced refusals;
-   without it the worker ended at turn 9). **Next**: (3c) the batched decode step, which (3b)
-   does not cover; and the field's shape on native Linux (a Linux card peer through `swarm_route`, or the next field export's
+   without it the worker ended at turn 9); (3c) a batched step refused puts its caches back and
+   runs again, then in halves, built and checked the same day (two chats, 15 of 15 batched steps
+   run again, both chats on the card to the end; without it the worker ended 1 min in). **Next**:
+   the field's shape on native Linux (a Linux card peer through `swarm_route`, or the next field export's
    `cuda_pool` DIAG lines and the new "refused memory" line). (#403 CLOSED 2026-11-04, released in
    v0.3.272 — § "Closed".)
 7. **#388** — the flow's guard takes a far computer's own delay for a queue on the link (the
@@ -1967,11 +1969,19 @@ on the card, the field's shape for 5 min an arm: run again 2 of 2, 36 turns, 0 w
 `SWARMLLM_FORWARD_RERUN=0` the worker ended at turn 9 and the chat ran on the processor at 8.0 tok/s.
 Greedy replies the same bytes with and without a rerun (five questions, one rerun). `docs/invariants/memory.md`
 § "A forward the card ran out of memory for is run once more". It answers one refusal per saved
-prompt: refused every other chunk, the worker still ends. **Next: (3c)** — the batched decode step:
-`forward_batch`'s layer loop takes every item's caches out of the store and a failed step does not put
-them back, so a refusal there still ends the worker. Put them back cut to the step's start (as the
-single path's error arm does), let saved prompts go and run the step once more; still refused,
-retract one slot and run the rest. **Prior art:** SGLang's `retract_decode`
+prompt: refused every other chunk, the worker still ends.
+
+**(3c) built and checked 2026-11-06**: a refused batched step puts every item's caches back where it
+began (`executor::put_back_where_the_step_began`, the single path's error arm too); `forward_batch`
+then lets the saved prompts go and runs the step once more, else runs it as two halves by the same rule
+— llama.cpp's server order (`server-context.cpp`: `try_clear_idle_slots()`, else `n_batch /= 2`).
+Two chats at once, the fault switch every 100,000th ask ≥ 64 KiB, 5 min an arm: 15 of 15 batched steps
+run again, 22 + 22 turns, 0 workers ended (19.9 tok/s against 19.5 with no refusals); with
+`SWARMLLM_FORWARD_RERUN=0` the first refusal (a batched step, 1 min in) ended the worker and the chats
+ran on the processor at 4.6-8.8 tok/s. Halves fired once with nothing to let go, and ran.
+`docs/invariants/memory.md` § "A batched step the card ran out of memory for". **Residual**: a half
+still refused fails the whole tick — no request is shed (SGLang's `retract_decode`, below, sheds the
+one with the fewest generated tokens and re-reads its prompt later). **Prior art:** SGLang's `retract_decode`
 (`python/sglang/srt/managers/schedule_batch.py`, read 2026-11-06) frees decode requests one at a time,
 the fewest generated tokens first, while the next step does not fit (`check_decode_mem`), keeps at
 least one ("Out of memory even after retracting all other requests in the decode batch" otherwise),

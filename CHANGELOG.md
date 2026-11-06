@@ -25,8 +25,10 @@ ran out of memory partway through a request even after being asked again, the re
 the model moved to the processor. Now those saved conversations are let go first and the step is
 run once more; a later question re-reads its conversation instead. On the test laptop, with the card
 made to fail on purpose during a long chat, the chat stayed on the card for all 36 turns; without
-the change the model moved to the processor at turn 9. This covers one request at a time; several
-answered together can still move the model to the processor (#367).
+the change the model moved to the processor at turn 9. Several requests answered together are
+covered too: their step is put back and run again, and if the card still has no room it runs in two
+halves. With two chats at once and the card made to fail on purpose, both chats stayed on the card
+for all 22 turns; without the change the model moved to the processor within a minute (#367).
 
 ## [0.3.274-alpha] — 2026-11-06
 
