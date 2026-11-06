@@ -84,8 +84,15 @@ pub(super) fn trees_wanted(
 /// its way) the flow ran 19.4 tok/s against the chain stream's 16.3 at 150 ms,
 /// 16.5 against 11.7 at 220 and 12.9 against 8.7 at 300, four warm 400-token
 /// replies an arm, arms alternating. Most links between continents are 150-300
-/// ms (this machine to Europe ~206-236), and they took the stream.
-pub(super) const FLOW_LEAST_ROUND_TRIP_MS: u32 = 150;
+/// ms (this machine to Europe ~206-236), and they took the stream. That rig
+/// crossed at ~110-120 ms (1.04 at 120, 0.94 at 100) and leans against the
+/// flow; on the REAL link (#411, 2026-11-06, the 14B split TH↔AU at 126-132 ms,
+/// a card at the far end, the far's own time read apart since #388) the flow
+/// beat the stream in every alternating block of three prose prompts, medians
+/// 14.62 / 16.65 / 16.67 tok/s against 11.91 / 14.43 / 13.27, and gave back
+/// 2-3% on code (32.31 against 33.45). So the line is 120 ms: the old rig's
+/// tie, under the shortest real link the flow was measured winning on.
+pub(super) const FLOW_LEAST_ROUND_TRIP_MS: u32 = 120;
 
 /// The line a reply's trees are the default from: the flow's where its tree
 /// would flow, the tree rounds' otherwise — a peer without the flow's feature
@@ -735,10 +742,15 @@ mod tests {
 
     /// A tree that FLOWS pays over a shorter link than tree rounds: on the rig
     /// it beat the chain stream at 150, 220 and 300 ms, where the rounds' line
-    /// had handed every one of those links to the stream (2026-10-23). A reply
-    /// whose tree cannot flow keeps the rounds' line.
+    /// had handed every one of those links to the stream (2026-10-23), and on
+    /// the real TH↔AU link at 126-132 ms (#411, 2026-11-06). A reply whose
+    /// tree cannot flow keeps the rounds' line.
     #[test]
     fn a_tree_that_flows_is_the_default_over_a_shorter_link_than_tree_rounds() {
+        assert!(
+            trees_wanted_given(None, true, true, Some(126), true),
+            "the shortest real link the flow was measured winning on flows"
+        );
         let between = Some(FLOW_LEAST_ROUND_TRIP_MS + 70);
         assert!(trees_wanted_given(None, true, true, between, true));
         assert!(

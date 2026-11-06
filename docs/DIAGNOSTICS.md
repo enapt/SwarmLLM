@@ -1462,7 +1462,11 @@ to it is a far busy with something else — narrowing did not help and was taken
 reproduce on the far side: `SWARMLLM_FAULT_SLOW_TURNS=<from>:<count>:<ms>` holds the forwards a
 stream or flow numbers `from` to `from + count − 1` that much longer, before the worker
 (`daemon/dispatch/layer_forward.rs`); rig
-`~/swarmllm-318/flow388.sh`.
+`~/swarmllm-318/flow388.sh`. **Whose queue is the far's?** `python3 -I examples/far_queue_from_log.py
+<node log at debug>` pairs each forward's send with its answer (in order, per request) and prints
+`ahead:count x median delay ms`: a delay flat while few are out, then rising one far service time
+per forward ahead, is a serial queue of the flow's OWN forwards (2026-11-06 TH↔AU: +~30 ms a
+forward past ~5, FUTURE_WORK #412); a delay that jumps regardless of the count is the far's own load.
 
 **CUDA-graph decode** (on by default since 2026-09-30; `SWARMLLM_CUDA_GRAPH=0` or `SWARMLLM_CUDA_OWN_STREAM=0` turns it off; recorded in groups of `SWARMLLM_CUDA_GRAPH_GROUP` layers, default 2, `0` = one graph per step):
 
@@ -2869,6 +2873,18 @@ Two things that will otherwise be misread:
   both arms on the same ids (`logits_reference_probe`, `LOGITS_PROBE_DEVICE=cuda`
   for the card) and compare position by position — and give llama.cpp the
   node's context, or a LongRoPE model runs its short factors.
+- **Two arms' SPEEDS on one greedy prompt can compare two replies, not two
+  shapes** (2026-11-06, #411). The batch shape flips near-ties (a stream's
+  checks and a tree's are different shapes on the far card), and the drafter
+  guesses one text better than another: on the lighthouse prompt the stream
+  wrote one story at 11.0-11.9 tok/s and another at 14.0-14.1, while every tree
+  arm wrote a third — read whole, "+26% for trees". Run several prompts
+  (`real_link.sh` `PROMPTS="prose prose2 prose3 code"`), read each arm against
+  the other within one opening (`examples/pair_speeds_by_reply.py <out dir>`),
+  and trust a gap that holds in every ABBA block of every prompt. Sampling is
+  ruled out by the texts repeating (160-token replies recurred byte for byte
+  across arms and days); a local model returns no logprobs, so the margin
+  itself is read only with llama.cpp on a whole file.
 - **What a split's state could tell a drafter is measured offline, and the lens
   is checked near the top first.** `LOGITS_PROBE_SPLIT=k LOGITS_PROBE_HIDDEN=1`
   writes the state crossing the split at every kept position

@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #412**). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #414**). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -93,10 +93,13 @@ the top track (`docs/plans/large_model_splits.md`).
    the field's shape on native Linux (a Linux card peer through `swarm_route`, or the next field export's
    `cuda_pool` DIAG lines and the new "refused memory" line). (#403 CLOSED 2026-11-04, released in
    v0.3.272 — § "Closed".)
-7. **#411** — where a tree should start to flow (150 ms today), now that its guard reads a far
-   computer's own time apart (#388 CLOSED 2026-11-06: on the real link the flow ran prose 14.8
-   against 11.7 tok/s with it, and it is on by default). **Next**: stream against forced flow in
-   one sitting at 100-150 ms.
+7. **#412** (conceptual) — a busy far card is busy with our own forwards: run its backlog as one
+   (`faster_than_local.md` § 13; an answer's delay rises ~30 ms a forward queued ahead past ~5;
+   no published system merges one request's queued forwards). **Next**: the far range's forward
+   at 20/40/60 rows on this card, then the gain replayed in `examples/tree_schedule_sim.py`.
+   (#388 CLOSED 2026-11-06: the far's own time read apart, on by default. #411 narrowed the same
+   day: the flow's line moved from 150 to 120 ms — on the real link at 126-133 ms the flow beat the
+   chain stream 1.15-1.26x on prose in every block, 0.97x on code.)
 8. **#318** — a model no single member can hold, at a usable speed. **Llama-3.3-70B on two
    machines — this one (8 GB card + processor) and an RTX 3060 in Australia (~420 ms) — reads
    2.37-2.61 tok/s on new questions (v0.3.264, 2026-10-31 04Z) and 1.81-2.22 (v0.3.265, 12Z, the
@@ -1480,6 +1483,23 @@ and optionally retry once on a different connection before failing over. The roo
 the one-way-dead connection (suspected TCP port-reuse 4-tuple collision) is unproven. The
 same-host churn the example scripts detect and name is environmental.
 
+#### #413 — A LAN neighbour's connections arrive in bursts of hundreds a minute, each closed by it at once
+`P3` · network · **OPEN** (cause unknown) — 2026-11-06 · evidence: below; neighbours: #169, gotcha #353
+
+Seen in a rig's node log (`real_link_411b/H_10_flowstream.log`, 08:05:56Z) and verified there: the
+Proxmox node on this LAN (`96842635`, 192.168.1.200, v0.3.274) opened 237 connections to this node
+in ~80 s, all INBOUND here (`is_dialer=false`; the one this node dialled stayed up), most QUIC,
+122 in one second — and each was closed from its side (`ApplicationClosed { error_code: 0 }`)
+while two other connections to it stayed up. The other eleven arms logged 2-14. The live node's `logs/swarmllm.log*` (from 11-01)
+shows the same peer at 681, 413, 286 and 280 connections in a single minute (00:06, 20:09, 00:09,
+05:57) and other peers in bursts of 75-195. That node's own journal logs `DIAG: connection
+established` normally (122 since 07:00) but NONE in 08:05:50-08:06:03, so its side never counted
+these as connections. No request failed. Hypothesis, unproven: its dials are refused by its own
+connection limit (3 a peer) after the handshake, and it dials again; this node's 624 + 484
+`Incoming connection failed … Local peer ID` (its own WSL and LAN addresses dialled back to it) in
+the same log may be one mechanism. **Next**: the Proxmox node at `-v` through a burst — which dial
+(PEX, DHT, bootstrap, the redial) it is, and whether its limit refuses it.
+
 #### #195 — A node cannot test whether its LAN neighbours can reach it
 `P3` · network · **PARTIAL** — 2026-08-18 · history: archive § "A node cannot test its own inbound reachability"
 
@@ -1997,24 +2017,77 @@ the last one — an agent's next turn — waits for it: those arms' first token 
 the card's device-to-host read) at both speeds; whether freed snapshots' host buffers are reused or
 the copy faults fresh pages (an allocation of 569 MB under WSL2 is 146K first touches).
 
-#### #411 — Where a tree should start to flow, now that its guard reads a far computer apart
-`P2` · perf-split · **OPEN** — 2026-11-06 · evidence: `docs/invariants/scheduling.md` § "A far computer's own time is not the link's"; history: #388 (closed 2026-11-06)
+#### #411 — Where the flow's line ends under 120 ms, and code's 2-3% at the line
+`P3` · perf-split · **OPEN** (narrowed 2026-11-06) · evidence: `docs/invariants/scheduling.md` § "A tree that flows" (the flow's distance line); history: #388 (closed 2026-11-06)
 
-A reply's tree flows from a 150 ms least round trip (`dsd_tree::FLOW_LEAST_ROUND_TRIP_MS`, the
-2026-10-23 rig: flow ÷ chain stream 0.94 at 100 ms, 1.04 at 120, 1.19 at 150), measured before the
-guard read the far's own time apart (#388). On the real link at 127-131 ms with the tree forced
-(`SWARMLLM_DRAFT_TREES=1`) and the far read apart, prose ran 14.8 tok/s (median of six) and code
-32.7 — the stream there on 2026-11-04 ran prose ~11.6 and code ~34.2, a different day. So the flow
-may pay below 150 ms for prose and not for code. **Next**: the same sitting, `real_link.sh` arms
-stream (no switch) against `SWARMLLM_DRAFT_TREES=1`, ABBA × 3, prose and code, on whichever far
-card is 100-150 ms away; the line moves only on that measurement, and per reply kind only if the
-copy-rich code reply is the one the stream wins. Prior art: only this repo's own sweep (above) so
-far — search how other split/speculative systems choose between pipelining and tree checks by
-distance before moving the line.
+**Narrowed 2026-11-06: the flow's line moved from 150 to 120 ms** (`dsd_tree::FLOW_LEAST_ROUND_TRIP_MS`,
+pinned at 126 ms by `a_tree_that_flows_is_the_default_over_a_shorter_link_than_tree_rounds`). Two
+sittings on the real link — the 14B split TH↔AU at 126-133 ms, here shards 0-3 with the 0.5B drafter
+on this card, `aa3d1e66` 4-15 on a card, the far's own time read apart (#388) — the published
+v0.3.274, the tree forced (`SWARMLLM_DRAFT_TREES=1`) against no switch (the chain stream), ABBA × 3,
+greedy 160-token replies (`real_link.sh`, `real_link_411/` 07:23Z and `real_link_411b/` 07:45Z,
+Windows up 15.4-16.2 h). Every tree arm logged "a tree that flowed is complete", every stream arm
+"streamed checks complete":
+
+| prompt | flow tok/s | chain stream tok/s | flow ÷ stream (medians) |
+|---|---|---|---|
+| prose2 (a clockmaker's story) | 15.28-17.84 (16.65) | 14.13-15.73 (14.43) | 1.15, ahead in all 3 blocks |
+| prose3 (the sky, for a child) | 15.56-18.23 (16.67) | 12.92-13.54 (13.27) | 1.26, ahead in all 3 blocks |
+| prose (the lighthouse) | 13.00-15.88 (14.62) | 11.74-14.19 (11.91) | 1.23 — but mostly two stories |
+| code (CSV statistics) | 30.70-33.56 (32.31) | 32.28-33.63 (33.45) | 0.97, behind in all 3 blocks |
+
+The first sitting ran only the lighthouse prompt and code (prose 14.96 against 11.86, code 32.89
+against 33.50): its prose gap was mostly the TEXT — the stream wrote one story at 11.0-11.9 tok/s
+and another at 14.0-14.1, every tree arm a third (`docs/DIAGNOSTICS.md` § Benchmarks traps,
+`examples/pair_speeds_by_reply.py`). prose2 and prose3 opened alike in all twelve arms, and the
+flow's slowest prose3 reply beat the stream's fastest. The CUDA build of the change, no switch set,
+flowed every measured reply at 125-130 ms (`real_link_411mech/`, 4 of 4).
+
+**What is left**: (a) **under 120 ms** — the one-card rig put the flow at 0.94x at 100 ms (a rig
+that leans against it); no real link with a card far at 100-120 ms has been measured. (b) **code
+at the line gives back 2-3%** — a per-reply or per-step switch by the drafter's confidence
+(EAGLE-2's signal, `faster_than_local.md` § 13.2) could keep it; the flow's tree is fixed-width
+today (`dsd_flow::rows_a_level` 8 × `levels_a_call` 3), so that is new code for 2-3%: passive.
+
+**Prior art** (searched 2026-11-06, abstracts and
+summaries, not full texts): no system found picks chain or tree by round trip, or by code against
+prose. Sequoia (arXiv 2402.12374) sizes its tree from a measured verify-time curve, one machine;
+EAGLE-2 (2406.16858) grows the tree by the drafter's path confidence — a confident run becomes a
+near-chain, a flat distribution a bushy tree, per step; FlexSpec (2601.00644, edge-cloud) puts the
+link into its cost model but sizes a chain; Ygg (Temple, edge-cloud) pre-drafts the next tree during
+verification with its depth set by the verify latency, and sends ids plus parent indices — it is
+this flow's shape. What transfers: the choice may belong per reply (or per step) to the drafter's
+confidence, EAGLE-2's signal, with the round trip as the budget — not to a distance line alone.
+Not checked: vLLM, SGLang, TensorRT-LLM, SpecInfer, PipeInfer's ablations, Petals.
 
 **Also** (moved from #369 (b) via #388, passive): a balance term for a cards-only chain whose reply
 flows, once a placement that saturates one side is seen on a real chain — today `plan_chain` fills
 each machine to its ceiling in turn, and a flow is priced by `split_rounds::round_trips_waited` (#3 (d)).
+
+#### #412 — A busy far card is busy with our own forwards: run its backlog as one
+`P2` · perf-split · **OPEN** (conceptual, tests first) — 2026-11-06 · evidence: `docs/plans/faster_than_local.md` § 13; history: #388
+
+On the real link (#388's run, the far's own time read apart) the far card's own time ran 120-255 ms
+over its least of 23-54 ms, while the link's queue stayed within 17 ms; the far's trials (halve the
+live budget, kept only if its queue falls) were kept 2-9 times a reply and undone 0-2 — the queue is
+the flow's own forwards, served one at a time (up to 12 in flight). A card prices rows nearly
+nothing (~21 ms a forward of ~23 rows, ~26 at 56), so a far that finds the same request's next
+forwards waiting could run them as one forward and answer each on its own — no wire change. The
+pair, for a processor far: drop rows its own walk has already killed (`large_model_splits.md`
+§ "What is new here" item 2). Checked from the run's debug logs (`examples/far_queue_from_log.py`): an
+answer's delay is flat to ~5 forwards out, then +~30 ms a forward ahead (385 ms at 9) — a serial
+queue of our own. **Next**, before code: the far range's forward at 20/40/60 rows on this card; the gain replayed on the
+flow's timeline (`examples/tree_schedule_sim.py`). **Prior art** (searched 2026-11-06, full texts
+unless noted): none found merges one request's queued forwards at a stage — FlowSpec (2507.02620
+§ III) serves its segments serially and prunes each stage's rows after a verify; PipeInfer
+(2407.11798 § IV-A/D) keeps a FIFO of runs and CANCELS invalid ones, a node mid-run polling a flag
+— the pair's shape; SpecPipe (2504.04104 § 3) drops in-flight work on a miss, a mask snapshot
+travelling with each level; SpecInfer and Orca batch DIFFERENT requests. No measured gain for the
+merge, card or processor. What transfers: each merged forward keeps its OWN cache base and
+positions (PipeInfer's sequence ids, SpecPipe's mask snapshot); one shared "current length" across
+them is the desync "Batch Speculative Decoding Done Right" (2510.22876 § 3.1) names as the central
+bug — so the merge keeps arrival order for the cache writes and stops at any prefix change. Not
+read: Orca's full text, PipeSpec's KV handling, Ygg's full text, llama.cpp/vLLM same-request batching.
 
 #### #357 — A card's first graph of a new shape, late in a worker's life, can stall one forward 10-59 s
 `P3` · perf-local · **OPEN** — 2026-10-26 · evidence: `faster_than_local.md` § 8.6; gotcha #883
@@ -2880,8 +2953,9 @@ is the default from 150 ms** (`dsd_tree::FLOW_LEAST_ROUND_TRIP_MS`; tree rounds 
 300 ms line was the rounds', and the flow inherited it, so links of 150-300 ms — most between
 continents — took the chain stream; on the one-card rig the flow beat it 1.19× at 150 ms, 1.42× at
 220, 1.48× at 300, tied at 120 and lost 0.94× at 100 (`docs/invariants/scheduling.md` § "A tree
-that flows", the flow's distance line). Owed: a real link under 300 ms with a card at the far end.
-Left: the choice on a
+that flows", the flow's distance line). The real link under 300 ms with a card at the far end was
+run on 2026-11-06 (TH↔AU, 126-133 ms): the flow beat the stream 1.15-1.26x on prose, 0.97x on
+code, and the line moved to 120 ms (#411). Left: the choice on a
 PROCESSOR (unmeasured; the Leviathan estimate put a 0.5B ~7% ahead there), a code prompt (the
 coder drafters on code text), copied runs, a drafter fed by the model's state.
 Left of the level: a whole drafter call

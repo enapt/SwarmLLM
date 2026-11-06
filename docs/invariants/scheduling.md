@@ -6029,6 +6029,34 @@ complete`, `farthest_round_trip_ms=Some(221)`, 14.95-15.61 tok/s) and at 120 ms 
 (18.27-18.50); each start's first request streamed at both, its drafter not yet on the card
 (`drafter_on_card=false`).
 
+**On the real link the line is 120 ms** (2026-11-06, #411). The one-card rig crossed at ~110-120 ms
+and leans against the flow; the real link with a card far was owed. `real_link.sh` (`TAG=411`,
+`TAG=411b` with `PROMPTS="prose prose2 prose3 code"`), the published v0.3.274, Qwen2.5-14B Q4_K_M
+split here 0-3 (the 0.5B Q8_0 drafting on this card) | `aa3d1e66` 4-15 (RTX 3060, AU, least round
+trip 126-133 ms), the far's own time read apart (#388), greedy 160-token replies, the tree forced
+(`SWARMLLM_DRAFT_TREES=1`) against no switch, ABBA × 3 a sitting, two sittings 07:23-08:12Z:
+
+| prompt | flow tok/s | chain stream tok/s | flow ÷ stream | blocks the flow led |
+|---|---|---|---|---|
+| prose2 (a clockmaker's story) | 15.28-17.84 (16.65) | 14.13-15.73 (14.43) | 1.15 | 3 of 3 (+0.96, +2.72, +2.13) |
+| prose3 (the sky, for a child) | 15.56-18.23 (16.67) | 12.92-13.54 (13.27) | 1.26 | 3 of 3 (+4.84, +3.03, +2.71) |
+| code, second sitting | 30.70-33.56 (32.31) | 32.28-33.63 (33.45) | 0.97 | 0 of 3 (−2.15, −0.83, −0.19) |
+| code, first sitting | 32.00-33.44 (32.89) | 33.27-33.65 (33.50) | 0.98 | — |
+
+Medians in brackets. Every tree arm logged `a tree that flowed is complete`, every stream arm
+`streamed checks complete`, `farthest_round_trip_ms` 126-133 in both. The lighthouse prompt is left
+out of the ratio: the stream wrote one story at 11.0-11.9 tok/s and another at 14.0-14.1, the tree
+arms a third, so its +23-26% was mostly text (`docs/DIAGNOSTICS.md` § Benchmarks traps). So the line
+moved from 150 to 120 ms: the old rig's tie, under the shortest real link the flow won on, and the
+126 ms point is pinned by the test above. Code's 2-3% is the price at the line; under 120 ms no real
+link has been measured. **Mechanism**, the CUDA build of this change with no switch set
+(`TAG=411mech`, two node starts, 08:29-08:36Z): every measured reply flowed at 125-130 ms (`a tree
+that flowed is complete`, 4 of 4; each start's warm-up streamed, its drafter not yet on the card),
+code 31.92-32.03 tok/s, prose3 16.99 — and 0.92 once, where the far computer's own time ran 0.9-4.5 s
+a forward (`far_least_ms=894`, against 23-54 ms on its card that morning) with the link's least at
+135-163 ms: the far was slow at its end, and the guard's trial said so ("fewer forwards out did not
+shorten the far computer's time").
+
 **What a change must keep.** The draw at a row must not depend on the forward that carried it
 (noise by position, the row's own ancestors in its mask); the three trees change only by the
 ordered ops; a rebase's forward goes out at once, before any proposal, so path + kept never

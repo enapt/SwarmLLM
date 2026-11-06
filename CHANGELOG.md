@@ -20,6 +20,13 @@ Thailand–Australia split of a 14B model, prose came 26% faster (14.8 against 1
 second) and code 9% faster. Turned on for everyone; `SWARMLLM_FLOW_SERVED_TIME=0` keeps the old
 behaviour (#388).
 
+**Splits a little closer than 150 ms now guess several ways at once too.** When a model is split
+between computers far apart, this computer guesses the next words and the far computer checks them.
+From 150 ms apart each check carried several alternative guesses, a tree of them; closer than that,
+a single line. On the same Thailand–Australia split, 126-133 ms apart, the tree made stories and
+explanations 15-26% faster on three prompts and code 2-3% slower. The tree now starts at 120 ms;
+`SWARMLLM_DRAFT_TREES=0` keeps a single line everywhere (#411).
+
 **A graphics card that refuses memory is asked once more before a request fails.** SwarmLLM keeps
 graphics memory a model has finished with, so the next request can reuse it quickly. When the card
 refused a new piece of memory, that kept memory could be in the way: the request failed, and the

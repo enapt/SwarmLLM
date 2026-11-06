@@ -1162,6 +1162,66 @@ the planner's own chains: four computers (this node, Italy, AU, the Thai i5) 1.5
 106 s first token while this node's worker loaded; then three (this node, AU, Thailand) 1.98 and
 1.43, first tokens 11.5 s and 7.5 s.
 
+## 13. The far computer's backlog is our own forwards — run it as one (2026-11-06, conceptual)
+
+**What #388's real-link run showed** (`docs/invariants/scheduling.md` § "A far computer's own time
+is not the link's", `real_link_388b/`): with the far's own time read apart, the LINK's queue stayed
+within 9-17 ms of its least, and the FAR's own time ran 120-255 ms over its least of 23-54 ms. The
+queue is most likely our own forwards, served one after another: a lone far takes up to 12 in
+flight (`forwards_in_flight`), and 11 waiting × ~25 ms is ~275 ms. A second sign: the far's
+trials — each halves the live budget and is kept only if the far's queue then falls to 3/4 — were
+kept 2-9 times a reply and undone 0-2. Fewer of our forwards out shortened the far's queue, so the
+queue was made of them. A card prices rows almost nothing at these widths (this node's last layers:
+~21 ms a forward of ~23 rows, ~26 at 56, § 10), so the far pays each forward's fixed cost once per
+forward. Today the trial answers a busy far by sending LESS; the far could answer by running MORE at
+once.
+
+**The design (not built).** A far worker that takes a forward of a flowing tree, and finds the
+same request's next forwards already waiting in order, runs them as ONE forward: their rows in
+the order sent, each row's visibility its own (`draft_tree::RowVisibility` — a later forward's rows
+see their ancestors in an earlier one, as the levels of one drafter call already do). It stops at
+the first forward that carries a cut or a rebase, and answers each forward on its own (its rows'
+draws, its own served time), so the coordinator, the wire and the feature bits are unchanged. It
+merges only what is ALREADY waiting and never holds a forward for another: interrupt coalescing,
+not Nagle (NAPI batches only under a backlog, so an idle path pays nothing). The pair is
+`large_model_splits.md` § "What is new here" item 2 — a segment drops rows its walk has already killed before
+computing them (PipeInfer's early cancellation, generalised to a tree). A far that draws knows its
+walk half a round trip before this node does, so it can drop them with no message. Merging pays on a
+card, where rows are nearly free. Dropping pays on a processor far, where each row costs (5 ms/GB a
+row at 8 threads, § 11). On a processor, merging is a trade: the first forward's answer waits for
+the second's rows, against one read of the weights saved. So merge there only where the backlog's
+wait exceeds that.
+
+**What would show it is wrong, before any code.** (1) Is the far's time the queue? **Checked
+2026-11-06 on the same run's debug logs** (`examples/far_queue_from_log.py`: each forward's answer
+delay against the forwards still out when it was sent, paired in order): the delay is flat at
+~175-200 ms with up to ~5 out (what the wire holds at this round trip), then rises ~30 ms a
+forward — read apart, 256 / 302 / 347 / 385 ms at 6 / 7 / 8 / 9 ahead; read whole, 211 / 241 /
+269 / 299 / 328 / 359 ms at 6-11. A serial queue of our own forwards at ~30 ms each. The whole-delay
+guard narrowed the ROWS to 2 a level and still kept 8-11 forwards out, each paying the far its
+fixed ~30 ms — which is why narrowing never shortened that queue. (2) The merge's price on this
+card: the 14B's far range at 20 / 40 / 60 tree rows a forward (`prefill_bench`, live node stopped,
+nothing else on the card). (3) The gain on the flow's own timeline, replayed with merged service
+(`examples/tree_schedule_sim.py`): only then build, behind `SWARMLLM_FLOW_FAR_MERGE=0`. The far
+must run it, so the real-link A/B waits for a release to reach the far card. Before that, a rig
+with this card as the far and the Proxmox node as the near end over a delayed link. Prior art
+(2026-11-06): no system found merges one request's QUEUED forwards at a stage. FlowSpec
+(2507.02620) and SpecPipe (2504.04104) serve their own forwards serially and prune rows after a
+verify; PipeInfer (2407.11798 § IV-D) cancels invalid queued runs, a node mid-run polling a flag
+(the dead-row pair's shape); Orca and SpecInfer batch different requests. The trap they name: each
+merged forward keeps its own cache base and positions (PipeInfer's sequence ids, SpecPipe's mask
+snapshot) — one shared length is the desync 2510.22876 § 3.1 calls the central bug. FUTURE_WORK #412.
+
+**13.2 The shape by the guess's confidence, not by the distance alone** (#411, measured
+2026-11-06 — worth 2-3%, passive). One sitting each way, twice, at 126-133 ms: the flow beat the
+stream 1.15-1.26x on two prose prompts in every alternating block and gave back 2-3% on code
+(32.31 against 33.45), so the distance line moved to 120 ms and the shape question shrank to
+code's 2-3%. EAGLE-2 (2406.16858) grows its tree by the drafter's path confidence: a confident run
+becomes a near-chain, a flat distribution a bushy tree. The flow's tree is fixed-width today
+(`dsd_flow::rows_a_level` 8 × `levels_a_call` 3, `live_most` 128), so the version that would keep
+code's 2-3% is a width that follows confidence inside the flow, not a switch between two shapes —
+new code in the drafter's call for a few percent, behind #412.
+
 ## Sources
 
 Petals 2312.08361 · Pope et al. 2211.05102 · StagFormer 2501.15665 · Layer
@@ -1170,7 +1230,9 @@ Parallelism 2502.02790 · Lookahead 2402.02057 · CLLM 2403.00835 · Lamina
 2311.04934 · Preble 2407.00023 · SkyWalker 2505.24095 · CacheGen 2310.07240 ·
 LLMCompiler 2312.04511 · Skeleton-of-Thought 2307.15337 · SpecExec 2406.02532 ·
 Sequoia 2402.12374 · ML-SpecQD 2503.13565 · QuantSpec 2502.10424 · SPEQ
-2510.18525 · Daliri et al. 2408.07978 · multistream-select 0.13.0 `Version`
+2510.18525 · Daliri et al. 2408.07978 · multistream-select 0.13.0 `Version` · FlowSpec
+2507.02620 · PipeInfer 2407.11798 · SpecPipe 2504.04104 · Batch Speculative Decoding Done Right
+2510.22876 · EAGLE-2 2406.16858
 docs · llama.cpp `--n-cpu-moe` reports (discussions #15396, dev.to 8 GB
 Qwen3-Coder-30B) · Leviathan 2211.17192 · Chen 2302.01318 · § 7: llguidance 1.9.1
 (`docs/fast_forward.md`, `syntax.md`) · TensorRT-LLM tech blog 12 (guided + speculative

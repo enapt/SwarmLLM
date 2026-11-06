@@ -502,7 +502,8 @@ larger drafter where the card has room.
 **The flow on shorter links (2026-10-23).** The flow had inherited the tree rounds' 300 ms line,
 so the links most splits between continents cross (150-300 ms; this machine to Europe is
 206-236 ms) took the chain stream. On the one-card rig the flow beat it 1.19× at 150 ms, 1.42× at
-220 and 1.48× at 300, tied at 120 and lost at 100 (0.94×), so it is now the default from 150 ms.
+220 and 1.48× at 300, tied at 120 and lost at 100 (0.94×), so it became the default from 150 ms —
+and from 120 ms since the real link's A/B (2026-11-06, #411: 1.15-1.26× on prose at 126-133 ms, 0.97× on code).
 Below ~220 ms the flow stops waiting and is bound by the requester's own work, ~20 tok/s on the
 shared card: on those links the next factor is the requester's forward (drafter + near half), not E.
 
