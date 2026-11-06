@@ -2221,12 +2221,19 @@ An allocation the driver refuses is asked again once, after the pool gives back 
 idle, and the card's memory reading then logs at INFO `The graphics card refused memory; its pool
 gave back what it held idle and asked again` — `asked_again`, `granted`, `still_refused`, totals
 for the worker's life, logged when they grow. `still_refused` above 0 is a refusal with nothing
-idle to give back: that forward still ends the worker with `CUDA_ERROR_OUT_OF_MEMORY` and the
-model is pinned to the processor (`Pinning this model to CPU`). Under WSL2 the driver lends host
-memory instead of refusing, so the line never appears on its own there; to run the path,
-`SWARMLLM_FAULT_CARD_OOM=<n>` refuses every n-th first ask outside a CUDA graph capture as the
-driver would, and `SWARMLLM_CUDA_ASK_AGAIN=0` lets a refusal stand (the behaviour before). With
-both, the field's failure appears on this laptop within a minute.
+idle to give back: that forward fails, and (fix (3b)) where saved prompts are kept on the card
+beside the live caches, they are let go and the forward runs once more — INFO `The graphics card
+ran out of memory in a forward; its saved prompts were let go and the forward run again`
+(`saved_prompts_let_go_mb`, `ran_again`, `first_error`). `ran_again=false`, a refusal with no saved
+prompts on the card (under WSL2 they live in host RAM), or one in a batched decode step still ends
+the worker with `CUDA_ERROR_OUT_OF_MEMORY` and pins the model to the processor (`Pinning this model
+to CPU`). Under WSL2 the driver lends host memory instead of refusing, so neither line appears on
+its own there; to run the path, `SWARMLLM_FAULT_CARD_OOM=<n>` refuses every n-th first ask outside
+a CUDA graph capture as the driver would (`SWARMLLM_FAULT_CARD_OOM_MIN_BYTES=<b>`: only asks of at
+least b bytes, the sizes the field's refusals were), `SWARMLLM_CUDA_ASK_AGAIN=0` lets a refusal
+stand and `SWARMLLM_FORWARD_RERUN=0` turns the rerun off (the behaviour before each). With all
+three, the field's failure appears on this laptop within a minute; `SWARMLLM_PREFIX_CACHE_HOME=card`
+keeps saved prompts on the card under WSL2, so (3b) has something to let go.
 
 ## Attention-kernel A/B — `SWARMLLM_FORCE_STANDARD_ATTN=1`
 

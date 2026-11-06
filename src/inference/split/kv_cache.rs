@@ -1881,6 +1881,25 @@ impl KvCacheStore {
         })
     }
 
+    /// Let every saved prompt kept beside the live caches go — the worker's
+    /// evictor asked for all of it — and return the bytes freed; 0 where none
+    /// is kept here or no evictor is installed. For a forward the card ran out
+    /// of memory for, before it is run once more
+    /// (`SplitModel::forward_inner_impl`, FUTURE_WORK #367 (d) (3b)).
+    pub(crate) fn let_saved_prompts_go(&self) -> u64 {
+        if self
+            .external_reserved
+            .load(std::sync::atomic::Ordering::Relaxed)
+            == 0
+        {
+            return 0;
+        }
+        match self.external_evictor.lock() {
+            Ok(slot) => slot.as_ref().map_or(0, |f| f(u64::MAX)),
+            Err(_) => 0,
+        }
+    }
+
     /// Record how many device bytes the prefix cache currently holds, so the
     /// head-room guard charges them. Call after every insert or release.
     pub fn set_external_reserved(&self, bytes: u64) {
@@ -2736,6 +2755,39 @@ mod tests {
         let bare = KvCacheStore::new(std::time::Duration::from_secs(60));
         bare.set_external_reserved(1000);
         assert!(bare.claim_room(KvHome::Host, 500, 10, "r").is_err());
+    }
+
+    /// A forward the card ran out of memory for asks for EVERY saved prompt
+    /// kept beside the live caches (#367 (d) (3b)) — and asks nothing where
+    /// none is kept here, so a node whose saved prompts live in host RAM
+    /// (WSL2) never reruns a forward on memory it did not free.
+    #[test]
+    fn letting_saved_prompts_go_asks_for_all_of_them_and_only_when_some_are_kept() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        use std::sync::Arc;
+        let store = KvCacheStore::new(std::time::Duration::from_secs(60));
+        assert_eq!(store.let_saved_prompts_go(), 0, "no evictor, nothing kept");
+        let asked = Arc::new(AtomicU64::new(0));
+        {
+            let asked = asked.clone();
+            store.set_external_evictor(Box::new(move |needed| {
+                asked.store(needed, Ordering::Relaxed);
+                700
+            }));
+        }
+        assert_eq!(
+            store.let_saved_prompts_go(),
+            0,
+            "nothing kept beside the live caches"
+        );
+        assert_eq!(asked.load(Ordering::Relaxed), 0, "the evictor is not asked");
+        store.set_external_reserved(700);
+        assert_eq!(store.let_saved_prompts_go(), 700);
+        assert_eq!(
+            asked.load(Ordering::Relaxed),
+            u64::MAX,
+            "asked for all of it"
+        );
     }
 
     /// A cache for `request`, last touched `idle` ago, holding `n` positions.

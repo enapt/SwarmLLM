@@ -85,8 +85,10 @@ the top track (`docs/plans/large_model_splits.md`).
    four times the hand-backs and saved prompts refused on a full card). Fix (3), shed and retry:
    (3a) a refused allocation asked again after the pool trims, built and checked with a fault
    switch on 2026-11-06 (132 of 132 granted; without it the worker ended and the model was
-   pinned). **Next**: (3b) let saved prompts go and rerun the forward once; and the field's shape
-   on native Linux (a Linux card peer through `swarm_route`, or the next field export's
+   pinned); (3b) a forward still refused lets the card's saved prompts go and runs once more,
+   built and checked the same day (a 36-turn chat stayed on the card through 2 forced refusals;
+   without it the worker ended at turn 9). **Next**: (3c) the batched decode step, which (3b)
+   does not cover; and the field's shape on native Linux (a Linux card peer through `swarm_route`, or the next field export's
    `cuda_pool` DIAG lines and the new "refused memory" line). (#403 CLOSED 2026-11-04, released in
    v0.3.272 — § "Closed".)
 7. **#388** — the flow's guard takes a far computer's own delay for a queue on the link (the
@@ -1956,6 +1958,25 @@ where the request's caches stand where the forward began: the layer loop's error
 and a recurrent state that cannot rewind is dropped. Under WSL2 saved prompts live in host RAM, so
 (3b) frees nothing here unless `SWARMLLM_PREFIX_CACHE_HOME=card`; check it with the fault switch and
 `SWARMLLM_CUDA_ASK_AGAIN=0`, which make a forward fail as the field's did.
+
+**(3b) built and checked 2026-11-06**: `SplitModel::forward_inner_impl` runs a forward refused for
+memory once more after the card's saved prompts go (`worth_running_again`,
+`KvCacheStore::let_saved_prompts_go`), only where the request's caches stand where the forward began.
+Fault switch every 20,000th ask ≥ 1 MiB (`SWARMLLM_FAULT_CARD_OOM_MIN_BYTES`), (3a) off, saved prompts
+on the card, the field's shape for 5 min an arm: run again 2 of 2, 36 turns, 0 workers ended; with
+`SWARMLLM_FORWARD_RERUN=0` the worker ended at turn 9 and the chat ran on the processor at 8.0 tok/s.
+Greedy replies the same bytes with and without a rerun (five questions, one rerun). `docs/invariants/memory.md`
+§ "A forward the card ran out of memory for is run once more". It answers one refusal per saved
+prompt: refused every other chunk, the worker still ends. **Next: (3c)** — the batched decode step:
+`forward_batch`'s layer loop takes every item's caches out of the store and a failed step does not put
+them back, so a refusal there still ends the worker. Put them back cut to the step's start (as the
+single path's error arm does), let saved prompts go and run the step once more; still refused,
+retract one slot and run the rest. **Prior art:** SGLang's `retract_decode`
+(`python/sglang/srt/managers/schedule_batch.py`, read 2026-11-06) frees decode requests one at a time,
+the fewest generated tokens first, while the next step does not fit (`check_decode_mem`), keeps at
+least one ("Out of memory even after retracting all other requests in the decode batch" otherwise),
+and a retracted request starts over — re-reading its prompt; SGLang decides BEFORE the step, from its
+own count of KV slots, where here the driver refuses during it.
 
 The same 1,800-token prompt's snapshot (Qwen2.5-14B Q4_K_M, 15 of 48 on the card: 569 MB, 486 of it
 the processor layers' f32 cache, all kept in host RAM under WSL2) was copied in 155-680 ms in one pair

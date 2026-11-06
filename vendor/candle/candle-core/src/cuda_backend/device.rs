@@ -389,16 +389,20 @@ impl CudaDevice {
         &self,
         len: usize,
     ) -> Result<cudarc::driver::CudaSlice<T>> {
-        self.ask_again_after_a_refusal(|| unsafe { self.stream.alloc::<T>(len) })
-            .w()
+        self.ask_again_after_a_refusal(len * std::mem::size_of::<T>(), || unsafe {
+            self.stream.alloc::<T>(len)
+        })
+        .w()
     }
 
     pub fn alloc_zeros<T: cudarc::driver::DeviceRepr + cudarc::driver::ValidAsZeroBits>(
         &self,
         len: usize,
     ) -> Result<cudarc::driver::CudaSlice<T>> {
-        self.ask_again_after_a_refusal(|| self.stream.alloc_zeros::<T>(len))
-            .w()
+        self.ask_again_after_a_refusal(len * std::mem::size_of::<T>(), || {
+            self.stream.alloc_zeros::<T>(len)
+        })
+        .w()
     }
 
     /// SwarmLLM patch (FUTURE_WORK #367 (d)): an allocation the driver refuses
@@ -416,16 +420,21 @@ impl CudaDevice {
     /// of the device's own buffers goes through here; the counts are
     /// [`allocations_asked_again`]. `SWARMLLM_FAULT_CARD_OOM=<n>` refuses
     /// every n-th first ask (outside a capture), so the path can be run where
-    /// the driver never refuses — under WSL2 an overflow is lent host memory.
+    /// the driver never refuses — under WSL2 an overflow is lent host memory;
+    /// `SWARMLLM_FAULT_CARD_OOM_MIN_BYTES=<b>` counts only asks of at least
+    /// `b` bytes, the sizes the field's refusals were (a forward's
+    /// activations and caches — `attn`, `mlp`, a split's device transfer —
+    /// never an 8-byte token upload the pool serves from a chunk it holds).
     /// PyTorch trims the device's DEFAULT pool; this trims its CURRENT one,
     /// the pool `cuMemAllocAsync` takes from (the same pool here: SwarmLLM
     /// sets no other). A/B `SWARMLLM_CUDA_ASK_AGAIN=0`: a refusal stands.
     fn ask_again_after_a_refusal<R>(
         &self,
+        bytes: usize,
         mut ask: impl FnMut() -> std::result::Result<R, cudarc::driver::DriverError>,
     ) -> std::result::Result<R, cudarc::driver::DriverError> {
         use cudarc::driver::sys::CUresult::CUDA_ERROR_OUT_OF_MEMORY;
-        let first = if self.refused_for_a_fault() {
+        let first = if self.refused_for_a_fault(bytes) {
             Err(cudarc::driver::DriverError(CUDA_ERROR_OUT_OF_MEMORY))
         } else {
             ask()
@@ -469,19 +478,22 @@ impl CudaDevice {
         }
     }
 
-    /// `SWARMLLM_FAULT_CARD_OOM=<n>`: whether this first ask is refused as
-    /// the driver would — every n-th outside a capture; never when unset.
-    fn refused_for_a_fault(&self) -> bool {
+    /// `SWARMLLM_FAULT_CARD_OOM=<n>`: whether this first ask of `bytes` is
+    /// refused as the driver would — every n-th outside a capture of at least
+    /// `SWARMLLM_FAULT_CARD_OOM_MIN_BYTES` (0 if unset); never when unset.
+    fn refused_for_a_fault(&self, bytes: usize) -> bool {
         use std::sync::atomic::{AtomicU64, Ordering};
-        static EVERY: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+        static EVERY: std::sync::OnceLock<(u64, usize)> = std::sync::OnceLock::new();
         static ASKS: AtomicU64 = AtomicU64::new(0);
-        let every = *EVERY.get_or_init(|| {
-            std::env::var("SWARMLLM_FAULT_CARD_OOM")
-                .ok()
-                .and_then(|v| v.trim().parse().ok())
-                .unwrap_or(0)
+        let (every, min_bytes) = *EVERY.get_or_init(|| {
+            let read = |name: &str| std::env::var(name).ok().and_then(|v| v.trim().parse().ok());
+            (
+                read("SWARMLLM_FAULT_CARD_OOM").unwrap_or(0),
+                read("SWARMLLM_FAULT_CARD_OOM_MIN_BYTES").map_or(0, |b: u64| b as usize),
+            )
         });
         every > 0
+            && bytes >= min_bytes
             && matches!(
                 self.stream.capture_status(),
                 Ok(cudarc::driver::sys::CUstreamCaptureStatus::CU_STREAM_CAPTURE_STATUS_NONE)

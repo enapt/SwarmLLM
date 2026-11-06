@@ -19,6 +19,15 @@ card made to refuse memory on purpose, every refusal was then granted and replie
 word for word. This is one part of the work on long chats running a 12 GB card out of memory
 (#367); a card with room to spare is unaffected.
 
+**When the card still has no room, the saved conversations go before the request does.** SwarmLLM
+keeps recent conversations on the graphics card so a follow-up question starts faster. If the card
+ran out of memory partway through a request even after being asked again, the request failed and
+the model moved to the processor. Now those saved conversations are let go first and the step is
+run once more; a later question re-reads its conversation instead. On the test laptop, with the card
+made to fail on purpose during a long chat, the chat stayed on the card for all 36 turns; without
+the change the model moved to the processor at turn 9. This covers one request at a time; several
+answered together can still move the model to the processor (#367).
+
 ## [0.3.274-alpha] — 2026-11-06
 
 **A short first reply no longer slows the replies after it.** When a model runs partly or wholly

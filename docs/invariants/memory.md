@@ -3038,6 +3038,68 @@ inside a capture; count both outcomes. A refusal with nothing idle to give back 
 rung is the worker's (FUTURE_WORK #367 (d), (3b)). A/B `SWARMLLM_CUDA_ASK_AGAIN=0`; the fault switch
 is for a machine whose driver never refuses.
 
+### A forward the card ran out of memory for is run once more, after the saved prompts go (2026-11-06, FUTURE_WORK #367 (d) fix (3b))
+
+**Why.** Asking again after a trim (3a) can only find memory the pool held idle. Where the card is
+full of LIVE buffers — the conversation's caches and the saved prompts kept beside them on a native
+card (`SnapshotHome::BesideLive`, ~400 MB each for the field's 14B) — the second ask is refused too,
+and the worker ends. Saved prompts are a cache; the conversation is not.
+
+**What others do.** vLLM and SGLang count cached prefix blocks as free and evict them when an
+allocation needs the room (SGLang's `_evict_until_allocatable`, before allocating); PyTorch's
+allocator frees its cached blocks and retries. Here the refusal arrives as an error from inside a
+forward, so the forward is the unit that is run again. For a batch SGLang goes further:
+`retract_decode` (`managers/schedule_batch.py`) frees requests one at a time — the fewest generated
+tokens first — until the next step fits, keeps at least one, and the retracted ones start over.
+
+**The change.** `SplitModel::forward_inner_impl` — every single forward passes it: decode steps,
+prompt chunks, checks, a split's segment, images — runs the forward once (`forward_once`) and, where
+`worth_running_again` holds, lets the saved prompts go (`KvCacheStore::let_saved_prompts_go`: the
+worker's evictor, `PrefixCache::release(.., BesideLive)`, asked for everything) and runs it again,
+once. `worth_running_again`: on a card; the error is the one that would pin the model for memory
+(`worker_ipc::permanent_gpu_failure` → `OutOfMemory`); and the request's caches hold as many
+positions as before the forward (`KvCacheStore::request_positions`) — the layer loop's error arm
+cuts them back, but an error after the write-back leaves them advanced and a recurrent state that
+cannot rewind is dropped. Nothing kept beside the live caches (WSL2 keeps them in host RAM) → no
+rerun. INFO "The graphics card ran out of memory in a forward; its saved prompts were let go and the
+forward run again" (`saved_prompts_let_go_mb`, `ran_again`, `first_error`).
+
+**Not covered.** The batched step (`forward_batch`): its layer loop takes every item's caches out of
+the store and a failed step does not put them back, so it cannot be run again — it ends the worker as
+before. An allocation outside a forward: the worker's token uploads (`tokenize`, `token_tensor`,
+`tensor_from_ids`) and a saved prompt's copy (whose failure is already only a skipped save).
+
+**Measured.** Saved prompts are kept on the card for the arms (`SWARMLLM_PREFIX_CACHE_HOME=card` —
+under WSL2 they live in host RAM, and (3b) would free nothing) and (3a) is off
+(`SWARMLLM_CUDA_ASK_AGAIN=0`), so a refusal reaches the forward as the field's did; the fault switch
+refuses every 20,000th first ask of at least 1 MiB (`SWARMLLM_FAULT_CARD_OOM_MIN_BYTES=1048576`, the
+sizes the field's refusals were: `attn`, `mlp`, a split's transfer). One CUDA release build, the live
+node stopped, Windows up ~18 h, 0 driver events; Llama-3.1-8B Q4_K_M whole on the 8 GB RTX 3070
+Laptop, the field's ~3,100-token prompts (`~/swarmllm-gate/deep/fr/creep_repro_ab.sh`, `PAD=130`),
+5 min an arm (`creep_out/1106_0522`):
+
+| | no refusals | refused, run again | refused, `SWARMLLM_FORWARD_RERUN=0` |
+|---|---|---|---|
+| forwards run again (ran again) | — | 2 (2): 1,144 and 1,167 MB let go | — |
+| turns (failed) | 37 (0) | 36 (0) | 20 (0) |
+| worker ended, model pinned to the processor | 0 | 0 | 1, at turn 9 (113.9 s first token, 8.0 tok/s) |
+
+A denser switch (every 2,000th) ran three forwards again, all three ran, but the next 512-position
+chunk, 0.3 s later, was refused again with nothing left to let go, and the worker ended in both arms
+(2 pins each): a rerun answers one refusal per saved prompt, not a card refused every other chunk.
+The long chat's streamed replies are not byte-repeatable between runs even with no refusals (turn 0
+differed between arms; the cause was not chased), so replies are judged by
+`~/swarmllm-gate/deep/fr/greedy_fault_ab.sh` (`WARM=2`: two other ~1,500-token questions, then one
+three times; temperature 0, every reply compared): with refusals every 3,500th ask, one forward of
+the second question ran again (its predecessor's saved prompt, 196 MB, let go), and all five replies
+were the same bytes as the arm without refusals.
+
+**What a change must keep.** Once, never in a loop; only on a card's out-of-memory; only where the
+caches stand where the forward began; the saved prompts go, never a conversation. A/B
+`SWARMLLM_FORWARD_RERUN=0`. Tests `forward_rerun_tests::*`,
+`letting_saved_prompts_go_asks_for_all_of_them_and_only_when_some_are_kept` (each red without its
+guard, checked).
+
 ## The daemon holds no CUDA context (2026-10-05)
 
 **What it cost.** The daemon never runs a model — its workers do — yet `nvidia-smi` listed it as a

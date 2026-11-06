@@ -903,8 +903,90 @@ impl SplitModel {
     /// them has to remember to do it and a new one inherits it. Reading a
     /// prompt and writing a reply want opposite thread counts; see
     /// [`crate::inference::cpu_pools`] for the measurements.
+    ///
+    /// **And the one place a forward the card ran out of memory for is run
+    /// once more** (FUTURE_WORK #367 (d), fix (3b)): the card's saved prompts
+    /// are let go first ([`KvCacheStore::let_saved_prompts_go`]) — a cache,
+    /// where the conversation is not — and only where the request's caches
+    /// stand where the forward began (the layer loop's error arm cuts them
+    /// back; an error after the write-back leaves them advanced, and a
+    /// recurrent state that could not be rewound is dropped), so the second
+    /// run reads exactly what the first did. The allocator has already asked
+    /// the driver twice by then (`CudaDevice::ask_again_after_a_refusal`, fix
+    /// (3a)); what it could not find idle, the saved prompts may hold. Without
+    /// this, ANY such error ends the worker and pins the model to the
+    /// processor (`worker_ipc::permanent_gpu_failure`). A/B
+    /// `SWARMLLM_FORWARD_RERUN=0`.
     #[allow(clippy::too_many_arguments)]
     fn forward_inner_impl(
+        &mut self,
+        input: &Tensor,
+        index_pos: usize,
+        kv_cache_store: &KvCacheStore,
+        request_id: &str,
+        lora_adapter: Option<&LoraAdapter>,
+        capture_layers: Option<Capture<'_>>,
+        skip_embedding: bool,
+        all_positions: bool,
+        skip_mask: Option<SkipLayers<'_>>,
+    ) -> Result<(Tensor, HashMap<usize, Tensor>), SwarmError> {
+        let held_before = kv_cache_store.request_positions(&self.kv_model_key, request_id);
+        let first = self.forward_once(
+            input,
+            index_pos,
+            kv_cache_store,
+            request_id,
+            lora_adapter,
+            capture_layers,
+            skip_embedding,
+            all_positions,
+            skip_mask,
+        );
+        let e = match first {
+            Err(e)
+                if worth_running_again(
+                    &e,
+                    self.device.is_cuda(),
+                    held_before,
+                    kv_cache_store.request_positions(&self.kv_model_key, request_id),
+                ) =>
+            {
+                e
+            }
+            other => return other,
+        };
+        let freed = kv_cache_store.let_saved_prompts_go();
+        if freed == 0 {
+            return Err(e);
+        }
+        let again = self.forward_once(
+            input,
+            index_pos,
+            kv_cache_store,
+            request_id,
+            lora_adapter,
+            capture_layers,
+            skip_embedding,
+            all_positions,
+            skip_mask,
+        );
+        tracing::info!(
+            request_id,
+            index_pos,
+            positions = input.dim(1).unwrap_or(1),
+            saved_prompts_let_go_mb = freed >> 20,
+            ran_again = again.is_ok(),
+            first_error = %e,
+            "The graphics card ran out of memory in a forward; its saved prompts were let go and \
+             the forward run again"
+        );
+        again
+    }
+
+    /// One forward, bound to its phase's thread pool — the body of
+    /// [`Self::forward_inner_impl`], which may run it twice.
+    #[allow(clippy::too_many_arguments)]
+    fn forward_once(
         &mut self,
         input: &Tensor,
         index_pos: usize,
@@ -3324,6 +3406,82 @@ fn note_a_layer_stayed_on_the_processor(e: &SwarmError) {
             "DIAG: a processor-held layer could not read a prompt chunk on the card; the processor ran it"
         )
     });
+}
+
+/// Whether a forward that failed with `e` is run once more after the card's
+/// saved prompts are let go (`SplitModel::forward_inner_impl`, FUTURE_WORK
+/// #367 (d) (3b)): it ran on a card, the error is the one that would pin the
+/// model to the processor for want of memory
+/// (`worker_ipc::permanent_gpu_failure` → `OutOfMemory`, the same reading the
+/// pool takes), and the request's caches hold as many positions as before the
+/// forward — or the second run would read a different conversation.
+/// `SWARMLLM_FORWARD_RERUN=0`: never.
+fn worth_running_again(
+    e: &SwarmError,
+    on_card: bool,
+    held_before: usize,
+    held_after: usize,
+) -> bool {
+    use crate::inference::worker_ipc::{permanent_gpu_failure, PermanentGpuFailure};
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    on_card
+        && held_before == held_after
+        && *ON.get_or_init(|| std::env::var("SWARMLLM_FORWARD_RERUN").as_deref() != Ok("0"))
+        && permanent_gpu_failure(&e.to_string()) == Some(PermanentGpuFailure::OutOfMemory)
+}
+
+#[cfg(test)]
+mod forward_rerun_tests {
+    use super::worth_running_again;
+    use crate::error::SwarmError;
+
+    /// The text a card's refusal reaches the executor as (candle wraps
+    /// cudarc's `DriverError`; the layer names the op) — read off the
+    /// fault-switch rig's log, 2026-11-06.
+    fn ran_out() -> SwarmError {
+        SwarmError::Internal(
+            r#"attn: DriverError(CUDA_ERROR_OUT_OF_MEMORY, "out of memory")"#.into(),
+        )
+    }
+
+    #[test]
+    fn a_card_that_ran_out_with_the_caches_where_they_began_runs_again() {
+        assert!(worth_running_again(&ran_out(), true, 3_000, 3_000));
+        assert!(
+            worth_running_again(&ran_out(), true, 0, 0),
+            "a prompt's first chunk"
+        );
+    }
+
+    #[test]
+    fn a_forward_is_never_run_again_on_a_cache_it_moved_or_lost() {
+        assert!(
+            !worth_running_again(&ran_out(), true, 3_000, 3_001),
+            "an error after the write-back left the caches advanced"
+        );
+        assert!(
+            !worth_running_again(&ran_out(), true, 3_000, 0),
+            "a recurrent state that could not be rewound was dropped with its caches"
+        );
+    }
+
+    #[test]
+    fn only_a_card_out_of_memory_is_run_again() {
+        assert!(
+            !worth_running_again(&ran_out(), false, 10, 10),
+            "not on a card"
+        );
+        let other = SwarmError::Internal("attn: shape mismatch".into());
+        assert!(!worth_running_again(&other, true, 10, 10));
+        let no_room = SwarmError::Internal(format!(
+            "{}: out of memory for the cache",
+            crate::inference::worker_ipc::NO_KV_CACHE_ROOM_MARKER
+        ));
+        assert!(
+            !worth_running_again(&no_room, true, 10, 10),
+            "the loader's own no-room verdict is not a refusal a rerun can meet"
+        );
+    }
 }
 
 #[cfg(test)]
