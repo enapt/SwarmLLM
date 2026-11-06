@@ -47,7 +47,9 @@ cannot host (#404's search half) and each computer's give and take in the peer l
 #403 (P2, closed), #367 raised to P1 (item 6, field report 2026-11-04), #401 (P2, closed), #396 and #399 (P3, closed together: both were the decode
 width), #400, #402, #404 (P3), #397 (P4). v0.3.272 (2026-11-05) carried #403, #401, #399/#396, #404's processor half
 and #400's fetch half; after it, #406 and #407 (a restarted computer heard again; connections closed before a restart,
-the country lookup and the map) closed on 2026-11-05 for the next release.
+the country lookup and the map) closed on 2026-11-05 for the next release. v0.3.273 carried #406 and #407;
+v0.3.274 (2026-11-06) #408, #409 and #410; v0.3.275 (2026-11-06) #367 (d)'s fix (3), #388, #411's narrowing and
+#407's residual.
 **2026-11-04:** #403 goes first among the open work by the user's direction: the release cut-off
 and the use gate must not be passable through a relay. Closed the same day (§ "Closed"). What each release carried is in § "Closed" and `CHANGELOG.md`; earlier
 rankings moved word for word to the archive, § "PRIORITIES re-rank log". Only OPEN work is listed
@@ -89,7 +91,8 @@ the top track (`docs/plans/large_model_splits.md`).
    built and checked the same day (a 36-turn chat stayed on the card through 2 forced refusals;
    without it the worker ended at turn 9); (3c) a batched step refused puts its caches back and
    runs again, then in halves, built and checked the same day (two chats, 15 of 15 batched steps
-   run again, both chats on the card to the end; without it the worker ended 1 min in). **Next**:
+   run again, both chats on the card to the end; without it the worker ended 1 min in). All three
+   were released in v0.3.275, with two fixes from its pre-release review. **Next**:
    the field's shape on native Linux (a Linux card peer through `swarm_route`, or the next field export's
    `cuda_pool` DIAG lines and the new "refused memory" line). (#403 CLOSED 2026-11-04, released in
    v0.3.272 — § "Closed".)
@@ -101,7 +104,8 @@ the top track (`docs/plans/large_model_splits.md`).
    forward in a 70B chain's debug log (#318).
    (#388 CLOSED 2026-11-06: the far's own time read apart, on by default. #411 narrowed the same
    day: the flow's line moved from 150 to 120 ms — on the real link at 126-133 ms the flow beat the
-   chain stream 1.15-1.26x on prose in every block, 0.97x on code.)
+   chain stream 1.15-1.26x on prose in every block, 0.97x on code; a chain that starts and
+   finishes here keeps 300 ms. Both released in v0.3.275.)
 8. **#318** — a model no single member can hold, at a usable speed. **Llama-3.3-70B on two
    machines — this one (8 GB card + processor) and an RTX 3060 in Australia (~420 ms) — reads
    2.37-2.61 tok/s on new questions (v0.3.264, 2026-10-31 04Z) and 1.81-2.22 (v0.3.265, 12Z, the
