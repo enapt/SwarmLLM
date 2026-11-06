@@ -139,10 +139,11 @@ mmproj). Never edit a count without the run behind it (`completeness.md`).
   registry, disk manifest, header and parts all describe one upload (#776).
 - **A family in `supported_list` is a claim**: check it against a REAL file's
   header (#715).
-- **A far split is fast only when a drafter's tree FLOWS**: 14B Thailand↔Australia (~420 ms), a card each end,
-  even split → 29.6 tok/s code (2x local), 9.6 prose (2026-10-29); a chain that starts and finishes here flows since
-  #369 (level with the default shape since 11-01's dead wait: prose 6.7 vs 6.9 tok/s, code 18.5 vs 17.2) and a lopsided split saturates the far side. Coordinates only PRICE a chain its head
-  leads (#3 (a)) → `docs/plans/faster_than_local.md` § 9, `split_speculation.md`, `regional_pipelines.md`.
+- **A far split is fast when a drafter's tree FLOWS from the far end**: 14B Thailand↔Australia (126-133 ms), a card
+  each end → prose 17.8-20.5, code 40-43 tok/s against 11.0-11.3 / 14.1-14.5 on this laptop alone (v0.3.275; the flow's
+  line is 120 ms since #411). A chain that starts and finishes here keeps the 300 ms line and streams below it (27-31
+  code, 12.0-12.8 prose on that link; `dsd_tree::FlowDraws`); a lopsided split saturates the far side. Coordinates only
+  PRICE a chain its head leads (#3 (a)) → `docs/plans/faster_than_local.md` § 9, `split_speculation.md`, `regional_pipelines.md`.
 - **Local GPU decode is bound by SUBMISSION COUNT**; ONE CUDA stream per device,
   decode and speculative checks submitted as CUDA graphs → `arch-inference.md`,
   `docs/plans/local_decode_submissions.md`.

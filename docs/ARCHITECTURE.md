@@ -201,6 +201,12 @@ swarmllm/
 │                 release_shapes.sh, family_conformance.sh, reply_ab.sh, split_rig.sh, stream_bench.py;
 │                 readme_speeds.py — the README's one-computer speeds, written from a release
 │                 check's speed.jsonl in the next bump commit (completeness.md § "README speeds");
+│                 pair_speeds_by_reply.py — two arms' speeds per prompt, grouped by the reply each
+│                 arm actually wrote (a near-tie the batch shape flips makes two arms of one
+│                 prompt compare different texts, #411);
+│                 far_queue_from_log.py — each forward's answer delay against the forwards
+│                 still out when it was sent, off a debug log: a delay rising one service time
+│                 per forward ahead is the far card queuing our own forwards (#412);
 │                 feature_check.py — every surface a user reaches (OpenAI, Anthropic, Responses,
 │                 MCP, dashboard + its WebSocket, admin, the error contract, a swarm split)
 │                 asserted against a RUNNING node, one request at a time)

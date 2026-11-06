@@ -2233,7 +2233,12 @@ graphics card ran out of memory in a batched step; its saved prompts were let go
 again` (`batch_size` too) or, with nothing to let go or refused again, `…; it is run again as two
 halves`. `ran_again=false` on a single forward, a refusal with no saved prompts on the card (under
 WSL2 they live in host RAM), or a half refused again (`decode tick failed`) still ends the worker
-with `CUDA_ERROR_OUT_OF_MEMORY` and pins the model to the processor (`Pinning this model to CPU`). Under WSL2 the driver lends host memory instead of refusing, so neither line appears on
+with `CUDA_ERROR_OUT_OF_MEMORY` and pins the model to the processor (`Pinning this model to CPU`).
+A request whose failed step could not put its caches back where it began (a sliding window past that
+position, a recurrent state that cannot rewind) is never run again: its next forward is refused with
+`this computer no longer holds request <id>'s conversation: an earlier step failed part-way and its
+caches could not be put back where it began` (`executor::conversation_lost`) — a lost conversation,
+never a crash. Under WSL2 the driver lends host memory instead of refusing, so neither line appears on
 its own there; to run the path, `SWARMLLM_FAULT_CARD_OOM=<n>` refuses every n-th first ask outside
 a CUDA graph capture as the driver would (`SWARMLLM_FAULT_CARD_OOM_MIN_BYTES=<b>`: only asks of at
 least b bytes, the sizes the field's refusals were), `SWARMLLM_CUDA_ASK_AGAIN=0` lets a refusal

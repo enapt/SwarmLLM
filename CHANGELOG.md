@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+**The README says near the top to keep automatic updates on.** While SwarmLLM is being built, new
+versions come out often, and a computer two or more releases behind is disconnected from the
+network until it updates. The note shows where the setting is (Settings → Software updates,
+"Install automatically and restart when idle", the default). The installation guide now says the
+same for the `.deb`/`.rpm` packages and Docker containers, which cannot update themselves, and
+gives the commands to pull and recreate a container. Documentation only.
+
 ## [0.3.275-alpha] — 2026-11-06
 
 **A computer whose stated location is not a country code is no longer planned as far away.**
