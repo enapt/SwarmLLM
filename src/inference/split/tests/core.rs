@@ -673,6 +673,59 @@ fn forward_batch_single_item_matches_forward() {
     assert_eq!(batch_out[0].dims(), &[1, 1, hidden_dim]);
 }
 
+/// A failed step that could not put a request's caches back where it began
+/// leaves its entry's lists empty (`put_back_where_the_step_began`). A forward
+/// on that entry — a rerun after the card's saved prompts go, a refused
+/// capture's plain step, a batch — is refused as a lost conversation, never
+/// run: the layer loops index a slot per layer, and an empty list panicked the
+/// worker where the failure itself was a plain error (#367 (d) (3b)).
+#[test]
+fn a_forward_on_caches_a_failed_step_could_not_put_back_is_refused() {
+    let hidden_dim = 128;
+    let mut model = make_test_split_model(2, hidden_dim);
+    let kv_store = KvCacheStore::new(std::time::Duration::from_secs(600));
+    let step = Tensor::randn(0f32, 1.0, (1, 1, hidden_dim), &Device::Cpu).unwrap();
+    for req in ["lost", "kept"] {
+        model.forward(&step, 0, &kv_store, req).unwrap();
+    }
+    {
+        let key = KvCacheStore::cache_key(model.kv_model_key(), "lost");
+        let mut entry = kv_store.get_or_create_keyed(&key, 2);
+        std::mem::take(&mut entry.layers);
+        std::mem::take(&mut entry.ssm_states);
+    }
+    assert_eq!(
+        kv_store.positions_in_place(model.kv_model_key(), "lost", 2),
+        None
+    );
+
+    let one = model.forward(&step, 1, &kv_store, "lost");
+    assert!(
+        one.as_ref()
+            .is_err_and(|e| e.to_string().contains("conversation")),
+        "a single forward: {one:?}"
+    );
+    let items = [
+        BatchItem {
+            input: &step,
+            index_pos: 1,
+            request_id: "kept",
+        },
+        BatchItem {
+            input: &step,
+            index_pos: 1,
+            request_id: "lost",
+        },
+    ];
+    assert!(model.forward_batch(&items, &kv_store).is_err(), "a batch");
+    assert_eq!(
+        kv_store.positions_in_place(model.kv_model_key(), "kept", 2),
+        Some(1),
+        "the other request's caches are left as they were"
+    );
+    model.forward(&step, 1, &kv_store, "kept").unwrap();
+}
+
 #[test]
 fn forward_batch_empty_returns_empty() {
     let mut model = make_test_split_model(1, 128);

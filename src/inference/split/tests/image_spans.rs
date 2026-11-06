@@ -119,3 +119,38 @@ fn a_forward_that_cuts_a_picture_in_two_is_refused() {
         .unwrap_err();
     assert!(err.to_string().contains("cuts the picture"), "{err}");
 }
+
+/// A forward refused before its first layer — a picture cut in two here; on a
+/// card, the masks it could find no memory for — has written nothing, and
+/// gives the request's caches back as it took them. A prompt's first chunk
+/// refused that way and run again (the rerun after the card's saved prompts
+/// go, #367 (d) (3b)) then reads the start: left with the lists taken out,
+/// the run indexed them empty and panicked the worker. A conversation refused
+/// that way mid-reply keeps its positions.
+#[test]
+fn a_forward_refused_before_its_first_layer_gives_the_caches_back() {
+    let hidden_dim = 64;
+    let mut model = make_test_split_model(2, hidden_dim);
+    let store = KvCacheStore::new(std::time::Duration::from_secs(600));
+    let input = Tensor::randn(0f32, 1.0, (1, 5, hidden_dim), &Device::Cpu).unwrap();
+    let cut = [std::ops::Range { start: 3, end: 9 }];
+    assert!(model
+        .with_image_spans(&cut, |m| m.forward(&input, 0, &store, "first"))
+        .is_err());
+    assert_eq!(
+        store.positions_in_place(model.kv_model_key(), "first", 2),
+        Some(0)
+    );
+    model.forward(&input, 0, &store, "first").unwrap();
+
+    model.forward(&input, 0, &store, "later").unwrap();
+    let later_cut = [std::ops::Range { start: 8, end: 12 }];
+    assert!(model
+        .with_image_spans(&later_cut, |m| m.forward(&input, 5, &store, "later"))
+        .is_err());
+    assert_eq!(
+        store.positions_in_place(model.kv_model_key(), "later", 2),
+        Some(5)
+    );
+    model.forward(&input, 5, &store, "later").unwrap();
+}

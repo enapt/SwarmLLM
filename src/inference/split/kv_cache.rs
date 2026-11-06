@@ -1333,6 +1333,24 @@ impl KvOccupancy {
 }
 
 impl KvCacheEntry {
+    /// An entry holding nothing, one slot per layer — a request's first
+    /// forward.
+    pub(crate) fn fresh(num_layers: usize) -> Self {
+        Self {
+            layers: (0..num_layers).map(|_| None).collect(),
+            ssm_states: vec![None; num_layers],
+            last_accessed: std::time::Instant::now(),
+        }
+    }
+
+    /// Does this entry have a slot for each of a segment's `num_layers`? A
+    /// forward takes the lists out while it runs; a failed step that could not
+    /// put them back where it began leaves them empty, and a forward on such
+    /// an entry is refused, never indexed (#367 (d) (3b)).
+    pub(crate) fn holds_every_layer(&self, num_layers: usize) -> bool {
+        self.layers.len() >= num_layers && self.ssm_states.len() >= num_layers
+    }
+
     /// Does this entry hold any of its request's conversation — a written
     /// position in any layer's cache, or a hybrid model's SSM state?
     pub(crate) fn holds_state(&self) -> bool {
@@ -1929,11 +1947,7 @@ impl KvCacheStore {
         // Slow path: first access for this request — allocate key and create entry.
         self.caches
             .entry(key.to_string())
-            .or_insert_with(|| KvCacheEntry {
-                layers: (0..num_layers).map(|_| None).collect(),
-                ssm_states: vec![None; num_layers],
-                last_accessed: std::time::Instant::now(),
-            })
+            .or_insert_with(|| KvCacheEntry::fresh(num_layers))
     }
 
     #[cfg(test)]
@@ -1976,15 +1990,39 @@ impl KvCacheStore {
     /// there is no entry.
     pub(crate) fn request_positions(&self, model_key: &str, request_id: &str) -> usize {
         let key = Self::cache_key(model_key, request_id);
-        self.caches.get(key.as_str()).map_or(0, |entry| {
-            entry
-                .layers
-                .iter()
-                .flatten()
-                .map(|kv| kv.current_seq_len())
-                .min()
-                .unwrap_or(0)
-        })
+        self.caches
+            .get(key.as_str())
+            .map_or(0, |entry| Self::positions_of(&entry))
+    }
+
+    /// [`Self::request_positions`] where the request's caches are in place for
+    /// a segment of `num_layers` — `None` where a failed step took them and
+    /// could not put them back ([`KvCacheEntry::holds_every_layer`]). What a
+    /// forward run again compares before and after the failure
+    /// (`executor::worth_running_again`): read as `0`, such an entry matched a
+    /// prompt's first chunk, and the rerun indexed the empty lists.
+    pub(crate) fn positions_in_place(
+        &self,
+        model_key: &str,
+        request_id: &str,
+        num_layers: usize,
+    ) -> Option<usize> {
+        let key = Self::cache_key(model_key, request_id);
+        match self.caches.get(key.as_str()) {
+            None => Some(0),
+            Some(entry) if entry.holds_every_layer(num_layers) => Some(Self::positions_of(&entry)),
+            Some(_) => None,
+        }
+    }
+
+    fn positions_of(entry: &KvCacheEntry) -> usize {
+        entry
+            .layers
+            .iter()
+            .flatten()
+            .map(|kv| kv.current_seq_len())
+            .min()
+            .unwrap_or(0)
     }
 
     /// Truncate a request's KV cache (all layers) to `target_len`. No-op if

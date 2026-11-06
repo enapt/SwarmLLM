@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #414**). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #415**). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -1485,6 +1485,18 @@ and optionally retry once on a different connection before failing over. The roo
 the one-way-dead connection (suspected TCP port-reuse 4-tuple collision) is unproven. The
 same-host churn the example scripts detect and name is environmental.
 
+#### #414 — Removing `region` while the node runs keeps the old country until a restart
+`P3` · network · **OPEN** — 2026-11-06 · evidence: below; neighbours: #407
+
+`daemon::background::spawn_region_detection` decides once, at startup, from the boot settings (a
+startup decision, so the boot snapshot is the right read): a `region` naming a country is written into
+`detected_region` and the internet lookup never starts. `SharedState::effective_region` reads the LIVE
+setting first, so a reload that SETS a region takes effect at once — but one that REMOVES it falls back to
+`detected_region`, which still holds the removed setting, until the node restarts. Found by the v0.3.275
+pre-release review; not a change of that release (the decision predates #407). **Next**: start the lookup
+when a reload leaves no country set, or leave `detected_region` unset in the configured branch — the
+lookup is an outside request a user who stated their country may not want, so only on that reload.
+
 #### #413 — A LAN neighbour's connections arrive in bursts of hundreds a minute, each closed by it at once
 `P3` · network · **OPEN** (cause unknown) — 2026-11-06 · evidence: below; neighbours: #169, gotcha #353
 
@@ -1998,6 +2010,14 @@ Two chats at once, the fault switch every 100,000th ask ≥ 64 KiB, 5 min an arm
 run again, 22 + 22 turns, 0 workers ended (19.9 tok/s against 19.5 with no refusals); with
 `SWARMLLM_FORWARD_RERUN=0` the first refusal (a batched step, 1 min in) ended the worker and the chats
 ran on the processor at 4.6-8.8 tok/s. Halves fired once with nothing to let go, and ran.
+**Fixed before release (pre-release review, 2026-11-06, gotcha #1047)**: a forward refused before its
+first layer (the masks, on a card an allocation) returned with the request's lists taken out, read as 0
+positions — a first chunk's own reading — so its rerun indexed the empty lists and panicked the worker.
+Such a failure now gives the caches back untouched, an entry a step could not put back reads `None`
+(`KvCacheStore::positions_in_place`, never run again), and both forwards refuse an emptied entry
+before taking it (`KvCacheEntry::holds_every_layer`; tests
+`a_forward_refused_before_its_first_layer_gives_the_caches_back`,
+`a_forward_on_caches_a_failed_step_could_not_put_back_is_refused`).
 `docs/invariants/memory.md` § "A batched step the card ran out of memory for". **Residual**: a half
 still refused fails the whole tick — no request is shed (SGLang's `retract_decode`, below, sheds the
 one with the fewest generated tokens and re-reads its prompt later). **Prior art:** SGLang's `retract_decode`

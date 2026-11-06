@@ -930,7 +930,9 @@ impl SplitModel {
         all_positions: bool,
         skip_mask: Option<SkipLayers<'_>>,
     ) -> Result<(Tensor, HashMap<usize, Tensor>), SwarmError> {
-        let held_before = kv_cache_store.request_positions(&self.kv_model_key, request_id);
+        let num_layers = self.layers.len();
+        let held_before =
+            kv_cache_store.positions_in_place(&self.kv_model_key, request_id, num_layers);
         let first = self.forward_once(
             input,
             index_pos,
@@ -948,7 +950,7 @@ impl SplitModel {
                     &e,
                     self.device.is_cuda(),
                     held_before,
-                    kv_cache_store.request_positions(&self.kv_model_key, request_id),
+                    kv_cache_store.positions_in_place(&self.kv_model_key, request_id, num_layers),
                 ) =>
             {
                 e
@@ -1690,10 +1692,20 @@ impl SplitModel {
             Vec<Option<SsmState>>,
         ) = {
             let mut entry = kv_cache_store.get_or_create_keyed(&cache_key, num_layers);
+            if !entry.holds_every_layer(num_layers) {
+                return Err(conversation_lost(request_id));
+            }
             (
                 std::mem::take(&mut entry.layers),
                 std::mem::take(&mut entry.ssm_states),
             )
+        };
+        // A failure before the first layer has written nothing: the caches go
+        // back exactly as they were taken, so the conversation survives it.
+        let untouched = |layers: Vec<Option<LayerKv>>, states: Vec<Option<SsmState>>| {
+            let mut entry = kv_cache_store.get_or_create_keyed(&cache_key, num_layers);
+            entry.layers = layers;
+            entry.ssm_states = states;
         };
 
         // Detect pre-populated prefix cache entries (KV already present from prefix
@@ -1718,19 +1730,22 @@ impl SplitModel {
         // every attention call reads them: the card's flash kernel takes
         // causality as a flag and would read none. The guard is set on the
         // thread that runs the layers, which `run_attention` asks.
-        let spans_here = self.spans_in_forward(kv_offset, seq_len)?;
+        let spans_here = match self.spans_in_forward(kv_offset, seq_len) {
+            Ok(spans) => spans,
+            Err(e) => {
+                untouched(layer_kv_caches, layer_ssm_states);
+                return Err(e);
+            }
+        };
         // A tree of guesses (#134): each row at its tree position, reading the
         // context and its own ancestors through the mask. A shape that does not
-        // match the cache is refused with the caches put back as they were —
-        // nothing has been written yet — so the conversation survives it.
+        // match the cache is refused with the caches put back as they were.
         let tree_rows = match self.draft_tree.as_ref() {
             None => None,
             Some(tree) => match tree.rows_for(kv_offset, seq_len) {
                 Ok(rows) => Some(rows),
                 Err(e) => {
-                    let mut entry = kv_cache_store.get_or_create_keyed(&cache_key, num_layers);
-                    entry.layers = layer_kv_caches;
-                    entry.ssm_states = layer_ssm_states;
+                    untouched(layer_kv_caches, layer_ssm_states);
                     return Err(SwarmError::Inference(format!("a tree of guesses: {e}")));
                 }
             },
@@ -1743,6 +1758,7 @@ impl SplitModel {
         if tree_staged {
             let staged = crate::inference::layers::tree_scope_now().map(|s| s.positions);
             if staged.as_ref() != tree_rows.as_ref().map(|(positions, _)| positions) {
+                untouched(layer_kv_caches, layer_ssm_states);
                 return Err(SwarmError::Internal(
                     "a captured tree's staged rows are not the forward's".into(),
                 ));
@@ -1751,24 +1767,29 @@ impl SplitModel {
 
         // `mut` because a hybrid segment moves it across the device boundary
         // with the activation — see the transition at the head of the loop.
-        let mut masks = if tree_staged {
+        let masks = if tree_staged {
             // The card's tree attention reads the staged bits on every layer
             // (`tree_steps_may_be_captured`); a call it declined fails loudly
             // (`layers::standard_attention`), never runs unmasked.
-            ForwardMasks::default()
+            Ok(ForwardMasks::default())
         } else if let Some((_, seen)) = &tree_rows {
-            ForwardMasks {
-                causal: Some(
-                    Tensor::from_slice(&seen.mask(), (seq_len, kv_offset + seq_len), &self.device)
-                        .map_err(SwarmError::internal)?,
-                ),
-                windowed: None,
-            }
+            Tensor::from_slice(&seen.mask(), (seq_len, kv_offset + seq_len), &self.device).map(
+                |causal| ForwardMasks {
+                    causal: Some(causal),
+                    windowed: None,
+                },
+            )
         } else if self.mask_is_read() || !spans_here.is_empty() {
             self.attention_masks(seq_len, kv_offset, &spans_here)
-                .map_err(SwarmError::internal)?
         } else {
-            ForwardMasks::default()
+            Ok(ForwardMasks::default())
+        };
+        let mut masks = match masks {
+            Ok(masks) => masks,
+            Err(e) => {
+                untouched(layer_kv_caches, layer_ssm_states);
+                return Err(SwarmError::internal(e));
+            }
         };
         // Set here, on the thread that runs the layers, like the guard above.
         let _row_positions = tree_rows.filter(|_| !tree_staged).map(|(positions, seen)| {
@@ -2347,17 +2368,20 @@ impl SplitModel {
         // step runs once more; still refused, it runs as two halves, each by
         // this same rule, down to single forwards, which have their own rerun.
         // SGLang's `retract_decode` sheds requests from the batch instead; here
-        // every request keeps its place (FUTURE_WORK #367 (d) (3c)).
+        // every request keeps its place (FUTURE_WORK #367 (d) (3c)). A second
+        // half refused after the first ran leaves the first half's caches a step
+        // on — every caller ends every request of the step on an error.
         let model_key = self.kv_model_key.clone();
-        let positions_held = |kv: &KvCacheStore| -> Vec<usize> {
+        let num_layers = self.layers.len();
+        let positions_held = |kv: &KvCacheStore| -> Vec<Option<usize>> {
             items
                 .iter()
-                .map(|i| kv.request_positions(&model_key, i.request_id))
+                .map(|i| kv.positions_in_place(&model_key, i.request_id, num_layers))
                 .collect()
         };
         let held_before = positions_held(kv_cache_store);
         let on_card = self.device.is_cuda();
-        let worth_it = |e: &SwarmError, held_now: Vec<usize>| {
+        let worth_it = |e: &SwarmError, held_now: Vec<Option<usize>>| {
             held_before
                 .iter()
                 .zip(held_now)
@@ -2550,6 +2574,18 @@ impl SplitModel {
         // doesn't conflict with reuse of this key below.
         let model_key: String = self.kv_model_key.clone();
         let num_layers = self.layers.len();
+
+        // A request whose caches an earlier failed step could not put back is
+        // refused before anything is taken, as the single path refuses it.
+        for item in items.iter() {
+            let key = KvCacheStore::cache_key(&model_key, item.request_id);
+            if kv_cache_store
+                .get_entry(&key)
+                .is_some_and(|entry| !entry.holds_every_layer(num_layers))
+            {
+                return Err(conversation_lost(item.request_id));
+            }
+        }
 
         // Extract all per-request KV-caches and SSM states up front (drop DashMap guards immediately).
         // Use mem::take instead of clone to avoid deep-copying all KV tensors.
@@ -3508,17 +3544,19 @@ fn note_a_layer_stayed_on_the_processor(e: &SwarmError) {
 /// model to the processor for want of memory
 /// (`worker_ipc::permanent_gpu_failure` → `OutOfMemory`, the same reading the
 /// pool takes), and the request's caches hold as many positions as before the
-/// forward — or the second run would read a different conversation.
-/// `SWARMLLM_FORWARD_RERUN=0`: never.
+/// forward, in place (`KvCacheStore::positions_in_place`) — or the second run
+/// would read a different conversation, or index the empty lists of one a
+/// failed step could not put back. `SWARMLLM_FORWARD_RERUN=0`: never.
 fn worth_running_again(
     e: &SwarmError,
     on_card: bool,
-    held_before: usize,
-    held_after: usize,
+    held_before: Option<usize>,
+    held_after: Option<usize>,
 ) -> bool {
     use crate::inference::worker_ipc::{permanent_gpu_failure, PermanentGpuFailure};
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     on_card
+        && held_before.is_some()
         && held_before == held_after
         && *ON.get_or_init(|| std::env::var("SWARMLLM_FORWARD_RERUN").as_deref() != Ok("0"))
         && permanent_gpu_failure(&e.to_string()) == Some(PermanentGpuFailure::OutOfMemory)
@@ -3540,9 +3578,12 @@ fn worth_running_again(
 /// (`docs/invariants/inference.md`), and two targets would leave the state and
 /// the caches apart. A sliding-window cache the step slid past that position
 /// cannot be cut back to it (`LayerKv::can_truncate_to`). Either way, nothing is
-/// put back: the store's entry stays empty, the request's positions read
-/// differently, and no rerun reads a history it no longer holds. `Err` carries
-/// a recurrent state's own failure to rewind.
+/// put back: the store's entry stays empty, `KvCacheStore::positions_in_place`
+/// reads `None`, no rerun reads a history it no longer holds and a later forward
+/// is refused ([`conversation_lost`]). A step from position 0 always goes back:
+/// a window slides only on a later append, and a recurrent state made in the
+/// step keeps the zero state it read (`SsmState::advance`). `Err` carries a
+/// recurrent state's own failure to rewind.
 fn put_back_where_the_step_began(
     kv_cache_store: &KvCacheStore,
     cache_key: &str,
@@ -3581,6 +3622,16 @@ fn put_back_where_the_step_began(
     Ok(())
 }
 
+/// The refusal of a forward whose request's caches a failed step took and
+/// could not put back (`KvCacheEntry::holds_every_layer`): the conversation is
+/// gone from this computer, and the forward would index its empty lists.
+fn conversation_lost(request_id: &str) -> SwarmError {
+    SwarmError::Inference(format!(
+        "this computer no longer holds request {request_id}'s conversation: an earlier step \
+         failed part-way and its caches could not be put back where it began"
+    ))
+}
+
 #[cfg(test)]
 mod put_back_tests {
     use super::{put_back_where_the_step_began, KvCacheStore, LayerKv};
@@ -3607,6 +3658,14 @@ mod put_back_tests {
         KvCacheStore::new(std::time::Duration::from_secs(60))
     }
 
+    /// What a forward does before its step: take the request's lists out of
+    /// its entry, leaving the entry empty while the step runs.
+    fn taken(store: &KvCacheStore, key: &str, num_layers: usize) {
+        let mut entry = store.get_or_create_keyed(key, num_layers);
+        std::mem::take(&mut entry.layers);
+        std::mem::take(&mut entry.ssm_states);
+    }
+
     /// A failed step's caches go back cut to where the step began — what a
     /// refused capture and a forward run again (#367 (d) (3b), (3c)) read.
     #[test]
@@ -3619,7 +3678,7 @@ mod put_back_tests {
     }
 
     /// A window the step slid past where it began cannot be cut back there:
-    /// nothing goes back, so the request's positions read differently and no
+    /// nothing goes back, so the request's caches read as not in place and no
     /// rerun reads keys the window has lost. A start it still answers goes back.
     #[test]
     fn a_window_slid_past_the_steps_start_is_not_put_back() {
@@ -3628,15 +3687,45 @@ mod put_back_tests {
         assert!(serves > 0, "the window slid");
         let store = store();
         let key = KvCacheStore::cache_key("m", "r");
+        taken(&store, &key, 1);
         put_back_where_the_step_began(&store, &key, 1, vec![Some(slid)], vec![None], serves - 1, 0)
             .unwrap();
-        assert_eq!(store.request_positions("m", "r"), 0, "nothing put back");
+        assert_eq!(
+            store.positions_in_place("m", "r", 1),
+            None,
+            "nothing put back"
+        );
 
         let slid = cache(400, 7, Some(4));
         let serves = slid.serves_from();
         put_back_where_the_step_began(&store, &key, 1, vec![Some(slid)], vec![None], serves, 0)
             .unwrap();
-        assert_eq!(store.request_positions("m", "r"), serves);
+        assert_eq!(store.positions_in_place("m", "r", 1), Some(serves));
+    }
+
+    /// A step from position 0 always goes back: a first chunk far wider than
+    /// its window has not slid (a window slides on a LATER append), so its
+    /// caches cut back to 0 and the entry is in place — a rerun of a prompt's
+    /// first chunk reads the start, never an emptied entry. The put-back's doc
+    /// comment rests on this.
+    #[test]
+    fn a_first_chunk_wider_than_its_window_still_goes_back_to_the_start() {
+        let wide = cache(400, 400, Some(4));
+        assert!(wide.can_truncate_to(0), "a first chunk does not slide");
+        let store = store();
+        let key = KvCacheStore::cache_key("m", "r");
+        taken(&store, &key, 2);
+        put_back_where_the_step_began(
+            &store,
+            &key,
+            2,
+            vec![Some(wide), None],
+            vec![None, None],
+            0,
+            0,
+        )
+        .unwrap();
+        assert_eq!(store.positions_in_place("m", "r", 2), Some(0));
     }
 }
 
@@ -3656,9 +3745,14 @@ mod forward_rerun_tests {
 
     #[test]
     fn a_card_that_ran_out_with_the_caches_where_they_began_runs_again() {
-        assert!(worth_running_again(&ran_out(), true, 3_000, 3_000));
+        assert!(worth_running_again(
+            &ran_out(),
+            true,
+            Some(3_000),
+            Some(3_000)
+        ));
         assert!(
-            worth_running_again(&ran_out(), true, 0, 0),
+            worth_running_again(&ran_out(), true, Some(0), Some(0)),
             "a prompt's first chunk"
         );
     }
@@ -3666,29 +3760,39 @@ mod forward_rerun_tests {
     #[test]
     fn a_forward_is_never_run_again_on_a_cache_it_moved_or_lost() {
         assert!(
-            !worth_running_again(&ran_out(), true, 3_000, 3_001),
+            !worth_running_again(&ran_out(), true, Some(3_000), Some(3_001)),
             "an error after the write-back left the caches advanced"
         );
         assert!(
-            !worth_running_again(&ran_out(), true, 3_000, 0),
+            !worth_running_again(&ran_out(), true, Some(3_000), None),
             "a recurrent state that could not be rewound was dropped with its caches"
+        );
+        assert!(
+            !worth_running_again(&ran_out(), true, Some(0), None),
+            "a first chunk left with its lists taken out: read as 0 positions, the rerun \
+             indexed the empty lists"
+        );
+        assert!(
+            !worth_running_again(&ran_out(), true, None, None),
+            "an entry already emptied when the forward began is never run again, whatever it \
+             reads after"
         );
     }
 
     #[test]
     fn only_a_card_out_of_memory_is_run_again() {
         assert!(
-            !worth_running_again(&ran_out(), false, 10, 10),
+            !worth_running_again(&ran_out(), false, Some(10), Some(10)),
             "not on a card"
         );
         let other = SwarmError::Internal("attn: shape mismatch".into());
-        assert!(!worth_running_again(&other, true, 10, 10));
+        assert!(!worth_running_again(&other, true, Some(10), Some(10)));
         let no_room = SwarmError::Internal(format!(
             "{}: out of memory for the cache",
             crate::inference::worker_ipc::NO_KV_CACHE_ROOM_MARKER
         ));
         assert!(
-            !worth_running_again(&no_room, true, 10, 10),
+            !worth_running_again(&no_room, true, Some(10), Some(10)),
             "the loader's own no-room verdict is not a refusal a rerun can meet"
         );
     }

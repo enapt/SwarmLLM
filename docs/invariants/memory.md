@@ -3058,9 +3058,24 @@ prompt chunks, checks, a split's segment, images — runs the forward once (`for
 worker's evictor, `PrefixCache::release(.., BesideLive)`, asked for everything) and runs it again,
 once. `worth_running_again`: on a card; the error is the one that would pin the model for memory
 (`worker_ipc::permanent_gpu_failure` → `OutOfMemory`); and the request's caches hold as many
-positions as before the forward (`KvCacheStore::request_positions`) — the layer loop's error arm
-cuts them back, but an error after the write-back leaves them advanced and a recurrent state that
-cannot rewind is dropped. Nothing kept beside the live caches (WSL2 keeps them in host RAM) → no
+positions as before the forward, IN PLACE (`KvCacheStore::positions_in_place`) — the layer loop's
+error arm cuts them back, but an error after the write-back leaves them advanced and a recurrent
+state that cannot rewind is dropped. ⚠ "In place" is the half the first version missed (pre-release
+review, 2026-11-06, gotcha #1047): a failure BEFORE the first layer (`spans_in_forward`, the
+masks — on a card an allocation that can be refused —, a staged tree) returned with the lists still
+taken out, and `request_positions` reads an emptied entry as 0 — the same as a prompt's first chunk
+— so a first chunk refused there compared 0 with 0, ran again and indexed the empty lists: a panic
+where the failure was a plain error. (The review also named a first chunk that cannot be put back;
+there is none — a window slides only on a later append and a recurrent state made in the step keeps
+the zero state it read, pinned by `a_first_chunk_wider_than_its_window_still_goes_back_to_the_start`.)
+Now such a failure gives the caches back untouched, so a conversation refused there keeps its
+positions too; an entry a step could not put back reads `None` (`positions_in_place`) and is never
+run again; and both forwards refuse an emptied entry before taking anything
+(`KvCacheEntry::holds_every_layer`), so a refused capture's plain step or a later forward cannot
+index it either. llama.cpp's `llama_context::decode` removes a failed ubatch's positions per
+sequence, and its recurrent memory refuses a partial rollback, the server failing the slot — the
+same two outcomes. Tests: `a_forward_refused_before_its_first_layer_gives_the_caches_back`,
+`a_forward_on_caches_a_failed_step_could_not_put_back_is_refused`. Nothing kept beside the live caches (WSL2 keeps them in host RAM) → no
 rerun. INFO "The graphics card ran out of memory in a forward; its saved prompts were let go and the
 forward run again" (`saved_prompts_let_go_mb`, `ran_again`, `first_error`).
 
@@ -3116,8 +3131,9 @@ its idle slots.
 **The change.** On an error inside the step (`forward_batch_body`'s `stepped` closure: the masks
 through the output head), each item's caches go back cut to where the step began
 (`executor::put_back_where_the_step_began` — the single path's error arm calls the same function), and
-a recurrent state that cannot rewind or a cache slid past the step's start is left out, which makes
-`worth_running_again` fail and the error stand. `forward_batch` then, where `worth_running_again` holds
+a recurrent state that cannot rewind or a cache slid past the step's start is left out (the entry
+stays empty — `positions_in_place` reads `None`, so `worth_running_again` fails and the error
+stands), and an emptied item refuses the batch before anything is taken. `forward_batch` then, where `worth_running_again` holds
 for EVERY item: lets the saved prompts go and runs the step once more (`forward_batch_once`); still
 refused or nothing let go, runs it as two halves, each half by the same rule — a half of one is a
 single forward, with (3b)'s own rerun. INFO "The graphics card ran out of memory in a batched step;
