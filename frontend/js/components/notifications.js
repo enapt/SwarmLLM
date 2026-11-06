@@ -101,6 +101,8 @@
     'manifest_rejected': '\u274C',       // ❌ R126 (bad manifest from peer)
     'manifest_rejected_backup': '\u274C', // backup-copy model name refused from a peer
     'card_slow_restart_windows': '\u26A0\uFE0F', // \u26A0\uFE0F fresh card memory slow \u2014 restart Windows (#762)
+    'clock_fast': '\u26A0\uFE0F',        // \u26A0\uFE0F this computer's clock is fast (#416)
+    'clock_slow': '\u26A0\uFE0F',        // \u26A0\uFE0F this computer's clock is slow (#416)
   };
 
   // Category CSS class for color coding

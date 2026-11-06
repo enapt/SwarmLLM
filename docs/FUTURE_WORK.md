@@ -4720,7 +4720,11 @@ grep `^| N |`).
   dropped from every save); the bounded last-reached table counts a dropped peer from the cut, not the
   start (it could evict a peer reached minutes before). **Left**: the
   swarm sheds the dead identities only as its nodes update — re-count "Unexpected peer ID" on a
-  fresh probe node a day after the release (baseline above: 67-74 in 90 s).
+  fresh probe node a day after the release (baseline above: 67-74 in 90 s). The .276 pre-release
+  review noted, below its bar: after this computer's own network is down for over an hour, every
+  failed dial takes that peer out of the table, anchors included — the peer cache still dials them and
+  a connection puts each back at Identify, so the table refills as the network returns (a sleep does
+  not count: `Instant` stops in suspend on Linux and macOS).
 - #415 — **A peer's own catch-up was dropped when it arrived before its Identify.** A node tells a
   newly connected peer its capability and its parts list point to point (#120, #359), sent as soon
   as IT has handled the peer's Identify. Identify is its own substream with no order against

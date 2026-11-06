@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.3.276-alpha] — 2026-11-07
+
 **A computer that has just started hears what each computer it connects to holds, at once.** When
 two computers connect, each tells the other what it can do and which model parts it holds. That
 message could arrive a moment before the receiving computer had finished recognising the sender,
