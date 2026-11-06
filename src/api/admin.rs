@@ -39,6 +39,21 @@ pub(crate) fn country_code(region: Option<&str>) -> Option<String> {
     .then(|| code.to_ascii_uppercase())
 }
 
+/// A peer's capability as this node keeps it: its `region` read through
+/// [`country_code`] as it ARRIVES, so every reader of the registry — the
+/// scheduler's region score, a route's regions, the relay's records — sees
+/// two letters or nothing, never the text a peer chose (#407's residual).
+/// Both installers call it (gossip in `daemon::dispatch`, the DHT record in
+/// `network::manager::events`); a new one does too. Normalised at the door,
+/// not by each reader: the scheduler read a padded or made-up region as a
+/// FAR country (0.2) instead of an unknown one (0.7).
+pub(crate) fn capability_as_kept(
+    mut cap: crate::types::NodeCapability,
+) -> crate::types::NodeCapability {
+    cap.region = country_code(cap.region.as_deref());
+    cap
+}
+
 /// Where the network map puts a peer: the country it names, else — on this
 /// computer's own network — ours (`self_region`, already a code or `??`),
 /// else `??`, which the map counts but draws nowhere. The ONE placement for
@@ -3269,6 +3284,78 @@ mod tests {
         assert_eq!(country_code(Some("xx")), None, "not known");
         assert_eq!(country_code(Some("")), None);
         assert_eq!(country_code(None), None);
+    }
+
+    /// A peer's capability is kept with its region as a country code from the
+    /// moment it arrives (#407's residual): the scheduler read ` de ` as a far
+    /// country and `asia` as another, where both are no country at all.
+    #[test]
+    fn a_peers_capability_is_kept_with_its_region_as_a_country_code() {
+        use serde_json::{json, Value};
+        let arrived = |region: Value| -> crate::types::NodeCapability {
+            serde_json::from_value(json!({
+                "node_id": vec![7u8; 32],
+                "ram_total_mb": 0,
+                "ram_available_mb": 0,
+                "disk_available_mb": 0,
+                "bandwidth_mbps": 0.0,
+                "hosted_shards": [],
+                "max_contribution": "Moderate",
+                "uptime_seconds": 0,
+                "version": "0.3.274-alpha",
+                "region": region,
+            }))
+            .expect("a capability as a peer sends it")
+        };
+        for (sent, kept) in [
+            (json!("JP"), Some("JP")),
+            (json!(" de "), Some("DE")),
+            (json!("asia"), None),
+            (json!("XX"), None),
+            (Value::Null, None),
+        ] {
+            let cap = capability_as_kept(arrived(sent.clone()));
+            assert_eq!(cap.region.as_deref(), kept, "{sent}");
+            assert_eq!(cap.version, "0.3.274-alpha", "nothing else changes");
+        }
+    }
+
+    /// This computer's own region is read from the LIVE config and as a
+    /// country (#407's residual): a configured value that names none gives
+    /// the lookup's answer, and a reload's change applies, padded or not —
+    /// both accessors, which the scheduler and the capability read.
+    #[tokio::test]
+    async fn this_computers_region_is_read_live_and_as_a_country() {
+        let temp = tempfile::tempdir().unwrap();
+        let db = crate::storage::db::Database::open(temp.path()).unwrap();
+        let executor = std::sync::Arc::new(tokio::sync::Mutex::new(
+            crate::inference::executor::ModelExecutor::new(),
+        ));
+        let mut config = crate::config::Config::default();
+        config.node.data_dir = temp.path().to_path_buf();
+        config.identity.region = Some("eu-west".into());
+        let (state, _, _) = crate::daemon::SharedState::new(
+            config.clone(),
+            crate::identity::Identity::generate(),
+            db,
+            executor,
+            None,
+        );
+        *state.detected_region.write().await = Some("TH".into());
+        assert_eq!(
+            state.effective_region_sync().as_deref(),
+            Some("TH"),
+            "eu-west is no country"
+        );
+        assert_eq!(state.effective_region().await.as_deref(), Some("TH"));
+        config.identity.region = Some(" de ".into());
+        let _ = state.make_config_live(config);
+        assert_eq!(
+            state.effective_region_sync().as_deref(),
+            Some("DE"),
+            "a reload applies"
+        );
+        assert_eq!(state.effective_region().await.as_deref(), Some("DE"));
     }
 
     /// A reload makes the FILE the live config, every setting in it — not only

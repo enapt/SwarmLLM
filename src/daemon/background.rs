@@ -627,7 +627,11 @@ pub(super) fn spawn_region_detection(
     shared_state: Arc<SharedState>,
     mut shutdown_rx: watch::Receiver<bool>,
 ) {
-    if shared_state.config.identity.region.is_none() {
+    // A configured value that names no country (`eu-west`) is looked up as if
+    // unset — `effective_region` reads it as nothing (#407).
+    let configured =
+        crate::api::admin::country_code(shared_state.config.identity.region.as_deref());
+    if configured.is_none() {
         let geo_state = shared_state.clone();
         tasks.spawn(async move {
             let lookup = async {
@@ -671,7 +675,7 @@ pub(super) fn spawn_region_detection(
     } else {
         let state = shared_state.clone();
         tasks.spawn(async move {
-            *state.detected_region.write().await = state.config.identity.region.clone();
+            *state.detected_region.write().await = configured;
             "region_detection_configured"
         });
     }

@@ -2128,7 +2128,9 @@ pub(crate) async fn dispatch_network_messages(
                                                 peer.capability.as_ref(),
                                                 &cap,
                                             ) {
-                                                peer.capability = Some(cap.clone());
+                                                peer.capability = Some(
+                                                    crate::api::admin::capability_as_kept(cap.clone()),
+                                                );
                                                 peer.last_seen = chrono::Utc::now();
                                             } else {
                                                 tracing::debug!(

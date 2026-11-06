@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+**A computer whose stated location is not a country code is no longer planned as far away.**
+When the swarm chooses computers for a request, a peer in the same country counts for more and one
+with no known location counts as neutral. A location that was padded with spaces or was not a
+country code (`eu-west`, say, written as `region` under `[identity]` in config.toml) was instead
+read as a far-away country. Every computer's location is now read as a two-letter country code as
+it arrives, and a `region` setting that is not one is looked up from the internet address instead,
+as if it were unset (#407).
+
 ## [0.3.274-alpha] — 2026-11-06
 
 **A short first reply no longer slows the replies after it.** When a model runs partly or wholly

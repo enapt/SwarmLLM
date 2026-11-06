@@ -8650,6 +8650,9 @@ fn every_cloud_path_asks_whether_the_model_is_kept_here() {
 ///
 /// This is the input every regional-placement decision reads, so it is the
 /// precondition for `docs/plans/regional_pipelines.md`.
+///
+/// Test code is not scanned: a test sets the field to check that the accessor
+/// resolves it (`this_computers_region_is_read_live_and_as_a_country`, #407).
 #[test]
 fn this_nodes_region_is_read_through_the_accessor_that_knows_it_was_detected() {
     let allowed = [
@@ -8669,10 +8672,8 @@ fn this_nodes_region_is_read_through_the_accessor_that_knows_it_was_detected() {
         let Ok(src) = std::fs::read_to_string(&path) else {
             continue;
         };
-        for (line, text) in statements(&src) {
-            if text.contains("config.identity.region") {
-                offenders.push(format!("{rel}:{line}: {}", text.trim()));
-            }
+        for (line, text) in own_region_reads(&src) {
+            offenders.push(format!("{rel}:{line}: {}", text.trim()));
         }
     }
     assert!(
@@ -8683,6 +8684,28 @@ fn this_nodes_region_is_read_through_the_accessor_that_knows_it_was_detected() {
          silently disables whatever depends on it:\n{}",
         offenders.join("\n")
     );
+}
+
+/// Statements of `src`'s production code that name the config's own region
+/// field, in any spelling rustfmt leaves.
+fn own_region_reads(src: &str) -> Vec<(usize, String)> {
+    statements(&production_code(src))
+        .into_iter()
+        .filter(|(_, text)| text.contains("config.identity.region"))
+        .collect()
+}
+
+#[test]
+fn the_region_guard_sees_a_wrapped_read_and_skips_tests() {
+    let planted = "fn f(state: &S) -> Option<String> {\n    state\n        .config\n        \
+                   .identity\n        .region\n        .clone()\n}\n\
+                   #[cfg(test)]\nmod tests {\n    fn t(config: &mut Config) {\n        \
+                   config.identity.region = Some(\"eu-west\".into());\n    }\n}\n";
+    let lines: Vec<usize> = own_region_reads(planted)
+        .into_iter()
+        .map(|(l, _)| l)
+        .collect();
+    assert_eq!(lines, vec![2]);
 }
 
 /// The scan above must see the real shape, and must not fire on the comments
@@ -10990,6 +11013,23 @@ mod tests {
     assert_eq!(tests.len(), 1, "the test module was not found: {tests:?}");
     let module = &src[tests[0].0..=tests[0].1];
     assert!(module.contains("fn fixture") && module.trim_end().ends_with('}'));
+}
+
+/// `src` with everything behind a `#[cfg(test)]` blanked to spaces, its
+/// newlines kept so a statement's line number is still the file's — what a
+/// guard about PRODUCTION code scans, where a test may legitimately do the
+/// thing the guard forbids (set a field to check the accessor that reads it).
+fn production_code(src: &str) -> String {
+    let mut masked: Vec<char> = src.chars().collect();
+    let char_at: Vec<usize> = src.char_indices().map(|(i, _)| i).collect();
+    for (s, e) in cfg_test_spans(src) {
+        for (k, c) in masked.iter_mut().enumerate() {
+            if (s..e).contains(&char_at[k]) && *c != '\n' {
+                *c = ' ';
+            }
+        }
+    }
+    masked.into_iter().collect()
 }
 
 /// The byte span of everything behind a `#[cfg(test)]`, whether it guards a
@@ -14870,16 +14910,7 @@ fn the_zstd_cap_guard_catches_every_uncapped_form() {
 /// NUMBER as `shard_count` less one — the last part — in any spelling
 /// rustfmt leaves: a wrapped chain, a cast, `checked_sub`.
 fn last_part_by_number_sites(src: &str) -> Vec<usize> {
-    let mut masked: Vec<char> = src.chars().collect();
-    let char_at: Vec<usize> = src.char_indices().map(|(i, _)| i).collect();
-    for (s, e) in cfg_test_spans(src) {
-        for (k, c) in masked.iter_mut().enumerate() {
-            if (s..e).contains(&char_at[k]) && *c != '\n' {
-                *c = ' ';
-            }
-        }
-    }
-    let masked: String = masked.into_iter().collect();
+    let masked = production_code(src);
     let mut out = Vec::new();
     for (line, stmt) in statements(&masked) {
         let flat = stmt.replace(char::is_whitespace, "");
@@ -14956,6 +14987,73 @@ fn no_production_code_judges_a_models_end_by_part_number() {
          `split::parts_that_finish` / `parts_at_the_ends`, or `head_part` for \
          the head's part: {offenders:#?}"
     );
+}
+
+/// The lines (1-based) of production statements in `src` that install a
+/// peer's capability (`.capability = Some(..)`), each with whether it reads
+/// the region through `api::admin::capability_as_kept`.
+fn capability_installs(src: &str) -> Vec<(usize, bool)> {
+    let masked = production_code(src);
+    statements(&masked)
+        .into_iter()
+        .filter_map(|(line, stmt)| {
+            let flat = stmt.replace(char::is_whitespace, "");
+            flat.contains(".capability=Some(").then(|| {
+                (
+                    line,
+                    flat.contains(".capability=Some(crate::api::admin::capability_as_kept("),
+                )
+            })
+        })
+        .collect()
+}
+
+/// A peer's capability enters the registry with its region read as a
+/// country (#407's residual): every installer goes through
+/// `api::admin::capability_as_kept`, so no reader — the scheduler's region
+/// score, a route's regions, the relay's records — is handed the text the
+/// peer chose. The scheduler read a padded or made-up region as a far
+/// country (0.2) where an unknown one is 0.7.
+#[test]
+fn every_peer_capability_is_installed_with_its_region_read_as_a_country() {
+    let root = repo_root();
+    let (mut installs, mut offenders) = (0usize, Vec::new());
+    for path in rust_sources_under("src") {
+        if module_file_is_test_only(&path) {
+            continue;
+        }
+        let rel = path
+            .strip_prefix(&root)
+            .unwrap_or(&path)
+            .to_string_lossy()
+            .replace('\\', "/");
+        let src = std::fs::read_to_string(&path).expect("read source");
+        for (line, kept) in capability_installs(&src) {
+            installs += 1;
+            if !kept {
+                offenders.push(format!("{rel}:{line}"));
+            }
+        }
+    }
+    assert!(
+        installs >= 2,
+        "the scan found {installs} capability installers — gossip's and the DHT \
+         record's are two; the scanner no longer sees them"
+    );
+    assert!(
+        offenders.is_empty(),
+        "a peer's capability installed without `api::admin::capability_as_kept` \
+         keeps the region text the peer chose (#407): {offenders:#?}"
+    );
+}
+
+#[test]
+fn the_capability_install_guard_sees_a_wrapped_install_and_skips_tests() {
+    let planted = "fn a(p: &mut P, cap: C) {\n    if ok {\n        p\n            .capability = \
+                   Some(cap.clone());\n        q.capability =\n            \
+                   Some(crate::api::admin::capability_as_kept(cap));\n    }\n}\n\
+                   #[cfg(test)]\nmod tests {\n    fn t(p: &mut P) { p.capability = Some(c()); }\n}\n";
+    assert_eq!(capability_installs(planted), vec![(3, false), (5, true)]);
 }
 
 #[test]

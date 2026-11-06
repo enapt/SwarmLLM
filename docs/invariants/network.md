@@ -7021,6 +7021,23 @@ country — #406's computer drew as a second dot in Thailand — and the live pa
 (`region_summary`) left such a peer out, so the count changed between refreshes. Both paths place
 through `api::admin::map_region_of`; a country anywhere is read by `api::admin::country_code`.
 
+**A country is normalised where it ARRIVES, not where it is read (2026-11-06, #407's residual).** The
+.273 review found seven readers past `country_code`: the scheduler's region score
+(`compute_region_score`), auto-manage's scoring, wishlist, manager and prune, and the relay's two
+records of a route's regions. Traced, most were harmless, because both sides of each comparison
+were already upper-cased — but the scheduler scored a peer whose region was padded (` de `) or not
+a country (`asia`, `eu-west`) as a FAR country (0.2) where an unknown one is 0.7, and the relay
+copied the text whole into its records. Seven readers, one rule: the fix is the choke point, not
+seven calls. **`api::admin::capability_as_kept`** reads the region through `country_code` at both
+places a peer's capability is installed (gossip in `daemon::dispatch`, the DHT record in
+`network::manager::events`), so the registry holds two letters or nothing and every reader inherits
+it — guard `every_peer_capability_is_installed_with_its_region_read_as_a_country` (with a planted
+self-test). This node's own region went the same way: `effective_region` / `effective_region_sync`
+read the BOOT snapshot's `identity.region` raw (a reload's change never applied, and `eu-west` was
+published as a country); both now read `cfg()` through `country_code`, and a configured value that
+names no country is looked up as if unset (`background::spawn_region_detection`). The field has
+always been documented as an ISO 3166-1 alpha-2 code (`IdentityConfig::region`).
+
 **Measured end to end (2026-11-05, `~/swarmllm-gate/deep/fr/gossip406.sh`).** Two nodes over QUIC only, in a private
 network namespace; B `kill -9`ed and restarted at once (back in 0.5 s; A logged B's new connection `count=2`, beside
 the old one), B on the v0.3.272 release in both arms. A's view of B's `uptime_seconds` 2 / 4 / 6 / 6.5 min after the

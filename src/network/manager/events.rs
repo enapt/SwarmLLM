@@ -832,7 +832,8 @@ impl NetworkManager {
                                                 entry.capability.as_ref(),
                                                 &cap,
                                             ) {
-                                                entry.capability = Some(cap);
+                                                entry.capability =
+                                                    Some(crate::api::admin::capability_as_kept(cap));
                                             }
                                         }
                                     }

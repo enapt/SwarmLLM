@@ -4269,11 +4269,14 @@ impl SharedState {
     /// auto-detected node, which is why the network map placed every such node
     /// nowhere (or defaulted them to the viewer's own country). Reporting paths
     /// (capacity announcement, WS region counts, region gossip) MUST use this.
+    ///
+    /// Both read the LIVE config (`cfg()`: a reload can change `identity.region`)
+    /// through `api::admin::country_code`, so a configured value that is not a
+    /// two-letter country (`eu-west`, ` de `) is the lookup's answer instead —
+    /// never text the swarm would read as a country of its own (#407).
     pub async fn effective_region(&self) -> Option<String> {
-        if let Some(r) = self.config.identity.region.as_ref() {
-            if !r.is_empty() {
-                return Some(r.clone());
-            }
+        if let Some(code) = self.configured_country() {
+            return Some(code);
         }
         self.detected_region.read().await.clone()
     }
@@ -4288,12 +4291,13 @@ impl SharedState {
     /// auto-manage fell back to config, so one path could score a node's region
     /// as "unknown" while the other resolved it).
     pub fn effective_region_sync(&self) -> Option<String> {
-        if let Some(r) = self.config.identity.region.as_ref() {
-            if !r.is_empty() {
-                return Some(r.clone());
-            }
-        }
-        self.detected_region.try_read().ok().and_then(|g| g.clone())
+        self.configured_country()
+            .or_else(|| self.detected_region.try_read().ok().and_then(|g| g.clone()))
+    }
+
+    /// The country `identity.region` names now, if it names one.
+    fn configured_country(&self) -> Option<String> {
+        crate::api::admin::country_code(self.cfg().identity.region.as_deref())
     }
 
     /// Does the legacy single-model executor hold **this** model?

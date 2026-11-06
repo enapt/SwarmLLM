@@ -4588,7 +4588,13 @@ grep `^| N |`).
   peer; else `??`, counted, drawn nowhere, not a region). (d) A country is read in ONE place,
   `api::admin::country_code` (two letters, never `XX`): the peer list, the map, swarm capacity's
   region count, a route's regions, the MCP peer list, the identity card and this node's own lookup
-  — four of those passed a peer's raw text on.
+  — four of those passed a peer's raw text on. (e) 2026-11-06, the .273 review's residual: seven
+  more readers past `country_code` (the scheduler's region score, auto-manage's four, the relay's
+  two records); the scheduler scored a padded or made-up region as a far country (0.2, unknown is
+  0.7). Now normalised where it ARRIVES — `api::admin::capability_as_kept` at both capability
+  installers (guard `every_peer_capability_is_installed_with_its_region_read_as_a_country`) — and
+  this node's own `identity.region` is read live through `country_code`, a value naming no
+  country looked up as if unset.
 - #406 — **A computer that restarted is heard again by every computer it was connected to.** One
   that came back before its peers' old connections had timed out (a few seconds — an update's
   restart does it) was never told what they subscribe to: libp2p-gossipsub tells only a peer's
