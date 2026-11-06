@@ -17,6 +17,17 @@ the work.
 
 **No account · No subscription · No ads · No crypto · Open source · Updates itself**
 
+> [!IMPORTANT]
+> **Keep automatic updates on, or your computer drops off the swarm.** While
+> SwarmLLM is being built, new versions come out often — sometimes more than one
+> a day — and computers only work with others that are up to date. **A computer
+> two or more releases behind is disconnected from the network until it
+> updates.** Automatic updates are on unless you turned them off: in the app,
+> **Settings → Software updates** should say *Install automatically and restart
+> when idle*. The `.deb`/`.rpm` packages and the Docker images can't update
+> themselves — install the new package, or pull the new image, whenever a
+> release comes out.
+
 **A giant model has now run on the swarm.** Bigger AI models give noticeably
 smarter answers, but the biggest open ones (70 billion "parameters" and up)
 need equipment normally found only in data centres — no home computer can hold

@@ -151,8 +151,9 @@ Either way SwarmLLM runs as a background service that keeps its data in
 `swarmllm status` find that folder by asking the running service; only the service and the
 administrator can read the token, so run them with `sudo` (`sudo swarmllm status`).
 Programs installed from a package **do not update themselves** — install the
-next release's package to update. Homebrew and AUR packages are not published
-yet.
+next release's package to update. Do it for every release: a computer two or
+more releases behind is disconnected from the swarm until it updates. Homebrew
+and AUR packages are not published yet.
 
 ### Docker
 
@@ -198,6 +199,12 @@ and signed, the same moment the built-in updater can see it. (Before this rule,
 images for `0.3.199-alpha`, which was withdrawn, and for `0.3.202-alpha` and
 `0.3.203-alpha`, which were never released, were published by mistake; they have
 been removed. If a container of yours still runs one, pull `latest` again.)
+
+**A container does not update itself** — it runs as a user that cannot replace
+the program inside the image. Pull the new image and recreate the container
+for every release (`docker compose pull && docker compose up -d`, with
+`--profile gpu` on both if you started it that way): a computer
+two or more releases behind is disconnected from the swarm until it updates.
 
 Data is persisted in Docker volumes. Model shards are stored in the `swarmllm-models` volume (or bind-mount a host directory via `SWARMLLM_MODELS_DIR` in `.env`).
 
