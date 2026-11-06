@@ -528,7 +528,6 @@ pub(crate) fn upload_claim(
         repo_id: source.repo_id,
         filename: source.filename,
         publisher: our_id.clone(),
-        mmproj_filename: source.mmproj_filename,
     }))
 }
 

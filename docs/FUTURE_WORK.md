@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #422**). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #423**). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -1580,16 +1580,21 @@ score at the default (`docs/invariants/network.md` § "The network loop never wa
 A request-response stall line now names its message (`swarm_event:RequestResponse:in:<kind>`), so
 the next one is attributable. Next: the running count on .268 (field and live node), read by kind.
 
-#### #421 — The vision encoder's HuggingFace fetch is unreachable, and would land under a name nothing reads
-`P4` · models · **OPEN** — 2026-11-07 · history: #419's audit
+#### #422 — A vision encoder reaches a node only by hand
+`P3` · models · **OPEN** — 2026-11-07 · history: #421
 
-`auto_manage::download::trigger_mmproj_download` fetches `HfSource::mmproj_filename` with
-`download_model`, which writes it under its HuggingFace name (`mmproj-….gguf`) and never renames it
-to `mmproj.gguf`, the name the trigger's own "already here" check and the loader look for. It never
-runs: nothing in this build sets `mmproj_filename` to a name (every local writer writes `None`;
-gossip and inheritance copy one). Either give it a source (the repo listing's mmproj file) and land
-the result as `mmproj.gguf`, or delete it as unreachable (`completeness.md`); a vision encoder
-reaches a node today as the sentinel part from a peer, or by hand.
+Nothing fetches a vision encoder (`mmproj.gguf`, the part at `MMPROJ_SHARD_INDEX`): not the download
+pass, not adding a model, not the explicit part download. No build writes a manifest's `mmproj`, so
+no node learns one exists until a holder announces the part. A holder serves it
+(`ShardStore::shard_path` → `mmproj.gguf`) and a picture is encoded wherever one is held
+(`VisionEncoderUnavailable` otherwise) — so a vision model reads pictures only in a swarm where
+somebody put the file in by hand. Cure: the origin's part download lists the repository
+(`is_the_model_file` already tells the projector apart), fetches the projector as `mmproj.gguf`
+behind a `StagingFile`, hashes it and records its size and hash from the ORIGIN
+(`record_origin_verified_hash`); peers then fetch the part from a holder, checked against that
+hash — never from HuggingFace by a name a peer gave. Prior art: BitTorrent BEP 9 — metadata a peer
+supplies is taken only once it hashes to the info-hash the user chose, so a peer cannot add a file
+to a download.
 
 #### #420 — A model added from the swarm can show a part as downloading for good while another download fetches it
 `P4` · storage · **OPEN** — 2026-11-07 · history: #418's review
@@ -2148,6 +2153,12 @@ positions (PipeInfer's sequence ids, SpecPipe's mask snapshot); one shared "curr
 them is the desync "Batch Speculative Decoding Done Right" (2510.22876 § 3.1) names as the central
 bug — so the merge keeps arrival order for the cache writes and stops at any prefix change. Not
 read: Orca's full text, PipeSpec's KV handling, Ygg's full text, llama.cpp/vLLM same-request batching.
+Re-searched 2026-11-07, still none: Petals' server runs one step at a time (`handler.py`
+`_iterate_inference_steps`, `block_functions.py` `iterate_rpc_inference` advancing `prefix_length` per
+step; its `can_merge_pools` merges BLOCKS into one pool call, not steps); vLLM's pipeline-parallel RFC
+(#11945) keeps a prefill's microbatches separate and holds a decode request to ONE in-flight
+microbatch "before we figure out how to deal with speculative decoding". Still unread: llama.cpp RPC
+and exo source, DeepSpeed/Megatron micro-batching.
 
 #### #357 — A card's first graph of a new shape, late in a worker's life, can stall one forward 10-59 s
 `P3` · perf-local · **OPEN** — 2026-10-26 · evidence: `faster_than_local.md` § 8.6; gotcha #883
@@ -4679,7 +4690,20 @@ Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
 
-**Closed 2026-11-06/07, unreleased** (#416's nicknames, #417, #402, #191, #418, #419)
+**Closed 2026-11-06/07, unreleased** (#416's nicknames, #417, #402, #191, #418, #419, #421)
+- #421 — **A vision encoder was a download candidate whose one fetch was a whole file from
+  HuggingFace that another computer named.** The download pass made a candidate of any manifest's
+  `mmproj` (at five times a part's score) and fetched it with `download_model` by
+  `HfSource::mmproj_filename`, landing it under its HuggingFace name, which nothing reads. No build
+  ever wrote either (`git log -S` finds no `MmprojInfo` ever built and no `mmproj_filename: Some`),
+  so it ran only on a peer's manifest and source gossip — the peer choosing the file (any file of
+  the model's repository that passes the name check, read from the code, not tried) and the size it
+  was budgeted at. Deleted: the candidate, the fetch, `HfSource::mmproj_filename`,
+  `HfSourceGossip::mmproj_filename` and `MmprojInfo::hf_filename` — each `skip_serializing_if` and
+  always `None`, so no node ever sent one, and an older node's messages parse as before. #421's
+  entry said a vision encoder reaches a node from a peer: nothing fetches one (#422). Prior art:
+  BitTorrent BEP 9 (a peer cannot add a file to a download). Test
+  `a_manifest_naming_a_vision_encoder_makes_no_candidate_of_it` — red with the candidate back.
 - #419 — **The clean-up deleted half-written files that are not model parts from under their
   writers, and Cancel never stopped a whole-file download.** `cleanup_tmp_files_no_one_is_writing`
   (the reclaim pass every 10 min while over the storage budget, and a model's Cancel) spared a

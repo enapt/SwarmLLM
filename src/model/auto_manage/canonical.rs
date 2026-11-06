@@ -1736,7 +1736,6 @@ mod tests {
             source: HfSource {
                 repo_id: "Org/X".into(),
                 filename: "x-q4_k_m.gguf".into(),
-                mmproj_filename: None,
             },
             total_size: 1_000,
             header_size: 100,
@@ -1866,7 +1865,6 @@ mod tests {
         let a = HfSource {
             repo_id: "a/M".into(),
             filename: "M-Q4_K_M.gguf".into(),
-            mmproj_filename: None,
         };
         let b = HfSource {
             repo_id: "b/M".into(),

@@ -1421,10 +1421,7 @@ impl SharedState {
             ) {
                 for (model_id_str, build) in entries {
                     let mid = crate::types::ModelId(model_id_str);
-                    let mmproj = hf_sources.get(&mid).and_then(|s| s.mmproj_filename.clone());
-                    let mut source = build.source.clone();
-                    source.mmproj_filename = source.mmproj_filename.or(mmproj);
-                    hf_sources.insert(mid.clone(), source);
+                    hf_sources.insert(mid.clone(), build.source.clone());
                     map.insert(mid, build);
                 }
             }

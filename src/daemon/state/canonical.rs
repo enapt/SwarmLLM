@@ -64,15 +64,7 @@ impl SharedState {
     /// Make `build` the upload this node uses for `model_id`, and point
     /// `hf_sources` at it. The ONLY writer of `canonical_builds`.
     pub fn adopt_canonical_build(&self, model_id: &ModelId, build: CanonicalBuild) {
-        let mut source = build.source.clone();
-        if source.mmproj_filename.is_none() {
-            source.mmproj_filename = self
-                .models
-                .hf_sources
-                .get(model_id)
-                .filter(|s| canonical::same_origin(s, &build.source))
-                .and_then(|s| s.mmproj_filename.clone());
-        }
+        let source = build.source.clone();
         if let Err(e) = self
             .db
             .put_json(canonical::CANONICAL_BUILDS_TREE, &model_id.0, &build)
@@ -409,7 +401,6 @@ mod tests {
         HfSource {
             repo_id: repo.into(),
             filename: file.into(),
-            mmproj_filename: None,
         }
     }
 

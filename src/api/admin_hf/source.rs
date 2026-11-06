@@ -71,7 +71,6 @@ pub async fn hf_source(
                     crate::daemon::HfSource {
                         repo_id: hit.repo_id.clone(),
                         filename: hit.filename.clone(),
-                        mmproj_filename: None,
                     },
                 );
             }

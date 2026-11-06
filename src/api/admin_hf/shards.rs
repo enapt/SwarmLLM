@@ -223,7 +223,6 @@ pub async fn hf_download_shards(
         let asked = crate::daemon::HfSource {
             repo_id: repo_id.clone(),
             filename: filename.clone(),
-            mmproj_filename: None,
         };
         state.shared_state.note_origin_claim(&mid, asked.clone());
         if let Some(build) = state.shared_state.canonical_build(&mid) {
@@ -643,7 +642,6 @@ pub async fn hf_download_shards(
         let hf_source = crate::daemon::HfSource {
             repo_id: repo_id.clone(),
             filename: filename.clone(),
-            mmproj_filename: None,
         };
         // A claim, not an overwrite: when this upload is (or becomes) the
         // swarm's, `auto_manage::canonical` adopts it and records it beside the
@@ -662,7 +660,6 @@ pub async fn hf_download_shards(
                     repo_id: repo_id.clone(),
                     filename: filename.clone(),
                     publisher: download_shared.identity.node_id().clone(),
-                    mmproj_filename: None,
                 });
             let _ = ntx
                 .send(crate::types::NetworkCommand::Broadcast(gossip_msg))

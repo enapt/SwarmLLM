@@ -982,7 +982,6 @@ mod tests {
             crate::daemon::state::hf::HfSource {
                 repo_id: "r/x".into(),
                 filename: "x.gguf".into(),
-                mmproj_filename: None,
             },
         );
         assert!(state.can_fetch_shard_from_origin(&mid));

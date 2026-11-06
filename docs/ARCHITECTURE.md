@@ -1019,13 +1019,13 @@ Text Pipeline (unchanged): embeddings travel with LayerForward
 ```
 
 **Key design decisions:**
-- Sentinel shard index (`u32::MAX`) reuses all ShardId infrastructure (registry, announcements, auto-manage, pruning)
+- Sentinel shard index (`u32::MAX`) reuses all ShardId infrastructure (registry, announcements, serving, pruning)
 - `VisionEncodeRequest` / `VisionEncodeResponse` network messages for remote encoding (JPEG-compressed images on wire)
 - `LayerForward.vision_embeddings: Option<Vec<u8>>` carries the embeddings on the first forward: an 8-byte header (rows, hidden — u32 LE) then zstd of the f16 rows, decoded only by `vision::decode_wire_embeddings` (50 MB cap, shape and finiteness checked). Sent only to a first segment that advertises `features::IMAGES_AT_MARKERS` (bit 26) — an older one would prepend the rows; the holder is blacklisted for the request and the router re-plans, and failover skips a standby without the bit
 - Gemma 3 reads each picture's rows both ways (llama.cpp's `mtmd_decode_use_non_causal`; `vision::rows_attend_both_ways`): the coordinator computes where each picture's rows sit (`PipelineExecutor::image_spans_for`, from the same tokenization the first segment uses) and every forward reaching into a picture — the prompt pass, a stand-in's replay from 0 — carries them as `LayerForward::image_spans` (trailer `0x0F`, AAD-bound) to EVERY segment, each of which must advertise bit 26 (else blacklisted, re-plan). A picture's rows see each other and the text before them; text stays causal; Gemma 3's windowed layers keep their window. The worker checks the spans (well formed, inside the forward; on the first segment exactly where its markers put the rows), forces mask-driven attention for that forward, never cuts a picture between prompt chunks, never captures it in a CUDA graph and never batches it; a tensor-parallel group is not used for such a request (#115 (2b))
 - Vision node selection: prefer local → first-segment node → any mmproj holder
 - `precompute_vision_embeddings()` runs once before the token generation loop
-- Auto-manage: 5x priority bonus for mmproj download, higher pruning floor (min 3 replicas), only prunes under extreme pressure (>0.95)
+- Auto-manage: a held mmproj has a higher pruning floor (min 3 replicas) and is pruned only under extreme pressure (>0.95). Nothing fetches one — it reaches a node by hand (FUTURE_WORK #422); the first design's HuggingFace fetch never ran and was removed (#421)
 
 ### BPE Tokenizer
 
@@ -1970,7 +1970,7 @@ score = model_popularity × rarity_bonus × configured_bonus × vram_fitness
 - **VRAM estimation**: `model_size × 1.15` (quantized weights + ~15% KV-cache overhead)
 - **nvidia-smi fallback**: If `gpu_info` is None, falls back to `nvidia-smi` for local VRAM
 - **Budget limits**: ONE storage budget (`auto_manage::storage_budget` — `max_storage_mb` as written, else 25/50/75% of `max_disk_mb` by contribution level, capped at `max_disk_mb` and at held + what is free beyond 10% of the filesystem, which this node never takes — `FREE_DISK_RESERVE_PCT`, gotcha #795) shared by the download pass, prune pressure, the settings bar, the pool page and the diagnostics report (gotcha #448); at most 1 / 1-2 / 2-4 new parts per cycle by contribution level (more once 5+ peers are connected, `scoring.rs`); skips in-progress acquisitions
-- **mmproj support**: Vision encoder (mmproj.gguf) treated as download candidate with 5x priority bonus; full-file HF download (not byte-range); higher pruning floor (min 3 replicas), only pruned under extreme pressure (>0.95)
+- **mmproj support**: a held vision encoder (mmproj.gguf) has a higher pruning floor (min 3 replicas) and is pruned only under extreme pressure (>0.95); nothing fetches one (FUTURE_WORK #421, #422)
 - **Download priority**: peers first — a P2P `ShardRequest` to the best allowed holder (`select_best_allowed_peer`); HuggingFace only when no peer holds the part, the peer copy cannot be checked, or P2P has been exhausted for it this session. P2P is single-source per shard (future: multi-source parallel download)
 - **Upload bandwidth cap**: `max_bandwidth_mbps` config enforced on shard serving via proportional delay after chunk reads. Tensor forwards exempt (latency-critical). Default 0 = automatic by contribution level: 10 Mbps Minimal, 50 Moderate, unlimited Maximum (`NodeConfig::shard_upload_mbps`)
 - **Config**: `[auto_manage]` section — `enabled`, `max_storage_mb` (storage is limited in bytes only — the count cap `max_shards` was removed, field report #039), `interval_minutes`, `prune_enabled`, `min_replicas`, `prune_cooldown_secs`, `max_holder_load_for_prune`, `auto_switch_quants` (R134.6, **default true since R141**), `hf_watcher_enabled`, `wishlist_gossip_publish`, `on_metered_connection` (`auto` / `pause` / `allow` — automatic downloads, and new work and parts for peers, wait on a metered connection; `daemon::metered`, `SharedState::metered_hold`)

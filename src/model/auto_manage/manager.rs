@@ -1856,7 +1856,6 @@ mod pending_fetches_follow_prune {
             crate::daemon::state::HfSource {
                 repo_id: "test/origin".into(),
                 filename: format!("{}.gguf", mid.0),
-                mmproj_filename: None,
             },
         );
         assert!(state.can_fetch_shard_from_origin(mid));

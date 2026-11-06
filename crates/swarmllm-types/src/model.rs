@@ -39,9 +39,6 @@ pub struct ModelManifest {
 pub struct MmprojInfo {
     pub size_bytes: u64,
     pub hash: Blake3Hash,
-    /// HuggingFace filename for the mmproj GGUF (e.g. "llava-v1.5-7b-mmproj-model-f16.gguf").
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub hf_filename: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

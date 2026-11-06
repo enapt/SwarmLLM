@@ -805,41 +805,6 @@ impl AutoShardManager {
                     asks_room,
                 });
             }
-
-            // -- T7: mmproj as download candidate for VLM models --
-            if let Some(ref mmproj_info) = manifest.mmproj {
-                let mmproj_shard_id = ShardId {
-                    model_id: manifest.id.clone(),
-                    index: crate::types::MMPROJ_SHARD_INDEX,
-                };
-                let mmproj_holders = registry.shard_holders(&mmproj_shard_id);
-                let mmproj_path = crate::model::shard::model_dir(
-                    &self.shared_state.config.node.data_dir,
-                    &manifest.id.0,
-                )
-                .join(crate::model::shard::MMPROJ_FILENAME);
-
-                if !mmproj_holders.contains(local_node_id) || !mmproj_path.exists() {
-                    let holder_count = mmproj_holders.len();
-                    // mmproj gets a high priority bonus -- every VLM node benefits from having it
-                    let rarity_bonus = if holder_count == 0 {
-                        10.0
-                    } else {
-                        3.0 / (holder_count as f64 + 1.0)
-                    };
-                    let mmproj_score = model_popularity * rarity_bonus * vram_fitness * 5.0; // 5x bonus for mmproj
-
-                    candidates.push(ShardCandidate {
-                        model_id: manifest.id.clone(),
-                        model_name: manifest.name.clone(),
-                        shard_index: crate::types::MMPROJ_SHARD_INDEX,
-                        shard_size_bytes: mmproj_info.size_bytes,
-                        holder_count,
-                        score: mmproj_score,
-                        asks_room: None,
-                    });
-                }
-            }
         }
 
         // Parts the swarm is short of first, the strongest reason first
@@ -1407,6 +1372,46 @@ mod tests {
         // a pin to this device all call this) restores the old behaviour.
         assert!(state.clear_shard_removed_by_user(&s1));
         assert!(wants_s1(&manager));
+    }
+
+    /// #421: a manifest naming a vision encoder — only a peer's could; no
+    /// build ever wrote one — made it a candidate whose one fetch was a whole
+    /// file from HuggingFace, named by a peer's source gossip and sized by the
+    /// peer's manifest. Nothing fetches a vision encoder now; the parts beside
+    /// it stay wanted.
+    #[test]
+    fn a_manifest_naming_a_vision_encoder_makes_no_candidate_of_it() {
+        let (state, manager) = make_test_manager();
+        let (local, _s0, s1) = split_model(&state);
+        let mut manifest = state.model_registry.get_manifest(&s1.model_id).unwrap();
+        manifest.mmproj = Some(crate::types::MmprojInfo {
+            size_bytes: 1,
+            hash: [9; 32],
+        });
+        state.model_registry.register_manifest(manifest);
+        assert!(
+            state
+                .model_registry
+                .get_manifest(&s1.model_id)
+                .unwrap()
+                .mmproj
+                .is_some(),
+            "control: the manifest names a vision encoder"
+        );
+
+        let candidates = manager.gather_candidates(&local, 0);
+        assert!(
+            candidates
+                .iter()
+                .any(|c| c.model_id == s1.model_id && c.shard_index == 1),
+            "control: the missing part is still wanted"
+        );
+        assert!(
+            !candidates
+                .iter()
+                .any(|c| c.shard_index == crate::types::MMPROJ_SHARD_INDEX),
+            "a vision encoder is never a download candidate"
+        );
     }
 
     /// A peer holding shards of a family this build refuses (#116-#118) — an

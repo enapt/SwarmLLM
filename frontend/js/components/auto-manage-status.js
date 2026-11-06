@@ -11,7 +11,6 @@
     shard_verification_failed: 1,
     header_download_failed: 1,
     tied_output_failed: 1,
-    mmproj_download_failed: 1,
     unsupported_architecture: 1,
     budget_exhausted: 1,
   };

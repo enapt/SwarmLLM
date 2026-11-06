@@ -543,7 +543,6 @@ mod tests {
             crate::daemon::state::HfSource {
                 repo_id: "example/small".into(),
                 filename: "small.gguf".into(),
-                mmproj_filename: None,
             },
         );
         assert!(manager.may_fetch_as_a_drafter(&manifest), "control");

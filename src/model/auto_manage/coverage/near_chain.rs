@@ -2271,7 +2271,6 @@ mod tests {
                 crate::daemon::state::HfSource {
                     repo_id: "someone/near-me-GGUF".into(),
                     filename: "near-me.gguf".into(),
-                    mmproj_filename: None,
                 },
             );
         };

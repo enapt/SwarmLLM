@@ -220,10 +220,7 @@ impl CanonicalBuild {
         now_ms: u64,
     ) -> Self {
         CanonicalBuild {
-            source: HfSource {
-                mmproj_filename: None,
-                ..source
-            },
+            source: HfSource { ..source },
             total_size: info.total_size,
             header_size: info.header_size,
             shard_sizes: info.layouts.iter().map(|l| l.size_bytes).collect(),
@@ -327,7 +324,6 @@ mod tests {
         HfSource {
             repo_id: repo.into(),
             filename: file.into(),
-            mmproj_filename: None,
         }
     }
 

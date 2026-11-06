@@ -469,7 +469,6 @@ pub(crate) async fn register_without_parts(
     let asked = crate::daemon::HfSource {
         repo_id: repo_id.to_string(),
         filename: filename.to_string(),
-        mmproj_filename: None,
     };
     state.note_origin_claim(&mid, asked.clone());
     let source = match state.canonical_build(&mid) {
@@ -536,7 +535,6 @@ pub(crate) async fn register_without_parts(
                 repo_id: source.repo_id.clone(),
                 filename: source.filename.clone(),
                 publisher: state.identity.node_id().clone(),
-                mmproj_filename: None,
             }),
         ))
         .await;

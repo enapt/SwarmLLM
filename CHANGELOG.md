@@ -39,6 +39,11 @@ instead of being fetched into a file with a gap in it.
 runs when the disk is nearly full no longer deletes files other than model parts while they are
 being written (#419). Before, Cancel only removed the file while the download carried on.
 
+**Removed an unused vision-encoder download (#421).** No release ever started it on its own: it ran
+only if another computer's announcements named a vision encoder, and then fetched whichever file of
+the model's HuggingFace repository they named. A vision encoder still reaches a computer only when
+placed there by hand (#422).
+
 ## [0.3.276-alpha] — 2026-11-07
 
 **A computer that has just started hears what each computer it connects to holds, at once.** When

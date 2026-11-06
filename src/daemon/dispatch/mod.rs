@@ -2472,7 +2472,6 @@ pub(crate) async fn dispatch_network_messages(
                                         let source = crate::daemon::HfSource {
                                             repo_id: gossip.repo_id.clone(),
                                             filename: gossip.filename.clone(),
-                                            mmproj_filename: gossip.mmproj_filename.clone(),
                                         };
                                         if !crate::model::canonical::origin_names_model(&source, &mid) {
                                             tracing::debug!(

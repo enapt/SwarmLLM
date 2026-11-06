@@ -628,9 +628,6 @@ pub struct HfSourceGossip {
     pub repo_id: String,
     pub filename: String,
     pub publisher: NodeId,
-    /// Filename of the mmproj GGUF on HuggingFace (for VLM models).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub mmproj_filename: Option<String>,
 }
 
 /// Which version of each model's manifest the sender holds — sent point to
