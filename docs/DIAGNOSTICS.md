@@ -2823,6 +2823,15 @@ Two things that will otherwise be misread:
   assert on the log line or counter the change emits.
 - **A short run magnifies a one-time cost** into what looks like a standing
   loss. Vary the length it should amortise against before believing it.
+- **A worker's first replies are slower than its later ones, so two timed replies
+  an arm measure the slope** (2026-11-06). Qwen3-30B-A3B with its experts in RAM
+  decoded ~22-23 tok/s for a fresh worker's first 2-3 replies and 26-27 after, in
+  both builds, so the v0.3.274 release check's MoE row read 0.93x (one candidate
+  arm 15% down, the other level with the previous release, same binary). Re-run
+  the placement with more replies an arm, judge the replies after the third, and
+  before blaming a speculation change, read which replies guessed
+  (`DIAG: local n-gram speculation complete` at `-v`): here only the warm-up did,
+  in both builds.
 - **A prompt-pass bench that GROWS its KV cache measures card allocations.**
   A worker reserves an admitted prompt's whole cache before the prompt pass;
   a bench that does not grows it a quantum per chunk, each step a fresh card

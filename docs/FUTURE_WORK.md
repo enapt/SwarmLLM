@@ -4488,7 +4488,7 @@ Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
 
-**Closed 2026-11-05, ships in the next release** (#410, #408, #409)
+**Closed 2026-11-05, released in v0.3.274** (#410, #408, #409)
 - #410 — **A peer manifest's layer count sized allocations unchecked.** `num_layers` and each part's
   `layer_range` were the peer's u32s; `available_layer_ranges_from_manifest` allocates a flag per
   layer on every plan and on the scan of a model with a part here — a manifest naming 4 billion
