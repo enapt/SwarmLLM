@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.3.275-alpha] — 2026-11-06
+
 **A computer whose stated location is not a country code is no longer planned as far away.**
 When the swarm chooses computers for a request, a peer in the same country counts for more and one
 with no known location counts as neutral. A location that was padded with spaces or was not a

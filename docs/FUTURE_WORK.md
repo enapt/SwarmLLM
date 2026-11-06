@@ -2081,7 +2081,9 @@ and code (`real_link_dsdw275ab/`, every flow arm 4 of 4 replies flowed, every st
 answer beside the drafter on one card, and the far's queue cut the flow back 8-16 times a reply.
 So the line is per shape (`dsd_tree::FlowDraws`): 120 ms where the far end draws, the tree rounds'
 300 where this node does — there the flow replaces the rounds, which it beat 1.2x at 420 ms
-(`faster_than_local.md` § 9); pinned by `a_tree_drawn_here_keeps_the_tree_rounds_line`. (c) **where
+(`faster_than_local.md` § 9); pinned by `a_tree_drawn_here_keeps_the_tree_rounds_line`. On the link
+with the fixed build (`real_link_readme275b/`, 127-130 ms, three default arms): every check streamed
+(3 of 3 replies an arm, none flowed), 27.1-31.5 code / 12.0-12.8 prose. (c) **where
 a tree drawn here starts to pay between 133 and 300 ms** is unmeasured (it flowed from 150 ms in
 v0.3.259-.274, never compared with the stream there).
 
