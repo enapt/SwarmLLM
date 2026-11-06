@@ -1451,7 +1451,7 @@ a rig's way to keep a drafter off a card that must serve one process, as llama.c
 **A tree that flows** (`pipeline::dsd_flow`, #134 (b)) ends with `DSD: a tree that flowed is complete`.
 The guard's fields: `guard_at_start` / `guard_least` / `guard_at_end` (rows a level × live rows),
 `guard_cuts`, `queue_ms_most` (the most a delay stood over the least, the link's window), and since
-#388 `served_time` (the switch, `SWARMLLM_FLOW_SERVED_TIME=1`, off by default), `served_read` (answers whose far's own
+#388 `served_time` (on by default since 2026-11-06; `SWARMLLM_FLOW_SERVED_TIME=0` reads whole delays), `served_read` (answers whose far's own
 time was believed — 0 on a chain, an older far, or a far whose time left less than the least round
 trip), `far_least_ms`, `far_queue_ms_most`, `far_cuts`, `far_undone`. At DEBUG each cut logs once:
 `… grows less ahead — its forwards queue on the way` (the link's window), `… tries fewer forwards

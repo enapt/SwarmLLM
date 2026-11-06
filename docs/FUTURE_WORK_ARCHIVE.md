@@ -17278,3 +17278,45 @@ no prompt is in scope: the executor keeps the verdict `build_prompt_with_header`
 the partial keeper); a continuation reads the ORIGINAL attempt's (its prompt ends inside the reasoning,
 not on the opener); the API's streams through `StreamingTokenTx`'s shared slot, set at render and read
 at the first token. Raw completions: `Nothing`.
+
+### #388 — closed 2026-11-06 (the entry as it stood when closed, word for word)
+
+#### #388 — The flow's guard takes a far computer's own delay for a queue on the link, and narrows a tree that cannot shorten it
+`P2` · perf-split · **NARROWED** — 2026-11-01 · evidence: `docs/invariants/scheduling.md` § "A far computer's own time is not the link's"; history: #369 (closed 2026-11-01, archive § "#369")
+
+`FlowGuard` (LEDBAT++'s window in rows, `dsd_flow.rs`) narrows a flowing tree when the least of the
+last 4 answer delays sits 60 ms over the least seen, and could not tell a queue on the link from the
+far computer's own delay: on TH↔AU a far slow on its own for 12 s (`guard1101` arm 8) and 37 s
+(`shape1101` arm 1) cut it to 2 rows a level, and each was its run's slowest reply.
+
+**Done 2026-11-01 (ships off):** Swift's split. (1) The far reports how long it held each forward —
+`LayerResult::served_us`, trailer `0x0A`, sent only to a requester advertising
+`features::SERVED_TIME` (bit 36), kept per authenticated sender (`network/manager/served_time.rs`;
+security review: nothing above LOW). (2) Behind `SWARMLLM_FLOW_SERVED_TIME=1`, the guard reads the
+link's window on the delay less that time (believed only above the least round trip,
+`believed_served_ms`) and gives the far's time a window of its own: each far cut a TRIAL — half the
+live budget first (fewer forwards out), from the window the flow runs at — kept only if the far's
+queue falls to 3/4. **Off by default**: on a processor-only rig (the card was off that boot) both
+designs lost to the whole delay, the first reply of every arm by 14-46% — on one processor every row
+costs this node's drafter and its own layers too, so the guard's pin at 2×32 is the best that rig
+can do.
+
+**Left**: (1) the A/B where #388 came from — a card far on the real link — now that v0.3.268 carries
+bit 36 (2026-11-02): `real_link.sh` arms `flow@SWARMLLM_FLOW_SERVED_TIME=1` against `flow`, ABBA × 3, prose and
+code, the far's slow spells counted per reply (`served_read`, `far_cuts`, `far_undone`); the
+default follows it. **Tried 2026-11-04, VOID** (`~/swarmllm-gate/deep/fr/real_link.sh`, `TAG=388`, ABBA × 3, one
+build = main `042f3dcc`): `aa3d1e66`'s least round trip had fallen to 117-156 ms (it read ~420 ms
+through October), and at that distance all 24 replies decoded by streamed checks (`dsd_stream`,
+shape `peer-last`) — 0 `a tree that flowed is complete` lines — so `FlowGuard` and the switch never
+ran; the arms' prose 11.97 against 11.22 tok/s and code 34.22 against 34.15 are noise. The A/B
+needs a far whose round trip makes the tree flow (or the shape forced). Same run: a reply's third
+token at temperature 0 differed between asks of one arm ("In the quiet town" / "In the heart"),
+the shape of a near-tie under reassociation (gotcha #709's test: off-rank would be sampling) — not
+scored against llama.cpp, no 14B reference here. (2) On the rig the link's share of a delay rose ~400 ms over its least while
+the far was busy — most likely both nodes' network tasks waiting for the one processor, not
+measured apart; on the real link, check `link_least_ms` against the least round trip before
+trusting the link window's cuts.
+
+**Also** (moved from #369 (b), passive): a balance term for a cards-only chain whose reply flows,
+once a placement that saturates one side is seen on a real chain — today `plan_chain` fills each
+machine to its ceiling in turn, and a flow is priced by `split_rounds::round_trips_waited` (#3 (d)).

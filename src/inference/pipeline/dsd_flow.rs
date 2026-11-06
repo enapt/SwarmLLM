@@ -120,18 +120,22 @@ fn guard_on() -> bool {
 }
 
 /// Whether the guard takes the far computer's own time off an answer's delay
-/// (#388, [`believed_served_ms`]): OFF unless `SWARMLLM_FLOW_SERVED_TIME=1`
-/// (or `on` / `true`) — every delay read whole, as before. Off until it is
-/// measured where #388 came from, a card far on the real link: on a
-/// processor-only rig it lost (`docs/invariants/scheduling.md` § "A far
-/// computer's own time is not the link's"), and a far reports its time only
-/// from the release that carries `features::SERVED_TIME`.
+/// (#388, [`believed_served_ms`]): ON unless `SWARMLLM_FLOW_SERVED_TIME=0`
+/// (or `off` / `false`), which reads every delay whole, as before. Measured
+/// where #388 came from, a card far on the real link (2026-11-06, TH↔AU,
+/// ABBA × 3): prose 14.8 against 11.7 tok/s, code 32.7 against 30.1 — read
+/// whole, the far's own busy spells cut the tree to 2 rows a level 18-24
+/// times a prose reply. It lost only on a processor-only rig, where every
+/// row costs this node's drafter and layers too (`docs/invariants/
+/// scheduling.md` § "A far computer's own time is not the link's"). A far
+/// older than `features::SERVED_TIME` reports nothing, and its delays are
+/// read whole.
 fn served_time_on() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
     *ON.get_or_init(|| {
-        matches!(
+        !matches!(
             std::env::var("SWARMLLM_FLOW_SERVED_TIME").ok().as_deref(),
-            Some("1") | Some("on") | Some("true")
+            Some("0") | Some("off") | Some("false")
         )
     })
 }

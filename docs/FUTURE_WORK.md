@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #411**). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #412**). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -93,13 +93,10 @@ the top track (`docs/plans/large_model_splits.md`).
    the field's shape on native Linux (a Linux card peer through `swarm_route`, or the next field export's
    `cuda_pool` DIAG lines and the new "refused memory" line). (#403 CLOSED 2026-11-04, released in
    v0.3.272 — § "Closed".)
-7. **#388** — the flow's guard takes a far computer's own delay for a queue on the link (the
-   slowest reply of two 12-arm runs on 2026-11-01). The far now reports its own time and the guard
-   can read it apart (`SWARMLLM_FLOW_SERVED_TIME=1`, off: it lost on a processor-only rig, for
-   that rig's reasons). The real-link A/B was VOID on 2026-11-04: the Australian card's round trip
-   had fallen to 117-156 ms, every reply streamed and the guard never ran. **Next**: the same A/B
-   on a far whose round trip makes the tree flow, or with the flow shape forced; the default
-   follows it. (#369 CLOSED 2026-11-01.)
+7. **#411** — where a tree should start to flow (150 ms today), now that its guard reads a far
+   computer's own time apart (#388 CLOSED 2026-11-06: on the real link the flow ran prose 14.8
+   against 11.7 tok/s with it, and it is on by default). **Next**: stream against forced flow in
+   one sitting at 100-150 ms.
 8. **#318** — a model no single member can hold, at a usable speed. **Llama-3.3-70B on two
    machines — this one (8 GB card + processor) and an RTX 3060 in Australia (~420 ms) — reads
    2.37-2.61 tok/s on new questions (v0.3.264, 2026-10-31 04Z) and 1.81-2.22 (v0.3.265, 12Z, the
@@ -2000,45 +1997,24 @@ the last one — an agent's next turn — waits for it: those arms' first token 
 the card's device-to-host read) at both speeds; whether freed snapshots' host buffers are reused or
 the copy faults fresh pages (an allocation of 569 MB under WSL2 is 146K first touches).
 
-#### #388 — The flow's guard takes a far computer's own delay for a queue on the link, and narrows a tree that cannot shorten it
-`P2` · perf-split · **NARROWED** — 2026-11-01 · evidence: `docs/invariants/scheduling.md` § "A far computer's own time is not the link's"; history: #369 (closed 2026-11-01, archive § "#369")
+#### #411 — Where a tree should start to flow, now that its guard reads a far computer apart
+`P2` · perf-split · **OPEN** — 2026-11-06 · evidence: `docs/invariants/scheduling.md` § "A far computer's own time is not the link's"; history: #388 (closed 2026-11-06)
 
-`FlowGuard` (LEDBAT++'s window in rows, `dsd_flow.rs`) narrows a flowing tree when the least of the
-last 4 answer delays sits 60 ms over the least seen, and could not tell a queue on the link from the
-far computer's own delay: on TH↔AU a far slow on its own for 12 s (`guard1101` arm 8) and 37 s
-(`shape1101` arm 1) cut it to 2 rows a level, and each was its run's slowest reply.
+A reply's tree flows from a 150 ms least round trip (`dsd_tree::FLOW_LEAST_ROUND_TRIP_MS`, the
+2026-10-23 rig: flow ÷ chain stream 0.94 at 100 ms, 1.04 at 120, 1.19 at 150), measured before the
+guard read the far's own time apart (#388). On the real link at 127-131 ms with the tree forced
+(`SWARMLLM_DRAFT_TREES=1`) and the far read apart, prose ran 14.8 tok/s (median of six) and code
+32.7 — the stream there on 2026-11-04 ran prose ~11.6 and code ~34.2, a different day. So the flow
+may pay below 150 ms for prose and not for code. **Next**: the same sitting, `real_link.sh` arms
+stream (no switch) against `SWARMLLM_DRAFT_TREES=1`, ABBA × 3, prose and code, on whichever far
+card is 100-150 ms away; the line moves only on that measurement, and per reply kind only if the
+copy-rich code reply is the one the stream wins. Prior art: only this repo's own sweep (above) so
+far — search how other split/speculative systems choose between pipelining and tree checks by
+distance before moving the line.
 
-**Done 2026-11-01 (ships off):** Swift's split. (1) The far reports how long it held each forward —
-`LayerResult::served_us`, trailer `0x0A`, sent only to a requester advertising
-`features::SERVED_TIME` (bit 36), kept per authenticated sender (`network/manager/served_time.rs`;
-security review: nothing above LOW). (2) Behind `SWARMLLM_FLOW_SERVED_TIME=1`, the guard reads the
-link's window on the delay less that time (believed only above the least round trip,
-`believed_served_ms`) and gives the far's time a window of its own: each far cut a TRIAL — half the
-live budget first (fewer forwards out), from the window the flow runs at — kept only if the far's
-queue falls to 3/4. **Off by default**: on a processor-only rig (the card was off that boot) both
-designs lost to the whole delay, the first reply of every arm by 14-46% — on one processor every row
-costs this node's drafter and its own layers too, so the guard's pin at 2×32 is the best that rig
-can do.
-
-**Left**: (1) the A/B where #388 came from — a card far on the real link — now that v0.3.268 carries
-bit 36 (2026-11-02): `real_link.sh` arms `flow@SWARMLLM_FLOW_SERVED_TIME=1` against `flow`, ABBA × 3, prose and
-code, the far's slow spells counted per reply (`served_read`, `far_cuts`, `far_undone`); the
-default follows it. **Tried 2026-11-04, VOID** (`~/swarmllm-gate/deep/fr/real_link.sh`, `TAG=388`, ABBA × 3, one
-build = main `042f3dcc`): `aa3d1e66`'s least round trip had fallen to 117-156 ms (it read ~420 ms
-through October), and at that distance all 24 replies decoded by streamed checks (`dsd_stream`,
-shape `peer-last`) — 0 `a tree that flowed is complete` lines — so `FlowGuard` and the switch never
-ran; the arms' prose 11.97 against 11.22 tok/s and code 34.22 against 34.15 are noise. The A/B
-needs a far whose round trip makes the tree flow (or the shape forced). Same run: a reply's third
-token at temperature 0 differed between asks of one arm ("In the quiet town" / "In the heart"),
-the shape of a near-tie under reassociation (gotcha #709's test: off-rank would be sampling) — not
-scored against llama.cpp, no 14B reference here. (2) On the rig the link's share of a delay rose ~400 ms over its least while
-the far was busy — most likely both nodes' network tasks waiting for the one processor, not
-measured apart; on the real link, check `link_least_ms` against the least round trip before
-trusting the link window's cuts.
-
-**Also** (moved from #369 (b), passive): a balance term for a cards-only chain whose reply flows,
-once a placement that saturates one side is seen on a real chain — today `plan_chain` fills each
-machine to its ceiling in turn, and a flow is priced by `split_rounds::round_trips_waited` (#3 (d)).
+**Also** (moved from #369 (b) via #388, passive): a balance term for a cards-only chain whose reply
+flows, once a placement that saturates one side is seen on a real chain — today `plan_chain` fills
+each machine to its ceiling in turn, and a flow is priced by `split_rounds::round_trips_waited` (#3 (d)).
 
 #### #357 — A card's first graph of a new shape, late in a worker's life, can stall one forward 10-59 s
 `P3` · perf-local · **OPEN** — 2026-10-26 · evidence: `faster_than_local.md` § 8.6; gotcha #883
@@ -4568,6 +4544,18 @@ archive under the named heading. Reopen one only with the evidence its line name
 Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 19-28 were
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
+
+**Closed 2026-11-06, unreleased** (#388)
+- #388 — **A flowing tree's guard took a far computer's own busy spells for a queue on the link.**
+  The far reports how long it held each forward (`LayerResult::served_us`, bit 36, since v0.3.268)
+  and the guard reads the link's window on the delay less that time (Swift's two windows, believed
+  only above the least round trip — RFC 9002 § 5.3), which was off after losing on a processor-only
+  rig. On the real link with a card far (TH↔AU, 127-131 ms, the tree forced, ABBA × 3, the
+  published v0.3.274) it won: prose 14.8 against 11.7 tok/s, code 32.7 against 30.1; read whole,
+  the far's queue (207-303 ms) cut the tree to 2 rows a level 18-24 times a prose reply, while the
+  link's own share stayed within 17 ms of its least. On by default (`dsd_flow::served_time_on`,
+  A/B `SWARMLLM_FLOW_SERVED_TIME=0`). Residual: where the flow's line belongs → #411. The entry as
+  it stood: archive § "#388".
 
 **Closed 2026-11-05, released in v0.3.274** (#410, #408, #409)
 - #410 — **A peer manifest's layer count sized allocations unchecked.** `num_layers` and each part's

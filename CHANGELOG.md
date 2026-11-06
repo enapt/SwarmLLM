@@ -10,6 +10,16 @@ read as a far-away country. Every computer's location is now read as a two-lette
 it arrives, and a `region` setting that is not one is looked up from the internet address instead,
 as if it were unset (#407).
 
+**A model split across two continents keeps guessing at full width while the far computer is
+busy.** When a model is split between computers far apart, this computer guesses several words ahead
+and the far computer checks the guesses. A guard narrows the guessing when the connection between
+them backs up. It could not tell a slow connection from a far computer that was simply busy, so it
+narrowed the guessing whenever the far computer slowed down. The far computer now says how long it
+spent on each step, and the guard counts only the rest against the connection. On a real
+Thailand–Australia split of a 14B model, prose came 26% faster (14.8 against 11.7 tokens a
+second) and code 9% faster. Turned on for everyone; `SWARMLLM_FLOW_SERVED_TIME=0` keeps the old
+behaviour (#388).
+
 **A graphics card that refuses memory is asked once more before a request fails.** SwarmLLM keeps
 graphics memory a model has finished with, so the next request can reuse it quickly. When the card
 refused a new piece of memory, that kept memory could be in the way: the request failed, and the

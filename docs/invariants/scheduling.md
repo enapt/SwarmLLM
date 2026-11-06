@@ -5650,7 +5650,7 @@ where the whole
 delay had pinned 2×32 (7.3-8.3 rows a forward against 6.6-6.9, 20-26 stale answers against 0-9, the
 drafter 65-76 s a reply against 44-58).
 
-**So it is off by default** (`SWARMLLM_FLOW_SERVED_TIME=1` turns it on). Neither design won on this
+**So it was off by default** (until 2026-11-06 — the next paragraph). Neither design won on this
 rig, and for a reason that is the rig's: every row costs THIS node's drafter and its own layers on
 the same processor as the far, which no window here measures, so the fewest rows always win and the
 whole delay's pin at the floor is the best this rig can do. A card far on the real link — where
@@ -5659,6 +5659,30 @@ otherwise — has none of that, and is gotcha #193's "second device class", the 
 reports its time only from a release carrying `features::SERVED_TIME` (bit 36); the A/B then runs
 from this node (`real_link.sh`, served time on against off, ABBA × 3, prose and code), and the
 default follows the measurement.
+
+**On the real link with a card far it wins, so it is ON** (2026-11-06; A/B `SWARMLLM_FLOW_SERVED_TIME=0`).
+`~/swarmllm-gate/deep/fr/real_link.sh`, `TAG=388b`, the published v0.3.274 binary, Qwen2.5-14B Q4_K_M
+with this node's card holding shards 0-3 and `aa3d1e66` (RTX 3060, AU, least round trip 127-131 ms)
+4-15, the 0.5B Q8_0 drafting, 160-token replies at temperature 0, ABBA × 3. At that distance a reply
+takes the stream (the flow's line is 150 ms — 2026-11-04's attempt never ran the guard), so both arms
+force the tree with `SWARMLLM_DRAFT_TREES=1`; every reply flowed (24 `a tree that flowed is complete`
+lines). Decode tok/s:
+
+| | served time read (on) | whole delays (off) |
+|---|---|---|
+| prose, six replies | 13.92-15.54, median 14.8 | 10.56-13.97, median 11.7 |
+| code, six replies | 30.57-34.10, median 32.7 | 29.43-30.47, median 30.1 |
+| link window cuts a reply | 0 | 18-24 prose, 2-7 code (to 2 rows a level) |
+| most queue over the least: the link / the far | 9-17 ms / 120-255 ms | 207-303 ms, read whole |
+| far trials cut / undone a reply | 2-9 / 0-2 | — |
+| rows a forward, prose | 20.3-21.0 | 7.6-11.1 |
+
+The whole delay's queue was the far's own time: the link's share stayed within 17 ms of its least
+while the far was busy, so the rig's ~400 ms rise in the link's share (above) was the rig's one
+processor. Replies: the six code replies of each arm are the same bytes (five of six without), and
+the arms part at one near-tie word ("calculates" / "computes" — the check's width moves a card's row,
+`arch-inference.md`); prose parts within BOTH arms alike, at story names ("Seabrook" / "Marisport"),
+so no arm is more or less exact than the other. Not scored against llama.cpp (no whole 14B here).
 
 **Copied runs** (2026-10-22, `~/swarmllm-318/copyrig.sh`, one binary, 385 ms, no rate limit, A/B
 `SWARMLLM_FLOW_COPY=0`, arms alternating, two warm 400-token replies an arm, request-level tok/s):
