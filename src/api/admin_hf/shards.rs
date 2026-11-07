@@ -142,6 +142,31 @@ fn parts_already_here(
         .collect()
 }
 
+/// What a part download that finished without failing writes into the
+/// model's progress entry, given how many parts it was asked for and which of
+/// those it left to another download that has not landed them yet.
+///
+/// The entry is one per model, so it may be that other download's own — a
+/// model added from the swarm, say. Calling it complete while those parts were
+/// on their way read 100% for a model still downloading; they are the other
+/// download's to report, and it settles the entry when they land (#420's
+/// reconcile, for a model added from the swarm).
+fn settle_finished_download(
+    entry: &mut crate::model::acquisition::AcquisitionStatus,
+    asked: usize,
+    still_on_the_way: &[u32],
+) {
+    if still_on_the_way.is_empty() {
+        entry.state = crate::model::acquisition::AcquisitionState::Complete;
+        entry.verified_shards = asked as u32;
+        entry.log_push("All shards downloaded and registered".to_string());
+    } else {
+        entry.log_push(format!(
+            "Shards {still_on_the_way:?} are still on their way through another download"
+        ));
+    }
+}
+
 pub async fn hf_download_shards(
     State(state): State<AppState>,
     JsonBody(body): JsonBody<HfShardDownloadRequest>,
@@ -598,7 +623,6 @@ pub async fn hf_download_shards(
         }
 
         // Generate manifest from header BEFORE downloading shard data.
-        // Pass empty shard_indices — no shards to register yet (they don't exist on disk).
         let header_path = dest_dir.join(crate::model::shard::HEADER_FILENAME);
         let manifest_result = crate::model::manifest::generate_manifest_from_header(
             &crate::model::manifest::ManifestGenParams {
@@ -607,7 +631,6 @@ pub async fn hf_download_shards(
                 filename: &filename,
                 total_size: info.total_size,
                 shard_count: info.shard_count(),
-                shard_indices: &[],
                 shared: &download_shared,
                 precomputed_layouts: Some(&info.layouts),
             },
@@ -723,6 +746,16 @@ pub async fn hf_download_shards(
         // post-loop `if failed { .. } else { .. }` would mark a cancelled
         // download Complete.
         let mut cancelled = false;
+        // What this download did with each part it was asked for: fetched it,
+        // or left it to the download that already had it. Only the first kind
+        // is this download's to credit or report — a part left to another one
+        // was registered as held here, and the model called complete, while
+        // its bytes were still on their way.
+        // Prior art: BitTorrent (BEP 3) — "the 'have' message's payload is
+        // the index which that downloader just completed and checked the hash
+        // of"; a piece requested elsewhere is in flight, not had.
+        let mut landed: Vec<u32> = Vec::new();
+        let mut left_to_another: Vec<u32> = Vec::new();
 
         for &shard_idx in &shard_indices {
             // Claim this shard's `.tmp` before writing a byte of it. The
@@ -744,6 +777,16 @@ pub async fn hf_download_shards(
                         shard = shard_idx,
                         "Shard is already being downloaded — leaving it to the download that has it"
                     );
+                    if let Some(mut entry) = download_shared
+                        .models
+                        .acquisition_progress
+                        .get_mut(&download_mid)
+                    {
+                        entry.log_push(format!(
+                            "Shard {shard_idx} is already being fetched by another download"
+                        ));
+                    }
+                    left_to_another.push(shard_idx);
                     continue;
                 }
             };
@@ -873,6 +916,7 @@ pub async fn hf_download_shards(
                 Ok(()) => {
                     progress_task.abort();
                     cumulative_downloaded += layout.size_bytes;
+                    landed.push(shard_idx);
 
                     if let Some(mut entry) = download_shared
                         .models
@@ -986,12 +1030,15 @@ pub async fn hf_download_shards(
         } else {
             tracing::info!(
                 model = %model_id_str,
-                shards = ?shard_indices,
+                landed = ?landed,
+                left_to_another = ?left_to_another,
                 "All shard downloads complete"
             );
 
             // Regenerate manifest with correct BLAKE3 hashes now that shard files
-            // exist on disk. The early manifest had [0u8; 32] placeholders.
+            // exist on disk. The early manifest had [0u8; 32] placeholders. It
+            // credits no part: each one this download fetched was registered
+            // and announced as it landed, above.
             if let Err(e) = crate::model::manifest::generate_manifest_from_header(
                 &crate::model::manifest::ManifestGenParams {
                     header_path: &header_path,
@@ -999,7 +1046,6 @@ pub async fn hf_download_shards(
                     filename: &filename,
                     total_size: info.total_size,
                     shard_count: info.shard_count(),
-                    shard_indices: &shard_indices,
                     shared: &download_shared,
                     precomputed_layouts: Some(&info.layouts),
                 },
@@ -1020,14 +1066,24 @@ pub async fn hf_download_shards(
                 );
             }
 
+            // A part left to another download counts once it has landed here,
+            // whoever fetched it; read before the entry's guard is taken.
+            let here = download_shared
+                .model_registry
+                .get_manifest(&download_mid)
+                .map(|m| download_shared.parts_landed_here(&m))
+                .unwrap_or_default();
+            let still_on_the_way: Vec<u32> = left_to_another
+                .iter()
+                .copied()
+                .filter(|index| !here.contains(index))
+                .collect();
             if let Some(mut entry) = download_shared
                 .models
                 .acquisition_progress
                 .get_mut(&download_mid)
             {
-                entry.state = crate::model::acquisition::AcquisitionState::Complete;
-                entry.verified_shards = shard_indices.len() as u32;
-                entry.log_push("All shards downloaded and registered".to_string());
+                settle_finished_download(&mut entry, shard_indices.len(), &still_on_the_way);
             }
 
             // Load available shards for inference (partial is fine)
@@ -1042,17 +1098,21 @@ pub async fn hf_download_shards(
             // Notify dashboard that models have changed
             download_shared.signal_dashboard(crate::daemon::state::DashboardSignal::ModelsChanged);
 
-            // Emit activity event for HF download completion
-            download_shared.emit_activity(
-                crate::daemon::state::ActivityEvent::new(
-                    "download",
-                    "hf_download_complete",
-                    format!("HuggingFace download complete: {}", model_id_str),
-                )
-                .with_model(model_id_str.clone())
-                .with_detail_str("huggingface".to_string())
-                .with_toast("success", 8000),
-            );
+            // Emit activity event for HF download completion — only for a
+            // download that fetched something; the one that has the rest
+            // reports its own.
+            if !landed.is_empty() {
+                download_shared.emit_activity(
+                    crate::daemon::state::ActivityEvent::new(
+                        "download",
+                        "hf_download_complete",
+                        format!("HuggingFace download complete: {}", model_id_str),
+                    )
+                    .with_model(model_id_str.clone())
+                    .with_detail_str("huggingface".to_string())
+                    .with_toast("success", 8000),
+                );
+            }
 
             // Wake auto-manage again to re-evaluate (maybe download more shards)
             download_shared.models.auto_manage_notify.notify_one();
@@ -1203,5 +1263,32 @@ mod tests {
         // A copy waiting to be replaced keeps nothing.
         state.model_registry.set_model_withheld(&id, true);
         assert!(here(&probe).is_empty());
+    }
+
+    /// A part download that left a part to another download does not call the
+    /// model complete while that part is still on its way: the entry is one
+    /// per model, and here it is the swarm download's, still at 0% (seen live
+    /// on a probe, 2026-11-07: "complete, 2 verified" for a download that
+    /// fetched nothing).
+    #[test]
+    fn a_part_left_to_another_download_keeps_the_model_downloading() {
+        use crate::model::acquisition::{AcquisitionState, AcquisitionStatus};
+        let id = crate::types::ModelId("left-to-another".into());
+        let fresh = || {
+            AcquisitionStatus::new_downloading(id.clone(), 3, 3 * 4096, "peers", "user", "start")
+        };
+
+        let mut entry = fresh();
+        settle_finished_download(&mut entry, 2, &[2]);
+        assert_eq!(entry.state, AcquisitionState::Downloading);
+        assert_eq!(
+            entry.verified_shards, 0,
+            "nothing verified by this download's say-so"
+        );
+
+        let mut entry = fresh();
+        settle_finished_download(&mut entry, 2, &[]);
+        assert_eq!(entry.state, AcquisitionState::Complete);
+        assert_eq!(entry.verified_shards, 2);
     }
 }

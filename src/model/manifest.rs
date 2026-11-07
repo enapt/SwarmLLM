@@ -198,17 +198,20 @@ pub(crate) struct ManifestGenParams<'a> {
     pub(crate) filename: &'a str,
     pub(crate) total_size: u64,
     pub(crate) shard_count: u32,
-    pub(crate) shard_indices: &'a [u32],
     pub(crate) shared: &'a std::sync::Arc<crate::daemon::SharedState>,
     /// Pre-computed layouts from probe. When provided, these are used directly
     /// instead of recomputing (avoids shard_count mismatch between probe and manifest).
     pub(crate) precomputed_layouts: Option<&'a [crate::inference::split::LayerShardLayout]>,
 }
 
-/// Generate a manifest from a downloaded GGUF header and register shards.
+/// Generate a manifest from a downloaded GGUF header and register it.
 /// The dashboard's shard download and the registration of a model people run
 /// (`huggingface::popular::register_without_parts`, #389 (b)) — one step, so
 /// both describe an upload alike.
+///
+/// It credits this computer with NO part: a part is credited where its bytes
+/// were accepted (`announce_shard_acquired`). A list passed in here once
+/// credited the parts a download had left to another one, still on their way.
 pub(crate) fn generate_manifest_from_header(params: &ManifestGenParams<'_>) -> Result<(), String> {
     let model_id = crate::types::ModelId(params.model_id_str.to_string());
     let node_id = params.shared.identity.node_id().clone();
@@ -229,7 +232,7 @@ pub(crate) fn generate_manifest_from_header(params: &ManifestGenParams<'_>) -> R
         params.filename,
         params.total_size,
         layouts,
-        node_id.clone(),
+        node_id,
     )?;
     let num_layers = manifest.num_layers;
     let model_dir = params
@@ -249,23 +252,10 @@ pub(crate) fn generate_manifest_from_header(params: &ManifestGenParams<'_>) -> R
     // Store GGUF metadata
     params.shared.gguf_meta.insert(model_id.clone(), meta);
 
-    // Register this node as holder of the downloaded shards
-    for &shard_idx in params.shard_indices {
-        let shard_id = crate::types::ShardId {
-            model_id: model_id.clone(),
-            index: shard_idx,
-        };
-        params
-            .shared
-            .model_registry
-            .record_shard_holder(shard_id, node_id.clone());
-    }
-
     tracing::info!(
         model = %model_id,
-        shards_registered = params.shard_indices.len(),
         num_layers,
-        "Generated manifest and registered shards from HF download"
+        "Generated manifest from a HuggingFace header"
     );
 
     Ok(())

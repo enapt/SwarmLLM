@@ -50,7 +50,7 @@ and #400's fetch half; after it, #406 and #407 (a restarted computer heard again
 the country lookup and the map) closed on 2026-11-05 for the next release. v0.3.273 carried #406 and #407;
 v0.3.274 (2026-11-06) #408, #409 and #410; v0.3.275 (2026-11-06) #367 (d)'s fix (3), #388, #411's narrowing and
 #407's residual; v0.3.276 (2026-11-07) #415, #413, #414 and #416's gossip half. On main, in no release yet (the
-next one carries them all): #416's nicknames, #417, #402, #191, #418, #419, #421, #420.
+next one carries them all): #416's nicknames, #417, #402, #191, #418, #419, #421, #420, #423.
 **2026-11-04:** #403 goes first among the open work by the user's direction: the release cut-off
 and the use gate must not be passable through a relay. Closed the same day (§ "Closed"). What each release carried is in § "Closed" and `CHANGELOG.md`; earlier
 rankings moved word for word to the archive, § "PRIORITIES re-rank log". Only OPEN work is listed
@@ -1595,7 +1595,11 @@ behind a `StagingFile`, hashes it and records its size and hash from the ORIGIN
 (`record_origin_verified_hash`); peers then fetch the part from a holder, checked against that
 hash — never from HuggingFace by a name a peer gave. Prior art: BitTorrent BEP 9 — metadata a peer
 supplies is taken only once it hashes to the info-hash the user chose, so a peer cannot add a file
-to a download.
+to a download. Which projector, where a repository has several (f16, bf16, Q8_0): llama.cpp's `-hf`
+download (`common/download.cpp::find_best_sibling`, 2026-11-07) takes the `*mmproj*.gguf` in the
+model file's own folder, an exact quant-tag match first, else the closest bit width — a rule over
+the listing, so two nodes agree only while the listing does: the first origin fetch must pin the
+file's name, size and hash, and later nodes take the pinned one, never re-choose.
 
 #### #168 — A relayed tensor forward over 32 MB is refused instead of chunked
 `P4` · network · **OPEN** — 2026-07-24 · history: archive § "Tensor-relay large-forward chunking (post-plan follow-on, deferred)"
@@ -4679,7 +4683,18 @@ Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
 
-**Closed 2026-11-06/07, unreleased** (#416's nicknames, #417, #402, #191, #418, #419, #421, #420)
+**Closed 2026-11-06/07, unreleased** (#416's nicknames, #417, #402, #191, #418, #419, #421, #420, #423)
+- #423 — **A part download that left its parts to another download credited them here and called the
+  model complete.** `admin_hf::shards` leaves a part another download claims to that download, then
+  credited every part asked for (`generate_manifest_from_header`'s `shard_indices` →
+  `record_shard_holder`), set the model's one progress entry `Complete` and sent a "download complete"
+  toast — seen on a probe node, 2026-11-07, with the model added from the swarm 4 s after the Get:
+  the swarm download's entry read complete at 0%, and 19 s later the health round withdrew the credit
+  as "removed from disk". Now the function credits no part (the field is gone); each part is
+  credited where its bytes were accepted; `settle_finished_download` calls the entry complete only
+  when no part left to another download is still on its way. Prior art: BitTorrent BEP 3 — `have`
+  names a piece "just completed and checked the hash of". Test
+  `a_part_left_to_another_download_keeps_the_model_downloading`.
 - #420 — **A model added from the swarm showed a part as downloading for good while another download
   fetched it.** The acquisition job (`model/acquisition.rs`) learns a part's progress only from the
   chunks the network manager sends it, and has no timer; a part another download writes sends it
@@ -4691,7 +4706,10 @@ grep `^| N |`).
   the part back to downloading and counted it twice), and a job the owner cancelled is dropped
   rather than called ready. Prior art: Kubernetes controllers are level-triggered — the reconcile
   reads the current state, so the next pass converges whatever event was missed. Test
-  `a_part_another_download_landed_completes_the_job` — red with the reading off.
+  `a_part_another_download_landed_completes_the_job` — red with the reading off. Verified live
+  2026-11-07 on a probe node beside the live node: Llama-3.2-1B added from the swarm while HuggingFace
+  wrote its part 1 — "Shard 1 arrived through another download", then complete at 3/3 (the run that
+  found #423).
 - #421 — **A vision encoder was a download candidate whose one fetch was a whole file from
   HuggingFace that another computer named.** The download pass made a candidate of any manifest's
   `mmproj` (at five times a part's score) and fetched it with `download_model` by

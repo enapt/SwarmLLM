@@ -522,7 +522,6 @@ pub(crate) async fn register_without_parts(
             filename: &source.filename,
             total_size: info.total_size,
             shard_count: info.shard_count(),
-            shard_indices: &[],
             shared: state,
             precomputed_layouts: Some(&info.layouts),
         },

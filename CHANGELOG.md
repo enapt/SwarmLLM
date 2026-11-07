@@ -48,6 +48,12 @@ placed there by hand (#422).
 fetched that part** (#420): the download checks every 10 seconds which parts have arrived, however
 they came.
 
+**Downloading parts this computer is already fetching no longer says the download finished**
+(#423). The download leaves such a part to the one already fetching it, but it then said "Download
+complete", showed the model as finished and counted the part as held here before it had arrived;
+shortly after, the activity list said the part had been removed from disk. It now reports only
+the parts it fetched, and the model shows as downloading until the rest arrive.
+
 ## [0.3.276-alpha] — 2026-11-07
 
 **A computer that has just started hears what each computer it connects to holds, at once.** When

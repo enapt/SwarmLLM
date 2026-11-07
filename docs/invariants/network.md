@@ -1506,6 +1506,27 @@ the swarm, its own copy of TinyLlama, part 1 asked for (`memory/tools/s393_probe
 over it. Test `a_part_already_here_is_not_fetched_again`, red with the skip off and with the dispute
 rule off.
 
+**A download credits only the parts it fetched (2026-11-07, #423).** The same handler leaves a part
+another download already claims to that download (`claim_shard_download` is `None` → `continue`,
+since 4b96d5e6) — and then, past the loop, credited every part it was asked for:
+`generate_manifest_from_header` took a `shard_indices` list and called `record_shard_holder` for
+each, and the progress entry was set `Complete` with that count verified. Seen on a probe node
+(main's dev build at 45485b0e, Llama-3.2-1B parts 1-2 from HuggingFace, the model added from the swarm 4 s
+later): the swarm download claimed both parts first, the HuggingFace download fetched nothing, and
+logged "registered shards … shards_registered=2"; the model's ONE progress entry — the swarm
+download's, at 0% — read complete with 2 verified, a "download complete" toast went out, and 19 s
+later the health round found the files absent, withdrew the credit and told the owner "A piece of …
+was removed from disk". The health round withdraws before it announces, so this run's claim most
+likely never reached a peer — but every registry reader (the scheduler, `privacy`, the dashboard)
+read it as held in between. Now the function credits NO part (the field is gone, so no caller can
+pass one): a part is credited where its bytes were accepted (`announce_shard_acquired`, per part,
+in the loop). The entry is settled by `admin_hf::shards::settle_finished_download`: `Complete` only
+when no part left to another download is still on its way (`parts_landed_here`), else a log line and
+the other download settles it; no toast from a download that fetched nothing. Prior art: BitTorrent
+(BEP 3) — the `have` message names "the index which that downloader just completed and checked the
+hash of"; a piece requested elsewhere is in flight, not had. Test
+`a_part_left_to_another_download_keeps_the_model_downloading`.
+
 → `docs/invariants/network.md`
 
 ## Destroying a shard we hold needs better evidence than a stranger's claim
