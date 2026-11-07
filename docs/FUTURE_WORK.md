@@ -49,7 +49,8 @@ width), #400, #402, #404 (P3), #397 (P4). v0.3.272 (2026-11-05) carried #403, #4
 and #400's fetch half; after it, #406 and #407 (a restarted computer heard again; connections closed before a restart,
 the country lookup and the map) closed on 2026-11-05 for the next release. v0.3.273 carried #406 and #407;
 v0.3.274 (2026-11-06) #408, #409 and #410; v0.3.275 (2026-11-06) #367 (d)'s fix (3), #388, #411's narrowing and
-#407's residual.
+#407's residual; v0.3.276 (2026-11-07) #415, #413, #414 and #416's gossip half. On main, in no release yet (the
+next one carries them all): #416's nicknames, #417, #402, #191, #418, #419, #421, #420.
 **2026-11-04:** #403 goes first among the open work by the user's direction: the release cut-off
 and the use gate must not be passable through a relay. Closed the same day (§ "Closed"). What each release carried is in § "Closed" and `CHANGELOG.md`; earlier
 rankings moved word for word to the archive, § "PRIORITIES re-rank log". Only OPEN work is listed
@@ -4810,7 +4811,7 @@ grep `^| N |`).
   MUST increase, a receiver takes only a greater one, the clock MAY be the `seq`). Test
   `a_rename_is_stamped_after_the_previous_record_even_when_the_clock_went_back`, red without it.
 
-**Closed 2026-11-06, in v0.3.276-alpha (tagged 17:10Z 11-06; published once signed)** (#416's gossip half and owner warning, #415, #414, #413, #388)
+**Closed 2026-11-06, released in v0.3.276 (published 2026-11-07 00:57:02Z)** (#416's gossip half and owner warning, #415, #414, #413, #388)
 - #416 (gossip half) — **Gossip from a computer whose clock runs a little fast was dropped by every
   peer.** The network loop's gate on health pings, parts lists and credit gossip took a message at
   most 30 s ahead of the receiver's clock; `773a3e85` (33 s fast) had all 150 of its messages dropped

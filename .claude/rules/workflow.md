@@ -78,7 +78,16 @@ before a `git commit` touching a file whose figures another document restates
 `frontend/i18n/*.json`, the book's installation page) — it tests THIS content,
 which a stamp file could not.
 
-**Both fail OPEN** (unparseable payload, missing cargo, timeout — the commit
+`release-window-gate.sh` (2026-11-07) refuses a `git commit` touching `src/`,
+`crates/`, `vendor/` or `frontend/` while `Cargo.toml`'s version is TAGGED and
+its release is not yet PUBLISHED (draft, or the Release run still building it).
+The user asked twice for ONE release carrying all the work (10-30, 11-07) and
+both times fixes landed after the tag; v0.3.276 missed seven. A fix that must
+ship re-cuts the release: tell the user, put `SWARMLLM_RECUT=1` in the commit
+command, abandon the draft, cut again. It reads the release with `gh` and says
+so when it cannot. Probe: `RWG_TEST_STATE=draft RWG_TEST_CHANGED=src/main.rs`.
+
+**All three fail OPEN** (unparseable payload, missing cargo, timeout — the commit
 gate now SAYS so when a cold build outlasts it, #779), and **a hook is verified
 by its OUTPUT, never its exit code** (#614) — three hooks here sat
 inert for months looking healthy. After touching the gate's patterns run

@@ -154,6 +154,11 @@ mmproj). Never edit a count without the run behind it (`completeness.md`).
   2026-11-01): no open P0/P1 against work it carries, no follow-up it needs, never on a boot
   after a driver stop — never a signed draft waiting on a reboot. Otherwise every fix rolls
   into the next release (`memory/release_gate.md` step 0).
+- ⛔ **The release the user signs carries EVERY fix on main** (user, 2026-10-30 AND 2026-11-07 — broken
+  twice): plan back from the signing time, cut the tag from the LAST fix, and land NO product code
+  between the tag and the publish — `release-window-gate.sh` refuses it. A fix that must ship re-cuts
+  the release. Before asking for the signature, `git diff --stat <tag> origin/main -- src crates vendor
+  frontend` is empty. Never name an unreleased version to the user ("on main, not in a release yet").
 - **Releases are SIGNED; CI leaves a DRAFT.** Read `memory/release_gate.md`
   before a release (~2 h bump → publish since 2026-10-14). ⛔ A BUILD gate is not
   a BEHAVIOUR gate (#683): `examples/release_gate.sh` runs on the DOWNLOADED
