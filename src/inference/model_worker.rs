@@ -3759,6 +3759,102 @@ struct MtpGuesses {
     declined: u64,
     /// Why it stopped for this reply.
     stopped: Option<String>,
+    /// The words its guesses read, where they read fewer than all.
+    words: Option<DraftWords>,
+}
+
+/// The words a reply's guesses read where the head guesses on the processor
+/// (#425 (b), `split::mtp::DRAFT_HOT_ROWS`): the output head's first rows,
+/// and the conversation's own words past them — a copied name is the head's
+/// surest guess. A conversation in words mostly past them, or a reply whose
+/// new words leave them often, reads every word.
+struct DraftWords {
+    hot: usize,
+    /// The conversation's words past the hot rows, in the order `rows`
+    /// holds them.
+    ids: Vec<u32>,
+    known: std::collections::HashSet<u32>,
+    /// The output head's rows for `ids[..built]`.
+    rows: Option<crate::inference::split::QMatMul>,
+    built: usize,
+    /// Words the reply committed, and how many were new past the hot rows.
+    committed: u64,
+    outside: u64,
+    /// Every word is read for the rest of the reply.
+    whole: bool,
+}
+
+impl DraftWords {
+    /// New words a reply collects before its rows are built again.
+    const REBUILD_AFTER: usize = 8;
+    /// Words a reply commits before it is judged.
+    const JUDGE_AFTER: u64 = 48;
+
+    /// `None` where more than a third of the prompt is past the hot rows, or
+    /// its own words past them number more than `DRAFT_MOST_OWN_WORDS`.
+    fn for_prompt(hot: usize, prompt: &[u32]) -> Option<Self> {
+        let past = prompt.iter().filter(|&&t| t as usize >= hot).count();
+        if past * 3 > prompt.len() {
+            return None;
+        }
+        let mut words = Self {
+            hot,
+            ids: Vec::new(),
+            known: Default::default(),
+            rows: None,
+            built: 0,
+            committed: 0,
+            outside: 0,
+            whole: false,
+        };
+        for &t in prompt {
+            words.learn(t);
+        }
+        (words.ids.len() <= crate::inference::split::DRAFT_MOST_OWN_WORDS).then_some(words)
+    }
+
+    /// `true` for a word past the hot rows not seen before.
+    fn learn(&mut self, t: u32) -> bool {
+        let new = t as usize >= self.hot && self.known.insert(t);
+        if new {
+            self.ids.push(t);
+        }
+        new
+    }
+
+    /// The reply's newly committed words. Every word is read from here on
+    /// once more than one in six was new past the hot rows — a guess costs
+    /// a third of a whole one, so that is where the hot rows stop paying —
+    /// or the own words outgrow `DRAFT_MOST_OWN_WORDS`.
+    fn note(&mut self, tokens: &[u32]) {
+        for &t in tokens {
+            self.committed += 1;
+            if self.learn(t) {
+                self.outside += 1;
+            }
+        }
+        if self.ids.len() > crate::inference::split::DRAFT_MOST_OWN_WORDS
+            || (self.committed >= Self::JUDGE_AFTER && self.outside * 6 > self.committed)
+        {
+            self.whole = true;
+            self.rows = None;
+        }
+    }
+
+    /// The own words' rows a guess reads beside the hot ones, built again
+    /// once enough new words wait.
+    fn rows(
+        &mut self,
+        model: &crate::inference::split::SplitModel,
+    ) -> Result<Option<(&crate::inference::split::QMatMul, &[u32])>, SwarmError> {
+        if !self.ids.is_empty()
+            && (self.rows.is_none() || self.ids.len() >= self.built + Self::REBUILD_AFTER)
+        {
+            self.rows = Some(model.mtp_rows_of(&self.ids)?);
+            self.built = self.ids.len();
+        }
+        Ok(self.rows.as_ref().map(|r| (r, &self.ids[..self.built])))
+    }
 }
 
 impl MtpGuesses {
@@ -3794,6 +3890,7 @@ impl MtpGuesses {
             accepted: 0,
             declined: 0,
             stopped: None,
+            words: None,
         })
     }
 
@@ -3884,6 +3981,9 @@ impl MtpGuesses {
                 .map_err(SwarmError::internal)?,
         );
         self.next_pos = index_pos + committed;
+        if let Some(words) = self.words.as_mut() {
+            words.note(tokens);
+        }
         Ok(())
     }
 
@@ -3930,18 +4030,19 @@ impl MtpGuesses {
                 self.for_the_owner,
             )?);
         }
-        let (mut rows_out, mut logits) =
+        let (mut rows_out, mut last_row) =
             out.ok_or_else(|| SwarmError::Internal("next-token head: nothing to read".into()))?;
+        let over = match self.words.as_mut() {
+            Some(words) if !words.whole => {
+                crate::inference::split::GuessOver::HotAnd(words.rows(model)?)
+            }
+            _ => crate::inference::split::GuessOver::Everything,
+        };
         // Every row so far is the reply's; the guesses' own rows go after.
         let held = self.cache.len();
         let mut guessed = Vec::with_capacity(gamma);
         loop {
-            let row: Vec<f32> = logits
-                .flatten_all()
-                .and_then(|l| l.to_dtype(candle_core::DType::F32))
-                .and_then(|l| l.to_vec1())
-                .map_err(SwarmError::internal)?;
-            let guess = crate::inference::sampling::argmax(&row);
+            let guess = model.mtp_guess(&last_row, over)?;
             guessed.push(guess);
             if guessed.len() >= gamma {
                 break;
@@ -3949,7 +4050,7 @@ impl MtpGuesses {
             let last = rows_out
                 .narrow(1, rows_out.dim(1).map_err(SwarmError::internal)? - 1, 1)
                 .map_err(SwarmError::internal)?;
-            (rows_out, logits) = model.mtp_forward(
+            (rows_out, last_row) = model.mtp_forward(
                 &mut self.cache,
                 &[guess],
                 &last,
@@ -4197,6 +4298,9 @@ impl LocalSpec {
         let Some(mut mtp) = MtpGuesses::for_model(model, kv_store, req_id_str) else {
             return self;
         };
+        mtp.words = model
+            .mtp_hot_rows()
+            .and_then(|hot| DraftWords::for_prompt(hot, prompt_ids));
         match mtp.take_the_prompt(model, prompt_ids, &kept, first) {
             Ok(()) => self.mtp = Some(mtp),
             Err(e) => tracing::warn!(error = %e, "next-token head: not used for this reply"),
@@ -4325,7 +4429,7 @@ impl LocalSpec {
         });
         let mtp = self.mtp.as_ref().map_or(String::new(), |m| {
             format!(
-                " head rounds {} guessed {} kept {} declined {} guess {} ms alpha {:.2} next {}{}",
+                " head rounds {} guessed {} kept {} declined {} guess {} ms alpha {:.2} next {} words {}{}",
                 m.rounds,
                 m.proposed,
                 m.accepted,
@@ -4335,6 +4439,14 @@ impl LocalSpec {
                     .map_or("-".to_string(), |ms| format!("{ms:.1}")),
                 m.acceptance.alpha(),
                 self.mtp_guess_count(self.room()),
+                m.words.as_ref().map_or("all".to_string(), |w| format!(
+                    "{}+{} new {}/{}{}",
+                    w.hot,
+                    w.ids.len(),
+                    w.outside,
+                    w.committed,
+                    if w.whole { " then all" } else { "" }
+                )),
                 m.stopped
                     .as_ref()
                     .map_or(String::new(), |why| format!(" stopped ({why})")),
@@ -9847,6 +9959,32 @@ mod local_speculation_tests {
                 "no check was taken back into — the replay never ran"
             );
         }
+    }
+
+    /// A reply's guesses read the hot rows and the conversation's own words
+    /// past them; a conversation mostly past them reads every word from the
+    /// start, and a reply whose new words leave them more than one in six
+    /// reads every word from then on (#425 (b)).
+    #[test]
+    fn a_replys_guesses_read_its_own_words_until_they_leave_the_hot_rows() {
+        assert!(
+            DraftWords::for_prompt(100, &[150, 160, 170, 5]).is_none(),
+            "a prompt mostly past the hot rows reads every word"
+        );
+        let mut words =
+            DraftWords::for_prompt(100, &[1, 2, 3, 150, 150, 4, 5]).expect("mostly hot");
+        assert_eq!(words.ids, vec![150], "each own word once");
+        // A word already known is no miss, however often it comes.
+        words.note(&[150; 60]);
+        assert!(!words.whole);
+        assert_eq!((words.committed, words.outside), (60, 0));
+        // Ten new words in seventy: under one in six.
+        words.note(&(200..210).collect::<Vec<u32>>());
+        assert!(!words.whole, "{} new of {}", words.outside, words.committed);
+        // Five more in seventy-five: over one in six.
+        words.note(&(300..305).collect::<Vec<u32>>());
+        assert!(words.whole, "{} new of {}", words.outside, words.committed);
+        assert_eq!(words.ids.len(), 16);
     }
 
     /// An open reply: little in it repeats the prompt, so the n-gram finds

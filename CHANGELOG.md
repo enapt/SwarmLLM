@@ -2,14 +2,17 @@
 
 ## [Unreleased]
 
-**Qwen 3.5, 3.6 and 3.8 reply up to 1.6 times faster on one computer** (#425). These models come
+**Qwen 3.5, 3.6 and 3.8 reply up to twice as fast on one computer** (#425). These models come
 with a small extra part trained to guess the next word, which was never used: replies were sped up
 only by copying text that already appeared in the conversation, which ordinary writing rarely
 repeats. That part now guesses a few words ahead and the model checks them all at once, keeping
-only the guesses it would have written itself. On a laptop, Qwen 3.5 4B continuing code
-went from about 10 to 16.7 words a second on the processor and from 72 to 90-110 on the graphics card;
-writing a story, from about 10 to 12 on the processor and 73 to 75-80 on the card. It costs the
-model 120-860 MB more memory, and is used only where the whole model runs on one computer.
+only the guesses it would have written itself. On the processor a guess weighs only the 32,768
+most common words plus the ones the conversation itself uses — about a third of the time of
+weighing all 248,000 — and every word in a conversation mostly in other scripts (Thai, Chinese).
+On a laptop, Qwen 3.5 4B continuing code went from about 10 to 20.5 words a second on the processor
+and from 72 to 90-110 on the graphics card; writing a story, from about 10 to 13 on the processor
+and 73 to 75-80 on the card. It costs the model about 120-900 MB more memory, and is used only
+where the whole model runs on one computer.
 
 **Your first question to a model no longer waits for the model to load** (#424). A model is loaded
 into memory only when a question needs it, and it is let go after five minutes without one — so the

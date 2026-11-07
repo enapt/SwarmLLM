@@ -2797,12 +2797,26 @@ A guess costs 21 ms on the processor (a 100 ms step) and 2.8-3.2 ms on the card 
 the 248K-row output head, not the block. Every reply parted from one at a time only at a near
 tie (#426 on the processor, gotcha #955 on the card).
 
+**On the processor a guess reads fewer words (built 2026-11-07, was residual (b)).** FR-Spec
+(arxiv 2502.14856): the draft's output head is the drafting bottleneck, and a frequent subset of
+the vocabulary keeps most of the mass. No frequency file ships with the model, but a byte-pair
+tokenizer's ids are its merges, most frequent first — so a guess reads the head's first 32,768
+rows plus the conversation's own words past them (`model_worker::DraftWords`), and every word
+where the conversation is mostly past them (Thai, Chinese). Same file and binary, A/B
+`SWARMLLM_MTP_VOCAB`, three runs an arm: a guess 21.2-21.7 → 6.6-7.0 ms; code 16.5-16.7 →
+20.5-20.6 tok/s, story 12.1-12.4 → 13.2-13.4 (one token at a time 9.5-10.4); a Thai continuation
+reads every word and is unchanged (22.2-23.7 against 23.1-23.6). 65,536 rows: 19.0-21.3 / 13.6-13.8, at twice the
+memory (138 MB beside the 4B's 69). Building it found gotcha #326 a second time (an owned buffer
+freed under the copy that read it), now fixed in the vendored `as_t_slice` itself.
+
 **Residual.** (a) **A split's last stage drafting with it** (#145's "MTP heads at the last
 stage"): the block loads only for a whole model; the far end holds the output head and could
-draft there. (b) **The draft's output head over a frequent-token subset** (FR-Spec, arxiv
-2502.14856: the draft head is the drafting bottleneck; a quarter of the vocabulary keeps ~95% of
-the mass) — a guess would cost a fraction of its 21 ms on the processor; needs a frequency
-ranking (none ships with the file). (c) No planner or admission charges the block (122-856 MB).
+draft there. (b) **Fewer words on a card too**: there a whole guess is 2.8-3.2 ms, about 1.2 ms
+of it the 521 MB head; the hot rows are one copy at load, but the conversation's own words would
+need their rows gathered on the card (reading the head back per rebuild is no option). Through the
+node a card's story gained nothing (3.85 s without the head, 3.87 with): its check costs 19 ms against a 16 ms step at
+~1.8 tokens a round. (c) No planner or admission charges the block (122-856 MB) or the hot rows
+(about 55-140 MB).
 (d) The head's cache stops at 16,384 positions and the head stops for the reply. (e) Unmeasured:
 the 27Bs, the 35B-A3B (experts in RAM beside a card), Qwen 3.8 27B's Q4_0 `eh_proj` (an int4 head
 collapsed to 0-4% in colibri, #145).

@@ -2534,6 +2534,12 @@ impl SplitModel {
                 .ok()
                 .and_then(|v| v.to_u32().ok())
                 .unwrap_or(0);
+            // The output head's first rows, which a guess reads where the
+            // head runs on the processor (#425 (b)) — charged with its block.
+            let hot_rows = super::mtp::hot_rows_for(
+                output.as_ref(),
+                placement.device_for(layer_end.saturating_sub(1)).is_cuda(),
+            );
             let mtp_block = super::mtp::block_to_load(
                 &ct,
                 &model_arch,
@@ -2545,7 +2551,8 @@ impl SplitModel {
             .filter(|&block| {
                 let last = placement.device_for(layer_end.saturating_sub(1));
                 let on_card = last.is_cuda();
-                let (here, beside) = super::mtp::block_bytes(&ct, block, on_card);
+                let (mut here, beside) = super::mtp::block_bytes(&ct, block, on_card);
+                here += hot_rows.map_or(0, |(_, bytes)| bytes);
                 let quarter = |bytes: u64, budget: Option<u64>| {
                     budget.is_none_or(|b| bytes.saturating_mul(4) <= b)
                 };
@@ -2578,6 +2585,7 @@ impl SplitModel {
                     block,
                     mb = here >> 20,
                     experts_in_ram_mb = beside >> 20,
+                    hot_rows = hot_rows.map_or(0, |(rows, _)| rows),
                     on_card,
                     loaded = fits,
                     "next-token-prediction block (a guess head)"
@@ -2812,6 +2820,13 @@ impl SplitModel {
                     ffn,
                     attention_norm,
                     post_attention_norm,
+                    hot: match (hot_rows, output.as_ref()) {
+                        (Some((rows, _)), Some(output)) => Some(super::mtp::head_rows(
+                            output,
+                            super::mtp::HeadRows::First(rows),
+                        )?),
+                        _ => None,
+                    },
                     device,
                 });
             }

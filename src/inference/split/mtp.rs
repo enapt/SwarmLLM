@@ -21,7 +21,10 @@
 //! check, then drops the rejected rows), so no row is computed to be thrown
 //! away, and the first draft step rides on the same forward.
 
-use candle_core::{Device, IndexOp, Tensor};
+use std::borrow::Cow;
+
+use candle_core::quantized::{QStorage, QTensor};
+use candle_core::{DType, Device, IndexOp, Tensor, D};
 use candle_nn::Module;
 
 use super::kv_cache::LayerKv;
@@ -45,6 +48,42 @@ pub(crate) const MTP_PROMPT_ROWS: usize = 4_096;
 /// Rows the head takes in per forward when it catches up.
 pub(crate) const MTP_CATCH_UP_CHUNK: usize = 512;
 
+/// Rows of the output head a guess on the processor reads by default
+/// (#425 (b)): the tokenizer's first 32,768 words, FR-Spec's best size.
+///
+/// Prior art: FR-Spec (arXiv 2502.14856) — a draft's output head over the
+/// most frequent 32K words cut its cost ~75% with no retraining (that head is
+/// most of a draft's time on a large vocabulary); SGLang ships it as
+/// `--speculative-token-map`, a frequency file made per model from a corpus;
+/// EAGLE-3 trains its draft over a 32K vocabulary with a draft-to-target map.
+/// Ours differs in three places. No frequency file exists for Qwen 3.5's
+/// tokenizer, so the hot rows are its FIRST ids: a byte-pair tokenizer's
+/// merges are made most frequent first, and this one's ids are its merges in
+/// order (`256 + k` is merge `k`, read off the 4B's file 2026-11-07). On
+/// samples tokenized as the file does, 32K covered 89-94% of English, code
+/// and JSON and 16-17% of Thai and Chinese — so a reply's guesses also read
+/// the conversation's own words past them (a copied name is the head's
+/// surest guess), and a conversation in words mostly past them reads the
+/// whole vocabulary (`DraftWords` in `model_worker`). And only where the
+/// output head is on the processor: there one guess took 20-21 ms, most of
+/// it this 248,320-row head; on a card a whole guess took 3 ms.
+pub(crate) const DRAFT_HOT_ROWS: usize = 32_768;
+
+/// The most of a conversation's own words past the hot rows a reply's
+/// guesses read beside them; with more, its guesses read every word.
+pub(crate) const DRAFT_MOST_OWN_WORDS: usize = 8_192;
+
+/// `SWARMLLM_MTP_VOCAB`: `full` — a guess reads the whole output head, as
+/// before (#425 (b)); a number — that many hot rows; else [`DRAFT_HOT_ROWS`].
+fn draft_hot_rows() -> Option<usize> {
+    static ROWS: std::sync::OnceLock<Option<usize>> = std::sync::OnceLock::new();
+    *ROWS.get_or_init(|| match std::env::var("SWARMLLM_MTP_VOCAB").as_deref() {
+        Ok("full") => None,
+        Ok(n) => Some(n.parse().ok().filter(|&n| n > 0).unwrap_or(DRAFT_HOT_ROWS)),
+        Err(_) => Some(DRAFT_HOT_ROWS),
+    })
+}
+
 /// The head, loaded only where the segment ends the model.
 pub(crate) struct MtpHead {
     pub(super) eh_proj: QMatMul,
@@ -56,6 +95,9 @@ pub(crate) struct MtpHead {
     pub(super) ffn: FfnVariant,
     pub(super) attention_norm: RmsNorm,
     pub(super) post_attention_norm: RmsNorm,
+    /// The output head's first rows, which a guess reads where the head is
+    /// on the processor (#425 (b), [`DRAFT_HOT_ROWS`]); `None` reads them all.
+    pub(super) hot: Option<QMatMul>,
     /// Where the block runs: the trunk's last layer's device (its experts, for
     /// a mixture-of-experts block on a card, in the machine's memory).
     pub(super) device: Device,
@@ -174,6 +216,89 @@ pub(crate) fn block_bytes(
         })
 }
 
+/// Rows of a quantized `[rows, cols]` head in whole blocks, and one row's
+/// bytes.
+fn rows_and_row_bytes(q: &QTensor) -> Option<(usize, usize)> {
+    let dims = q.shape().dims();
+    let [rows, cols] = dims[..] else {
+        return None;
+    };
+    let dtype = q.dtype();
+    (cols % dtype.block_size() == 0).then(|| (rows, cols / dtype.block_size() * dtype.type_size()))
+}
+
+/// The hot rows a guess reads first, `(rows, bytes)`, where they apply: the
+/// switch is on, the output head is quantized and on the processor, so is
+/// the block (`block_on_card` false), and the head has more rows than that.
+pub(crate) fn hot_rows_for(output: Option<&QMatMul>, block_on_card: bool) -> Option<(usize, u64)> {
+    let rows = draft_hot_rows()?;
+    let q = output?.quantized_weight()?;
+    if block_on_card || !q.device().is_cpu() {
+        return None;
+    }
+    let (vocab, row_bytes) = rows_and_row_bytes(q)?;
+    (rows < vocab).then(|| (rows, (rows * row_bytes) as u64))
+}
+
+/// Rows of a quantized output head.
+pub(crate) enum HeadRows<'a> {
+    /// The first `n`.
+    First(usize),
+    /// These, in this order.
+    Of(&'a [u32]),
+}
+
+/// A copy of `rows` of `output` (quantized, `[vocab, hidden]`) as a head of
+/// its own, on the device `output` is on. Each row is the same bytes, so it
+/// scores its word exactly as the whole head does.
+pub(crate) fn head_rows(output: &QMatMul, rows: HeadRows<'_>) -> Result<QMatMul, SwarmError> {
+    let fail = |what: String| SwarmError::Internal(format!("draft words: {what}"));
+    let q = output
+        .quantized_weight()
+        .ok_or_else(|| fail("the output head is not quantized".into()))?;
+    let (vocab, row_bytes) =
+        rows_and_row_bytes(q).ok_or_else(|| fail(format!("an output head of {:?}", q.shape())))?;
+    let cols = q.shape().dims()[1];
+    let data = q.data().map_err(|e| fail(e.to_string()))?;
+    let (n, bytes): (usize, Cow<'_, [u8]>) = match rows {
+        HeadRows::First(n) => (
+            n,
+            Cow::Borrowed(
+                data.get(..n * row_bytes)
+                    .ok_or_else(|| fail(format!("{n} rows of {vocab}")))?,
+            ),
+        ),
+        HeadRows::Of(ids) => {
+            let mut v = Vec::with_capacity(ids.len() * row_bytes);
+            for &id in ids {
+                let at = id as usize * row_bytes;
+                v.extend_from_slice(
+                    data.get(at..at + row_bytes)
+                        .ok_or_else(|| fail(format!("word {id} of {vocab}")))?,
+                );
+            }
+            (ids.len(), Cow::Owned(v))
+        }
+    };
+    if n == 0 {
+        return Err(fail("no rows".into()));
+    }
+    QStorage::from_data(bytes, &q.device(), q.dtype())
+        .and_then(|storage| QTensor::new(storage, (n, cols)))
+        .and_then(QMatMul::from_qtensor)
+        .map_err(|e| fail(e.to_string()))
+}
+
+/// What a guess picks from ([`SplitModel::mtp_guess`]).
+#[derive(Clone, Copy)]
+pub(crate) enum GuessOver<'a> {
+    /// The whole vocabulary.
+    Everything,
+    /// The hot rows, and a reply's own words past them: `(their rows, their
+    /// ids)`.
+    HotAnd(Option<(&'a QMatMul, &'a [u32])>),
+}
+
 impl SplitModel {
     /// The layer a forward keeps for the head: the trunk's last (absolute).
     pub(crate) fn mtp_capture_layer(&self) -> Option<usize> {
@@ -196,10 +321,88 @@ impl SplitModel {
             .map_err(|e| SwarmError::Internal(format!("next-token head: hidden norm: {e}")))
     }
 
+    /// The hot rows a guess reads first (`MtpHead::hot`), where it has them.
+    pub(crate) fn mtp_hot_rows(&self) -> Option<usize> {
+        self.mtp.as_ref()?.hot.as_ref()?.out_features().ok()
+    }
+
+    /// The output head's rows for `ids` — a conversation's own words past
+    /// the hot rows — for a guess to read beside them.
+    pub(crate) fn mtp_rows_of(&self, ids: &[u32]) -> Result<QMatMul, SwarmError> {
+        let output = self
+            .output
+            .as_ref()
+            .ok_or_else(|| SwarmError::Internal("draft words: no output head".into()))?;
+        head_rows(output, HeadRows::Of(ids))
+    }
+
+    /// The head's guess from its last normed row (`[1, hidden]`, from
+    /// [`Self::mtp_forward`]): the best word of the whole vocabulary, or of
+    /// the hot rows and a reply's own words — scored as the whole head scores
+    /// them, the file's suppressed words included (#282). Both are read where
+    /// the whole head was before the hot rows, so an A/B of the two differs
+    /// only in the rows read. No closure here may hold `self`: on a card build
+    /// a `SplitModel` is not `Sync` (gotcha #912).
+    pub(crate) fn mtp_guess(&self, row: &Tensor, over: GuessOver<'_>) -> Result<u32, SwarmError> {
+        let err = |what: &'static str| {
+            move |e: candle_core::Error| {
+                SwarmError::Internal(format!("next-token head {what}: {e}"))
+            }
+        };
+        let flat = |t: Tensor| {
+            t.flatten_all()
+                .and_then(|t| t.to_dtype(DType::F32))
+                .and_then(|t| t.to_vec1::<f32>())
+        };
+        let row = row
+            .to_device(&self.device)
+            .map_err(err("to the output head"))?;
+        let GuessOver::HotAnd(words) = over else {
+            let logits = self.logits_from(&row)?;
+            return Ok(crate::inference::sampling::argmax(
+                &flat(logits).map_err(err("logits"))?,
+            ));
+        };
+        let hot = self
+            .mtp
+            .as_ref()
+            .and_then(|h| h.hot.as_ref())
+            .ok_or_else(|| SwarmError::Internal("next-token head: no hot rows".into()))?;
+        let mut logits = hot.forward(&row).map_err(err("hot rows"))?;
+        let n = logits.dim(D::Minus1).map_err(err("hot rows"))?;
+        if let Some(s) = &self.suppressed_logits {
+            logits = s
+                .narrow(0, 0, n)
+                .and_then(|s| s.to_dtype(logits.dtype()))
+                .and_then(|s| logits.broadcast_add(&s))
+                .map_err(err("suppressed words"))?;
+        }
+        let mut scores = flat(logits).map_err(err("hot rows"))?;
+        if let Some((rows, ids)) = words {
+            let mut own = rows.forward(&row).map_err(err("own words"))?;
+            if let Some(s) = &self.suppressed_logits {
+                own = Tensor::new(ids, s.device())
+                    .and_then(|i| s.index_select(&i, 0))
+                    .and_then(|s| s.to_dtype(own.dtype()))
+                    .and_then(|s| own.broadcast_add(&s))
+                    .map_err(err("suppressed words"))?;
+            }
+            scores.extend(flat(own).map_err(err("own words"))?);
+        }
+        let best = crate::inference::sampling::argmax(&scores) as usize;
+        match words {
+            Some((_, ids)) if best >= n => ids.get(best - n).copied().ok_or_else(|| {
+                SwarmError::Internal("next-token head: a word past its rows".into())
+            }),
+            _ => Ok(best as u32),
+        }
+    }
+
     /// One forward of the head over `tokens`, each beside the hidden state of
     /// the position before it (`hidden`, `[1, n, hidden]`), at the cache's
     /// next positions. Returns the head's own normed rows — the hidden state
-    /// a next draft step reads — and the last row's logits (`[1, vocab]`).
+    /// a next draft step reads — and the last of them (`[1, hidden]`), which
+    /// [`Self::mtp_guess`] reads.
     pub(crate) fn mtp_forward(
         &self,
         cache: &mut MtpCache,
@@ -288,11 +491,46 @@ impl SplitModel {
             },
         )?;
         cache.len += n;
-        let logits = self.logits_from(
-            &logits_row
-                .to_device(&self.device)
-                .map_err(err("to the head"))?,
-        )?;
-        Ok((out, logits))
+        Ok((out, logits_row))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use candle_core::quantized::GgmlDType;
+
+    /// The hot rows and a reply's own words are copies of the whole head's
+    /// rows, so each scores its word to the bit as the whole head does — a
+    /// guess read off them can differ only where the best word is not among
+    /// them.
+    #[test]
+    fn a_heads_rows_score_each_word_exactly_as_the_whole_head_does() -> candle_core::Result<()> {
+        let dev = Device::Cpu;
+        let w = Tensor::randn(0f32, 1.0, (10, 64), &dev)?;
+        let whole = QMatMul::from_qtensor(QTensor::quantize(&w, GgmlDType::Q8_0)?)?;
+        let x = Tensor::randn(0f32, 1.0, (1, 64), &dev)?;
+        let all: Vec<f32> = whole.forward(&x)?.flatten_all()?.to_vec1()?;
+        let first: Vec<f32> = head_rows(&whole, HeadRows::First(4))
+            .expect("first rows")
+            .forward(&x)?
+            .flatten_all()?
+            .to_vec1()?;
+        assert_eq!(first, all[..4].to_vec());
+        let own: Vec<f32> = head_rows(&whole, HeadRows::Of(&[7, 2]))
+            .expect("own words")
+            .forward(&x)?
+            .flatten_all()?
+            .to_vec1()?;
+        assert_eq!(own, vec![all[7], all[2]]);
+        assert!(
+            head_rows(&whole, HeadRows::Of(&[10])).is_err(),
+            "a word past the head"
+        );
+        assert!(
+            head_rows(&whole, HeadRows::First(11)).is_err(),
+            "more rows than the head"
+        );
+        Ok(())
     }
 }

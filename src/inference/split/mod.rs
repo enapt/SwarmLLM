@@ -69,7 +69,10 @@ pub(crate) use self::loader::card_free_for_a_load;
 pub use self::model::SplitModel;
 #[cfg(test)]
 pub(crate) use self::mtp::mtp_on;
-pub(crate) use self::mtp::{MtpCache, MTP_CATCH_UP_CHUNK, MTP_MOST_POSITIONS, MTP_PROMPT_ROWS};
+pub(crate) use self::mtp::{
+    GuessOver, MtpCache, DRAFT_MOST_OWN_WORDS, MTP_CATCH_UP_CHUNK, MTP_MOST_POSITIONS,
+    MTP_PROMPT_ROWS,
+};
 pub(crate) use self::per_layer::PerLayerInputs;
 pub use self::prefix_cache::{
     compute_block_hashes, deserialize_snapshot, deserialize_snapshot_full,

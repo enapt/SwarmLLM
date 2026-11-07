@@ -5977,6 +5977,57 @@ guessed 13 times and kept 7 and declined 78 rounds. The n-gram alone parts the
 same reply from one at a time at position 51 (a 0.09-logit near tie), with or
 without the head and with #174's split keys off (#426).
 
+**On the processor a guess reads fewer words (#425 (b)).** Of a 21 ms guess,
+about 16 ms was the output head: 248,320 rows of Q6_K, 521 MB read per guess.
+Prior art: FR-Spec (arXiv 2502.14856) restricts a draft's output head to the
+most frequent 32K words with no retraining and keeps ~95% of the mass; SGLang
+ships it as `--speculative-token-map`, a frequency file made per model from a
+corpus; EAGLE-3 trains its draft over a 32K vocabulary with a draft-to-target
+map. What is ours: (1) no frequency file exists for this tokenizer, so the hot
+rows are its FIRST ids — a byte-pair tokenizer's merges are learned most
+frequent first and this one's ids are its merges in order (`256 + k` is merge
+`k`, read off the 4B's file); on samples tokenized as the file does, 32K
+covered 89-94% of English, code and JSON and 16-17% of Thai and Chinese.
+(2) A reply's guesses also read the conversation's own words past the hot
+rows (a copied name is the head's surest guess), rebuilt once 8 new ones wait.
+(3) A conversation mostly past them reads every word: a prompt more than a
+third past, own words past `DRAFT_MOST_OWN_WORDS` (8,192), or a reply whose
+new words past them pass one in six after 48 — a guess over the hot rows
+costs about a third of a whole one, so there the hot rows stop paying.
+(4) The rows are byte copies of the head's (`mtp::head_rows`), so a word
+scores exactly as the whole head scores it (the file's suppressed words
+included), and a guess differs from the whole head's only where its best word
+is not among them. (5) Only where the head is on the processor: the copied own
+words would have to be gathered from the card's copy of the head.
+
+Measured 2026-11-07, Qwen3.5-4B Q4_K_M on the processor, one optimized CUDA
+test binary, live node stopped, safety kit, A/B `SWARMLLM_MTP_VOCAB`, three
+runs an arm, 96 greedy tokens (`the_models_own_guess_head_writes_the_reply_read_one_token_at_a_time`):
+
+| Prompt | whole vocabulary | 32,768 rows (default) | 65,536 rows |
+|---|---|---|---|
+| code, tok/s | 16.5-16.7 | 20.5-20.6 | 19.0-21.3 |
+| story | 12.1-12.4 | 13.2-13.4 | 13.6-13.8 |
+| Thai (every arm reads every word) | 23.1-23.6 | 22.2-23.7 | 23.5-23.8 |
+| one guess | 21.2-21.7 ms | 6.6-7.0 ms | 8.6-9.3 ms |
+
+One token at a time ran 9.5-10.4 tok/s. On code the head's guesses were kept
+68 of 92 against 67 of 82-83 with the whole head: the cheaper guess raises how
+many a round carries. On the story more guesses are tried (111-120 vs 84-92)
+for about as many kept (50-51 vs 51-55). 32,768 is the default: 65,536 is no faster
+across both and costs twice the memory (138 MB beside 69 on the 4B).
+
+**The bug it found.** The first unit test of the copied rows failed: the first
+of two own words scored -3.27 where the whole head scored 2.67, the second
+exactly. The vendored `as_t_slice` took its bytes as a `Cow` BY VALUE and
+returned a slice into them, so an owned buffer was freed before the copy read
+it, and the allocator's bookkeeping overwrote its first bytes (gotcha #326,
+the second time; past the allocator's map threshold — about 62 own words of
+the 4B — it would have faulted). It now borrows (`&[u8]`, bytemuck's
+`cast_slice` shape), so the dangling slice no longer compiles. No released
+path handed it an owned buffer: `QTensor::stack_some` did only on the
+processor, which only a test uses.
+
 ## Qwen 3.5's prompt is saved short of its end, and restored whole (2026-10-18, FUTURE_WORK #228 (8))
 
 **What it replaced.** `PrefixCache::insert_from_kv` skipped any request holding SSM state
