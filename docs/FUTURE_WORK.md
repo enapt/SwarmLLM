@@ -2811,12 +2811,19 @@ freed under the copy that read it), now fixed in the vendored `as_t_slice` itsel
 
 **Residual.** (a) **A split's last stage drafting with it** (#145's "MTP heads at the last
 stage"): the block loads only for a whole model; the far end holds the output head and could
-draft there. (b) **Fewer words on a card too**: there a whole guess is 2.8-3.2 ms, about 1.2 ms
-of it the 521 MB head; the hot rows are one copy at load, but the conversation's own words would
-need their rows gathered on the card (reading the head back per rebuild is no option). Through the
-node a card's story gained nothing (3.85 s without the head, 3.87 with): its check costs 19 ms against a 16 ms step at
-~1.8 tokens a round. (c) No planner or admission charges the block (122-856 MB) or the hot rows
-(about 55-140 MB).
+draft there. (b) **Fewer words on a card too — built and measured 2026-11-07, NOT kept**: the
+rows gathered on the card (vendored `QTensor::gather_rows`, its padding zeroed as a loaded weight's
+is; patch `memory/archive/card_hot_rows_425b_1107.patch`, bit-exact against the card's whole head)
+cut a guess 2.9-3.4 → 1.3-1.5 ms, but the cheaper guess raised how many a round carries, and on a
+story most are rejected: code 93.8-109.4 → 112.9-114.1 tok/s, story 74.8-78.7 → **51.2-75.1**
+(three runs an arm, one optimized CUDA test binary, `scratchpad mtp_vocab_card_ab.sh`). The
+story's runs recorded 3-5 one-off graphs of new check widths against 1 (each ~250 ms), and kept
+39-49 of 109-114 guesses against 39-40 of 60-64. Next: price a new check width's recording in the
+guess count (`best_gamma_beside_a_step` sees only replayed checks), or hold a card's guess count
+to widths already recorded; then re-measure. Through the node a card's story gained nothing from
+the head either (3.85 s without it, 3.87 with): its check costs 19 ms against a 16 ms step at ~1.8
+tokens a round. (c) No planner or admission charges the block (122-856 MB) or the processor's hot
+rows (about 55-140 MB).
 (d) The head's cache stops at 16,384 positions and the head stops for the reply. (e) Unmeasured:
 the 27Bs, the 35B-A3B (experts in RAM beside a card), Qwen 3.8 27B's Q4_0 `eh_proj` (an int4 head
 collapsed to 0-4% in colibri, #145).
