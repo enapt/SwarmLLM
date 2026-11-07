@@ -2878,7 +2878,12 @@ an 8-16-row check at 4-16K: 1.6-1.9× faster; a Qwen2.5 drafter's 2-group shape 
 models unchanged (not split — splitting them was 10-25% slower). Whole 7B check forward at ~4K
 cached: a check costs 1.16× one step at width 4 (was 1.22-1.24×), 1.89-2.02× at 8 (2.08×), 3.75-3.91× at 16 (3.94-4.05×). Prior art: Flash-Decoding's split-K, llama.cpp's processor flash path; the
 fold order is #179's. `docs/invariants/inference.md` § "A check of a few rows splits its blocks'
-keys into jobs".
+keys into jobs". **Unmeasured at a short context**: a card/processor split's checks run at ~1.8K
+tokens (the release gate's split arm, 14B), where the split gives fewer, shorter jobs. v0.3.278's gate
+re-timed that arm three times — 0.93x, 0.94x, and 1.04x with the split off in the candidate — inside
+the arm's ±10% run-to-run swing (each reply's tokens a round, 2.2-5, set its speed), so neither a gain
+nor a loss is shown. Time it at the kernel before relying on it there: `attn_bench`, 2-8 rows,
+1-2K keys, the 14B's KV groups, `SWARMLLM_PREFILL_SPLIT_KEYS=0` against default.
 
 **Residual — the decode row's BYTES.** After the 09-26 fix the 3B's decode growth was +8.2 ms for
 1,536 positions at 4 threads, ~43 GB/s — the floor for f32 keys and values. What is left is the
