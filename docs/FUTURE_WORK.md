@@ -145,6 +145,23 @@ the top track (`docs/plans/large_model_splits.md`).
    top-1 on the recorded replies (`~/swarmllm-70b/ranks`) against the 3B's 0.82 — drop it unless
    clearly above 0.85. #412 on the stream: at most +4% for the 70B (44% of chunks restart, the
    queue is then empty).
+   **Measured 2026-11-07** (v0.3.277 release binary, rig node on its own data dir, AU `aa3d1e66`
+   pinned, 3 new prose prompts × 96 tokens; `~/swarmllm-70b/ab70shape.sh`, outputs
+   `ab70shape-*.out`): (1) **the 3B cannot go on this card on this route** — beside it the card
+   holds 6 of the 70B's layers (`room_for=Some(6)`), AU holds only [8,80), so even 8 layers here
+   leave it 1,763 MB of the 2,298 it needs (`GPU admission refused`); `drafter_on_card=false` in
+   every arm. (2) **16 layers here beat 8, ABBA**: 1.98/2.70/2.46 and 2.05/2.66/2.44 tok/s against
+   1.89/2.60/2.35 and 1.93/2.55/2.46 (+3-4%, every pair) — the planner's preview gives this node
+   [0,8). (3) **This node's time a check** (`SWARMLLM_PROFILE=1`): 16 layers, 3-5 rows, median
+   157 ms (p90 240) unsynced, 167 synced, against ~65 the weights predict; the 3B guesses at 54 ms
+   on the processor, never overlapping a check. **Most of the excess is the CARD'S CLOCKS**: sampled
+   every 50 ms (`nvidia-smi -lms 50`) the card spent 37-45% of the decode at P5/P8 (memory 810/405
+   MHz against 6001), and an 8-layer check that BEGAN there took 128 ms (124-134) against 26 at P0 —
+   it never ramps within one check; the card drops within ~30-60 ms of going idle. A keep-alive
+   beside it (a 1-block kernel 200 µs every 10 ms, a separate process: P0 held, +13 W) cut the card
+   check's median 73 → 48 ms, ABBA, but the reply within the link's noise (~2% of a 1.2 s cycle).
+   Not built: a 14B split keeps the card at P0 by itself (flow and "start and finish here", every
+   forward but each reply's first began at P0/P3: 27 and 9 ms; the first, at P8, ~200 ms).
    On a 14B: split evenly between this machine's card and the 3060 the flow runs 29.2-29.9 tok/s on
    code, twice this machine's whole-14B speed (13.6-15.4), and 9.2-10.0 on prose; three cards (+ an
    RTX 4050 in Europe, ~230 ms) 12.4-14.3 and 4.4-4.9 against 15.7-20.9 and 6.1-7.3 for two — a
@@ -4232,7 +4249,18 @@ nothing, the worker reads weights on `DaemonMsg::LoadRange`.
    explicit call to this endpoint is its preload), and a model the router would split or hand off.
 2. **The first forward after a load** (cold first token less the load: ~0.3-1.9 s here; #293's 1-6 s on a
    split, #326's ~2 min of compiling on a card newer than the release's machine code): a warm-up forward
-   at load — measured first, with the load's own figure beside it.
+   at load — measured first, with the load's own figure beside it. **MEASURED 2026-11-07 — no warm-up
+   needed, none built.** Processor (memory `tools/p424/p424b.sh`, the 3B, prefix cache off, rounds of
+   loaded-ahead / warm / warm): a question after a load ahead 1.21-1.28 s against a warm one's 1.17-1.27.
+   Card (`tools/p424/p424c.sh`, the 8B whole on the card, the release binary, the live node stopped, ABBA):
+   the first token 112-124 ms after the worker's `Model loaded`. The cold first token less the load is
+   that, not the 0.3-1.9 s estimated above (the estimate counted the worker's start and its CUDA context,
+   ~440 ms, as the forward). What a warm question pays on the card, 0.24-0.37 s for a 3-word question 5 s
+   after the last, is ~90% the CARD'S CLOCKS: the prompt pass ran ~300 ms at P8 against ~33 at P0, and the
+   card drops to P8 within ~50 ms of going idle (`docs/DIAGNOSTICS.md` § "The card's clocks, forward by
+   forward"). A keep-alive in a separate process did not hold P0 beside the worker (P8/P5, 12-14%
+   utilisation); locking the clocks needs an administrator. Not measured: #326's compile on a card newer
+   than the release's machine code (no such card here).
 3. **The load itself**: the sharded path reads layer by layer on one thread, a pageable copy a tensor
    (the 8B: 3.4 s to the processor, 5.5 s to the card). Log read vs upload first; llama.cpp uploads
    through 4 pinned 1 MiB buffers with events (`src/llama-model-loader.cpp`).

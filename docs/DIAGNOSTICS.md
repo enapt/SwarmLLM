@@ -2246,6 +2246,25 @@ stand and `SWARMLLM_FORWARD_RERUN=0` turns the rerun off (the behaviour before e
 three, the field's failure appears on this laptop within a minute; `SWARMLLM_PREFIX_CACHE_HOME=card`
 keeps saved prompts on the card under WSL2, so (3b) has something to let go.
 
+## The card's clocks, forward by forward
+
+A card drops to a low power state within ~30-60 ms of going idle and does NOT ramp up inside a short
+forward: on this RTX 3070 Laptop an 8-layer 70B check took 128 ms when it began at P5 (memory 810 MHz)
+and 26 ms at P0 (6001 MHz), 2026-11-07 (FUTURE_WORK #318). So a forward's time on a card that works in
+bursts — a split's segment waiting on a far peer, a reply's first forward after a pause — says as much
+about the card's clock state as about the kernels. To see it, sample the card beside the run and read
+each forward against the state it began in:
+
+```
+nvidia-smi --query-gpu=timestamp,clocks.sm,clocks.mem,pstate,utilization.gpu,power.draw \
+  --format=csv,noheader -lms 50 > smi.csv &      # timestamps in Windows' local time under WSL2
+```
+
+The forward's own time is the worker's `DIAG: worker forward answered` line's `received_to_computed_ms` (at
+`-v`) — never an unsynced `PROF` block, which on a card is the enqueue time (1-5 ms). A keep-alive that
+holds P0 for an A/B: a 1-block kernel spinning 200 µs every 10 ms (+13 W here; 20 µs or every 50-100 ms
+slipped to P5 a fifth of the time). The 70B parse is in `~/swarmllm-70b/ab70shape.sh`'s outputs.
+
 ## Attention-kernel A/B — `SWARMLLM_FORCE_STANDARD_ATTN=1`
 
 Forces every attention call in the process onto `standard_attention`, so the
