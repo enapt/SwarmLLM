@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.3.277-alpha] — 2026-11-07
+
 **A vision model can read pictures without anyone copying its image reader in by hand** (#422).
 When a computer downloads parts of a vision model from HuggingFace and none of the computers it is
 connected to has the model's image reader, it now fetches that file too — the one llama.cpp would
