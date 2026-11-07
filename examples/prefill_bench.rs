@@ -749,8 +749,9 @@ fn sync(device: &Device) {
 /// Expand a leading `~` so the documented invocation works from a shell that
 /// did not expand it (e.g. when the value came from a file or a CI variable).
 /// Ask the kernel to drop every file of a model directory from its page cache
-/// (`POSIX_FADV_DONTNEED` — clean pages only, no privilege needed).
-#[cfg(unix)]
+/// (`POSIX_FADV_DONTNEED` — clean pages only, no privilege needed). Linux only:
+/// macOS has no `posix_fadvise` (the macOS clippy job failed on it, 2026-11-07).
+#[cfg(target_os = "linux")]
 fn drop_from_page_cache(model_dir: &Path) -> anyhow::Result<()> {
     use std::os::fd::AsRawFd;
     for entry in std::fs::read_dir(model_dir)? {
@@ -766,9 +767,9 @@ fn drop_from_page_cache(model_dir: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-#[cfg(not(unix))]
+#[cfg(not(target_os = "linux"))]
 fn drop_from_page_cache(_model_dir: &Path) -> anyhow::Result<()> {
-    anyhow::bail!("SWARM_BENCH_COLD needs a Unix page cache")
+    anyhow::bail!("SWARM_BENCH_COLD needs Linux's page cache (posix_fadvise)")
 }
 
 fn shellexpand(p: &str) -> String {
