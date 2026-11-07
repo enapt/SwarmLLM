@@ -3043,6 +3043,15 @@ published move and in the planner's machine line (`coord=0.43`, not `yes`); read
 plans the same chain from its own side (its own coordinate is read from its local capability, as
 here); then decide whether planning needs a hysteresis on usability (usable below 0.5, unusable
 only above a higher line) — look up how Serf/Consul gate a coordinate by its error first.
+**23:17Z** (68 min after the restart): this node `coord=yes` at last, and best is 11-05's chain
+again — here 0-13, Australia 13-36, `a661155f` 36-59, `99aafc41` 59-80, **720 ms** against held
+1077 (here 0-13 + Australia), `moving=true` — then in the same pass "a nearby machine named for
+part of this model has fetched none of it — planning the chain without it" (`a661155f`), and the
+chain planned is here + Australia, 1077 ms. So the blocker is now ONE question: why the US card,
+named and with 779 GB of room, never fetches its segment — does it plan the same chain from its
+own side (it would read this node's coordinate as unusable for the hour after each of our
+restarts), or does its fetch start and fail? Its download pass's view is needed: ask its owner for
+a `-v` log, or add the chain it plans to its published capability.
 
 #### #10 — Conversation prefixes across computers: a cache this node did not fill is invisible
 `P2` · perf-split · **PARTIAL** — 2026-09-07 · absorbs #139 and archive § "Speeding up inference BETWEEN nodes" idea 1 (prefix-keyed remote KV); history: archive row #10 and § "A conversation's later turns do not seek out the peer holding its prefix"
