@@ -199,7 +199,7 @@ the top track (`docs/plans/large_model_splits.md`).
     the 10-minute expiry), and a split's prompt pieces chained between two peers.
 14. **#138**, **#129** — a model that does not fit the card (MoE and a split's prompt stages
     shipped in v0.3.235-v0.3.237; the entries hold what is left), and a near-fit model sent far.
-15. **#228** — Qwen 3.5 guesses ahead on one computer (processor and card) and through a split's n-gram loop (bit 33) since 2026-10-25; the drafter's paths and MTP still stay off — a checkpoint replayed across steps, #228 (5).
+15. **#228** — Qwen 3.5 guesses ahead on one computer (processor and card) and through a split's n-gram loop (bit 33) since 2026-10-25, and with its file's own guess head on one computer since 2026-11-07 (#425); the drafter's paths still stay off — a checkpoint replayed across steps, #228 (5).
 16. **#336** — tool calls, and `response_format` on a split or a peer's whole-model hand-off, are
     checked only after they are written, so an agent driving a small model meets malformed calls.
     `response_format` is held on a model run whole since v0.3.262 (llguidance); next, a feature bit
@@ -2772,6 +2772,60 @@ layers' experts in RAM (24 against 14) cost ours 1.56 ms a layer and llama.cpp 2
 (`decode_graph_ineligibility`), and llama.cpp with its graphs off read 19.2-23.8 against
 25.8-29.6 on (two rounds, ± 2-5 within each) — the same lean as the 30B's, the same route.
 
+#### #425 — Qwen 3.5, 3.6 and 3.8 guess with the head their files carry
+`P2` · perf-local · **OPEN (built 2026-11-07)** — 2026-11-07 · plan: `docs/invariants/inference.md` § "A file's own guess head"
+
+**Built 2026-11-07.** These files carry a next-token-prediction block past the trunk
+(`nextn_predict_layers` 1) that the model was trained with; it was never loaded, and the family
+guessed with the n-gram alone (a separate drafter and SWIFT stay off a model with recurrent state).
+`split::mtp` loads it beside a whole model; `model_worker::MtpGuesses` drafts with it where the
+n-gram finds nothing, declines, or is kept less often — fed the trunk's last-layer rows of the
+positions the reply commits, the check the n-gram's own. On a card the captured step copies that
+row out itself (`executor::graph_keeps_the_head_row`), so it stays a replayed graph. Prior art:
+llama.cpp `graph_mtp` + `draft-mtp`, vLLM's Qwen3-Next MTP proposer (the evidence section).
+Measured 2026-11-07, Qwen3.5-4B Q4_K_M, one optimized CUDA test binary, A/B `SWARMLLM_MTP=0`, live
+node stopped, 96 greedy tokens, three runs an arm (`the_models_own_guess_head_writes_the_reply_read_one_token_at_a_time`):
+
+| Where, prompt | one token at a time | n-gram alone | with the head | head's guesses kept |
+|---|---|---|---|---|
+| processor, story | 9.4-10.5 tok/s | 9.4-9.9 | 11.8-12.2 | 51-60% |
+| processor, code | 9.6-10.5 | 11.1-11.7 | 16.7-16.8 | 81% |
+| card (RTX 3070 Laptop), story | 72.2-74.0 | 50.5-59.1 | 74.9-80.3 | 58-65% |
+| card, code | 71.3-73.2 | 73.9-76.3 | 90.1-110.0 | 81-86% |
+
+A guess costs 21 ms on the processor (a 100 ms step) and 2.8-3.2 ms on the card (13 ms) — mostly
+the 248K-row output head, not the block. Every reply parted from one at a time only at a near
+tie (#426 on the processor, gotcha #955 on the card).
+
+**Residual.** (a) **A split's last stage drafting with it** (#145's "MTP heads at the last
+stage"): the block loads only for a whole model; the far end holds the output head and could
+draft there. (b) **The draft's output head over a frequent-token subset** (FR-Spec, arxiv
+2502.14856: the draft head is the drafting bottleneck; a quarter of the vocabulary keeps ~95% of
+the mass) — a guess would cost a fraction of its 21 ms on the processor; needs a frequency
+ranking (none ships with the file). (c) No planner or admission charges the block (122-856 MB).
+(d) The head's cache stops at 16,384 positions and the head stops for the reply. (e) Unmeasured:
+the 27Bs, the 35B-A3B (experts in RAM beside a card), Qwen 3.8 27B's Q4_0 `eh_proj` (an int4 head
+collapsed to 0-4% in colibri, #145).
+
+#### #426 — A processor check of 9-11 rows or more is not bit for bit a step on Qwen 3.5 4B
+`P3` · perf-local · **OPEN** — 2026-11-07 · history: found while checking #425
+
+The n-gram's guessed reply of Qwen3.5-4B Q4_K_M on the processor parts from the reply written one
+token at a time — the lighthouse story (`GUESS_TEST_STORY`), reply position 51, a near tie (5817
+at 16.347 against 16002 at 16.258 read one token at a time). The docs promised ids EXACT on the
+processor. Found 2026-11-07, root-cause agent, debug test build, guess head off (`SWARMLLM_MTP=0`):
+a script replaying only round 2's check (10 guesses, all rejected) parts it; plain steps through
+`LocalSpec` do not; three rejected 2-row checks do not; the same check at 3, 4 and 8 rows
+(`SWARMLLM_GUESS_TEST_MOST`) does not, at 11 rows it does — the cause is row 0 of a forward 9-11
+rows wide or wider (its attention K/V or its kept `SsmRows`), NOT the rewind (same 1-row replay
+after every width). `SWARMLLM_QMATMUL_ROWS=per-row` and `SWARMLLM_PREFILL_SPLIT_KEYS=0` leave it
+as it is (the first not confirmed to have fired). The card's switch at 8 rows
+(`layers/mod.rs` `mmq_wanted`) is the card's, not this. Prior art: verify passes that are not
+batch-invariant part greedy replies (LLM-42, arxiv 2601.17768). The guess head (#425) checks at
+most 5 rows, so it never meets this. Next: add widths 9, 10, 11 to `a_checks_row_reads_nothing_after_it`'s
+tails compared against width 1 (`SWARMLLM_ROW_TEST_AT=2`), then keep row 0's hidden state per
+layer at width 1 and 11 (`forward_keeping`) to find the first layer that differs.
+
 #### #174 — Processor attention reads its keys and values as f32
 `P3` · perf-local · **OPEN (narrowed 2026-11-07)** — 2026-08-22 · history: archive § "CPU decode attention: the kernel sits 2x above the DRAM floor"
 
@@ -3174,7 +3228,7 @@ Q8_0 beat both (#134).
 Every machine in a split idles ~99% of each pass. The plan — "parallelise the reply, not the
 token", within the rule that nobody holds a whole model — has its first step done (the
 continuous stream, v0.3.216) and #143 done (v0.3.221). Next in its order: multi-token-prediction
-heads at the last stage (Qwen 3.5 runs since v0.3.229 and guesses with its own n-gram since v0.3.253, but MTP needs its rows kept across steps, #228 (5); GLM-4.5+ is
+heads at the last stage (Qwen 3.5 runs since v0.3.229, guesses with its own n-gram since v0.3.253 and with its head on one computer since #425 — its draft steps touch no recurrent state; GLM-4.5+ is
 unsupported), a stage batching forwards of several streams into one
 visit, multi-block attention for workers sharing a cache, outline-then-expand with a
 classifier router. Research-grade; the largest multiplier on the list
@@ -3541,8 +3595,9 @@ runs on a Qwen 3.5 split only where every peer segment does (`pipeline::checks_c
 before the loop and at each round — a stand-in may not), and a peer whose truncate is refused refuses the
 forward (`ServiceUnavailable`; it was logged and the forward ran, its cache holding positions the reply did
 not). Qwen3.5-0.8B Q8_0 split across two nodes on the processor (`split_rig.sh split`, `RIG_PROMPT`, `RIG_ASKS=2`, a 100 ms round trip, an optimized build, the warm second ask, two runs an arm, greedy): code continued 6.5-6.6 → 13.8-14.0 tokens a second (73 rounds → 22), a function renamed 6.0 → 12.7-12.8 (44 → 12); every reply identical to the one with the n-gram off, and with B on v0.3.252 A did not guess (same reply). B took back 9 checks, each INTO the check it had just read (a 5-position check from 104 cut to 107), none refused. One check in flight only: the chain stream, trees and flows stay off for such a
-model. **Then the drafter and MTP**: they take back γ steps of
-their own, so the rows must be kept across steps from one checkpoint (ReplaySSM buffers 16 for Qwen 3.5;
+model. **Then the drafter** (MTP is built, #425: its draft steps run only its own
+full-attention block, so the trunk takes back only the check): it takes back γ steps of
+its own, so the rows must be kept across steps from one checkpoint (ReplaySSM buffers 16 for Qwen 3.5;
 `docs/plans/split_speculation.md` § MTP). Today's gates: `pipeline::distributed`
 (`no_speculation_on_a_model_with_recurrent_state`), `engine_drafter` (a drafter with recurrent state is
 refused), SWIFT, `split::kv_cache` (a truncate past the last check's start or its kept rows is refused); (6) ~~the 4B's gap to llama.cpp~~ —

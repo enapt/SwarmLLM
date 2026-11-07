@@ -15,6 +15,7 @@ pub(crate) mod kv_cache;
 mod kv_write;
 mod loader;
 mod model;
+mod mtp;
 mod per_layer;
 mod prefix_cache;
 mod rope;
@@ -66,6 +67,9 @@ pub(crate) use self::gguf_meta::{
 pub use self::kv_cache::{KvCacheStore, KvOccupancy};
 pub(crate) use self::loader::card_free_for_a_load;
 pub use self::model::SplitModel;
+#[cfg(test)]
+pub(crate) use self::mtp::mtp_on;
+pub(crate) use self::mtp::{MtpCache, MTP_CATCH_UP_CHUNK, MTP_MOST_POSITIONS, MTP_PROMPT_ROWS};
 pub(crate) use self::per_layer::PerLayerInputs;
 pub use self::prefix_cache::{
     compute_block_hashes, deserialize_snapshot, deserialize_snapshot_full,

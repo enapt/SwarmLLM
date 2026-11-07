@@ -126,6 +126,9 @@ pub(super) struct SkipLayers<'a> {
     bridge: Option<&'a SkipBridge>,
 }
 
+/// A forward's output and the hidden states it kept ([`Capture`]).
+type ForwardOut = (Tensor, HashMap<usize, Tensor>);
+
 /// The hidden states a forward keeps ([`SplitModel::forward_keeping`]): after
 /// each layer in `layers`, its last `last` positions — copied where that is
 /// fewer than the forward read, so a prompt pass does not hold a
@@ -268,7 +271,7 @@ impl SplitModel {
     /// `kv_len` is the total key length; `query_len` of it are the new
     /// positions, so the first `kv_len - query_len` columns are prefix that
     /// every query attends to.
-    fn causal_mask(&self, query_len: usize, kv_len: usize) -> CandleResult<Tensor> {
+    pub(super) fn causal_mask(&self, query_len: usize, kv_len: usize) -> CandleResult<Tensor> {
         causal_mask_with_spans(query_len, kv_len, &[], &self.device)
     }
 
@@ -860,7 +863,7 @@ impl SplitModel {
     /// head owes every row (Gemma 2's soft cap; the file's suppressed tokens,
     /// #282) cannot be skipped by a path. The batched loop used to carry its
     /// own copy of the soft cap.
-    fn logits_from(&self, x: &Tensor) -> Result<Tensor, SwarmError> {
+    pub(super) fn logits_from(&self, x: &Tensor) -> Result<Tensor, SwarmError> {
         let output = self
             .output
             .as_ref()
@@ -1027,11 +1030,17 @@ impl SplitModel {
                     None => seq_len == 1 || !self.mask_is_read(),
                     Some(_) => self.tree_steps_may_be_captured(),
                 };
+                // The rows a guess head reads are kept by the graph itself
+                // (`graph_keeps_the_head_row`); any other capture runs plainly.
+                let capture_in_graph = match capture_layers {
+                    None => true,
+                    Some(capture) => self.graph_keeps_the_head_row(capture, seq_len),
+                };
                 if seq_len <= crate::inference::cuda_graph::MAX_POSITIONS
                     && shape_may_be_captured
                     && self.image_spans.is_empty()
                     && lora_adapter.is_none()
-                    && capture_layers.is_none()
+                    && capture_in_graph
                     && skip_mask.is_none()
                 {
                     if let Some(out) = self.forward_decode_as_graph(
@@ -1041,8 +1050,9 @@ impl SplitModel {
                         request_id,
                         skip_embedding,
                         all_positions,
+                        capture_layers,
                     )? {
-                        return Ok((out, HashMap::new()));
+                        return Ok(out);
                     }
                 }
                 self.forward_inner_body(
@@ -1155,6 +1165,7 @@ impl SplitModel {
     /// see [`crate::inference::cuda_graph`] for the conditions and why each
     /// exists. `Ok(None)` hands the step to the ordinary path untouched: this
     /// model does not capture at all.
+    #[allow(clippy::too_many_arguments)]
     fn forward_decode_as_graph(
         &mut self,
         input: &Tensor,
@@ -1163,7 +1174,8 @@ impl SplitModel {
         request_id: &str,
         skip_embedding: bool,
         all_positions: bool,
-    ) -> Result<Option<Tensor>, SwarmError> {
+        capture_layers: Option<Capture<'_>>,
+    ) -> Result<Option<ForwardOut>, SwarmError> {
         use crate::inference::cuda_graph::DecodeGraphSlot;
         if matches!(self.decode_graph, DecodeGraphSlot::Unchecked) {
             self.decode_graph =
@@ -1184,9 +1196,24 @@ impl SplitModel {
             request_id,
             skip_embedding,
             all_positions,
+            capture_layers,
         );
         self.decode_graph = DecodeGraphSlot::On(graph);
         out.map(Some)
+    }
+
+    /// Does a captured step keep what `capture` asks for? Only the guess
+    /// head's row (#425): the trunk's last layer, every position, on a model
+    /// that carries a head — whose every captured step records the copy, so
+    /// a step that keeps it and one that does not record the same graph.
+    fn graph_keeps_the_head_row(&self, capture: Capture<'_>, positions: usize) -> bool {
+        self.mtp.is_some()
+            && capture.last >= positions
+            && capture.layers.len() == 1
+            && self
+                .layer_end
+                .checked_sub(1)
+                .is_some_and(|last| capture.layers.contains(&last))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1199,7 +1226,8 @@ impl SplitModel {
         request_id: &str,
         skip_embedding: bool,
         all_positions: bool,
-    ) -> Result<Tensor, SwarmError> {
+        capture_layers: Option<Capture<'_>>,
+    ) -> Result<(Tensor, HashMap<usize, Tensor>), SwarmError> {
         let follows = graph.follows_previous_step(request_id, index_pos);
         let cache_key = KvCacheStore::cache_key(&self.kv_model_key, request_id);
         let positions = input.dim(1).map_err(SwarmError::internal)?;
@@ -1228,13 +1256,13 @@ impl SplitModel {
         let template = match ready {
             Some(t) if !graph.declines(shape) => t,
             ready => {
-                let (out, _) = self.forward_inner_body(
+                let (out, caught) = self.forward_inner_body(
                     input,
                     index_pos,
                     kv_cache_store,
                     request_id,
                     None,
-                    None,
+                    capture_layers,
                     skip_embedding,
                     all_positions,
                     None,
@@ -1244,7 +1272,7 @@ impl SplitModel {
                 if not_ready {
                     graph.note_not_ready();
                 }
-                return Ok(out);
+                return Ok((out, caught));
             }
         };
         // A tree's rows (#134): set on this thread, with their visibility on
@@ -1274,20 +1302,20 @@ impl SplitModel {
                     // Nothing to stage it with (`SWARMLLM_TREE_ROPE=per-call`):
                     // the ordinary way.
                     drop(scope);
-                    let (out, _) = self.forward_inner_body(
+                    let (out, caught) = self.forward_inner_body(
                         input,
                         index_pos,
                         kv_cache_store,
                         request_id,
                         None,
-                        None,
+                        capture_layers,
                         skip_embedding,
                         all_positions,
                         None,
                         None,
                     )?;
                     graph.note_uncaptured(all_positions, shape, &out, began, false);
-                    return Ok(out);
+                    return Ok((out, caught));
                 }
                 Some(scope)
             }
@@ -1339,6 +1367,20 @@ impl SplitModel {
         let (dims, dtype) = template;
         let out = Tensor::zeros(dims, dtype, &device).map_err(SwarmError::internal)?;
         let boundaries = graph.boundaries(&device, positions, self.hidden_dim)?;
+        // A model with a guess head copies its trunk's last row out of every
+        // captured step, into memory made here, whether this one asked or
+        // not: one graph either way (#425).
+        let head_row = match self.mtp.as_ref() {
+            Some(_) => Some(
+                Tensor::zeros(
+                    (1, positions, self.hidden_dim),
+                    boundaries[0].dtype(),
+                    &device,
+                )
+                .map_err(SwarmError::internal)?,
+            ),
+            None => None,
+        };
         // A multi-position step catches the f16 mirror up before appending to
         // it; done inside the capture, a refusal leaves the mirror claiming
         // positions it never received (`LayerKv::catch_up_mirror`). A single
@@ -1356,6 +1398,11 @@ impl SplitModel {
             // taken here (one add) rather than fused into the next norm.
             let mut crossed = 0usize;
             let mut at_layer_end = |layer_idx: usize, hidden: Residual| {
+                if let Some(kept) = head_row.as_ref().filter(|_| layer_idx + 1 == num_layers) {
+                    let value = hidden.into_tensor().map_err(SwarmError::internal)?;
+                    kept.slice_set(&value, 0, 0).map_err(SwarmError::internal)?;
+                    return Ok(Residual::Ready(value));
+                }
                 if !(layer_idx + 1).is_multiple_of(per_group) || layer_idx + 1 >= num_layers {
                     return Ok(hidden);
                 }
@@ -1391,7 +1438,13 @@ impl SplitModel {
             out.slice_set(&step, 0, 0).map_err(SwarmError::internal)
         });
         if captured.is_ok() {
-            return Ok(out);
+            let mut caught = HashMap::new();
+            if let (Some(capture), Some(kept)) = (capture_layers, head_row) {
+                if let Some(&layer) = capture.layers.iter().next() {
+                    caught.insert(layer, kept);
+                }
+            }
+            return Ok((out, caught));
         }
         // The ordinary way below sets the tree's scope itself.
         drop(staged_tree);
@@ -1400,13 +1453,13 @@ impl SplitModel {
         // back, then take the step the ordinary way.
         kv_cache_store.truncate_request_to(&self.kv_model_key, request_id, index_pos)?;
         let began = graph.begin_step(&device, shape);
-        let (out, _) = self.forward_inner_body(
+        let (out, caught) = self.forward_inner_body(
             &input,
             index_pos,
             kv_cache_store,
             request_id,
             None,
-            None,
+            capture_layers,
             skip_embedding,
             all_positions,
             None,
@@ -1414,7 +1467,7 @@ impl SplitModel {
         )?;
         // Not a step of its own: the refused capture's time is in it.
         graph.note_uncaptured(all_positions, shape, &out, began, false);
-        Ok(out)
+        Ok((out, caught))
     }
 
     #[allow(clippy::too_many_arguments)]

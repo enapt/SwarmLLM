@@ -798,7 +798,9 @@ into a cache of another dtype),
 `per_layer.rs` (Gemma 4 E2B/E4B's per-layer inputs, built beside the token
 embedding from a table kept in the machine's memory), `stand_in.rs` (what stands in
 for the processor's run while a card/processor split's card guesses alone: a
-sliding-window kernel ridge fitted from the reply's own real forwards).
+sliding-window kernel ridge fitted from the reply's own real forwards), `mtp.rs`
+(a Qwen 3.5/3.6/3.8 file's next-token-prediction block, loaded beside a whole
+model as a guess head: its weights, its per-request cache, its forward).
 
 ```
 Client → API Server → InferenceRouter → Pipeline Assembly

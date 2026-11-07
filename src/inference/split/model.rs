@@ -31,6 +31,10 @@ pub struct SplitModel {
     pub(super) norm: Option<RmsNorm>,
     /// LM head / output projection (only loaded by the last segment).
     pub(super) output: Option<QMatMul>,
+    /// The file's next-token-prediction block, a guess head (#425) — loaded
+    /// only where the segment ends a model that carries one (Qwen 3.5's
+    /// family), `None` everywhere else.
+    pub(super) mtp: Option<super::mtp::MtpHead>,
     /// Additive causal mask for the no-prefix case, cached at its EXACT size.
     /// Tuple is `(query_len, mask)`; `None` means nothing cached yet. See
     /// `SplitModel::mask` for why this is not a narrowed view of a bigger one.

@@ -5903,6 +5903,80 @@ bar stays identical ids.
 A recurrent drafter, MTP and the split's chain stream, trees and flows wait on a checkpoint replayed
 across steps (FUTURE_WORK #228 (5)).
 
+## A file's own guess head (2026-11-07, FUTURE_WORK #425)
+
+**What it is.** Qwen 3.5, 3.6 and 3.8 files (`qwen35`, `qwen35moe`) declare
+`nextn_predict_layers = 1` and carry one decoder block past the trunk (`blk.32`
+on the 4B, `blk.64` on the 27Bs, `blk.40` on the 35B-A3B): a full-attention
+layer with a gated query, `nextn.eh_proj` (2E → E), `nextn.enorm`, `nextn.hnorm`,
+and sometimes `nextn.shared_head_norm`. The model was trained with it to predict
+the token after next. Before it, these models guessed with the n-gram alone: a
+separate drafter is refused for a model with recurrent state (γ steps of its
+own, nothing to rewind them from), and SWIFT likewise.
+
+**Prior art.** llama.cpp `models/qwen35.cpp` (`graph_mtp`) and
+`common/speculative.cpp` (`common_speculative_impl_draft_mtp`, `--spec-type
+draft-mtp`, defaults n_max 3), read at `~/llama.cpp-ref` (4b1a27f): the head's
+row p is `eh_proj(concat(enorm(embed(x_p)), hnorm(h_{p-1})))` through the
+block, `shared_head_norm`, then the model's own output head, where h is the
+trunk's final hidden state AFTER `output_norm`; a draft feeds each step's own
+normed output back as the next h; the head's cache is filled over every
+position the trunk writes. vLLM's Qwen3-Next MTP proposer has the same shape.
+The colibri engine (#145's note) found an MTP head cut to int4 collapsed to
+0-4% acceptance — the files here keep it at Q8_0, except Qwen 3.8 27B's Q4_0
+`eh_proj` (unmeasured).
+
+**What is ours.** (1) The head takes in only COMMITTED positions — llama.cpp
+runs it over every row the trunk read, then drops the rejected ones — so no
+head row is computed to be thrown away, and the rows waiting since the last
+draft ride on the draft's first forward. (2) Its positions count from its own
+first row: RoPE is relative, so a head that starts mid-prompt (a prefix-cache
+hit, or the last `MTP_PROMPT_ROWS` = 4,096 of a long prompt) attends as one
+that started at 0 over the same rows. (3) The trunk's check is the n-gram's,
+rewind and all: the head's draft steps run only its own full-attention layer,
+so nothing recurrent is taken back but the check — what kept the drafter and
+SWIFT off these models does not apply. (4) On a card, a model with a head
+copies the trunk's last row out of every captured step into memory made
+before the capture (`executor::graph_keeps_the_head_row`), so the step that
+feeds the head is still a replayed graph and every step records the same one.
+
+**Memory.** No planner or admission charges the block: 122 MB on the 4B, 430
+MB on Qwen 3.6 27B, 228 MB on Qwen 3.8 27B, 856 MB on the 35B-A3B of which 816
+MB are routed experts. The loader takes its bytes off the conversation budget
+of the device its layer runs on, and skips it where they would be more than a
+quarter of that budget. A mixture-of-experts head on a card keeps its routed
+experts in the machine's memory (`for_the_next_token_block`), charged to the
+machine's conversation budget — and where there is none, the head is not
+loaded (they would sit there uncharged). Its cache stops at
+`MTP_MOST_POSITIONS` (16,384); past it the head stops for the reply.
+
+**Measured** (2026-11-07, Qwen3.5-4B Q4_K_M, one optimized CUDA test binary,
+A/B `SWARMLLM_MTP=0`, live node stopped, safety kit, 96 greedy tokens, three
+runs an arm, `the_models_own_guess_head_writes_the_reply_read_one_token_at_a_time`;
+`GUESS_TEST_STORY` and `GUESS_TEST_CODE`):
+
+| Where, prompt | one token at a time | n-gram alone | with the head | head's guesses kept |
+|---|---|---|---|---|
+| processor, story | 9.4-10.5 tok/s | 9.4-9.9 | 11.8-12.2 | 51-60% |
+| processor, code | 9.6-10.5 | 11.1-11.7 | 16.7-16.8 | 81% |
+| card (RTX 3070 Laptop), story | 72.2-74.0 | 50.5-59.1 | 74.9-80.3 | 58-65% |
+| card, code | 71.3-73.2 | 73.9-76.3 | 90.1-110.0 | 81-86% |
+
+A guess is 20-21 ms on the processor beside a ~100 ms step, 2.8-3.2 ms on the
+card beside ~13 — mostly the 248K-row output head (FR-Spec's finding). On the
+card the steps through the guessing loop stayed at 12.5-13.9 ms with every
+step keeping the head's row: the captured graph ran (an uncaptured Qwen 3.5
+step is 2-3x that). The card's ranges move with one-off graph recordings of a
+new check width inside the timed run (1-4 a run).
+
+**Checked.** Qwen3.5-4B Q4_K_M on the processor, debug test build, the
+lighthouse story (`GUESS_TEST_STORY`, 96 tokens, greedy): the head guessed 58
+times in 54 rounds and 40 were kept (alpha 0.74); the reply was the one written
+one token at a time. In the first run, with checks priced at debug speed, it
+guessed 13 times and kept 7 and declined 78 rounds. The n-gram alone parts the
+same reply from one at a time at position 51 (a 0.09-logit near tie), with or
+without the head and with #174's split keys off (#426).
+
 ## Qwen 3.5's prompt is saved short of its end, and restored whole (2026-10-18, FUTURE_WORK #228 (8))
 
 **What it replaced.** `PrefixCache::insert_from_kv` skipped any request holding SSM state

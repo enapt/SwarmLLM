@@ -403,6 +403,7 @@ pub(crate) fn arch_supports_hybrid(arch: &crate::inference::model_arch::ModelArc
 /// with this type's answers on its first line, so every load inside the body
 /// picks up the right device with no further edit and a new architecture
 /// inherits the behaviour by construction.
+#[derive(Clone)]
 pub(crate) struct LayerPlacement {
     /// Absolute index of this segment's first layer.
     layer_start: usize,
@@ -430,6 +431,7 @@ pub(crate) struct LayerPlacement {
 }
 
 /// [`LayerPlacement::with_windowed_rope`]'s tables and the layers they are for.
+#[derive(Clone)]
 struct WindowedTables {
     window: super::SlidingWindow,
     gpu: Option<(Tensor, Tensor)>,
@@ -515,6 +517,17 @@ impl LayerPlacement {
             self.experts_on_the_processor = n;
         }
         self
+    }
+
+    /// Where a model's next-token-prediction block loads (#425): as the
+    /// segment's last layer `last` does — the block is that layer's neighbour
+    /// on every path its rows take — but with a card-held block's routed
+    /// experts in the machine's memory. Ask it with `last`, never the block's
+    /// own index, which lies past the segment. No planner charges the block,
+    /// so the loader takes its card bytes off the conversations' budget; a
+    /// 35B-A3B's routed experts alone are 855 MB.
+    pub(crate) fn for_the_next_token_block(&self) -> Self {
+        self.clone().with_experts_on_the_processor(usize::MAX)
     }
 
     fn on_gpu(&self, abs_layer: usize) -> bool {

@@ -3554,6 +3554,9 @@ struct LocalSpec {
     /// The card's own guesses, for a whole model split between the card and
     /// the processor; `None` elsewhere.
     card: Option<CardGuesses>,
+    /// The model's own guess head (#425), for a file that carries one;
+    /// `None` elsewhere.
+    mtp: Option<MtpGuesses>,
     /// The owner's earlier replies, looked in where the conversation has no
     /// match (#337) — `None` unless the owner asked
     /// (`OwnerReplies::in_this_process`). Read as shown to no peer: the
@@ -3716,6 +3719,247 @@ fn card_guesses_on() -> bool {
 fn card_stand_in_on() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var("SWARMLLM_CARD_GUESS_STAND_IN").as_deref() != Ok("none"))
+}
+
+/// The model's own guess head (#425): the file's next-token-prediction block
+/// (`split::mtp`) drafting where the conversation offers nothing to copy, or
+/// where its guesses have been kept more often than the copies'.
+///
+/// The head reads, at each position `p`, token `x_p` beside the trunk's
+/// hidden state at `p - 1`. It takes in every position the reply COMMITS —
+/// the prompt's last [`MTP_PROMPT_ROWS`](crate::inference::split::MTP_PROMPT_ROWS)
+/// after the prompt pass, then each round's accepted ones — from the rows
+/// every trunk forward keeps of its last layer (`capture`). A draft runs the
+/// rows waiting plus `(next token, last state)` in one forward, whose last row
+/// is the first guess, then one row a guess, each fed its own output (as
+/// llama.cpp's `draft-mtp`); the guesses' own rows are cut from its cache
+/// before the check. Any failure stops it for the reply — the n-gram goes on;
+/// a guess head never fails a reply.
+struct MtpGuesses {
+    /// The trunk layer whose output each forward keeps for the head.
+    capture: std::collections::HashSet<usize>,
+    cache: crate::inference::split::MtpCache,
+    /// Rows waiting to be taken in: their tokens, and the trunk's normed state
+    /// before each, in pieces of `[1, n, hidden]`.
+    tokens: Vec<u32>,
+    hidden: Vec<candle_core::Tensor>,
+    /// The trunk's normed state at the last position it wrote (`[1, 1, hidden]`).
+    last_h: Option<candle_core::Tensor>,
+    /// The position of the next row to take in.
+    next_pos: usize,
+    /// The first allocation of the head's cache: the request's reservation.
+    kv_reserve: usize,
+    for_the_owner: bool,
+    acceptance: crate::inference::dsd_controller::AcceptanceEstimate,
+    /// One guess's time, read back with the round's guesses.
+    guess_ms: crate::inference::dsd_controller::RecentMedian,
+    rounds: u64,
+    proposed: u64,
+    accepted: u64,
+    declined: u64,
+    /// Why it stopped for this reply.
+    stopped: Option<String>,
+}
+
+impl MtpGuesses {
+    /// Guesses before a check has been timed — llama.cpp's default draft.
+    const FIRST_GUESSES: usize = 3;
+    /// The most a round makes: the head was trained to look ONE token ahead,
+    /// and each further guess reads its own output, so they are kept less
+    /// often the deeper they go — which the round's single acceptance figure
+    /// does not see.
+    const MOST_GUESSES: usize = 4;
+
+    fn for_model(
+        model: &crate::inference::split::SplitModel,
+        kv_store: &crate::inference::split::KvCacheStore,
+        req_id_str: &str,
+    ) -> Option<Self> {
+        let layer = model.mtp_capture_layer()?;
+        Some(Self {
+            capture: std::iter::once(layer).collect(),
+            cache: Default::default(),
+            tokens: Vec::new(),
+            hidden: Vec::new(),
+            last_h: None,
+            next_pos: 0,
+            kv_reserve: kv_store
+                .reserved_positions(req_id_str)
+                .min(crate::inference::split::MTP_MOST_POSITIONS),
+            for_the_owner: kv_store.serves_the_owner(req_id_str),
+            acceptance: crate::inference::dsd_controller::AcceptanceEstimate::recent(),
+            guess_ms: Default::default(),
+            rounds: 0,
+            proposed: 0,
+            accepted: 0,
+            declined: 0,
+            stopped: None,
+        })
+    }
+
+    fn active(&self) -> bool {
+        self.stopped.is_none()
+    }
+
+    fn stop(&mut self, why: String) {
+        if self.stopped.is_none() {
+            tracing::warn!(reason = %why, "next-token head: no more guesses for this reply");
+            self.stopped = Some(why);
+            self.tokens.clear();
+            self.hidden.clear();
+        }
+    }
+
+    /// The prompt pass's kept rows (`[1, n, hidden]`, before the output norm),
+    /// positions `first..first + n` of `prompt`. Position 0 is paired with a
+    /// zero state, as llama.cpp's first row is.
+    fn take_the_prompt(
+        &mut self,
+        model: &crate::inference::split::SplitModel,
+        prompt: &[u32],
+        kept: &candle_core::Tensor,
+        first: usize,
+    ) -> Result<(), SwarmError> {
+        let n = kept.dim(1).map_err(SwarmError::internal)?;
+        if n == 0 || first + n != prompt.len() {
+            return Err(SwarmError::Internal(format!(
+                "next-token head: {n} prompt rows from {first} of {}",
+                prompt.len()
+            )));
+        }
+        let h = model.mtp_hidden_from(kept)?;
+        if first == 0 {
+            self.tokens.push(prompt[0]);
+            self.hidden.push(
+                h.narrow(1, 0, 1)
+                    .and_then(|r| r.zeros_like())
+                    .map_err(SwarmError::internal)?,
+            );
+        }
+        if n > 1 {
+            self.tokens.extend_from_slice(&prompt[first + 1..first + n]);
+            self.hidden
+                .push(h.narrow(1, 0, n - 1).map_err(SwarmError::internal)?);
+        }
+        self.last_h = Some(h.narrow(1, n - 1, 1).map_err(SwarmError::internal)?);
+        self.next_pos = first + n;
+        Ok(())
+    }
+
+    /// A round's committed positions — `tokens` at `index_pos..` — with the
+    /// rows its forward kept (`caught`, every position it read).
+    fn take_the_round(
+        &mut self,
+        model: &crate::inference::split::SplitModel,
+        index_pos: usize,
+        tokens: &[u32],
+        caught: Option<&HashMap<usize, candle_core::Tensor>>,
+    ) -> Result<(), SwarmError> {
+        let committed = tokens.len();
+        let kept = caught
+            .and_then(|c| self.capture.iter().next().and_then(|l| c.get(l)))
+            .ok_or_else(|| {
+                SwarmError::Internal("next-token head: the forward kept no rows".into())
+            })?;
+        let h =
+            model.mtp_hidden_from(&kept.narrow(1, 0, committed).map_err(SwarmError::internal)?)?;
+        // Position `index_pos` reads the state before the round; it is
+        // already in when this round's guesses were the head's.
+        if index_pos >= self.next_pos {
+            let before = self.last_h.clone().ok_or_else(|| {
+                SwarmError::Internal("next-token head: no state before the round".into())
+            })?;
+            self.tokens.push(tokens[0]);
+            self.hidden.push(before);
+        }
+        if committed > 1 {
+            self.tokens.extend_from_slice(&tokens[1..]);
+            self.hidden.push(
+                h.narrow(1, 0, committed - 1)
+                    .map_err(SwarmError::internal)?,
+            );
+        }
+        self.last_h = Some(
+            h.narrow(1, committed - 1, 1)
+                .map_err(SwarmError::internal)?,
+        );
+        self.next_pos = index_pos + committed;
+        Ok(())
+    }
+
+    /// Up to `gamma` guesses after `next_token`, the token at `index_pos`.
+    fn guesses(
+        &mut self,
+        model: &crate::inference::split::SplitModel,
+        next_token: u32,
+        index_pos: usize,
+        gamma: usize,
+    ) -> Result<Vec<u32>, SwarmError> {
+        if self.next_pos != index_pos {
+            return Err(SwarmError::Internal(format!(
+                "next-token head: rows end at {} but the reply is at {index_pos}",
+                self.next_pos
+            )));
+        }
+        let before = self
+            .last_h
+            .clone()
+            .ok_or_else(|| SwarmError::Internal("next-token head: no state yet".into()))?;
+        let rows = self.tokens.len() + 1;
+        if self.cache.len() + rows + gamma > crate::inference::split::MTP_MOST_POSITIONS {
+            return Err(SwarmError::Internal(format!(
+                "next-token head: its cache would pass {} positions",
+                crate::inference::split::MTP_MOST_POSITIONS
+            )));
+        }
+        let mut tokens = std::mem::take(&mut self.tokens);
+        tokens.push(next_token);
+        let mut pieces = std::mem::take(&mut self.hidden);
+        pieces.push(before);
+        let hidden = candle_core::Tensor::cat(&pieces, 1).map_err(SwarmError::internal)?;
+        self.next_pos = index_pos + 1;
+        let chunk = crate::inference::split::MTP_CATCH_UP_CHUNK;
+        let mut out = None;
+        for start in (0..tokens.len()).step_by(chunk) {
+            let len = chunk.min(tokens.len() - start);
+            out = Some(model.mtp_forward(
+                &mut self.cache,
+                &tokens[start..start + len],
+                &hidden.narrow(1, start, len).map_err(SwarmError::internal)?,
+                self.kv_reserve,
+                self.for_the_owner,
+            )?);
+        }
+        let (mut rows_out, mut logits) =
+            out.ok_or_else(|| SwarmError::Internal("next-token head: nothing to read".into()))?;
+        // Every row so far is the reply's; the guesses' own rows go after.
+        let held = self.cache.len();
+        let mut guessed = Vec::with_capacity(gamma);
+        loop {
+            let row: Vec<f32> = logits
+                .flatten_all()
+                .and_then(|l| l.to_dtype(candle_core::DType::F32))
+                .and_then(|l| l.to_vec1())
+                .map_err(SwarmError::internal)?;
+            let guess = crate::inference::sampling::argmax(&row);
+            guessed.push(guess);
+            if guessed.len() >= gamma {
+                break;
+            }
+            let last = rows_out
+                .narrow(1, rows_out.dim(1).map_err(SwarmError::internal)? - 1, 1)
+                .map_err(SwarmError::internal)?;
+            (rows_out, logits) = model.mtp_forward(
+                &mut self.cache,
+                &[guess],
+                &last,
+                self.kv_reserve,
+                self.for_the_owner,
+            )?;
+        }
+        self.cache.truncate(held);
+        Ok(guessed)
+    }
 }
 
 /// `SWARMLLM_CARD_GUESS_PRIOR=0`: each reply's stand-in is fitted from that
@@ -3906,6 +4150,7 @@ impl LocalSpec {
             probe_after: Self::FIRST_PROBE_AFTER,
             probes: 0,
             card: (!fixed).then(|| CardGuesses::for_model(model)).flatten(),
+            mtp: None,
             earlier: None,
             from_earlier: 0,
             #[cfg(test)]
@@ -3930,6 +4175,31 @@ impl LocalSpec {
         if let Some(card) = self.card.as_mut() {
             card.stand_in = stand_in;
             card.prompt = prompt;
+        }
+        self
+    }
+
+    /// Hand the model's guess head what the prompt pass kept for it
+    /// ([`MtpGuesses::take_the_prompt`]): its last layer's rows, from prompt
+    /// position `first`. Nothing where the model has no head, the prompt pass
+    /// kept nothing, or every guess is checked as before (`fixed`).
+    fn with_mtp(
+        mut self,
+        model: &crate::inference::split::SplitModel,
+        kv_store: &crate::inference::split::KvCacheStore,
+        req_id_str: &str,
+        prompt_ids: &[u32],
+        kept: Option<(candle_core::Tensor, usize)>,
+    ) -> Self {
+        let Some((kept, first)) = kept.filter(|_| !self.fixed) else {
+            return self;
+        };
+        let Some(mut mtp) = MtpGuesses::for_model(model, kv_store, req_id_str) else {
+            return self;
+        };
+        match mtp.take_the_prompt(model, prompt_ids, &kept, first) {
+            Ok(()) => self.mtp = Some(mtp),
+            Err(e) => tracing::warn!(error = %e, "next-token head: not used for this reply"),
         }
         self
     }
@@ -3997,6 +4267,29 @@ impl LocalSpec {
         .map_or(CardGuesses::FIRST_GUESSES.min(room), |g| g as usize)
     }
 
+    /// How many guesses the model's head makes this round ([`MtpGuesses`]):
+    /// none before a plain step has been timed,
+    /// [`MtpGuesses::FIRST_GUESSES`] before a check has, then the count that
+    /// pays with each guess's time charged — zero included — and never more
+    /// than [`MtpGuesses::MOST_GUESSES`].
+    fn mtp_guess_count(&self, room: usize) -> usize {
+        let Some(mtp) = self.mtp.as_ref().filter(|m| m.active()) else {
+            return 0;
+        };
+        let Some(step) = self.step_ms.median() else {
+            return 0;
+        };
+        let room = room.min(MtpGuesses::MOST_GUESSES);
+        crate::inference::dsd_controller::best_gamma_beside_a_step(
+            mtp.acceptance.alpha(),
+            Some(step),
+            &self.check,
+            u32::try_from(room).unwrap_or(u32::MAX),
+            mtp.guess_ms.median().unwrap_or(0.0),
+        )
+        .map_or(MtpGuesses::FIRST_GUESSES.min(room), |g| g as usize)
+    }
+
     /// What the guessing learned, for the request's closing line.
     fn summary(&self) -> String {
         let fit = self.check.fit().map_or("-".to_string(), |(f, s)| {
@@ -4030,8 +4323,25 @@ impl LocalSpec {
                 self.card_guess_count(self.room()),
             )
         });
+        let mtp = self.mtp.as_ref().map_or(String::new(), |m| {
+            format!(
+                " head rounds {} guessed {} kept {} declined {} guess {} ms alpha {:.2} next {}{}",
+                m.rounds,
+                m.proposed,
+                m.accepted,
+                m.declined,
+                m.guess_ms
+                    .median()
+                    .map_or("-".to_string(), |ms| format!("{ms:.1}")),
+                m.acceptance.alpha(),
+                self.mtp_guess_count(self.room()),
+                m.stopped
+                    .as_ref()
+                    .map_or(String::new(), |why| format!(" stopped ({why})")),
+            )
+        });
         format!(
-            "rounds {} accepted {} rejected {} declined {} probes {} one-off {} earlier {} step {step} ms check {fit} ms alpha {:.2} next {}{card}",
+            "rounds {} accepted {} rejected {} declined {} probes {} one-off {} earlier {} step {step} ms check {fit} ms alpha {:.2} next {}{card}{mtp}",
             self.rounds,
             self.accepted,
             self.rejected,
@@ -4119,13 +4429,52 @@ impl LocalSpec {
             (worth, probe) = (script.pop_front().unwrap_or(0).min(found.len()), false);
         }
         let declined = !found.is_empty() && worth == 0;
+        // The model's own head guesses where the conversation offers nothing
+        // worth checking, or where its guesses have been kept more often.
+        let mut mtp_round = false;
+        let mut mtp_declined = false;
+        let mtp_due = !settling
+            && room > 0
+            && self.mtp.as_ref().is_some_and(|m| {
+                m.active()
+                    && (found.is_empty()
+                        || worth == 0
+                        || m.acceptance.alpha() > self.acceptance.alpha())
+            });
+        #[cfg(test)]
+        let mtp_due = mtp_due && self.script.is_none();
+        if mtp_due {
+            let gamma = self.mtp_guess_count(room);
+            if let Some(mtp) = self.mtp.as_mut().filter(|_| gamma > 0) {
+                let started = std::time::Instant::now();
+                let guessed = tokio::task::block_in_place(|| {
+                    let _g = crate::inference::attn_kernel::ForceStandardAttnGuard::new(force_attn);
+                    mtp.guesses(model, next_token, *index_pos, gamma)
+                });
+                match guessed {
+                    Ok(guesses) if !guesses.is_empty() => {
+                        mtp.guess_ms.record(
+                            started.elapsed().as_secs_f64() * 1000.0 / guesses.len() as f64,
+                        );
+                        found = guesses;
+                        worth = found.len();
+                        probe = false;
+                        mtp_round = true;
+                    }
+                    Ok(_) => {}
+                    Err(e) => mtp.stop(e.to_string()),
+                }
+            } else {
+                mtp_declined = self.step_ms.median().is_some() && self.check.fit().is_some();
+            }
+        }
         let one_offs_before = model.one_off_forwards();
         #[cfg(test)]
         let began_at = *index_pos;
         // Nothing to copy: the card guesses on its own, where it can.
         let mut card_round = false;
         let mut card_declined = false;
-        let card_due = found.is_empty() && self.card.is_some() && !settling;
+        let card_due = found.is_empty() && !mtp_round && self.card.is_some() && !settling;
         #[cfg(test)]
         let card_due = card_due && self.script.is_none();
         if card_due {
@@ -4174,7 +4523,21 @@ impl LocalSpec {
             // probe of the check's price nor a round of the card's guesses.
             probe &= worth > 0;
             card_round &= worth > 0;
+            mtp_round &= worth > 0;
         }
+        // The rows the head and the card's stand-in read, kept by the check.
+        let capture: Option<std::collections::HashSet<usize>> = {
+            let stand_in = self
+                .card
+                .as_ref()
+                .and_then(|c| c.stand_in.as_ref())
+                .map(crate::inference::split::RunStandIn::capture_layers);
+            let head = self.mtp.as_ref().filter(|m| m.active()).map(|m| &m.capture);
+            match (stand_in, head) {
+                (None, None) => None,
+                (a, b) => Some(a.into_iter().chain(b).flatten().copied().collect()),
+            }
+        };
         let round = ngram_spec_round(
             model,
             kv_store,
@@ -4186,12 +4549,19 @@ impl LocalSpec {
             generated,
             sampling,
             force_attn,
-            self.card
-                .as_ref()
-                .and_then(|c| c.stand_in.as_ref())
-                .map(crate::inference::split::RunStandIn::capture_layers),
+            capture.as_ref(),
             held,
         )?;
+        if let Some(mtp) = self.mtp.as_mut().filter(|m| m.active()) {
+            let committed: Vec<u32> = std::iter::once(next_token)
+                .chain(round.produced.iter().copied())
+                .take(round.committed)
+                .collect();
+            if let Err(e) = mtp.take_the_round(model, *index_pos, &committed, round.caught.as_ref())
+            {
+                mtp.stop(e.to_string());
+            }
+        }
         *index_pos += round.committed;
         if let (Some(caught), Some(card)) = (round.caught.as_ref(), self.card.as_mut()) {
             if let Some(stand_in) = card.stand_in.as_mut() {
@@ -4224,6 +4594,18 @@ impl LocalSpec {
                 .check
                 .record(u32::try_from(p).unwrap_or(u32::MAX), round.ms),
         }
+        if let Some(mtp) = self.mtp.as_mut() {
+            if mtp_round {
+                mtp.rounds += 1;
+                mtp.proposed += round.proposed as u64;
+                mtp.accepted += round.accepted as u64;
+                mtp.acceptance
+                    .record(round.accepted as u32, round.proposed as u32);
+            } else if mtp_declined {
+                mtp.declined += 1;
+                mtp.acceptance.fade();
+            }
+        }
         if let Some(card) = self.card.as_mut().filter(|_| card_round || card_declined) {
             if card_round {
                 card.rounds += 1;
@@ -4235,7 +4617,7 @@ impl LocalSpec {
                 card.declined += 1;
                 card.acceptance.fade();
             }
-        } else if round.proposed > 0 {
+        } else if round.proposed > 0 && !mtp_round {
             self.backoff.record(round.accepted > 0);
             self.acceptance
                 .record(round.accepted as u32, round.proposed as u32);
@@ -4270,6 +4652,33 @@ impl LocalSpec {
 fn local_guess_gamma_fixed() -> bool {
     static FIXED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *FIXED.get_or_init(|| std::env::var("SWARMLLM_LOCAL_GUESS_GAMMA").as_deref() == Ok("fixed"))
+}
+
+/// The rows the prompt pass kept for the model's guess head, in order — the
+/// part before a recurrent model's save point, then the rest — as the
+/// prompt's last [`MTP_PROMPT_ROWS`](crate::inference::split::MTP_PROMPT_ROWS)
+/// rows and the position of the first. Each piece kept its own last rows, so
+/// the two meet wherever the second is shorter than that; where it is not,
+/// the second alone is kept. `None` where nothing was kept or they would not
+/// join (logged: the reply goes on without the head).
+fn mtp_prompt_rows(
+    rows: Vec<candle_core::Tensor>,
+    prompt_len: usize,
+) -> Option<(candle_core::Tensor, usize)> {
+    if rows.is_empty() {
+        return None;
+    }
+    let joined = (|| {
+        let all = candle_core::Tensor::cat(&rows, 1)?;
+        let n = all.dim(1)?;
+        let keep = n
+            .min(crate::inference::split::MTP_PROMPT_ROWS)
+            .min(prompt_len);
+        Ok::<_, candle_core::Error>((all.narrow(1, n - keep, keep)?, prompt_len - keep))
+    })();
+    joined
+        .map_err(|e| tracing::warn!(error = %e, "next-token head: the prompt's rows did not join"))
+        .ok()
 }
 
 /// KV positions reserved for the reply when a prompt is admitted and when its
@@ -5908,6 +6317,22 @@ async fn handle_generate(
     // The card's stand-in for the run its guesses skip is fitted from the
     // prompt's last positions first (`CardGuesses`).
     let mut stand_in = card_stand_in_for(model, speculating);
+    // The model's own guess head reads the prompt's last rows of the trunk's
+    // last layer (`MtpGuesses`). A card's stand-in, where there is one, keeps
+    // its own rows alone (no file here carries both: a head is Qwen 3.5's,
+    // whose recurrent layers the card's guesses refuse).
+    let mtp_layer: Option<std::collections::HashSet<usize>> =
+        (speculating && stand_in.is_none() && !local_guess_gamma_fixed())
+            .then(|| model.mtp_capture_layer())
+            .flatten()
+            .map(|layer| std::iter::once(layer).collect());
+    let mtp_capture = mtp_layer
+        .as_ref()
+        .map(|layers| crate::inference::split::Capture {
+            layers,
+            last: crate::inference::split::MTP_PROMPT_ROWS,
+        });
+    let mut mtp_rows: Vec<candle_core::Tensor> = Vec::new();
     // The owner's earlier replies: read by the guesses, and this reply kept
     // in them once written (#337). `None` for anyone else's request.
     let earlier = crate::inference::owner_replies::OwnerReplies::in_this_process(
@@ -5922,7 +6347,22 @@ async fn handle_generate(
         let mut from = index_pos_start;
         if let Some(at) = stop_to_save {
             let head = model.tensor_from_ids(&prompt_ids[from..at])?;
-            model.forward(&head, from, kv_store, &req_id_str)?;
+            match mtp_capture {
+                Some(capture) => {
+                    let (_, caught) = model.forward_keeping(
+                        &head,
+                        from,
+                        kv_store,
+                        &req_id_str,
+                        capture,
+                        false,
+                    )?;
+                    mtp_rows.extend(caught.into_values());
+                }
+                None => {
+                    model.forward(&head, from, kv_store, &req_id_str)?;
+                }
+            }
             manifest = save_prompt_opening(
                 model,
                 kv_store,
@@ -5936,16 +6376,17 @@ async fn handle_generate(
             from = at;
         }
         let rest = model.tensor_from_ids(&prompt_ids[from..])?;
-        match stand_in.as_ref() {
-            Some(s) => {
-                let capture = crate::inference::split::Capture {
-                    layers: s.capture_layers(),
-                    last: s.prompt_capture(),
-                };
-                model
-                    .forward_keeping(&rest, from, kv_store, &req_id_str, capture, false)
-                    .map(|(logits, caught)| (logits, Some(caught)))
-            }
+        let capture = match (stand_in.as_ref(), mtp_capture) {
+            (Some(s), _) => Some(crate::inference::split::Capture {
+                layers: s.capture_layers(),
+                last: s.prompt_capture(),
+            }),
+            (None, head) => head,
+        };
+        match capture {
+            Some(capture) => model
+                .forward_keeping(&rest, from, kv_store, &req_id_str, capture, false)
+                .map(|(logits, caught)| (logits, Some(caught))),
             None => model
                 .forward(&rest, from, kv_store, &req_id_str)
                 .map(|logits| (logits, None)),
@@ -5956,9 +6397,13 @@ async fn handle_generate(
     let mut prompt_caught: Option<(HashMap<usize, candle_core::Tensor>, usize)> = None;
     let logits = match prefill {
         Ok((l, caught)) => {
-            if let (Some(_), Some(caught)) = (stand_in.as_ref(), caught) {
-                let rows = caught.values().next().map_or(0, |t| t.dim(1).unwrap_or(0));
-                prompt_caught = Some((caught, rows));
+            match (stand_in.as_ref(), caught) {
+                (Some(_), Some(caught)) => {
+                    let rows = caught.values().next().map_or(0, |t| t.dim(1).unwrap_or(0));
+                    prompt_caught = Some((caught, rows));
+                }
+                (None, Some(caught)) => mtp_rows.extend(caught.into_values()),
+                _ => {}
             }
             l
         }
@@ -6094,9 +6539,11 @@ async fn handle_generate(
             // speculative-sampling rejection rule itself, not an approximation of
             // it. See the note on `ngram_spec_eligible`.
             // Only built when it will be used — it copies the whole prompt.
+            let mtp_prompt = mtp_prompt_rows(std::mem::take(&mut mtp_rows), prompt_ids.len());
             let mut spec = speculating.then(|| {
                 LocalSpec::new(*ngram_cfg, &prompt_ids, model, local_guess_gamma_fixed())
                     .with_stand_in(stand_in.take(), prompt_caught.take())
+                    .with_mtp(model, kv_store, &req_id_str, &prompt_ids, mtp_prompt)
                     .with_earlier(earlier.clone())
             });
 
@@ -9402,6 +9849,108 @@ mod local_speculation_tests {
         }
     }
 
+    /// An open reply: little in it repeats the prompt, so the n-gram finds
+    /// little and the model's own guess head is what guesses.
+    const GUESS_TEST_STORY: &str = "Here is a short story about a lighthouse keeper \
+         who finds a message in a bottle.\n\n";
+
+    /// The model's own guess head (#425) guesses a reply the conversation
+    /// offers nothing to copy into, and the reply is the one written one
+    /// token at a time. Red with the head's catch-up fed the wrong state —
+    /// the hidden state of the same position rather than the one before, or
+    /// left unnormed — where its guesses are kept far less often, and with
+    /// any row of a check taken in that the check did not keep (the reply
+    /// still matches, the guesses decay). Exact ids on the processor; on a
+    /// card printed only (the near ties of
+    /// [`a_guessed_reply_is_the_reply_read_one_token_at_a_time`]).
+    ///
+    /// `SWARMLLM_GUESS_TEST_GGUF=~/swarmllm-ref/qwen35/bartowski/Qwen_Qwen3.5-4B-Q4_K_M.gguf
+    /// cargo dev-test --lib own_guess_head -- --ignored --nocapture`;
+    /// `SWARMLLM_MTP=0` for the reply without the head.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[ignore = "needs a GGUF in SWARMLLM_GUESS_TEST_GGUF"]
+    async fn the_models_own_guess_head_writes_the_reply_read_one_token_at_a_time() {
+        let Some(mut model) = guess_test_model() else {
+            return;
+        };
+        let asked = std::env::var("SWARMLLM_GUESS_TEST_PROMPT").ok();
+        let prompt = model.encode_ids(asked.as_deref().unwrap_or(GUESS_TEST_STORY));
+        let kv = crate::inference::split::KvCacheStore::new(std::time::Duration::from_secs(600));
+        // Twice, the second timed (graphs made on a card's first use of a shape).
+        let mut plain = (Vec::new(), 0.0, None);
+        let mut chosen = (Vec::new(), 0.0, None);
+        for pass in 0..2 {
+            plain = guessed_reply(
+                &mut model,
+                &kv,
+                &prompt,
+                &format!("head-plain-{pass}"),
+                None,
+                None,
+            );
+            chosen = guessed_reply(
+                &mut model,
+                &kv,
+                &prompt,
+                &format!("head-chosen-{pass}"),
+                Some(false),
+                None,
+            );
+        }
+        let speed = |secs: f64| GUESSED_REPLY_STEPS as f64 / secs;
+        let spec = chosen.2.as_ref().unwrap();
+        let mut carry = Vec::new();
+        let text: String = plain
+            .0
+            .iter()
+            .map(|&t| decode_token(&model, t, &mut carry))
+            .collect();
+        eprintln!("reply {text:?}");
+        eprintln!(
+            "one token at a time {:.1} tok/s, guessed {:.1} tok/s; {}",
+            speed(plain.1),
+            speed(chosen.1),
+            spec.summary()
+        );
+        // Where they part, it must be where one token at a time barely
+        // decides: the n-gram's own checks part the 4B's story there on the
+        // processor too (#426), so a parting is judged as
+        // [`a_guessed_reply_is_the_reply_read_one_token_at_a_time`] judges a card's.
+        if let Some(at) = plain.0.iter().zip(&chosen.0).position(|(a, b)| a != b) {
+            let stepped = logits_after(&mut model, &kv, &prompt, &plain.0[..at], "head-why", true);
+            let (wrote, guessed) = (plain.0[at] as usize, chosen.0[at] as usize);
+            eprintln!(
+                "apart at {at}: one at a time {wrote} ({:.3}), guessed {guessed} ({:.3}), top two {:?}",
+                stepped[wrote],
+                stepped[guessed],
+                top_two(&stepped)
+            );
+            assert!(
+                top_two(&stepped)[0].0 as usize == wrote
+                    && stepped[wrote] - stepped[guessed] < CARD_NEAR_TIE_LOGITS,
+                "the guessed reply parts from the reply at {at}, not at a near tie"
+            );
+        }
+        if crate::inference::split::mtp_on() {
+            let head = spec.mtp.as_ref().expect("the file carries no guess head");
+            assert!(
+                head.stopped.is_none(),
+                "the head stopped: {}",
+                spec.summary()
+            );
+            assert!(
+                head.rounds > 0,
+                "the head never guessed: {}",
+                spec.summary()
+            );
+            assert!(
+                head.accepted > 0,
+                "no guess of the head's was kept: {}",
+                spec.summary()
+            );
+        }
+    }
+
     /// A record to copy: a reply held to JSON that repeats it is mostly guessed.
     const GUESS_TEST_JSON: &str = "A record as JSON: {\"name\": \"Ada Lovelace\", \"born\": 1815, \
          \"city\": \"London\", \"field\": \"mathematics\", \"known for\": \"the first program\"}\n\
@@ -9563,11 +10112,29 @@ mod local_speculation_tests {
                 .0
             };
         let input = model.tensor_from_ids(prompt).unwrap();
-        let mut next = pick(
-            &model.forward(&input, 0, kv, request).unwrap(),
-            &[],
-            held.as_mut(),
-        );
+        // The prompt pass keeps the model's guess head its rows, as
+        // `handle_generate`'s does, where the count is chosen.
+        let head_layers: Option<std::collections::HashSet<usize>> = guessing
+            .filter(|fixed| !fixed)
+            .and_then(|_| model.mtp_capture_layer())
+            .map(|layer| std::iter::once(layer).collect());
+        let (logits, mut head_prompt) = match head_layers.as_ref() {
+            Some(layers) => {
+                let capture = crate::inference::split::Capture {
+                    layers,
+                    last: crate::inference::split::MTP_PROMPT_ROWS,
+                };
+                let (logits, caught) = model
+                    .forward_keeping(&input, 0, kv, request, capture, false)
+                    .unwrap();
+                (
+                    logits,
+                    mtp_prompt_rows(caught.into_values().collect(), prompt.len()),
+                )
+            }
+            None => (model.forward(&input, 0, kv, request).unwrap(), None),
+        };
+        let mut next = pick(&logits, &[], held.as_mut());
         // `SWARMLLM_GUESS_TEST_MOST=7`: at most that many guesses a check, so
         // on a card every check of the fixed arm is captured
         // (`cuda_graph::MAX_POSITIONS`) and its choices do not turn on timings.
@@ -9578,8 +10145,11 @@ mod local_speculation_tests {
                 .unwrap_or(NgramLookupConfig::default().num_pred_tokens),
             ..NgramLookupConfig::default()
         };
-        let mut spec =
-            guessing.map(|fixed| LocalSpec::new(cfg, prompt, model, fixed).with_earlier(earlier));
+        let mut spec = guessing.map(|fixed| {
+            LocalSpec::new(cfg, prompt, model, fixed)
+                .with_mtp(model, kv, request, prompt, head_prompt.take())
+                .with_earlier(earlier)
+        });
         // `SWARMLLM_GUESS_TEST_SCRIPT=3,0,7,…`: the guesses each round of the
         // guesses that pay checks, as a failing run printed them.
         if let (Some(spec), Some(false), Ok(script)) = (

@@ -2059,6 +2059,9 @@ impl SplitModel {
         // Load only the specified layer range (capped at actual block count)
         let layer_end = layer_end.min(block_count);
         let mut layers: Vec<LayerVariant> = Vec::with_capacity(layer_end - layer_start);
+        // The file's next-token-prediction block, a guess head (#425); only
+        // the Qwen 3.5 branch loads one.
+        let mut mtp: Option<super::mtp::MtpHead> = None;
 
         if matches!(model_arch, ModelArch::DeepSeek2) {
             // ── DeepSeek-V2/V3: MLA + MoE loading ──
@@ -2519,15 +2522,85 @@ impl SplitModel {
                 QMatMul::from_qtensor(q35_tensor(file, name, device)?).map_err(SwarmError::internal)
             };
 
-            for layer_idx in layer_start..layer_end {
+            // The file's next-token-prediction block (#425): read where this
+            // segment is the whole model, by the loop below as one more
+            // full-attention layer, placed as the last layer is
+            // (`LayerPlacement::for_the_next_token_block`) and kept apart from
+            // the trunk. No planner charges it, so what it takes of the device
+            // its layer runs on comes off that device's conversation budget —
+            // and where that is short (more than a quarter of it), it is not
+            // loaded at all.
+            let nextn_layers = md_get("nextn_predict_layers")
+                .ok()
+                .and_then(|v| v.to_u32().ok())
+                .unwrap_or(0);
+            let mtp_block = super::mtp::block_to_load(
+                &ct,
+                &model_arch,
+                nextn_layers,
+                is_first && is_last,
+                layer_end,
+                block_count,
+            )
+            .filter(|&block| {
+                let last = placement.device_for(layer_end.saturating_sub(1));
+                let on_card = last.is_cuda();
+                let (here, beside) = super::mtp::block_bytes(&ct, block, on_card);
+                let quarter = |bytes: u64, budget: Option<u64>| {
+                    budget.is_none_or(|b| bytes.saturating_mul(4) <= b)
+                };
+                // Experts kept beside a card are charged to the machine's
+                // conversation budget, and need one: with none, they would sit
+                // in its memory uncharged.
+                let fits = if on_card {
+                    quarter(here, kv_budget_bytes)
+                        && (beside == 0
+                            || host_kv_budget_bytes.is_some_and(|h| beside.saturating_mul(4) <= h))
+                } else if host_kv_budget_bytes.is_some() {
+                    quarter(here, host_kv_budget_bytes)
+                } else {
+                    quarter(here, kv_budget_bytes)
+                };
+                if fits {
+                    let device_budget = if !on_card && host_kv_budget_bytes.is_some() {
+                        &mut host_kv_budget_bytes
+                    } else {
+                        &mut kv_budget_bytes
+                    };
+                    if let Some(b) = device_budget.as_mut() {
+                        *b -= here;
+                    }
+                    if let Some(h) = host_kv_budget_bytes.as_mut().filter(|_| beside > 0) {
+                        *h -= beside;
+                    }
+                }
+                tracing::info!(
+                    block,
+                    mb = here >> 20,
+                    experts_in_ram_mb = beside >> 20,
+                    on_card,
+                    loaded = fits,
+                    "next-token-prediction block (a guess head)"
+                );
+                fits
+            });
+            let mtp_placement = placement.for_the_next_token_block();
+            let mut mtp_layer: Option<LayerVariant> = None;
+            for layer_idx in (layer_start..layer_end).chain(mtp_block) {
+                let is_mtp = layer_idx >= layer_end;
+                // The tensors are named by the block's own index; from here
+                // on `layer_idx` is the place it loads at, and the
+                // next-token block takes the last layer's.
+                let prefix = format!("blk.{layer_idx}");
+                let is_deltanet = !is_mtp && super::layer_is_recurrent(&ct, layer_idx);
+                let layer_idx = if is_mtp { layer_end - 1 } else { layer_idx };
+                let placement = if is_mtp { &mtp_placement } else { &placement };
                 // Per-layer placement, applied by shadowing — see
                 // `hybrid::LayerPlacement`. Every tensor below loads through
                 // these names; that is what puts Qwen 3.5 on the hybrid
                 // allowlist (`hybrid::arch_supports_hybrid`, FUTURE_WORK #228).
                 let device = placement.device_for(layer_idx);
                 let (cos, sin) = placement.rope_for(layer_idx);
-                let prefix = format!("blk.{layer_idx}");
-                let is_deltanet = super::layer_is_recurrent(&ct, layer_idx);
 
                 let attn_norm =
                     q35_tensor(&mut *file, format!("{prefix}.attn_norm.weight"), &device)?;
@@ -2546,7 +2619,7 @@ impl SplitModel {
                         &ct,
                         &mut file,
                         &prefix,
-                        &placement,
+                        placement,
                         layer_idx,
                         n_experts_used,
                         moe_routing,
@@ -2667,7 +2740,7 @@ impl SplitModel {
                         RmsNorm::from_qtensor(q35_tensor(file, name, &device)?, rms_norm_eps)
                             .map_err(SwarmError::internal)
                     };
-                    layers.push(LayerVariant::Qwen35Attn {
+                    let attention = LayerVariant::Qwen35Attn {
                         weights: Qwen35AttnWeights {
                             wq_gate: q35_mm(
                                 &mut *file,
@@ -2693,8 +2766,54 @@ impl SplitModel {
                         ffn,
                         attention_norm: make_norm(attn_norm, rms_norm_eps)?,
                         post_attention_norm: make_norm(post_attn_norm, rms_norm_eps)?,
-                    });
+                    };
+                    if is_mtp {
+                        mtp_layer = Some(attention);
+                    } else {
+                        layers.push(attention);
+                    }
                 }
+            }
+            if let Some(LayerVariant::Qwen35Attn {
+                weights,
+                ffn,
+                attention_norm,
+                post_attention_norm,
+            }) = mtp_layer
+            {
+                let device = placement.device_for(layer_end - 1);
+                let nextn = |file: &mut R, what: &str| {
+                    q35_tensor(
+                        file,
+                        format!("blk.{block_count}.nextn.{what}.weight"),
+                        &device,
+                    )
+                };
+                // llama.cpp: `nextn.shared_head_norm`, else the model's own.
+                let shared = format!("blk.{block_count}.nextn.shared_head_norm.weight");
+                let head_norm = if ct.tensor_infos.contains_key(&shared) {
+                    shared
+                } else {
+                    "output_norm.weight".to_string()
+                };
+                mtp = Some(super::mtp::MtpHead {
+                    eh_proj: q35_mm(
+                        &mut *file,
+                        format!("blk.{block_count}.nextn.eh_proj.weight"),
+                        &device,
+                    )?,
+                    enorm: make_norm(nextn(&mut *file, "enorm")?, rms_norm_eps)?,
+                    hnorm: make_norm(nextn(&mut *file, "hnorm")?, rms_norm_eps)?,
+                    head_norm: make_norm(
+                        q35_tensor(&mut *file, head_norm, &device)?,
+                        rms_norm_eps,
+                    )?,
+                    attn: weights,
+                    ffn,
+                    attention_norm,
+                    post_attention_norm,
+                    device,
+                });
             }
         } else {
             // ── Standard dense architecture loading (Llama, Qwen2, Gemma, GLM-4, etc.) ──
@@ -3362,6 +3481,7 @@ impl SplitModel {
                 stack_bytes: prompt_stack_bytes,
                 last: None,
             },
+            mtp,
             stand_in_prior: None,
             grammar_vocab: Default::default(),
         })
