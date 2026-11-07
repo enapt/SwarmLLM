@@ -7360,7 +7360,14 @@ had placed the file by hand.
 **Who fetches from HuggingFace.** Only this node's own HuggingFace download of the model — the
 dashboard's part download (`api/admin_hf/shards.rs`, after the parts) and the download pass's
 origin branch (`auto_manage/download.rs`, beside a part, asking `metered_hold`) — and only while no
-computer holds one. A repository answered with nothing to fetch is not listed again for 6 h.
+computer connected here holds one, on its OWN word (`reason_not_to_fetch`: `part_has_a_holder_where`
++ `holder_standing`, #333's and #341's test). It first counted every holder record
+(`mmproj_holders`): any key can announce the sentinel part and a DHT record names any key, so one
+announcement — or a stale record of a holder long gone — kept the encoder off every computer
+(pre-release review, 2026-11-07; test `only_a_connected_holders_own_claim_keeps_the_reader_unfetched`,
+red with the old count). libp2p-kad takes a provider record only from the provider itself
+(`behaviour.rs`, `provider.node_id != source`). A connected holder can still claim falsely; it is the
+one pictures are sent to. A repository answered with nothing to fetch is not listed again for 6 h.
 
 **Which file.** llama.cpp's `-hf` rule (`common/download.cpp::find_best_sibling`, keyword
 `mmproj`, no tag): the model file's own folder or one above it, deepest first, then the closest

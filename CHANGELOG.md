@@ -3,13 +3,14 @@
 ## [Unreleased]
 
 **A vision model can read pictures without anyone copying its image reader in by hand** (#422).
-When a computer downloads parts of a vision model from HuggingFace and no computer in the swarm has
-the model's image reader yet, it now fetches that file too — the one llama.cpp would load beside the
-model, only of a kind this version can run (LLaVA's, Gemma 3's), and only if it matches the
-checksum HuggingFace publishes for it. Its size and checksum are written into the model's
-description, and a copy any other computer receives is checked against them or thrown away. Before,
-nothing ever fetched it, so pictures worked only where someone had placed the file themselves.
-Computers still fetch only that one copy; a second copy for when its holder is away is the next step.
+When a computer downloads parts of a vision model from HuggingFace and none of the computers it is
+connected to has the model's image reader, it now fetches that file too — the one llama.cpp would
+load beside the model, only of a kind this version can run (LLaVA's, Gemma 3's), and only if it
+matches the checksum HuggingFace publishes for it. Its size and checksum are written into the
+model's description, and a copy any other computer receives is checked against them or thrown
+away. Before, nothing ever fetched it, so pictures worked only where someone had placed the file
+themselves. Computers still fetch only that one copy; a second copy for when its holder is away is
+the next step.
 
 **The name you give your computer is shown to the others even when its clock runs a little fast**
 (#416). It was ignored by every other computer once your clock ran more than 30 seconds fast; it
@@ -50,8 +51,9 @@ being written (#419). Before, Cancel only removed the file while the download ca
 
 **Removed an unused vision-encoder download (#421).** No release ever started it on its own: it ran
 only if another computer's announcements named a vision encoder, and then fetched whichever file of
-the model's HuggingFace repository they named. A vision encoder still reaches a computer only when
-placed there by hand (#422).
+the model's HuggingFace repository they named. The fetch at the top of this list (#422) replaces it:
+started only by the computer's own HuggingFace download, for the one file llama.cpp would load,
+checked against HuggingFace's checksum.
 
 **A model added from the swarm no longer shows a part as downloading for ever when another download
 fetched that part** (#420): the download checks every 10 seconds which parts have arrived, however

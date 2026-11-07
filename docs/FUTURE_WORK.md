@@ -1585,8 +1585,12 @@ the next one is attributable. Next: the running count on .268 (field and live no
 `P3` · models · **OPEN** — 2026-11-07 · history: #421
 
 **Steps 1-4 below landed 2026-11-07** (`model::huggingface::vision_encoder`): a node downloading a
-vision model from HuggingFace fetches its image reader too, when no computer holds one, and pins it;
-a peer's copy is checked against the pin or refused. **Open: step 5** — nothing fetches a SECOND
+vision model from HuggingFace fetches its image reader too, when no computer connected to it holds
+one on its own word (the pre-release review's fix, same day: any record had counted, so one bare
+announcement kept the reader off every computer), and pins it; a peer's copy is checked against the
+pin or refused. **Step 5 must also check a peer's copy BEFORE it replaces `mmproj.gguf`**: the
+transfer's `finalize_shard` renames it over the file and the pin check after can delete what was
+there (the review, unconfirmed — nothing starts a peer transfer of the reader yet). **Open: step 5** — nothing fetches a SECOND
 copy from a holder, so a model reads pictures while its one holder is reachable (a picture is encoded
 wherever one is held, `VisionEncoderUnavailable` otherwise). Before it: nothing fetched a vision
 encoder at all, and no build wrote a manifest's `mmproj`. Verified live 2026-11-07 on a probe
@@ -1641,6 +1645,10 @@ this on: the pin is trusted exactly as a part's hash is, and checked the same wa
    at the ~1.9 MB/s peers uploaded at on 2026-11-07, before the rows go on to the chain's head. A
    node that had a picture encoded elsewhere fetching the encoder from that holder in the
    background (checked against the pin) encodes the next one itself.
+   Not worth it (measured 2026-11-07): fetching the encoder from HuggingFace in parallel ranges
+   (hf_transfer's way). One stream from its CDN ran 41-44 MB/s here, four ranges 47-54 MB/s (ABBA,
+   128 MB each, `curl -r`), so ~3 s saved of ~20 on the 851 MB Gemma 3 encoder; the #422 probe's own
+   one-stream fetch half an hour earlier took 10 s (~85 MB/s).
 Live check: a probe's part download of a Gemma 3 4B lands `mmproj.gguf` with the listing's SHA-256
 and the pin; a second probe fetches it from the first; a .276 node shows no new candidate.
 

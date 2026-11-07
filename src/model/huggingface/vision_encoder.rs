@@ -163,8 +163,40 @@ fn note_nothing_to_fetch(model_id: &crate::types::ModelId) {
     map.insert(model_id.clone(), std::time::Instant::now());
 }
 
+/// Why this node leaves a model's image reader unfetched now, or `None` to
+/// fetch it. A holder counts only on its OWN word, from this node or a node
+/// connected to it — `part_has_a_holder_where` + `holder_standing`, #333's and
+/// #341's test. Any key can announce the sentinel part and a DHT provider
+/// record names any key, so counting every record let one announcement keep
+/// the reader off every computer, and a stale record of a holder long gone did
+/// the same (pre-release review, 2026-11-07). A connected holder can still
+/// claim falsely; it is the one pictures would be sent to. Prior art:
+/// libp2p-kad 0.48 `behaviour.rs` takes a provider record only from the
+/// provider itself (`provider.node_id != source` → ignored).
+fn reason_not_to_fetch(
+    state: &crate::daemon::state::SharedState,
+    sentinel: &crate::types::ShardId,
+    model_dir: &std::path::Path,
+) -> Option<&'static str> {
+    let held = state
+        .model_registry
+        .part_has_a_holder_where(sentinel, |holder| state.holder_standing(holder).is_some());
+    if held {
+        Some("a computer connected here holds it")
+    } else if model_dir
+        .join(crate::model::shard::MMPROJ_FILENAME)
+        .exists()
+    {
+        Some("it is on disk here")
+    } else if asked_recently(&sentinel.model_id) {
+        Some("its repository gave nothing to fetch lately")
+    } else {
+        None
+    }
+}
+
 /// Fetch a vision model's image reader as the model's own origin (#422), when
-/// no computer holds one: the file the pin names if the manifest has one,
+/// no computer connected here holds one ([`reason_not_to_fetch`]): the file the pin names if the manifest has one,
 /// else the one llama.cpp would choose ([`best_encoder_for`]); only a projector
 /// type this build reads (`vision::reads_projector_type`, off the header by
 /// range); held to HuggingFace's listed size and SHA-256. Then its BLAKE3
@@ -180,21 +212,8 @@ pub(crate) async fn fetch_from_origin(
 ) -> Option<crate::types::MmprojInfo> {
     let sentinel = crate::types::ShardId::mmproj_for(model_id.clone());
     let model_dir = crate::model::shard::model_dir(&state.config.node.data_dir, &model_id.0);
-    let held_by = state.model_registry.mmproj_holders(model_id).len();
-    let skip = if held_by > 0 {
-        "a computer holds it"
-    } else if model_dir
-        .join(crate::model::shard::MMPROJ_FILENAME)
-        .exists()
-    {
-        "it is on disk here"
-    } else if asked_recently(model_id) {
-        "its repository gave nothing to fetch lately"
-    } else {
-        ""
-    };
-    if !skip.is_empty() {
-        tracing::debug!(model = %model_id, held_by, "Not fetching the image reader: {skip}");
+    if let Some(skip) = reason_not_to_fetch(state, &sentinel, &model_dir) {
+        tracing::debug!(model = %model_id, "Not fetching the image reader: {skip}");
         return None;
     }
     // One writer per file: a second origin download of this model waits out.
@@ -379,5 +398,60 @@ mod tests {
         assert_eq!(found[0].filename, "mmproj-model-f16.gguf");
         assert_eq!(found[0].size_bytes, 851_251_104);
         assert_eq!(found[0].sha256[..4], [0x8c, 0x0f, 0xb0, 0x64]);
+    }
+
+    /// Pre-release review, 2026-11-07: only a holder's own word, from this
+    /// node or a node connected to it, keeps this node from fetching the
+    /// image reader. A stranger's announcement or a DHT record kept every
+    /// computer from fetching it.
+    #[test]
+    fn only_a_connected_holders_own_claim_keeps_the_reader_unfetched() {
+        let dir = tempfile::tempdir().unwrap().keep();
+        let mut config = crate::config::Config::default();
+        config.node.data_dir = dir.clone();
+        let db = crate::storage::db::Database::open(&dir).unwrap();
+        let executor = std::sync::Arc::new(tokio::sync::Mutex::new(
+            crate::inference::executor::ModelExecutor::new(),
+        ));
+        let (state, _, _) = crate::daemon::state::SharedState::new(
+            config,
+            crate::identity::Identity::generate(),
+            db,
+            executor,
+            None,
+        );
+        let model = crate::types::ModelId("vision-review-test".to_string());
+        let sentinel = crate::types::ShardId::mmproj_for(model.clone());
+        let model_dir = dir.join("models").join(&model.0);
+
+        let stranger = crate::types::NodeId([7; 32]);
+        state
+            .model_registry
+            .record_shard_holder(sentinel.clone(), stranger.clone());
+        assert_eq!(
+            reason_not_to_fetch(&state, &sentinel, &model_dir),
+            None,
+            "a key that only announced the part keeps nothing unfetched"
+        );
+
+        let reachable_by_dht_only = crate::types::NodeId([8; 32]);
+        state
+            .connected_node_ids
+            .insert(reachable_by_dht_only.clone());
+        state
+            .model_registry
+            .merge_dht_providers(&sentinel, &[reachable_by_dht_only]);
+        assert_eq!(
+            reason_not_to_fetch(&state, &sentinel, &model_dir),
+            None,
+            "a DHT record is the DHT's word, not the holder's"
+        );
+
+        state.connected_node_ids.insert(stranger);
+        assert_eq!(
+            reason_not_to_fetch(&state, &sentinel, &model_dir),
+            Some("a computer connected here holds it"),
+            "a connected holder's own claim is counted"
+        );
     }
 }
