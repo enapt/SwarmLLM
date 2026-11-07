@@ -269,6 +269,103 @@ pub async fn unload_model(
     })))
 }
 
+/// What `POST /api/admin/models/:model_id/load` did, as its `status` reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LoadAhead {
+    /// The load was asked for now; the question that follows finds it done,
+    /// or queues behind it in the worker.
+    Loading,
+    /// The model's worker already holds what a question would run.
+    Held,
+    /// A question would not run it whole here — the router decides where,
+    /// so nothing is loaded on a guess.
+    NotHere,
+}
+
+impl LoadAhead {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Loading => "loading",
+            Self::Held => "held",
+            Self::NotHere => "not_here",
+        }
+    }
+}
+
+/// POST /api/admin/models/:model_id/load — Load a model before the owner's
+/// question arrives (#424), the mirror of `unload`.
+///
+/// A finished download only registers a model, and the idle unload gives the
+/// card back after five minutes, so the first question after either waited
+/// for the whole load: 5.5-7.1 s for the 8B against 0.23-0.30 s warm (this
+/// node's logs, 2026-10-31 → 11-07). The dashboard asks this while the owner
+/// types, so the load runs during the typing (Ollama preloads a model on an
+/// empty request the same way, and keeps it five minutes, as we do).
+///
+/// It loads only what the question would: the name is resolved as a chat
+/// request resolves it (`resolve_model_for_inference`, `auto` included), and
+/// only a model a question would run whole here (`local_fast_path_for`, the
+/// fast path's own predicate) has its range (`get_split_model_meta`, the range
+/// that path runs) loaded — through the question's spawn rules, as the
+/// owner's (`ModelProcessPool::load_ahead_for_the_owner`). Elsewhere the
+/// router chooses at the question, so nothing is loaded on a guess. Answers
+/// at once; the load runs on its own task, and the idle unload still applies.
+pub async fn load_model(
+    State(state): State<AppState>,
+    Path(model_id): Path<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    validate_model_id(&model_id)?;
+    let resolved = crate::api::openai::resolve_model_for_inference(&state, &model_id).await;
+    let mid = crate::types::ModelId(resolved.clone());
+    let shared = &state.shared_state;
+    if shared.model_registry.get_manifest(&mid).is_none() {
+        return Err(ApiError(crate::error::SwarmError::ModelNotAvailable(mid)));
+    }
+    let outcome = load_ahead_for_the_owner(shared, &mid);
+    Ok(Json(serde_json::json!({
+        "status": outcome.as_str(),
+        "model_id": resolved,
+    })))
+}
+
+/// The decision behind [`load_model`], on the node's state alone so it can be
+/// tested without a server: start the owner's load where a question would run
+/// the model whole here, and say what was done.
+pub(crate) fn load_ahead_for_the_owner(
+    shared: &std::sync::Arc<crate::daemon::SharedState>,
+    model_id: &crate::types::ModelId,
+) -> LoadAhead {
+    // `Unasked` and no request's needs: the same reading the model list's
+    // "runs here" takes — a question that asks to stay here, or carries a
+    // picture, is planned at the question, as always.
+    let runs_whole_here = shared.local_fast_path_for(
+        model_id,
+        None,
+        crate::types::KeepAsked::Unasked,
+        crate::inference::pipeline::FastPathNeeds::NO_REQUEST,
+    );
+    let range = if runs_whole_here {
+        crate::api::openai::get_split_model_meta(shared, model_id).map(|m| m.layer_range)
+    } else {
+        None
+    };
+    let Some(range) = range else {
+        return LoadAhead::NotHere;
+    };
+    if shared.model_process_pool.holds_range(model_id, range) {
+        return LoadAhead::Held;
+    }
+    let shared = shared.clone();
+    let model_id = model_id.clone();
+    tokio::spawn(async move {
+        shared
+            .model_process_pool
+            .load_ahead_for_the_owner(&model_id, range)
+            .await;
+    });
+    LoadAhead::Loading
+}
+
 /// POST /api/admin/models/:model_id/shards/:shard_index/unload — Unload a single shard from memory.
 ///
 /// Narrows the shard window to exclude this shard, then restarts the model worker.
@@ -796,5 +893,77 @@ mod tests {
         assert_eq!(parse(r#"{"enabled": false}"#), Some(Some(false)));
         assert_eq!(parse(r#"{"enabled": null}"#), Some(None));
         assert_eq!(parse("{}"), None);
+    }
+}
+
+#[cfg(test)]
+mod load_ahead_tests {
+    use super::{load_ahead_for_the_owner, LoadAhead};
+    use crate::inference::split::SplitModelEntry;
+    use crate::types::ModelId;
+
+    fn state() -> (
+        tempfile::TempDir,
+        std::sync::Arc<crate::daemon::SharedState>,
+    ) {
+        let temp = tempfile::tempdir().unwrap();
+        let db = crate::storage::db::Database::open(temp.path()).unwrap();
+        let executor = std::sync::Arc::new(tokio::sync::Mutex::new(
+            crate::inference::executor::ModelExecutor::new(),
+        ));
+        let (state, _, _) = crate::daemon::SharedState::new(
+            crate::config::Config::default(),
+            crate::identity::Identity::generate(),
+            db,
+            executor,
+            None,
+        );
+        (temp, state)
+    }
+
+    fn entry(layer_start: usize, layer_end: usize, is_complete: bool) -> SplitModelEntry {
+        SplitModelEntry {
+            last_used: std::sync::atomic::AtomicU64::new(0),
+            estimated_vram_mb: 0,
+            is_complete,
+            eos_tokens: vec![],
+            eos_token_str: String::new(),
+            bos_token: String::new(),
+            cached_chat_template: None,
+            vocab: None,
+            layer_start,
+            layer_end,
+        }
+    }
+
+    /// The owner's load is the load their question would make, never a guess
+    /// (#424): where a question would not run the model whole here — nothing
+    /// held, only a tail held (the router places that question), or a
+    /// "complete" entry whose files are gone (the stale shape that once won the
+    /// fast path, 2026-08-04) — nothing is loaded. Asking `get_split_model_meta`
+    /// alone would load the stale entry's whole range: with the fast-path
+    /// question taken out, this test reaches the load's spawn and fails
+    /// (checked 2026-11-07; a plain `#[test]` has no runtime to spawn on).
+    #[test]
+    fn a_model_a_question_would_not_run_whole_here_is_not_loaded() {
+        let (_dir, state) = state();
+        let mid = ModelId("llama-3.2-3b-instruct-q4-k-m".into());
+
+        assert_eq!(load_ahead_for_the_owner(&state, &mid), LoadAhead::NotHere);
+
+        state
+            .split_models
+            .insert((mid.clone(), 21, 28), entry(21, 28, false));
+        assert_eq!(load_ahead_for_the_owner(&state, &mid), LoadAhead::NotHere);
+
+        state
+            .split_models
+            .insert((mid.clone(), 0, 28), entry(0, 28, true));
+        assert_eq!(
+            load_ahead_for_the_owner(&state, &mid),
+            LoadAhead::NotHere,
+            "a complete entry with no part files on disk must not be loaded"
+        );
+        assert!(!state.model_process_pool.holds_range(&mid, (0, 28)));
     }
 }

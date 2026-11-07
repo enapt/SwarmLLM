@@ -204,6 +204,14 @@ Response:
 { "status": "unloaded", "model_id": "...", "model_name": "...", "segments_removed": 2, "estimated_freed_mb": 4096 }
 ```
 
+### POST /api/admin/models/{id}/load
+Load a model into memory before a question arrives, so the question does not wait for the load. The dashboard's chat box asks this while you type. The name is read as a chat request reads it (`auto` included). The model is loaded only where a question would run it whole on this computer; otherwise the swarm decides where it runs when the question comes, and nothing is loaded. It answers at once, while the load runs; a model loaded this way and not used is unloaded after the idle time like any other. Bearer auth required. An unknown model is a 404.
+
+Response (`status` is `loading`, `held` — already in memory — or `not_here`):
+```json
+{ "status": "loading", "model_id": "..." }
+```
+
 ### GET /api/admin/shard-storage
 Per-model storage breakdown, disk and VRAM usage.
 

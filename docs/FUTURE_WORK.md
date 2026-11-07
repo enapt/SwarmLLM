@@ -49,8 +49,10 @@ width), #400, #402, #404 (P3), #397 (P4). v0.3.272 (2026-11-05) carried #403, #4
 and #400's fetch half; after it, #406 and #407 (a restarted computer heard again; connections closed before a restart,
 the country lookup and the map) closed on 2026-11-05 for the next release. v0.3.273 carried #406 and #407;
 v0.3.274 (2026-11-06) #408, #409 and #410; v0.3.275 (2026-11-06) #367 (d)'s fix (3), #388, #411's narrowing and
-#407's residual; v0.3.276 (2026-11-07) #415, #413, #414 and #416's gossip half. On main, in no release yet (the
-next one carries them all): #416's nicknames, #417, #402, #191, #418, #419, #421, #420, #423.
+#407's residual; v0.3.276 (2026-11-07) #415, #413, #414 and #416's gossip half; v0.3.277 (2026-11-07) #416's
+nicknames, #417, #402, #191, #418, #419, #421, #420, #423 and #422's first steps. **2026-11-07, a performance
+round**: #424 (a model's first question waits for its load) is new at P2; #318 and #174 carry the round's
+other two measured-first levers.
 **2026-11-04:** #403 goes first among the open work by the user's direction: the release cut-off
 and the use gate must not be passable through a relay. Closed the same day (§ "Closed"). What each release carried is in § "Closed" and `CHANGELOG.md`; earlier
 rankings moved word for word to the archive, § "PRIORITIES re-rank log". Only OPEN work is listed
@@ -133,6 +135,16 @@ the top track (`docs/plans/large_model_splits.md`).
    body). **Left**: those machines fetch their parts once they run a release with this; then a measured reply;
    then tokens a round past the drafter (`large_model_splits.md` step 4). Its planning residuals: a
    head holding it whole declining to lead (#372), the drafter's room on a near-full card (#376).
+   **Without the third card (research 2026-11-07, a replay of the recorded 70B traces — HYPOTHESIS
+   until a rig)**: at today's 128 ms a miss cycle is ~1.33 s — the far check ~720 ms (54%), this
+   node's layers ~295 (22%), the 3B drafter on this processor ~183 (14%, 61 ms a guess), the round
+   trip 128 (10%). Next, measured first: (1) the 3B drafter on THIS card, the layers it displaces to
+   the processor — the replay gives +16-22% with 5-guess chunks; ABBA on the pinned TH↔AU route in
+   one sitting, with `SWARMLLM_PROFILE=1` beside it to name this node's 250 ms for 16 layers
+   (100-150 ms more than its devices predict); (2) offline only: a Llama-3.3-70B EAGLE-3 head's
+   top-1 on the recorded replies (`~/swarmllm-70b/ranks`) against the 3B's 0.82 — drop it unless
+   clearly above 0.85. #412 on the stream: at most +4% for the 70B (44% of chunks restart, the
+   queue is then empty).
    On a 14B: split evenly between this machine's card and the 3060 the flow runs 29.2-29.9 tok/s on
    code, twice this machine's whole-14B speed (13.6-15.4), and 9.2-10.0 on prose; three cards (+ an
    RTX 4050 in Europe, ~230 ms) 12.4-14.3 and 4.4-4.9 against 15.7-20.9 and 6.1-7.3 for two — a
@@ -177,7 +189,10 @@ the top track (`docs/plans/large_model_splits.md`).
     and far-end masking for a split, then tool calls as a lazy grammar (`faster_than_local.md` § 7.1).
 17. **#30** — the plaintext-prompt trust bar sits at the score an unknown peer starts on: a policy
     decision, with research, when picked up.
-18. **#326** — on a card newer than a release's machine code (Hopper, Blackwell: RTX 50-series),
+18. **#424** — a model's first question waits for its whole load: 5.5-7.1 s for the 8B against
+    0.23-0.30 s warm, after every download and every 5-minute idle unload. Step 1, loading while
+    the owner types, is built; steps 2-3 (the first forward, the load itself) measure first.
+19. **#326** — on a card newer than a release's machine code (Hopper, Blackwell: RTX 50-series),
     the first reply waits ~2 min while the driver compiles flash attention's PTX (MMQ's ~8 s a
     weight type), then it is cached. Correct since the PTX went in (before: wrong output).
 
@@ -2746,6 +2761,19 @@ the archive (fold `from_vec`/`to_vec1` into a CustomOp, f16 KV on the processor,
 below ~128 KV). Smallest step: single-thread the rayon split below ~128 KV and measure with
 `SWARMLLM_PROFILE=1 prefill_bench`'s attention bucket (min-of-N, idle box).
 
+**2026-11-07 (research round, from the archive's own figures — re-measure before acting)**: the
+title is likely STALE for decode — after the 09-26 fix the 3B's growth was +8.2 ms for 1,536
+positions at 4 threads, ~43 GB/s, the floor for f32 bytes; what is left there is BYTES (f16 KV on
+the processor). The larger lever is a CHECK of k rows at long context: `prefill_attn` runs one task
+per kv-head × 128-row block, each walking every key chunk in turn, so a 2-16-row check has only
+n_kv_heads tasks (4 on Qwen2.5-7B, 8 on Llama-3 and the 70B) on 8+ cores — ~2.2 ms a row per 1K
+cached positions (3B, 8 threads), ~70 ms of a k=8 check at 4K against its ~260 ms of weights.
+Split it across key chunks as `decode_attn` does (flash-decoding's split-K) where tasks < 2 ×
+threads, folding partials in chunk order so the result stays bit-identical (#179). Helps the 70B's
+far processor and a drafter's tree steps on long conversations; nothing at short context. First:
+`examples/attn_bench.rs` (`SWARM_ATTN_KV=4096`, q_len 4/8/16) and `prefill_bench`'s width sweep
+with a prefilled context, to confirm attention is a real share of such a check.
+
 #### #173 — A request that joins a busy worker never speculates
 `P3` · perf-local · **OPEN** — 2026-08-23 · history: archive § "Speculation inside the batched decode scheduler"
 
@@ -4164,6 +4192,50 @@ them changes every model's manifest hash, so check what a new manifest version d
 the swarm (`manifest_heard`, `model::canonical`) before changing the builder. The cheaper
 half is the display name: derive it from the id or the HF repo where the file's own name
 disagrees with the id's size and quant tags.
+
+#### #424 — A model's first question waits for its load: after a download, and after every 5-minute idle unload
+`P2` · speed · **OPEN** — 2026-11-07 · history: none (the 2026-11-07 performance research round)
+
+**Measured** (this node's own logs 10-31 → 11-07, read only; an RTX 3070 laptop on a fast disk, so a
+floor for a home machine): the 8B's first token 5.5-7.1 s cold (`ttft_ms`, ~14 cold replies, 252-token
+prompts) against 0.23-0.30 s warm (722-1,658 tokens); worker spawn → `Model loaded` median 5.2 s (n=45,
+worst 7.6) — 2B 2.3 s, 4B 5.0, 9B 6.3, 12B 9.5-10.8, gpt-oss-20b 16-17; the same 8B on the processor 3.4 s.
+64 idle unloads and 191 worker spawns in that week. **Why every user pays it**: a finished download
+only registers the model (`auto_manage::check_and_load_model`: "subprocess will load on first
+inference"), so the first question spawns the worker and reads the weights; the idle unload (#249,
+`idle_unload_secs` 300) gives the card back, so the first question after any pause pays it again.
+
+**Prior art**: Ollama preloads a model on an EMPTY request and keeps one 5 min by default
+(docs.ollama.com/faq, read 2026-11-07) — our window is the same, we lacked the preload. llama.cpp runs
+an empty warm-up decode at start-up then clears the memory (`common_init_from_params`); vLLM captures
+its graphs in a start-up warm-up. Loading while the person TYPES is ours (none found: searched only
+Ollama's FAQ). The peer half already exists here: `ModelProcessPool::load_ahead_for_a_peer` (#252 (b),
+a split's machines load side by side — 73 s → loads in parallel, 2026-10-25); a spawn alone loads
+nothing, the worker reads weights on `DaemonMsg::LoadRange`.
+
+**Plan, each step ending on a measurement**:
+1. **Load while the owner types** — `POST /api/admin/models/{id}/load` (the mirror of `unload`): the
+   name resolved as a chat request resolves it (`resolve_model_for_inference`, `auto` included), and
+   only where a question would run it whole here (`SharedState::local_fast_path_for`), the range that
+   path runs (`get_split_model_meta`) is loaded as the OWNER's, through the request's own spawn rules
+   (`get_or_spawn`, `Tenancy::Tenant`, `Requester::Owner`) — nothing a question would not load, refused
+   where it would be; the idle unload still applies. The chat box asks once a model per minute at the
+   first keystroke. **BUILT 2026-11-07, measured on a probe** (memory `tools/p424/p424.sh`: one node in
+   `unshare -rn`, the dev build, Llama-3.2-3B Q4_K_M on the processor, idle unload 20 s so every arm
+   starts cold, ABBA, a question 8 s after the load is asked; the machine shared with the idle live
+   node): first token **3.83 / 2.99 s cold against 1.23 / 1.16 s loaded ahead**; the daemon's "loading
+   the model for the owner's next question" and the worker's "read a range ahead" (load_ms 2348, 1216)
+   once per loaded-ahead arm, never in a cold one. The 1.2 s left is the 45-token prompt and the first
+   token on a processor dev build — the question arrived 5.7 s after the read ended. On the card the
+   load it hides is larger (the 8B's 5.2 s). Test `a_model_a_question_would_not_run_whole_here_is_not_loaded`
+   (red with the fast-path question taken out). Not covered: an API client (no keystroke to see — an
+   explicit call to this endpoint is its preload), and a model the router would split or hand off.
+2. **The first forward after a load** (cold first token less the load: ~0.3-1.9 s here; #293's 1-6 s on a
+   split, #326's ~2 min of compiling on a card newer than the release's machine code): a warm-up forward
+   at load — measured first, with the load's own figure beside it.
+3. **The load itself**: the sharded path reads layer by layer on one thread, a pageable copy a tensor
+   (the 8B: 3.4 s to the processor, 5.5 s to the card). Log read vs upload first; llama.cpp uploads
+   through 4 pinned 1 MiB buffers with events (`src/llama-model-loader.cpp`).
 
 ### Packaging, release and operations
 

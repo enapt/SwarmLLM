@@ -817,6 +817,7 @@
     if (S.inputEl) {
       S.inputEl.addEventListener('input', U.autoResizeInput);
       S.inputEl.addEventListener('input', U.updateTokenCounter);
+      S.inputEl.addEventListener('input', function() { App.chat.loadAheadWhileTyping(); });
     }
 
     // Project links in the header — fetched once, not on the stats tick:

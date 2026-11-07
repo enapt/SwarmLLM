@@ -2988,6 +2988,7 @@ Routes Claude model requests through a locally-authenticated `claude` CLI subpro
 - `POST   /api/admin/downloads/{model_id}/cancel` — Cancel in-progress HF download
 - `DELETE /api/admin/models/{model_id}` — Remove model (shards + manifest + state)
 - `POST   /api/admin/models/{id}/unload` — Unload model from VRAM (keep shards on disk)
+- `POST   /api/admin/models/{id}/load` — Load a model before the owner's question arrives (#424): the name resolved as a chat request resolves it (`auto` too); only where a question would run it whole here (`local_fast_path_for`) is that range loaded, as the owner's, through the question's spawn rules. Answers at once: `status` = `loading` / `held` / `not_here`. The chat box asks it while the owner types; the idle unload still applies
 - `DELETE /api/admin/models/{id}/shards/{index}` — Delete a single shard
 - `GET/PUT /api/admin/models/{id}/auto-manage` — Per-model auto-manage policy (incl. prune toggle)
 - `PUT    /api/admin/models/{id}/shards/{index}/lock` — Lock/unlock a shard (prevent auto-pruning)

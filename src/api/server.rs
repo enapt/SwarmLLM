@@ -398,6 +398,8 @@ pub fn build_router(state: AppState) -> Router {
         // Model management
         .route("/api/admin/models/{id}", delete(admin::delete_model))
         .route("/api/admin/models/{id}/unload", post(admin::unload_model))
+        // Load before the owner's question arrives (#424)
+        .route("/api/admin/models/{id}/load", post(admin::load_model))
         // LoRA adapters
         .route(
             "/api/admin/adapters",

@@ -8618,16 +8618,51 @@ impl ModelProcessPool {
     /// request id. A refusal is left to the forward, which meets it as it
     /// always has.
     pub(crate) async fn load_ahead_for_a_peer(&self, model_id: &ModelId, ranges: &[(u32, u32)]) {
+        self.load_ranges_ahead(model_id, ranges, Requester::Swarm)
+            .await;
+    }
+
+    /// Load the range the OWNER's next question would run here, before they
+    /// send it — while they type (#424, `POST /api/admin/models/{id}/load`).
+    /// A finished download only registers a model and the idle unload gives
+    /// the card back after five minutes, so the first question after either
+    /// waited 5.5-7.1 s for the 8B's load against 0.23-0.30 s warm (this
+    /// node's logs, 10-31 → 11-07). Ollama's preload is the same idea
+    /// (an empty request loads the model, kept 5 min).
+    ///
+    /// The same loading as a peer's ([`Self::load_ahead_for_a_peer`]): the
+    /// question's own spawn rules, weighed as the owner's work against the
+    /// owner's memory cap — the cap `generate` weighs the question by — so it
+    /// loads nothing the question would not, and is refused where the
+    /// question would be. The idle unload still applies to what it loads.
+    pub(crate) async fn load_ahead_for_the_owner(&self, model_id: &ModelId, range: (u32, u32)) {
+        self.load_ranges_ahead(model_id, &[range], Requester::Owner)
+            .await;
+    }
+
+    /// Whether this model's live worker already holds `range` — what a
+    /// load ahead skips.
+    pub(crate) fn holds_range(&self, model_id: &ModelId, range: (u32, u32)) -> bool {
+        self.workers
+            .get(model_id)
+            .is_some_and(|h| !h.dead.load(Ordering::Acquire) && h.segment_is_charged(range))
+    }
+
+    /// The one loader behind both: through `get_or_spawn` as the work it
+    /// precedes would go, then `DaemonMsg::LoadRange` so the worker reads the
+    /// weights now (a spawn alone loads nothing).
+    async fn load_ranges_ahead(
+        &self,
+        model_id: &ModelId,
+        ranges: &[(u32, u32)],
+        requester: Requester,
+    ) {
         for &range in ranges {
-            let held = self
-                .workers
-                .get(model_id)
-                .is_some_and(|h| !h.dead.load(Ordering::Acquire) && h.segment_is_charged(range));
-            if held {
+            if self.holds_range(model_id, range) {
                 continue;
             }
             let handle = match self
-                .get_or_spawn(model_id, range, Tenancy::Tenant, Requester::Swarm)
+                .get_or_spawn(model_id, range, Tenancy::Tenant, requester)
                 .await
             {
                 Ok(handle) => handle,
@@ -8635,8 +8670,10 @@ impl ModelProcessPool {
                     tracing::debug!(
                         model = %model_id,
                         layers = ?range,
+                        ?requester,
                         error = %e,
-                        "Did not load a peer's layers ahead of its forward — the forward loads or refuses them"
+                        "Did not load layers ahead of their first use — the work that needs them \
+                         loads or refuses them"
                     );
                     continue;
                 }
@@ -8651,6 +8688,11 @@ impl ModelProcessPool {
             };
             let mut writer = handle.writer.lock().await;
             match send_daemon(&mut *writer, &msg, &[]).await {
+                Ok(()) if requester == Requester::Owner => tracing::info!(
+                    model = %model_id,
+                    layers = ?range,
+                    "DIAG: loading the model for the owner's next question, before they send it"
+                ),
                 Ok(()) => tracing::info!(
                     model = %model_id,
                     layers = ?range,
@@ -8659,9 +8701,10 @@ impl ModelProcessPool {
                 Err(e) => tracing::warn!(
                     model = %model_id,
                     layers = ?range,
+                    ?requester,
                     error = %e,
-                    "Could not ask the model's worker to load a peer's layers ahead — the \
-                     range's own forward will find the worker gone"
+                    "Could not ask the model's worker to load layers ahead — the work that \
+                     needs them will find the worker gone"
                 ),
             }
         }

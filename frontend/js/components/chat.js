@@ -504,6 +504,28 @@
       App.chat.scrollToBottom(true);
     },
 
+    // Load the chat's model while the owner types, so the question does not
+    // wait for the load (#424): a model never loaded since its download, or
+    // unloaded after five idle minutes, took 5.5-7.1 s before its first word
+    // against 0.23-0.30 s loaded. Asked at most once a minute per model and
+    // only for a model held whole here; the node decides whether a question
+    // would run it here, and loads nothing otherwise. Nothing is shown either
+    // way, so its answer is not read.
+    _loadAheadAt: {},
+    loadAheadWhileTyping: function() {
+      if (!S.inputEl || !S.inputEl.value.trim()) return;
+      var session = S.currentSessionId && S.sessions[S.currentSessionId];
+      var model = (session && session.model) || S.currentModel;
+      if (!model) return;
+      var item = (S._modelDropdownData || []).find(function(m) { return m.id === model; });
+      if (!item || item.group !== 'local') return;
+      var now = Date.now();
+      if (now - (App.chat._loadAheadAt[model] || 0) < 60000) return;
+      App.chat._loadAheadAt[model] = now;
+      App.authFetch('/api/admin/models/' + encodeURIComponent(model) + '/load', { method: 'POST' })
+        .catch(function() {});
+    },
+
     send: async function() {
       // Per SESSION, not per page: another chat generating must not block this
       // one, and the guard has to agree with the button the user is looking at.

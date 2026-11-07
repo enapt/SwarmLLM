@@ -8435,13 +8435,19 @@ fn every_path_a_request_leaves_by_asks_its_scope() {
 /// Where "no instruction" is the honest answer because there is no caller's
 /// request to read one from (#251 (2b)): the parser itself, an absent body
 /// field, `/v1/models` and the dashboard describing a model, and a PEER's
-/// request (one its caller kept on their computer never reaches this one).
+/// request (one its caller kept on their computer never reaches this one), and
+/// the owner's load ahead of a question not yet sent (#424 — it only ever loads
+/// on this computer, and the question brings its own instruction when it comes).
 const KEEP_UNASKED_IS_THE_ANSWER: &[(&str, &str)] = &[
     ("src/api/keep_here.rs", "*"),
     ("src/api/openai/types.rs", "keep_asked"),
     ("src/api/openai/mod.rs", "another_holder_could_take_part"),
     ("src/api/admin_models/listing.rs", "list_models"),
     ("src/api/admin_models/listing.rs", "pipeline_plan"),
+    (
+        "src/api/admin_models/lifecycle.rs",
+        "load_ahead_for_the_owner",
+    ),
     (
         "src/daemon/dispatch/remote_generate.rs",
         "handle_remote_generate_request",
