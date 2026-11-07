@@ -4411,3 +4411,86 @@ mod suppressed_token_tests {
             .is_none());
     }
 }
+
+#[cfg(test)]
+mod weight_read_tests {
+    use candle_core::quantized::{ggml_file, gguf_file, GgmlDType, QTensor};
+    use candle_core::{Device, Tensor};
+    use std::io::{Read, Seek, SeekFrom};
+
+    /// A weight of `rows × 512` in `dtype`, values in a pattern no two
+    /// neighbouring blocks share.
+    fn weight(rows: usize, dtype: GgmlDType) -> QTensor {
+        let cols = 512;
+        let data: Vec<f32> = (0..rows * cols)
+            .map(|i| ((i * 7919) % 1009) as f32 * 0.002 - 1.0)
+            .collect();
+        let dense = Tensor::from_vec(data, (rows, cols), &Device::Cpu).unwrap();
+        QTensor::quantize(&dense, dtype).unwrap()
+    }
+
+    /// #424 step 3: a weight is read straight into its storage (the processor) or
+    /// through one reused staging buffer a chunk at a time (a card), never a
+    /// buffer of its whole size first — and the bytes it holds are the old read's
+    /// (`ggml_file::qtensor_from_ggml` handed the whole buffer), for every type
+    /// here and a weight larger than one staging chunk (16 MiB).
+    fn every_weight_holds_the_bytes_the_old_read_gave(device: &Device) {
+        let weights = [
+            ("f32", weight(3, GgmlDType::F32)),
+            ("f16", weight(5, GgmlDType::F16)),
+            ("q4k", weight(64, GgmlDType::Q4K)),
+            ("q6k", weight(48, GgmlDType::Q6K)),
+            ("q8_0", weight(40, GgmlDType::Q8_0)),
+            // 34,000 × 512 Q8_0 = 18.5 MB: two chunks, the second short.
+            ("q8_0.large", weight(34_000, GgmlDType::Q8_0)),
+        ];
+        let named: Vec<(&str, &QTensor)> = weights.iter().map(|(n, t)| (*n, t)).collect();
+        let mut file = std::io::Cursor::new(Vec::new());
+        gguf_file::write(&mut file, &[], &named).unwrap();
+        file.set_position(0);
+        let ct = gguf_file::Content::read(&mut file).unwrap();
+
+        for (name, _) in &weights {
+            let read = ct.tensor(&mut file, name, device).unwrap();
+
+            let info = &ct.tensor_infos[*name];
+            let mut raw = vec![0u8; crate::inference::split::tensor_byte_size(info) as usize];
+            file.seek(SeekFrom::Start(ct.tensor_data_offset + info.offset))
+                .unwrap();
+            file.read_exact(&mut raw).unwrap();
+            let old = ggml_file::qtensor_from_ggml(
+                info.ggml_dtype,
+                &raw,
+                info.shape.dims().to_vec(),
+                device,
+            )
+            .unwrap();
+
+            assert_eq!(read.dtype(), old.dtype(), "{name}");
+            assert_eq!(read.shape(), old.shape(), "{name}");
+            assert_eq!(read.device().is_cuda(), device.is_cuda(), "{name}: device");
+            assert!(
+                read.data().unwrap() == old.data().unwrap(),
+                "{name}: the weight's bytes differ from the old read's"
+            );
+        }
+    }
+
+    #[test]
+    fn a_weight_read_into_its_storage_holds_the_old_reads_bytes() {
+        every_weight_holds_the_bytes_the_old_read_gave(&Device::Cpu);
+    }
+
+    /// The card's read: chunked through the staging buffer, on the card a load
+    /// picks (`load_device`, which keeps the pool's freed memory, #146). Returns
+    /// without a card.
+    #[cfg(feature = "candle-cuda")]
+    #[test]
+    fn a_weight_read_onto_the_card_holds_the_old_reads_bytes() {
+        let device = super::load_device(false);
+        if !device.is_cuda() {
+            return;
+        }
+        every_weight_holds_the_bytes_the_old_read_gave(&device);
+    }
+}

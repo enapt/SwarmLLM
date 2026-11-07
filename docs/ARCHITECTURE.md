@@ -3151,6 +3151,15 @@ and it runs since 2026-11-02 — checked on the real gpt-oss-20b against llama.c
 an exact forward of the file (`docs/invariants/inference.md` § "gpt-oss: the whole forward
 against llama.cpp's"; FUTURE_WORK #390).
 
+### A weight is read into the memory it stays in (2026-11-07)
+
+`vendor/candle/candle-core/src/quantized/gguf_file.rs::TensorInfo::read` — every load from a
+GGUF or part files — reads through `ggml_file::qtensor_read`: the processor's blocks in place,
+a card's through one 16 MiB staging buffer per loading thread (`cuda::load_quantized_read`),
+never upstream's fresh buffer of the weight's whole size (and, on the processor, a second fresh
+copy). Fresh memory is faulted per read; the 8B loads ~35% faster on a laptop card, byte for byte
+the same weights (FUTURE_WORK #424 (3a); A/B `SWARMLLM_LOAD_READ=fresh`; `DIAG: split load timed`).
+
 ### The right attention kernel is OPPOSITE for prefill and decode
 
 `run_attention` (`src/inference/layers/mod.rs`) picks between a fused/flash CPU

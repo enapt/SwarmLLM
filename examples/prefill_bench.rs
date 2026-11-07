@@ -163,6 +163,69 @@ fn main() -> anyhow::Result<()> {
         println!("card layers: {n}, the rest on the processor");
     }
 
+    // `SWARM_BENCH_LOADS=N` times N loads and stops (#424 step 3); with
+    // `RUST_LOG=info` each prints its `DIAG: split load timed` line (reads
+    // against the rest). `SWARM_BENCH_COLD=1` first asks the kernel to drop the
+    // model's files from its page cache, so each load reads the disk — under
+    // WSL2 the host may still hold the disk image's pages, so say which.
+    if let Some(loads) = std::env::var("SWARM_BENCH_LOADS")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+    {
+        let cold = std::env::var("SWARM_BENCH_COLD").as_deref() == Ok("1");
+        let mut times = Vec::with_capacity(loads);
+        for i in 0..loads {
+            if cold {
+                drop_from_page_cache(&model_dir)?;
+            }
+            let t = Instant::now();
+            let mut model = load(&model_dir)?;
+            let secs = t.elapsed().as_secs_f64();
+            println!(
+                "load {i}: {secs:.3} s (device={}, cold={cold})",
+                if model.device().is_cuda() {
+                    "cuda"
+                } else {
+                    "cpu"
+                }
+            );
+            // `SWARM_BENCH_FINGERPRINT=1`: one forward of 16 fixed tokens after
+            // the load — the last row's pick and its logits' sum as bits, so two
+            // ways of loading the same weights can be compared in one binary.
+            if std::env::var("SWARM_BENCH_FINGERPRINT").as_deref() == Ok("1") {
+                let ids: Vec<i64> = (0..16).map(|i| 100 + 37 * i).collect();
+                let input = Tensor::from_vec(ids, &[1, 16], &Device::Cpu)?;
+                let store = KvCacheStore::new(std::time::Duration::from_secs(60));
+                let logits = model
+                    .forward(&input, 0, &store, "fingerprint")
+                    .map_err(|e| anyhow::anyhow!("fingerprint: {e}"))?;
+                let vocab = *logits.dims().last().unwrap_or(&1);
+                let logits = logits
+                    .to_device(&Device::Cpu)?
+                    .to_dtype(candle_core::DType::F32)?
+                    .flatten_all()?
+                    .to_vec1::<f32>()?;
+                let row = &logits[logits.len() - vocab..];
+                let pick = row
+                    .iter()
+                    .enumerate()
+                    .fold((0, f32::MIN), |b, (i, &v)| if v > b.1 { (i, v) } else { b })
+                    .0;
+                let sum: f64 = row.iter().map(|&v| v as f64).sum();
+                println!("fingerprint: pick {pick}, sum bits {:016x}", sum.to_bits());
+            }
+            drop(model);
+            times.push(secs);
+        }
+        times.sort_by(f64::total_cmp);
+        println!(
+            "loads: min {:.3} s, median {:.3} s of {loads}",
+            times[0],
+            times[times.len() / 2]
+        );
+        return Ok(());
+    }
+
     println!("loading {}", model_dir.display());
     let t = Instant::now();
     let mut model = load(&model_dir)?;
@@ -684,6 +747,29 @@ fn sync(device: &Device) {
 
 /// Expand a leading `~` so the documented invocation works from a shell that
 /// did not expand it (e.g. when the value came from a file or a CI variable).
+/// Ask the kernel to drop every file of a model directory from its page cache
+/// (`POSIX_FADV_DONTNEED` — clean pages only, no privilege needed).
+#[cfg(unix)]
+fn drop_from_page_cache(model_dir: &Path) -> anyhow::Result<()> {
+    use std::os::fd::AsRawFd;
+    for entry in std::fs::read_dir(model_dir)? {
+        let path = entry?.path();
+        if path.is_file() {
+            let file = std::fs::File::open(&path)?;
+            // SAFETY: a valid descriptor for the whole call; offset 0, length 0 = the whole file.
+            let rc =
+                unsafe { libc::posix_fadvise(file.as_raw_fd(), 0, 0, libc::POSIX_FADV_DONTNEED) };
+            anyhow::ensure!(rc == 0, "posix_fadvise {}: {rc}", path.display());
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn drop_from_page_cache(_model_dir: &Path) -> anyhow::Result<()> {
+    anyhow::bail!("SWARM_BENCH_COLD needs a Unix page cache")
+}
+
 fn shellexpand(p: &str) -> String {
     match p.strip_prefix("~/") {
         Some(rest) => match std::env::var("HOME") {

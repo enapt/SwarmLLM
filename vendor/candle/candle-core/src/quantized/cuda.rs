@@ -1865,6 +1865,54 @@ pub fn load_quantized<T: super::GgmlType + Send + Sync + 'static>(
     }))
 }
 
+/// SwarmLLM patch (#424 step 3): the largest piece of a weight read and copied
+/// at a time by [`load_quantized_read`]. A pageable copy here reaches ~6.5 GB/s
+/// from 16 MiB up — pinned memory no faster (RTX 3070 laptop, 2026-11-07).
+const LOAD_CHUNK_BYTES: usize = 16 << 20;
+
+std::thread_local! {
+    /// [`load_quantized_read`]'s staging, kept by the loading thread: at most
+    /// [`LOAD_CHUNK_BYTES`], its pages faulted once rather than per weight.
+    static LOAD_STAGING: std::cell::RefCell<Vec<u8>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// SwarmLLM patch (#424 step 3): [`load_quantized`] read off `reader` — `len`
+/// bytes of `dtype` blocks — through one staging buffer the loading thread
+/// reuses, a chunk at a time, never a buffer of the weight's whole size made
+/// fresh for it (`ggml_file::qtensor_read` says why). The copy is the one
+/// [`load_quantized`] makes: pageable, and done with its source when it
+/// returns, so the next chunk may be read into the same memory.
+pub fn load_quantized_read<R: std::io::Read>(
+    device: &CudaDevice,
+    reader: &mut R,
+    len: usize,
+    dtype: GgmlDType,
+) -> Result<super::QStorage> {
+    let padded_len = len + MATRIX_ROW_PADDING * dtype.type_size() / dtype.block_size();
+    let mut inner = device.alloc_zeros::<u8>(padded_len)?;
+    LOAD_STAGING.with(|staging| -> Result<()> {
+        let mut staging = staging.borrow_mut();
+        let chunk = len.min(LOAD_CHUNK_BYTES);
+        if staging.len() < chunk {
+            staging.resize(chunk, 0);
+        }
+        let mut done = 0;
+        while done < len {
+            let n = (len - done).min(LOAD_CHUNK_BYTES);
+            reader.read_exact(&mut staging[..n])?;
+            device.memcpy_htod(&staging[..n], &mut inner.slice_mut(done..done + n))?;
+            done += n;
+        }
+        Ok(())
+    })?;
+    Ok(QStorage::Cuda(QCudaStorage {
+        data: PaddedCudaSlice { inner, len },
+        device: device.clone(),
+        dtype,
+        accumulate_f32: false,
+    }))
+}
+
 /// SwarmLLM patch: [`load_quantized`] from a weight's bytes, copied on the
 /// device's copy stream (`CudaDevice::clone_htod_padded_beside`) and padded as
 /// [`load_quantized`] pads.

@@ -2265,6 +2265,24 @@ The forward's own time is the worker's `DIAG: worker forward answered` line's `r
 holds P0 for an A/B: a 1-block kernel spinning 200 µs every 10 ms (+13 W here; 20 µs or every 50-100 ms
 slipped to P5 a fifth of the time). The 70B parse is in `~/swarmllm-70b/ab70shape.sh`'s outputs.
 
+## Where a model's load goes (`DIAG: split load timed`, 2026-11-07, #424 step 3)
+
+Every load from part files logs `DIAG: split load timed` (INFO, the worker's log): `load_ms` the range's
+whole load, `read_ms` the part files' `read` calls — the page faults on the memory read into count here —
+and `read_mb`. The rest is placing the weights (a card's allocations and copies). To time loads without a
+node: `SWARM_BENCH_LOADS=N` in `examples/prefill_bench.rs` (`SWARM_BENCH_DEVICE=cuda` for a card,
+`SWARM_BENCH_COLD=1` drops the model's files from the page cache first — under WSL2 the host may still
+hold the disk image's pages). Time ONE load per process, as a worker does: a second load in the same
+process reuses memory the first gave back (no page faults, but `alloc_zeroed` then zeroes it), so it
+measures neither path. Old read for an A/B in one binary: `SWARMLLM_LOAD_READ=fresh`;
+`SWARM_BENCH_FINGERPRINT=1` adds one forward's pick and logit sum, to show two reads loaded the same
+weights. The 8B on this RTX 3070 laptop, warm: `load_ms` ~1,600, `read_ms` ~500 (9 GB/s), the rest the
+card's copies (~6.5 GB/s) and allocations; `read_ms` of 2,400+ with the page cache warm is fresh memory
+being faulted under a full page cache (compaction stalls, `docs/invariants/inference.md` § snapshot
+room). Under WSL2 with
+`autoMemoryReclaim=dropcache` (this machine's `.wslconfig`) the page cache is emptied when the VM idles,
+so a load after an idle unload reads the disk.
+
 ## Attention-kernel A/B — `SWARMLLM_FORCE_STANDARD_ATTN=1`
 
 Forces every attention call in the process onto `standard_attention`, so the

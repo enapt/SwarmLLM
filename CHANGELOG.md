@@ -2,6 +2,22 @@
 
 ## [Unreleased]
 
+**Your first question to a model no longer waits for the model to load** (#424). A model is loaded
+into memory only when a question needs it, and it is let go after five minutes without one — so the
+first question after a download or a pause waited for the whole load: 5.5-7 seconds for an 8B model
+on a laptop graphics card, against a quarter of a second once loaded. The chat box now asks for the
+model to be loaded as soon as you start typing, so the load runs while you write. It loads only what
+your question would load on this computer anyway, and nothing for a model that would run elsewhere.
+Programs using the API can ask for the same with `POST /api/admin/models/{id}/load`.
+
+**Models load about a third faster** (#424). Each weight was read from disk into a fresh block of
+memory of its own size before being placed — on the graphics card, copied there; on the processor,
+copied again. Fresh memory costs a page fault for every few kilobytes, and with the computer's file
+cache full it can stall for seconds. Weights are now read straight into the memory they stay in, or
+through one small reused buffer on their way to the card. An 8B model on a laptop's graphics card
+loads in 1.6-1.8 seconds instead of 2.3-2.9 (up to 4.7 when memory was tight), and on the processor
+in 1.6-2.0 seconds instead of 2.7. The weights loaded are byte for byte the same.
+
 ## [0.3.277-alpha] — 2026-11-07
 
 **A vision model can read pictures without anyone copying its image reader in by hand** (#422).

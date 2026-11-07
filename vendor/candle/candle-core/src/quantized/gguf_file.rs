@@ -54,6 +54,14 @@ pub struct TensorInfo {
     pub offset: u64,
 }
 
+/// SwarmLLM patch (#424 step 3): `SWARMLLM_LOAD_READ=fresh` reads every tensor
+/// through a fresh buffer of its whole size, as candle does — the A/B of
+/// [`super::ggml_file::qtensor_read`] in one binary. Read once.
+fn reads_through_a_fresh_buffer() -> bool {
+    static FRESH: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *FRESH.get_or_init(|| std::env::var("SWARMLLM_LOAD_READ").as_deref() == Ok("fresh"))
+}
+
 impl TensorInfo {
     pub fn read<R: std::io::Seek + std::io::Read>(
         &self,
@@ -69,8 +77,19 @@ impl TensorInfo {
         )
         }
         let size_in_bytes = tensor_elems / block_size * self.ggml_dtype.type_size();
-        let mut raw_data = vec![0u8; size_in_bytes];
         reader.seek(std::io::SeekFrom::Start(tensor_data_offset + self.offset))?;
+        // SwarmLLM patch (#424 step 3): read into the tensor's own storage
+        // (`ggml_file::qtensor_read`), never a fresh buffer of its whole size
+        // first. `SWARMLLM_LOAD_READ=fresh` is the old read, the A/B.
+        if !reads_through_a_fresh_buffer() {
+            return super::ggml_file::qtensor_read(
+                self.ggml_dtype,
+                reader,
+                self.shape.dims().to_vec(),
+                device,
+            );
+        }
+        let mut raw_data = vec![0u8; size_in_bytes];
         reader.read_exact(&mut raw_data)?;
         super::ggml_file::qtensor_from_ggml(
             self.ggml_dtype,

@@ -199,6 +199,110 @@ pub fn qtensor_from_ggml(
     }
 }
 
+/// SwarmLLM patch (#424 step 3): a GGML tensor read off `reader` straight into
+/// the storage it will live in — [`qtensor_from_ggml`] without the buffer of
+/// the tensor's whole size it is handed.
+///
+/// That buffer was fresh memory for every tensor, and a large one is fresh
+/// pages from the OS: a page fault per 4 KB while the file is read into it
+/// (1.23 GB/s here against 3.5 reading into memory already touched, the same
+/// cached files — 287 K faults a GB). On the processor the blocks were then
+/// copied into a SECOND fresh allocation (`to_vec`), faulting again. Now the
+/// processor reads into the blocks themselves, and a card through one
+/// staging buffer each loading thread reuses (`cuda::load_quantized_read`).
+///
+/// Prior art: llama.cpp's `llama_model_loader::load_all_data` reads a tensor
+/// bound for a device through 4 REUSED pinned staging buffers (1 MiB, or
+/// 64 MiB with direct I/O) and uploads each asynchronously behind an event
+/// (`src/llama-model-loader.cpp`, read 2026-11-07); one in host memory is read
+/// in place. The reuse is taken here; the overlap of a read with the previous
+/// chunk's copy is not (measured first, #424 step 3).
+pub fn qtensor_read<R: std::io::Read>(
+    ggml_dtype: GgmlDType,
+    reader: &mut R,
+    dims: Vec<usize>,
+    device: &Device,
+) -> Result<super::QTensor> {
+    let tensor_elems = dims.iter().product::<usize>();
+    let block_size = ggml_dtype.block_size();
+    if tensor_elems % block_size != 0 {
+        crate::bail!(
+            "the number of elements {tensor_elems} is not divisible by the block size {block_size}"
+        )
+    }
+    let size = tensor_elems / block_size * ggml_dtype.type_size();
+    use k_quants::*;
+    match ggml_dtype {
+        GgmlDType::F32 => read_blocks::<f32, R>(reader, size, dims, device),
+        GgmlDType::F16 => read_blocks::<half::f16, R>(reader, size, dims, device),
+        GgmlDType::BF16 => read_blocks::<half::bf16, R>(reader, size, dims, device),
+        GgmlDType::Q4_0 => read_blocks::<BlockQ4_0, R>(reader, size, dims, device),
+        GgmlDType::Q4_1 => read_blocks::<BlockQ4_1, R>(reader, size, dims, device),
+        GgmlDType::Q5_0 => read_blocks::<BlockQ5_0, R>(reader, size, dims, device),
+        GgmlDType::Q5_1 => read_blocks::<BlockQ5_1, R>(reader, size, dims, device),
+        GgmlDType::Q8_0 => read_blocks::<BlockQ8_0, R>(reader, size, dims, device),
+        GgmlDType::Q2K => read_blocks::<BlockQ2K, R>(reader, size, dims, device),
+        GgmlDType::Q3K => read_blocks::<BlockQ3K, R>(reader, size, dims, device),
+        GgmlDType::Q4K => read_blocks::<BlockQ4K, R>(reader, size, dims, device),
+        GgmlDType::Q5K => read_blocks::<BlockQ5K, R>(reader, size, dims, device),
+        GgmlDType::Q6K => read_blocks::<BlockQ6K, R>(reader, size, dims, device),
+        GgmlDType::Mxfp4 => read_blocks::<BlockMxfp4, R>(reader, size, dims, device),
+        GgmlDType::Iq4Nl => read_blocks::<BlockIq4Nl, R>(reader, size, dims, device),
+        GgmlDType::Iq4Xs => read_blocks::<BlockIq4Xs, R>(reader, size, dims, device),
+        _ => crate::bail!("quantized type {ggml_dtype:?} is not supported yet"),
+    }
+}
+
+/// [`qtensor_read`] for one block type: the bytes [`from_raw_data`] would be
+/// handed, read where they will stay.
+fn read_blocks<T: super::GgmlType + Send + Sync + 'static, R: std::io::Read>(
+    reader: &mut R,
+    size_in_bytes: usize,
+    dims: Vec<usize>,
+    device: &Device,
+) -> Result<super::QTensor> {
+    let n_blocks = size_in_bytes / std::mem::size_of::<T>();
+    let bytes = n_blocks * std::mem::size_of::<T>();
+    let data: QStorage = match device {
+        Device::Cpu => {
+            let mut blocks = zeroed_blocks::<T>(n_blocks)?;
+            // SAFETY: a GGML block is plain numbers (`GgmlType::zeros` builds one
+            // from zeroed memory), so its bytes may be written as bytes.
+            let raw = unsafe { std::slice::from_raw_parts_mut(blocks.as_mut_ptr() as *mut u8, bytes) };
+            reader.read_exact(raw)?;
+            QStorage::Cpu(Box::new(blocks))
+        }
+        Device::Cuda(cuda) => super::cuda::load_quantized_read(cuda, reader, bytes, T::DTYPE)?,
+        Device::Metal(metal) => {
+            let mut raw_data = vec![0u8; bytes];
+            reader.read_exact(&mut raw_data)?;
+            // SAFETY: as `from_raw_data` — the bytes of `n_blocks` plain blocks.
+            let blocks =
+                unsafe { std::slice::from_raw_parts(raw_data.as_ptr() as *const T, n_blocks) };
+            super::metal::load_quantized(metal, blocks)?
+        }
+    };
+    super::QTensor::new(data, dims)
+}
+
+/// `n` zeroed blocks in memory the allocator hands over already zero — a large
+/// one fresh from the OS, its pages faulted once, by the read that fills them.
+fn zeroed_blocks<T: super::GgmlType>(n: usize) -> Result<Vec<T>> {
+    if n == 0 || std::mem::size_of::<T>() == 0 {
+        return Ok(Vec::new());
+    }
+    let layout = std::alloc::Layout::array::<T>(n)
+        .map_err(|e| crate::Error::Msg(format!("{n} blocks: {e}")))?;
+    // SAFETY: a layout of non-zero size; a null answer is handled below.
+    let ptr = unsafe { std::alloc::alloc_zeroed(layout) } as *mut T;
+    if ptr.is_null() {
+        std::alloc::handle_alloc_error(layout);
+    }
+    // SAFETY: allocated by the global allocator with `T`'s layout for `n`
+    // elements, every one initialised: all-zero bytes are a block.
+    Ok(unsafe { Vec::from_raw_parts(ptr, n, n) })
+}
+
 fn read_one_tensor<R: std::io::Seek + std::io::Read>(
     reader: &mut R,
     magic: VersionedMagic,

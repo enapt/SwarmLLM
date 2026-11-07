@@ -289,7 +289,10 @@ impl SplitModel {
         // This range's own placement where the daemon sent one
         // (`split::placement_of`, #265), else the spawn's.
         let placement = crate::inference::split::placement_of(layer_start, layer_end);
-        Self::load_model_from_content(
+        let on_card = device.is_cuda();
+        let started = std::time::Instant::now();
+        let (read_before, _) = reader.read_so_far();
+        let model = Self::load_model_from_content(
             ct,
             &mut reader,
             device,
@@ -303,7 +306,21 @@ impl SplitModel {
                 gpu_layers: placement.gpu_layers,
                 cpu_expert_layers: placement.cpu_expert_layers,
             },
-        )
+        );
+        // Where a load's time goes (#424 step 3): the part files' reads — the
+        // page faults on the buffer read into count here — against the rest
+        // (placing the weights: a copy to the card, a second copy in host memory).
+        let (read_after, read_bytes) = reader.read_so_far();
+        tracing::info!(
+            layer_start,
+            layer_end,
+            on_card,
+            load_ms = started.elapsed().as_millis() as u64,
+            read_ms = read_after.saturating_sub(read_before).as_millis() as u64,
+            read_mb = read_bytes / (1024 * 1024),
+            "DIAG: split load timed"
+        );
+        model
     }
 }
 

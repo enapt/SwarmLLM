@@ -208,7 +208,8 @@ the top track (`docs/plans/large_model_splits.md`).
     decision, with research, when picked up.
 18. **#424** — a model's first question waits for its whole load: 5.5-7.1 s for the 8B against
     0.23-0.30 s warm, after every download and every 5-minute idle unload. Step 1, loading while
-    the owner types, is built; steps 2-3 (the first forward, the load itself) measure first.
+    the owner types, is built; step 2 measured no first-forward cost; step 3's first part (no buffer
+    of a weight's whole size) cut the 8B's load ~35% on the card — overlapping reads with copies next.
 19. **#326** — on a card newer than a release's machine code (Hopper, Blackwell: RTX 50-series),
     the first reply waits ~2 min while the driver compiles flash attention's PTX (MMQ's ~8 s a
     weight type), then it is cached. Correct since the PTX went in (before: wrong output).
@@ -4263,7 +4264,27 @@ nothing, the worker reads weights on `DaemonMsg::LoadRange`.
    than the release's machine code (no such card here).
 3. **The load itself**: the sharded path reads layer by layer on one thread, a pageable copy a tensor
    (the 8B: 3.4 s to the processor, 5.5 s to the card). Log read vs upload first; llama.cpp uploads
-   through 4 pinned 1 MiB buffers with events (`src/llama-model-loader.cpp`).
+   through 4 pinned 1 MiB buffers with events (`src/llama-model-loader.cpp`). **(3a) BUILT 2026-11-07 —
+   no buffer of a weight's whole size**: candle read every weight into a FRESH buffer of its size
+   (`vec![0u8; n]`), and on the processor copied it into a second fresh allocation — fresh pages,
+   faulted per read (cached files: 1.23 GB/s into fresh memory against 3.5 into touched memory, 287 K
+   faults a GB, memory `tools/p424/faults.py`). Vendored `ggml_file::qtensor_read` now reads the
+   processor's blocks in place and a card's through one 16 MiB staging buffer the loading thread reuses
+   (`cuda::load_quantized_read`, the same pageable copy). `DIAG: split load timed` splits a load into
+   its reads and the rest; `SWARM_BENCH_LOADS` in `examples/prefill_bench.rs` times it, one load per
+   process as a worker loads; A/B `SWARMLLM_LOAD_READ=fresh`. **Measured** (the 8B, 4.6 GB, page cache
+   warm, ABBA): **the card 2.25-2.86 s → 1.55-1.78 s** (release CUDA bench, memory `tools/p424/cardload.sh`, the live node stopped;
+   three old loads took 4.2-4.7 s, their read 2.4-2.9 s — fresh memory under a full page cache, #367's
+   compaction stalls — none of eight new ones did), **page cache dropped 3.82-3.97 → 3.11-3.17 s**;
+   **the processor 2.67-2.74 s → 1.63-1.95 s** (dev bench, first load of a process). Same weights:
+   `a_weight_read_into_its_storage_holds_the_old_reads_bytes` (bytes equal, every type, a weight of two
+   chunks; red with one byte flipped), and on the card the same logits from all four arms
+   (`SWARM_BENCH_FINGERPRINT=1`: pick 220, identical sum bits). **Left**: a warm card load is now
+   ~0.5 s of reads and ~1.1 s of placing (copies at ~6.5 GB/s, 291 allocations ~0.17 s) — (3b) overlap
+   a chunk's read with the previous chunk's copy (llama.cpp's pinned buffers + events; up to ~0.5 s of
+   the 1.6); a cold load is ~2.0 s of reads (2.2 GB/s one reader, 3.37 with four, `dd`, 2026-11-07) —
+   (3c) read the next layer's parts while this one's copy runs; the processor's own first touch of its
+   weights (~0.6 s for the 8B) stays.
 
 ### Packaging, release and operations
 

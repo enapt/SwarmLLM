@@ -66,6 +66,11 @@ pub struct ShardReader {
     position: u64,
     /// Currently open shard file handle (cached to avoid repeated opens).
     current_shard: Option<(usize, std::fs::File)>,
+    /// Time spent in the shard files' `read` calls, and the bytes they gave:
+    /// what a load spends reading, page faults on the buffer read into
+    /// included, beside what it spends placing the weights (#424 step 3).
+    read_time: std::time::Duration,
+    read_bytes: u64,
 }
 
 /// The sidecars on disk for a model directory — every entry of
@@ -211,7 +216,14 @@ impl ShardReader {
             total_size: total_gguf_size,
             position: 0,
             current_shard: None,
+            read_time: std::time::Duration::ZERO,
+            read_bytes: 0,
         })
+    }
+
+    /// The time spent reading the shard files so far, and the bytes read.
+    pub(crate) fn read_so_far(&self) -> (std::time::Duration, u64) {
+        (self.read_time, self.read_bytes)
     }
 
     /// Find which shard (if any) contains the given virtual file position,
@@ -303,7 +315,10 @@ impl IoRead for ShardReader {
                 );
                 return Ok(0);
             }
+            let started = std::time::Instant::now();
             let n = file.read(&mut buf[..to_read])?;
+            self.read_time += started.elapsed();
+            self.read_bytes += n as u64;
             self.position += n as u64;
             Ok(n)
         } else {
