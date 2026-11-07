@@ -2825,7 +2825,21 @@ draft graphs once at start-up and replays them; adaptive-length verification on 
 2605.00342) records one verify graph PER LENGTH up front and picks the one the chosen length needs,
 and SGLang's DSpark rounds a ragged batch up to the nearest recorded tier (LMSYS, 2026-07-06) — so
 take the third road: record every check width 1..=`cuda_graph::MAX_POSITIONS` before the first
-reply (beside the load, outside any request), and a γ change never pays a recording. Through the node a card's story gained nothing from
+reply (beside the load, outside any request), and a γ change never pays a recording. Mapped
+2026-11-08 (code only, unmeasured): we never replay a stored graph — every captured step is
+captured again and pushed into the shape's exec with `cuGraphExecUpdate_v2` (`cuda_graph.rs`
+`capture`); a width's one-off is its FIRST step (ordinary, records the template:
+`note_uncaptured`) plus the first instantiation. A width is warm after two forwards of it by one
+request (`follows_previous_step`, `every_cache_holds`; Qwen 3.5's rows are made by its first check),
+keyed by `StepShape { positions, tree }` per `SplitModel`, never per request. So: warm the widths
+the guesses can ask (2..=`MOST_GUESSES`+1, the n-gram's to 8) on a throwaway request while the
+worker has nothing waiting (`refit_stale_priors`'s rule, stopping at a message — never on the load
+path #424 made the first keystroke's), then `clear_request`. Check before building: (i) the card
+memory each width's exec keeps (`trim_idle_graph_memory` exists because it is not small); (ii) a
+warm-up forward that fails or is refused adds a `defects` count that is never reset (3 gives the
+shape up for good), and refused updates feed `churn` (3 in 8 rests it 256 steps); (iii) whether a
+graph recorded at a short cache is refused its update at a long one (a KV chunk count growing
+changes the node count, `cuda_graph.rs` ~170). Through the node a card's story gained nothing from
 the head either (3.85 s without it, 3.87 with): its check costs 19 ms against a 16 ms step at ~1.8
 tokens a round. (c) No planner or admission charges the block (122-856 MB) or the processor's hot
 rows (about 55-140 MB).
