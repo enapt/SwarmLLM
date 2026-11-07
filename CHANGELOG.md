@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.3.278-alpha] — 2026-11-08
+
 **Qwen 3.5, 3.6 and 3.8 reply up to twice as fast on one computer** (#425). These models come
 with a small extra part trained to guess the next word, which was never used: replies were sped up
 only by copying text that already appeared in the conversation, which ordinary writing rarely
