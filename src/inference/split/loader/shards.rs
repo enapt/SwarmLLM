@@ -292,21 +292,27 @@ impl SplitModel {
         let on_card = device.is_cuda();
         let started = std::time::Instant::now();
         let (read_before, _) = reader.read_so_far();
-        let model = Self::load_model_from_content(
-            ct,
-            &mut reader,
-            device,
-            super::SplitLoadOptions {
-                layer_start,
-                layer_end,
-                is_first,
-                is_last,
-                // ShardReader can't be shared across threads for parallel loading
-                parallel_data: None,
-                gpu_layers: placement.gpu_layers,
-                cpu_expert_layers: placement.cpu_expert_layers,
-            },
-        );
+        // A weight bound for a card is read into one page-locked chunk while
+        // the card copies the other (#424 (3b); Prior art: llama.cpp's
+        // `load_all_data`, four pinned buffers with an event each). The chunks
+        // are freed when the load returns. `SWARMLLM_LOAD_PINNED=0` = (3a).
+        let model = candle_core::quantized::with_pinned_load_staging(|| {
+            Self::load_model_from_content(
+                ct,
+                &mut reader,
+                device,
+                super::SplitLoadOptions {
+                    layer_start,
+                    layer_end,
+                    is_first,
+                    is_last,
+                    // ShardReader can't be shared across threads for parallel loading
+                    parallel_data: None,
+                    gpu_layers: placement.gpu_layers,
+                    cpu_expert_layers: placement.cpu_expert_layers,
+                },
+            )
+        });
         // Where a load's time goes (#424 step 3): the part files' reads — the
         // page faults on the buffer read into count here — against the rest
         // (placing the weights: a copy to the card, a second copy in host memory).

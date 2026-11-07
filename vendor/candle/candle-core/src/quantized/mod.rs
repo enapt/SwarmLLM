@@ -36,6 +36,20 @@ use half::{bf16, f16};
 
 pub use k_quants::GgmlType;
 
+/// SwarmLLM patch (#424 (3b)): run `load` with every weight it reads onto a card
+/// copied through two page-locked chunks, so the file read of one overlaps the
+/// copy of the last; the chunks are freed when `load` returns. A build without
+/// CUDA just runs `load`.
+pub fn with_pinned_load_staging<T>(load: impl FnOnce() -> T) -> T {
+    cuda::with_pinned_load_staging(load)
+}
+
+/// SwarmLLM patch (#424 (3b)): chunks copied to a card through the pinned pair
+/// so far in this process — the proof the scope above fired.
+pub fn pinned_load_chunks() -> u64 {
+    cuda::pinned_load_chunks()
+}
+
 fn as_t_slice<T>(data: Cow<'_, [u8]>) -> &[T] {
     let size = std::mem::size_of::<T>();
     assert_eq!(

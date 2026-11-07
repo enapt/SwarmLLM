@@ -209,7 +209,8 @@ the top track (`docs/plans/large_model_splits.md`).
 18. **#424** — a model's first question waits for its whole load: 5.5-7.1 s for the 8B against
     0.23-0.30 s warm, after every download and every 5-minute idle unload. Step 1, loading while
     the owner types, is built; step 2 measured no first-forward cost; step 3's first part (no buffer
-    of a weight's whole size) cut the 8B's load ~35% on the card — overlapping reads with copies next.
+    of a weight's whole size) cut the 8B's load ~35% on the card, and its second (a chunk read while
+    the last is copied, two pinned buffers) ~0.3 s warm, ~0.6 s cold more — a cold load's reads next.
 19. **#326** — on a card newer than a release's machine code (Hopper, Blackwell: RTX 50-series),
     the first reply waits ~2 min while the driver compiles flash attention's PTX (MMQ's ~8 s a
     weight type), then it is cached. Correct since the PTX went in (before: wrong output).
@@ -4279,12 +4280,27 @@ nothing, the worker reads weights on `DaemonMsg::LoadRange`.
    **the processor 2.67-2.74 s → 1.63-1.95 s** (dev bench, first load of a process). Same weights:
    `a_weight_read_into_its_storage_holds_the_old_reads_bytes` (bytes equal, every type, a weight of two
    chunks; red with one byte flipped), and on the card the same logits from all four arms
-   (`SWARM_BENCH_FINGERPRINT=1`: pick 220, identical sum bits). **Left**: a warm card load is now
-   ~0.5 s of reads and ~1.1 s of placing (copies at ~6.5 GB/s, 291 allocations ~0.17 s) — (3b) overlap
-   a chunk's read with the previous chunk's copy (llama.cpp's pinned buffers + events; up to ~0.5 s of
-   the 1.6); a cold load is ~2.0 s of reads (2.2 GB/s one reader, 3.37 with four, `dd`, 2026-11-07) —
+   (`SWARM_BENCH_FINGERPRINT=1`: pick 220, identical sum bits). **(3b) BUILT 2026-11-07 — a chunk is
+   read while the last one is copied**: a warm card load was ~0.5 s of reads and ~1.1 s of placing
+   (copies at ~6.5 GB/s, 291 allocations ~0.17 s), one after the other. A load from parts now runs inside
+   `candle_core::quantized::with_pinned_load_staging` (`split::loader::shards`): a weight bound for the
+   card is read into one of two page-locked 16 MiB chunks while the card copies the other, each chunk
+   refilled only once an event recorded behind its copy has passed (llama.cpp's `load_all_data`: 4
+   pinned buffers, an event each; ours are our own events — cudarc records a pinned slice's only where
+   it manages stream synchronization, off with one stream per device). The pair lives for the load and
+   is freed after; a refusal of page-locked memory copies as (3a). Feasibility first (a CUDA program,
+   memory `tools/p424/overlap.cu`, the 8B's parts): 4.9 GB to the card in 0.80-0.83 s through two pinned
+   chunks against 1.24-1.25 through one pageable, four 0.78-0.81. **Measured** (release CUDA bench,
+   `tools/p424/cardload3b.sh`, the live node stopped, ABBA, 0 driver events): **warm 1.95-2.00 s → 1.67-1.79 s**
+   (`load_ms` 1499-1546 → 1203-1296; the first pageable load after the node stopped took 4.27 s and is
+   left out), **page cache dropped 3.54-3.76 → 3.00-3.05 s**. A read runs slower beside the card's copy
+   (`read_ms` ~430 → ~620: both use host memory) but no longer waits for it. Same logits in all 16 loads
+   (pick 220, identical sum bits); `pinned_load_chunks` counted 445 chunks in every pinned load, 0 in
+   every `SWARMLLM_LOAD_PINNED=0` one; test `a_weight_read_through_the_pinned_pair_holds_the_old_reads_bytes`.
+   **Left**: a cold load is ~2.0 s of reads (2.2 GB/s one reader, 3.37 with four, `dd`, 2026-11-07) —
    (3c) read the next layer's parts while this one's copy runs; the processor's own first touch of its
-   weights (~0.6 s for the 8B) stays.
+   weights (~0.6 s for the 8B) stays. A load through the mmap path (one whole GGUF, a thread per layer)
+   keeps (3a)'s pageable staging per thread.
 
 ### Packaging, release and operations
 

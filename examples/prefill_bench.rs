@@ -182,12 +182,13 @@ fn main() -> anyhow::Result<()> {
             let mut model = load(&model_dir)?;
             let secs = t.elapsed().as_secs_f64();
             println!(
-                "load {i}: {secs:.3} s (device={}, cold={cold})",
+                "load {i}: {secs:.3} s (device={}, cold={cold}, pinned chunks so far={})",
                 if model.device().is_cuda() {
                     "cuda"
                 } else {
                     "cpu"
-                }
+                },
+                candle_core::quantized::pinned_load_chunks()
             );
             // `SWARM_BENCH_FINGERPRINT=1`: one forward of 16 fixed tokens after
             // the load — the last row's pick and its logits' sum as bits, so two

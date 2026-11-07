@@ -3159,6 +3159,11 @@ a card's through one 16 MiB staging buffer per loading thread (`cuda::load_quant
 never upstream's fresh buffer of the weight's whole size (and, on the processor, a second fresh
 copy). Fresh memory is faulted per read; the 8B loads ~35% faster on a laptop card, byte for byte
 the same weights (FUTURE_WORK #424 (3a); A/B `SWARMLLM_LOAD_READ=fresh`; `DIAG: split load timed`).
+A load from part files runs inside `quantized::with_pinned_load_staging` (#424 (3b)): there a card's
+weight goes through two page-locked 16 MiB chunks instead, one read into while the card copies the
+other, each refilled only after an event behind its last copy (llama.cpp's `load_all_data`). The pair
+is freed when the load returns; a refused allocation copies as above. 8B warm 1.95-2.00 → 1.67-1.79 s,
+cold 3.54-3.76 → 3.00-3.05 s; A/B `SWARMLLM_LOAD_PINNED=0`, proof `quantized::pinned_load_chunks`.
 
 ### The right attention kernel is OPPOSITE for prefill and decode
 

@@ -2279,7 +2279,10 @@ measures neither path. Old read for an A/B in one binary: `SWARMLLM_LOAD_READ=fr
 weights. The 8B on this RTX 3070 laptop, warm: `load_ms` ~1,600, `read_ms` ~500 (9 GB/s), the rest the
 card's copies (~6.5 GB/s) and allocations; `read_ms` of 2,400+ with the page cache warm is fresh memory
 being faulted under a full page cache (compaction stalls, `docs/invariants/inference.md` § snapshot
-room). Under WSL2 with
+room). Since #424 (3b) a card's reads overlap its copies: `load_ms` ~1,250 with `read_ms` ~620 (a read
+beside the card's copy runs slower — both use host memory — but no longer waits for it). The bench's
+`load` line prints `pinned chunks so far` (`quantized::pinned_load_chunks`): 445 for the 8B through the
+pinned pair, 0 under `SWARMLLM_LOAD_PINNED=0` (the (3a) arm). Under WSL2 with
 `autoMemoryReclaim=dropcache` (this machine's `.wslconfig`) the page cache is emptied when the VM idles,
 so a load after an idle unload reads the disk.
 

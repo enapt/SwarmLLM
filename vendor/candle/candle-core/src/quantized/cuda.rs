@@ -1874,6 +1874,152 @@ std::thread_local! {
     /// [`load_quantized_read`]'s staging, kept by the loading thread: at most
     /// [`LOAD_CHUNK_BYTES`], its pages faulted once rather than per weight.
     static LOAD_STAGING: std::cell::RefCell<Vec<u8>> = const { std::cell::RefCell::new(Vec::new()) };
+    /// Inside [`with_pinned_load_staging`]: the pinned pair, made at the first
+    /// weight bound for a card.
+    static PINNED_STAGING: std::cell::RefCell<PinnedScope> =
+        const { std::cell::RefCell::new(PinnedScope::Off) };
+}
+
+enum PinnedScope {
+    /// No scope open: [`load_quantized_read`] copies through [`LOAD_STAGING`].
+    Off,
+    /// A scope is open; the pair once a weight has needed it.
+    On(Option<PinnedStaging>),
+    /// The driver refused page-locked memory: this scope copies as `Off` does.
+    Refused,
+}
+
+/// SwarmLLM patch (#424 (3b)): two page-locked chunks and, for each, an event
+/// recorded behind the copy made from it, so the file read into one runs while
+/// the card takes the other — llama.cpp's `load_all_data` (4 pinned buffers, an
+/// event each, `src/llama-model-loader.cpp`). Our own events: cudarc records a
+/// pinned slice's event only where it manages stream synchronization, which one
+/// stream per device (the default) leaves off. Host memory on the device's one
+/// stream, so a host wait on the event is the whole guard (gotcha #836 is about
+/// DEVICE pool frees across streams, which this is not). Measured with the 8B's
+/// part files on this RTX 3070 laptop: 4.9 GB to the card in 0.80-0.83 s through
+/// two pinned chunks against 1.24-1.25 through one reused pageable one (four
+/// pinned: 0.78-0.81).
+struct PinnedStaging {
+    chunks: [cudarc::driver::PinnedHostSlice<u8>; 2],
+    copied: [cudarc::driver::CudaEvent; 2],
+    next: usize,
+    stream: std::sync::Arc<cudarc::driver::CudaStream>,
+}
+
+impl PinnedStaging {
+    fn new(device: &CudaDevice) -> Result<Self> {
+        let stream = device.cuda_stream();
+        let ctx = stream.context();
+        // Plain page-locked memory (flags 0), as measured — not cudarc's default
+        // write-combined. SAFETY: a chunk's bytes are read into before any copy.
+        let chunk = || unsafe { ctx.alloc_pinned_with_flags::<u8>(LOAD_CHUNK_BYTES, 0) }.w();
+        let chunks = [chunk()?, chunk()?];
+        let copied = [ctx.new_event(None).w()?, ctx.new_event(None).w()?];
+        Ok(Self {
+            chunks,
+            copied,
+            next: 0,
+            stream,
+        })
+    }
+
+    fn holds_the_card_of(&self, device: &CudaDevice) -> bool {
+        std::sync::Arc::ptr_eq(self.stream.context(), device.cuda_stream().context())
+    }
+
+    /// `len` bytes off `reader` into `dst`, a chunk at a time, alternating chunks:
+    /// a chunk is read into only once the copy last made from it has finished.
+    fn copy<R: std::io::Read>(
+        &mut self,
+        device: &CudaDevice,
+        reader: &mut R,
+        dst: &mut CudaSlice<u8>,
+        len: usize,
+    ) -> Result<()> {
+        let mut done = 0;
+        while done < len {
+            let n = (len - done).min(LOAD_CHUNK_BYTES);
+            let k = self.next;
+            self.copied[k].synchronize().w()?;
+            let chunk = self.chunks[k].as_mut_slice().w()?;
+            reader.read_exact(&mut chunk[..n])?;
+            device.memcpy_htod(&chunk[..n], &mut dst.slice_mut(done..done + n))?;
+            self.copied[k].record(&self.stream).w()?;
+            PINNED_LOAD_CHUNKS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            self.next = 1 - k;
+            done += n;
+        }
+        Ok(())
+    }
+}
+
+impl Drop for PinnedStaging {
+    /// A chunk is never freed under a copy still reading it.
+    fn drop(&mut self) {
+        for copied in &self.copied {
+            let _ = copied.synchronize();
+        }
+    }
+}
+
+static PINNED_LOAD_CHUNKS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Chunks this process has copied to a card through the pinned pair — the
+/// proof [`with_pinned_load_staging`] fired, for a test or a bench.
+pub fn pinned_load_chunks() -> u64 {
+    PINNED_LOAD_CHUNKS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// SwarmLLM patch (#424 (3b)): run `load` with weights bound for a card copied
+/// through two page-locked chunks ([`PinnedStaging`]), freed when it returns.
+/// A scope, not a thread's for its life: a worker loads once and serves for
+/// hours, and a loader running a thread per layer would pin a pair per thread.
+/// Where the driver refuses page-locked memory the scope copies through the
+/// pageable staging, as outside one. `SWARMLLM_LOAD_PINNED=0` never opens one.
+pub fn with_pinned_load_staging<T>(load: impl FnOnce() -> T) -> T {
+    static OFF: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if *OFF.get_or_init(|| std::env::var("SWARMLLM_LOAD_PINNED").as_deref() == Ok("0")) {
+        return load();
+    }
+    struct Close;
+    impl Drop for Close {
+        fn drop(&mut self) {
+            let _ = PINNED_STAGING.try_with(|s| *s.borrow_mut() = PinnedScope::Off);
+        }
+    }
+    PINNED_STAGING.with(|s| *s.borrow_mut() = PinnedScope::On(None));
+    let _close = Close;
+    load()
+}
+
+/// Copies `len` bytes off `reader` into `dst` through the open scope's pinned
+/// chunks — `None` where no scope is open or the driver refused the chunks.
+fn copy_through_pinned_chunks<R: std::io::Read>(
+    device: &CudaDevice,
+    reader: &mut R,
+    dst: &mut CudaSlice<u8>,
+    len: usize,
+) -> Option<Result<()>> {
+    PINNED_STAGING.with(|s| {
+        let mut scope = s.borrow_mut();
+        let PinnedScope::On(staging) = &mut *scope else {
+            return None;
+        };
+        if staging.as_ref().is_some_and(|p| !p.holds_the_card_of(device)) {
+            *staging = None;
+        }
+        if staging.is_none() {
+            match PinnedStaging::new(device) {
+                Ok(made) => *staging = Some(made),
+                Err(_) => {
+                    *scope = PinnedScope::Refused;
+                    return None;
+                }
+            }
+        }
+        staging.as_mut().map(|p| p.copy(device, reader, dst, len))
+    })
 }
 
 /// SwarmLLM patch (#424 step 3): [`load_quantized`] read off `reader` — `len`
@@ -1890,6 +2036,15 @@ pub fn load_quantized_read<R: std::io::Read>(
 ) -> Result<super::QStorage> {
     let padded_len = len + MATRIX_ROW_PADDING * dtype.type_size() / dtype.block_size();
     let mut inner = device.alloc_zeros::<u8>(padded_len)?;
+    if let Some(copied) = copy_through_pinned_chunks(device, reader, &mut inner, len) {
+        copied?;
+        return Ok(QStorage::Cuda(QCudaStorage {
+            data: PaddedCudaSlice { inner, len },
+            device: device.clone(),
+            dtype,
+            accumulate_f32: false,
+        }));
+    }
     LOAD_STAGING.with(|staging| -> Result<()> {
         let mut staging = staging.borrow_mut();
         let chunk = len.min(LOAD_CHUNK_BYTES);

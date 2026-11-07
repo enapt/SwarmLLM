@@ -111,6 +111,17 @@ pub fn load_quantized_read<R: std::io::Read>(
     Err(Error::NotCompiledWithCudaSupport)
 }
 
+/// SwarmLLM patch: the CUDA build's `with_pinned_load_staging` — no card, so
+/// nothing to pin.
+pub fn with_pinned_load_staging<T>(load: impl FnOnce() -> T) -> T {
+    load()
+}
+
+/// SwarmLLM patch: the CUDA build's `pinned_load_chunks` — never any here.
+pub fn pinned_load_chunks() -> u64 {
+    0
+}
+
 /// SwarmLLM patch: the CUDA build's `load_quantized_beside`.
 pub fn load_quantized_beside(
     _device: &CudaDevice,

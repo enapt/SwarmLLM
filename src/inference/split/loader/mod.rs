@@ -4493,4 +4493,27 @@ mod weight_read_tests {
         }
         every_weight_holds_the_bytes_the_old_read_gave(&device);
     }
+
+    /// #424 (3b): inside a load's pinned scope the card's read alternates two
+    /// page-locked chunks, each refilled only once its last copy is done. Twice
+    /// over, so each chunk is refilled many times (and the 18.5 MB weight spans
+    /// both); the counter proves the pinned path ran, not the pageable one.
+    #[cfg(feature = "candle-cuda")]
+    #[test]
+    fn a_weight_read_through_the_pinned_pair_holds_the_old_reads_bytes() {
+        let device = super::load_device(false);
+        if !device.is_cuda() {
+            return;
+        }
+        let before = candle_core::quantized::pinned_load_chunks();
+        candle_core::quantized::with_pinned_load_staging(|| {
+            every_weight_holds_the_bytes_the_old_read_gave(&device);
+            every_weight_holds_the_bytes_the_old_read_gave(&device);
+        });
+        // 2 × (five one-chunk weights + the two-chunk one) = 14.
+        assert!(
+            candle_core::quantized::pinned_load_chunks() - before >= 14,
+            "the reads went through the pageable staging, not the pinned pair"
+        );
+    }
 }

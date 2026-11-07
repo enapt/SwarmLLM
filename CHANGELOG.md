@@ -18,6 +18,12 @@ through one small reused buffer on their way to the card. An 8B model on a lapto
 loads in 1.6-1.8 seconds instead of 2.3-2.9 (up to 4.7 when memory was tight), and on the processor
 in 1.6-2.0 seconds instead of 2.7. The weights loaded are byte for byte the same.
 
+**Loading onto a graphics card no longer waits for each copy to finish before reading the next piece
+from disk** (#424). The next piece of the model is now read while the card copies the last one, as
+llama.cpp does. Measured side by side on a laptop card, this takes a further quarter of a second off
+an 8B model's load when its files are already in memory, and over half a second when they have to be
+read from disk (3.5-3.8 seconds down to 3.0). The weights are the same.
+
 ## [0.3.277-alpha] — 2026-11-07
 
 **A vision model can read pictures without anyone copying its image reader in by hand** (#422).
