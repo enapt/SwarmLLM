@@ -2881,9 +2881,10 @@ fold order is #179's. `docs/invariants/inference.md` § "A check of a few rows s
 keys into jobs". It never fires on the release gate's split arm (Qwen2.5-14B: 8 KV groups, so 8
 blocks against an 8-thread check pool — `splits_keys` needs fewer blocks than threads); v0.3.278's
 three re-times of that arm (0.93x, 0.94x, 1.04x with the switch off) were its run-to-run swing — each
-reply's tokens a round, 2.2-5, set its speed. **Unmeasured at a short context** for the models it
-does split (2-4 KV groups: Qwen2.5 0.5B-7B): `attn_bench` at 1-2K keys, 2-8 rows,
-`SWARMLLM_PREFILL_SPLIT_KEYS=0` against default.
+reply's tokens a round, 2.2-5, set its speed. **At a short context it gains too** (2026-11-08,
+`SWARM_ATTN_CHECK=1024,2048,4096 RAYON_NUM_THREADS=8 attn_bench`, off/on/off/on, best of two):
+Qwen2.5-7B's check attention 1.50-1.72× faster at 1K keys, 1.67-1.84× at 2K; the 0.5B's 1.89-2.47× and
+2.43-3.00×; the 4K control 1.74-1.82× (7B), as measured when it landed.
 
 **Residual — the decode row's BYTES.** After the 09-26 fix the 3B's decode growth was +8.2 ms for
 1,536 positions at 4 threads, ~43 GB/s — the floor for f32 keys and values. What is left is the
