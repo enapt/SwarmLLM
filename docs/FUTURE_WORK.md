@@ -2820,7 +2820,12 @@ story most are rejected: code 93.8-109.4 → 112.9-114.1 tok/s, story 74.8-78.7 
 story's runs recorded 3-5 one-off graphs of new check widths against 1 (each ~250 ms), and kept
 39-49 of 109-114 guesses against 39-40 of 60-64. Next: price a new check width's recording in the
 guess count (`best_gamma_beside_a_step` sees only replayed checks), or hold a card's guess count
-to widths already recorded; then re-measure. Through the node a card's story gained nothing from
+to widths already recorded; then re-measure. Prior art (2026-11-08): SGLang records its target and
+draft graphs once at start-up and replays them; adaptive-length verification on SGLang (arXiv
+2605.00342) records one verify graph PER LENGTH up front and picks the one the chosen length needs,
+and SGLang's DSpark rounds a ragged batch up to the nearest recorded tier (LMSYS, 2026-07-06) — so
+take the third road: record every check width 1..=`cuda_graph::MAX_POSITIONS` before the first
+reply (beside the load, outside any request), and a γ change never pays a recording. Through the node a card's story gained nothing from
 the head either (3.85 s without it, 3.87 with): its check costs 19 ms against a 16 ms step at ~1.8
 tokens a round. (c) No planner or admission charges the block (122-856 MB) or the processor's hot
 rows (about 55-140 MB).
