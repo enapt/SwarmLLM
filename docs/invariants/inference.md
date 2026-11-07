@@ -3936,6 +3936,62 @@ reads past its visible range. The matmul paths (`layers::matmul_attention`) are 
 — a kernel that declines (a per-head mask, a non-f32 cache) gives that call the old
 behaviour, and so does every card (FUTURE_WORK #313).
 
+### A check of a few rows splits its blocks' keys into jobs (2026-11-07, #174)
+
+**What it replaced.** `gqa_prefill_attention_cpu` made one task per KV group × 128-row block, and
+each task walked every 256-key chunk in turn. A prompt chunk has plenty of blocks; a speculative
+check of 4-16 rows has ONE per KV group — 2 on a Qwen2.5 drafter, 4 on Qwen2.5-7B, 8 on Llama 3 —
+so at a long context most of an 8-thread pool sat idle while 2-4 threads walked 16+ chunks each.
+`examples/attn_bench.rs` (`SWARM_ATTN_CHECK=1024,4096,16384`, 8 threads): a 16-row check of
+Qwen2.5-7B at 4K cost 10.3× one decode row; Llama-3.1-8B, with 8 groups, 3.1×.
+
+**Prior art.** Flash-Decoding (Dao et al., 2023) and llama.cpp's processor flash path split ONE
+query's keys across threads and merge the partials by log-sum-exp; `decode_attn` already does
+this for a decode row. The detail that matters here is #179's: the merge must stay in chunk
+order, so the split may change which thread computes a chunk's partial, never the order the
+partials are folded.
+
+**Now.** Where the blocks are fewer than the pool's threads (`prefill_attn::splits_keys`),
+every (block, chunk) is a job of its own: `chunk_partials` writes each one's partial to its
+own slot, then a second parallel pass folds each block's rows through `merge_into` in chunk
+order and `finish_row`s them — the same partials, merged in the same order, so the same bits
+(`a_block_s_keys_split_into_jobs_give_the_same_bits`: GQA 3:1 to 8:1, MHA, batch 2, a window
+starting mid-chunk, soft-cap, sinks, several blocks). Only the choice of PATH reads the pool,
+as llama.cpp's `nth` does; sizes stay constants. The partials are capped at 64 MiB
+(`SPLIT_KEYS_MOST_BYTES`; a 16-row check at 32K positions of a 7:1 model is ~30 MB). A/B
+`SWARMLLM_PREFILL_SPLIT_KEYS=0`.
+
+**Measured** (`examples/attn_bench.rs`, live node stopped, min of 7×5, the switch in one binary,
+arms interleaved twice, 8 threads):
+
+| check | old | split | |
+|---|---|---|---|
+| Qwen2.5-0.5B (2 groups), 16 rows at 4K | 2.07 ms | 0.64 | 3.2× |
+| Qwen2.5-7B (4 groups), 8 rows at 4K | 2.14 ms | 1.13 | 1.9× |
+| Qwen2.5-7B, 16 rows at 16K | 13.7 ms | 8.8 | 1.6× |
+| Llama-3.1-8B / 70B shapes (8 groups) | — | — | unchanged (not split) |
+
+A first gate on a constant (fewer than 32 blocks) split the 8-group shapes too and made them
+10-25% SLOWER — the partials' round trip with no idle thread to pay for it; hence the pool's
+width. At the check width (4 threads) only the 2-group shapes split. Whole model,
+`examples/prefill_bench` on Qwen2.5-Coder-7B Q4_K_M at ~4,008 cached positions, 8 threads,
+`SWARM_BENCH_SPEC_WIDTHS=4,8,16` (min of interleaved pairs), arms old/new/new/old:
+a check's cost against one step, both timed interleaved inside each arm (the live node was up,
+so absolute times drifted 149-168 ms at width 4 between arms; the ratio inside an arm did not):
+
+| width | old (2 arms) | split (2 arms) |
+|---|---|---|
+| 4 | 1.22-1.24× | 1.16× |
+| 8 | 2.08× | 1.89-2.02× |
+| 16 | 3.94-4.05× | 3.75-3.91× |
+
+A 3-7% cheaper check on a 4-group model at 4K; more at longer contexts, where attention is a
+larger share.
+
+**What a change must keep.** The fold order: a new parallel shape computes partials anywhere
+but folds a row's chunks in chunk order through `merge_into`. The path choice may read the
+pool; nothing that changes a bit may.
+
 ## A model's RoPE frequency factors are applied — and reach a node without shard 0 (2026-09-27, #124)
 
 **The defect.** Llama 3.1/3.2 GGUFs carry `rope_freqs.weight`: 64 per-pair

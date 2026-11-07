@@ -179,7 +179,108 @@ fn grouped_long_context(kv_lens: &str) {
     }
 }
 
+/// A speculative CHECK at long context (#174): k = 4/8/16 query positions of a
+/// chain, each seeing the cache plus the check's rows before it, for the head
+/// layouts of the models a processor node checks on. `prefill_attn` runs one
+/// task per KV group here, so a check has 4-8 tasks however many threads there
+/// are; beside it, the decode kernel (one task per group AND key chunk) for one
+/// row, and the bytes of K and V a check must read at least once.
+/// `SWARM_ATTN_CHECK=1024,4096`.
+fn check_long_context(kv_lens: &str) {
+    let dev = Device::Cpu;
+    println!(
+        "speculative check at long context, threads={}\n",
+        rayon::current_num_threads()
+    );
+    for kv in kv_lens
+        .split(',')
+        .filter_map(|s| s.trim().parse::<usize>().ok())
+    {
+        for (name, n_head, n_kv, d) in [
+            ("qwen2.5-0.5b 14/2 d64", 14usize, 2usize, 64usize),
+            ("llama-3.2-3b 24/8", 24, 8, 128),
+            ("qwen2.5-7b 28/4", 28, 4, 128),
+            ("llama-3.1-8b 32/8", 32, 8, 128),
+            ("llama-3.x-70b 64/8", 64, 8, 128),
+        ] {
+            let kbuf = Tensor::randn(0f32, 1., (1, n_kv, kv + 512, d), &dev).unwrap();
+            let vbuf = Tensor::randn(0f32, 1., (1, n_kv, kv + 512, d), &dev).unwrap();
+            let k = kbuf.narrow(2, 0, kv).unwrap();
+            let v = vbuf.narrow(2, 0, kv).unwrap();
+            let kv_mb = (2 * n_kv * kv * d * 4) as f64 / 1e6;
+            println!("{name}, kv = {kv} (K+V {kv_mb:.1} MB a layer)");
+            let scale = 1.0 / (d as f32).sqrt();
+            let q_one = Tensor::randn(0f32, 1., (1, n_head, 1, d), &dev).unwrap();
+            let one = time_ms(|| {
+                swarmllm::inference::decode_attn::gqa_decode_attention_cpu(
+                    &q_one, &k, &v, None, scale, None, 0, None,
+                )
+                .unwrap()
+                .expect("in scope")
+            });
+            println!(
+                "  one row (decode_attn)                          {one:>8.3} ms  {:>6.1} GB/s",
+                kv_mb / one
+            );
+            for q_len in [4usize, 8, 16] {
+                let q = Tensor::randn(0f32, 1., (1, n_head, q_len, d), &dev).unwrap();
+                let past = kv - q_len;
+                let m: Vec<f32> = (0..q_len)
+                    .flat_map(|i| {
+                        (0..kv).map(move |j| {
+                            if j <= past + i {
+                                0.0
+                            } else {
+                                f32::NEG_INFINITY
+                            }
+                        })
+                    })
+                    .collect();
+                let mask = Tensor::from_vec(m, (q_len, kv), &dev).unwrap();
+                let t = time_ms(|| {
+                    swarmllm::inference::prefill_attn::gqa_prefill_attention_cpu(
+                        &q,
+                        &k,
+                        &v,
+                        Some(&mask),
+                        scale,
+                        None,
+                        0,
+                        None,
+                    )
+                    .unwrap()
+                    .expect("in scope")
+                });
+                println!(
+                    "  check of {q_len:>2} rows (prefill_attn)               {t:>8.3} ms  {:>6.1} GB/s  ({:.2}x one row)",
+                    kv_mb / t,
+                    t / one
+                );
+            }
+        }
+        println!();
+    }
+}
+
+/// Best of 7 rounds of 5 calls, in ms per call.
+fn time_ms<T>(f: impl Fn() -> T) -> f64 {
+    std::hint::black_box(f());
+    let mut best = f64::INFINITY;
+    for _ in 0..7 {
+        let t = std::time::Instant::now();
+        for _ in 0..5 {
+            std::hint::black_box(f());
+        }
+        best = best.min(t.elapsed().as_secs_f64() * 1e3 / 5.0);
+    }
+    best
+}
+
 fn main() {
+    if let Ok(kv) = std::env::var("SWARM_ATTN_CHECK") {
+        check_long_context(&kv);
+        return;
+    }
     if let Ok(kv) = std::env::var("SWARM_ATTN_KV") {
         grouped_long_context(&kv);
         return;

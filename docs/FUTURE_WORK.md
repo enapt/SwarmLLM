@@ -2772,26 +2772,26 @@ layers' experts in RAM (24 against 14) cost ours 1.56 ms a layer and llama.cpp 2
 (`decode_graph_ineligibility`), and llama.cpp with its graphs off read 19.2-23.8 against
 25.8-29.6 on (two rounds, ± 2-5 within each) — the same lean as the 30B's, the same route.
 
-#### #174 — CPU decode attention sits ~2× above the memory-bandwidth floor
-`P3` · perf-local · **OPEN** — 2026-08-22 · history: archive § "CPU decode attention: the kernel sits 2x above the DRAM floor"
+#### #174 — Processor attention reads its keys and values as f32
+`P3` · perf-local · **OPEN (narrowed 2026-11-07)** — 2026-08-22 · history: archive § "CPU decode attention: the kernel sits 2x above the DRAM floor"
 
-Modest: about half of ~15 ms/token at long context on processor-only nodes. Three options in
-the archive (fold `from_vec`/`to_vec1` into a CustomOp, f16 KV on the processor, single-thread
-below ~128 KV). Smallest step: single-thread the rayon split below ~128 KV and measure with
-`SWARMLLM_PROFILE=1 prefill_bench`'s attention bucket (min-of-N, idle box).
+**Built 2026-11-07 — a check's keys split into jobs.** A speculative check of 4-16 rows had one
+task per KV group (2-4 on Qwen2.5, 8 on Llama 3), each walking every 256-key chunk in turn, so at
+a long context most threads sat idle. Where the blocks are fewer than the pool's threads, each
+(block, chunk) is now a job and each row's chunks are folded afterwards in chunk order — the same
+bits (`prefill_attn::splits_keys`; A/B `SWARMLLM_PREFILL_SPLIT_KEYS=0`). Qwen2.5-7B's attention in
+an 8-16-row check at 4-16K: 1.6-1.9× faster; a Qwen2.5 drafter's 2-group shape 2.1-3.3×; 8-group
+models unchanged (not split — splitting them was 10-25% slower). Whole 7B check forward at ~4K
+cached: a check costs 1.16× one step at width 4 (was 1.22-1.24×), 1.89-2.02× at 8 (2.08×), 3.75-3.91× at 16 (3.94-4.05×). Prior art: Flash-Decoding's split-K, llama.cpp's processor flash path; the
+fold order is #179's. `docs/invariants/inference.md` § "A check of a few rows splits its blocks'
+keys into jobs".
 
-**2026-11-07 (research round, from the archive's own figures — re-measure before acting)**: the
-title is likely STALE for decode — after the 09-26 fix the 3B's growth was +8.2 ms for 1,536
-positions at 4 threads, ~43 GB/s, the floor for f32 bytes; what is left there is BYTES (f16 KV on
-the processor). The larger lever is a CHECK of k rows at long context: `prefill_attn` runs one task
-per kv-head × 128-row block, each walking every key chunk in turn, so a 2-16-row check has only
-n_kv_heads tasks (4 on Qwen2.5-7B, 8 on Llama-3 and the 70B) on 8+ cores — ~2.2 ms a row per 1K
-cached positions (3B, 8 threads), ~70 ms of a k=8 check at 4K against its ~260 ms of weights.
-Split it across key chunks as `decode_attn` does (flash-decoding's split-K) where tasks < 2 ×
-threads, folding partials in chunk order so the result stays bit-identical (#179). Helps the 70B's
-far processor and a drafter's tree steps on long conversations; nothing at short context. First:
-`examples/attn_bench.rs` (`SWARM_ATTN_KV=4096`, q_len 4/8/16) and `prefill_bench`'s width sweep
-with a prefilled context, to confirm attention is a real share of such a check.
+**Residual — the decode row's BYTES.** After the 09-26 fix the 3B's decode growth was +8.2 ms for
+1,536 positions at 4 threads, ~43 GB/s — the floor for f32 keys and values. What is left is the
+bytes themselves: an f16 cache on the processor (half the reads; every processor kernel reads f32
+today, and `attn_rows`' arithmetic would widen on load so #179's bits hold per storage type).
+Measure the share first: `SWARMLLM_PROFILE=1 prefill_bench`'s attention bucket at 4K and 16K on a
+processor-only node.
 
 #### #173 — A request that joins a busy worker never speculates
 `P3` · perf-local · **OPEN** — 2026-08-23 · history: archive § "Speculation inside the batched decode scheduler"

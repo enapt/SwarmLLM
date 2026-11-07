@@ -100,6 +100,57 @@ fn mask_rows<'a>(
 /// chunk's K and V (256 KB) in L2.
 const ROWS_PER_TASK: usize = 128;
 
+/// The most the split path's per-chunk partials may take (rows × chunks ×
+/// `d + 2` floats): a 16-row check at 4K positions is 4-8.5 MB, at 32K of a
+/// 7:1 GQA model ~30 MB. Past it, the blocks walk their chunks in turn.
+const SPLIT_KEYS_MOST_BYTES: usize = 64 << 20;
+
+/// `SWARMLLM_PREFILL_SPLIT_KEYS=0` → never split a block's keys (A/B switch).
+fn split_keys_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var("SWARMLLM_PREFILL_SPLIT_KEYS").as_deref() != Ok("0"))
+}
+
+#[cfg(test)]
+std::thread_local! {
+    /// A test's choice of path for forwards on its thread, past every gate.
+    static FORCE_SPLIT_KEYS: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+}
+
+/// Whether a forward of `tasks` row blocks spanning `items` (block, chunk)
+/// pairs splits its blocks' keys into jobs of their own, on a pool of
+/// `threads` (#174): only where blocks alone would leave threads idle — a check
+/// of 4-16 rows has one block per KV group: 2 for a Qwen2.5 drafter, 4 for
+/// Qwen2.5-7B, 8 for Llama 3. Where every thread already has a block, splitting
+/// only adds the partials' round trip (measured: 10-25% slower, 8 groups on 8
+/// threads). The path depends on the pool, as llama.cpp's split of a decode
+/// row's keys does (`nth`); the bits never do — both fold the same partials in
+/// the same order.
+fn splits_keys(tasks: usize, items: usize, partial_bytes: usize, threads: usize) -> bool {
+    #[cfg(test)]
+    if let Some(forced) = FORCE_SPLIT_KEYS.with(std::cell::Cell::get) {
+        return forced;
+    }
+    split_keys_enabled()
+        && tasks < threads
+        && items > tasks
+        && partial_bytes <= SPLIT_KEYS_MOST_BYTES
+}
+
+/// One block of up to [`ROWS_PER_TASK`] query rows of one KV group: what it
+/// reads, and the absolute key chunks any of its rows sees.
+struct Task<'a> {
+    /// The KV group (within its batch entry).
+    g: usize,
+    /// The block's first row within the group's `n_rep * q_len`.
+    r0: usize,
+    q_block: &'a [f32],
+    k_plane: &'a [f32],
+    v_plane: &'a [f32],
+    row_seen: Vec<std::ops::Range<usize>>,
+    chunks: std::ops::Range<usize>,
+}
+
 /// Attention for `q_len >= 2` query positions. Returns `Ok(None)` when the
 /// inputs are outside the kernel's scope (caller falls back to the matmul path).
 ///
@@ -181,24 +232,17 @@ pub fn gqa_prefill_attention_cpu(
         );
     }
     let w = attn_rows::partial_len(d);
-    let mut out = vec![0f32; b * n_head * q_len * d];
-    out.par_chunks_mut(rows * d)
-        .enumerate()
-        .flat_map(|(ga, out_g)| {
-            out_g
-                .par_chunks_mut(ROWS_PER_TASK * d)
-                .enumerate()
-                .map(move |(blk, o)| (ga, blk, o))
-        })
-        .for_each(|(ga, blk, o)| {
+    // One task per block of up to `ROWS_PER_TASK` rows of one KV group, in the
+    // order the output holds them: what it reads and the chunks it spans.
+    let blocks = rows.div_ceil(ROWS_PER_TASK);
+    let tasks: Vec<Task> = (0..b * n_kv_head)
+        .flat_map(|ga| (0..blocks).map(move |blk| (ga, blk)))
+        .map(|(ga, blk)| {
             let (bi, g) = (ga / n_kv_head, ga % n_kv_head);
             let r0 = blk * ROWS_PER_TASK;
-            let nr = o.len() / d;
-            let q_block = &qv[((bi * n_head + g * n_rep) * q_len + r0) * d..][..nr * d];
+            let nr = (rows - r0).min(ROWS_PER_TASK);
             let k_base = kp.offset + bi * kp.strides[0] + g * kp.strides[1];
             let v_base = vp.offset + bi * vp.strides[0] + g * vp.strides[1];
-            let k_plane = &kp.data[k_base..k_base + s_len * d];
-            let v_plane = &vp.data[v_base..v_base + s_len * d];
             let row_seen: Vec<_> = (0..nr).map(|r| seen[(r0 + r) % q_len].clone()).collect();
             // The chunks any of these rows reads; the others would only give
             // partials the merge skips.
@@ -212,6 +256,111 @@ pub fn gqa_prefill_attention_cpu(
                 Some(from) => attn_rows::chunks_spanned(key_origin + from, to - from),
                 None => 0..0,
             };
+            Task {
+                g,
+                r0,
+                q_block: &qv[((bi * n_head + g * n_rep) * q_len + r0) * d..][..nr * d],
+                k_plane: &kp.data[k_base..k_base + s_len * d],
+                v_plane: &vp.data[v_base..v_base + s_len * d],
+                row_seen,
+                chunks,
+            }
+        })
+        .collect();
+    let partials_of = |t: &Task, c: usize, scores: &mut [f32], part: &mut [f32]| {
+        attn_rows::chunk_partials(
+            t.q_block,
+            &t.row_seen,
+            t.k_plane,
+            t.v_plane,
+            d,
+            key_origin,
+            c,
+            &|r| mask_of((t.r0 + r) % q_len),
+            scale,
+            softcap,
+            scores,
+            part,
+        );
+    };
+    let finish = |t: &Task, acc: &mut [f32], o: &mut [f32]| {
+        for (r, (o_row, a)) in o
+            .chunks_exact_mut(d)
+            .zip(acc.chunks_exact_mut(w))
+            .enumerate()
+        {
+            if let Some(s) = sinks {
+                attn_rows::fold_sink(a, s[t.g * n_rep + (t.r0 + r) / q_len]);
+            }
+            attn_rows::finish_row(a, o_row);
+        }
+    };
+    let mut out = vec![0f32; b * n_head * q_len * d];
+    // Each task's rows of the output, with the task's index.
+    let task_outputs: Vec<(usize, &mut [f32])> = out
+        .chunks_mut(rows * d)
+        .enumerate()
+        .flat_map(|(ga, out_g)| {
+            out_g
+                .chunks_mut(ROWS_PER_TASK * d)
+                .enumerate()
+                .map(move |(blk, o)| (ga * blocks + blk, o))
+        })
+        .collect();
+
+    // A few tasks over many chunks — a speculative check at a long context —
+    // leave most threads idle while each walks its chunks in turn (#174). Then
+    // every (task, chunk) is its own job, as a decode step splits its keys
+    // (`decode_attn`; Flash-Decoding's split-K), and a second pass folds each
+    // row's chunks in chunk order: the same partials merged in the same order,
+    // so the same bits either way. Sizes are constants, never the thread count;
+    // only the choice of path reads the pool (`splits_keys`).
+    let slot = rows.min(ROWS_PER_TASK) * w;
+    let n_items: usize = tasks.iter().map(|t| t.chunks.len()).sum();
+    if splits_keys(
+        tasks.len(),
+        n_items,
+        n_items * slot * std::mem::size_of::<f32>(),
+        rayon::current_num_threads(),
+    ) {
+        let items: Vec<(usize, usize)> = tasks
+            .iter()
+            .enumerate()
+            .flat_map(|(i, t)| t.chunks.clone().map(move |c| (i, c)))
+            .collect();
+        let mut first_item = Vec::with_capacity(tasks.len());
+        let mut at = 0;
+        for t in &tasks {
+            first_item.push(at);
+            at += t.chunks.len();
+        }
+        let mut partial = vec![0f32; n_items * slot];
+        partial
+            .par_chunks_mut(slot)
+            .zip(items.par_iter())
+            .for_each_init(
+                || vec![0f32; rows.min(ROWS_PER_TASK) * attn_rows::CHUNK],
+                |scores, (part, &(i, c))| partials_of(&tasks[i], c, scores, part),
+            );
+        task_outputs.into_par_iter().for_each(|(i, o)| {
+            let t = &tasks[i];
+            let nr = t.row_seen.len();
+            let mut acc = vec![0f32; nr * w];
+            for a in acc.chunks_exact_mut(w) {
+                attn_rows::empty_partial(a);
+            }
+            for j in 0..t.chunks.len() {
+                let part = &partial[(first_item[i] + j) * slot..][..nr * w];
+                for (a, p) in acc.chunks_exact_mut(w).zip(part.chunks_exact(w)) {
+                    attn_rows::merge_into(a, p);
+                }
+            }
+            finish(t, &mut acc, o);
+        });
+    } else {
+        task_outputs.into_par_iter().for_each(|(i, o)| {
+            let t = &tasks[i];
+            let nr = t.row_seen.len();
             // Each chunk is folded into the rows' merges as soon as it is
             // computed, in chunk order — a decode step folds the same way.
             let mut scores = vec![0f32; nr * attn_rows::CHUNK];
@@ -220,36 +369,15 @@ pub fn gqa_prefill_attention_cpu(
             for a in acc.chunks_exact_mut(w) {
                 attn_rows::empty_partial(a);
             }
-            for c in chunks {
-                attn_rows::chunk_partials(
-                    q_block,
-                    &row_seen,
-                    k_plane,
-                    v_plane,
-                    d,
-                    key_origin,
-                    c,
-                    &|r| mask_of((r0 + r) % q_len),
-                    scale,
-                    softcap,
-                    &mut scores,
-                    &mut part,
-                );
+            for c in t.chunks.clone() {
+                partials_of(t, c, &mut scores, &mut part);
                 for (a, p) in acc.chunks_exact_mut(w).zip(part.chunks_exact(w)) {
                     attn_rows::merge_into(a, p);
                 }
             }
-            for (r, (o_row, a)) in o
-                .chunks_exact_mut(d)
-                .zip(acc.chunks_exact_mut(w))
-                .enumerate()
-            {
-                if let Some(s) = sinks {
-                    attn_rows::fold_sink(a, s[g * n_rep + (r0 + r) / q_len]);
-                }
-                attn_rows::finish_row(a, o_row);
-            }
+            finish(t, &mut acc, o);
         });
+    }
 
     Ok(Some(Tensor::from_vec(
         out,
@@ -449,6 +577,103 @@ mod tests {
                 assert_eq!(forward(p, p + 1)[0], whole[p], "{case}: position {p} alone");
             }
         }
+    }
+
+    /// #174: a block's keys split into jobs of their own and folded afterwards
+    /// give the bits the block gives walking its chunks in turn — checks of a
+    /// few rows at several chunks, GQA 4:1 and 7:1, MHA, batch 2, a window
+    /// (keys from a non-zero origin, mid-chunk), soft-cap, sinks, a row block
+    /// past the first, and rows that see no key of some chunks.
+    #[test]
+    fn a_block_s_keys_split_into_jobs_give_the_same_bits() {
+        let dev = Device::Cpu;
+        for (b, n_head, n_kv_head, q_len, s_len, key_origin, softcap, sinks) in [
+            (
+                1usize, 32usize, 8usize, 8usize, 2100usize, 0usize, None, false,
+            ),
+            (1, 28, 4, 16, 1300, 0, None, false),
+            (1, 16, 16, 4, 900, 0, Some(30.0f32), false),
+            (2, 12, 4, 6, 1030, 0, None, true),
+            (1, 24, 8, 5, 700, 333, None, false),
+            (1, 8, 1, 200, 600, 0, None, true), // 1,600 rows: several blocks
+        ] {
+            let d = 64;
+            let q = Tensor::randn(0f32, 1.0, (b, n_head, q_len, d), &dev).unwrap();
+            let k = Tensor::randn(0f32, 1.0, (b, n_kv_head, s_len, d), &dev).unwrap();
+            let v = Tensor::randn(0f32, 1.0, (b, n_kv_head, s_len, d), &dev).unwrap();
+            // A chain: row i sees the keys up to the cache's end less the
+            // rows after it; with a window, only its last 300 of those.
+            let m: Vec<f32> = (0..q_len)
+                .flat_map(|i| {
+                    let last = s_len - q_len + i;
+                    (0..s_len).map(move |j| {
+                        let hidden = j > last || (key_origin > 0 && last - j >= 300);
+                        if hidden {
+                            f32::NEG_INFINITY
+                        } else {
+                            0.0
+                        }
+                    })
+                })
+                .collect();
+            let mask = Tensor::from_vec(m, (q_len, s_len), &dev).unwrap();
+            let sink_values: Vec<f32> = (0..n_head).map(|h| h as f32 * 0.1 - 1.0).collect();
+            let run = |split: bool| -> Vec<u32> {
+                FORCE_SPLIT_KEYS.with(|f| f.set(Some(split)));
+                let out = gqa_prefill_attention_cpu(
+                    &q,
+                    &k,
+                    &v,
+                    Some(&mask),
+                    1.0 / (d as f32).sqrt(),
+                    softcap,
+                    key_origin,
+                    sinks.then_some(sink_values.as_slice()),
+                );
+                FORCE_SPLIT_KEYS.with(|f| f.set(None));
+                out.unwrap()
+                    .expect("the kernel takes these inputs")
+                    .flatten_all()
+                    .unwrap()
+                    .to_vec1::<f32>()
+                    .unwrap()
+                    .iter()
+                    .map(|x| x.to_bits())
+                    .collect()
+            };
+            assert!(
+                run(true) == run(false),
+                "b={b} heads {n_head}/{n_kv_head} q={q_len} S={s_len} origin={key_origin}: \
+                 the split path's bits differ"
+            );
+        }
+    }
+
+    /// The split is chosen only where the blocks alone would leave the pool's
+    /// threads idle, a block spans several chunks, and the partials fit.
+    #[test]
+    fn keys_are_split_only_where_blocks_leave_threads_idle() {
+        assert!(
+            splits_keys(4, 64, 4 << 20, 8),
+            "Qwen2.5-7B's 8-row check at 4K positions, 8 threads"
+        );
+        assert!(
+            splits_keys(8, 128, 8 << 20, 16),
+            "Llama 3's 8-row check at 4K positions, 16 threads"
+        );
+        assert!(
+            !splits_keys(8, 128, 8 << 20, 8),
+            "Llama 3's on 8 threads: every thread has a block"
+        );
+        assert!(
+            !splits_keys(4, 4, 1 << 20, 8),
+            "one chunk a block: nothing to split"
+        );
+        assert!(
+            !splits_keys(96, 1500, 8 << 20, 16),
+            "a prompt chunk: blocks enough"
+        );
+        assert!(!splits_keys(4, 1024, 68 << 20, 8), "partials past the cap");
     }
 
     #[test]

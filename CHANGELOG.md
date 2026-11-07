@@ -24,6 +24,13 @@ llama.cpp does. Measured side by side on a laptop card, this takes a further qua
 an 8B model's load when its files are already in memory, and over half a second when they have to be
 read from disk (3.5-3.8 seconds down to 3.0). The weights are the same.
 
+**Checking guesses is quicker in long conversations on the processor** (#174). To reply faster, a
+computer guesses a few words ahead and checks them all in one pass. On the processor, the part of
+that check that reads back over a long conversation used only a few cores for models such as
+Qwen2.5 7B and left the rest idle; it now uses all of them. That part runs 1.6-1.9 times faster at
+4,000-16,000 tokens of conversation, and a whole check of four to sixteen guesses on Qwen2.5 7B
+costs 3-7% less. Replies are the same, bit for bit.
+
 ## [0.3.277-alpha] — 2026-11-07
 
 **A vision model can read pictures without anyone copying its image reader in by hand** (#422).
