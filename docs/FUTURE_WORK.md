@@ -1584,7 +1584,7 @@ the next one is attributable. Next: the running count on .268 (field and live no
 #### #422 — A vision encoder's second copy reaches a node only by hand
 `P3` · models · **OPEN** — 2026-11-07 · history: #421
 
-**Steps 1-4 below landed 2026-11-07** (`model::huggingface::vision_encoder`): a node downloading a
+**Steps 1-4 below landed 2026-11-07, released in v0.3.277** (`model::huggingface::vision_encoder`): a node downloading a
 vision model from HuggingFace fetches its image reader too, when no computer connected to it holds
 one on its own word (the pre-release review's fix, same day: any record had counted, so one bare
 announcement kept the reader off every computer), and pins it; a peer's copy is checked against the
@@ -4734,7 +4734,7 @@ Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
 
-**Closed 2026-11-06/07, unreleased** (#416's nicknames, #417, #402, #191, #418, #419, #421, #420, #423)
+**Closed 2026-11-06/07, released in v0.3.277 (published 2026-11-07 07:45:06Z)** (#416's nicknames, #417, #402, #191, #418, #419, #421, #420, #423)
 - #423 — **A part download that left its parts to another download credited them here and called the
   model complete.** `admin_hf::shards` leaves a part another download claims to that download, then
   credited every part asked for (`generate_manifest_from_header`'s `shard_indices` →
