@@ -4298,8 +4298,15 @@ nothing, the worker reads weights on `DaemonMsg::LoadRange`.
    (pick 220, identical sum bits); `pinned_load_chunks` counted 445 chunks in every pinned load, 0 in
    every `SWARMLLM_LOAD_PINNED=0` one; test `a_weight_read_through_the_pinned_pair_holds_the_old_reads_bytes`.
    **Left**: a cold load is ~2.0 s of reads (2.2 GB/s one reader, 3.37 with four, `dd`, 2026-11-07) —
-   (3c) read the next layer's parts while this one's copy runs; the processor's own first touch of its
-   weights (~0.6 s for the 8B) stays. A load through the mmap path (one whole GGUF, a thread per layer)
+   (3c) read the next parts ahead. **MEASURED 2026-11-07, not built** (memory `tools/p424/readahead.py`:
+   the 8B's nine parts read cold in order, 16 MiB at a time, dropped from the page cache before each
+   arm, ABBA): one reader 2.36-2.84 s; llama.cpp's prefetch (`posix_fadvise` WILLNEED on the next two
+   parts — its mmap path's `POSIX_MADV_WILLNEED`) 2.38-2.50; a helper thread reading the next two parts
+   2.09-2.29; the next four 2.28-2.39; all eight at once 2.84-2.93 (the readers contend). About 0.25 s
+   of a 3.0 s cold load at best, on this WSL2 disk only and with a wide spread, and the reader is
+   handed every part the node holds (a helper would read parts a range never reads). Revisit on a
+   native NVMe machine, where deeper queues may pay. The processor's own first touch of its weights
+   (~0.6 s for the 8B) stays. A load through the mmap path (one whole GGUF, a thread per layer)
    keeps (3a)'s pageable staging per thread.
 
 ### Packaging, release and operations
