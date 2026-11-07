@@ -1589,17 +1589,52 @@ pass, not adding a model, not the explicit part download. No build writes a mani
 no node learns one exists until a holder announces the part. A holder serves it
 (`ShardStore::shard_path` → `mmproj.gguf`) and a picture is encoded wherever one is held
 (`VisionEncoderUnavailable` otherwise) — so a vision model reads pictures only in a swarm where
-somebody put the file in by hand. Cure: the origin's part download lists the repository
-(`is_the_model_file` already tells the projector apart), fetches the projector as `mmproj.gguf`
-behind a `StagingFile`, hashes it and records its size and hash from the ORIGIN
-(`record_origin_verified_hash`); peers then fetch the part from a holder, checked against that
-hash — never from HuggingFace by a name a peer gave. Prior art: BitTorrent BEP 9 — metadata a peer
-supplies is taken only once it hashes to the info-hash the user chose, so a peer cannot add a file
-to a download. Which projector, where a repository has several (f16, bf16, Q8_0): llama.cpp's `-hf`
-download (`common/download.cpp::find_best_sibling`, 2026-11-07) takes the `*mmproj*.gguf` in the
-model file's own folder, an exact quant-tag match first, else the closest bit width — a rule over
-the listing, so two nodes agree only while the listing does: the first origin fetch must pin the
-file's name, size and hash, and later nodes take the pinned one, never re-choose.
+somebody put the file in by hand.
+
+Prior art: BitTorrent BEP 9 — metadata a peer supplies is taken only once it hashes to the
+info-hash the user chose, so a peer cannot add a file to a download. Ollama (`server/images.go`,
+2026-11-07) ships the projector as one more manifest layer (`application/vnd.ollama.image.projector`)
+named by its sha256 digest and size, and `verifyBlob` refuses a pulled blob whose digest differs.
+llama.cpp's `-hf` download (`common/download.cpp::find_best_sibling`) chooses among several
+(f16, bf16, Q8_0): the `*mmproj*.gguf` in the model file's own folder, an exact quant-tag match
+first, else the closest bit width — a rule over the listing, so two nodes agree only while the
+listing does. HuggingFace's listing (`/api/models/<repo>?blobs=true`) gives each LFS file's size
+and SHA-256 (`ggml-org/gemma-3-4b-it-GGUF`: `mmproj-model-f16.gguf`, 851,251,104 bytes, `8c0fb064…`).
+
+**Design (2026-11-07, before any code).** The manifest is UNSIGNED (transport-authenticated, then
+`judge_peer_manifest`; `manifest_hash` is self-referential), so no signed field exists to hang
+this on: the pin is trusted exactly as a part's hash is, and checked the same way.
+1. **Only a node's own origin download fetches from HuggingFace** — the explicit part download
+   (`admin_hf/shards.rs`) and the download pass's HuggingFace branch (`auto_manage/download.rs`),
+   when the swarm has no holder; never on a peer's manifest or source gossip (#421). It lists the
+   repository (`HfFileInfo` gains `lfs.sha256`), chooses by `find_best_sibling`'s rule, reads the
+   candidate's header by range and goes on only for a `clip.projector_type` this build runs (ONE
+   answer shared with `vision::load_from_mmproj_gguf`: `mlp`, `gemma3`), fetches it whole into
+   `mmproj.gguf` behind a `StagingFile` inside the disk budget, refuses it unless size and SHA-256
+   equal the listing's, records its BLAKE3 as origin-verified for the sentinel and announces the holder.
+2. **The pin is a NEW field**, `vision_encoder: Option<{ size_bytes, blake3, sha256 }>`,
+   `#[serde(default)]`, outside `manifest_hash` like `context_length`; `MmprojInfo` / `mmproj` go.
+   Not the old field: v0.3.276's download pass makes any `mmproj: Some` its top candidate (5×) and
+   then returns without fetching (no `mmproj_filename` since #421) — a wasted pick every pass until
+   it updates. An older node ignores an unknown field (no `deny_unknown_fields`) and re-gossips the
+   manifest without it, so `register_manifest` keeps a known pin over `None` and over a
+   contradicting one (`keep_known_hashes_over_contradicting_ones`' rule); this node's own origin
+   fetch outranks any gossiped pin; a peer's `size_bytes` over a cap is refused with the other
+   manifest caps (the cap set from the largest real file of a supported type). The final
+   `generate_manifest_from_header` of a part download keeps the pin (it rebuilds the manifest).
+3. **A later origin never re-chooses**: with a pin adopted it takes the sibling whose listed SHA-256
+   equals the pin — no name travels, HuggingFace's own listing vouches for the file — else fetches
+   nothing and leaves it to the holders.
+4. **Peers fetch it from holders only, checked against the pin**: the received-part check compares
+   the sentinel's size and BLAKE3 with the pin; with no pin it is refused (today's no-hash path
+   would accept it unchecked), and it is never `FetchFromOrigin` (a byte-range fallback means
+   nothing for it).
+5. **Who keeps copies**: the download pass makes it a candidate again — #421's minus HuggingFace —
+   only with a pin, a live holder and a part of the model already here, scored as a part. Open:
+   whether it belongs beside the chain's head (image rows enter at layer 0); time an image
+   request's extra hop before deciding.
+Live check: a probe's part download of a Gemma 3 4B lands `mmproj.gguf` with the listing's SHA-256
+and the pin; a second probe fetches it from the first; a .276 node shows no new candidate.
 
 #### #168 — A relayed tensor forward over 32 MB is refused instead of chunked
 `P4` · network · **OPEN** — 2026-07-24 · history: archive § "Tensor-relay large-forward chunking (post-plan follow-on, deferred)"
