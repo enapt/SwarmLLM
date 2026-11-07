@@ -686,6 +686,24 @@ impl AutoShardManager {
                             // Success clears any accumulated download backoff.
                             shared.models.clear_shard_download_backoff(&sid);
 
+                            // A vision model's image reader, fetched by its
+                            // origin (#422) beside the part — a download nobody
+                            // asked for, so it waits on a metered connection.
+                            {
+                                let (shared, net_tx) = (shared.clone(), net_tx.clone());
+                                let (model_id, repo_id, filename) =
+                                    (model_id.clone(), repo_id.clone(), filename.clone());
+                                tokio::spawn(async move {
+                                    if shared.metered_hold().await {
+                                        return;
+                                    }
+                                    crate::model::huggingface::vision_encoder::fetch_from_origin(
+                                        &shared, &net_tx, &model_id, &repo_id, &filename,
+                                    )
+                                    .await;
+                                });
+                            }
+
                             // Broadcast download completion progress
                             let complete_msg = crate::types::SwarmMessage::ShardDownloadProgress(
                                 crate::types::ShardDownloadProgress {

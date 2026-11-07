@@ -1387,6 +1387,7 @@ mod tests {
         manifest.mmproj = Some(crate::types::MmprojInfo {
             size_bytes: 1,
             hash: [9; 32],
+            sha256: [9; 32],
         });
         state.model_registry.register_manifest(manifest);
         assert!(

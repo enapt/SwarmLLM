@@ -189,6 +189,40 @@ pub async fn read_public_range(
     .await
 }
 
+/// The projector type a vision encoder file declares, read off its header by
+/// range (#422) — asked before the file is fetched, so a type this build cannot
+/// load is never downloaded. Only a ranged answer (206) is read: a server that
+/// ignored the range would be sending the whole file.
+pub(super) async fn read_projector_type(repo_id: &str, filename: &str) -> Result<String, String> {
+    let client = &*HF_META_CLIENT;
+    let url = download_url(repo_id, filename)?;
+    let end = GGUF_HEADER_PROBE_SIZE - 1;
+    let bytes = retry_hf("Range-probe", || async {
+        let resp = with_credentials(client.get(&url), Credentials::IfConfigured)
+            .header("Range", format!("bytes=0-{end}"))
+            .send()
+            .await
+            .map_err(|e| (format!("Range probe request failed: {e}"), true))?;
+        let status = resp.status();
+        if status.as_u16() != 206 {
+            let transient = status.is_server_error() || status.as_u16() == 429;
+            return Err((format!("Range probe returned {status}"), transient));
+        }
+        resp.bytes()
+            .await
+            .map_err(|e| (format!("Failed to read probe bytes: {e}"), true))
+    })
+    .await?;
+    let ct = candle_core::quantized::gguf_file::Content::read(&mut Cursor::new(&bytes[..]))
+        .map_err(|e| {
+            format!(
+                "Failed to parse the image reader's header: {}",
+                crate::inference::split::explain_gguf_parse_error(&e)
+            )
+        })?;
+    Ok(crate::inference::vision::projector_type_named(&ct.metadata))
+}
+
 async fn probe(
     repo_id: &str,
     filename: &str,

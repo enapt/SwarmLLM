@@ -226,7 +226,7 @@ pub(crate) fn generate_manifest_from_header(params: &ManifestGenParams<'_>) -> R
                 crate::inference::split::compute_layer_shard_layouts(&meta, params.shard_count);
             &computed_layouts
         };
-    let (manifest, meta) = manifest_from_header(
+    let (mut manifest, meta) = manifest_from_header(
         params.header_path,
         &model_id,
         params.filename,
@@ -234,6 +234,13 @@ pub(crate) fn generate_manifest_from_header(params: &ManifestGenParams<'_>) -> R
         layouts,
         node_id,
     )?;
+    // A header names no vision encoder: the copy saved to disk keeps the pin
+    // this build already has (#422), as the registry's merge does in memory.
+    if let Some(known) = params.shared.model_registry.get_manifest(&model_id) {
+        if !crate::model::registry::ModelRegistry::describes_a_different_build(&known, &manifest) {
+            manifest.mmproj = known.mmproj.clone();
+        }
+    }
     let num_layers = manifest.num_layers;
     let model_dir = params
         .header_path
@@ -467,6 +474,10 @@ pub enum P2pShardAcceptance {
     /// No hash and no origin. Accept, but the shard is UNCHECKED — it must be
     /// reported as such and verified once a hash reaches us.
     AcceptUnchecked,
+    /// A vision encoder with no pin to check it against (#422): discard it.
+    /// It has no byte-range origin fetch, and taken unchecked, any GGUF a peer
+    /// sent would become this model's image reader.
+    Refuse,
 }
 
 /// The single policy for "may these bytes be accepted, and on what basis?".
@@ -498,15 +509,78 @@ pub enum P2pShardAcceptance {
 /// being switched off is deliberately NOT one: the fetch runs outside that gate,
 /// because it means "do not decide what to fetch for me", not "abandon a shard I
 /// already asked for".
+///
+/// **A vision encoder is checked against its pin or refused** (`vision_encoder`,
+/// #422): neither fallback fits it — the origin path fetches a layer part's
+/// bytes by range, and an unchecked encoder is a file a peer chose.
 pub fn classify_p2p_shard_acceptance(
     manifest_has_hash: bool,
     origin_fetch_available: bool,
+    vision_encoder: bool,
 ) -> P2pShardAcceptance {
     match (manifest_has_hash, origin_fetch_available) {
         (true, _) => P2pShardAcceptance::Verify,
+        (false, _) if vision_encoder => P2pShardAcceptance::Refuse,
         (false, true) => P2pShardAcceptance::FetchFromOrigin,
         (false, false) => P2pShardAcceptance::AcceptUnchecked,
     }
+}
+
+/// What a part of this model must be — its size and BLAKE3 — before a copy
+/// from a peer is taken in: a layer part's from `shards`, the vision encoder's
+/// from the origin's pin (#422). `None`: nothing to check it against.
+pub fn expected_part(manifest: &ModelManifest, index: u32) -> Option<crate::types::ShardInfo> {
+    if index == crate::types::MMPROJ_SHARD_INDEX {
+        return manifest.mmproj.as_ref().map(|pin| crate::types::ShardInfo {
+            index,
+            layer_range: (0, 0),
+            size_bytes: pin.size_bytes,
+            hash: pin.hash,
+            tensors: Vec::new(),
+        });
+    }
+    manifest.shards.iter().find(|s| s.index == index).cloned()
+}
+
+/// The largest vision encoder a manifest may pin (#422). The largest real file
+/// of a type this build reads is Gemma 3 27B's at f32, 1,692,266,400 bytes (its
+/// f16: 857,739,168; HuggingFace listings, 2026-11-07); twice that, rounded up,
+/// leaves room for the next type. A pin past it is dropped, never the manifest.
+pub const MAX_VISION_ENCODER_BYTES: u64 = 4 << 30;
+
+/// Which vision-encoder pin a manifest being registered keeps (#422). The pin
+/// is trusted exactly as a part's hash is, so it follows the same rules:
+/// - a pin that is empty or past [`MAX_VISION_ENCODER_BYTES`] is no pin;
+/// - this node's own origin fetch (`origin`: the encoder's origin-verified
+///   BLAKE3) outranks any gossiped pin — only a pin carrying it is kept;
+/// - otherwise a known pin is kept over none (v0.3.276 re-gossips a manifest
+///   without the field) and over a contradicting one, as
+///   `keep_known_hashes_over_contradicting_ones` keeps a part's hash — unless
+///   the manifest describes a different build, whose encoder is its own.
+///
+/// Returns whether the incoming pin was set aside.
+pub fn keep_known_vision_encoder(
+    incoming: &mut ModelManifest,
+    known: Option<&ModelManifest>,
+    different_build: bool,
+    origin: Option<Blake3Hash>,
+) -> bool {
+    let usable = |pin: &crate::types::MmprojInfo| {
+        pin.size_bytes > 0 && pin.size_bytes <= MAX_VISION_ENCODER_BYTES && pin.hash != [0u8; 32]
+    };
+    let theirs = incoming.mmproj.take();
+    let ours = known
+        .filter(|_| !different_build)
+        .and_then(|k| k.mmproj.clone())
+        .filter(usable);
+    let candidates = [ours, theirs.clone().filter(usable)];
+    let kept = match origin {
+        Some(fetched) => candidates.into_iter().flatten().find(|p| p.hash == fetched),
+        None => candidates.into_iter().flatten().next(),
+    };
+    let set_aside = theirs.is_some_and(|t| kept.as_ref() != Some(&t));
+    incoming.mmproj = kept;
+    set_aside
 }
 
 /// Adopt shard hashes we already know for shards `incoming` leaves as
@@ -947,17 +1021,115 @@ mod tests {
     /// reachable — that is what let a corrupt shard spread between peers.
     #[test]
     fn an_uncheckable_shard_is_fetched_from_the_origin_instead() {
-        assert_eq!(classify(false, true), A::FetchFromOrigin);
+        assert_eq!(classify(false, true, false), A::FetchFromOrigin);
         // The second argument means the fetch will actually happen. When it
         // cannot (auto-manage off, so nothing performs the fallback), the copy
         // in hand is kept rather than discarded for nothing.
-        assert_eq!(classify(false, false), A::AcceptUnchecked);
+        assert_eq!(classify(false, false, false), A::AcceptUnchecked);
         // With a hash present the origin is irrelevant — check locally.
-        assert_eq!(classify(true, true), A::Verify);
-        assert_eq!(classify(true, false), A::Verify);
+        assert_eq!(classify(true, true, false), A::Verify);
+        assert_eq!(classify(true, false, false), A::Verify);
         // No hash AND no origin: accepting is the only way such a model can be
         // acquired, but it must be reported as unchecked, never as verified.
-        assert_eq!(classify(false, false), A::AcceptUnchecked);
+        assert_eq!(classify(false, false, false), A::AcceptUnchecked);
+    }
+
+    /// A vision encoder from a peer is checked against the origin's pin or
+    /// refused (#422): never taken on trust, never sent to the byte-range
+    /// origin fetch, which has nothing to fetch for it.
+    #[test]
+    fn a_vision_encoder_with_no_pin_is_refused_not_taken_on_trust() {
+        assert_eq!(classify(false, true, true), A::Refuse);
+        assert_eq!(classify(false, false, true), A::Refuse);
+        assert_eq!(classify(true, true, true), A::Verify);
+        assert_eq!(classify(true, false, true), A::Verify);
+
+        // The pin is what it is checked against.
+        let mut manifest = test_manifest();
+        let sentinel = crate::types::MMPROJ_SHARD_INDEX;
+        assert!(super::expected_part(&manifest, sentinel).is_none());
+        manifest.mmproj = Some(pin(7));
+        let expected = super::expected_part(&manifest, sentinel).expect("pinned");
+        assert_eq!((expected.size_bytes, expected.hash), (700, [7u8; 32]));
+        assert_eq!(super::expected_part(&manifest, 0).map(|s| s.index), Some(0));
+    }
+
+    fn pin(byte: u8) -> crate::types::MmprojInfo {
+        crate::types::MmprojInfo {
+            size_bytes: byte as u64 * 100,
+            hash: [byte; 32],
+            sha256: [byte; 32],
+        }
+    }
+
+    /// The pin is kept as a part's hash is (#422): over none, over a stranger's
+    /// contradicting one, never past this node's own origin fetch, and never
+    /// when empty or past the cap.
+    #[test]
+    fn a_known_vision_encoder_pin_is_kept_as_a_parts_hash_is() {
+        use super::keep_known_vision_encoder as keep;
+        let known = {
+            let mut m = test_manifest();
+            m.mmproj = Some(pin(1));
+            m
+        };
+        let with = |p: Option<crate::types::MmprojInfo>| {
+            let mut m = test_manifest();
+            m.mmproj = p;
+            m
+        };
+
+        // An older node re-gossips the manifest without the field.
+        let mut m = with(None);
+        assert!(!keep(&mut m, Some(&known), false, None));
+        assert_eq!(m.mmproj, Some(pin(1)));
+
+        // A stranger's contradicting pin is set aside.
+        let mut m = with(Some(pin(2)));
+        assert!(keep(&mut m, Some(&known), false, None));
+        assert_eq!(m.mmproj, Some(pin(1)));
+
+        // A different build's encoder is its own.
+        let mut m = with(Some(pin(2)));
+        assert!(!keep(&mut m, Some(&known), true, None));
+        assert_eq!(m.mmproj, Some(pin(2)));
+
+        // This node's own origin fetch outranks every gossiped pin.
+        let mut m = with(Some(pin(2)));
+        assert!(!keep(&mut m, Some(&known), false, Some([2u8; 32])));
+        assert_eq!(m.mmproj, Some(pin(2)));
+        let mut m = with(Some(pin(3)));
+        assert!(keep(&mut m, None, false, Some([2u8; 32])));
+        assert_eq!(m.mmproj, None);
+
+        // First sight: taken, unless it is no pin at all.
+        let mut m = with(Some(pin(2)));
+        assert!(!keep(&mut m, None, false, None));
+        assert_eq!(m.mmproj, Some(pin(2)));
+        let mut too_big = pin(2);
+        too_big.size_bytes = super::MAX_VISION_ENCODER_BYTES + 1;
+        let mut m = with(Some(too_big));
+        assert!(keep(&mut m, None, false, None));
+        assert_eq!(m.mmproj, None);
+        let mut m = with(Some(crate::types::MmprojInfo {
+            hash: [0u8; 32],
+            ..pin(2)
+        }));
+        assert!(keep(&mut m, None, false, None));
+        assert_eq!(m.mmproj, None);
+    }
+
+    /// The pin travels under a key v0.3.276 ignores (#422): under `mmproj` that
+    /// release makes it a download candidate it cannot fetch, every pass.
+    #[test]
+    fn a_pinned_vision_encoder_travels_under_a_key_older_nodes_ignore() {
+        let mut manifest = test_manifest();
+        manifest.mmproj = Some(pin(4));
+        let json = serde_json::to_value(&manifest).unwrap();
+        assert!(json.get("mmproj").is_none(), "{json}");
+        assert!(json.get("vision_encoder").is_some(), "{json}");
+        let back: crate::types::ModelManifest = serde_json::from_value(json).unwrap();
+        assert_eq!(back.mmproj, Some(pin(4)));
     }
 
     use super::is_backup_artifact_id;

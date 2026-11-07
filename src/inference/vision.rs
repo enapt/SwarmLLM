@@ -1134,21 +1134,12 @@ pub fn load_from_mmproj_gguf(
     // `clip.projector_type`; a file that names none is LLaVA's `mlp`). One is
     // read here and nowhere else — an unknown kind is refused by name rather
     // than loaded as LLaVA, which is what every file was before (#115 (2)).
-    let projector_type = ct
-        .metadata
-        .get("clip.projector_type")
-        .and_then(|v| v.to_string().ok())
-        .map(String::as_str)
-        .unwrap_or("mlp");
-    let kind = match projector_type {
-        "mlp" => ProjectorKind::Llava,
-        "gemma3" => ProjectorKind::Gemma3,
-        other => {
-            return Err(SwarmError::Validation(format!(
-                "This model's image reader (projector type '{other}') is not supported yet. \
-                 Supported: mlp (LLaVA), gemma3."
-            )))
-        }
+    let projector_type = projector_type_named(&ct.metadata);
+    let Some(kind) = projector_kind(&projector_type) else {
+        return Err(SwarmError::Validation(format!(
+            "This model's image reader (projector type '{projector_type}') is not supported yet. \
+             Supported: mlp (LLaVA), gemma3."
+        )));
     };
 
     let dim0_of = |name: &str| ct.tensor_infos.get(name).map(|t| t.shape.dims()[0]);
@@ -1231,7 +1222,7 @@ pub fn load_from_mmproj_gguf(
     };
 
     tracing::info!(
-        projector_type,
+        projector_type = %projector_type,
         image_size,
         patch_size,
         hidden_size,
@@ -1500,6 +1491,33 @@ pub fn load_from_mmproj_gguf(
 enum ProjectorKind {
     Llava,
     Gemma3,
+}
+
+/// The projector type a vision encoder's header names (`clip.projector_type`);
+/// a file naming none is LLaVA's `mlp`.
+pub fn projector_type_named(
+    metadata: &std::collections::HashMap<String, candle_core::quantized::gguf_file::Value>,
+) -> String {
+    metadata
+        .get("clip.projector_type")
+        .and_then(|v| v.to_string().ok())
+        .cloned()
+        .unwrap_or_else(|| "mlp".to_string())
+}
+
+fn projector_kind(projector_type: &str) -> Option<ProjectorKind> {
+    match projector_type {
+        "mlp" => Some(ProjectorKind::Llava),
+        "gemma3" => Some(ProjectorKind::Gemma3),
+        _ => None,
+    }
+}
+
+/// Does this build read a vision encoder of this projector type? The one
+/// answer: [`load_from_mmproj_gguf`] builds by it, and the origin fetch asks it
+/// before downloading a file it could never load (#422).
+pub fn reads_projector_type(projector_type: &str) -> bool {
+    projector_kind(projector_type).is_some()
 }
 
 /// A GGUF integer of any width, as llama.cpp's `get_arr_int` reads one.

@@ -6,6 +6,7 @@ mod private_types;
 mod probe;
 mod search;
 mod shards;
+pub(crate) mod vision_encoder;
 pub mod watcher;
 
 pub use download::{download_model, download_url};

@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+**A vision model can read pictures without anyone copying its image reader in by hand** (#422).
+When a computer downloads parts of a vision model from HuggingFace and no computer in the swarm has
+the model's image reader yet, it now fetches that file too — the one llama.cpp would load beside the
+model, only of a kind this version can run (LLaVA's, Gemma 3's), and only if it matches the
+checksum HuggingFace publishes for it. Its size and checksum are written into the model's
+description, and a copy any other computer receives is checked against them or thrown away. Before,
+nothing ever fetched it, so pictures worked only where someone had placed the file themselves.
+Computers still fetch only that one copy; a second copy for when its holder is away is the next step.
+
 **The name you give your computer is shown to the others even when its clock runs a little fast**
 (#416). It was ignored by every other computer once your clock ran more than 30 seconds fast; it
 is now accepted up to 5 minutes ahead, like the rest of what a computer tells the others since

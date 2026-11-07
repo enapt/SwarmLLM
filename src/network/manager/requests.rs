@@ -1005,7 +1005,7 @@ impl NetworkManager {
                             .model_registry
                             .get_manifest(&shard_id.model_id)
                             .and_then(|m| {
-                                m.shards.iter().find(|s| s.index == shard_id.index).cloned()
+                                crate::model::manifest::expected_part(&m, shard_id.index)
                             });
                         // Whether the manifest carries a hash decides HOW the
                         // bytes are checked, not WHETHER they are trusted.
@@ -1077,7 +1077,36 @@ impl NetworkManager {
                             let decision = crate::model::manifest::classify_p2p_shard_acceptance(
                                 manifest_has_hash,
                                 origin_fetch_available,
+                                shard_id.is_mmproj(),
                             );
+                            if decision == crate::model::manifest::P2pShardAcceptance::Refuse {
+                                // No pin to check a vision encoder against
+                                // (#422). The peer is not penalised: we cannot
+                                // tell its bytes are wrong, only that we have
+                                // nothing to check them with.
+                                tracing::warn!(
+                                    model = %shard_id.model_id,
+                                    peer = %peer,
+                                    "No pinned vision encoder to check this copy against — \
+                                     discarding it"
+                                );
+                                let _ = self
+                                    .shard_store
+                                    .delete_shard(&shard_id.model_id, shard_id.index);
+                                if let Some(mut entry) = self
+                                    .shared_state
+                                    .models
+                                    .acquisition_progress
+                                    .get_mut(&shard_id.model_id)
+                                {
+                                    entry.shard_progress.remove(&shard_id.index);
+                                }
+                                self.shared_state
+                                    .models
+                                    .p2p_download_permits
+                                    .remove(&shard_id);
+                                return;
+                            }
                             if decision
                                 == crate::model::manifest::P2pShardAcceptance::FetchFromOrigin
                             {

@@ -21,8 +21,16 @@ pub struct ModelManifest {
     pub publisher: NodeId,
     pub publish_date: chrono::DateTime<chrono::Utc>,
     pub license: String,
-    /// Vision encoder (mmproj) metadata. Present only for VLM models.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// The vision encoder (`mmproj.gguf`, the part at `MMPROJ_SHARD_INDEX`) the
+    /// model's origin fetched and pinned (#422); `None` for a text model.
+    /// Travels as `vision_encoder`: v0.3.276 and older make a `mmproj` key a
+    /// download candidate they cannot fetch (#421) and ignore an unknown key.
+    /// Outside `manifest_hash`, like `context_length`.
+    #[serde(
+        default,
+        rename = "vision_encoder",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub mmproj: Option<MmprojInfo>,
     /// The context length the model itself declares (`<arch>.context_length`
     /// in its header), so a node that holds none of it — and so has no header
@@ -34,11 +42,16 @@ pub struct ModelManifest {
     pub context_length: Option<u32>,
 }
 
-/// Metadata for a VLM vision encoder (mmproj GGUF file).
-#[derive(Clone, Debug, Serialize, Deserialize)]
+/// A vision encoder pinned by the model's origin (#422): what every copy is
+/// checked against, and how a later origin finds the same file again.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MmprojInfo {
     pub size_bytes: u64,
+    /// BLAKE3 of the file — a copy from a peer is checked against it.
     pub hash: Blake3Hash,
+    /// The SHA-256 HuggingFace lists for the file (`lfs.sha256`): a later
+    /// origin takes the listed file carrying it, so no file name travels.
+    pub sha256: [u8; 32],
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

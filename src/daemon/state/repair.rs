@@ -309,6 +309,45 @@ impl SharedState {
         }
     }
 
+    /// Take in a vision encoder this node fetched from the model's origin
+    /// (#422): its BLAKE3 becomes origin-derived, so no gossiped pin displaces
+    /// it, and its pin goes into the manifest — in memory, on disk and in the
+    /// database, as an origin part's hash does (`record_origin_part_hash`).
+    pub fn accept_origin_vision_encoder(
+        &self,
+        model_id: &crate::types::ModelId,
+        pin: crate::types::MmprojInfo,
+    ) {
+        self.record_origin_verified_hash(ShardId::mmproj_for(model_id.clone()), pin.hash);
+        let Some(mut manifest) = self.model_registry.get_manifest(model_id) else {
+            tracing::warn!(
+                model = %model_id,
+                "No manifest to pin the vision encoder in — it stays unpinned until one arrives"
+            );
+            return;
+        };
+        if manifest.mmproj.as_ref() == Some(&pin) {
+            return;
+        }
+        manifest.mmproj = Some(pin);
+        let dir = crate::model::shard::model_dir(&self.config.node.data_dir, &model_id.0);
+        if let Err(e) = crate::model::manifest::ModelManifestExt::save_to_dir(&manifest, &dir) {
+            tracing::warn!(
+                model = %model_id,
+                error = %e,
+                "Could not save the manifest with its vision encoder — the pin is in memory only"
+            );
+        }
+        self.model_registry.register_manifest(manifest.clone());
+        if let Err(e) = self.model_registry.persist_manifest(&self.db, &manifest) {
+            tracing::warn!(
+                model = %model_id,
+                error = %e,
+                "Could not store the manifest with its vision encoder"
+            );
+        }
+    }
+
     /// Drop the repair request once the shard is back. Called when a download
     /// completes so the set stays bounded and nothing re-fetches a good shard.
     pub fn clear_shard_repair(&self, shard_id: &ShardId) {

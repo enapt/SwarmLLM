@@ -1581,15 +1581,19 @@ score at the default (`docs/invariants/network.md` § "The network loop never wa
 A request-response stall line now names its message (`swarm_event:RequestResponse:in:<kind>`), so
 the next one is attributable. Next: the running count on .268 (field and live node), read by kind.
 
-#### #422 — A vision encoder reaches a node only by hand
+#### #422 — A vision encoder's second copy reaches a node only by hand
 `P3` · models · **OPEN** — 2026-11-07 · history: #421
 
-Nothing fetches a vision encoder (`mmproj.gguf`, the part at `MMPROJ_SHARD_INDEX`): not the download
-pass, not adding a model, not the explicit part download. No build writes a manifest's `mmproj`, so
-no node learns one exists until a holder announces the part. A holder serves it
-(`ShardStore::shard_path` → `mmproj.gguf`) and a picture is encoded wherever one is held
-(`VisionEncoderUnavailable` otherwise) — so a vision model reads pictures only in a swarm where
-somebody put the file in by hand.
+**Steps 1-4 below landed 2026-11-07** (`model::huggingface::vision_encoder`): a node downloading a
+vision model from HuggingFace fetches its image reader too, when no computer holds one, and pins it;
+a peer's copy is checked against the pin or refused. **Open: step 5** — nothing fetches a SECOND
+copy from a holder, so a model reads pictures while its one holder is reachable (a picture is encoded
+wherever one is held, `VisionEncoderUnavailable` otherwise). Before it: nothing fetched a vision
+encoder at all, and no build wrote a manifest's `mmproj`. Verified live 2026-11-07 on a probe
+beside the live node: part 1 of `ggml-org/gemma-3-4b-it-GGUF`'s Q4_K_M, then `mmproj-model-f16.gguf`
+(llama.cpp's choice) — 851,251,104 bytes in 10 s, SHA-256 the listing's, BLAKE3 `2b24649f…` equal
+to an independent hash, pinned under `vision_encoder` in `manifest.json` (no `mmproj` key); after a
+restart the holder re-registered, the pin stayed and no claim was withdrawn in 150 s.
 
 Prior art: BitTorrent BEP 9 — metadata a peer supplies is taken only once it hashes to the
 info-hash the user chose, so a peer cannot add a file to a download. Ollama (`server/images.go`,
@@ -1612,9 +1616,8 @@ this on: the pin is trusted exactly as a part's hash is, and checked the same wa
    answer shared with `vision::load_from_mmproj_gguf`: `mlp`, `gemma3`), fetches it whole into
    `mmproj.gguf` behind a `StagingFile` inside the disk budget, refuses it unless size and SHA-256
    equal the listing's, records its BLAKE3 as origin-verified for the sentinel and announces the holder.
-2. **The pin is a NEW field**, `vision_encoder: Option<{ size_bytes, blake3, sha256 }>`,
-   `#[serde(default)]`, outside `manifest_hash` like `context_length`; `MmprojInfo` / `mmproj` go.
-   Not the old field: v0.3.276's download pass makes any `mmproj: Some` its top candidate (5×) and
+2. **The pin travels under a NEW key**, `vision_encoder` (`ModelManifest::mmproj` renamed on the
+   wire; `MmprojInfo` gains `sha256`), outside `manifest_hash` like `context_length`. Not the old key: v0.3.276's download pass makes any `mmproj: Some` its top candidate (5×) and
    then returns without fetching (no `mmproj_filename` since #421) — a wasted pick every pass until
    it updates. An older node ignores an unknown field (no `deny_unknown_fields`) and re-gossips the
    manifest without it, so `register_manifest` keeps a known pin over `None` and over a
@@ -1632,7 +1635,12 @@ this on: the pin is trusted exactly as a part's hash is, and checked the same wa
 5. **Who keeps copies**: the download pass makes it a candidate again — #421's minus HuggingFace —
    only with a pin, a live holder and a part of the model already here, scored as a part. Open:
    whether it belongs beside the chain's head (image rows enter at layer 0); time an image
-   request's extra hop before deciding.
+   request's extra hop before deciding. Performance argues for a cache fill on a miss: a picture
+   encoded by a remote holder comes back as f16 rows, zstd'd (`vision::decode_wire_embeddings`) —
+   Gemma 3 4B 256 × 2560 × 2 B ≈ 1.3 MB, LLaVA 7B 576 × 4096 × 2 B ≈ 4.7 MB, so 0.7-2.5 s a picture
+   at the ~1.9 MB/s peers uploaded at on 2026-11-07, before the rows go on to the chain's head. A
+   node that had a picture encoded elsewhere fetching the encoder from that holder in the
+   background (checked against the pin) encodes the next one itself.
 Live check: a probe's part download of a Gemma 3 4B lands `mmproj.gguf` with the listing's SHA-256
 and the pin; a second probe fetches it from the first; a .276 node shows no new candidate.
 

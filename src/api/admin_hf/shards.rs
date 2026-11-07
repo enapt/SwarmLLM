@@ -1120,6 +1120,19 @@ pub async fn hf_download_shards(
             // Clean up acquisition_progress after a delay so the frontend sees
             // the "complete" state and triggers a re-render before we remove it.
             download_shared.schedule_acquisition_cleanup(download_mid.clone());
+
+            // A vision model's image reader, fetched by its origin (#422) —
+            // after the parts, which the model needs first.
+            if let Some(ref ntx) = network_tx {
+                crate::model::huggingface::vision_encoder::fetch_from_origin(
+                    &download_shared,
+                    ntx,
+                    &download_mid,
+                    &repo_id,
+                    &filename,
+                )
+                .await;
+            }
         }
     });
 

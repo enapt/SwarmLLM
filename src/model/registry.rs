@@ -570,8 +570,21 @@ impl ModelRegistry {
                 .collect(),
             None => std::collections::HashSet::new(),
         };
-        let (recovered, contested) = match self.manifests.get(&manifest.id) {
+        // The vision encoder's pin is kept as a part's hash is (#422), and this
+        // node's own fetch of it outranks every gossiped one.
+        let encoder_origin = self.origin_verified_hash(&ShardId {
+            model_id: manifest.id.clone(),
+            index: crate::types::MMPROJ_SHARD_INDEX,
+        });
+        let (recovered, contested, pin_set_aside) = match self.manifests.get(&manifest.id) {
             Some(prev) => {
+                let different_build = Self::describes_a_different_build(prev.value(), &manifest);
+                let pin_set_aside = crate::model::manifest::keep_known_vision_encoder(
+                    &mut manifest,
+                    Some(prev.value()),
+                    different_build,
+                    encoder_origin,
+                );
                 let recovered =
                     crate::model::manifest::merge_known_shard_hashes(&mut manifest, prev.value());
                 // The model's context length goes unknown → known, never back,
@@ -591,10 +604,26 @@ impl ModelRegistry {
                         &held_locally,
                     )
                 };
-                (recovered, contested)
+                (recovered, contested, pin_set_aside)
             }
-            None => (0, 0),
+            None => {
+                let pin_set_aside = crate::model::manifest::keep_known_vision_encoder(
+                    &mut manifest,
+                    None,
+                    false,
+                    encoder_origin,
+                );
+                (0, 0, pin_set_aside)
+            }
         };
+        if pin_set_aside {
+            tracing::debug!(
+                model = %manifest.id,
+                publisher = %manifest.publisher,
+                "Set aside this manifest's vision encoder pin: empty, too large, or \
+                 contradicting the one already known"
+            );
+        }
         if contested > 0 {
             // Rate-limited on the same key the origin-contradiction warning
             // uses, and for the same reason: this fires once per SHARD, and the

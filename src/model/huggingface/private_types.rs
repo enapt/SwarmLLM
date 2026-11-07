@@ -33,4 +33,13 @@ pub(super) struct HfGgufSummary {
 pub(super) struct HfFileInfo {
     pub rfilename: String,
     pub size: Option<u64>,
+    /// What HuggingFace stores for a large file (`?blobs=true`): its SHA-256,
+    /// the check a vision encoder is fetched against (#422).
+    #[serde(default)]
+    pub lfs: Option<HfLfs>,
+}
+
+#[derive(Deserialize, Clone)]
+pub(super) struct HfLfs {
+    pub sha256: String,
 }

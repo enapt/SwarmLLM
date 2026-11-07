@@ -367,6 +367,7 @@ fn the_search_lists_only_the_model_files_of_a_repo() {
         .map(|name| super::private_types::HfFileInfo {
             rfilename: name.to_string(),
             size: Some(1),
+            lfs: None,
         })
         .collect();
     let kept: Vec<String> = super::search::model_files(siblings)

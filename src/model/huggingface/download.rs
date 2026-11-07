@@ -87,6 +87,76 @@ impl Drop for StagingFile {
     }
 }
 
+/// Download a vision encoder whole into `model_dir/mmproj.gguf` (#422), held to
+/// the size and SHA-256 HuggingFace lists for it: anything else is refused and
+/// its staging file goes. Answers the file's BLAKE3, computed on the way —
+/// what every copy is checked against from then on.
+pub(super) async fn download_vision_encoder(
+    repo_id: &str,
+    listed: &super::vision_encoder::ListedEncoder,
+    model_dir: &std::path::Path,
+) -> Result<crate::types::Blake3Hash, String> {
+    use futures::StreamExt;
+    use sha2::Digest;
+    use tokio::io::AsyncWriteExt;
+
+    let expected = listed.size_bytes;
+    if expected == 0 || expected > crate::model::manifest::MAX_VISION_ENCODER_BYTES {
+        return Err(format!("listed size {expected} bytes is out of range"));
+    }
+    std::fs::create_dir_all(model_dir).map_err(|e| format!("Failed to create dir: {e}"))?;
+    crate::model::check_disk_space(model_dir, expected).map_err(|e| e.to_string())?;
+    let url = download_url(repo_id, &listed.filename)?;
+    let resp = hf_headers(HF_DOWNLOAD_CLIENT.get(&url))
+        .send()
+        .await
+        .map_err(|e| format!("Download request failed: {e}"))?;
+    if !resp.status().is_success() {
+        return Err(format!("Download returned {}", resp.status()));
+    }
+
+    let dest = model_dir.join(crate::model::shard::MMPROJ_FILENAME);
+    let tmp = model_dir.join(format!("{}.tmp", crate::model::shard::MMPROJ_FILENAME));
+    // Declared before the file, so it drops after it.
+    let staging = StagingFile::new(tmp.clone());
+    let mut file = tokio::fs::File::create(&tmp)
+        .await
+        .map_err(|e| format!("Failed to create temp file: {e}"))?;
+    let mut sha256 = sha2::Sha256::new();
+    let mut blake3 = blake3::Hasher::new();
+    let mut received: u64 = 0;
+    let mut stream = resp.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|e| format!("Download chunk error: {e}"))?;
+        received = received.saturating_add(chunk.len() as u64);
+        if received > expected {
+            return Err(format!("longer than the {expected} bytes listed"));
+        }
+        sha256.update(&chunk);
+        blake3.update(&chunk);
+        file.write_all(&chunk)
+            .await
+            .map_err(|e| format!("Write error: {e}"))?;
+    }
+    if received != expected {
+        return Err(format!("{received} bytes arrived, {expected} listed"));
+    }
+    let sha256: [u8; 32] = sha256.finalize().into();
+    if sha256 != listed.sha256 {
+        return Err("the file's SHA-256 is not the one HuggingFace lists".to_string());
+    }
+    // The disk's word before the rename (fsyncgate, FUTURE_WORK #217).
+    file.sync_all()
+        .await
+        .map_err(|e| format!("Sync error: {e}"))?;
+    drop(file);
+    tokio::fs::rename(&tmp, &dest)
+        .await
+        .map_err(|e| format!("Failed to rename temp file: {e}"))?;
+    staging.landed();
+    Ok(*blake3.finalize().as_bytes())
+}
+
 /// Download a GGUF file from HuggingFace with progress reporting.
 ///
 /// Supports HTTP range requests for partial/shard downloads.

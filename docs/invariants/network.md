@@ -7349,3 +7349,51 @@ connects, so the old build passes too.
 **What a change must keep.** Both bounds explicit and one-sided; a kind joins this gate only if it is
 kept per sender; test `gossip_from_a_clock_a_minute_fast_is_heard_and_one_far_off_is_not` (33, 60
 and 300 s ahead heard; 301 s ahead, an hour ahead and 301 s old dropped) fails at the old 30 s.
+
+## A vision encoder is fetched by its own origin, and pinned (2026-11-07, #422)
+
+Until #422 nothing fetched a vision encoder (`mmproj.gguf`, the part at `MMPROJ_SHARD_INDEX`):
+#421 had deleted the one path, which fetched a whole file from HuggingFace by the name a PEER's
+source gossip gave, sized by a peer's manifest. So a vision model read pictures only where someone
+had placed the file by hand.
+
+**Who fetches from HuggingFace.** Only this node's own HuggingFace download of the model — the
+dashboard's part download (`api/admin_hf/shards.rs`, after the parts) and the download pass's
+origin branch (`auto_manage/download.rs`, beside a part, asking `metered_hold`) — and only while no
+computer holds one. A repository answered with nothing to fetch is not listed again for 6 h.
+
+**Which file.** llama.cpp's `-hf` rule (`common/download.cpp::find_best_sibling`, keyword
+`mmproj`, no tag): the model file's own folder or one above it, deepest first, then the closest
+quantization width (`extract_quant_bits`), the first listed winning a tie — ported as
+`best_encoder_for`. A rule over a listing agrees between nodes only while the listing does, so once
+a pin exists a later origin takes the listed file whose SHA-256 is the pin's (`listed_with_sha256`)
+and never chooses again. Only a projector type this build loads is fetched
+(`vision::reads_projector_type`, the one answer `load_from_mmproj_gguf` builds by), read off the
+file's header by range first.
+
+**What it is held to.** HuggingFace's listing (`/api/models/<repo>?blobs=true`) gives each large
+file's size and SHA-256 (`lfs.sha256`; `ggml-org/gemma-3-4b-it-GGUF`'s `mmproj-model-f16.gguf`:
+851,251,104 bytes, `8c0fb064…`). The download is refused unless both match, so the bytes are the
+repository's own and no peer vouches for them. Prior art: BitTorrent BEP 9 (metadata from a peer is
+taken only once it hashes to the info-hash the user chose); Ollama's projector layer, named by its
+sha256 digest and refused by `verifyBlob` when the pulled blob differs.
+
+**The pin.** `ModelManifest::mmproj` = `{ size_bytes, hash (BLAKE3), sha256 }`. A manifest is
+unsigned (transport-authenticated, then `judge_peer_manifest`; `manifest_hash` is self-referential
+and leaves the pin out, like `context_length`), so the pin is trusted exactly as a part's hash is,
+by the same rules (`manifest::keep_known_vision_encoder`, called in `register_manifest`): a known
+pin is kept over none (an older node re-gossips a manifest without the field) and over a
+contradicting one; this node's own fetch (`origin_verified` for the sentinel) outranks any gossiped
+pin; a different build's is its own; one past `MAX_VISION_ENCODER_BYTES` (4 GiB: the largest real
+file of a supported type is Gemma 3 27B's f32, 1,692,266,400 bytes) or empty is no pin. It travels
+as `vision_encoder`, not `mmproj`: v0.3.276's download pass makes any `mmproj: Some` its top
+candidate (5×) and then returns at once without fetching — a wasted pick every pass until it
+updates — and it ignores an unknown key. `generate_manifest_from_header` keeps the pin in the copy
+it saves, since a header names no encoder.
+
+**A copy from a peer.** `manifest::expected_part` gives the sentinel's expected size and BLAKE3
+from the pin, so the accept gate checks it like a part (`verify_shard`). With no pin it is
+`P2pShardAcceptance::Refuse` — never `FetchFromOrigin` (a byte-range fetch means nothing for it),
+never `AcceptUnchecked` (any GGUF a peer sent would become the model's image reader).
+
+**Open (FUTURE_WORK #422 step 5):** nothing fetches a second copy from a holder.
