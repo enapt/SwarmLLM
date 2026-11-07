@@ -3023,6 +3023,27 @@ segment, so those machines fetch only once they run a release carrying this (unt
 passed over when its 30 min place lapses, as any machine that does not fetch); then measure the
 reply on the new chain against the old in one interleaved sitting.
 
+**2026-11-08 — every peer on .277, and still nobody fetches** (live node, official .277 at `-v` from
+22:09Z, one 70B request at 22:19 and one at 22:43; `node.log` from byte 231174081). The US 3080 Ti
+`a661155f` holds none of the 79 parts; the Proxmox node 51, `99aafc41` 38, Australia all.
+**22:21** (12 min after the restart): far machines weighed with coordinates — this node and
+`a661155f` `coord=none`, so each of their hops is the flat `FAR_HOP_MS` (300 ms) — and the far
+search ended at "one runs it whole" (Australia alone), no held/best line. **22:44**: `a661155f`
+`coord=yes`; held = Australia 0-80, 1168 ms (59 processor layers); best = `99aafc41` 0-22,
+`a661155f` 22-45, Australia 45-80, **860 ms** (slowest machine 287, 34 processor layers),
+`moving=true`, the chain planned. This node is in neither: still `coord=none` 35 min after its
+restart though it published three coordinate moves (22:24, 22:34, 22:38), and `disk_mb=0`. Two
+findings: (1) **a chain flips with one peer's coordinate** — `is_usable` is `error < 0.5`, and a
+machine whose error sits near that line is priced 300 ms a hop in one pass and by its coordinate
+in the next, so the chain every machine must plan alike can differ between machines that read the
+same peer a minute apart, and a planned machine may never see itself named; (2) **this node's own
+coordinate is not usable** for at least 35 min after a restart (its error is logged nowhere, so
+whether it is the restart or this machine's samples is unknown). Next: log the error with each
+published move and in the planner's machine line (`coord=0.43`, not `yes`); read whether `a661155f`
+plans the same chain from its own side (its own coordinate is read from its local capability, as
+here); then decide whether planning needs a hysteresis on usability (usable below 0.5, unusable
+only above a higher line) — look up how Serf/Consul gate a coordinate by its error first.
+
 #### #10 — Conversation prefixes across computers: a cache this node did not fill is invisible
 `P2` · perf-split · **PARTIAL** — 2026-09-07 · absorbs #139 and archive § "Speeding up inference BETWEEN nodes" idea 1 (prefix-keyed remote KV); history: archive row #10 and § "A conversation's later turns do not seek out the peer holding its prefix"
 
