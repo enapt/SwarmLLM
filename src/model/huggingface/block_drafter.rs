@@ -174,20 +174,45 @@ enum Step {
     Fetch(&'static PinnedDrafter),
     /// A drafter on disk beside a model whose ends left: nothing can attach it.
     GiveBack,
+    /// A drafter on disk that no load here attaches ([`attaches_here`]).
+    NotUsedHere,
     Nothing,
 }
 
+/// `attaches_here`: would a load of this model here attach its drafter
+/// ([`attaches_here`])? Where it would not, nothing is fetched and what is on
+/// disk goes.
 fn step_for(
     pinned: Option<&'static PinnedDrafter>,
     ends: Ends,
     on_disk: bool,
     failed_lately: bool,
+    attaches_here: bool,
 ) -> Step {
     match (pinned, ends, on_disk) {
         (_, Ends::Gone, true) => Step::GiveBack,
-        (Some(p), Ends::Held, false) if !failed_lately => Step::Fetch(p),
+        (_, Ends::Held, true) if !attaches_here => Step::NotUsedHere,
+        (Some(p), Ends::Held, false) if !failed_lately && attaches_here => Step::Fetch(p),
         _ => Step::Nothing,
     }
+}
+
+/// Would a load of this model here attach a block drafter? Not where this
+/// computer's models never go to a card
+/// (`auto_manage::vram::models_go_to_the_card`) and the file carries its own
+/// guess head (`split::mtp::head_in_shape`, one next-token block): a load
+/// there runs the head alone (`SplitModel::head_guesses_better_here` — the
+/// head writes faster on the processor), so a fetch held 0.4-1.85 GB of the
+/// user's disk for nothing. `SWARMLLM_BLOCK_DRAFTER=processor` attaches it
+/// there, and fetches it.
+/// `block_count` is the trunk's (the header's count less its next-token
+/// blocks), `has` answers for a tensor name in the file's table.
+fn attaches_here(to_a_card: bool, block_count: usize, has: impl Fn(&str) -> bool) -> bool {
+    use crate::inference::split::{block_drafter_on_the_processor_anyway, head_in_shape, mtp_on};
+    let one_head = mtp_on()
+        && head_in_shape(block_count, &has)
+        && !has(&format!("blk.{}.nextn.eh_proj.weight", block_count + 1));
+    to_a_card || !one_head || block_drafter_on_the_processor_anyway()
 }
 
 /// Where this node stands on the parts a drafter attaches beside: part 0 (the
@@ -234,9 +259,16 @@ pub(crate) async fn fetch_for_models_held_end_to_end(state: &std::sync::Arc<Shar
     for model_id in crate::model::auto_manage::canonical::models_kept_on_disk(state) {
         let dir = state.model_dir(&model_id.0);
         let path = dir.join(crate::inference::split::BLOCK_DRAFTER_FILE);
-        let pinned = state
-            .gguf_meta_for(&model_id)
-            .and_then(|m| pinned_for(m.model_name.as_deref(), &m.architecture, m.embedding_length));
+        let (pinned, attaches) = state.gguf_meta_for(&model_id).map_or((None, true), |m| {
+            (
+                pinned_for(m.model_name.as_deref(), &m.architecture, m.embedding_length),
+                attaches_here(
+                    crate::model::auto_manage::vram::models_go_to_the_card(state),
+                    m.block_count,
+                    |name| m.tensors.contains_key(name),
+                ),
+            )
+        });
         let failed_lately = FAILED_LATELY
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -247,8 +279,20 @@ pub(crate) async fn fetch_for_models_held_end_to_end(state: &std::sync::Arc<Shar
             ends_here(state, &model_id),
             path.is_file(),
             failed_lately,
+            attaches,
         ) {
             Step::Nothing => {}
+            Step::NotUsedHere => {
+                if state.model_is_in_use(&model_id) {
+                    continue;
+                }
+                match std::fs::remove_file(&path) {
+                    Ok(()) => tracing::info!(model = %model_id,
+                        "Gave back the model's guesser: on this computer's processor the model's own guess head writes faster"),
+                    Err(e) => tracing::debug!(model = %model_id, error = %e,
+                        "Could not remove the model's guesser"),
+                }
+            }
             Step::GiveBack => {
                 if state.model_is_in_use(&model_id) {
                     continue;
@@ -353,15 +397,105 @@ mod tests {
     #[test]
     fn a_drafter_is_fetched_only_beside_both_ends_and_given_back_when_they_go() {
         let p = &PINNED[0];
-        assert_eq!(step_for(Some(p), Ends::Held, false, false), Step::Fetch(p));
-        assert_eq!(step_for(Some(p), Ends::Held, false, true), Step::Nothing);
-        assert_eq!(step_for(Some(p), Ends::Held, true, false), Step::Nothing);
-        assert_eq!(step_for(Some(p), Ends::Unsure, false, false), Step::Nothing);
-        assert_eq!(step_for(Some(p), Ends::Gone, false, false), Step::Nothing);
+        assert_eq!(
+            step_for(Some(p), Ends::Held, false, false, true),
+            Step::Fetch(p)
+        );
+        assert_eq!(
+            step_for(Some(p), Ends::Held, false, true, true),
+            Step::Nothing
+        );
+        assert_eq!(
+            step_for(Some(p), Ends::Held, true, false, true),
+            Step::Nothing
+        );
+        assert_eq!(
+            step_for(Some(p), Ends::Unsure, false, false, true),
+            Step::Nothing
+        );
+        assert_eq!(
+            step_for(Some(p), Ends::Gone, false, false, true),
+            Step::Nothing
+        );
         // A part being fetched again, or no manifest yet, gives nothing back.
-        assert_eq!(step_for(Some(p), Ends::Unsure, true, false), Step::Nothing);
-        assert_eq!(step_for(Some(p), Ends::Gone, true, false), Step::GiveBack);
-        assert_eq!(step_for(None, Ends::Gone, true, false), Step::GiveBack);
-        assert_eq!(step_for(None, Ends::Held, false, false), Step::Nothing);
+        assert_eq!(
+            step_for(Some(p), Ends::Unsure, true, false, true),
+            Step::Nothing
+        );
+        assert_eq!(
+            step_for(Some(p), Ends::Gone, true, false, true),
+            Step::GiveBack
+        );
+        assert_eq!(
+            step_for(None, Ends::Gone, true, false, true),
+            Step::GiveBack
+        );
+        assert_eq!(
+            step_for(None, Ends::Held, false, false, true),
+            Step::Nothing
+        );
+    }
+
+    /// Where no load here attaches it, a drafter is never fetched, and one on
+    /// disk goes — beside both ends only; a model whose ends left goes as before.
+    #[test]
+    fn a_drafter_no_load_here_attaches_is_not_fetched_and_goes() {
+        let p = &PINNED[0];
+        assert_eq!(
+            step_for(Some(p), Ends::Held, false, false, false),
+            Step::Nothing
+        );
+        assert_eq!(
+            step_for(Some(p), Ends::Held, true, false, false),
+            Step::NotUsedHere
+        );
+        assert_eq!(
+            step_for(Some(p), Ends::Unsure, true, false, false),
+            Step::Nothing
+        );
+        assert_eq!(
+            step_for(Some(p), Ends::Gone, true, false, false),
+            Step::GiveBack
+        );
+    }
+
+    /// A processor-only computer attaches no drafter beside a file that
+    /// carries ONE guess head in the loader's shape, and does beside a file
+    /// with none (an upload that left it out, #431) or two.
+    #[test]
+    fn a_processor_only_computer_attaches_no_drafter_beside_the_files_own_head() {
+        let head = [
+            "nextn.eh_proj.weight",
+            "nextn.enorm.weight",
+            "nextn.hnorm.weight",
+            "attn_norm.weight",
+            "post_attention_norm.weight",
+            "attn_q.weight",
+            "attn_k.weight",
+            "attn_v.weight",
+            "attn_output.weight",
+            "attn_q_norm.weight",
+            "attn_k_norm.weight",
+        ];
+        let names_with = |blocks: &[usize]| -> std::collections::HashSet<String> {
+            blocks
+                .iter()
+                .flat_map(|b| head.iter().map(move |t| format!("blk.{b}.{t}")))
+                .collect()
+        };
+        let attaches = |to_a_card: bool, names: &std::collections::HashSet<String>| {
+            attaches_here(to_a_card, 32, |n| names.contains(n))
+        };
+        let with_head = names_with(&[32]);
+        assert!(!attaches(false, &with_head), "the head writes faster here");
+        assert!(attaches(true, &with_head), "a card attaches it");
+        assert!(attaches(false, &names_with(&[])), "no head of its own");
+        assert!(
+            attaches(false, &names_with(&[32, 33])),
+            "two blocks are not one head"
+        );
+        let mut odd = names_with(&[32]);
+        odd.insert("blk.32.nextn.embed_tokens.weight".into());
+        assert!(attaches(false, &odd), "a head the loader does not run");
     }
 }

@@ -8655,8 +8655,15 @@ subset of the draft's vocabulary keeps 95.4% of acceptance at 32k words on Qwen-
 steps, where the head guesses at ~6 ms a word: over three runs (`~/rig428/cpu2`, cpu3) the drafter beside the head
 ran 16.8-19.0 / 16.8-17.8 / 11.1-11.7 / 14.5-17.2 tok/s on a palindrome, a BST class, a story and a hash map against
 16.0-18.0 / 17.0-19.2 / 11.9-12.2 / 15.6-19.4 without it — and held 0.4-1.85 GB of the machine's memory. With the rule (`~/rig428/cpu4`, three runs a side; its `block drafter not attached` line in every log) the four prompts ran 15.7-17.5 / 17.4-17.5 / 12.0-13.0 / 16.7-17.1, the path the drafter's absence takes (16.8-18.1 / 18.2-20.7 / 11.8-12.0 / 17.5-17.9 there — this processor's spread between arms), against 14.1-17.8 / 16.6-17.9 / 10.8-11.7 / 14.8-15.4 with it attached anyway (`SWARMLLM_BLOCK_DRAFTER=processor`).
-A split's first segment, a card, and a model with no guess head (the swarm's Qwen3.5-9B upload, #431) keep it. The
-pinned fetch (stage 6) still fetches it: the same machine may hold the model's first part of a split.
+A split's first segment, a card, and a model with no guess head (the swarm's Qwen3.5-9B upload, #431) keep it. **Nor
+is it fetched there** (`model::huggingface::block_drafter::attaches_here`, the same night): a computer whose models
+never go to a card (`auto_manage::vram::models_go_to_the_card`) beside a file with ONE guess head in the shape the
+loader runs (`split::mtp::head_in_shape` — `mtp::block_to_load` asks it too, so a header's table answers as the loaded
+file does) fetches nothing, and a drafter already on disk goes (`Step::NotUsedHere`, logged). Before it, such a
+computer fetched 0.4-1.85 GB it never attached; no published release had fetched one. A computer with a card still
+fetches it, though a load may yet put a model too big for its card on the processor; `SWARMLLM_BLOCK_DRAFTER=processor`
+fetches and attaches it. Tests: `a_drafter_no_load_here_attaches_is_not_fetched_and_goes`,
+`a_processor_only_computer_attaches_no_drafter_beside_the_files_own_head` (both red with the rule off).
 
 ### A drafter's context rows are made at its next draft (2026-11-08 night)
 

@@ -111,7 +111,7 @@ pub(crate) fn block_drafter_on() -> bool {
 /// `SWARMLLM_BLOCK_DRAFTER=processor`: attach the drafter beside a whole
 /// model on the processor even where its own guess head guesses
 /// ([`SplitModel::head_guesses_better_here`]), for A/B inside one binary.
-fn block_drafter_on_the_processor_anyway() -> bool {
+pub(crate) fn block_drafter_on_the_processor_anyway() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var("SWARMLLM_BLOCK_DRAFTER").as_deref() == Ok("processor"))
 }

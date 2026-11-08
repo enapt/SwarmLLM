@@ -174,11 +174,24 @@ pub(crate) fn block_to_load(
         );
         return None;
     }
-    let has = |s: &str| {
-        ct.tensor_infos
-            .contains_key(&format!("blk.{block_count}.{s}"))
-    };
-    let shaped = [
+    if !head_in_shape(block_count, |name| ct.tensor_infos.contains_key(name)) {
+        tracing::info!(
+            block = block_count,
+            "next-token-prediction block not in the shape the head runs; not loaded"
+        );
+        return None;
+    }
+    Some(block_count)
+}
+
+/// Does a file whose trunk is `block_count` blocks carry, as block
+/// `block_count`, a next-token-prediction block in the shape the head runs?
+/// Read off its tensor names (`has`), so a header's tensor table answers as
+/// the loaded file does — [`block_to_load`] and the drafter's fetch
+/// (`model::huggingface::block_drafter`) both ask it.
+pub(crate) fn head_in_shape(block_count: usize, has: impl Fn(&str) -> bool) -> bool {
+    let at = |s: &str| has(&format!("blk.{block_count}.{s}"));
+    [
         "nextn.eh_proj.weight",
         "nextn.enorm.weight",
         "nextn.hnorm.weight",
@@ -192,15 +205,9 @@ pub(crate) fn block_to_load(
         "attn_k_norm.weight",
     ]
     .iter()
-    .all(|s| has(s));
-    if !shaped || has("nextn.embed_tokens.weight") || has("nextn.shared_head_head.weight") {
-        tracing::info!(
-            block = block_count,
-            "next-token-prediction block not in the shape the head runs; not loaded"
-        );
-        return None;
-    }
-    Some(block_count)
+    .all(|s| at(s))
+        && !at("nextn.embed_tokens.weight")
+        && !at("nextn.shared_head_head.weight")
 }
 
 /// What block `block`'s weights take: `(on its device, in the machine's

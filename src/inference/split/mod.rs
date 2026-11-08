@@ -48,8 +48,8 @@ pub use super::tokenizer::{BpeTokenizer, SplitTokenizer, SpmTokenizer};
 
 // Re-export from submodules so that `crate::inference::split::SplitModel` etc. continue to work.
 pub(crate) use self::block_drafter::{
-    block_drafter_on, plan_in as block_drafter_plan_in, BlockCache, BLOCK_CATCH_UP_CHUNK,
-    BLOCK_DRAFTER_FILE, BLOCK_MOST_POSITIONS, BLOCK_PROMPT_ROWS,
+    block_drafter_on, block_drafter_on_the_processor_anyway, plan_in as block_drafter_plan_in,
+    BlockCache, BLOCK_CATCH_UP_CHUNK, BLOCK_DRAFTER_FILE, BLOCK_MOST_POSITIONS, BLOCK_PROMPT_ROWS,
 };
 pub(crate) use self::draft::guesses_through_far_run;
 pub use self::draft::{FlowGrowth, FlowStep, TreeGrowth};
@@ -72,8 +72,7 @@ pub(crate) use self::gguf_meta::{
 pub use self::kv_cache::{KvCacheStore, KvOccupancy};
 pub(crate) use self::loader::card_free_for_a_load;
 pub use self::model::SplitModel;
-#[cfg(test)]
-pub(crate) use self::mtp::mtp_on;
+pub(crate) use self::mtp::{head_in_shape, mtp_on};
 pub(crate) use self::mtp::{
     GuessOver, MtpCache, DRAFT_MOST_OWN_WORDS, MTP_CATCH_UP_CHUNK, MTP_MOST_POSITIONS,
     MTP_PROMPT_ROWS,

@@ -3218,7 +3218,8 @@ processor-only machines: judge a probe without checking it — under greedy deco
 are read exactly off the tokens the reply commits next. **Done 2026-11-08 night**: a probe is judged by the reply where
 a check of the block costs ≥ 2 steps (`model_worker::BlockShadow`, `SHADOW_FROM_STEPS`), and a whole processor model
 with its own guess head attaches no drafter (`SplitModel::head_guesses_better_here`) — even judged, the drafter beside
-the head ran under its absence there (`docs/invariants/scheduling.md`, `inference.md`). With the rule (`~/rig428/cpu4`, three runs a side; its `block drafter not attached` line in every log) the four prompts ran 15.7-17.5 / 17.4-17.5 / 12.0-13.0 / 16.7-17.1, the path the drafter's absence takes (16.8-18.1 / 18.2-20.7 / 11.8-12.0 / 17.5-17.9 there — this processor's spread between arms), against 14.1-17.8 / 16.6-17.9 / 10.8-11.7 / 14.8-15.4 with it attached anyway (`SWARMLLM_BLOCK_DRAFTER=processor`).
+the head ran under its absence there (`docs/invariants/scheduling.md`, `inference.md`) — nor fetches one where its
+models never go to a card (`model::huggingface::block_drafter::attaches_here`). With the rule (`~/rig428/cpu4`, three runs a side; its `block drafter not attached` line in every log) the four prompts ran 15.7-17.5 / 17.4-17.5 / 12.0-13.0 / 16.7-17.1, the path the drafter's absence takes (16.8-18.1 / 18.2-20.7 / 11.8-12.0 / 17.5-17.9 there — this processor's spread between arms), against 14.1-17.8 / 16.6-17.9 / 10.8-11.7 / 14.8-15.4 with it attached anyway (`SWARMLLM_BLOCK_DRAFTER=processor`).
 **Stage 6 — built 2026-11-08** (`model::huggingface::block_drafter`): a node holding a model from its first part to its
 head fetches that model's drafter once, from a PINNED table — the target's `general.name` folded, its architecture
 and width name one repo, file, size and SHA-256 (Anbeeld's Q8_0 conversions: Qwen3.6-35B-A3B and -27B, Qwen3.5-4B,
