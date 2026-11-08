@@ -56,7 +56,9 @@ other two measured-first levers. v0.3.278 (2026-11-08) carried #424's three step
 processor). **2026-11-08:** #427 goes first by the user's direction — "we need to be able to use the models between
 also, like 14b 28b, also 70b": the next round is ranked by which tier (~14B, ~27-35B, 70B) a user can actually use,
 starting with measuring each as a user gets it — on the models people run most (#427 § Research 2026-11-08:
-Qwen3.8-27B, Qwen3.6-35B-A3B, Gemma 4, gpt-oss, Qwen3-14B, Llama 3.3 70B).
+Qwen3.8-27B, Qwen3.6-35B-A3B, Gemma 4, gpt-oss, Qwen3-14B, Llama 3.3 70B). The measurement's first half put every
+split of them at ONE token a round trip (1.7-5.6 tok/s), so **#428 — a DFlash drafter at the split's far end** is the
+round's main build, by the user's direction "research and find a way to dramatically improve all models".
 **2026-11-04:** #403 goes first among the open work by the user's direction: the release cut-off
 and the use gate must not be passable through a relay. Closed the same day (§ "Closed"). What each release carried is in § "Closed" and `CHANGELOG.md`; earlier
 rankings moved word for word to the archive, § "PRIORITIES re-rank log". Only OPEN work is listed
@@ -2971,6 +2973,51 @@ What it changes:
   a fetch; (b) the swarm cannot see its own demand: the popular list (`hf_popular`) lives only in a log line, peer-served
   requests per model are not logged at info, and no endpoint exposes `model_use`. The 83 requests of 11-01 → 11-07 were
   all test runs. Both are candidate work under this entry.
+
+#### #428 — Every popular model guesses 4-5 tokens a round trip: a DFlash drafter at the split's far end
+`P1` · perf-split · **OPEN** (stage 1 next) — 2026-11-08 · history: #427 (the measurement), #425 (the guess head), #411 (the flow)
+
+**What a user gets today** (#427's table, 2026-11-08 01:00-01:30Z, live node, one ask at a time): every split of
+the popular models decodes ONE token a round trip — Gemma 4 31B here↔Australia 1.7-1.9 tok/s, Gemma 4 26B-A4B
+5.3-5.6, Ornith-1.5-35B Italy↔Australia 2.3-2.8 — against 32 tok/s for Qwen3.6-35B-A3B whole on one RTX 3060. The
+14B that runs 18-43 tok/s across Thailand↔Australia (#411) does it with a small drafter's TREE checked in one
+round trip; **7 of the 9 most-run families cannot**: `SplitModel::draft_tree_refusal` refuses sliding windows
+(Gemma 3/4, gpt-oss), recurrent layers (Qwen 3.5/3.6/3.8, Qwen3-Next) and MLA, and a separate drafter is refused
+for recurrent targets. A split of them gets only the n-gram, which rarely lands on prose.
+
+**Prior art** (four searches 2026-11-08, sources in the session's research notes): (a) SGLang verifies TREES on
+hybrid Qwen3-Next (a state slot per draft token, parent indices) yet gains only ~6% over a CHAIN (accept 4.23 vs
+3.41, H200) and recommends chains for Qwen3.8 — so a strong draft, not a tree, is what these families lack; chains
+through recurrent layers already work here (`RECURRENT_REWIND`, ≤ 32 rows). (b) **DFlash** (arXiv 2602.06036,
+z-lab, Apache-2.0/MIT): a 0.4-1.9B block drafter conditioned on the target's own hidden states proposes a whole
+block (7-15 tokens) in ONE non-autoregressive forward; Qwen3.8-27B-DFlash2 accepts 4.10 (MT-Bench) - 5.46 (GSM8K)
+of 7 (2.7-3.4x at batch 1); released for Qwen 3.5 (4B-397B), 3.6, 3.8, Gemma 4 (12B/26B/31B), gpt-oss (20b/120b),
+Qwen3 4B/8B/Coder-30B, Llama-3.1-8B; GGUF in llama.cpp (`src/models/dflash.cpp`, `common/speculative.cpp`
+`draft-dflash`; our `~/llama.cpp-ref` has it). It ships NO embedding or head (the target's, frozen) and reads the
+target's layer OUTPUTS at `target_layer_ids` (Qwen3.8: 5,19,33,47,61) for every COMMITTED position, fused by
+`fc` + norm and injected as K/V into every drafter layer; it keeps its own KV of that context across rounds. (c)
+EAGLE-3 (Llama 3.3 70B 69-82% acceptance, 1.85-2.41x in llama.cpp; Gemma 4, gpt-oss-120b, Qwen3-32B heads)
+reads three target layers the same way, then drafts autoregressively. (d) vLLM places a drafter on the LAST
+pipeline stage. (e) Across slow links the only published several-x is many tokens verified per check (SpecExec
+8-19x with 1-2K-token trees, Petals' authors); placement or compression alone gave 1.3-2x. No published system
+drafts at the far end of a continental split.
+
+**Design**: the drafter runs on the computer that holds the model's last layers and output head — right after a
+check it drafts the next block, so each round trip carries 7-15 guesses instead of one, checked as a chain. The
+earlier computers append their `target_layer_ids` rows for committed positions to the forward they already send
+(Qwen3.8 at a 32/32 split: 2 × 5120 f16 ≈ 20 KB a position), gated by a new feature bit; the far end embeds only
+the anchor and the mask token (rows on demand for an untied target). Expected at Thailand↔Australia (~130 ms):
+~4-5 tokens a round where one lands today — and the same drafter speeds a WHOLE model on one computer.
+
+**Stages, each ending on a measurement**: (1) DFlash on a whole model here — Qwen3.5-9B Q4_K_M (whole here) with
+`z-lab/Qwen3.5-9B-DFlash`: acceptance and the greedy reply judged against llama.cpp `draft-dflash` on the same
+prompts, the reply read one token at a time; (2) DFlash 2 (dynamic convolutions + candidate selector) for
+Qwen3.8-27B (`z-lab/Qwen3.8-27B-DFlash2-GGUF`); (3) features across a split and drafting at the far end, flowing
+with the check (#411's machinery); (4) Gemma 4 and gpt-oss drafters (windows, softcap, biases); (5) EAGLE-3 on the
+same plumbing (Llama 3.3 70B, Qwen3-32B); (6) fetching a target's drafter by its origin (≤ 2 GiB rule).
+Open questions: the causal flag of sliding drafter layers whose config lacks `is_causal` (reference code vs
+llama.cpp differ); llama.cpp reports greedy output parting from one-at-a-time on qwen35moe targets at 100%
+acceptance (#31472) — check ours against one-at-a-time, not only against llama.cpp.
 
 #### #318 — A large model split across machines is too slow to use
 `P2` · perf-split · **OPEN** — 2026-10-20 · plan: `docs/plans/large_model_splits.md` · draws on #134, #145, #148, #149, #192
