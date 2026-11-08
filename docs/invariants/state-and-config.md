@@ -914,6 +914,21 @@ next start runs. Guards: `a_node_asked_to_stop_is_not_restarted_into_its_update`
 an exec) and `a_node_asked_to_stop_does_not_install_and_restart_into_its_update`
 (fails with the checks removed: `["installing", "install_failed"]`).
 
+### The drain counts work in flight, never a model's serving record (2026-11-08)
+
+`update_restart::drain` waited for `state.serving_models` to empty. That map is
+permanent by design — prune reads its `last_served_at` to know a model was used
+— so a node that had ever served a peer never drained: every update waited the
+full `DRAIN_TIMEOUT` (600 s) and logged `drained_cleanly=false`. A field report
+(2026-11-08, v0.3.275 and v0.3.278) showed it on both updates, `serving=1` and
+`serving=7`, with nothing in flight. The drain now asks
+`SharedState::active_inference_load()` — the requests running now, the same
+figure admission reads — beside `active_pipelines`. Prior art: Envoy's drain
+and Kubernetes' pre-stop hooks count active requests and connections, never a
+history. Test: `a_model_served_earlier_does_not_hold_an_update` (paused time:
+a dropped `ServingGuard` leaves its entry and the drain returns at once; a live
+one holds it to the timeout) — it fails with the old count.
+
 ## Single-source-of-truth helpers — SharedState, live config and credits
 
 Each names the ONE place a decision is made. A second implementation of any of

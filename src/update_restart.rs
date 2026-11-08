@@ -35,23 +35,32 @@ const DRAIN_POLL: Duration = Duration::from_secs(2);
 /// Returns `true` if the node went idle, `false` if [`DRAIN_TIMEOUT`] expired
 /// first (the caller decides whether that is still worth restarting for).
 ///
-/// Consults BOTH `active_pipelines` and `serving_models`, and the second is the
-/// one that is easy to forget: `active_pipelines` is the *coordinator's* map
-/// and never contains work this node is doing on a peer's behalf, so a node
-/// that does nothing but answer other people looks permanently idle through it
-/// alone (gotcha #194 — that exact blind spot got a worker killed mid-answer).
+/// Busy is [`SharedState::active_inference_load`] — the requests this node
+/// started and those it computes for peers, by their IN-FLIGHT counts — and
+/// `active_pipelines` beside it. `active_pipelines` alone is the
+/// *coordinator's* map and never contains work done on a peer's behalf, so a
+/// node that only answers other people looked permanently idle through it
+/// (gotcha #194 — that blind spot got a worker killed mid-answer). And
+/// `serving_models` keeps an entry for every model ever served (prune reads
+/// its `last_served_at`): read by its LENGTH, as it was until 2026-11-08, a node
+/// that had once served peers waited out the whole window before every update
+/// and restarted calling itself busy (`drained_cleanly=false`, `serving=7`
+/// with nothing running — field report 2026-11-08). Prior art: Envoy's drain
+/// and Kubernetes' connection draining wait for ACTIVE requests to reach zero.
 pub async fn drain(state: &Arc<SharedState>) -> bool {
-    let started = Instant::now();
+    // Tokio's clock, the one its sleep below runs on: the same instant in a
+    // running node, and the one a paused-time test advances.
+    let started = tokio::time::Instant::now();
     loop {
         let coordinating = state.active_pipelines.len();
-        let serving = state.serving_models.len();
-        if coordinating == 0 && serving == 0 {
+        let in_flight = state.active_inference_load();
+        if coordinating == 0 && in_flight == 0 {
             return true;
         }
         if started.elapsed() >= DRAIN_TIMEOUT {
             tracing::warn!(
                 coordinating,
-                serving,
+                in_flight,
                 timeout_secs = DRAIN_TIMEOUT.as_secs(),
                 "Still busy after the drain window — restarting into the update anyway"
             );
@@ -973,6 +982,41 @@ mod tests {
         );
         assert_eq!(line(r"C:\x.exe", &[""]), r#""C:\x.exe" """#);
         assert_eq!(line(r"C:\x.exe", &[r"a\b"]), r#""C:\x.exe" a\b"#);
+    }
+
+    /// A model this node served a peer earlier is history, not work: its
+    /// entry stays for prune's `last_served_at`, and read by its presence it
+    /// held every update for the whole drain window (field report 2026-11-08).
+    /// Work under way still holds it.
+    #[tokio::test(start_paused = true)]
+    async fn a_model_served_earlier_does_not_hold_an_update() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = crate::config::Config::default();
+        config.node.data_dir = dir.path().to_path_buf();
+        let db = crate::storage::db::Database::open(dir.path()).unwrap();
+        let executor = Arc::new(tokio::sync::Mutex::new(
+            crate::inference::executor::ModelExecutor::new(),
+        ));
+        let (state, _, _) = SharedState::new(
+            config,
+            crate::identity::Identity::generate(),
+            db,
+            executor,
+            None,
+        );
+        let model = crate::types::ModelId("served-earlier".into());
+        drop(crate::daemon::state::ServingGuard::new(
+            &state,
+            model.clone(),
+        ));
+        assert!(state.serving_models.contains_key(&model));
+        assert!(drain(&state).await, "nothing is running: the drain is over");
+
+        let _serving = crate::daemon::state::ServingGuard::new(&state, model);
+        assert!(
+            !drain(&state).await,
+            "a peer's request under way holds the update to the window"
+        );
     }
 
     #[test]
