@@ -3203,6 +3203,14 @@ on prose (10-38 of ~105 at 42-77 tokens/s against plain steps' ~83, card run 18)
 (~27 ms a round for ~1.7 tokens, against ~11 ms a token from the head) before its record sets it aside. Next for it: start
 a reply's block at a narrow count until its record says it pays (a probe at the full block costs the most where it keeps
 the least), or let the head go first on a reply whose prompt asks for prose.
+**Tried and dropped 2026-11-08 night: a card's chain check carrying the whole block (16) in one graph** instead of 8
+(`cuda_graph::MAX_CHAIN_POSITIONS`, A/B against the same binary capped at 8; card run 19, three runs a side, idle box,
+every width 9-16 captured and recorded while idle): the palindrome 167-188 tok/s against 180-184 at 8, a BST class
+178-205 against 185-194, a story 77.0-79.4 against 77.9-81.6, a hash map 111-121 against 116-127 (without the drafter
+117-118 / 125-127 / 83 / 88-109). No gain: past 8 rows the quantized products leave the several-row MMVQ for MMQ and a
+check's price jumps — widths 9-16 timed 31-59 ms against 22-27 at 8 and ~11 for a step — so the guesses kept past the
+eighth do not pay for it on the 3070 with a 4B. Revisit only with a cheaper 9-16 row product (llama.cpp's newer
+`mmvq` `ncols_dst` up to 8 + its `mmq` small-batch tiles), measured per width first.
 **Where a story's ~200 ms go (card run 16, arm 3, read 2026-11-08 night)**: 105 rounds — the head 71 (46 of 91 kept,
 writes 96/s), the block 15 (10 of 79 kept, ~6.2 ms draft + a ~17 ms check a round, ~72 tok/s; 4 of the 15 were PROBES
 checked at the full block), plain steps 19 — against OFF's 92-107 rounds nearly all on the head (writes 91-111/s). Those 15

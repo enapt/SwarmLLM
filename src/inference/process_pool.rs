@@ -4331,6 +4331,15 @@ impl ModelProcessPool {
         self.load_rate.observe(bytes, ms);
     }
 
+    /// A worker for `model` holding `request`'s conversation between two
+    /// forwards, as a peer's split reply leaves it — for tests outside the pool.
+    #[cfg(test)]
+    pub(crate) async fn hold_a_conversation_for_test(&self, model: ModelId, request: Uuid) {
+        let h = tests::fake_worker_handle(false).await;
+        h.note_conversation(request);
+        self.workers.insert(model, h);
+    }
+
     /// Install the prefix-probe sink. Daemon owns the receiver and answers
     /// each probe via `send_prefix_fetch_result`.
     pub fn set_prefix_probe_tx(&self, tx: mpsc::Sender<PrefixProbeEvent>) {

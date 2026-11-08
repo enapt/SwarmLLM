@@ -929,6 +929,20 @@ history. Test: `a_model_served_earlier_does_not_hold_an_update` (paused time:
 a dropped `ServingGuard` leaves its entry and the drain returns at once; a live
 one holds it to the timeout) — it fails with the old count.
 
+The in-flight count alone is too narrow for a split (pre-release review,
+2026-11-09): a peer's split reply runs one forward here per word, its
+`ServingGuard` lives for that forward only (`handle_layer_forward`), and
+between two forwards — the coordinator's own layers, the round trip — nothing
+is in flight. A drain polling every 2 s returned in that gap and the restart cut
+the reply's segment. The drain now also asks the pool's single answer to "is
+this worker in use" (`models_with_inflight_requests` → `WorkerHandle::in_use`:
+a conversation that sent a forward within `CONVERSATION_GAP_SECS`). A reply
+nobody releases stops counting after the gap, so the bound is unchanged.
+Envoy's HTTP/2 drain is the same rule: an open stream counts between its frames.
+Test: `a_peers_reply_between_two_forwards_holds_an_update` (a held conversation,
+`active_inference_load() == 0`, the drain holds to the window; released, it
+returns).
+
 ## Single-source-of-truth helpers — SharedState, live config and credits
 
 Each names the ONE place a decision is made. A second implementation of any of

@@ -45,8 +45,17 @@ const DRAIN_POLL: Duration = Duration::from_secs(2);
 /// its `last_served_at`): read by its LENGTH, as it was until 2026-11-08, a node
 /// that had once served peers waited out the whole window before every update
 /// and restarted calling itself busy (`drained_cleanly=false`, `serving=7`
-/// with nothing running — field report 2026-11-08). Prior art: Envoy's drain
-/// and Kubernetes' connection draining wait for ACTIVE requests to reach zero.
+/// with nothing running — field report 2026-11-08).
+///
+/// A reply between two of its forwards is busy too: a peer's split reply
+/// passes through here once a word, and between two of its forwards nothing is
+/// in flight. The pool's answer counts it — a worker holding a conversation
+/// that sent a forward within the gap (`WorkerHandle::in_use`, through
+/// `models_with_inflight_requests`) — or an update restarted mid-reply in the
+/// first quiet two seconds (pre-release review, 2026-11-09). A reply nobody
+/// releases stops counting after `CONVERSATION_GAP_SECS`. Prior art: Envoy's
+/// drain and Kubernetes' connection draining wait for ACTIVE requests and
+/// open streams to reach zero — a stream counts between its frames.
 pub async fn drain(state: &Arc<SharedState>) -> bool {
     // Tokio's clock, the one its sleep below runs on: the same instant in a
     // running node, and the one a paused-time test advances.
@@ -54,13 +63,18 @@ pub async fn drain(state: &Arc<SharedState>) -> bool {
     loop {
         let coordinating = state.active_pipelines.len();
         let in_flight = state.active_inference_load();
-        if coordinating == 0 && in_flight == 0 {
+        let replies_held = state
+            .model_process_pool
+            .models_with_inflight_requests()
+            .len();
+        if coordinating == 0 && in_flight == 0 && replies_held == 0 {
             return true;
         }
         if started.elapsed() >= DRAIN_TIMEOUT {
             tracing::warn!(
                 coordinating,
                 in_flight,
+                replies_held,
                 timeout_secs = DRAIN_TIMEOUT.as_secs(),
                 "Still busy after the drain window — restarting into the update anyway"
             );
@@ -1017,6 +1031,44 @@ mod tests {
             !drain(&state).await,
             "a peer's request under way holds the update to the window"
         );
+    }
+
+    /// A peer's split reply passes through here once a word: between two of
+    /// its forwards nothing is in flight, yet its conversation is held here.
+    /// Read by the in-flight count alone, the drain returned in that gap and
+    /// the update cut the reply (pre-release review, 2026-11-09).
+    #[tokio::test(start_paused = true)]
+    async fn a_peers_reply_between_two_forwards_holds_an_update() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = crate::config::Config::default();
+        config.node.data_dir = dir.path().to_path_buf();
+        let db = crate::storage::db::Database::open(dir.path()).unwrap();
+        let executor = Arc::new(tokio::sync::Mutex::new(
+            crate::inference::executor::ModelExecutor::new(),
+        ));
+        let (state, _, _) = SharedState::new(
+            config,
+            crate::identity::Identity::generate(),
+            db,
+            executor,
+            None,
+        );
+        let reply = uuid::Uuid::new_v4();
+        state
+            .model_process_pool
+            .hold_a_conversation_for_test(crate::types::ModelId("a-split".into()), reply)
+            .await;
+        assert_eq!(
+            state.active_inference_load(),
+            0,
+            "between two forwards nothing is in flight"
+        );
+        assert!(
+            !drain(&state).await,
+            "the reply's conversation holds the update to the window"
+        );
+        state.model_process_pool.release_request_kv(reply).await;
+        assert!(drain(&state).await, "the reply is over: the drain is too");
     }
 
     #[test]
