@@ -222,7 +222,8 @@ swarmllm/
 │                 launch (cast + copy); delta_rule.cu — Qwen 3.5's gated delta rule,
 │                 every token of a layer in one launch, NOT bit-identical — and on a card its
 │                 convolution + SiLU in one launch, a taken-back check's replay in two, both
-│                 bit-identical; tree_rank.cu — a
+│                 bit-identical, its gates and q/k's L2 norm one launch each (NOT
+│                 bit-identical); tree_rank.cu — a
 │                 drafter's tree level ranked (log-sum-exp + top 8 a row) in two launches, NOT
 │                 bit-identical. A NEW kernel goes here, not into
 │                 vendor/candle/candle-kernels — that copy exists for patches to upstream kernels and

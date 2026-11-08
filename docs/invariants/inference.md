@@ -6241,6 +6241,82 @@ one launch for both, or a few-rows kernel); the kept rows' copies (5 a layer);
 the read-back (a pick on the card helps greedy requests only — a chat's default
 is temperature 0.7); a check's 13 host → device copies.
 
+### Its gates and q and k's L2 norm, on a card (2026-11-08, FUTURE_WORK #228 (9))
+
+**What they cost**: the same card trace (`~/rig428/nsys1`, a plain step of
+Qwen3.5-4B Q4_K_M, 11.4 ms of card time) put a DeltaNet layer's gates at ~15
+launches — cuBLAS's f32 dot products for `ssm_beta` and `ssm_alpha`
+(`dot_kernel` + `reduce_1Block`, 0.25 ms a step), the sigmoid, the bias add,
+softplus's seven, the multiply by `a` and the stack into `gb` — 0.65 ms a step,
+with cuBLAS's `gemmSN` 0.54 ms more in a 2-row check; and the L2 norm of q and k
+at five launches, ~0.25 ms. Every popular Qwen 3.5 / 3.6 / 3.8 upload the swarm
+holds keeps `ssm_alpha` and `ssm_beta` in f32 (the 4B, Qwen3.6-27B,
+Qwen3.8-27B, Qwen3.6-35B-A3B; the 9B and 0.8B in Q8_0 — their headers,
+2026-11-08).
+
+**Changed**: `DeltaNetWeights::gates` writes [g | beta] in one launch — with f32
+weights and up to 8 rows the projections too (`ssm_gates_project_f32_r1..r8`: a
+block a head and projection, 128 threads summing their stride of `hidden` with
+`fmaf` for every row, a fixed reduction — llama.cpp's `mmvf` keeps such small
+batches off cuBLAS the same way), else after the matmuls (`ssm_gates_f32`, bit
+for bit the composition: candle's sigmoid is `recipg(1 + expg(−x))` with
+`recipg` a double division, which rounds to the float division's answer). The
+delta rule reads the two blocks (`gates` `[2, b, seq, nv]`, beta at `b·seq·nv`)
+where it read the stack, so the stack is gone for every path.
+`l2_norm_on_the_card` is a warp a row (llama.cpp's card L2 norm is one launch a
+row too; it uses `rsqrtf(fmaxf(Σ, eps²))`, we keep `x / sqrt(Σ + eps)`).
+
+**Correctness**: the projected gates differ from cuBLAS's by < 1e-5 and each
+row's are its gates read alone bit for bit; after quantized projections they
+are the composition's bit for bit; the norm is within 1e-6; a layer on the
+card (prompt chunk, steps, a 3-row check) is the processor's to 1e-4 of its
+outputs, with the gates swapped far off (the null control). On real text —
+llama.cpp master's greedy reply to a story and a BST prompt (`ref_generate`,
+96 tokens), teacher-forced, every reply position a decode step
+(`logits_reference_probe`, `~/rig428/probe2`):
+
+| | story top-1 | story cos, worst / median | code top-1 | code cos |
+|---|---|---|---|---|
+| ours, one launch | 95/96 | 0.99390 / 0.999584 | 95/96 | 0.99691 / 0.999160 |
+| ours, composed | 96/96 | 0.99466 / 0.999596 | 96/96 | 0.99582 / 0.999211 |
+| llama.cpp's card build | 94/96 | 0.99445 / 0.999341 | 95/96 | 0.99270 / 0.998784 |
+| llama.cpp's processor, one pass | 94/96 | 1 | 94/96 | 1 |
+
+(cosines against llama.cpp's processor pass.) Each miss of ours is a near tie
+where llama.cpp parts from itself: the story's at a margin of 0.008, where its
+card build and its one-pass processor run pick our token; the code's first
+token at 0.029, where its one-pass run picks ours. Two runs an arm are
+identical. The guessed reply is the reply read one token at a time on both
+uploads (Q8_0 gates: the bit-exact path; f32: the projected one).
+
+**Speed** (`prefill_bench SWARM_BENCH_SPEC_ROUND=1`, the same model and
+settings as the convolution's table, two runs a side alternated,
+`~/rig428/bench4`):
+
+| width | round, composed (ms) | round, one launch (ms) |
+|---|---|---|
+| 1 (a step) | 11.89-12.30 | 10.95-11.12 |
+| 2 | 14.84-15.33 | 13.25-14.14 |
+| 3 | 16.47-17.34 | 14.40-14.76 |
+| 4 | 17.34-17.58 | 14.88-15.54 |
+| 8 | 18.83-19.11 | 16.34-16.67 |
+
+One token at a time in the guessed-reply test, bartowski's upload (the swarm's):
+76.5 → 81.4-82.3 tok/s; llama.cpp master on the same file in the same sitting
+(`llama-bench -fa on -p 0 -n 128 -d 256 -r 5`, `~/rig428/llb2`): 76.7 ± 3.2.
+The drafter rig (`card428.sh`, `WARM_IDLE=20`, Chrome closed, `~/rig428/card14`;
+tok/s with stalls of 1 s or more out, two runs a side):
+
+| reply | ON | ON, composed | OFF | OFF, composed |
+|---|---|---|---|---|
+| palindrome | 135-157 | 129-136 | 94-110 | 100-101 |
+| BST class | 177-198 | 174-175 | 113-115 | 107-117 |
+| story | 67-75 | 69-71 | 82-85 | 76-77 |
+| hash map | 123-132 | 112-113 | 95-98 | 86-90 |
+
+A story with the block drafter stays under plain steps (0.8-0.9×): plain steps
+gained as much.
+
 ## Qwen3-Next: value heads grouped by key head, put in the kernels' order at load (2026-11-01, FUTURE_WORK #390)
 
 **What differs from Qwen 3.5** (llama.cpp master `4b1a27f`: `src/models/qwen3next.cpp`,

@@ -128,6 +128,21 @@ impl QMatMul {
         }
     }
 
+    /// The plain f32 weight `[out, in]` behind a projection the file kept in
+    /// f32 (candle never quantizes one); `None` for any other. What a card's
+    /// one-launch kernels read a small f32 weight from (`qwen35::cuda::gates`).
+    #[cfg(feature = "candle-cuda")]
+    pub(crate) fn dense_f32_weight(&self) -> Option<&Tensor> {
+        match &self.inner {
+            QMatMulInner::Standard(candle_core::quantized::QMatMul::Tensor(t))
+                if t.dtype() == candle_core::DType::F32 =>
+            {
+                Some(t)
+            }
+            _ => None,
+        }
+    }
+
     /// How many outputs this projection produces — the weight's dim 0.
     pub(crate) fn out_features(&self) -> CandleResult<usize> {
         match &self.inner {
