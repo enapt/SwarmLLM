@@ -3087,6 +3087,32 @@ llama.cpp's 168 / 214 / 400 / 624 (`llama-bench` pp4/pp8/pp16, tg) — the test 
 its opt-level 0. A block keeping 6.5 on code therefore pays on a processor at 8-16 rows. **Left in stage 1**: (ii)
 the draft itself — 340-430 ms in the test build for 1.69 GB of weights, two steps; a Q8_0 conversion
 (`convert_hf_to_gguf.py --outtype q8_0`) is the first thing to time, with its acceptance on the fixed reply.
+— Correction: the file measured WAS Q8_0 (1,309 MiB, + a 384 MiB f32 cache = the logged 1,693). What is left of
+the draft on a processor is about a third the TARGET's head over 15 rows (248,320 words): the draft words of #425 (b)
+(`mtp::GuessOver::HotAnd`, 32K hot rows + the conversation's own) apply to it — measure the split of the draft first.
+**Drafters for stage 3's field target** (z-lab, Hugging Face, read 2026-11-08): `Qwen3.6-35B-A3B-DFlash` 0.77 GB bf16
+(6 layers, hidden 2048, 8 target layers 1..37 of 40) — the first, popular (#427 rank 2) and in stage 1's family;
+`Qwen3.6-27B-DFlash` 3.46 GB bf16 (~1.8 GB at Q8_0, under the 2 GiB fetch rule); `gemma-4-26B-A4B-it-DFlash` 0.86 GB
+and `gemma-4-31B-it-DFlash` 3.07 GB (stage 4); `gpt-oss-20b/120b-DFlash`; `Qwen3-Coder-30B-A3B-DFlash`. Stage 3 is
+built on the 9B split across two local nodes (`examples/split_rig.sh`, `RIG_RTT_MS`), then on Qwen3.6-35B-A3B.
+
+**Stage 3 design (2026-11-08).** Prior art (read at vllm `d76fe93`, sglang `cbbc6b6`, llama.cpp `f477f79`):
+vLLM v1 runs DFlash/EAGLE-3 on the LAST pipeline rank (`v1/worker/gpu/pp_utils.py` `broadcast_drafts`); each rank
+captures its own target layers and relays them RAW, one full row per layer per position in the model's dtype
+(`aux_hidden_states_{i}` in `IntermediateTensors`, `eagle3_utils.py`), opt-in per model. SGLang drafts on the last
+stage only and drafts the next chain right after the check ("PP tail-draft", `eagle_worker_v2.py`); its DFlash
+refuses pipeline parallelism. llama.cpp gathers layer inputs as raw f32 across backends. No system shrinks the rows.
+Correction to the design above: #411's drafter runs at the COORDINATOR — the far end only draws a sample per row.
+**Ours**: the drafter runs where the output head is (the tail). Right after its check walks the guesses
+(`SPEC_WALK_AT_TAIL`) it takes in the accepted positions' rows and drafts the next block, and returns 15 token ids
+with the result — nothing else comes back; the round's critical path is the same as a coordinator drafting (round
+trip + both segments' layers + the draft), with the whole head exact. Each earlier segment captures its target
+layers for the forward's positions and the rows ride forward: (3a) raw, as vLLM; (3b) fc is linear with no bias, so
+a segment holding target layers S can send Σ_{i∈S} W_i x_i, ONE row per position instead of |S| (our own — no
+precedent found) — Qwen3.5-9B with 4 target layers before the tail, 16 rows: 524 KB a round raw f16, 131 KB summed.
+The anchor's embedding needs the target's token table at the tail: (3a) loads it there; (3c) its first 32K rows and
+the conversation's own, skipping a round whose anchor is past them (draft words' rule). A new feature bit gates the
+trailer and the tail's drafting; an older tail gets today's round. Built and measured on the rig before any field use.
 
 #### #318 — A large model split across machines is too slow to use
 `P2` · perf-split · **OPEN** — 2026-10-20 · plan: `docs/plans/large_model_splits.md` · draws on #134, #145, #148, #149, #192
