@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #431**). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #438**). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -3059,7 +3059,7 @@ vLLM and SGLang run it) or reads them one machine at a time; (c) the report: a s
 "has gone".
 
 #### #428 — Every popular model guesses 4-5 tokens a round trip: a DFlash drafter at the split's far end
-`P1` · perf-split · **OPEN** (stage 1 built and measured: the reply is exact, acceptance matches llama.cpp's; stage 3 built and measured on the rig — a split over 130 ms, processors: code 1.6-1.8×, a story 1.10-1.15×, the same replies; on a card, whole: code 1.4-1.6×, a story 0.91× — (c2), (c3); stage 6 built: the drafter fetched by a pin; next: the field model, Qwen3.6-35B-A3B) — 2026-11-08 · history: #427 (the measurement), #425 (the guess head), #411 (the flow)
+`P1` · perf-split · **OPEN** (stage 1 built and measured: the reply is exact, acceptance matches llama.cpp's; stage 3 built and measured on the rig — a split over 130 ms, processors: code 1.6-1.8×, a story 1.10-1.15×, the same replies; on a card, whole: code 1.4-1.6×, a story 0.89-0.92× — (c2) done, the block's first rounds on prose, (c3); stage 6 built: the drafter fetched by a pin; next: the field model, Qwen3.6-35B-A3B) — 2026-11-08 · history: #427 (the measurement), #425 (the guess head), #411 (the flow)
 
 **What a user gets today** (#427's table, 2026-11-08 01:00-01:30Z, live node, one ask at a time): every split of
 the popular models decodes ONE token a round trip — Gemma 4 31B here↔Australia 1.7-1.9 tok/s, Gemma 4 26B-A4B
@@ -3193,6 +3193,21 @@ story's residual, 0.91×: the block's rounds on prose write ~70 tokens/s where t
 (c3) the 8-row checks part from one-at-a-time where llama.cpp's processor scores the pick 0.8-1.0
 under its own (palindrome token 60) — run llama.cpp's card build at a batch of 8 there before calling it a near tie.
 **A round's cost, 2026-11-08**: a two-guess check cost 1.42-1.51× a step (llama.cpp's 2-row forward 1.02×) — the forward +2.9 ms (2-row matmuls, the f32 alpha/beta projections, copies), the take-back 1.7, the read-back 0.55 a row; the convolution in one launch and the take-back in two (#228 (9)) bring it to 1.23-1.28× and a plain step ~6% faster. The drafter rig (run 13, two runs a side): a BST class 135-163 → 167-172 tok/s, a hash map 103-112 → 116-126, the palindrome and the story inside the spread (the story with the block 66-73 against 73-77 without — still ~0.9×). Then the gates and the L2 norm in one launch each: a step 12.0 → 11.0 ms; the rig (run 14): palindrome 129-136 → 135-157, a BST class 174-175 → 177-198, a hash map 112-113 → 123-132 with the block; plain stories 76-77 → 82-85, so the block's story stays 0.8-0.9× of plain. Left: the 2-row matmuls, the kept rows' copies, the read-back; the story's residual is now the block's own rounds on prose.
+**(c2) done 2026-11-08 (night)**: a check on one computer is priced by its WIDTH (`CheckCost::width_price`, each width's
+recent median; the line only for a width not yet timed twice) — the line through the block's wide checks had priced the
+head's narrow ones ~2.4 ms dear, and it was declined 47-67 rounds of a story against 11-29 alone. Card run 16: the head
+declined 8-18, a BST class 190-193 tok/s (176-183 before), a hash map 118-124, but the story still 77.0 against 83.5-86.7
+OFF (0.89-0.92×). So the story's residual is the BLOCK's first rounds on prose — 12-15 rounds keeping ~1 of 5 guesses
+(~27 ms a round for ~1.7 tokens, against ~11 ms a token from the head) before its record sets it aside. Next for it: start
+a reply's block at a narrow count until its record says it pays (a probe at the full block costs the most where it keeps
+the least), or let the head go first on a reply whose prompt asks for prose.
+**On the processor, whole (2026-11-08 night)**: the block's guesses now read the guess head's hot rows and the
+conversation's own words (#425 (b)): a 15-guess draft 155-172 → 76-99 ms on Qwen3.5-4B, a BST class +15%, a hash map
++22% against reading every word (`docs/invariants/inference.md` § "On the processor: the guesses read the hot rows").
+⚠ **But the drafter ON ran 10-20% under OFF on every prompt there** — each probe checks the whole block, ~400 ms for 16
+positions on a processor against a ~60 ms step, ~4 a reply. Must be fixed before a release ships the pin (stage 6) to
+processor-only machines: judge a probe without checking it — under greedy decoding the guesses a check would have kept
+are read exactly off the tokens the reply commits next.
 **Stage 6 — built 2026-11-08** (`model::huggingface::block_drafter`): a node holding a model from its first part to its
 head fetches that model's drafter once, from a PINNED table — the target's `general.name` folded, its architecture
 and width name one repo, file, size and SHA-256 (Anbeeld's Q8_0 conversions: Qwen3.6-35B-A3B and -27B, Qwen3.5-4B,
@@ -3206,6 +3221,56 @@ drafter on its own — llama.cpp takes `-md`, LM Studio a manual pick, SGLang/vL
 digest (`verifyBlob`); #422 fetches a vision encoder by its origin's listed SHA-256 — the pin follows those, and the
 loader's own checks (`dflash` arch, width, target layers) plus the set-aside (`Delivered`) are what stand behind a
 wrong or weak pairing.
+
+#### #435 — A split's far end sends the block drafter one row a position, not one per layer it reads
+`P2` · perf-split · **OPEN** (designed 2026-11-08, not built) · history: #428 stage 3 (the rows come back)
+A DFlash drafter beside the coordinator reads the target's outputs at ~5 layers spread through depth
+(`dflash.target_layers`), so each check's answer carries, for every kept position, one hidden-width row per target
+layer the far segment runs (`LayerResult::block_rows`, `split_block_rows`). The drafter's fusion is LINEAR before its
+norm — `hidden_norm(fc(concat(rows)))`, `fc` a bias-free matrix — so `fc(concat) = Σ_l W_l · row_l` exactly: the far
+end can multiply its own rows by its slice of `fc` and send ONE hidden-width partial sum per position, which the
+coordinator adds to its own layers' share before the norm. The bytes the far end sends back for the drafter fall by the
+number of target layers it runs (3-4× on Qwen3.6-27B/35B-A3B's splits), exact up to summation order. It matters where
+the far end's UPLINK is thin: 8 kept positions × 3 layers × 5,120 × 2 bytes is ~250 KB a round on the 27B, ~100 ms
+at 20 Mbit/s, against ~33 ms for the partial. Needs: the far end holds its `fc` slice (tens of MB, cut from the pinned
+drafter by the coordinator and sent once per conversation, or fetched by the same pin), a new feature bit and a
+`block_rows` variant carrying a partial (gated at the sender, `architecture.md` § "Additive Protocol Evolution"), and
+the order of the sum fixed so a reply is the same at any split point. **Prior art: none found** — searched
+2026-11-08: arXiv/Semantic Scholar for split computing / bottleneck injection (compress the activation at the split
+point — lossy, learned), SPD 2605.30852 (pipeline-parallel drafter fusing features from stages: moves the features
+whole), DSD 2511.11733, WANSpec 2602.18931, PipeSpec, EAGLE-3 multi-layer fusion (all move hidden states unreduced);
+none pushes a feature-fusing drafter's first linear layer across the boundary. Measure first on a real thin uplink
+(the field's residential peers): the rows' bytes per round against the round trip, from `served_us` and the payload size.
+
+#### #436 — A block drafter's spare: the next block drafted before the check returns, from features this side can make
+`P2` · perf-split · **OPEN** (designed 2026-11-08, not built) · history: #428, #134 (b) (the flow), #366 (4) (a far run's stand-in)
+Over a long link a split checks once a round trip; a small drafter's tree already FLOWS (#134 (b)) and streams
+spares, but a block drafter needs the target's features at the positions it conditions on, and the far segment's
+layers' rows for block n arrive only with check n's answer. This side can make them: its OWN target layers' rows for
+block n exist the moment it sends the check, and the far layers' rows can be stood in for by a closed-form ridge map
+from this side's boundary state, fitted online from the rows every answer already brings back (the dual kernel ridge
+`split::RunStandIn` fits for a far run today, #366 (4)). So with each check send a SPARE: the next block drafted for the
+likeliest (kept count, bonus token) outcomes from stood-in features, run by the far end only for the outcome its walk
+reaches — up to two blocks' tokens per round trip. Prior art: SSD/Saguaro 2603.03251 precomputes the next drafts for
+likely (accepted, bonus) outcomes during verification — with a drafter that reads no target features; DPara
+2609.27396 drafts in parallel from feature-less anchors after fine-tuning; SPD 2605.30852 measured ~5% acceptance lost
+when its drafter fused pre-step (earlier) features. **Not found** (searched 2026-11-08): a FEATURE-conditioned drafter
+drafting past the verified frontier from imputed far-stage features. First measure: the block's acceptance with its
+far layers' rows replaced by the ridge map's, offline over a reply (`examples/` probe beside `skip_agreement_probe.rs`).
+
+#### #437 — A split checks a TREE from the block drafter, and the recurrent layers walk it
+`P2` · perf-split · **OPEN** (researched 2026-11-08, not built) · history: #428, #134 (trees for small drafters)
+A block drafter's one forward gives a distribution at every position; DDTree (arXiv 2604.12989) builds a tree from
+those marginals best-first (a node's score the sum of its path's log-probabilities, budget B, parents before children,
+each row seeing its parent's row and itself) and checks it in one forward: on Qwen3.6-27B a chain of 16 keeps τ 6.82,
+DDTree-64 8.49, Trees-from-Marginals-64 9.69 (2607.06763). Over a split a check costs a round trip whatever its rows,
+so a 64-row tree costs little more than a 16-row chain (SpecExec's argument). The obstacle here is Qwen 3.5/3.6's
+DeltaNet layers — a recurrent state per request reads no tree (`SplitModel::draft_tree_refusal`). **Prior art solves
+it**: Trees from Marginals runs an ancestor-masked chunked delta rule and replays the accepted path afterwards;
+TreeWY 2608.20961 (a vLLM fork) does the same with a WY form; Twig/Bole 2608.01651 also carry the convolution through
+parent pointers; SpecLA 2607.16673; STree 2505.14969 for Mamba-2. Take: the ancestor mask over the delta rule (our one
+kernel, `qwen35::delta_rule_into`, gains a parent-pointer mode), the accepted path replayed by the existing replay
+(`SsmState::rewind_to` already replays kept rows). Build after #428's field model runs on two real peers.
 
 #### #318 — A large model split across machines is too slow to use
 `P2` · perf-split · **OPEN** — 2026-10-20 · plan: `docs/plans/large_model_splits.md` · draws on #134, #145, #148, #149, #192

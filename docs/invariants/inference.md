@@ -8632,6 +8632,22 @@ graph per length up front (arXiv 2605.00342) — FUTURE_WORK #425 (b).
 **What a round costs beyond a step**, and the two parts made smaller: § "Qwen 3.5's delta rule is ONE op per layer" › "Its convolution, and a taken-back check, on a card".
 
 
+### On the processor: the guesses read the hot rows (2026-11-08, #425 (b))
+
+A block's guesses are read through the target's output head, one row a guess. On the processor the head is most
+of a draft — 248,320 words × the model's width for every row: Qwen3.5-4B whole, a 15-guess draft cost 155-172 ms
+reading every word. Where the model's guess head keeps the hot rows (`MtpHead::hot`, the first
+`DRAFT_HOT_ROWS` of the head, a byte-pair tokenizer's most frequent first) and the conversation's own words
+(`model_worker::DraftWords`), the block's guesses read them through the same picker (`SplitModel::mtp_guesses`,
+all rows in ONE product): 76-99 ms. The check still reads every word, so a guess past them is only lost, never a
+different reply. Card-free rig (`~/rig428/cpu1`, `gpu_layers = 0`, two runs a side, 160 greedy tokens): a BST class
+15.0-16.0 tok/s against 13.2-13.5 reading every word, a hash map 14.8-15.6 against 12.1-12.6, a story 10.8-10.9
+against 10.3, the palindrome 13.9-14.5 against 15.6-15.7 (there the every-word arm let the block take the reply).
+⚠ **The same run put the drafter ON 10-20% under OFF on every prompt** (OFF: 15.4-16.1, 17.9-18.3, 12.2-13.1,
+17.4-18.2): its probes check the whole block — a processor check of 16 positions costs ~400 ms against a step's
+~60 — and every reply paid ~4 (FUTURE_WORK #428). Prior art: FR-Spec (arXiv 2502.14856) — a frequency-ranked
+subset of the draft's vocabulary keeps 95.4% of acceptance at 32k words on Qwen-2-7B.
+
 ### Where the drafter comes from: a pin (stage 6, 2026-11-08)
 
 **What it does.** `model::huggingface::block_drafter::fetch_for_models_held_end_to_end`, spawned beside each

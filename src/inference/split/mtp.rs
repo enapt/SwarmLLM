@@ -355,31 +355,46 @@ impl SplitModel {
     /// only in the rows read. No closure here may hold `self`: on a card build
     /// a `SplitModel` is not `Sync` (gotcha #912).
     pub(crate) fn mtp_guess(&self, row: &Tensor, over: GuessOver<'_>) -> Result<u32, SwarmError> {
+        self.mtp_guesses(row, over)?
+            .first()
+            .copied()
+            .ok_or_else(|| SwarmError::Internal("next-token head: no row to read".into()))
+    }
+
+    /// The best word for each of `rows` (normed, `[.., hidden]`, one guess
+    /// a row), over the words `over` names — [`Self::mtp_guess`] for one row,
+    /// and a block drafter's guesses on the processor (#428): its rows read
+    /// the hot rows in ONE product, as the head's guess reads them.
+    pub(crate) fn mtp_guesses(
+        &self,
+        rows: &Tensor,
+        over: GuessOver<'_>,
+    ) -> Result<Vec<u32>, SwarmError> {
         let err = |what: &'static str| {
             move |e: candle_core::Error| {
                 SwarmError::Internal(format!("next-token head {what}: {e}"))
             }
         };
-        let flat = |t: Tensor| {
-            t.flatten_all()
-                .and_then(|t| t.to_dtype(DType::F32))
-                .and_then(|t| t.to_vec1::<f32>())
-        };
-        let row = row
+        let hidden = rows.dim(D::Minus1).map_err(err("rows"))?;
+        let rows = rows
             .to_device(&self.device)
+            .and_then(|r| r.reshape(((), hidden)))
             .map_err(err("to the output head"))?;
+        let table = |t: Tensor| t.to_dtype(DType::F32).and_then(|t| t.to_vec2::<f32>());
         let GuessOver::HotAnd(words) = over else {
-            let logits = self.logits_from(&row)?;
-            return Ok(crate::inference::sampling::argmax(
-                &flat(logits).map_err(err("logits"))?,
-            ));
+            let logits = self.logits_from(&rows)?;
+            return Ok(table(logits)
+                .map_err(err("logits"))?
+                .iter()
+                .map(|row| crate::inference::sampling::argmax(row))
+                .collect());
         };
         let hot = self
             .mtp
             .as_ref()
             .and_then(|h| h.hot.as_ref())
             .ok_or_else(|| SwarmError::Internal("next-token head: no hot rows".into()))?;
-        let mut logits = hot.forward(&row).map_err(err("hot rows"))?;
+        let mut logits = hot.forward(&rows).map_err(err("hot rows"))?;
         let n = logits.dim(D::Minus1).map_err(err("hot rows"))?;
         if let Some(s) = &self.suppressed_logits {
             logits = s
@@ -388,9 +403,9 @@ impl SplitModel {
                 .and_then(|s| logits.broadcast_add(&s))
                 .map_err(err("suppressed words"))?;
         }
-        let mut scores = flat(logits).map_err(err("hot rows"))?;
-        if let Some((rows, ids)) = words {
-            let mut own = rows.forward(&row).map_err(err("own words"))?;
+        let mut scores = table(logits).map_err(err("hot rows"))?;
+        if let Some((own_rows, ids)) = words {
+            let mut own = own_rows.forward(&rows).map_err(err("own words"))?;
             if let Some(s) = &self.suppressed_logits {
                 own = Tensor::new(ids, s.device())
                     .and_then(|i| s.index_select(&i, 0))
@@ -398,15 +413,22 @@ impl SplitModel {
                     .and_then(|s| own.broadcast_add(&s))
                     .map_err(err("suppressed words"))?;
             }
-            scores.extend(flat(own).map_err(err("own words"))?);
+            for (row, own) in scores.iter_mut().zip(table(own).map_err(err("own words"))?) {
+                row.extend(own);
+            }
         }
-        let best = crate::inference::sampling::argmax(&scores) as usize;
-        match words {
-            Some((_, ids)) if best >= n => ids.get(best - n).copied().ok_or_else(|| {
-                SwarmError::Internal("next-token head: a word past its rows".into())
-            }),
-            _ => Ok(best as u32),
-        }
+        scores
+            .iter()
+            .map(|row| {
+                let best = crate::inference::sampling::argmax(row) as usize;
+                match words {
+                    Some((_, ids)) if best >= n => ids.get(best - n).copied().ok_or_else(|| {
+                        SwarmError::Internal("next-token head: a word past its rows".into())
+                    }),
+                    _ => Ok(best as u32),
+                }
+            })
+            .collect()
     }
 
     /// One forward of the head over `tokens`, each beside the hidden state of

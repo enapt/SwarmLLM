@@ -6475,6 +6475,32 @@ worth reading:
   not two running, and two fitted the card's checks at 214 ms against 19. Every
   guesser declined at that price, each probe was judged at it and never paid,
   and the story ran without guessing to its end (run 6, arm 3).
+- **A check is priced by its WIDTH** (`CheckCost::width_price`, one computer
+  only: the median of that width's last 8 fitted checks once 2 are timed, a
+  held-back stall not among them, else the line). One line through every width
+  priced a card's narrow checks from its wide ones: the block's 8-position
+  checks beside the head's 3-4 read 15.2 + 0.52 a position, the head's checks
+  priced ~16.8 ms where they cost 14.4-15.3, and the head — judged by what it
+  writes at that price — was declined 47-67 rounds of a story against 11-29
+  without the block (card runs 15). A card's check is one recorded graph per
+  width and its cost a step function of the width, not a line: the vendored
+  matmul sends a k-quant's 4 rows and more to MMQ (`mmq_few_rows_line`), as
+  llama.cpp's build switches at `MMVQ_MAX_BATCH_SIZE`; vLLM pads a batch to a
+  recorded size and is costed per size. Priced per width (card run 16, the
+  closing line's `widths`, e.g. `2:14.7 3:16.5 4:17.2 5:16.4 8:17.9`): the head
+  was declined 8-18 rounds of a story, a BST class 190-193 tok/s against
+  176-183 before, a hash map 118-124 against 115-125 — and the story stayed
+  0.89-0.92× of the drafter's absence (77.0 against 83.5-86.7): its residual is
+  the block's own first rounds on prose (12-15 rounds keeping ~1 of 5 guesses
+  before its record sets it aside), not the head. Test
+  `a_width_timed_here_is_priced_at_its_own_cost`.
+- **A block round is charged its whole time** (`BlockGuesses::rest_ms`: the
+  rows taken in, a refused guess's take-back, the bookkeeping), weighed against
+  a plain round's whole time (`LocalSpec::plain_round_per_ms`). Measured small on
+  the card — 0.2-0.7 ms a round, a plain round's 0.1-0.4 — so it moves little;
+  it is there so the two records are kept on the same terms. A/B
+  `SWARMLLM_BLOCK_CHARGE=draft` (card run 15: the two arms within each other's
+  spread).
 
 Tests: `a_guesser_is_set_aside_only_by_a_record_another_way_beats`,
 `a_faster_step_starts_a_stale_figure_over`,

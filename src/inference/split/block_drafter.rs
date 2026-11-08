@@ -647,6 +647,7 @@ impl BlockDrafter {
         guesses: usize,
         kv_reserve: usize,
         for_the_owner: bool,
+        over: super::GuessOver<'_>,
     ) -> Result<Vec<u32>, SwarmError> {
         let err = |what: &'static str| {
             move |e: candle_core::Error| SwarmError::Internal(format!("block drafter {what}: {e}"))
@@ -706,6 +707,17 @@ impl BlockDrafter {
         }
         cache.len = start;
         let out = out?;
+        // On the processor the guesses read the hot rows and the
+        // conversation's own words (#425 (b), FR-Spec), where the model's
+        // head keeps them: there the head read for every row was most of a
+        // draft (247 ms at 15 guesses on a 9B). The check reads every word,
+        // so the reply is the same; only a guess past them is lost.
+        if matches!(over, super::GuessOver::HotAnd(_))
+            && target.output.is_some()
+            && target.mtp_hot_rows().is_some()
+        {
+            return target.mtp_guesses(&out, over);
+        }
         let logits = match (&target.output, &target.drafter_head) {
             (None, Some(head)) => head.forward(&out).map_err(err("output head"))?,
             _ => target.logits_from(&out)?,

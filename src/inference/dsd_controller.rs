@@ -108,6 +108,9 @@ pub struct CheckCost {
     /// Fits started over by a check far under them — see
     /// [`Self::record_trusting_a_faster`].
     started_over: u32,
+    /// What each width cost lately (index = positions − 1), for checks that
+    /// stay on this computer — see [`Self::width_price`].
+    by_width: Vec<RecentMedian>,
 }
 
 /// The most [`best_gamma_for_check`] moves γ in one round: far enough to
@@ -147,6 +150,7 @@ impl CheckCost {
             reach,
             least_check_ms: None,
             started_over: 0,
+            by_width: Vec::new(),
         }
     }
 
@@ -231,6 +235,13 @@ impl CheckCost {
     }
 
     fn fit_round(&mut self, positions: u32, ms: f64) {
+        if self.reach == CheckReach::Here && (1..=Self::WIDTHS_PRICED).contains(&positions) {
+            let at = positions as usize - 1;
+            if self.by_width.len() <= at {
+                self.by_width.resize_with(at + 1, RecentMedian::default);
+            }
+            self.by_width[at].record_trusting_a_faster(ms);
+        }
         let d = Self::DECAY;
         let x = f64::from(positions);
         self.w = self.w * d + 1.0;
@@ -339,11 +350,59 @@ impl CheckCost {
     /// optimism where a cost is unknown, as UCB prices an arm not yet tried
     /// (BanditSpec, Hou et al., ICML 2025, picks γ that way); a check that
     /// crosses to a peer ([`Self::floor_ms`]) is priced by its fit alone.
+    ///
+    /// A width timed [`Self::WIDTH_SAMPLES_TRUSTED`] times here is priced at
+    /// its own recent median instead ([`Self::width_price`]).
     pub fn predict_beside_a_step(&self, positions: u32, step_ms: f64) -> Option<f64> {
         if self.reach != CheckReach::Here {
             return self.predict(positions);
         }
-        self.predict_through_a_step(positions, step_ms)
+        self.width_price(positions)
+            .or_else(|| self.predict_through_a_step(positions, step_ms))
+    }
+
+    /// The widest check whose own cost is kept ([`Self::width_price`]).
+    pub const WIDTHS_PRICED: u32 = 64;
+    /// Checks of one width timed before its own median prices it.
+    pub const WIDTH_SAMPLES_TRUSTED: usize = 2;
+
+    /// What a check of `positions` cost lately on this computer — the median
+    /// of its last [`RecentMedian::WINDOW`] fitted checks (a held-back stall is
+    /// not one; a sample under [`RecentMedian::FASTER`] of it starts it over) —
+    /// once [`Self::WIDTH_SAMPLES_TRUSTED`] have been timed; `None` for a check
+    /// that crosses to a peer, whose round trip varies both ways and is pooled
+    /// by the line.
+    ///
+    /// One line through every width priced a card's narrow checks from its
+    /// wide ones. A card's check is one recorded graph per width, and its cost
+    /// is a step function of the width, not a line: the vendored matmul sends
+    /// a k-quant's products of 4 rows and more to llama.cpp's MMQ and fewer to
+    /// the one-row kernels (`mmq_few_rows_line`), as llama.cpp's own build
+    /// switches at `MMVQ_MAX_BATCH_SIZE`; vLLM likewise pads a batch to a
+    /// recorded size and is costed per size. With the block drafter's wide
+    /// checks beside the guess head's 3-4 positions (Qwen3.5-4B, RTX 3070,
+    /// 2026-11-08) the line read 15.2 + 0.52 a position, the head's checks
+    /// priced ~16.8 ms against the 14.4-15.3 its line read without the block,
+    /// and the head — judged by what it writes at that price — was declined
+    /// 47-67 rounds of a story against 11-29: the story ran 72.9-76.2 tok/s
+    /// with the drafter against 82.8 without it.
+    pub fn width_price(&self, positions: u32) -> Option<f64> {
+        if self.reach != CheckReach::Here {
+            return None;
+        }
+        let at = usize::try_from(positions).ok()?.checked_sub(1)?;
+        self.by_width
+            .get(at)
+            .filter(|m| m.len() >= Self::WIDTH_SAMPLES_TRUSTED)
+            .and_then(RecentMedian::median)
+    }
+
+    /// Every width priced by its own median ([`Self::width_price`]), as
+    /// `(positions, ms)`, for the request's closing line.
+    pub fn width_prices(&self) -> Vec<(u32, f64)> {
+        (1..=u32::try_from(self.by_width.len()).unwrap_or(u32::MAX))
+            .filter_map(|p| self.width_price(p).map(|ms| (p, ms)))
+            .collect()
     }
 
     /// [`Self::predict_beside_a_step`] at any reach, for a step timed over
@@ -1608,5 +1667,45 @@ mod tests {
             !check.slope_is_measured(),
             "twelve checks of one width later, the other is forgotten"
         );
+    }
+
+    /// A card's check costs what its width's recorded graph costs — a step
+    /// function (the matmul kernel changes at 4 rows), not a line — so a
+    /// width timed here is priced at its own median. One line through narrow
+    /// and wide checks priced the guess head's narrow ones from the block
+    /// drafter's wide ones (#428, 2026-11-08).
+    #[test]
+    fn a_width_timed_here_is_priced_at_its_own_cost() {
+        let record = |check: &mut CheckCost| {
+            for _ in 0..4 {
+                check.record_with(3, 12.0, true);
+                check.record_with(16, 20.0, true);
+                check.record_with(4, 20.0, true);
+            }
+        };
+        let mut here = CheckCost::for_a_plan(CheckReach::Here);
+        record(&mut here);
+        let line = here.predict(3).unwrap();
+        assert!(
+            line > 15.0,
+            "the line prices the narrow check from the wide ones: {line}"
+        );
+        assert_eq!(here.predict_beside_a_step(3, 10.0), Some(12.0));
+        assert_eq!(here.predict_beside_a_step(16, 10.0), Some(20.0));
+        assert_eq!(here.width_prices(), vec![(3, 12.0), (4, 20.0), (16, 20.0)]);
+        // A width timed once is still the line's.
+        here.record_with(8, 20.0, true);
+        assert_eq!(here.width_price(8), None);
+        // A stall held back is no width's sample.
+        here.record_with(3, 200.0, true);
+        assert_eq!(here.width_price(3), Some(12.0));
+
+        // A check that crosses to a peer is pooled by the line.
+        let mut far = CheckCost::for_a_plan(CheckReach::Peer {
+            round_trip_ms: Some(1),
+        });
+        record(&mut far);
+        assert_eq!(far.width_price(3), None);
+        assert_eq!(far.predict_beside_a_step(3, 10.0), far.predict(3));
     }
 }

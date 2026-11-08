@@ -3714,6 +3714,11 @@ struct LocalSpec {
     /// Every guess checked, as before 2026-10-25 (`SWARMLLM_LOCAL_GUESS_GAMMA=fixed`).
     fixed: bool,
     step_ms: crate::inference::dsd_controller::RecentMedian,
+    /// A plain round's time outside its forward: the guessers' take-ins, the
+    /// bookkeeping — what a plain step costs beyond [`Self::step_ms`] as the
+    /// reply runs, so a block round's whole time is weighed against a plain
+    /// round's whole time ([`BlockGuesses::rest_ms`]).
+    plain_rest_ms: crate::inference::dsd_controller::RecentMedian,
     /// Whether the reply is the owner's: which of the model's remembered
     /// plain steps it starts from and adds to ([`Self::with_remembered_step`]).
     owner: bool,
@@ -4283,6 +4288,16 @@ struct BlockGuesses {
     acceptance: crate::inference::dsd_controller::AcceptanceEstimate,
     /// One round's draft time — one forward, whatever its count.
     draft_ms: crate::inference::dsd_controller::RecentMedian,
+    /// A block round's time outside its check and its draft: the rows taken
+    /// in, a refused guess's take-back, the bookkeeping. Charged to the
+    /// block's record with them, as a plain round's is to the plain step's
+    /// ([`LocalSpec::plain_round_per_ms`]), so the two are weighed on the same
+    /// terms. Small on a card — 0.2-0.6 ms a round against 0.1-0.4 for a plain
+    /// one (Qwen3.5-4B, RTX 3070, 2026-11-08); the story the block slowed
+    /// there was the check's price, not this (`CheckCost::width_price`).
+    rest_ms: crate::inference::dsd_controller::RecentMedian,
+    /// Making a round's context rows, every round the block is attached.
+    upkeep_ms: crate::inference::dsd_controller::RecentMedian,
     /// What its rounds have written a millisecond ([`LocalSpec::next`]).
     delivered: crate::inference::dsd_controller::Delivered,
     /// Rounds set aside because a plain step or the head was writing faster.
@@ -4314,6 +4329,8 @@ impl BlockGuesses {
             for_the_owner: kv_store.serves_the_owner(req_id_str),
             acceptance: crate::inference::dsd_controller::AcceptanceEstimate::recent(),
             draft_ms: Default::default(),
+            rest_ms: Default::default(),
+            upkeep_ms: Default::default(),
             delivered: Default::default(),
             outpaced: 0,
             rounds: 0,
@@ -4434,6 +4451,7 @@ impl BlockGuesses {
         next_token: u32,
         index_pos: usize,
         gamma: usize,
+        over: crate::inference::split::GuessOver<'_>,
     ) -> Result<Vec<u32>, SwarmError> {
         if self.next_pos != index_pos {
             return Err(SwarmError::Internal(format!(
@@ -4457,6 +4475,7 @@ impl BlockGuesses {
             gamma,
             self.kv_reserve,
             self.for_the_owner,
+            over,
         )
     }
 }
@@ -4705,7 +4724,13 @@ async fn handle_block_draft(
         }
         let started = std::time::Instant::now();
         let gamma = (d.gamma as usize).min(g.most(model));
-        let guesses = g.guesses(model, d.token, d.index_pos as usize, gamma)?;
+        let guesses = g.guesses(
+            model,
+            d.token,
+            d.index_pos as usize,
+            gamma,
+            crate::inference::split::GuessOver::Everything,
+        )?;
         g.draft_ms.record(started.elapsed().as_secs_f64() * 1000.0);
         g.rounds += 1;
         g.proposed += guesses.len() as u64;
@@ -5318,6 +5343,7 @@ impl LocalSpec {
             widest,
             fixed,
             step_ms: Default::default(),
+            plain_rest_ms: Default::default(),
             owner: false,
             check: crate::inference::dsd_controller::CheckCost::for_a_plan(
                 crate::inference::dsd_controller::CheckReach::Here,
@@ -5467,6 +5493,15 @@ impl LocalSpec {
         self.step_ms.median().map(|ms| 1.0 / ms.max(0.1))
     }
 
+    /// A plain ROUND's tokens per millisecond: its step and what the round
+    /// took beside it ([`Self::plain_rest_ms`]) — what a block round's whole
+    /// time is weighed against.
+    fn plain_round_per_ms(&self) -> Option<f64> {
+        self.step_ms
+            .median()
+            .map(|ms| 1.0 / (ms + self.plain_rest_ms.median().unwrap_or(0.0)).max(0.1))
+    }
+
     /// What a round's check costs, for a guesser's record: the price the
     /// check is fitted at for its width, so one stalled by the machine (under
     /// WSL2 a growing card pool stalls seconds, gotcha #883) is not charged
@@ -5587,8 +5622,22 @@ impl LocalSpec {
             format!("{f:.1} + {s:.2}/position")
         });
         let started_over = self.check.started_over();
+        let widths = self.check.width_prices();
+        let widths = if widths.is_empty() {
+            "-".to_string()
+        } else {
+            widths
+                .iter()
+                .map(|(p, ms)| format!("{p}:{ms:.1}"))
+                .collect::<Vec<_>>()
+                .join(" ")
+        };
         let step = self
             .step_ms
+            .median()
+            .map_or("-".to_string(), |m| format!("{m:.1}"));
+        let plain_rest = self
+            .plain_rest_ms
             .median()
             .map_or("-".to_string(), |m| format!("{m:.1}"));
         let card = self.card.as_ref().map_or(String::new(), |c| {
@@ -5647,7 +5696,7 @@ impl LocalSpec {
         });
         let block = self.block.as_ref().map_or(String::new(), |b| {
             format!(
-                " block rounds {} guessed {} kept {} declined {} outpaced {} probes {} draft {} ms alpha {:.2} writes {}/s{}",
+                " block rounds {} guessed {} kept {} declined {} outpaced {} probes {} draft {} ms rest {} ms upkeep {} ms alpha {:.2} writes {}/s{}",
                 b.rounds,
                 b.proposed,
                 b.accepted,
@@ -5657,6 +5706,12 @@ impl LocalSpec {
                 b.draft_ms
                     .median()
                     .map_or("-".to_string(), |ms| format!("{ms:.1}")),
+                b.rest_ms
+                    .median()
+                    .map_or("-".to_string(), |ms| format!("{ms:.1}")),
+                b.upkeep_ms
+                    .median()
+                    .map_or("-".to_string(), |ms| format!("{ms:.2}")),
                 b.acceptance.alpha(),
                 b.delivered
                     .per_ms()
@@ -5667,7 +5722,7 @@ impl LocalSpec {
             )
         });
         format!(
-            "rounds {} accepted {} rejected {} declined {} probes {} one-off {} earlier {} step {step} ms check {fit} ms started over {started_over} alpha {:.2} next {}{card}{mtp}{block}",
+            "rounds {} accepted {} rejected {} declined {} probes {} one-off {} earlier {} step {step} ms rest {plain_rest} ms check {fit} ms widths {widths} started over {started_over} alpha {:.2} next {}{card}{mtp}{block}",
             self.rounds,
             self.accepted,
             self.rejected,
@@ -5704,6 +5759,7 @@ impl LocalSpec {
         if let Some(tok) = self.pending.pop_front() {
             return Ok(tok);
         }
+        let round_started = std::time::Instant::now();
         // Until the processor's decode width has settled, step plainly: the
         // calibration learns only from plain steps, and a step taken at a width
         // under trial is not the step the guesses are priced against
@@ -5796,7 +5852,11 @@ impl LocalSpec {
         // rounds, as before.
         // Prior art: BanditSpec (Hou et al., ICML 2025) chooses by confidence
         // bounds; a mean of all-or-nothing rounds has none worth comparing.
-        let beside_block = [self.plain_per_ms()];
+        let beside_block = [if block_charge_whole_round() {
+            self.plain_round_per_ms()
+        } else {
+            self.plain_per_ms()
+        }];
         if block_due {
             let mut gamma = self.block_guess_count(block_room);
             if !self.fixed
@@ -5825,9 +5885,17 @@ impl LocalSpec {
             }
             if let Some(block) = self.block.as_mut().filter(|_| gamma > 0) {
                 let started = std::time::Instant::now();
+                // The words the guess head reads on the processor (#425 (b)).
+                let words = self.mtp.as_mut().and_then(|m| m.words.as_mut());
                 let guessed = tokio::task::block_in_place(|| {
                     let _g = crate::inference::attn_kernel::ForceStandardAttnGuard::new(force_attn);
-                    block.guesses(model, next_token, *index_pos, gamma)
+                    let over = match words {
+                        Some(w) if !w.whole => {
+                            crate::inference::split::GuessOver::HotAnd(w.rows(model)?)
+                        }
+                        _ => crate::inference::split::GuessOver::Everything,
+                    };
+                    block.guesses(model, next_token, *index_pos, gamma, over)
                 });
                 match guessed {
                     Ok(guesses) if !guesses.is_empty() => {
@@ -5998,10 +6066,12 @@ impl LocalSpec {
             }
         }
         if let Some(block) = self.block.as_mut().filter(|b| b.active()) {
-            if let Err(e) =
-                block.take_the_round(model, *index_pos, round.committed, round.caught.as_ref())
-            {
-                block.stop(e.to_string());
+            let started = std::time::Instant::now();
+            match block.take_the_round(model, *index_pos, round.committed, round.caught.as_ref()) {
+                Ok(()) => block
+                    .upkeep_ms
+                    .record(started.elapsed().as_secs_f64() * 1000.0),
+                Err(e) => block.stop(e.to_string()),
             }
         }
         *index_pos += round.committed;
@@ -6044,7 +6114,24 @@ impl LocalSpec {
         // A round's record charges the check's fitted price and the guesses'
         // usual time; a one-off forward's round is not the guesser's.
         let check_price = (!one_off).then(|| self.check_price(&round));
+        // What the round took outside its forward (and a block's draft).
+        let rest =
+            (round_started.elapsed().as_secs_f64() * 1000.0 - round.ms - block_draft_ms).max(0.0);
+        if !one_off && !settling {
+            if block_round {
+                if let Some(block) = self.block.as_mut() {
+                    block.rest_ms.record(rest);
+                }
+            } else if round.positions == 1 {
+                self.plain_rest_ms.record(rest);
+            }
+        }
         let plain = self.plain_per_ms();
+        let plain_round = if block_charge_whole_round() {
+            self.plain_round_per_ms()
+        } else {
+            plain
+        };
         // A probe paid where it wrote at least as fast as plain steps.
         let paid = |tokens: usize, ms: f64| {
             !crate::inference::dsd_controller::delivers_less(
@@ -6081,7 +6168,12 @@ impl LocalSpec {
                 block
                     .acceptance
                     .record(round.accepted as u32, round.proposed as u32);
-                let draft = block.draft_ms.median().unwrap_or(block_draft_ms);
+                let draft = block.draft_ms.median().unwrap_or(block_draft_ms)
+                    + if block_charge_whole_round() {
+                        block.rest_ms.median().unwrap_or(rest)
+                    } else {
+                        0.0
+                    };
                 if let Some(price) = check_price {
                     block.delivered.record(round.produced.len(), price + draft);
                 }
@@ -6093,9 +6185,12 @@ impl LocalSpec {
                     // after an unlucky start until a hash map's explanation
                     // ran on the head at 82 tok/s where the block had
                     // written 103-117 (2026-11-08).
-                    block.probing.judged(
-                        check_price.is_none_or(|price| paid(round.produced.len(), price + draft)),
-                    );
+                    block.probing.judged(check_price.is_none_or(|price| {
+                        !crate::inference::dsd_controller::delivers_less(
+                            Some(round.produced.len() as f64 / (price + draft).max(0.1)),
+                            [plain_round],
+                        )
+                    }));
                 }
             } else if block_declined {
                 block.declined += 1;
@@ -6143,6 +6238,14 @@ impl LocalSpec {
         self.pending.extend(it);
         Ok(first)
     }
+}
+
+/// `SWARMLLM_BLOCK_CHARGE=draft`: a block round's record charges its check
+/// and its draft alone, and is weighed against plain steps alone — the rule
+/// before 2026-11-08 — for A/B inside one binary.
+fn block_charge_whole_round() -> bool {
+    static WHOLE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *WHOLE.get_or_init(|| std::env::var("SWARMLLM_BLOCK_CHARGE").as_deref() != Ok("draft"))
 }
 
 /// `SWARMLLM_LOCAL_GUESS_GAMMA=fixed`: the local n-gram checks every guess it
@@ -11738,6 +11841,7 @@ mod local_speculation_tests {
                     block,
                     p + block + 1,
                     false,
+                    crate::inference::split::GuessOver::Everything,
                 )
                 .unwrap();
             let k = guesses
