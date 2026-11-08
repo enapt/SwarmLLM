@@ -8292,7 +8292,12 @@ greedy, 96 tokens, chat prompts with thinking off:
   are where a block pays most.
 - **No speed of ours is in this table**: `cargo dev-test` builds the crate
   at opt-level 0 (its dependencies at 2), so its check (~165 ms per position,
-  linear) and draft (340-430 ms) are not the release build's.
+  linear) and draft (340-430 ms) are not the release build's. The release
+  build's check is llama.cpp's price: `prefill_bench`
+  (`SWARM_BENCH_SPEC_WIDTHS=1,4,8,16 SWARM_BENCH_SPEC_ALL_ROWS=1`, 8 threads,
+  min of 3) reads 1 / 4 / 8 / 16 rows in 175 / 209 / 335 / 690 ms against
+  llama.cpp's 168 / 214 / 400 / 624 (taken with the owner at the computer —
+  a ratio inside one run, not a speed sitting).
 - **A price fitted on one cold check declined every later round** (92 of 92):
   the block is now probed again after 8 declines, the gap doubling to 64 while
   a probe does not pay — the n-gram's `probe_after`.

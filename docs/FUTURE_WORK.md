@@ -3081,11 +3081,12 @@ against llama.cpp `draft-dflash`'s 6.67 and 1.32 on its own replies; over ONE fi
 rule for sliding layers keeps 6.47 / 1.44 against llama.cpp's both-ways 5.98 / 1.30, so it is the default
 (`SWARMLLM_BLOCK_DRAFTER_CAUSAL=none` = llama.cpp's). A round is priced once, not per guess
 (`best_gamma_beside_a_step_per_round`), and a declined block is probed again (a price fitted on one cold check had
-declined 92 rounds of 92). **Left in stage 1**: (i) speed — `cargo dev-test` builds the crate at opt-level 0, so no
-tok/s of ours is measured yet; its check cost ~165 ms per position, linear, where llama.cpp reads 16 positions in
-624 ms against 168 ms a step (pp16 25.6, tg 5.96, 8 threads) — time a 16-position qwen35 check in a release build
-against that before anything else, since a check that costs a step per position makes every guesser lose on a
-processor; (ii) the draft itself (340-430 ms in the test build for 1.69 GB of weights).
+declined 92 rounds of 92). **The check is llama.cpp's price** (release `prefill_bench`, Qwen3.5-9B, 8 threads,
+min of 3, 128-token prompt): 1 / 4 / 8 / 16 rows in 175 / 209 / 335 / 690 ms (1.0 / 1.2 / 1.9 / 4.0 steps) against
+llama.cpp's 168 / 214 / 400 / 624 (`llama-bench` pp4/pp8/pp16, tg) — the test build's ~165 ms a row, linear, was
+its opt-level 0. A block keeping 6.5 on code therefore pays on a processor at 8-16 rows. **Left in stage 1**: (ii)
+the draft itself — 340-430 ms in the test build for 1.69 GB of weights, two steps; a Q8_0 conversion
+(`convert_hf_to_gguf.py --outtype q8_0`) is the first thing to time, with its acceptance on the fixed reply.
 
 #### #318 — A large model split across machines is too slow to use
 `P2` · perf-split · **OPEN** — 2026-10-20 · plan: `docs/plans/large_model_splits.md` · draws on #134, #145, #148, #149, #192
