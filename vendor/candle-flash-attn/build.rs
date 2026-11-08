@@ -204,6 +204,9 @@ fn main() -> Result<()> {
         .unwrap_or(80);
     let ptx_beside = format!("-gencode=arch=compute_{compute_cap},code=compute_{compute_cap}");
     builder = builder.arg(&ptx_beside);
+    for gencode in machine_code_also() {
+        builder = builder.arg(&gencode);
+    }
 
     let mut is_target_msvc = false;
     if let Ok(target) = std::env::var("TARGET") {
@@ -297,4 +300,25 @@ fn emit_link_directives(build_dir: &std::path::Path, is_target_msvc: bool) {
     if !is_target_msvc {
         println!("cargo::rustc-link-lib=dylib=stdc++");
     }
+}
+
+/// SwarmLLM patch (#326): machine code for more card generations, beside the
+/// floor's machine code and PTX — the same function as in
+/// vendor/candle/candle-kernels/build.rs, which says why (an RTX 50-series
+/// card JIT-compiled these kernels for ~2 minutes before its first reply).
+/// Guard `extra_machine_code_is_built_the_same_way_everywhere`.
+fn machine_code_also() -> Vec<String> {
+    println!("cargo::rerun-if-env-changed=SWARMLLM_CUDA_MACHINE_CODE_ALSO");
+    let list = std::env::var("SWARMLLM_CUDA_MACHINE_CODE_ALSO").unwrap_or_default();
+    list.split([',', ';', ' '])
+        .map(str::trim)
+        .filter(|cap| !cap.is_empty())
+        .map(|cap| {
+            assert!(
+                cap.chars().all(|c| c.is_ascii_digit()),
+                "SWARMLLM_CUDA_MACHINE_CODE_ALSO: {cap:?} is not a compute capability such as 120"
+            );
+            format!("-gencode=arch=compute_{cap},code=sm_{cap}")
+        })
+        .collect()
 }

@@ -61,6 +61,9 @@ fn main() -> Result<()> {
     // that loads nothing else: candle cannot open a device under it.
     let ptx_beside = format!("-gencode=arch=compute_{compute_cap},code=compute_{compute_cap}");
     moe_builder = moe_builder.arg(&ptx_beside);
+    for gencode in machine_code_also() {
+        moe_builder = moe_builder.arg(&gencode);
+    }
 
     let mut is_target_msvc = false;
     if let Ok(target) = std::env::var("TARGET") {
@@ -93,6 +96,15 @@ fn main() -> Result<()> {
         .arg("-std=c++17")
         .arg("-O3")
         .arg(&ptx_beside);
+    // SwarmLLM patch (#326): MMQ takes NO extra machine code. With 12.0 among
+    // the compiled generations, its host side configures a 12.x card for
+    // Blackwell (`blackwell_mma_available` reads the highest COMPILED arch at
+    // or below the card's) while its Blackwell device code is FP4
+    // `mma.sync.kind::mxf4`, which assembles only for the arch-specific
+    // `sm_120a` — machine code that runs on 12.0 exactly. A 12.1 card would
+    // then run the floor's PTX under the Blackwell host configuration: wrong
+    // tiles, no error. On PTX alone both sides read 80 and agree; the cost is
+    // the driver compiling MMQ once (7-9 s a weight type).
     for include in &mmq_includes {
         mmq_builder = mmq_builder.arg(include);
     }
@@ -145,4 +157,35 @@ fn cuda_headers(dir: &std::path::Path, out: &mut Vec<PathBuf>) {
             out.push(path);
         }
     }
+}
+
+/// SwarmLLM patch (#326): machine code for more card generations, beside the
+/// floor's machine code and PTX. `SWARMLLM_CUDA_MACHINE_CODE_ALSO` lists
+/// compute capabilities ("120"); each adds `-gencode=arch=compute_N,code=sm_N`.
+/// Without it a card past the floor's major version (an RTX 50-series, 12.0)
+/// runs the PTX, which its driver compiles on first use: about two minutes
+/// before the first reply (flash attention 45-67 s a variant), again whenever
+/// a release changes the kernels. Read by the MoE library and flash attention;
+/// MMQ takes none (see its builder).
+///
+/// Prior art: llama.cpp's CUDA build ships machine code for the common
+/// consumer generations (86, 89, 120a) and PTX for the rest; vLLM and PyTorch
+/// list generations the same way. Set by the Linux CUDA release and
+/// cache-warm builds (CUDA 12.8 is the first nvcc to know sm_120). The same
+/// function is in vendor/candle-flash-attn/build.rs; guard
+/// `extra_machine_code_is_built_the_same_way_everywhere`.
+fn machine_code_also() -> Vec<String> {
+    println!("cargo::rerun-if-env-changed=SWARMLLM_CUDA_MACHINE_CODE_ALSO");
+    let list = env::var("SWARMLLM_CUDA_MACHINE_CODE_ALSO").unwrap_or_default();
+    list.split([',', ';', ' '])
+        .map(str::trim)
+        .filter(|cap| !cap.is_empty())
+        .map(|cap| {
+            assert!(
+                cap.chars().all(|c| c.is_ascii_digit()),
+                "SWARMLLM_CUDA_MACHINE_CODE_ALSO: {cap:?} is not a compute capability such as 120"
+            );
+            format!("-gencode=arch=compute_{cap},code=sm_{cap}")
+        })
+        .collect()
 }

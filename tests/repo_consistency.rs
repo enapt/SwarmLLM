@@ -618,6 +618,99 @@ fn compute_cap_matches_release_workflow() {
     );
 }
 
+/// The `SWARMLLM_CUDA_MACHINE_CODE_ALSO: …` lines of one workflow, trimmed, in file order.
+fn machine_code_also_pins(text: &str) -> Vec<String> {
+    text.lines()
+        .map(str::trim)
+        .filter(|line| line.starts_with("SWARMLLM_CUDA_MACHINE_CODE_ALSO:"))
+        .map(str::to_string)
+        .collect()
+}
+
+/// Machine code for newer cards (#326) is built the same way by every build that
+/// makes or warms a release.
+///
+/// release.yml and cache-warm.yml share one cache: a release restoring flash-attention
+/// objects built for another list recompiles them all cold (~1 h on CI). And the list
+/// reaches three libraries through two vendored build scripts, which carry the same
+/// `machine_code_also` — a script that stopped reading it would ship its library
+/// without the RTX 50-series code, with nothing failing.
+#[test]
+fn extra_machine_code_is_built_the_same_way_everywhere() {
+    let read = |path: &str| {
+        std::fs::read_to_string(repo_root().join(path))
+            .unwrap_or_else(|e| panic!("read {path}: {e}"))
+    };
+    let release = machine_code_also_pins(&read(".github/workflows/release.yml"));
+    let warm = machine_code_also_pins(&read(".github/workflows/cache-warm.yml"));
+    // The build step sets it, and the step after it checks the libraries against it.
+    assert_eq!(release.len(), 2, "release.yml: expected the build and the check step to set SWARMLLM_CUDA_MACHINE_CODE_ALSO, found {release:?}");
+    assert!(
+        release.iter().all(|line| *line == release[0]),
+        "release.yml: the build and its check name different machine code: {release:?}"
+    );
+    assert_eq!(
+        release, warm,
+        "release.yml and cache-warm.yml build different machine code — the release would restore a cache built for another list"
+    );
+
+    let kernels = read("vendor/candle/candle-kernels/build.rs");
+    let flash = read("vendor/candle-flash-attn/build.rs");
+    let body = |src: &str, file: &str| {
+        fn_body(src, "fn machine_code_also()")
+            .unwrap_or_else(|| panic!("{file}: no `fn machine_code_also()` — the list no longer reaches its libraries"))
+            .replace("std::env::var", "env::var")
+    };
+    assert_eq!(
+        body(&kernels, "candle-kernels/build.rs"),
+        body(&flash, "candle-flash-attn/build.rs"),
+        "the two vendored build scripts read SWARMLLM_CUDA_MACHINE_CODE_ALSO differently"
+    );
+    for workflow in ["release.yml", "cache-warm.yml"] {
+        assert!(
+            read(&format!(".github/workflows/{workflow}"))
+                .contains("run: bash examples/check_card_machine_code.sh"),
+            "{workflow}: the step that checks the libraries carry the extra machine code is gone"
+        );
+    }
+    for (file, src, use_site) in [
+        (
+            "candle-kernels/build.rs",
+            &kernels,
+            "moe_builder = moe_builder.arg(&gencode)",
+        ),
+        (
+            "candle-flash-attn/build.rs",
+            &flash,
+            "builder = builder.arg(&gencode)",
+        ),
+    ] {
+        assert!(
+            src.contains(use_site),
+            "{file}: `{use_site}` is gone — a library is built without the extra machine code"
+        );
+    }
+    // MMQ must stay on the floor alone: its host side reads the compiled generations, and a
+    // 12.1 card would run the floor's PTX under a Blackwell configuration (build.rs says why).
+    assert!(
+        !kernels.contains("mmq_builder = mmq_builder.arg(&gencode)") && !kernels.contains("mmq_builder = mmq_builder.arg(gencode)"),
+        "candle-kernels/build.rs hands MMQ the extra machine code — unsafe until its host check is patched (#326)"
+    );
+}
+
+#[test]
+fn the_machine_code_guard_sees_a_disagreement() {
+    let release = "    env:\n          SWARMLLM_CUDA_MACHINE_CODE_ALSO: ${{ matrix.cuda_linux && '120' || '' }}\n";
+    let warm =
+        "          SWARMLLM_CUDA_MACHINE_CODE_ALSO: ${{ matrix.cuda_linux && '90,120' || '' }}\n";
+    assert_eq!(machine_code_also_pins(release).len(), 1);
+    assert_ne!(
+        machine_code_also_pins(release),
+        machine_code_also_pins(warm)
+    );
+    assert!(machine_code_also_pins("CUDA_COMPUTE_CAP: '80'\n").is_empty());
+}
+
 /// FlashAttention is the whole reason the floor is 8.0, so the two must not
 /// drift apart in either direction.
 ///

@@ -183,6 +183,15 @@ jobs:
           # uses the Vulkan backend, so it stays empty there).
           CUDA_COMPUTE_CAP: ${{ (matrix.cuda_linux || matrix.cuda_windows) && '80' || '' }}
           CMAKE_CUDA_ARCHITECTURES: ${{ matrix.cuda_linux && '61-real;75-real;80-real;86-real;89-real;90-real;120-real;120-virtual' || '' }}
+          # Machine code for RTX 50-series cards (12.0) in the vendored MoE and
+          # flash-attention libraries, beside the 80 floor's code and PTX (#326):
+          # with PTX alone such a card's driver compiled them for ~2 min before
+          # the first reply. Not MMQ (candle-kernels/build.rs says why). Linux
+          # only — the Windows and Docker builds use CUDA 12.4, which does not
+          # know sm_120. Must match the other workflow and the check step below
+          # (guard `extra_machine_code_is_built_the_same_way_everywhere`).
+          # Changing the list: bump `flash-attn-kernels-vN` in gpu-build-env.
+          SWARMLLM_CUDA_MACHINE_CODE_ALSO: ${{ matrix.cuda_linux && '120' || '' }}
           # Must equal the release matrix's rustflags for the SAME cell.
           # RUSTFLAGS is part of both the rust-cache key (Swatinem hashes RUST*)
           # and cargo's own fingerprint, so warming with a different value
@@ -191,3 +200,9 @@ jobs:
           # in v0.3.79 without mirroring it here took the CUDA release build
           # from 12 minutes to 78.
           RUSTFLAGS: ${{ matrix.rustflags || '' }}
+      - name: The kernel libraries carry RTX 50-series machine code (#326)
+        if: matrix.cuda_linux
+        run: bash examples/check_card_machine_code.sh
+        env:
+          CUDA_COMPUTE_CAP: ${{ (matrix.cuda_linux || matrix.cuda_windows) && '80' || '' }}
+          SWARMLLM_CUDA_MACHINE_CODE_ALSO: ${{ matrix.cuda_linux && '120' || '' }}

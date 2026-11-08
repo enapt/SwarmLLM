@@ -115,6 +115,8 @@ swarmllm/
 │                 research_gate_probe.py — plants one violation per Bash mutation form
 │                 against `.claude/scripts/research-gate.sh` and reports which are caught;
 │                 check_ci_gate.sh — branch protection vs the jobs CI produces;
+│                 check_card_machine_code.sh — CI: the kernel libraries carry each card
+│                 generation's machine code (#326);
 │                 docs_drift.py — reports docs drifted from the code: cited names that no
 │                 longer exist, wrong module paths, DIAG rows whose level/fields differ
 │                 from the tracing call, § pointers to missing headings (the sweep runs it);

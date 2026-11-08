@@ -4262,6 +4262,16 @@ reads (D4 / DS4 / D2S6). Below 8 rows llama.cpp keeps its vector kernel (MMVQ) f
   `swarm_mmq_available` probes for an image of the library (an empty kernel): llama.cpp's own
   `turing_mma_available` reads the COMPILED architectures and says no to a card older than the
   build, but yes to a newer one whose machine code the library lacks.
+- **The Linux release adds 12.0 machine code to flash attention and the MoE library, never MMQ**
+  (2026-11-08, #326): `SWARMLLM_CUDA_MACHINE_CODE_ALSO` (`release.yml`, `cache-warm.yml`) →
+  `machine_code_also` in both vendored build scripts → `-gencode=arch=compute_N,code=sm_N`. With PTX
+  alone an RTX 50-series card's driver compiled flash for 45-67 s a variant before the first reply.
+  MMQ is left out on purpose: its Blackwell device code (FP4 `mma.sync.kind::mxf4`) assembles only
+  for `sm_120a`, which runs on 12.0 exactly, and its host side (`blackwell_mma_available`) reads the
+  highest COMPILED generation at or below the card's — with 120a compiled, a 12.1 card runs the
+  floor's PTX under the Blackwell tile configuration. On PTX alone both sides read 80. CI fails a
+  build whose libraries lack the code, or whose MMQ carries 12.x code
+  (`examples/check_card_machine_code.sh`; guard `extra_machine_code_is_built_the_same_way_everywhere`).
 - ⛔ **The library carries its floor's PTX** (`build.rs` `ptx_beside`, beside the MoE library):
   cudaforge's `build_lib` compiles `code=sm_NN` alone, machine code runs only within its major
   version, and a release is built at 80 — so a Hopper or Blackwell card, which

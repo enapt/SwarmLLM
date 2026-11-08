@@ -3644,7 +3644,7 @@ llama.cpp's — Granite Q8 position 3, 0.99737 against 0.99970 — was looked in
 window by layer pattern and a GELU feed-forward (`spark2-5.cpp`) — a family, not a mapping.
 
 #### #326 — A card newer than the release's machine code waits minutes for its first reply
-`P2` · platform · **OPEN** — 2026-10-21 · history: gotcha #928, #325 (closed)
+`P2` · platform · **PARTIAL** (Linux release: flash + MoE) — 2026-11-08 · history: gotcha #928, #325 (closed)
 
 The vendored kernel libraries (MoE, MMQ, flash attention) carry machine code for the release's
 `CUDA_COMPUTE_CAP` (80, which runs on 8.x cards only) and, since 2026-10-21, its PTX. A Hopper or
@@ -3670,6 +3670,25 @@ machine code for 9.0 and 12.0 beside 8.0 in the release build (nvcc 12.8 builds 
 flash kernels are cached across releases, so the cost is one cold build and the binary's size),
 or a warm-up at worker start that says what it is doing. No such card is here to check either
 on.
+
+**2026-11-08 — the Linux release carries 12.0 machine code for flash attention and the MoE
+kernels** (the ~2 min): `SWARMLLM_CUDA_MACHINE_CODE_ALSO=120`, set by `release.yml` and
+`cache-warm.yml` for the Linux CUDA build (CUDA 12.8) and read by both vendored build scripts
+(`machine_code_also`), adds `-gencode=arch=compute_120,code=sm_120` beside the floor's code and
+PTX; `examples/check_card_machine_code.sh` runs after each build and fails unless `cuobjdump`
+lists sm_120 in both libraries (guard `extra_machine_code_is_built_the_same_way_everywhere`).
+Prior art: llama.cpp's CUDA build ships machine code for the common consumer generations (86,
+89, 120a) and PTX for the rest; vLLM and PyTorch list generations the same way. **Left**: (1)
+**MMQ stays on PTX** (7-9 s a weight type, once): its Blackwell device code is FP4
+`mma.sync.kind::mxf4`, which assembles only for `sm_120a` (runs on 12.0 exactly), while its host
+side picks the Blackwell configuration from the highest COMPILED generation at or below the
+card's — so with 120a compiled, a 12.1 card (DGX Spark) would run the floor's PTX under the
+Blackwell configuration, wrong with no error. Needs `blackwell_mma_available` to also require
+the card's own generation to be compiled, then `120a`. (2) **Windows and Docker** build with
+CUDA 12.4, which does not know sm_120: both need 12.8 (Windows code tested on Windows first).
+(3) The first Cache warm after the push is the compile check on 12.8 (this machine has 13.0);
+read its check step's lines. (4) No 12.0 card in the swarm or here: the machine code is
+unverified on one; the release asset grows by the second image (flash 98 MB at one image + PTX).
 
 #### #228 — Qwen 3.5: what the first version leaves out (speculation, and the 4B's decode speed)
 `P2` · model-support · **PARTIAL** — 2026-10-06 · history: #117 (closed); plan: `docs/plans/qwen35_support.md`

@@ -289,6 +289,22 @@ jobs:
           # research shows the compute_90-PTX-JIT path is up to ~5× slower on the
           # llama.cpp/cuBLAS Blackwell path, which native SASS avoids.
           CMAKE_CUDA_ARCHITECTURES: ${{ matrix.cuda_linux && '61-real;75-real;80-real;86-real;89-real;90-real;120-real;120-virtual' || '' }}
+          # Machine code for RTX 50-series cards (12.0) in the vendored MoE and
+          # flash-attention libraries, beside the 80 floor's code and PTX (#326):
+          # with PTX alone such a card's driver compiled them for ~2 min before
+          # the first reply. Not MMQ (candle-kernels/build.rs says why). Linux
+          # only — the Windows and Docker builds use CUDA 12.4, which does not
+          # know sm_120. Must match the other workflow and the check step below
+          # (guard `extra_machine_code_is_built_the_same_way_everywhere`).
+          # Changing the list: bump `flash-attn-kernels-vN` in gpu-build-env.
+          SWARMLLM_CUDA_MACHINE_CODE_ALSO: ${{ matrix.cuda_linux && '120' || '' }}
+
+      - name: The kernel libraries carry RTX 50-series machine code (#326)
+        if: matrix.cuda_linux
+        run: bash examples/check_card_machine_code.sh
+        env:
+          CUDA_COMPUTE_CAP: ${{ (matrix.cuda_linux || matrix.cuda_windows) && '80' || '' }}
+          SWARMLLM_CUDA_MACHINE_CODE_ALSO: ${{ matrix.cuda_linux && '120' || '' }}
 
       - name: Package archive (Linux/macOS)
         if: runner.os != 'Windows'
