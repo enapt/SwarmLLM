@@ -55,7 +55,8 @@ round**: #424 (a model's first question waits for its load) is new at P2; #318 a
 other two measured-first levers. v0.3.278 (2026-11-08) carried #424's three steps, #174 and #425 (+ (b) on the
 processor). **2026-11-08:** #427 goes first by the user's direction — "we need to be able to use the models between
 also, like 14b 28b, also 70b": the next round is ranked by which tier (~14B, ~27-35B, 70B) a user can actually use,
-starting with measuring each as a user gets it.
+starting with measuring each as a user gets it — on the models people run most (#427 § Research 2026-11-08:
+Qwen3.8-27B, Qwen3.6-35B-A3B, Gemma 4, gpt-oss, Qwen3-14B, Llama 3.3 70B).
 **2026-11-04:** #403 goes first among the open work by the user's direction: the release cut-off
 and the use gate must not be passable through a relay. Closed the same day (§ "Closed"). What each release carried is in § "Closed" and `CHANGELOG.md`; earlier
 rankings moved word for word to the archive, § "PRIORITIES re-rank log". Only OPEN work is listed
