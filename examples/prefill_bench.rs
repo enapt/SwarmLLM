@@ -25,6 +25,10 @@
 //! `SWARM_BENCH_SPEC_WIDTHS=1,2,4,8` prices a K-row forward against a 1-row
 //! one at the same cache depth; `SWARM_BENCH_SPEC_ALL_ROWS=1` makes it a
 //! check's forward (logits at every row, as a draft tree's growth reads).
+//! `SWARM_BENCH_SPEC_ROUND=1` times a check ROUND's parts apart — the forward,
+//! the kept rows' logits read back and picked on the host, the cache taken
+//! back to `SWARM_BENCH_SPEC_KEEP` rows (default 1; a recurrent model replays
+//! them) — beside a plain step's.
 //! `SWARM_BENCH_CHUNK=128` reads the prompt in chunks the way a node's prefill
 //! pacer does — compare a node against the bench with it set, since one
 //! forward over the whole prompt is a different attention shape.
@@ -687,6 +691,16 @@ fn spec_width_sweep(
             Ok(dt)
         };
 
+    // `SWARM_BENCH_SPEC_ROUND=1` times a check ROUND as the worker runs one
+    // (`model_worker::ngram_spec_round`): the K-row forward, each kept row's
+    // logits read back to the host and picked there, then the cache taken
+    // back to the kept rows (`SWARM_BENCH_SPEC_KEEP`, default 1 — every guess
+    // refused), which on a recurrent model replays the rows it kept. Each
+    // part is synced and timed alone, against a plain step's forward and
+    // read-back.
+    if std::env::var("SWARM_BENCH_SPEC_ROUND").as_deref() == Ok("1") {
+        return spec_round_sweep(model, device, widths, &store, &req, pos);
+    }
     println!(
         "\nSPEC WIDTH SWEEP at ~{} KV (interleaved 1-vs-K, min of pairs{})",
         prompt_tokens + decode_tokens,
@@ -732,6 +746,106 @@ fn spec_width_sweep(
                 String::new()
             }
         );
+    }
+    Ok(())
+}
+
+/// `SWARM_BENCH_SPEC_ROUND=1`: a check round's three parts — forward, the
+/// kept rows read back and picked on the host, the cache taken back — each
+/// synced and timed alone, min of N, a plain step interleaved beside it.
+fn spec_round_sweep(
+    model: &mut SplitModel,
+    device: &Device,
+    widths: &str,
+    store: &KvCacheStore,
+    req: &str,
+    mut pos: usize,
+) -> anyhow::Result<()> {
+    use candle_core::IndexOp;
+    let keep = env_usize("SWARM_BENCH_SPEC_KEEP", 1).max(1);
+    let reps = env_usize("SWARM_BENCH_SPEC_REPS", 5);
+    let model_key = model.kv_model_key().to_string();
+    // A row read back whole and picked on the host, as
+    // `tensor_util::sample_token_with_logprob_history` reads one.
+    let pick = |row: &Tensor| -> anyhow::Result<u32> {
+        let v = row.to_dtype(candle_core::DType::F32)?.to_vec1::<f32>()?;
+        let mut best = 0usize;
+        for (i, x) in v.iter().enumerate() {
+            if *x > v[best] {
+                best = i;
+            }
+        }
+        Ok(best as u32)
+    };
+    // (forward, read-back, take-back) seconds of one round of `k` rows.
+    let mut round = |model: &mut SplitModel, k: usize| -> anyhow::Result<(f64, f64, f64)> {
+        let step = Tensor::from_vec(vec![7i64; k], &[1, k], &Device::Cpu)?;
+        let t = Instant::now();
+        let out = if k > 1 {
+            model.forward_verify_all_positions(&step, pos, store, req)
+        } else {
+            model.forward(&step, pos, store, req)
+        }
+        .map_err(|e| anyhow::anyhow!("round forward: {e}"))?;
+        sync(device);
+        let fwd = t.elapsed().as_secs_f64();
+        let t = Instant::now();
+        let kept = if k > 1 { keep.min(k) } else { 1 };
+        for i in 0..kept {
+            let row = if k > 1 {
+                out.i((0, i))?
+            } else {
+                out.flatten_all()?
+            };
+            pick(&row)?;
+        }
+        let read = t.elapsed().as_secs_f64();
+        let t = Instant::now();
+        if k > 1 {
+            store
+                .truncate_request_to(&model_key, req, pos + kept)
+                .map_err(|e| anyhow::anyhow!("take back: {e}"))?;
+            sync(device);
+        }
+        let back = t.elapsed().as_secs_f64();
+        pos += kept;
+        Ok((fwd, read, back))
+    };
+    println!(
+        "\nSPEC ROUND SWEEP ({keep} row(s) kept a check; min of {reps}, a plain step beside each)"
+    );
+    println!("  width   forward ms   read-back ms   take-back ms   round ms   vs a plain step");
+    for w in widths
+        .split(',')
+        .filter_map(|w| w.trim().parse::<usize>().ok())
+        .filter(|&w| w > 0)
+    {
+        let min3 =
+            |a: (f64, f64, f64), b: (f64, f64, f64)| (a.0.min(b.0), a.1.min(b.1), a.2.min(b.2));
+        let (mut one, mut wide) = (
+            (f64::MAX, f64::MAX, f64::MAX),
+            (f64::MAX, f64::MAX, f64::MAX),
+        );
+        let (mut one_total, mut wide_total) = (f64::MAX, f64::MAX);
+        for _ in 0..reps {
+            let a = round(model, 1)?;
+            one = min3(one, a);
+            one_total = one_total.min(a.0 + a.1 + a.2);
+            let b = round(model, w)?;
+            wide = min3(wide, b);
+            wide_total = wide_total.min(b.0 + b.1 + b.2);
+        }
+        for (label, parts, total) in [("1", one, one_total), (&*w.to_string(), wide, wide_total)] {
+            println!(
+                "  {:>5}   {:>10.2}   {:>12.2}   {:>12.2}   {:>8.2}   {:>8.2}x",
+                label,
+                parts.0 * 1000.0,
+                parts.1 * 1000.0,
+                parts.2 * 1000.0,
+                total * 1000.0,
+                total / one_total
+            );
+        }
     }
     Ok(())
 }

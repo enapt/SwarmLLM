@@ -19,7 +19,13 @@
 //     S[col, :] = exp(g) · S[col, :] + k · delta
 //     out[col]  = scale · Σ_i S[col, i] · q[i]     (warp sum)
 //
-// — the decay folded into the update as llama.cpp's card op folds it. The
+// — the decay folded into the update as llama.cpp's card op folds it.
+//
+// A REPLAY (`SsmState::rewind_to` into a check, `layers::qwen35::replay_rows`)
+// runs the same body over the first rows a check kept, outputs off
+// (`delta_rule_replay_f32_d*`), and `conv_window_replay_f32` rebuilds the
+// convolution's window: two launches a layer where the composition made seven,
+// and the state bit for bit the step's at that row. The
 // processor's kernel (`delta_rule_cpu`) decays first; the two agree to float
 // rounding, NOT bitwise, and neither is bit-identical to the composition. Replies
 // are judged against llama.cpp.
@@ -55,11 +61,18 @@ __device__ __forceinline__ float warp_sum(float x) {
     return x;
 }
 
-template <int D>
+// g and beta of (token bt, head h) are at `g[(bt·nv + h)·gs]` and
+// `beta[(bt·nv + h)·gs]`: a step passes its stacked `gb` (beta = gb + 1, gs = 2),
+// a replay the two rows it kept (gs = 1). OUT = false writes no outputs: a
+// replay wants only the state, and runs every update as the step did, so the
+// state is bit for bit the one the step passed at that row.
+template <int D, bool OUT>
 __device__ void delta_rule_body(
     const float *__restrict__ qk,
     const float *__restrict__ v,
-    const float *__restrict__ gb,
+    const float *__restrict__ g,
+    const float *__restrict__ beta_in,
+    const int gs,
     const float *__restrict__ state,
     float *__restrict__ state_out,
     float *__restrict__ dst,
@@ -92,9 +105,9 @@ __device__ void delta_rule_body(
         const size_t bt = (size_t)bi * seq + t;
         const float *q_t = qk + (bt * 2 * nk + kh) * D;
         const float *k_t = q_t + (size_t)nk * D;
-        const float *gb_t = gb + (bt * nv + h) * 2;
-        const float decay = expf(gb_t[0]);
-        const float beta = gb_t[1];
+        const size_t gi = (bt * nv + h) * gs;
+        const float decay = expf(g[gi]);
+        const float beta = beta_in[gi];
         const float v_col = v[bi * sv_b + t * sv_t + h * sv_h + col];
 
         float kr[R], qr[R];
@@ -118,9 +131,11 @@ __device__ void delta_rule_body(
             s[r] = decay * s[r] + kr[r] * delta;
             o += s[r] * qr[r];
         }
-        o = warp_sum(o);
-        if (lane == 0) {
-            dst[(bt * nv + h) * D + col] = o * scale;
+        if constexpr (OUT) {
+            o = warp_sum(o);
+            if (lane == 0) {
+                dst[(bt * nv + h) * D + col] = o * scale;
+            }
         }
     }
 
@@ -139,9 +154,102 @@ __device__ void delta_rule_body(
         const int nv, const int seq,                                               \
         const long long sv_b, const long long sv_t, const long long sv_h,          \
         const float scale) {                                                       \
-        delta_rule_body<D>(qk, v, gb, state, state_out, dst, nk, nv, seq, sv_b,    \
-                           sv_t, sv_h, scale);                                     \
+        delta_rule_body<D, true>(qk, v, gb, gb + 1, 2, state, state_out, dst, nk,  \
+                                 nv, seq, sv_b, sv_t, sv_h, scale);                \
+    }                                                                              \
+    extern "C" __global__ void __launch_bounds__(128) delta_rule_replay_f32_d##D(  \
+        const float *__restrict__ qk, const float *__restrict__ v,                 \
+        const float *__restrict__ g, const float *__restrict__ beta,               \
+        const float *__restrict__ state, float *__restrict__ state_out,            \
+        const int nk, const int nv, const int rows,                                \
+        const long long sv_t, const long long sv_h) {                              \
+        delta_rule_body<D, false>(qk, v, g, beta, 1, state, state_out, nullptr,    \
+                                  nk, nv, rows, 0, sv_t, sv_h, 0.0f);              \
     }
 
 DELTA_RULE_ENTRY(64)
 DELTA_RULE_ENTRY(128)
+
+// A replay's convolution window (`SsmState::rewind_to` into a check): the last
+// `pad` (= kernel − 1) of [the window the check read | its first `rows` inputs]
+// — what `cat` + `narrow` composed in five launches, as one copy. One sequence:
+// `read` and `out` [C, pad], `mixed` the kept inputs [rows ≥ `rows`, C].
+extern "C" __global__ void conv_window_replay_f32(
+    const float *__restrict__ read, const float *__restrict__ mixed,
+    float *__restrict__ out, const int channels, const int pad, const int rows) {
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= channels * pad) {
+        return;
+    }
+    const int c = i / pad;
+    const int src = rows + i % pad;
+    out[i] = src < pad ? read[c * pad + src] : mixed[(size_t)(src - pad) * channels + c];
+}
+
+// A step's causal depthwise convolution and its SiLU in ONE launch a layer
+// (`DeltaNetWeights::causal_conv` + `silu`: 12 launches at one position, up to
+// 14 at several — 24 layers of Qwen3.5-4B made ~290 a token). llama.cpp fuses
+// the same pair on a card (`ggml_cuda_op_ssm_conv`, apply_silu).
+//
+// A thread a channel slides its window over the step: output t is
+// Σ_j win[t + j] · w[j] over [the window before | the step's inputs], summed
+// in tap order with each product and sum rounded as candle's `bmul` / `badd`
+// round them (`__fmul_rn` / `__fadd_rn`: no fused multiply-add), then candle's
+// `silu_fwd` (`x / (1 + expf(-x))`) — bit for bit the composition. Channels
+// below `split` (q | k) and the rest (v) are written to two contiguous blocks
+// of `out`, [seq, split] then [seq, C − split]; the window after the step, the
+// last K − 1 inputs, straight into `state_out` [C, K − 1], the step's buffers.
+// One sequence: `x` [seq, C], `prev` [C, K − 1], `w` [C, K].
+template <int K>
+__device__ void ssm_conv_silu_body(
+    const float *__restrict__ x, const float *__restrict__ prev,
+    const float *__restrict__ w, float *__restrict__ out,
+    float *__restrict__ state_out, const int channels, const int split,
+    const int seq) {
+    const int c = blockIdx.x * blockDim.x + threadIdx.x;
+    if (c >= channels) {
+        return;
+    }
+    constexpr int PAD = K - 1;
+    float win[K];
+    float wc[K];
+#pragma unroll
+    for (int j = 0; j < K; j++) {
+        wc[j] = w[(size_t)c * K + j];
+    }
+#pragma unroll
+    for (int j = 0; j < PAD; j++) {
+        win[j] = prev[(size_t)c * PAD + j];
+    }
+    float *v_out = out + (size_t)seq * split;
+    for (int t = 0; t < seq; t++) {
+        win[PAD] = x[(size_t)t * channels + c];
+        float acc = __fmul_rn(win[0], wc[0]);
+#pragma unroll
+        for (int j = 1; j < K; j++) {
+            acc = __fadd_rn(acc, __fmul_rn(win[j], wc[j]));
+        }
+        const float y = acc / (1.0f + expf(-acc));
+        if (c < split) {
+            out[(size_t)t * split + c] = y;
+        } else {
+            v_out[(size_t)t * (channels - split) + (c - split)] = y;
+        }
+#pragma unroll
+        for (int j = 0; j < PAD; j++) {
+            win[j] = win[j + 1];
+        }
+    }
+#pragma unroll
+    for (int j = 0; j < PAD; j++) {
+        state_out[(size_t)c * PAD + j] = win[j];
+    }
+}
+
+extern "C" __global__ void ssm_conv_silu_f32_k4(
+    const float *__restrict__ x, const float *__restrict__ prev,
+    const float *__restrict__ w, float *__restrict__ out,
+    float *__restrict__ state_out, const int channels, const int split,
+    const int seq) {
+    ssm_conv_silu_body<4>(x, prev, w, out, state_out, channels, split, seq);
+}

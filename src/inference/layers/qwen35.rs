@@ -459,18 +459,34 @@ impl DeltaNetWeights {
             None
         };
 
-        let (conv, new_conv) = self.causal_conv(&mixed, &read.conv_state)?;
-        let conv = candle_nn::ops::silu(&conv)?; // [b, seq, C]
-
         // q and k side by side, `[b, seq, 2·nk, kd]` (heads 0..nk are q), so
         // one L2 norm serves both and the card kernel reads them as one input.
-        let qk = conv
-            .narrow(2, 0, 2 * self.key_dim())?
-            .reshape((b_sz, seq_len, 2 * nk, kd))?;
+        // On a card the convolution and its SiLU are one launch, written as
+        // q | k and v apart and its window straight into the step's buffers
+        // (`conv_on_the_card`); `new_conv` is then `None`.
+        let fused = match target.as_ref() {
+            Some(t) => self.conv_on_the_card(&mixed, &read.conv_state, &t.conv_state)?,
+            None => None,
+        };
+        let (qk, v, new_conv) = match fused {
+            Some((qk, v)) => (
+                qk.reshape((b_sz, seq_len, 2 * nk, kd))?,
+                v.reshape((b_sz, seq_len, nv, vd))?,
+                None,
+            ),
+            None => {
+                let (conv, new_conv) = self.causal_conv(&mixed, &read.conv_state)?;
+                let conv = candle_nn::ops::silu(&conv)?; // [b, seq, C]
+                (
+                    conv.narrow(2, 0, 2 * self.key_dim())?
+                        .reshape((b_sz, seq_len, 2 * nk, kd))?,
+                    conv.narrow(2, 2 * self.key_dim(), self.value_dim())?
+                        .reshape((b_sz, seq_len, nv, vd))?,
+                    Some(new_conv),
+                )
+            }
+        };
         let qk = l2_norm(&qk, self.eps)?;
-        let v = conv
-            .narrow(2, 2 * self.key_dim(), self.value_dim())?
-            .reshape((b_sz, seq_len, nv, vd))?;
 
         let (out, new_state, written) = delta_rule_into(
             &qk,
@@ -543,20 +559,81 @@ impl DeltaNetWeights {
         let new_state = padded.narrow(2, seq_len, pad)?.contiguous()?;
         Ok((out, new_state))
     }
+
+    /// [`Self::causal_conv`] and its SiLU in one launch on a card
+    /// (`kernels/delta_rule.cu` `ssm_conv_silu_f32_k4`, bit for bit the
+    /// composition): q | k `[b, seq, 2·key_dim]` and v `[b, seq, value_dim]`,
+    /// each contiguous, with the window after the step written into
+    /// `state_out` (the step's own buffers). `None`, nothing written, off a
+    /// card build, outside the kernel's scope (one sequence, f32, a kernel of
+    /// 4) or under `SWARMLLM_SSM_CONV=composed`, the A/B switch.
+    ///
+    /// Prior art: llama.cpp fuses the same pair on a card
+    /// (`ggml_cuda_op_ssm_conv` with `apply_silu`, read at `4b1a27f`); the
+    /// composition made 12 launches a layer at one position — ~290 a token of
+    /// Qwen3.5-4B's 24 such layers (#428, card profile, 2026-11-08).
+    fn conv_on_the_card(
+        &self,
+        x: &Tensor,
+        prev: &Tensor,
+        state_out: &Tensor,
+    ) -> CandleResult<Option<(Tensor, Tensor)>> {
+        #[cfg(feature = "candle-cuda")]
+        {
+            if !conv_in_one_launch() || self.conv_kernel != 4 || !x.device().is_cuda() {
+                return Ok(None);
+            }
+            let (_, seq_len, _) = x.dims3()?;
+            let split = 2 * self.key_dim();
+            let op = cuda::ConvSilu {
+                state_out: state_out.clone(),
+                split,
+            };
+            if !op.takes(x, prev, &self.conv1d) {
+                return Ok(None);
+            }
+            let out = x.apply_op3_no_bwd(prev, &self.conv1d, &op)?;
+            let qk = out.narrow(0, 0, seq_len * split)?;
+            let v = out.narrow(0, seq_len * split, seq_len * self.value_dim())?;
+            Ok(Some((qk, v)))
+        }
+        #[cfg(not(feature = "candle-cuda"))]
+        {
+            let _ = (x, prev, state_out);
+            Ok(None)
+        }
+    }
+}
+
+/// `SWARMLLM_SSM_CONV=composed` → a DeltaNet layer's convolution and SiLU as
+/// candle ops on a card too: the A/B switch for
+/// [`DeltaNetWeights::conv_on_the_card`]. Read once.
+#[cfg(feature = "candle-cuda")]
+fn conv_in_one_launch() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        !matches!(
+            std::env::var("SWARMLLM_SSM_CONV").as_deref(),
+            Ok("composed")
+        )
+    })
 }
 
 /// The new state as a step or a replay leaves it: on a card in `target`, the
 /// buffers it keeps (the delta rule's kernel `written` its state there
-/// already), on the processor the tensors made.
+/// already, and a fused convolution its window — `conv_state` `None`), on the
+/// processor the tensors made.
 fn written_into(
     target: Option<SsmSlot>,
-    conv_state: Tensor,
+    conv_state: Option<Tensor>,
     recurrent_state: Tensor,
     written: bool,
 ) -> CandleResult<SsmSlot> {
     Ok(match target {
         Some(t) => {
-            t.conv_state.slice_set(&conv_state, 0, 0)?;
+            if let Some(conv_state) = conv_state {
+                t.conv_state.slice_set(&conv_state, 0, 0)?;
+            }
             if !written {
                 t.recurrent_state
                     .slice_set(&recurrent_state.contiguous()?, 0, 0)?;
@@ -564,7 +641,9 @@ fn written_into(
             t
         }
         None => SsmSlot {
-            conv_state,
+            conv_state: conv_state.ok_or_else(|| {
+                candle_core::Error::Msg("a convolution window written into no buffer".into())
+            })?,
             recurrent_state,
         },
     })
@@ -642,6 +721,26 @@ pub(super) fn replay_rows(
     rows: usize,
     into: Option<&SsmSlot>,
 ) -> CandleResult<SsmSlot> {
+    // On a card, two launches a layer — the step's kernel needs the
+    // one-pass rule, as here (`delta_rule_into`).
+    #[cfg(feature = "candle-cuda")]
+    if let Some(into) = into.filter(|_| replay_in_two_launches() && delta_rule_in_one_pass()) {
+        if cuda::replay(read, kept, rows, into)? {
+            return Ok(into.clone());
+        }
+    }
+    replay_rows_composed(read, kept, rows, into)
+}
+
+/// [`replay_rows`] as candle ops: the processor's, and on a card the A/B arm
+/// (`SWARMLLM_SSM_REPLAY=composed`) and whatever the two-launch replay does
+/// not take.
+fn replay_rows_composed(
+    read: &SsmSlot,
+    kept: &SsmRows,
+    rows: usize,
+    into: Option<&SsmSlot>,
+) -> CandleResult<SsmSlot> {
     let first = |t: &Tensor| t.narrow(1, 0, rows)?.contiguous();
     let pad = read.conv_state.dim(2)?;
     let inputs = first(&kept.mixed)?.transpose(1, 2)?.contiguous()?; // [b, C, rows]
@@ -659,7 +758,7 @@ pub(super) fn replay_rows(
         &read.recurrent_state,
         into.map(|t| &t.recurrent_state),
     )?;
-    written_into(into.cloned(), conv_state, recurrent_state, written)
+    written_into(into.cloned(), Some(conv_state), recurrent_state, written)
 }
 
 /// The gated delta rule, token by token (`build_delta_net_autoregressive`),
@@ -831,9 +930,291 @@ fn delta_rule_cuda(
     }
 }
 
+/// `SWARMLLM_SSM_REPLAY=composed` → a rewind into a check replays its rows
+/// with the composition ([`replay_rows_composed`]) on a card too: the A/B
+/// switch for the two-launch replay (`cuda::replay`). Read once.
+#[cfg(feature = "candle-cuda")]
+fn replay_in_two_launches() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        !matches!(
+            std::env::var("SWARMLLM_SSM_REPLAY").as_deref(),
+            Ok("composed")
+        )
+    })
+}
+
 #[cfg(feature = "candle-cuda")]
 mod cuda {
     use candle_core::{CpuStorage, CustomOp3, Layout, Result, Shape, Tensor};
+
+    /// A DeltaNet step's convolution and SiLU as one launch
+    /// (`ssm_conv_silu_f32_k4`): operands x `[1, seq, C]`, the window before
+    /// the step `[1, C, 3]` and the filters `[C, 4]`; the output is q | k
+    /// `[seq, split]` then v `[seq, C − split]`, flat. The window after the
+    /// step is written INTO `state_out` `[1, C, 3]`, other buffers than the
+    /// window read (`SsmState`'s second pair), as [`DeltaRule`] writes its
+    /// state.
+    pub(super) struct ConvSilu {
+        pub(super) state_out: Tensor,
+        pub(super) split: usize,
+    }
+
+    impl ConvSilu {
+        /// Whether the kernel takes these operands: one sequence, f32,
+        /// contiguous, on a card, a kernel of 4.
+        pub(super) fn takes(&self, x: &Tensor, prev: &Tensor, w: &Tensor) -> bool {
+            let all = [x, prev, w, &self.state_out];
+            if all.iter().any(|t| {
+                t.dtype() != candle_core::DType::F32 || !t.is_contiguous() || !t.device().is_cuda()
+            }) {
+                return false;
+            }
+            let Ok((b, _, channels)) = x.dims3() else {
+                return false;
+            };
+            b == 1
+                && self.split < channels
+                && prev.dims() == [1, channels, 3]
+                && w.dims() == [channels, 4]
+                && self.state_out.dims() == [1, channels, 3]
+        }
+    }
+
+    impl CustomOp3 for ConvSilu {
+        fn name(&self) -> &'static str {
+            "ssm-conv-silu"
+        }
+
+        /// Never reached: [`super::DeltaNetWeights::conv_on_the_card`] asks
+        /// [`ConvSilu::takes`] first, which wants a card.
+        fn cpu_fwd(
+            &self,
+            _: &CpuStorage,
+            _: &Layout,
+            _: &CpuStorage,
+            _: &Layout,
+            _: &CpuStorage,
+            _: &Layout,
+        ) -> Result<(CpuStorage, Shape)> {
+            candle_core::bail!("ssm-conv-silu's kernel is CUDA-only")
+        }
+
+        fn cuda_fwd(
+            &self,
+            s1: &candle_core::CudaStorage,
+            l1: &Layout,
+            s2: &candle_core::CudaStorage,
+            l2: &Layout,
+            s3: &candle_core::CudaStorage,
+            l3: &Layout,
+        ) -> Result<(candle_core::CudaStorage, Shape)> {
+            use candle_core::cuda_backend::cudarc::driver::{LaunchConfig, PushKernelArg};
+            use candle_core::cuda_backend::WrapErr;
+
+            let dev = s1.device.clone();
+            let (b, seq, channels) = l1.shape().dims3()?;
+            if b != 1
+                || self.split >= channels
+                || l2.shape().dims() != [1, channels, 3]
+                || l3.shape().dims() != [channels, 4]
+                || self.state_out.dims() != [1, channels, 3]
+            {
+                candle_core::bail!("ssm-conv-silu: unexpected shapes");
+            }
+            let (Some((xo, xe)), Some((po, pe)), Some((wo, we))) = (
+                l1.contiguous_offsets(),
+                l2.contiguous_offsets(),
+                l3.contiguous_offsets(),
+            ) else {
+                candle_core::bail!("ssm-conv-silu: operands must be contiguous");
+            };
+            let (out_storage, out_layout) = self.state_out.storage_and_layout();
+            let candle_core::Storage::Cuda(st_out) = &*out_storage else {
+                candle_core::bail!("ssm-conv-silu: the window's buffer is not on the card");
+            };
+            let Some((oo, oe)) = out_layout.contiguous_offsets() else {
+                candle_core::bail!("ssm-conv-silu: the window's buffer must be contiguous");
+            };
+            let x = s1.as_cuda_slice::<f32>()?.slice(xo..xe);
+            let prev = s2.as_cuda_slice::<f32>()?.slice(po..pe);
+            let w = s3.as_cuda_slice::<f32>()?.slice(wo..we);
+            let state_out = st_out.as_cuda_slice::<f32>()?.slice(oo..oe);
+            let n_out = seq * channels;
+            // Every element is assigned: each (position, channel) by its
+            // channel's thread, into the q | k block or the v block.
+            let mut out = dev.alloc_fully_overwritten::<f32>(n_out)?;
+            let func = dev.get_or_load_custom_func(
+                "ssm_conv_silu_f32_k4",
+                "swarmllm_delta_rule",
+                super::DELTA_RULE_PTX,
+            )?;
+            let cfg = LaunchConfig {
+                grid_dim: (channels.div_ceil(128) as u32, 1, 1),
+                block_dim: (128, 1, 1),
+                shared_mem_bytes: 0,
+            };
+            let (channels_i, split_i, seq_i) = (channels as i32, self.split as i32, seq as i32);
+            let mut builder = func.builder();
+            builder.arg(&x);
+            builder.arg(&prev);
+            builder.arg(&w);
+            builder.arg(&mut out);
+            builder.arg(&state_out);
+            builder.arg(&channels_i);
+            builder.arg(&split_i);
+            builder.arg(&seq_i);
+            // SAFETY: ffi. Shapes and contiguity are checked above: the kernel
+            // reads x [seq, C], prev [C, 3] and w [C, 4], writes each of `out`'s
+            // seq·C elements once and `state_out`'s C·3. `state_out` is the
+            // step's spare pair, never `prev`'s buffer, written through a read
+            // view ordered by the ONE stream per device, as `DeltaRule` writes.
+            unsafe { builder.launch(cfg) }.w()?;
+            Ok((
+                candle_core::CudaStorage::wrap_cuda_slice(out, dev),
+                Shape::from_dims(&[n_out]),
+            ))
+        }
+    }
+
+    /// [`super::replay_rows`] on a card in two launches a layer: the
+    /// convolution window (`conv_window_replay_f32`) and the delta rule over
+    /// the kept rows (`delta_rule_replay_f32_d*`, the step's own update with
+    /// no outputs), both written into `into`'s buffers straight from the rows
+    /// kept, where the composition copied them first — 7 launches and 6
+    /// allocations a layer: 168 a rewind of Qwen3.5-4B, 2.07 ms of which the
+    /// card was busy 0.59 (#428, card, 2026-11-08). `false`, nothing written,
+    /// outside its scope: one sequence, f32, contiguous buffers, a width
+    /// [`super::card_delta_rule_covers`].
+    ///
+    /// Prior art: llama.cpp master writes a state per position of a check
+    /// instead (`ggml_gated_delta_net(…, K)`, rollback picks a slot — 2 MB a
+    /// slot a layer here); this keeps the replay's 32 KB a row and its
+    /// bit-exactness, and drops only its launches.
+    pub(super) fn replay(
+        read: &super::SsmSlot,
+        kept: &super::SsmRows,
+        rows: usize,
+        into: &super::SsmSlot,
+    ) -> Result<bool> {
+        use candle_core::cuda_backend::cudarc::driver::{LaunchConfig, PushKernelArg};
+        use candle_core::cuda_backend::WrapErr;
+
+        let all = [
+            &read.conv_state,
+            &read.recurrent_state,
+            &kept.mixed,
+            &kept.qk,
+            &kept.v,
+            &kept.g,
+            &kept.beta,
+            &into.conv_state,
+            &into.recurrent_state,
+        ];
+        if all.iter().any(|t| {
+            t.dtype() != candle_core::DType::F32 || !t.is_contiguous() || !t.device().is_cuda()
+        }) {
+            return Ok(false);
+        }
+        let (b, cap, two_nk, kd) = kept.qk.dims4()?;
+        let (_, channels, pad) = read.conv_state.dims3()?;
+        let nv = kept.g.dim(2)?;
+        let vd = kept.v.dim(3)?;
+        if b != 1
+            || two_nk % 2 != 0
+            || !(1..=cap).contains(&rows)
+            || !super::card_delta_rule_covers(kd, vd)
+            || kept.v.dims() != [1, cap, nv, vd]
+            || kept.mixed.dims() != [1, cap, channels]
+            || kept.g.dims() != [1, cap, nv]
+            || kept.beta.dims() != [1, cap, nv]
+            || read.recurrent_state.dims() != [1, nv, vd, kd]
+            || into.recurrent_state.dims() != [1, nv, vd, kd]
+            || into.conv_state.dims() != [1, channels, pad]
+        {
+            return Ok(false);
+        }
+        let held: Vec<_> = all.iter().map(|t| t.storage_and_layout()).collect();
+        let mut views = Vec::with_capacity(held.len());
+        let mut device = None;
+        for (storage, layout) in &held {
+            let candle_core::Storage::Cuda(cs) = &**storage else {
+                return Ok(false);
+            };
+            let Some((start, end)) = layout.contiguous_offsets() else {
+                return Ok(false);
+            };
+            device.get_or_insert_with(|| cs.device.clone());
+            views.push(cs.as_cuda_slice::<f32>()?.slice(start..end));
+        }
+        let (Some(dev), [read_conv, read_state, mixed, qk, v, g, beta, into_conv, into_state]) =
+            (device, views.as_slice())
+        else {
+            return Ok(false);
+        };
+
+        let window = dev.get_or_load_custom_func(
+            "conv_window_replay_f32",
+            "swarmllm_delta_rule",
+            super::DELTA_RULE_PTX,
+        )?;
+        let n = channels * pad;
+        let cfg = LaunchConfig {
+            grid_dim: (n.div_ceil(256) as u32, 1, 1),
+            block_dim: (256, 1, 1),
+            shared_mem_bytes: 0,
+        };
+        let (channels_i, pad_i, rows_i) = (channels as i32, pad as i32, rows as i32);
+        let mut builder = window.builder();
+        builder.arg(read_conv);
+        builder.arg(mixed);
+        builder.arg(into_conv);
+        builder.arg(&channels_i);
+        builder.arg(&pad_i);
+        builder.arg(&rows_i);
+        // SAFETY: ffi. Every buffer is contiguous f32 of the shape checked
+        // above; the kernel reads `read` [C, pad] and the first `rows` ≤ cap
+        // rows of `mixed` [cap, C], and writes each of `into`'s C·pad
+        // elements once. `into` and `read` are a state's two pairs, never one
+        // buffer; it is written through a read view, ordered by the ONE
+        // stream per device, as `DeltaRule` writes its `state_out`.
+        unsafe { builder.launch(cfg) }.w()?;
+
+        let rule = dev.get_or_load_custom_func(
+            if kd == 64 {
+                "delta_rule_replay_f32_d64"
+            } else {
+                "delta_rule_replay_f32_d128"
+            },
+            "swarmllm_delta_rule",
+            super::DELTA_RULE_PTX,
+        )?;
+        let cfg = LaunchConfig {
+            grid_dim: (nv as u32, 1, (kd / 4) as u32),
+            block_dim: (32, 4, 1),
+            shared_mem_bytes: 0,
+        };
+        let (nk_i, nv_i) = ((two_nk / 2) as i32, nv as i32);
+        let (sv_t, sv_h) = ((nv * vd) as i64, vd as i64);
+        let mut builder = rule.builder();
+        builder.arg(qk);
+        builder.arg(v);
+        builder.arg(g);
+        builder.arg(beta);
+        builder.arg(read_state);
+        builder.arg(into_state);
+        builder.arg(&nk_i);
+        builder.arg(&nv_i);
+        builder.arg(&rows_i);
+        builder.arg(&sv_t);
+        builder.arg(&sv_h);
+        // SAFETY: ffi. As the step's launch (`DeltaRule::cuda_fwd`), for one
+        // sequence of `rows` ≤ cap rows: qk [cap, 2·nk, kd], v [cap, nv, vd]
+        // and g / beta [cap, nv] contiguous, the states [nv, vd, kd] with
+        // kd == vd ∈ {64, 128}; it writes `into`'s state only, never `read`'s.
+        unsafe { builder.launch(cfg) }.w()?;
+        Ok(true)
+    }
 
     pub(super) struct DeltaRule {
         /// `[b, nv, vd, kd]`, contiguous: the fourth operand, which a
@@ -1328,6 +1709,111 @@ mod tests {
             .unwrap()
             .to_scalar()
             .unwrap()
+    }
+
+    /// A DeltaNet step's convolution and SiLU in one launch on a card
+    /// (`conv_on_the_card`) are the composition's bit for bit — q | k, v and
+    /// the window after the step — at one position, a check's few and a
+    /// prompt chunk's many, and the window lands in the buffer it is given.
+    #[cfg(feature = "candle-cuda")]
+    #[test]
+    fn the_card_convolution_is_the_composed_one_bit_for_bit() {
+        let Ok(device) = Device::new_cuda(0) else {
+            eprintln!("SKIPPED: no card");
+            return;
+        };
+        let w = weights_of(&device, false);
+        let channels = w.conv1d.dim(0).unwrap();
+        let split = 2 * w.key_dim();
+        for seq in [1usize, 2, 3, 8, 37] {
+            let x = Tensor::randn(0f32, 1.0, (1, seq, channels), &device).unwrap();
+            let prev = Tensor::randn(0f32, 1.0, (1, channels, 3), &device).unwrap();
+            let (conv, window) = w.causal_conv(&x, &prev).unwrap();
+            let conv = candle_nn::ops::silu(&conv).unwrap();
+            let state_out = Tensor::zeros((1, channels, 3), DType::F32, &device).unwrap();
+            let (qk, v) = w
+                .conv_on_the_card(&x, &prev, &state_out)
+                .unwrap()
+                .expect("the one-launch convolution took the step");
+            let qk = qk.reshape((1, seq, split)).unwrap();
+            let v = v.reshape((1, seq, channels - split)).unwrap();
+            assert_eq!(
+                max_abs_diff(&qk, &conv.narrow(2, 0, split).unwrap()),
+                0.0,
+                "{seq} positions: q | k"
+            );
+            assert_eq!(
+                max_abs_diff(&v, &conv.narrow(2, split, channels - split).unwrap()),
+                0.0,
+                "{seq} positions: v"
+            );
+            assert_eq!(
+                max_abs_diff(&state_out, &window),
+                0.0,
+                "{seq} positions: the window after the step"
+            );
+        }
+    }
+
+    /// A rewind on a card in two launches a layer (`cuda::replay`) lands
+    /// where the composed replay does, bit for bit, for every count of rows
+    /// a check keeps — window and state — and is the path that ran. A replay
+    /// one row off lands elsewhere, so the comparison sees the error a wrong
+    /// window or row count makes. Qwen 3.5's widths (kd = vd = 128).
+    #[cfg(feature = "candle-cuda")]
+    #[test]
+    fn a_replay_on_the_card_lands_where_the_composed_replay_does() {
+        let Ok(device) = Device::new_cuda(0) else {
+            eprintln!("SKIPPED: no card");
+            return;
+        };
+        let (nk, d, nv, cap, pad) = (2usize, 128usize, 4usize, 8usize, 3usize);
+        let channels = 2 * nk * d + nv * d;
+        let randn = |dims: &[usize], s: f32| Tensor::randn(0f32, s, dims, &device).unwrap();
+        let unit = |dims: &[usize]| Tensor::rand(0f32, 1f32, dims, &device).unwrap();
+        let read = SsmSlot {
+            conv_state: randn(&[1, channels, pad], 1.0),
+            recurrent_state: randn(&[1, nv, d, d], 0.3),
+        };
+        let kept = SsmRows {
+            mixed: randn(&[1, cap, channels], 1.0),
+            qk: l2_norm(&randn(&[1, cap, 2 * nk, d], 1.0), 1e-6).unwrap(),
+            v: randn(&[1, cap, nv, d], 1.0),
+            g: unit(&[1, cap, nv]).neg().unwrap(),
+            beta: unit(&[1, cap, nv]),
+        };
+        let blank = || SsmSlot {
+            conv_state: Tensor::zeros((1, channels, pad), DType::F32, &device).unwrap(),
+            recurrent_state: Tensor::zeros((1, nv, d, d), DType::F32, &device).unwrap(),
+        };
+        let fused = |rows: usize| {
+            let into = blank();
+            assert!(
+                cuda::replay(&read, &kept, rows, &into).unwrap(),
+                "the two-launch replay took {rows} rows"
+            );
+            into
+        };
+        for rows in 1..cap {
+            let composed = replay_rows_composed(&read, &kept, rows, Some(&blank())).unwrap();
+            let into = fused(rows);
+            assert_eq!(
+                max_abs_diff(&composed.conv_state, &into.conv_state),
+                0.0,
+                "{rows} rows: convolution window"
+            );
+            assert_eq!(
+                max_abs_diff(&composed.recurrent_state, &into.recurrent_state),
+                0.0,
+                "{rows} rows: recurrent state"
+            );
+            let off = fused(rows + 1);
+            assert!(
+                max_abs_diff(&composed.conv_state, &off.conv_state) > 0.0
+                    && max_abs_diff(&composed.recurrent_state, &off.recurrent_state) > 0.0,
+                "{rows} rows: a replay one row further must land elsewhere"
+            );
+        }
     }
 
     /// A refused CUDA graph capture takes a decode step back and runs it again

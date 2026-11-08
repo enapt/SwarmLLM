@@ -3192,6 +3192,7 @@ run 11, the recording off in the same binary: the story 22-24 tok/s with 3.7-4.0
 story's residual, 0.91×: the block's rounds on prose write ~70 tokens/s where the head writes ~82 and plain steps ~74;
 (c3) the 8-row checks part from one-at-a-time where llama.cpp's processor scores the pick 0.8-1.0
 under its own (palindrome token 60) — run llama.cpp's card build at a batch of 8 there before calling it a near tie.
+**A round's cost, 2026-11-08**: a two-guess check cost 1.42-1.51× a step (llama.cpp's 2-row forward 1.02×) — the forward +2.9 ms (2-row matmuls, the f32 alpha/beta projections, copies), the take-back 1.7, the read-back 0.55 a row; the convolution in one launch and the take-back in two (#228 (9)) bring it to 1.23-1.28× and a plain step ~6% faster. The drafter rig (run 13, two runs a side): a BST class 135-163 → 167-172 tok/s, a hash map 103-112 → 116-126, the palindrome and the story inside the spread (the story with the block 66-73 against 73-77 without — still ~0.9×). Left: the 2-row matmuls, alpha/beta, the kept rows' copies, the read-back.
 
 #### #318 — A large model split across machines is too slow to use
 `P2` · perf-split · **OPEN** — 2026-10-20 · plan: `docs/plans/large_model_splits.md` · draws on #134, #145, #148, #149, #192
@@ -4003,7 +4004,7 @@ decode rate, against llama.cpp's 80.3 (`llama-bench -ngl 99 -n 128`, same file, 
 stopped): 89-94%. Without capture it reads 40, the old figure; on 10-11 capture did not lift the 4B and now it
 does, and which change between did it is not established. Left: the 6-11% to llama.cpp — 1,540 launches a
 step against Phi-4-mini's 804: each DeltaNet layer quantizes one input four times (`QMatMul::forward_shared`
-would do it once), runs its convolution as ~12 launches, softplus and the L2 norm as ~5 each; (8) ~~every
+would do it once), runs its convolution as ~12 launches (one on a card since 2026-11-08, (9)), softplus and the L2 norm as ~5 each; (8) ~~every
 turn re-read the whole conversation~~ — **saved since 2026-10-18, released in v0.3.243**: the prefix cache
 skipped any request holding recurrent state, because a DeltaNet layer's state cannot be cut back to a
 shorter prefix the way attention KV can. Now the prompt is saved 16 tokens short of its end (llama.cpp's
@@ -4013,7 +4014,7 @@ state, and a hit restores it whole or not at all (`docs/invariants/inference.md`
 saved short of its end"). Qwen3.5-0.8B Q8_0 on the processor (dev build, live node stopped,
 `~/swarmllm-228c/rig.sh`, both slot and sequential paths): a second turn of a 2,416-token conversation
 took 16.7 / 15.0 s instead of 127.6 / 135.8 s cold, replies identical to the cold run. Such a save is
-never announced to peers or exported — a peer's copy could not be narrowed either.
+never announced to peers or exported — a peer's copy could not be narrowed either; (9) **a check and its take-back on a card — 2026-11-08**: a two-guess check cost 1.42-1.51× a step where llama.cpp's 2-row forward costs 1.02×; the convolution + SiLU is now one launch a layer (12-14 before) and a take-back's replay two (seven), both bit for bit the composition — a 2-guess round 1.23-1.28× a step, a plain step 12.4 → 11.7 ms, the 4B's guessed reply 77 → 87 tok/s on the RTX 3070 (`docs/invariants/inference.md` § "Its convolution, and a taken-back check, on a card"; A/B `SWARMLLM_SSM_CONV=composed`, `SWARMLLM_SSM_REPLAY=composed`). Left: the 2-row matmuls, the alpha/beta projections at > 1 row, the kept rows' copies.
 
 A family in `supported_list` is a claim — check it against a REAL file's header (#715), and
 never flip `ModelArch::is_supported` without a real-file comparison against llama.cpp

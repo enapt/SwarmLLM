@@ -6155,6 +6155,92 @@ A/B: `SWARMLLM_DELTA_RULE=steps`. Profile stage: `delta rule`.
 The 48 reply tokens identical in all eight runs, processor and card alike. On the processor the rest of the
 prompt is now the projections and the FFN, as for any dense model.
 
+### Its convolution, and a taken-back check, on a card (2026-11-08, FUTURE_WORK #228 (9), #428)
+
+**Why it was looked at**: with the block drafter on a card (#428) a story wrote
+0.91× of plain steps once every check width was recorded ahead. A round of
+guesses has to cost little more than a step for prose's ~2-3 kept tokens a
+round to pay, so its parts were timed apart (`prefill_bench`
+`SWARM_BENCH_SPEC_ROUND=1`: the forward, the kept rows' logits read back and
+picked, the cache taken back to one kept row — a recurrent model replays it —
+each against a plain step interleaved; Qwen3.5-4B Q4_K_M whole on the RTX
+3070, a 256-token prompt, min of 9; live node stopped, safety kit).
+
+**What a two-guess check cost** (the composition): 18.75-19.27 ms against a
+step's 12.42-13.53, 1.42-1.51×. llama.cpp master on the same file
+(`llama-bench -p 1,2,3,4,8 -d 256`, `~/rig428/llb1`) forwards 2 rows in 11.9 ms
+against 11.7 for 1 — 1.02×. Where ours went:
+
+| part | ms over a step | what |
+|---|---|---|
+| forward, card time | +2.2 | 2-row quantized matmuls +0.86 (candle's MMVQ at 2 columns; llama.cpp's `calc_nwarps` / `calc_rows_per_block` pick the same launch at 2-4, so the gap is inside the kernel), cuBLAS gemmSN for the f32 alpha/beta projections at > 1 row +0.47, copies +0.6 (the convolution's `cat` / `narrow`, the kept rows), attention +0.1 |
+| forward, host | +0.7 | launches: a step 1,362 (42.6 a layer), a 2-row check 1,626 (`SWARMLLM_COUNT_KERNELS=1`) |
+| take-back | 1.65-1.78 | the replay: 7 launches a layer × 24, host-bound |
+| read-back | 0.55 a row | a 1 MB f32 logits row to the host, picked there |
+
+(card time: `nsys profile -t cuda --cuda-graph-trace=node`, `~/rig428/nsys1`,
+split at each device synchronize.)
+
+**Changed**: the convolution and its SiLU in one launch a layer
+(`ssm_conv_silu_f32_k4`, a thread a channel sliding its window over the step,
+llama.cpp's `ggml_cuda_op_ssm_conv` with `apply_silu`) where the composition
+made 12 at one position and up to 14 at several — ~290 a token of the 4B's 24
+DeltaNet layers; and a replay in two (`conv_window_replay_f32` rebuilds the
+window as one copy, `delta_rule_replay_f32_d*` runs the step's body over the
+kept rows with its outputs off). Both are bit for bit the composition: the
+products and sums rounded in tap order as candle's `bmul` / `badd` round them
+(`__fmul_rn` / `__fadd_rn`, no fused multiply-add — `kernels/` is built
+without `-use_fast_math`), then candle's `silu_fwd`, `x / (1 + expf(-x))`.
+Tests: `the_card_convolution_is_the_composed_one_bit_for_bit` (1, 2, 3, 8 and
+37 positions: q | k, v and the window, max difference 0) and
+`a_replay_on_the_card_lands_where_the_composed_replay_does` (every kept count;
+a replay one row off differs, the null control).
+
+**Measured** (the same bench, one binary, `SWARMLLM_SSM_CONV=composed
+SWARMLLM_SSM_REPLAY=composed` the old arm, two runs a side alternated,
+`~/rig428/bench3`):
+
+| width | round, composed (ms) | round, one launch (ms) | take-back | × a step |
+|---|---|---|---|---|
+| 1 (a step) | 12.42-13.53 | 11.66-12.49 | — | — |
+| 2 | 18.75-19.27 | 14.89-15.56 | 1.69-1.78 → 0.56-0.62 | 1.42-1.51 → 1.23-1.28 |
+| 3 | 19.70-20.00 | 16.81-19.31 | 1.68-1.72 → 0.58-0.61 | 1.53 → 1.35-1.60 |
+| 4 | 19.31-19.45 | 17.72-17.95 | 1.62-1.71 → 0.57-0.58 | 1.45-1.48 → 1.49-1.53 |
+| 8 | 20.86-21.91 | 18.58-19.30 | 1.64-1.81 → 0.56-0.57 | 1.62-1.71 → 1.52-1.66 |
+
+The guessed reply on the card (`a_guessed_reply_is_the_reply_read_one_token_at_a_time`,
+`SWARMLLM_GUESS_TEST_ON_CARD=1`, the n-gram and the guess head; four runs a
+side alternated, best, `~/rig428/exact1-2`): one token at a time 74.4 → 81.2
+tok/s, every guess 77.1 → 86.8, guesses that pay 76.9 → 84.6; the ids exact
+in every run, both sides.
+
+The drafter rig with real replies (`card428.sh`, `WARM_IDLE=20`; arms ON, ON
+composed, OFF, OFF composed — OFF the block drafter off — twice each in one
+binary; 160 greedy tokens, tok/s with stalls of 1 s or more out; Chrome
+closed; `~/rig428/card13`. Run 12 is left out: without the idle pause the
+widths were never recorded ahead and every arm paid first graphs inside its
+replies):
+
+| reply | ON | ON, composed | OFF | OFF, composed |
+|---|---|---|---|---|
+| palindrome | 129-132 | 124-140 | 98-102 | 93-101 |
+| BST class | 167-172 | 135-163 | 103-117 | 108-112 |
+| story | 66-73 | 66 | 73-77 | 71-75 |
+| hash map | 116-126 | 103-112 | 89-96 | 85-109 |
+
+Replies differ between runs of ONE arm as they did before the change (runs
+9-11: a near tie falls with the check width the timings choose), so the
+kernels' bit-for-bit tests and the guessed-reply test (ids exact) are what pin
+the change. Two runs a side do not separate ±10%: the drafter's BST class and
+hash map gain ~10-15%, the rest is inside the spread, and a story with the
+block stays ~0.9× of plain steps.
+
+**Left**, by size: the 2-row matmuls (+16% at 2 columns, inside the kernel);
+the alpha/beta projections at > 1 row (one f32 matmul each through cuBLAS —
+one launch for both, or a few-rows kernel); the kept rows' copies (5 a layer);
+the read-back (a pick on the card helps greedy requests only — a chat's default
+is temperature 0.7); a check's 13 host → device copies.
+
 ## Qwen3-Next: value heads grouped by key head, put in the kernels' order at load (2026-11-01, FUTURE_WORK #390)
 
 **What differs from Qwen 3.5** (llama.cpp master `4b1a27f`: `src/models/qwen3next.cpp`,
@@ -8466,4 +8552,6 @@ segments and a tree's row counts. Prior art: vLLM records its graphs at
 start-up for every capture size, largest first; SGLang records target and
 draft graphs once at start-up; an adaptive-length verifier records one verify
 graph per length up front (arXiv 2605.00342) — FUTURE_WORK #425 (b).
+
+**What a round costs beyond a step**, and the two parts made smaller: § "Qwen 3.5's delta rule is ONE op per layer" › "Its convolution, and a taken-back check, on a card".
 

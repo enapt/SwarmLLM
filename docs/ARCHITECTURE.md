@@ -220,7 +220,9 @@ swarmllm/
 │                 the card's half cache (flash-decoding), NOT bit-identical;
 │                 kv_append.cu — a step's f32 K or V written into the half cache in ONE
 │                 launch (cast + copy); delta_rule.cu — Qwen 3.5's gated delta rule,
-│                 every token of a layer in one launch, NOT bit-identical; tree_rank.cu — a
+│                 every token of a layer in one launch, NOT bit-identical — and on a card its
+│                 convolution + SiLU in one launch, a taken-back check's replay in two, both
+│                 bit-identical; tree_rank.cu — a
 │                 drafter's tree level ranked (log-sum-exp + top 8 a row) in two launches, NOT
 │                 bit-identical. A NEW kernel goes here, not into
 │                 vendor/candle/candle-kernels — that copy exists for patches to upstream kernels and
@@ -919,7 +921,7 @@ references: `docs/plans/qwen35_support.md`.
   kernel 4, state carried across steps) + SiLU, L2-normalised q/k (key heads TILED to value heads,
   as llama.cpp's kernel does — interleaving them is the null control that fails), `beta =
   sigmoid(ssm_beta·x)`, `g = softplus(ssm_alpha·x + ssm_dt.bias) · ssm_a`, the gated delta rule
-  token by token, `ssm_norm` gated by SiLU(z), `ssm_out`.
+  (one op a layer), `ssm_norm` gated by SiLU(z), `ssm_out`.
 - **Attention layer**: `attn_q` projects Q and an output gate interleaved PER HEAD; per-head RMS norm
   on Q and K; IMROPE over 64 of 256 dims; output × sigmoid(gate).
 - **State**: `SsmState` (conv + recurrent) per request beside the attention KV cache. It can be
