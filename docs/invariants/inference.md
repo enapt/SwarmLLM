@@ -5947,7 +5947,7 @@ rewind and all: the head's draft steps run only its own full-attention layer,
 so nothing recurrent is taken back but the check — what kept the drafter and
 SWIFT off these models does not apply. (4) On a card, a model with a head
 copies the trunk's last row out of every captured step into memory made
-before the capture (`executor::graph_keeps_the_head_row`), so the step that
+before the capture (`executor::graph_keeps_rows`), so the step that
 feeds the head is still a replayed graph and every step records the same one.
 
 **Memory.** No planner or admission charges the block: 122 MB on the 4B, 430
@@ -8358,3 +8358,62 @@ greedy tokens, thinking off; arms ON / OFF / ON / OFF inside one binary,
   guesses is left (FUTURE_WORK #428).
 - **The checks**: fitted 131-249 ms + 39-88 a row on the drafter's own line; a
   one-token round 305-431 ms (one per reply, taken before the first price).
+
+### On a card (2026-11-08)
+
+**Built**: the drafter loads on the target's own device (llama.cpp places a
+DFlash drafter on the target's devices), is charged to the card's budget, and
+picks its guesses on the card (`tree_rank::greedy_picks`, the one greedy pick —
+only ids cross). The drafter reads the target layers' rows of every committed
+position, so EVERY captured step and check keeps them
+(`executor::graph_keeps_rows`, buffers made outside the capture, as the guess
+head's row): asking for them never changes a graph. The head stays beside the
+block (`with_guessers`); the prompt pass keeps the union of both windows.
+
+**Measured** — Qwen3.5-4B Q4_K_M whole on the RTX 3070 (WSL2), z-lab's
+Qwen3.5-4B-DFlash as Q8_0, 160 greedy tokens, thinking off; one CUDA binary,
+arms ON / OFF (`SWARMLLM_BLOCK_DRAFTER=0`) alternating, a fresh node each, the
+live node stopped (`card428.sh`). Tokens a second with every gap of 1 s or more
+taken out (`*`: a reply that had one — WSL2's pool growth, gotcha #883; shorter
+stalls stay in). ON (OFF beside it):
+
+| run — what chose the guesser | palindrome | BST class | story | hash map |
+|---|---|---|---|---|
+| 1 — the block alone, no head | 143-145 (71) | 176-181 (81*-83*) | 68*-69* (72-75) | — |
+| 3 — the head beside it, count only | 151-152 (94*-100*) | 180-181 (48*-66*) | 54*-61* (72-74) | 102-103 (82-88) |
+| 6 — set aside by plain steps OR the head's record | 110*-129 (88-107) | 158-180 (92*-101*) | 59*-63 (71-74) | 86*-98 (74*-87) |
+| 7 — set aside by plain steps only | 150-151 (101*-107*) | 130*-179 (108*-112*) | 49*-54* (70-73) | 102-113 (83-91) |
+
+- **Code pays 1.4-1.7×, the hash map ~1.2×.** A code reply is 25-40 rounds of
+  ~6-7 guesses, ~4-5 kept (α 0.73-0.96), draft 6.0-6.4 ms, the check 25-29 ms.
+- **The story loses, every run.** The block keeps ~0.9 of ~4.9 guesses a round
+  there — ~18 ms a token against a 13.4 ms step — and its count read α 0.70-0.74
+  (an all-or-nothing guesser reads optimistic in a geometric model), hence the
+  records (`scheduling.md` § "Speculation that does not pay"). In run 7 the
+  block was set aside 50-107 rounds a story, and still: (1) **5-7 one-off
+  forwards a story ON against 1 OFF** — a check's first capture costs 240-300 ms
+  against 16-30 replayed, and the ON replies check at every width from 2 to 8
+  (the block's, the head's, the n-gram's) where OFF's check at 2-3; every ON
+  story hit a sub-second stall and no OFF one did, as a capture that allocates
+  grows the pool; (2) **the head declined 68-90 rounds ON against 5-17 OFF** —
+  its checks priced on a line the block's wide checks steepened (16.8 + 0.76 a
+  position against OFF's flat 16.5); (3) the block's probes (4-6 a story, ~30 ms
+  for ~1 token each). Best story ON: run 1's, the block declined nearly every
+  round — a plain reply (68-69).
+- **Which guesser the records chose** (runs 6 → 7): weighed against the head's
+  record the block lost a hash map's explanation to the head for 18-55 rounds
+  and code its first captures (`model_worker::LocalSpec`, comment at
+  `beside_block`); plain steps only brought code back to run 3's.
+- **Two stale figures fixed on the way**: a plain step remembered from a slow
+  spell (30.8-36.1 ms against 13) and a check fitted through two stalls (214 ms
+  against 19, run 6 arm 3: every guesser declined, the probes were judged at it
+  and never paid). Both now start over at a figure under 0.75× theirs.
+- **The replies**: the same text between ON arms on code; story and hash part
+  between arms OFF as well as ON. Where they part, llama.cpp's processor
+  (`margin_check.py`) puts the two picks 0.02-0.29 apart, except palindrome
+  token 60 in runs 3 and 7 (ON ` If`, OFF ` Args`; ` If` 1.04 under llama.cpp's
+  pick, its top two 0.81 apart) and run 1's token 124 (`\n` against `\n\n`,
+  0.81 under): the 8-row checks multiply through MMQ's int8 (from 4 rows,
+  #325), the 2-3-row checks do not. Whether llama.cpp's own card build picks
+  the same at a batch of 8 is open (FUTURE_WORK #428).
+

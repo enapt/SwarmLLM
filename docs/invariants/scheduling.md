@@ -6441,6 +6441,50 @@ BanditSpec keeps trying arms it declined — the probe after `FIRST_PROBE_AFTER`
 declines, doubling to `MOST_PROBE_AFTER`, now shared with `LocalSpec` from
 `dsd_controller`.
 
+**On one computer a guesser is set aside by what it WRITES** (2026-11-08, #428
+on a card, `model_worker::LocalSpec`). A guesser's count is priced from a
+geometric acceptance model, and one whose guesses are kept all or nothing reads
+optimistic there: the block drafter on a story read α 0.74 while keeping ~0.94
+of ~4.9 guesses a round — ~18 ms a token against a 13.4 ms plain step, 54-61
+tok/s where the head alone wrote 72-74 (Qwen3.5-4B Q4_K_M, RTX 3070). So each
+guesser keeps a record, `dsd_controller::Delivered`: the tokens its rounds wrote
+over what they cost, each round charged its check's fitted price plus the
+guesser's usual time (a round the machine stalled is the machine's), and the
+block is set aside where that record is below a plain step's
+(`delivers_less`). **Never below another guesser's**: weighed against the
+head's record, one all-or-nothing round put the block under it, and a hash
+map's explanation ran 18-55 rounds on the head at ~100 tok/s where the block
+wrote 125-143; the head sent first to earn a record cost code its first
+captures — palindrome 110-129 tok/s against 151-152 with neither rule, the story
+no better (59-63 against 54-61; card runs 3 and 6). Three things make a record
+worth reading:
+
+- **A declined guesser is asked again** — the n-gram, the card, the head and the
+  block by one rule (`model_worker::Probing`: after `FIRST_PROBE_AFTER`
+  declines, doubling to `MOST_PROBE_AFTER` while a probe does not pay; a block
+  probe is judged against a plain step). The head, priced off a conversation's
+  first (uncaptured) check, had declined a whole reply.
+- **The plain step a round is weighed against is the MODEL's**
+  (`SplitModel::plain_steps`, the owner's and the swarm's apart, carried across
+  replies), re-timed by one plain step every `PlainSteps::RETIME_AFTER` (64)
+  guessed rounds; a step under `RecentMedian::FASTER` (0.75) of the median
+  starts the window over (`record_trusting_a_faster`): a slow spell's steps held
+  it at 30.8-36.1 ms against a real 13.
+- **So does a check** (`CheckCost::record_trusting_a_faster`, one computer only —
+  a peer's round trip varies both ways): the hold lets one stalled check by,
+  not two running, and two fitted the card's checks at 214 ms against 19. Every
+  guesser declined at that price, each probe was judged at it and never paid,
+  and the story ran without guessing to its end (run 6, arm 3).
+
+Tests: `a_guesser_is_set_aside_only_by_a_record_another_way_beats`,
+`a_faster_step_starts_a_stale_figure_over`,
+`a_stalled_check_fit_starts_over_at_the_next_fast_check`,
+`a_declined_guesser_is_asked_again`. Prior art: BanditSpec (Hou et al., ICML
+2025, arXiv 2505.15141) chooses among speculative configurations by the tokens a
+unit of time they realise, with no model of acceptance; vLLM's and SmartSpec's
+goodput price a round the same way; BBR trusts the least round trip because a
+queue only ever adds to it.
+
 → `docs/plans/split_speculation.md` § "Guessing steps aside where it does not pay"
 
 ## What a peer HOLDS on disk and what it has LOADED are different facts

@@ -197,6 +197,7 @@ fn make_test_split_model_impl(
         block_drafter: None,
         drafter_head: None,
         drafter_head_bytes: 0,
+        plain_steps: Default::default(),
         stand_in_prior: None,
         grammar_vocab: Default::default(),
     }
@@ -306,6 +307,7 @@ pub(super) fn make_gqa_test_model(
         block_drafter: None,
         drafter_head: None,
         drafter_head_bytes: 0,
+        plain_steps: Default::default(),
         stand_in_prior: None,
         grammar_vocab: Default::default(),
     }
@@ -475,6 +477,7 @@ pub(super) fn make_deepseek_test_model(hidden_dim: usize) -> SplitModel {
         block_drafter: None,
         drafter_head: None,
         drafter_head_bytes: 0,
+        plain_steps: Default::default(),
         stand_in_prior: None,
         grammar_vocab: Default::default(),
     }

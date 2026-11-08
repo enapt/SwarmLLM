@@ -3678,11 +3678,11 @@ struct SpecRound {
 /// against 16-30 replayed). Timed as checks, either priced every check of the
 /// reply; neither is timed.
 ///
-/// **A refusal is tried again** ([`Self::probe_after`]). Fitted from its first
+/// **A refusal is tried again** ([`Probing`]). Fitted from its first
 /// cold check, the count went to zero and, checking
 /// nothing more, never learned that the reply had turned to repeating itself —
 /// Qwen3.5-4B's story, where checking every guess ran 102-104 tok/s against 72
-/// one at a time (α 0.93), stayed at 71. So after `probe_after` rounds of
+/// one at a time (α 0.93), stayed at 71. So after `FIRST_PROBE_AFTER` rounds of
 /// guesses declined, the next guesses found are checked anyway; one that pays
 /// (it wrote more than a step would have in its time) starts the count over at
 /// [`Self::FIRST_PROBE_AFTER`], one that does not doubles it, up to
@@ -3709,6 +3709,9 @@ struct LocalSpec {
     /// Every guess checked, as before 2026-10-25 (`SWARMLLM_LOCAL_GUESS_GAMMA=fixed`).
     fixed: bool,
     step_ms: crate::inference::dsd_controller::RecentMedian,
+    /// Whether the reply is the owner's: which of the model's remembered
+    /// plain steps it starts from and adds to ([`Self::with_remembered_step`]).
+    owner: bool,
     check: crate::inference::dsd_controller::CheckCost,
     acceptance: crate::inference::dsd_controller::AcceptanceEstimate,
     rounds: u64,
@@ -3728,12 +3731,8 @@ struct LocalSpec {
     /// no chance to guess, so no evidence of what guessing pays
     /// ([`payoff_sample`]).
     settling_rounds: u64,
-    /// Rounds of guesses declined since the last check.
-    declined_run: u32,
-    /// Declined rounds after which found guesses are checked anyway.
-    probe_after: u32,
-    /// Checks made that way.
-    probes: u64,
+    /// Rounds of guesses declined, and the checks made anyway ([`Probing`]).
+    probing: Probing,
     /// The card's own guesses, for a whole model split between the card and
     /// the processor; `None` elsewhere.
     card: Option<CardGuesses>,
@@ -3844,6 +3843,8 @@ struct CardGuesses {
     accepted: u64,
     /// Rounds that found guessing on the card not worth its time.
     declined: u64,
+    /// Those declines in a row, and the guesses made anyway ([`Probing`]).
+    probing: Probing,
 }
 
 impl CardGuesses {
@@ -3865,6 +3866,7 @@ impl CardGuesses {
             proposed: 0,
             accepted: 0,
             declined: 0,
+            probing: Probing::default(),
         })
     }
 
@@ -3939,6 +3941,11 @@ struct MtpGuesses {
     acceptance: crate::inference::dsd_controller::AcceptanceEstimate,
     /// One guess's time, read back with the round's guesses.
     guess_ms: crate::inference::dsd_controller::RecentMedian,
+    /// What its rounds have written a millisecond, which the block drafter
+    /// must beat to be checked instead ([`LocalSpec::next`]).
+    delivered: crate::inference::dsd_controller::Delivered,
+    /// Rounds declined, and the guesses made anyway ([`Probing`]).
+    probing: Probing,
     rounds: u64,
     proposed: u64,
     accepted: u64,
@@ -4071,6 +4078,8 @@ impl MtpGuesses {
             for_the_owner: kv_store.serves_the_owner(req_id_str),
             acceptance: crate::inference::dsd_controller::AcceptanceEstimate::recent(),
             guess_ms: Default::default(),
+            delivered: Default::default(),
+            probing: Probing::default(),
             rounds: 0,
             proposed: 0,
             accepted: 0,
@@ -4269,15 +4278,16 @@ struct BlockGuesses {
     acceptance: crate::inference::dsd_controller::AcceptanceEstimate,
     /// One round's draft time — one forward, whatever its count.
     draft_ms: crate::inference::dsd_controller::RecentMedian,
+    /// What its rounds have written a millisecond ([`LocalSpec::next`]).
+    delivered: crate::inference::dsd_controller::Delivered,
+    /// Rounds set aside because a plain step or the head was writing faster.
+    outpaced: u64,
     rounds: u64,
     proposed: u64,
     accepted: u64,
     declined: u64,
-    /// Rounds declined in a row, and how many before one is drafted anyway
-    /// ([`LocalSpec::probe_after`]'s rule).
-    declined_run: u32,
-    probe_after: u32,
-    probes: u64,
+    /// Rounds declined, and the drafts made anyway ([`Probing`]).
+    probing: Probing,
     stopped: Option<String>,
 }
 
@@ -4299,13 +4309,13 @@ impl BlockGuesses {
             for_the_owner: kv_store.serves_the_owner(req_id_str),
             acceptance: crate::inference::dsd_controller::AcceptanceEstimate::recent(),
             draft_ms: Default::default(),
+            delivered: Default::default(),
+            outpaced: 0,
             rounds: 0,
             proposed: 0,
             accepted: 0,
             declined: 0,
-            declined_run: 0,
-            probe_after: LocalSpec::FIRST_PROBE_AFTER,
-            probes: 0,
+            probing: Probing::default(),
             stopped: None,
         })
     }
@@ -5117,6 +5127,60 @@ fn refit_stale_priors(
     any
 }
 
+/// A guesser's declined rounds and the probes that try it again: ONE rule for
+/// the n-gram, the card's guesses, the model's head and a block drafter
+/// (#428). After [`LocalSpec::FIRST_PROBE_AFTER`] declines in a row the next
+/// round guesses anyway; a probe that pays starts the count over, one that
+/// does not doubles it, up to [`LocalSpec::MOST_PROBE_AFTER`]. The head had
+/// no such rule: on a story on the card a cold first fit (29.5 ms a check
+/// whatever its width, where one writes in ~21) declined it 144 rounds of 149
+/// and nothing asked it again (2026-11-08).
+#[derive(Debug)]
+struct Probing {
+    declined_run: u32,
+    probe_after: u32,
+    probes: u64,
+}
+
+impl Default for Probing {
+    fn default() -> Self {
+        Self {
+            declined_run: 0,
+            probe_after: LocalSpec::FIRST_PROBE_AFTER,
+            probes: 0,
+        }
+    }
+}
+
+impl Probing {
+    /// A round it guesses in of its own accord: the run of declines ends.
+    fn guessed(&mut self) {
+        self.declined_run = 0;
+    }
+
+    /// A round it declined, with a price to decline by: whether it guesses
+    /// anyway.
+    fn declined(&mut self) -> bool {
+        self.declined_run += 1;
+        let probe = self.declined_run >= self.probe_after;
+        if probe {
+            self.declined_run = 0;
+        }
+        probe
+    }
+
+    /// A probe's outcome: whether it wrote faster than the round it replaced
+    /// would have.
+    fn judged(&mut self, paid: bool) {
+        self.probes += 1;
+        self.probe_after = if paid {
+            LocalSpec::FIRST_PROBE_AFTER
+        } else {
+            (self.probe_after * 2).min(LocalSpec::MOST_PROBE_AFTER)
+        };
+    }
+}
+
 impl LocalSpec {
     /// `fixed`: check every guess found, as before 2026-10-25 — the loop
     /// passes [`local_guess_gamma_fixed`], the test runs both.
@@ -5145,6 +5209,7 @@ impl LocalSpec {
             widest,
             fixed,
             step_ms: Default::default(),
+            owner: false,
             check: crate::inference::dsd_controller::CheckCost::for_a_plan(
                 crate::inference::dsd_controller::CheckReach::Here,
             ),
@@ -5156,9 +5221,7 @@ impl LocalSpec {
             declined: 0,
             one_offs: 0,
             settling_rounds: 0,
-            declined_run: 0,
-            probe_after: Self::FIRST_PROBE_AFTER,
-            probes: 0,
+            probing: Probing::default(),
             card: (!fixed).then(|| CardGuesses::for_model(model)).flatten(),
             mtp: None,
             block: None,
@@ -5218,9 +5281,25 @@ impl LocalSpec {
         self
     }
 
-    /// Hand the reply's guesser what the prompt pass kept for it
+    /// Start the step's price from the model's recent plain steps for this
+    /// requester ([`SplitModel::plain_steps`](crate::inference::split::SplitModel::plain_steps)),
+    /// which this reply's plain steps then join.
+    fn with_remembered_step(
+        mut self,
+        model: &crate::inference::split::SplitModel,
+        owner: bool,
+    ) -> Self {
+        self.owner = owner;
+        self.step_ms = model.plain_steps(owner).clone();
+        self
+    }
+
+    /// Hand the reply's guessers what the prompt pass kept for them
     /// ([`prompt_capture_for_guesses`], first position `first`): the block
-    /// drafter where one is attached (#428), else the model's own guess head.
+    /// drafter where one is attached (#428), AND the model's own guess head,
+    /// which guesses the rounds the block does not (a story's: the block
+    /// declined 150 of 155 rounds on the card, and without the head every
+    /// one of them was a plain step).
     fn with_guessers(
         mut self,
         model: &crate::inference::split::SplitModel,
@@ -5239,7 +5318,6 @@ impl LocalSpec {
                 Ok(()) => self.block = Some(block),
                 Err(e) => tracing::warn!(error = %e, "block drafter: not used for this reply"),
             }
-            return self;
         }
         if self.fixed {
             return self;
@@ -5273,6 +5351,25 @@ impl LocalSpec {
             return true;
         };
         round.produced.len() as f64 * step >= round.ms
+    }
+
+    /// A plain step's tokens per millisecond: one a step.
+    fn plain_per_ms(&self) -> Option<f64> {
+        self.step_ms.median().map(|ms| 1.0 / ms.max(0.1))
+    }
+
+    /// What a round's check costs, for a guesser's record: the price the
+    /// check is fitted at for its width, so one stalled by the machine (under
+    /// WSL2 a growing card pool stalls seconds, gotcha #883) is not charged
+    /// to the guesser; its own time where nothing is fitted yet.
+    fn check_price(&self, round: &SpecRound) -> f64 {
+        self.step_ms
+            .median()
+            .and_then(|step| {
+                self.check
+                    .predict_beside_a_step(u32::try_from(round.positions).unwrap_or(u32::MAX), step)
+            })
+            .unwrap_or(round.ms)
     }
 
     /// How many guesses the next round's lookup may return: a round reads the
@@ -5380,6 +5477,7 @@ impl LocalSpec {
         let fit = self.check.fit().map_or("-".to_string(), |(f, s)| {
             format!("{f:.1} + {s:.2}/position")
         });
+        let started_over = self.check.started_over();
         let step = self
             .step_ms
             .median()
@@ -5396,11 +5494,12 @@ impl LocalSpec {
                 )
             });
             format!(
-                " card rounds {} guessed {} kept {} declined {} guess {} ms alpha {:.2} next {}{stand_in}",
+                " card rounds {} guessed {} kept {} declined {} probes {} guess {} ms alpha {:.2} next {}{stand_in}",
                 c.rounds,
                 c.proposed,
                 c.accepted,
                 c.declined,
+                c.probing.probes,
                 c.guess_ms
                     .median()
                     .map_or("-".to_string(), |m| format!("{m:.1}")),
@@ -5410,15 +5509,19 @@ impl LocalSpec {
         });
         let mtp = self.mtp.as_ref().map_or(String::new(), |m| {
             format!(
-                " head rounds {} guessed {} kept {} declined {} guess {} ms alpha {:.2} next {} words {}{}",
+                " head rounds {} guessed {} kept {} declined {} probes {} guess {} ms alpha {:.2} writes {}/s next {} words {}{}",
                 m.rounds,
                 m.proposed,
                 m.accepted,
                 m.declined,
+                m.probing.probes,
                 m.guess_ms
                     .median()
                     .map_or("-".to_string(), |ms| format!("{ms:.1}")),
                 m.acceptance.alpha(),
+                m.delivered
+                    .per_ms()
+                    .map_or("-".to_string(), |r| format!("{:.0}", r * 1000.0)),
                 self.mtp_guess_count(self.room()),
                 m.words.as_ref().map_or("all".to_string(), |w| format!(
                     "{}+{} new {}/{}{}",
@@ -5435,28 +5538,32 @@ impl LocalSpec {
         });
         let block = self.block.as_ref().map_or(String::new(), |b| {
             format!(
-                " block rounds {} guessed {} kept {} declined {} probes {} draft {} ms alpha {:.2}{}",
+                " block rounds {} guessed {} kept {} declined {} outpaced {} probes {} draft {} ms alpha {:.2} writes {}/s{}",
                 b.rounds,
                 b.proposed,
                 b.accepted,
                 b.declined,
-                b.probes,
+                b.outpaced,
+                b.probing.probes,
                 b.draft_ms
                     .median()
                     .map_or("-".to_string(), |ms| format!("{ms:.1}")),
                 b.acceptance.alpha(),
+                b.delivered
+                    .per_ms()
+                    .map_or("-".to_string(), |r| format!("{:.0}", r * 1000.0)),
                 b.stopped
                     .as_ref()
                     .map_or(String::new(), |why| format!(" stopped ({why})")),
             )
         });
         format!(
-            "rounds {} accepted {} rejected {} declined {} probes {} one-off {} earlier {} step {step} ms check {fit} ms alpha {:.2} next {}{card}{mtp}{block}",
+            "rounds {} accepted {} rejected {} declined {} probes {} one-off {} earlier {} step {step} ms check {fit} ms started over {started_over} alpha {:.2} next {}{card}{mtp}{block}",
             self.rounds,
             self.accepted,
             self.rejected,
             self.declined,
-            self.probes,
+            self.probing.probes,
             self.one_offs,
             self.from_earlier,
             self.acceptance.alpha(),
@@ -5496,7 +5603,13 @@ impl LocalSpec {
             !self.fixed && !model.decode_width_settled(kv_store.serves_the_owner(req_id_str));
         #[cfg(test)]
         let settling = settling && self.script.is_none();
-        let room = if settling { 0 } else { self.room() };
+        // A step not timed for a while is timed again: where every round
+        // guesses, nothing else re-times it ([`SplitModel::plain_step_due`](crate::inference::split::SplitModel::plain_step_due)).
+        let retime = !self.fixed && model.plain_step_due(self.owner);
+        #[cfg(test)]
+        let retime = retime && self.script.is_none();
+        let plain_now = settling || retime;
+        let room = if plain_now { 0 } else { self.room() };
         // `room` first: a settling step is no paused round.
         let mut found = if room > 0 && self.backoff.should_draft() {
             let (mut found, _source) = crate::inference::ngram_lookup::cascade_find_candidate(
@@ -5525,12 +5638,9 @@ impl LocalSpec {
         let mut probe = false;
         if !found.is_empty() {
             if worth > 0 {
-                self.declined_run = 0;
-            } else {
-                self.declined_run += 1;
-                if self.declined_run >= self.probe_after {
-                    (worth, probe, self.declined_run) = (found.len(), true, 0);
-                }
+                self.probing.guessed();
+            } else if self.probing.declined() {
+                (worth, probe) = (found.len(), true);
             }
         }
         // Guesses found and none worth their check.
@@ -5539,13 +5649,22 @@ impl LocalSpec {
             (worth, probe) = (script.pop_front().unwrap_or(0).min(found.len()), false);
         }
         let declined = !found.is_empty() && worth == 0;
-        // A block drafter guesses where the conversation offers nothing worth
-        // checking, or where its guesses have been kept more often (#428).
+        // The model's own head guesses where the conversation offers nothing
+        // worth checking, or where its guesses have been kept more often.
+        let head_wants = !plain_now
+            && room > 0
+            && self.mtp.as_ref().is_some_and(|m| {
+                m.active()
+                    && (found.is_empty()
+                        || worth == 0
+                        || m.acceptance.alpha() > self.acceptance.alpha())
+            });
+        // A block drafter guesses on the same terms (#428).
         let mut block_round = false;
         let mut block_declined = false;
         let mut block_probe = false;
         let mut block_draft_ms = 0.0;
-        let block_room = if settling { 0 } else { self.block_room(model) };
+        let block_room = if plain_now { 0 } else { self.block_room(model) };
         let block_due = block_room > 0
             && self.block.as_ref().is_some_and(|b| {
                 b.active()
@@ -5555,19 +5674,44 @@ impl LocalSpec {
             });
         #[cfg(test)]
         let block_due = block_due && self.script.is_none();
+        // The block is checked while what it has written beats plain steps,
+        // as a probe after that (BanditSpec's choice by realised speed) —
+        // and is set aside by plain steps ONLY, never by the head's record.
+        // A block round keeps all or nothing, so one bad round put its record
+        // under the head's: a hash map's explanation then ran 18-55 rounds on
+        // the head at ~100 tok/s where the block wrote 125-143, and the head
+        // sent first to earn a record cost code its first captures — code
+        // 110-129 tok/s against 151-152 without either rule, the story no
+        // better (59-63 against 54-61; #428, card runs 3 and 6, 2026-11-08).
+        // Where the block loses to plain steps — prose — the head takes its
+        // rounds, as before.
+        // Prior art: BanditSpec (Hou et al., ICML 2025) chooses by confidence
+        // bounds; a mean of all-or-nothing rounds has none worth comparing.
+        let beside_block = [self.plain_per_ms()];
         if block_due {
             let mut gamma = self.block_guess_count(block_room);
+            if !self.fixed
+                && gamma > 0
+                && self.block.as_ref().is_some_and(|b| {
+                    crate::inference::dsd_controller::delivers_less(
+                        b.delivered.per_ms(),
+                        beside_block,
+                    )
+                })
+            {
+                gamma = 0;
+                if let Some(block) = self.block.as_mut() {
+                    block.outpaced += 1;
+                }
+            }
             // A refusal is tried again, as the n-gram's is: one cold check
             // fitted alone must not decline the whole reply.
             let priced = self.step_ms.median().is_some() && self.check.fit().is_some();
             if let Some(block) = self.block.as_mut() {
                 if gamma > 0 {
-                    block.declined_run = 0;
-                } else if priced {
-                    block.declined_run += 1;
-                    if block.declined_run >= block.probe_after {
-                        (gamma, block_probe, block.declined_run) = (block_room, true, 0);
-                    }
+                    block.probing.guessed();
+                } else if priced && block.probing.declined() {
+                    (gamma, block_probe) = (block_room, true);
                 }
             }
             if let Some(block) = self.block.as_mut().filter(|_| gamma > 0) {
@@ -5592,23 +5736,23 @@ impl LocalSpec {
                 block_declined = priced;
             }
         }
-        // The model's own head guesses where the conversation offers nothing
-        // worth checking, or where its guesses have been kept more often.
         let mut mtp_round = false;
         let mut mtp_declined = false;
-        let mtp_due = !settling
-            && !block_round
-            && room > 0
-            && self.mtp.as_ref().is_some_and(|m| {
-                m.active()
-                    && (found.is_empty()
-                        || worth == 0
-                        || m.acceptance.alpha() > self.acceptance.alpha())
-            });
+        let mut mtp_guessed = 0;
+        let mut mtp_probe = false;
+        let mtp_due = head_wants && !block_round;
         #[cfg(test)]
         let mtp_due = mtp_due && self.script.is_none();
         if mtp_due {
-            let gamma = self.mtp_guess_count(room);
+            let mut gamma = self.mtp_guess_count(room);
+            let priced = self.step_ms.median().is_some() && self.check.fit().is_some();
+            if let Some(mtp) = self.mtp.as_mut() {
+                if gamma > 0 {
+                    mtp.probing.guessed();
+                } else if priced && mtp.probing.declined() {
+                    (gamma, mtp_probe) = (MtpGuesses::FIRST_GUESSES.min(room), true);
+                }
+            }
             if let Some(mtp) = self.mtp.as_mut().filter(|_| gamma > 0) {
                 let started = std::time::Instant::now();
                 let guessed = tokio::task::block_in_place(|| {
@@ -5620,6 +5764,7 @@ impl LocalSpec {
                         mtp.guess_ms.record(
                             started.elapsed().as_secs_f64() * 1000.0 / guesses.len() as f64,
                         );
+                        mtp_guessed = guesses.len();
                         found = guesses;
                         worth = found.len();
                         probe = false;
@@ -5629,7 +5774,7 @@ impl LocalSpec {
                     Err(e) => mtp.stop(e.to_string()),
                 }
             } else {
-                mtp_declined = self.step_ms.median().is_some() && self.check.fit().is_some();
+                mtp_declined = priced;
             }
         }
         let one_offs_before = model.one_off_forwards();
@@ -5638,12 +5783,21 @@ impl LocalSpec {
         // Nothing to copy: the card guesses on its own, where it can.
         let mut card_round = false;
         let mut card_declined = false;
+        let mut card_probe = false;
         let card_due =
-            found.is_empty() && !mtp_round && !block_round && self.card.is_some() && !settling;
+            found.is_empty() && !mtp_round && !block_round && self.card.is_some() && !plain_now;
         #[cfg(test)]
         let card_due = card_due && self.script.is_none();
         if card_due {
-            let gamma = self.card_guess_count(room);
+            let mut gamma = self.card_guess_count(room);
+            let priced = self.step_ms.median().is_some() && self.check.fit().is_some();
+            if let Some(card) = self.card.as_mut() {
+                if gamma > 0 {
+                    card.probing.guessed();
+                } else if priced && card.probing.declined() {
+                    (gamma, card_probe) = (CardGuesses::FIRST_GUESSES.min(room), true);
+                }
+            }
             if gamma > 0 {
                 if let Some(card) = self.card.as_mut() {
                     let started = std::time::Instant::now();
@@ -5677,7 +5831,7 @@ impl LocalSpec {
                     card_round = worth > 0;
                 }
             } else {
-                card_declined = self.step_ms.median().is_some() && self.check.fit().is_some();
+                card_declined = priced;
             }
         }
         // A reply held to JSON checks only the guesses its grammar could take
@@ -5768,11 +5922,27 @@ impl LocalSpec {
         self.rejected += u64::from(round.accepted < round.proposed);
         match round.positions {
             _ if one_off || settling => {}
-            1 => self.step_ms.record(round.ms),
-            p => self
-                .check
-                .record(u32::try_from(p).unwrap_or(u32::MAX), round.ms),
+            1 => {
+                self.step_ms.record_trusting_a_faster(round.ms);
+                model.note_plain_step(self.owner, round.ms);
+            }
+            p => {
+                self.check
+                    .record_trusting_a_faster(u32::try_from(p).unwrap_or(u32::MAX), round.ms);
+                model.note_guessed_round(self.owner);
+            }
         }
+        // A round's record charges the check's fitted price and the guesses'
+        // usual time; a one-off forward's round is not the guesser's.
+        let check_price = (!one_off).then(|| self.check_price(&round));
+        let plain = self.plain_per_ms();
+        // A probe paid where it wrote at least as fast as plain steps.
+        let paid = |tokens: usize, ms: f64| {
+            !crate::inference::dsd_controller::delivers_less(
+                Some(tokens as f64 / ms.max(0.1)),
+                [plain],
+            )
+        };
         if let Some(mtp) = self.mtp.as_mut() {
             if mtp_round {
                 mtp.rounds += 1;
@@ -5780,12 +5950,20 @@ impl LocalSpec {
                 mtp.accepted += round.accepted as u64;
                 mtp.acceptance
                     .record(round.accepted as u32, round.proposed as u32);
+                let guesses = mtp.guess_ms.median().unwrap_or(0.0) * mtp_guessed as f64;
+                if let Some(price) = check_price {
+                    mtp.delivered.record(round.produced.len(), price + guesses);
+                }
+                if mtp_probe {
+                    mtp.probing.judged(
+                        check_price.is_none_or(|price| paid(round.produced.len(), price + guesses)),
+                    );
+                }
             } else if mtp_declined {
                 mtp.declined += 1;
                 mtp.acceptance.fade();
             }
         }
-        let step = self.step_ms.median();
         if let Some(block) = self.block.as_mut() {
             if block_round {
                 block.rounds += 1;
@@ -5794,22 +5972,26 @@ impl LocalSpec {
                 block
                     .acceptance
                     .record(round.accepted as u32, round.proposed as u32);
+                let draft = block.draft_ms.median().unwrap_or(block_draft_ms);
+                if let Some(price) = check_price {
+                    block.delivered.record(round.produced.len(), price + draft);
+                }
                 if block_probe {
-                    // Paid: it wrote more than steps would have in the
-                    // check's and the draft's time.
-                    block.probes += 1;
-                    let paid = step.is_none_or(|step| {
-                        round.produced.len() as f64 * step >= round.ms + block_draft_ms
-                    });
-                    block.probe_after = if paid {
-                        Self::FIRST_PROBE_AFTER
-                    } else {
-                        (block.probe_after * 2).min(Self::MOST_PROBE_AFTER)
-                    };
+                    // Paid: it wrote faster than plain steps. Which of two
+                    // guessers that pay runs is their records' to say — a
+                    // probe judged against the head's record, one round of
+                    // all-or-nothing guesses against many, doubled the wait
+                    // after an unlucky start until a hash map's explanation
+                    // ran on the head at 82 tok/s where the block had
+                    // written 103-117 (2026-11-08).
+                    block.probing.judged(
+                        check_price.is_none_or(|price| paid(round.produced.len(), price + draft)),
+                    );
                 }
             } else if block_declined {
                 block.declined += 1;
                 block.acceptance.fade();
+                block.delivered.fade();
             }
         }
         if let Some(card) = self.card.as_mut().filter(|_| card_round || card_declined) {
@@ -5819,6 +6001,12 @@ impl LocalSpec {
                 card.accepted += round.accepted as u64;
                 card.acceptance
                     .record(round.accepted as u32, round.proposed as u32);
+                if card_probe {
+                    let guesses = card.guess_ms.median().unwrap_or(0.0) * round.proposed as f64;
+                    card.probing.judged(
+                        check_price.is_none_or(|price| paid(round.produced.len(), price + guesses)),
+                    );
+                }
             } else {
                 card.declined += 1;
                 card.acceptance.fade();
@@ -5832,14 +6020,10 @@ impl LocalSpec {
             self.acceptance.fade();
         }
         if probe {
-            self.probes += 1;
             // A probe that paid a one-off said nothing of a check's price:
             // the next is soon, and cheap.
-            self.probe_after = if one_off || self.probe_paid(&round) {
-                Self::FIRST_PROBE_AFTER
-            } else {
-                (self.probe_after * 2).min(Self::MOST_PROBE_AFTER)
-            };
+            let paid = one_off || self.probe_paid(&round);
+            self.probing.judged(paid);
         }
         let mut it = round.produced.into_iter();
         // A round always yields at least the token that follows the one just
@@ -5866,11 +6050,17 @@ fn local_guess_gamma_fixed() -> bool {
 fn prompt_capture_for_guesses(
     model: &crate::inference::split::SplitModel,
 ) -> Option<(std::collections::HashSet<usize>, usize)> {
+    // Both: the drafter's layers and the head's, at the drafter's count — the
+    // head then reads a long prompt's last 2,048 rows, not 4,096, where nine
+    // layers at 4,096 would hold 377 MB more on a 4B's card through the pass.
     if let Some(drafter) = model.block_drafter() {
-        return Some((
-            drafter.target_layers().iter().copied().collect(),
-            crate::inference::split::BLOCK_PROMPT_ROWS,
-        ));
+        let layers = drafter
+            .target_layers()
+            .iter()
+            .copied()
+            .chain(model.mtp_capture_layer())
+            .collect();
+        return Some((layers, crate::inference::split::BLOCK_PROMPT_ROWS));
     }
     model.mtp_capture_layer().map(|layer| {
         (
@@ -7783,6 +7973,7 @@ async fn handle_generate(
             });
             let mut spec = speculating.then(|| {
                 LocalSpec::new(*ngram_cfg, &prompt_ids, model, local_guess_gamma_fixed())
+                    .with_remembered_step(model, kv_store.serves_the_owner(&req_id_str))
                     .with_stand_in(stand_in.take(), prompt_caught.take())
                     .with_guessers(model, kv_store, &req_id_str, &prompt_ids, guess_prompt)
                     .with_earlier(earlier.clone())
@@ -10836,6 +11027,29 @@ mod local_speculation_tests {
     use crate::inference::ngram_lookup::NgramLookupConfig;
     use crate::types::SamplingParams;
 
+    /// Every guesser's declines end in a probe: after 8 in a row, then 16,
+    /// 32 and 64 while probes do not pay, and back to 8 once one does. A
+    /// guess in between ends the run.
+    #[test]
+    fn a_declined_guesser_is_asked_again() {
+        let mut p = Probing::default();
+        let declines_to_probe = |p: &mut Probing| (1..=64).find(|_| p.declined()).unwrap_or(0);
+        assert_eq!(declines_to_probe(&mut p), 8);
+        p.judged(false);
+        assert_eq!(declines_to_probe(&mut p), 16);
+        p.judged(false);
+        p.judged(false);
+        p.judged(false);
+        assert_eq!(declines_to_probe(&mut p), 64);
+        p.judged(true);
+        for _ in 0..5 {
+            assert!(!p.declined());
+        }
+        p.guessed();
+        assert_eq!(declines_to_probe(&mut p), 8);
+        assert_eq!(p.probes, 5);
+    }
+
     fn greedy() -> SamplingParams {
         SamplingParams {
             temperature: 0.0,
@@ -11627,6 +11841,7 @@ mod local_speculation_tests {
         };
         let mut spec = guessing.map(|fixed| {
             LocalSpec::new(cfg, prompt, model, fixed)
+                .with_remembered_step(model, kv.serves_the_owner(request))
                 .with_guessers(model, kv, request, prompt, head_prompt.take())
                 .with_earlier(earlier)
         });

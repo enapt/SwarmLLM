@@ -337,7 +337,7 @@ impl SplitModel {
         if let Some(info) = drafter_head {
             let bytes = crate::inference::split::tensor_byte_size(&info);
             match info
-                .read(&mut reader, tensor_data_offset, &candle_core::Device::Cpu)
+                .read(&mut reader, tensor_data_offset, &model.device)
                 .map_err(SwarmError::internal)
                 .and_then(|t| super::super::QMatMul::from_qtensor(t).map_err(SwarmError::internal))
             {

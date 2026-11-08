@@ -252,17 +252,13 @@ impl BlockDrafter {
     /// not a `dflash` file, a part this loader does not build (DFlash 2's
     /// convolutions and selector, a draft vocabulary, scaled embeddings or
     /// logits, M-RoPE sections that are not plain), or one that does not fit
-    /// the target (its width, its layers, its token table). On the
-    /// processor only for now (#428 stage 1).
+    /// the target (its width, its layers, its token table). It runs on the
+    /// target's own device — the card where the model's first layers are, as
+    /// llama.cpp loads a DFlash drafter on the target's devices.
     pub(crate) fn load(path: &Path, target: &SplitModel) -> Result<Self, SwarmError> {
         let fail = |what: String| {
             SwarmError::Internal(format!("block drafter {}: {what}", path.display()))
         };
-        if !target.device.is_cpu() {
-            return Err(fail(
-                "the model runs on a graphics card; the drafter runs beside a model on the processor only (#428)".into(),
-            ));
-        }
         // The block is embedded by the model's token table and read by its
         // head: a whole model, or a first segment beside the head's part
         // (`SplitModel::drafter_head`), whose other layers' rows its peers
@@ -378,7 +374,7 @@ impl BlockDrafter {
             .unwrap_or_default();
         let rule = attention_rule(md("dflash.attention.causal").and_then(|v| v.to_bool().ok()));
 
-        let device = Device::Cpu;
+        let device = target.device.clone();
         let mut bytes = 0u64;
         let mut tensor = |name: String| {
             let info = ct
@@ -714,6 +710,19 @@ impl BlockDrafter {
             (None, Some(head)) => head.forward(&out).map_err(err("output head"))?,
             _ => target.logits_from(&out)?,
         };
+        // On a card the guesses are picked there, so only their ids cross
+        // to the host (llama.cpp samples a draft on the device too): the
+        // ONE greedy pick, the first of equal maxima. A score that is not
+        // finite stops the drafter for the reply.
+        #[cfg(feature = "candle-cuda")]
+        if logits.device().is_cuda() {
+            let rows = logits.squeeze(0).map_err(err("logits"))?;
+            return crate::inference::tree_rank::greedy_picks(&rows)
+                .map_err(err("guesses picked on the card"))?
+                .ok_or_else(|| {
+                    SwarmError::Internal("block drafter: a guess's scores are not finite".into())
+                });
+        }
         let rows: Vec<Vec<f32>> = logits
             .to_dtype(DType::F32)
             .and_then(|l| l.squeeze(0))
@@ -764,11 +773,10 @@ impl SplitModel {
             }
         };
         let takes = drafter.bytes.saturating_add(self.drafter_head_bytes);
-        let (budget, growth) = if self.host_kv_budget_bytes.is_some() {
-            (&mut self.host_kv_budget_bytes, &self.host_kv_growth)
-        } else {
-            (&mut self.kv_budget_bytes, &self.kv_growth)
-        };
+        // The drafter and the head it borrows sit on the model's own device
+        // (`BlockDrafter::load`): its budget pays, never a card/processor
+        // split's processor-side one (`host_kv_budget_bytes`).
+        let (budget, growth) = (&mut self.kv_budget_bytes, &self.kv_growth);
         let one_conversation = growth.bytes_for(self.max_seq_len);
         let fits = fits_beside_one_conversation(*budget, takes, one_conversation);
         if fits {

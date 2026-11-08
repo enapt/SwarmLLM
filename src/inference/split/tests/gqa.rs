@@ -299,6 +299,7 @@ fn qwen2_forward_with_biases() {
         block_drafter: None,
         drafter_head: None,
         drafter_head_bytes: 0,
+        plain_steps: Default::default(),
         stand_in_prior: None,
         grammar_vocab: Default::default(),
     };

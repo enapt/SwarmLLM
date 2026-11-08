@@ -105,6 +105,9 @@ pub struct CheckCost {
     reach: CheckReach,
     /// The cheapest check ever recorded, held back or fitted.
     least_check_ms: Option<f64>,
+    /// Fits started over by a check far under them — see
+    /// [`Self::record_trusting_a_faster`].
+    started_over: u32,
 }
 
 /// The most [`best_gamma_for_check`] moves γ in one round: far enough to
@@ -143,6 +146,7 @@ impl CheckCost {
             held_back: 0,
             reach,
             least_check_ms: None,
+            started_over: 0,
         }
     }
 
@@ -155,6 +159,42 @@ impl CheckCost {
 
     pub fn record(&mut self, positions: u32, ms: f64) {
         self.record_with(positions, ms, hold_outlying_checks());
+    }
+
+    /// [`Self::record`] for checks on ONE computer, which run slow by chance
+    /// — a stall — and never fast: a check under [`RecentMedian::FASTER`] of
+    /// what the line says its width costs shows the line is stale, and the
+    /// fit starts over from it. The hold above lets one stalled check by, not
+    /// two running: under WSL2 a growing card pool stalls seconds (gotcha
+    /// #883), and two stalled checks fitted a Qwen3.5-4B card's checks at
+    /// 214 ms against a real 19. Every guesser then declined at that price,
+    /// each probe was judged at it and never paid, and a story ran without
+    /// guessing to its end (#428, 2026-11-08). A check that crosses to a peer
+    /// keeps [`Self::record`] — its round trip varies both ways.
+    /// Prior art: the plain step's own rule
+    /// ([`RecentMedian::record_trusting_a_faster`]); BBR trusts the least
+    /// round trip because a queue only ever adds to it (Cardwell et al., ACM
+    /// Queue 2016).
+    pub fn record_trusting_a_faster(&mut self, positions: u32, ms: f64) {
+        if self
+            .predict(positions)
+            .is_some_and(|line| ms < line * RecentMedian::FASTER)
+        {
+            self.w = 0.0;
+            self.x = 0.0;
+            self.y = 0.0;
+            self.xx = 0.0;
+            self.xy = 0.0;
+            self.held = None;
+            self.started_over = self.started_over.saturating_add(1);
+        }
+        self.record(positions, ms);
+    }
+
+    /// Fits started over since this one began — carried from request to
+    /// request like [`Self::held_back`].
+    pub fn started_over(&self) -> u32 {
+        self.started_over
     }
 
     fn record_with(&mut self, positions: u32, ms: f64, hold: bool) {
@@ -629,6 +669,66 @@ impl Default for AcceptanceEstimate {
     }
 }
 
+/// What one guesser's rounds have written lately against what they cost
+/// (`model_worker::LocalSpec`, #428): tokens per millisecond, each round
+/// weighing the ones before it by [`Self::KEEP`].
+///
+/// A guesser's count is priced from a geometric acceptance model
+/// ([`expected_tokens_per_round`]), and one whose guesses are kept all or
+/// nothing reads optimistic there: a block drafter on a story on the card
+/// read α 0.74 while keeping ~0.94 of ~4.9 guesses a round, ~18 ms a token
+/// against a 13.4 ms plain step — 54-61 tokens/s where the model's own head
+/// wrote 72-74 (2026-11-08). The record is what the rounds gave, so whether a
+/// guesser beats a plain step reads it, not the model ([`delivers_less`]). Two
+/// guessers' records are not compared with each other: an all-or-nothing
+/// round swings a record, and a block drafter set aside by the head's ran
+/// code 15-25% slower (`model_worker::LocalSpec`).
+///
+/// Prior art: BanditSpec (ICML 2025, arXiv 2505.15141) chooses among
+/// speculative configurations by the tokens a unit of time they realise,
+/// with no model of acceptance; vLLM's and SmartSpec's goodput price a round
+/// the same way.
+#[derive(Debug, Clone, Default)]
+pub struct Delivered {
+    tokens: f64,
+    ms: f64,
+}
+
+impl Delivered {
+    /// As [`AcceptanceEstimate::recent`]'s: a reply changes inside itself.
+    pub const KEEP: f64 = 0.9;
+
+    /// A round that wrote `tokens` (its guesses kept and the one after) at a
+    /// cost of `ms`, its guesses' own time included.
+    pub fn record(&mut self, tokens: usize, ms: f64) {
+        if !ms.is_finite() || ms <= 0.0 {
+            return;
+        }
+        self.fade();
+        self.tokens += tokens as f64;
+        self.ms += ms;
+    }
+
+    /// A round it sat out: what came before weighs less against the next.
+    pub fn fade(&mut self) {
+        self.tokens *= Self::KEEP;
+        self.ms *= Self::KEEP;
+    }
+
+    /// Tokens per millisecond, once a round has been recorded.
+    pub fn per_ms(&self) -> Option<f64> {
+        (self.ms > 0.0).then(|| self.tokens / self.ms)
+    }
+}
+
+/// Whether a guesser's record says another way writes faster: its tokens a
+/// millisecond below the best of `others` (a plain step's, another
+/// guesser's). A guesser with no record is never set aside — a round is how
+/// it gets one.
+pub fn delivers_less(own: Option<f64>, others: impl IntoIterator<Item = Option<f64>>) -> bool {
+    own.is_some_and(|own| others.into_iter().flatten().any(|other| own < other))
+}
+
 /// What one request's speculation learned — how often the guesses were kept,
 /// what a check cost, what a guess cost, and the γ it settled on — handed to
 /// the next request on the same model and machines.
@@ -671,6 +771,23 @@ impl RecentMedian {
             self.samples.pop_front();
         }
         self.samples.push_back(sample);
+    }
+
+    /// Under this share of the median, a sample starts the window over
+    /// ([`Self::record_trusting_a_faster`]).
+    pub const FASTER: f64 = 0.75;
+
+    /// [`Self::record`] for a cost that runs slow by chance — a stall, a busy
+    /// machine — and never fast, such as a plain decode step: a sample under
+    /// [`Self::FASTER`] of the median says the figure is stale, and starts
+    /// the window over. Recorded plainly, a slow spell's steps held a card's
+    /// step at 31-36 ms against a real 13 until five fast ones had come
+    /// (#428, 2026-11-08).
+    pub fn record_trusting_a_faster(&mut self, sample: f64) {
+        if self.median().is_some_and(|m| sample < m * Self::FASTER) {
+            self.samples.clear();
+        }
+        self.record(sample);
     }
 
     /// Samples held, at most [`Self::WINDOW`].
@@ -780,6 +897,58 @@ pub fn remember(key: String, learned: Learned) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The story on the card (2026-11-08): the block drafter's rounds wrote
+    /// ~1.9 tokens for ~30 ms where a plain step writes one in 13.4 — set
+    /// aside; on code they wrote ~5 for ~30 ms — kept. A guesser with no
+    /// record is tried; an alternative with none sets nothing aside.
+    #[test]
+    fn a_faster_step_starts_a_stale_figure_over() {
+        let mut fresh = RecentMedian::default();
+        for ms in [31.0, 36.0, 34.0] {
+            fresh.record_trusting_a_faster(ms);
+        }
+        // 13.5 is under three quarters of 34: the figure starts from it,
+        // where a plain record would keep 31 until more fast ones came.
+        let mut plain = fresh.clone();
+        plain.record(13.5);
+        assert_eq!(plain.median(), Some(31.0));
+        fresh.record_trusting_a_faster(13.5);
+        assert_eq!(fresh.median(), Some(13.5));
+        // A slow one never does: the median stands.
+        fresh.record_trusting_a_faster(13.2);
+        fresh.record_trusting_a_faster(60.0);
+        assert_eq!(fresh.median(), Some(13.5));
+    }
+
+    #[test]
+    fn a_guesser_is_set_aside_only_by_a_record_another_way_beats() {
+        let plain = Some(1.0 / 13.4);
+        let mut story = Delivered::default();
+        for (tokens, ms) in [(1, 30.0), (3, 31.0), (1, 30.0), (2, 31.0)] {
+            story.record(tokens, ms);
+        }
+        assert!(delivers_less(story.per_ms(), [plain]));
+        let mut code = Delivered::default();
+        for (tokens, ms) in [(6, 30.0), (4, 31.0), (5, 30.0)] {
+            code.record(tokens, ms);
+        }
+        assert!(!delivers_less(code.per_ms(), [plain]));
+        // Beaten by the head's record, not by the plain step.
+        assert!(delivers_less(code.per_ms(), [plain, Some(0.2)]));
+        assert!(!delivers_less(None, [plain, Some(0.2)]));
+        assert!(!delivers_less(story.per_ms(), [None, None]));
+        // A round sat out fades the record; it does not change its rate,
+        // and the next round counts for more.
+        let before = story.per_ms().unwrap();
+        story.fade();
+        assert!((story.per_ms().unwrap() - before).abs() < 1e-12);
+        // A round with no cost recorded is no round.
+        let mut none = Delivered::default();
+        none.record(3, 0.0);
+        none.record(3, f64::NAN);
+        assert_eq!(none.per_ms(), None);
+    }
 
     /// A check fitted only from checks, with the step priced on its own: a
     /// card's captured step of 7.7 ms against op-by-op checks of ~20 ms at
@@ -1221,6 +1390,33 @@ mod tests {
         after.record_with(2, 55.0, true);
         assert!(after.held.is_none());
         assert!(best_gamma_overall(0.622, &after, 7.2, 3, BEST_GAMMA_MAX) > 0);
+    }
+
+    #[test]
+    fn a_stalled_check_fit_starts_over_at_the_next_fast_check() {
+        let mut fit = CheckCost::for_a_plan(CheckReach::Here);
+        for _ in 0..3 {
+            fit.record(2, 19.0);
+        }
+        // Two stalled checks running: the hold fits both.
+        fit.record(2, 1000.0);
+        fit.record(2, 1000.0);
+        assert!(fit.predict(2).unwrap() > 400.0);
+
+        // Recorded plainly, a fast check leaves the stall in the price.
+        let mut plain = fit.clone();
+        plain.record(2, 19.0);
+        assert!(plain.predict(2).unwrap() > 300.0);
+
+        // Trusting a faster check, the price is that check again.
+        let mut trusting = fit.clone();
+        trusting.record_trusting_a_faster(2, 19.0);
+        assert!((trusting.predict(2).unwrap() - 19.0).abs() < 1e-9);
+        assert_eq!(trusting.started_over(), 1);
+
+        // A check a little under the line is noise, not a stale line.
+        trusting.record_trusting_a_faster(2, 17.0);
+        assert_eq!(trusting.started_over(), 1);
     }
 
     /// The first request of a fresh node on the real TH↔AU link (2026-10-23,

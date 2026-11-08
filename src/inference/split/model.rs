@@ -13,6 +13,22 @@ use super::{LayerVariant, ModelArch, QMatMul, SplitTokenizer};
 /// A partial transformer model that loads and runs only a specific range of layers.
 /// Used for split inference where each node holds different layers.
 /// Supports multiple architectures: Llama, Qwen2, Gemma 2, Phi-3, Mistral, Qwen 3.5.
+/// A model's recent plain decode steps and the rounds that have guessed since
+/// the last, the swarm's requests' at `[0]` and the owner's at `[1]` — a
+/// processor decodes them at different widths ([`SplitModel::plain_steps`]).
+#[derive(Debug, Clone, Default)]
+pub(crate) struct PlainSteps {
+    ms: [crate::inference::dsd_controller::RecentMedian; 2],
+    rounds_since: [u32; 2],
+}
+
+impl PlainSteps {
+    /// Rounds of guesses after which a step is timed again: the most rounds
+    /// a declined guesser waits for its probe (`dsd_controller::MOST_PROBE_AFTER`),
+    /// one plain round in 64 — under 2% of a reply guessing 2.5 tokens a round.
+    pub(crate) const RETIME_AFTER: u32 = crate::inference::dsd_controller::MOST_PROBE_AFTER;
+}
+
 pub struct SplitModel {
     /// Token embedding table (only loaded by the first segment).
     ///
@@ -48,6 +64,9 @@ pub struct SplitModel {
     /// What `drafter_head` holds, counted with the drafter when it is
     /// attached ([`Self::attach_block_drafter`]); 0 without one.
     pub(super) drafter_head_bytes: u64,
+    /// This model's recent plain decode steps, carried across replies
+    /// ([`Self::plain_steps`]).
+    pub(super) plain_steps: PlainSteps,
     /// Additive causal mask for the no-prefix case, cached at its EXACT size.
     /// Tuple is `(query_len, mask)`; `None` means nothing cached yet. See
     /// `SplitModel::mask` for why this is not a narrowed view of a bigger one.
@@ -828,6 +847,45 @@ impl SplitModel {
     #[cfg(test)]
     pub fn batch_stats(&self) -> (u64, u64) {
         (self.batch_calls, self.batch_fellback)
+    }
+
+    /// This model's recent plain decode steps for the owner's requests or the
+    /// swarm's: where a reply's step price starts. Learned from each reply's
+    /// own steps alone, a reply guessing from its first rounds priced a step
+    /// from its first few and never timed another — a story on the card at
+    /// 24-58 ms against a real 13, so a block drafter checked every round at
+    /// a loss (#428, 2026-11-08). The distributed drafter starts from a
+    /// remembered figure the same way (`pipeline::dsd`).
+    pub(crate) fn plain_steps(
+        &self,
+        owner: bool,
+    ) -> &crate::inference::dsd_controller::RecentMedian {
+        &self.plain_steps.ms[usize::from(owner)]
+    }
+
+    /// A plain decode step's time, for [`Self::plain_steps`]. A step faster
+    /// than the figure starts it over
+    /// ([`RecentMedian::record_trusting_a_faster`](crate::inference::dsd_controller::RecentMedian::record_trusting_a_faster)).
+    pub(crate) fn note_plain_step(&mut self, owner: bool, ms: f64) {
+        let i = usize::from(owner);
+        self.plain_steps.ms[i].record_trusting_a_faster(ms);
+        self.plain_steps.rounds_since[i] = 0;
+    }
+
+    /// A round that checked guesses: one more since the last plain step.
+    pub(crate) fn note_guessed_round(&mut self, owner: bool) {
+        let i = usize::from(owner);
+        self.plain_steps.rounds_since[i] = self.plain_steps.rounds_since[i].saturating_add(1);
+    }
+
+    /// Whether the next round should be a plain step, to time one again:
+    /// [`PlainSteps::RETIME_AFTER`] rounds have guessed since the last. Where
+    /// every round guesses nothing else times a step, and a figure from a
+    /// slow spell stays: a card's read 31-36 ms against a real 13 for the
+    /// rest of a run, so its head checked guesses every round, where a plain
+    /// step would have written faster (#428, 2026-11-08).
+    pub(crate) fn plain_step_due(&self, owner: bool) -> bool {
+        self.plain_steps.rounds_since[usize::from(owner)] >= PlainSteps::RETIME_AFTER
     }
 
     /// The memory this model's primary KV budget is drawn from: its device's.

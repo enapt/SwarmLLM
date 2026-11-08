@@ -2787,7 +2787,7 @@ guessed with the n-gram alone (a separate drafter and SWIFT stay off a model wit
 `split::mtp` loads it beside a whole model; `model_worker::MtpGuesses` drafts with it where the
 n-gram finds nothing, declines, or is kept less often — fed the trunk's last-layer rows of the
 positions the reply commits, the check the n-gram's own. On a card the captured step copies that
-row out itself (`executor::graph_keeps_the_head_row`), so it stays a replayed graph. Prior art:
+row out itself (`executor::graph_keeps_rows`), so it stays a replayed graph. Prior art:
 llama.cpp `graph_mtp` + `draft-mtp`, vLLM's Qwen3-Next MTP proposer (the evidence section).
 Measured 2026-11-07, Qwen3.5-4B Q4_K_M, one optimized CUDA test binary, A/B `SWARMLLM_MTP=0`, live
 node stopped, 96 greedy tokens, three runs an arm (`the_models_own_guess_head_writes_the_reply_read_one_token_at_a_time`):
@@ -3045,7 +3045,7 @@ vLLM and SGLang run it) or reads them one machine at a time; (c) the report: a s
 "has gone".
 
 #### #428 — Every popular model guesses 4-5 tokens a round trip: a DFlash drafter at the split's far end
-`P1` · perf-split · **OPEN** (stage 1 built and measured: the reply is exact, acceptance matches llama.cpp's; stage 3 built and measured on the rig — a split over 130 ms, processors: code 1.6-1.8×, a story 1.10-1.15×, the same replies; next: the field model, Qwen3.6-35B-A3B) — 2026-11-08 · history: #427 (the measurement), #425 (the guess head), #411 (the flow)
+`P1` · perf-split · **OPEN** (stage 1 built and measured: the reply is exact, acceptance matches llama.cpp's; stage 3 built and measured on the rig — a split over 130 ms, processors: code 1.6-1.8×, a story 1.10-1.15×, the same replies; on a card, whole: code 1.4-1.7×, a story 0.7× — (c1)-(c3); next: the field model, Qwen3.6-35B-A3B) — 2026-11-08 · history: #427 (the measurement), #425 (the guess head), #411 (the flow)
 
 **What a user gets today** (#427's table, 2026-11-08 01:00-01:30Z, live node, one ask at a time): every split of
 the popular models decodes ONE token a round trip — Gemma 4 31B here↔Australia 1.7-1.9 tok/s, Gemma 4 26B-A4B
@@ -3133,7 +3133,7 @@ ask, and the n-gram loop's checks come back here anyway. The coordinator (`pipel
 hands the rows to its own worker every round (`DaemonMsg::BlockDraft`, whose `first` replaces an earlier attempt's
 drafter, #749), which joins each layer's run up to the reply (`model_worker::block_rows_for_the_drafter`; a gap stops
 the drafter for the reply, never fails it) and drafts where nothing else would be checked (`best_gamma_beside_a_step_per_round`;
-zero is an answer, and the rows are still taken in). A worker that refuses (a card target, no head) keeps the model
+zero is an answer, and the rows are still taken in). A worker that refuses (no head) keeps the model
 off block drafting for 10 min. The coordinator reads the drafter's layers off the file beside its own parts
 (`block_drafter_plan_in`), so a first request drafts from the prompt's window too. Off: `SWARMLLM_BLOCK_DRAFTER=0` on
 the coordinator. **Left**: (3b) one summed row per segment — `fc` is linear with no bias, so a segment holding target
@@ -3159,6 +3159,19 @@ the borrowed head duplicates the tail's in an A → B → A split (share it — 
 head charged to the planner's budget; (3b)/(3c) above; drafting on the fastest computer of the chain, a card peer,
 where the coordinator's processor is the slow part (a draft's rows already cross the wire); the DSD and flow paths;
 then Qwen3.6-35B-A3B with its drafter on two real peers.
+**On a card — built and measured 2026-11-08** (Qwen3.5-4B Q4_K_M whole on the RTX 3070, ON / OFF in one binary, 160
+greedy tokens, stalls of 1 s or more taken out; `docs/invariants/inference.md` § "On a card"): code 1.4-1.7× (palindrome
+150-151 against 101-107, a BST class 179 against 108-112), a hash map ~1.2× (102-113 against 83-91), **the story 0.7×**
+(49-54 against 70-73). The drafter runs on the target's device and picks its guesses there; every captured step keeps
+its rows; a guesser is set aside by what it WRITES against plain steps only (`dsd_controller::Delivered`), probed
+again by one rule, beside a plain step remembered per model, and a step or check figure under 0.75× of the remembered
+one starts it over. A split's card-held first segment attaches one too — built, not measured. **Left on a card**:
+(c1) hold the checks to a few widths — vLLM captures graphs at fixed sizes and pads a forward up to the next; ON
+stories check at every width from 2 to 8 and paid 5-7 one-off forwards (240-300 ms each) against OFF's 1, every one
+with a pool-growth stall; first log which kind each one-off is (first of a shape, not ready, rebuilt); (c2) the head
+declines 68-90 rounds of a story beside the block against 5-17 alone — its checks priced on a line the block's wide
+checks steepen; (c3) the 8-row checks part from one-at-a-time where llama.cpp's processor scores the pick 0.8-1.0
+under its own (palindrome token 60) — run llama.cpp's card build at a batch of 8 there before calling it a near tie.
 
 #### #318 — A large model split across machines is too slow to use
 `P2` · perf-split · **OPEN** — 2026-10-20 · plan: `docs/plans/large_model_splits.md` · draws on #134, #145, #148, #149, #192

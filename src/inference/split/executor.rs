@@ -1106,11 +1106,12 @@ impl SplitModel {
                     None => seq_len == 1 || !self.mask_is_read(),
                     Some(_) => self.tree_steps_may_be_captured(),
                 };
-                // The rows a guess head reads are kept by the graph itself
-                // (`graph_keeps_the_head_row`); any other capture runs plainly.
+                // The rows a guess head or a block drafter reads are kept by
+                // the graph itself (`graph_keeps_rows`); any other capture
+                // runs plainly.
                 let capture_in_graph = match capture_layers {
                     None => true,
-                    Some(capture) => self.graph_keeps_the_head_row(capture, seq_len),
+                    Some(capture) => self.graph_keeps_rows(capture),
                 };
                 if seq_len <= crate::inference::cuda_graph::MAX_POSITIONS
                     && shape_may_be_captured
@@ -1278,18 +1279,36 @@ impl SplitModel {
         out.map(Some)
     }
 
-    /// Does a captured step keep what `capture` asks for? Only the guess
-    /// head's row (#425): the trunk's last layer, every position, on a model
-    /// that carries a head — whose every captured step records the copy, so
-    /// a step that keeps it and one that does not record the same graph.
-    fn graph_keeps_the_head_row(&self, capture: Capture<'_>, positions: usize) -> bool {
-        self.mtp.is_some()
-            && capture.last >= positions
-            && capture.layers.len() == 1
-            && self
-                .layer_end
-                .checked_sub(1)
-                .is_some_and(|last| capture.layers.contains(&last))
+    /// The layers (absolute) whose output EVERY captured step of this model
+    /// copies out, asked or not, so a step that keeps them and one that does
+    /// not record the same graph: the trunk's last layer where a guess head
+    /// reads it (#425), and the layers a block drafter reads that this
+    /// segment runs (#428 — llama.cpp marks them as outputs of every target
+    /// graph, `llama-graph.cpp`'s `embeddings_layer_inp`).
+    fn layers_every_captured_step_keeps(&self) -> Vec<usize> {
+        let mut layers: Vec<usize> = self
+            .block_drafter()
+            .map(|d| {
+                d.target_layers()
+                    .iter()
+                    .copied()
+                    .filter(|l| (self.layer_start..self.layer_end).contains(l))
+                    .collect()
+            })
+            .unwrap_or_default();
+        if self.mtp.is_some() {
+            layers.extend(self.layer_end.checked_sub(1));
+        }
+        layers.sort_unstable();
+        layers.dedup();
+        layers
+    }
+
+    /// Does a captured step keep what `capture` asks for? Only layers every
+    /// captured step copies out ([`Self::layers_every_captured_step_keeps`]).
+    fn graph_keeps_rows(&self, capture: Capture<'_>) -> bool {
+        let kept = self.layers_every_captured_step_keeps();
+        !capture.layers.is_empty() && capture.layers.iter().all(|l| kept.contains(l))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1443,20 +1462,23 @@ impl SplitModel {
         let (dims, dtype) = template;
         let out = Tensor::zeros(dims, dtype, &device).map_err(SwarmError::internal)?;
         let boundaries = graph.boundaries(&device, positions, self.hidden_dim)?;
-        // A model with a guess head copies its trunk's last row out of every
-        // captured step, into memory made here, whether this one asked or
-        // not: one graph either way (#425).
-        let head_row = match self.mtp.as_ref() {
-            Some(_) => Some(
+        // A model with a guess head or a block drafter copies the rows they
+        // read out of every captured step, into memory made here, whether
+        // this one asked or not: one graph either way (#425, #428).
+        let kept_rows: Vec<(usize, Tensor)> = self
+            .layers_every_captured_step_keeps()
+            .into_iter()
+            .map(|layer| {
                 Tensor::zeros(
                     (1, positions, self.hidden_dim),
                     boundaries[0].dtype(),
                     &device,
                 )
-                .map_err(SwarmError::internal)?,
-            ),
-            None => None,
-        };
+                .map(|t| (layer, t))
+            })
+            .collect::<candle_core::Result<_>>()
+            .map_err(SwarmError::internal)?;
+        let layer_start = self.layer_start;
         // A multi-position step catches the f16 mirror up before appending to
         // it; done inside the capture, a refusal leaves the mirror claiming
         // positions it never received (`LayerKv::catch_up_mirror`). A single
@@ -1474,10 +1496,14 @@ impl SplitModel {
             // taken here (one add) rather than fused into the next norm.
             let mut crossed = 0usize;
             let mut at_layer_end = |layer_idx: usize, hidden: Residual| {
-                if let Some(kept) = head_row.as_ref().filter(|_| layer_idx + 1 == num_layers) {
+                let mut hidden = hidden;
+                if let Some((_, kept)) = kept_rows
+                    .iter()
+                    .find(|(layer, _)| *layer == layer_start + layer_idx)
+                {
                     let value = hidden.into_tensor().map_err(SwarmError::internal)?;
                     kept.slice_set(&value, 0, 0).map_err(SwarmError::internal)?;
-                    return Ok(Residual::Ready(value));
+                    hidden = Residual::Ready(value);
                 }
                 if !(layer_idx + 1).is_multiple_of(per_group) || layer_idx + 1 >= num_layers {
                     return Ok(hidden);
@@ -1515,9 +1541,11 @@ impl SplitModel {
         });
         if captured.is_ok() {
             let mut caught = HashMap::new();
-            if let (Some(capture), Some(kept)) = (capture_layers, head_row) {
-                if let Some(&layer) = capture.layers.iter().next() {
-                    caught.insert(layer, kept);
+            if let Some(capture) = capture_layers {
+                for (layer, kept) in kept_rows {
+                    if capture.layers.contains(&layer) {
+                        caught.insert(layer, capture.kept_of(&kept)?);
+                    }
                 }
             }
             return Ok((out, caught));
