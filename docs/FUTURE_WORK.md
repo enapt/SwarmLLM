@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #423**). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #428**). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -52,7 +52,10 @@ v0.3.274 (2026-11-06) #408, #409 and #410; v0.3.275 (2026-11-06) #367 (d)'s fix 
 #407's residual; v0.3.276 (2026-11-07) #415, #413, #414 and #416's gossip half; v0.3.277 (2026-11-07) #416's
 nicknames, #417, #402, #191, #418, #419, #421, #420, #423 and #422's first steps. **2026-11-07, a performance
 round**: #424 (a model's first question waits for its load) is new at P2; #318 and #174 carry the round's
-other two measured-first levers.
+other two measured-first levers. v0.3.278 (2026-11-08) carried #424's three steps, #174 and #425 (+ (b) on the
+processor). **2026-11-08:** #427 goes first by the user's direction — "we need to be able to use the models between
+also, like 14b 28b, also 70b": the next round is ranked by which tier (~14B, ~27-35B, 70B) a user can actually use,
+starting with measuring each as a user gets it.
 **2026-11-04:** #403 goes first among the open work by the user's direction: the release cut-off
 and the use gate must not be passable through a relay. Closed the same day (§ "Closed"). What each release carried is in § "Closed" and `CHANGELOG.md`; earlier
 rankings moved word for word to the archive, § "PRIORITIES re-rank log". Only OPEN work is listed
@@ -2908,6 +2911,29 @@ Designs: `docs/plans/large_model_splits.md` (the target, the bound and the build
 `docs/plans/split_speculation.md` (guess-and-check across a split),
 `docs/plans/wan_parallel.md` (parallelise the reply, not the token), `docs/plans/regional_pipelines.md`
 (placement by distance, #192), `docs/plans/faster_than_local.md` (the ranked list).
+
+#### #427 — The models between (~14B, ~27-35B) and 70B: what a user gets from each is unmeasured
+`P1` · perf-split · **OPEN** (measure first) — 2026-11-08 · history: user direction 2026-11-08; #318 (the 70B)
+
+The user, at v0.3.278's publish: "we need to be able to use the models between also, like 14b 28b, also 70b". A 4B
+runs on any computer; the models worth the swarm are the ones that need several. What the swarm holds (the live node's
+`/api/admin/models`, 2026-11-07 22:00Z; parts here · peers hosting/holding whole):
+
+| Tier | Models |
+|---|---|
+| ~14B | qwen2.5-14b-instruct 48L (16 of 16 · 6/4), qwen3-14b 40L (0 · 4/2), gemma-4-12b-it 48L (15 of 15 · 3/2) |
+| 20-35B dense | qwen-qwen3.6-27b 64L (2 of 33 · 2/2), qwen3.8-27b 64L (2 of 32 · 2/2), google-gemma-4-31b-it 60L (2 of 36 · 2/2), ornith-1.5-35b 40L (0 · 3/2), gpt-oss-20b (q4-k-m 0 · 3/2; mxfp4 22 of 22 here) |
+| 20-35B MoE | qwen-qwen3.6-35b-a3b 40L (2 of 41 · 2/2), qwen3-30b-a3b-2507 (q4 0 · 3/1; q2-k 20 of 20 · 2/2), google-gemma-4-26b-a4b 30L (2 of 30 · 2/2) |
+| 70B+ | llama-3.3-70b-instruct 80L (27 of 79 · 3/1), ornith-1.5-122b, ornith-1.5-397b (0 · 2/1 each) |
+
+Measured: a 14B split on this laptop (card + processor) decodes ~15 tok/s with guessing (v0.3.278's gate); a 14B
+Thailand↔Australia far split 17.8-20.5 prose, 40-43 code (v0.3.275); the 70B here + Australia ~1077 ms a token by
+stated speeds (#318). **No 20-35B model has been measured as a user gets it.** Known gaps: #425's guess head runs only
+where a whole model is on one computer, and a drafter is refused for the Qwen 3.5 family, so a 27B split guesses by
+the n-gram alone; #318's faster 70B chain waits on one machine fetching. **Next**: one real request per model from the
+live node, one at a time (route and segments from the `x-swarm-*` headers, first token, tok/s, any failure), the table
+here with each tier's blocker, then rank the round by which tier a fix makes usable. Prior art first (`workflow.md`
+item 1): how Petals, exo and llama.cpp's RPC backend make a 30B usable across machines — none searched yet.
 
 #### #318 — A large model split across machines is too slow to use
 `P2` · perf-split · **OPEN** — 2026-10-20 · plan: `docs/plans/large_model_splits.md` · draws on #134, #145, #148, #149, #192
