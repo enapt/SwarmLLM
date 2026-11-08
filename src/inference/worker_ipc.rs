@@ -571,6 +571,11 @@ pub struct IpcBlockDraft {
     /// request is an earlier attempt's, and goes — state of an attempt is
     /// never the request's (`arch-scheduling.md`, #749).
     pub first: bool,
+    /// The words committed since the last draft — the prompt and the reply so
+    /// far on the first — so the guesses can read the hot rows and the
+    /// conversation's own words on the processor (#425 (b)).
+    #[serde(default)]
+    pub words: Vec<u32>,
 }
 
 /// Forward-pass result header.

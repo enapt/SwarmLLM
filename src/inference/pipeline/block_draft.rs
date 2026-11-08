@@ -199,6 +199,8 @@ pub(super) struct SplitBlockDrafter {
     pub(super) probes: u32,
     /// Calls made this attempt, rows-only ones included.
     calls: u32,
+    /// The prompt's and the reply's words the worker has been told of.
+    words_sent: usize,
 }
 
 impl SplitBlockDrafter {
@@ -268,6 +270,7 @@ impl SplitBlockDrafter {
             declined: 0,
             probes: 0,
             calls: 0,
+            words_sent: 0,
         }
     }
 
@@ -275,13 +278,24 @@ impl SplitBlockDrafter {
     /// to `upto`, the position after the last one committed — and ask for up
     /// to `gamma` guesses after `token`, the token at `upto`. `gamma` 0 only
     /// keeps its rows level with the reply. An error ends it for the reply.
+    /// `prompt` and `generated` are the conversation's words so far; the
+    /// worker is told those it has not been.
     pub(super) async fn round(
         &mut self,
         exec: &PipelineExecutor,
         upto: usize,
         token: u32,
         gamma: u32,
+        prompt: &[u32],
+        generated: &[u32],
     ) -> Result<Vec<u32>, SwarmError> {
+        let words: Vec<u32> = prompt
+            .iter()
+            .chain(generated)
+            .skip(self.words_sent)
+            .copied()
+            .collect();
+        self.words_sent += words.len();
         let rows = exec
             .block_rows
             .as_ref()
@@ -312,6 +326,7 @@ impl SplitBlockDrafter {
                     token,
                     gamma: gamma.min(self.most),
                     first: self.calls == 0,
+                    words,
                 },
                 &payload,
             )

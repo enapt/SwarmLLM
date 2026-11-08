@@ -332,9 +332,25 @@ impl SplitModel {
             .map_err(|e| SwarmError::Internal(format!("next-token head: hidden norm: {e}")))
     }
 
-    /// The hot rows a guess reads first (`MtpHead::hot`), where it has them.
+    /// The hot rows a guess reads first — the guess head's (`MtpHead::hot`),
+    /// else a block drafter's (`SplitModel::drafter_hot`) — where there are.
+    fn hot_head(&self) -> Option<&QMatMul> {
+        self.mtp
+            .as_ref()
+            .and_then(|h| h.hot.as_ref())
+            .or(self.drafter_hot.as_ref())
+    }
+
+    /// How many words a block drafter's OWN hot rows hold
+    /// (`SplitModel::drafter_hot`) — where no guess head keeps them, its
+    /// guesses keep their own words ([`Self::mtp_rows_of`]).
+    pub(crate) fn block_hot_rows(&self) -> Option<usize> {
+        self.drafter_hot.as_ref()?.out_features().ok()
+    }
+
+    /// How many words the hot rows hold ([`Self::hot_head`]).
     pub(crate) fn mtp_hot_rows(&self) -> Option<usize> {
-        self.mtp.as_ref()?.hot.as_ref()?.out_features().ok()
+        self.hot_head()?.out_features().ok()
     }
 
     /// The output head's rows for `ids` — a conversation's own words past
@@ -343,6 +359,7 @@ impl SplitModel {
         let output = self
             .output
             .as_ref()
+            .or(self.drafter_head.as_ref())
             .ok_or_else(|| SwarmError::Internal("draft words: no output head".into()))?;
         head_rows(output, HeadRows::Of(ids))
     }
@@ -390,9 +407,7 @@ impl SplitModel {
                 .collect());
         };
         let hot = self
-            .mtp
-            .as_ref()
-            .and_then(|h| h.hot.as_ref())
+            .hot_head()
             .ok_or_else(|| SwarmError::Internal("next-token head: no hot rows".into()))?;
         let mut logits = hot.forward(&rows).map_err(err("hot rows"))?;
         let n = logits.dim(D::Minus1).map_err(err("hot rows"))?;

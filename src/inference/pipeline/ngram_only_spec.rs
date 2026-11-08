@@ -923,7 +923,17 @@ impl PipelineExecutor {
                     } else {
                         0
                     };
-                    match b.round(self, current_pos, last_token, gamma).await {
+                    match b
+                        .round(
+                            self,
+                            current_pos,
+                            last_token,
+                            gamma,
+                            &prompt_tokens,
+                            &generated,
+                        )
+                        .await
+                    {
                         Ok(guesses) if drafts.is_empty() => {
                             from_block = !guesses.is_empty();
                             guesses

@@ -108,6 +108,14 @@ pub(crate) fn block_drafter_on() -> bool {
     *ON.get_or_init(|| std::env::var("SWARMLLM_BLOCK_DRAFTER").as_deref() != Ok("0"))
 }
 
+/// `SWARMLLM_BLOCK_DRAFTER=processor`: attach the drafter beside a whole
+/// model on the processor even where its own guess head guesses
+/// ([`SplitModel::head_guesses_better_here`]), for A/B inside one binary.
+fn block_drafter_on_the_processor_anyway() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("SWARMLLM_BLOCK_DRAFTER").as_deref() == Ok("processor"))
+}
+
 struct DrafterLayer {
     attn_norm: RmsNorm,
     wq: QMatMul,
@@ -712,10 +720,7 @@ impl BlockDrafter {
         // head keeps them: there the head read for every row was most of a
         // draft (247 ms at 15 guesses on a 9B). The check reads every word,
         // so the reply is the same; only a guess past them is lost.
-        if matches!(over, super::GuessOver::HotAnd(_))
-            && target.output.is_some()
-            && target.mtp_hot_rows().is_some()
-        {
+        if matches!(over, super::GuessOver::HotAnd(_)) && target.mtp_hot_rows().is_some() {
             return target.mtp_guesses(&out, over);
         }
         let logits = match (&target.output, &target.drafter_head) {
@@ -769,10 +774,33 @@ impl SplitModel {
     /// (6.1 GB budget) that had room for 137K positions beside it. Not
     /// attached, the borrowed head goes too. A file that cannot be used is
     /// logged and left; the model serves without it.
+    /// A whole model on the processor with its own guess head: there the head
+    /// writes faster than a block drafter beside it — a block's draft costs
+    /// 25-105 ms and its 16-position check ~4 steps, where the head guesses at
+    /// ~6 ms a word (Qwen3.5-4B Q4_K_M, 8 threads: drafter on 16.8-19.0 /
+    /// 16.8-17.8 / 11.1-11.7 / 14.5-17.2 tok/s on a palindrome, a BST class, a
+    /// story and a hash map against 16.0-18.0 / 17.0-19.2 / 11.9-12.2 /
+    /// 15.6-19.4 without it; `~/rig428/cpu2`, 2026-11-08 night). A split's first
+    /// segment, a card, or a model without a guess head keep the drafter.
+    fn head_guesses_better_here(&self) -> bool {
+        self.mtp.is_some()
+            && self.output.is_some()
+            && self.layer_start == 0
+            && self.layer_end == self.total_layers
+            && self.device().is_cpu()
+    }
+
     pub(crate) fn attach_block_drafter(&mut self, dir: &Path) {
         let path = dir.join(BLOCK_DRAFTER_FILE);
         let head_here = self.output.is_some() || self.drafter_head.is_some();
         if !block_drafter_on() || !path.is_file() || self.layer_start != 0 || !head_here {
+            self.drop_drafter_head();
+            return;
+        }
+        if self.head_guesses_better_here() && !block_drafter_on_the_processor_anyway() {
+            tracing::info!(
+                "block drafter not attached: on the processor this model's own guess head writes faster"
+            );
             self.drop_drafter_head();
             return;
         }
@@ -784,7 +812,30 @@ impl SplitModel {
                 return;
             }
         };
-        let takes = drafter.bytes.saturating_add(self.drafter_head_bytes);
+        // The head's first rows, where the drafter reads it on the processor
+        // and no guess head keeps them (`SplitModel::drafter_hot`).
+        let hot = if self.mtp_hot_rows().is_some() {
+            None
+        } else {
+            let head = self.output.as_ref().or(self.drafter_head.as_ref());
+            match head.and_then(|h| super::mtp::hot_rows_for(Some(h), false).map(|r| (h, r))) {
+                Some((h, (rows, bytes))) => {
+                    match super::mtp::head_rows(h, super::mtp::HeadRows::First(rows)) {
+                        Ok(rows) => Some((rows, bytes)),
+                        Err(e) => {
+                            tracing::warn!(error = %e, "block drafter: reads every word");
+                            None
+                        }
+                    }
+                }
+                None => None,
+            }
+        };
+        let hot_bytes = hot.as_ref().map_or(0, |(_, bytes)| *bytes);
+        let takes = drafter
+            .bytes
+            .saturating_add(self.drafter_head_bytes)
+            .saturating_add(hot_bytes);
         // The drafter and the head it borrows sit on the model's own device
         // (`BlockDrafter::load`): its budget pays, never a card/processor
         // split's processor-side one (`host_kv_budget_bytes`).
@@ -799,6 +850,7 @@ impl SplitModel {
         tracing::info!(
             mb = takes >> 20,
             head_mb = self.drafter_head_bytes >> 20,
+            hot_rows_mb = hot_bytes >> 20,
             budget_left_mb = ?budget.map(|b| b >> 20),
             one_conversation_mb = one_conversation >> 20,
             layers = drafter.layers.len(),
@@ -810,6 +862,7 @@ impl SplitModel {
         );
         if fits {
             self.block_drafter = Some(drafter);
+            self.drafter_hot = hot.map(|(rows, _)| rows);
         } else {
             self.drop_drafter_head();
         }
@@ -820,6 +873,7 @@ impl SplitModel {
     fn drop_drafter_head(&mut self) {
         self.drafter_head = None;
         self.drafter_head_bytes = 0;
+        self.drafter_hot = None;
     }
 
     pub(crate) fn block_drafter(&self) -> Option<&BlockDrafter> {

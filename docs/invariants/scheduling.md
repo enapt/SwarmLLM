@@ -6490,10 +6490,42 @@ worth reading:
   closing line's `widths`, e.g. `2:14.7 3:16.5 4:17.2 5:16.4 8:17.9`): the head
   was declined 8-18 rounds of a story, a BST class 190-193 tok/s against
   176-183 before, a hash map 118-124 against 115-125 — and the story stayed
-  0.89-0.92× of the drafter's absence (77.0 against 83.5-86.7): its residual is
-  the block's own first rounds on prose (12-15 rounds keeping ~1 of 5 guesses
-  before its record sets it aside), not the head. Test
+  0.89-0.92× of the drafter's absence (77.0 against 83.5-86.7). ⚠ Corrected
+  2026-11-08 night: that residual is NOT the block's first rounds on prose —
+  card run 17's story ran 0.90× with the block never taking a round. It is the
+  cost of feeding the drafter: its context rows made every round (~0.4 ms; now
+  made at the draft, `BlockGuesses::raw`), the in-graph copies of its layers'
+  rows (a step 11.8-12.3 against 11.7-11.8 ms), and the block's own rounds on
+  prose (10-38 of a story's ~105, writing 42-77 tokens/s where plain steps write
+  ~83, card run 18). Beside probes JUDGED by the reply the head declined 29-105
+  rounds against 6-38 alone (10-40 beside checked ones) — not explained; a card
+  checks its probes (`SHADOW_FROM_STEPS`). Test
   `a_width_timed_here_is_priced_at_its_own_cost`.
+- **A block's probe is judged by the reply where a check of the block is dear**
+  (`model_worker::BlockShadow`, `SHADOW_FROM_STEPS` = 2 plain steps, one
+  computer, 2026-11-08 night). There the block drafts as for a round and the round
+  goes on without it; the tokens the reply commits at its positions say how many
+  of its guesses a check would have kept — a check keeps a guess only where it
+  matches the token drawn there, and the committed token is a draw of the same
+  distribution after the same prefix, so this is exact under greedy decoding and
+  the same in distribution when sampling. It is recorded as the round a check would
+  have been: its width's price, its draft. Checked, a probe read the whole block:
+  on the processor ~400 ms for 16 positions against a ~97 ms step, ~4 a reply.
+  Qwen3.5-4B Q4_K_M whole on the processor, a palindrome / a BST class / a story /
+  a hash map, tok/s, three runs a side (`~/rig428/cpu2`): judged 16.8-19.0 /
+  16.8-17.8 / 11.1-11.7 / 14.5-17.2, checked 13.8-15.0 / 15.5-16.8 / 10.2-11.8 /
+  14.5-16.5, no drafter 16.0-18.0 / 17.0-19.2 / 11.9-12.2 / 15.6-19.4. **On a card
+  a checked probe stays**: a check of the block is one recorded graph, ~1.5 steps,
+  and keeps what it guessed right (card run 18: a story 78.3-79.0 checked against
+  73.7-78.5 judged, code alike). **A reply's FIRST block was tried as a shadow too
+  and dropped**: on the card a hash map's prose opening judged it unpaid and its
+  code ran on the head (97-116 tok/s against 121-124, card run 17); on the
+  processor the first verdict paid against plain steps and the block's live rounds
+  then lost to the head's (cpu run 3). Prior art: none found for a drafter judged
+  without a check (searched 2026-11-08 — SVIP's entropy, SpecDec++'s acceptance
+  head and Draft & Verify's threshold predict; SGLang's average and BanditSpec
+  learn only from what was checked). The drafter's reward is seen whether it ran
+  or not: full information, as Hedge has, where a bandit sees only its own arm's.
 - **A block round is charged its whole time** (`BlockGuesses::rest_ms`: the
   rows taken in, a refused guess's take-back, the bookkeeping), weighed against
   a plain round's whole time (`LocalSpec::plain_round_per_ms`). Measured small on

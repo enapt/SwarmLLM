@@ -4280,6 +4280,13 @@ struct BlockGuesses {
     capture: std::collections::HashSet<usize>,
     cache: crate::inference::split::BlockCache,
     /// Context rows made and not yet taken in (`[1, n, hidden]` pieces).
+    /// Rows the target's forwards kept that are not made context rows yet
+    /// (one tensor per capture layer, `[1, len, hidden]`): made together at the
+    /// next draft ([`join_row_pieces`]), so a round the block sits out pays no
+    /// projection — the drafter's `fc` read whole for one row, 2.4 ms a round
+    /// on a processor and ~0.3 on a card (#428; card run 17: a story whose
+    /// block never ran live was 0.90x of the drafter's absence).
+    raw: Vec<Vec<candle_core::Tensor>>,
     waiting: Vec<candle_core::Tensor>,
     /// The position after the last context row made.
     next_pos: usize,
@@ -4298,6 +4305,14 @@ struct BlockGuesses {
     rest_ms: crate::inference::dsd_controller::RecentMedian,
     /// Making a round's context rows, every round the block is attached.
     upkeep_ms: crate::inference::dsd_controller::RecentMedian,
+    /// The words its guesses read beside the drafter's own hot rows
+    /// (`SplitModel::block_hot_rows`), where no guess head keeps them.
+    words: Option<DraftWords>,
+    /// A probe drafted and not checked, judged by the tokens the reply
+    /// commits at its positions ([`BlockShadow`]).
+    shadow: Option<BlockShadow>,
+    /// Probes judged that way, for the closing line.
+    shadows: u64,
     /// What its rounds have written a millisecond ([`LocalSpec::next`]).
     delivered: crate::inference::dsd_controller::Delivered,
     /// Rounds set aside because a plain step or the head was writing faster.
@@ -4322,6 +4337,7 @@ impl BlockGuesses {
             capture: drafter.target_layers().iter().copied().collect(),
             cache: Default::default(),
             waiting: Vec::new(),
+            raw: Vec::new(),
             next_pos: 0,
             kv_reserve: kv_store
                 .reserved_positions(req_id_str)
@@ -4331,6 +4347,9 @@ impl BlockGuesses {
             draft_ms: Default::default(),
             rest_ms: Default::default(),
             upkeep_ms: Default::default(),
+            words: None,
+            shadow: None,
+            shadows: 0,
             delivered: Default::default(),
             outpaced: 0,
             rounds: 0,
@@ -4351,6 +4370,7 @@ impl BlockGuesses {
             tracing::warn!(reason = %why, "block drafter: no more guesses for this reply");
             self.stopped = Some(why);
             self.waiting.clear();
+            self.raw.clear();
         }
     }
 
@@ -4362,8 +4382,9 @@ impl BlockGuesses {
     }
 
     /// Context rows from `n` positions of `kept` (one tensor per capture
-    /// layer, its first `n` rows), made in pieces of
-    /// [`BLOCK_CATCH_UP_CHUNK`](crate::inference::split::BLOCK_CATCH_UP_CHUNK).
+    /// layer, its first `n` rows), kept in pieces of
+    /// [`BLOCK_CATCH_UP_CHUNK`](crate::inference::split::BLOCK_CATCH_UP_CHUNK)
+    /// and made at the next draft ([`Self::raw`]).
     fn make_rows(
         &mut self,
         model: &crate::inference::split::SplitModel,
@@ -4390,7 +4411,7 @@ impl BlockGuesses {
                 .map(|t| t.narrow(1, start, len))
                 .collect::<Result<_, _>>()
                 .map_err(SwarmError::internal)?;
-            self.waiting.push(drafter.context_rows(&piece)?);
+            self.raw.push(piece);
         }
         Ok(())
     }
@@ -4462,6 +4483,10 @@ impl BlockGuesses {
         let drafter = model
             .block_drafter()
             .ok_or_else(|| SwarmError::Internal("block drafter: none attached".into()))?;
+        let chunk = crate::inference::split::BLOCK_CATCH_UP_CHUNK;
+        for piece in join_row_pieces(std::mem::take(&mut self.raw), chunk)? {
+            self.waiting.push(drafter.context_rows(&piece)?);
+        }
         let mut waiting = std::mem::take(&mut self.waiting);
         let last = waiting.pop();
         for piece in &waiting {
@@ -4477,6 +4502,90 @@ impl BlockGuesses {
             self.for_the_owner,
             over,
         )
+    }
+}
+
+/// Kept row pieces (each one tensor per capture layer, `[1, len, hidden]`, in
+/// position order) joined into pieces of at most `chunk` positions, in the
+/// same order — a piece longer than `chunk` stays whole.
+fn join_row_pieces(
+    pieces: Vec<Vec<candle_core::Tensor>>,
+    chunk: usize,
+) -> Result<Vec<Vec<candle_core::Tensor>>, SwarmError> {
+    fn join(group: &[Vec<candle_core::Tensor>]) -> Result<Vec<candle_core::Tensor>, SwarmError> {
+        if let [one] = group {
+            return Ok(one.clone());
+        }
+        let layers = group.first().map_or(0, Vec::len);
+        (0..layers)
+            .map(|l| {
+                let parts: Vec<&candle_core::Tensor> = group.iter().map(|p| &p[l]).collect();
+                candle_core::Tensor::cat(&parts, 1).map_err(SwarmError::internal)
+            })
+            .collect()
+    }
+    let mut joined = Vec::new();
+    let mut group: Vec<Vec<candle_core::Tensor>> = Vec::new();
+    let mut held = 0;
+    for piece in pieces {
+        let len = piece
+            .first()
+            .map_or(Ok(0), |t| t.dim(1))
+            .map_err(SwarmError::internal)?;
+        if !group.is_empty() && held + len > chunk {
+            joined.push(join(&group)?);
+            group.clear();
+            held = 0;
+        }
+        held += len;
+        group.push(piece);
+    }
+    if !group.is_empty() {
+        joined.push(join(&group)?);
+    }
+    Ok(joined)
+}
+
+#[cfg(test)]
+mod join_row_pieces_tests {
+    use super::join_row_pieces;
+    use candle_core::{Device, Tensor};
+
+    /// A piece of `len` positions whose rows hold `first..first + len`, for
+    /// two capture layers (the second one's rows negated).
+    fn piece(first: u32, len: usize) -> Vec<Tensor> {
+        let rows: Vec<f32> = (0..len).map(|i| (first as usize + i) as f32).collect();
+        let a = Tensor::from_vec(rows, (1, len, 1), &Device::Cpu).unwrap();
+        vec![a.clone(), a.neg().unwrap()]
+    }
+
+    fn rows(t: &Tensor) -> Vec<f32> {
+        t.flatten_all().unwrap().to_vec1().unwrap()
+    }
+
+    #[test]
+    fn row_pieces_join_up_to_a_chunk_in_position_order() {
+        let pieces = vec![
+            piece(0, 1),
+            piece(1, 1),
+            piece(2, 3),
+            piece(5, 2),
+            piece(7, 6),
+        ];
+        let joined = join_row_pieces(pieces, 4).unwrap();
+        let firsts: Vec<Vec<f32>> = joined.iter().map(|p| rows(&p[0])).collect();
+        assert_eq!(
+            firsts,
+            vec![
+                vec![0.0, 1.0],
+                vec![2.0, 3.0, 4.0],
+                vec![5.0, 6.0],
+                vec![7.0, 8.0, 9.0, 10.0, 11.0, 12.0]
+            ]
+        );
+        // Every layer joined the same way.
+        assert_eq!(rows(&joined[1][1]), vec![-2.0, -3.0, -4.0]);
+        assert!(join_row_pieces(Vec::new(), 4).unwrap().is_empty());
     }
 }
 
@@ -4506,6 +4615,97 @@ impl SplitBlockDrafts {
         if !self.0.is_empty() {
             self.0.retain(|id, _| !cancelled.contains_key(id));
         }
+    }
+}
+
+/// A block drafter's probe drafted and NOT checked (#428): where a probe is
+/// due, the block drafts as for a round and the round goes on without it;
+/// the reply's next tokens then say how many of its guesses a check would
+/// have kept. A check keeps a guess only where it matches the token drawn
+/// there (`ngram_spec_eligible`'s rule), and the token the reply commits is a
+/// draw of the same distribution after the same prefix, so the run it follows
+/// is the run a check would have kept — exactly under greedy decoding, in
+/// distribution when sampling. Checked, a probe read the whole block: on the
+/// processor ~400 ms for 16 positions against a ~60 ms step, ~4 a reply, and
+/// the drafter ran 10-20% under its absence (Qwen3.5-4B, 2026-11-08).
+/// Prior art: none found for a drafter judged without a check (searched
+/// 2026-11-08 — SVIP's entropy, SpecDec++'s acceptance head and Draft &
+/// Verify's threshold predict, SGLang's average and BanditSpec learn only from
+/// what was checked). Here the drafter's reward is seen whether it ran or not:
+/// full information, as Hedge has, where a bandit has only its own arm's.
+#[derive(Debug)]
+struct BlockShadow {
+    /// The position of its first guess.
+    from: usize,
+    guesses: Vec<u32>,
+    /// Its guesses the reply has followed so far.
+    followed: usize,
+    draft_ms: f64,
+}
+
+impl BlockShadow {
+    /// The reply's `committed` tokens from position `at`: `Some(kept)` once
+    /// they decide it — a token unlike its guess there, or every guess
+    /// followed.
+    fn follow(&mut self, at: usize, committed: &[u32]) -> Option<usize> {
+        for (i, &t) in committed.iter().enumerate() {
+            if (at + i).checked_sub(self.from) != Some(self.followed) {
+                continue;
+            }
+            match self.guesses.get(self.followed) {
+                Some(&g) if g == t => self.followed += 1,
+                _ => return Some(self.followed),
+            }
+        }
+        (self.followed >= self.guesses.len()).then_some(self.followed)
+    }
+}
+
+/// `SWARMLLM_BLOCK_PROBE=check`: a block probe checks its whole block, the
+/// rule before 2026-11-08 ([`BlockShadow`]), for A/B inside one binary.
+fn block_shadow_probes() -> bool {
+    static SHADOW: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *SHADOW.get_or_init(|| std::env::var("SWARMLLM_BLOCK_PROBE").as_deref() != Ok("check"))
+}
+
+/// A block probe is judged by the reply ([`BlockShadow`]) where a check of
+/// the whole block costs this many plain steps or more: on a processor it
+/// cost ~4, on a card's recorded graph ~1.5 — there a checked probe keeps what
+/// it guessed right for little (card run 18: a story 78.3-79.0 tok/s checked,
+/// 73.7-78.5 judged; code alike).
+const SHADOW_FROM_STEPS: f64 = 2.0;
+
+#[cfg(test)]
+mod block_shadow_tests {
+    use super::BlockShadow;
+
+    fn shadow(guesses: &[u32]) -> BlockShadow {
+        // Drafted beside the token at position 10: its first guess is at 11.
+        BlockShadow {
+            from: 11,
+            guesses: guesses.to_vec(),
+            followed: 0,
+            draft_ms: 80.0,
+        }
+    }
+
+    /// Kept is the run of guesses the reply's tokens follow, read across
+    /// rounds, as a check would have kept them.
+    #[test]
+    fn a_shadow_keeps_the_run_the_reply_follows() {
+        let mut s = shadow(&[5, 6, 7]);
+        // A plain step commits only the token it was given: nothing to judge.
+        assert_eq!(s.follow(10, &[9]), None);
+        // The head's round commits 9 then 5: one followed, not yet decided.
+        assert_eq!(s.follow(10, &[9, 5]), None);
+        // The next round commits 6 then 8 where 7 was guessed.
+        assert_eq!(s.follow(12, &[6, 8]), Some(2));
+
+        let mut s = shadow(&[5, 6]);
+        assert_eq!(s.follow(10, &[9, 5, 6, 4]), Some(2), "every guess followed");
+
+        let mut s = shadow(&[5, 6]);
+        assert_eq!(s.follow(10, &[9, 4]), Some(0), "the first guess missed");
     }
 }
 
@@ -4673,7 +4873,8 @@ async fn handle_block_draft(
         if d.first {
             drafts.0.remove(&d.request_id);
         }
-        if !drafts.0.contains_key(&d.request_id) {
+        let created = !drafts.0.contains_key(&d.request_id);
+        if created {
             while drafts.0.len() >= MOST_FLOW_SESSIONS {
                 let Some(oldest) = drafts
                     .0
@@ -4685,9 +4886,14 @@ async fn handle_block_draft(
                 };
                 drafts.0.remove(&oldest);
             }
-            let fresh = BlockGuesses::for_model(model, kv_store, &req).ok_or_else(|| {
+            let mut fresh = BlockGuesses::for_model(model, kv_store, &req).ok_or_else(|| {
                 SwarmError::ServiceUnavailable("no block drafter beside this segment".into())
             })?;
+            // The words its guesses read beside the hot rows, on the processor
+            // (#425 (b)): the prompt and the reply so far, then each draft's new.
+            fresh.words = model
+                .block_hot_rows()
+                .and_then(|hot| DraftWords::for_prompt(hot, &d.words));
             drafts
                 .0
                 .insert(d.request_id, (fresh, std::time::Instant::now()));
@@ -4696,6 +4902,9 @@ async fn handle_block_draft(
             return Ok(Vec::new());
         };
         *used = std::time::Instant::now();
+        if let Some(words) = g.words.as_mut().filter(|_| !created) {
+            words.note(&d.words);
+        }
         let layers: Vec<usize> = model
             .block_drafter()
             .map(|b| b.target_layers().to_vec())
@@ -4724,13 +4933,14 @@ async fn handle_block_draft(
         }
         let started = std::time::Instant::now();
         let gamma = (d.gamma as usize).min(g.most(model));
-        let guesses = g.guesses(
-            model,
-            d.token,
-            d.index_pos as usize,
-            gamma,
-            crate::inference::split::GuessOver::Everything,
-        )?;
+        let mut words = g.words.take();
+        let over = match words.as_mut() {
+            Some(w) if !w.whole => crate::inference::split::GuessOver::HotAnd(w.rows(model)?),
+            _ => crate::inference::split::GuessOver::Everything,
+        };
+        let guesses = g.guesses(model, d.token, d.index_pos as usize, gamma, over);
+        g.words = words;
+        let guesses = guesses?;
         g.draft_ms.record(started.elapsed().as_secs_f64() * 1000.0);
         g.rounds += 1;
         g.proposed += guesses.len() as u64;
@@ -5449,6 +5659,9 @@ impl LocalSpec {
         // A block drafter guesses under a fixed count too — its whole block
         // every round ([`Self::block_guess_count`]); the head does not.
         if let Some(mut block) = BlockGuesses::for_model(model, kv_store, req_id_str) {
+            block.words = model
+                .block_hot_rows()
+                .and_then(|hot| DraftWords::for_prompt(hot, prompt_ids));
             match block.take_the_prompt(model, prompt_ids.len(), &kept, first) {
                 Ok(()) => self.block = Some(block),
                 Err(e) => tracing::warn!(error = %e, "block drafter: not used for this reply"),
@@ -5696,13 +5909,14 @@ impl LocalSpec {
         });
         let block = self.block.as_ref().map_or(String::new(), |b| {
             format!(
-                " block rounds {} guessed {} kept {} declined {} outpaced {} probes {} draft {} ms rest {} ms upkeep {} ms alpha {:.2} writes {}/s{}",
+                " block rounds {} guessed {} kept {} declined {} outpaced {} probes {} unchecked {} draft {} ms rest {} ms upkeep {} ms alpha {:.2} writes {}/s{}",
                 b.rounds,
                 b.proposed,
                 b.accepted,
                 b.declined,
                 b.outpaced,
                 b.probing.probes,
+                b.shadows,
                 b.draft_ms
                     .median()
                     .map_or("-".to_string(), |ms| format!("{ms:.1}")),
@@ -5828,6 +6042,7 @@ impl LocalSpec {
         let mut block_round = false;
         let mut block_declined = false;
         let mut block_probe = false;
+        let mut block_shadow = false;
         let mut block_draft_ms = 0.0;
         let block_room = if plain_now { 0 } else { self.block_room(model) };
         let block_due = block_room > 0
@@ -5880,13 +6095,32 @@ impl LocalSpec {
                 if gamma > 0 {
                     block.probing.guessed();
                 } else if priced && block.probing.declined() {
-                    (gamma, block_probe) = (block_room, true);
+                    // Where checking the whole block is dear, drafted and
+                    // judged by the reply's next tokens instead
+                    // ([`BlockShadow`], [`SHADOW_FROM_STEPS`]); one at a time.
+                    let width = u32::try_from(block_room + 1).unwrap_or(u32::MAX);
+                    let dear = self.step_ms.median().is_none_or(|step| {
+                        self.check
+                            .predict_beside_a_step(width, step)
+                            .is_none_or(|price| price >= SHADOW_FROM_STEPS * step)
+                    });
+                    if !block_shadow_probes() || !dear {
+                        (gamma, block_probe) = (block_room, true);
+                    } else if block.shadow.is_none() {
+                        (gamma, block_shadow) = (block_room, true);
+                    }
                 }
             }
             if let Some(block) = self.block.as_mut().filter(|_| gamma > 0) {
                 let started = std::time::Instant::now();
-                // The words the guess head reads on the processor (#425 (b)).
-                let words = self.mtp.as_mut().and_then(|m| m.words.as_mut());
+                // The words the guess head reads on the processor (#425 (b)),
+                // else the block's own beside its own hot rows.
+                let mut own = block.words.take();
+                let words = self
+                    .mtp
+                    .as_mut()
+                    .and_then(|m| m.words.as_mut())
+                    .or(own.as_mut());
                 let guessed = tokio::task::block_in_place(|| {
                     let _g = crate::inference::attn_kernel::ForceStandardAttnGuard::new(force_attn);
                     let over = match words {
@@ -5897,7 +6131,19 @@ impl LocalSpec {
                     };
                     block.guesses(model, next_token, *index_pos, gamma, over)
                 });
+                block.words = own;
                 match guessed {
+                    Ok(guesses) if !guesses.is_empty() && block_shadow => {
+                        block_draft_ms = started.elapsed().as_secs_f64() * 1000.0;
+                        block.draft_ms.record(block_draft_ms);
+                        block.shadow = Some(BlockShadow {
+                            from: *index_pos + 1,
+                            guesses,
+                            followed: 0,
+                            draft_ms: block_draft_ms,
+                        });
+                        block_declined = true;
+                    }
                     Ok(guesses) if !guesses.is_empty() => {
                         block_draft_ms = started.elapsed().as_secs_f64() * 1000.0;
                         block.draft_ms.record(block_draft_ms);
@@ -6055,17 +6301,29 @@ impl LocalSpec {
             capture.as_ref(),
             held,
         )?;
+        let committed: Vec<u32> = std::iter::once(next_token)
+            .chain(round.produced.iter().copied())
+            .take(round.committed)
+            .collect();
         if let Some(mtp) = self.mtp.as_mut().filter(|m| m.active()) {
-            let committed: Vec<u32> = std::iter::once(next_token)
-                .chain(round.produced.iter().copied())
-                .take(round.committed)
-                .collect();
             if let Err(e) = mtp.take_the_round(model, *index_pos, &committed, round.caught.as_ref())
             {
                 mtp.stop(e.to_string());
             }
         }
+        let mut shadow_kept = None;
         if let Some(block) = self.block.as_mut().filter(|b| b.active()) {
+            if let Some(words) = block.words.as_mut() {
+                words.note(&committed);
+            }
+            let decided = block.shadow.as_mut().and_then(|s| {
+                s.follow(*index_pos, &committed)
+                    .map(|kept| (kept, s.guesses.len(), s.draft_ms))
+            });
+            if decided.is_some() {
+                block.shadow = None;
+                shadow_kept = decided;
+            }
             let started = std::time::Instant::now();
             match block.take_the_round(model, *index_pos, round.committed, round.caught.as_ref()) {
                 Ok(()) => block
@@ -6196,6 +6454,32 @@ impl LocalSpec {
                 block.declined += 1;
                 block.acceptance.fade();
                 block.delivered.fade();
+            }
+            // A probe judged by the reply ([`BlockShadow`]): recorded as the
+            // round a check would have been — its width's price, its draft.
+            if let Some((kept, guessed, draft_ms)) = shadow_kept {
+                let width = u32::try_from(guessed + 1).unwrap_or(u32::MAX);
+                let price = self
+                    .step_ms
+                    .median()
+                    .and_then(|step| self.check.predict_beside_a_step(width, step));
+                let draft = draft_ms
+                    + if block_charge_whole_round() {
+                        block.rest_ms.median().unwrap_or(0.0)
+                    } else {
+                        0.0
+                    };
+                let paid = price.is_none_or(|price| {
+                    let tokens = kept + 1;
+                    block.delivered.record(tokens, price + draft);
+                    block.acceptance.record(kept as u32, guessed as u32);
+                    !crate::inference::dsd_controller::delivers_less(
+                        Some(tokens as f64 / (price + draft).max(0.1)),
+                        [plain_round],
+                    )
+                });
+                block.probing.judged(paid);
+                block.shadows += 1;
             }
         }
         if let Some(card) = self.card.as_mut().filter(|_| card_round || card_declined) {

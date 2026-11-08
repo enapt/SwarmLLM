@@ -8648,6 +8648,37 @@ against 10.3, the palindrome 13.9-14.5 against 15.6-15.7 (there the every-word a
 ~60 — and every reply paid ~4 (FUTURE_WORK #428). Prior art: FR-Spec (arXiv 2502.14856) — a frequency-ranked
 subset of the draft's vocabulary keeps 95.4% of acceptance at 32k words on Qwen-2-7B.
 
+### Not beside a whole processor model with its own guess head (2026-11-08 night)
+
+`SplitModel::head_guesses_better_here`: a model held whole on the processor that carries its own guess head
+(`MtpHead`) attaches no block drafter. There a block's draft costs 25-105 ms and its 16-position check ~4 plain
+steps, where the head guesses at ~6 ms a word: over three runs (`~/rig428/cpu2`, cpu3) the drafter beside the head
+ran 16.8-19.0 / 16.8-17.8 / 11.1-11.7 / 14.5-17.2 tok/s on a palindrome, a BST class, a story and a hash map against
+16.0-18.0 / 17.0-19.2 / 11.9-12.2 / 15.6-19.4 without it — and held 0.4-1.85 GB of the machine's memory. With the rule (`~/rig428/cpu4`, three runs a side; its `block drafter not attached` line in every log) the four prompts ran 15.7-17.5 / 17.4-17.5 / 12.0-13.0 / 16.7-17.1, the path the drafter's absence takes (16.8-18.1 / 18.2-20.7 / 11.8-12.0 / 17.5-17.9 there — this processor's spread between arms), against 14.1-17.8 / 16.6-17.9 / 10.8-11.7 / 14.8-15.4 with it attached anyway (`SWARMLLM_BLOCK_DRAFTER=processor`).
+A split's first segment, a card, and a model with no guess head (the swarm's Qwen3.5-9B upload, #431) keep it. The
+pinned fetch (stage 6) still fetches it: the same machine may hold the model's first part of a split.
+
+### A drafter's context rows are made at its next draft (2026-11-08 night)
+
+The rows the target's forwards keep for the drafter wait raw (`BlockGuesses::raw`) and are joined into pieces of
+`BLOCK_CATCH_UP_CHUNK` positions (`join_row_pieces`) and made context rows (`BlockDrafter::context_rows`: cast,
+join, `fc`, norm) at the next draft. Made every round, a round the block sat out paid the drafter's `fc` read whole
+for one row — 2.4 ms on the processor, ~0.3-0.4 ms on a card — and a card story whose block never took a round ran
+0.90× of the drafter's absence (card run 17). Card runs 17 → 18: the block's upkeep 0.10 → 0.00 ms a round, a story
+with its probes checked 75.5-77.4 → 78.3-79.0 tok/s (without the drafter 83.1-85.5, then 79.5-84.0).
+Prior art: llama.cpp's EAGLE-3 names the same stash as its TODO (`common/speculative.cpp`, "process() only stash
+features and let draft() seed run encoder+decoder"); its DFlash drafts every round and never needed it.
+
+### On a split's first segment: the drafter's own hot rows (2026-11-08 night)
+
+A split's block drafter sits beside the model's head on the first segment, reading the head it borrows
+(`SplitModel::drafter_head`); no guess head is loaded there to keep hot rows. The drafter keeps its own where its
+head is on the processor (`SplitModel::drafter_hot`: the head's first `DRAFT_HOT_ROWS`, built and charged at attach
+— `hot_rows_mb` in its line — and dropped with the head), and the coordinator tells it the conversation's words
+with each draft (`IpcBlockDraft::words`: the prompt and the reply so far on the first, each round's new after; an
+older coordinator sends none and the guesses read every word). The same holds on one computer for a model with no
+guess head. Over two processors (130 ms, each node on half the cores, `~/rig428/run7` and `run7b`, two clean runs a side — two more arms voided, gotcha #1067) the 9B's drafter keeps its own hot rows (`hot_rows_mb=105`) and drafts in half the time, 46-69 against 78-134 ms, but its speeds stayed inside the runs' spread: a palindrome 4.35-5.20 tok/s against 4.94-5.25 reading the whole head, a BST class 5.44-5.80 against 5.94-5.98, a story 4.15-4.21 against 3.78-3.90 (without the drafter 2.87-2.95 / 3.28-3.34 / 3.32-3.42; the same reply on every arm). The count follows the draft's price — 4.4 guesses a round against 7.6 on the palindrome — so the cheaper draft went to more, shorter rounds, not to more words a second; pricing the draft as a line in guesses is the open step. With the first segment on a card (an RTX 3070, the second on the processor, 130 ms, two runs a side, `~/rig428/run8`) the head is read whole there (`hot_rows_mb=0`): a palindrome 6.4-7.3 tok/s against 3.8 without the drafter, a BST class 8.6-9.3 against 3.9-4.0, a story 5.5-5.8 against 3.9; the replies part from the drafter's absence at near ties of word choice ("one child" / "single child"), as a card's checks of several rows do.
+
 ### Where the drafter comes from: a pin (stage 6, 2026-11-08)
 
 **What it does.** `model::huggingface::block_drafter::fetch_for_models_held_end_to_end`, spawned beside each

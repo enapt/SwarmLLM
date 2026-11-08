@@ -64,6 +64,13 @@ pub struct SplitModel {
     /// What `drafter_head` holds, counted with the drafter when it is
     /// attached ([`Self::attach_block_drafter`]); 0 without one.
     pub(super) drafter_head_bytes: u64,
+    /// The first rows of the head a block drafter reads (`output`, else
+    /// `drafter_head`), where that head is on the processor and no guess head
+    /// keeps them already (`MtpHead::hot`): its guesses read them and the
+    /// conversation's own words (#425 (b)) — the whole head read for every
+    /// block row was most of a draft. Built and charged with the drafter
+    /// ([`Self::attach_block_drafter`]).
+    pub(super) drafter_hot: Option<QMatMul>,
     /// This model's recent plain decode steps, carried across replies
     /// ([`Self::plain_steps`]).
     pub(super) plain_steps: PlainSteps,

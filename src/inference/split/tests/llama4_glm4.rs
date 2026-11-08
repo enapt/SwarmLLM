@@ -473,6 +473,7 @@ fn test_llama4_moe_layer_forward() {
         block_drafter: None,
         drafter_head: None,
         drafter_head_bytes: 0,
+        drafter_hot: None,
         plain_steps: Default::default(),
         stand_in_prior: None,
         grammar_vocab: Default::default(),

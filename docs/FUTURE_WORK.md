@@ -3179,7 +3179,7 @@ greedy tokens, stalls of 1 s or more taken out; `docs/invariants/inference.md` �
 (49-54 against 70-73; 0.91× once every width is recorded ahead, (c1)). The drafter runs on the target's device and picks its guesses there; every captured step keeps
 its rows; a guesser is set aside by what it WRITES against plain steps only (`dsd_controller::Delivered`), probed
 again by one rule, beside a plain step remembered per model, and a step or check figure under 0.75× of the remembered
-one starts it over. A split's card-held first segment attaches one too — built, not measured. **Left on a card**:
+one starts it over. A split's card-held first segment attaches one too — measured 2026-11-08 night (Qwen3.5-9B, the first part on the RTX 3070, the rest on a processor, 130 ms, `~/rig428/run8`): a palindrome 6.4-7.3 tok/s against 3.8, a BST class 8.6-9.3 against 3.9-4.0, a story 5.5-5.8 against 3.9. **Left on a card**:
 (c1) hold the checks to a few widths — vLLM captures graphs at fixed sizes and pads a forward up to the next; ON
 stories check at every width from 2 to 8 and paid 5-7 one-off forwards (240-300 ms each) against OFF's 1, every one
 with a pool-growth stall; first log which kind each one-off is (first of a shape, not ready, rebuilt); (c2) the head
@@ -3197,17 +3197,28 @@ under its own (palindrome token 60) — run llama.cpp's card build at a batch of
 recent median; the line only for a width not yet timed twice) — the line through the block's wide checks had priced the
 head's narrow ones ~2.4 ms dear, and it was declined 47-67 rounds of a story against 11-29 alone. Card run 16: the head
 declined 8-18, a BST class 190-193 tok/s (176-183 before), a hash map 118-124, but the story still 77.0 against 83.5-86.7
-OFF (0.89-0.92×). So the story's residual is the BLOCK's first rounds on prose — 12-15 rounds keeping ~1 of 5 guesses
+OFF (0.89-0.92×). ⚠ **Corrected the same night**: card run 17's story ran 0.90× with the block never taking a round — the
+residual is feeding the drafter (rows made every round, now at the draft; the in-graph copies) and the block's own rounds
+on prose (10-38 of ~105 at 42-77 tokens/s against plain steps' ~83, card run 18). The first reading, kept as written and WRONG: So the story's residual is the BLOCK's first rounds on prose — 12-15 rounds keeping ~1 of 5 guesses
 (~27 ms a round for ~1.7 tokens, against ~11 ms a token from the head) before its record sets it aside. Next for it: start
 a reply's block at a narrow count until its record says it pays (a probe at the full block costs the most where it keeps
 the least), or let the head go first on a reply whose prompt asks for prose.
+**Where a story's ~200 ms go (card run 16, arm 3, read 2026-11-08 night)**: 105 rounds — the head 71 (46 of 91 kept,
+writes 96/s), the block 15 (10 of 79 kept, ~6.2 ms draft + a ~17 ms check a round, ~72 tok/s; 4 of the 15 were PROBES
+checked at the full block), plain steps 19 — against OFF's 92-107 rounds nearly all on the head (writes 91-111/s). Those 15
+block rounds in the head's place cost ~120 ms; the probes ~70 of it. But card run 17 then put a story at 0.90× with the
+block never taking a round: most of the residual is feeding the drafter, not its rounds (the correction below). A step is
+12.2 ms with the drafter's rows kept, 11.7-12.1 without.
 **On the processor, whole (2026-11-08 night)**: the block's guesses now read the guess head's hot rows and the
 conversation's own words (#425 (b)): a 15-guess draft 155-172 → 76-99 ms on Qwen3.5-4B, a BST class +15%, a hash map
 +22% against reading every word (`docs/invariants/inference.md` § "On the processor: the guesses read the hot rows").
 ⚠ **But the drafter ON ran 10-20% under OFF on every prompt there** — each probe checks the whole block, ~400 ms for 16
 positions on a processor against a ~60 ms step, ~4 a reply. Must be fixed before a release ships the pin (stage 6) to
 processor-only machines: judge a probe without checking it — under greedy decoding the guesses a check would have kept
-are read exactly off the tokens the reply commits next.
+are read exactly off the tokens the reply commits next. **Done 2026-11-08 night**: a probe is judged by the reply where
+a check of the block costs ≥ 2 steps (`model_worker::BlockShadow`, `SHADOW_FROM_STEPS`), and a whole processor model
+with its own guess head attaches no drafter (`SplitModel::head_guesses_better_here`) — even judged, the drafter beside
+the head ran under its absence there (`docs/invariants/scheduling.md`, `inference.md`). With the rule (`~/rig428/cpu4`, three runs a side; its `block drafter not attached` line in every log) the four prompts ran 15.7-17.5 / 17.4-17.5 / 12.0-13.0 / 16.7-17.1, the path the drafter's absence takes (16.8-18.1 / 18.2-20.7 / 11.8-12.0 / 17.5-17.9 there — this processor's spread between arms), against 14.1-17.8 / 16.6-17.9 / 10.8-11.7 / 14.8-15.4 with it attached anyway (`SWARMLLM_BLOCK_DRAFTER=processor`).
 **Stage 6 — built 2026-11-08** (`model::huggingface::block_drafter`): a node holding a model from its first part to its
 head fetches that model's drafter once, from a PINNED table — the target's `general.name` folded, its architecture
 and width name one repo, file, size and SHA-256 (Anbeeld's Q8_0 conversions: Qwen3.6-35B-A3B and -27B, Qwen3.5-4B,
