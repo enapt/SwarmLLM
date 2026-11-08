@@ -3059,7 +3059,7 @@ vLLM and SGLang run it) or reads them one machine at a time; (c) the report: a s
 "has gone".
 
 #### #428 — Every popular model guesses 4-5 tokens a round trip: a DFlash drafter at the split's far end
-`P1` · perf-split · **OPEN** (stage 1 built and measured: the reply is exact, acceptance matches llama.cpp's; stage 3 built and measured on the rig — a split over 130 ms, processors: code 1.6-1.8×, a story 1.10-1.15×, the same replies; on a card, whole: code 1.4-1.6×, a story 0.91× — (c2), (c3); next: the field model, Qwen3.6-35B-A3B) — 2026-11-08 · history: #427 (the measurement), #425 (the guess head), #411 (the flow)
+`P1` · perf-split · **OPEN** (stage 1 built and measured: the reply is exact, acceptance matches llama.cpp's; stage 3 built and measured on the rig — a split over 130 ms, processors: code 1.6-1.8×, a story 1.10-1.15×, the same replies; on a card, whole: code 1.4-1.6×, a story 0.91× — (c2), (c3); stage 6 built: the drafter fetched by a pin; next: the field model, Qwen3.6-35B-A3B) — 2026-11-08 · history: #427 (the measurement), #425 (the guess head), #411 (the flow)
 
 **What a user gets today** (#427's table, 2026-11-08 01:00-01:30Z, live node, one ask at a time): every split of
 the popular models decodes ONE token a round trip — Gemma 4 31B here↔Australia 1.7-1.9 tok/s, Gemma 4 26B-A4B
@@ -3193,6 +3193,19 @@ story's residual, 0.91×: the block's rounds on prose write ~70 tokens/s where t
 (c3) the 8-row checks part from one-at-a-time where llama.cpp's processor scores the pick 0.8-1.0
 under its own (palindrome token 60) — run llama.cpp's card build at a batch of 8 there before calling it a near tie.
 **A round's cost, 2026-11-08**: a two-guess check cost 1.42-1.51× a step (llama.cpp's 2-row forward 1.02×) — the forward +2.9 ms (2-row matmuls, the f32 alpha/beta projections, copies), the take-back 1.7, the read-back 0.55 a row; the convolution in one launch and the take-back in two (#228 (9)) bring it to 1.23-1.28× and a plain step ~6% faster. The drafter rig (run 13, two runs a side): a BST class 135-163 → 167-172 tok/s, a hash map 103-112 → 116-126, the palindrome and the story inside the spread (the story with the block 66-73 against 73-77 without — still ~0.9×). Then the gates and the L2 norm in one launch each: a step 12.0 → 11.0 ms; the rig (run 14): palindrome 129-136 → 135-157, a BST class 174-175 → 177-198, a hash map 112-113 → 123-132 with the block; plain stories 76-77 → 82-85, so the block's story stays 0.8-0.9× of plain. Left: the 2-row matmuls, the kept rows' copies, the read-back; the story's residual is now the block's own rounds on prose.
+**Stage 6 — built 2026-11-08** (`model::huggingface::block_drafter`): a node holding a model from its first part to its
+head fetches that model's drafter once, from a PINNED table — the target's `general.name` folded, its architecture
+and width name one repo, file, size and SHA-256 (Anbeeld's Q8_0 conversions: Qwen3.6-35B-A3B and -27B, Qwen3.5-4B,
+-9B, -35B-A3B, -122B-A10B, -397B-A17B; 0.42-1.85 GB, every header read 2026-11-08) — into `block_drafter.gguf`
+beside the parts, used from the model's next load. Never past `MOST_DRAFTER_BYTES` (2 GiB: Qwen3.5-27B's Q8_0 is
+2.27 GB and is left out; Qwen3.8-27B's DFlash 2 is refused by the loader, so it is not pinned); it asks
+`metered_hold` and the disk reserve first, one fetch at a time, a failure waits 6 h; the file goes when NEITHER end
+is held any more (a part being fetched again, or no manifest, keeps it). The 35B-A3B conversion was checked against
+llama.cpp's converter run on z-lab's safetensors here: 69 of 69 tensors identical. **Prior art**: no runtime pairs a
+drafter on its own — llama.cpp takes `-md`, LM Studio a manual pick, SGLang/vLLM a path; Ollama checks a blob by its
+digest (`verifyBlob`); #422 fetches a vision encoder by its origin's listed SHA-256 — the pin follows those, and the
+loader's own checks (`dflash` arch, width, target layers) plus the set-aside (`Delivered`) are what stand behind a
+wrong or weak pairing.
 
 #### #318 — A large model split across machines is too slow to use
 `P2` · perf-split · **OPEN** — 2026-10-20 · plan: `docs/plans/large_model_splits.md` · draws on #134, #145, #148, #149, #192

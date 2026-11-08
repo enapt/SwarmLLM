@@ -925,6 +925,16 @@ impl AutoShardManager {
 
         self.evaluate_and_download().await;
 
+        // A block drafter for each model held from its first part to its head
+        // (#428), beside the pass: one fetch at a time, never holding it up.
+        {
+            let shared = self.shared_state.clone();
+            tokio::spawn(async move {
+                crate::model::huggingface::block_drafter::fetch_for_models_held_end_to_end(&shared)
+                    .await;
+            });
+        }
+
         // Prune only if enabled -- pruning is the last resort to free resources.
         // The download phase already respects storage budgets, so pruning only
         // fires when we're genuinely over-replicated or under resource pressure.

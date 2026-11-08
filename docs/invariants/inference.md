@@ -8631,3 +8631,27 @@ graph per length up front (arXiv 2605.00342) — FUTURE_WORK #425 (b).
 
 **What a round costs beyond a step**, and the two parts made smaller: § "Qwen 3.5's delta rule is ONE op per layer" › "Its convolution, and a taken-back check, on a card".
 
+
+### Where the drafter comes from: a pin (stage 6, 2026-11-08)
+
+**What it does.** `model::huggingface::block_drafter::fetch_for_models_held_end_to_end`, spawned beside each
+download pass, fetches one drafter at a time for a model this node holds from its first part to its head part
+(`parts_servable_here`; both ends are where a drafter attaches — a whole model, or a split's first segment that also
+holds the output head). The drafter is found by a PIN: the target header's `general.name` folded to ASCII
+alphanumerics, its architecture and its width name one repo, file, size and SHA-256 (`PINNED`), held to them by
+`download::download_listed_file` — the one whole-file download a vision encoder uses too (#422). It lands as
+`block_drafter.gguf` and is attached at the model's next load.
+
+**What was checked before pinning.** Every pinned file's header was range-fetched and read (2026-11-08): arch
+`dflash`, its width the target's, its target layers inside the target. The Qwen3.6-35B-A3B file was compared with
+llama.cpp's own converter run on z-lab's safetensors here: 69 of 69 tensors byte-identical. Left out: Qwen3.5-27B
+(its Q8_0 is 2.27 GB, past `MOST_DRAFTER_BYTES`), Qwen3.8-27B (DFlash 2, which the loader refuses).
+
+**When it goes.** Only when NEITHER end is held any more (`Ends::Gone`, read from `parts_landed_here`). A first
+version gave it back whenever the ends were not SERVABLE — a part being fetched again, or a manifest not yet loaded,
+would have deleted a good drafter and fetched it again later. A file in use (`model_is_in_use`) waits.
+
+**Prior art.** No runtime pairs a drafter by itself: llama.cpp takes `-md`, LM Studio a manual pick, SGLang and vLLM
+a path. Ollama checks every blob by its digest (`verifyBlob`); #422 fetches a vision encoder by its origin's listed
+SHA-256. A wrong pairing is still refused at load (arch, width, target layers), and a weak one is set aside by
+what it writes (`dsd_controller::Delivered`).

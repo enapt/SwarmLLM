@@ -96,17 +96,43 @@ pub(super) async fn download_vision_encoder(
     listed: &super::vision_encoder::ListedEncoder,
     model_dir: &std::path::Path,
 ) -> Result<crate::types::Blake3Hash, String> {
+    download_listed_file(
+        repo_id,
+        &listed.filename,
+        listed.size_bytes,
+        &listed.sha256,
+        crate::model::manifest::MAX_VISION_ENCODER_BYTES,
+        model_dir,
+        crate::model::shard::MMPROJ_FILENAME,
+    )
+    .await
+}
+
+/// Download `filename` from `repo_id` whole into `model_dir/dest_name`, held
+/// to `size_bytes` (at most `most_bytes`) and `sha256` — the figures
+/// HuggingFace lists, or a pin made from them (a block drafter, #428):
+/// anything else is refused and its staging file goes. Answers the file's
+/// BLAKE3, computed on the way.
+pub(super) async fn download_listed_file(
+    repo_id: &str,
+    filename: &str,
+    size_bytes: u64,
+    sha256_listed: &[u8; 32],
+    most_bytes: u64,
+    model_dir: &std::path::Path,
+    dest_name: &str,
+) -> Result<crate::types::Blake3Hash, String> {
     use futures::StreamExt;
     use sha2::Digest;
     use tokio::io::AsyncWriteExt;
 
-    let expected = listed.size_bytes;
-    if expected == 0 || expected > crate::model::manifest::MAX_VISION_ENCODER_BYTES {
+    let expected = size_bytes;
+    if expected == 0 || expected > most_bytes {
         return Err(format!("listed size {expected} bytes is out of range"));
     }
     std::fs::create_dir_all(model_dir).map_err(|e| format!("Failed to create dir: {e}"))?;
     crate::model::check_disk_space(model_dir, expected).map_err(|e| e.to_string())?;
-    let url = download_url(repo_id, &listed.filename)?;
+    let url = download_url(repo_id, filename)?;
     let resp = hf_headers(HF_DOWNLOAD_CLIENT.get(&url))
         .send()
         .await
@@ -115,8 +141,8 @@ pub(super) async fn download_vision_encoder(
         return Err(format!("Download returned {}", resp.status()));
     }
 
-    let dest = model_dir.join(crate::model::shard::MMPROJ_FILENAME);
-    let tmp = model_dir.join(format!("{}.tmp", crate::model::shard::MMPROJ_FILENAME));
+    let dest = model_dir.join(dest_name);
+    let tmp = model_dir.join(format!("{dest_name}.tmp"));
     // Declared before the file, so it drops after it.
     let staging = StagingFile::new(tmp.clone());
     let mut file = tokio::fs::File::create(&tmp)
@@ -142,7 +168,7 @@ pub(super) async fn download_vision_encoder(
         return Err(format!("{received} bytes arrived, {expected} listed"));
     }
     let sha256: [u8; 32] = sha256.finalize().into();
-    if sha256 != listed.sha256 {
+    if &sha256 != sha256_listed {
         return Err("the file's SHA-256 is not the one HuggingFace lists".to_string());
     }
     // The disk's word before the rename (fsyncgate, FUTURE_WORK #217).

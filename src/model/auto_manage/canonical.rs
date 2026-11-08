@@ -396,7 +396,7 @@ fn forget_origin_hashes_of_copies_gone_from_here(state: &SharedState) {
 
 /// The models this node keeps a directory of under `models/`, by the id
 /// `SharedState::model_dir` names that directory for.
-fn models_kept_on_disk(state: &SharedState) -> Vec<ModelId> {
+pub(crate) fn models_kept_on_disk(state: &SharedState) -> Vec<ModelId> {
     let root = state.config.node.data_dir.join("models");
     let Ok(entries) = std::fs::read_dir(&root) else {
         return Vec::new();

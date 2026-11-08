@@ -1,5 +1,6 @@
 //! HuggingFace API client: search, download, probe, byte-range shard fetching.
 
+pub(crate) mod block_drafter;
 mod download;
 pub(crate) mod popular;
 mod private_types;
