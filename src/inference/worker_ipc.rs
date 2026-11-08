@@ -50,6 +50,10 @@ pub enum DaemonMsg {
     /// worker holds, through a stand-in for the far layers between them
     /// (`IpcHeadGuess`). Answered with `WorkerMsg::Drafted`.
     HeadGuess(IpcHeadGuess),
+    /// Take in a split's rows for its block drafter and guess a block, at the
+    /// split's first segment, which this worker holds (`IpcBlockDraft`, #428
+    /// stage 3). Answered with `WorkerMsg::Drafted`.
+    BlockDraft(IpcBlockDraft),
     /// Unload a specific layer range (free its GPU memory within the worker).
     Unload {
         layer_start: usize,
@@ -520,6 +524,11 @@ pub struct IpcForward {
     /// (`ModelProcessPool::learn_far_run`), never read off the network.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub far_run: Option<(u32, u32)>,
+    /// The block drafter's layers this forward's segment answers with
+    /// (`LayerForward::block_rows_wanted`, #428 stage 3): their rows come back
+    /// in `IpcLayerResult::block_rows`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub block_rows_wanted: Option<crate::types::BlockRowsWanted>,
 }
 
 /// A guess at the head of a chain whose two ends this worker holds
@@ -538,6 +547,30 @@ pub struct IpcHeadGuess {
     pub index_pos: u32,
     pub token: u32,
     pub gamma: u32,
+}
+
+/// A block of guesses from the drafter beside a split's FIRST segment
+/// (`DaemonMsg::BlockDraft`, #428 stage 3), which this worker holds with the
+/// model's token table and output head: take in the rows of the drafter's
+/// layers the request's segments sent back (`rows`, their bytes the message's
+/// payload, in order) for every committed position up to `upto`, then guess up
+/// to `gamma` tokens after `token`, the token at `index_pos`. `gamma` 0 only
+/// takes the rows in. Answered with `WorkerMsg::Drafted`; an error ends the
+/// drafter for the reply.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct IpcBlockDraft {
+    pub request_id: Uuid,
+    pub model_id: ModelId,
+    pub first_range: (u32, u32),
+    pub rows: Vec<IpcBlockRows>,
+    pub upto: u32,
+    pub index_pos: u32,
+    pub token: u32,
+    pub gamma: u32,
+    /// This attempt's first draft: a drafter the worker still keeps for the
+    /// request is an earlier attempt's, and goes — state of an attempt is
+    /// never the request's (`arch-scheduling.md`, #749).
+    pub first: bool,
 }
 
 /// Forward-pass result header.
@@ -592,6 +625,53 @@ pub struct IpcLayerResult {
     /// network-only fields are stamped by the daemon.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt_blocks_stored: Option<u32>,
+    /// The rows of a block drafter's layers this segment ran
+    /// (`IpcForward::block_rows_wanted`, #428 stage 3). Their bytes END the
+    /// binary payload, after whatever else it carries — never in this JSON
+    /// header, where bytes are written as decimal text (gotcha #24).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub block_rows: Option<IpcBlockRows>,
+}
+
+/// Where a segment's block-drafter rows sit in a result's payload
+/// ([`IpcLayerResult::block_rows`]).
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct IpcBlockRows {
+    pub layers: Vec<u32>,
+    pub from: u32,
+    /// How many bytes at the payload's end are the rows.
+    pub bytes: u32,
+}
+
+/// Split a result's payload into what it carried before the rows, and the
+/// rows themselves (`IpcLayerResult::block_rows`); `Err` where the payload is
+/// shorter than the rows it names.
+pub fn split_block_rows(
+    mut payload: Vec<u8>,
+    rows: Option<IpcBlockRows>,
+) -> Result<(Vec<u8>, Option<crate::types::BlockRows>), String> {
+    let Some(rows) = rows else {
+        return Ok((payload, None));
+    };
+    let at = payload
+        .len()
+        .checked_sub(rows.bytes as usize)
+        .ok_or_else(|| {
+            format!(
+                "block rows of {} bytes in a {}-byte payload",
+                rows.bytes,
+                payload.len()
+            )
+        })?;
+    let data = payload.split_off(at);
+    Ok((
+        payload,
+        Some(crate::types::BlockRows {
+            layers: rows.layers,
+            from: rows.from,
+            data,
+        }),
+    ))
 }
 
 /// Encode `Vec<Vec<f32>>` as a flat little-endian f32 byte buffer,
@@ -1565,6 +1645,7 @@ mod tests {
             prompt_cache: None,
             for_the_owner: false,
             far_run: None,
+            block_rows_wanted: None,
             prompt_span: None,
             image_spans: Vec::new(),
             draft_parents: Vec::new(),
@@ -1610,6 +1691,7 @@ mod tests {
             prompt_cache: None,
             for_the_owner,
             far_run: None,
+            block_rows_wanted: None,
             prompt_span: None,
             image_spans: Vec::new(),
             draft_parents: Vec::new(),
@@ -1657,6 +1739,7 @@ mod tests {
             prompt_cache: None,
             for_the_owner: false,
             far_run: None,
+            block_rows_wanted: None,
             prompt_span: None,
             image_spans: Vec::new(),
             draft_parents: Vec::new(),

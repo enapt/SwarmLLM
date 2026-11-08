@@ -48,7 +48,8 @@ pub use super::tokenizer::{BpeTokenizer, SplitTokenizer, SpmTokenizer};
 
 // Re-export from submodules so that `crate::inference::split::SplitModel` etc. continue to work.
 pub(crate) use self::block_drafter::{
-    BlockCache, BLOCK_CATCH_UP_CHUNK, BLOCK_MOST_POSITIONS, BLOCK_PROMPT_ROWS,
+    plan_in as block_drafter_plan_in, BlockCache, BLOCK_CATCH_UP_CHUNK, BLOCK_MOST_POSITIONS,
+    BLOCK_PROMPT_ROWS,
 };
 pub(crate) use self::draft::guesses_through_far_run;
 pub use self::draft::{FlowGrowth, FlowStep, TreeGrowth};

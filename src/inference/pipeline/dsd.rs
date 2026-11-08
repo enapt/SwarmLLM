@@ -786,6 +786,7 @@ impl PipelineExecutor {
                     super::worker_requester(&self.request),
                     self.verify_may_chain(),
                     &mut self.chaining_disabled,
+                    None,
                 );
                 let ((reply, check_ms), beside) = tokio::join!(
                     async move {
@@ -1023,6 +1024,7 @@ impl PipelineExecutor {
                 super::worker_requester(&self.request),
                 self.verify_may_chain(),
                 &mut self.chaining_disabled,
+                None,
             )
             .await
             {

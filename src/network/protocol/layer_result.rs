@@ -162,7 +162,80 @@ pub fn encode_layer_result(result: &LayerResult) -> Result<Vec<u8>, SwarmError> 
         buf.extend_from_slice(&us.to_le_bytes());
     }
 
+    // Optional: a block drafter's layer rows (marker 0x0B + k u8 + k × layer
+    // u32 LE + from u32 LE + n u32 LE + n bytes), see
+    // `LayerResult::block_rows` (#428 stage 3). After 0x0A; only a forward
+    // that asked (`block_rows_wanted`, sent only by a coordinator to a peer
+    // advertising `features::SENDS_BLOCK_ROWS`) is answered with them.
+    if let Some(rows) = result.block_rows.as_ref() {
+        if rows.layers.is_empty()
+            || rows.layers.len() > super::layer_forward::MOST_BLOCK_ROW_LAYERS
+            || rows.data.len() > MOST_BLOCK_ROW_BYTES
+        {
+            return Err(SwarmError::Network(
+                "block rows do not fit their trailer".into(),
+            ));
+        }
+        buf.push(0x0B);
+        buf.push(rows.layers.len() as u8);
+        for layer in &rows.layers {
+            buf.extend_from_slice(&layer.to_le_bytes());
+        }
+        buf.extend_from_slice(&rows.from.to_le_bytes());
+        buf.extend_from_slice(&(rows.data.len() as u32).to_le_bytes());
+        buf.extend_from_slice(&rows.data);
+    }
+
     Ok(buf)
+}
+
+/// Most bytes of block-drafter rows a result carries (`0x0B`): a prompt
+/// window of a few hundred rows over a handful of layers is a few MB.
+pub(crate) const MOST_BLOCK_ROW_BYTES: usize = 64 * 1024 * 1024;
+
+/// Read the block-rows trailer (`0x0B`) at `pos`. REFUSED when truncated or
+/// past its bounds; whether the rows are the size the coordinator asked for
+/// is the coordinator's to check, which knows the hidden width.
+fn read_block_rows_trailer(
+    data: &[u8],
+    pos: &mut usize,
+) -> Result<Option<crate::types::BlockRows>, SwarmError> {
+    if *pos >= data.len() || data[*pos] != 0x0B {
+        return Ok(None);
+    }
+    let truncated = || SwarmError::Network("block-rows trailer truncated".into());
+    let k = *data.get(*pos + 1).ok_or_else(truncated)? as usize;
+    if k == 0 || k > super::layer_forward::MOST_BLOCK_ROW_LAYERS {
+        return Err(SwarmError::Network(format!(
+            "block rows of {k} layers refused"
+        )));
+    }
+    let head = data
+        .get(*pos + 2..*pos + 2 + 4 * k + 8)
+        .ok_or_else(truncated)?;
+    let words: Vec<u32> = head
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|b| u32::from_le_bytes(*b))
+        .collect();
+    let (layers, from, n) = (words[..k].to_vec(), words[k], words[k + 1] as usize);
+    if n > MOST_BLOCK_ROW_BYTES {
+        return Err(SwarmError::Network(format!(
+            "block rows of {n} bytes refused"
+        )));
+    }
+    let at = *pos + 2 + 4 * k + 8;
+    let bytes = at
+        .checked_add(n)
+        .and_then(|end| data.get(at..end))
+        .ok_or_else(truncated)?;
+    *pos = at + n;
+    Ok(Some(crate::types::BlockRows {
+        layers,
+        from,
+        data: bytes.to_vec(),
+    }))
 }
 
 /// Cap for the `token_logprobs` JSON trailer. 4 MiB accommodates the largest
@@ -474,6 +547,8 @@ pub fn decode_layer_result(data: &[u8]) -> Result<LayerResult, SwarmError> {
         served_us = Some(u32::from_le_bytes([b[0], b[1], b[2], b[3]]));
         pos += 4;
     }
+    // Optional: a block drafter's layer rows (marker 0x0B), after 0x0A.
+    let block_rows = read_block_rows_trailer(data, &mut pos)?;
     // Suppress unused-assignment warning on the last pos += that has no
     // subsequent reader.
     let _ = pos;
@@ -496,6 +571,7 @@ pub fn decode_layer_result(data: &[u8]) -> Result<LayerResult, SwarmError> {
         answers_step,
         prompt_blocks_stored,
         served_us,
+        block_rows,
     })
 }
 

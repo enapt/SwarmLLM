@@ -7404,3 +7404,82 @@ from the pin, so the accept gate checks it like a part (`verify_shard`). With no
 never `AcceptUnchecked` (any GGUF a peer sent would become the model's image reader).
 
 **Open (FUTURE_WORK #422 step 5):** nothing fetches a second copy from a holder.
+
+## A block drafter's rows come back with the answer (2026-11-08, FUTURE_WORK #428 stage 3)
+
+**Why.** A DFlash drafter guesses a block from the target's own hidden states at
+a few layers (`target_layers`). On a split those layers run on other computers,
+so their outputs have to reach the drafter. It runs beside the coordinator's
+first segment (FUTURE_WORK #428 § "Stage 3 design": the n-gram loop chooses the
+guesses there and the first segment's worker holds the token table), so the rows
+travel BACK with each segment's answer.
+
+**Prior art.** vLLM v1 relays EAGLE-3 / DFlash auxiliary hidden states between
+pipeline ranks raw, one row per layer per position in the model's dtype
+(`aux_hidden_states_{i}` in `IntermediateTensors`); SGLang drafts on the last
+stage only and refuses DFlash under pipeline parallelism. Nobody shrinks the
+rows; we send bf16, the precision the drafters are trained on (z-lab's
+checkpoints are bf16).
+
+**The wire.** `LayerForward::block_rows_wanted` (`0x14`) names the layers and the
+most rows; it is the last forward trailer and bound into the AAD (a relay must
+not change which rows come back or how many — `a_block_drafters_ask_is_sealed_and_survives_the_encrypted_frame`
+fails with the binding removed). `LayerResult::block_rows` (`0x0B`) follows the
+served time: layers, the first row's position, `[positions, layers × hidden]`
+bf16. An older decoder reads everything before it and stops. A forward carries the
+ask only to a peer advertising `features::SENDS_BLOCK_ROWS` (bit 39, in `ALL`):
+an older peer would answer without rows and the drafter would wait on a gap.
+
+**What a segment sends.** Only asked layers it runs; a forward's last
+`most_rows` rows (a prompt piece asks only within `PROMPT_WINDOW` = 64 of the
+prompt's end, `prompt_chunks::rows_of_the_end`: the drafter kept 92-98% of its
+whole-prompt acceptance with 64); a check walked at the tail only the positions
+it kept, so a refused guess's rows never reach the drafter. Intermediate
+segments send every position of the check: the coordinator's worker narrows them
+to the reply (`block_rows_for_the_drafter` takes, per layer, the newest piece from
+each position up to `upto`).
+
+**What the coordinator checks.** The numbers are a peer's: sizes that do not
+divide into rows of the model's width, or rows that do not reach the reply
+without a gap, are refused (`rows_whose_sizes_do_not_add_up_are_refused`), and a
+refusal stops the drafter for the reply — never fails the reply. Rows of a layer
+it did not ask for are never read.
+
+**Held to what was asked, at both ends** (security review, 2026-11-08). The
+review found the bound was the global `MOST_BLOCK_ROW_BYTES` where the rule is
+"what was ASKED for", in three places:
+- **the coordinator** kept any answer's rows (up to 64 MiB where 16 rows were
+  asked), from any segment for any layer — so a peer could displace the rows of
+  layers another segment runs. `BlockRowsAsk::note` now takes the answering
+  segment and the rows its forward asked as REQUIRED arguments and drops rows of
+  a layer the segment does not run or the reply did not ask, a layer named
+  twice, or more rows than asked (`rows_a_segment_was_not_asked_for_are_dropped`);
+  the drafter's first feed reaches back `PROMPT_WINDOW` rows, not
+  `BLOCK_PROMPT_ROWS` (2,048 — 32× the catch-up a peer could make it run);
+- **a serving segment's prompt pass in chunks** kept every chunk's rows of every
+  asked layer to the pass's end — an 8K prompt on a 20-layer segment, ~2 GiB of f32 on
+  a card, while only the last `most_rows` were ever sent; each chunk's rows are
+  now folded to the ask as the pass goes (`Capture::kept_of` after every chunk;
+  `a_chunked_prompt_pass_keeps_the_same_last_rows_as_the_whole_pass` crosses the
+  fold);
+- **a serving segment's check** captured every row (`last: usize::MAX`, a walking
+  tail needs them all) and refused the result's size only after holding them —
+  a 512-row check of a 40-layer, 8,192-wide segment held ~640 MiB it could not
+  send. A check wider than the rows its ask allows now keeps none.
+A card that ran out there would have pinned its model to the processor for up to
+30 min (`CpuPins`), one forward from a peer at a time. Prior art: this repo's own
+rule — `StreamReassembler`, `reply_stream_bound` — and vLLM, which sizes a
+pipeline rank's auxiliary hidden states by the batch it scheduled.
+
+**Chaining.** A chained hop forwards the activation onward and drops the ask, so
+while a reply asks for rows (`PipelineExecutor::block_rows` is `Some`) the prompt
+pass and every check return to the coordinator (`verify_may_chain`, the prompt
+pass's chain condition and the check's own `may_chain`). The n-gram loop's checks
+return here anyway; the prompt pass gives up chaining for one round trip a
+segment.
+
+**Tests.** `a_block_drafters_ask_survives_the_wire_and_a_malformed_one_is_refused`,
+`a_block_drafters_ask_is_sealed_and_survives_the_encrypted_frame`,
+`a_block_drafters_rows_ride_after_the_served_time`, and the worker's
+`split_block_rows_tests` (which layers and rows a segment sends, how the drafter
+joins them).

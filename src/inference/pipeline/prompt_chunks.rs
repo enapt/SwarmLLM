@@ -448,7 +448,7 @@ impl PipelineExecutor {
         failed: &AtomicBool,
     ) -> DriverResult {
         let mut answer = None;
-        for (k, &(from, _)) in cuts.iter().enumerate() {
+        for (k, &(from, to)) in cuts.iter().enumerate() {
             let Some(activations) = input.recv().await else {
                 return Err(knock_on());
             };
@@ -470,6 +470,14 @@ impl PipelineExecutor {
                         &[]
                     },
                     Some(span),
+                    if rows_of_the_end(span, to) {
+                        self.block_rows_wanted_for(
+                            &segment.node_id,
+                            super::block_draft::PROMPT_WINDOW,
+                        )
+                    } else {
+                        None
+                    },
                 )
                 .await?;
             if let Some(err) = super::peer_error_from_result(&result) {
@@ -478,6 +486,7 @@ impl PipelineExecutor {
             if final_piece {
                 self.note_prompt_blocks_stored(idx, 0, &result);
             }
+            self.note_block_rows(&result, segment, rows_asked_of(span, to));
             match output {
                 Some(next) => next
                     .send(result.activations)
@@ -566,6 +575,7 @@ impl PipelineExecutor {
                             if final_piece {
                                 self.note_prompt_blocks_stored(idx, 0, &result);
                             }
+                            self.note_block_rows(&result, segment, rows_asked_of(span, cuts[k].1));
                             match output {
                                 Some(next) => {
                                     if next.send(result.activations).await.is_err() {
@@ -651,7 +661,7 @@ impl PipelineExecutor {
         let seq = stream_seq::compose(attempt, turn).ok_or_else(|| {
             SwarmError::Internal("a prompt pass ran past its pieces' numbering".into())
         })?;
-        let (from, _) = cuts[k];
+        let (from, to) = cuts[k];
         let final_piece = k + 1 == cuts.len();
         let state = &self.shared_state;
         let forward = LayerForward {
@@ -705,6 +715,11 @@ impl PipelineExecutor {
             draft_parents: Vec::new(),
             draft_tree_from: None,
             stream_lookahead: None,
+            block_rows_wanted: if rows_of_the_end(span, to) {
+                self.block_rows_wanted_for(&segment.node_id, super::block_draft::PROMPT_WINDOW)
+            } else {
+                None
+            },
             stream_branch: None,
         };
         if state.pending_layer_results.len() >= super::MAX_PENDING_LAYER_RESULTS {
@@ -780,6 +795,25 @@ impl PipelineExecutor {
 /// failed — never the cause.
 fn knock_on() -> SwarmError {
     SwarmError::Inference(KNOCK_ON.into())
+}
+
+/// Does a piece ending at `to` hold any of the pass's last
+/// [`PROMPT_WINDOW`](super::block_draft::PROMPT_WINDOW) positions — the rows a
+/// split's block drafter reads of the prompt (#428 stage 3)? Only those pieces
+/// are asked for rows: each piece sends its own last rows, so the asked ones
+/// cover the window between them.
+fn rows_of_the_end(span: PromptSpan, to: u32) -> bool {
+    to.saturating_add(super::block_draft::PROMPT_WINDOW) > span.end
+}
+
+/// The rows a piece ending at `to` asked for: the window where it reaches the
+/// prompt's end, none before.
+fn rows_asked_of(span: PromptSpan, to: u32) -> u32 {
+    if rows_of_the_end(span, to) {
+        super::block_draft::PROMPT_WINDOW
+    } else {
+        0
+    }
 }
 
 const KNOCK_ON: &str = "a prompt pass in pieces stopped: another segment's piece failed";

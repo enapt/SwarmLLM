@@ -6416,6 +6416,31 @@ included. After it, no round declined in 16 runs of the test; the 4B story 15.9-
 processor (10.4-10.5 one at a time). Test: `a_check_dearer_than_a_step_is_bought_only_when_its_guesses_are_kept`
 (a check of one width, red with the step's line removed).
 
+**A split's block drafter has a step of its own** (2026-11-08, #428 stage 3,
+`pipeline::block_draft::SplitBlockDrafter`). It was priced from the round loop's
+one fit, its step read as that fit at one position. The fit held one-token rounds
+and 16-row checks, each fading (0.8 a round) while the other ran: a run of block
+rounds left a flat line through the 16-row check, which priced the step as one and
+the check as no dearer, so any acceptance over ~0.2 bought all 15 guesses; a run
+of one-token rounds left a flat line through the step, which priced the 16-row check
+as a step — 15 again. On the rig's story (Qwen3.5-9B split over 130 ms, processors)
+its 54 rounds that guessed guessed 15 each (810 guesses, never fewer), 39 more
+read one token, it kept ~1.1 a round, and took 85-86 s against 48 without the
+drafter; the request's own end-of-reply fit
+(238 ms + 64 a row) chooses 0. Now the drafter times one-token rounds on their own
+(one plain round is taken before its first price) and fits checks only, as
+`LocalSpec` does — and a check of the one width it has seen is priced on the line
+through that step. `predict_beside_a_step` refuses a step at a peer's reach, for a
+LOCAL step pricing a check that crosses the link; this step crosses the same link,
+so the drafter names it `Step::OverTheChecksRoute` and the line holds there
+(`a_step_timed_over_the_route_prices_a_peers_check_through_it`, which prices the
+run's figures at 0 guesses and the flat fit's at 15;
+`a_split_block_drafter_steps_aside_on_a_reply_it_does_not_guess`). Prior art: SmartSpec
+fits its latency model over every batch width it runs, the plain step included;
+BanditSpec keeps trying arms it declined — the probe after `FIRST_PROBE_AFTER`
+declines, doubling to `MOST_PROBE_AFTER`, now shared with `LocalSpec` from
+`dsd_controller`.
+
 → `docs/plans/split_speculation.md` § "Guessing steps aside where it does not pay"
 
 ## What a peer HOLDS on disk and what it has LOADED are different facts

@@ -431,6 +431,13 @@ pub mod features {
     /// or the next. Nothing on the wire changes.
     pub const JUDGES_THE_COORDINATOR: u64 = 1 << 38;
 
+    /// Answers a forward naming a block drafter's layers
+    /// (`LayerForward::block_rows_wanted`, the `0x14` trailer, AAD-bound)
+    /// with the rows of those it ran (`LayerResult::block_rows`, `0x0B`,
+    /// after `0x0A`) — the coordinator's drafter reads them (#428 stage 3).
+    /// Asked only of a peer advertising this.
+    pub const SENDS_BLOCK_ROWS: u64 = 1 << 39;
+
     /// The full feature set THIS build implements. Advertised by every node,
     /// with [`KV_HALF_ON_CARD`], [`KV_WINDOW_SLIDES`] and
     /// [`REQUESTER_GUESSES`] beside it where they apply.
@@ -469,7 +476,8 @@ pub mod features {
         | STREAM_SPARES
         | SERVED_TIME
         | TEMPLATE_VARS
-        | JUDGES_THE_COORDINATOR;
+        | JUDGES_THE_COORDINATOR
+        | SENDS_BLOCK_ROWS;
 
     /// Does `advertised` include every bit in `needed`?
     pub fn supports(advertised: u64, needed: u64) -> bool {

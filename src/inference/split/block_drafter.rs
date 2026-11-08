@@ -201,6 +201,52 @@ fn meta_u32(v: &gguf_file::Value) -> Option<u32> {
         .or_else(|| v.to_u64().ok().and_then(|x| u32::try_from(x).ok()))
 }
 
+/// The model's layers a drafter reads, off its file: `dflash.target_layers`
+/// stores each as its id + 1 (llama.cpp reads that layer's INPUT, the output
+/// of the id). `None` where the key is missing or names no layer.
+fn target_layers_in(ct: &gguf_file::Content) -> Option<Vec<usize>> {
+    ct.metadata
+        .get("dflash.target_layers")?
+        .to_vec()
+        .ok()?
+        .iter()
+        .map(|v| meta_u32(v).and_then(|id| (id as usize).checked_sub(1)))
+        .collect()
+}
+
+/// What a split's coordinator needs of the drafter beside its first segment
+/// before it asks the segments for rows (#428 stage 3), read off the file's
+/// header ([`plan_in`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct BlockPlan {
+    /// The model's layers whose outputs the drafter reads.
+    pub target_layers: Vec<usize>,
+    /// Its block: the next token and as many guesses less one.
+    pub block_size: usize,
+}
+
+/// [`BlockPlan`] of the drafter in `dir` ([`BLOCK_DRAFTER_FILE`]); `None`
+/// where there is none, it is switched off ([`block_drafter_on`]) or its
+/// header does not name its layers. Whether the worker attached it is the
+/// worker's answer, at the first draft.
+pub(crate) fn plan_in(dir: &Path) -> Option<BlockPlan> {
+    if !block_drafter_on() {
+        return None;
+    }
+    let file = std::fs::File::open(dir.join(BLOCK_DRAFTER_FILE)).ok()?;
+    let ct = gguf_file::Content::read(&mut std::io::BufReader::new(file)).ok()?;
+    let target_layers = target_layers_in(&ct).filter(|l| !l.is_empty())?;
+    let block_size = ct
+        .metadata
+        .get("dflash.block_size")
+        .and_then(meta_u32)
+        .unwrap_or(16) as usize;
+    Some(BlockPlan {
+        target_layers,
+        block_size,
+    })
+}
+
 impl BlockDrafter {
     /// Load `path` for `target`, refusing a file it cannot run as written:
     /// not a `dflash` file, a part this loader does not build (DFlash 2's
@@ -217,12 +263,17 @@ impl BlockDrafter {
                 "the model runs on a graphics card; the drafter runs beside a model on the processor only (#428)".into(),
             ));
         }
+        // The block is embedded by the model's token table and read by its
+        // head: a whole model, or a first segment beside the head's part
+        // (`SplitModel::drafter_head`), whose other layers' rows its peers
+        // send (#428 stage 3).
         if target.layer_start != 0
-            || target.layer_end != target.total_layers
             || target.tok_embeddings.is_none()
-            || target.output.is_none()
+            || (target.output.is_none() && target.drafter_head.is_none())
         {
-            return Err(fail("the model is not whole here".into()));
+            return Err(fail(
+                "the model's token table and output head are not both here".into(),
+            ));
         }
         let file = std::fs::File::open(path).map_err(|e| fail(e.to_string()))?;
         let mut file = std::io::BufReader::new(file);
@@ -252,16 +303,8 @@ impl BlockDrafter {
         let mask_token = md("tokenizer.ggml.mask_token_id")
             .and_then(meta_u32)
             .ok_or_else(|| fail("no tokenizer.ggml.mask_token_id".into()))?;
-        let target_layers: Vec<usize> = md("dflash.target_layers")
-            .and_then(|v| v.to_vec().ok())
-            .ok_or_else(|| fail("no dflash.target_layers".into()))?
-            .iter()
-            .map(|v| {
-                meta_u32(v)
-                    .and_then(|id| (id as usize).checked_sub(1))
-                    .ok_or_else(|| fail("a target layer that is not a layer".into()))
-            })
-            .collect::<Result<_, _>>()?;
+        let target_layers = target_layers_in(&ct)
+            .ok_or_else(|| fail("no dflash.target_layers, or one that is not a layer".into()))?;
         // What this loader does not build is refused by name, never skipped.
         for (key, plain) in [
             ("dflash.embedding_scale", 1.0f32),
@@ -667,7 +710,10 @@ impl BlockDrafter {
         }
         cache.len = start;
         let out = out?;
-        let logits = target.logits_from(&out)?;
+        let logits = match (&target.output, &target.drafter_head) {
+            (None, Some(head)) => head.forward(&out).map_err(err("output head"))?,
+            _ => target.logits_from(&out)?,
+        };
         let rows: Vec<Vec<f32>> = logits
             .to_dtype(DType::F32)
             .and_then(|l| l.squeeze(0))
@@ -680,38 +726,61 @@ impl BlockDrafter {
     }
 }
 
+/// May a drafter taking `takes` bytes come off a conversation `budget`?
+/// Only while one conversation of the model's whole context
+/// (`one_conversation`) still fits in what is left; an unknown budget refuses
+/// nothing ([`SplitModel::attach_block_drafter`]).
+fn fits_beside_one_conversation(budget: Option<u64>, takes: u64, one_conversation: u64) -> bool {
+    budget.is_none_or(|b| takes.saturating_add(one_conversation) <= b)
+}
+
 impl SplitModel {
     /// Attach the block drafter in `dir` ([`BLOCK_DRAFTER_FILE`]), where
-    /// there is one and the switch is on. What it takes — its weights and
-    /// its cache at its longest — comes off this model's conversation budget
-    /// for its device, as the file's own guess head's does, and where that is
-    /// short (more than a quarter of it) it is not attached. A file that
-    /// cannot be used is logged and left; the model serves without it.
+    /// there is one and the switch is on. What it takes — its weights, its
+    /// cache at its longest and, beside a split's first segment, the output
+    /// head it borrows — comes off this model's conversation budget for its
+    /// device, and it is attached only while ONE conversation of the model's
+    /// whole context still fits in what is left: vLLM's rule, which sizes
+    /// the cache from what every model's weights leave and refuses only where
+    /// one `max_model_len` sequence would not fit
+    /// (`_check_enough_kv_cache_memory`). The guess head's quarter refused
+    /// this 1.7 GB drafter beside a 9B's first segment on a 16 GB machine
+    /// (6.1 GB budget) that had room for 137K positions beside it. Not
+    /// attached, the borrowed head goes too. A file that cannot be used is
+    /// logged and left; the model serves without it.
     pub(crate) fn attach_block_drafter(&mut self, dir: &Path) {
         let path = dir.join(BLOCK_DRAFTER_FILE);
-        if !block_drafter_on() || !path.is_file() {
+        let head_here = self.output.is_some() || self.drafter_head.is_some();
+        if !block_drafter_on() || !path.is_file() || self.layer_start != 0 || !head_here {
+            self.drop_drafter_head();
             return;
         }
         let drafter = match BlockDrafter::load(&path, self) {
             Ok(d) => d,
             Err(e) => {
                 tracing::warn!(error = %e, "block drafter not attached");
+                self.drop_drafter_head();
                 return;
             }
         };
-        let budget = if self.host_kv_budget_bytes.is_some() {
-            &mut self.host_kv_budget_bytes
+        let takes = drafter.bytes.saturating_add(self.drafter_head_bytes);
+        let (budget, growth) = if self.host_kv_budget_bytes.is_some() {
+            (&mut self.host_kv_budget_bytes, &self.host_kv_growth)
         } else {
-            &mut self.kv_budget_bytes
+            (&mut self.kv_budget_bytes, &self.kv_growth)
         };
-        let fits = budget.is_none_or(|b| drafter.bytes.saturating_mul(4) <= b);
+        let one_conversation = growth.bytes_for(self.max_seq_len);
+        let fits = fits_beside_one_conversation(*budget, takes, one_conversation);
         if fits {
             if let Some(b) = budget.as_mut() {
-                *b -= drafter.bytes;
+                *b -= takes;
             }
         }
         tracing::info!(
-            mb = drafter.bytes >> 20,
+            mb = takes >> 20,
+            head_mb = self.drafter_head_bytes >> 20,
+            budget_left_mb = ?budget.map(|b| b >> 20),
+            one_conversation_mb = one_conversation >> 20,
             layers = drafter.layers.len(),
             block = drafter.block_size,
             target_layers = ?drafter.target_layers,
@@ -721,7 +790,16 @@ impl SplitModel {
         );
         if fits {
             self.block_drafter = Some(drafter);
+        } else {
+            self.drop_drafter_head();
         }
+    }
+
+    /// The output head a split's first segment read for its drafter, given
+    /// back where no drafter is attached.
+    fn drop_drafter_head(&mut self) {
+        self.drafter_head = None;
+        self.drafter_head_bytes = 0;
     }
 
     pub(crate) fn block_drafter(&self) -> Option<&BlockDrafter> {
@@ -732,6 +810,38 @@ impl SplitModel {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The drafter comes off the conversation budget while one conversation
+    /// of the model's context still fits beside it — the case that refused
+    /// it under the guess head's quarter: Qwen3.5-9B's first segment on a
+    /// 16 GB machine, 6,069 MB of budget, the drafter and its borrowed head
+    /// 2,527 MB, 8,192 positions at 32 KB.
+    #[test]
+    fn a_drafter_takes_room_while_one_whole_conversation_still_fits() {
+        const MB: u64 = 1 << 20;
+        let one = 8_192 * 32 * 1024;
+        assert!(fits_beside_one_conversation(
+            Some(6_069 * MB),
+            2_527 * MB,
+            one
+        ));
+        assert!(fits_beside_one_conversation(
+            Some(2_527 * MB + one),
+            2_527 * MB,
+            one
+        ));
+        assert!(!fits_beside_one_conversation(
+            Some(2_527 * MB + one - 1),
+            2_527 * MB,
+            one
+        ));
+        assert!(!fits_beside_one_conversation(
+            Some(2_000 * MB),
+            2_527 * MB,
+            0
+        ));
+        assert!(fits_beside_one_conversation(None, u64::MAX, u64::MAX));
+    }
 
     /// z-lab's `_attention_mask`, written out: query `i` of `q_len` at
     /// `key_len − q_len + i`, key `j`.

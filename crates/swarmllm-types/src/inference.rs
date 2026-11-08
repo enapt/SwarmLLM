@@ -699,6 +699,39 @@ pub struct LayerForward {
     /// `features::STREAM_SPARES` that walks the check itself.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stream_branch: Option<StreamBranch>,
+    /// The layers whose outputs a block drafter on the coordinator reads
+    /// (#428 stage 3): a segment running any of them answers with their rows
+    /// ([`LayerResult::block_rows`]). `None` on every other forward. Travels
+    /// as the `0x14` trailer, bound into the AAD; sent only to a peer
+    /// advertising `features::SENDS_BLOCK_ROWS`. vLLM relays a drafter's
+    /// layer rows on the pipeline hand-off the same way (`aux_hidden_states`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub block_rows_wanted: Option<BlockRowsWanted>,
+}
+
+/// What a forward asks of a segment for a block drafter
+/// ([`LayerForward::block_rows_wanted`]).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BlockRowsWanted {
+    /// The drafter's layers, absolute; a segment answers for those it runs.
+    pub layers: Vec<u32>,
+    /// Rows at most, the forward's last: a prompt pass's window. A check that
+    /// is walked where it runs answers only the positions it kept.
+    pub most_rows: u32,
+}
+
+/// The outputs of a block drafter's layers that ONE segment ran, for
+/// consecutive positions ([`LayerResult::block_rows`]).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BlockRows {
+    /// The layers, absolute, in the order their rows are joined.
+    pub layers: Vec<u32>,
+    /// The position of the first row.
+    pub from: u32,
+    /// `[positions, layers × hidden]` as little-endian bf16, row-major — the
+    /// precision the drafters are trained on. Numbers a peer chose: the
+    /// coordinator holds them to what it asked before reading them.
+    pub data: Vec<u8>,
 }
 
 /// Where a streamed check stands against a spare restart — see
@@ -1076,6 +1109,12 @@ pub struct LayerResult {
     /// `features::SERVED_TIME`. Travels as the `0x0A` trailer.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub served_us: Option<u32>,
+    /// The rows of the layers [`LayerForward::block_rows_wanted`] named that
+    /// this segment ran (#428 stage 3), only where the forward asked. Travels
+    /// as the `0x0B` trailer: a result's activations are hidden states too,
+    /// and travel no more sealed than this.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub block_rows: Option<BlockRows>,
 }
 
 /// What a split's prompt pass tells each segment about keeping the prompt
@@ -1238,6 +1277,7 @@ impl LayerResult {
             refusal: None,
             answers_step: None,
             prompt_blocks_stored: None,
+            block_rows: None,
             served_us: None,
         }
     }
@@ -1478,6 +1518,7 @@ mod chunk_assembly_tests {
             draft_parents: Vec::new(),
             draft_tree_from: None,
             stream_lookahead: None,
+            block_rows_wanted: None,
             stream_branch: None,
         }
     }

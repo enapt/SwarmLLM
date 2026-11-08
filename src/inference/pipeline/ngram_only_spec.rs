@@ -613,6 +613,17 @@ impl PipelineExecutor {
         &mut self,
         token_tx: Option<StreamingTokenTx>,
     ) -> Result<Option<InferenceOutput>, SwarmError> {
+        let out = self.ngram_only_distributed(token_tx).await;
+        // A block drafter's ask ends with the loop, however it ends: a forward
+        // after it (a failover's, a re-plan's) asks nothing and may chain.
+        self.block_rows = None;
+        out
+    }
+
+    async fn ngram_only_distributed(
+        &mut self,
+        token_tx: Option<StreamingTokenTx>,
+    ) -> Result<Option<InferenceOutput>, SwarmError> {
         let live = self.shared_state.cfg();
         let cfg = &live.inference;
         tracing::debug!(
@@ -625,7 +636,13 @@ impl PipelineExecutor {
         );
         let guess_slot = requester_guess_slot(self);
         let mut far_run = FarRunGuesses::for_plan(self);
-        if !eligible(self, guess_slot.is_some() || far_run.is_some()) {
+        // A DFlash drafter beside this node's first segment, fed the rows of
+        // the layers it reads by every segment running them (#428 stage 3).
+        let block_plan = super::block_draft::SplitBlockDrafter::for_plan(self);
+        if !eligible(
+            self,
+            guess_slot.is_some() || far_run.is_some() || block_plan.is_some(),
+        ) {
             tracing::debug!(
                 request_id = %self.request.id,
                 "DIAG: try_ngram_only_distributed ineligible — skipping"
@@ -691,6 +708,14 @@ impl PipelineExecutor {
                 .model_process_pool
                 .learn_far_run(request_id, g.far_run())
         });
+        // From the prompt pass on, every segment running a layer the block
+        // drafter reads sends its rows back; withdrawn by the caller.
+        let mut block = block_plan.map(|(drafter, ask)| {
+            self.block_rows = Some(ask);
+            drafter
+        });
+        let block_planned = block.is_some();
+        let (mut block_rounds, mut block_guessed, mut block_kept) = (0u32, 0u32, 0u32);
         let prefill_result = self
             .forward_through_segments(request_id, 0, 0, prompt_bytes, None, false, &[])
             .await?;
@@ -884,6 +909,43 @@ impl PipelineExecutor {
             } else {
                 Vec::new()
             };
+            // The block drafter takes in the rows the last round's segments
+            // sent every round, and guesses where nothing else will be checked
+            // and its guesses pay (`SplitBlockDrafter::gamma`; zero is an
+            // answer). A failure stops it for the reply; its cache is its own,
+            // so the target's caches stay where they are.
+            let mut from_block = false;
+            let mut block_failed = false;
+            let drafts = match block.as_mut() {
+                Some(b) => {
+                    let gamma = if drafts.is_empty() && super::checks_can_be_taken_back(self) {
+                        b.gamma(remaining)
+                    } else {
+                        0
+                    };
+                    match b.round(self, current_pos, last_token, gamma).await {
+                        Ok(guesses) if drafts.is_empty() => {
+                            from_block = !guesses.is_empty();
+                            guesses
+                        }
+                        Ok(_) => drafts,
+                        Err(e) => {
+                            tracing::warn!(
+                                %request_id,
+                                error = %e,
+                                "block drafter stopped for this reply"
+                            );
+                            block_failed = true;
+                            drafts
+                        }
+                    }
+                }
+                None => drafts,
+            };
+            if block_failed {
+                block = None;
+                self.block_rows = None;
+            }
             // Nothing else to check: guess through the far run's stand-in. A
             // guess that failed stops them for the reply, and the next check
             // cuts this node's caches back to where the reply is.
@@ -942,6 +1004,7 @@ impl PipelineExecutor {
                     super::worker_requester(&self.request),
                     self.verify_may_chain(),
                     &mut self.chaining_disabled,
+                    self.block_rows.as_ref(),
                 )
                 .await?;
                 // An unusable reply fails the request, exactly as the hit arm
@@ -963,8 +1026,12 @@ impl PipelineExecutor {
                         return Err(e);
                     }
                 };
-                if guess_slot.is_some() || far_run.is_some() {
-                    check_cost.record(1, checked_at.elapsed().as_secs_f64() * 1000.0);
+                let step_ms = checked_at.elapsed().as_secs_f64() * 1000.0;
+                if let Some(b) = block.as_mut() {
+                    b.record_step(step_ms);
+                }
+                if guess_slot.is_some() || far_run.is_some() || block.is_some() {
+                    check_cost.record(1, step_ms);
                     guess_gamma =
                         choose_guess_gamma(&guess_acceptance, &check_cost, guess_gamma, cfg);
                 }
@@ -1001,6 +1068,9 @@ impl PipelineExecutor {
             if from_requester {
                 guess_rounds += 1;
                 guesses_checked += drafts.len() as u32;
+            } else if from_block {
+                block_rounds += 1;
+                block_guessed += drafts.len() as u32;
             } else if from_far_run {
                 if let Some(g) = far_run.as_mut() {
                     g.rounds += 1;
@@ -1039,8 +1109,10 @@ impl PipelineExecutor {
                 super::worker_requester(&self.request),
                 self.verify_may_chain(),
                 &mut self.chaining_disabled,
+                self.block_rows.as_ref(),
             )
             .await?;
+            let check_ms = checked_at.elapsed().as_secs_f64() * 1000.0;
             let (accepted, bonus, _all) = match reply.accept(
                 &drafts,
                 &self.request.sampling_params,
@@ -1062,6 +1134,16 @@ impl PipelineExecutor {
             if from_requester {
                 guesses_kept += accepted.len() as u32;
                 guess_acceptance.record(accepted.len() as u32, drafts.len() as u32);
+            } else if from_block {
+                block_kept += accepted.len() as u32;
+                if let Some(b) = block.as_mut() {
+                    b.record_round(
+                        accepted.len() as u32,
+                        drafts.len() as u32,
+                        emitted.len(),
+                        check_ms,
+                    );
+                }
             } else if from_far_run {
                 if let Some(g) = far_run.as_mut() {
                     g.kept += accepted.len() as u32;
@@ -1073,11 +1155,11 @@ impl PipelineExecutor {
                 earlier_checked += drafts.len() as u32;
                 earlier_kept += accepted.len() as u32;
             }
-            if guess_slot.is_some() || far_run.is_some() {
-                check_cost.record(
-                    verify_tokens.len() as u32,
-                    checked_at.elapsed().as_secs_f64() * 1000.0,
-                );
+            if let Some(b) = block.as_mut() {
+                b.record_check(verify_tokens.len() as u32, check_ms);
+            }
+            if guess_slot.is_some() || far_run.is_some() || block.is_some() {
+                check_cost.record(verify_tokens.len() as u32, check_ms);
                 guess_gamma = choose_guess_gamma(&guess_acceptance, &check_cost, guess_gamma, cfg);
             }
             if let Some(g) = far_run.as_mut() {
@@ -1136,7 +1218,7 @@ impl PipelineExecutor {
         // The payoff is prompt lookup's: a reply the requester guessed for
         // says nothing about what prompt lookup earns the next one.
         let far_run_rounds = far_run.as_ref().map_or(0, |g| g.rounds);
-        if guess_rounds == 0 && far_run_rounds == 0 {
+        if guess_rounds == 0 && far_run_rounds == 0 && block_rounds == 0 {
             record_payoff(generated.len() as u32, ngram_rounds + fallback_rounds);
         }
         if let Some(store) = &earlier {
@@ -1169,6 +1251,16 @@ impl PipelineExecutor {
             far_run_empty = far_run.as_ref().map_or(0, |g| g.empty),
             far_run_gamma = far_run.as_ref().map_or(0, |g| g.gamma),
             far_run_ms_each = ?far_run.as_ref().and_then(|g| g.ms_each.median()).map(|m| (m * 10.0).round() / 10.0),
+            block_drafter = block_planned,
+            block_stopped = block_planned && block.is_none(),
+            block_rounds,
+            block_guessed,
+            block_kept,
+            block_draft_ms = ?block.as_ref().and_then(|b| b.draft_ms()).map(f64::round),
+            block_step_ms = ?block.as_ref().and_then(|b| b.step_ms()).map(f64::round),
+            block_check_fit = ?block.as_ref().and_then(|b| b.check_fit()).map(|(fixed, per)| (fixed.round(), per.round())),
+            block_declined = block.as_ref().map_or(0, |b| b.declined),
+            block_probes = block.as_ref().map_or(0, |b| b.probes),
             guess_waits = waits.waits,
             guess_waits_paid = waits.paid,
             guess_waited_ms = waits.waited_ms.round(),

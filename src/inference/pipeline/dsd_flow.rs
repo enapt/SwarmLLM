@@ -3155,6 +3155,7 @@ mod tests {
             refusal: None,
             answers_step: None,
             prompt_blocks_stored: None,
+            block_rows: None,
             served_us: None,
         };
         assert!(answered_whole(&Ok(ok.clone())));

@@ -8260,8 +8260,17 @@ where the block pays: `best_gamma_beside_a_step_per_round` charges the round
 once (`a_draft_paid_once_a_round_is_not_priced_per_guess`).
 
 **Memory.** Its weights and its whole cache come off the conversation budget
-of the device the model's KV lives on, refused past a quarter — the MTP head's
-rule; no planner charges either.
+of the device the model's KV lives on — and on a split, the output head it
+borrows beside the first segment (`drafter_head_bytes`, 795 MB on the 9B) —
+while ONE conversation of the model's whole context still fits beside them
+(`fits_beside_one_conversation`): vLLM's rule, which loads a drafter's weights
+before it sizes the KV cache and refuses to start where one request of
+`max_model_len` would not fit in what is left. It was the MTP head's quarter
+until stage 3: on a 16 GB machine the 9B's first segment had 6,069 MB of budget,
+the drafter and head take 2,488 (its cache 384 of them), and a quarter refused
+it where 3,580 MB was left beside a whole 8,192-position conversation of 256.
+A drafter that does not fit drops the head it borrowed. No planner charges
+either (`a_drafter_takes_room_while_one_whole_conversation_still_fits`).
 
 **Measured (stage 1, 2026-11-08)** — Qwen3.5-9B Q4_K_M on this laptop's
 processor with `z-lab/Qwen3.5-9B-DFlash` as llama.cpp converts it (1.69 GB),
@@ -8298,6 +8307,54 @@ greedy, 96 tokens, chat prompts with thinking off:
   min of 3) reads 1 / 4 / 8 / 16 rows in 175 / 209 / 335 / 690 ms against
   llama.cpp's 168 / 214 / 400 / 624 (taken with the owner at the computer —
   a ratio inside one run, not a speed sitting).
+- **The context it reads**: with only the last 64 rows before each position
+  the drafter keeps 5.95 (code) and 1.41 (story); the last 16, 2.69 and 1.16;
+  the reply's own rows without the prompt's, 2.31 and 0.99
+  (`SWARMLLM_GUESS_TEST_CONTEXT`) — a split's tail needs a window of the
+  prompt's rows, not the whole prompt.
 - **A price fitted on one cold check declined every later round** (92 of 92):
   the block is now probed again after 8 declines, the gap doubling to 64 while
   a probe does not pay — the n-gram's `probe_after`.
+
+### On a split: the drafter beside the first segment (stage 3, 2026-11-08)
+
+**Built head-side**, beside the coordinator's first segment, fed the rows the
+segments send back (`docs/invariants/network.md` § "A block drafter's rows come
+back with the answer, asked for and bounded"); the design and its prior art are
+in FUTURE_WORK #428. Three things the rig found before it ran:
+- **the drafter did not fit** under the guess head's quarter — the memory rule
+  above is vLLM's since;
+- **the rows a segment joins are strided**: each layer's piece is a column range
+  of the rows the segment sent together, and `fc` refused the join ("input tensor
+  is not contiguous") — `block_rows_for_the_drafter` makes each layer's rows
+  contiguous, as a layer's own capture is
+  (`the_drafter_reads_each_layers_rows_up_to_the_reply` asserts it);
+- **the count was priced from the round loop's fit** and chose 15 or nothing —
+  `docs/invariants/scheduling.md` § "Speculation that does not pay steps aside"
+  (a split's block drafter has a step of its own).
+
+**Measured** (`examples/split_rig.sh split`, `BLOCK_DRAFTER=`; Qwen3.5-9B Q4_K_M
+split A [0,17) + [31,32) + head ↔ B [17,31), `RIG_RTT_MS=130` over netns,
+both on the processor, each pinned to 8 logical processors (`CPUS_A=0-7
+CPUS_B=8-15`), 160
+greedy tokens, thinking off; arms ON / OFF / ON / OFF inside one binary,
+`SWARMLLM_BLOCK_DRAFTER=0` on A for OFF; seconds per reply, wall):
+
+| prompt | OFF | ON, count from the loop's fit (run 4) | ON, own step (run 5) | run 5 ÷ OFF |
+|---|---|---|---|---|
+| code: palindrome function | 52.6-53.5 | 35.4 / 36.6 | 30.4 / 32.8 | **1.60-1.76×** |
+| code: binary search tree class | 46.4-48.3 | 28.6 / 27.6 | 27.1 / 29.0 | **1.66-1.78×** |
+| story: lighthouse keeper | 45.9-48.1 | 85.9 / 85.1 | 40.8 / 41.9 | **1.10-1.15×** |
+
+- **The replies are the same text** on all four arms of run 5, every prompt.
+- **What a round did** (run 5's ON arms): code 195-230 guesses over 26-35 rounds
+  (5.6-7.5 a round), 118-132 kept (3.4-5.1 a round); the story 204-208 over
+  77-80 rounds (~2.6), 73-74 kept (~0.9) — never declined, never probed. Run 4
+  guessed 15 in every round it guessed (810 of 810 on the story).
+- **The draft's time follows the count**: 68-77 ms at ~2.6 guesses, 99-147 at
+  6-7, 247 at 15 (run 4): the drafter and the target's head read only the
+  block's rows a round asks for.
+  The count prices it as the recent median, one figure a round; a line in the
+  guesses is left (FUTURE_WORK #428).
+- **The checks**: fitted 131-249 ms + 39-88 a row on the drafter's own line; a
+  one-token round 305-431 ms (one per reply, taken before the first price).

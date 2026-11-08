@@ -297,6 +297,8 @@ fn qwen2_forward_with_biases() {
         prompt_room: Default::default(),
         mtp: None,
         block_drafter: None,
+        drafter_head: None,
+        drafter_head_bytes: 0,
         stand_in_prior: None,
         grammar_vocab: Default::default(),
     };

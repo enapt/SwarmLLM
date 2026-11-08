@@ -4149,6 +4149,11 @@ fn forward_is_schedulable(f: &crate::types::LayerForward) -> bool {
     if !f.image_spans.is_empty() {
         return false;
     }
+    // A forward asking for a block drafter's rows (#428): the batch path keeps
+    // no layer's output.
+    if f.block_rows_wanted.is_some() {
+        return false;
+    }
     true
 }
 
@@ -10650,6 +10655,7 @@ impl ModelProcessPool {
             draft_tree_from,
             // Read by dispatch before the forward reaches the pool (#382).
             stream_lookahead: _,
+            block_rows_wanted,
             stream_branch: _,
         } = forward;
 
@@ -10697,6 +10703,7 @@ impl ModelProcessPool {
             draft_tree_from,
             for_the_owner: requester == Requester::Owner,
             far_run: self.far_runs.get(&request_id).map(|r| *r.value()),
+            block_rows_wanted,
         };
 
         if handle.dead.load(Ordering::Acquire) {
@@ -10749,6 +10756,12 @@ impl ModelProcessPool {
                 match resp_rx.recv().await {
                     Some((msg, payload)) => match msg {
                         WorkerMsg::LayerResult(r) if r.request_id == request_id => {
+                            let (payload, block_rows) =
+                                crate::inference::worker_ipc::split_block_rows(
+                                    payload,
+                                    r.block_rows.clone(),
+                                )
+                                .map_err(SwarmError::Internal)?;
                             let (activations, spec_logits) = reconstruct_layer_payload(
                                 r.has_activations,
                                 r.has_spec_logits,
@@ -10769,6 +10782,7 @@ impl ModelProcessPool {
                                 refusal: None,
                                 answers_step: None,
                                 prompt_blocks_stored: r.prompt_blocks_stored,
+                                block_rows,
                                 served_us: None,
                             });
                         }
@@ -11013,6 +11027,82 @@ impl ModelProcessPool {
         crate::inference::cancel::unless_cancelled(wait, cancel.as_ref()).await
     }
 
+    /// A block of guesses from the drafter beside a split's first segment,
+    /// which this node's worker holds (`DaemonMsg::BlockDraft`, #428 stage 3),
+    /// after it takes in `rows` — the bytes of `d.rows`, in order. Asked only
+    /// of a live worker: a guess never loads a model. Empty where `d.gamma` is
+    /// 0; an error ends the drafter for the reply.
+    pub async fn block_draft(
+        &self,
+        d: crate::inference::worker_ipc::IpcBlockDraft,
+        rows: &[u8],
+    ) -> Result<Vec<u32>, SwarmError> {
+        let model_id = d.model_id.clone();
+        let request_id = d.request_id;
+        let Some(handle) = self.live_worker(&model_id) else {
+            return Err(SwarmError::ServiceUnavailable(format!(
+                "no worker holds {model_id} to draft with"
+            )));
+        };
+        let (resp_tx, mut resp_rx) = mpsc::channel(RESPONSE_CHANNEL_CAPACITY);
+        let (mut guard, _) = handle.register_response(request_id, resp_tx, true);
+        let attempt_token = guard.token;
+        {
+            let mut writer = handle.writer.lock().await;
+            if let Err(e) = send_daemon(&mut *writer, &DaemonMsg::BlockDraft(d), rows).await {
+                drop(writer);
+                self.evict_this_worker(&model_id, &handle, "IPC send failed");
+                guard.disarm();
+                return Err(SwarmError::ServiceUnavailable(format!(
+                    "send BlockDraft: {e}"
+                )));
+            }
+        }
+        loop {
+            match resp_rx.recv().await {
+                Some((
+                    WorkerMsg::Drafted {
+                        request_id: rid,
+                        tokens,
+                        ..
+                    },
+                    _,
+                )) if rid == request_id => {
+                    guard.disarm();
+                    return Ok(tokens);
+                }
+                Some((
+                    WorkerMsg::Error {
+                        request_id: rid,
+                        message,
+                        fatal,
+                        local_memory_refusal,
+                    },
+                    _,
+                )) if rid == request_id => {
+                    guard.disarm();
+                    return Err(self.classify_worker_error(
+                        &model_id,
+                        message,
+                        fatal,
+                        local_memory_refusal,
+                    ));
+                }
+                Some(_) => continue,
+                None => {
+                    guard.disarm();
+                    return Err(self.reply_channel_closed(
+                        &model_id,
+                        &handle,
+                        request_id,
+                        attempt_token,
+                        "before reply",
+                    ));
+                }
+            }
+        }
+    }
+
     /// Batched forward: send N forwards in a single `DaemonMsg::BatchForward`
     /// message. Worker runs them through the fused `SplitModel::forward_batch`
     /// when they're compatible (same model/layer_range, decode-only, no vision
@@ -11120,6 +11210,8 @@ impl ModelProcessPool {
                 draft_parents: _,
                 draft_tree_from: _,
                 stream_lookahead: _,
+                // Nor one asking for a block drafter's rows.
+                block_rows_wanted: _,
                 stream_branch: _,
             } = f;
             let forward_sampling = sampling.unwrap_or_default();
@@ -11153,6 +11245,7 @@ impl ModelProcessPool {
                 // A request learning a far run is never batched
                 // (`ModelProcessPool::far_runs`).
                 far_run: None,
+                block_rows_wanted: None,
                 prompt_span: None,
                 image_spans: Vec::new(),
                 draft_parents: Vec::new(),
@@ -11207,6 +11300,7 @@ impl ModelProcessPool {
                             refusal: None,
                             answers_step: None,
                             prompt_blocks_stored: None,
+                            block_rows: None,
                             served_us: None,
                         });
                         break;
@@ -12317,6 +12411,7 @@ mod tests {
             draft_parents: Vec::new(),
             draft_tree_from: None,
             stream_lookahead: None,
+            block_rows_wanted: None,
             stream_branch: None,
         }
     }

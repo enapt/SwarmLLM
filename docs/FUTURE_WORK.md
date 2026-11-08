@@ -3032,7 +3032,7 @@ vLLM and SGLang run it) or reads them one machine at a time; (c) the report: a s
 "has gone".
 
 #### #428 — Every popular model guesses 4-5 tokens a round trip: a DFlash drafter at the split's far end
-`P1` · perf-split · **OPEN** (stage 1 built and measured: the reply is exact, acceptance matches llama.cpp's; stage 3 — the far end — next) — 2026-11-08 · history: #427 (the measurement), #425 (the guess head), #411 (the flow)
+`P1` · perf-split · **OPEN** (stage 1 built and measured: the reply is exact, acceptance matches llama.cpp's; stage 3 built and measured on the rig — a split over 130 ms, processors: code 1.6-1.8×, a story 1.10-1.15×, the same replies; next: the field model, Qwen3.6-35B-A3B) — 2026-11-08 · history: #427 (the measurement), #425 (the guess head), #411 (the flow)
 
 **What a user gets today** (#427's table, 2026-11-08 01:00-01:30Z, live node, one ask at a time): every split of
 the popular models decodes ONE token a round trip — Gemma 4 31B here↔Australia 1.7-1.9 tok/s, Gemma 4 26B-A4B
@@ -3103,16 +3103,49 @@ captures its own target layers and relays them RAW, one full row per layer per p
 stage only and drafts the next chain right after the check ("PP tail-draft", `eagle_worker_v2.py`); its DFlash
 refuses pipeline parallelism. llama.cpp gathers layer inputs as raw f32 across backends. No system shrinks the rows.
 Correction to the design above: #411's drafter runs at the COORDINATOR — the far end only draws a sample per row.
-**Ours**: the drafter runs where the output head is (the tail). Right after its check walks the guesses
-(`SPEC_WALK_AT_TAIL`) it takes in the accepted positions' rows and drafts the next block, and returns 15 token ids
-with the result — nothing else comes back; the round's critical path is the same as a coordinator drafting (round
-trip + both segments' layers + the draft), with the whole head exact. Each earlier segment captures its target
-layers for the forward's positions and the rows ride forward: (3a) raw, as vLLM; (3b) fc is linear with no bias, so
-a segment holding target layers S can send Σ_{i∈S} W_i x_i, ONE row per position instead of |S| (our own — no
-precedent found) — Qwen3.5-9B with 4 target layers before the tail, 16 rows: 524 KB a round raw f16, 131 KB summed.
-The anchor's embedding needs the target's token table at the tail: (3a) loads it there; (3c) its first 32K rows and
-the conversation's own, skipping a round whose anchor is past them (draft words' rule). A new feature bit gates the
-trailer and the tail's drafting; an older tail gets today's round. Built and measured on the rig before any field use.
+**Built: the drafter runs HEAD-SIDE, beside the split's first segment** — moved from the tail on reading our own
+loop: the n-gram loop already chooses every round's guesses at the coordinator (`ngram_only_spec`), the first
+segment's worker already holds the token table a block is embedded by, and #411's drafter runs there too. Drafting
+at the tail needed the table there, a protocol for the tail to draft and a fallback for an older tail, for the same
+critical path (round trip + every segment's layers + the draft). What it needs instead is the output head beside the
+first segment: `split::loader::shards::drafter_head_info` loads it from its part where that part is on disk — an
+A → B → A split finishes here, so it is; elsewhere the part (834 MB on the 9B) must be held; the worker charges it to the conversation budget with the
+drafter (`drafter_head_bytes`), the planner does not yet. **The rows come BACK**: every forward to a segment running a layer the drafter reads carries
+`BlockRowsWanted` (`LayerForward` trailer `0x14`: the layers and how many of the forward's last rows at most; sealed in
+the AAD) and its answer `BlockRows` (`LayerResult` trailer `0x0B`: bf16 rows per layer from a position, bounded by
+`MOST_BLOCK_ROW_BYTES`), asked of a peer only where it advertises `features::SENDS_BLOCK_ROWS` (bit 39, gated at the
+sender). A walking tail sends only the positions it kept; a prompt piece is asked only within `PROMPT_WINDOW` (64)
+of the prompt's end (`prompt_chunks::rows_of_the_end`). While rows are asked nothing chains — an onward hop drops the
+ask, and the n-gram loop's checks come back here anyway. The coordinator (`pipeline::block_draft::SplitBlockDrafter`)
+hands the rows to its own worker every round (`DaemonMsg::BlockDraft`, whose `first` replaces an earlier attempt's
+drafter, #749), which joins each layer's run up to the reply (`model_worker::block_rows_for_the_drafter`; a gap stops
+the drafter for the reply, never fails it) and drafts where nothing else would be checked (`best_gamma_beside_a_step_per_round`;
+zero is an answer, and the rows are still taken in). A worker that refuses (a card target, no head) keeps the model
+off block drafting for 10 min. The coordinator reads the drafter's layers off the file beside its own parts
+(`block_drafter_plan_in`), so a first request drafts from the prompt's window too. Off: `SWARMLLM_BLOCK_DRAFTER=0` on
+the coordinator. **Left**: (3b) one summed row per segment — `fc` is linear with no bias, so a segment holding target
+layers S can send Σ_{i∈S} W_i x_i (no precedent found; 524 KB → 131 KB a 16-row round on the 9B's four layers) — or
+Q8 rows; (3c) only the head's hot rows beside the first segment (draft words' rule); failover forwards ask no rows (a stand-in's gap stops the drafter); the DSD and flow paths do not
+yet draft by block.
+**The prompt's rows are needed, a window of them is enough** (fixed reply, z-lab's rule, 81 positions,
+`SWARMLLM_GUESS_TEST_CONTEXT`): code keeps 6.47 a block with every row, 5.95 with the last 64, 2.69 with the last 16,
+2.31 with the reply's own rows only; the story 1.44 / 1.41 / 1.16 / 0.99. So each segment sends the prompt's last 64
+rows, and the drafter keeps them with the reply's.
+**Stage 3 — measured on the rig 2026-11-08** (Qwen3.5-9B Q4_K_M, A [0,17) + [31,32) + head ↔ B [17,31), 130 ms over
+netns, both on the processor, 160 greedy tokens; ON / OFF / ON / OFF in one binary; the table is in
+`docs/invariants/inference.md` § "On a split: the drafter beside the first segment"): code 1.60-1.78× (30.4-32.8 s
+against 52.6-53.5; 27.1-29.0 against 48.0-48.3), the story 1.10-1.15× (40.8-41.9 against 45.9-46.9), the replies the
+same text on every arm. Three fixes it took: the drafter's memory is vLLM's rule (its weights, cache and borrowed head
+come off the conversation budget while one whole-context conversation still fits — the quarter refused it on a 16 GB
+machine); each layer's rows are joined contiguous (`fc` refused the strided join); and the count is priced as one
+computer's — its own step, a one-token round over the split (`dsd_controller::Step::OverTheChecksRoute`), its own line
+from checks only, probes after declines. Priced from the loop's one fit it chose 15 or nothing: the story ran at
+0.56× (85-86 s, 810 of 810 guesses at 15) where it now guesses ~2.6 a round. **Left in stage 3**: the draft priced
+as a line in its guesses (it reads `guesses + 1` rows: 68-77 ms at ~2.6, 247 at 15; priced as the recent median);
+the borrowed head duplicates the tail's in an A → B → A split (share it — the tail is this node's own worker); the
+head charged to the planner's budget; (3b)/(3c) above; drafting on the fastest computer of the chain, a card peer,
+where the coordinator's processor is the slow part (a draft's rows already cross the wire); the DSD and flow paths;
+then Qwen3.6-35B-A3B with its drafter on two real peers.
 
 #### #318 — A large model split across machines is too slow to use
 `P2` · perf-split · **OPEN** — 2026-10-20 · plan: `docs/plans/large_model_splits.md` · draws on #134, #145, #148, #149, #192

@@ -3895,6 +3895,7 @@ mod inbound_forward_slot_tests {
             draft_parents: Vec::new(),
             draft_tree_from: None,
             stream_lookahead: None,
+            block_rows_wanted: None,
             stream_branch: None,
         }
     }

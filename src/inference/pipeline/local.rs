@@ -369,6 +369,7 @@ impl PipelineExecutor {
         precomputed_vision_bytes: Option<&[u8]>,
         pre_embedded: bool,
         generated_ids: &[u32],
+        block_rows_wanted: Option<crate::types::BlockRowsWanted>,
     ) -> Result<LayerResult, SwarmError> {
         self.run_local_forward(
             segment,
@@ -379,6 +380,7 @@ impl PipelineExecutor {
             pre_embedded,
             generated_ids,
             None,
+            block_rows_wanted,
         )
         .await
     }
@@ -396,6 +398,9 @@ impl PipelineExecutor {
         pre_embedded: bool,
         generated_ids: &[u32],
         prompt_span: Option<crate::types::PromptSpan>,
+        // The rows a split's block drafter asks of this forward (#428 stage
+        // 3, `block_rows_wanted_for`), or `None`.
+        block_rows_wanted: Option<crate::types::BlockRowsWanted>,
     ) -> Result<LayerResult, SwarmError> {
         let model_id = &segment.shard_id.model_id;
         let (layer_start, layer_end) = (
@@ -481,6 +486,7 @@ impl PipelineExecutor {
             draft_parents: Vec::new(),
             draft_tree_from: None,
             stream_lookahead: None,
+            block_rows_wanted,
             stream_branch: None,
         };
         // Watched against the request's cancel flag: a client that leaves
@@ -1932,6 +1938,7 @@ mod segment_budget_tests {
             draft_parents: Vec::new(),
             draft_tree_from: None,
             stream_lookahead: None,
+            block_rows_wanted: None,
             stream_branch: None,
         }
     }

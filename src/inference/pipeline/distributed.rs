@@ -1265,6 +1265,7 @@ impl PipelineExecutor {
                         refusal: None,
                         answers_step: None,
                         prompt_blocks_stored: None,
+                        block_rows: None,
                         served_us: None,
                     });
                 } else {
@@ -1300,9 +1301,14 @@ impl PipelineExecutor {
                         },
                         pre_embedded && idx == 0,
                         generated_ids,
+                        self.block_rows_wanted_for(
+                            &segment.node_id,
+                            super::block_draft::PROMPT_WINDOW,
+                        ),
                     )
                     .await?;
                 self.note_prompt_blocks_stored(idx, sequence_num, &result);
+                self.note_block_rows(&result, segment, super::block_draft::PROMPT_WINDOW);
                 let segment_ms = segment_start.elapsed().as_millis() as u64;
                 tracing::debug!(
                     request_id = %request_id,
@@ -1384,7 +1390,7 @@ impl PipelineExecutor {
                         )
                         .await?;
                     match failover_result {
-                        Takeover::Finished(result) => return Ok(result),
+                        Takeover::Finished(result) => return Ok(*result),
                         Takeover::Continue(next) => activations = next,
                     }
                     idx += 1;
@@ -1415,11 +1421,14 @@ impl PipelineExecutor {
                 // chain's answer comes from its tail alone. One round trip per
                 // hop on a pass that runs once per request.
                 let keeping_the_prompt = sequence_num == 0 && self.prompt_cache_hint.is_some();
+                // Nor while a block drafter asks for rows (#428 stage 3): an
+                // onward hop drops the ask.
                 let chain: Vec<crate::types::ChainHop> =
                     if self.shared_state.cfg().inference.pipeline_chaining
                         && !needs_generated_ids
                         && !self.chaining_disabled
                         && !keeping_the_prompt
+                        && self.block_rows.is_none()
                     {
                         let st = &self.shared_state;
                         super::plan_chain(
@@ -1558,6 +1567,8 @@ impl PipelineExecutor {
                     draft_parents: Vec::new(),
                     draft_tree_from: None,
                     stream_lookahead: None,
+                    block_rows_wanted: self
+                        .block_rows_wanted_for(&segment.node_id, super::block_draft::PROMPT_WINDOW),
                     stream_branch: None,
                 };
                 let forward = rebuild_forward();
@@ -1961,14 +1972,20 @@ impl PipelineExecutor {
                             // composite takeover of the last segment leaves
                             // parts behind this one still to run.
                             match failover_result {
-                                Takeover::Finished(result) => return Ok(result),
+                                Takeover::Finished(result) => return Ok(*result),
                                 Takeover::Continue(next) => activations = next,
                             }
                         } else {
                             let seg_elapsed_ms = segment_start.elapsed().as_millis() as u64;
                             // Unchained whenever a prompt is being kept, so this
-                            // answer is this segment's own.
+                            // answer is this segment's own — and whenever rows
+                            // are asked for.
                             self.note_prompt_blocks_stored(idx, sequence_num, &result);
+                            self.note_block_rows(
+                                &result,
+                                segment,
+                                super::block_draft::PROMPT_WINDOW,
+                            );
                             // A chained run answered for every segment it
                             // covered, so the loop must not send to them again.
                             //
@@ -2093,7 +2110,7 @@ impl PipelineExecutor {
                                 // not commit the skip, and let the failover say
                                 // whether it finished — see `Takeover`.
                                 match failover_result {
-                                    Takeover::Finished(result) => return Ok(result),
+                                    Takeover::Finished(result) => return Ok(*result),
                                     Takeover::Continue(next) => activations = next,
                                 }
                             } else {
@@ -2152,7 +2169,7 @@ impl PipelineExecutor {
                             )
                             .await?;
                         match failover_result {
-                            Takeover::Finished(result) => return Ok(result),
+                            Takeover::Finished(result) => return Ok(*result),
                             Takeover::Continue(next) => activations = next,
                         }
                     }
@@ -2757,6 +2774,9 @@ impl PipelineExecutor {
                         },
                         pre_embedded && failed_idx == 0,
                         if is_last { generated_ids } else { &[] },
+                        // A stand-in's answer is not a round the drafter
+                        // reads: a replay's rows would sit beside its own.
+                        None,
                     )
                     .await
                 {
@@ -2943,6 +2963,7 @@ impl PipelineExecutor {
                 draft_parents: Vec::new(),
                 draft_tree_from: None,
                 stream_lookahead: None,
+                block_rows_wanted: None,
                 stream_branch: None,
             };
             let forward = rebuild_forward();
@@ -3166,8 +3187,9 @@ pub(super) fn longer_than_the_swarm_serves_text(
 /// `docs/FUTURE_WORK.md` #17 (`examples/split_rig.sh failover`, 2026-09-25);
 /// the unit tests and the segment-count guard all passed.
 enum Takeover {
-    /// The stand-in ran the model's last layers and sampled: the answer.
-    Finished(LayerResult),
+    /// The stand-in ran the model's last layers and sampled: the answer
+    /// (boxed: a result is many times the other variant's size).
+    Finished(Box<LayerResult>),
     /// Hidden states for the next segment — after a composite splice, the next
     /// PART of the cover, which the caller's loop runs next.
     Continue(Vec<u8>),
@@ -3176,7 +3198,7 @@ enum Takeover {
 impl Takeover {
     fn of(result: LayerResult, finishes_pipeline: bool) -> Self {
         if finishes_pipeline {
-            Takeover::Finished(result)
+            Takeover::Finished(Box::new(result))
         } else {
             Takeover::Continue(result.activations)
         }

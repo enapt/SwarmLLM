@@ -127,6 +127,8 @@ pub fn encode_layer_forward(forward: &LayerForward) -> Result<Vec<u8>, SwarmErro
     append_draft_tree_flow_trailer(&mut buf, forward);
     append_stream_lookahead_trailer(&mut buf, forward);
     append_stream_branch_trailer(&mut buf, forward);
+    block_rows_wanted_fit(forward)?;
+    append_block_rows_wanted_trailer(&mut buf, forward);
 
     Ok(buf)
 }
@@ -612,6 +614,71 @@ pub(crate) fn read_stream_branch_trailer(
     Ok(Some(branch))
 }
 
+/// Most layers a block drafter's ask names (`0x14`) or its rows carry
+/// (`0x0B`) — a drafter reads a handful.
+pub(crate) const MOST_BLOCK_ROW_LAYERS: usize = 64;
+
+/// Whether a forward's ask for a block drafter's rows fits its trailer
+/// (`0x14`): 1..=[`MOST_BLOCK_ROW_LAYERS`] layers. Both encoders refuse a
+/// forward whose ask does not, so the writer never has to cut one short.
+pub(crate) fn block_rows_wanted_fit(forward: &LayerForward) -> Result<(), SwarmError> {
+    match forward.block_rows_wanted.as_ref() {
+        Some(w) if w.layers.is_empty() || w.layers.len() > MOST_BLOCK_ROW_LAYERS => Err(
+            SwarmError::Network("block-rows ask does not fit its trailer".into()),
+        ),
+        _ => Ok(()),
+    }
+}
+
+/// Write the block-rows trailer: `0x14 | k u8 | k × layer u32 | most_rows
+/// u32`, all LE (`LayerForward::block_rows_wanted`, #428 stage 3). Last,
+/// after `0x13`, by the ONE function the plaintext frame, the encrypted frame
+/// and the AAD all call. Set only on a forward to a peer advertising
+/// `features::SENDS_BLOCK_ROWS`; the encoders check it with
+/// [`block_rows_wanted_fit`] first.
+pub(crate) fn append_block_rows_wanted_trailer(buf: &mut Vec<u8>, forward: &LayerForward) {
+    let Some(wanted) = forward.block_rows_wanted.as_ref() else {
+        return;
+    };
+    let layers = &wanted.layers[..wanted.layers.len().min(MOST_BLOCK_ROW_LAYERS)];
+    buf.push(0x14);
+    buf.push(layers.len() as u8);
+    for layer in layers {
+        buf.extend_from_slice(&layer.to_le_bytes());
+    }
+    buf.extend_from_slice(&wanted.most_rows.to_le_bytes());
+}
+
+/// Read the block-rows trailer (`0x14`) at `cursor`. REFUSED when truncated
+/// or naming no layers or more than its bound.
+pub(crate) fn read_block_rows_wanted_trailer(
+    data: &[u8],
+    cursor: &mut usize,
+) -> Result<Option<crate::types::BlockRowsWanted>, SwarmError> {
+    if data.len() <= *cursor || data[*cursor] != 0x14 {
+        return Ok(None);
+    }
+    let truncated = || SwarmError::Network("block-rows trailer truncated".into());
+    let k = *data.get(*cursor + 1).ok_or_else(truncated)? as usize;
+    if k == 0 || k > MOST_BLOCK_ROW_LAYERS {
+        return Err(SwarmError::Network(format!(
+            "block-rows ask of {k} layers refused"
+        )));
+    }
+    let body = data
+        .get(*cursor + 2..*cursor + 2 + 4 * k + 4)
+        .ok_or_else(truncated)?;
+    let mut words = body
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|b| u32::from_le_bytes(*b));
+    let layers: Vec<u32> = words.by_ref().take(k).collect();
+    let most_rows = words.next().ok_or_else(truncated)?;
+    *cursor += 2 + 4 * k + 4;
+    Ok(Some(crate::types::BlockRowsWanted { layers, most_rows }))
+}
+
 /// Write the decoded-so-far trailer: `0x08 | n(2 LE) | n × id(4 LE)`.
 ///
 /// **The field this carries never reached the wire at all until 2026-09-21.**
@@ -1072,6 +1139,7 @@ pub fn decode_layer_forward(data: &[u8]) -> Result<LayerForward, SwarmError> {
         read_draft_tree_flow_trailer(data, &mut cursor, !draft_parents.is_empty())?;
     let stream_lookahead = read_stream_lookahead_trailer(data, &mut cursor)?;
     let stream_branch = read_stream_branch_trailer(data, &mut cursor)?;
+    let block_rows_wanted = read_block_rows_wanted_trailer(data, &mut cursor)?;
     let _ = cursor;
 
     Ok(LayerForward {
@@ -1105,6 +1173,7 @@ pub fn decode_layer_forward(data: &[u8]) -> Result<LayerForward, SwarmError> {
         draft_tree_from,
         stream_lookahead,
         stream_branch,
+        block_rows_wanted,
     })
 }
 
@@ -1152,6 +1221,7 @@ mod tests {
             draft_parents: Vec::new(),
             draft_tree_from: None,
             stream_lookahead: None,
+            block_rows_wanted: None,
             stream_branch: None,
         }
     }
@@ -2016,6 +2086,60 @@ mod tests {
                 "cut {cut} bytes short"
             );
         }
+    }
+
+    /// A block drafter's ask (#428 stage 3) crosses as `0x14` after every
+    /// other trailer, a branch's included; a forward without one is
+    /// byte-identical to before; one cut short, naming no layer or more than
+    /// its bound is REFUSED — read as absent, the coordinator's drafter would
+    /// wait for rows that never come.
+    #[test]
+    fn a_block_drafters_ask_survives_the_wire_and_a_malformed_one_is_refused() {
+        use crate::types::{BlockRowsWanted, StreamBranch};
+        let mut f = base_forward();
+        f.spec_logits_requested = true;
+        f.spec_walk_at_tail = true;
+        f.draft_tokens = vec![11, 12];
+        f.stream_seq = Some(6);
+        f.stream_branch = Some(StreamBranch::AfterSpare { spare: 5 });
+        let none = encode_layer_forward(&f).unwrap();
+        let mut with = f.clone();
+        with.block_rows_wanted = Some(BlockRowsWanted {
+            layers: vec![1, 8, 30],
+            most_rows: 16,
+        });
+        let bytes = encode_layer_forward(&with).unwrap();
+        assert_eq!(&bytes[..none.len()], &none[..], "after every older trailer");
+        assert_eq!(bytes.len(), none.len() + 2 + 4 * 3 + 4);
+        let back = decode_layer_forward(&bytes).unwrap();
+        assert_eq!(back.block_rows_wanted, with.block_rows_wanted);
+        assert_eq!(back.stream_branch, with.stream_branch, "the branch reads");
+        assert_eq!(decode_layer_forward(&none).unwrap().block_rows_wanted, None);
+        for cut in 1..(2 + 4 * 3 + 4) {
+            assert!(
+                decode_layer_forward(&bytes[..bytes.len() - cut]).is_err(),
+                "cut {cut} bytes short"
+            );
+        }
+        // A forged ask of no layers is refused, and so is one past the bound.
+        let mut forged = none.clone();
+        forged.extend_from_slice(&[0x14, 0]);
+        forged.extend_from_slice(&16u32.to_le_bytes());
+        assert!(decode_layer_forward(&forged).is_err(), "no layers");
+        let mut forged = none.clone();
+        forged.extend_from_slice(&[0x14, (MOST_BLOCK_ROW_LAYERS + 1) as u8]);
+        for l in 0..=MOST_BLOCK_ROW_LAYERS as u32 + 1 {
+            forged.extend_from_slice(&l.to_le_bytes());
+        }
+        assert!(decode_layer_forward(&forged).is_err(), "past the bound");
+        // The encoder never writes either.
+        let mut empty = with.clone();
+        empty.block_rows_wanted.as_mut().unwrap().layers.clear();
+        assert!(encode_layer_forward(&empty).is_err());
+        let mut wide = with;
+        wide.block_rows_wanted.as_mut().unwrap().layers =
+            (0..=MOST_BLOCK_ROW_LAYERS as u32).collect();
+        assert!(encode_layer_forward(&wide).is_err());
     }
 
     /// A spare restart (#381) and a check built on one each survive the wire

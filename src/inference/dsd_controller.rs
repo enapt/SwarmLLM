@@ -112,6 +112,15 @@ pub struct CheckCost {
 /// guess about it costs one slow round, not a reply's worth.
 pub const GAMMA_STEP: u32 = 2;
 
+/// Rounds of guesses declined after which the next are checked anyway — a
+/// refusal fitted from a few checks must not decline a whole reply that turns
+/// to copying. One that pays starts the count over; one that does not doubles
+/// it, up to [`MOST_PROBE_AFTER`] (`SpecBackoff`'s doubling). Read by
+/// `model_worker::LocalSpec` and a split's block drafter (`pipeline::block_draft`).
+pub const FIRST_PROBE_AFTER: u32 = 8;
+/// The longest run of declined rounds before a probe.
+pub const MOST_PROBE_AFTER: u32 = 64;
+
 impl CheckCost {
     const DECAY: f64 = 0.8;
     /// How many times its expected cost a check must take to be held back.
@@ -291,13 +300,25 @@ impl CheckCost {
     /// (BanditSpec, Hou et al., ICML 2025, picks γ that way); a check that
     /// crosses to a peer ([`Self::floor_ms`]) is priced by its fit alone.
     pub fn predict_beside_a_step(&self, positions: u32, step_ms: f64) -> Option<f64> {
+        if self.reach != CheckReach::Here {
+            return self.predict(positions);
+        }
+        self.predict_through_a_step(positions, step_ms)
+    }
+
+    /// [`Self::predict_beside_a_step`] at any reach, for a step timed over
+    /// the machines every check crosses ([`Step::OverTheChecksRoute`]): it
+    /// carries the round trip a check does, so the line through it and the
+    /// mean check is no cheaper than the route. A LOCAL step is never read
+    /// here — it would price a peer's check as this computer's.
+    fn predict_through_a_step(&self, positions: u32, step_ms: f64) -> Option<f64> {
         if self.w <= 0.0 {
             return None;
         }
         let mx = self.x / self.w;
         let my = self.y / self.w;
         let spread = self.xx / self.w - mx * mx >= 0.25;
-        if spread || mx <= 1.0 || self.reach != CheckReach::Here {
+        if spread || mx <= 1.0 {
             return self.predict(positions);
         }
         let slope = ((my - step_ms) / (mx - 1.0)).max(0.0);
@@ -438,16 +459,43 @@ pub fn best_gamma_beside_a_step(
     draft_ms_each: f64,
 ) -> Option<u32> {
     let each = draft_ms_each.max(0.0);
-    best_beside_a_step(alpha, step_ms, check, max, |g| each * f64::from(g))
+    best_beside_a_step(alpha, step_ms.map(Step::Here), check, max, |g| {
+        each * f64::from(g)
+    })
+}
+
+/// A step — a round of one position — and where it was timed, which decides
+/// the checks it may price.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Step {
+    /// On this computer alone (`model_worker::LocalSpec`): it prices a check
+    /// that stays here; a check that crosses to a peer keeps its fit
+    /// ([`CheckCost::predict_beside_a_step`]).
+    Here(f64),
+    /// Over the machines every check crosses — a split's one-token round
+    /// (`pipeline::block_draft`, #428 stage 3). It prices a check of any reach:
+    /// with every check as wide as the block, the fit alone is flat, and priced
+    /// a 16-row check as a step — the split chose 15 guesses in every round it
+    /// guessed on a story, keeping ~1.1 a round at 0.56× the speed without.
+    OverTheChecksRoute(f64),
+}
+
+impl Step {
+    pub fn ms(self) -> f64 {
+        match self {
+            Self::Here(ms) | Self::OverTheChecksRoute(ms) => ms,
+        }
+    }
 }
 
 /// [`best_gamma_beside_a_step`] for guesses made all at once: a block
 /// drafter (`model_worker::BlockGuesses`, #428) pays `draft_ms_round` for a
 /// round of any count — one forward over its block — where a chain drafter
-/// pays per guess. Apart, so neither is priced as the other.
+/// pays per guess. Apart, so neither is priced as the other. The step says
+/// where it was timed ([`Step`]).
 pub fn best_gamma_beside_a_step_per_round(
     alpha: f64,
-    step_ms: Option<f64>,
+    step: Option<Step>,
     check: &CheckCost,
     max: u32,
     draft_ms_round: f64,
@@ -455,7 +503,7 @@ pub fn best_gamma_beside_a_step_per_round(
     let round = draft_ms_round.max(0.0);
     best_beside_a_step(
         alpha,
-        step_ms,
+        step,
         check,
         max,
         |g| if g == 0 { 0.0 } else { round },
@@ -464,21 +512,21 @@ pub fn best_gamma_beside_a_step_per_round(
 
 fn best_beside_a_step(
     alpha: f64,
-    step_ms: Option<f64>,
+    step: Option<Step>,
     check: &CheckCost,
     max: u32,
     draft_ms: impl Fn(u32) -> f64,
 ) -> Option<u32> {
-    let step_ms = step_ms?;
+    let step = step?;
+    let step_ms = step.ms();
     check.predict(2)?;
     let cost = |g: u32| {
-        let forward = match g {
-            0 => step_ms,
-            _ => check
-                .predict_beside_a_step(1 + g, step_ms)
-                .unwrap_or(step_ms),
+        let forward = match (g, step) {
+            (0, _) => Some(step_ms),
+            (_, Step::Here(_)) => check.predict_beside_a_step(1 + g, step_ms),
+            (_, Step::OverTheChecksRoute(_)) => check.predict_through_a_step(1 + g, step_ms),
         };
-        forward.max(0.1) + draft_ms(g)
+        forward.unwrap_or(step_ms).max(0.1) + draft_ms(g)
     };
     Some(
         (0..=max)
@@ -830,17 +878,56 @@ mod tests {
             check.record(p, 150.0 + 6.0 * f64::from(p));
         }
         let step = Some(150.0);
-        let round = best_gamma_beside_a_step_per_round(0.9, step, &check, 15, 40.0).unwrap();
+        let here = step.map(Step::Here);
+        let round = best_gamma_beside_a_step_per_round(0.9, here, &check, 15, 40.0).unwrap();
         let each = best_gamma_beside_a_step(0.9, step, &check, 15, 40.0).unwrap();
         assert!(round > each, "{round} vs {each}");
         assert!(round >= 10, "{round}");
         assert_eq!(
-            best_gamma_beside_a_step_per_round(0.9, step, &check, 15, 0.0),
+            best_gamma_beside_a_step_per_round(0.9, here, &check, 15, 0.0),
             best_gamma_beside_a_step(0.9, step, &check, 15, 0.0)
         );
         assert_eq!(
-            best_gamma_beside_a_step_per_round(0.3, step, &check, 15, 400.0),
+            best_gamma_beside_a_step_per_round(0.3, here, &check, 15, 400.0),
             Some(0)
+        );
+    }
+
+    /// A split's block drafter (#428 stage 3) checks every round as wide as
+    /// its block, so its checks alone fit no slope. Its step is the one-token
+    /// round over the same peers, and the line through it prices a peer's
+    /// check — the rig's story (Qwen3.5-9B split over 130 ms, processors): a
+    /// step of 302 ms, a 16-row check of 1,262, a draft of 247, ~1.1 kept a
+    /// round (α ≈ 0.52). Priced by the flat fit — a 16-row check as cheap as a
+    /// step — every round guessed 15, at 0.56× the speed without the drafter.
+    #[test]
+    fn a_step_timed_over_the_route_prices_a_peers_check_through_it() {
+        let mut checks = CheckCost::for_a_plan(CheckReach::Peer {
+            round_trip_ms: Some(130),
+        });
+        for _ in 0..3 {
+            checks.record(16, 1_262.0);
+        }
+        let route = Some(Step::OverTheChecksRoute(302.0));
+        assert_eq!(
+            best_gamma_beside_a_step_per_round(0.52, route, &checks, 15, 247.0),
+            Some(0)
+        );
+        // The fit alone, as before: the step priced as a check, and 15.
+        let flat = Some(Step::OverTheChecksRoute(checks.predict(1).unwrap()));
+        assert_eq!(
+            best_gamma_beside_a_step_per_round(0.52, flat, &checks, 15, 247.0),
+            Some(15)
+        );
+        // Where the guesses are kept (code, α ≈ 0.9), several pay — fewer
+        // than the block: the line prices a narrower check below the widest.
+        let kept = best_gamma_beside_a_step_per_round(0.9, route, &checks, 15, 150.0).unwrap();
+        assert!((4..=14).contains(&kept), "{kept}");
+        // A local step prices no peer's check: every width is the fitted
+        // 16-row check, so it buys the whole block or nothing.
+        assert_eq!(
+            best_gamma_beside_a_step_per_round(0.9, Some(Step::Here(302.0)), &checks, 15, 150.0),
+            Some(15)
         );
     }
 

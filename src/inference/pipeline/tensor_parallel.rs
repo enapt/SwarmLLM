@@ -119,6 +119,7 @@ impl PipelineExecutor {
                     draft_parents: Vec::new(),
                     draft_tree_from: None,
                     stream_lookahead: None,
+                    block_rows_wanted: None,
                     stream_branch: None,
                 };
                 self.shared_state
@@ -169,6 +170,7 @@ impl PipelineExecutor {
                         draft_parents: Vec::new(),
                         draft_tree_from: None,
                         stream_lookahead: None,
+                        block_rows_wanted: None,
                         stream_branch: None,
                     };
                     let _ = self
@@ -216,6 +218,7 @@ impl PipelineExecutor {
                     draft_parents: Vec::new(),
                     draft_tree_from: None,
                     stream_lookahead: None,
+                    block_rows_wanted: None,
                     stream_branch: None,
                 };
                 let attn_partial = self
@@ -315,6 +318,7 @@ impl PipelineExecutor {
                         draft_parents: Vec::new(),
                         draft_tree_from: None,
                         stream_lookahead: None,
+                        block_rows_wanted: None,
                         stream_branch: None,
                     };
                     let _ = self
@@ -362,6 +366,7 @@ impl PipelineExecutor {
                     draft_parents: Vec::new(),
                     draft_tree_from: None,
                     stream_lookahead: None,
+                    block_rows_wanted: None,
                     stream_branch: None,
                 };
                 let ffn_partial = self
@@ -466,6 +471,7 @@ impl PipelineExecutor {
                 draft_parents: Vec::new(),
                 draft_tree_from: None,
                 stream_lookahead: None,
+                block_rows_wanted: None,
                 stream_branch: None,
             };
             let layer_result = self

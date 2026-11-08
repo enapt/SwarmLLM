@@ -882,6 +882,7 @@ pub use encrypted::{
     build_layer_forward_aad, decode_layer_forward_encrypted, encode_layer_forward_encrypted,
 };
 pub use layer_forward::{decode_layer_forward, encode_layer_forward};
+pub(crate) use layer_result::MOST_BLOCK_ROW_BYTES;
 pub use layer_result::{decode_layer_result, encode_layer_result};
 
 impl serde::Serialize for SwarmRequest {
@@ -1397,6 +1398,7 @@ mod tests {
             draft_parents: Vec::new(),
             draft_tree_from: None,
             stream_lookahead: None,
+            block_rows_wanted: None,
             stream_branch: None,
         };
 
@@ -1448,6 +1450,7 @@ mod tests {
                 draft_parents: Vec::new(),
                 draft_tree_from: None,
                 stream_lookahead: None,
+                block_rows_wanted: None,
                 stream_branch: None,
             };
             let encoded = encode_layer_forward(&forward).unwrap();
@@ -1495,6 +1498,7 @@ mod tests {
             draft_parents: Vec::new(),
             draft_tree_from: None,
             stream_lookahead: None,
+            block_rows_wanted: None,
             stream_branch: None,
         };
 
@@ -1536,6 +1540,7 @@ mod tests {
             draft_parents: Vec::new(),
             draft_tree_from: None,
             stream_lookahead: None,
+            block_rows_wanted: None,
             stream_branch: None,
         };
 
@@ -1582,6 +1587,7 @@ mod tests {
             draft_parents: Vec::new(),
             draft_tree_from: None,
             stream_lookahead: None,
+            block_rows_wanted: None,
             stream_branch: None,
         };
         let encoded = encode_layer_forward(&forward).unwrap();
@@ -1606,6 +1612,7 @@ mod tests {
             refusal: None,
             answers_step: None,
             prompt_blocks_stored: None,
+            block_rows: None,
             served_us: None,
         };
 
@@ -1635,6 +1642,7 @@ mod tests {
             refusal: None,
             answers_step: None,
             prompt_blocks_stored: None,
+            block_rows: None,
             served_us: None,
         };
 
@@ -1658,6 +1666,7 @@ mod tests {
             refusal: None,
             answers_step: None,
             prompt_blocks_stored: None,
+            block_rows: None,
             served_us: None,
         };
 
@@ -1787,6 +1796,7 @@ mod tests {
             draft_parents: Vec::new(),
             draft_tree_from: None,
             stream_lookahead: None,
+            block_rows_wanted: None,
             stream_branch: None,
         };
         let encoded = encode_layer_forward(&forward).unwrap();
@@ -1841,6 +1851,7 @@ mod tests {
             draft_parents: Vec::new(),
             draft_tree_from: None,
             stream_lookahead: None,
+            block_rows_wanted: None,
             stream_branch: None,
         };
 
@@ -1888,6 +1899,7 @@ mod tests {
             draft_parents: Vec::new(),
             draft_tree_from: None,
             stream_lookahead: None,
+            block_rows_wanted: None,
             stream_branch: None,
         };
         let encoded = encode_layer_forward(&forward).unwrap();
@@ -1933,6 +1945,7 @@ mod tests {
             draft_parents: Vec::new(),
             draft_tree_from: None,
             stream_lookahead: None,
+            block_rows_wanted: None,
             stream_branch: None,
         };
         let encoded = encode_layer_forward(&forward).unwrap();
@@ -1960,6 +1973,7 @@ mod tests {
             refusal: None,
             answers_step: None,
             prompt_blocks_stored: None,
+            block_rows: None,
             served_us: None,
         };
         let encoded = encode_layer_result(&result).unwrap();
@@ -1985,6 +1999,7 @@ mod tests {
             refusal: None,
             answers_step: None,
             prompt_blocks_stored: None,
+            block_rows: None,
             served_us: None,
         };
         let encoded = encode_layer_result(&result).unwrap();
@@ -2019,6 +2034,7 @@ mod tests {
             refusal: None,
             answers_step: None,
             prompt_blocks_stored: None,
+            block_rows: None,
             served_us: None,
         };
         let encoded = encode_layer_result(&result).unwrap();
@@ -2220,6 +2236,56 @@ mod tests {
         assert_eq!(decode_layer_result(&c).unwrap().served_us, Some(41_000));
     }
 
+    /// #428 stage 3: a block drafter's rows ride after the served time — a
+    /// decoder that predates them reads everything before and stops at `0x0B`;
+    /// one cut short, naming no layer, or claiming more bytes than its bound
+    /// is refused, never read as rows.
+    #[test]
+    fn a_block_drafters_rows_ride_after_the_served_time() {
+        let rid = uuid::Uuid::new_v4();
+        let mut without = LayerResult::error(rid, "x");
+        without.served_us = Some(41_000);
+        let rows = crate::types::BlockRows {
+            layers: vec![8, 30],
+            from: 0x0102_0304,
+            data: (0..24u8).collect(),
+        };
+        let mut with = without.clone();
+        with.block_rows = Some(rows.clone());
+        let a = encode_layer_result(&without).unwrap();
+        let b = encode_layer_result(&with).unwrap();
+        assert_eq!(&b[..a.len()], &a[..]);
+        assert_eq!(b.len(), a.len() + 2 + 4 * 2 + 8 + 24);
+        let back = decode_layer_result(&b).unwrap();
+        assert_eq!(back.block_rows, Some(rows.clone()));
+        assert_eq!(back.served_us, Some(41_000));
+        assert_eq!(decode_layer_result(&a).unwrap().block_rows, None);
+        for cut in 1..(2 + 4 * 2 + 8 + 24) {
+            assert!(
+                decode_layer_result(&b[..b.len() - cut]).is_err(),
+                "cut {cut} bytes short"
+            );
+        }
+        let mut forged = a.clone();
+        forged.extend_from_slice(&[0x0B, 0]);
+        forged.extend_from_slice(&[0; 8]);
+        assert!(decode_layer_result(&forged).is_err(), "no layers");
+        let mut forged = a.clone();
+        forged.extend_from_slice(&[0x0B, 1]);
+        forged.extend_from_slice(&8u32.to_le_bytes());
+        forged.extend_from_slice(&0u32.to_le_bytes());
+        forged.extend_from_slice(&((MOST_BLOCK_ROW_BYTES + 1) as u32).to_le_bytes());
+        assert!(decode_layer_result(&forged).is_err(), "past the bound");
+        let mut empty = with;
+        empty.block_rows.as_mut().unwrap().layers.clear();
+        assert!(encode_layer_result(&empty).is_err());
+        // Alone, too.
+        let mut bare = LayerResult::error(rid, "x");
+        bare.block_rows = Some(rows.clone());
+        let c = encode_layer_result(&bare).unwrap();
+        assert_eq!(decode_layer_result(&c).unwrap().block_rows, Some(rows));
+    }
+
     /// A reason a newer peer knows and this build does not is read as no
     /// reason — the behaviour before the trailer existed — not as a broken
     /// result that loses the error it carries.
@@ -2259,6 +2325,7 @@ mod tests {
             refusal: None,
             answers_step: None,
             prompt_blocks_stored: None,
+            block_rows: None,
             served_us: None,
         };
         let encoded = encode_layer_result(&result).unwrap();

@@ -471,6 +471,8 @@ pub async fn run_worker(
     let mut flow_sessions = FlowSessions::default();
     // Chains whose two ends this worker holds, learning their far run.
     let mut far_runs = FarRuns::default();
+    // Splits whose first segment this worker holds, drafting by block.
+    let mut block_drafts = SplitBlockDrafts::default();
 
     loop {
         // Either block on the next IPC message (no slots are decoding) OR race
@@ -524,6 +526,7 @@ pub async fn run_worker(
                 &cancelled,
                 &mut flow_sessions,
                 &mut far_runs,
+                &mut block_drafts,
             )
             .await;
 
@@ -555,6 +558,7 @@ pub async fn run_worker(
                             &cancelled,
                             &mut flow_sessions,
                             &mut far_runs,
+                            &mut block_drafts,
                         )
                         .await;
                     }
@@ -654,6 +658,7 @@ pub async fn run_worker(
             release_caches_of_cancelled(&cancelled, &mut kv_released_for_cancel, &kv_store);
             flow_sessions.forget_cancelled(&cancelled);
             far_runs.forget_cancelled(&cancelled);
+            block_drafts.forget_cancelled(&cancelled);
             // Sweep cancels that never matched a request (the request had
             // already finished when the cancel arrived).
             cancelled.retain(|_, at| at.elapsed().as_secs() < CANCEL_RETENTION_SECS);
@@ -994,6 +999,7 @@ fn cancelled_request_id(msg: &DaemonMsg) -> Option<Uuid> {
         DaemonMsg::Generate(g) => Some(g.request_id),
         DaemonMsg::Draft(d) => Some(d.request_id),
         DaemonMsg::HeadGuess(g) => Some(g.request_id),
+        DaemonMsg::BlockDraft(d) => Some(d.request_id),
         _ => None,
     }
 }
@@ -1218,8 +1224,9 @@ fn ensure_model_loaded(
     // Apply TP weight splitting if this is a TP variant (tp_size > 1)
     if tp_size > 1 {
         model.pre_split_for_tp(tp_rank, tp_size)?;
-    } else if layer_start == 0 && layer_end == total_layers {
-        // A block drafter guesses for the whole model it sits beside (#428).
+    } else if layer_start == 0 {
+        // A block drafter guesses for the whole model it sits beside, or for
+        // a split whose first segment this is, beside the head's part (#428).
         model.attach_block_drafter(&model_dir);
     }
 
@@ -1558,6 +1565,7 @@ async fn run_fused_batch_forward(
                 has_spec_logits: false,
                 spec_logits_dims: None,
                 prompt_blocks_stored: None,
+                block_rows: None,
             });
             result_lens.push(0);
         } else {
@@ -1584,6 +1592,7 @@ async fn run_fused_batch_forward(
                 has_spec_logits: false,
                 spec_logits_dims: None,
                 prompt_blocks_stored: None,
+                block_rows: None,
             });
             result_lens.push(len);
         }
@@ -1779,6 +1788,99 @@ fn spec_rows_fit_the_answer(
         )));
     }
     Ok(())
+}
+
+/// What a forward's ask for a block drafter's rows means on THIS segment
+/// (`LayerForward::block_rows_wanted`, #428 stage 3): the asked layers it
+/// runs, in the ask's order, and how many of the forward's last rows to keep —
+/// held to what a result carries ([`crate::network::protocol::MOST_BLOCK_ROW_BYTES`]),
+/// so a coordinator naming millions keeps no more than that on the device.
+struct BlockRowsHere {
+    set: std::collections::HashSet<usize>,
+    layers: Vec<u32>,
+    most_rows: usize,
+}
+
+/// [`BlockRowsHere`] for a segment running `layers` of `hidden` wide rows;
+/// `None` where it runs none of the asked layers, or where the forward's rows
+/// are not positions of the reply (`positions_are_the_replys`: no
+/// tensor-parallel phase, no tree of guesses).
+fn block_rows_here(
+    wanted: Option<&crate::types::BlockRowsWanted>,
+    layers: std::ops::Range<usize>,
+    hidden: usize,
+    positions_are_the_replys: bool,
+) -> Option<BlockRowsHere> {
+    let wanted = wanted.filter(|_| positions_are_the_replys)?;
+    let mut set = std::collections::HashSet::new();
+    let here: Vec<u32> = wanted
+        .layers
+        .iter()
+        .copied()
+        .filter(|&l| layers.contains(&(l as usize)) && set.insert(l as usize))
+        .collect();
+    let row_bytes = here.len().max(1) * hidden.max(1) * 2;
+    let most_rows =
+        (wanted.most_rows as usize).min(crate::network::protocol::MOST_BLOCK_ROW_BYTES / row_bytes);
+    (!here.is_empty() && most_rows > 0).then_some(BlockRowsHere {
+        set,
+        layers: here,
+        most_rows,
+    })
+}
+
+/// A segment's rows of a block drafter's layers as they travel (#428 stage
+/// 3): little-endian bf16 `[rows, layers × hidden]`, the layers joined in
+/// `layers`' order. `caught` holds each layer's LAST rows of a forward of
+/// `positions` at `index_pos`; `kept` takes only the first that many — a
+/// check walked here answers only the positions it kept, which it caught
+/// whole.
+fn block_rows_from(
+    caught: &HashMap<usize, candle_core::Tensor>,
+    layers: &[u32],
+    index_pos: u32,
+    positions: usize,
+    kept: Option<usize>,
+) -> Result<crate::types::BlockRows, String> {
+    let fail = |e: candle_core::Error| e.to_string();
+    let mut parts = Vec::with_capacity(layers.len());
+    for layer in layers {
+        let rows = caught
+            .get(&(*layer as usize))
+            .ok_or_else(|| format!("layer {layer}'s rows were not kept"))?;
+        parts.push(rows.squeeze(0).map_err(fail)?);
+    }
+    let joined = candle_core::Tensor::cat(&parts, 1).map_err(fail)?;
+    let rows = joined.dim(0).map_err(fail)?;
+    let first = positions
+        .checked_sub(rows)
+        .ok_or_else(|| format!("{rows} rows kept of a forward of {positions}"))?;
+    let take = match kept {
+        Some(_) if first != 0 => return Err("a walked check's rows were not kept whole".into()),
+        Some(n) => n.min(rows),
+        None => rows,
+    };
+    let values: Vec<half::bf16> = joined
+        .narrow(0, 0, take)
+        .and_then(|t| t.to_dtype(candle_core::DType::BF16))
+        .and_then(|t| t.flatten_all())
+        .and_then(|t| t.to_vec1())
+        .map_err(fail)?;
+    if values.len() * 2 > crate::network::protocol::MOST_BLOCK_ROW_BYTES {
+        return Err(format!(
+            "{} rows of block-drafter rows are past a result's bound",
+            take
+        ));
+    }
+    let mut data = Vec::with_capacity(values.len() * 2);
+    for v in values {
+        data.extend_from_slice(&v.to_bits().to_le_bytes());
+    }
+    Ok(crate::types::BlockRows {
+        layers: layers.to_vec(),
+        from: index_pos + first as u32,
+        data,
+    })
 }
 
 /// The picture spans a forward applies (#115 (2b)), checked: well formed
@@ -2258,6 +2360,23 @@ async fn handle_forward(
     if draws_each_row {
         refuse_draws_with_penalties(&fwd.sampling, &fwd.generated_ids)?;
     }
+    // The block drafter's layers this segment runs, where the forward asks for
+    // their rows (#428 stage 3): the coordinator drafts from them. Kept by the
+    // forward itself, so they cost no second pass.
+    let rows_here = block_rows_here(
+        fwd.block_rows_wanted.as_ref(),
+        layer_start..layer_end,
+        model.hidden_dim,
+        tp_meta.is_none() && draft_tree.is_none(),
+    );
+    let rows_capture = rows_here
+        .as_ref()
+        .map(|here| crate::inference::split::Capture {
+            layers: &here.set,
+            last: here.most_rows,
+        });
+    let block_caught: std::cell::RefCell<Option<HashMap<usize, candle_core::Tensor>>> =
+        Default::default();
     // The rows of this forward's tree read in earlier forwards — answered then.
     let read_before = draft_tree
         .as_ref()
@@ -2339,6 +2458,13 @@ async fn handle_forward(
 
     // The far run's near end: what the first segment hands on.
     let far_output: std::cell::RefCell<Option<candle_core::Tensor>> = Default::default();
+    // A plain forward's caught rows, kept where the forward asked for some.
+    let keep_rows = |caught: HashMap<usize, candle_core::Tensor>, out: candle_core::Tensor| {
+        if rows_capture.is_some() {
+            *block_caught.borrow_mut() = Some(caught);
+        }
+        out
+    };
     // Run forward pass — CPU-bound, use block_in_place. A tree of guesses
     // shapes every forward the pass makes (`SplitModel::with_draft_tree`).
     let compute = |model: &mut SplitModel| -> Result<crate::types::LayerResult, String> {
@@ -2349,7 +2475,29 @@ async fn handle_forward(
         // input is hidden state from the previous segment and we skip
         // embedding via the *_pre_embedded variant.
         if want_spec_output {
-            let output_t = if is_first {
+            // A check keeps every row: a tail that walks it answers only those
+            // it kept, which it knows after the forward. So a check wider than
+            // the rows the ask allows keeps none — never a whole check's rows
+            // a result could not carry (security review, 2026-11-08).
+            let output_t = if let Some(capture) = rows_capture.filter(|c| input_positions <= c.last)
+            {
+                let capture = crate::inference::split::Capture {
+                    last: usize::MAX,
+                    ..capture
+                };
+                let (out, caught) = model
+                    .forward_verify_keeping(
+                        &input_tensor,
+                        fwd.index_pos as usize,
+                        kv_store,
+                        &req_id_str,
+                        !is_first,
+                        capture,
+                    )
+                    .map_err(|e| format!("Forward speculative verify: {e}"))?;
+                *block_caught.borrow_mut() = Some(caught);
+                out
+            } else if is_first {
                 model
                     .forward_verify_all_positions(
                         &input_tensor,
@@ -2453,6 +2601,7 @@ async fn handle_forward(
                     refusal: None,
                     answers_step: None,
                     prompt_blocks_stored: None,
+                    block_rows: None,
                     served_us: None,
                 });
             }
@@ -2497,6 +2646,7 @@ async fn handle_forward(
                         refusal: None,
                         answers_step: None,
                         prompt_blocks_stored: None,
+                        block_rows: None,
                         served_us: None,
                     });
                 }
@@ -2565,6 +2715,7 @@ async fn handle_forward(
                 refusal: None,
                 answers_step: None,
                 prompt_blocks_stored: None,
+                block_rows: None,
                 served_us: None,
             });
         }
@@ -2592,7 +2743,7 @@ async fn handle_forward(
                 // it expects. `None` here answered a LoRA request from the
                 // base model, without a word (#316's review).
                 model
-                    .forward_prompt_in_chunks(
+                    .forward_prompt_in_chunks_keeping(
                         &input_tensor,
                         fwd.index_pos as usize,
                         kv_store,
@@ -2600,7 +2751,9 @@ async fn handle_forward(
                         lora_adapter.as_deref(),
                         true,
                         prefill_chunk_tokens,
+                        rows_capture,
                     )
+                    .map(|(out, caught)| keep_rows(caught, out))
                     .map_err(|e| format!("Forward pre-embedded: {e}"))?
             } else if let Some(ref vis_emb) = vision_tensor {
                 model
@@ -2618,7 +2771,7 @@ async fn handle_forward(
                 // segment; a decode step is one position and takes the
                 // one-shot path unchanged.
                 model
-                    .forward_prompt_in_chunks(
+                    .forward_prompt_in_chunks_keeping(
                         &input_tensor,
                         fwd.index_pos as usize,
                         kv_store,
@@ -2626,7 +2779,9 @@ async fn handle_forward(
                         lora_adapter.as_deref(),
                         false,
                         prefill_chunk_tokens,
+                        rows_capture,
                     )
+                    .map(|(out, caught)| keep_rows(caught, out))
                     .map_err(|e| format!("Forward: {e}"))?
             })
         })?;
@@ -2687,6 +2842,7 @@ async fn handle_forward(
                 refusal: None,
                 answers_step: None,
                 prompt_blocks_stored: None,
+                block_rows: None,
                 served_us: None,
             })
         } else {
@@ -2711,6 +2867,7 @@ async fn handle_forward(
                 refusal: None,
                 answers_step: None,
                 prompt_blocks_stored: None,
+                block_rows: None,
                 served_us: None,
             })
         }
@@ -2727,6 +2884,17 @@ async fn handle_forward(
     });
 
     let mut result = compute_result.map_err(SwarmError::Internal)?;
+    if let (Some(here), Some(caught)) = (rows_here.as_ref(), block_caught.into_inner()) {
+        // A check walked here answers only the positions it kept.
+        let kept = (want_spec_output && fwd.spec_walk_at_tail).then_some(result.token_ids.len());
+        match block_rows_from(&caught, &here.layers, fwd.index_pos, input_positions, kept) {
+            Ok(rows) => result.block_rows = Some(rows),
+            // The reply is whole without them: the coordinator stops drafting
+            // by block for it.
+            Err(e) => tracing::warn!(%request_id, error = %e,
+                "a block drafter's rows could not be kept; the reply goes on without them"),
+        }
+    }
     if let (Some(run), Some(near)) = (far_run, far_side) {
         let kept = if near {
             far_output.into_inner()
@@ -2791,7 +2959,8 @@ async fn handle_forward(
     // is populated.
     let has_activations = !result.activations.is_empty();
     let has_spec_logits = !result.spec_logits.is_empty();
-    let (payload, spec_logits_dims): (Vec<u8>, Option<(u32, u32)>) = if has_spec_logits {
+    let block_rows = result.block_rows.take();
+    let (mut payload, spec_logits_dims): (Vec<u8>, Option<(u32, u32)>) = if has_spec_logits {
         let (bytes, dims) = crate::inference::worker_ipc::encode_spec_logits(&result.spec_logits);
         (bytes, Some(dims))
     } else if has_activations {
@@ -2799,6 +2968,16 @@ async fn handle_forward(
     } else {
         (Vec::new(), None)
     };
+    // A block drafter's rows END the payload (`split_block_rows`), never in
+    // the JSON header.
+    let block_rows = block_rows.map(|rows| {
+        payload.extend_from_slice(&rows.data);
+        IpcBlockRows {
+            layers: rows.layers,
+            from: rows.from,
+            bytes: rows.data.len() as u32,
+        }
+    });
 
     let ipc_result = IpcLayerResult {
         request_id: result.request_id,
@@ -2817,6 +2996,7 @@ async fn handle_forward(
         has_spec_logits,
         spec_logits_dims,
         prompt_blocks_stored: result.prompt_blocks_stored,
+        block_rows,
     };
 
     send_worker(writer, &WorkerMsg::LayerResult(ipc_result), &payload)
@@ -4266,6 +4446,532 @@ impl BlockGuesses {
     }
 }
 
+/// A split's block drafters (#428 stage 3), one per request whose FIRST
+/// segment this worker holds beside the model's head: each fed the rows the
+/// split's segments sent back (`DaemonMsg::BlockDraft`). Bounded as the far
+/// runs are; a request's goes when it is released or cancelled.
+#[derive(Default)]
+struct SplitBlockDrafts(HashMap<Uuid, (BlockGuesses, std::time::Instant)>);
+
+impl SplitBlockDrafts {
+    fn release(&mut self, request_id: &Uuid) {
+        if let Some((g, _)) = self.0.remove(request_id) {
+            // Once a reply, and only on a split that drafted by block.
+            tracing::info!(
+                %request_id,
+                rounds = g.rounds,
+                proposed = g.proposed,
+                draft_ms = ?g.draft_ms.median().map(f64::round),
+                stopped = g.stopped.as_deref().unwrap_or(""),
+                "DIAG: split block drafter complete"
+            );
+        }
+    }
+
+    fn forget_cancelled(&mut self, cancelled: &CancelledSet) {
+        if !self.0.is_empty() {
+            self.0.retain(|id, _| !cancelled.contains_key(id));
+        }
+    }
+}
+
+/// Where a drafter's new rows start, and each layer's `[1, n, hidden]`.
+type RowsFrom = (usize, HashMap<usize, candle_core::Tensor>);
+
+/// The rows a split's segments sent back, as a block drafter's context reads
+/// them (#428 stage 3): for each of `layers`, `[1, n, hidden]` over the
+/// positions `start..upto` — `start` where the drafter's rows end (`next`),
+/// or for a drafter not yet fed, the latest position from which every layer
+/// is covered up to `upto`, at most [`BLOCK_PROMPT_ROWS`] back. `None` where
+/// there is nothing to take in. The rows are numbers peers chose: every size
+/// is checked against the payload and the model's width before anything is
+/// read (`architecture.md` § "A size the other computer chose").
+///
+/// [`BLOCK_PROMPT_ROWS`]: crate::inference::split::BLOCK_PROMPT_ROWS
+fn block_rows_for_the_drafter(
+    rows: &[IpcBlockRows],
+    payload: &[u8],
+    layers: &[usize],
+    hidden: usize,
+    next: Option<usize>,
+    upto: usize,
+    device: &candle_core::Device,
+) -> Result<Option<RowsFrom>, String> {
+    use candle_core::Tensor;
+    let fail = |e: candle_core::Error| e.to_string();
+    // Each layer's pieces: (first position, [n, hidden]).
+    let mut pieces: HashMap<usize, Vec<(usize, Tensor)>> = HashMap::new();
+    let mut at = 0usize;
+    for entry in rows {
+        let k = entry.layers.len();
+        let row_bytes = k
+            .checked_mul(hidden)
+            .and_then(|v| v.checked_mul(2))
+            .filter(|&b| b > 0)
+            .ok_or_else(|| format!("rows of {k} layers of width {hidden}"))?;
+        let bytes = entry.bytes as usize;
+        let end = at
+            .checked_add(bytes)
+            .filter(|&e| e <= payload.len())
+            .ok_or_else(|| {
+                format!(
+                    "rows of {bytes} bytes past a {}-byte payload",
+                    payload.len()
+                )
+            })?;
+        if !bytes.is_multiple_of(row_bytes) {
+            return Err(format!(
+                "rows of {bytes} bytes are not whole rows of {row_bytes}"
+            ));
+        }
+        let n = bytes / row_bytes;
+        let values: Vec<f32> = payload[at..end]
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|b| half::bf16::from_bits(u16::from_le_bytes(*b)).to_f32())
+            .collect();
+        at = end;
+        if n == 0 {
+            continue;
+        }
+        let joined =
+            Tensor::from_vec(values, (n, k * hidden), &candle_core::Device::Cpu).map_err(fail)?;
+        for (i, layer) in entry.layers.iter().enumerate() {
+            let piece = joined.narrow(1, i * hidden, hidden).map_err(fail)?;
+            pieces
+                .entry(*layer as usize)
+                .or_default()
+                .push((entry.from as usize, piece));
+        }
+    }
+    if at != payload.len() {
+        return Err(format!(
+            "{} bytes of rows named, {} sent",
+            at,
+            payload.len()
+        ));
+    }
+    // Each layer's run of rows ending at `upto`, newest piece first.
+    let mut runs: Vec<(usize, Vec<Tensor>)> = Vec::with_capacity(layers.len());
+    for layer in layers {
+        let mut mine = pieces.remove(layer).unwrap_or_default();
+        mine.sort_by_key(|piece| std::cmp::Reverse(piece.0));
+        let mut covered_from = upto;
+        let mut parts = Vec::new();
+        for (from, rows) in mine {
+            let n = rows.dim(0).map_err(fail)?;
+            if from >= covered_from {
+                continue;
+            }
+            if from + n < covered_from {
+                break;
+            }
+            parts.push(rows.narrow(0, 0, covered_from - from).map_err(fail)?);
+            covered_from = from;
+        }
+        parts.reverse();
+        runs.push((covered_from, parts));
+    }
+    let start = match next {
+        Some(p) => p,
+        None => {
+            runs.iter()
+                .map(|(from, _)| *from)
+                .max()
+                .unwrap_or(upto)
+                .max(upto.saturating_sub(
+                    crate::inference::pipeline::block_draft::PROMPT_WINDOW as usize,
+                ))
+        }
+    };
+    if start >= upto {
+        return Ok(None);
+    }
+    let mut kept = HashMap::with_capacity(layers.len());
+    for (layer, (from, parts)) in layers.iter().zip(runs) {
+        if from > start {
+            return Err(format!(
+                "layer {layer}'s rows start at {from}, not by {start} (up to {upto})"
+            ));
+        }
+        // Contiguous, as a layer's own capture is: each piece is a column
+        // range of the rows a segment joined, and the drafter's `fc` refuses
+        // the strided input the layers' concatenation then makes (the rig's
+        // first split draft, 2026-11-08).
+        let rows = Tensor::cat(&parts, 0)
+            .and_then(|t| t.narrow(0, start - from, upto - start))
+            .and_then(|t| t.unsqueeze(0))
+            .and_then(|t| t.contiguous())
+            .and_then(|t| t.to_device(device))
+            .map_err(fail)?;
+        kept.insert(*layer, rows);
+    }
+    Ok(Some((start, kept)))
+}
+
+/// `DaemonMsg::BlockDraft` (#428 stage 3): the split's rows for its committed
+/// positions taken in, then up to `gamma` guesses after `token` from the
+/// drafter beside this worker's first segment. An error ends the drafter for
+/// the reply; the coordinator drafts without it.
+async fn handle_block_draft(
+    writer: &mut IpcWriter,
+    models: &mut HashMap<RangeKey, SplitModel>,
+    kv_store: &Arc<KvCacheStore>,
+    drafts: &mut SplitBlockDrafts,
+    d: crate::inference::worker_ipc::IpcBlockDraft,
+    payload: &[u8],
+) -> Result<(), SwarmError> {
+    let key = (
+        d.first_range.0 as usize,
+        d.first_range.1 as usize,
+        0usize,
+        1usize,
+    );
+    let model = models.get(&key).ok_or_else(|| {
+        SwarmError::ServiceUnavailable(format!(
+            "this computer no longer holds layers {}..{} of request {}",
+            d.first_range.0, d.first_range.1, d.request_id
+        ))
+    })?;
+    let req = d.request_id.to_string();
+    let guessed = tokio::task::block_in_place(|| -> Result<Vec<u32>, SwarmError> {
+        if d.first {
+            drafts.0.remove(&d.request_id);
+        }
+        if !drafts.0.contains_key(&d.request_id) {
+            while drafts.0.len() >= MOST_FLOW_SESSIONS {
+                let Some(oldest) = drafts
+                    .0
+                    .iter()
+                    .min_by_key(|(_, (_, at))| *at)
+                    .map(|(id, _)| *id)
+                else {
+                    break;
+                };
+                drafts.0.remove(&oldest);
+            }
+            let fresh = BlockGuesses::for_model(model, kv_store, &req).ok_or_else(|| {
+                SwarmError::ServiceUnavailable("no block drafter beside this segment".into())
+            })?;
+            drafts
+                .0
+                .insert(d.request_id, (fresh, std::time::Instant::now()));
+        }
+        let Some((g, used)) = drafts.0.get_mut(&d.request_id) else {
+            return Ok(Vec::new());
+        };
+        *used = std::time::Instant::now();
+        let layers: Vec<usize> = model
+            .block_drafter()
+            .map(|b| b.target_layers().to_vec())
+            .unwrap_or_default();
+        let next = (g.next_pos > 0).then_some(g.next_pos);
+        let upto = d.upto as usize;
+        let taken = block_rows_for_the_drafter(
+            &d.rows,
+            payload,
+            &layers,
+            model.hidden_dim,
+            next,
+            upto,
+            model.device(),
+        )
+        .map_err(|e| SwarmError::Validation(format!("block drafter rows: {e}")))?;
+        match (taken, next) {
+            (Some((start, kept)), None) => g.take_the_prompt(model, upto, &kept, start)?,
+            (Some((start, kept)), Some(_)) => {
+                g.take_the_round(model, start, upto - start, Some(&kept))?
+            }
+            (None, _) => {}
+        }
+        if d.gamma == 0 {
+            return Ok(Vec::new());
+        }
+        let started = std::time::Instant::now();
+        let gamma = (d.gamma as usize).min(g.most(model));
+        let guesses = g.guesses(model, d.token, d.index_pos as usize, gamma)?;
+        g.draft_ms.record(started.elapsed().as_secs_f64() * 1000.0);
+        g.rounds += 1;
+        g.proposed += guesses.len() as u64;
+        Ok(guesses)
+    });
+    let guessed = match guessed {
+        Ok(g) => g,
+        Err(e) => {
+            drafts.0.remove(&d.request_id);
+            return Err(e);
+        }
+    };
+    send_worker(
+        writer,
+        &WorkerMsg::Drafted {
+            request_id: d.request_id,
+            tokens: guessed,
+            parents: Vec::new(),
+            scores: Vec::new(),
+            runner_ups: Vec::new(),
+        },
+        &[],
+    )
+    .await
+    .map_err(|e| SwarmError::Internal(format!("send Drafted: {e}")))
+}
+
+#[cfg(test)]
+mod split_block_rows_tests {
+    use super::{block_rows_for_the_drafter, block_rows_from, block_rows_here};
+    use crate::inference::worker_ipc::IpcBlockRows;
+    use crate::types::BlockRowsWanted;
+    use candle_core::{Device, Tensor};
+    use std::collections::HashMap;
+
+    const HIDDEN: usize = 2;
+
+    /// Layer `layer`'s output at position `p`: `[sign · p, sign · (p + ½)]`,
+    /// exact in bf16 below 128 — each layer its own sign, so a row read
+    /// from the wrong layer shows.
+    fn row(layer: u32, p: usize) -> [f32; HIDDEN] {
+        let sign = if layer.is_multiple_of(2) { 1.0 } else { -1.0 };
+        [sign * p as f32, sign * (p as f32 + 0.5)]
+    }
+
+    /// What a forward of `positions` at `index_pos` kept of each of `layers`:
+    /// its last `last` rows, `[1, last, HIDDEN]`.
+    fn caught(
+        layers: &[u32],
+        index_pos: usize,
+        positions: usize,
+        last: usize,
+    ) -> HashMap<usize, Tensor> {
+        layers
+            .iter()
+            .map(|&l| {
+                let v: Vec<f32> = (index_pos + positions - last..index_pos + positions)
+                    .flat_map(|p| row(l, p))
+                    .collect();
+                let t = Tensor::from_vec(v, (1, last, HIDDEN), &Device::Cpu).unwrap();
+                (l as usize, t)
+            })
+            .collect()
+    }
+
+    /// A segment's answer as it reaches the drafter's worker.
+    fn sent(
+        layers: &[u32],
+        index_pos: usize,
+        positions: usize,
+        last: usize,
+        kept: Option<usize>,
+    ) -> (IpcBlockRows, Vec<u8>) {
+        let rows = block_rows_from(
+            &caught(layers, index_pos, positions, last),
+            layers,
+            index_pos as u32,
+            positions,
+            kept,
+        )
+        .unwrap();
+        (
+            IpcBlockRows {
+                layers: rows.layers,
+                from: rows.from,
+                bytes: rows.data.len() as u32,
+            },
+            rows.data,
+        )
+    }
+
+    fn joined(parts: &[(IpcBlockRows, Vec<u8>)]) -> (Vec<IpcBlockRows>, Vec<u8>) {
+        let metas = parts.iter().map(|(m, _)| m.clone()).collect();
+        let payload = parts.iter().flat_map(|(_, b)| b.clone()).collect();
+        (metas, payload)
+    }
+
+    fn values(t: &Tensor) -> Vec<f32> {
+        t.flatten_all().unwrap().to_vec1().unwrap()
+    }
+
+    /// The asked layers this segment runs, in the ask's order and once each;
+    /// none where it runs none, or the forward's rows are not the reply's
+    /// positions; the rows held to what a result may carry.
+    #[test]
+    fn a_segment_keeps_only_the_asked_layers_it_runs_and_no_more_rows_than_a_result_carries() {
+        let ask = BlockRowsWanted {
+            layers: vec![30, 1, 8, 8, 40],
+            most_rows: 16,
+        };
+        let here = block_rows_here(Some(&ask), 0..32, 4096, true).unwrap();
+        assert_eq!(here.layers, vec![30, 1, 8]);
+        assert_eq!(here.set.len(), 3);
+        assert_eq!(here.most_rows, 16);
+        assert!(block_rows_here(Some(&ask), 41..48, 4096, true).is_none());
+        assert!(block_rows_here(Some(&ask), 0..32, 4096, false).is_none());
+        assert!(block_rows_here(None, 0..32, 4096, true).is_none());
+        let greedy = BlockRowsWanted {
+            layers: vec![1, 8, 30],
+            most_rows: u32::MAX,
+        };
+        let row_bytes = 3 * 4096 * 2;
+        let here = block_rows_here(Some(&greedy), 0..32, 4096, true).unwrap();
+        assert_eq!(
+            here.most_rows,
+            crate::network::protocol::MOST_BLOCK_ROW_BYTES / row_bytes
+        );
+        // A row wider than a result: nothing kept at all.
+        let wide = crate::network::protocol::MOST_BLOCK_ROW_BYTES;
+        assert!(block_rows_here(Some(&greedy), 0..32, wide, true).is_none());
+    }
+
+    /// A forward sends its last rows from where they start; a check walked
+    /// here sends only the positions it kept, from its first; a layer it was
+    /// asked for and did not keep is an error, never a gap filled with
+    /// another layer's rows.
+    #[test]
+    fn a_forward_sends_its_last_rows_and_a_walked_check_only_the_ones_it_kept() {
+        let (meta, bytes) = sent(&[8, 1], 40, 20, 3, None);
+        assert_eq!(meta.from, 57);
+        assert_eq!(bytes.len(), 3 * 2 * HIDDEN * 2);
+        let back: Vec<f32> = bytes
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|b| half::bf16::from_bits(u16::from_le_bytes(*b)).to_f32())
+            .collect();
+        let want: Vec<f32> = (57..60)
+            .flat_map(|p| row(8, p).into_iter().chain(row(1, p)))
+            .collect();
+        assert_eq!(back, want, "each row is its layers in the ask's order");
+
+        let (meta, bytes) = sent(&[8], 60, 5, 5, Some(2));
+        assert_eq!(meta.from, 60);
+        assert_eq!(bytes.len(), 2 * HIDDEN * 2);
+        assert!(
+            block_rows_from(&caught(&[8], 60, 5, 3), &[8], 60, 5, Some(2)).is_err(),
+            "a walked check's rows are kept whole"
+        );
+        assert!(block_rows_from(&caught(&[8], 60, 5, 5), &[8, 1], 60, 5, None).is_err());
+    }
+
+    /// The prompt's rows, then a check whose first segment sent every
+    /// position and whose walking tail sent the two it kept: each layer is
+    /// read from where the reply's rows end up to the reply, from the right
+    /// layer, and a layer missing a position stops the drafter.
+    #[test]
+    fn the_drafter_reads_each_layers_rows_up_to_the_reply() {
+        let device = Device::Cpu;
+        let layers = [1usize, 8, 30];
+        // The prompt pass: 20 positions, the last 10 of each segment's layers.
+        let prompt = [sent(&[1, 8], 0, 20, 10, None), sent(&[30], 0, 20, 10, None)];
+        let (metas, payload) = joined(&prompt);
+        let (start, kept) =
+            block_rows_for_the_drafter(&metas, &payload, &layers, HIDDEN, None, 20, &device)
+                .unwrap()
+                .expect("rows to take in");
+        assert_eq!(start, 10);
+        for &l in &layers {
+            let want: Vec<f32> = (10..20).flat_map(|p| row(l as u32, p)).collect();
+            assert_eq!(kept[&l].dims(), &[1, 10, HIDDEN]);
+            assert_eq!(values(&kept[&l]), want, "layer {l}");
+            // The drafter's `fc` reads the layers joined, and refuses a
+            // strided input.
+            assert!(kept[&l].is_contiguous(), "layer {l}'s rows are contiguous");
+        }
+
+        // A check of 4 at 20 that kept 2: the first segment answered all 4.
+        let check = [
+            sent(&[1, 8], 20, 4, 4, None),
+            sent(&[30], 20, 4, 4, Some(2)),
+        ];
+        let (metas, payload) = joined(&check);
+        let (start, kept) =
+            block_rows_for_the_drafter(&metas, &payload, &layers, HIDDEN, Some(20), 22, &device)
+                .unwrap()
+                .expect("rows to take in");
+        assert_eq!(start, 20);
+        for &l in &layers {
+            let want: Vec<f32> = (20..22).flat_map(|p| row(l as u32, p)).collect();
+            assert_eq!(
+                values(&kept[&l]),
+                want,
+                "layer {l}: only the kept positions"
+            );
+        }
+
+        // Nothing new to take in.
+        assert!(
+            block_rows_for_the_drafter(&[], &[], &layers, HIDDEN, Some(22), 22, &device)
+                .unwrap()
+                .is_none()
+        );
+        // The tail's rows lost: layer 30 has none of 20..22.
+        let (metas, payload) = joined(&check[..1]);
+        assert!(block_rows_for_the_drafter(
+            &metas,
+            &payload,
+            &layers,
+            HIDDEN,
+            Some(20),
+            22,
+            &device
+        )
+        .is_err());
+    }
+
+    /// The rows' sizes are numbers a peer chose: a payload shorter or longer
+    /// than the entries name, or bytes that are not whole rows, are refused
+    /// before anything is read.
+    #[test]
+    fn rows_whose_sizes_do_not_add_up_are_refused() {
+        let device = Device::Cpu;
+        let (meta, bytes) = sent(&[8], 0, 4, 4, None);
+        let short = &bytes[..bytes.len() - 2];
+        assert!(block_rows_for_the_drafter(
+            std::slice::from_ref(&meta),
+            short,
+            &[8],
+            HIDDEN,
+            None,
+            4,
+            &device
+        )
+        .is_err());
+        let mut long = bytes.clone();
+        long.extend_from_slice(&[0, 0]);
+        assert!(block_rows_for_the_drafter(
+            std::slice::from_ref(&meta),
+            &long,
+            &[8],
+            HIDDEN,
+            None,
+            4,
+            &device
+        )
+        .is_err());
+        let ragged = IpcBlockRows {
+            bytes: meta.bytes - 2,
+            ..meta.clone()
+        };
+        assert!(block_rows_for_the_drafter(
+            &[ragged],
+            &bytes[..bytes.len() - 2],
+            &[8],
+            HIDDEN,
+            None,
+            4,
+            &device
+        )
+        .is_err());
+        let lying = IpcBlockRows {
+            bytes: u32::MAX,
+            ..meta
+        };
+        assert!(
+            block_rows_for_the_drafter(&[lying], &bytes, &[8], HIDDEN, None, 4, &device).is_err()
+        );
+    }
+}
+
 /// `SWARMLLM_CARD_GUESS_PRIOR=0`: each reply's stand-in is fitted from that
 /// reply alone, as before the model's prior ([`CardGuesses`]), for A/B inside
 /// one binary.
@@ -4465,8 +5171,8 @@ impl LocalSpec {
         }
     }
 
-    const FIRST_PROBE_AFTER: u32 = 8;
-    const MOST_PROBE_AFTER: u32 = 64;
+    const FIRST_PROBE_AFTER: u32 = crate::inference::dsd_controller::FIRST_PROBE_AFTER;
+    const MOST_PROBE_AFTER: u32 = crate::inference::dsd_controller::MOST_PROBE_AFTER;
 
     /// Hand the card's guesses the stand-in the prompt pass fed
     /// ([`card_stand_in_for`]) and what the pass kept for it, learned on the
@@ -4653,7 +5359,7 @@ impl LocalSpec {
         };
         crate::inference::dsd_controller::best_gamma_beside_a_step_per_round(
             block.acceptance.alpha(),
-            Some(step),
+            Some(crate::inference::dsd_controller::Step::Here(step)),
             &self.check,
             u32::try_from(room).unwrap_or(u32::MAX),
             block.draft_ms.median().unwrap_or(0.0),
@@ -9160,6 +9866,7 @@ async fn handle_daemon_msg(
     cancelled: &CancelledSet,
     flow_sessions: &mut FlowSessions,
     far_runs: &mut FarRuns,
+    block_drafts: &mut SplitBlockDrafts,
 ) -> bool {
     let activation_compression = options.activation_compression;
     let force_standard_attn = options.force_standard_attn;
@@ -9200,6 +9907,14 @@ async fn handle_daemon_msg(
         DaemonMsg::HeadGuess(g) => {
             let request_id = g.request_id;
             if let Err(e) = handle_head_guess(writer, models, kv_store, far_runs, g).await {
+                send_worker_error(writer, request_id, e).await;
+            }
+        }
+        DaemonMsg::BlockDraft(d) => {
+            let request_id = d.request_id;
+            if let Err(e) =
+                handle_block_draft(writer, models, kv_store, block_drafts, d, &payload).await
+            {
                 send_worker_error(writer, request_id, e).await;
             }
         }
@@ -9364,6 +10079,7 @@ async fn handle_daemon_msg(
             kv_store.cleanup_request_id(&request_id.to_string());
             flow_sessions.release(&request_id);
             far_runs.release(&request_id, models);
+            block_drafts.release(&request_id);
             let after = kv_store.occupancy().allocated_bytes;
             if after < before {
                 tracing::debug!(
@@ -10676,16 +11392,25 @@ mod local_speculation_tests {
             .collect();
         let rows = drafter.context_rows(&kept).unwrap();
         let block = drafter.block_size() - 1;
+        // `SWARMLLM_GUESS_TEST_CONTEXT`: `reply` — the reply's own rows only
+        // (a split's tail that never saw the prompt's, #428 stage 3); a
+        // number — that many rows before each position; else every row.
+        let first_row = |p: usize| match std::env::var("SWARMLLM_GUESS_TEST_CONTEXT").as_deref() {
+            Ok("reply") => prompt.len().min(p),
+            Ok(n) => n.parse::<usize>().map_or(0, |n| p.saturating_sub(n)),
+            Err(_) => 0,
+        };
         let (mut anchors, mut kept_total, mut whole) = (0usize, 0usize, 0usize);
         let mut by_anchor = Vec::new();
         for p in prompt.len()..text.len() - block {
             let mut cache = crate::inference::split::BlockCache::default();
-            let context = rows.narrow(1, 0, p).unwrap();
+            let from = first_row(p);
+            let context = (p > from).then(|| rows.narrow(1, from, p - from).unwrap());
             let guesses = drafter
                 .draft(
                     &model,
                     &mut cache,
-                    Some(&context),
+                    context.as_ref(),
                     text[p],
                     block,
                     p + block + 1,

@@ -635,6 +635,33 @@ impl SplitModel {
         )
     }
 
+    /// A speculative check — logits at every position, as
+    /// [`Self::forward_verify_all_positions`] (`skip_embedding` as its
+    /// `_pre_embedded` sibling) — that keeps the hidden states `capture`
+    /// names: a block drafter's rows, for the computer that drafts (#428
+    /// stage 3).
+    pub fn forward_verify_keeping(
+        &mut self,
+        input: &Tensor,
+        index_pos: usize,
+        kv_cache_store: &KvCacheStore,
+        request_id: &str,
+        skip_embedding: bool,
+        capture: Capture<'_>,
+    ) -> Result<ForwardOut, SwarmError> {
+        self.forward_inner_impl(
+            input,
+            index_pos,
+            kv_cache_store,
+            request_id,
+            None,
+            Some(capture),
+            skip_embedding,
+            true,
+            None,
+        )
+    }
+
     /// Forward pass with pre-embedded hidden states (local embedding privacy).
     ///
     /// The input tensor is already in hidden-state space (shape [1, seq, hidden_dim])
@@ -701,6 +728,34 @@ impl SplitModel {
         skip_embedding: bool,
         chunk_tokens: usize,
     ) -> Result<Tensor, SwarmError> {
+        self.forward_prompt_in_chunks_keeping(
+            input,
+            index_pos,
+            kv_cache_store,
+            request_id,
+            lora_adapter,
+            skip_embedding,
+            chunk_tokens,
+            None,
+        )
+        .map(|(out, _)| out)
+    }
+
+    /// [`Self::forward_prompt_in_chunks`], keeping the hidden states `capture`
+    /// names: each layer's last `capture.last` positions of the WHOLE pass,
+    /// however it was cut — a block drafter's rows (#428 stage 3).
+    #[allow(clippy::too_many_arguments)]
+    pub fn forward_prompt_in_chunks_keeping(
+        &mut self,
+        input: &Tensor,
+        index_pos: usize,
+        kv_cache_store: &KvCacheStore,
+        request_id: &str,
+        lora_adapter: Option<&LoraAdapter>,
+        skip_embedding: bool,
+        chunk_tokens: usize,
+        capture: Option<Capture<'_>>,
+    ) -> Result<ForwardOut, SwarmError> {
         let ceiling = |model: &Self, at: usize| match chunk_tokens {
             0 => 0,
             n => crate::inference::prefill_pacer::prompt_chunk_ceiling(n, model.prompt_reader(at)),
@@ -714,21 +769,22 @@ impl SplitModel {
         // refused every honest tree and failed the reply (security review of
         // #134).
         if first_chunk == 0 || seq_len <= first_chunk || self.draft_tree.is_some() {
-            let (out, _) = self.forward_inner_impl(
+            return self.forward_inner_impl(
                 input,
                 index_pos,
                 kv_cache_store,
                 request_id,
                 lora_adapter,
-                None,
+                capture,
                 skip_embedding,
                 false,
                 None,
-            )?;
-            return Ok(out);
+            );
         }
         let last_segment = self.is_last();
         let mut outputs: Vec<Tensor> = Vec::new();
+        // Each chunk's last rows per layer: the pass's last are among them.
+        let mut kept: HashMap<usize, Vec<Tensor>> = HashMap::new();
         let mut start = 0usize;
         while start < seq_len {
             // The whole point of the chunking: a place to notice the client has
@@ -757,17 +813,28 @@ impl SplitModel {
                 .narrow(1, start, len)
                 .and_then(|t| t.contiguous())
                 .map_err(SwarmError::internal)?;
-            let (out, _) = self.forward_inner_impl(
+            let (out, caught) = self.forward_inner_impl(
                 &part,
                 index_pos + start,
                 kv_cache_store,
                 request_id,
                 lora_adapter,
-                None,
+                capture,
                 skip_embedding,
                 false,
                 None,
             )?;
+            // Held to the capture chunk by chunk: kept whole to the pass's
+            // end, a long prompt's rows of every asked layer were a buffer per
+            // layer the prompt's size (security review, 2026-11-08).
+            for (layer, rows) in caught {
+                let pieces = kept.entry(layer).or_default();
+                pieces.push(rows);
+                if let (Some(capture), true) = (capture.as_ref(), pieces.len() > 1) {
+                    let joined = Tensor::cat(pieces, 1).map_err(SwarmError::internal)?;
+                    *pieces = vec![capture.kept_of(&joined)?];
+                }
+            }
             if last_segment {
                 // Only the final position's logits are the answer; an earlier
                 // chunk's are the cost of having somewhere to stop.
@@ -776,10 +843,19 @@ impl SplitModel {
             outputs.push(out);
             start += len;
         }
-        if outputs.len() == 1 {
-            return Ok(outputs.pop().expect("one output"));
+        let mut caught = HashMap::with_capacity(kept.len());
+        if let Some(capture) = capture {
+            for (layer, pieces) in kept {
+                let rows = Tensor::cat(&pieces, 1).map_err(SwarmError::internal)?;
+                caught.insert(layer, capture.kept_of(&rows)?);
+            }
         }
-        Tensor::cat(&outputs, 1).map_err(SwarmError::internal)
+        let out = if outputs.len() == 1 {
+            outputs.pop().expect("one output")
+        } else {
+            Tensor::cat(&outputs, 1).map_err(SwarmError::internal)?
+        };
+        Ok((out, caught))
     }
 
     /// Forward pass with optional LoRA adapter applied per-layer.

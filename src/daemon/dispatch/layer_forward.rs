@@ -631,6 +631,7 @@ pub(super) async fn handle_layer_forward(
                         draft_tree_from: draft_tree_from_onward,
                         // Never handed on: a look-ahead goes only to a lone far segment (#382).
                         stream_lookahead: None,
+                        block_rows_wanted: None,
                         stream_branch: None,
                     };
                     tracing::info!(
@@ -1648,6 +1649,7 @@ mod chaining_tests {
             draft_parents: Vec::new(),
             draft_tree_from: None,
             stream_lookahead: None,
+            block_rows_wanted: None,
             stream_branch: None,
         };
         let (tx, mut rx) = tokio::sync::mpsc::channel(8);
@@ -1784,6 +1786,7 @@ mod chaining_tests {
             draft_parents: Vec::new(),
             draft_tree_from: None,
             stream_lookahead: None,
+            block_rows_wanted: None,
             stream_branch: None,
         };
         let (tx, mut rx) = tokio::sync::mpsc::channel(8);
@@ -2137,6 +2140,7 @@ mod tests {
             draft_parents: Vec::new(),
             draft_tree_from: None,
             stream_lookahead: None,
+            block_rows_wanted: None,
             stream_branch: None,
         };
         let (tx, mut rx) = mpsc::channel(4);
@@ -2292,6 +2296,7 @@ mod tests {
             draft_parents: Vec::new(),
             draft_tree_from: None,
             stream_lookahead: Some(4),
+            block_rows_wanted: None,
             stream_branch: None,
         };
         let mut answer = crate::types::LayerResult::error(uuid::Uuid::nil(), String::new());
@@ -2345,6 +2350,7 @@ mod tests {
             draft_parents: Vec::new(),
             draft_tree_from: None,
             stream_lookahead: Some(4),
+            block_rows_wanted: None,
             stream_branch: Some(crate::types::StreamBranch::Spare {
                 of: 2,
                 kept: 1,
@@ -2513,6 +2519,7 @@ mod forward_positions_tests {
             draft_parents: Vec::new(),
             draft_tree_from: None,
             stream_lookahead: None,
+            block_rows_wanted: None,
             stream_branch: None,
         };
         let piece = turn_wait(&f);

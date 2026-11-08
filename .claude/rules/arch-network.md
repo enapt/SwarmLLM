@@ -135,6 +135,12 @@ Streaming rr sends MUST set `SendDirectMessage.delivery_request_id = Some(uuid)`
 
 → `docs/invariants/network.md` § "A tensor forward is acknowledged on receipt; a result is always its own request"
 
+## A block drafter's rows come back with the answer, asked for and bounded (2026-11-08, #428 stage 3)
+
+A forward to a segment running a layer the coordinator's block drafter reads carries `LayerForward::block_rows_wanted` (`0x14`, after every other trailer, AAD-bound: the layers, ≤ `MOST_BLOCK_ROW_LAYERS`, and how many of the forward's last rows at most), gated at the SENDER on `features::SENDS_BLOCK_ROWS` (bit 39) — only **`PipelineExecutor::block_rows_wanted_for`** builds one. The answer's `LayerResult::block_rows` (`0x0B`, after `0x0A`) carries bf16 rows of only the asked layers the segment runs, never more rows than the result covers (`model_worker` capture; a walking tail only the positions it KEPT), bounded on read by `MOST_BLOCK_ROW_BYTES`; a cut-short, empty or over-bound trailer is refused, never read as absent. The coordinator holds each answer to what it asked of THAT segment (**`BlockRowsAsk::note`**, REQUIRED segment and rows asked at every site: only layers the segment runs and the reply asked, each once, no more rows than its forward asked — else dropped) and again before the drafter reads them (`block_rows_for_the_drafter`: sizes must divide into rows, each asked layer's run must reach the reply without a gap, a first feed reaches back `PROMPT_WINDOW` rows at most). **The serving side never holds more on its device than the ask allows**: a chunked prompt pass folds each chunk's rows to the ask as it goes (`forward_prompt_in_chunks_keeping`), and a check wider than the rows asked keeps none (security review 2026-11-08: a greedy ask could out-of-memory a serving card and pin its model to the processor). While a reply asks for rows nothing chains — an onward hop drops the ask.
+
+→ `docs/invariants/network.md` § "A block drafter's rows come back with the answer"
+
 ## A split token crosses on the pipeline stream, keyed by (request, peer) (2026-09-27)
 
 `inference.persistent_pipeline_stream` is measured faster but stays OFF (no receipt ACK, #133). Streams are keyed by **(request, peer)**. Measure per-message cost on a REAL link; run the failover rigs before any default flip.

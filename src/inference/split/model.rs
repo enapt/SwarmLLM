@@ -38,6 +38,16 @@ pub struct SplitModel {
     /// A block drafter beside the whole model (#428), attached after the
     /// load from the model's directory (`SplitModel::attach_block_drafter`).
     pub(super) block_drafter: Option<super::block_drafter::BlockDrafter>,
+    /// The model's output head, read for a block drafter beside a FIRST
+    /// segment that does not end the model (#428): the drafter's block is
+    /// read through it, never a forward of this segment — `output` stays
+    /// `None`, so the segment is not taken for the model's end (`is_last`).
+    /// Set by the shard loader only where the drafter's file is here and the
+    /// part holding the head is too.
+    pub(super) drafter_head: Option<QMatMul>,
+    /// What `drafter_head` holds, counted with the drafter when it is
+    /// attached ([`Self::attach_block_drafter`]); 0 without one.
+    pub(super) drafter_head_bytes: u64,
     /// Additive causal mask for the no-prefix case, cached at its EXACT size.
     /// Tuple is `(query_len, mask)`; `None` means nothing cached yet. See
     /// `SplitModel::mask` for why this is not a narrowed view of a bigger one.

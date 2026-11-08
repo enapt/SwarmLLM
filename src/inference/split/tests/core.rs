@@ -1766,6 +1766,62 @@ fn a_prompt_pass_in_chunks_matches_the_whole_pass() {
     }
 }
 
+/// A split's block drafter reads the prompt pass's last rows of each layer it
+/// asks for (#428 stage 3), however the worker cut the pass: in 4-position
+/// chunks (4, 4, 3) the six rows kept span two chunks, and equal the one-shot
+/// pass's; a layer not asked for is not kept.
+#[test]
+fn a_chunked_prompt_pass_keeps_the_same_last_rows_as_the_whole_pass() {
+    let hidden_dim = 128;
+    let mut model = make_test_split_model(3, hidden_dim);
+    let kv_store = KvCacheStore::new(std::time::Duration::from_secs(600));
+    let input = Tensor::randn(0f32, 1.0, (1, 11, hidden_dim), &Device::Cpu).unwrap();
+    let layers: std::collections::HashSet<usize> = [0usize, 2].into_iter().collect();
+    let capture = Capture {
+        layers: &layers,
+        last: 6,
+    };
+    let (_, whole) = model
+        .forward_prompt_in_chunks_keeping(
+            &input,
+            0,
+            &kv_store,
+            "whole",
+            None,
+            false,
+            0,
+            Some(capture),
+        )
+        .unwrap();
+    let (_, chunked) = model
+        .forward_prompt_in_chunks_keeping(
+            &input,
+            0,
+            &kv_store,
+            "chunked",
+            None,
+            false,
+            4,
+            Some(capture),
+        )
+        .unwrap();
+    for layer in [0usize, 2] {
+        assert_eq!(whole[&layer].dims(), &[1, 6, hidden_dim], "layer {layer}");
+        assert_eq!(chunked[&layer].dims(), &[1, 6, hidden_dim], "layer {layer}");
+        assert_tensors_close(
+            &chunked[&layer],
+            &whole[&layer],
+            1e-3,
+            "a chunked pass keeps the one-shot pass's last rows",
+        );
+    }
+    assert!(!whole.contains_key(&1) && !chunked.contains_key(&1));
+    let (_, none) = model
+        .forward_prompt_in_chunks_keeping(&input, 0, &kv_store, "none", None, false, 4, None)
+        .unwrap();
+    assert!(none.is_empty(), "nothing kept unasked");
+}
+
 /// The reason the chunks exist: a request cancelled while its prompt pass is
 /// running stops at the next chunk boundary instead of finishing the prompt.
 /// Control: the same pass with the oracle saying "not cancelled" completes.

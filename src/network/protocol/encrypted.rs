@@ -172,6 +172,9 @@ pub fn build_layer_forward_aad(forward: &LayerForward) -> Vec<u8> {
     // The branch trailer (0x13): whether this check is a spare restart, or
     // built on one, and which (#381).
     super::layer_forward::append_stream_branch_trailer(&mut aad, forward);
+    // The block-rows trailer (0x14): which layers' rows the segment answers
+    // with, for the coordinator's block drafter (#428).
+    super::layer_forward::append_block_rows_wanted_trailer(&mut aad, forward);
 
     aad
 }
@@ -289,6 +292,8 @@ pub fn encode_layer_forward_encrypted(
     super::layer_forward::append_draft_tree_flow_trailer(&mut buf, forward);
     super::layer_forward::append_stream_lookahead_trailer(&mut buf, forward);
     super::layer_forward::append_stream_branch_trailer(&mut buf, forward);
+    super::layer_forward::block_rows_wanted_fit(forward)?;
+    super::layer_forward::append_block_rows_wanted_trailer(&mut buf, forward);
 
     Ok(buf)
 }
@@ -525,6 +530,8 @@ pub fn decode_layer_forward_encrypted(
     )?;
     let stream_lookahead = super::layer_forward::read_stream_lookahead_trailer(data, &mut cursor)?;
     let stream_branch = super::layer_forward::read_stream_branch_trailer(data, &mut cursor)?;
+    let block_rows_wanted =
+        super::layer_forward::read_block_rows_wanted_trailer(data, &mut cursor)?;
     let _ = cursor;
 
     let mut forward = LayerForward {
@@ -558,6 +565,7 @@ pub fn decode_layer_forward_encrypted(
         draft_tree_from,
         stream_lookahead,
         stream_branch,
+        block_rows_wanted,
     };
 
     // Reconstruct AAD from the parsed forward via the helper. This MUST
@@ -610,6 +618,7 @@ mod tests {
             draft_parents: Vec::new(),
             draft_tree_from: None,
             stream_lookahead: None,
+            block_rows_wanted: None,
             stream_branch: None,
         }
     }
@@ -1000,6 +1009,47 @@ mod tests {
         )
         .unwrap();
         assert_eq!(decoded.stream_branch, None, "absent reads absent");
+    }
+
+    /// A block drafter's ask (#428 stage 3) decides which layers' rows the
+    /// segment sends back and how many, so it is sealed: changed, added or
+    /// dropped on the way, the frame no longer opens.
+    #[test]
+    fn a_block_drafters_ask_is_sealed_and_survives_the_encrypted_frame() {
+        use crate::types::BlockRowsWanted;
+        let mut orig = base_forward();
+        orig.spec_logits_requested = true;
+        orig.draft_tokens = vec![11, 12];
+        orig.block_rows_wanted = Some(BlockRowsWanted {
+            layers: vec![1, 8, 30],
+            most_rows: 3,
+        });
+        let bytes = encode_layer_forward_encrypted(&orig, vec![0u8; 32]).unwrap();
+        let (decoded, _sealed, aad) = decode_layer_forward_encrypted(&bytes).unwrap();
+        assert_eq!(decoded.block_rows_wanted, orig.block_rows_wanted);
+        assert_eq!(aad, build_layer_forward_aad(&orig));
+        let mut other = orig.clone();
+        other.block_rows_wanted.as_mut().unwrap().most_rows = 64;
+        assert_ne!(
+            build_layer_forward_aad(&other),
+            aad,
+            "a relay must not change how many rows come back"
+        );
+        other.block_rows_wanted.as_mut().unwrap().most_rows = 3;
+        other.block_rows_wanted.as_mut().unwrap().layers = vec![1, 8, 31];
+        assert_ne!(build_layer_forward_aad(&other), aad, "nor which layers");
+        other.block_rows_wanted = None;
+        assert_ne!(build_layer_forward_aad(&other), aad, "nor drop it");
+        let mut none = orig.clone();
+        none.block_rows_wanted = None;
+        let (decoded, _, _) = decode_layer_forward_encrypted(
+            &encode_layer_forward_encrypted(&none, vec![0u8; 32]).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(decoded.block_rows_wanted, None, "absent reads absent");
+        let mut empty = orig;
+        empty.block_rows_wanted.as_mut().unwrap().layers.clear();
+        assert!(encode_layer_forward_encrypted(&empty, vec![0u8; 32]).is_err());
     }
 
     #[test]

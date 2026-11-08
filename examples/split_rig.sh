@@ -85,6 +85,11 @@
 #          `speculative_decoding` and `decentralized_spec_decoding` on; A picks it
 #          itself (or name it with `draft_model`). MODEL must share its vocabulary,
 #          e.g. MODEL=qwen2.5-coder-7b-instruct-q4-k-m DRAFTER=qwen2.5-0.5b-instruct-fp16.
+#   (any mode) BLOCK_DRAFTER=<path to block_drafter.gguf> puts a DFlash block drafter
+#          beside A's parts of MODEL (#428 stage 3) — A must hold part 0 and the part
+#          with the output head (`SHARDS_A=0,1,9` on Qwen3.5-9B). A's first segment
+#          then guesses whole blocks from rows the segments send back. Off in one arm:
+#          ENV_A=SWARMLLM_BLOCK_DRAFTER=0.
 #   softunload  A holds the WHOLE model, larger than its card, with auto-manage at
 #          its defaults (a 30 s cycle); B holds every part but the first and last,
 #          on the processor. One question, two of A's prune passes, a second
@@ -784,6 +789,11 @@ if [ -n "${DRAFTER:-}" ]; then
   [ -f "$DSRC/manifest.json" ] || { echo "no manifest for drafter $DRAFTER in $MODELS_DIR"; exit 2; }
   mkdir -p "$BASE/A/models/$DRAFTER"
   for f in "$DSRC"/*; do ln "$f" "$BASE/A/models/$DRAFTER/" || { echo "cannot link $f"; exit 2; }; done
+fi
+if [ -n "${BLOCK_DRAFTER:-}" ]; then
+  [ -f "$BLOCK_DRAFTER" ] || { echo "no block drafter at $BLOCK_DRAFTER"; exit 2; }
+  ln "$BLOCK_DRAFTER" "$BASE/A/models/$MODEL/block_drafter.gguf" \
+    || cp "$BLOCK_DRAFTER" "$BASE/A/models/$MODEL/block_drafter.gguf" || exit 2
 fi
 if [ "$MODE" = peerload ]; then
   # What keeps B busy: another model, held whole there.

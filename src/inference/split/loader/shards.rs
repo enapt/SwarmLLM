@@ -286,6 +286,13 @@ impl SplitModel {
             );
         }
 
+        // A block drafter beside a first segment reads its block through the
+        // model's output head (#428), which only the model's end loads: read
+        // here where the part holding it is too, whole, before the content
+        // is handed to the load.
+        let drafter_head = (is_first && !is_last)
+            .then(|| drafter_head_info(model_dir, &ct, &reader))
+            .flatten();
         // This range's own placement where the daemon sent one
         // (`split::placement_of`, #265), else the spawn's.
         let placement = crate::inference::split::placement_of(layer_start, layer_end);
@@ -326,8 +333,50 @@ impl SplitModel {
             read_mb = read_bytes / (1024 * 1024),
             "DIAG: split load timed"
         );
-        model
+        let mut model = model?;
+        if let Some(info) = drafter_head {
+            let bytes = crate::inference::split::tensor_byte_size(&info);
+            match info
+                .read(&mut reader, tensor_data_offset, &candle_core::Device::Cpu)
+                .map_err(SwarmError::internal)
+                .and_then(|t| super::super::QMatMul::from_qtensor(t).map_err(SwarmError::internal))
+            {
+                Ok(head) => {
+                    model.drafter_head = Some(head);
+                    model.drafter_head_bytes = bytes;
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "block drafter: the output head could not be read")
+                }
+            }
+        }
+        Ok(model)
     }
+}
+
+/// The output head's entry where a block drafter beside a first segment can
+/// read it (#428): the drafter's file is in `model_dir`, the switch is on, and
+/// a part held here covers the whole tensor.
+fn drafter_head_info(
+    model_dir: &Path,
+    ct: &gguf_file::Content,
+    reader: &ShardReader,
+) -> Option<gguf_file::TensorInfo> {
+    if !super::super::block_drafter::block_drafter_on()
+        || !model_dir
+            .join(super::super::block_drafter::BLOCK_DRAFTER_FILE)
+            .is_file()
+    {
+        return None;
+    }
+    let info = ct.tensor_infos.get("output.weight")?;
+    let size = crate::inference::split::tensor_byte_size(info);
+    let (_, _, held) = reader.find_shard(ct.tensor_data_offset + info.offset)?;
+    (held >= size).then(|| gguf_file::TensorInfo {
+        ggml_dtype: info.ggml_dtype,
+        shape: info.shape.clone(),
+        offset: info.offset,
+    })
 }
 
 /// Which tensor should the load-time integrity probe read?

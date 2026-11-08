@@ -5,6 +5,7 @@
 //! The `PipelineExecutor` struct lives here; per-phase methods live in sibling
 //! files (`local`, `distributed`, `vision`, `prompt`, `tensor_parallel`).
 
+pub(crate) mod block_draft;
 pub(crate) mod distributed;
 mod dsd;
 mod dsd_flow;
@@ -489,6 +490,7 @@ pub(super) fn build_spec_verify_forward(
         draft_parents: Vec::new(),
         draft_tree_from: None,
         stream_lookahead: None,
+        block_rows_wanted: None,
         stream_branch: None,
     }
 }
@@ -542,10 +544,15 @@ pub(super) async fn forward_verify_through_segments(
     // unchained here, and the caller passes its `chaining_disabled` so the
     // rest of the request is not chained again.
     chain_failed: &mut bool,
+    // While the reply drafts by block (#428 stage 3): every segment running a
+    // layer the drafter reads is asked for its rows — a peer only where it
+    // advertises `features::SENDS_BLOCK_ROWS` — and they are kept here.
+    // Nothing chains while it is set: an onward hop drops the ask.
+    rows: Option<&block_draft::BlockRowsAsk>,
 ) -> Result<VerifyReply, SwarmError> {
     let num_segments = segments.len();
     let local_node_id = shared_state.identity.node_id().clone();
-    let mut may_chain = may_chain;
+    let mut may_chain = may_chain && rows.is_none();
     // Segments up to this index re-run a chained run that failed: the hops
     // that ran wrote this check's rows, so each is cut back to `index_pos`.
     let mut rerun_through: Option<usize> = None;
@@ -651,6 +658,17 @@ pub(super) async fn forward_verify_through_segments(
                 None,
             );
             forward.draft_parents = tree_parents.to_vec();
+            // Every position this check reads: a walking tail sends only the
+            // ones it kept.
+            forward.block_rows_wanted = rows
+                .filter(|_| {
+                    local
+                        || shared_state.peer_advertises_feature(
+                            &segment.node_id,
+                            swarmllm_types::node::features::SENDS_BLOCK_ROWS,
+                        )
+                })
+                .map(|ask| ask.wanted(verify_tokens.len() as u32));
             if !chain.is_empty() {
                 forward.chain = chain.clone();
                 // The reply-to the tail answers (the `0x07` trailer), as on a
@@ -850,6 +868,9 @@ pub(super) async fn forward_verify_through_segments(
                     SwarmError::Inference(format!("spec verify segment {idx}: {msg}"))
                 }),
             );
+        }
+        if let Some(ask) = rows {
+            ask.note(&result, segment.layer_range, verify_tokens.len() as u32);
         }
 
         if is_last {
@@ -1119,6 +1140,7 @@ pub(super) fn build_kv_truncate_forward(
         draft_parents: Vec::new(),
         draft_tree_from: None,
         stream_lookahead: None,
+        block_rows_wanted: None,
         stream_branch: None,
     }
 }
@@ -1704,6 +1726,12 @@ pub struct PipelineExecutor {
     /// once before the prompt pass; every forward of that pass carries it, to
     /// every segment — each one's layers need it.
     pub(super) image_spans: Vec<crate::types::PromptSpan>,
+    /// While this reply drafts by block (#428 stage 3): what every forward to
+    /// a segment running a layer the drafter reads asks for, and the rows they
+    /// sent back that it has not yet taken in. Set and cleared around the
+    /// n-gram loop (`ngram_only_spec`); while set, nothing chains — an onward
+    /// hop drops the ask.
+    pub(super) block_rows: Option<block_draft::BlockRowsAsk>,
 }
 
 impl PipelineExecutor {
@@ -1726,6 +1754,7 @@ impl PipelineExecutor {
             hand_off_emitted: 0,
             prompt_cache_hint: None,
             image_spans: Vec::new(),
+            block_rows: None,
         }
     }
 
@@ -1745,6 +1774,7 @@ impl PipelineExecutor {
         });
         !switched_off
             && !self.chaining_disabled
+            && self.block_rows.is_none()
             && self.shared_state.cfg().inference.pipeline_chaining
     }
 
@@ -4009,6 +4039,7 @@ mod tests {
             crate::inference::process_pool::Requester::Owner,
             false,
             &mut false,
+            None,
         )
         .await;
         assert!(result.is_err(), "closed-channel send must surface as Err");
@@ -4103,6 +4134,7 @@ mod tests {
                 crate::inference::process_pool::Requester::Owner,
                 false,
                 &mut false,
+                None,
             ),
         )
         .await
@@ -4215,6 +4247,7 @@ mod tests {
                 crate::inference::process_pool::Requester::Owner,
                 false,
                 &mut false,
+                None,
             )
             .await
         });
@@ -4675,6 +4708,7 @@ mod failover_retarget_tests {
                 crate::inference::process_pool::Requester::Owner,
                 false,
                 &mut false,
+                None,
             )
             .await;
         });
@@ -4727,6 +4761,7 @@ mod failover_retarget_tests {
                 crate::inference::process_pool::Requester::Owner,
                 false,
                 &mut false,
+                None,
             )
             .await;
         });
@@ -4792,6 +4827,7 @@ mod failover_retarget_tests {
                 crate::inference::process_pool::Requester::Owner,
                 may_chain,
                 &mut false,
+                None,
             )
             .await;
         });
@@ -4956,6 +4992,7 @@ mod failover_retarget_tests {
                     crate::inference::process_pool::Requester::Owner,
                     true,
                     &mut chain_failed,
+                    None,
                 )
                 .await;
                 chain_failed
@@ -5432,6 +5469,7 @@ mod peer_error_recovery_tests {
             refusal: None,
             answers_step: None,
             prompt_blocks_stored: None,
+            block_rows: None,
             served_us: None,
         }
     }
