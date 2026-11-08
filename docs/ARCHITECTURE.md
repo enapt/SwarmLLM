@@ -802,7 +802,10 @@ embedding from a table kept in the machine's memory), `stand_in.rs` (what stands
 for the processor's run while a card/processor split's card guesses alone: a
 sliding-window kernel ridge fitted from the reply's own real forwards), `mtp.rs`
 (a Qwen 3.5/3.6/3.8 file's next-token-prediction block, loaded beside a whole
-model as a guess head: its weights, its per-request cache, its forward).
+model as a guess head: its weights, its per-request cache, its forward),
+`block_drafter.rs` (a DFlash block drafter, `block_drafter.gguf` beside a whole
+model: reads the model's own layer outputs, guesses a whole block in ONE forward
+through the model's token table and output head, #428).
 
 ```
 Client → API Server → InferenceRouter → Pipeline Assembly

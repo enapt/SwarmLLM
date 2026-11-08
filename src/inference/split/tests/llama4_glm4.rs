@@ -470,6 +470,7 @@ fn test_llama4_moe_layer_forward() {
         decode_graph: Default::default(),
         prompt_room: Default::default(),
         mtp: None,
+        block_drafter: None,
         stand_in_prior: None,
         grammar_vocab: Default::default(),
     };

@@ -194,6 +194,7 @@ fn make_test_split_model_impl(
         decode_graph: Default::default(),
         prompt_room: Default::default(),
         mtp: None,
+        block_drafter: None,
         stand_in_prior: None,
         grammar_vocab: Default::default(),
     }
@@ -300,6 +301,7 @@ pub(super) fn make_gqa_test_model(
         decode_graph: Default::default(),
         prompt_room: Default::default(),
         mtp: None,
+        block_drafter: None,
         stand_in_prior: None,
         grammar_vocab: Default::default(),
     }
@@ -466,6 +468,7 @@ pub(super) fn make_deepseek_test_model(hidden_dim: usize) -> SplitModel {
         decode_graph: Default::default(),
         prompt_room: Default::default(),
         mtp: None,
+        block_drafter: None,
         stand_in_prior: None,
         grammar_vocab: Default::default(),
     }

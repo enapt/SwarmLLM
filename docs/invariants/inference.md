@@ -8221,3 +8221,78 @@ reaches a card, and outside any capture (a device read there would be a driver c
 `arch-inference.md` § CUDA graphs). A refusal is the forward's error, worded as the malformed
 payloads beside it are. Test `a_forward_naming_a_token_the_table_has_no_row_for_is_refused`
 (red with the range check off).
+
+## A block drafter (2026-11-08, FUTURE_WORK #428)
+
+**Why.** #427 measured every split of the popular models at ONE token a round
+trip (1.7-5.6 tok/s): none of their families reads a drafter's tree, and a
+separate drafter is refused for recurrent targets. A DFlash drafter (arXiv
+2602.06036, z-lab) guesses a whole block in ONE forward conditioned on the
+target's own hidden states, so a check carries 4-6 kept tokens where one lands
+now — first on one computer (stage 1, this section), then at a split's far end.
+
+**Prior art, read before building.** z-lab's `dflash/model.py` (read at
+`95c8aeca`) and llama.cpp's `draft-dflash` (`src/models/dflash.cpp`,
+`common/speculative.cpp`, `conversion/qwen.py` `DFlashModel`). What each part
+took from them:
+- the context is `hidden_states[id + 1]` for each `target_layer_ids` entry —
+  the OUTPUT of layer `id`; llama.cpp writes `id + 1` and reads that layer's
+  INPUT, the same rows. The loader subtracts one.
+- keys and values of every drafter layer read cat(context, block); the context
+  is NOT normed by the layer's input norm (both references), the queries come
+  from the block alone, `k_norm` is on every key.
+- the drafter has no token table or head of its own (Qwen3.5-9B-DFlash: 69
+  tensors, none of them) — llama.cpp takes the target's unless the file
+  carries its own, and so does this.
+- **the attention rule is where they differ**: llama.cpp attends both ways
+  everywhere unless the GGUF writes `dflash.attention.causal`; z-lab's
+  reference since `c2394722` (2026-08-17) makes `sliding_attention` layers
+  one-way when the config has no `is_causal` (both ways at `7d2ea1e9`, April).
+  Qwen3.5-9B-DFlash has five sliding layers and one full, and no `is_causal`.
+  Both rules are built; z-lab's is the default (measured below),
+  `SWARMLLM_BLOCK_DRAFTER_CAUSAL=none` gives llama.cpp's.
+- the mask is z-lab's `_attention_mask` rule, compared over shapes in
+  `a_blocks_mask_is_the_references`.
+
+**Pricing.** A draft is one forward whatever it guesses, so the per-guess
+pricing of the guess head (`best_gamma_beside_a_step`) would buy a few guesses
+where the block pays: `best_gamma_beside_a_step_per_round` charges the round
+once (`a_draft_paid_once_a_round_is_not_priced_per_guess`).
+
+**Memory.** Its weights and its whole cache come off the conversation budget
+of the device the model's KV lives on, refused past a quarter — the MTP head's
+rule; no planner charges either.
+
+**Measured (stage 1, 2026-11-08)** — Qwen3.5-9B Q4_K_M on this laptop's
+processor with `z-lab/Qwen3.5-9B-DFlash` as llama.cpp converts it (1.69 GB),
+greedy, 96 tokens, chat prompts with thinking off:
+
+| | code: kept a block | story: kept a block |
+|---|---|---|
+| ours, a block every round, both ways | 5.50 | 1.16 |
+| ours, a block every round, z-lab's rule | 6.07 | 1.16 |
+| llama.cpp `draft-dflash` (both ways), its own reply | 6.67 (92 of 207 guessed) | 1.32 (56 of 636) |
+| ONE fixed reply, 81 positions, both ways | 5.98 (9 blocks whole) | 1.30 |
+| ONE fixed reply, 81 positions, z-lab's rule | **6.47** (13 whole) | **1.44** |
+
+- **The reply is the one read one token at a time** on every arm — both
+  rules, both prompts, raw and chat (`a_block_drafters_guesses_write_the_reply_read_one_token_at_a_time`,
+  with its near-tie check). llama.cpp's report of greedy output parting on
+  qwen35moe targets (#31472) does not happen here.
+- **The rule was chosen on the fixed reply, not the free runs**: a free run's
+  reply differs per arm, so its count compares two texts. Over one reply
+  (`a_block_drafters_acceptance_over_a_fixed_reply`, a fresh drafter cache
+  per position, the gotcha #811 shape) z-lab's rule keeps 8-11% more on both.
+- **A processor's price**: llama.cpp reads 16 positions in 624 ms (pp16
+  25.6 ± 1.1 t/s, 8 threads), 8 in 400, 4 in 214, against 168 ms a step
+  (tg 5.96) — a block keeping 6.5 can pay on code even here, a story's 1.4
+  cannot; llama.cpp, drafting every round, ran 3.94 tok/s on code and 1.09 on
+  the story against 5.96 plain. Pricing a round and declining is the point
+  on a processor; a card's check (memory-bound) and a split's round trip
+  are where a block pays most.
+- **No speed of ours is in this table**: `cargo dev-test` builds the crate
+  at opt-level 0 (its dependencies at 2), so its check (~165 ms per position,
+  linear) and draft (340-430 ms) are not the release build's.
+- **A price fitted on one cold check declined every later round** (92 of 92):
+  the block is now probed again after 8 declines, the gap doubling to 64 while
+  a probe does not pay — the n-gram's `probe_after`.

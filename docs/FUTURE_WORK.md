@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #428**). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #431**). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -2974,8 +2974,65 @@ What it changes:
   requests per model are not logged at info, and no endpoint exposes `model_use`. The 83 requests of 11-01 → 11-07 were
   all test runs. Both are candidate work under this entry.
 
+**Measured 2026-11-08 01:00-01:57Z** (live node on v0.3.278, one ask at a time, `~/swarmllm-gate-common/ask_tier.py`
+via a loop; records `~/swarmllm-gate/tier427/1108a/run.log`): a 26-84-token question twice (32 and 128 tokens), then a
+~4,100-token prompt (128 tokens). "Pieces" equalled tokens on every split — ONE token a round trip.
+
+| Model | Route | Reply tok/s | ~4.1K prompt: first token (prompt tok/s) / reply |
+|---|---|---|---|
+| Qwen3.8-27B | AU whole | 4.7-5.3 | **failed** after 573 s: AU sent no first token in its 600 s; the retry had no holder for 51-63 |
+| Qwen3.6-27B | AU whole | 7.4-7.5 | 432 s (9.5) / 1.7 |
+| Qwen3.6-35B-A3B | AU whole | 15-32 | 29 s (141) / 27.7 |
+| Ornith-1.5-35B-A3B | split IT ↔ AU | 2.5-2.8 | 26 s (159) / 2.3 |
+| Gemma 4 31B | split here ↔ AU ↔ here | 1.7-1.9 | 33 s (132) / 1.7 |
+| Gemma 4 26B-A4B | split here ↔ AU ↔ here | 5.3-5.6 | **failed** in 3.4 s: the QUIC connection to AU died 260 ms into a 12.9 MB prompt-pass send (#429) |
+| Gemma 4 12B | split here ↔ AU ↔ here, then here | 4.3-4.8 | 11 s (389) / 4.0 |
+| gpt-oss-20b MXFP4 / Q4_K_M | here / AU whole | 20.5-21.5 / 36-44 | 39 s (104) / 24.4 · 25 s (159) / 33.1 |
+| Qwen3-14B | AU whole | 15.7-17.1 | 7.2 s (566) / 17.0 |
+| Qwen2.5-14B | split here ↔ US ↔ here, then here | 4.3-5.1 | 13 s (305) / 4.0 |
+| Qwen3-30B-A3B-2507 | AU whole | 29-53 | 21 s (193) / 22.5 |
+| Llama 3.3 70B | split here ↔ AU ↔ TH | 1.9-2.1 | 173 s (23) / 2.0 |
+
+What it says (the user, 11-08: a split that fails or is slow is the defect — never "prefer a whole holder"):
+- **Every split decodes one token a round trip, 1.7-5.6 tok/s**: none of these families reads a drafter's tree
+  (#428 is the fix: a block drafter at the far end, 4-5 tokens a round trip).
+- **Two splits failed on the long prompt, neither by a refusal** (node log traced 11-08): the Gemma 26B's
+  connection died on quinn's own assembler bug (#429); the 27B's whole-model hand-off waited out its 600 s
+  first-token budget on a computer reading a 27B's prompt at under ~7 tok/s (its sibling 3.6-27B: 9.5), and
+  the re-plan, the silent peer barred, found nobody for layers 51-63 — reported as "has gone"
+  (`ModelIncompleteInSwarm`) though the holder was there and only slow. A 4K prompt of a 27B is ~7 minutes on
+  ONE such computer; read across several in pieces it need not be (#430).
+
+#### #429 — A far split's connection dies on quinn's assembler bug ("too many gaps in stream buffer")
+`P1` · split reliability · **OPEN** — 2026-11-08 · history: #112 (the 0.11.17 regression, fixed by 0.11.18)
+
+2026-11-08 01:23:35Z: the Gemma 4 26B split's 4,298-token prompt pass sent 12.9 MB to Australia (~130 ms); 260 ms
+later the connection closed `INTERNAL_ERROR: too many gaps in stream buffer`, segment failover had no standby and the
+re-plan found no holder for 10-28 — the reply lost in 3.4 s. Once in the node log's ~8 days, on quinn-proto 0.11.18
+(the fix for #112). **Prior art** (quinn tracker, read 11-08): quinn-rs/quinn#2955 (open, 2026-10-26) — after ONE lost
+packet early in a burst, everything behind the gap is contiguous but `Assembler::defragment` keeps it as alternating
+large and small chunks (a retained chunk is never merged with its neighbours), so past `MAX_CHUNKS` (1024) the stream
+is refused with a single real gap; reproduced at 150 ms / 3% loss, 1 in 10-20 transfers of 180 MB. Fix in review:
+PR #2976 ("bound assembler gaps by the data buffered": each contiguous run coalesced into one buffer, the limit
+scaled with buffered bytes, 1024-8192); no release carries it (0.11.19, 2026-09-30, does not). **Next**: vendor
+quinn-proto with #2976's change (`[patch.crates-io]`, the pattern of `vendor/libp2p-quic`), a test that fails on
+0.11.18 with #2955's chunk state, and a guard that the patch is applied — rather than a smaller stream window
+(`max_stream_data` 10 MB caps a far link's speed) or a retry after the connection is gone.
+
+#### #430 — A long prompt read on ONE computer that cannot read it fast: no first token in 10 minutes
+`P2` · perf-split · **OPEN** — 2026-11-08 · history: #427 (measured), #171 (a prompt pass read in pieces)
+
+Qwen3.8-27B with a 4,110-token prompt (#427's table) was handed whole to the only machine holding every layer, whose
+card holds part of a 27B and processor the rest; it reads such a prompt at ~7-9.5 tok/s (Qwen3.6-27B there: 432 s),
+so the 600 s first-token budget ran out and the request failed. Open questions, each to be measured before a
+design: (a) the prompt price the search used for that hand-off (`ModelSpeed::prompt_ms_per_layer_byte`) against the
+time it took — a priced 7-minute prompt should have lost to a split; (b) whether a split's prompt pass overlaps its
+pieces across machines (machine A reading piece k+1 while B reads piece k — pipeline-parallel chunked prefill, as
+vLLM and SGLang run it) or reads them one machine at a time; (c) the report: a silent-but-present holder is not
+"has gone".
+
 #### #428 — Every popular model guesses 4-5 tokens a round trip: a DFlash drafter at the split's far end
-`P1` · perf-split · **OPEN** (stage 1 next) — 2026-11-08 · history: #427 (the measurement), #425 (the guess head), #411 (the flow)
+`P1` · perf-split · **OPEN** (stage 1 built and measured: the reply is exact, acceptance matches llama.cpp's; stage 3 — the far end — next) — 2026-11-08 · history: #427 (the measurement), #425 (the guess head), #411 (the flow)
 
 **What a user gets today** (#427's table, 2026-11-08 01:00-01:30Z, live node, one ask at a time): every split of
 the popular models decodes ONE token a round trip — Gemma 4 31B here↔Australia 1.7-1.9 tok/s, Gemma 4 26B-A4B
@@ -3015,9 +3072,20 @@ prompts, the reply read one token at a time; (2) DFlash 2 (dynamic convolutions 
 Qwen3.8-27B (`z-lab/Qwen3.8-27B-DFlash2-GGUF`); (3) features across a split and drafting at the far end, flowing
 with the check (#411's machinery); (4) Gemma 4 and gpt-oss drafters (windows, softcap, biases); (5) EAGLE-3 on the
 same plumbing (Llama 3.3 70B, Qwen3-32B); (6) fetching a target's drafter by its origin (≤ 2 GiB rule).
-Open questions: the causal flag of sliding drafter layers whose config lacks `is_causal` (reference code vs
-llama.cpp differ); llama.cpp reports greedy output parting from one-at-a-time on qwen35moe targets at 100%
-acceptance (#31472) — check ours against one-at-a-time, not only against llama.cpp.
+
+**Stage 1 — built and measured 2026-11-08** (`split::block_drafter`, `model_worker::BlockGuesses`; Qwen3.5-9B
+Q4_K_M on this laptop's processor, greedy, 96 tokens; the table is in `docs/invariants/inference.md` § "A block
+drafter"): the reply equals the one read one token at a time on every arm (both rules, code and story, raw and
+chat) — #31472's parting does not happen here. A block every round keeps 6.07 a round on code and 1.16 on a story
+against llama.cpp `draft-dflash`'s 6.67 and 1.32 on its own replies; over ONE fixed reply (81 positions) z-lab's
+rule for sliding layers keeps 6.47 / 1.44 against llama.cpp's both-ways 5.98 / 1.30, so it is the default
+(`SWARMLLM_BLOCK_DRAFTER_CAUSAL=none` = llama.cpp's). A round is priced once, not per guess
+(`best_gamma_beside_a_step_per_round`), and a declined block is probed again (a price fitted on one cold check had
+declined 92 rounds of 92). **Left in stage 1**: (i) speed — `cargo dev-test` builds the crate at opt-level 0, so no
+tok/s of ours is measured yet; its check cost ~165 ms per position, linear, where llama.cpp reads 16 positions in
+624 ms against 168 ms a step (pp16 25.6, tg 5.96, 8 threads) — time a 16-position qwen35 check in a release build
+against that before anything else, since a check that costs a step per position makes every guesser lose on a
+processor; (ii) the draft itself (340-430 ms in the test build for 1.69 GB of weights).
 
 #### #318 — A large model split across machines is too slow to use
 `P2` · perf-split · **OPEN** — 2026-10-20 · plan: `docs/plans/large_model_splits.md` · draws on #134, #145, #148, #149, #192

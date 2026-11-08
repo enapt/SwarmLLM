@@ -296,6 +296,7 @@ fn qwen2_forward_with_biases() {
         decode_graph: Default::default(),
         prompt_room: Default::default(),
         mtp: None,
+        block_drafter: None,
         stand_in_prior: None,
         grammar_vocab: Default::default(),
     };

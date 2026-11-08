@@ -437,9 +437,40 @@ pub fn best_gamma_beside_a_step(
     max: u32,
     draft_ms_each: f64,
 ) -> Option<u32> {
+    let each = draft_ms_each.max(0.0);
+    best_beside_a_step(alpha, step_ms, check, max, |g| each * f64::from(g))
+}
+
+/// [`best_gamma_beside_a_step`] for guesses made all at once: a block
+/// drafter (`model_worker::BlockGuesses`, #428) pays `draft_ms_round` for a
+/// round of any count — one forward over its block — where a chain drafter
+/// pays per guess. Apart, so neither is priced as the other.
+pub fn best_gamma_beside_a_step_per_round(
+    alpha: f64,
+    step_ms: Option<f64>,
+    check: &CheckCost,
+    max: u32,
+    draft_ms_round: f64,
+) -> Option<u32> {
+    let round = draft_ms_round.max(0.0);
+    best_beside_a_step(
+        alpha,
+        step_ms,
+        check,
+        max,
+        |g| if g == 0 { 0.0 } else { round },
+    )
+}
+
+fn best_beside_a_step(
+    alpha: f64,
+    step_ms: Option<f64>,
+    check: &CheckCost,
+    max: u32,
+    draft_ms: impl Fn(u32) -> f64,
+) -> Option<u32> {
     let step_ms = step_ms?;
     check.predict(2)?;
-    let each = draft_ms_each.max(0.0);
     let cost = |g: u32| {
         let forward = match g {
             0 => step_ms,
@@ -447,7 +478,7 @@ pub fn best_gamma_beside_a_step(
                 .predict_beside_a_step(1 + g, step_ms)
                 .unwrap_or(step_ms),
         };
-        forward.max(0.1) + each * f64::from(g)
+        forward.max(0.1) + draft_ms(g)
     };
     Some(
         (0..=max)
@@ -787,6 +818,30 @@ mod tests {
         // Dearer guesses buy fewer of them.
         let dear = best_gamma_beside_a_step(0.77, step, &check, 7, 60.0).unwrap();
         assert!(dear < paid, "{dear} vs {paid}");
+    }
+
+    /// A block drafter pays once a round whatever it guesses (#428): priced
+    /// that way it buys its block where the same cost charged per guess buys
+    /// a few; free, the two agree; dear enough, it buys none.
+    #[test]
+    fn a_draft_paid_once_a_round_is_not_priced_per_guess() {
+        let mut check = CheckCost::default();
+        for p in [2u32, 4, 8, 12, 16] {
+            check.record(p, 150.0 + 6.0 * f64::from(p));
+        }
+        let step = Some(150.0);
+        let round = best_gamma_beside_a_step_per_round(0.9, step, &check, 15, 40.0).unwrap();
+        let each = best_gamma_beside_a_step(0.9, step, &check, 15, 40.0).unwrap();
+        assert!(round > each, "{round} vs {each}");
+        assert!(round >= 10, "{round}");
+        assert_eq!(
+            best_gamma_beside_a_step_per_round(0.9, step, &check, 15, 0.0),
+            best_gamma_beside_a_step(0.9, step, &check, 15, 0.0)
+        );
+        assert_eq!(
+            best_gamma_beside_a_step_per_round(0.3, step, &check, 15, 400.0),
+            Some(0)
+        );
     }
 
     /// The recent estimate follows a reply that turns to copying, and one that

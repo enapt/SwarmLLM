@@ -35,6 +35,9 @@ pub struct SplitModel {
     /// only where the segment ends a model that carries one (Qwen 3.5's
     /// family), `None` everywhere else.
     pub(super) mtp: Option<super::mtp::MtpHead>,
+    /// A block drafter beside the whole model (#428), attached after the
+    /// load from the model's directory (`SplitModel::attach_block_drafter`).
+    pub(super) block_drafter: Option<super::block_drafter::BlockDrafter>,
     /// Additive causal mask for the no-prefix case, cached at its EXACT size.
     /// Tuple is `(query_len, mask)`; `None` means nothing cached yet. See
     /// `SplitModel::mask` for why this is not a narrowed view of a bigger one.

@@ -3497,6 +3497,7 @@ impl SplitModel {
                 last: None,
             },
             mtp,
+            block_drafter: None,
             stand_in_prior: None,
             grammar_vocab: Default::default(),
         })
