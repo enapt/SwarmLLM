@@ -2908,6 +2908,19 @@ accepted count in `step_decode_pool`, one batched `forward_verify_all_positions`
 `SlotTable` able to advance a variable number of tokens, and `truncate_request_to` on reject.
 Only worth it if concurrent local serving becomes common.
 
+#### #431 — The swarm's Qwen3.5-9B is an upload without the guess head its family carries
+`P2` · perf-local · **OPEN** — 2026-11-08 · history: #425 (the head), #151 (one upload per model id), field report 2026-11-08
+
+A tester's Qwen3.5-9B ran a flat 51 tok/s on prose and code alike, and nothing in the log said whether #425's head
+was used. It was not: the swarm's `qwen3.5-9b-q4-k-m` is unsloth's `Qwen3.5-9B-Q4_K_M.gguf`, whose header has no
+`nextn_predict_layers` and no `blk.32` — unsloth left the block out. bartowski's `Qwen_Qwen3.5-9B-Q4_K_M.gguf`
+(6,169,341,984 bytes, id `qwen-qwen3.5-9b-q4-k-m`) keeps it; lmstudio-community's leaves it out too. #151's canonical
+rule cannot move the swarm across: a different file name is a different model id. The load now says so at INFO
+(`split::mtp::block_to_load`: "this file carries no guess head of its own"). **To do**: where the popular list
+(`model::huggingface::popular`, one file per base model) picks the file for a family with a head (`qwen35`,
+`qwen35moe`), prefer an upload whose header carries the block — a range read of the header, as #394 reads one to
+refuse a file — and measure the 9B both ways on this card before changing which upload new nodes fetch.
+
 ### Speed across computers (splits)
 
 Designs: `docs/plans/large_model_splits.md` (the target, the bound and the build order, #318),
@@ -3625,6 +3638,16 @@ reply whose peers changed (failover) is not kept (`PipelineExecutor::exposure_of
   `SWARMLLM_FLOW_COPY_STORE=0`, on a card boot (review of `bcf3127a`, 2026-11-01).
 - A requester guessing for the head that leads its split (`requester_guesses`) does not read it.
 - Field measurement on an agent's replayed session (the rig measures the mechanism, below).
+
+#### #433 — A 70B split's first token grows with the conversation: 6.9 → 16.5 s over five turns
+`P2` · perf-split · **OPEN** — 2026-11-08 · history: #10 (a split's stored prompt), field report 2026-11-08
+
+A tester's 70B, split over two computers by their harness (v0.3.278): 6/6 replies at 2.6 tok/s, the first token
+56 s cold, then 6.9, 7.4, 9.8, 13.1, 16.5 s as the conversation grew. A segment that kept the conversation's opening
+(#10) reads only each turn's new tokens, so the first token should stay roughly flat; growing with the conversation
+looks like each turn's prompt read from 0 — a `PromptCacheMiss` re-send, or entries let go between turns. **To do**:
+reproduce on `split_rig.sh splitcache` with a five-turn conversation on a 70B-shaped split and read
+`split prompt cache` / `PromptCacheMiss` lines per turn before any design.
 
 ### Model families and platforms
 
@@ -4496,6 +4519,22 @@ tensor-parallel forwards are answered on a channel the AllReduce collector never
 stall per layer; TP off by default), and `VisionEncodeResponse` has no error field, so an
 image-encode refusal stays silent.
 
+#### #432 — A full node whose every part is kept cannot say which rule keeps them
+`P2` · auto-manage · **OPEN** — 2026-11-08 · history: #371, #401 (room for a wanted part), #389 (d), field report 2026-11-08
+
+A tester's node held 450.3 of 450 GB (≈45 models, most of them whole: a 70B, Gemma 4 31B, Qwen3.6-35B-A3B,
+Qwen3.8-27B, …), and a wanted qwen3.5-2b-q8-0 part asked for 764 MB every ~10 min and got none (`candidates=0`,
+`disk_pressure=1.00`). The toast said "nothing can be removed without leaving the network short of a model". The
+rule that kept each part is logged (`kept=` on prune's "a part asks for room and prune gave none back" line and its
+over-budget WARN) but is NOT in the diagnostics report, so the report alone cannot tell the candidates apart (code
+reading, sonnet agent): the owner's pins (`download-shards` pins a model — kept at every pressure, never offered for
+room, never given back as unused, and the toast would then be WRONG: nothing the network needs is at stake); the
+replica target at urgent pressure (floored at `min_replicas` 2, so a part needs 3 live holders to be shed); or the room
+path's own exclusions (`not_spare_for_room` refuses any copy of a model held whole here, at any pressure). Done: the diagnostics report prints the last prune pass's `kept` summary under the storage line
+(`state.models.parts_kept_by`). **To do**: (2) once a report
+names the rule, the toast says the true reason — pins: "the models you downloaded fill your limit" — with keys in all
+21 languages; (3) only then decide whether a node holding many whole models should give one up for a wanted part.
+
 ### API surface
 
 #### #336 — Tool calls, and `response_format` on a split, are checked only after they are written
@@ -5024,6 +5063,14 @@ would need the plugin in its own repo via `git subtree split`), then ask upstrea
 bundling. Independent leftovers: `/v1/embeddings` answers 501 by design until this node runs an
 embedding model (`LocalEmbedder` holds only the token table and is NOT one — the doc comment on
 `openai::embeddings` says why), and the 8192 default context wants a decision (#189 helps).
+
+#### #434 — Two peers' 27B requests ran on the processor after the card ran out (card_mb=0)
+`P3` · memory · **PARKED: needs the node.log lines** — 2026-11-08 · history: #367 (d), field report 2026-11-08
+
+A tester's node (RTX 3060 12 GB, v0.3.278, its own 14B run recovering every refusal: asked_again 32, granted 26, 7
+forward reruns, no pin) still loaded two peers' requests with `card_mb=0` earlier that day — qwen3.8-27b at 01:01Z and
+qwen3.6-27b at 01:42Z. The report carries no log around them, so whether a pin (`CpuPins`) or the admission placed
+them there is undetermined. Wanted: the node.log lines from a minute before each.
 
 ### Ideas — researched, not scheduled
 

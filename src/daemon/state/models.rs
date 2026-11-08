@@ -15,6 +15,14 @@ use crate::types::NodeId;
 
 use super::hf::{HfProbeInfo, HfSource};
 
+/// What the last prune pass kept, and when ([`ModelMgmt::parts_kept_by`]).
+#[derive(Debug, Clone)]
+pub struct PartsKeptReport {
+    /// `rule (parts); rule (parts)`, the rule that kept the most first.
+    pub summary: String,
+    pub at: std::time::Instant,
+}
+
 /// Model management: shard acquisition, auto-manage, trust gating, pruning.
 pub struct ModelMgmt {
     pub acquisition_progress:
@@ -318,6 +326,13 @@ pub struct ModelMgmt {
     /// `AutoShardManager::watch_model_use`, saved (`unused::USE_TREE`); read by
     /// `AutoShardManager::nobody_runs`.
     pub model_use: DashMap<crate::types::ModelId, crate::model::auto_manage::unused::ModelUse>,
+    /// Why the last prune pass kept the parts it kept (FUTURE_WORK #432): its
+    /// `KeptBy` summary — each rule with the parts it kept — and when. Written
+    /// only by `AutoShardManager::evaluate_and_prune`, read only by the
+    /// diagnostics report: a full node's report said "nothing can be removed"
+    /// and nothing more, and the rule was only in a log line (field report
+    /// 2026-11-08).
+    pub parts_kept_by: arc_swap::ArcSwapOption<PartsKeptReport>,
     /// R130: foreign wishlist interest, populated from inbound
     /// `WishlistAnnouncement` gossip. Key = (publisher node id, model id);
     /// value = (publisher's score 0..100, timestamp_ms received). Capped
@@ -1251,6 +1266,7 @@ mod tests {
                 crate::model::huggingface::popular::PopularSnapshot::default(),
             ),
             model_use: DashMap::new(),
+            parts_kept_by: arc_swap::ArcSwapOption::empty(),
             foreign_wishlist: DashMap::new(),
             quant_recommendations: arc_swap::ArcSwap::from_pointee(
                 crate::model::auto_manage::quant::QuantRecommendations::default(),

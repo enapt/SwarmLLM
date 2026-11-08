@@ -622,6 +622,21 @@ pub async fn diagnostics(
             budget.remaining(held_bytes) / MB,
             ss.cfg().resources.max_disk_mb
         );
+        // Which rule kept the parts — a full node said only "nothing can be
+        // removed", and the reason lived in a log line (FUTURE_WORK #432).
+        match ss.models.parts_kept_by.load_full() {
+            Some(report) => {
+                let _ = writeln!(
+                    out,
+                    "  kept by (last prune pass, {} s ago): {}",
+                    report.at.elapsed().as_secs(),
+                    report.summary
+                );
+            }
+            None => {
+                let _ = writeln!(out, "  kept by: no prune pass yet");
+            }
+        }
     }
     // What the system says about the connection NOW, beside the setting and
     // whether this node holds back (automatic downloads, work and parts for

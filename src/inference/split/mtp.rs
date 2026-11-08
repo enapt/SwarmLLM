@@ -158,9 +158,20 @@ pub(crate) fn block_to_load(
     if !mtp_on()
         || !whole
         || layer_end != block_count
-        || nextn_layers != 1
         || !matches!(arch, ModelArch::Qwen35 | ModelArch::Qwen35Moe)
     {
+        return None;
+    }
+    // Said, as llama.cpp's load prints `n_nextn_layer`: unsloth's
+    // Qwen3.5-9B Q4_K_M leaves the block out where bartowski's keeps it, and
+    // a tester's run could not tell whether the head had been used (field
+    // report 2026-11-08, FUTURE_WORK #431).
+    if nextn_layers != 1 {
+        tracing::info!(
+            nextn_layers,
+            "this file carries no guess head of its own (its upload left the next-token-prediction \
+             block out); replies guess from the conversation's own text only"
+        );
         return None;
     }
     let has = |s: &str| {

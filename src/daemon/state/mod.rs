@@ -58,7 +58,7 @@ pub use events::EventBus;
 pub use hf::{HfProbeInfo, HfSource};
 pub use metrics::{ChannelCounters, ChannelMetricsSet, MetricsProviders};
 pub use models::{
-    ModelMgmt, P2pDownloadSlot, ShardDownloadClaim, FOREIGN_WISHLIST_MAX_AGE_MS,
+    ModelMgmt, P2pDownloadSlot, PartsKeptReport, ShardDownloadClaim, FOREIGN_WISHLIST_MAX_AGE_MS,
     MAX_FOREIGN_WISHLIST_ENTRIES,
 };
 pub use peer_outliers::PeerOutliers;
@@ -1717,6 +1717,7 @@ impl SharedState {
                     .flatten()
                     .unwrap_or_default(),
                 ),
+                parts_kept_by: arc_swap::ArcSwapOption::empty(),
                 model_use: {
                     let map = DashMap::new();
                     if let Ok(pairs) = db

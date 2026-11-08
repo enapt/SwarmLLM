@@ -1245,6 +1245,15 @@ impl AutoShardManager {
                 );
             }
         }
+        self.shared_state
+            .models
+            .parts_kept_by
+            .store(Some(std::sync::Arc::new(
+                crate::daemon::state::PartsKeptReport {
+                    summary: kept.summary(),
+                    at: std::time::Instant::now(),
+                },
+            )));
 
         // Whatever this cycle emptied — and whatever a cancelled download left
         // behind earlier — gives its derived files back now.
