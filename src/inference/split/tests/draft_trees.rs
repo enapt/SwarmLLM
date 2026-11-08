@@ -248,6 +248,78 @@ fn a_captured_tree_level_reads_as_the_ordinary_one() {
     }
 }
 
+/// A reply's checks find their graphs already made once an idle worker has
+/// recorded the widths (`model_worker::record_check_widths`): no check of any
+/// width a reply asks for is then a one-off forward. Without the recording each
+/// width's first check runs the ordinary way and the next makes its graph —
+/// 0.3-8 s each under WSL2, inside the reply (#428, card runs 8-9). The
+/// recording's own request leaves no cache behind.
+///
+/// ⚠ Gated: run it on a card with `--nocapture` and look for the SKIPPED line
+/// before believing a pass, with `--test-threads=1` beside other card tests.
+#[cfg(feature = "candle-cuda")]
+#[test]
+fn a_reply_after_the_idle_recording_makes_no_graph() {
+    let card = match Device::new_cuda(0) {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("SKIPPED idle recording: no CUDA device ({e})");
+            return;
+        }
+    };
+    let mut model = whole_model_on(&card);
+    let kv = KvCacheStore::new(std::time::Duration::from_secs(60));
+    let widths = model.widths_to_record();
+    assert_eq!(
+        widths.first(),
+        Some(&crate::inference::cuda_graph::MAX_POSITIONS),
+        "a whole model on the card names every width, widest first: {widths:?}"
+    );
+    let finished =
+        crate::inference::model_worker::record_check_widths(&mut model, &kv, &widths, &|| true)
+            .unwrap();
+    assert!(finished, "nothing asked the recording to stop");
+    for &w in &widths {
+        assert!(
+            model.has_step_graph(w),
+            "width {w} has no graph after the recording"
+        );
+    }
+    assert_eq!(
+        kv.active_entries(),
+        0,
+        "the recording left its cache behind"
+    );
+    // A reply: its prompt, its first step (a one-off in every reply: nothing
+    // of its own ran before it), then each width as a reply runs it — a step,
+    // or a check cut back to its first position as a rejected one is.
+    let prompt = model.tensor_from_ids(&PROMPT).unwrap();
+    model.forward(&prompt, 0, &kv, "reply").unwrap();
+    let step = model.tensor_from_ids(&[42]).unwrap();
+    model.forward(&step, PROMPT.len(), &kv, "reply").unwrap();
+    let before = model.one_off_forwards();
+    let mut at = PROMPT.len() + 1;
+    for &w in widths.iter().rev() {
+        let ids: Vec<u32> = (0..w as u32).map(|i| 7 + i).collect();
+        let input = model.tensor_from_ids(&ids).unwrap();
+        if w == 1 {
+            model.forward(&input, at, &kv, "reply").unwrap();
+        } else {
+            model
+                .forward_verify_all_positions(&input, at, &kv, "reply")
+                .unwrap();
+            kv.truncate_request_to(model.kv_model_key(), "reply", at + 1)
+                .unwrap();
+        }
+        at += 1;
+    }
+    assert_eq!(
+        model.one_off_forwards(),
+        before,
+        "a check after the recording made its graph inside the reply"
+    );
+}
+
 /// A tree WIDER than the per-row kernel's rows, read on the card in one
 /// forward — a worker's check of a flow's levels — comes out row by row as
 /// each row's own path read fresh, and was read by the TILED kernel

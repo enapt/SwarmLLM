@@ -8417,3 +8417,53 @@ stalls stay in). ON (OFF beside it):
   #325), the 2-3-row checks do not. Whether llama.cpp's own card build picks
   the same at a batch of 8 is open (FUTURE_WORK #428).
 
+### A card records its check widths while the worker is idle (2026-11-08)
+
+**What it replaced**: each check width's graph made inside the first reply
+that asked for it — an ordinary forward, then the recording. Logging each
+one-off's kind (`cuda_graph::one_off`) on the card rig (Qwen3.5-4B whole on the
+RTX 3070, WSL2, Windows up ~67 h, `card428.sh`, `~/rig428/card8..11`): every
+forward of 300 ms or more in eight arms was a width's first graph made,
+0.33-8.2 s (one a first of its shape) — the block drafter on or off. The
+drafter's story paid most, as its guess head asked for widths the code
+replies before it had not used: 5.5-6.9 s at a width of 2. The pool's growth
+under WSL2 (gotcha #883) is the likely part of it; a graph's own mapping at
+first launch measured ≤ 4 ms (#357, 2026-10-27).
+
+**Now**: `model_worker::warm_check_widths` (beside `refit_stale_priors`, while
+`ipc_rx` is empty) records every width `SplitModel::widths_to_record` names —
+a whole model on a card, `MAX_POSITIONS` down to 1 where no mask is read, the
+step alone otherwise — on a throwaway request: a 12-token prompt, then each
+width as a reply runs it (a step; a check cut back to its first position),
+at most 3 tries, stopping at the first message. Its cache is cleared either
+way; a model is tried once a load (`DecodeGraph::widths_recorded`).
+
+**Measured** (one binary, `SWARMLLM_CUDA_GRAPH_WARM=0` the A/B, 20 s idle after
+the first reply, 160 greedy tokens; tok/s with every gap counted):
+
+| run | recording | palindrome ON / OFF | BST ON / OFF | story ON / OFF | hash ON / OFF |
+|---|---|---|---|---|---|
+| 10 | on (3-4 widths left, 0.5-2.5 s) | 134 / 94-103 | 63*-161 / 104-108 | 66 / 72-73 | 103 / 15*-86 |
+| 11 | off | 120-130 / 81-97 | 173-181 / 37-43* | 22-24* / 72-75 | 101-104 / 17*-83 |
+
+`*` a stall of 1 s or more — in run 11's ON stories the width-2 graph
+(3.7-4.0 s); the OFF ones' and run 10's two (1.6 and 8.5 s) were OUTSIDE any
+forward, in both arms alike (#357 (c)). No forward of a reply after the
+recording took 300 ms in run 10. The same question asked again after 75 s idle
+— past the 60 s hand-back of graph memory (`trim_idle_graph_memory`) — stalled
+nowhere in either run (123-178 tok/s, the owner's earlier reply copied).
+
+**Why it holds**: a captured step is recorded again at every launch and pushed
+into its exec with `cuGraphExecUpdate`; the live node rebuilt no chain width
+over days of replies (2 rebuilds, both a tree's rows), so a graph recorded at
+12 positions is updated in place at any length. The rows a guess head or block
+drafter reads are copied out of EVERY captured step (`graph_keeps_rows`), so
+the recording's plain forwards record the graph a reply's keeping ones replay.
+
+**Left**: a worker's first reply when the model loads on the request (idle
+comes after it; the dashboard loads at the first keystroke, #424); a split's
+segments and a tree's row counts. Prior art: vLLM records its graphs at
+start-up for every capture size, largest first; SGLang records target and
+draft graphs once at start-up; an adaptive-length verifier records one verify
+graph per length up front (arXiv 2605.00342) — FUTURE_WORK #425 (b).
+

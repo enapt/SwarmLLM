@@ -1254,10 +1254,7 @@ impl SplitModel {
         capture_layers: Option<Capture<'_>>,
     ) -> Result<Option<ForwardOut>, SwarmError> {
         use crate::inference::cuda_graph::DecodeGraphSlot;
-        if matches!(self.decode_graph, DecodeGraphSlot::Unchecked) {
-            self.decode_graph =
-                DecodeGraphSlot::decide(&self.device, self.decode_graph_ineligibility());
-        }
+        self.settle_decode_graph();
         let mut graph = match std::mem::replace(&mut self.decode_graph, DecodeGraphSlot::Off) {
             DecodeGraphSlot::On(graph) => graph,
             other => {
@@ -1277,6 +1274,49 @@ impl SplitModel {
         );
         self.decode_graph = DecodeGraphSlot::On(graph);
         out.map(Some)
+    }
+
+    /// Decide, once, whether this model's decode steps are captured: at its
+    /// first decode step, or before it where an idle worker records the
+    /// widths ahead ([`Self::widths_to_record`]).
+    fn settle_decode_graph(&mut self) {
+        use crate::inference::cuda_graph::DecodeGraphSlot;
+        if matches!(self.decode_graph, DecodeGraphSlot::Unchecked) {
+            self.decode_graph =
+                DecodeGraphSlot::decide(&self.device, self.decode_graph_ineligibility());
+        }
+    }
+
+    /// The check widths, widest first, a reply on this card may ask for and
+    /// whose graph is not recorded yet — what `model_worker::warm_check_widths`
+    /// records while the worker has nothing to do. Empty where nothing is
+    /// captured (off a card, a card/processor split), for a segment of a split
+    /// (its forwards carry another computer's rows, not token ids), and once
+    /// recorded. A check of several positions is captured only where no mask
+    /// is read ([`Self::mask_is_read`]); there only the step is named.
+    pub(crate) fn widths_to_record(&mut self) -> Vec<usize> {
+        use crate::inference::cuda_graph::{DecodeGraphSlot, StepShape, MAX_POSITIONS};
+        if !crate::inference::cuda_graph::record_widths_ahead()
+            || !self.device.is_cuda()
+            || !self.is_first()
+            || !self.is_last()
+            || self.draft_tree.is_some()
+        {
+            return Vec::new();
+        }
+        self.settle_decode_graph();
+        let widest = if self.mask_is_read() {
+            1
+        } else {
+            MAX_POSITIONS
+        };
+        match &self.decode_graph {
+            DecodeGraphSlot::On(graph) if !graph.widths_recorded() => (1..=widest)
+                .rev()
+                .filter(|&w| !graph.has_graph(StepShape::chain(w)))
+                .collect(),
+            _ => Vec::new(),
+        }
     }
 
     /// The layers (absolute) whose output EVERY captured step of this model
@@ -1365,7 +1405,7 @@ impl SplitModel {
                 )?;
                 graph.note_uncaptured(all_positions, shape, &out, began, ready.is_some());
                 if not_ready {
-                    graph.note_not_ready();
+                    graph.note_not_ready(shape, all_positions);
                 }
                 return Ok((out, caught));
             }

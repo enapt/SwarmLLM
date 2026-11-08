@@ -213,6 +213,15 @@ fn rest_weighs_cost() -> bool {
     *ON.get_or_init(|| std::env::var("SWARMLLM_CUDA_GRAPH_REST").as_deref() != Ok("count"))
 }
 
+/// Whether an idle worker records every check width before a reply needs it
+/// (the default, `model_worker::warm_check_widths`), or leaves each to the
+/// reply that first asks for it, as v0.3.278 did: `SWARMLLM_CUDA_GRAPH_WARM=0`,
+/// the A/B inside one binary. Read once.
+pub(crate) fn record_widths_ahead() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("SWARMLLM_CUDA_GRAPH_WARM").as_deref() != Ok("0"))
+}
+
 /// The refusal that is the forward's own failure, not the capture's.
 pub(crate) const FORWARD_FAILED: &str = "the forward failed inside the capture";
 
@@ -512,6 +521,10 @@ pub(crate) struct DecodeGraph {
     /// `defects`: the checks churned while the one-position step updated.
     churn: HashMap<StepShape, Churn>,
     stats: Stats,
+    /// Set once every check width a reply may ask for has been recorded while
+    /// the worker had nothing to do, or tried and could not be
+    /// (`model_worker::warm_check_widths`): none is tried again for this load.
+    widths_recorded: bool,
     /// Times steps on the card (`cuda::StepClock`); made at the first step, never
     /// again once the driver would not make its events.
     #[cfg(feature = "candle-cuda")]
@@ -563,6 +576,31 @@ impl DecodeGraph {
             + self.stats.refused
     }
 
+    /// Whether forwards of `shape` have their graph: every group of it
+    /// instantiated, so the next is only updated in place.
+    pub(crate) fn has_graph(&self, shape: StepShape) -> bool {
+        #[cfg(feature = "candle-cuda")]
+        {
+            self.execs
+                .get(&shape)
+                .is_some_and(|groups| !groups.is_empty() && groups.iter().all(Option::is_some))
+        }
+        #[cfg(not(feature = "candle-cuda"))]
+        {
+            let _ = shape;
+            false
+        }
+    }
+
+    /// Whether the widths a reply may ask for were recorded ahead (or tried).
+    pub(crate) fn widths_recorded(&self) -> bool {
+        self.widths_recorded
+    }
+
+    pub(crate) fn note_widths_recorded(&mut self) {
+        self.widths_recorded = true;
+    }
+
     /// A step of a shape that has its graph, run the ordinary way because it
     /// could not be captured yet: a conversation's first decode step, or one
     /// whose caches must grow first — a KV buffer, or the buffers a check of
@@ -571,8 +609,13 @@ impl DecodeGraph {
     /// That first check of Qwen3.5-0.8B took 28.8 ms against 12.3 for the
     /// next of its width (2026-10-25); priced as a check, it told the local
     /// guess count that checking never pays.
-    pub(crate) fn note_not_ready(&mut self) {
+    pub(crate) fn note_not_ready(&mut self, shape: StepShape, all_positions: bool) {
         self.stats.not_ready += 1;
+        one_off(
+            shape,
+            Some(all_positions),
+            "not ready: a cache must grow first",
+        );
     }
 
     /// True when forwards of `positions` are not to be captured now: they were
@@ -708,6 +751,9 @@ impl DecodeGraph {
             .insert((all_positions, shape), (out.dims().to_vec(), out.dtype()))
             .is_none();
         self.stats.first_of_shape += u64::from(first);
+        if first {
+            one_off(shape, Some(all_positions), "first of its shape");
+        }
         if let Some(churn) = self.churn.get_mut(&shape) {
             if churn.rest_left > 0 {
                 churn.rest_left -= 1;
@@ -867,11 +913,21 @@ impl DecodeGraph {
                     self.stats.updated += 1;
                 } else {
                     self.stats.instantiated += 1;
+                    one_off(
+                        shape,
+                        None,
+                        if refused_updates.is_empty() {
+                            "graph made"
+                        } else {
+                            "graph rebuilt: the driver refused to update it"
+                        },
+                    );
                 }
                 self.note_launched(shape, refused_updates);
             }
             Err(refusal) => {
                 self.stats.refused += 1;
+                one_off(shape, None, refusal.kind);
                 if refusal.kind != FORWARD_FAILED {
                     let defects = self.defects.entry(shape).or_insert(0);
                     *defects += 1;
@@ -930,6 +986,23 @@ impl DecodeGraph {
             "DIAG: decode graph"
         );
     }
+}
+
+/// One forward that cost more than its shape will from now on
+/// ([`DecodeGraph::one_off_forwards`]), said at debug with its shape and why:
+/// a reply's count alone could not tell a story's 5-7 one-offs with a block
+/// drafter beside the model (against 1 without, #428) apart. Prior art:
+/// llama.cpp's CUDA backend says each graph's warm-up, reset and failed update
+/// at debug (`ggml_backend_cuda_graph_compute`); its graphs are keyed by the
+/// graph, so one per batch size, run directly once and captured the next time,
+/// as here.
+fn one_off(shape: StepShape, all_positions: Option<bool>, why: &str) {
+    tracing::debug!(
+        positions = %shape,
+        all_positions = ?all_positions,
+        why,
+        "DIAG: decode graph one-off forward"
+    );
 }
 
 #[cfg(feature = "candle-cuda")]

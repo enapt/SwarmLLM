@@ -483,6 +483,11 @@ pub async fn run_worker(
             if ipc_rx.is_empty() && refit_stale_priors(&mut models, &|| ipc_rx.is_empty()) {
                 pool_may_hold_freed = true;
             }
+            // Then record the card's check widths before a reply needs one.
+            if ipc_rx.is_empty() && warm_check_widths(&mut models, &kv_store, &|| ipc_rx.is_empty())
+            {
+                pool_may_hold_freed = true;
+            }
             if pool_may_hold_freed && crate::inference::cuda_pool::keep_enabled() {
                 match tokio::time::timeout(crate::inference::cuda_pool::IDLE_TRIM, ipc_rx.recv())
                     .await
@@ -5125,6 +5130,110 @@ fn refit_stale_priors(
         }
     }
     any
+}
+
+/// Record every check width a reply on a card may ask for — a plain step up to
+/// [`MAX_POSITIONS`](crate::inference::cuda_graph::MAX_POSITIONS) — on a
+/// throwaway request while the worker has nothing to do, stopping the moment a
+/// message comes (`keep_going`, as [`refit_stale_priors`]). Otherwise a width's
+/// graph is made inside the first reply that asks for it: an ordinary forward,
+/// then the recording, which took 0.3-8 s under WSL2 — every forward of 300 ms
+/// or more in eight card runs of Qwen3.5-4B was one, with the block drafter or
+/// without, and a story whose guess head first asked for 2 stalled 5.5-6.9 s
+/// (#428, card runs 8-9, 2026-11-08; a pool that grows stalls, gotcha #883). A
+/// recorded graph is updated in place for every later request: the live node
+/// rebuilt no chain width over days of replies. Each width runs as a reply's
+/// rejected check does — then cut back to its first position — widest first.
+/// Prior art: vLLM records its graphs at start-up for every capture size,
+/// largest first; SGLang records target and draft graphs once at start-up, and
+/// an adaptive-length verifier records one per length up front (arXiv
+/// 2605.00342) — FUTURE_WORK #425 (b). True where anything ran, so the card's
+/// pool may hold what it freed.
+fn warm_check_widths(
+    models: &mut HashMap<(usize, usize, usize, usize), SplitModel>,
+    kv_store: &KvCacheStore,
+    keep_going: &dyn Fn() -> bool,
+) -> bool {
+    let mut any = false;
+    for model in models.values_mut() {
+        if !keep_going() {
+            break;
+        }
+        let widths = model.widths_to_record();
+        if widths.is_empty() {
+            continue;
+        }
+        any = true;
+        let started = std::time::Instant::now();
+        match tokio::task::block_in_place(|| {
+            record_check_widths(model, kv_store, &widths, keep_going)
+        }) {
+            Ok(true) => {
+                model.note_widths_recorded();
+                let recorded = widths.iter().filter(|&&w| model.has_step_graph(w)).count();
+                tracing::info!(
+                    widths = widths.len(),
+                    recorded,
+                    took_ms = started.elapsed().as_millis() as u64,
+                    "DIAG: the card's check widths recorded before any reply needs them"
+                );
+            }
+            Ok(false) => tracing::debug!(
+                "card check widths: a message came first; the rest wait for the next idle moment"
+            ),
+            Err(e) => {
+                model.note_widths_recorded();
+                tracing::warn!(
+                    error = %e,
+                    "card check widths: not recorded ahead; replies record them as they come"
+                );
+            }
+        }
+    }
+    any
+}
+
+/// [`warm_check_widths`]'s forwards for one model: `Ok(true)` once every width
+/// was tried, `Ok(false)` where a message came first. Its cache goes either way.
+pub(crate) fn record_check_widths(
+    model: &mut SplitModel,
+    kv_store: &KvCacheStore,
+    widths: &[usize],
+    keep_going: &dyn Fn() -> bool,
+) -> Result<bool, SwarmError> {
+    // Longer than any captured forward, so the prompt pass is no width of its own.
+    const PROMPT: usize = crate::inference::cuda_graph::MAX_POSITIONS + 4;
+    // An ordinary forward, then the recording; one more where a cache grew.
+    const TRIES: usize = 3;
+    let request = format!("check-widths-{}", Uuid::new_v4());
+    let key = model.kv_model_key().to_string();
+    let mut run = || -> Result<bool, SwarmError> {
+        let prompt = model.tensor_from_ids(&[0; PROMPT])?;
+        model.forward(&prompt, 0, kv_store, &request)?;
+        let mut at = PROMPT;
+        for &width in widths {
+            for _ in 0..TRIES {
+                if !keep_going() {
+                    return Ok(false);
+                }
+                if model.has_step_graph(width) {
+                    break;
+                }
+                let input = model.tensor_from_ids(&vec![0; width])?;
+                if width == 1 {
+                    model.forward(&input, at, kv_store, &request)?;
+                } else {
+                    model.forward_verify_all_positions(&input, at, kv_store, &request)?;
+                    kv_store.truncate_request_to(&key, &request, at + 1)?;
+                }
+                at += 1;
+            }
+        }
+        Ok(true)
+    };
+    let outcome = run();
+    kv_store.clear_request(&key, &request);
+    outcome
 }
 
 /// A guesser's declined rounds and the probes that try it again: ONE rule for

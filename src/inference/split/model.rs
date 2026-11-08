@@ -764,6 +764,25 @@ impl SplitModel {
         }
     }
 
+    /// Whether a check of `positions` (a chain) has its recorded graph on the
+    /// card (`cuda_graph::DecodeGraph::has_graph`); false where none is kept.
+    pub(crate) fn has_step_graph(&self, positions: usize) -> bool {
+        match &self.decode_graph {
+            crate::inference::cuda_graph::DecodeGraphSlot::On(graph) => {
+                graph.has_graph(crate::inference::cuda_graph::StepShape::chain(positions))
+            }
+            _ => false,
+        }
+    }
+
+    /// Every width `widths_to_record` named has been tried: none is tried
+    /// again while this model stays loaded.
+    pub(crate) fn note_widths_recorded(&mut self) {
+        if let crate::inference::cuda_graph::DecodeGraphSlot::On(graph) = &mut self.decode_graph {
+            graph.note_widths_recorded();
+        }
+    }
+
     /// The card this model uses, if any: its primary device, or the card half
     /// of a card/processor split.
     pub(crate) fn card(&self) -> Option<&Device> {

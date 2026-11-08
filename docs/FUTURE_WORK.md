@@ -2245,7 +2245,7 @@ microbatch "before we figure out how to deal with speculative decoding". Still u
 and exo source, DeepSpeed/Megatron micro-batching.
 
 #### #357 — A card's first graph of a new shape, late in a worker's life, can stall one forward 10-59 s
-`P3` · perf-local · **OPEN** — 2026-10-26 · evidence: `faster_than_local.md` § 8.6; gotcha #883
+`P3` · perf-local · **PARTIAL** (a whole model on a card records its check widths while idle, 2026-11-08) — 2026-10-26 · evidence: `faster_than_local.md` § 8.6; gotcha #883
 
 Four of 16 split replies on 2026-10-26 (this PC, Windows up 84 h) each lost 10-59 s to ONE
 forward on the card: the worker's first CUDA graph of a 2-row chunk (`decode graph … instantiated`
@@ -2275,6 +2275,15 @@ worker beside the rig's other half and a drafter, both allocating. Next: the 10-
 memory readings timed. Then the candidates the research named: allocate a graph's buffers
 outside the capture (llama.cpp and PyTorch's way), build a new shape's graph off the forward's
 path and run that forward uncaptured, or capture only a shape seen N times.
+**Built for a whole model on a card, 2026-11-08** (#428 card runs 8-11, Qwen3.5-4B on the RTX 3070, Windows up ~67 h):
+every forward of 300 ms or more in eight arms was a width's FIRST graph made (0.33-8.2 s; a story whose head first asked
+for a width of 2 stalled 5.5-6.9 s), with the block drafter or without — so the idle worker now records every check
+width ahead (`model_worker::warm_check_widths`, the second candidate above). With it no forward of a later reply took
+300 ms on any arm; `SWARMLLM_CUDA_GRAPH_WARM=0` in the same binary brought the 3.7-4.0 s ones back. A question asked
+again after 75 s idle (past the card's 60 s hand-back of graph memory) stalled nowhere. **Left**: (a) a worker's FIRST
+reply when the model loads ON the request — idle comes only after it (the dashboard's load at the first keystroke, #424,
+gives the time); (b) a split's segments and a tree's row counts are not recorded; (c) gaps of 1.6-8.5 s OUTSIDE any
+forward, in both arms of those runs alike — the 10-26 ones' other half (ending at a card memory reading).
 
 #### #147 — Prompt reading on the card: the smaller items left after f16 accumulation
 `P3` · perf-local · **PARTIAL** — 2026-10-09 · history: archive row #147 and § "Prompt reading on the card (#147, 2026-09-29)"
@@ -2845,7 +2854,12 @@ memory each width's exec keeps (`trim_idle_graph_memory` exists because it is no
 warm-up forward that fails or is refused adds a `defects` count that is never reset (3 gives the
 shape up for good), and refused updates feed `churn` (3 in 8 rests it 256 steps); (iii) whether a
 graph recorded at a short cache is refused its update at a long one (a KV chunk count growing
-changes the node count, `cuda_graph.rs` ~170). Through the node a card's story gained nothing from
+changes the node count, `cuda_graph.rs` ~170). **The third road built 2026-11-08** (`model_worker::warm_check_widths`,
+#357): (i) a recorded width keeps its graph's memory until the 60 s idle hand-back (32-128 MB on the live node), and
+the next reply after that hand-back stalled nowhere (75 s pause, card run 10); (ii) the recording runs the reply's own
+path — a step, a check cut back to its first position — so a refusal there is one a reply would meet, and a width is
+tried at most 3 times; (iii) the live node rebuilt no chain width over days of replies (2 rebuilds, both tree rows):
+a graph recorded at 12 positions is updated in place at any length. Through the node a card's story gained nothing from
 the head either (3.85 s without it, 3.87 with): its check costs 19 ms against a 16 ms step at ~1.8
 tokens a round. (c) No planner or admission charges the block (122-856 MB) or the processor's hot
 rows (about 55-140 MB).
@@ -3045,7 +3059,7 @@ vLLM and SGLang run it) or reads them one machine at a time; (c) the report: a s
 "has gone".
 
 #### #428 — Every popular model guesses 4-5 tokens a round trip: a DFlash drafter at the split's far end
-`P1` · perf-split · **OPEN** (stage 1 built and measured: the reply is exact, acceptance matches llama.cpp's; stage 3 built and measured on the rig — a split over 130 ms, processors: code 1.6-1.8×, a story 1.10-1.15×, the same replies; on a card, whole: code 1.4-1.7×, a story 0.7× — (c1)-(c3); next: the field model, Qwen3.6-35B-A3B) — 2026-11-08 · history: #427 (the measurement), #425 (the guess head), #411 (the flow)
+`P1` · perf-split · **OPEN** (stage 1 built and measured: the reply is exact, acceptance matches llama.cpp's; stage 3 built and measured on the rig — a split over 130 ms, processors: code 1.6-1.8×, a story 1.10-1.15×, the same replies; on a card, whole: code 1.4-1.6×, a story 0.91× — (c2), (c3); next: the field model, Qwen3.6-35B-A3B) — 2026-11-08 · history: #427 (the measurement), #425 (the guess head), #411 (the flow)
 
 **What a user gets today** (#427's table, 2026-11-08 01:00-01:30Z, live node, one ask at a time): every split of
 the popular models decodes ONE token a round trip — Gemma 4 31B here↔Australia 1.7-1.9 tok/s, Gemma 4 26B-A4B
@@ -3162,7 +3176,7 @@ then Qwen3.6-35B-A3B with its drafter on two real peers.
 **On a card — built and measured 2026-11-08** (Qwen3.5-4B Q4_K_M whole on the RTX 3070, ON / OFF in one binary, 160
 greedy tokens, stalls of 1 s or more taken out; `docs/invariants/inference.md` § "On a card"): code 1.4-1.7× (palindrome
 150-151 against 101-107, a BST class 179 against 108-112), a hash map ~1.2× (102-113 against 83-91), **the story 0.7×**
-(49-54 against 70-73). The drafter runs on the target's device and picks its guesses there; every captured step keeps
+(49-54 against 70-73; 0.91× once every width is recorded ahead, (c1)). The drafter runs on the target's device and picks its guesses there; every captured step keeps
 its rows; a guesser is set aside by what it WRITES against plain steps only (`dsd_controller::Delivered`), probed
 again by one rule, beside a plain step remembered per model, and a step or check figure under 0.75× of the remembered
 one starts it over. A split's card-held first segment attaches one too — built, not measured. **Left on a card**:
@@ -3170,7 +3184,13 @@ one starts it over. A split's card-held first segment attaches one too — built
 stories check at every width from 2 to 8 and paid 5-7 one-off forwards (240-300 ms each) against OFF's 1, every one
 with a pool-growth stall; first log which kind each one-off is (first of a shape, not ready, rebuilt); (c2) the head
 declines 68-90 rounds of a story beside the block against 5-17 alone — its checks priced on a line the block's wide
-checks steepen; (c3) the 8-row checks part from one-at-a-time where llama.cpp's processor scores the pick 0.8-1.0
+checks steepen; **(c1) done 2026-11-08**: each kind logged (`cuda_graph::one_off`, debug) showed the one-offs were each
+width's first graph — made inside whichever reply first asked for it, 0.33-8.2 s under WSL2, the story's at a width of
+2 — and the idle worker now records every width ahead (#357; card run 10: no forward of 300 ms after it, story 66
+against 72-73 OFF, palindrome 134 against 94-103, a BST class 161-173 against 104-108, a hash map 103 against 71-86, one stall outside any forward taken out of each;
+run 11, the recording off in the same binary: the story 22-24 tok/s with 3.7-4.0 s stalls at a width of 2). A
+story's residual, 0.91×: the block's rounds on prose write ~70 tokens/s where the head writes ~82 and plain steps ~74;
+(c3) the 8-row checks part from one-at-a-time where llama.cpp's processor scores the pick 0.8-1.0
 under its own (palindrome token 60) — run llama.cpp's card build at a batch of 8 there before calling it a near tie.
 
 #### #318 — A large model split across machines is too slow to use
