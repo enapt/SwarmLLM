@@ -2,6 +2,61 @@
 
 ## [Unreleased]
 
+## [0.3.279-alpha] — 2026-11-09
+
+**Qwen 3.5 and 3.6 models split across computers write several words a round trip instead of one**
+(#428). A model too large for one computer runs in parts on several, and each word it writes needs a
+round trip between them — so a split of these popular models wrote one word per round trip, since
+their layers cannot use the guessing method other models use across a split. The computer running
+the first part, where it also holds the model's last part, now keeps a small "block drafter" beside
+it: it reads the model's own working values and guesses a whole block of up to 15 words in one pass,
+and one round trip checks them all, keeping only the words the model would have written itself.
+Measured as two nodes on one machine with 130 ms added between them (Qwen3.5-9B), both on the
+processor: code 1.6-1.8 times faster, a short story 1.1 times, the same replies with and without it.
+With the first part on a graphics card (an RTX 3070) and the rest on the processor: code 1.7-1.9
+times as fast, a class 2.2-2.4 times, a story 1.4-1.5 times; there the replies can part from the
+drafter-less ones at close word choices ("one child" / "single child"), as a card's checks of
+several words do. Both computers need this release; an older one is never asked for what the drafter
+reads.
+
+**The same drafter speeds up these models on one graphics card** — code replies 1.4-1.9 times as
+fast on an RTX 3070 with Qwen3.5-4B (a class 190-193 words a second against ~120 without it). A
+story runs about as fast as without it (78-79 words a second against 80-84): on prose the drafter
+rests and is tried again now and then.
+
+**Each model fetches its drafter on its own.** A computer that holds a Qwen 3.5 or 3.6 model's first
+and last parts (or the whole model) fetches its drafter (0.4-1.85 GB) from a pinned list — each file
+checked against its listed size and SHA-256 before it is kept — and uses it from the model's next
+load. It waits while the connection is metered, never takes the disk's last 10%, and the file goes
+when the model does. A computer that runs its models only on the processor neither fetches nor loads
+it beside a file that carries the model's own guess head, which writes faster there (Qwen3.5-4B on 8
+threads: 15.7-17.5 words a second on code with the head alone, 14.1-17.8 with both). The drafters
+pinned for Qwen3.5/3.6-35B-A3B are not measured yet: the model is larger than our test machine.
+
+**Qwen 3.5 replies faster on a graphics card** even without the drafter: each recurrent layer's
+convolution, gates and normalisation now run as one card launch each where they took ~20, and a
+rejected guess is taken back in two launches where it took seven. On an RTX 3070, one word at a time
+76.5 → 81-82 words a second (llama.cpp: 76.7 on the same file and card), and a two-guess check
+1.42-1.51 → 1.23-1.28 times a plain step.
+
+**No more multi-second pauses the first time a reply checks a new number of guesses** on a graphics
+card. Each number ran as its own recorded set of card work, recorded the first time a reply needed
+it — 0.3-8 seconds each under WSL2. An idle model now records them ahead of time, stopping the
+moment a question arrives.
+
+**An update no longer waits 10 minutes on a computer that once answered another's question.** The
+wait before restarting counted every model the computer had ever served instead of the work in
+flight; an idle computer now restarts into its update at once, and one serving part of another
+computer's reply waits for that reply to end, as before.
+
+**RTX 50-series cards no longer wait about two minutes before their first reply** on Linux: the
+release now carries ready-made code for them (compute capability 12.0) for flash attention and the
+mixture-of-experts kernels, which the driver otherwise compiled on first use. Windows and Docker
+builds still compile it (they need CUDA 12.8 first). Unverified on a real 12.0 card.
+
+**The diagnostics report says which rule keeps a full computer's model parts**, and a Qwen 3.5 file
+uploaded without its guess head says so once at load.
+
 ## [0.3.278-alpha] — 2026-11-08
 
 **Qwen 3.5, 3.6 and 3.8 reply up to twice as fast on one computer** (#425). These models come

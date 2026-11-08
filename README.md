@@ -151,7 +151,7 @@ idea, applied to running AI instead of sharing files.)
 
 ## How fast is it?
 
-<!-- speeds:begin, reviewed for 0.3.278-alpha. Refreshed at every release: .claude/rules/completeness.md § "README speeds" -->
+<!-- speeds:begin, reviewed for 0.3.279-alpha. Refreshed at every release: .claude/rules/completeness.md § "README speeds" -->
 Speed here is **tokens a second**. A token is a word or part of one, and most
 people read about 5 a second. Every figure below comes from this project's
 test computer, a laptop with an 8 GB NVIDIA RTX 3070 graphics card and an
@@ -170,6 +170,7 @@ model reads a 1,800-token document and writes 128 tokens about it.
 | Llama 3.2 3B | the processor only | 15.3–15.4 | 80 |
 <!-- release-check:end -->
 <!-- release-check:skipped v0.3.277 — its split arms swung over 30% in both builds, single replies 10.8-18.5 (the machine, #1050; release_gate_history § .277) -->
+<!-- release-check:skipped v0.3.278 — its processor arm shared the machine with a scoring run; the re-time on the published release put the split's first run at 9.0 against 15.2-16.2 in four others, unexplained, and the rest matched this table (release_gate_history § .279) -->
 
 **Across computers**: the same laptop in Thailand, teamed up with volunteers'
 computers: one with an RTX 3060 card in Australia (about 130 ms there and back
@@ -395,7 +396,7 @@ SwarmLLM is built by a human developer working with Claude Code, an AI
 programming assistant: the human sets the direction, tests and reviews, and
 Claude writes the code. We say so openly so you can judge the project on its
 merits. Every change is checked by thousands of automated tests
-(4416 lib tests + 80 integration tests) before it ships, and regular
+(4445 lib tests + 80 integration tests) before it ships, and regular
 automated audits are logged in the repository. Scrutiny and contributions are
 welcome.
 
