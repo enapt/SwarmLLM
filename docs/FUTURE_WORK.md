@@ -2933,7 +2933,43 @@ where a whole model is on one computer, and a drafter is refused for the Qwen 3.
 the n-gram alone; #318's faster 70B chain waits on one machine fetching. **Next**: one real request per model from the
 live node, one at a time (route and segments from the `x-swarm-*` headers, first token, tok/s, any failure), the table
 here with each tier's blocker, then rank the round by which tier a fix makes usable. Prior art first (`workflow.md`
-item 1): how Petals, exo and llama.cpp's RPC backend make a 30B usable across machines — none searched yet.
+item 1): how Petals, exo and llama.cpp's RPC backend make a 30B usable across machines — first pass below; how each
+one PLACES a 30B is still unread.
+
+**Research 2026-11-08 — which models people actually run, and the round uses them.** Three web searches (Hugging Face
+downloads and trending, the Ollama library, OpenRouter's rankings and its usage study arXiv 2601.10088, the Steam
+hardware survey), read 11-08. **By the user's direction the round is measured, fixed and verified ON these models**,
+not on the small test models alone. Ranked by popularity among what this build loads:
+
+| # | Model (architecture, ~size at Q4) | Popularity | In the swarm (11-08) |
+|---|---|---|---|
+| 1 | Qwen3.8-27B (`qwen35`, dense, ~16 GB) | HF 7.8M + 6.1M GGUF; Ollama 6M in its first week | 2 hold, 1 whole; a split gets no guess head |
+| 2 | Qwen3.6-35B-A3B, Ornith-1.5-35B-A3B (`qwen35moe`, ~21 GB, 3B active) | Ollama 7.5M; 4.2M | 2-3 hold, 1 whole each |
+| 3 | Gemma 4 12B / 26B-A4B / 31B (`gemma4`) | Ollama 28.7M | 12B whole here; 26B and 31B whole on 1 |
+| 4 | gpt-oss-20b (~12 GB) / gpt-oss-120b (~65 GB, MoE) | HF 5.9M / 2.4M | the 20b held; **the 120b on no machine** |
+| 5 | Qwen3-14B, Qwen3-32B, Qwen3-30B-A3B, Qwen3-Coder-30B, Gemma 3 12B/27B | Qwen3-14B HF 13.0M (top of 12-16B) | 14B 4 hold; 32B none |
+| 6 | Llama 3.3 70B; Qwen3.5-122B / Ornith-1.5-122B | the only 70B anyone here asked for | 70B whole on 1; 122B whole nowhere |
+
+Popular and not loadable here: DeepSeek V4 (MLA, ~300B), GLM-5.3 (753B), Qwen3.8-Flash-Next (`qwen4exp`, 177B),
+MiniMax — all far larger than the tiers above.
+
+What it changes:
+- **Who needs the swarm**: Steam (July 2026) — 8 GB cards 25.3%, 12 GB 12.9%, 16 GB 25.9%, 24 GB 5.4%. A 27-35B at Q4
+  fits alone on ~5% of machines, a 70B on almost none, so the 20-35B tier has the most users to win: it goes first,
+  then 70B.
+- **The few-active-parameter MoEs** (35B-A3B, 26B-A4B, 30B-A3B, gpt-oss-120b) compute 3-5B parameters a token, so each
+  machine's share is quick even on a processor and a split is bound by its links. Measure them early: they may be the
+  cheapest large models to make usable.
+- **Speed bars** (r/LocalLLaMA, anecdotal): a reply feels usable from ~20 tok/s; a coding agent reads 20K+ token prompts,
+  so prompt reading at hundreds of tok/s is its bar. Each tier's row records both. Roleplay and creative writing are
+  over half of open-model tokens, programming 15-20% with the longest prompts; 15-70B models are gaining share.
+- **Prior art, first pass**: llama.cpp's RPC got slower as machines were added (20.4 → 15.2 tok/s at 4); exo fell from
+  18.6 to 6.4 tok/s at a 13K context; Petals reaches ~6 steps/s for a 70B at best. Their users complain about setup and
+  breakage — ease and degrading gracefully are where a swarm can beat them.
+- **Gaps found**: (a) each top 27-35B model has ONE complete copy in the swarm — one machine leaving turns a reply into
+  a fetch; (b) the swarm cannot see its own demand: the popular list (`hf_popular`) lives only in a log line, peer-served
+  requests per model are not logged at info, and no endpoint exposes `model_use`. The 83 requests of 11-01 → 11-07 were
+  all test runs. Both are candidate work under this entry.
 
 #### #318 — A large model split across machines is too slow to use
 `P2` · perf-split · **OPEN** — 2026-10-20 · plan: `docs/plans/large_model_splits.md` · draws on #134, #145, #148, #149, #192
