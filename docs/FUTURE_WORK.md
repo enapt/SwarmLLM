@@ -2826,7 +2826,29 @@ freed under the copy that read it), now fixed in the vendored `as_t_slice` itsel
 
 **Residual.** (a) **A split's last stage drafting with it** (#145's "MTP heads at the last
 stage"): the block loads only for a whole model; the far end holds the output head and could
-draft there. (b) **Fewer words on a card too — built and measured 2026-11-07, NOT kept**: the
+draft there. **Where the chain starts AND finishes on the asking computer it needs no far end
+at all** (read 2026-11-08 night): the live node's plan for Qwen3.6-35B-A3B (the #2 model) is
+[0,1) + [29,40) here, [1,29) in Australia at 132 ms (`/api/admin/models/{id}/pipeline-plan`) —
+the head's inputs (the last layer's output, the token table, the head part with block 40) all on
+this computer, the layout #428's split drafter already runs in. On prose the head keeps far more
+than the block drafter: a card story kept 46 of 91 head guesses against 10 of 79 block ones (card
+run 16), and a split's round is a round trip, so the words a round keeps are the speed. Shape: a
+guess source in the split's n-gram loop beside `SplitBlockDrafter` (priced per round as
+`LocalSpec` prices its head and block), the head run by the worker holding the model's END range
+(`block_to_load`'s `whole` widened to a range ending the model in a worker that also holds part 0),
+its own cache rewound with the segments'. Prior art: vLLM and SGLang run MTP/EAGLE at the last
+pipeline rank (`aux_hidden_states`), which is this computer here. **Map (read 2026-11-08 night,
+not built — ~5-8 h)**: the loop is `ngram_only_spec::ngram_only_distributed` (sources are concrete
+`Option`s, no trait: requester → prompt lookup → `SplitBlockDrafter` → `FarRunGuesses`, the closest
+precedent — it already serves exactly this layout, `for_plan` first = last = here); a worker holding
+[0,k) and [m,n) holds TWO `SplitModel`s (`RangeKey`), the token table on the first and the head on
+the last, so the head block loads on the LAST (`loader/mod.rs` passes `is_first && is_last` to
+`block_to_load` — relax it, and charge the block to the spawn as `drafter_head_bytes` is) and takes
+its embeddings from the first (`models.get_disjoint_mut`, as `handle_head_guess` does; `mtp_forward`
+calls `self.embed_ids` today); the last layer's output rows come back as block rows of layer n-1
+(`BlockRowsAsk`, local, no wire change); a new `DaemonMsg` beside `IpcBlockDraft` keeps a per-request
+`MtpGuesses` (`take_the_round` takes only committed positions, so a rejected guess needs no rewind);
+price it per guess (`best_gamma_for_check`, as `FarRunGuesses` does). (b) **Fewer words on a card too — built and measured 2026-11-07, NOT kept**: the
 rows gathered on the card (vendored `QTensor::gather_rows`, its padding zeroed as a loaded weight's
 is; patch `memory/archive/card_hot_rows_425b_1107.patch`, bit-exact against the card's whole head)
 cut a guess 2.9-3.4 → 1.3-1.5 ms, but the cheaper guess raised how many a round carries, and on a
