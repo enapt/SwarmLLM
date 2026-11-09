@@ -1573,7 +1573,6 @@ pub fn node_model_budget_bytes(shared: &crate::daemon::SharedState) -> Option<u6
     node_model_budget_mb(shared).map(|mb| mb.saturating_mul(1024 * 1024))
 }
 
-/// [`node_model_budget_bytes`] in MB, which is the unit most callers hold.
 /// Will this node's models be loaded onto a graphics card?
 ///
 /// "Has a GPU" must mean "the GPU will actually run the models", not merely
@@ -1596,20 +1595,62 @@ pub fn node_ram_model_budget_mb(shared: &crate::daemon::SharedState) -> Option<u
     node_model_budget_mb(shared)
 }
 
+/// [`node_model_budget_bytes`] in MB, which is the unit most callers hold —
+/// the SWARM's figure: the card's budget on a node whose models go to a card,
+/// else the machine memory under the contribution level's cap. What the owner
+/// may run here is [`owners_model_budget_mb`].
 pub fn node_model_budget_mb(shared: &crate::daemon::SharedState) -> Option<u64> {
-    let has_gpu = models_go_to_the_card(shared);
-    let mb = if has_gpu {
-        compute_vram_budget(shared)?
+    if models_go_to_the_card(shared) {
+        compute_vram_budget(shared)
     } else {
-        let budget = ram_budget_now(shared)?;
-        // What a model may take right now: the uncommitted ceiling, and never
-        // more than the machine can absorb without swapping.
+        ram_room_now_mb(shared, crate::inference::process_pool::Requester::Swarm)
+    }
+}
+
+/// What this computer may give ONE model of its OWNER's — the figure the model
+/// search marks "Runs locally" by, and the "Running now" list's `fits_here`.
+/// Two differences from [`node_model_budget_mb`], which is the swarm's: the
+/// machine memory is weighed against the owner's cap, never the contribution
+/// level's (#266); and on a computer whose models go to a card, the room the
+/// loader would give a card/processor split's processor share counts beside
+/// the card's, as the spawn charges it (`process_pool::ram_charged_share`).
+/// Judged by the card alone, a 6.6 GB model this laptop runs whole read "Host
+/// parts" at the Minimal contribution level (FUTURE_WORK #438).
+pub fn owners_model_budget_mb(shared: &crate::daemon::SharedState) -> Option<u64> {
+    let owner = crate::inference::process_pool::Requester::Owner;
+    if !models_go_to_the_card(shared) {
+        return ram_room_now_mb(shared, owner);
+    }
+    let card = compute_vram_budget(shared)?;
+    let beside = if hybrid_offload_off() {
+        0
+    } else {
+        ram_room_now_mb(shared, owner).unwrap_or(0)
+    };
+    Some(card.saturating_add(beside))
+}
+
+/// The machine memory a NEW model may take right now, weighed as `requester`'s
+/// request: its cap less what is committed, and never more than the machine
+/// absorbs without swapping. The one arithmetic behind both node budgets and
+/// [`node_machine_room_beside_card_mb`].
+fn ram_room_now_mb(
+    shared: &crate::daemon::SharedState,
+    requester: crate::inference::process_pool::Requester,
+) -> Option<u64> {
+    let budget = ram_budget_now(shared)?.judging(requester);
+    Some(
         budget
             .cap_mb
             .saturating_sub(shared.model_process_pool.ram_committed_mb())
-            .min(budget.live_headroom_mb)
-    };
-    Some(mb)
+            .min(budget.live_headroom_mb),
+    )
+}
+
+/// The A/B switch that stops the loader splitting a model across the card and
+/// the processor (`ModelProcessPool`'s own reads of it).
+fn hybrid_offload_off() -> bool {
+    std::env::var("SWARMLLM_HYBRID_OFFLOAD").as_deref() == Ok("0")
 }
 
 /// The most memory this node could EVER give one model — the figure behind
@@ -1649,18 +1690,10 @@ pub fn node_model_memory_ceiling_mb(shared: &crate::daemon::SharedState) -> Opti
 /// use, and where the loader does not split a model across the two
 /// (`SWARMLLM_HYBRID_OFFLOAD=0`).
 pub fn node_machine_room_beside_card_mb(shared: &crate::daemon::SharedState) -> Option<u64> {
-    if !models_go_to_the_card(shared)
-        || std::env::var("SWARMLLM_HYBRID_OFFLOAD").as_deref() == Ok("0")
-    {
+    if !models_go_to_the_card(shared) || hybrid_offload_off() {
         return None;
     }
-    let budget = ram_budget_now(shared)?;
-    Some(
-        budget
-            .cap_mb
-            .saturating_sub(shared.model_process_pool.ram_committed_mb())
-            .min(budget.live_headroom_mb),
-    )
+    ram_room_now_mb(shared, crate::inference::process_pool::Requester::Swarm)
 }
 
 /// This machine's processor speed in 7B reference tokens a second — what its
@@ -1825,6 +1858,49 @@ mod tests {
         assert_eq!(
             node_model_memory_ceiling_mb(&state),
             Some(12_288 + ram.cap_mb)
+        );
+    }
+
+    /// **What the owner may run on a card computer counts the processor beside
+    /// the card** (#438): the loader splits a model wider than the card's budget
+    /// across both, so the model search's "Runs locally" — which asked the
+    /// card's budget alone — told this laptop a 6.6 GB model it runs whole was
+    /// only "Host parts". The swarm's figure stays the card's.
+    #[test]
+    fn the_owners_budget_on_a_card_computer_counts_the_processor_beside_the_card() {
+        let mut config = crate::config::Config::default();
+        // Explicit ceilings, so neither the real card's other programs nor the
+        // contribution level moves the figures: both caps are 2,000 MB.
+        config.resources.max_gpu_vram_mb = 2_000;
+        config.resources.max_ram_mb = 2_000;
+        let temp = tempfile::tempdir().unwrap();
+        let (state, _, _) = crate::daemon::SharedState::new(
+            config,
+            crate::identity::Identity::generate(),
+            crate::storage::db::Database::open(temp.path()).unwrap(),
+            std::sync::Arc::new(tokio::sync::Mutex::new(
+                crate::inference::executor::ModelExecutor::new(),
+            )),
+            Some(crate::inference::executor::GpuInfo {
+                name: "test card".into(),
+                vram_total_mb: 12_288,
+                backend: "cuda".into(),
+            }),
+        );
+        let ram = ram_budget_now(&state).expect("this machine's memory reads");
+        if ram.live_headroom_mb < 2_000 {
+            eprintln!("skipped: under 2 GB free on this machine, the anti-swap guard binds");
+            return;
+        }
+        assert_eq!(
+            node_model_budget_mb(&state),
+            Some(2_000),
+            "the swarm's: the card"
+        );
+        assert_eq!(
+            owners_model_budget_mb(&state),
+            Some(4_000),
+            "the owner's: the card and the processor's room beside it"
         );
     }
 

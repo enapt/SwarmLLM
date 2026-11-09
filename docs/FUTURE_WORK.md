@@ -3373,18 +3373,6 @@ parent pointers; SpecLA 2607.16673; STree 2505.14969 for Mamba-2. Take: the ance
 kernel, `qwen35::delta_rule_into`, gains a parent-pointer mode), the accepted path replayed by the existing replay
 (`SsmState::rewind_to` already replays kept rows). Build after #428's field model runs on two real peers.
 
-#### #438 — The model search judges "Runs locally" on a card computer by the card alone
-`P2` · models-ui · **OPEN** — since 2026-11-09 (found taking the README's screenshots) · history: gotcha #483 (the same budget on a processor-only machine)
-`admin_hf::search` asks `vram::node_model_budget_bytes`, which on a computer whose models go to the card is the card's
-budget only (`compute_vram_budget`: 6.33 GiB on this RTX 3070 laptop). The loader runs a wider model across the card
-and the processor (`ModelProcessPool::fresh_run_layers_for_planning`; the machine room offered beside the card since
-2026-10-25), so Gemma 4 12B Q4_K_M (6.6 GB), which this computer runs whole, reads "↗ Host parts" in the search, and a
-new user with a card is told every mid-size model will not run on their computer. Next: answer the search's "runs here"
-from the loader's own bound (the card plus `machine_room_beside_card_mb`, through the helper the planner asks), never
-a second estimate; consider a third pill for "runs here, partly on the processor", since it runs slower. Prior art (their
-UIs as remembered, not re-checked): LM Studio's search marks "Partial GPU offload possible" apart from "likely too
-large"; `ollama ps` reports a split like "48%/52% CPU/GPU".
-
 #### #318 — A large model split across machines is too slow to use
 `P2` · perf-split · **OPEN** — 2026-10-20 · plan: `docs/plans/large_model_splits.md` · draws on #134, #145, #148, #149, #192
 
@@ -5537,6 +5525,19 @@ archive under the named heading. Reopen one only with the evidence its line name
 Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 19-28 were
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
+
+**Closed 2026-11-09, on main (not in a release yet)** (#438)
+- #438 — **The model search judged "Runs locally" on a card computer by the card alone.** It asked
+  `vram::node_model_budget_bytes` — the swarm's figure, the card's budget (6.33 GiB on this RTX 3070
+  laptop at the Minimal contribution level) — so Gemma 4 12B Q4_K_M (6.6 GB), which this laptop runs
+  whole across card and processor, read "↗ Host parts". The search and the "Running now" list's
+  `fits_here` now ask `vram::owners_model_budget_mb`: the card's budget plus the machine memory the
+  loader would give a split's processor share, weighed against the OWNER's cap (#266); on a
+  processor-only computer, the owner's cap instead of the contribution level's. The swarm's figure is
+  unchanged (`node_model_budget_mb`; one arithmetic, `ram_room_now_mb`, behind all three). Test
+  `the_owners_budget_on_a_card_computer_counts_the_processor_beside_the_card` (red with
+  `SWARMLLM_HYBRID_OFFLOAD=0`). Not built: a pill of its own for a model that runs here partly on the
+  processor, more slowly (LM Studio marks "Partial GPU offload possible").
 
 **Closed 2026-11-06/07, released in v0.3.277 (published 2026-11-07 07:45:06Z)** (#416's nicknames, #417, #402, #191, #418, #419, #421, #420, #423)
 - #423 — **A part download that left its parts to another download credited them here and called the

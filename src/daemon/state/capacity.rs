@@ -75,8 +75,9 @@ pub struct SwarmCapacity {
     /// count proxied via `total_size_bytes`. Surfaced as the headline
     /// "your swarm runs up to X" claim.
     pub headline_model: Option<HeadlineModel>,
-    /// What this computer may give one model, in MB (`vram::node_model_budget_mb`,
-    /// the figure the HuggingFace search marks "Runs locally" by), as last READ —
+    /// What this computer may give one model of its owner's, in MB
+    /// (`vram::owners_model_budget_mb`, the figure the HuggingFace search marks
+    /// "Runs locally" by), as last READ —
     /// by the health monitor's tick, off the network loop
     /// ([`refresh_swarm_capacity_reading_the_budget`]). The refreshes on every
     /// peer connect and disconnect run ON that loop and carry this figure over:
@@ -106,8 +107,8 @@ pub struct ModelEntry {
     /// Whether THIS node hosts at least one shard. Drives the "your
     /// contribution" badge.
     pub hosted_by_us: bool,
-    /// Would the whole model fit what this computer may give a model now
-    /// (`vram::node_model_budget_mb`, the figure the HuggingFace search marks
+    /// Would the whole model fit what this computer may give its owner's model
+    /// now (`vram::owners_model_budget_mb`, the figure the HuggingFace search marks
     /// "Runs locally" by)? `None` when that cannot be read — never a no. The
     /// "Running now" list said nothing of what runs here (field report
     /// 2026-10-15).
@@ -377,7 +378,7 @@ pub async fn refresh_swarm_capacity_reading_the_budget(state: &Arc<SharedState>)
     let reading = Arc::clone(state);
     let budget = match tokio::task::spawn_blocking(move || {
         reading.learn_geometry_of_known_models();
-        crate::model::auto_manage::vram::node_model_budget_mb(&reading)
+        crate::model::auto_manage::vram::owners_model_budget_mb(&reading)
     })
     .await
     {

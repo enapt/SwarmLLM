@@ -84,13 +84,16 @@ pub async fn hf_search(
         tags_by_repo.insert(e.repo_id.clone(), e.task_tags.clone());
     }
 
-    // How large a model this node could host, on whichever device would run it.
-    // Asking the card alone answered zero on every processor-only machine, so
+    // How large a model the OWNER could run here, on whichever devices would run
+    // it. Asking the card alone answered zero on every processor-only machine, so
     // nothing ever "fitted" and the frontend's fit filter hid every result of
-    // every search (gotcha #483). `None` is unknowable, not zero — see below,
-    // where it deliberately does not exclude.
+    // every search (gotcha #483); and on a card computer it left out the
+    // processor the loader splits a model onto, so a model the computer runs
+    // whole read "Host parts" (#438). `None` is unknowable, not zero — see
+    // below, where it deliberately does not exclude.
     let node_budget_bytes =
-        crate::model::auto_manage::vram::node_model_budget_bytes(&state.shared_state);
+        crate::model::auto_manage::vram::owners_model_budget_mb(&state.shared_state)
+            .map(|mb| mb.saturating_mul(1024 * 1024));
 
     // Group results by repo_id with quant variants (preserve HF API order = by downloads)
     let mut repo_order: Vec<String> = Vec::new();
