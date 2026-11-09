@@ -72,7 +72,7 @@ pub(crate) use self::gguf_meta::{
 pub use self::kv_cache::{KvCacheStore, KvOccupancy};
 pub(crate) use self::loader::card_free_for_a_load;
 pub use self::model::SplitModel;
-pub(crate) use self::mtp::{head_in_shape, mtp_on};
+pub(crate) use self::mtp::{head_in_shape, mtp_on, split_guess_head_on};
 pub(crate) use self::mtp::{
     GuessOver, MtpCache, DRAFT_MOST_OWN_WORDS, MTP_CATCH_UP_CHUNK, MTP_MOST_POSITIONS,
     MTP_PROMPT_ROWS,

@@ -19,6 +19,20 @@ drafter-less ones at close word choices ("one child" / "single child"), as a car
 several words do. Both computers need this release; an older one is never asked for what the drafter
 reads.
 
+**And where the far computer does the middle, a Qwen 3.5 or 3.6 split guesses with the model's own
+guess head — code replies 2-3 times as fast** (#425). The small next-word block these files carry
+now loads beside the first part and guesses from the model's own last-layer values, which come back
+with every check: nothing new crosses the network, and the far computer needs no update. Measured on
+a real link (Qwen3.6-35B-A3B, its first and last layers on an RTX 3070 Laptop GPU here, layers 1-38
+on a card in Australia ~137 ms away, four runs a side): a palindrome function 5.0-5.1 → 13.5-15.2
+words a second, a binary search tree class 5.5-5.8 → 11.1-14.8, a short story 4.5-4.8 → 6.8-8.9.
+**It also guesses the next round while the far computer checks this one**: when the check keeps
+every guess and its last word is the one guessed next, the next guesses go at once — and the card,
+working through the wait, stays at full speed, so each fresh guess costs 4-8 ms instead of 16-17.
+Four runs a side on the same link, alternating: 13.5 → 15.4, 11.8 → 13.0 and 7.8 → 8.5 words a
+second on the same three prompts. The replies are the same as without either, except where two
+words score almost alike (a blank line with or without spaces).
+
 **The same drafter speeds up these models on one graphics card** — code replies 1.4-1.9 times as
 fast on an RTX 3070 with Qwen3.5-4B (a class 190-193 words a second against ~120 without it). A
 story runs about as fast as without it (78-79 words a second against 80-84): on prose the drafter

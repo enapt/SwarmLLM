@@ -488,6 +488,10 @@ pub async fn run_worker(
             {
                 pool_may_hold_freed = true;
             }
+            // And guess on beside a split's check that is abroad (#425 (f)).
+            if ipc_rx.is_empty() && block_drafts.guess_ahead(&models, &|| ipc_rx.is_empty()) {
+                pool_may_hold_freed = true;
+            }
             if pool_may_hold_freed && crate::inference::cuda_pool::keep_enabled() {
                 match tokio::time::timeout(crate::inference::cuda_pool::IDLE_TRIM, ipc_rx.recv())
                     .await
@@ -3951,6 +3955,11 @@ struct MtpGuesses {
     acceptance: crate::inference::dsd_controller::AcceptanceEstimate,
     /// One guess's time, read back with the round's guesses.
     guess_ms: crate::inference::dsd_controller::RecentMedian,
+    /// A round's FIRST guess, its waiting rows taken in with it — read apart
+    /// from the rest because a split's card sits idle while the check is
+    /// abroad, and the work after an idle gap can pay for it (gotcha #756;
+    /// #425 (a): 16.6 ms a guess on the field against 2.9 in a probe).
+    first_ms: crate::inference::dsd_controller::RecentMedian,
     /// What its rounds have written a millisecond, which the block drafter
     /// must beat to be checked instead ([`LocalSpec::next`]).
     delivered: crate::inference::dsd_controller::Delivered,
@@ -3964,6 +3973,17 @@ struct MtpGuesses {
     stopped: Option<String>,
     /// The words its guesses read, where they read fewer than all.
     words: Option<DraftWords>,
+    /// Rows of `cache` that are the reply's own, the trunk's states taken in;
+    /// a chain kept past the last check ([`HeadChain`]) sits after them.
+    real_len: usize,
+    /// The guesses kept past the last check, beside a split's first segment
+    /// where [`ahead_on`] (#425 (f)).
+    chain: Option<HeadChain>,
+    ahead: bool,
+    /// Rounds answered from the chain, and the chain's steps run while a
+    /// check was abroad.
+    served_ahead: u64,
+    steps_ahead: u64,
 }
 
 /// The words a reply's guesses read where the head guesses on the processor
@@ -4074,8 +4094,32 @@ impl MtpGuesses {
         kv_store: &crate::inference::split::KvCacheStore,
         req_id_str: &str,
     ) -> Option<Self> {
-        let layer = model.mtp_capture_layer()?;
-        Some(Self {
+        Some(Self::reading(
+            model.mtp_capture_layer()?,
+            kv_store,
+            req_id_str,
+        ))
+    }
+
+    /// The head beside a split's first segment (#425 (a)), fed the trunk's
+    /// last layer as the segment running it sends its rows back
+    /// ([`SplitHead`]).
+    fn for_split(
+        model: &crate::inference::split::SplitModel,
+        kv_store: &crate::inference::split::KvCacheStore,
+        req_id_str: &str,
+    ) -> Option<Self> {
+        let mut head = Self::reading(model.split_head_reads_layer()?, kv_store, req_id_str);
+        head.ahead = ahead_on();
+        Some(head)
+    }
+
+    fn reading(
+        layer: usize,
+        kv_store: &crate::inference::split::KvCacheStore,
+        req_id_str: &str,
+    ) -> Self {
+        Self {
             capture: std::iter::once(layer).collect(),
             cache: Default::default(),
             tokens: Vec::new(),
@@ -4088,6 +4132,7 @@ impl MtpGuesses {
             for_the_owner: kv_store.serves_the_owner(req_id_str),
             acceptance: crate::inference::dsd_controller::AcceptanceEstimate::recent(),
             guess_ms: Default::default(),
+            first_ms: Default::default(),
             delivered: Default::default(),
             probing: Probing::default(),
             rounds: 0,
@@ -4096,7 +4141,12 @@ impl MtpGuesses {
             declined: 0,
             stopped: None,
             words: None,
-        })
+            real_len: 0,
+            chain: None,
+            ahead: false,
+            served_ahead: 0,
+            steps_ahead: 0,
+        }
     }
 
     fn active(&self) -> bool {
@@ -4107,6 +4157,7 @@ impl MtpGuesses {
         if self.stopped.is_none() {
             tracing::warn!(reason = %why, "next-token head: no more guesses for this reply");
             self.stopped = Some(why);
+            self.chain = None;
             self.tokens.clear();
             self.hidden.clear();
         }
@@ -4206,6 +4257,11 @@ impl MtpGuesses {
                 self.next_pos
             )));
         }
+        // A fresh draft replaces any chain kept past the last check, whose
+        // rows go before the waiting ones are read in.
+        self.chain = None;
+        self.cache.truncate(self.real_len);
+        let started = std::time::Instant::now();
         let before = self
             .last_h
             .clone()
@@ -4245,9 +4301,14 @@ impl MtpGuesses {
         };
         // Every row so far is the reply's; the guesses' own rows go after.
         let held = self.cache.len();
+        self.real_len = held;
         let mut guessed = Vec::with_capacity(gamma);
         loop {
             let guess = model.mtp_guess(&last_row, over)?;
+            if guessed.is_empty() {
+                self.first_ms
+                    .record(started.elapsed().as_secs_f64() * 1000.0);
+            }
             guessed.push(guess);
             if guessed.len() >= gamma {
                 break;
@@ -4263,9 +4324,209 @@ impl MtpGuesses {
                 self.for_the_owner,
             )?;
         }
-        self.cache.truncate(held);
+        if self.ahead && !guessed.is_empty() {
+            self.chain = Some(HeadChain::kept(index_pos, &guessed, rows_out, last_row));
+        } else {
+            self.cache.truncate(held);
+        }
         Ok(guessed)
     }
+
+    /// The next round's guesses from the chain kept past the last check
+    /// (#425 (f)): where every word committed since the chain began is its
+    /// own — the check's bonus word included — and it reaches past
+    /// `index_pos`. Else `None`, the chain dropped (a fresh draft cuts its
+    /// rows). `words` are the conversation's, position `p` at index `p`,
+    /// through `index_pos`. The round's first word waits with the rows, as a
+    /// draft would have read it, and the chain is rebuilt from the trunk's
+    /// states while this round's check is abroad ([`Self::extend_ahead`]).
+    fn serve_ahead(&mut self, words: &[u32], index_pos: usize, gamma: usize) -> Option<Vec<u32>> {
+        let c = self.chain.take()?;
+        if c.rebase || self.next_pos != index_pos || index_pos < c.from_pos {
+            return None;
+        }
+        let j = index_pos - c.from_pos;
+        if words.get(c.from_pos..=index_pos)? != c.tokens.get(..=j)? {
+            return None;
+        }
+        let served: Vec<u32> = c.tokens[j + 1..].iter().take(gamma).copied().collect();
+        if served.is_empty() {
+            return None;
+        }
+        let before = self.last_h.clone()?;
+        self.tokens.push(words[index_pos]);
+        self.hidden.push(before);
+        self.next_pos = index_pos + 1;
+        self.chain = Some(HeadChain::served(index_pos, &served));
+        self.served_ahead += 1;
+        Some(served)
+    }
+
+    /// Guess on past the round's check while it is abroad (#425 (f), PEARL's
+    /// post-verify), one head step at a time while `keep_going` holds — the
+    /// segment's next forward waits at most one step. A chain that was served
+    /// is first rebuilt from the trunk's states waiting (its old rows cut),
+    /// then reads the guesses it was served and guesses on. Returns the steps
+    /// run.
+    fn extend_ahead(
+        &mut self,
+        model: &crate::inference::split::SplitModel,
+        keep_going: &dyn Fn() -> bool,
+    ) -> Result<u64, SwarmError> {
+        let Self {
+            chain,
+            cache,
+            real_len,
+            tokens,
+            hidden,
+            kv_reserve,
+            for_the_owner,
+            words,
+            steps_ahead,
+            ..
+        } = self;
+        let Some(c) = chain.as_mut().filter(|c| c.armed) else {
+            return Ok(0);
+        };
+        let internal = |what: &str| SwarmError::Internal(format!("next-token head ahead: {what}"));
+        let mut steps = 0u64;
+        if c.rebase {
+            if !keep_going() {
+                return Ok(0);
+            }
+            if tokens.is_empty() {
+                return Err(internal("a served chain has no rows to read in"));
+            }
+            cache.truncate(*real_len);
+            let fed = std::mem::take(tokens);
+            let pieces = std::mem::take(hidden);
+            let h = candle_core::Tensor::cat(&pieces, 1).map_err(SwarmError::internal)?;
+            let chunk = crate::inference::split::MTP_CATCH_UP_CHUNK;
+            let mut out = None;
+            for start in (0..fed.len()).step_by(chunk) {
+                let len = chunk.min(fed.len() - start);
+                out = Some(model.mtp_forward(
+                    cache,
+                    &fed[start..start + len],
+                    &h.narrow(1, start, len).map_err(SwarmError::internal)?,
+                    *kv_reserve,
+                    *for_the_owner,
+                )?);
+            }
+            let (r, l) = out.ok_or_else(|| internal("nothing read in"))?;
+            *real_len = cache.len();
+            c.rows_out = Some(r);
+            c.last_row = Some(l);
+            c.fed = 0;
+            c.rebase = false;
+            steps += 1;
+        }
+        let over = match words.as_mut() {
+            Some(w) if !w.whole => crate::inference::split::GuessOver::HotAnd(w.rows(model)?),
+            _ => crate::inference::split::GuessOver::Everything,
+        };
+        while c.tokens.len() < c.most && keep_going() {
+            if *real_len + c.fed + 1 > crate::inference::split::MTP_MOST_POSITIONS {
+                break;
+            }
+            if c.fed < c.tokens.len() {
+                let rows_out = c.rows_out.as_ref().ok_or_else(|| internal("no rows"))?;
+                let last = rows_out
+                    .narrow(1, rows_out.dim(1).map_err(SwarmError::internal)? - 1, 1)
+                    .map_err(SwarmError::internal)?;
+                let (r, l) = model.mtp_forward(
+                    cache,
+                    &[c.tokens[c.fed]],
+                    &last,
+                    *kv_reserve,
+                    *for_the_owner,
+                )?;
+                c.rows_out = Some(r);
+                c.last_row = Some(l);
+                c.fed += 1;
+            } else {
+                let l = c
+                    .last_row
+                    .as_ref()
+                    .ok_or_else(|| internal("no row to guess from"))?;
+                c.tokens.push(model.mtp_guess(l, over)?);
+            }
+            steps += 1;
+        }
+        *steps_ahead += steps;
+        Ok(steps)
+    }
+}
+
+/// The guess head's words kept past a round's check (#425 (f), PEARL's
+/// post-verify, Liu et al., ICLR 2025): `tokens` at positions `from_pos..`,
+/// the first `fed` of them read into the head's cache past its real rows,
+/// `rows_out` / `last_row` the head's output after the last one read. It
+/// grows only while its check is abroad (`armed`: that check's first-segment
+/// forward has run here and nothing for the request has come back), and it
+/// is served at the next draft only where the check kept every guess and its
+/// bonus word is the chain's next — so a served guess is one the head would
+/// have made chained that deep, and the check still decides every word.
+struct HeadChain {
+    from_pos: usize,
+    tokens: Vec<u32>,
+    fed: usize,
+    rows_out: Option<candle_core::Tensor>,
+    last_row: Option<candle_core::Tensor>,
+    /// The words it holds at most: its checked or served guesses, the word
+    /// standing for the bonus, then a round's worth.
+    most: usize,
+    /// The position the check it waits beside starts at.
+    check_pos: usize,
+    armed: bool,
+    /// Served: read the waiting trunk rows in before it grows.
+    rebase: bool,
+}
+
+impl HeadChain {
+    /// After a draft at `index_pos`: its guesses, the last one not yet read.
+    fn kept(
+        index_pos: usize,
+        guessed: &[u32],
+        rows_out: candle_core::Tensor,
+        last_row: candle_core::Tensor,
+    ) -> Self {
+        Self {
+            from_pos: index_pos + 1,
+            tokens: guessed.to_vec(),
+            fed: guessed.len() - 1,
+            rows_out: Some(rows_out),
+            last_row: Some(last_row),
+            most: guessed.len() + 1 + MtpGuesses::MOST_GUESSES,
+            check_pos: index_pos,
+            armed: false,
+            rebase: false,
+        }
+    }
+
+    /// After a round at `index_pos` was served `served` from a chain.
+    fn served(index_pos: usize, served: &[u32]) -> Self {
+        Self {
+            from_pos: index_pos + 1,
+            tokens: served.to_vec(),
+            fed: 0,
+            rows_out: None,
+            last_row: None,
+            most: served.len() + 1 + MtpGuesses::MOST_GUESSES,
+            check_pos: index_pos,
+            armed: false,
+            rebase: true,
+        }
+    }
+}
+
+/// Whether a split's guess head guesses on while its check is abroad
+/// (#425 (f)): on, A/B `SWARMLLM_SPLIT_HEAD_AHEAD=0` — the 35B-A3B with its
+/// middle 137 ms away wrote code 11-14% and a story 9% faster with it
+/// (`docs/invariants/inference.md` § "A file's own guess head").
+fn ahead_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("SWARMLLM_SPLIT_HEAD_AHEAD").map_or(true, |v| v != "0"))
 }
 
 /// A block drafter's guesses (#428, `split::BlockDrafter`): it reads the
@@ -4589,24 +4850,151 @@ mod join_row_pieces_tests {
     }
 }
 
-/// A split's block drafters (#428 stage 3), one per request whose FIRST
-/// segment this worker holds beside the model's head: each fed the rows the
-/// split's segments sent back (`DaemonMsg::BlockDraft`). Bounded as the far
-/// runs are; a request's goes when it is released or cancelled.
+/// A split's guessers beside its FIRST segment, one entry per request whose
+/// first segment this worker holds beside the model's output head: the block
+/// drafter (#428 stage 3) and the model's own guess head (#425 (a)), each fed
+/// the rows the split's segments sent back (`DaemonMsg::BlockDraft`). Bounded
+/// as the far runs are; a request's goes when it is released or cancelled.
 #[derive(Default)]
-struct SplitBlockDrafts(HashMap<Uuid, (BlockGuesses, std::time::Instant)>);
+struct SplitBlockDrafts(HashMap<Uuid, SplitGuessers>);
+
+/// One request's guessers beside a split's first segment. A failure ends the
+/// guesser it came from; the other goes on.
+struct SplitGuessers {
+    block: Option<BlockGuesses>,
+    head: Option<SplitHead>,
+    /// The words both read beside the hot rows on the processor (#425 (b)):
+    /// one set, so the conversation's own words are copied out of the output
+    /// head once.
+    words: Option<DraftWords>,
+    used: std::time::Instant,
+    /// The first segment's model, for the head's steps between messages.
+    key: RangeKey,
+}
+
+/// The guess head beside a split's first segment (#425 (a)): the trunk's last
+/// layer is another segment's, whose rows come back with each forward as a
+/// block drafter's do (`arch-network.md` § "A block drafter's rows come
+/// back"). The head pairs the token at `p` with the trunk's state at `p - 1`
+/// (`MtpGuesses`), so it keeps the conversation's words by position.
+struct SplitHead {
+    g: MtpGuesses,
+    /// Every word of the conversation so far, the one at position `p` at
+    /// index `p`: the prompt and the reply, the token being guessed after last.
+    tokens: Vec<u32>,
+    /// Where the trunk rows it has taken in end: its last state is at
+    /// `rows_upto - 1`.
+    rows_upto: usize,
+}
+
+impl SplitHead {
+    /// A head for a reply whose words so far are `words` — every one from
+    /// position 0 to `upto`, the token guessed after, or none: a head told
+    /// fewer would pair the wrong token with each state.
+    fn for_model(
+        model: &crate::inference::split::SplitModel,
+        kv_store: &crate::inference::split::KvCacheStore,
+        req_id_str: &str,
+        words: &[u32],
+        upto: usize,
+    ) -> Option<Self> {
+        let g = MtpGuesses::for_split(model, kv_store, req_id_str)?;
+        if words.len() != upto + 1 {
+            tracing::warn!(
+                words = words.len(),
+                upto,
+                "guess head beside the first segment: the words do not line up with the reply, \
+                 so it does not guess for it"
+            );
+            return None;
+        }
+        Some(Self {
+            g,
+            tokens: words.to_vec(),
+            rows_upto: 0,
+        })
+    }
+
+    /// The trunk's rows the split sent back, up to `upto`: the prompt's end
+    /// on the first, then each round's committed positions.
+    fn take_rows(
+        &mut self,
+        model: &crate::inference::split::SplitModel,
+        rows: &[IpcBlockRows],
+        payload: &[u8],
+        upto: usize,
+    ) -> Result<(), SwarmError> {
+        let layer = model
+            .split_head_reads_layer()
+            .ok_or_else(|| SwarmError::Internal("guess head: no trunk layer to read".into()))?;
+        if self.tokens.len() != upto + 1 {
+            return Err(SwarmError::Internal(format!(
+                "guess head: {} words for a reply at {upto}",
+                self.tokens.len()
+            )));
+        }
+        let next = (self.rows_upto > 0).then_some(self.rows_upto);
+        let taken = block_rows_for_the_drafter(
+            rows,
+            payload,
+            &[layer],
+            model.hidden_dim,
+            next,
+            upto,
+            model.device(),
+        )
+        .map_err(|e| SwarmError::Validation(format!("guess head rows: {e}")))?;
+        let Some((start, kept)) = taken else {
+            return Ok(());
+        };
+        match next {
+            None => {
+                let kept = kept.get(&layer).ok_or_else(|| {
+                    SwarmError::Internal("guess head: the prompt's rows are missing".into())
+                })?;
+                self.g
+                    .take_the_prompt(model, &self.tokens[..upto], kept, start)?
+            }
+            Some(_) => {
+                self.g
+                    .take_the_round(model, start, &self.tokens[start..upto], Some(&kept))?
+            }
+        }
+        self.rows_upto = upto;
+        Ok(())
+    }
+}
 
 impl SplitBlockDrafts {
     fn release(&mut self, request_id: &Uuid) {
-        if let Some((g, _)) = self.0.remove(request_id) {
-            // Once a reply, and only on a split that drafted by block.
+        let Some(g) = self.0.remove(request_id) else {
+            return;
+        };
+        // Once a reply, and only on a split that guessed beside its first
+        // segment.
+        if let Some(b) = g.block.as_ref() {
             tracing::info!(
                 %request_id,
-                rounds = g.rounds,
-                proposed = g.proposed,
-                draft_ms = ?g.draft_ms.median().map(f64::round),
-                stopped = g.stopped.as_deref().unwrap_or(""),
+                rounds = b.rounds,
+                proposed = b.proposed,
+                draft_ms = ?b.draft_ms.median().map(f64::round),
+                stopped = b.stopped.as_deref().unwrap_or(""),
                 "DIAG: split block drafter complete"
+            );
+        }
+        if let Some(h) = g.head.as_ref() {
+            tracing::info!(
+                %request_id,
+                rounds = h.g.rounds,
+                proposed = h.g.proposed,
+                guess_ms = ?h.g.guess_ms.median().map(|m| (m * 10.0).round() / 10.0),
+                first_guess_ms = ?h.g.first_ms.median().map(|m| (m * 10.0).round() / 10.0),
+                kv_reserve = h.g.kv_reserve,
+                served_ahead = h.g.served_ahead,
+                steps_ahead = h.g.steps_ahead,
+                reads_hot_rows = g.words.as_ref().is_some_and(|w| !w.whole),
+                stopped = h.g.stopped.as_deref().unwrap_or(""),
+                "DIAG: split guess head complete"
             );
         }
     }
@@ -4615,6 +5003,54 @@ impl SplitBlockDrafts {
         if !self.0.is_empty() {
             self.0.retain(|id, _| !cancelled.contains_key(id));
         }
+    }
+
+    /// A forward for `request_id` ran here (#425 (f)): the check a kept
+    /// chain waits beside has left its first segment (`first`, at the
+    /// chain's position) — it may grow — or something came back, and it
+    /// stops growing.
+    fn note_forward(&mut self, request_id: &Uuid, first: bool, index_pos: usize) {
+        if let Some(c) = self
+            .0
+            .get_mut(request_id)
+            .and_then(|g| g.head.as_mut())
+            .and_then(|h| h.g.chain.as_mut())
+        {
+            c.armed = first && c.check_pos == index_pos;
+        }
+    }
+
+    /// Grow every chain whose check is abroad while no message waits. True
+    /// where a step ran.
+    fn guess_ahead(
+        &mut self,
+        models: &HashMap<RangeKey, SplitModel>,
+        keep_going: &dyn Fn() -> bool,
+    ) -> bool {
+        let mut any = false;
+        for g in self.0.values_mut() {
+            if !keep_going() {
+                break;
+            }
+            let Some(h) = g
+                .head
+                .as_mut()
+                .filter(|h| h.g.active() && h.g.chain.as_ref().is_some_and(|c| c.armed))
+            else {
+                continue;
+            };
+            let Some(model) = models.get(&g.key) else {
+                continue;
+            };
+            h.g.words = g.words.take();
+            let ran = tokio::task::block_in_place(|| h.g.extend_ahead(model, keep_going));
+            g.words = h.g.words.take();
+            match ran {
+                Ok(steps) => any |= steps > 0,
+                Err(e) => h.g.stop(e.to_string()),
+            }
+        }
+        any
     }
 }
 
@@ -4844,10 +5280,46 @@ fn block_rows_for_the_drafter(
     Ok(Some((start, kept)))
 }
 
-/// `DaemonMsg::BlockDraft` (#428 stage 3): the split's rows for its committed
-/// positions taken in, then up to `gamma` guesses after `token` from the
-/// drafter beside this worker's first segment. An error ends the drafter for
-/// the reply; the coordinator drafts without it.
+/// A block drafter's share of the rows the split sent back — the outputs of
+/// the layers it reads, up to `upto`: the prompt's end on its first call, then
+/// each round's committed positions.
+fn block_takes_rows(
+    b: &mut BlockGuesses,
+    model: &SplitModel,
+    rows: &[IpcBlockRows],
+    payload: &[u8],
+    upto: usize,
+) -> Result<(), SwarmError> {
+    let layers: Vec<usize> = model
+        .block_drafter()
+        .map(|d| d.target_layers().to_vec())
+        .unwrap_or_default();
+    let next = (b.next_pos > 0).then_some(b.next_pos);
+    let taken = block_rows_for_the_drafter(
+        rows,
+        payload,
+        &layers,
+        model.hidden_dim,
+        next,
+        upto,
+        model.device(),
+    )
+    .map_err(|e| SwarmError::Validation(format!("block drafter rows: {e}")))?;
+    match (taken, next) {
+        (Some((start, kept)), None) => b.take_the_prompt(model, upto, &kept, start),
+        (Some((start, kept)), Some(_)) => b.take_the_round(model, start, upto - start, Some(&kept)),
+        (None, _) => Ok(()),
+    }
+}
+
+/// `DaemonMsg::BlockDraft` (#428 stage 3, #425 (a)): the split's rows for its
+/// committed positions taken in by every guesser beside this worker's first
+/// segment, then up to `gamma` guesses after `token` from the one asked — the
+/// block drafter, or the model's own guess head (`by_head`). An error ends the
+/// guesser it came from for the reply; the coordinator hears of it when it
+/// asks that one (`ServiceUnavailable` for one not here, `Inference` for one
+/// stopped in this reply — only the first is held off the model), and the
+/// other goes on.
 async fn handle_block_draft(
     writer: &mut IpcWriter,
     models: &mut HashMap<RangeKey, SplitModel>,
@@ -4869,6 +5341,7 @@ async fn handle_block_draft(
         ))
     })?;
     let req = d.request_id.to_string();
+    let upto = d.upto as usize;
     let guessed = tokio::task::block_in_place(|| -> Result<Vec<u32>, SwarmError> {
         if d.first {
             drafts.0.remove(&d.request_id);
@@ -4879,77 +5352,146 @@ async fn handle_block_draft(
                 let Some(oldest) = drafts
                     .0
                     .iter()
-                    .min_by_key(|(_, (_, at))| *at)
+                    .min_by_key(|(_, g)| g.used)
                     .map(|(id, _)| *id)
                 else {
                     break;
                 };
                 drafts.0.remove(&oldest);
             }
-            let mut fresh = BlockGuesses::for_model(model, kv_store, &req).ok_or_else(|| {
-                SwarmError::ServiceUnavailable("no block drafter beside this segment".into())
-            })?;
-            // The words its guesses read beside the hot rows, on the processor
-            // (#425 (b)): the prompt and the reply so far, then each draft's new.
-            fresh.words = model
-                .block_hot_rows()
+            let block = BlockGuesses::for_model(model, kv_store, &req);
+            let head = SplitHead::for_model(model, kv_store, &req, &d.words, upto);
+            if block.is_none() && head.is_none() {
+                return Err(SwarmError::ServiceUnavailable(
+                    "no block drafter or guess head beside this segment".into(),
+                ));
+            }
+            // The words their guesses read beside the hot rows, on the
+            // processor (#425 (b)): the prompt and the reply so far, then each
+            // draft's new. The hot rows are the head's where it keeps them,
+            // else the drafter's own (`SplitModel::mtp_hot_rows`).
+            let words = model
+                .mtp_hot_rows()
                 .and_then(|hot| DraftWords::for_prompt(hot, &d.words));
-            drafts
-                .0
-                .insert(d.request_id, (fresh, std::time::Instant::now()));
+            drafts.0.insert(
+                d.request_id,
+                SplitGuessers {
+                    block,
+                    head,
+                    words,
+                    used: std::time::Instant::now(),
+                    key,
+                },
+            );
         }
-        let Some((g, used)) = drafts.0.get_mut(&d.request_id) else {
+        let Some(g) = drafts.0.get_mut(&d.request_id) else {
             return Ok(Vec::new());
         };
-        *used = std::time::Instant::now();
+        g.used = std::time::Instant::now();
         if let Some(words) = g.words.as_mut().filter(|_| !created) {
             words.note(&d.words);
         }
-        let layers: Vec<usize> = model
-            .block_drafter()
-            .map(|b| b.target_layers().to_vec())
-            .unwrap_or_default();
-        let next = (g.next_pos > 0).then_some(g.next_pos);
-        let upto = d.upto as usize;
-        let taken = block_rows_for_the_drafter(
-            &d.rows,
-            payload,
-            &layers,
-            model.hidden_dim,
-            next,
-            upto,
-            model.device(),
-        )
-        .map_err(|e| SwarmError::Validation(format!("block drafter rows: {e}")))?;
-        match (taken, next) {
-            (Some((start, kept)), None) => g.take_the_prompt(model, upto, &kept, start)?,
-            (Some((start, kept)), Some(_)) => {
-                g.take_the_round(model, start, upto - start, Some(&kept))?
+        // Every guesser takes in the rows; a failure stops only its own.
+        if let Some(b) = g.block.as_mut().filter(|b| b.active()) {
+            if let Err(e) = block_takes_rows(b, model, &d.rows, payload, upto) {
+                b.stop(e.to_string());
             }
-            (None, _) => {}
         }
+        if let Some(h) = g.head.as_mut().filter(|h| h.g.active()) {
+            if !created {
+                h.tokens.extend_from_slice(&d.words);
+            }
+            if let Err(e) = h.take_rows(model, &d.rows, payload, upto) {
+                h.g.stop(e.to_string());
+            }
+        }
+        let block_active = g.block.as_ref().is_some_and(BlockGuesses::active);
+        let head_active = g.head.as_ref().is_some_and(|h| h.g.active());
         if d.gamma == 0 {
-            return Ok(Vec::new());
+            return if block_active || head_active {
+                Ok(Vec::new())
+            } else {
+                Err(SwarmError::ServiceUnavailable(
+                    "no guesser beside this segment is still guessing".into(),
+                ))
+            };
         }
         let started = std::time::Instant::now();
-        let gamma = (d.gamma as usize).min(g.most(model));
-        let mut words = g.words.take();
-        let over = match words.as_mut() {
+        // One not loaded here is `ServiceUnavailable` (the coordinator holds it
+        // off the model a while); one that stopped in this reply is the
+        // reply's own failure, `Inference`, so it is never held off for an
+        // error the next reply would not meet.
+        let stopped = |what: &str, why: Option<&str>| {
+            SwarmError::Inference(format!(
+                "the {what} beside this segment stopped for this reply: {}",
+                why.unwrap_or("no reason recorded")
+            ))
+        };
+        if d.by_head {
+            let h = g.head.as_mut().ok_or_else(|| {
+                SwarmError::ServiceUnavailable("no guess head beside this segment".into())
+            })?;
+            if !head_active {
+                return Err(stopped("guess head", h.g.stopped.as_deref()));
+            }
+            let gamma = (d.gamma as usize).min(MtpGuesses::MOST_GUESSES);
+            if let Some(served) = h.g.serve_ahead(&h.tokens, d.index_pos as usize, gamma) {
+                h.g.rounds += 1;
+                h.g.proposed += served.len() as u64;
+                return Ok(served);
+            }
+            h.g.words = g.words.take();
+            let guesses = h.g.guesses(model, d.token, d.index_pos as usize, gamma);
+            g.words = h.g.words.take();
+            let guesses = match guesses {
+                Ok(guesses) => guesses,
+                Err(e) => {
+                    h.g.stop(e.to_string());
+                    return Err(e);
+                }
+            };
+            if !guesses.is_empty() {
+                h.g.guess_ms
+                    .record(started.elapsed().as_secs_f64() * 1000.0 / guesses.len() as f64);
+            }
+            h.g.rounds += 1;
+            h.g.proposed += guesses.len() as u64;
+            return Ok(guesses);
+        }
+        let b = g.block.as_mut().ok_or_else(|| {
+            SwarmError::ServiceUnavailable("no block drafter beside this segment".into())
+        })?;
+        if !block_active {
+            return Err(stopped("block drafter", b.stopped.as_deref()));
+        }
+        let gamma = (d.gamma as usize).min(b.most(model));
+        let over = match g.words.as_mut() {
             Some(w) if !w.whole => crate::inference::split::GuessOver::HotAnd(w.rows(model)?),
             _ => crate::inference::split::GuessOver::Everything,
         };
-        let guesses = g.guesses(model, d.token, d.index_pos as usize, gamma, over);
-        g.words = words;
-        let guesses = guesses?;
-        g.draft_ms.record(started.elapsed().as_secs_f64() * 1000.0);
-        g.rounds += 1;
-        g.proposed += guesses.len() as u64;
+        let guesses = match b.guesses(model, d.token, d.index_pos as usize, gamma, over) {
+            Ok(guesses) => guesses,
+            Err(e) => {
+                b.stop(e.to_string());
+                return Err(e);
+            }
+        };
+        b.draft_ms.record(started.elapsed().as_secs_f64() * 1000.0);
+        b.rounds += 1;
+        b.proposed += guesses.len() as u64;
         Ok(guesses)
     });
     let guessed = match guessed {
         Ok(g) => g,
         Err(e) => {
-            drafts.0.remove(&d.request_id);
+            // The entry goes once nothing in it guesses; a guesser that
+            // stopped keeps its place for the closing line.
+            if drafts.0.get(&d.request_id).is_some_and(|g| {
+                !g.block.as_ref().is_some_and(BlockGuesses::active)
+                    && !g.head.as_ref().is_some_and(|h| h.g.active())
+            }) {
+                drafts.release(&d.request_id);
+            }
             return Err(e);
         }
     };
@@ -10573,7 +11115,8 @@ async fn handle_daemon_msg(
     match msg {
         DaemonMsg::Forward(fwd) => {
             let request_id = fwd.request_id;
-            if let Err(e) = handle_forward(
+            let (first, at) = (fwd.layer_range.0 == 0, fwd.index_pos as usize);
+            let forwarded = handle_forward(
                 writer,
                 models,
                 kv_store,
@@ -10586,9 +11129,10 @@ async fn handle_daemon_msg(
                 options.prefill_chunk_tokens as usize,
                 far_runs,
             )
-            .await
-            {
-                send_worker_error(writer, request_id, e).await;
+            .await;
+            match forwarded {
+                Ok(_) => block_drafts.note_forward(&request_id, first, at),
+                Err(e) => send_worker_error(writer, request_id, e).await,
             }
         }
         DaemonMsg::HeadGuess(g) => {
@@ -11936,6 +12480,183 @@ mod local_speculation_tests {
                 spec.summary()
             );
         }
+    }
+
+    /// Where a split's guess head (#425 (a)) spends a guess, piece by piece,
+    /// beside a first segment `[0, 1)` loaded from a node's own parts as the
+    /// worker loads it: the head's forward, its guess (the output head's
+    /// product, the row read back, the pick) and the read-back alone, each
+    /// closed by a synchronize. Times only — it checks nothing.
+    ///
+    /// `SWARMLLM_SPLIT_HEAD_PROBE_DIR=~/.local/share/swarmllm/models/<id>
+    /// cargo test --release --features cuda --lib split_guess_head_is_timed -- --ignored --nocapture`
+    #[test]
+    #[ignore = "needs a model's parts in SWARMLLM_SPLIT_HEAD_PROBE_DIR"]
+    fn a_split_guess_head_is_timed_piece_by_piece() {
+        use crate::inference::split::{GuessOver, MtpCache, SplitModel};
+        let Ok(dir) = std::env::var("SWARMLLM_SPLIT_HEAD_PROBE_DIR") else {
+            return;
+        };
+        let dir = std::path::PathBuf::from(dir);
+        let manifest: crate::types::ModelManifest =
+            serde_json::from_slice(&std::fs::read(dir.join("manifest.json")).unwrap()).unwrap();
+        let shard_files: Vec<(u32, PathBuf)> = (0..manifest.shard_count)
+            .map(|i| (i, dir.join(format!("shard_{i:03}.bin"))))
+            .filter(|(_, p)| p.exists())
+            .collect();
+        let mut entries: Vec<Vec<crate::types::ShardTensorEntry>> = shard_files
+            .iter()
+            .map(|(i, _)| {
+                manifest
+                    .shards
+                    .iter()
+                    .find(|s| s.index == *i)
+                    .map(|s| s.tensors.clone())
+                    .unwrap_or_default()
+            })
+            .collect();
+        if entries.iter().all(Vec::is_empty) {
+            entries =
+                crate::daemon::shard_loader::derive_tensor_entries(&dir, &manifest, &shard_files)
+                    .expect("no tensor table");
+        }
+        let model = SplitModel::load_from_shards(
+            &dir,
+            shard_files,
+            &entries,
+            manifest.total_size_bytes,
+            0,
+            1,
+            true,
+            false,
+        )
+        .expect("the first segment loads");
+        model
+            .split_head_reads_layer()
+            .expect("no guess head beside the first segment");
+        // As the worker does after a load: the head is kept, with its hot rows
+        // where they apply (`keep_the_split_guess_head`).
+        let mut model = model;
+        model.attach_block_drafter(&dir);
+        let hot = model.mtp_hot_rows();
+        eprintln!(
+            "split guess head kept: {}, hot rows {hot:?}",
+            model.split_head_reads_layer().is_some()
+        );
+        let over = if hot.is_some() {
+            GuessOver::HotAnd(None)
+        } else {
+            GuessOver::Everything
+        };
+        let dev = model.device().clone();
+        let sync = || dev.synchronize().unwrap();
+        let ms = |t: std::time::Instant| t.elapsed().as_secs_f64() * 1000.0;
+        let median = |mut v: Vec<f64>| {
+            v.sort_by(f64::total_cmp);
+            v[v.len() / 2]
+        };
+        let rows = |n: usize| {
+            candle_core::Tensor::randn(0f32, 1.0, (1, n, model.hidden_dim), &dev).unwrap()
+        };
+        let mut cache = MtpCache::default();
+        let prompt: Vec<u32> = (1000..1064).collect();
+        let (_, mut last) = model
+            .mtp_forward(&mut cache, &prompt, &rows(prompt.len()), 512, true)
+            .unwrap();
+        sync();
+        let (mut forward, mut guess, mut five, mut back) = (vec![], vec![], vec![], vec![]);
+        let mut hot_guess = vec![];
+        for step in 0..40u32 {
+            let t = std::time::Instant::now();
+            let picked = model.mtp_guess(&last, GuessOver::Everything).unwrap();
+            guess.push(ms(t));
+            if hot.is_some() {
+                let t = std::time::Instant::now();
+                let _ = model.mtp_guess(&last, over).unwrap();
+                hot_guess.push(ms(t));
+            }
+            let t = std::time::Instant::now();
+            (_, last) = model
+                .mtp_forward(&mut cache, &[picked], &rows(1), 512, true)
+                .unwrap();
+            sync();
+            forward.push(ms(t));
+            let held = cache.len();
+            let t = std::time::Instant::now();
+            let tokens: Vec<u32> = (0..5).map(|i| 2000 + step * 5 + i).collect();
+            model
+                .mtp_forward(&mut cache, &tokens, &rows(5), 512, true)
+                .unwrap();
+            sync();
+            five.push(ms(t));
+            cache.truncate(held);
+            let row = candle_core::Tensor::zeros(248_320, candle_core::DType::F32, &dev).unwrap();
+            sync();
+            let t = std::time::Instant::now();
+            let _ = row.to_vec1::<f32>().unwrap();
+            back.push(ms(t));
+        }
+        eprintln!(
+            "split guess head, medians of 40: guess (output head + read back + pick) {:.2} ms, \
+             forward of one row {:.2} ms, of five rows {:.2} ms, a 248,320-float read back {:.2} ms",
+            median(guess),
+            median(forward),
+            median(five),
+            median(back)
+        );
+        if !hot_guess.is_empty() {
+            eprintln!(
+                "split guess head, medians of 40: a guess over the hot rows {:.2} ms",
+                median(hot_guess)
+            );
+        }
+        // A round as the field runs one: the round's rows caught up, then four
+        // guesses — after the card sat idle as long as a check's trip abroad
+        // (`SWARMLLM_SPLIT_HEAD_PROBE_IDLE_MS`, default 0; gotcha #756's
+        // control arm is the same binary at 0).
+        let idle = std::env::var("SWARMLLM_SPLIT_HEAD_PROBE_IDLE_MS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(0);
+        // As many rounds as a reply takes (a 160-token story ran ~78): the
+        // card clocks down within seconds of light work, not at once.
+        let rounds = std::env::var("SWARMLLM_SPLIT_HEAD_PROBE_ROUNDS")
+            .ok()
+            .and_then(|v| v.parse::<u32>().ok())
+            .unwrap_or(30);
+        let mut round = vec![];
+        for step in 0..rounds {
+            std::thread::sleep(std::time::Duration::from_millis(idle));
+            let held = cache.len();
+            let t = std::time::Instant::now();
+            let tokens: Vec<u32> = (0..5).map(|i| 3000 + step * 5 + i).collect();
+            let (_, mut last) = model
+                .mtp_forward(&mut cache, &tokens, &rows(5), 512, true)
+                .unwrap();
+            for g in 0..4 {
+                let picked = model.mtp_guess(&last, over).unwrap();
+                if g < 3 {
+                    (_, last) = model
+                        .mtp_forward(&mut cache, &[picked], &rows(1), 512, true)
+                        .unwrap();
+                }
+            }
+            round.push(ms(t));
+            cache.truncate(held + 5);
+        }
+        let late = round[round.len() * 2 / 3..].to_vec();
+        eprintln!(
+            "split guess head, {rounds} rounds of four guesses ({}) after {idle} ms idle: median \
+             {:.2} ms, the last third's {:.2} ms, most {:.2} ms",
+            if hot.is_some() {
+                "hot rows"
+            } else {
+                "every word"
+            },
+            median(round.clone()),
+            median(late),
+            round.iter().copied().fold(0.0, f64::max)
+        );
     }
 
     /// A block drafter (#428) guesses a reply the conversation offers nothing

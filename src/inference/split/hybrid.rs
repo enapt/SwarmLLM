@@ -521,13 +521,22 @@ impl LayerPlacement {
 
     /// Where a model's next-token-prediction block loads (#425): as the
     /// segment's last layer `last` does — the block is that layer's neighbour
-    /// on every path its rows take — but with a card-held block's routed
-    /// experts in the machine's memory. Ask it with `last`, never the block's
-    /// own index, which lies past the segment. No planner charges the block,
-    /// so the loader takes its card bytes off the conversations' budget; a
-    /// 35B-A3B's routed experts alone are 855 MB.
-    pub(crate) fn for_the_next_token_block(&self) -> Self {
-        self.clone().with_experts_on_the_processor(usize::MAX)
+    /// on every path its rows take — with a card-held block's routed experts
+    /// in the machine's memory where `experts_in_ram`: a segment with a
+    /// processor side, whose budget they are charged to. Ask it with `last`,
+    /// never the block's own index, which lies past the segment. No planner
+    /// charges the block, so the loader takes its card bytes off the
+    /// conversations' budget; a 35B-A3B's routed experts alone are 855 MB. A
+    /// segment wholly on a card has no processor side to charge them to, so
+    /// they stay with the last layer's (#425 (a): a split's first segment,
+    /// [0,1) of the 35B-A3B; llama.cpp counts the block as one more layer,
+    /// placed as `-ngl` places the last).
+    pub(crate) fn for_the_next_token_block(&self, experts_in_ram: bool) -> Self {
+        if experts_in_ram {
+            self.clone().with_experts_on_the_processor(usize::MAX)
+        } else {
+            self.clone()
+        }
     }
 
     fn on_gpu(&self, abs_layer: usize) -> bool {

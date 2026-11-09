@@ -791,6 +791,9 @@ impl SplitModel {
     }
 
     pub(crate) fn attach_block_drafter(&mut self, dir: &Path) {
+        // A guess head beside a split's first segment keeps the output head
+        // it reads, charged before any drafter, which then shares it.
+        let head_charged = self.keep_the_split_guess_head();
         let path = dir.join(BLOCK_DRAFTER_FILE);
         let head_here = self.output.is_some() || self.drafter_head.is_some();
         if !block_drafter_on() || !path.is_file() || self.layer_start != 0 || !head_here {
@@ -832,9 +835,14 @@ impl SplitModel {
             }
         };
         let hot_bytes = hot.as_ref().map_or(0, |(_, bytes)| *bytes);
+        let head_bytes = if head_charged {
+            0
+        } else {
+            self.drafter_head_bytes
+        };
         let takes = drafter
             .bytes
-            .saturating_add(self.drafter_head_bytes)
+            .saturating_add(head_bytes)
             .saturating_add(hot_bytes);
         // The drafter and the head it borrows sit on the model's own device
         // (`BlockDrafter::load`): its budget pays, never a card/processor
@@ -869,11 +877,75 @@ impl SplitModel {
     }
 
     /// The output head a split's first segment read for its drafter, given
-    /// back where no drafter is attached.
+    /// back where no drafter is attached — unless a guess head beside the
+    /// segment reads it ([`Self::keep_the_split_guess_head`]).
     fn drop_drafter_head(&mut self) {
+        self.drafter_hot = None;
+        if self.split_head_reads_layer().is_some() {
+            return;
+        }
         self.drafter_head = None;
         self.drafter_head_bytes = 0;
-        self.drafter_hot = None;
+    }
+
+    /// A guess head beside a split's first segment (#425 (a)) keeps the output
+    /// head it reads (`drafter_head`) and, on the processor, that head's first
+    /// rows (`MtpHead::hot`, #425 (b)), charged to the model's own budget while
+    /// one conversation of its whole context still fits beside them — the block
+    /// drafter's rule (`fits_beside_one_conversation`). Without the head, or
+    /// past that, the guess head goes. `true` where the borrowed head stays,
+    /// charged.
+    fn keep_the_split_guess_head(&mut self) -> bool {
+        if self.split_head_reads_layer().is_none() {
+            return false;
+        }
+        let Some(head) = self.drafter_head.as_ref() else {
+            tracing::info!(
+                "guess head beside the split's first segment not kept: the output head could not be read"
+            );
+            self.mtp = None;
+            return false;
+        };
+        let on_card = self.mtp.as_ref().is_some_and(|m| m.device.is_cuda());
+        let hot = match super::mtp::hot_rows_for(Some(head), on_card) {
+            Some((rows, bytes)) => {
+                match super::mtp::head_rows(head, super::mtp::HeadRows::First(rows)) {
+                    Ok(rows) => Some((rows, bytes)),
+                    Err(e) => {
+                        tracing::warn!(error = %e, "guess head beside the first segment: reads every word");
+                        None
+                    }
+                }
+            }
+            None => None,
+        };
+        let hot_bytes = hot.as_ref().map_or(0, |(_, bytes)| *bytes);
+        let takes = self.drafter_head_bytes.saturating_add(hot_bytes);
+        let one_conversation = self.kv_growth.bytes_for(self.max_seq_len);
+        let fits = fits_beside_one_conversation(self.kv_budget_bytes, takes, one_conversation);
+        if fits {
+            if let Some(b) = self.kv_budget_bytes.as_mut() {
+                *b -= takes;
+            }
+        }
+        tracing::info!(
+            head_mb = self.drafter_head_bytes >> 20,
+            hot_rows_mb = hot_bytes >> 20,
+            on_card,
+            reads_layer = ?self.split_head_reads_layer(),
+            budget_left_mb = ?self.kv_budget_bytes.map(|b| b >> 20),
+            one_conversation_mb = one_conversation >> 20,
+            kept = fits,
+            "guess head beside the split's first segment (#425 (a))"
+        );
+        if !fits {
+            self.mtp = None;
+            return false;
+        }
+        if let (Some(m), Some((rows, _))) = (self.mtp.as_mut(), hot) {
+            m.hot = Some(rows);
+        }
+        true
     }
 
     pub(crate) fn block_drafter(&self) -> Option<&BlockDrafter> {

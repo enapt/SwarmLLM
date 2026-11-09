@@ -66,7 +66,12 @@ pub(crate) const MTP_CATCH_UP_CHUNK: usize = 512;
 /// surest guess), and a conversation in words mostly past them reads the
 /// whole vocabulary (`DraftWords` in `model_worker`). And only where the
 /// output head is on the processor: there one guess took 20-21 ms, most of
-/// it this 248,320-row head; on a card a whole guess took 3 ms.
+/// it this 248,320-row head; on a card a whole guess took 3 ms. Measured on a
+/// card twice and not kept: a whole model (#425 (b), 2026-11-07: the story
+/// lost), and beside a split's first segment (#425 (a), 2026-11-09), where an
+/// idle card clocks down between rounds and a guess cost 4.2-19.3 ms against
+/// 2.9 back to back — the hot rows cut it, and no reply got faster
+/// (`~/rig428/fieldh1`, two arms a side; the code replies kept fewer guesses).
 pub(crate) const DRAFT_HOT_ROWS: usize = 32_768;
 
 /// The most of a conversation's own words past the hot rows a reply's
@@ -98,6 +103,11 @@ pub(crate) struct MtpHead {
     /// The output head's first rows, which a guess reads where the head is
     /// on the processor (#425 (b), [`DRAFT_HOT_ROWS`]); `None` reads them all.
     pub(super) hot: Option<QMatMul>,
+    /// The trunk's output norm, where the head sits beside a split's first
+    /// segment ([`HeadBeside::FirstSegment`]), which loads none of its own:
+    /// the trunk's last-layer rows are normed by it before the head reads
+    /// them ([`SplitModel::mtp_hidden_from`]). `None` beside the whole model.
+    pub(super) trunk_norm: Option<RmsNorm>,
     /// Where the block runs: the trunk's last layer's device (its experts, for
     /// a mixture-of-experts block on a card, in the machine's memory).
     pub(super) device: Device,
@@ -137,29 +147,51 @@ pub(crate) fn mtp_on() -> bool {
     *ON.get_or_init(|| std::env::var("SWARMLLM_MTP").as_deref() != Ok("0"))
 }
 
+/// `SWARMLLM_SPLIT_GUESS_HEAD=0`: no guess head is loaded beside a split's
+/// first segment (#425 (a)), for A/B inside one binary.
+pub(crate) fn split_guess_head_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("SWARMLLM_SPLIT_GUESS_HEAD").as_deref() != Ok("0"))
+}
+
+/// Where a load may read the file's next-token-prediction block.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum HeadBeside {
+    /// The segment is the whole model: its own replies read the head (#425).
+    WholeModel,
+    /// A split's first segment, from layer 0, with the parts holding the head,
+    /// the output norm and the output head on disk here (#425 (a)): the
+    /// split's guesses read it, beside the token table they need, fed the
+    /// trunk's last layer by the segment that runs it — where a split's block
+    /// drafter sits (#428 stage 3).
+    FirstSegment,
+    /// Neither.
+    Nowhere,
+}
+
 /// The index of the file's next-token-prediction block where this load reads
-/// it, else `None`: the switch is on, the segment is the WHOLE model (the
-/// worker's own replies are its only reader so far, and they need the token
-/// table), the family is Qwen 3.5's (`qwen35`, `qwen35moe` — llama.cpp's
-/// `graph_mtp` is written for these two), the file declares exactly one block
-/// (`nextn_layers`), and that block is the shape the head runs: a
-/// full-attention layer with `eh_proj`, `enorm` and `hnorm`, and neither a
-/// token table nor an output head of its own (llama.cpp reads those where
-/// present; no file here carries them).
+/// it, else `None`: the switch is on, the segment is the WHOLE model or a
+/// split's first segment beside the head's parts (`beside`), the family is
+/// Qwen 3.5's (`qwen35`, `qwen35moe` — llama.cpp's `graph_mtp` is written for
+/// these two), the file declares exactly one block (`nextn_layers`), and that
+/// block is the shape the head runs: a full-attention layer with `eh_proj`,
+/// `enorm` and `hnorm`, and neither a token table nor an output head of its
+/// own (llama.cpp reads those where present; no file here carries them).
 pub(crate) fn block_to_load(
     ct: &candle_core::quantized::gguf_file::Content,
     arch: &crate::inference::model_arch::ModelArch,
     nextn_layers: u32,
-    whole: bool,
+    beside: HeadBeside,
     layer_end: usize,
     block_count: usize,
 ) -> Option<usize> {
     use crate::inference::model_arch::ModelArch;
-    if !mtp_on()
-        || !whole
-        || layer_end != block_count
-        || !matches!(arch, ModelArch::Qwen35 | ModelArch::Qwen35Moe)
-    {
+    let placed = match beside {
+        HeadBeside::WholeModel => layer_end == block_count,
+        HeadBeside::FirstSegment => split_guess_head_on() && layer_end < block_count,
+        HeadBeside::Nowhere => false,
+    };
+    if !mtp_on() || !placed || !matches!(arch, ModelArch::Qwen35 | ModelArch::Qwen35Moe) {
         return None;
     }
     // Said, as llama.cpp's load prints `n_nextn_layer`: unsloth's
@@ -212,12 +244,12 @@ pub(crate) fn head_in_shape(block_count: usize, has: impl Fn(&str) -> bool) -> b
 
 /// What block `block`'s weights take: `(on its device, in the machine's
 /// memory beside a card)` — every `blk.{block}` tensor, its routed experts in
-/// the second where a card-held block keeps them there
-/// (`LayerPlacement::for_the_next_token_block`).
+/// the second where a card-held block keeps them there (`experts_beside`, as
+/// `LayerPlacement::for_the_next_token_block` placed them).
 pub(crate) fn block_bytes(
     ct: &candle_core::quantized::gguf_file::Content,
     block: usize,
-    on_card: bool,
+    experts_beside: bool,
 ) -> (u64, u64) {
     ct.tensor_infos
         .iter()
@@ -226,7 +258,7 @@ pub(crate) fn block_bytes(
         })
         .fold((0, 0), |(here, beside), (name, info)| {
             let bytes = super::tensor_byte_size(info);
-            if on_card && name.contains("_exps.") {
+            if experts_beside && name.contains("_exps.") {
                 (here, beside + bytes)
             } else {
                 (here + bytes, beside)
@@ -318,25 +350,70 @@ pub(crate) enum GuessOver<'a> {
 }
 
 impl SplitModel {
-    /// The layer a forward keeps for the head: the trunk's last (absolute).
+    /// The layer a forward keeps for the head: the trunk's last (absolute) —
+    /// only where this model ends the trunk; a head beside a split's first
+    /// segment reads that layer's rows off the split instead
+    /// ([`Self::split_head_reads_layer`]).
     pub(crate) fn mtp_capture_layer(&self) -> Option<usize> {
         self.mtp
             .as_ref()
+            .filter(|_| self.output.is_some())
             .and_then(|_| self.layer_end.checked_sub(1))
+    }
+
+    /// The trunk layer whose rows a guess head beside this split's first
+    /// segment reads (#425 (a), [`HeadBeside::FirstSegment`]): the model's
+    /// last, which another segment runs. `None` where no head sits here so.
+    pub(crate) fn split_head_reads_layer(&self) -> Option<usize> {
+        self.mtp
+            .as_ref()
+            .filter(|h| h.trunk_norm.is_some() && self.output.is_none())
+            .and_then(|_| self.total_layers.checked_sub(1))
     }
 
     /// The head's hidden-state input from rows a forward kept after the
     /// trunk's last layer: normed as the output head reads them
-    /// (llama.cpp's `t_h_nextn`).
+    /// (llama.cpp's `t_h_nextn`) — by the model's own output norm, else, beside
+    /// a split's first segment, the head's copy of it.
     pub(crate) fn mtp_hidden_from(&self, kept: &Tensor) -> Result<Tensor, SwarmError> {
-        let norm = self
-            .norm
+        let err = |e: candle_core::Error| {
+            SwarmError::Internal(format!("next-token head: hidden norm: {e}"))
+        };
+        // The model's norm lives on its main device (`output_on_primary_device`);
+        // the head's copy on the head's.
+        if let Some(norm) = self.norm.as_ref() {
+            return kept
+                .to_device(&self.device)
+                .and_then(|k| norm.forward(&k))
+                .map_err(err);
+        }
+        let (norm, device) = self
+            .mtp
             .as_ref()
+            .and_then(|h| h.trunk_norm.as_ref().map(|n| (n, &h.device)))
             .ok_or_else(|| SwarmError::Internal("next-token head: no output norm".into()))?;
-        // The norm lives on the model's main device (`output_on_primary_device`).
-        kept.to_device(&self.device)
+        kept.to_device(device)
             .and_then(|k| norm.forward(&k))
-            .map_err(|e| SwarmError::Internal(format!("next-token head: hidden norm: {e}")))
+            .map_err(err)
+    }
+
+    /// The output head's logits for a guess's rows: the model's own head
+    /// ([`Self::logits_from`]), else the one a split's first segment borrowed
+    /// (`drafter_head`), with the file's suppressed words as `logits_from`
+    /// adds them (#282). A block drafter's guesses read it the same way.
+    fn guess_logits(&self, rows: &Tensor) -> Result<Tensor, SwarmError> {
+        let (None, Some(head)) = (&self.output, &self.drafter_head) else {
+            return self.logits_from(rows);
+        };
+        let err = |e: candle_core::Error| SwarmError::Internal(format!("borrowed head: {e}"));
+        let logits = head.forward(rows).map_err(err)?;
+        match &self.suppressed_logits {
+            Some(s) => s
+                .to_dtype(logits.dtype())
+                .and_then(|row| logits.broadcast_add(&row))
+                .map_err(err),
+            None => Ok(logits),
+        }
     }
 
     /// The hot rows a guess reads first — the guess head's (`MtpHead::hot`),
@@ -406,7 +483,7 @@ impl SplitModel {
             .map_err(err("to the output head"))?;
         let table = |t: Tensor| t.to_dtype(DType::F32).and_then(|t| t.to_vec2::<f32>());
         let GuessOver::HotAnd(words) = over else {
-            let logits = self.logits_from(&rows)?;
+            let logits = self.guess_logits(&rows)?;
             return Ok(table(logits)
                 .map_err(err("logits"))?
                 .iter()

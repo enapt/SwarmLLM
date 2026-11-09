@@ -714,8 +714,13 @@ impl PipelineExecutor {
             self.block_rows = Some(ask);
             drafter
         });
-        let block_planned = block.is_some();
+        let block_planned = block.as_ref().is_some_and(|b| b.block.is_some());
+        let head_planned = block.as_ref().is_some_and(|b| b.head.is_some());
         let (mut block_rounds, mut block_guessed, mut block_kept) = (0u32, 0u32, 0u32);
+        let (mut head_rounds, mut head_guessed, mut head_kept) = (0u32, 0u32, 0u32);
+        // Head rounds whose every guess was kept: the rounds the head's
+        // guesses made while the check was abroad can answer (#425 (f)).
+        let mut head_all_kept = 0u32;
         let prefill_result = self
             .forward_through_segments(request_id, 0, 0, prompt_bytes, None, false, &[])
             .await?;
@@ -909,33 +914,38 @@ impl PipelineExecutor {
             } else {
                 Vec::new()
             };
-            // The block drafter takes in the rows the last round's segments
-            // sent every round, and guesses where nothing else will be checked
-            // and its guesses pay (`SplitBlockDrafter::gamma`; zero is an
-            // answer). A failure stops it for the reply; its cache is its own,
-            // so the target's caches stay where they are.
+            // The guessers beside the first segment — the block drafter and
+            // the model's guess head — take in the rows the last round's
+            // segments sent every round, and one guesses where nothing else
+            // will be checked and its guesses pay (`SplitBlockDrafter::gamma`;
+            // zero is an answer). A failure stops the guesser it came from for
+            // the reply; their caches are their own, so the target's caches
+            // stay where they are.
             let mut from_block = false;
-            let mut block_failed = false;
+            let mut from_head = false;
             let drafts = match block.as_mut() {
                 Some(b) => {
-                    let gamma = if drafts.is_empty() && super::checks_can_be_taken_back(self) {
+                    let ask = if drafts.is_empty() && super::checks_can_be_taken_back(self) {
                         b.gamma(remaining)
                     } else {
-                        0
+                        (super::block_draft::By::Block, 0)
                     };
                     match b
                         .round(
                             self,
                             current_pos,
                             last_token,
-                            gamma,
+                            ask,
                             &prompt_tokens,
                             &generated,
                         )
                         .await
                     {
                         Ok(guesses) if drafts.is_empty() => {
-                            from_block = !guesses.is_empty();
+                            from_block =
+                                !guesses.is_empty() && ask.0 == super::block_draft::By::Block;
+                            from_head =
+                                !guesses.is_empty() && ask.0 == super::block_draft::By::Head;
                             guesses
                         }
                         Ok(_) => drafts,
@@ -943,16 +953,16 @@ impl PipelineExecutor {
                             tracing::warn!(
                                 %request_id,
                                 error = %e,
-                                "block drafter stopped for this reply"
+                                guesser = if ask.1 > 0 { ask.0.name() } else { "every guesser" },
+                                "a guesser beside the first segment stopped for this reply"
                             );
-                            block_failed = true;
                             drafts
                         }
                     }
                 }
                 None => drafts,
             };
-            if block_failed {
+            if block.as_ref().is_some_and(|b| b.is_empty()) {
                 block = None;
                 self.block_rows = None;
             }
@@ -1081,6 +1091,9 @@ impl PipelineExecutor {
             } else if from_block {
                 block_rounds += 1;
                 block_guessed += drafts.len() as u32;
+            } else if from_head {
+                head_rounds += 1;
+                head_guessed += drafts.len() as u32;
             } else if from_far_run {
                 if let Some(g) = far_run.as_mut() {
                     g.rounds += 1;
@@ -1144,10 +1157,21 @@ impl PipelineExecutor {
             if from_requester {
                 guesses_kept += accepted.len() as u32;
                 guess_acceptance.record(accepted.len() as u32, drafts.len() as u32);
-            } else if from_block {
-                block_kept += accepted.len() as u32;
+            } else if from_block || from_head {
+                use super::block_draft::By;
+                let by = if from_head {
+                    head_kept += accepted.len() as u32;
+                    if !drafts.is_empty() && accepted.len() >= drafts.len() {
+                        head_all_kept += 1;
+                    }
+                    By::Head
+                } else {
+                    block_kept += accepted.len() as u32;
+                    By::Block
+                };
                 if let Some(b) = block.as_mut() {
                     b.record_round(
+                        by,
                         accepted.len() as u32,
                         drafts.len() as u32,
                         emitted.len(),
@@ -1228,7 +1252,7 @@ impl PipelineExecutor {
         // The payoff is prompt lookup's: a reply the requester guessed for
         // says nothing about what prompt lookup earns the next one.
         let far_run_rounds = far_run.as_ref().map_or(0, |g| g.rounds);
-        if guess_rounds == 0 && far_run_rounds == 0 && block_rounds == 0 {
+        if guess_rounds == 0 && far_run_rounds == 0 && block_rounds == 0 && head_rounds == 0 {
             record_payoff(generated.len() as u32, ngram_rounds + fallback_rounds);
         }
         if let Some(store) = &earlier {
@@ -1262,15 +1286,24 @@ impl PipelineExecutor {
             far_run_gamma = far_run.as_ref().map_or(0, |g| g.gamma),
             far_run_ms_each = ?far_run.as_ref().and_then(|g| g.ms_each.median()).map(|m| (m * 10.0).round() / 10.0),
             block_drafter = block_planned,
-            block_stopped = block_planned && block.is_none(),
+            block_stopped = block_planned && !block.as_ref().is_some_and(|b| b.block.is_some()),
             block_rounds,
             block_guessed,
             block_kept,
-            block_draft_ms = ?block.as_ref().and_then(|b| b.draft_ms()).map(f64::round),
+            block_draft_ms = ?block.as_ref().and_then(|b| b.block.as_ref()?.draft_ms()).map(f64::round),
             block_step_ms = ?block.as_ref().and_then(|b| b.step_ms()).map(f64::round),
             block_check_fit = ?block.as_ref().and_then(|b| b.check_fit()).map(|(fixed, per)| (fixed.round(), per.round())),
-            block_declined = block.as_ref().map_or(0, |b| b.declined),
-            block_probes = block.as_ref().map_or(0, |b| b.probes),
+            block_declined = block.as_ref().and_then(|b| b.block.as_ref()).map_or(0, |g| g.declined),
+            block_probes = block.as_ref().and_then(|b| b.block.as_ref()).map_or(0, |g| g.probes),
+            split_head = head_planned,
+            split_head_stopped = head_planned && !block.as_ref().is_some_and(|b| b.head.is_some()),
+            split_head_rounds = head_rounds,
+            split_head_guessed = head_guessed,
+            split_head_kept = head_kept,
+            split_head_all_kept = head_all_kept,
+            split_head_guess_ms = ?block.as_ref().and_then(|b| b.head.as_ref()?.draft_ms()).map(|m| (m * 10.0).round() / 10.0),
+            split_head_declined = block.as_ref().and_then(|b| b.head.as_ref()).map_or(0, |g| g.declined),
+            split_head_probes = block.as_ref().and_then(|b| b.head.as_ref()).map_or(0, |g| g.probes),
             guess_waits = waits.waits,
             guess_waits_paid = waits.paid,
             guess_waited_ms = waits.waited_ms.round(),

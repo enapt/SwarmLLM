@@ -557,10 +557,8 @@ pub fn best_gamma_beside_a_step(
     max: u32,
     draft_ms_each: f64,
 ) -> Option<u32> {
-    let each = draft_ms_each.max(0.0);
-    best_beside_a_step(alpha, step_ms.map(Step::Here), check, max, |g| {
-        each * f64::from(g)
-    })
+    rated_beside_a_step_per_guess(alpha, step_ms.map(Step::Here), check, max, draft_ms_each)
+        .map(|(g, _)| g)
 }
 
 /// A step — a round of one position — and where it was timed, which decides
@@ -599,6 +597,20 @@ pub fn best_gamma_beside_a_step_per_round(
     max: u32,
     draft_ms_round: f64,
 ) -> Option<u32> {
+    rated_beside_a_step_per_round(alpha, step, check, max, draft_ms_round).map(|(g, _)| g)
+}
+
+/// [`best_gamma_beside_a_step_per_round`] with the rate its count is
+/// expected to write at, in tokens a millisecond — so two guessers priced
+/// over the same step and line can be weighed against each other (a split's
+/// block drafter and guess head, #425 (a)).
+pub fn rated_beside_a_step_per_round(
+    alpha: f64,
+    step: Option<Step>,
+    check: &CheckCost,
+    max: u32,
+    draft_ms_round: f64,
+) -> Option<(u32, f64)> {
     let round = draft_ms_round.max(0.0);
     best_beside_a_step(
         alpha,
@@ -609,13 +621,30 @@ pub fn best_gamma_beside_a_step_per_round(
     )
 }
 
+/// [`best_gamma_beside_a_step`] for a step timed anywhere ([`Step`]), with
+/// the rate its count is expected to write at: guesses made one forward each
+/// (a split's guess head, #425 (a)), priced beside a block drafter's
+/// [`rated_beside_a_step_per_round`].
+pub fn rated_beside_a_step_per_guess(
+    alpha: f64,
+    step: Option<Step>,
+    check: &CheckCost,
+    max: u32,
+    draft_ms_each: f64,
+) -> Option<(u32, f64)> {
+    let each = draft_ms_each.max(0.0);
+    best_beside_a_step(alpha, step, check, max, |g| each * f64::from(g))
+}
+
+/// The count with the most tokens a millisecond, and that rate. Ties go to
+/// the smaller count.
 fn best_beside_a_step(
     alpha: f64,
     step: Option<Step>,
     check: &CheckCost,
     max: u32,
     draft_ms: impl Fn(u32) -> f64,
-) -> Option<u32> {
+) -> Option<(u32, f64)> {
     let step = step?;
     let step_ms = step.ms();
     check.predict(2)?;
@@ -630,8 +659,7 @@ fn best_beside_a_step(
     Some(
         (0..=max)
             .map(|g| (g, expected_tokens_per_round(alpha, g) / cost(g)))
-            .fold((0, f64::MIN), |best, c| if c.1 > best.1 { c } else { best })
-            .0,
+            .fold((0, f64::MIN), |best, c| if c.1 > best.1 { c } else { best }),
     )
 }
 

@@ -55,6 +55,12 @@ pub(super) struct SplitLoadOptions<'a> {
     /// experts in the machine's memory (`split::cpu_expert_layers`, #138 (3)).
     /// Obeyed the same way.
     pub cpu_expert_layers: Option<usize>,
+    /// A split's first segment whose load holds, whole, the file's
+    /// next-token-prediction block, its output norm and its output head
+    /// (`shards::guess_head_parts_held`): the guess head loads beside it
+    /// (#425 (a), `mtp::HeadBeside::FirstSegment`). Only the part-file load
+    /// reads the output head such a head borrows, so only it sets this.
+    pub guess_head_beside_first: bool,
 }
 
 /// Element type the token-embedding table is dequantized to.
@@ -1206,6 +1212,7 @@ impl SplitModel {
                 parallel_data: Some(mmap.as_ref()),
                 gpu_layers: placement.gpu_layers,
                 cpu_expert_layers: placement.cpu_expert_layers,
+                guess_head_beside_first: false,
             },
         )
     }
@@ -1228,6 +1235,7 @@ impl SplitModel {
             parallel_data,
             gpu_layers,
             cpu_expert_layers,
+            guess_head_beside_first,
         } = opts;
         // Detect architecture prefix from GGUF metadata
         let arch_str = super::gguf_arch_str(&ct);
@@ -2540,18 +2548,30 @@ impl SplitModel {
                 output.as_ref(),
                 placement.device_for(layer_end.saturating_sub(1)).is_cuda(),
             );
+            let beside = if is_first && is_last {
+                super::mtp::HeadBeside::WholeModel
+            } else if guess_head_beside_first && is_first && layer_start == 0 {
+                super::mtp::HeadBeside::FirstSegment
+            } else {
+                super::mtp::HeadBeside::Nowhere
+            };
+            // Its routed experts go to the machine's memory only where this
+            // segment has a processor side to charge them to; one wholly on a
+            // card keeps them there (`for_the_next_token_block`).
+            let mtp_placement = placement.for_the_next_token_block(host_kv_budget_bytes.is_some());
             let mtp_block = super::mtp::block_to_load(
                 &ct,
                 &model_arch,
                 nextn_layers,
-                is_first && is_last,
+                beside,
                 layer_end,
                 block_count,
             )
             .filter(|&block| {
-                let last = placement.device_for(layer_end.saturating_sub(1));
-                let on_card = last.is_cuda();
-                let (mut here, beside) = super::mtp::block_bytes(&ct, block, on_card);
+                let last = layer_end.saturating_sub(1);
+                let on_card = placement.device_for(last).is_cuda();
+                let experts_beside = on_card && !mtp_placement.experts_device_for(last).is_cuda();
+                let (mut here, beside) = super::mtp::block_bytes(&ct, block, experts_beside);
                 here += hot_rows.map_or(0, |(_, bytes)| bytes);
                 let quarter = |bytes: u64, budget: Option<u64>| {
                     budget.is_none_or(|b| bytes.saturating_mul(4) <= b)
@@ -2592,7 +2612,6 @@ impl SplitModel {
                 );
                 fits
             });
-            let mtp_placement = placement.for_the_next_token_block();
             let mut mtp_layer: Option<LayerVariant> = None;
             for layer_idx in (layer_start..layer_end).chain(mtp_block) {
                 let is_mtp = layer_idx >= layer_end;
@@ -2824,6 +2843,15 @@ impl SplitModel {
                         (Some((rows, _)), Some(output)) => Some(super::mtp::head_rows(
                             output,
                             super::mtp::HeadRows::First(rows),
+                        )?),
+                        _ => None,
+                    },
+                    // Beside a split's first segment, which loads no output
+                    // norm, the head reads the trunk's rows through its own.
+                    trunk_norm: match beside {
+                        super::mtp::HeadBeside::FirstSegment => Some(make_norm(
+                            q35_tensor(&mut *file, "output_norm.weight".to_string(), &device)?,
+                            rms_norm_eps,
                         )?),
                         _ => None,
                     },

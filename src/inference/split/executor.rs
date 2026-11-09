@@ -1336,9 +1336,9 @@ impl SplitModel {
                     .collect()
             })
             .unwrap_or_default();
-        if self.mtp.is_some() {
-            layers.extend(self.layer_end.checked_sub(1));
-        }
+        // Beside the model's end only: a head beside a split's first segment
+        // reads another segment's last layer (`split_head_reads_layer`).
+        layers.extend(self.mtp_capture_layer());
         layers.sort_unstable();
         layers.dedup();
         layers

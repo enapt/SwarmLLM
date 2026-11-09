@@ -93,7 +93,7 @@ cargo dev-test                        # lib + integration; counts below come fro
 cargo dev-run -- run -p 8800 -v       # start a daemon serving the frontend from disk
 ```
 
-**Counts, measured at v0.3.279 (dev,claude-subscription)**: **4445 lib** (+25 ignored),
+**Counts, measured at v0.3.279 (dev,claude-subscription)**: **4447 lib** (+26 ignored),
 80 integration (32 + 34 + 14 `yamux_substream`), **266 repo-consistency**,
 1 `api_key_side_effects`, 83 `swarmllm-types`, 12 in the vendored
 request-response patch, 152 in the libp2p-gossipsub one, 5 in the libp2p-quic one and 20 in the libp2p-upnp one — plus 26 in the `swarmllm` BIN target (`cli::*`, counted
@@ -158,7 +158,9 @@ mmproj). Never edit a count without the run behind it (`completeness.md`).
   twice): plan back from the signing time, cut the tag from the LAST fix, and land NO product code
   between the tag and the publish — `release-window-gate.sh` refuses it. A fix that must ship re-cuts
   the release. Before asking for the signature, `git diff --stat <tag> origin/main -- src crates vendor
-  frontend` is empty. Never name an unreleased version to the user ("on main, not in a release yet").
+  frontend` is empty, and so is `git status --short` over them. **Complete ALL tasks before the cut, and cut at
+  the time the user names, never early** (user, 2026-11-09, a third time: an early cut left six hours of speed-ups
+  behind the draft). Never name an unreleased version to the user ("on main, not in a release yet").
 - **Releases are SIGNED; CI leaves a DRAFT.** Read `memory/release_gate.md`
   before a release (~2 h bump → publish since 2026-10-14). ⛔ A BUILD gate is not
   a BEHAVIOUR gate (#683): `examples/release_gate.sh` runs on the DOWNLOADED

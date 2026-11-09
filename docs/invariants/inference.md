@@ -5956,8 +5956,13 @@ MB are routed experts. The loader takes its bytes off the conversation budget
 of the device its layer runs on, and skips it where they would be more than a
 quarter of that budget. A mixture-of-experts head on a card keeps its routed
 experts in the machine's memory (`for_the_next_token_block`), charged to the
-machine's conversation budget — and where there is none, the head is not
-loaded (they would sit there uncharged). Its cache stops at
+machine's conversation budget, where the segment has a processor side; a
+segment wholly on a card keeps them on the card, charged to the card under the
+same quarter (2026-11-09: until then such a segment refused the head, as the
+experts would have sat in memory nobody charged — and a split's first
+segment, [0,1) of the 35B-A3B on the asking computer's card, is exactly that;
+llama.cpp counts the block as one more layer, `dev_layer` over `n_layer_all`,
+placed as `-ngl` places the last). Its cache stops at
 `MTP_MOST_POSITIONS` (16,384); past it the head stops for the reply.
 
 **Measured** (2026-11-07, Qwen3.5-4B Q4_K_M, one optimized CUDA test binary,
@@ -6037,6 +6042,157 @@ the 4B — it would have faulted). It now borrows (`&[u8]`, bytemuck's
 `cast_slice` shape), so the dangling slice no longer compiles. No released
 path handed it an owned buffer: `QTensor::stack_some` did only on the
 processor, which only a test uses.
+
+### Beside a split's first segment (2026-11-09, FUTURE_WORK #425 (a))
+
+**What it is.** A split that starts AND finishes on the asking computer (the
+live node's Qwen3.6-35B-A3B: [0,1) and [39,40) here, [1,39) in Australia) has
+every input the head needs on that computer: layer n−1's output (the last local
+segment computes it), the token table (part 0) and the output head (the head
+part, which holds block 40 too). So the head loads beside the FIRST segment,
+exactly where #428's split block drafter sits, and reuses its path: the rows
+come back as block rows of layer n−1 (`BlockRowsAsk` → `IpcBlockDraft.rows`, no
+wire change), and the guesses are checked by the n-gram loop's own check
+(`ngram_only_spec`).
+
+**Why the first segment, not the last range** (the FUTURE_WORK map planned the
+last): a worker holding [0,k) and [m,n) holds TWO `SplitModel`s, and the head
+needs the token table (first) and the output head (last). The block drafter
+already borrows the output head into the first segment (`drafter_head`,
+charged as `drafter_head_bytes`), so the head block and its own copy of the
+output norm (`trunk_norm`) are all that load; nothing crosses between the two
+models. Prior art: vLLM and SGLang run MTP/EAGLE at the last pipeline rank on
+`aux_hidden_states` — the rank holding the head and the last layer's output,
+which on this layout is the asking computer.
+
+**Pairing.** Position p pairs token p with the state at p−1 (`MtpGuesses`).
+`SplitHead` keeps every word of the reply by position (words = upto + 1, else
+it stops) and the position its rows reach (`rows_upto`): the prompt goes in
+with `take_the_prompt`, each later round's rows with `take_the_round` from
+`rows_upto`. Only committed positions are taken in, so a rejected guess needs
+no rewind of the head.
+
+**Choosing between the two guessers** (`pipeline::block_draft::choose`): the
+block is priced per ROUND (`dsd_controller::rated_beside_a_step_per_round`: a
+draft is one forward whatever it guesses), the head per GUESS
+(`rated_beside_a_step_per_guess`: one forward a guess), both over the checks'
+route (`Step::OverTheChecksRoute`), each at its own acceptance and draft time.
+One that would not guess loses to one that would; a probe takes its round; an
+untimed guesser goes first (block before head); one that sat out
+`MOST_ROUNDS_SAT_OUT` (16) rounds gets one, so a guesser that loses early is
+measured again; otherwise the higher rate. A refusal from the segment holds
+that guesser off the model for 10 min (`model:guess-head`), the block's own
+separately.
+
+**Its experts on a card.** The first field run loaded nothing
+(`loaded=false`): the head's routed experts (816 MB) were placed in the
+machine's memory, and [0,1) wholly on the card has no processor side whose
+budget could be charged. A segment wholly on a card now keeps them on the card
+(`for_the_next_token_block(experts_in_ram)`), charged to the card under the
+same quarter rule — llama.cpp's placement (`dev_layer` over `n_layer_all`: the
+block is one more layer, offloaded as the last is).
+
+**Measured** (2026-11-09, `~/rig428/scripts/field425a.sh`: the live node
+swapped to one CUDA build, arms by restarting with `SWARMLLM_SPLIT_GUESS_HEAD=0`,
+three greedy prompts at 160 tokens, Australia at ~137 ms, the user idle 7-8 h;
+four runs an arm over three field runs — run 1's one arm had its head refused
+(the off arm it is counted as), Australia left the swarm in the middle of run 2):
+
+| Prompt | head off | head on | ratio | head's guesses kept |
+|---|---|---|---|---|
+| palindrome (code) | 5.03-5.12 tok/s | 13.45-15.23 | 2.6-3.0× | 72-73 of 79-83 |
+| BST class (code) | 5.51-5.80 | 11.07-14.84 | 1.9-2.7× | 94-102 of 109-115 |
+| lighthouse story | 4.50-4.83 | 6.83-8.85 | 1.4-2.0× | 74-84 of 186-194 |
+
+A round over the split is ~190-198 ms (`block_step_ms`). A guess costs, from
+ask to answer (the round's rows taken in included), 4.5-6.6 ms in some replies
+and 16.4-17.3 ms in others — bimodal. The same head in a probe on this card
+(`a_split_guess_head_is_timed_piece_by_piece`, live node stopped, eight
+repeats): a guess 1.66-1.68 ms (the output head, the row read back, the pick),
+a one-row forward 1.11-1.18 ms, a five-row one 1.40-1.45 ms; a 4-guess round
+11.2-11.6 ms back to back, and after 190 ms idle (a check's trip abroad) a
+median of 12.8-15.5 ms with rounds of 67-73 ms among them — gotcha #756's idle
+card. So the head's own work is a quarter of the field's slow rounds.
+
+**Why it is bimodal: the card's clocks** (field runs 4-5, 2026-11-09:
+`first_guess_ms` timed apart, the card traced every 100 ms). A slow reply's
+FIRST guess costs what its others do (19.7 against 19.3 ms; 17.9 against 16.9),
+and a fast reply's too (5.8 / 4.4) — not the idle gap before a round, a state
+that lasts the reply. Which reply is slow is not the prompt's (the palindrome
+19.3 ms in one run, 8.9 in the next; the BST class 4.4 then 18.0), and the 22 s
+story was slow in all three. The trace says why: the card idles ~140 ms of each
+~190 ms round while the check is abroad, and within six seconds of a reply's
+start the driver steps it down — core 1309 → 731 → 338 MHz, memory 6001 → 810
+MHz (P0 → P3/P5). A reply guessed while the clocks are still high is fast; one
+guessed at the floor pays ~5× the probe's 2.9 ms. Prior art: a GeForce card's
+clocks float and fall in idle gaps (NVIDIA's TensorRT measurement guide; forum
+threads on the first batch after idle); the fix on record, locked clocks
+(`nvidia-smi -lgc`), needs an administrator, and a null-kernel keep-alive
+queues the real work behind it. **Fewer bytes a guess did not help** (field
+A/B `~/rig428/fieldh1`, one binary, hot, full, full, hot; patch
+`memory/archive/card_hot_rows_split_425a_1109.patch`): the hot rows on this
+card (32,768 rows, 52 MB, copied on the card and bit-exact against its whole
+head) cut a story's guess 16.6-17.1 → 6.0-6.4 ms, yet no reply got faster —
+palindrome 12.39 / 15.00 against 12.63 / 12.80 tok/s, BST class 11.34 / 10.39
+against 11.24 / 11.16, story 7.12 / 8.80 against 7.67 / 7.78 — and the code
+replies kept fewer guesses (70 of 87 against 72 of 83; 90 of 123 against 94 of
+111). Even within the every-word arms the reply speed did not follow the guess
+cost (4.9-18.1 ms a guess, 12.63-12.80 tok/s on one prompt): the card's wake
+after each idle wait is paid by whatever card work runs first — UNVERIFIED as
+the mechanism, but a cheaper guess moved the cost rather than removing it. The
+palindrome's reply was the same in every run; the BST class and the story
+parted from the head-off reply at near ties (the BST class at chars 74 and 291
+in two of four runs, the story in all four), the near-tie class of a card's
+checks: the head-off runs of one binary agreed with each other, and parted from
+the older binary's on the BST class (char 278).
+
+**What did help: guess the next round while the check is abroad** (#425 (f),
+2026-11-09; PEARL's post-verify, Liu et al., ICLR 2025, arXiv 2408.11850 — the
+drafter drafts during verification and keeps it if every guess is accepted).
+Measured first, with the head guessing one word past the checked ones and
+holding it back (`~/rig428/fieldf1`, two arms): a round kept every guess AND its
+bonus was that word on 15 of 21 head rounds of the palindrome, 16-17 of 28-29 of
+the BST class, 5-10 of 66-75 of the story — a fifth chained guess is right on
+89-94% of a code reply's all-kept rounds. Built in the worker
+(`model_worker::HeadChain`): the draft's chain is kept past the head's real rows
+(`MtpGuesses::real_len`), grows from the worker loop's idle hook beside
+`warm_check_widths` one head step at a time while `ipc_rx` is empty
+(`SplitBlockDrafts::guess_ahead`) — armed by the check's first-segment forward,
+disarmed by any later forward of the request (`note_forward`), so the
+segment's own [39,40) forward waits at most one step — and answers the next
+draft only where every committed word since the chain began is its own
+(`serve_ahead`); a served chain reads the waiting trunk rows in at the next wait
+and grows from them, so it never grows deeper than one round past real states.
+A/B in one binary (`~/rig428/fielda{1,2}`, on/ahead/ahead/on then
+ahead/on/on/ahead, 160 tokens greedy): palindrome 12.34-15.93 (mean 13.47) →
+14.08-18.38 (15.36) tok/s, BST class 11.25-12.88 (11.79) → 11.79-13.66 (13.04),
+story 6.80-8.77 (7.78) → 7.59-9.51 (8.46). Rounds served from the chain: 14 of
+22 (palindrome), 12-13 of 31, 3-7 of 70-78 (story). Two effects, not one: the
+served rounds skip the head's draft, AND the card working through the wait
+keeps its clocks — a FRESH guess cost 16.1-17.0 ms with it off and 3.6-8.3 ms
+with it on (the worker's `guess_ms`), which is why the story gained too.
+Guesses were kept as often (palindrome 71 of 82 against 72 of 83). The
+palindrome's reply was the same in all eight arms; the BST class parted at a
+whitespace near tie (char 291: an empty blank line against one of four spaces)
+in three of four ahead arms and no head arm — a served round changes the check
+widths, which move a card's row; the story parted at near ties in every arm of
+both kinds. **Deeper rounds did not pay** (`~/rig428/fieldm1`, 4 against 7
+guesses a round, on/deep/deep/on, guess-ahead on in both): the head guessed 6.5
+a round against 3.7 and kept more (palindrome 82 against 71, over 19 rounds
+against 22), yet the palindrome ran 11.22-12.21 against 12.79-18.23 tok/s, the
+BST class 13.06-13.82 against 8.18-12.02, the story 7.73-8.94 against
+7.89-9.53. A longer draft is less often kept whole: the palindrome's rounds
+that kept every guess fell 18 → 8-9, so the chain answered 8 rounds against
+14 — deeper rounds trade the guess-ahead's gain for words a round. The cap
+stays at `MOST_GUESSES` (4).
+
+**Residuals.** (1) A tied output head (Qwen3.5-4B/2B) has no `output.weight` to
+borrow — not loaded. (2) A card segment asked for layer n−1's rows that its
+captured step does not keep (`graph_keeps_rows`) runs uncaptured. (3) Where the
+first segment's worker also holds the model's end, two copies of the output
+head sit in one worker (~417 MB on the 35B-A3B). (4) The coordinator cannot see
+whether the segment's parts hold the head; the first ask's refusal holds it off
+instead.
 
 ## Qwen 3.5's prompt is saved short of its end, and restored whole (2026-10-18, FUTURE_WORK #228 (8))
 

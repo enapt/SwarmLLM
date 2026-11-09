@@ -133,6 +133,7 @@ impl SplitModel {
                     parallel_data: Some(mmap.as_ref()),
                     gpu_layers: placement.gpu_layers,
                     cpu_expert_layers: placement.cpu_expert_layers,
+                    guess_head_beside_first: false,
                 },
             );
         }
@@ -290,8 +291,13 @@ impl SplitModel {
         // model's output head (#428), which only the model's end loads: read
         // here where the part holding it is too, whole, before the content
         // is handed to the load.
+        // A guess head beside a first segment reads the trunk through the same
+        // head (#425 (a)): where its parts are here too, the head is loaded
+        // beside the segment and the output head read for it.
+        let guess_head_beside_first =
+            is_first && !is_last && layer_start == 0 && guess_head_parts_held(&ct, &reader);
         let drafter_head = (is_first && !is_last)
-            .then(|| drafter_head_info(model_dir, &ct, &reader))
+            .then(|| drafter_head_info(model_dir, &ct, &reader, guess_head_beside_first))
             .flatten();
         // This range's own placement where the daemon sent one
         // (`split::placement_of`, #265), else the spawn's.
@@ -317,6 +323,7 @@ impl SplitModel {
                     parallel_data: None,
                     gpu_layers: placement.gpu_layers,
                     cpu_expert_layers: placement.cpu_expert_layers,
+                    guess_head_beside_first,
                 },
             )
         });
@@ -355,28 +362,72 @@ impl SplitModel {
 }
 
 /// The output head's entry where a block drafter beside a first segment can
-/// read it (#428): the drafter's file is in `model_dir`, the switch is on, and
-/// a part held here covers the whole tensor.
+/// read it (#428) — the drafter's file is in `model_dir` and its switch is on
+/// — or a guess head beside it will (`for_guess_head`, #425 (a)), and a part
+/// held here covers the whole tensor.
 fn drafter_head_info(
     model_dir: &Path,
     ct: &gguf_file::Content,
     reader: &ShardReader,
+    for_guess_head: bool,
 ) -> Option<gguf_file::TensorInfo> {
-    if !super::super::block_drafter::block_drafter_on()
-        || !model_dir
+    let for_drafter = super::super::block_drafter::block_drafter_on()
+        && model_dir
             .join(super::super::block_drafter::BLOCK_DRAFTER_FILE)
-            .is_file()
-    {
+            .is_file();
+    if !for_drafter && !for_guess_head {
         return None;
     }
     let info = ct.tensor_infos.get("output.weight")?;
-    let size = crate::inference::split::tensor_byte_size(info);
-    let (_, _, held) = reader.find_shard(ct.tensor_data_offset + info.offset)?;
-    (held >= size).then(|| gguf_file::TensorInfo {
+    tensor_held_whole(ct, reader, info).then(|| gguf_file::TensorInfo {
         ggml_dtype: info.ggml_dtype,
         shape: info.shape.clone(),
         offset: info.offset,
     })
+}
+
+/// Does a part held here cover the whole of `info`?
+fn tensor_held_whole(
+    ct: &gguf_file::Content,
+    reader: &ShardReader,
+    info: &gguf_file::TensorInfo,
+) -> bool {
+    let size = crate::inference::split::tensor_byte_size(info);
+    reader
+        .find_shard(ct.tensor_data_offset + info.offset)
+        .is_some_and(|(_, _, held)| held >= size)
+}
+
+/// Does this load hold, whole, every tensor a guess head beside a split's
+/// first segment reads (#425 (a)): the file's next-token-prediction block —
+/// the block whose tensors carry `nextn.`, cut as a part past the last layer
+/// (gotcha #1025) — the output norm, and an output head of its own (a tied
+/// one is the token table, which this sketch does not borrow)? Whether the
+/// block is in the shape the head runs is `mtp::block_to_load`'s question.
+fn guess_head_parts_held(ct: &gguf_file::Content, reader: &ShardReader) -> bool {
+    if !super::super::mtp::split_guess_head_on() || !super::super::mtp::mtp_on() {
+        return false;
+    }
+    let Some(block) = ct
+        .tensor_infos
+        .keys()
+        .find(|name| name.contains(".nextn."))
+        .and_then(|name| name.split('.').nth(1))
+        .map(str::to_owned)
+    else {
+        return false;
+    };
+    let prefix = format!("blk.{block}.");
+    ct.tensor_infos.contains_key("output.weight")
+        && ct
+            .tensor_infos
+            .iter()
+            .filter(|(name, _)| {
+                name.starts_with(&prefix)
+                    || name.as_str() == "output_norm.weight"
+                    || name.as_str() == "output.weight"
+            })
+            .all(|(_, info)| tensor_held_whole(ct, reader, info))
 }
 
 /// Which tensor should the load-time integrity probe read?

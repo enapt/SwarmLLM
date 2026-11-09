@@ -576,6 +576,10 @@ pub struct IpcBlockDraft {
     /// conversation's own words on the processor (#425 (b)).
     #[serde(default)]
     pub words: Vec<u32>,
+    /// The guesses are the model's own guess head's, beside the segment
+    /// (#425 (a)), not the block drafter's. Both take in the rows either way.
+    #[serde(default)]
+    pub by_head: bool,
 }
 
 /// Forward-pass result header.
