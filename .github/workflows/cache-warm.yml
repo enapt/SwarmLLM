@@ -78,9 +78,17 @@ permissions:
   contents: read
 
 concurrency:
-  # Never stack hour-long builds; a newer run supersedes an in-flight one.
+  # Never stack hour-long builds; a newer PUSH supersedes an in-flight run.
+  # The weekly schedule never cancels: GitHub starts it 6-8.7 h late (every
+  # Monday 10-05 → 11-09), and on 2026-11-09 it landed 8 min into a version
+  # bump's own warm and cancelled it, so the release waited on a second build
+  # of the same commit (gotcha #1075). A schedule now waits behind a running
+  # warm (`false` leaves it pending; a newer pending run replaces an older
+  # one) and runs after it, mostly from the cache that run saved. Prior art:
+  # GitHub's concurrency docs — `cancel-in-progress` takes an expression,
+  # their example `${{ !contains(github.ref, 'release/') }}`.
   group: cache-warm-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name != 'schedule' }}
 
 env:
   CARGO_TERM_COLOR: always
