@@ -3082,7 +3082,22 @@ is a candidate (~300 ms a token on paper, unchecked). Prior art (11-09, one sear
 sequence's possible first and last servers, and each server pings its NEXT servers and neighbours, so a hop between
 two servers is priced by the servers' own measurement, not the client's (its `SequenceManager` commit messages, mirror
 git.blob42.xyz/Archives/petals); our coordinates could play that part for a chain driven from here — check how #3 (a)
-gates them before reusing `led_hop_ms`.
+gates them before reusing `led_hop_ms`. **Where the 3.0 came from** (11-09, each link read in the code; a sonnet search found the
+first): Gemma's replies decode on the n-gram rounds (`ngram_only_spec`), whose checks go through
+`pipeline::forward_verify_through_segments` — and it records a peer's decode sample only for a ONE-token check of an
+UNCHAINED segment (`verify_tokens.len() == 1 && chain.is_empty()`, "a chained run's time is several peers'"). Denmark
+handed Australia every forward, so it never got one; `ModelSpeed::ranking_ms_per_layer` then answers from the warm
+PREFILL coefficient × `NOMINAL_DECODE_ACTIVATION_BYTES` (`daemon/state/peer_speed.rs`), and a prompt pass spreads the
+round trip over every position — and `vertex_cost_as` drops the network term for it as for a decode observation. The
+log agrees: Denmark's figure was `None` for the two 8-token warm-ups, then 3.00, 2.87, 2.78, 2.76 (each request's
+prompt pass, warmer each time), never toward the ~10 a layer its checks took; `observed_prefill_ms_per_layer_byte`
+read `None` throughout because the DIAG logs the PROMPT-rate figure (`prompt_ms_per_layer_byte`), not the fallback's.
+**The fix, in two halves**: (1) a figure that answered from the prefill fallback keeps the vertex's network term
+(the source carried to `NodeCandidate` beside `observed_latency_ms_per_layer`, and logged); (2) a chained check is
+charged to its head over the layers it ran, as `forward_through_segments_inner` already charges a chained forward —
+the two writers disagree today. Neither alone may move THIS route (Denmark's ~20 s + 56 × 217 ms still undercuts
+Australia's 43 s on paper); the route that is faster in physics needs Denmark to hold 49-51 (above). Verify on the
+real route: the DIAG's source field, the logged prediction against the measured ~580 ms a token.
 
 **Research 2026-11-08 — which models people actually run, and the round uses them.** Three web searches (Hugging Face
 downloads and trending, the Ollama library, OpenRouter's rankings and its usage study arXiv 2601.10088, the Steam
