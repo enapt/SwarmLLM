@@ -3065,9 +3065,24 @@ twice each at 160 tokens, under the safety kit; the README's rows): **Qwen3.8-27
 (#318's ~1 tok/s chain is gone). **Gemma 4 31B** is the slow one: "start and finish here" turned itself on (this
 computer holds parts 0 and the last, no setting in `config.toml`), so every token went here (0-1) → Denmark (1-49) →
 Australia (49-59) → here (59-60), ~580 ms a token: code 1.7 and 6.2 (the repeat reused the first reply's ids, #337),
-prose 1.7-2.3. Denmark held 1-49 and 51-59 — not the whole model — and Proxmox 49-51. **Next for it**: why the chain
-crosses BOTH far computers when Australia could serve 0-60 (`ranges=[(0, 60)]`, 29 on its card) and Denmark all but
-three layers — the planner's `without_privacy_ms=20033` vs `privacy_extra_ms=0` says it priced the loop as free.
+prose 1.7-2.3. Denmark held 1-49 and 51-59 — not the whole model — and Proxmox 49-51. **Why that route** (a sonnet
+read of the planner and the request's DIAG lines, 11-09; checked by hand: `parallax.rs` `chain_cost_terms`' `hops_ms`
+is 0 for a chain driven from here, "whose round trips are in its vertices"): "start and finish here" did NOT force it
+(`privacy_extra_ms=0`; no remote computer holds layer 0 or 59, so none could head or finish another route). The planner
+priced the route at ≤ 20,033 ms over 56 passes, ~358 ms a token, against ~580 measured — the gap about Denmark's round
+trip: once Denmark had a measured `observed_ms_per_layer` (3.0, no fixed term) its vertex dropped the network term
+(`vertex_cost_as`: an observation "already carries the round trip inside it"), yet 3.0 × 48 layers = 144 ms cannot hold
+a 217 ms round trip; where that 3.0 came from is UNKNOWN (a chained decode sample was 551 ms over 58 layers, charged to
+Denmark whole by `distributed.rs`). And the run EXECUTES chained (Denmark hands Australia the forward, `plan_chain`)
+while it is priced star-shaped, each far computer's round trip from here. Australia alone [1,59) priced 43,117 (half its
+layers on its processor at 6.3 tok/s) — not faster on paper or in physics. **Next**: find where the 3.0 was recorded
+and keep a vertex's round trip unless its observation provably includes it; price a chain driven from here as it runs
+(here → head, head → next by `hop_one_way_ms`, tail → here); and the larger win — Denmark fetching 49-51 so ONE far hop
+is a candidate (~300 ms a token on paper, unchecked). Prior art (11-09, one search): Petals' client pings a
+sequence's possible first and last servers, and each server pings its NEXT servers and neighbours, so a hop between
+two servers is priced by the servers' own measurement, not the client's (its `SequenceManager` commit messages, mirror
+git.blob42.xyz/Archives/petals); our coordinates could play that part for a chain driven from here — check how #3 (a)
+gates them before reusing `led_hop_ms`.
 
 **Research 2026-11-08 — which models people actually run, and the round uses them.** Three web searches (Hugging Face
 downloads and trending, the Ollama library, OpenRouter's rankings and its usage study arXiv 2601.10088, the Steam
