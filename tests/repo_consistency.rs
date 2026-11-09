@@ -14445,6 +14445,80 @@ fn the_upnp_guard_catches_the_release_without_the_backoff() {
     assert_eq!(upnp_versions_without_the_backoff(planted), vec!["0.5.0"]);
 }
 
+/// The P2P TCP port is `network::manager::p2p_tcp_port(listen_port)`, never a
+/// sum written at the call site (pre-release review, 2026-11-09). Four sites —
+/// the invite code, the WSL firewall advice (twice) and the anchor's startup
+/// banner — wrote `port + 10`, an unchecked `u16` sum: past 65525 it panics in
+/// a debug build and wraps in a release one, so an invite code named a port
+/// nothing listened on while the listener saturated to 65535.
+#[test]
+fn the_p2p_tcp_port_is_never_an_unchecked_sum() {
+    let mut offenders = Vec::new();
+    for path in rust_sources_under("src") {
+        let src = std::fs::read_to_string(&path).expect("read a source file");
+        for line in strip_c_comments(&production_code(&src)).lines() {
+            if unchecked_port_sum(line) {
+                offenders.push(format!("{}: {}", path.display(), line.trim()));
+            }
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "an unchecked `port + 10` — name the P2P TCP port with \
+         `crate::network::manager::p2p_tcp_port(port)`:\n{}",
+        offenders.join("\n")
+    );
+}
+
+/// Does this line add 10 to a name ending in `port` with a bare `+`?
+fn unchecked_port_sum(line: &str) -> bool {
+    let mut from = 0;
+    while let Some(at) = line[from..].find("port") {
+        let end = from + at + "port".len();
+        from = end;
+        let continues_the_name = line[end..]
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_alphanumeric() || c == '_');
+        if continues_the_name {
+            continue;
+        }
+        let Some(after_plus) = line[end..].trim_start().strip_prefix('+') else {
+            continue;
+        };
+        let Some(tail) = after_plus.trim_start().strip_prefix("10") else {
+            continue;
+        };
+        if !tail.starts_with(|c: char| c.is_ascii_digit() || c == '.') {
+            return true;
+        }
+    }
+    false
+}
+
+/// The guard above, against the spellings it exists to catch — planted.
+#[test]
+fn the_port_sum_guard_catches_each_spelling() {
+    for planted in [
+        "let tcp_port = port + 10;",
+        "p2p_tcp = port+10,",
+        "self.config.node.listen_port + 10)",
+        "format!(\"{}\", port +  10)",
+    ] {
+        assert!(unchecked_port_sum(planted), "missed: {planted}");
+    }
+    for fine in [
+        "let tcp_port = crate::network::manager::p2p_tcp_port(port);",
+        "port + 100",
+        "port + 1",
+        "port + 10.5",
+        "listen_port.saturating_add(10)",
+        "portion + 10",
+    ] {
+        assert!(!unchecked_port_sum(fine), "flagged: {fine}");
+    }
+}
+
 /// The first igd-next that resolves a router's control URL as a URL (0.18,
 /// `common::endpoint`). 0.16 pasted it after the router's address as text.
 const IGD_JOINS_THE_CONTROL_URL: (u64, u64) = (0, 18);

@@ -2662,8 +2662,9 @@ impl HealthMonitor {
             return;
         }
         let port = self.shared_state.config.node.listen_port;
+        let tcp_port = crate::network::manager::p2p_tcp_port(port);
         tracing::warn!(
-            p2p_tcp = port + 10,
+            p2p_tcp = tcp_port,
             quic_udp = port,
             peers = self.shared_state.connected_node_ids.len(),
             "No other machine has ever opened a connection TO this node — every link it \
@@ -2677,7 +2678,7 @@ impl HealthMonitor {
              -Protocol TCP -LocalPort {} -Action Allow ; \
              New-NetFirewallRule -DisplayName 'SwarmLLM P2P QUIC' -Direction Inbound \
              -Protocol UDP -LocalPort {} -Action Allow",
-            port + 10,
+            tcp_port,
             port
         );
         self.shared_state.emit_activity(

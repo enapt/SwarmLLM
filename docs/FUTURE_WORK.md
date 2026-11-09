@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #439**). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #440**). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -2848,7 +2848,18 @@ Residual: a story still sets the block aside at token 50-56 (once 93; ~64 before
 against the head alone's 8.5-9.0 in 3 replies of 4 (9.1 against 9.0 in the fourth) — guessing ~2 a
 round it wins about one judgement in five, and 8 losses IN A ROW take ~25 of them; a judgement by
 how much it lost (a running ratio against the head's price, HedgeSpec's weights) would set it aside
-in ~8. And an answer carrying the block's rows for 16 positions (~280 KB) waits twice its width's
+in ~8. **Tried 2026-11-09 and DROPPED** (`~/rig428/fieldc3`, binary `swarmllm-c3`, patch
+`~/rig428/patches/block_own_rounds_weighed_1109.patch`): the block's OWN last 6 rounds weighed by how
+much they lost, set aside below 0.8 of the better price. Arms on/runonly(the rule before)/head ×2,
+tok/s: palindrome 14.4/13.3, 13.9/13.6, 14.8/14.6; BST class 13.7/13.1, 14.4/14.1, 13.0/12.7; story
+7.9/7.8, 7.5/7.4, 9.6/8.5 — mixed (+5% story, −6% class), never near the head alone on the story. It
+never fired there: the block's own rounds scored 1.13 and 1.03 of the head's PRICE (53 block rounds,
+51 of 124 guesses kept) while the reply ran ~20% under the head alone, and the run rule set it aside
+at token 119 in one arm, never in the other. **So the loss is not in the rounds the judgement
+weighs**: what the block costs while merely PRESENT — its 8 layers' rows asked back on every forward
+(~35 KB a position, ~20 ms more an answer, the invariant above) and the head's rounds slowed by them
+— is in no price. Next: price the rows into every round the block is present for (the head's too), or
+judge the pair by the reply's own rate against the head alone's measured one. And an answer carrying the block's rows for 16 positions (~280 KB) waits twice its width's
 time in some replies, with or without the head. A segment wholly on a card keeps the block's experts on the card
 (`LayerPlacement::for_the_next_token_block`) — it refused the head until then, as the experts would
 have sat in memory nothing charged (the first field run found it: `loaded=false`). No wire change;
@@ -3046,6 +3057,17 @@ live node, one at a time (route and segments from the `x-swarm-*` headers, first
 here with each tier's blocker, then rank the round by which tier a fix makes usable. Prior art first (`workflow.md`
 item 1): how Petals, exo and llama.cpp's RPC backend make a 30B usable across machines — first pass below; how each
 one PLACES a 30B is still unread.
+
+**Measured 2026-11-09 09:58-10:10Z, v0.3.279, the live node's own route** (`ask_tier.py`, a warm-up then code and prose
+twice each at 160 tokens, under the safety kit; the README's rows): **Qwen3.8-27B** went WHOLE to Denmark `fa652c66`
+(RTX 5090 32 GB, ~210 ms): code 138-145, prose 120-124 tok/s, first token 0.4-0.5 s. **Llama 3.3 70B**: here (layers
+0-2) → Australia `aa3d1e66` (2-78) → the Proxmox processor node `96842635` (78-80): code 4.0 both runs, prose 1.7-1.8
+(#318's ~1 tok/s chain is gone). **Gemma 4 31B** is the slow one: "start and finish here" turned itself on (this
+computer holds parts 0 and the last, no setting in `config.toml`), so every token went here (0-1) → Denmark (1-49) →
+Australia (49-59) → here (59-60), ~580 ms a token: code 1.7 and 6.2 (the repeat reused the first reply's ids, #337),
+prose 1.7-2.3. Denmark held 1-49 and 51-59 — not the whole model — and Proxmox 49-51. **Next for it**: why the chain
+crosses BOTH far computers when Australia could serve 0-60 (`ranges=[(0, 60)]`, 29 on its card) and Denmark all but
+three layers — the planner's `without_privacy_ms=20033` vs `privacy_extra_ms=0` says it priced the loop as free.
 
 **Research 2026-11-08 — which models people actually run, and the round uses them.** Three web searches (Hugging Face
 downloads and trending, the Ollama library, OpenRouter's rankings and its usage study arXiv 2601.10088, the Steam
@@ -4818,6 +4840,16 @@ dashboard's final usage event has them. If a client asks: an extra field in the 
 chunk, without breaking the OpenAI/Anthropic wire shapes.
 
 ### Dashboard and first-hour experience
+
+#### #439 — The relay hint says "turn on UPnP" where a router found late refused the ports
+`P3` · ux · **OPEN** — 2026-11-09 · history: the pre-release review of `7b2229f5` (the relay hint)
+
+`UpnpWatch::verdict` reads any earlier "no gateway" as `NoRouter` until a mapping lands. A router missed at the first
+search, found by a later one (vendor/libp2p-upnp searches again on a backoff, #329) and then refusing the mapping emits
+nothing: the hint stays "turn UPnP on in the router" where "another device holds the ports" is the cause. Narrow (a
+router slow to answer at boot AND a held port). **Fix**: the vendored crate emits a gateway-found event (it knows: the
+search succeeded), and `UpnpWatch` clears `gateway_misses` on it, so the silence after it reads `Refused`. Prior art:
+none needed beyond the crate's own search loop — the event is the missing half of `GatewayNotFound`.
 
 #### #62 — The Network map is blank on a node that has not served across regions
 `P3` · ux · **PARTIAL** — 2026-09-13 · history: archive row #62 and § "The Network map is blank on a node that has not served across regions"

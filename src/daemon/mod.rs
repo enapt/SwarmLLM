@@ -590,7 +590,11 @@ impl Daemon {
             eprintln!("  SwarmLLM ANCHOR is running (bootstrap / relay only)");
             eprintln!("  Inference disabled — no models, no downloads.");
             eprintln!("  Dashboard:  http://127.0.0.1:{port}  (loopback only)");
-            eprintln!("  P2P:        TCP {}  +  UDP {} (QUIC)", port + 10, port);
+            eprintln!(
+                "  P2P:        TCP {}  +  UDP {} (QUIC)",
+                crate::network::manager::p2p_tcp_port(port),
+                port
+            );
         } else {
             eprintln!("  SwarmLLM is running");
             eprintln!("  Dashboard:  http://localhost:{port}");

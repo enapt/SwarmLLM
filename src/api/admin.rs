@@ -2753,9 +2753,9 @@ pub async fn network_code(State(state): State<AppState>) -> Json<serde_json::Val
         })
     };
 
-    // Use TCP address (port+10) — more reliable across environments (WSL2, Docker, NAT).
+    // Use the TCP address — more reliable across environments (WSL2, Docker, NAT).
     // QUIC on WSL2 often fails with handshake timeouts on the virtual adapter IP.
-    let tcp_port = port + 10;
+    let tcp_port = crate::network::manager::p2p_tcp_port(port);
     let multiaddr_str = format!("/ip4/{best_ip}/tcp/{tcp_port}/p2p/{peer_id_str}");
     let code = if let Ok(addr) = multiaddr_str.parse::<libp2p::Multiaddr>() {
         crate::network::discovery::encode_network_code(&addr)
