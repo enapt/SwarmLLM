@@ -1214,7 +1214,11 @@ a:hover { color: var(--accent-hover); }
   gap: 10px;
   overflow-x: auto;
   padding: 4px 4px 12px;
+  /* A standard scrollbar-width turns off ::-webkit-scrollbar for this element
+     (Chrome 121+), so it also needs the standard colour — without it the bar
+     was the browser's light one on the dark theme. */
   scrollbar-width: thin;
+  scrollbar-color: var(--bg-tertiary) transparent;
 }
 .browse-trending-card {
   flex: 0 0 auto;
@@ -3296,7 +3300,7 @@ input.cloud-model-filter:focus { border-color: var(--accent); background: var(--
 select.cloud-model-sort { flex: 0 0 88px; width: 88px; padding: 6px 6px; font-size: 12px; background: var(--bg-tertiary); border: 1px solid var(--border); border-radius: var(--radius-md); color: var(--text-primary); cursor: pointer; outline: none; }
 .cloud-model-sort:focus { border-color: var(--accent); }
 /* Scrollable model list */
-.cloud-model-list { max-height: 320px; overflow-y: auto; border: 1px solid var(--border); border-radius: var(--radius-sm); margin-bottom: 8px; scrollbar-width: thin; }
+.cloud-model-list { max-height: 320px; overflow-y: auto; border: 1px solid var(--border); border-radius: var(--radius-sm); margin-bottom: 8px; scrollbar-width: thin; scrollbar-color: var(--bg-tertiary) transparent; }
 .cloud-model-row { display: flex; align-items: center; gap: 8px; padding: 6px 10px; border-bottom: 1px solid var(--border); cursor: pointer; font-size: var(--fs-md); transition: background 0.1s; }
 .cloud-model-row:last-child { border-bottom: none; }
 .cloud-model-row:hover { background: var(--bg-tertiary); }

@@ -716,7 +716,7 @@
       : I18n.t('browse.results_title');
     if (meta) {
       if (_browseState.fitOnly && filtered.length < totalRaw) {
-        meta.textContent = I18n.t('browse.results_count_filtered', { shown: filtered.length, hidden: totalRaw - filtered.length });
+        meta.textContent = I18n.t('browse.results_count_filtered', { hidden: totalRaw - filtered.length, total: totalRaw });
       } else {
         meta.textContent = I18n.t('browse.results_count', { count: filtered.length });
       }
@@ -755,17 +755,20 @@
 
     var fit = _fitPill(repo);
 
-    // The size is what Download will fetch: the whole file when it runs here,
-    // otherwise one part. It showed the first-and-last-parts estimate before,
-    // which is neither. A swarm-only row fetches nothing — its button is Chat —
-    // so it shows the model's own size.
+    // Every row shows the model's own size. Where Download fetches one part
+    // ("Host parts"), the part it keeps here follows it: the part's size alone
+    // read as the model's — a 27B listed at 981 MB.
     var sizeEl = document.createElement('div');
     sizeEl.className = 'browse-result-size';
     var recommended = _browseVariant(repo, null);
-    var sizeBytes = (fit.key === 'run' || fit.key === 'swarm')
-      ? ((recommended && recommended.size_bytes) || 0)
-      : (repo.est_shard_size || 0);
-    sizeEl.textContent = sizeBytes ? U.formatBytes(sizeBytes) : '—';
+    var modelBytes = (recommended && recommended.size_bytes) || 0;
+    var partBytes = fit.key === 'host' ? (repo.est_shard_size || 0) : 0;
+    if (modelBytes && partBytes) {
+      sizeEl.textContent = I18n.t('browse.size_part_here', { size: U.formatBytes(modelBytes), part: U.formatBytes(partBytes) });
+    } else {
+      var sizeBytes = modelBytes || partBytes;
+      sizeEl.textContent = sizeBytes ? U.formatBytes(sizeBytes) : '—';
+    }
     row.appendChild(sizeEl);
     var pill = document.createElement('span');
     pill.className = 'browse-fit-pill browse-fit-pill-' + fit.key;

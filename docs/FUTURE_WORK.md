@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #438**). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #439**). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -3372,6 +3372,18 @@ TreeWY 2608.20961 (a vLLM fork) does the same with a WY form; Twig/Bole 2608.016
 parent pointers; SpecLA 2607.16673; STree 2505.14969 for Mamba-2. Take: the ancestor mask over the delta rule (our one
 kernel, `qwen35::delta_rule_into`, gains a parent-pointer mode), the accepted path replayed by the existing replay
 (`SsmState::rewind_to` already replays kept rows). Build after #428's field model runs on two real peers.
+
+#### #438 — The model search judges "Runs locally" on a card computer by the card alone
+`P2` · models-ui · **OPEN** — since 2026-11-09 (found taking the README's screenshots) · history: gotcha #483 (the same budget on a processor-only machine)
+`admin_hf::search` asks `vram::node_model_budget_bytes`, which on a computer whose models go to the card is the card's
+budget only (`compute_vram_budget`: 6.33 GiB on this RTX 3070 laptop). The loader runs a wider model across the card
+and the processor (`ModelProcessPool::fresh_run_layers_for_planning`; the machine room offered beside the card since
+2026-10-25), so Gemma 4 12B Q4_K_M (6.6 GB), which this computer runs whole, reads "↗ Host parts" in the search, and a
+new user with a card is told every mid-size model will not run on their computer. Next: answer the search's "runs here"
+from the loader's own bound (the card plus `machine_room_beside_card_mb`, through the helper the planner asks), never
+a second estimate; consider a third pill for "runs here, partly on the processor", since it runs slower. Prior art (their
+UIs as remembered, not re-checked): LM Studio's search marks "Partial GPU offload possible" apart from "likely too
+large"; `ollama ps` reports a split like "48%/52% CPU/GPU".
 
 #### #318 — A large model split across machines is too slow to use
 `P2` · perf-split · **OPEN** — 2026-10-20 · plan: `docs/plans/large_model_splits.md` · draws on #134, #145, #148, #149, #192
