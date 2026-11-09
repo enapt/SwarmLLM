@@ -82,6 +82,27 @@ pass above the single worker on math/code reasoning. Works on reasoning models o
 ~8B and up (1.7-4B "get distracted"). → n tokens a pass for n ≤ 4, on the tasks
 where replies are longest (thinking).
 
+**Chosen 2026-11-09 as the next round's top track** (the owner: "we really need to
+push parallel processing somehow to really push past any token/sec barriers"; "the
+parallel streams sounds promising and aligns with the projects design"). The
+survey that day ranked, for ONE reply over a WAN split: (1) these shared-cache
+streams — the only lever that multiplies tokens per pass without a drafter, and
+the pass is what a WAN split pays for; (2) batching several requests over the same
+passes — aggregate throughput, not one reply's speed, so it serves the swarm
+rather than the reader; (3) trained tree drafters (JetSpec, DDTree) — more depth
+per check, on top of §2's drafting; (4) judge decoding — accepts guesses a judge
+rates as good enough, so it is LOSSY and could only ever be an opt-in. Not worth
+building here: tensor or sequence parallelism across a WAN (a round trip per
+layer), Jacobi decoding (few tokens converge per iteration on chat), ensembles of
+drafters (each guesser already competes by its own price, `dsd_controller`). **The
+trap to design around first is the positions**: each worker's block is stored at
+block-local RoPE positions and every query is rotated once per block, so a stage's
+cache can no longer index a position by the reply's length alone — every path
+that sizes, saves (`PrefixCache`) or restores a split's cache by position has to
+learn the block layout before a second stream can share it. First step: the
+authors' own reference against llama.cpp on ONE computer with a reasoning model
+of ~8B or more, then the two-stream layout on a split this node leads.
+
 **Parallel sections (outline, then expand; SoT 2307.15337, Jupiter INFOCOM'25).**
 Measured here on the live node (`~/swarmllm-ref/spec/parallel_reply.py`,
 llama-3.1-8B, 16 prompts): where the answer is list-shaped (how-to, plans,
