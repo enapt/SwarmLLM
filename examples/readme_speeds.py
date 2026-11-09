@@ -16,7 +16,9 @@ usage: python3 -I examples/readme_speeds.py ~/swarmllm-gate/v0.3.260-alpha/out/s
 The version is read from the path: the gate writes under `v<version>/`. A check that
 shared the card with another program is timed again on the published release, the
 step's candidate arms only, into `v<version>-alpha-rebench/out/` (completeness.md §
-"README speeds"); from a `-rebench` path the block says it is a re-run.
+"README speeds"); from a `-rebench` path the block's comment says it is a re-run.
+The version goes in an HTML comment, where the guard reads it: the reader sees
+current figures and no version (user, 2026-11-09).
 """
 
 import json
@@ -28,8 +30,8 @@ from pathlib import Path
 # The gate's placements, in the order the README lists them.
 PLACES = {
     "card": "the graphics card",
-    "split": "card and processor together (too big for the card)",
-    "moe": "card and processor together (a mixture of experts, too big for the card)",
+    "split": "card and processor (too big for the card)",
+    "moe": "card and processor (a mixture of experts, too big for the card)",
     "cpu": "the processor only",
 }
 NAMES = {
@@ -65,19 +67,15 @@ def block(records, version, rerun=False):
     prompt = round(statistics.median(r["prompt_tokens"] for r in every), -2)
     written = int(statistics.median(r["completion_tokens"] for r in every))
     if rerun:
-        source = [
-            f"**On one computer**: the v{version} release check's speed step, run again on the",
-            "downloaded release because the check itself shared the graphics card with other",
-            f"programs. Each model reads a {int(prompt):,}-token document and writes {written} tokens about it.",
-        ]
+        note = (f"<!-- from the v{version} release check's speed step, timed again on the published"
+                " release because the check shared the graphics card with other programs -->")
     else:
-        source = [
-            f"**On one computer**: the v{version} release check, run on the downloaded release. Each",
-            f"model reads a {int(prompt):,}-token document and writes {written} tokens about it.",
-        ]
+        note = f"<!-- from the v{version} release check, timed on the downloaded release -->"
     lines = [
         BEGIN,
-        *source,
+        note,
+        f"**On one computer.** Each model reads a {int(prompt):,}-token document and writes {written}",
+        "tokens about it.",
         "",
         "| Model | Runs on | Writing (tokens a second) | Reading (tokens a second) |",
         "|---|---|---|---|",

@@ -6465,16 +6465,52 @@ fn the_readme_test_counts_agree_with_each_other_and_with_claude_md() {
     }
 }
 
-/// The versions `## [x.y.z…]` headings name in a changelog, newest first.
-fn changelog_releases(changelog: &str) -> Vec<String> {
+/// The releases `## [x.y.z…] — YYYY-MM-DD` headings name in a changelog,
+/// newest first: the version, and its day (days since 1970-01-01) when dated.
+fn changelog_releases(changelog: &str) -> Vec<(String, Option<i64>)> {
     changelog
         .lines()
         .filter_map(|l| l.strip_prefix("## ["))
-        .filter_map(|l| l.split(']').next())
-        .filter(|v| v.starts_with(|c: char| c.is_ascii_digit()))
-        .map(str::to_string)
+        .filter_map(|l| l.split_once(']'))
+        .filter(|(v, _)| v.starts_with(|c: char| c.is_ascii_digit()))
+        .map(|(v, rest)| {
+            let date = rest.trim_start_matches([' ', '—', '-']);
+            (v.to_string(), date.get(..10).and_then(civil_day))
+        })
         .collect()
 }
+
+/// Days since 1970-01-01 of a `YYYY-MM-DD` date (Howard Hinnant's
+/// `days_from_civil`).
+fn civil_day(date: &str) -> Option<i64> {
+    let mut parts = date.split('-').map(|p| p.parse::<i64>().ok());
+    let (y, m, d) = (parts.next()??, parts.next()??, parts.next()??);
+    if !(1..=12).contains(&m) || !(1..=31).contains(&d) {
+        return None;
+    }
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let doy = (153 * ((m + 9) % 12) + 2) / 5 + d - 1;
+    Some(era * 146_097 + yoe * 365 + yoe / 4 - yoe / 100 + doy - 719_468)
+}
+
+/// `text` as a reader of the rendered page sees it: its HTML comments removed.
+fn without_html_comments(text: &str) -> String {
+    let mut out = String::new();
+    let mut rest = text;
+    while let Some(i) = rest.find("<!--") {
+        out.push_str(&rest[..i]);
+        rest = rest[i..].find("-->").map_or("", |e| &rest[i + e + 3..]);
+    }
+    out.push_str(rest);
+    out
+}
+
+/// How old an across-computer speed may be: measured on a release at most
+/// this many days before the newest (user, 2026-11-09: "it should be
+/// uptodate numbers only").
+const README_SPEED_MAX_AGE_DAYS: i64 = 7;
 
 /// `[package] version` in a Cargo.toml.
 fn package_version(cargo_toml: &str) -> String {
@@ -6515,9 +6551,19 @@ fn cited_versions(text: &str) -> Vec<String> {
 
 /// What is wrong with the README's "How fast is it?" section for a tree at
 /// `cargo_version` whose changelog names `released` (newest first).
-fn readme_speed_problems(readme: &str, cargo_version: &str, released: &[String]) -> Vec<String> {
+fn readme_speed_problems(
+    readme: &str,
+    cargo_version: &str,
+    released: &[(String, Option<i64>)],
+) -> Vec<String> {
     let bare = |v: &str| v.split('-').next().unwrap_or(v).to_string();
-    let released_bare: Vec<String> = released.iter().map(|v| bare(v)).collect();
+    let released_bare: Vec<String> = released.iter().map(|(v, _)| bare(v)).collect();
+    let day_of = |v: &str| {
+        released
+            .iter()
+            .find(|(r, _)| bare(r) == v)
+            .and_then(|(_, d)| *d)
+    };
     let mut problems = Vec::new();
     let (Some(start), Some(end)) = (
         readme.find("<!-- speeds:begin"),
@@ -6541,8 +6587,9 @@ fn readme_speed_problems(readme: &str, cargo_version: &str, released: &[String])
             "README.md's speed section says `reviewed for {}` but Cargo.toml is {cargo_version}. \
              A release's bump commit refreshes it (.claude/rules/completeness.md § \"README \
              speeds\"): run `python3 -I examples/readme_speeds.py \
-             ~/swarmllm-gate/v<previous release>/out/speed.jsonl`, replace any across-computer \
-             row this release measured again, then write `reviewed for {cargo_version}`.",
+             ~/swarmllm-gate/v<previous release>/out/speed.jsonl`, measure again or remove any \
+             across-computer row this guard calls too old, then write `reviewed for \
+             {cargo_version}`.",
             stamp.as_deref().unwrap_or("<nothing>")
         ));
     }
@@ -6629,6 +6676,76 @@ fn readme_speed_problems(readme: &str, cargo_version: &str, released: &[String])
             ));
         }
     }
+    // A reader sees current figures and no version or date they were measured
+    // on (user, 2026-11-09: "i dont want 'it ran this fast at version x' also,
+    // it should be uptodate numbers only"). The version a figure was measured
+    // on is kept in an HTML comment, where this guard reads it.
+    let visible = without_html_comments(section);
+    for v in cited_versions(&visible) {
+        problems.push(format!(
+            "README.md's speed section shows v{v} to its readers. Keep the version a figure was \
+             measured on in an HTML comment (`<!-- measured on v{v} -->`); the reader sees only \
+             current figures."
+        ));
+    }
+    const MONTHS: [&str; 12] = [
+        "January",
+        "February",
+        "March",
+        "April",
+        "May",
+        "June",
+        "July",
+        "August",
+        "September",
+        "October",
+        "November",
+        "December",
+    ];
+    let words: Vec<&str> = visible.split(|c: char| !c.is_ascii_alphabetic()).collect();
+    for month in MONTHS.iter().filter(|m| words.contains(m)) {
+        problems.push(format!(
+            "README.md's speed section dates a figure (\"{month}\"). It shows current figures \
+             only: measure it again, or remove it."
+        ));
+    }
+    // Every figure outside the release-check block (whose age the rule above
+    // bounds) and the skip markers was measured on a release of the last
+    // README_SPEED_MAX_AGE_DAYS before the newest.
+    let mut rows = section.to_string();
+    if let Some(b) = block {
+        rows = rows.replace(b, "");
+    }
+    let rows: String = rows
+        .split("<!-- release-check:skipped")
+        .enumerate()
+        .map(|(i, part)| match i {
+            0 => part,
+            _ => part.split_once("-->").map_or("", |(_, after)| after),
+        })
+        .collect();
+    let newest_day = released.first().and_then(|(_, d)| *d);
+    for v in cited_versions(&rows) {
+        match (day_of(&v), newest_day) {
+            (Some(day), Some(newest)) => {
+                if newest - day > README_SPEED_MAX_AGE_DAYS {
+                    problems.push(format!(
+                        "README.md's speed section has a figure measured on v{v}, {} days \
+                         before the newest release; it shows figures from the last \
+                         {README_SPEED_MAX_AGE_DAYS} days only. Measure it again on the \
+                         current release, or remove it.",
+                        newest - day
+                    ))
+                }
+            }
+            // An unreleased version is reported above.
+            _ if !released_bare.contains(&v) => {}
+            _ => problems.push(format!(
+                "CHANGELOG.md's newest heading or v{v}'s has no date (`## [x.y.z] — \
+                 YYYY-MM-DD`), which this guard needs to tell a README speed's age."
+            )),
+        }
+    }
     problems
 }
 
@@ -6642,8 +6759,10 @@ fn readme_speed_problems(readme: &str, cargo_version: &str, released: &[String])
 /// runs this file on any commit touching `Cargo.toml` or `README.md`. The
 /// one-computer table must come from one of the two newest release checks not
 /// skipped by a marker (`examples/readme_speeds.py` writes it from the gate's
-/// own records), and
-/// no row may cite a version that was never released.
+/// own records), no row may cite a version that was never released, and
+/// (user, 2026-11-09) a reader sees no version or month — each figure's
+/// version sits in an HTML comment — and no across-computer figure older than
+/// `README_SPEED_MAX_AGE_DAYS`.
 #[test]
 fn the_readme_speeds_are_reviewed_at_every_release() {
     let root = repo_root();
@@ -6662,20 +6781,22 @@ fn the_readme_speeds_are_reviewed_at_every_release() {
 /// The guard above fires on each thing it exists to catch.
 #[test]
 fn the_readme_speeds_guard_catches_a_release_that_did_not_refresh_them() {
-    let released = |top: u32| -> Vec<String> {
-        (top - 9..=top)
+    // Twenty releases, one a day.
+    let released = |top: u32| -> Vec<(String, Option<i64>)> {
+        (top - 19..=top)
             .rev()
-            .map(|n| format!("0.3.{n}-alpha"))
+            .map(|n| (format!("0.3.{n}-alpha"), Some(i64::from(n))))
             .collect()
     };
     let section = |stamp: &str, check: &str, rows: &str| {
         format!(
             "intro\n<!-- speeds:begin, reviewed for {stamp}. Refreshed at every release -->\n\
-             <!-- release-check:begin -->\nthe v{check} release check\n\
-             <!-- release-check:end -->\n{rows}\n<!-- speeds:end -->\nrest"
+             <!-- release-check:begin -->\n<!-- from the v{check} release check -->\n\
+             **On one computer**\n<!-- release-check:end -->\n{rows}\n<!-- speeds:end -->\nrest"
         )
     };
-    let fresh = section("0.3.261-alpha", "0.3.260", "| 14B | v0.3.255 |");
+    let row = |measured: &str| format!("| 14B | 40 |\n<!-- measured on v{measured} -->");
+    let fresh = section("0.3.261-alpha", "0.3.260", &row("0.3.255"));
     assert_eq!(
         readme_speed_problems(&fresh, "0.3.261-alpha", &released(261)),
         Vec::<String>::new()
@@ -6686,11 +6807,55 @@ fn the_readme_speeds_guard_catches_a_release_that_did_not_refresh_them() {
     assert!(missed[0].contains("reviewed for 0.3.261-alpha"));
     assert!(missed[1].contains("v0.3.260 release check"));
     // A row citing a build only main has.
-    let early = section("0.3.261-alpha", "0.3.260", "| 14B | v0.3.262 |");
+    let early = section("0.3.261-alpha", "0.3.260", &row("0.3.262"));
     let cited = readme_speed_problems(&early, "0.3.261-alpha", &released(261));
     assert!(
         cited.len() == 1 && cited[0].contains("v0.3.262"),
         "{cited:?}"
+    );
+    // A version or a month the reader sees, in a row or in the check's block.
+    let shown = section("0.3.261-alpha", "0.3.260", "| 14B | 40 | v0.3.255 |");
+    let shown = readme_speed_problems(&shown, "0.3.261-alpha", &released(261));
+    assert!(
+        shown.len() == 1 && shown[0].contains("shows v0.3.255"),
+        "{shown:?}"
+    );
+    let block_shown = fresh.replace(
+        "<!-- from the v0.3.260 release check -->",
+        "the v0.3.260 release check",
+    );
+    let block_shown = readme_speed_problems(&block_shown, "0.3.261-alpha", &released(261));
+    assert!(
+        block_shown.len() == 1 && block_shown[0].contains("shows v0.3.260"),
+        "{block_shown:?}"
+    );
+    let dated = section(
+        "0.3.261-alpha",
+        "0.3.260",
+        "| 14B | 40, measured in October |\n<!-- v0.3.255 -->",
+    );
+    let dated = readme_speed_problems(&dated, "0.3.261-alpha", &released(261));
+    assert!(
+        dated.len() == 1 && dated[0].contains("\"October\""),
+        "{dated:?}"
+    );
+    // An across-computer figure older than README_SPEED_MAX_AGE_DAYS; one
+    // exactly that old still stands.
+    let old = section("0.3.270-alpha", "0.3.269", &row("0.3.262"));
+    let old = readme_speed_problems(&old, "0.3.270-alpha", &released(270));
+    assert!(old.len() == 1 && old[0].contains("8 days"), "{old:?}");
+    let week = section("0.3.270-alpha", "0.3.269", &row("0.3.263"));
+    assert_eq!(
+        readme_speed_problems(&week, "0.3.270-alpha", &released(270)),
+        Vec::<String>::new()
+    );
+    // An undated newest heading leaves a figure's age unknown.
+    let mut undated = released(261);
+    undated[0].1 = None;
+    let undated = readme_speed_problems(&fresh, "0.3.261-alpha", &undated);
+    assert!(
+        undated.len() == 1 && undated[0].contains("has no date"),
+        "{undated:?}"
     );
     // A check that shared the machine, skipped by name with its reason: the
     // table may come from the check before it.
@@ -6738,6 +6903,20 @@ fn the_readme_speeds_guard_catches_a_release_that_did_not_refresh_them() {
     assert_eq!(
         cited_versions("v0.3.260, (v0.3.255) dev0.1.2 v1.2"),
         ["0.3.260", "0.3.255"]
+    );
+    assert_eq!(without_html_comments("a<!-- b -->c<!-- d"), "ac");
+    let day = |d: &str| civil_day(d).expect(d);
+    assert_eq!(day("1970-01-01"), 0);
+    assert_eq!(day("2026-11-09") - day("2026-11-02"), 7);
+    assert_eq!(day("2024-03-01") - day("2024-02-28"), 2);
+    assert_eq!(civil_day("2026-13-01"), None);
+    assert_eq!(
+        changelog_releases("## [0.3.279-alpha] — 2026-11-09\n## [Unreleased]\n## [0.3.1] - 2025-01-02\n## [0.3.0]\n"),
+        [
+            ("0.3.279-alpha".to_string(), Some(day("2026-11-09"))),
+            ("0.3.1".to_string(), Some(day("2025-01-02"))),
+            ("0.3.0".to_string(), None),
+        ]
     );
 }
 

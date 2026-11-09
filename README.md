@@ -10,118 +10,116 @@
 ## Run AI on your own computer. Run bigger AI together.
 
 SwarmLLM is a free app that gives you a ChatGPT-style assistant running on
-your own computer, using open AI models from Meta, Google, Alibaba, Mistral
-and others. When a model is too big for one machine, computers running
-SwarmLLM team up over the internet and run it together, each doing part of
-the work.
+your own computer, using open AI models from Meta, Google, OpenAI, Alibaba,
+Mistral and others. When a model is too big for one machine, computers running
+SwarmLLM team up over the internet and run it together, each holding part of
+it. Teamed with a computer on another continent, a laptop runs a 14-billion-
+parameter model faster than it can alone, and models no home computer can
+hold, like Llama 3.3 70B, run across several.
 
 **No account · No subscription · No ads · No crypto · Open source · Updates itself**
 
+**[Download](#get-started)** · **[What people use it for](#what-people-use-it-for)** · **[Join the Discord](https://discord.gg/nq9be3u828)** · **[Get help](#get-help)** · **[For developers](#for-developers)**
+
+![The SwarmLLM chat: two everyday questions, each answered by Llama 3.2 3B on this computer in about a second](docs/images/chat.png)
+
 > [!IMPORTANT]
-> **Keep automatic updates on, or your computer drops off the swarm.** While
-> SwarmLLM is being built, new versions come out often — sometimes more than one
-> a day — and computers only work with others that are up to date. **A computer
-> two or more releases behind is disconnected from the network until it
-> updates.** Automatic updates are on unless you turned them off: in the app,
-> **Settings → Software updates** should say *Install automatically and restart
-> when idle*. The `.deb`/`.rpm` packages and the Docker images can't update
-> themselves — install the new package, or pull the new image, whenever a
-> release comes out.
-
-**A giant model has now run on the swarm.** Bigger AI models give noticeably
-smarter answers, but the biggest open ones (70 billion "parameters" and up)
-need equipment normally found only in data centres — no home computer can hold
-one. In October 2026, Llama 3.3 70B answered across four ordinary computers in
-Thailand, Australia and Italy, each holding a part of it. It is slow so far —
-about a word a second — because those computers are continents apart. **The
-goal now is giant models that are fast, free for everyone**, and every computer
-that joins near another brings that closer.
-
-**[Download](#get-started)** · **[Join the Discord](https://discord.gg/nq9be3u828)** — find people near you to team up with · **[For developers](#for-developers)**
-
-![The SwarmLLM chat: two everyday questions, each answered by Llama 3.2 3B on this computer in about two seconds](docs/images/chat.png)
-
-> **An early version, improving every week.** Fixes reach you automatically.
-> Hit a rough edge? [Tell us](https://github.com/enapt/SwarmLLM/issues).
+> **Keep automatic updates on, or your computer drops off the swarm.** New
+> versions come out often, sometimes more than one a day, and **a computer two
+> or more releases behind is disconnected until it updates.** Updates are on
+> unless you turned them off: **Settings → Software updates** should say
+> *Install automatically and restart when idle*. The `.deb`/`.rpm` packages and
+> the Docker images can't update themselves — install the new package, or pull
+> the new image, when a release comes out.
 
 ## Get started
 
 Pick the download for your computer from the
-[latest release page](https://github.com/enapt/SwarmLLM/releases/latest).
+[latest release page](https://github.com/enapt/SwarmLLM/releases/latest):
+
+| Your computer | Download | Runs models on |
+|---|---|---|
+| Windows with an NVIDIA RTX 30-series card or newer | `swarmllm-windows-x86_64-gpu.zip` | the graphics card and the processor |
+| Windows, any other (AMD or Intel graphics, no card, not sure) | `swarmllm-windows-x86_64-cpu.zip` | the processor |
+| Mac with an Apple chip (M1 or newer) | `swarmllm-macos-aarch64.tar.gz` | the processor, for now |
+| Linux with an NVIDIA RTX 30-series card or newer | `swarmllm-linux-x86_64-cuda.tar.gz` | the graphics card and the processor |
+| Linux, any other | `swarmllm-linux-x86_64.tar.gz` | the processor |
+
+Macs with an Intel chip aren't supported yet. A processor from before 2013
+needs the download with `-baseline` in its name, which runs on the processor
+only.
 
 **Windows**
 
-1. Download **`swarmllm-windows-x86_64-gpu.zip`** if your PC has an NVIDIA
-   graphics card — most gaming PCs do. AMD or Intel graphics, no graphics card,
-   or not sure? Take **`swarmllm-windows-x86_64-cpu.zip`**, which works on any PC.
-2. Right-click the downloaded file and choose **Extract All**.
-3. Open the extracted folder and double-click **`swarmllm.exe`**. Windows shows
-   a blue box saying *"Windows protected your PC"* — it does that for programs
-   from small projects that aren't registered with Microsoft yet. Click
-   **More info**, then **Run anyway**.
-4. A black window with scrolling text appears: that *is* SwarmLLM. **Leave it
+1. Right-click the downloaded file and choose **Extract All**.
+2. Open the extracted folder and double-click **`swarmllm.exe`**. If Windows
+   shows a blue box saying *"Windows protected your PC"*, click **More info**,
+   then **Run anyway** — it says that about programs from small projects that
+   aren't registered with Microsoft yet.
+3. A black window with scrolling text appears: that *is* SwarmLLM. **Leave it
    open** (minimising is fine) — closing it switches SwarmLLM off. The app
    opens in your web browser by itself.
 
-**Mac** (with an Apple chip — M1 or newer)
+**Mac**
 
-1. Download **`swarmllm-macos-aarch64.tar.gz`** and double-click it to unpack.
-2. Keep the folder in **Documents** or **Downloads** — not in Applications,
-   where it can't update itself.
-3. Double-click **`swarmllm`**. macOS blocks the first launch because the app
+1. Double-click the download to unpack it, and keep the folder in
+   **Documents** or **Downloads** — not in Applications, where it can't update
+   itself.
+2. Double-click **`swarmllm`**. macOS blocks the first launch because the app
    isn't registered with Apple yet: open **System Settings → Privacy &
    Security**, click **Open Anyway**, and double-click it again.
-4. A Terminal window opens — that's SwarmLLM running, so leave it open. The
+3. A Terminal window opens — that's SwarmLLM running, so leave it open. The
    app appears in your web browser.
 
-Macs with an Intel chip aren't supported yet.
-
-**Linux** — download `swarmllm-linux-x86_64-cuda.tar.gz` if you have an NVIDIA
-RTX 30-series card or newer, otherwise `swarmllm-linux-x86_64.tar.gz`, unpack
-it and run `./swarmllm run`.
+**Linux** — unpack the download and run `./swarmllm run`.
 
 **Then pick a model and start chatting.** The app shows which models fit your
-computer. Your first one is a one-time download of a few gigabytes — about the
-size of a big game update. If the browser doesn't open by itself, type
-`localhost:8800` into its address bar.
+computer. Your first one is a one-time download of a few gigabytes. If the
+browser doesn't open by itself, type `localhost:8800` into its address bar.
 
 ![The Models tab: search for a model, see its size and whether it runs on your computer, and download it](docs/images/models.png)
 
-**And then leave it running, and tell someone near you.** While SwarmLLM is
-open, your computer helps the swarm with what it can spare. Every computer
-nearby makes bigger models faster for everyone in your area —
+**And leave it running, and tell someone near you.** While SwarmLLM is open,
+your computer helps the swarm with what it can spare, and every computer nearby
+makes bigger models faster for everyone around it —
 [here's why](#help-build-the-swarm).
 
 <details>
-<summary>Very old computer, Docker or Linux packages?</summary>
+<summary>Docker or Linux packages?</summary>
 
-If SwarmLLM closes straight away with an *Illegal instruction* message, your
-processor is from before 2013 — download the file ending in `-baseline`
-instead. Docker images, `.deb`/`.rpm` packages (which run as a background
-service and don't update themselves) and step-by-step help for every system
-are in the
+The `.deb`/`.rpm` packages (which run as a background service and don't
+update themselves) are on the same release page, the Docker images are
+`ghcr.io/enapt/swarmllm:latest` (`:latest-cuda` for an NVIDIA card), and
+step-by-step help for every system is in the
 **[installation guide](https://enapt.github.io/SwarmLLM/getting-started/installation.html)**.
 
 </details>
 
-## What you can do with it
+## What people use it for
 
-- **Chat with AI on your own computer.** Download a model once and it runs on
-  your machine. Unlike a cloud chatbot, there's no company on the other end.
-- **Use models too big for your computer.** Computers in the swarm each hold a
-  part of a bigger model and work through your question together — fastest
-  when they're close to each other, like your own laptop and desktop, or
-  people in the same region. A 70-billion-parameter model has run this way
-  across three countries.
-- **Help others with what you can spare.** While SwarmLLM is open, your
-  computer keeps parts of popular models and helps answer other people's
-  questions — like seeding a torrent. There's no payment and no token; what
-  you get back is the swarm itself: every model it can run, you can use.
-- **Link your own devices.** Put your laptop, desktop and home server into one
-  private group and use them as one bigger machine.
-- **Plug it into the apps you already use.** Chat apps, coding assistants and
-  AI agents that work with ChatGPT or Claude can use SwarmLLM instead —
-  [see below](#for-developers).
+- **A private assistant.** Ask about health, money or work with a model that
+  runs entirely on your computer: the conversation doesn't leave it, and
+  there's no company on the other end. ([Is it private?](#is-it-private))
+- **A free coding assistant.** Point Claude Code, Continue, Cline or another
+  coding tool at SwarmLLM and use an open coding model, with no per-token bill.
+  ([How](#for-developers))
+- **Models too big for your computer.** Computers in the swarm each hold part
+  of a bigger model and answer together — 27- to 70-billion-parameter models
+  that no laptop can hold.
+- **One AI for a home, an office or a school.** Computers on the same network
+  find each other and team up. Link your own laptop, desktop and home server
+  into one group, and **Private Mode** keeps your questions among them and the
+  other computers on your network.
+- **A use for an older computer.** No graphics card needed: small models run on
+  the processor alone, faster than you can read, and a spare computer left on
+  adds its room to the swarm.
+- **Your own apps, agents and smart home.** Anything that works with OpenAI's
+  or Anthropic's API — chat apps, agent frameworks, Home Assistant, OpenClaw —
+  can use SwarmLLM instead.
+- **Helping others.** While SwarmLLM is open, your computer keeps parts of
+  popular models and helps answer other people's questions, like seeding a
+  torrent. There's no payment and no token; what you get back is the swarm
+  itself: every model it can run, you can use.
 
 The app comes in 21 languages, works on a phone, and shows which model gave
 each answer and how long it took.
@@ -147,97 +145,75 @@ idea, applied to running AI instead of sharing files.)
   parts it has room for, within limits you set — or every part, if the model
   fits and you want to run it yourself.
 - **Every part is checked.** Model parts are verified when they arrive and
-  every time they load, so a bad copy is caught and replaced.
+  each time SwarmLLM starts, so a bad copy is caught and replaced.
 
 ## How fast is it?
 
 <!-- speeds:begin, reviewed for 0.3.279-alpha. Refreshed at every release: .claude/rules/completeness.md § "README speeds" -->
-Speed here is **tokens a second**. A token is a word or part of one, and most
-people read about 5 a second. Every figure below comes from this project's
-test computer, a laptop with an 8 GB NVIDIA RTX 3070 graphics card and an
-8-core AMD Ryzen 7 5800H processor, alone or teamed up with others, and names
-the version it was measured on.
+Speed is in **tokens a second**: a token is a word or part of one, and most
+people read about 5 a second. The figures are from the project's test laptop,
+with an 8 GB NVIDIA RTX 3070 graphics card and an 8-core AMD Ryzen 7 5800H
+processor, on its own or teamed up with volunteers' computers.
 
 <!-- release-check:begin -->
-**On one computer**: the v0.3.276 release check, run on the downloaded release. Each
-model reads a 1,800-token document and writes 128 tokens about it.
+<!-- from the v0.3.276 release check, timed on the downloaded release -->
+**On one computer.** Each model reads a 1,800-token document and writes 128
+tokens about it.
 
 | Model | Runs on | Writing (tokens a second) | Reading (tokens a second) |
 |---|---|---|---|
 | Qwen2.5 Coder 7B | the graphics card | 55 | 1,740–1,760 |
-| Qwen2.5 14B | card and processor together (too big for the card) | 15.4–17.5 | 600–610 |
-| Qwen3 30B-A3B (2-bit) | card and processor together (a mixture of experts, too big for the card) | 21.5–22.5 | 230 |
+| Qwen2.5 14B | card and processor (too big for the card) | 15.4–17.5 | 600–610 |
+| Qwen3 30B-A3B (2-bit) | card and processor (a mixture of experts, too big for the card) | 21.5–22.5 | 230 |
 | Llama 3.2 3B | the processor only | 15.3–15.4 | 80 |
 <!-- release-check:end -->
 <!-- release-check:skipped v0.3.277 — its split arms swung over 30% in both builds, single replies 10.8-18.5 (the machine, #1050; release_gate_history § .277) -->
 <!-- release-check:skipped v0.3.278 — its processor arm shared the machine with a scoring run; the re-time on the published release put the split's first run at 9.0 against 15.2-16.2 in four others, unexplained, and the rest matched this table (release_gate_history § .279) -->
 
-**Across computers**: the same laptop in Thailand, teamed up with volunteers'
-computers: one with an RTX 3060 card in Australia (about 130 ms there and back
-in November, 400–460 ms in October), a laptop with an RTX 4050 card in Europe,
-about 220–240 ms, a second computer in Thailand and a Mac mini in Italy. For
-the 14B a small model guesses the next few words and the big one checks them
-all at once; for the 35B-A3B the model's own guess head, a small block its file
-carries, does the guessing on this laptop.
+**Across computers.** The same laptop, in Thailand, asking volunteers'
+computers: one with a 12 GB RTX 3060 card in Australia, about 130 ms there and
+back, and one with a 32 GB RTX 5090 in Denmark, about 210 ms. When a model is
+split, a small helper guesses the next few words and the big model checks them
+all at once, so each trip across the long link brings back several words.
 
-| Model, and how it is shared | Speed | Version |
+| Model, and how it is shared | Writing code | Writing prose |
 |---|---|---|
-| Qwen2.5 14B, about half on this laptop and half in Australia | 40–43 writing code, 17.8–20.5 writing prose | v0.3.275 |
-| Qwen2.5 14B, the same, set to "Start and finish on this computer" | 27–31 writing code, 12.0–12.8 writing prose | v0.3.275 |
-| Qwen2.5 14B, split three ways: this laptop, the laptop in Europe and the computer in Australia | 12–14 writing code, 4.4–4.9 writing prose | v0.3.261 |
-| Qwen3.8 27B, handed whole to the computer in Australia (the swarm's own choice) | 2.6–3.6 | v0.3.273 |
-| Qwen3.6 35B-A3B (a mixture of experts), its first and last layers on this laptop's card, the middle 38 on the computer in Australia | 8.2–18.4 writing code, 7.6–9.5 writing prose | v0.3.279 |
-| Llama 3.3 70B, this laptop and the computer in Australia, new questions | 1.8–2.6 | v0.3.264–v0.3.265 |
-| Llama 3.3 70B, three or four computers in Thailand, Australia and Italy, new questions | 1.4–2.0 | v0.3.273 |
+| Qwen3.8 27B, run whole by the computer in Denmark | 138–145 | 120–124 |
+| Qwen2.5 14B, half on this laptop and half in Australia | 40–43 | 17.8–20.5 |
+| The same, set to "Start and finish on this computer" | 27–31 | 12.0–12.8 |
+| Qwen3.6 35B-A3B, its first and last layers on this laptop, the middle 38 in Australia | 8.2–18.4 | 7.6–9.5 |
+| Llama 3.3 70B, 76 of its 80 layers in Australia, the first two on this laptop and the last two on a small home server beside it | 4.0 | 1.7–1.8 |
+<!-- measured on: the two 14B rows and the laptop-alone 14B figures below v0.3.275; the 35B-A3B, 27B and 70B rows v0.3.279 (27B/70B: the live node's own route, ask_tier.py, 160 tokens, code and prose twice each after a warm-up, 11-09) -->
 
-Without its guess head the same 35B-A3B split wrote 5.0–5.8 tokens a second of
-code and 4.5–4.8 of prose; the head also guesses the next round while the
-computer in Australia checks this one.
-
-On code, two computers on different continents were nearly three times as fast
-as this laptop running the same 14B alone (14.1–14.5 tokens a second, measured
-the same day): code is easy to guess, so the guesses keep the long connection
-busy. Prose is harder to guess, and still came out 1.6–1.9 times as fast as the
-laptop alone (11.0–11.3), because each check now carries several alternative
-guesses at once. One prose run of the first row is left out of its range: the
-computer in Australia was slow at its own end, 0.6–2.5 seconds a step, and that
-run wrote 1.7 tokens a second.
-A third computer in the middle made it slower: measured side by side in
-October, two computers wrote 16–21 tokens a second of code and 6.1–7.3 of
-prose, three wrote 12–14 and 4.4–4.9, because every check then crosses three
-long links and fewer guesses are in flight at once. The 27B and the 70B do not
-fit on this laptop at all, so sharing is the only way it runs them. For the 27B
-the swarm hands the whole model to the computer in Australia: split across
-three or four computers it wrote 0.7–0.9 tokens a second, because every token
-then also crosses the long link to Italy. Each range
-spans several runs; the across-computer rows were measured on builds of the
-named version ([how](docs/plans/faster_than_local.md)).
+On its own this laptop writes the 14B's code at 14.1–14.5 tokens a second and
+its prose at 11.0–11.3, so the two continents together are about three times
+as fast on code and 1.6–1.9 times on prose. Code is easier to guess, and the
+guesses keep the long link busy ([how](docs/plans/faster_than_local.md)).
 <!-- speeds:end -->
 
 ## Help build the swarm
 
-How big a model the swarm can run is set by who is online. The 70B took the
-spare room of four computers — and a model that size only answers quickly when
-those computers are **near each other**, because your question passes through
-every one of them for every word of the reply. A team spread across continents
-works — the 70B showed it — but slowly.
+How big a model the swarm can run, and how fast, is set by who is online. A
+model too big for one computer answers fastest when the computers holding it
+are **near each other**, because every word of the reply passes through all of
+them. Computers on different continents work together too, but nearby is
+faster.
 
-So the swarm needs two things: **more computers, and enough of them close
-together.** No amount of code can do that part — only people can.
+So the swarm needs **more computers, and enough of them close together.** No
+amount of code can do that part — only people can.
 
 ![The network map, lighting up the countries with SwarmLLM computers online](docs/images/network-map.png)
 
 - **Install it, leave it running, and bring someone near you** — a friend
-  across town, a housemate, your office. Your friend doesn't need to set
-  anything up: they install it too, and the computers find each other.
+  across town, a housemate, your office. They don't need to set anything up:
+  they install it too, and the computers find each other.
 - **[Find people near you on Discord](https://discord.gg/nq9be3u828)** and
   team up.
 - **Star this page** so others can find it.
 
-**Already automatic:** computers near each other share out a big model's parts
-and run it together, and where there aren't enough of them nearby, the swarm
-teams up computers further away — that is how the 70B ran. **Next up:** making
-those teams fast, with the goal of answering faster than one computer alone.
+Computers near each other already share out a big model's parts and run it
+together on their own, and where there aren't enough of them nearby, the swarm
+teams up computers further away.
 
 ## Is it private?
 
@@ -269,6 +245,33 @@ The model list in the app shows which models are **on this computer**. The
 details are in the
 [security guide](https://enapt.github.io/SwarmLLM/architecture/security.html).
 
+## Get help
+
+**The common first-run problems:**
+
+- **The browser didn't open.** With SwarmLLM's window open, go to
+  `localhost:8800` in your browser.
+- **Windows or macOS won't start it.** Both warn about apps that aren't
+  registered with Microsoft or Apple yet; [Get started](#get-started) shows the
+  one-time click past it.
+- **It closes straight away with *Illegal instruction*.** Your processor is
+  from before 2013: take the download with `-baseline` in its name.
+- **It doesn't use my graphics card.** It needs an NVIDIA RTX 30-series card or
+  newer and, on Windows, the `-gpu` download. Any other card leaves the work to
+  the processor.
+- **No other computers show up, a download is stuck, or a model is slow.** The
+  [troubleshooting guide](https://enapt.github.io/SwarmLLM/troubleshooting.html)
+  goes through each.
+
+**Still stuck?** Ask on **[Discord](https://discord.gg/nq9be3u828)** or open an
+**[issue](https://github.com/enapt/SwarmLLM/issues)**, and paste the report
+from **Settings → Testing & Diagnostics → Copy diagnostics** (or run
+`swarmllm diagnostics`). It is safe to post in public: no keys, no invite
+codes, and network addresses are replaced with placeholders.
+[What else helps](docs/TESTING.md). Ideas and questions go in
+**[Discussions](https://github.com/enapt/SwarmLLM/discussions)**; please report
+security problems privately ([SECURITY.md](SECURITY.md)).
+
 ## Common questions
 
 **What's the catch?** There's nothing to buy — no account, no ads, no
@@ -278,13 +281,12 @@ source, and the computing power comes from people who leave it running.
 
 **Can someone use the swarm without helping?** Not for long. Other computers
 run your chats only while yours shares at least two parts of a model — leave
-auto-manage on and that happens by itself — and only while it stays up to date:
-a computer two or more releases behind is disconnected until it updates. A
-computer that shares nothing can still see the swarm, and still run the models
-it holds itself. The peer list on the Dashboard shows, for every computer, how
-many chats it ran for yours and how many yours ran for it, so anyone can see a
-computer that only takes. Those counts are what your own computer saw, and
-nothing is charged or paid by them.
+auto-manage on and that happens by itself — and only while it stays up to date.
+A computer that shares nothing can still see the swarm, and still run the
+models it holds itself. The list of computers on the Dashboard shows, for each
+one, how many chats it ran for yours and how many yours ran for it, so anyone
+can see a computer that only takes. Those counts are what your own computer
+saw, and nothing is charged or paid by them.
 
 **How is this different from Ollama or LM Studio?** They run AI on one
 computer, and they're great at it. SwarmLLM does that too — and also lets
@@ -294,29 +296,29 @@ others](https://enapt.github.io/SwarmLLM/comparison.html).)
 
 **What do I need?** A Windows, Linux or Apple-chip Mac computer, ideally with
 8 GB of memory or more, and a few gigabytes of free disk space per model. A
-graphics card makes it much faster but isn't required: it needs an NVIDIA RTX
-30-series or newer, on Windows and Linux alike, and any other card leaves the
-work to the processor. On a Mac it runs on
-the main processor for now — slower than a PC with a gaming card, but a
-MacBook Air can run the smaller models.
+graphics card makes it much faster but isn't required; the table in
+[Get started](#get-started) shows which ones it uses. A Mac runs models on the
+processor for now — slower than a PC with a gaming card, but a MacBook Air runs
+the smaller models.
 
 **Will it slow my computer down?** It can, while it's answering someone.
 SwarmLLM keeps a slice of your graphics card free and fits around whatever
 memory other programs are already using, but it doesn't know when you're
 gaming or busy. If something feels slower, close the SwarmLLM window while
 you play, pick a lighter contribution level in Settings, or set a
-**Resource Schedule** so it holds back at the times you choose. It only runs
-when you open it; it doesn't start with your computer.
+**Resource Schedule** so it holds back at the times you choose. The download
+from the release page runs only while its window is open; the `.deb`/`.rpm`
+packages install it as a background service, which starts with the computer
+once you enable it.
 
-**How much internet does it use?** A computer left running stays in touch with
-the swarm all the time, and uses more while it shares model parts or answers
-requests. Measured on 24 September 2026 on a computer running the current
-release, idle and connected to six others: about **110 MB an hour received and
-130 MB an hour sent** — roughly 5 to 6 GB a day if it runs all day. Most of that
-is the swarm telling each other which models exist. That is still too much for
-a capped or pay-per-gigabyte connection, and we are still bringing it down. You
-can cap how fast it shares model parts in Settings, and it uses nothing while
-it is closed.
+**How much internet does it use?** Left running with nothing to do, connected
+to six other computers, **under 10 MB an hour each way** — what keeps it in
+touch with the swarm. It uses more while it shares model parts or works for
+others, and nothing while it is closed. In Settings you can cap how fast it
+shares parts, and on a connection your computer marks as metered (like a
+phone's hotspot) it pauses its own downloads and its work for others — or you
+can tell it to pause them always.
+<!-- idle traffic measured on v0.3.279: total less parts, inference and relay, 10-min samples 15-85 min after a start, six computers connected: in 7.4-11.4, out 6.4-8.4 MB/h, 9.1 / 7.3 overall -->
 
 **How much disk space?** SwarmLLM keeps what it stores within a disk limit —
 50 GB by default — which you can change in Settings. Whatever the limit, it
@@ -334,8 +336,8 @@ unpacked and the folder where it keeps models: `%APPDATA%\swarmllm` on Windows,
 `~/Library/Application Support/swarmllm` on a Mac, `~/.local/share/swarmllm`
 on Linux.
 
-**Which models can I run?** Popular open models — Llama, Qwen, Mistral, Gemma,
-Phi, GLM and more, from small ones that run on a laptop up to a
+**Which models can I run?** Popular open models — Llama, Qwen, Gemma, gpt-oss,
+Mistral, Phi, GLM and more, from small ones that run on a laptop up to a
 70-billion-parameter Llama shared across the swarm. The app shows which ones
 your computer, or the swarm, can actually run.
 
@@ -344,7 +346,7 @@ your computer, or the swarm, can actually run.
 *(You can skip this part if you just want to chat.)*
 
 **A free OpenAI- and Anthropic-compatible endpoint on your own machine.** Point
-any agent, coding assistant or chat UI at `http://localhost:8800` — no
+any agent, coding assistant or chat app at `http://localhost:8800` — no
 per-token bill, and models bigger than your machine behind the same URL. Copy
 your key from **Settings → Access Token** in the app:
 
@@ -365,6 +367,12 @@ ANTHROPIC_BASE_URL=http://localhost:8800 ANTHROPIC_AUTH_TOKEN="$SWARMLLM_KEY" \
   claude --model qwen2.5-coder-7b-instruct-q4-k-m
 ```
 
+**Works with the tools you already use.** Any app that takes an
+OpenAI-compatible address — for example Open WebUI, LibreChat, Continue, Cline
+or Home Assistant — can use SwarmLLM: give it `http://localhost:8800/v1` and
+the key. Anthropic clients like Claude Code take `http://localhost:8800`, as
+above.
+
 Also included: tool calling with local models, streaming, an MCP server, and
 optional routing to 12 cloud providers with your own keys. Agents send long
 prompts, so raise the context size first (`max_seq_len_override = 32768`
@@ -373,7 +381,7 @@ your computer runs; a part running on another computer follows that computer's
 own setting, and the swarm routes around one that is set too short.
 
 - **[API reference](https://enapt.github.io/SwarmLLM/api/openai.html)** — OpenAI, Anthropic, Responses and MCP
-- **[OpenClaw setup](integrations/openclaw/)** — a plugin that adds SwarmLLM to OpenClaw's setup wizard
+- **[Claude Code](https://enapt.github.io/SwarmLLM/api/anthropic.html)**, **[OpenClaw](integrations/openclaw/)** (a plugin that adds SwarmLLM to OpenClaw's setup wizard) and **[Continue, Cursor and other MCP clients](https://enapt.github.io/SwarmLLM/api/mcp.html)** — setup notes
 - **[Configuration](https://enapt.github.io/SwarmLLM/configuration/reference.html)** and **[command line](https://enapt.github.io/SwarmLLM/configuration/cli-env.html)**
 - **[Architecture](docs/ARCHITECTURE.md)** ([every document, one page](docs/README.md)), **[performance](https://enapt.github.io/SwarmLLM/operations/performance.html)** and **[how it compares](https://enapt.github.io/SwarmLLM/comparison.html)**
 
@@ -386,15 +394,8 @@ cargo build --release
 ```
 
 GPU builds — the build command for each release variant — are in [CONTRIBUTING.md](CONTRIBUTING.md).
-
-## Get involved
-
-- **[Discord](https://discord.gg/nq9be3u828)** — find people to team up with, ask questions, get help
-- **[Issues](https://github.com/enapt/SwarmLLM/issues)** — bugs and feature requests (`swarmllm diagnostics` prints a report that's safe to paste; [what else helps](docs/TESTING.md))
-- **[Discussions](https://github.com/enapt/SwarmLLM/discussions)** — ideas and questions
-- **[Changelog](CHANGELOG.md)** — what changed recently
-- **[Security](SECURITY.md)** — please report vulnerabilities privately
-- **[Contributing](CONTRIBUTING.md)** — build, test and send a pull request
+**[Contributing](CONTRIBUTING.md)** covers building, testing and sending a pull
+request; the **[changelog](CHANGELOG.md)** says what changed recently.
 
 ## Built in the open
 

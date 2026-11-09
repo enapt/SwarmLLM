@@ -27,7 +27,11 @@ payload budget, the i18n totals, the MSRV.
 ## README speeds are refreshed in every release's bump commit (user, 2026-10-29)
 
 The README's "How fast is it?" section shows what users can DOWNLOAD, so it
-changes at release, never per change. In the bump commit, beside the counts:
+changes at release, never per change. **The reader sees current figures only,
+and no version or month they were measured on** (user, 2026-11-09: "i dont want
+'it ran this fast at version x' also, it should be uptodate numbers only, less
+fluff"): a figure's version lives in an HTML comment, where the guard reads it.
+In the bump commit, beside the counts:
 
 1. **One computer**: `python3 -I examples/readme_speeds.py
    ~/swarmllm-gate/v<previous release>/out/speed.jsonl` rewrites that table from
@@ -43,13 +47,17 @@ changes at release, never per change. In the bump commit, beside the counts:
    skip, time the step again on the published release:
    `~/swarmllm-gate-common/rebench.sh v<x.y.z>-alpha` (the candidate's arms; it
    refuses with the card busy or the processor's boost off, gotcha #1037) writes
-   `v<x.y.z>-alpha-rebench/out/`, which `readme_speeds.py` words as a re-run
-   (first for v0.3.273, 2026-11-05).
-2. **Across computers**: each row names the version it was measured on. Replace
-   a row when this release's CHANGELOG entry or `faster_than_local.md` carries a
-   newer measurement of that setup; add a row for a setup newly measured. A
-   figure only main has waits for the release that ships it. A range spans every
-   run of the setup, never one run's best (gotcha #990), and names the machines.
+   `v<x.y.z>-alpha-rebench/out/`, which `readme_speeds.py` notes as a re-run in
+   the block's comment (first for v0.3.273, 2026-11-05).
+2. **Across computers**: the versions go in one comment after the table
+   (`<!-- measured on: <row> v0.3.x; … -->`). A figure from a release more than
+   7 days older than the newest (`README_SPEED_MAX_AGE_DAYS`, by the CHANGELOG
+   headings' dates) is measured again on the current release, or its row goes.
+   Replace a row when this release's CHANGELOG entry or `faster_than_local.md`
+   carries a newer measurement of that setup; add a row for a setup newly
+   measured. A figure only main has waits for the release that ships it. A range
+   spans every run of the setup, never one run's best (gotcha #990), and names
+   the machines.
 3. Set `reviewed for <new version>` in the section's opening marker.
 
 Guard: `the_readme_speeds_are_reviewed_at_every_release` — the bump changes
