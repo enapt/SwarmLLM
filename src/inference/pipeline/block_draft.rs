@@ -136,6 +136,8 @@ impl PipelineExecutor {
         let Some(layers) = d.rows_now_read() else {
             return;
         };
+        // A round the block took judges it before the reply has its tokens.
+        d.set_aside_at.get_or_insert(reply_len);
         tracing::info!(
             request_id = %self.request.id,
             reply_tokens = reply_len,
@@ -803,11 +805,21 @@ impl SplitBlockDrafter {
             Some((_, b)) => head.is_some_and(|(g, h)| g > 0 && h > b),
             None => false,
         };
+        self.note_judgement(losing, Some(reply_len));
+    }
+
+    /// One judgement of the block: `losing` when it would not have written
+    /// faster than a plain step or the head. Only a judgement it WON starts
+    /// the count over — being chosen is not one: a story chose a block that
+    /// kept ~1 guess in 5 15-19 times, each choice restarted the count, and it
+    /// was set aside only at token 64 (`~/rig428/fieldc1`, 2026-11-09). A
+    /// round it took is judged by what it wrote ([`Self::record_round`]).
+    fn note_judgement(&mut self, losing: bool, reply_len: Option<usize>) {
         self.losing_run = if losing { self.losing_run + 1 } else { 0 };
-        if self.losing_run >= SET_ASIDE_AFTER_JUDGED {
+        if self.losing_run >= SET_ASIDE_AFTER_JUDGED && self.block.is_some() {
             self.block = None;
             self.set_aside = true;
-            self.set_aside_at = Some(reply_len);
+            self.set_aside_at = reply_len;
         }
     }
 
@@ -879,9 +891,6 @@ impl SplitBlockDrafter {
         if let Some(g) = self.guesser_mut(chosen) {
             g.sat_out = 0;
         }
-        if chosen == By::Block && gamma_b > 0 {
-            self.losing_run = 0;
-        }
         // A probe always takes its round, so the one sitting out guessed by
         // its price. One judged by the reply never sits a round out.
         if other_gamma > 0 {
@@ -930,6 +939,24 @@ impl SplitBlockDrafter {
         let step = self.step_ms.median();
         if let Some(g) = self.guesser_mut(by) {
             g.record_round(kept, guessed, wrote, check_ms, step);
+        }
+        // A judged block's own round is a judgement by what it WROTE — the
+        // tokens a ms over its draft and check, against the best the others
+        // are priced at (the head's price counts a plain step) — as one
+        // computer sets a guesser aside (`dsd_controller::Delivered`).
+        let judged = self
+            .block
+            .as_ref()
+            .filter(|g| by == By::Block && g.judged)
+            .map(|g| g.last_draft_ms);
+        if let (Some(draft_ms), Some(step)) = (judged, step) {
+            let wrote_per_ms = wrote as f64 / (check_ms + draft_ms).max(0.1);
+            let head = self
+                .head
+                .as_ref()
+                .and_then(|h| h.priced(h.most, step, &self.check))
+                .map_or(0.0, |(_, rate)| rate);
+            self.note_judgement(wrote_per_ms < head.max(1.0 / step), None);
         }
     }
 
@@ -1262,6 +1289,63 @@ mod tests {
         let (by, gamma) = b.gamma(200);
         assert_eq!(by, By::Block, "the block writes faster");
         assert!(gamma >= 8, "deep enough to keep its run: {gamma}");
+        assert!(b.block.is_some());
+    }
+
+    /// The story of 2026-11-09 (`~/rig428/fieldc1`): a block the reply
+    /// followed early is priced over the head and chosen, then keeps 3 of 15
+    /// in its own rounds. Each is judged by what it wrote and being chosen
+    /// starts nothing over, so it is set aside after `SET_ASIDE_AFTER_JUDGED`
+    /// losing judgements — its own rounds and the head's shadows together.
+    #[test]
+    fn a_block_chosen_often_while_keeping_little_is_set_aside() {
+        let mut b = judged_pair();
+        for i in 0..6 {
+            judge(&mut b, 100 + 20 * i, 12);
+        }
+        let (mut judged, mut chosen, mut at) = (0, 0, 300);
+        while b.block.is_some() && judged < 3 * SET_ASIDE_AFTER_JUDGED {
+            match b.gamma(200) {
+                (By::Block, gamma) if gamma > 0 => {
+                    chosen += 1;
+                    block(&mut b).record_draft(gamma as usize, 20.0);
+                    b.record_check(gamma + 1, 600.0);
+                    b.record_round(By::Block, 3, gamma, 4, 600.0);
+                }
+                (by, gamma) => {
+                    if by == By::Head && gamma > 0 {
+                        b.record_round(By::Head, 3, gamma, gamma as usize, 230.0);
+                    }
+                    judge(&mut b, at, 3);
+                }
+            }
+            judged += 1;
+            at += 20;
+        }
+        assert!(chosen >= 2, "chosen while it lost: {chosen}");
+        assert!(b.block.is_none(), "set aside");
+        assert_eq!(judged, SET_ASIDE_AFTER_JUDGED);
+        assert_eq!(b.rows_now_read(), Some(vec![40]), "the head's layer");
+    }
+
+    /// A block that wins its own rounds — more tokens a ms over its draft and
+    /// check than the head is priced at — starts the count over, so losing
+    /// shadows on the head's rounds in between never add up to setting it
+    /// aside.
+    #[test]
+    fn a_block_winning_its_own_rounds_survives_the_heads_in_between() {
+        let mut b = judged_pair();
+        let mut at = 100;
+        for _ in 0..3 {
+            for _ in 1..SET_ASIDE_AFTER_JUDGED {
+                judge(&mut b, at, 0);
+                at += 20;
+            }
+            block(&mut b).record_draft(15, 20.0);
+            b.record_check(16, 600.0);
+            b.record_round(By::Block, 14, 15, 15, 600.0);
+            assert_eq!(b.losing_run, 0, "a round it won");
+        }
         assert!(b.block.is_some());
     }
 

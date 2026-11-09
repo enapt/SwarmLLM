@@ -2840,10 +2840,16 @@ its rows after 8 losing judgements; the head tried again after 16 rounds sat out
 (`~/rig428/fieldb1`: BST class 6.5 against 9.7-10.4 and 7.9-8.4 tok/s); judged, both together lead
 on code (palindrome 14.3-14.9 against the better single's 12.5, BST class level) and the old rule on
 every prompt (`~/rig428/fieldc1`; `docs/invariants/scheduling.md` § "Beside the guess head, the block
-is judged by the reply"). Residual: a story sets the block aside only at token ~64 (6.8-7.5 against
-the head's 7.5), as a round the block is chosen restarts the count; and an answer carrying the
-block's rows for 16 positions (~280 KB) waits twice its width's time in some replies, with or
-without the head. A segment wholly on a card keeps the block's experts on the card
+is judged by the reply"). A round the block is CHOSEN no longer restarts its count, and a round
+it takes is judged by what it wrote — tokens a ms over its draft and check against the head's price
+or a plain step (`SplitBlockDrafter::note_judgement`): code level or ahead (`~/rig428/fieldc2`:
+palindrome 14.2-16.3 against the head alone's 14.3-15.0, BST class 13.1-14.7 against 12.3-13.2).
+Residual: a story still sets the block aside at token 50-56 (once 93; ~64 before) and runs 7.4-7.9
+against the head alone's 8.5-9.0 in 3 replies of 4 (9.1 against 9.0 in the fourth) — guessing ~2 a
+round it wins about one judgement in five, and 8 losses IN A ROW take ~25 of them; a judgement by
+how much it lost (a running ratio against the head's price, HedgeSpec's weights) would set it aside
+in ~8. And an answer carrying the block's rows for 16 positions (~280 KB) waits twice its width's
+time in some replies, with or without the head. A segment wholly on a card keeps the block's experts on the card
 (`LayerPlacement::for_the_next_token_block`) — it refused the head until then, as the experts would
 have sat in memory nothing charged (the first field run found it: `loaded=false`). No wire change;
 A/B `SWARMLLM_SPLIT_GUESS_HEAD=0`. Prior art: vLLM and SGLang run MTP/EAGLE at the last pipeline

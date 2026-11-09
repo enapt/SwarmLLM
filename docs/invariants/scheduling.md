@@ -6467,7 +6467,10 @@ E(γ) = 1 + Σ S(d), each depth's stop rate shrunk toward the pooled α by
 run kept whole or not at all (15/15 then 0/15) at ~4.4 tokens for 4 guesses and
 ~10 for 15 where the rounds wrote 3 and 8.5. After `SET_ASIDE_AFTER_JUDGED` (8)
 judgements in a row say the block could not beat a plain step or the head's
-price, it is set aside for the reply and the rows ask narrows to the head's layer
+price — a shadow's by its price, a round the block TOOK by what it wrote (tokens a
+ms over its draft and check, `note_judgement`); being chosen restarts nothing, as
+it did until a story's block, chosen 15-19 times while keeping ~1 in 5, was set
+aside only at token ~64 (`~/rig428/fieldc1` → `fieldc2`: 50-56, once 93) — it is set aside for the reply and the rows ask narrows to the head's layer
 (`block_drafter_set_aside`; a segment running none of the asked layers sends
 none). A/B `SWARMLLM_SPLIT_GUESS_PRICE=geometric` (the rule before). Measured
 (`~/rig428/fieldc1`, one build, arms on/old/head/off/off/head/old/on, decode tok/s
