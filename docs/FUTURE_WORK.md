@@ -2833,8 +2833,17 @@ output norm (`MtpHead::trunk_norm`), loaded where this node's parts hold the blo
 drafter (`model_worker::SplitGuessers`; `SplitHead` pairs token p with the state at p−1 over
 committed positions only, so a rejected guess needs no rewind), and the coordinator's
 `pipeline::block_draft::SplitBlockDrafter` chooses between the two each round (`choose`: the block
-priced per round, the head per guess, both over the checks' route; one that sat out 16 rounds is
-tried again). A segment wholly on a card keeps the block's experts on the card
+priced per round, the head per guess, both over the checks' route, each by a per-depth survival curve;
+the block JUDGED by the reply on rounds it does not take — drafted, not checked — and set aside with
+its rows after 8 losing judgements; the head tried again after 16 rounds sat out). Judged since
+2026-11-09: learned only from its checked rounds, both guessers together ran below either alone
+(`~/rig428/fieldb1`: BST class 6.5 against 9.7-10.4 and 7.9-8.4 tok/s); judged, both together lead
+on code (palindrome 14.3-14.9 against the better single's 12.5, BST class level) and the old rule on
+every prompt (`~/rig428/fieldc1`; `docs/invariants/scheduling.md` § "Beside the guess head, the block
+is judged by the reply"). Residual: a story sets the block aside only at token ~64 (6.8-7.5 against
+the head's 7.5), as a round the block is chosen restarts the count; and an answer carrying the
+block's rows for 16 positions (~280 KB) waits twice its width's time in some replies, with or
+without the head. A segment wholly on a card keeps the block's experts on the card
 (`LayerPlacement::for_the_next_token_block`) — it refused the head until then, as the experts would
 have sat in memory nothing charged (the first field run found it: `loaded=false`). No wire change;
 A/B `SWARMLLM_SPLIT_GUESS_HEAD=0`. Prior art: vLLM and SGLang run MTP/EAGLE at the last pipeline

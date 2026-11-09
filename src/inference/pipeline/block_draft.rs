@@ -41,6 +41,13 @@ impl BlockRowsAsk {
         }
     }
 
+    /// Ask only `layers` from now on — the head's, once the block is set
+    /// aside ([`SplitBlockDrafter::rows_now_read`]). Rows already kept stay:
+    /// each guesser in the worker reads only its own layers of them.
+    pub(super) fn narrow(&mut self, layers: Vec<u32>) {
+        self.layers = layers;
+    }
+
     /// The ask a forward carries: at most `most_rows` of its last rows.
     pub(super) fn wanted(&self, most_rows: u32) -> BlockRowsWanted {
         BlockRowsWanted {
@@ -114,6 +121,37 @@ impl PipelineExecutor {
         .then(|| ask.wanted(most_rows))
     }
 
+    /// After a round's tokens are committed: where the reply's block drafter
+    /// was just set aside ([`SplitBlockDrafter::reply_committed`]), its
+    /// forwards ask only the head's rows from now on — or none, and the
+    /// reply goes on without asking a guesser.
+    pub(super) fn block_drafter_set_aside(
+        &mut self,
+        drafter: &mut Option<SplitBlockDrafter>,
+        reply_len: usize,
+    ) {
+        let Some(d) = drafter.as_mut() else {
+            return;
+        };
+        let Some(layers) = d.rows_now_read() else {
+            return;
+        };
+        tracing::info!(
+            request_id = %self.request.id,
+            reply_tokens = reply_len,
+            judged = d.shadows,
+            judged_kept = d.shadow_kept,
+            head = d.head.is_some(),
+            "block drafter set aside for this reply: the guess head or a plain step writes faster"
+        );
+        if d.is_empty() || layers.is_empty() {
+            *drafter = None;
+            self.block_rows = None;
+        } else if let Some(ask) = self.block_rows.as_mut() {
+            ask.narrow(layers);
+        }
+    }
+
     /// Keep the rows `segment`'s answer carries, for the next draft — held to
     /// `most_rows`, what its forward asked ([`BlockRowsAsk::note`]).
     pub(super) fn note_block_rows(
@@ -173,8 +211,24 @@ pub(crate) const HEAD_MOST_GUESSES: u32 = 4;
 const HEAD_FIRST_GUESSES: u32 = 3;
 /// Rounds a guesser that would have guessed sits out while the other is
 /// chosen before it is given one: its price is its own record, which moves
-/// only when it runs.
+/// only when it runs. Not the block's while it is judged by the reply
+/// ([`judged_by_the_reply`]): its record moves on every round.
 const MOST_ROUNDS_SAT_OUT: u32 = 16;
+/// Judged rounds in a row in which the block would not have written faster
+/// than the round the reply took — the head's, or a plain step — after which
+/// it is set aside for the reply, and its rows no longer cross the split.
+const SET_ASIDE_AFTER_JUDGED: u32 = 8;
+
+/// The block drafter is judged by the reply on every round it does not take
+/// (`dsd_controller::BlockShadow`), each guesser is priced by its own depth
+/// curve (`DepthAcceptance`), and a block that keeps losing is set aside for
+/// the reply — on unless `SWARMLLM_SPLIT_GUESS_PRICE=geometric`, which keeps
+/// the rule before 2026-11-09 (one α, the block measured only when checked),
+/// for A/B inside one binary.
+pub(super) fn judged_by_the_reply() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("SWARMLLM_SPLIT_GUESS_PRICE").as_deref() != Ok("geometric"))
+}
 
 /// Which guesser beside the split's first segment a round asks.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -200,7 +254,13 @@ pub(super) struct Guesser {
     /// The most guesses a draft makes: a block less the next token, or the
     /// head's [`HEAD_MOST_GUESSES`].
     most: u32,
-    acceptance: crate::inference::dsd_controller::AcceptanceEstimate,
+    acceptance: crate::inference::dsd_controller::DepthAcceptance,
+    /// Its record moves on every round, whether it takes the round or not
+    /// (the block, [`judged_by_the_reply`]): it never probes, never fades
+    /// on a decline and never sits rounds out.
+    judged: bool,
+    /// Priced by its own depth curve, else by one α (the rule before).
+    by_depth: bool,
     /// A draft's time from here, rows taken in included: a block's whole
     /// draft, one forward whatever it guesses; the head's per guess.
     draft_ms: crate::inference::dsd_controller::RecentMedian,
@@ -222,11 +282,14 @@ pub(super) struct Guesser {
 }
 
 impl Guesser {
-    fn new(by: By, most: u32) -> Self {
+    /// `rule`: [`judged_by_the_reply`], read once for the reply.
+    fn new(by: By, most: u32, rule: bool) -> Self {
         Self {
             by,
             most,
-            acceptance: crate::inference::dsd_controller::AcceptanceEstimate::recent(),
+            acceptance: crate::inference::dsd_controller::DepthAcceptance::recent(),
+            judged: by == By::Block && rule,
+            by_depth: rule,
             draft_ms: Default::default(),
             last_draft_ms: 0.0,
             declined_run: 0,
@@ -257,30 +320,21 @@ impl Guesser {
         step: Option<f64>,
         check: &crate::inference::dsd_controller::CheckCost,
     ) -> (u32, Option<f64>) {
-        use crate::inference::dsd_controller::{
-            rated_beside_a_step_per_guess, rated_beside_a_step_per_round, Step,
-        };
         let most = self.most.min(remaining);
         self.probing = false;
-        let Some(draft_ms) = self.draft_ms.median() else {
+        if self.draft_ms.median().is_none() {
             return match self.by {
                 By::Block => (most, None),
                 By::Head => (HEAD_FIRST_GUESSES.min(most), None),
             };
-        };
+        }
         let Some(step) = step else {
             // One plain step first. A round another source fills (the far
             // run's guesses) times no step, so the wait counts as a decline
             // and is probed past the same way.
             return (self.decline_or_probe(most), None);
         };
-        let alpha = self.acceptance.alpha();
-        let step = Some(Step::OverTheChecksRoute(step));
-        let rated = match self.by {
-            By::Block => rated_beside_a_step_per_round(alpha, step, check, most, draft_ms),
-            By::Head => rated_beside_a_step_per_guess(alpha, step, check, most, draft_ms),
-        };
-        let (gamma, rate) = match rated {
+        let (gamma, rate) = match self.priced(most, step, check) {
             Some((g, rate)) => (g, Some(rate)),
             None => (most, None),
         };
@@ -291,13 +345,49 @@ impl Guesser {
         let gamma = self.decline_or_probe(most);
         if gamma == 0 {
             self.declined += 1;
-            self.acceptance.fade();
+            if !self.judged {
+                self.acceptance.fade();
+            }
         }
         (gamma, None)
     }
 
-    /// Zero, or `most` as a probe once `probe_after` rounds have declined.
+    /// The count of at most `most` that writes fastest over the checks'
+    /// route, and that rate (tokens a millisecond) — zero guesses, a plain
+    /// step, among them. `None` before a draft and a check are timed.
+    fn priced(
+        &self,
+        most: u32,
+        step: f64,
+        check: &crate::inference::dsd_controller::CheckCost,
+    ) -> Option<(u32, f64)> {
+        use crate::inference::dsd_controller::{
+            expected_tokens_per_round, rated_beside_a_step_per_guess,
+            rated_beside_a_step_per_round, Step,
+        };
+        let draft_ms = self.draft_ms.median()?;
+        let step = Some(Step::OverTheChecksRoute(step));
+        let alpha = self.acceptance.alpha();
+        let expected = |g| {
+            if self.by_depth {
+                self.acceptance.expected_tokens(g)
+            } else {
+                expected_tokens_per_round(alpha, g)
+            }
+        };
+        match self.by {
+            By::Block => rated_beside_a_step_per_round(expected, step, check, most, draft_ms),
+            By::Head => rated_beside_a_step_per_guess(expected, step, check, most, draft_ms),
+        }
+    }
+
+    /// Zero, or `most` as a probe once `probe_after` rounds have declined —
+    /// never for a guesser judged by the reply, whose record does not wait
+    /// for a round of its own.
     fn decline_or_probe(&mut self, most: u32) -> u32 {
+        if self.judged {
+            return 0;
+        }
         self.declined_run += 1;
         if self.declined_run
             < self
@@ -369,10 +459,26 @@ impl Guesser {
 /// **With both, a round goes to the one priced to write faster** over the
 /// same step and line — the block's draft a round, the head's a guess — a
 /// probe goes to its guesser, one that has not drafted yet drafts once, and
-/// one that would have guessed and sat out [`MOST_ROUNDS_SAT_OUT`] rounds is
-/// given one: its price is its own record, which moves only when it runs.
-/// Estimated before building: on field prose the head's ~17 tok/s against
-/// the block's ~9-10 (`docs/FUTURE_WORK.md` #425 (a)).
+/// a head that would have guessed and sat out [`MOST_ROUNDS_SAT_OUT`] rounds
+/// is given one: its price is its own record, which moves only when it runs.
+///
+/// **The block is judged on every round it does not take** (2026-11-09,
+/// [`judged_by_the_reply`]): it drafts beside the head's draft, the n-gram's
+/// or a plain step, one shadow at a time, and the reply's next tokens say
+/// how many of its guesses a check would have kept (`BlockShadow` — exact
+/// under greedy decoding; HedgeSpec's full information, where the rule
+/// before had a bandit's). Both are priced by their own depth curves
+/// (`DepthAcceptance`), never one α. Measured only when it ran, a few rounds
+/// set the block's price for the reply: on the field (35B-A3B here ↔
+/// Australia, `~/rig428/fieldb1`) its three rounds of a class kept 12 of 24
+/// while the head's 28 kept 80 of 101 — and the block alone wrote that
+/// class 20-25% faster (9.7-10.4 tok/s against the head's 7.9-8.4; the pair
+/// 6.5) — and a story's block took 23-33 rounds keeping one guess in five
+/// (the pair 4.3-5.2, the head alone 6.9). After
+/// [`SET_ASIDE_AFTER_JUDGED`] judged rounds in a row that it would not
+/// have written faster than the round the reply took, it is set aside for
+/// the reply ([`Self::rows_now_read`]): its rows — eight layers a position,
+/// a 5-position answer 133,858 bytes against 10,944 — stop crossing.
 ///
 /// [`Step::OverTheChecksRoute`]: crate::inference::dsd_controller::Step::OverTheChecksRoute
 /// [`FIRST_PROBE_AFTER`]: crate::inference::dsd_controller::FIRST_PROBE_AFTER
@@ -389,6 +495,20 @@ pub(super) struct SplitBlockDrafter {
     calls: u32,
     /// The prompt's and the reply's words the worker has been told of.
     words_sent: usize,
+    /// The block's draft beside a round it did not take, waiting for the
+    /// reply's tokens to judge it ([`judged_by_the_reply`]).
+    shadow: Option<crate::inference::dsd_controller::BlockShadow>,
+    /// Shadows judged this reply, and the guesses of theirs the reply kept.
+    pub(super) shadows: u32,
+    pub(super) shadow_kept: u32,
+    /// Judged in a row that the block would not have written faster.
+    losing_run: u32,
+    /// The trunk layer the head reads, and whether the block was set aside
+    /// since the caller last asked ([`Self::rows_now_read`]).
+    head_layer: Option<u32>,
+    set_aside: bool,
+    /// The reply's length when the block was set aside, for the log.
+    pub(super) set_aside_at: Option<usize>,
 }
 
 impl SplitBlockDrafter {
@@ -440,8 +560,9 @@ impl SplitBlockDrafter {
                 block
                     .as_ref()
                     .map(|plan| plan.block_size.saturating_sub(1) as u32),
-                head_layer.is_some(),
+                head_layer.map(|l| l as u32),
                 super::check_reach(&exec.shared_state, segments),
+                judged_by_the_reply(),
             ),
             BlockRowsAsk::new(layers, meta.embedding_length),
         ))
@@ -450,17 +571,25 @@ impl SplitBlockDrafter {
     fn new(
         first: (u32, u32),
         block_most: Option<u32>,
-        head: bool,
+        head_layer: Option<u32>,
         reach: crate::inference::dsd_controller::CheckReach,
+        rule: bool,
     ) -> Self {
         Self {
             first,
-            block: block_most.map(|most| Guesser::new(By::Block, most)),
-            head: head.then(|| Guesser::new(By::Head, HEAD_MOST_GUESSES)),
+            block: block_most.map(|most| Guesser::new(By::Block, most, rule)),
+            head: head_layer.map(|_| Guesser::new(By::Head, HEAD_MOST_GUESSES, rule)),
             step_ms: Default::default(),
             check: crate::inference::dsd_controller::CheckCost::for_a_plan(reach),
             calls: 0,
             words_sent: 0,
+            shadow: None,
+            shadows: 0,
+            shadow_kept: 0,
+            losing_run: 0,
+            head_layer,
+            set_aside: false,
+            set_aside_at: None,
         }
     }
 
@@ -572,7 +701,120 @@ impl SplitBlockDrafter {
                 self.head = None;
             }
         }
+        if asked != Some(By::Block) {
+            self.shadow_the_block(exec, upto, token).await;
+        }
         guessed
+    }
+
+    /// Draft the block beside a round it does not take, for the reply to
+    /// judge ([`judged_by_the_reply`]): one shadow at a time, once it has
+    /// drafted and been timed, with every guess it may make — one forward
+    /// whatever it guesses. Its rows were taken in by the round's own call.
+    async fn shadow_the_block(&mut self, exec: &PipelineExecutor, upto: usize, token: u32) {
+        if self.shadow.is_some() {
+            return;
+        }
+        let Some(most) = self
+            .block
+            .as_ref()
+            .filter(|g| g.judged && g.draft_ms.median().is_some())
+            .map(|g| g.most)
+        else {
+            return;
+        };
+        let started = std::time::Instant::now();
+        let guessed = exec
+            .shared_state
+            .model_process_pool
+            .block_draft(
+                crate::inference::worker_ipc::IpcBlockDraft {
+                    request_id: exec.request.id,
+                    model_id: exec.request.model_id.clone(),
+                    first_range: self.first,
+                    rows: Vec::new(),
+                    upto: upto as u32,
+                    index_pos: upto as u32,
+                    token,
+                    gamma: most,
+                    first: false,
+                    words: Vec::new(),
+                    by_head: false,
+                },
+                &[],
+            )
+            .await;
+        self.calls += 1;
+        match guessed {
+            Ok(guesses) if !guesses.is_empty() => {
+                let ms = started.elapsed().as_secs_f64() * 1000.0;
+                if let Some(g) = self.block.as_mut() {
+                    g.asked += 1;
+                    g.record_draft(guesses.len(), ms);
+                }
+                self.shadow = Some(crate::inference::dsd_controller::BlockShadow {
+                    from: upto + 1,
+                    guesses,
+                    followed: 0,
+                    draft_ms: ms,
+                });
+            }
+            Ok(_) => {}
+            Err(e) => {
+                tracing::warn!(
+                    request_id = %exec.request.id,
+                    error = %e,
+                    "the block drafter beside the first segment stopped for this reply"
+                );
+                self.block = None;
+            }
+        }
+    }
+
+    /// The reply committed `committed` from position `at` (`reply_len`
+    /// tokens so far): a waiting shadow is judged by them, and the block is
+    /// set aside once [`SET_ASIDE_AFTER_JUDGED`] judged rounds in a row say
+    /// it would not have written faster — it could not beat a plain step,
+    /// or the head was priced faster.
+    pub(super) fn reply_committed(&mut self, at: usize, committed: &[u32], reply_len: usize) {
+        let Some(shadow) = self.shadow.as_mut() else {
+            return;
+        };
+        let Some(kept) = shadow.follow(at, committed) else {
+            return;
+        };
+        let guessed = shadow.guesses.len();
+        self.shadow = None;
+        self.shadows += 1;
+        self.shadow_kept += kept as u32;
+        let Some(block) = self.block.as_mut() else {
+            return;
+        };
+        block.acceptance.record(kept as u32, guessed as u32);
+        let Some(step) = self.step_ms.median() else {
+            return;
+        };
+        let head = self
+            .head
+            .as_ref()
+            .and_then(|h| h.priced(h.most, step, &self.check));
+        let losing = match block.priced(block.most, step, &self.check) {
+            Some((0, _)) => true,
+            Some((_, b)) => head.is_some_and(|(g, h)| g > 0 && h > b),
+            None => false,
+        };
+        self.losing_run = if losing { self.losing_run + 1 } else { 0 };
+        if self.losing_run >= SET_ASIDE_AFTER_JUDGED {
+            self.block = None;
+            self.set_aside = true;
+            self.set_aside_at = Some(reply_len);
+        }
+    }
+
+    /// Once, after the block was set aside: the layers the reply's forwards
+    /// still ask rows of — the head's trunk layer, or none.
+    pub(super) fn rows_now_read(&mut self) -> Option<Vec<u32>> {
+        std::mem::take(&mut self.set_aside).then(|| self.head_layer.into_iter().collect())
     }
 
     fn slot(&mut self, by: By) -> &mut Option<Guesser> {
@@ -637,10 +879,13 @@ impl SplitBlockDrafter {
         if let Some(g) = self.guesser_mut(chosen) {
             g.sat_out = 0;
         }
+        if chosen == By::Block && gamma_b > 0 {
+            self.losing_run = 0;
+        }
         // A probe always takes its round, so the one sitting out guessed by
-        // its price.
+        // its price. One judged by the reply never sits a round out.
         if other_gamma > 0 {
-            if let Some(g) = self.guesser_mut(other) {
+            if let Some(g) = self.guesser_mut(other).filter(|g| !g.judged) {
                 g.sat_out += 1;
             }
         }
@@ -792,8 +1037,16 @@ mod tests {
         assert!(ask.take().is_empty(), "a forward that asked for none");
     }
 
+    /// The rule before 2026-11-09 (`SWARMLLM_SPLIT_GUESS_PRICE=geometric`):
+    /// the block measured only when checked, probed after declines.
     fn block_only(round_trip_ms: Option<u32>) -> SplitBlockDrafter {
-        SplitBlockDrafter::new((0, 17), Some(15), false, CheckReach::Peer { round_trip_ms })
+        SplitBlockDrafter::new(
+            (0, 17),
+            Some(15),
+            None,
+            CheckReach::Peer { round_trip_ms },
+            false,
+        )
     }
 
     fn block(b: &mut SplitBlockDrafter) -> &mut Guesser {
@@ -875,10 +1128,11 @@ mod tests {
         let mut b = SplitBlockDrafter::new(
             (0, 1),
             Some(15),
-            true,
+            Some(40),
             CheckReach::Peer {
                 round_trip_ms: Some(130),
             },
+            false,
         );
         assert_eq!(b.gamma(200), (By::Block, 15), "the block drafts first");
         b.block.as_mut().unwrap().record_draft(15, 60.0);
@@ -914,6 +1168,101 @@ mod tests {
         }
         assert_eq!(heads, MOST_ROUNDS_SAT_OUT, "the head writes faster");
         assert_eq!(blocks, 1, "the block is given a round after sitting out");
+    }
+
+    /// Both guessers under the rule of 2026-11-09, timed as on the field: a
+    /// round over the split ~190 ms, checks on a line, the block's draft
+    /// 20 ms, the head's guesses 3 ms.
+    fn judged_pair() -> SplitBlockDrafter {
+        let mut b = SplitBlockDrafter::new(
+            (0, 1),
+            Some(15),
+            Some(40),
+            CheckReach::Peer {
+                round_trip_ms: Some(130),
+            },
+            true,
+        );
+        assert_eq!(b.gamma(200), (By::Block, 15), "the block drafts first");
+        b.block.as_mut().unwrap().record_draft(15, 20.0);
+        b.record_check(16, 600.0);
+        b.record_round(By::Block, 1, 15, 2, 600.0);
+        assert_eq!(
+            b.gamma(200),
+            (By::Head, HEAD_FIRST_GUESSES),
+            "then the head"
+        );
+        b.head.as_mut().unwrap().record_draft(3, 9.0);
+        b.record_check(4, 220.0);
+        b.record_round(By::Head, 3, 3, 4, 220.0);
+        b.record_step(190.0);
+        for _ in 0..6 {
+            b.record_check(5, 230.0);
+            b.record_round(By::Head, 3, 4, 4, 230.0);
+        }
+        b
+    }
+
+    /// The reply's next tokens judge a shadow drafted at `from`: `kept` of its
+    /// 15 guesses followed.
+    fn judge(b: &mut SplitBlockDrafter, from: usize, kept: usize) {
+        b.shadow = Some(crate::inference::dsd_controller::BlockShadow {
+            from,
+            guesses: (1..=15).collect(),
+            followed: 0,
+            draft_ms: 20.0,
+        });
+        let mut committed: Vec<u32> = (1..=kept as u32).collect();
+        committed.push(99);
+        b.reply_committed(from, &committed, from);
+        assert!(b.shadow.is_none(), "decided");
+    }
+
+    /// A block the reply never follows is judged on the head's rounds — it
+    /// never probes and never sits rounds out to be measured — and after
+    /// `SET_ASIDE_AFTER_JUDGED` judged rounds that it would not have paid,
+    /// it is set aside: the forwards ask the head's layer alone, once.
+    #[test]
+    fn a_judged_block_that_loses_is_set_aside_and_its_rows_stop() {
+        let mut b = judged_pair();
+        for i in 0..SET_ASIDE_AFTER_JUDGED as usize {
+            assert!(b.block.is_some(), "still guessing after {i} judged");
+            judge(&mut b, 100 + 20 * i, 0);
+            for _ in 0..FIRST_PROBE_AFTER + MOST_ROUNDS_SAT_OUT {
+                let (by, gamma) = b.gamma(200);
+                assert!(by == By::Head || gamma == 0, "the block took a round");
+                if by == By::Head && gamma > 0 {
+                    b.record_round(By::Head, 3, gamma, gamma as usize, 230.0);
+                }
+            }
+            if let Some(block) = b.block.as_ref() {
+                assert_eq!((block.probes, block.sat_out), (0, 0));
+            }
+        }
+        assert!(b.block.is_none(), "set aside");
+        assert_eq!(b.set_aside_at, Some(100 + 20 * 7));
+        assert_eq!(b.rows_now_read(), Some(vec![40]), "the head's layer");
+        assert_eq!(b.rows_now_read(), None, "once");
+        assert_eq!((b.shadows, b.shadow_kept), (SET_ASIDE_AFTER_JUDGED, 0));
+    }
+
+    /// A block whose judged runs the reply follows twelve deep is priced
+    /// over the head and takes the round, and a judged win starts the
+    /// count towards setting it aside over.
+    #[test]
+    fn a_judged_block_the_reply_follows_takes_the_round() {
+        let mut b = judged_pair();
+        for i in 0..2 {
+            judge(&mut b, 100 + 20 * i, 0);
+        }
+        for i in 0..6 {
+            judge(&mut b, 300 + 20 * i, 12);
+        }
+        assert_eq!(b.losing_run, 0);
+        let (by, gamma) = b.gamma(200);
+        assert_eq!(by, By::Block, "the block writes faster");
+        assert!(gamma >= 8, "deep enough to keep its run: {gamma}");
+        assert!(b.block.is_some());
     }
 
     /// One that would not guess never takes the round from one that would,

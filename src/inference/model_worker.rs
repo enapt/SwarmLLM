@@ -51,6 +51,7 @@ const CANCEL_RETENTION_SECS: u64 = 60;
 /// first version of this instrumentation did.
 const KV_OCCUPANCY_REPORT_SECS: u64 = 30;
 use crate::error::SwarmError;
+use crate::inference::dsd_controller::BlockShadow;
 use crate::inference::slot_table::{Slot, SlotTable};
 use crate::inference::split::kv_budget::KvGrowth;
 use crate::inference::split::kv_cache::KvHome;
@@ -5054,49 +5055,6 @@ impl SplitBlockDrafts {
     }
 }
 
-/// A block drafter's probe drafted and NOT checked (#428): where a probe is
-/// due, the block drafts as for a round and the round goes on without it;
-/// the reply's next tokens then say how many of its guesses a check would
-/// have kept. A check keeps a guess only where it matches the token drawn
-/// there (`ngram_spec_eligible`'s rule), and the token the reply commits is a
-/// draw of the same distribution after the same prefix, so the run it follows
-/// is the run a check would have kept — exactly under greedy decoding, in
-/// distribution when sampling. Checked, a probe read the whole block: on the
-/// processor ~400 ms for 16 positions against a ~60 ms step, ~4 a reply, and
-/// the drafter ran 10-20% under its absence (Qwen3.5-4B, 2026-11-08).
-/// Prior art: none found for a drafter judged without a check (searched
-/// 2026-11-08 — SVIP's entropy, SpecDec++'s acceptance head and Draft &
-/// Verify's threshold predict, SGLang's average and BanditSpec learn only from
-/// what was checked). Here the drafter's reward is seen whether it ran or not:
-/// full information, as Hedge has, where a bandit has only its own arm's.
-#[derive(Debug)]
-struct BlockShadow {
-    /// The position of its first guess.
-    from: usize,
-    guesses: Vec<u32>,
-    /// Its guesses the reply has followed so far.
-    followed: usize,
-    draft_ms: f64,
-}
-
-impl BlockShadow {
-    /// The reply's `committed` tokens from position `at`: `Some(kept)` once
-    /// they decide it — a token unlike its guess there, or every guess
-    /// followed.
-    fn follow(&mut self, at: usize, committed: &[u32]) -> Option<usize> {
-        for (i, &t) in committed.iter().enumerate() {
-            if (at + i).checked_sub(self.from) != Some(self.followed) {
-                continue;
-            }
-            match self.guesses.get(self.followed) {
-                Some(&g) if g == t => self.followed += 1,
-                _ => return Some(self.followed),
-            }
-        }
-        (self.followed >= self.guesses.len()).then_some(self.followed)
-    }
-}
-
 /// `SWARMLLM_BLOCK_PROBE=check`: a block probe checks its whole block, the
 /// rule before 2026-11-08 ([`BlockShadow`]), for A/B inside one binary.
 fn block_shadow_probes() -> bool {
@@ -5110,40 +5068,6 @@ fn block_shadow_probes() -> bool {
 /// it guessed right for little (card run 18: a story 78.3-79.0 tok/s checked,
 /// 73.7-78.5 judged; code alike).
 const SHADOW_FROM_STEPS: f64 = 2.0;
-
-#[cfg(test)]
-mod block_shadow_tests {
-    use super::BlockShadow;
-
-    fn shadow(guesses: &[u32]) -> BlockShadow {
-        // Drafted beside the token at position 10: its first guess is at 11.
-        BlockShadow {
-            from: 11,
-            guesses: guesses.to_vec(),
-            followed: 0,
-            draft_ms: 80.0,
-        }
-    }
-
-    /// Kept is the run of guesses the reply's tokens follow, read across
-    /// rounds, as a check would have kept them.
-    #[test]
-    fn a_shadow_keeps_the_run_the_reply_follows() {
-        let mut s = shadow(&[5, 6, 7]);
-        // A plain step commits only the token it was given: nothing to judge.
-        assert_eq!(s.follow(10, &[9]), None);
-        // The head's round commits 9 then 5: one followed, not yet decided.
-        assert_eq!(s.follow(10, &[9, 5]), None);
-        // The next round commits 6 then 8 where 7 was guessed.
-        assert_eq!(s.follow(12, &[6, 8]), Some(2));
-
-        let mut s = shadow(&[5, 6]);
-        assert_eq!(s.follow(10, &[9, 5, 6, 4]), Some(2), "every guess followed");
-
-        let mut s = shadow(&[5, 6]);
-        assert_eq!(s.follow(10, &[9, 4]), Some(0), "the first guess missed");
-    }
-}
 
 /// Where a drafter's new rows start, and each layer's `[1, n, hidden]`.
 type RowsFrom = (usize, HashMap<usize, candle_core::Tensor>);

@@ -1063,6 +1063,10 @@ impl PipelineExecutor {
                     slot.record(generated.len(), &[bonus]);
                 }
                 generated.push(bonus);
+                if let Some(b) = block.as_mut() {
+                    b.reply_committed(current_pos + 1, &[bonus], generated.len());
+                }
+                self.block_drafter_set_aside(&mut block, generated.len());
                 current_pos += 1;
                 // Through the shared helper rather than a direct send, so this
                 // arm inherits the end-of-turn filter like every other emission
@@ -1222,6 +1226,10 @@ impl PipelineExecutor {
                     break;
                 }
             }
+            if let Some(b) = block.as_mut() {
+                b.reply_committed(current_pos + 1, &emitted, generated.len());
+            }
+            self.block_drafter_set_aside(&mut block, generated.len());
             // Remote KV grew by verify_tokens.len() positions. If we
             // partially rejected (emitted.len() < verify_tokens.len()),
             // the trailing rejected positions hold incorrect content
@@ -1295,6 +1303,9 @@ impl PipelineExecutor {
             block_check_fit = ?block.as_ref().and_then(|b| b.check_fit()).map(|(fixed, per)| (fixed.round(), per.round())),
             block_declined = block.as_ref().and_then(|b| b.block.as_ref()).map_or(0, |g| g.declined),
             block_probes = block.as_ref().and_then(|b| b.block.as_ref()).map_or(0, |g| g.probes),
+            block_judged = block.as_ref().map_or(0, |b| b.shadows),
+            block_judged_kept = block.as_ref().map_or(0, |b| b.shadow_kept),
+            block_set_aside_at = ?block.as_ref().and_then(|b| b.set_aside_at),
             split_head = head_planned,
             split_head_stopped = head_planned && !block.as_ref().is_some_and(|b| b.head.is_some()),
             split_head_rounds = head_rounds,

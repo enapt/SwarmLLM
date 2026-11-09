@@ -6441,6 +6441,42 @@ BanditSpec keeps trying arms it declined — the probe after `FIRST_PROBE_AFTER`
 declines, doubling to `MOST_PROBE_AFTER`, now shared with `LocalSpec` from
 `dsd_controller`.
 
+**Beside the guess head, the block is judged by the reply** (2026-11-09, #425 (a)
+with #428, `SplitBlockDrafter::reply_committed`). Both guessers beside a split's
+first segment (Qwen3.6-35B-A3B, [0,1) + [39,41) here on the RTX 3070, [1,39) in
+Australia ~132 ms) ran SLOWER than either alone on two of three prompts
+(`~/rig428/fieldb1`, .279: BST class 6.5 against the drafter's 9.7-10.4 and the
+head's 7.9-8.4; a story 4.3-5.2 against the head's 6.9). Two contributors. (a) The
+chooser learned the block only from rounds it CHECKED — a bandit, as BanditSpec
+and MetaSD are — so a block that lost early sat out 16 rounds, came back on a
+probe, and faded toward its prior α 0.7 while out: on the story it took 23-33
+rounds keeping ~1 in 5. (b) While the block is present every forward to the far
+segment asks its 8 layers' rows back (~35 KB a position): at the same width an
+answer with rows waited a median ~20 ms more (5 positions: 233-238 against 214
+ms), and the widest (16 positions, ~280 KB) sometimes twice their width's
+time — 538 ms median in one arm, 462 in a drafter-only one, so that tail is the
+link's or the far's, not the pairing's. Fix: full information, as HedgeSpec
+(arXiv 2510.20064) scores every drafter from the checked tokens — on a round the
+block does not take it drafts anyway (one forward, `shadow_the_block`), unchecked,
+and the tokens the reply commits next say how many a check would have kept
+(`BlockShadow`, moved to `dsd_controller` from the worker; exact under greedy
+decoding). A judged block takes no probes, no sat-out and no fade on a decline.
+Each guesser's acceptance is a per-depth survival curve (`DepthAcceptance`:
+E(γ) = 1 + Σ S(d), each depth's stop rate shrunk toward the pooled α by
+`SHRINK_ROUNDS` 2 — DIVERSED 2604.07622, SpecBlock 2605.07243): one α prices a
+run kept whole or not at all (15/15 then 0/15) at ~4.4 tokens for 4 guesses and
+~10 for 15 where the rounds wrote 3 and 8.5. After `SET_ASIDE_AFTER_JUDGED` (8)
+judgements in a row say the block could not beat a plain step or the head's
+price, it is set aside for the reply and the rows ask narrows to the head's layer
+(`block_drafter_set_aside`; a segment running none of the asked layers sends
+none). A/B `SWARMLLM_SPLIT_GUESS_PRICE=geometric` (the rule before). Measured
+(`~/rig428/fieldc1`, one build, arms on/old/head/off/off/head/old/on, decode tok/s
+of two replies an arm): palindrome both 14.3/14.9, old rule 11.6/9.8, head 11.1/12.3,
+drafter 12.5/12.5; BST class 10.4/13.7, 10.6/13.5, 12.4/9.9, 13.6/10.1; story
+6.8/7.5, 6.2/5.2, 7.5/7.5, 6.9/4.6. Residual: the story set the block aside only
+at token 64-65, after 16-17 judgements — a round the block is CHOSEN restarts the
+count, and it was chosen 15-19 times keeping ~1 in 5.
+
 **On one computer a guesser is set aside by what it WRITES** (2026-11-08, #428
 on a card, `model_worker::LocalSpec`). A guesser's count is priced from a
 geometric acceptance model, and one whose guesses are kept all or nothing reads

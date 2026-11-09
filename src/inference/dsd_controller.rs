@@ -557,8 +557,14 @@ pub fn best_gamma_beside_a_step(
     max: u32,
     draft_ms_each: f64,
 ) -> Option<u32> {
-    rated_beside_a_step_per_guess(alpha, step_ms.map(Step::Here), check, max, draft_ms_each)
-        .map(|(g, _)| g)
+    rated_beside_a_step_per_guess(
+        |g| expected_tokens_per_round(alpha, g),
+        step_ms.map(Step::Here),
+        check,
+        max,
+        draft_ms_each,
+    )
+    .map(|(g, _)| g)
 }
 
 /// A step — a round of one position — and where it was timed, which decides
@@ -597,15 +603,24 @@ pub fn best_gamma_beside_a_step_per_round(
     max: u32,
     draft_ms_round: f64,
 ) -> Option<u32> {
-    rated_beside_a_step_per_round(alpha, step, check, max, draft_ms_round).map(|(g, _)| g)
+    rated_beside_a_step_per_round(
+        |g| expected_tokens_per_round(alpha, g),
+        step,
+        check,
+        max,
+        draft_ms_round,
+    )
+    .map(|(g, _)| g)
 }
 
 /// [`best_gamma_beside_a_step_per_round`] with the rate its count is
 /// expected to write at, in tokens a millisecond — so two guessers priced
 /// over the same step and line can be weighed against each other (a split's
-/// block drafter and guess head, #425 (a)).
+/// block drafter and guess head, #425 (a)). `expected` is the tokens a round
+/// of `g` guesses writes: [`expected_tokens_per_round`] at one α, or a
+/// guesser's own curve ([`DepthAcceptance::expected_tokens`]).
 pub fn rated_beside_a_step_per_round(
-    alpha: f64,
+    expected: impl Fn(u32) -> f64,
     step: Option<Step>,
     check: &CheckCost,
     max: u32,
@@ -613,7 +628,7 @@ pub fn rated_beside_a_step_per_round(
 ) -> Option<(u32, f64)> {
     let round = draft_ms_round.max(0.0);
     best_beside_a_step(
-        alpha,
+        expected,
         step,
         check,
         max,
@@ -626,20 +641,20 @@ pub fn rated_beside_a_step_per_round(
 /// (a split's guess head, #425 (a)), priced beside a block drafter's
 /// [`rated_beside_a_step_per_round`].
 pub fn rated_beside_a_step_per_guess(
-    alpha: f64,
+    expected: impl Fn(u32) -> f64,
     step: Option<Step>,
     check: &CheckCost,
     max: u32,
     draft_ms_each: f64,
 ) -> Option<(u32, f64)> {
     let each = draft_ms_each.max(0.0);
-    best_beside_a_step(alpha, step, check, max, |g| each * f64::from(g))
+    best_beside_a_step(expected, step, check, max, |g| each * f64::from(g))
 }
 
 /// The count with the most tokens a millisecond, and that rate. Ties go to
 /// the smaller count.
 fn best_beside_a_step(
-    alpha: f64,
+    expected: impl Fn(u32) -> f64,
     step: Option<Step>,
     check: &CheckCost,
     max: u32,
@@ -658,7 +673,7 @@ fn best_beside_a_step(
     };
     Some(
         (0..=max)
-            .map(|g| (g, expected_tokens_per_round(alpha, g) / cost(g)))
+            .map(|g| (g, expected(g) / cost(g)))
             .fold((0, f64::MIN), |best, c| if c.1 > best.1 { c } else { best }),
     )
 }
@@ -753,6 +768,153 @@ impl AcceptanceEstimate {
 impl Default for AcceptanceEstimate {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// How deep a guesser's runs are kept, depth by depth: at each depth, the
+/// share of rounds that reached it (every guess before it kept) and stopped
+/// there — a survival curve over rounds, as Kaplan-Meier's estimate is built,
+/// a round that ended before its rejection was seen (every guess kept)
+/// counting only where it reached. [`AcceptanceEstimate`]'s one α prices
+/// every depth alike (Leviathan et al.'s i.i.d. guesses), and a block
+/// drafter's are not alike: once its block is on the reply's track the rest
+/// follow. A split judges the block's whole block on every round it does not
+/// take (`pipeline::block_draft`, [`BlockShadow`]); one α fitted from such
+/// rounds, kept whole or not at all, prices four guesses at ~4.4 tokens and
+/// fifteen at ~10 where the rounds wrote 3 and 8.5
+/// (`a_depth_curve_prices_a_run_that_is_kept_whole_or_not_at_all`) — and the
+/// count chosen from it is the count it misprices. Prior art: per-position
+/// acceptance is the measured shape in DIVERSED (arXiv 2604.07622, "the
+/// acceptance probability of a draft token is highly related to its
+/// position"), DeLS-Spec (2607.07409, P(acceptance length ≥ i)) and
+/// SpecBlock (2605.07243, per position within a block).
+///
+/// Each depth's estimate is drawn towards the pooled α by
+/// [`Self::SHRINK_ROUNDS`] rounds' worth, so with little evidence at a depth
+/// the curve is the one-α curve, and it leaves it only as that depth is seen
+/// (a hierarchical prior). Every round weighs those before it by 0.9, as
+/// [`AcceptanceEstimate::recent`] does.
+#[derive(Debug, Clone)]
+pub struct DepthAcceptance {
+    pooled: AcceptanceEstimate,
+    /// Rounds that reached each depth (index 0 = the first guess).
+    reached: Vec<f64>,
+    /// Of those, the rounds whose guess there was not kept.
+    stopped: Vec<f64>,
+}
+
+impl DepthAcceptance {
+    /// Rounds' worth of the pooled α each depth starts from.
+    pub const SHRINK_ROUNDS: f64 = 2.0;
+
+    /// From [`AcceptanceEstimate::recent`]'s prior, no depth yet seen.
+    pub fn recent() -> Self {
+        Self {
+            pooled: AcceptanceEstimate::recent(),
+            reached: Vec::new(),
+            stopped: Vec::new(),
+        }
+    }
+
+    /// A round kept `accepted` of `proposed` guesses.
+    pub fn record(&mut self, accepted: u32, proposed: u32) {
+        self.pooled.record(accepted, proposed);
+        self.fade_depths();
+        let stopped = accepted < proposed;
+        let reached = accepted as usize + usize::from(stopped);
+        if self.reached.len() < reached {
+            self.reached.resize(reached, 0.0);
+            self.stopped.resize(reached, 0.0);
+        }
+        for r in &mut self.reached[..reached] {
+            *r += 1.0;
+        }
+        if stopped {
+            self.stopped[accepted as usize] += 1.0;
+        }
+    }
+
+    /// A round that had guesses and checked none of them
+    /// ([`AcceptanceEstimate::fade`]).
+    pub fn fade(&mut self) {
+        self.pooled.fade();
+        self.fade_depths();
+    }
+
+    fn fade_depths(&mut self) {
+        let keep = self.pooled.keep;
+        for v in self.reached.iter_mut().chain(self.stopped.iter_mut()) {
+            *v *= keep;
+        }
+    }
+
+    /// The one α over every depth.
+    pub fn alpha(&self) -> f64 {
+        self.pooled.alpha()
+    }
+
+    /// The tokens a round of `gamma` guesses is expected to write: the token
+    /// the check samples where the run stops, plus each depth's chance of
+    /// being reached kept — `1 + Σ S(d)`. With no depth seen, exactly
+    /// [`expected_tokens_per_round`] at [`Self::alpha`].
+    pub fn expected_tokens(&self, gamma: u32) -> f64 {
+        let miss = 1.0 - self.alpha().clamp(0.0, 0.999_999);
+        let (mut kept, mut tokens) = (1.0, 1.0);
+        for d in 0..gamma as usize {
+            let reached = self.reached.get(d).copied().unwrap_or(0.0);
+            let stopped = self.stopped.get(d).copied().unwrap_or(0.0);
+            let stop = (stopped + Self::SHRINK_ROUNDS * miss) / (reached + Self::SHRINK_ROUNDS);
+            kept *= 1.0 - stop;
+            tokens += kept;
+        }
+        tokens
+    }
+}
+
+/// A block drafter's guesses drafted and NOT checked (#428): the reply's next
+/// tokens then say how many of them a check would have kept. A check keeps a
+/// guess only where it matches the token drawn there (`ngram_spec_eligible`'s
+/// rule), and the token the reply commits is a draw of the same distribution
+/// after the same prefix, so the run it follows is the run a check would have
+/// kept — exactly under greedy decoding, in distribution when sampling.
+/// One computer judges a block PROBE this way where checking the whole block
+/// is dear (`model_worker::LocalSpec`, `model_worker::SHADOW_FROM_STEPS`);
+/// a split judges the block on every round another guesser or a plain step
+/// takes (`pipeline::block_draft::SplitBlockDrafter`), so its record never
+/// waits for a round of its own.
+///
+/// Checked, a probe read the whole block: on the processor ~400 ms for 16
+/// positions against a ~60 ms step, ~4 a reply, and the drafter ran 10-20%
+/// under its absence (Qwen3.5-4B, 2026-11-08). Prior art: HedgeSpec ("Not a
+/// Bandit: provably no-regret drafter selection", Liu et al., ICLR 2026,
+/// arXiv 2510.20064) scores every drafter after each check from the checked
+/// tokens, where a bandit (BanditSpec, Hou et al., ICML 2025; MetaSD, ACL
+/// 2026 Findings) learns only from the drafter it ran — full information.
+#[derive(Debug)]
+pub(crate) struct BlockShadow {
+    /// The position of its first guess.
+    pub(crate) from: usize,
+    pub(crate) guesses: Vec<u32>,
+    /// Its guesses the reply has followed so far.
+    pub(crate) followed: usize,
+    pub(crate) draft_ms: f64,
+}
+
+impl BlockShadow {
+    /// The reply's `committed` tokens from position `at`: `Some(kept)` once
+    /// they decide it — a token unlike its guess there, or every guess
+    /// followed.
+    pub(crate) fn follow(&mut self, at: usize, committed: &[u32]) -> Option<usize> {
+        for (i, &t) in committed.iter().enumerate() {
+            if (at + i).checked_sub(self.from) != Some(self.followed) {
+                continue;
+            }
+            match self.guesses.get(self.followed) {
+                Some(&g) if g == t => self.followed += 1,
+                _ => return Some(self.followed),
+            }
+        }
+        (self.followed >= self.guesses.len()).then_some(self.followed)
     }
 }
 
@@ -1735,5 +1897,86 @@ mod tests {
         record(&mut far);
         assert_eq!(far.width_price(3), None);
         assert_eq!(far.predict_beside_a_step(3, 10.0), far.predict(3));
+    }
+
+    /// Kept is the run of guesses the reply's tokens follow, read across
+    /// rounds, as a check would have kept them.
+    #[test]
+    fn a_shadow_keeps_the_run_the_reply_follows() {
+        // Drafted beside the token at position 10: its first guess is at 11.
+        let shadow = |guesses: &[u32]| BlockShadow {
+            from: 11,
+            guesses: guesses.to_vec(),
+            followed: 0,
+            draft_ms: 80.0,
+        };
+        let mut s = shadow(&[5, 6, 7]);
+        // A plain step commits only the token it was given: nothing to judge.
+        assert_eq!(s.follow(10, &[9]), None);
+        // The head's round commits 9 then 5: one followed, not yet decided.
+        assert_eq!(s.follow(10, &[9, 5]), None);
+        // The next round commits 6 then 8 where 7 was guessed.
+        assert_eq!(s.follow(12, &[6, 8]), Some(2));
+
+        let mut s = shadow(&[5, 6]);
+        assert_eq!(s.follow(10, &[9, 5, 6, 4]), Some(2), "every guess followed");
+
+        let mut s = shadow(&[5, 6]);
+        assert_eq!(s.follow(10, &[9, 4]), Some(0), "the first guess missed");
+    }
+
+    /// With no depth seen, the curve is the one-α curve, at every count.
+    #[test]
+    fn a_depth_curve_with_no_depth_seen_is_the_one_alpha_curve() {
+        let fresh = DepthAcceptance::recent();
+        for g in 0..=15 {
+            let one = expected_tokens_per_round(fresh.alpha(), g);
+            assert!((fresh.expected_tokens(g) - one).abs() < 1e-9, "γ = {g}");
+        }
+    }
+
+    /// A block that is on the reply's track keeps its whole block, and off
+    /// it keeps nothing: one α from those rounds (15 of 16 trials kept)
+    /// prices four guesses at ~4.4 tokens and fifteen at ~10, where the
+    /// rounds wrote 3 and 8.5. The depth curve follows the rounds.
+    #[test]
+    fn a_depth_curve_prices_a_run_that_is_kept_whole_or_not_at_all() {
+        let mut depth = DepthAcceptance::recent();
+        for i in 0..40 {
+            if i % 2 == 0 {
+                depth.record(15, 15);
+            } else {
+                depth.record(0, 15);
+            }
+        }
+        let one_alpha = |g| expected_tokens_per_round(depth.alpha(), g);
+        for (g, written) in [(4, 3.0), (15, 8.5)] {
+            let by_depth = depth.expected_tokens(g);
+            assert!(
+                (by_depth - written).abs() < 0.5,
+                "γ = {g}: {by_depth:.2} against {written}"
+            );
+            assert!(
+                (by_depth - written).abs() < (one_alpha(g) - written).abs(),
+                "γ = {g}: one α {:.2} is nearer {written} than the curve {by_depth:.2}",
+                one_alpha(g)
+            );
+        }
+    }
+
+    /// A round that stopped at a depth counts there; one kept whole counts
+    /// only as far as it reached, never as a stop past it.
+    #[test]
+    fn a_round_kept_whole_is_never_counted_as_a_stop() {
+        let mut depth = DepthAcceptance::recent();
+        for _ in 0..30 {
+            depth.record(3, 3);
+        }
+        // Depths 1-3 always kept; depth 4 never seen: the curve's step there
+        // is the pooled α's, not a stop.
+        let three = depth.expected_tokens(3);
+        assert!(three > 3.8, "three always-kept guesses price {three:.2}");
+        let step4 = depth.expected_tokens(4) - three;
+        assert!(step4 > 0.8, "the unseen fourth adds {step4:.2}");
     }
 }

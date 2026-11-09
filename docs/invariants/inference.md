@@ -6076,13 +6076,18 @@ no rewind of the head.
 block is priced per ROUND (`dsd_controller::rated_beside_a_step_per_round`: a
 draft is one forward whatever it guesses), the head per GUESS
 (`rated_beside_a_step_per_guess`: one forward a guess), both over the checks'
-route (`Step::OverTheChecksRoute`), each at its own acceptance and draft time.
-One that would not guess loses to one that would; a probe takes its round; an
-untimed guesser goes first (block before head); one that sat out
-`MOST_ROUNDS_SAT_OUT` (16) rounds gets one, so a guesser that loses early is
-measured again; otherwise the higher rate. A refusal from the segment holds
-that guesser off the model for 10 min (`model:guess-head`), the block's own
-separately.
+route (`Step::OverTheChecksRoute`), each at its own acceptance — a per-depth
+survival curve, `dsd_controller::DepthAcceptance` — and draft time.
+One that would not guess loses to one that would; an untimed guesser goes first
+(block before head); otherwise the higher rate. The block is JUDGED by the reply
+(2026-11-09): on a round it does not take it drafts anyway, unchecked, and the
+committed tokens record what a check would have kept (`BlockShadow`), so it
+needs no probe and no sat-out; eight judgements in a row under a plain step or
+the head's price set it aside for the reply, its rows ask narrowed to the head's
+layer — `docs/invariants/scheduling.md` § "Beside the guess head, the block is
+judged by the reply". The head keeps the probes and `MOST_ROUNDS_SAT_OUT` (16).
+A refusal from the segment holds that guesser off the model for 10 min
+(`model:guess-head`), the block's own separately.
 
 **Its experts on a card.** The first field run loaded nothing
 (`loaded=false`): the head's routed experts (816 MB) were placed in the
