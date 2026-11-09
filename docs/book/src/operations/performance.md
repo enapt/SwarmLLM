@@ -229,6 +229,40 @@ plus a coordinator loop in `pipeline/dsd.rs`.
   `inference.decentralized_spec_decoding`); set either to `false` to switch it
   off. Optionally `inference.draft_model = "<model id>"`.
 
+### Qwen 3.5 and 3.6: the model's own guessers
+
+These models guess ahead without a separate small model, in two ways:
+
+- **The guess head** — a small next-word block the model's own file carries.
+  It loads beside the model's last layer when one computer runs the whole
+  model (since 0.3.278), and beside the first part of a split when the asking
+  computer also runs the model's last layers (since 0.3.279). There it guesses
+  from the values that come back with every check, so nothing new crosses the
+  network and the far computer needs no update; while the far computer checks
+  one round of guesses, it already guesses the next. Measured with
+  Qwen3.6-35B-A3B, its first and last layers on an RTX 3070 laptop card and the
+  rest on a computer in Australia about 137 ms away: code 5.0–5.8 → 8.2–18.4
+  tokens a second, prose 4.5–4.8 → 7.6–9.5 (v0.3.279). It takes 120–900 MB more
+  on the device it sits on.
+- **The block drafter** (since 0.3.279) — a separate small file for each model
+  (0.4–1.85 GB) that guesses a block of up to 15 words in one pass from the
+  model's own working values; one check keeps the words the model would have
+  written itself. A computer that holds a Qwen 3.5 or 3.6 model's first and last
+  parts, or the whole model, fetches it from a pinned list, checks its size and
+  SHA-256 before keeping it, waits while the connection is metered, never takes
+  the disk's last 10%, and deletes it with the model. Both computers of a split
+  need 0.3.279. A computer that runs models only on its processor neither
+  fetches nor loads it beside a file with its own guess head, which is faster
+  there. Measured: Qwen3.5-9B split over two processors 130 ms apart, code
+  1.6–1.8 times as fast and a story 1.1 times; Qwen3.5-4B on an RTX 3070, code
+  1.4–1.9 times.
+- **Replies are the model's own**: every guess is checked, and a reply can part
+  from an unguessed one only where two words score almost alike.
+- **Off switches** (environment variables, for comparing): `SWARMLLM_MTP=0` (no
+  guess head anywhere), `SWARMLLM_SPLIT_GUESS_HEAD=0` (none beside a split),
+  `SWARMLLM_SPLIT_HEAD_AHEAD=0` (no guessing the next round during a check),
+  `SWARMLLM_BLOCK_DRAFTER=0` (no block drafter).
+
 ### Activation compression Q8_0 (`activation_compression`)
 
 Intermediate pipeline hidden-state activations are quantized from f16 to

@@ -205,7 +205,7 @@ the top track (`docs/plans/large_model_splits.md`).
     the 10-minute expiry), and a split's prompt pieces chained between two peers.
 14. **#138**, **#129** — a model that does not fit the card (MoE and a split's prompt stages
     shipped in v0.3.235-v0.3.237; the entries hold what is left), and a near-fit model sent far.
-15. **#228** — Qwen 3.5 guesses ahead on one computer (processor and card) and through a split's n-gram loop (bit 33) since 2026-10-25, and with its file's own guess head on one computer since 2026-11-07 (#425); the drafter's paths still stay off — a checkpoint replayed across steps, #228 (5).
+15. **#228** — Qwen 3.5 guesses ahead on one computer (processor and card) and through a split's n-gram loop (bit 33) since 2026-10-25, and with its file's own guess head on one computer since 2026-11-07 and beside a split's first segment since 2026-11-09 (#425 (a), (f), v0.3.279); the drafter's paths still stay off — a checkpoint replayed across steps, #228 (5).
 16. **#336** — tool calls, and `response_format` on a split or a peer's whole-model hand-off, are
     checked only after they are written, so an agent driving a small model meets malformed calls.
     `response_format` is held on a model run whole since v0.3.262 (llguidance); next, a feature bit

@@ -177,7 +177,8 @@ computers: one with an RTX 3060 card in Australia (about 130 ms there and back
 in November, 400–460 ms in October), a laptop with an RTX 4050 card in Europe,
 about 220–240 ms, a second computer in Thailand and a Mac mini in Italy. For
 the 14B a small model guesses the next few words and the big one checks them
-all at once.
+all at once; for the 35B-A3B the model's own guess head, a small block its file
+carries, does the guessing on this laptop.
 
 | Model, and how it is shared | Speed | Version |
 |---|---|---|
@@ -185,8 +186,13 @@ all at once.
 | Qwen2.5 14B, the same, set to "Start and finish on this computer" | 27–31 writing code, 12.0–12.8 writing prose | v0.3.275 |
 | Qwen2.5 14B, split three ways: this laptop, the laptop in Europe and the computer in Australia | 12–14 writing code, 4.4–4.9 writing prose | v0.3.261 |
 | Qwen3.8 27B, handed whole to the computer in Australia (the swarm's own choice) | 2.6–3.6 | v0.3.273 |
+| Qwen3.6 35B-A3B (a mixture of experts), its first and last layers on this laptop's card, the middle 38 on the computer in Australia | 8.2–18.4 writing code, 7.6–9.5 writing prose | v0.3.279 |
 | Llama 3.3 70B, this laptop and the computer in Australia, new questions | 1.8–2.6 | v0.3.264–v0.3.265 |
 | Llama 3.3 70B, three or four computers in Thailand, Australia and Italy, new questions | 1.4–2.0 | v0.3.273 |
+
+Without its guess head the same 35B-A3B split wrote 5.0–5.8 tokens a second of
+code and 4.5–4.8 of prose; the head also guesses the next round while the
+computer in Australia checks this one.
 
 On code, two computers on different continents were nearly three times as fast
 as this laptop running the same 14B alone (14.1–14.5 tokens a second, measured

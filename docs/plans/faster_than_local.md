@@ -1239,6 +1239,21 @@ becomes a near-chain, a flat distribution a bushy tree. The flow's tree is fixed
 code's 2-3% is a width that follows confidence inside the flow, not a switch between two shapes —
 new code in the drafter's call for a few percent, behind #412.
 
+## 14. A file's own guess head across the far split (2026-11-09, shipped in v0.3.279)
+
+Qwen 3.5 and 3.6 files carry a one-layer next-word head (MTP). Where a split's first and last layers run on the asking
+computer, it now loads beside the first segment and drafts from the last-layer state each check brings back, so
+nothing new crosses the link and the far computer needs no update (#425 (a)). It also drafts the NEXT round while the
+check is abroad, and the next draft is served from that chain only when the check kept every guess and its bonus word
+is the chain's next (#425 (f), PEARL's post-verify, 2408.11850): drafter and far computer work at the same time.
+Qwen3.6-35B-A3B Q4_K_M, layers [0,1) + [39,40) on the RTX 3070 here and [1,39) in Australia (~137 ms), greedy,
+160 tokens: head off, code 5.0-5.8 / prose 4.5-4.8 tok/s; head on, 11.1-15.2 / 6.8-8.9 (four runs a side); with
+guess-ahead, the shipped default, 8.2-18.4 / 7.6-9.5 over seven runs (means in one binary, palindrome / BST class /
+story: 13.5 → 15.4, 11.8 → 13.0, 7.8 → 8.5). Half of guess-ahead's gain is the card staying clocked through the wait
+(gotcha #1070); 7 guesses a round instead of 4 did not pay. Evidence: `docs/invariants/inference.md` § "A file's own
+guess head". Open: the DFlash block drafter beside the same segment does not guess ahead, and the two guessers have
+not yet been measured together on this link (FUTURE_WORK #425 (f), #428).
+
 ## Sources
 
 Petals 2312.08361 · Pope et al. 2211.05102 · StagFormer 2501.15665 · Layer
@@ -1256,4 +1271,4 @@ Qwen3-Coder-30B) · Leviathan 2211.17192 · Chen 2302.01318 · § 7: llguidance 
 decoding) · vLLM `v1/structured_output` · Medusa 2401.10774 (typical acceptance) · Tuned Lens
 2303.08112 · LayerSkip 2404.16710 · BloomBee 2604.21072 (lossless activation coding) · OSD
 2310.07177 · OmniDraft 2507.02659 · SuffixDecoding 2411.04975 · speculation side channels
-2411.01076.
+2411.01076. · § 14: PEARL 2408.11850 (post-verify).
