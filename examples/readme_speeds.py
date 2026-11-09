@@ -13,8 +13,9 @@ on the PREVIOUS release's records — the newest the gate has measured
 
 usage: python3 -I examples/readme_speeds.py ~/swarmllm-gate/v0.3.260-alpha/out/speed.jsonl [README.md]
 
-The version is read from the path: the gate writes under `v<version>/`. A check that
-shared the card with another program is timed again on the published release, the
+The version is read from the path: the gate writes under `v<version>/`. A check whose
+speed step cannot be used (another program on the card, arms that swung in both
+builds) is timed again on the published release, the
 step's candidate arms only, into `v<version>-alpha-rebench/out/` (completeness.md §
 "README speeds"); from a `-rebench` path the block's comment says it is a re-run.
 The version goes in an HTML comment, where the guard reads it: the reader sees
@@ -67,8 +68,11 @@ def block(records, version, rerun=False):
     prompt = round(statistics.median(r["prompt_tokens"] for r in every), -2)
     written = int(statistics.median(r["completion_tokens"] for r in every))
     if rerun:
+        # Why the check's own figures were set aside differs per release (another
+        # program on the card at .273, arms that swung in both builds at .279):
+        # the gate's history says which, so this note claims no cause.
         note = (f"<!-- from the v{version} release check's speed step, timed again on the published"
-                " release because the check shared the graphics card with other programs -->")
+                " release with the machine idle, the check's own figures set aside -->")
     else:
         note = f"<!-- from the v{version} release check, timed on the downloaded release -->"
     lines = [

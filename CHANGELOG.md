@@ -2,6 +2,63 @@
 
 ## [Unreleased]
 
+## [0.3.280-alpha] — 2026-11-09
+
+**Replies take the fastest route by default.** "Start and finish on this computer" used to switch
+itself on for every model whose first and last parts this computer held — and then the model could
+not be handed whole to a faster computer. Gemma 4 31B ran across three computers at 1.7-2.3 words a
+second, where the computer holding all of it answered at 2.5-2.9. It now stays off unless you switch it
+on: per model on the model's card on the Dashboard, or for every model whose ends you hold with
+`inference.encrypted_pipeline_auto = true` in `config.toml`, as before. **If you relied on it, switch it
+on again.** It was never private: the computers in between still work on numbers that can reveal much of
+what you wrote, and it makes replies slower. "Get the missing parts" on a model's card now switches it
+on when both parts are already here, and otherwise says to switch it on once they arrive; a failure
+there shows its reason instead of "[object Promise]".
+
+**A far computer in a split is no longer priced as if it were next door** (#427). A computer that
+passes each word on to the next one never timed a word on its own, so the route planner read its
+prompt-reading speed instead — a figure that leaves out the round trip — and a computer ~210 ms away
+looked almost free. Its round trip is charged again, and the planner's diagnostics now say what each
+computer's figure was timed on (`observed_timed_on`: decode steps or prompt passes).
+
+**A computer that others can reach only through a relay is told why, and how to fix it.** A relay
+works but is slower than a direct connection. The network status panel now names the cause it found
+and the one fix for it: turn UPnP on in the router or forward the two ports (named, UDP and TCP);
+another device holds the ports, often a second computer running SwarmLLM; the router sits behind the
+provider's box (bridge mode, or ask for a public address); UPnP is off in this computer's settings;
+or, under WSL, mirrored networking is off or Windows treats the network as Public. Nothing shows in the
+first three minutes, while the router and the reachability check are still being asked. In all 21
+languages, and on every stats surface as `reachability`.
+
+**A Qwen 3.5 or 3.6 split with both guessers no longer runs slower than with one** (#425). Where the
+first part carries the model's own guess head and the block drafter, the two together were slower
+than either alone on two of three prompts: the drafter was judged only on the rounds it was picked
+for. Now every reply judges it, from the words it actually commits, and sets it aside when it would
+not have written faster. Qwen3.6-35B-A3B split between Thailand and Australia (~132 ms): a palindrome
+function 9.8-11.6 → 14.3-14.9 words a second (the better single guesser: 12.5), a story 5.2-6.2 →
+6.8-7.5, a class level. On a story the pair still trails the guess head alone (7.4-7.9 against
+8.5-9.6 words a second, measured again before this release): the drafter's cost while it is present
+is not yet weighed (FUTURE_WORK #425).
+
+**"Runs locally" counts the processor beside the graphics card.** The model search and the "Running
+now" list judged a model by the card's share alone, so a model the computer runs across card and
+processor read "Host parts" — Gemma 4 12B did on an 8 GB laptop card. Both now count the processor's
+room too, against the owner's own memory limit rather than the contribution level, which caps only
+the work done for other computers. What the computer offers the swarm is unchanged.
+
+**The model search counts what it hid the right way round** ("3 of 10 hidden", it read "7 of 3"),
+a "Host parts" row shows the model's size beside the part this computer would keep ("15.3 GB · 981.4
+MB on this computer", where it showed 981 MB alone), and the Trending strip's scrollbar is dark on the
+dark theme in Chrome 121 and later.
+
+**An invite code names the right port on a computer running SwarmLLM above port 65525**: it added
+10 to the port unchecked, which wrapped round, while the computer listened at 65535. The Windows
+firewall advice under WSL and the anchor's startup banner had the same sum.
+
+**The README** says what people use SwarmLLM for and where to get help, with new screenshots and
+current speeds only, among them Qwen3.8 27B answered whole by a computer in Denmark (138-145 words a
+second on code) and Llama 3.3 70B across three computers (4.0 on code).
+
 ## [0.3.279-alpha] — 2026-11-09
 
 **Qwen 3.5 and 3.6 models split across computers write several words a round trip instead of one**

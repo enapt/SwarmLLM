@@ -3119,6 +3119,13 @@ the fast route is Denmark's RTX 5090 holding the whole model: Denmark joined the
 is still fetching (it lacked 0, 49-51 and 59-60 at 10:00Z), so that is a newcomer's fetch, not a fault. "Get the
 missing parts" (`enable-privacy`) now switches the setting ON where both ends are already here and otherwise says
 whether a setting will switch it on once they arrive (`turns_on_when_they_arrive`), since nothing does by default.
+**Verified live 12:10-12:22Z 11-09** (the candidate CUDA build on this node's port, `scratchpad/swap427.sh`, five asks
+at 160 tokens): with the new default Gemma 4 31B went whole to Australia every time, 2.54-2.89 tok/s, the prediction
+within 1-4% of each warm reply (36.8-37.2 s against 35.6-36.3); with Australia excluded (`swarm_route`
+`exclude_nodes`) the chain here → Denmark → Proxmox → Denmark → here gave Denmark `observed_timed_on=Some(PromptPasses)`
+(1.51 ms a layer) from the third ask, and the prediction carried its round trips — the first, uncopied reply priced
+545 ms a pass against ~600 measured (this morning: 358 against ~590). Later asks repeated the prompt and copied the
+earlier reply (#337), 4.7-8.8 tok/s, so they price nothing.
 **Residual**: each hop of a chain timed by the hop itself — a chained hop sends no `served_us` today, so a chain
 driven from here is priced from the requester's view alone (a wire trailer, a feature bit and a security review: the
 next round); re-measure Gemma 4 31B once Denmark holds it whole.
@@ -5623,7 +5630,11 @@ grep `^| N |`).
   unchanged (`node_model_budget_mb`; one arithmetic, `ram_room_now_mb`, behind all three). Test
   `the_owners_budget_on_a_card_computer_counts_the_processor_beside_the_card` (red with
   `SWARMLLM_HYBRID_OFFLOAD=0`). Not built: a pill of its own for a model that runs here partly on the
-  processor, more slowly (LM Studio marks "Partial GPU offload possible").
+  processor, more slowly (LM Studio marks "Partial GPU offload possible"). Residual (the v0.3.280 review,
+  checked): the CARD half is still the contribution-scaled budget (`compute_vram_budget` →
+  `inference_vram_budget_mb(.., contribution())`) — but so is what the loader admits for the owner
+  (`ModelProcessPool::vram_budget_now` takes no requester), so the search agrees with the load; giving the
+  owner's own card work its own cap, as #266 did for system memory, is a change of its own.
 
 **Closed 2026-11-06/07, released in v0.3.277 (published 2026-11-07 07:45:06Z)** (#416's nicknames, #417, #402, #191, #418, #419, #421, #420, #423)
 - #423 — **A part download that left its parts to another download credited them here and called the
