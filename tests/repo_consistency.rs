@@ -8537,8 +8537,8 @@ fn every_apt_command_goes_through_a_retrying_action() {
 /// `SharedState::encrypted_pipeline_for` is the single answer. Reading
 /// `encrypted_pipeline_models` directly sees only an EXPLICIT per-model toggle
 /// and misses both automatic cases — an explicit global `encrypted_pipeline`,
-/// and the default `encrypted_pipeline_auto`, which has switched privacy on
-/// wherever a node holds both ends of a model since 2026-07-27.
+/// and `encrypted_pipeline_auto`, which switches privacy on wherever a node
+/// holds both ends of a model (the default from 2026-07-27 to 2026-11-09).
 ///
 /// Auto-manage prune did exactly that. Its skip looked like a guard and read
 /// like one; it protected models a user had toggled by hand and silently left

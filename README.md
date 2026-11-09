@@ -227,10 +227,11 @@ It depends on where the model runs, so here's the straight answer:
   person running one of them could reconstruct your question. **Don't send
   anything sensitive through the public swarm.**
 - **Start and finish on this computer — harder to read, still not private.**
-  When your computer holds a model's first and last parts, it does the first
-  and last steps itself (automatically; switch it per model on the model's card
-  on the Dashboard). Other computers then never receive your typed text or the
-  reply — only the numbers in between. Those numbers can still reveal much of
+  When your computer holds a model's first and last parts, you can have it do
+  the first and last steps itself (switch it on per model on the model's card
+  on the Dashboard; it is off unless you do, so replies take the fastest
+  route). Other computers then never receive your typed text or the reply —
+  only the numbers in between. Those numbers can still reveal much of
   what you wrote, so it is a real improvement but not a guarantee, and replies
   get slower.
 - **Private Mode** keeps your questions on your own linked devices and, by

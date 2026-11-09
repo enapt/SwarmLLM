@@ -1055,7 +1055,8 @@ computer, made it the default model, or gave it prompt privacy by hand.
   download passes refuse to fetch it — one place, not a gate per adoption
   path (trust has four writers: `NetworkPopular`, quant siblings, the trusted
   publisher promotion, requests). It sits BEFORE prompt privacy's exemption:
-  the automatic privacy default keeps both ends of any model held whole, which
+  the automatic privacy rule (the default until 2026-11-09) keeps both ends of
+  any model held whole, which
   would have kept two parts of a model nobody chose. A copy taken up before
   this change is given back by the same rule. Prune's checks that guard the
   swarm's copies — the replica count, busy holders, re-acquirable, the

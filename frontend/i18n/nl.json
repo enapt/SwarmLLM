@@ -547,6 +547,7 @@
   "enc.enable_privacy": "Beginnen en eindigen op deze computer",
   "enc.fetch_missing": "Ontbrekende delen ophalen",
   "enc.fetch_started": "De delen worden gedownload die deze computer nodig heeft om antwoorden zelf te beginnen en af te ronden. Het gaat vanzelf aan zodra ze binnen zijn.",
+  "enc.fetch_started_switch_on": "De delen worden gedownload die deze computer nodig heeft om antwoorden zelf te beginnen en af te ronden. Zet het aan op de kaart van dit model zodra ze binnen zijn.",
   "enc.full_e2e": "Begint en eindigt op deze computer — andere computers krijgen je tekst en het antwoord nooit, maar wat ze wel krijgen kan er nog veel van verraden",
   "enc.full_e2e_overhead": "tragere antwoorden",
   "enc.gain_speed": "meer snelheid, minder privacy",

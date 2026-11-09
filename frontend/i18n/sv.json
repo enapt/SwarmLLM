@@ -547,6 +547,7 @@
   "enc.enable_privacy": "Börja och avsluta på den här datorn",
   "enc.fetch_missing": "Hämta delarna som saknas",
   "enc.fetch_started": "Laddar ner delarna som den här datorn behöver för att själv börja och avsluta svar. Det slås på av sig självt när de har kommit.",
+  "enc.fetch_started_switch_on": "Laddar ner delarna som den här datorn behöver för att själv börja och avsluta svar. Slå på det på den här modellens kort när de har kommit.",
   "enc.full_e2e": "Börjar och slutar på den här datorn — andra datorer får aldrig din text eller svaret, men det de får kan ändå avslöja mycket av det",
   "enc.full_e2e_overhead": "långsammare svar",
   "enc.gain_speed": "vinn hastighet, förlora lite integritet",

@@ -8,10 +8,12 @@
 //! Pipeline Privacy Model). It requires holding the first AND last piece of
 //! the model.
 //!
-//! This asks the daemon to fetch exactly those pieces. It deliberately does not
-//! set a flag — privacy turns itself on once both ends are present, so there is
-//! no window where a flag is set but the shards have not arrived, which would
-//! fail every request for the model until the download finished.
+//! This asks the daemon to fetch exactly those pieces. Where both are already
+//! here it switches the setting on for the model. Where one is missing it sets
+//! no flag (a flag before the parts arrive fails every request for the model
+//! until the download finishes) and says whether a setting will switch it on
+//! once they arrive or the owner must — the automatic rule is off by default
+//! since 2026-11-09 (`inference.encrypted_pipeline_auto`).
 
 /// Ask the daemon to fetch the first and last shard of `model`.
 pub async fn enable_privacy(
@@ -48,21 +50,10 @@ pub async fn enable_privacy(
 
     match body.get("status").and_then(|s| s.as_str()) {
         Some("already_available") => {
-            let on = body
-                .get("encrypted_pipeline")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false);
-            println!("{model}: both ends are already on this machine.");
-            if on {
-                println!("Start and finish on this computer is ON — other computers never");
-                println!("receive your text or the reply, but the numbers they work on can");
-                println!("still reveal much of it.");
-            } else {
-                println!(
-                    "Start and finish on this computer is off for this model because it was turned off for it."
-                );
-                println!("Turn it back on in the dashboard, or via the per-model setting.");
-            }
+            println!("{model}: both ends are already on this computer.");
+            println!("Start and finish on this computer is ON — other computers never");
+            println!("receive your text or the reply, but the numbers they work on can");
+            println!("still reveal much of it.");
         }
         Some("downloading") => {
             let shards = body
@@ -77,14 +68,14 @@ pub async fn enable_privacy(
                 })
                 .unwrap_or_default();
             println!("{model}: fetching part(s) {shards}.");
-            println!("Start and finish on this computer turns on by itself once they arrive.");
+            print_when_it_turns_on(model, &body);
             println!("Progress:  swarmllm status");
         }
         Some("no_download_source") => {
             println!("{model}: the missing part(s) cannot be fetched directly —");
             println!("no HuggingFace source is recorded for this model.");
-            println!("They may still arrive from other computers; starting and finishing");
-            println!("on this computer turns on by itself once both ends are here.");
+            println!("They may still arrive from other computers.");
+            print_when_it_turns_on(model, &body);
         }
         _ => {
             // Unrecognised shape: show it rather than pretending to interpret it.
@@ -96,4 +87,20 @@ pub async fn enable_privacy(
     }
 
     Ok(())
+}
+
+/// Whether the setting switches on by itself once the parts arrive — only
+/// where the model's own choice, the global switch or the automatic rule says
+/// so (`turns_on_when_they_arrive`); otherwise how to switch it on then.
+fn print_when_it_turns_on(model: &str, body: &serde_json::Value) {
+    let by_itself = body
+        .get("turns_on_when_they_arrive")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    if by_itself {
+        println!("Start and finish on this computer turns on by itself once they arrive.");
+    } else {
+        println!("Once they have arrived, run `swarmllm privacy {model}` again, or switch");
+        println!("it on from the model's card on the Dashboard, to turn it on.");
+    }
 }

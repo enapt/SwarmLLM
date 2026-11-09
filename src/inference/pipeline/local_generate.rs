@@ -254,7 +254,8 @@ mod tests {
     /// single remote segment** — and the hand-off agrees with the scheduler about
     /// privacy.
     ///
-    /// The node holds both ends of `m`, so automatic prompt privacy is ON and the
+    /// The node holds both ends of `m` and the automatic rule is switched on (off
+    /// by default since 2026-11-09), so prompt privacy is ON and the
     /// hand-off — which puts the raw prompt on the wire — must refuse (control).
     /// Under a `swarm_route` override releasing every shard, the scheduler plans
     /// with privacy OFF (the automatic default steps aside), and the hand-off
@@ -294,6 +295,9 @@ mod tests {
             "fixture: the n-gram loop's own preconditions are met"
         );
 
+        let mut live = (**state.cfg()).clone();
+        live.inference.encrypted_pipeline_auto = true;
+        state.apply_live_config(live);
         let exec = executor_for(state.clone(), vec![segment(peer.clone(), (0, 32))]);
         assert!(
             state.encrypted_pipeline_for(&ModelId("m".into())),

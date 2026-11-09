@@ -62,7 +62,7 @@ pub use models::{
     MAX_FOREIGN_WISHLIST_ENTRIES,
 };
 pub use peer_outliers::PeerOutliers;
-pub use peer_speed::{PeerSpeed, WorkKind};
+pub use peer_speed::{PeerSpeed, Ranking, TimedOn, WorkKind};
 pub use prompt_admission::PeerPromptFit;
 pub use relay::{
     LocalMemoryRefusal, PeerServe, RelayForwardCounter, RelayProvenFeatures, RelayRoute, ServeKind,
@@ -616,7 +616,7 @@ pub enum PrivacyDecidedBy {
     /// off for every model unasked because `encrypted_pipeline_auto` is off.
     GlobalSetting,
     /// On exactly while this node holds both ends of the model
-    /// (`encrypted_pipeline_auto`, the default).
+    /// (`encrypted_pipeline_auto`, off by default since 2026-11-09).
     Automatic,
 }
 
@@ -2868,7 +2868,12 @@ impl SharedState {
     /// machine that answers you from reading your prompt, and it was previously
     /// off unless a user knew to look for it. It is safe to default on ONLY where
     /// both ends are already local, because otherwise the pipeline has no legal
-    /// route and the request fails outright.
+    /// route and the request fails outright. It WAS on by default from
+    /// 2026-07-27 to 2026-11-09 and is off by default since: holding a model's
+    /// ends kept its middle from being handed WHOLE to a faster computer
+    /// (#427 — Gemma 4 31B ran as a three-computer chain at 1.7-2.3 tok/s where
+    /// the hand-off it blocked ran at 2.5-2.9), so the node routes for speed
+    /// unless the owner asks for this (`config::inference`'s comment).
     ///
     /// **This is the single answer to "is prompt privacy on for this model".**
     /// The scheduler and the admin API both read it here; computing it separately
@@ -2955,6 +2960,25 @@ impl SharedState {
             decided_by,
             without_a_choice,
         }
+    }
+
+    /// Would prompt privacy be in force for this model once this node holds
+    /// both its ends? The same precedence with the ends taken as held — what
+    /// "get the missing parts" must ask before it promises that privacy turns
+    /// on by itself when they arrive (`enable_model_privacy`). Since
+    /// `encrypted_pipeline_auto` went off by default (2026-11-09) the answer
+    /// with no choice for the model and no global switch is NO: the owner
+    /// still has to switch it on, and a reply that said otherwise left them
+    /// believing it was on.
+    pub fn prompt_privacy_once_both_ends_here(&self, model_id: &crate::types::ModelId) -> bool {
+        let cfg = self.cfg();
+        Self::resolve_encrypted_pipeline_inner(
+            self.prompt_privacy_choice(model_id),
+            cfg.inference.encrypted_pipeline,
+            cfg.inference.encrypted_pipeline_auto,
+            || true,
+        )
+        .0
     }
 
     /// The ONE writer of the owner's per-model choice: `Some` records it,
@@ -3515,6 +3539,17 @@ impl SharedState {
         model_id: &crate::types::ModelId,
     ) -> Option<f32> {
         self.peer_model_speed(node_id, model_id, |s| s.ranking_ms_per_layer())
+    }
+
+    /// The same figure with what it was timed on (`peer_speed::TimedOn`) —
+    /// for a price, which must know whether the figure already holds this
+    /// node's round trip to the peer (gotcha #1073).
+    pub fn observed_ranking(
+        &self,
+        node_id: &crate::types::NodeId,
+        model_id: &crate::types::ModelId,
+    ) -> Option<Ranking> {
+        self.peer_model_speed(node_id, model_id, |s| s.ranking())
     }
 
     /// `(fixed_ms_per_visit, ms_per_layer)` for a decode step of `model_id` on
@@ -6122,6 +6157,33 @@ mod encrypted_pipeline_precedence_tests {
         );
     }
 
+    /// "Get the missing parts" promises privacy turns on by itself only where a
+    /// setting will do it. With the automatic rule off by default (2026-11-09)
+    /// a model nobody chose for stays off once its ends arrive, and saying
+    /// otherwise left the owner believing it was on.
+    #[test]
+    fn privacy_turns_on_once_the_ends_arrive_only_where_a_setting_says_so() {
+        let state = test_state();
+        let model = crate::types::ModelId("m".into());
+        assert!(
+            !state.prompt_privacy_once_both_ends_here(&model),
+            "the default: nothing switches it on by itself"
+        );
+        state.set_prompt_privacy_choice(&model, Some(true));
+        assert!(state.prompt_privacy_once_both_ends_here(&model));
+        state.set_prompt_privacy_choice(&model, None);
+
+        let mut live = (**state.cfg()).clone();
+        live.inference.encrypted_pipeline_auto = true;
+        state.apply_live_config(live);
+        assert!(state.prompt_privacy_once_both_ends_here(&model));
+        state.set_prompt_privacy_choice(&model, Some(false));
+        assert!(
+            !state.prompt_privacy_once_both_ends_here(&model),
+            "an explicit off wins over the automatic rule"
+        );
+    }
+
     /// Both global switches live in config.toml, which a reload applies while
     /// the node runs. The resolver read the boot snapshot, so a reloaded
     /// `encrypted_pipeline = true` changed nothing until a restart.
@@ -6151,6 +6213,10 @@ mod encrypted_pipeline_precedence_tests {
     fn a_models_choice_can_be_forgotten_back_to_automatic() {
         let state = test_state();
         let model = crate::types::ModelId("m".into());
+        // What a forgotten choice falls back to; off by default since 2026-11-09.
+        let mut live = (**state.cfg()).clone();
+        live.inference.encrypted_pipeline_auto = true;
+        state.apply_live_config(live);
         let stored = |state: &SharedState| {
             state
                 .db

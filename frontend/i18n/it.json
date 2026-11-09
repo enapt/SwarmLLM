@@ -547,6 +547,7 @@
   "enc.enable_privacy": "Iniziare e finire su questo computer",
   "enc.fetch_missing": "Scarica le parti mancanti",
   "enc.fetch_started": "Download delle parti che servono a questo computer per iniziare e finire le risposte da solo. Si attiverà da solo quando arrivano.",
+  "enc.fetch_started_switch_on": "Download delle parti che servono a questo computer per iniziare e finire le risposte da solo. Quando arrivano, attivalo dalla scheda di questo modello.",
   "enc.full_e2e": "Inizia e finisce su questo computer: gli altri computer non ricevono mai il tuo testo né la risposta, ma ciò che ricevono può comunque rivelarne gran parte",
   "enc.full_e2e_overhead": "risposte più lente",
   "enc.gain_speed": "guadagna velocità, perdi un po' di privacy",

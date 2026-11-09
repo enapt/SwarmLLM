@@ -596,11 +596,29 @@ fn vertex_cost_as(
         c.observed_latency_ms_per_layer
     };
 
-    // When we have an observed per-layer latency, it already includes the peer's
-    // segment wall-clock round-trip (compute + peer-side load). Fold the whole
-    // `segment_ms` into `compute_ms` and skip the static round-trip network
-    // term to avoid double-counting. When we don't have an observation yet, use
-    // the traditional two-part cost (network + static compute estimate).
+    // ONE round trip a pass: `latency_ms` is already a round trip
+    // (`PeerInfo::round_trip_ms`, what one exchange with the peer costs),
+    // and a pass driven from here crosses it once — the forward out, the
+    // result back — as Petals charges `rtt / 2` an edge
+    // (`sequence_manager.py`, `_rtt_to_delay`) and `led_hop_ms` half the
+    // coordinates' round trip a hop. It was `2 * latency_ms`, written as
+    // though the figure were one way: the 70B's checks to a 3060 in
+    // Australia answered in 1,145 ms at the least, its ~400 ms round trip
+    // inside that once, and were priced 800 ms of network a pass on top of
+    // the compute (FUTURE_WORK #3 (h), 2026-10-29). Charged by both branches
+    // below where the figure does not already hold it.
+    let round_trip_a_pass = if is_local || in_led_chain {
+        0.0
+    } else {
+        c.latency_ms as f32
+    };
+
+    // When we have an observed per-layer latency timed on DECODE steps, it
+    // already includes the peer's segment wall-clock round-trip (compute +
+    // peer-side load). Fold the whole `segment_ms` into `compute_ms` and skip
+    // the static round-trip network term to avoid double-counting. When we
+    // don't have an observation yet, use the traditional two-part cost
+    // (network + static compute estimate).
     let (base_network_ms, per_layer_ms) = if let Some(obs_per_layer) = observation {
         // A measured peer's segment time is `fixed + per_layer × layers`, and
         // the fixed half is what a visit costs before any layer is computed —
@@ -630,23 +648,28 @@ fn vertex_cost_as(
         } else {
             fixed
         };
-        (per_visit, obs_per_layer)
-    } else {
-        // ONE round trip a pass: `latency_ms` is already a round trip
-        // (`PeerInfo::round_trip_ms`, what one exchange with the peer costs),
-        // and a pass driven from here crosses it once — the forward out, the
-        // result back — as Petals charges `rtt / 2` an edge
-        // (`sequence_manager.py`, `_rtt_to_delay`) and `led_hop_ms` half the
-        // coordinates' round trip a hop. It was `2 * latency_ms`, written as
-        // though the figure were one way: the 70B's checks to a 3060 in
-        // Australia answered in 1,145 ms at the least, its ~400 ms round trip
-        // inside that once, and were priced 800 ms of network a pass on top of
-        // the compute (FUTURE_WORK #3 (h), 2026-10-29).
-        let network = if is_local || in_led_chain {
-            0.0
+        // ⚠ A figure timed only on PROMPT passes carries almost none of our
+        // round trip: a pass crosses it once for every position it carries,
+        // and the figure is scaled to one (`peer_speed::TimedOn::PromptPasses`).
+        // A peer that only ever runs CHAINED has nothing else — no chained
+        // check is timed — so a 5090 217 ms away read 3.0 ms a layer and a
+        // Gemma 4 31B split across two far computers was priced ~358 ms a
+        // token against ~580 measured (gotcha #1073, FUTURE_WORK #427). Such a
+        // vertex is entered per token like any other and pays the round trip
+        // an unmeasured peer pays. Only where it is entered from here: a
+        // whole-model hand-off pays its trip once, a led chain's hops are
+        // `led_hop_ms`'s.
+        let round_trip_not_in_the_figure = if entered_per_token
+            && c.observed_latency_timed_on
+                .is_some_and(|t| !t.carries_the_round_trip())
+        {
+            round_trip_a_pass
         } else {
-            c.latency_ms as f32
+            0.0
         };
+        (per_visit + round_trip_not_in_the_figure, obs_per_layer)
+    } else {
+        let network = round_trip_a_pass;
         // The static prior, priced as one of THIS model's layers (#250), on
         // the device each layer of the range runs on.
         (network, DecodePrice::Prior { range, ahead }.ms_per_layer(c))
@@ -2039,6 +2062,7 @@ mod tests {
             est_tokens_per_sec,
             layer_work: 1.0,
             observed_latency_ms_per_layer: None,
+            observed_latency_timed_on: None,
             observed_fixed_ms_per_visit: None,
             observed_delegated_ms_per_layer: None,
             expected_attempts: 1.0,
@@ -2880,6 +2904,36 @@ mod tests {
         assert_eq!(v.compute_ms, 31.4 * 8.0 * ASSUMED_FORWARD_PASSES);
     }
 
+    /// A figure timed only on PROMPT passes carries almost none of our round
+    /// trip — the pass crossed it once for every position — so its vertex pays
+    /// the trip a pass as an unmeasured peer does; the same figure timed on
+    /// decode steps still pays none (gotcha #1073: Gemma 4 31B's computer in
+    /// Denmark, 217 ms away, read 3.0 ms a layer and was priced near free).
+    #[test]
+    fn a_figure_timed_on_prompt_passes_still_pays_the_round_trip() {
+        use crate::daemon::state::TimedOn;
+        let local = NodeId([9u8; 32]);
+        let mut c = cand(2, vec![(1, 49)], 217, 0.0, false, false, 0.0);
+        c.observed_latency_ms_per_layer = Some(3.0);
+        c.observed_latency_timed_on = Some(TimedOn::PromptPasses);
+
+        let v = vertex_cost(&c, (1, 49), &local, 60, None);
+        assert_eq!(
+            v.network_ms,
+            217.0 * ASSUMED_FORWARD_PASSES,
+            "a prompt-pass figure leaves the round trip out, so the vertex pays it"
+        );
+        assert_eq!(v.compute_ms, 3.0 * 48.0 * ASSUMED_FORWARD_PASSES);
+
+        c.observed_latency_timed_on = Some(TimedOn::DecodeSteps { samples: 4 });
+        let d = vertex_cost(&c, (1, 49), &local, 60, None);
+        assert_eq!(
+            d.network_ms, 0.0,
+            "a decode-timed figure already carries it"
+        );
+        assert_eq!(d.compute_ms, v.compute_ms);
+    }
+
     /// A remote segment starting at layer 0 but NOT covering the whole model is
     /// still entered once per token: the coordinator samples each token and
     /// hands it back to the first segment. Charging that segment its network
@@ -3261,7 +3315,7 @@ mod tests {
             CapacityBound::Everyone,
             None,
         )
-        .expect("the constrained pass must route the shape privacy is on by default for");
+        .expect("the constrained pass must route the shape privacy asks for");
         assert_eq!(segs.len(), 3, "{segs:?}");
         assert_eq!(segs[0].node_id, local);
         assert_ne!(segs[1].node_id, local);
@@ -5338,6 +5392,7 @@ mod transfer_cost_tests {
             est_tokens_per_sec: 20.0,
             layer_work: 1.0,
             observed_latency_ms_per_layer: None,
+            observed_latency_timed_on: None,
             observed_fixed_ms_per_visit: None,
             observed_delegated_ms_per_layer: None,
             observed_prefill_ms_per_layer_byte: None,

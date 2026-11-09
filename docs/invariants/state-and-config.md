@@ -586,10 +586,11 @@ unchanged without the block and genuinely answered by another machine with it
 
 (2026-09-11.) `SharedState::encrypted_pipeline_for` resolves three cases in
 order: an explicit per-model choice, an explicit global `encrypted_pipeline`,
-and — since 2026-07-27 — `encrypted_pipeline_auto`, which is **ON by default**
-and switches privacy on wherever this node holds both ends of a model. That
-third case is how prompt privacy is normally in force at all, because it is the
-only one that needs no user action.
+and `encrypted_pipeline_auto`, which switches privacy on wherever this node
+holds both ends of a model. That third case was ON by default from 2026-07-27 to
+2026-11-09, and was then how prompt privacy was normally in force at all; it is
+off by default since, because holding a model's ends kept its middle from being
+handed whole to a faster computer (#427).
 
 `encrypted_pipeline_models` holds the FIRST case alone. Four sites re-derived
 the setting from it, each implementing a different prefix of the precedence
@@ -982,8 +983,9 @@ Full evidence: `docs/invariants/state-and-config.md`
   `SharedState::encrypted_pipeline_for` is the single answer to "is prompt
   privacy on for this model"; the map holds only the EXPLICIT per-model toggle
   and misses both automatic cases, one of which
-  (`encrypted_pipeline_auto`, default ON wherever the node holds both ends) is
-  how privacy is normally switched on at all. Use
+  (`encrypted_pipeline_auto`, wherever the node holds both ends — ON by
+  default from 2026-07-27 to 2026-11-09, off since) switches privacy on with no
+  per-model choice. Use
   `privacy_explicitly_enabled_for` only where a DELIBERATE user choice is the
   question. `prompt_privacy_is_never_re_derived_from_the_per_model_map` in
   `tests/repo_consistency.rs` fails the build on a direct read.

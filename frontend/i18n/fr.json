@@ -547,6 +547,7 @@
   "enc.enable_privacy": "Commencer et finir sur cet ordinateur",
   "enc.fetch_missing": "Récupérer les parties manquantes",
   "enc.fetch_started": "Téléchargement des parties dont cet ordinateur a besoin pour commencer et finir les réponses lui-même. L'option s'activera d'elle-même à leur arrivée.",
+  "enc.fetch_started_switch_on": "Téléchargement des parties dont cet ordinateur a besoin pour commencer et finir les réponses lui-même. Une fois arrivées, activez l'option depuis la carte de ce modèle.",
   "enc.full_e2e": "Commence et finit sur cet ordinateur — les autres ordinateurs ne reçoivent jamais votre texte ni la réponse, mais ce qu'ils reçoivent peut encore en révéler une grande partie",
   "enc.full_e2e_overhead": "réponses plus lentes",
   "enc.gain_speed": "gagner en vitesse, perdre un peu de confidentialité",

@@ -468,11 +468,17 @@ pub async fn set_model_auto_manage(
 /// which previously meant reading which pieces were missing and downloading them
 /// by hand. This fetches exactly those pieces and nothing else.
 ///
-/// It deliberately does NOT set a per-model flag. Privacy turns itself on once
-/// both ends are present (`encrypted_pipeline_for`), so there is no window where
-/// a flag is on but the shards have not arrived — which would fail every request
-/// for the model with "No node available" until the download finished. It does
-/// clear an explicit OFF, since that would otherwise keep suppressing it.
+/// Where both ends are already here it records the owner's choice as ON —
+/// asking for privacy is that choice, and nothing else would switch it on now
+/// that `encrypted_pipeline_auto` is off by default (2026-11-09).
+///
+/// Where an end is missing it sets NO flag: a flag on before the parts arrive
+/// fails every request for the model until the download finishes, and the
+/// card would read "Requests are failing" the moment the owner clicked. It
+/// clears an explicit OFF, and says in `turns_on_when_they_arrive`
+/// (`SharedState::prompt_privacy_once_both_ends_here`) whether a setting will
+/// switch privacy on once the parts land, or the owner must — until
+/// 2026-11-09 the reply promised the former whatever the settings said.
 pub async fn enable_model_privacy(
     State(state): State<AppState>,
     Path(model_id): Path<String>,
@@ -525,6 +531,9 @@ pub async fn enable_model_privacy(
         .collect();
 
     if needed.is_empty() {
+        state
+            .shared_state
+            .set_prompt_privacy_choice(&mid, Some(true));
         return Ok(Json(serde_json::json!({
             "model_id": model_id,
             "status": "already_available",
@@ -533,6 +542,7 @@ pub async fn enable_model_privacy(
             "downloading": [],
         })));
     }
+    let turns_on_when_they_arrive = state.shared_state.prompt_privacy_once_both_ends_here(&mid);
 
     // Needs a HuggingFace source to fetch from. Without one the shards can still
     // arrive over the network from peers, so say so rather than failing.
@@ -546,12 +556,11 @@ pub async fn enable_model_privacy(
         return Ok(Json(serde_json::json!({
             "model_id": model_id,
             "status": "no_download_source",
-            "message": "No HuggingFace source recorded for this model, so the missing pieces \
-                        cannot be fetched directly. They may still arrive from peers; starting \
-                        and finishing on this computer turns on by itself once both ends are \
-                        present.",
+            "message": "No HuggingFace source recorded for this model, so the missing parts \
+                        cannot be fetched directly. They may still arrive from other computers.",
             "needed_shards": needed,
             "cleared_explicit_off": had_explicit_off,
+            "turns_on_when_they_arrive": turns_on_when_they_arrive,
         })));
     };
 
@@ -591,7 +600,7 @@ pub async fn enable_model_privacy(
         "status": "downloading",
         "needed_shards": needed,
         "cleared_explicit_off": had_explicit_off,
-        "note": "Starting and finishing on this computer turns on by itself once both ends are here.",
+        "turns_on_when_they_arrive": turns_on_when_they_arrive,
         "download": resp.0,
     })))
 }
@@ -803,13 +812,28 @@ fn forget_encrypted_pipeline_choice(state: &AppState, model_id: String) -> Json<
         "encrypted_pipeline": privacy.on,
         "decided_by": privacy.decided_by.as_str(),
         "per_model_override": serde_json::Value::Null,
-        "note": if privacy.on {
-            "No choice is stored for this model now. Start and finish on this computer \
-             is on: it holds both ends of the model, or the global setting asks for it."
-        } else {
-            "No choice is stored for this model now. Start and finish on this computer \
-             is off: it turns on by itself while this computer holds both ends of the \
-             model, unless the global setting says otherwise."
+        // Said by the rule that decided: the automatic one is off by default
+        // since 2026-11-09, so "it turns on by itself" is no longer the
+        // general answer.
+        "note": match (privacy.on, &privacy.decided_by) {
+            (true, crate::daemon::state::PrivacyDecidedBy::Automatic) => {
+                "No choice is stored for this model now. Start and finish on this computer \
+                 is on: it holds both ends of the model and the automatic rule is on."
+            }
+            (true, _) => {
+                "No choice is stored for this model now. Start and finish on this computer \
+                 is on: the global setting asks for it."
+            }
+            (false, crate::daemon::state::PrivacyDecidedBy::Automatic) => {
+                "No choice is stored for this model now. Start and finish on this computer \
+                 is off: it turns on by itself while this computer holds both ends of the \
+                 model."
+            }
+            (false, _) => {
+                "No choice is stored for this model now. Start and finish on this computer \
+                 is off, as it is for every model unless it is switched on for this one or \
+                 by the global setting."
+            }
         },
     }))
 }

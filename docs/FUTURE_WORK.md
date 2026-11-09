@@ -3068,7 +3068,11 @@ Australia (49-59) → here (59-60), ~580 ms a token: code 1.7 and 6.2 (the repea
 prose 1.7-2.3. Denmark held 1-49 and 51-59 — not the whole model — and Proxmox 49-51. **Why that route** (a sonnet
 read of the planner and the request's DIAG lines, 11-09; checked by hand: `parallax.rs` `chain_cost_terms`' `hops_ms`
 is 0 for a chain driven from here, "whose round trips are in its vertices"): "start and finish here" did NOT force it
-(`privacy_extra_ms=0`; no remote computer holds layer 0 or 59, so none could head or finish another route). The planner
+(`privacy_extra_ms=0`; no remote computer holds layer 0 or 59, so none could head or finish another route) — **WRONG,
+corrected 11:40Z 11-09**: Australia `aa3d1e66` has offered `ranges=[(0, 60)]`, the whole model, in every candidate
+line since 11-07, so the automatic privacy rule DID force the chain — it rules out the whole hand-off (`parallax`'s
+`source_ok`), and that hand-off measured faster (below; the owner's diagnosis, "isnt the end middle gap issue due to
+me holding the first/last shard for boomerang?"). The planner
 priced the route at ≤ 20,033 ms over 56 passes, ~358 ms a token, against ~580 measured — the gap about Denmark's round
 trip: once Denmark had a measured `observed_ms_per_layer` (3.0, no fixed term) its vertex dropped the network term
 (`vertex_cost_as`: an observation "already carries the round trip inside it"), yet 3.0 × 48 layers = 144 ms cannot hold
@@ -3098,6 +3102,26 @@ charged to its head over the layers it ran, as `forward_through_segments_inner` 
 the two writers disagree today. Neither alone may move THIS route (Denmark's ~20 s + 56 × 217 ms still undercuts
 Australia's 43 s on paper); the route that is faster in physics needs Denmark to hold 49-51 (above). Verify on the
 real route: the DIAG's source field, the logged prediction against the measured ~580 ms a token.
+
+**Done 11-09 (on main, not in a release yet).** (1) BUILT: `PeerSpeed::ranking` says what its figure was timed on
+(`peer_speed::Ranking` / `TimedOn::{DecodeSteps, PromptPasses}`), carried to `NodeCandidate::observed_latency_timed_on`
+(`SharedState::observed_ranking`), and `parallax::vertex_cost_as` keeps the vertex's round trip for a `PromptPasses`
+figure — a decode-step figure still carries its own; logged as the DIAG's `observed_timed_on`. Tests
+`a_figure_timed_on_prompt_passes_still_pays_the_round_trip` (red with the fix off: network 0 against 13,888 ms) and
+`the_ranking_figure_says_what_it_was_timed_on`. (2) DROPPED: charging a chained check to its head would put the next
+computer's time (Australia's) into the head's (Denmark's) OWN figure, which prices Denmark wherever it runs — the
+same error the other way. (3) `inference.encrypted_pipeline_auto` is OFF by default (the owner: "you should be able
+to simply disable this (route for optimal speed not privacy)"): measured on v0.3.279 with the request's own
+`swarm_route` `{"pretend_local_holds":"none"}` (11:30Z, `ask_tier.py`, 160 tokens, twice) Gemma 4 31B went WHOLE to
+Australia: 2.5 then 2.88 tok/s, first token 24 s (its load) then 2.5 s, against the chain's 1.7-2.3. Australia's card
+is an RTX 3060 (12 GB), so the 31B runs split across its card and processor there — 2.9 tok/s is its own speed, and
+the fast route is Denmark's RTX 5090 holding the whole model: Denmark joined the swarm only on 11-09 (the owner) and
+is still fetching (it lacked 0, 49-51 and 59-60 at 10:00Z), so that is a newcomer's fetch, not a fault. "Get the
+missing parts" (`enable-privacy`) now switches the setting ON where both ends are already here and otherwise says
+whether a setting will switch it on once they arrive (`turns_on_when_they_arrive`), since nothing does by default.
+**Residual**: each hop of a chain timed by the hop itself — a chained hop sends no `served_us` today, so a chain
+driven from here is priced from the requester's view alone (a wire trailer, a feature bit and a security review: the
+next round); re-measure Gemma 4 31B once Denmark holds it whole.
 
 **Research 2026-11-08 — which models people actually run, and the round uses them.** Three web searches (Hugging Face
 downloads and trending, the Ollama library, OpenRouter's rankings and its usage study arXiv 2601.10088, the Steam

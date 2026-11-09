@@ -547,6 +547,7 @@
   "enc.enable_privacy": "Começar e terminar neste computador",
   "enc.fetch_missing": "Obter as partes que faltam",
   "enc.fetch_started": "A transferir as partes de que este computador precisa para começar e terminar as respostas sozinho. Ativa-se sozinho assim que chegarem.",
+  "enc.fetch_started_switch_on": "A transferir as partes de que este computador precisa para começar e terminar as respostas sozinho. Quando chegarem, ative a opção no cartão deste modelo.",
   "enc.full_e2e": "Começa e termina neste computador — os outros computadores nunca recebem o seu texto nem a resposta, mas o que recebem ainda pode revelar grande parte deles",
   "enc.full_e2e_overhead": "respostas mais lentas",
   "enc.gain_speed": "ganhe velocidade, perca alguma privacidade",

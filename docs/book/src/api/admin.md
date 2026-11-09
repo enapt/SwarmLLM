@@ -131,7 +131,7 @@ Delete a single shard.
 Per-model auto-manage policy (including prune toggle).
 
 ### GET/PUT/DELETE /api/admin/models/{id}/encrypted-pipeline
-Per-model "Start and finish on this computer" setting (`encrypted_pipeline`). It is decided, first match wins, by: your choice for this model; an explicit global `encrypted_pipeline = true`; otherwise it is on exactly while this node holds both the first and last part of the model (`encrypted_pipeline_auto`, default on).
+Per-model "Start and finish on this computer" setting (`encrypted_pipeline`). It is decided, first match wins, by: your choice for this model; an explicit global `encrypted_pipeline = true`; otherwise it is on exactly while this node holds both the first and last part of the model (`encrypted_pipeline_auto`, default off since 2026-11-09).
 
 GET returns `encrypted_pipeline` (in force or not), `decided_by` (`this_model`, `global_setting` or `automatic`), `per_model_override` (your choice, or `null`), `default_for_this_model` (what it would be with no choice), `global_default`, `automatic_when_both_ends_here`, readiness (`ready`, `has_first_shard`, `has_last_shard`) and an overhead note.
 

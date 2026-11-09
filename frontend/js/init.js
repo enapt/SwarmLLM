@@ -502,9 +502,10 @@
       }
 
       // One action to make prompt privacy possible: fetch the first and last
-      // pieces of the model. Privacy then turns on by itself, so there is no
-      // separate toggle step and no window where a flag is set but the pieces
-      // have not arrived.
+      // parts of the model. No flag is set before they arrive (that would fail
+      // every request meanwhile); whether it then turns on by itself depends
+      // on the settings — the automatic rule is off by default since
+      // 2026-11-09 — and the reply says which (`turns_on_when_they_arrive`).
       var encFetchEl = target.closest('[data-enc-fetch]');
       if (encFetchEl) {
         var encFetchId = encFetchEl.getAttribute('data-enc-fetch');
@@ -513,11 +514,15 @@
           .then(function(r) { return r.json().then(function(d) { return { ok: r.ok, d: d }; }); })
           .then(function(res) {
             if (!res.ok) {
-              App.ui.showBanner('error', U.getApiErrorMessage(res.d));
+              // The body is already read: `getApiErrorMessage` takes a
+              // response and is async, and handed this it showed
+              // "[object Promise]" (dashboard audit 2026-11-09).
+              App.ui.showBanner('error', U.extractErrorMessage(res.d, I18n.t('common.request_failed')));
               encFetchEl.disabled = false;
               return;
             }
-            App.ui.showBanner('success', I18n.t('enc.fetch_started'));
+            App.ui.showBanner('success', I18n.t(res.d.turns_on_when_they_arrive === false
+              ? 'enc.fetch_started_switch_on' : 'enc.fetch_started'));
             App.models.load();
           })
           .catch(function() {

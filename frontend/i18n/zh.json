@@ -547,6 +547,7 @@
   "enc.enable_privacy": "在本机开始和结束",
   "enc.fetch_missing": "获取缺少的部分",
   "enc.fetch_started": "正在下载本机自己开始和结束回复所需的部分。下载完成后会自动开启。",
+  "enc.fetch_started_switch_on": "正在下载本机自己开始和结束回复所需的部分。下载完成后，请在该模型的卡片上开启。",
   "enc.full_e2e": "在本机开始和结束——其他电脑永远收不到你的文字或回复，但它们收到的数据仍可能泄露其中大部分内容",
   "enc.full_e2e_overhead": "回复较慢",
   "enc.gain_speed": "提升速度，牺牲部分隐私",

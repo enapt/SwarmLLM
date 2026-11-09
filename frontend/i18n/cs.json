@@ -547,6 +547,7 @@
   "enc.enable_privacy": "Začít a skončit na tomto počítači",
   "enc.fetch_missing": "Získat chybějící části",
   "enc.fetch_started": "Stahují se části, které tento počítač potřebuje, aby mohl odpovědi sám začínat a dokončovat. Zapne se samo, jakmile dorazí.",
+  "enc.fetch_started_switch_on": "Stahují se části, které tento počítač potřebuje, aby mohl odpovědi sám začínat a dokončovat. Až dorazí, zapněte to na kartě tohoto modelu.",
   "enc.full_e2e": "Začíná a končí na tomto počítači — jiné počítače nikdy nedostanou váš text ani odpověď, ale to, co dostanou, z nich stále může hodně prozradit",
   "enc.full_e2e_overhead": "pomalejší odpovědi",
   "enc.gain_speed": "získejte rychlost, ztratíte trochu soukromí",

@@ -628,8 +628,18 @@ pub struct InferenceConfig {
     ///
     /// Turn prompt privacy on automatically for any model where this node holds
     /// both the first and last shard — the condition under which it can work at
-    /// all. Default TRUE, so the strongest privacy applies wherever it is
-    /// available without the user having to know it exists.
+    /// all. **Default FALSE since 2026-11-09** (the owner: "route for optimal
+    /// speed not privacy"): on, it kept every such model's first and last
+    /// layers here, which shut out a whole-model hand-off to a peer holding it
+    /// all — Gemma 4 31B went here → Denmark → Australia → here at ~580 ms a
+    /// token while Australia held all 60 layers (FUTURE_WORK #427), the shape
+    /// of report #036 too. And what it bought is structural, not cryptographic:
+    /// the middle computers read hidden states, ~81% invertible to text
+    /// (`docs/ARCHITECTURE.md` § Pipeline Privacy Model). Off is a default the
+    /// OWNER sets, never a downgrade a slow peer can trigger (RFC 7507's
+    /// concern, which is why privacy is never dropped for a slow route).
+    /// Prior art: Petals, exo and distributed-llama route for speed with no
+    /// such shape by default.
     ///
     /// It cannot simply be the default for `encrypted_pipeline` itself: without
     /// both ends locally an encrypted pipeline has no legal route, so defaulting
@@ -638,8 +648,8 @@ pub struct InferenceConfig {
     /// precondition already holds.
     ///
     /// An explicit choice always wins: a per-model setting first, then an
-    /// explicit `encrypted_pipeline = true`. Set this to false to opt out of the
-    /// automatic behaviour entirely and go back to off-unless-asked.
+    /// explicit `encrypted_pipeline = true`. Set this to true to have it on
+    /// automatically wherever this node holds both ends.
     #[serde(default = "default_encrypted_pipeline_auto")]
     pub encrypted_pipeline_auto: bool,
 
@@ -675,7 +685,7 @@ pub struct InferenceConfig {
 }
 
 fn default_encrypted_pipeline_auto() -> bool {
-    true
+    false
 }
 
 fn default_parallax_routing() -> bool {

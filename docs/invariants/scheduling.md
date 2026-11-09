@@ -3933,8 +3933,8 @@ segment. Do NOT reintroduce a penalty term — it distorts every other route.
 off the peer gets the whole model. With privacy on, `boomerang_assignment` keeps
 layer 0 and the final layer local — the embedding and the sampling, which is what
 the guarantee actually is — and gives the peer everything between, as encrypted
-activations. Since `encrypted_pipeline_auto` is on by default for any model whose
-ends this node holds, that is the COMMON path, not an edge case: treating privacy
+activations. While `encrypted_pipeline_auto` was on by default (2026-07-27 to
+2026-11-09) for any model whose ends this node holds, that was the COMMON path: treating privacy
 as a veto stranded the default configuration on its CPU for no privacy gain.
 **The boomerang is constructed, not searched, for the same reason.** Asked to route
 it, the general search answers "all of it locally" — that satisfies the encrypted

@@ -134,6 +134,13 @@ struct NodeCandidate {
     /// `forward_through_segments` hops. Used by the Parallax routing DP to
     /// replace the static capability estimate with live signal when available.
     observed_latency_ms_per_layer: Option<f32>,
+    /// What `observed_latency_ms_per_layer` was timed on, read beside it
+    /// (`SharedState::observed_ranking`); `None` (no figure, or its source
+    /// unknown) prices as before. A figure from `TimedOn::PromptPasses`
+    /// does NOT carry this node's round trip, so `parallax::vertex_cost_as`
+    /// charges it as for an unmeasured peer (gotcha #1073: a 5090 217 ms
+    /// away, only ever chained, read 3.0 ms a layer and priced near free).
+    observed_latency_timed_on: Option<crate::daemon::state::TimedOn>,
     /// Observed per-layer latency EMA (ms/layer) for whole models this peer has
     /// run for us end to end — the *delegated* shape, carrying no per-token
     /// round trip. `None` for the local node and for any peer we have never
@@ -5033,22 +5040,26 @@ impl PipelineScheduler {
             // proportional EMA with no fixed term — read together, because a
             // slope from the fit beside a fixed cost of zero would price the
             // peer lower than either model does alone.
-            let (observed_latency_ms_per_layer, observed_fixed_ms_per_visit) =
-                if local_on_processor && self.shared_state.gpu_info.is_some() {
-                    (None, None)
-                } else {
-                    match self
-                        .shared_state
-                        .observed_decode_terms(&node_id, &manifest.id)
-                    {
-                        Some((fixed, per_layer)) => (Some(per_layer), Some(fixed)),
-                        None => (
-                            self.shared_state
-                                .observed_latency_ms_per_layer(&node_id, &manifest.id),
-                            None,
-                        ),
-                    }
-                };
+            // What the figure was timed on comes from the SAME reading
+            // (`observed_ranking`), so the two cannot describe different
+            // samples (gotcha #1073).
+            let (
+                observed_latency_ms_per_layer,
+                observed_fixed_ms_per_visit,
+                observed_latency_timed_on,
+            ) = if local_on_processor && self.shared_state.gpu_info.is_some() {
+                (None, None, None)
+            } else {
+                let ranking = self.shared_state.observed_ranking(&node_id, &manifest.id);
+                let timed_on = ranking.map(|r| r.timed_on);
+                match self
+                    .shared_state
+                    .observed_decode_terms(&node_id, &manifest.id)
+                {
+                    Some((fixed, per_layer)) => (Some(per_layer), Some(fixed), timed_on),
+                    None => (ranking.map(|r| r.ms_per_layer), None, timed_on),
+                }
+            };
             // Deliberately `None` for the local node: there is no such thing as
             // delegating to ourselves, and a local segment pays no network at
             // all, so the whole distinction this figure exists to draw is moot.
@@ -5600,6 +5611,7 @@ impl PipelineScheduler {
                     reported.as_ref().and_then(|r| r.decode_us_per_layer),
                 ),
                 observed_latency_ms_per_layer,
+                observed_latency_timed_on,
                 observed_fixed_ms_per_visit,
                 observed_delegated_ms_per_layer,
                 expected_attempts,
@@ -5687,6 +5699,10 @@ impl PipelineScheduler {
                 // `None` = priced from the stated speed alone, as before.
                 stated_ms_per_layer = ?c.stated_ms_per_layer,
                 observed_ms_per_layer = ?c.observed_latency_ms_per_layer,
+                // What that figure was timed on, and so whether our round
+                // trip is inside it: `DecodeSteps { samples }` carries it,
+                // `PromptPasses` does not and is charged it (gotcha #1073).
+                observed_timed_on = ?c.observed_latency_timed_on,
                 // Present only where the samples could separate a per-visit
                 // cost from a per-layer one. Its absence is the ordinary case
                 // and means this peer is priced exactly as it always was —

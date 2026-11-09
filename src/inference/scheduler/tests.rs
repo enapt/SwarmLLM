@@ -1084,6 +1084,7 @@ fn simple_candidate(byte: u8, ranges: Vec<(u32, u32)>) -> NodeCandidate {
         est_tokens_per_sec: 0.0,
         layer_work: 1.0,
         observed_latency_ms_per_layer: None,
+        observed_latency_timed_on: None,
         observed_fixed_ms_per_visit: None,
         observed_delegated_ms_per_layer: None,
         expected_attempts: 1.0,
@@ -1545,6 +1546,7 @@ fn greedy_assign_multi_range_candidate() {
             est_tokens_per_sec: 0.0,
             layer_work: 1.0,
             observed_latency_ms_per_layer: None,
+            observed_latency_timed_on: None,
             observed_fixed_ms_per_visit: None,
             observed_delegated_ms_per_layer: None,
             expected_attempts: 1.0,
@@ -1591,6 +1593,7 @@ fn greedy_assign_multi_range_candidate() {
             est_tokens_per_sec: 0.0,
             layer_work: 1.0,
             observed_latency_ms_per_layer: None,
+            observed_latency_timed_on: None,
             observed_fixed_ms_per_visit: None,
             observed_delegated_ms_per_layer: None,
             expected_attempts: 1.0,
@@ -2636,6 +2639,7 @@ fn cost_cand(
         est_tokens_per_sec: 0.0,
         layer_work: 1.0,
         observed_latency_ms_per_layer: ms_per_layer,
+        observed_latency_timed_on: None,
         observed_fixed_ms_per_visit: None,
         observed_delegated_ms_per_layer: None,
         expected_attempts: 1.0,
@@ -4046,6 +4050,7 @@ fn one_node_is_not_made_standby_for_more_layers_than_it_can_run() {
         est_tokens_per_sec: 5.0,
         layer_work: 1.0,
         observed_latency_ms_per_layer: None,
+        observed_latency_timed_on: None,
         observed_fixed_ms_per_visit: None,
         observed_delegated_ms_per_layer: None,
         expected_attempts: 1.0,
@@ -4155,6 +4160,7 @@ fn a_node_with_room_still_stands_in_for_every_segment() {
         est_tokens_per_sec: 5.0,
         layer_work: 1.0,
         observed_latency_ms_per_layer: None,
+        observed_latency_timed_on: None,
         observed_fixed_ms_per_visit: None,
         observed_delegated_ms_per_layer: None,
         expected_attempts: 1.0,
@@ -4264,6 +4270,7 @@ fn a_standby_is_chosen_by_cost_not_by_ping() {
         est_tokens_per_sec: tps,
         layer_work: 1.0,
         observed_latency_ms_per_layer: None,
+        observed_latency_timed_on: None,
         observed_fixed_ms_per_visit: None,
         observed_delegated_ms_per_layer: None,
         expected_attempts: 1.0,
@@ -5208,7 +5215,14 @@ fn processor_holder_beside_two_gpu_halves_with(
     peer_tokens_per_sec: f32,
     tweak: impl FnOnce(&mut Config),
 ) -> (Arc<SharedState>, NodeId, NodeId, NodeId) {
-    let state = make_shared_state_with(tweak);
+    let state = make_shared_state_with(|c| {
+        // Written when prompt privacy came on by itself wherever this node held
+        // both ends, and the tests on it are about the boomerang that rule
+        // makes; it is off by default since 2026-11-09. The default's own route
+        // here: `by_default_the_cards_read_the_prompt_with_no_ends_kept_here`.
+        c.inference.encrypted_pipeline_auto = true;
+        tweak(c)
+    });
     let local = state.identity.node_id().clone();
     let b = NodeId([0xB1; 32]);
     let c = NodeId([0xC1; 32]);
@@ -5511,6 +5525,52 @@ fn a_small_cached_prefix_does_not_keep_a_long_prompt_off_faster_cards() {
         nodes,
         vec![local.clone(), b, c, local],
         "{:?}",
+        assignment.segments
+    );
+}
+
+/// The default since 2026-11-09 (#427): holding a model's ends no longer
+/// switches prompt privacy on, so nothing keeps the first and last layers on
+/// this processor — the long prompt is read on the cards from the first layer.
+/// With the automatic rule on, the same layout is the boomerang above.
+#[test]
+fn by_default_the_cards_read_the_prompt_with_no_ends_kept_here() {
+    let (state, local, b, c) = processor_holder_beside_two_gpu_halves_with(5, 20.0, |c| {
+        c.inference.encrypted_pipeline_auto = false;
+    });
+    let model = ModelId("split-14b".into());
+    assert!(
+        !state.encrypted_pipeline_for(&model),
+        "fixture: the default leaves prompt privacy off though both ends are held"
+    );
+    let scheduler = PipelineScheduler::with_local_processor_speed(state, LOCAL_PROCESSOR_TPS);
+    let assignment = scheduler
+        .assemble_pipeline_for(
+            &model,
+            &local,
+            uuid::Uuid::new_v4(),
+            super::Purpose::Route,
+            super::cached_prefix::PromptPlan {
+                tokens: Some(14_000),
+                ..Default::default()
+            },
+            crate::types::KeepAsked::Unasked,
+        )
+        .unwrap();
+    let nodes: Vec<NodeId> = assignment
+        .segments
+        .iter()
+        .map(|s| s.node_id.clone())
+        .collect();
+    assert_ne!(
+        nodes.first(),
+        Some(&local),
+        "the first layers go to a card: {:?}",
+        assignment.segments
+    );
+    assert!(
+        nodes.contains(&b) && nodes.contains(&c),
+        "both cards: {:?}",
         assignment.segments
     );
 }

@@ -547,6 +547,7 @@
   "enc.enable_privacy": "Bu bilgisayarda başlat ve bitir",
   "enc.fetch_missing": "Eksik parçaları getir",
   "enc.fetch_started": "Bu bilgisayarın yanıtları kendisi başlatıp bitirmesi için gereken parçalar indiriliyor. Gelir gelmez kendiliğinden açılacak.",
+  "enc.fetch_started_switch_on": "Bu bilgisayarın yanıtları kendisi başlatıp bitirmesi için gereken parçalar indiriliyor. Geldiklerinde bu modelin kartından açın.",
   "enc.full_e2e": "Bu bilgisayarda başlar ve biter — diğer bilgisayarlar metninizi veya yanıtı hiç almaz, ancak aldıkları veriler yine de bunun büyük kısmını ele verebilir",
   "enc.full_e2e_overhead": "daha yavaş yanıtlar",
   "enc.gain_speed": "hız kazanın, biraz gizlilik kaybedilir",

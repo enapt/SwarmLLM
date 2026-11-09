@@ -560,7 +560,7 @@ pub(crate) fn request_may_be_handed_off(
     }
     let model_id = &request.model_id;
     // Ask the one accessor. Re-deriving it from the per-model map missed the
-    // automatic case (`encrypted_pipeline_auto`, the default), so a model with
+    // automatic case (`encrypted_pipeline_auto`), so a model with
     // privacy in force did not disqualify the fast path here — the path that
     // puts the RAW PROMPT on the wire to a peer.
     //

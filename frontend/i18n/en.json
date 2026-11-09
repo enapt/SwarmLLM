@@ -547,6 +547,7 @@
   "enc.enable_privacy": "Start and finish on this computer",
   "enc.fetch_missing": "Get the missing parts",
   "enc.fetch_started": "Downloading the parts this computer needs to start and finish replies itself. It turns on by itself once they arrive.",
+  "enc.fetch_started_switch_on": "Downloading the parts this computer needs to start and finish replies itself. When they have arrived, turn it on from this model's card.",
   "enc.full_e2e": "Starts and finishes on this computer — other computers never receive your text or the reply, but what they do receive can still reveal much of it",
   "enc.full_e2e_overhead": "slower replies",
   "enc.gain_speed": "gain speed, lose some privacy",

@@ -547,6 +547,7 @@
   "enc.enable_privacy": "Mulai dan selesai di komputer ini",
   "enc.fetch_missing": "Ambil bagian yang hilang",
   "enc.fetch_started": "Mengunduh bagian yang diperlukan komputer ini untuk memulai dan menyelesaikan jawaban sendiri. Fitur ini aktif dengan sendirinya setelah bagian tersebut tiba.",
+  "enc.fetch_started_switch_on": "Mengunduh bagian yang diperlukan komputer ini untuk memulai dan menyelesaikan jawaban sendiri. Setelah bagian tersebut tiba, aktifkan dari kartu model ini.",
   "enc.full_e2e": "Mulai dan selesai di komputer ini — komputer lain tidak pernah menerima teks atau jawaban Anda, tetapi data yang mereka terima masih bisa mengungkap sebagian besar isinya",
   "enc.full_e2e_overhead": "jawaban lebih lambat",
   "enc.gain_speed": "dapatkan kecepatan, sedikit privasi hilang",

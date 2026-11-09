@@ -434,6 +434,14 @@ impl ModelSpeed {
     /// falls back to is exactly that prior. Falling back cannot price a peer
     /// worse than one that was never measured at all, which bounds the risk.
     pub fn ranking_ms_per_layer(&self) -> Option<f32> {
+        self.ranking().map(|r| r.ms_per_layer)
+    }
+
+    /// The ranking figure AND what it was timed on — one answer, so a reader
+    /// that needs to know whether the figure carries the round trip
+    /// (`parallax::vertex_cost_as`) cannot get the number from one function
+    /// and its source from another.
+    pub fn ranking(&self) -> Option<Ranking> {
         if self.updated_at.elapsed() >= RANKING_STALE_AFTER {
             return None;
         }
@@ -463,7 +471,12 @@ impl ModelSpeed {
         // `NodeCapability.observed_latencies`.
         if self.decode_samples > 0 {
             if let Some(d) = self.decode_ms_per_layer {
-                return Some(d);
+                return Some(Ranking {
+                    ms_per_layer: d,
+                    timed_on: TimedOn::DecodeSteps {
+                        samples: self.decode_samples,
+                    },
+                });
             }
         }
         // Prefill is local by construction, so it can always rank — from WARM
@@ -471,8 +484,14 @@ impl ModelSpeed {
         // `warm_prefill_ms_per_layer_byte`); with no warm sample the caller
         // prices from the advertised capability, which is what a node never
         // measured gets, so this can never price one worse than that.
-        self.warm_prefill_ms_per_layer_byte
-            .map(|c| c * NOMINAL_DECODE_ACTIVATION_BYTES as f32)
+        //
+        // ⚠ It does NOT carry the round trip: a prompt pass crosses it once for
+        // every position it carries, so scaled to one position it is nearly
+        // gone (gotcha #1073 — a 5090 217 ms away read 3.0 ms a layer).
+        self.warm_prefill_ms_per_layer_byte.map(|c| Ranking {
+            ms_per_layer: c * NOMINAL_DECODE_ACTIVATION_BYTES as f32,
+            timed_on: TimedOn::PromptPasses,
+        })
     }
 
     /// Measured prefill coefficient, in ms per (layer x activation byte), or
@@ -805,6 +824,37 @@ impl PeerSpeed {
 /// scale as a decode one for ranking.
 pub(crate) const NOMINAL_DECODE_ACTIVATION_BYTES: usize = 4096 * 4;
 
+/// What ranks a peer on a model: its figure per layer, and what that figure
+/// was timed on ([`ModelSpeed::ranking`]).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Ranking {
+    pub ms_per_layer: f32,
+    pub timed_on: TimedOn,
+}
+
+/// What a ranking figure was timed on — which says whether this node's round
+/// trip to the peer is inside it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TimedOn {
+    /// Decode steps this node timed end to end: each crossed the round trip
+    /// once, so the figure carries it.
+    DecodeSteps { samples: u32 },
+    /// Warm prompt passes, scaled to one position: the round trip was crossed
+    /// once for EVERY position, so the figure carries almost none of it. A
+    /// peer that only ever runs chained (it hands the next computer every
+    /// forward) has only this — `forward_verify_through_segments` times no
+    /// chained check (gotcha #1073).
+    PromptPasses,
+}
+
+impl TimedOn {
+    /// Whether a figure timed this way already holds this node's round trip
+    /// to the peer, so a price must not charge it again.
+    pub fn carries_the_round_trip(self) -> bool {
+        matches!(self, TimedOn::DecodeSteps { .. })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -908,6 +958,26 @@ mod tests {
         both.observe(WorkKind::Prefill, 10_199, 8, 213_268, true);
         both.observe(WorkKind::Decode, 150, 8, 16_384, true);
         assert!((both.ranking_ms_per_layer().unwrap() - 18.75).abs() < 0.1);
+    }
+
+    /// The figure says what it was timed on, from the same reading: a peer
+    /// timed only on prompt passes (one only ever run chained, gotcha #1073)
+    /// is `PromptPasses`, which a price must charge the round trip; one decode
+    /// step makes it `DecodeSteps`, which already carries it.
+    #[test]
+    fn the_ranking_figure_says_what_it_was_timed_on() {
+        let mut s = ModelSpeed::default();
+        s.observe(WorkKind::Prefill, 10_199, 8, 213_268, true);
+        let r = s.ranking().unwrap();
+        assert_eq!(r.timed_on, TimedOn::PromptPasses);
+        assert!(!r.timed_on.carries_the_round_trip());
+        assert_eq!(Some(r.ms_per_layer), s.ranking_ms_per_layer());
+
+        s.observe(WorkKind::Decode, 150, 8, 16_384, true);
+        let r = s.ranking().unwrap();
+        assert_eq!(r.timed_on, TimedOn::DecodeSteps { samples: 1 });
+        assert!(r.timed_on.carries_the_round_trip());
+        assert_eq!(Some(r.ms_per_layer), s.ranking_ms_per_layer());
     }
 
     /// Gossip must not be able to shorten a timeout we size from our own

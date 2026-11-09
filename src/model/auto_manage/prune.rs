@@ -1733,9 +1733,9 @@ impl AutoShardManager {
         // pipeline assembly.
         //
         // This used to read `encrypted_pipeline_models` directly, which
-        // sees ONLY an explicit per-model toggle. Privacy has been ON BY
-        // DEFAULT wherever a node holds both ends since 2026-07-27
-        // (`encrypted_pipeline_auto`), and that map is empty for it — so
+        // sees ONLY an explicit per-model toggle. Privacy is on wherever a
+        // node holds both ends under `encrypted_pipeline_auto` (the default
+        // from 2026-07-27 to 2026-11-09), and that map is empty for it — so
         // the models most likely to have privacy in force were exactly
         // the ones this did not protect. `privacy_required_shards` is the
         // shared rule, and `delete_shard` refuses on the same answer.
@@ -2332,8 +2332,9 @@ mod tests {
         );
     }
 
-    /// The defect this was written for. Prompt privacy is ON BY DEFAULT wherever
-    /// a node holds both ends of a model (`encrypted_pipeline_auto`, 2026-07-27),
+    /// The defect this was written for. Prompt privacy is on wherever a node
+    /// holds both ends of a model under `encrypted_pipeline_auto` (the default
+    /// from 2026-07-27 to 2026-11-09),
     /// and prune asked the per-model map instead — which is EMPTY in that case.
     /// So a node that had never touched the setting, and therefore had privacy in
     /// force, would prune the very shard the setting depends on, and every
