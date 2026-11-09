@@ -826,7 +826,7 @@
   "netstatus.reach_fix_refused": "O seu router não abriu a porta {udp} (UDP) nem {tcp} (TCP) para ele, normalmente porque outro dispositivo da sua rede já as usa — por exemplo, um segundo computador com o SwarmLLM. Inicie este noutra porta (swarmllm run -p {other}; o painel passa também para essa porta) ou pare o outro e reinicie aqui o SwarmLLM.",
   "netstatus.reach_fix_wsl": "O SwarmLLM corre com a rede predefinida do WSL, que nenhum outro computador consegue alcançar. Ative a rede espelhada: adicione networkingMode=mirrored em [wsl2] no ficheiro .wslconfig da sua pasta de utilizador do Windows, execute wsl --shutdown e volte a iniciar o SwarmLLM.",
   "netstatus.reach_fix_wsl_mirrored": "No WSL, o Windows só deixa entrar as respostas do router numa rede definida como Privada: nas Definições do Windows → Rede e Internet, torne esta rede Privada. O router também precisa de ter o UPnP ativado — ou reencaminhe a porta {udp} (UDP) e {tcp} (TCP) para este computador.",
-  "netstatus.reach_relay": "Os outros computadores só chegam a este através de um relay, o que é mais lento.",
+  "netstatus.reach_relay": "Os outros computadores só chegam a este através de um retransmissor, o que é mais lento.",
   "netstatus.res_computers_one": "computador",
   "netstatus.res_computers_other": "computadores",
   "netstatus.res_disk": "armazenamento compartilhado",

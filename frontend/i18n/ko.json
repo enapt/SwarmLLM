@@ -826,7 +826,7 @@
   "netstatus.reach_fix_refused": "공유기가 포트 {udp}(UDP)와 {tcp}(TCP)를 열어 주지 않았습니다. 보통 네트워크의 다른 기기가 이미 쓰고 있기 때문입니다(예: SwarmLLM을 실행하는 두 번째 컴퓨터). 이 컴퓨터를 다른 포트로 시작하거나(swarmllm run -p {other}, 대시보드도 그 포트로 옮겨집니다) 다른 컴퓨터를 멈춘 뒤 여기서 SwarmLLM을 다시 시작하세요.",
   "netstatus.reach_fix_wsl": "SwarmLLM이 WSL의 기본 네트워킹으로 실행 중이라 다른 컴퓨터가 닿을 수 없습니다. 미러 네트워킹을 켜세요. Windows 사용자 폴더의 .wslconfig 파일에서 [wsl2] 아래에 networkingMode=mirrored를 추가하고, wsl --shutdown을 실행한 다음 SwarmLLM을 다시 시작하면 됩니다.",
   "netstatus.reach_fix_wsl_mirrored": "WSL에서는 Windows가 '개인'으로 설정된 네트워크에서만 공유기의 응답을 들여보냅니다. Windows 설정 → 네트워크 및 인터넷에서 이 네트워크를 개인으로 바꾸세요. 공유기에서도 UPnP를 켜야 합니다. 아니면 포트 {udp}(UDP)와 {tcp}(TCP)를 이 컴퓨터로 포워딩하세요.",
-  "netstatus.reach_relay": "다른 컴퓨터는 릴레이를 거쳐서만 이 컴퓨터에 닿으며, 그만큼 느립니다.",
+  "netstatus.reach_relay": "다른 컴퓨터는 중계를 거쳐서만 이 컴퓨터에 닿으며, 그만큼 느립니다.",
   "netstatus.res_computers_one": "대의 컴퓨터",
   "netstatus.res_computers_other": "대의 컴퓨터",
   "netstatus.res_disk": "공유 저장소",

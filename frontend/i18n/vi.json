@@ -826,7 +826,7 @@
   "netstatus.reach_fix_refused": "Bộ định tuyến không mở cổng {udp} (UDP) hay {tcp} (TCP) cho máy này, thường là vì một thiết bị khác trong mạng của bạn đã dùng chúng — chẳng hạn một máy tính thứ hai chạy SwarmLLM. Hãy khởi động máy này trên cổng khác (swarmllm run -p {other}; bảng điều khiển cũng chuyển sang cổng đó), hoặc dừng máy kia rồi khởi động lại SwarmLLM ở đây.",
   "netstatus.reach_fix_wsl": "SwarmLLM đang chạy với mạng mặc định của WSL, nơi không máy tính nào khác tới được. Hãy bật mạng phản chiếu: thêm networkingMode=mirrored dưới [wsl2] trong tệp .wslconfig ở thư mục người dùng Windows của bạn, chạy wsl --shutdown, rồi khởi động lại SwarmLLM.",
   "netstatus.reach_fix_wsl_mirrored": "Trong WSL, Windows chỉ cho phản hồi của bộ định tuyến đi vào trên mạng được đặt là Riêng tư: trong Cài đặt Windows → Mạng và Internet, hãy đặt mạng này là Riêng tư. Bộ định tuyến cũng cần bật UPnP — hoặc chuyển tiếp cổng {udp} (UDP) và {tcp} (TCP) tới máy tính này.",
-  "netstatus.reach_relay": "Các máy tính khác chỉ tới được máy này qua một trạm chuyển tiếp (relay), nên chậm hơn.",
+  "netstatus.reach_relay": "Các máy tính khác chỉ tới được máy này qua một bộ tiếp sức, nên chậm hơn.",
   "netstatus.res_computers_one": "máy tính",
   "netstatus.res_computers_other": "máy tính",
   "netstatus.res_disk": "lưu trữ chung",

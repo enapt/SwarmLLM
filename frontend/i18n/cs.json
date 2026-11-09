@@ -826,7 +826,7 @@
   "netstatus.reach_fix_refused": "Router pro něj neotevřel port {udp} (UDP) ani {tcp} (TCP), obvykle proto, že je ve vaší síti už používá jiné zařízení — třeba druhý počítač se SwarmLLM. Spusťte tento na jiném portu (swarmllm run -p {other}; jeho přehled se přesune na ten port také), nebo ten druhý zastavte a SwarmLLM tady restartujte.",
   "netstatus.reach_fix_wsl": "SwarmLLM běží ve výchozí síti WSL, na kterou žádný jiný počítač nedosáhne. Zapněte zrcadlenou síť: přidejte networkingMode=mirrored pod [wsl2] do souboru .wslconfig ve své uživatelské složce Windows, spusťte wsl --shutdown a SwarmLLM spusťte znovu.",
   "netstatus.reach_fix_wsl_mirrored": "Ve WSL pouští Windows odpovědi routeru dovnitř jen v síti nastavené jako Soukromá: v Nastavení Windows → Síť a internet nastavte tuto síť jako soukromou. Router také potřebuje zapnuté UPnP — nebo přesměrujte port {udp} (UDP) a {tcp} (TCP) na tento počítač.",
-  "netstatus.reach_relay": "Ostatní počítače se k tomuto dostanou jen přes relay, a to je pomalejší.",
+  "netstatus.reach_relay": "Ostatní počítače se k tomuto dostanou jen přes přenašeč, a to je pomalejší.",
   "netstatus.res_computers_one": "počítač",
   "netstatus.res_computers_other": "počítače",
   "netstatus.res_disk": "sdílené úložiště",

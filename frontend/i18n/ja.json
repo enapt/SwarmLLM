@@ -826,7 +826,7 @@
   "netstatus.reach_fix_refused": "ルーターがポート {udp}（UDP）と {tcp}（TCP）を開けませんでした。たいていは、ネットワーク内の別の機器がすでに使っているためです（SwarmLLM を動かしている2台目のコンピューターなど）。このコンピューターを別のポートで起動するか（swarmllm run -p {other}。ダッシュボードもそのポートに移ります）、もう一方を止めてから、ここで SwarmLLM を再起動してください。",
   "netstatus.reach_fix_wsl": "SwarmLLM は WSL の既定のネットワークで動いており、他のコンピューターからは届きません。ミラーモードのネットワークをオンにしてください。Windows のユーザーフォルダーにある .wslconfig ファイルの [wsl2] の下に networkingMode=mirrored を追加し、wsl --shutdown を実行してから SwarmLLM をもう一度起動します。",
   "netstatus.reach_fix_wsl_mirrored": "WSL では、Windows は「プライベート」に設定されたネットワークでしかルーターの応答を通しません。Windows の設定 → ネットワークとインターネット で、このネットワークをプライベートにしてください。ルーター側でも UPnP をオンにするか、ポート {udp}（UDP）と {tcp}（TCP）をこのコンピューターに転送してください。",
-  "netstatus.reach_relay": "他のコンピューターはリレー経由でしかこのコンピューターに届かず、そのぶん遅くなります。",
+  "netstatus.reach_relay": "他のコンピューターは中継経由でしかこのコンピューターに届かず、そのぶん遅くなります。",
   "netstatus.res_computers_one": "台のコンピューター",
   "netstatus.res_computers_other": "台のコンピューター",
   "netstatus.res_disk": "共有ストレージ",
