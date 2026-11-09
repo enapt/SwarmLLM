@@ -843,6 +843,25 @@ impl super::SharedState {
             && !self.metered_hold_now()
     }
 
+    /// Whether other computers can connect to this one directly and, if not,
+    /// what UPnP found in the way — the dashboard's advice
+    /// (`frontend/js/components/ui.js`, `netstatus.reach_fix_*`), on every
+    /// stats surface (`GET /api/admin/stats`, the WebSocket tick,
+    /// `GET /v1/status`). `direct` is `publicly_reachable`'s answer; `upnp` is
+    /// only the cause (`network::manager::UpnpVerdict`). The ports are the
+    /// boot snapshot's: the listeners are bound once, at start.
+    pub fn reachability_json(&self) -> serde_json::Value {
+        let udp_port = self.config.node.listen_port;
+        serde_json::json!({
+            "direct": self
+                .publicly_reachable
+                .load(std::sync::atomic::Ordering::Relaxed),
+            "upnp": self.metrics.upnp_verdict.lock().key(),
+            "udp_port": udp_port,
+            "tcp_port": crate::network::manager::p2p_tcp_port(udp_port),
+        })
+    }
+
     /// Whether inference for `node` can be routed through an application-level
     /// relay, even though we hold no libp2p connection to it.
     ///

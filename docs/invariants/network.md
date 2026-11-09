@@ -5500,6 +5500,28 @@ then mapped both. With no restart, this PC's next renewal (04:54:02Z) read the t
 UDP 8800, this PC TCP 48807 + UDP 47681, one row each and nothing left from the probes. A
 node whose port is taken while it runs heals at its next renewal (≤ 30 min); it needs no restart.
 
+**A computer others reach only through a relay is told what is in the way, and its fix (2026-11-09).**
+A new Denmark computer (RTX 5090) was reached by relay only, and its owner had nothing on the
+dashboard to say so or what to do. The dashboard now says both: `SharedState::reachability_json`
+(`reachability` on all three stats surfaces, guard `every_stats_surface_carries_the_reachability_reading`)
+carries `direct` — `publicly_reachable`'s answer, never UPnP's — and `upnp`, the cause
+`UpnpWatch::verdict` names (`UpnpVerdict`, published to `state.metrics.upnp_verdict` after every UPnP
+event and on the discovery tick). `ui.js` shows one line only while `direct` is false and the cause has
+a fix. Prior art: Xbox's "Test NAT type" and Plex's Remote Access panel name the state and give ONE
+fix, in this order — UPnP on at the router, a second router into bridge mode, forward the ports by
+hand, and last carrier-grade NAT, which only the provider can lift. The causes map onto libp2p-upnp's
+own events: `GatewayNotFound` → `no_router` (UPnP off at the router, or none), `NonRoutableGateway`
+(the gateway's external address is not public) → `behind_another_nat` (bridge mode, else ask for a
+public address), silence past `UPNP_QUIET_AFTER` → `refused` (another device holds the ports:
+`-p` moves THIS computer's ports, the dashboard's too). Two causes are this node's own setting:
+`enable_upnp = false` → `off`, and WSL2's NAT-mode safe defaults (the P2P listener on loopback,
+`wsl_network_adaptation`) → `wsl_default_networking` (mirrored networking). Under mirrored WSL a router
+unheard or silent is `wsl_mirrored`: Windows lets the router's answer in only on a network it classes
+Private (`docs/NETWORKING.md`). **Nothing is named in the first `UPNP_QUIET_AFTER`** (`Searching`): a
+server with a public address of its own needs no UPnP, and would otherwise be told to fix a router it
+does not have before AutoNAT confirmed it. A mapping is never advice — the next reachability check
+settles it. Test `the_verdict_names_what_stands_in_the_way`.
+
 ## ACK-Timeout Fast-Fail for rr Sends
 
 `SendDirectMessage` carries `delivery_request_id: Option<uuid::Uuid>`.

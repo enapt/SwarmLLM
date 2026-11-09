@@ -1116,6 +1116,8 @@ pub async fn status(State(state): State<AppState>) -> Json<serde_json::Value> {
         // Whether other computers run this node's requests — `swarmllm status`
         // prints why when they do not (`cli::status::describe_swarm_use`).
         "swarm_use": state.shared_state.swarm_use_json(),
+        // Can other computers connect here directly (`SharedState::reachability_json`).
+        "reachability": state.shared_state.reachability_json(),
     }))
 }
 

@@ -9019,6 +9019,31 @@ fn every_stats_surface_carries_the_traffic_figure() {
     }
 }
 
+/// The dashboard tells the owner of a computer reached only through a relay
+/// what to change (UPnP at the router, a second router, WSL's networking) from
+/// `reachability`, and paints from whichever stats surface answered last — so
+/// every one carries it (`SharedState::reachability_json`).
+#[test]
+fn every_stats_surface_carries_the_reachability_reading() {
+    let root = repo_root();
+    for file in [
+        "src/api/admin.rs",
+        "src/api/websocket.rs",
+        "src/api/openai/mod.rs",
+    ] {
+        let src = std::fs::read_to_string(root.join(file)).unwrap();
+        let joined: Vec<String> = statements(&src).into_iter().map(|(_, s)| s).collect();
+        assert!(
+            joined
+                .iter()
+                .any(|s| s.contains("\"reachability\"") && s.contains("reachability_json")),
+            "{file} must carry \"reachability\" from `SharedState::reachability_json` — \
+             without it the dashboard cannot say why other computers reach this one \
+             only through a relay"
+        );
+    }
+}
+
 /// A method's body, brace-balanced from its signature.
 ///
 /// [`fn_body`] stops at the first closing brace in column zero, which for a

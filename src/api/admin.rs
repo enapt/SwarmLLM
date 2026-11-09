@@ -1476,6 +1476,9 @@ pub async fn stats(State(state): State<AppState>) -> Json<serde_json::Value> {
         "swarm_spec": swarm_spec_metrics,
         // May this node's chats use other computers — `daemon::state::swarm_use`.
         "swarm_use": state.shared_state.swarm_use_json(),
+        // Can other computers connect here directly, and what is in the way —
+        // `SharedState::reachability_json`.
+        "reachability": state.shared_state.reachability_json(),
     }))
 }
 

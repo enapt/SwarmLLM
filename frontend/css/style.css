@@ -1426,6 +1426,17 @@ a:hover { color: var(--accent-hover); }
 .network-status .netstatus-row-models {
   font-size: var(--fs-lg);
 }
+/* Reached only through a relay: what is in the way and its one fix. */
+.network-status .netstatus-row-reach {
+  font-size: var(--fs-md);
+  color: var(--text-muted);
+  flex-wrap: nowrap;
+  align-items: baseline;
+}
+.network-status .netstatus-row-reach .netstatus-reach-icon {
+  color: var(--yellow-text);
+  flex: none;
+}
 .network-status .netstatus-row-resources {
   font-size: var(--fs-md);
   color: var(--text-muted);

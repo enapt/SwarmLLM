@@ -28,8 +28,77 @@ pub(super) const UPNP_QUIET_AFTER: Duration = Duration::from_secs(180);
 /// (`docs/invariants/network.md` § "UPnP that the router refuses …").
 pub(super) const UPNP_RELEASE_WAIT: Duration = Duration::from_secs(3);
 
+/// What stands between this node and a computer that would connect to it
+/// directly, as far as UPnP and this node's settings say — the cause the
+/// dashboard advises on (`SharedState::reachability_json`). WHETHER it is
+/// reachable is `SharedState::publicly_reachable`'s answer, never this one:
+/// a port forwarded by hand or a public address needs no UPnP at all.
+///
+/// Prior art: Xbox's "Test NAT type" and Plex's Remote Access panel both name
+/// the state and give ONE fix in this order — turn UPnP on at the router,
+/// remove a second router (bridge mode), forward the ports by hand, and last
+/// carrier-grade NAT, which only the provider can lift. libp2p-upnp's events
+/// already tell those apart; a refused mapping is the silence `UpnpWatch`
+/// explains.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum UpnpVerdict {
+    /// WSL2's default networking: the P2P listener is bound to this computer
+    /// alone (`config::network::wsl_network_adaptation`'s NAT-mode defaults),
+    /// so no other computer can connect whatever the router does.
+    WslDefaultNetworking,
+    /// WSL2's mirrored networking, the router unheard or silent: Windows lets
+    /// the router's answer in only on a network it classes as Private
+    /// (`docs/NETWORKING.md`).
+    WslMirrored,
+    /// UPnP is turned off in this node's settings.
+    Off,
+    /// Nothing to advise yet: the node started under [`UPNP_QUIET_AFTER`]
+    /// ago, while UPnP and AutoNAT are still asking — a computer with a
+    /// public address of its own needs neither, and is confirmed by then.
+    #[default]
+    Searching,
+    /// No router answered UPnP's search: UPnP off at the router, or none.
+    NoRouter,
+    /// The router answered and mapped nothing within [`UPNP_QUIET_AFTER`] —
+    /// usually another device holding the ports ([`refused_mapping_message`]).
+    Refused,
+    /// The router's own address is not public: a second router in front of
+    /// it, or the provider's carrier-grade NAT.
+    BehindAnotherNat,
+    /// The router holds a mapping for this node.
+    Mapped,
+}
+
+impl UpnpVerdict {
+    /// The dashboard's key (`frontend/js/components/ui.js`, `netstatus.reach_fix_*`).
+    pub fn key(self) -> &'static str {
+        match self {
+            Self::WslDefaultNetworking => "wsl_default_networking",
+            Self::WslMirrored => "wsl_mirrored",
+            Self::Off => "off",
+            Self::Searching => "searching",
+            Self::NoRouter => "no_router",
+            Self::Refused => "refused",
+            Self::BehindAnotherNat => "behind_another_nat",
+            Self::Mapped => "mapped",
+        }
+    }
+}
+
+/// Where this node runs, as far as the advice for a silent router goes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Wsl {
+    /// Not under WSL2 (a container on Windows is not, #640).
+    No,
+    /// WSL2's NAT mode, whose safe defaults bind the P2P listener to loopback.
+    DefaultNetworking,
+    /// WSL2's mirrored networking.
+    Mirrored,
+}
+
 pub(super) struct UpnpWatch {
     enabled: bool,
+    wsl: Wsl,
     started: Instant,
     /// Any UPnP outcome at all — a mapping, its expiry, no gateway, a gateway
     /// behind another NAT. Each already says what happened.
@@ -40,17 +109,48 @@ pub(super) struct UpnpWatch {
     /// Searches that found no gateway. vendor/libp2p-upnp searches again on a
     /// backoff (FUTURE_WORK #329), so only the first is said to the owner.
     gateway_misses: u32,
+    /// The gateway's own external address is not public.
+    behind_another_nat: bool,
 }
 
 impl UpnpWatch {
-    pub(super) fn new(enabled: bool, started: Instant) -> Self {
+    pub(super) fn new(enabled: bool, wsl: Wsl, started: Instant) -> Self {
         Self {
             enabled,
+            wsl,
             started,
             heard: false,
             mapped: 0,
             explained: false,
             gateway_misses: 0,
+            behind_another_nat: false,
+        }
+    }
+
+    /// What stands in the way now ([`UpnpVerdict`]). A mapping outranks an
+    /// older miss: the router was looked for again and answered. Nothing is
+    /// named before [`UPNP_QUIET_AFTER`]: a server with a public address
+    /// would be told to fix a router it does not have.
+    pub(super) fn verdict(&self, now: Instant) -> UpnpVerdict {
+        let settled = now.saturating_duration_since(self.started) >= UPNP_QUIET_AFTER;
+        if self.enabled && self.mapped > 0 {
+            UpnpVerdict::Mapped
+        } else if !settled {
+            UpnpVerdict::Searching
+        } else if self.wsl == Wsl::DefaultNetworking {
+            UpnpVerdict::WslDefaultNetworking
+        } else if !self.enabled {
+            UpnpVerdict::Off
+        } else if self.behind_another_nat {
+            UpnpVerdict::BehindAnotherNat
+        } else if self.wsl == Wsl::Mirrored && (self.gateway_misses > 0 || !self.heard) {
+            UpnpVerdict::WslMirrored
+        } else if self.gateway_misses > 0 {
+            UpnpVerdict::NoRouter
+        } else if !self.heard {
+            UpnpVerdict::Refused
+        } else {
+            UpnpVerdict::Searching
         }
     }
 
@@ -64,9 +164,10 @@ impl UpnpWatch {
         self.mapped = self.mapped.saturating_sub(1);
     }
 
-    /// No gateway, or one behind another NAT: said by its own event.
-    pub(super) fn note_answered(&mut self) {
+    /// A gateway behind another NAT: said by its own event.
+    pub(super) fn note_behind_another_nat(&mut self) {
         self.heard = true;
+        self.behind_another_nat = true;
     }
 
     /// A search found no gateway. True the FIRST time only: the search repeats
@@ -117,7 +218,7 @@ mod tests {
     fn watch_started_ago(enabled: bool, ago: Duration) -> (UpnpWatch, Instant) {
         let now = Instant::now();
         let started = now.checked_sub(ago).expect("a clock old enough");
-        (UpnpWatch::new(enabled, started), now)
+        (UpnpWatch::new(enabled, Wsl::No, started), now)
     }
 
     /// The two-nodes-behind-one-router case: UPnP on, nothing heard, no public
@@ -145,10 +246,10 @@ mod tests {
         mapped.note_expired();
         assert!(!mapped.holds_a_mapping());
 
-        let (mut no_gateway, now) = watch_started_ago(true, ago);
-        no_gateway.note_answered();
-        assert!(!no_gateway.silence_to_explain(now, false));
-        assert!(!no_gateway.holds_a_mapping());
+        let (mut behind, now) = watch_started_ago(true, ago);
+        behind.note_behind_another_nat();
+        assert!(!behind.silence_to_explain(now, false));
+        assert!(!behind.holds_a_mapping());
 
         let (mut reachable, now) = watch_started_ago(true, ago);
         assert!(
@@ -166,6 +267,44 @@ mod tests {
         assert!(w.note_no_gateway());
         assert!(!w.note_no_gateway());
         assert!(!w.note_no_gateway());
+    }
+
+    /// Each cause the dashboard advises on, and which wins when two are
+    /// true: a mapping made after a miss is the router answering at last.
+    #[test]
+    fn the_verdict_names_what_stands_in_the_way() {
+        let (fresh, now) = watch_started_ago(true, Duration::ZERO);
+        assert_eq!(fresh.verdict(now), UpnpVerdict::Searching);
+        let (silent, now) = watch_started_ago(true, UPNP_QUIET_AFTER);
+        assert_eq!(silent.verdict(now), UpnpVerdict::Refused);
+
+        let (mut missed, now) = watch_started_ago(true, UPNP_QUIET_AFTER * 2);
+        missed.note_no_gateway();
+        assert_eq!(missed.verdict(now), UpnpVerdict::NoRouter);
+        missed.note_mapped();
+        assert_eq!(missed.verdict(now), UpnpVerdict::Mapped);
+        missed.note_expired();
+        assert_eq!(missed.verdict(now), UpnpVerdict::NoRouter);
+
+        let (mut behind, now) = watch_started_ago(true, Duration::ZERO);
+        behind.note_behind_another_nat();
+        assert_eq!(behind.verdict(now), UpnpVerdict::Searching, "too early");
+        let later = now + UPNP_QUIET_AFTER;
+        assert_eq!(behind.verdict(later), UpnpVerdict::BehindAnotherNat);
+
+        let (off, now) = watch_started_ago(false, UPNP_QUIET_AFTER);
+        assert_eq!(off.verdict(now), UpnpVerdict::Off);
+        let (early_off, now) = watch_started_ago(false, Duration::ZERO);
+        assert_eq!(early_off.verdict(now), UpnpVerdict::Searching);
+        let started = now
+            .checked_sub(UPNP_QUIET_AFTER)
+            .expect("a clock old enough");
+        let wsl = UpnpWatch::new(false, Wsl::DefaultNetworking, started);
+        assert_eq!(wsl.verdict(now), UpnpVerdict::WslDefaultNetworking);
+        let mut mirrored = UpnpWatch::new(true, Wsl::Mirrored, started);
+        assert_eq!(mirrored.verdict(now), UpnpVerdict::WslMirrored, "silent");
+        mirrored.note_mapped();
+        assert_eq!(mirrored.verdict(now), UpnpVerdict::Mapped);
     }
 
     #[test]

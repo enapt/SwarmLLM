@@ -233,6 +233,11 @@ pub struct MetricsProviders {
     /// `note_head_led` (`remote_generate::try_delegated_split`), read ONLY by
     /// `SharedState::peer_may_lead`.
     pub declined_leads: super::declined_leads::DeclinedLeads,
+    /// What stands between this node and a computer connecting to it
+    /// directly (`network::manager::UpnpVerdict`): written ONLY by the network
+    /// manager's `publish_upnp_verdict`, read ONLY by
+    /// `SharedState::reachability_json`.
+    pub upnp_verdict: parking_lot::Mutex<crate::network::manager::UpnpVerdict>,
     /// Last time a segment forward for `(peer, model)` completed successfully.
     ///
     /// Its only job is to answer "might this peer have to LOAD the model

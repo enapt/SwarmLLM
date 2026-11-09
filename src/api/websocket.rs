@@ -692,6 +692,9 @@ async fn build_stats_message(state: &SharedState) -> String {
         // May this node's chats use other computers — the same object as
         // `GET /api/admin/stats` carries (`SharedState::swarm_use_json`).
         "swarm_use": state.swarm_use_json(),
+        // Can other computers connect here directly — the same object as
+        // `GET /api/admin/stats` carries (`SharedState::reachability_json`).
+        "reachability": state.reachability_json(),
     });
 
     data["shard_registry"] = shard_registry_val;

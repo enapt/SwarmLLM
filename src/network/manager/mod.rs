@@ -42,6 +42,16 @@ mod tensors;
 mod upload_pacer;
 mod upnp_watch;
 
+pub use upnp_watch::UpnpVerdict;
+
+/// The TCP port the P2P listener takes beside `listen_port` (QUIC's UDP port):
+/// ten up, clear of the HTTP API on `listen_port` itself. The one spelling —
+/// the listener, the owner's UPnP explanation and the dashboard's advice all
+/// name it.
+pub fn p2p_tcp_port(listen_port: u16) -> u16 {
+    listen_port.saturating_add(10)
+}
+
 /// Maximum in-flight shard chunk requests before dropping new ones.
 const MAX_PENDING_SHARD_REQUESTS: usize = 1024;
 /// Maximum lifetime (seconds) for a tensor channel or outbound forward before eviction.
@@ -869,6 +879,26 @@ impl NetworkManager {
         let enable_autonat = config.network.enable_autonat;
         let enable_dcutr = config.network.enable_dcutr;
         let enable_upnp = config.network.enable_upnp;
+        // Under WSL2 the advice for an unreachable node is Windows' to take
+        // (`UpnpVerdict`): NAT mode's safe defaults bind the P2P listener to
+        // loopback (`config::network::wsl_network_adaptation`), and mirrored
+        // mode hears the router only on a network Windows classes Private.
+        let wsl = if !crate::config::network::is_wsl2()
+            || crate::config::network::running_in_container()
+        {
+            upnp_watch::Wsl::No
+        } else if config
+            .network
+            .listen_address
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback())
+        {
+            upnp_watch::Wsl::DefaultNetworking
+        } else if crate::config::network::wsl_networking_is_mirrored() {
+            upnp_watch::Wsl::Mirrored
+        } else {
+            upnp_watch::Wsl::No
+        };
         // Load cached peer count to auto-scale GossipSub mesh parameters.
         // This is the one call that genuinely is a restore from the last
         // session, so it is the one that says so — see `load_peer_cache`.
@@ -1076,7 +1106,7 @@ impl NetworkManager {
             next_hop_lookups: HashMap::new(),
             next_hop_misses: commands::NextHopMisses::default(),
             relay_provider_registered: false,
-            upnp_watch: upnp_watch::UpnpWatch::new(enable_upnp, std::time::Instant::now()),
+            upnp_watch: upnp_watch::UpnpWatch::new(enable_upnp, wsl, std::time::Instant::now()),
             p2p_listeners: Vec::new(),
             pending_relay_provider_query: None,
             pending_prefix_kv_outbound: HashMap::new(),
@@ -1422,6 +1452,9 @@ impl NetworkManager {
     /// only at libp2p's `debug` level, and a tester read that silence as "this
     /// computer cannot do UPnP" for days (2026-10-08).
     fn explain_a_silent_router(&mut self) {
+        // Every tick, so a router that stays silent reads `Refused` once the
+        // quiet period is over.
+        self.publish_upnp_verdict();
         let reachable = self
             .shared_state
             .publicly_reachable
@@ -1433,7 +1466,7 @@ impl NetworkManager {
             return;
         }
         let port = self.shared_state.config.node.listen_port;
-        let message = upnp_watch::refused_mapping_message(port, port.saturating_add(10));
+        let message = upnp_watch::refused_mapping_message(port, p2p_tcp_port(port));
         tracing::info!("{message}");
         self.shared_state
             .emit_activity(crate::daemon::state::ActivityEvent::new(
@@ -1441,6 +1474,15 @@ impl NetworkManager {
                 "upnp_refused",
                 message,
             ));
+    }
+
+    /// Tell the dashboard what stands between this node and a direct
+    /// connection ([`UpnpVerdict`]): after every UPnP event and on the
+    /// discovery tick. Written only here, read only by
+    /// `SharedState::reachability_json`.
+    pub(super) fn publish_upnp_verdict(&self) {
+        *self.shared_state.metrics.upnp_verdict.lock() =
+            self.upnp_watch.verdict(std::time::Instant::now());
     }
 
     /// Hand this node's port mappings back to the router on a clean shutdown.
@@ -1523,7 +1565,7 @@ impl NetworkManager {
         // Listen on QUIC and TCP
         // TCP P2P uses port+10 to avoid conflicting with the HTTP API server on the same TCP port.
         let listen_ip = &config.network.listen_address;
-        let tcp_port = port + 10;
+        let tcp_port = p2p_tcp_port(port);
         let tcp_addr: Multiaddr = format!("/ip4/{listen_ip}/tcp/{tcp_port}")
             .parse()
             .map_err(|e| SwarmError::Network(format!("Invalid TCP address: {e}")))?;

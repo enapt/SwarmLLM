@@ -174,6 +174,16 @@
   // old swarm-capacity-banner + mode-indicator strip. Nine named states:
   //   unreachable | connecting | global | behind | viewonly | private | lan | solo | offline
   // Cloud-provider count + capacity facts fold in as supporting detail.
+  // A cause the backend names (`UpnpVerdict::key`) → its fix. `searching`
+  // and `mapped` have none: the next reachability check settles them.
+  var REACH_FIX = {
+    no_router: 'netstatus.reach_fix_no_router',
+    refused: 'netstatus.reach_fix_refused',
+    behind_another_nat: 'netstatus.reach_fix_behind_nat',
+    off: 'netstatus.reach_fix_off',
+    wsl_default_networking: 'netstatus.reach_fix_wsl',
+    wsl_mirrored: 'netstatus.reach_fix_wsl_mirrored'
+  };
   App.networkStatus = {
     update: function(statsData, providerData) {
       var panel = document.getElementById('network-status-panel');
@@ -329,6 +339,25 @@
           detailHtml += ' · ' + U.escapeHtml(I18n.t(cloudCount === 1 ? 'netstatus.also_cloud_one' : 'netstatus.also_cloud_other', { count: cloudCount }));
         }
         detailEl.innerHTML = detailHtml;
+      }
+
+      // Reached only through a relay, which is slower: name what is in the
+      // way and its one fix (`SharedState::reachability_json`, the backend's
+      // `UpnpVerdict`), in the order Xbox's NAT test and Plex's Remote Access
+      // advise. Nothing while UPnP is still asking or holds a mapping.
+      var reachEl = document.getElementById('netstatus-reach');
+      if (reachEl) {
+        var reach = stats ? stats.reachability : null;
+        var fixKey = reach && reach.direct === false ? REACH_FIX[reach.upnp] : null;
+        if (fixKey && (stateKey === 'global' || stateKey === 'viewonly')) {
+          var fix = I18n.t(fixKey, { udp: reach.udp_port, tcp: reach.tcp_port, other: reach.udp_port <= 65000 ? reach.udp_port + 100 : reach.udp_port - 100 });
+          reachEl.innerHTML = '<span class="netstatus-reach-icon" aria-hidden="true">⚠</span> <span>'
+            + U.escapeHtml(I18n.t('netstatus.reach_relay') + ' ' + fix) + '</span>';
+          reachEl.style.display = '';
+        } else {
+          reachEl.innerHTML = '';
+          reachEl.style.display = 'none';
+        }
       }
 
       if (modelsEl) {

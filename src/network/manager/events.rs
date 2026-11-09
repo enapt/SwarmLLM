@@ -806,7 +806,7 @@ impl NetworkManager {
                         }
                     }
                     UpnpEvent::NonRoutableGateway => {
-                        self.upnp_watch.note_answered();
+                        self.upnp_watch.note_behind_another_nat();
                         // The gateway exists but is itself behind another NAT —
                         // the classic carrier-grade NAT (CGNAT) signature. Port
                         // mapping cannot make this node publicly reachable.
@@ -819,6 +819,7 @@ impl NetworkManager {
                         }
                     }
                 }
+                self.publish_upnp_verdict();
             }
 
             // ── Identify ──
