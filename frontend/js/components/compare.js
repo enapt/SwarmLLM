@@ -292,7 +292,7 @@
           }
           // NOT "this model failed": the daemon may well still be working, and
           // on the reported case it had already produced a complete reply.
-          var msg = err.name === 'AbortError' ? I18n.t('compare.no_reply_yet') : err.message;
+          var msg = err.name === 'AbortError' ? I18n.t('compare.no_reply_yet') : U.failureText(err);
           return { model: modelId, error: msg, ok: false, latency_ms: elapsed };
         });
       });

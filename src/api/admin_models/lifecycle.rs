@@ -402,11 +402,43 @@ pub async fn get_model_auto_manage(
 }
 
 /// PUT /api/admin/models/:model_id/auto-manage — Set per-model auto-manage policy.
+///
+/// Only the fields a request NAMES change; an absent one keeps its stored
+/// value (or the no-policy default: enabled, `max_shards` 0 = follow the
+/// node's default cap, prune enabled). It used to replace the whole policy,
+/// so a client that sent one field reset the other two, and the dashboard
+/// had to send all three — including values it had never managed to read.
+/// The same rule as `update_config` and RFC 7396's merge patch.
 #[derive(Debug, Deserialize)]
 pub struct ModelAutoManageUpdate {
     pub enabled: Option<bool>,
     pub max_shards: Option<u32>,
     pub prune_enabled: Option<bool>,
+}
+
+impl ModelAutoManageUpdate {
+    /// `stored` with the named fields replaced.
+    fn applied_to(
+        &self,
+        stored: &crate::config::ModelAutoManagePolicy,
+    ) -> crate::config::ModelAutoManagePolicy {
+        crate::config::ModelAutoManagePolicy {
+            enabled: self.enabled.unwrap_or(stored.enabled),
+            max_shards: self.max_shards.unwrap_or(stored.max_shards),
+            prune_enabled: self.prune_enabled.unwrap_or(stored.prune_enabled),
+        }
+    }
+}
+
+/// What a model with no stored policy is managed by — the same answer
+/// `get_model_auto_manage` reports for one (its `max_shards` 0 reads as
+/// the node's default cap).
+fn unset_auto_manage_policy() -> crate::config::ModelAutoManagePolicy {
+    crate::config::ModelAutoManagePolicy {
+        enabled: true,
+        max_shards: 0,
+        prune_enabled: true,
+    }
 }
 
 pub async fn set_model_auto_manage(
@@ -417,18 +449,18 @@ pub async fn set_model_auto_manage(
     validate_model_id(&model_id)?;
     let mid = crate::types::ModelId(model_id.clone());
 
-    let policy = crate::config::ModelAutoManagePolicy {
-        enabled: body.enabled.unwrap_or(true),
-        max_shards: body.max_shards.unwrap_or(0),
-        prune_enabled: body.prune_enabled.unwrap_or(true),
+    // Read-modify-write under the entry's lock, so two PUTs naming
+    // different fields cannot each undo the other's. No await while held.
+    let policy = {
+        let mut stored = state
+            .shared_state
+            .models
+            .model_auto_manage_policies
+            .entry(mid.clone())
+            .or_insert_with(unset_auto_manage_policy);
+        *stored = body.applied_to(&stored);
+        stored.clone()
     };
-
-    // Update in-memory
-    state
-        .shared_state
-        .models
-        .model_auto_manage_policies
-        .insert(mid.clone(), policy.clone());
 
     // Persist to database
     if let Err(e) = state
@@ -917,6 +949,57 @@ mod tests {
         assert_eq!(parse(r#"{"enabled": false}"#), Some(Some(false)));
         assert_eq!(parse(r#"{"enabled": null}"#), Some(None));
         assert_eq!(parse("{}"), None);
+    }
+
+    /// A PUT naming one field changes that field only. It used to replace
+    /// the whole policy, so `{"max_shards": 3}` also switched auto-manage
+    /// and pruning back on for a model the user had switched them off for.
+    #[test]
+    fn an_auto_manage_put_changes_only_the_fields_it_names() {
+        use super::{unset_auto_manage_policy, ModelAutoManageUpdate};
+        let stored = crate::config::ModelAutoManagePolicy {
+            enabled: false,
+            max_shards: 7,
+            prune_enabled: false,
+        };
+        let put = |body: &str| {
+            serde_json::from_str::<ModelAutoManageUpdate>(body)
+                .unwrap()
+                .applied_to(&stored)
+        };
+
+        let only_cap = put(r#"{"max_shards": 3}"#);
+        assert_eq!(
+            (
+                only_cap.enabled,
+                only_cap.max_shards,
+                only_cap.prune_enabled
+            ),
+            (false, 3, false)
+        );
+        let only_prune = put(r#"{"prune_enabled": true}"#);
+        assert_eq!(
+            (
+                only_prune.enabled,
+                only_prune.max_shards,
+                only_prune.prune_enabled
+            ),
+            (false, 7, true)
+        );
+        let nothing = put("{}");
+        assert_eq!(
+            (nothing.enabled, nothing.max_shards, nothing.prune_enabled),
+            (false, 7, false)
+        );
+
+        // No stored policy: the unnamed fields are what GET reports for one.
+        let fresh = serde_json::from_str::<ModelAutoManageUpdate>(r#"{"enabled": false}"#)
+            .unwrap()
+            .applied_to(&unset_auto_manage_policy());
+        assert_eq!(
+            (fresh.enabled, fresh.max_shards, fresh.prune_enabled),
+            (false, 0, true)
+        );
     }
 }
 

@@ -85,10 +85,10 @@
             App.notifications.showToast(I18n.t(newLocked ? 'shard.locked' : 'shard.unlocked', { idx: shardIndex + 1 }), 'success');
             rowReload();
           } else {
-            App.notifications.showToast(I18n.t('shard.lock_failed'), 'error');
+            U.getApiErrorMessage(resp, I18n.t('shard.lock_failed')).then(function(msg) { App.notifications.showToast(msg, 'error'); });
           }
         }).catch(function(err) {
-          App.notifications.showToast(I18n.t('shard.lock_error', { error: err.message }), 'error');
+          App.notifications.showToast(I18n.t('shard.lock_error', { error: U.failureText(err) }), 'error');
         });
         return;
       }
@@ -104,7 +104,7 @@
             ? App.notifications.showToast(I18n.t('shard.loading', { idx: shardIndex + 1 }), 'success')
             : U.getApiErrorMessage(resp, I18n.t('shard.load_failed')).then(function(msg) { App.notifications.showToast(msg, 'error'); });
         }).then(rowReload).catch(function(err) {
-          App.notifications.showToast(I18n.t('shard.load_error', { error: err.message }), 'error');
+          App.notifications.showToast(I18n.t('shard.load_error', { error: U.failureText(err) }), 'error');
         });
         return;
       }
@@ -120,7 +120,7 @@
             U.getApiErrorMessage(resp, I18n.t('shard.unload_failed')).then(function(msg) { App.notifications.showToast(msg, 'error'); });
           }
         }).catch(function(err) {
-          App.notifications.showToast(I18n.t('shard.unload_error', { error: err.message }), 'error');
+          App.notifications.showToast(I18n.t('shard.unload_error', { error: U.failureText(err) }), 'error');
         });
         return;
       }
@@ -135,7 +135,7 @@
             U.getApiErrorMessage(resp, I18n.t('shard.remove_failed')).then(function(msg) { App.ui.showBanner('error', msg); });
           }
         }).catch(function(err) {
-          App.ui.showBanner('error', I18n.t('shard.remove_error', { error: err.message }));
+          App.ui.showBanner('error', I18n.t('shard.remove_error', { error: U.failureText(err) }));
         });
         return;
       }
@@ -146,6 +146,8 @@
       }
 
       if (action === 'download') {
+        // An error reply is JSON too: it has no `status`, so it lands in the
+        // last branch, which reads its `error`.
         App.authFetch(url + '/download', { method: 'POST' }).then(function(resp) {
           return resp.json();
         }).then(function(data) {
@@ -170,7 +172,7 @@
             App.ui.showBanner('error', U.extractErrorMessage(data, I18n.t('shard.download_unavailable')));
           }
         }).catch(function(err) {
-          App.ui.showBanner('error', I18n.t('shard.download_failed', { error: err.message }));
+          App.ui.showBanner('error', I18n.t('shard.download_failed', { error: U.failureText(err) }));
         });
         return;
       }
@@ -446,19 +448,42 @@
             }
           });
     },
-    loadInitial: async function() {
-      // Debounce: skip if already loading or loaded within 5s
-      if (App.dashboard._loading) return;
+    // `opts.force`: a reload asked for after a write (a removal, a cancel, a
+    // finished download, saved settings). The 5-second debounce is for the
+    // polls; it used to swallow these too, so the page showed the old state
+    // until the next 30-second poll. A forced call during a load runs once
+    // after it rather than being dropped (a trailing call, as lodash's
+    // `debounce` keeps one).
+    loadInitial: async function(opts) {
+      var force = !!(opts && opts.force);
+      if (App.dashboard._loading) {
+        if (force) App.dashboard._reloadAfter = true;
+        return;
+      }
       var now = Date.now();
-      if (now - (App.dashboard._lastLoadTime || 0) < 5000) return;
+      if (!force && now - (App.dashboard._lastLoadTime || 0) < 5000) return;
       App.dashboard._loading = true;
       App.dashboard._lastLoadTime = now;
+      // `finally`, not a reset on each exit: a throw in any renderer below
+      // used to leave `_loading` set, and every later poll returned at the
+      // top without a word — the dashboard froze until a reload.
+      try {
+        await App.dashboard._loadInitialOnce();
+      } finally {
+        App.dashboard._loading = false;
+        if (App.dashboard._reloadAfter) {
+          App.dashboard._reloadAfter = false;
+          App.dashboard.loadInitial({ force: true });
+        }
+      }
+    },
+
+    _loadInitialOnce: async function() {
       var statsResult;
       try {
         var results = await Promise.all([App.data.loadStats(), App.models.load()]);
         statsResult = results[0];
       } catch (e) {
-        App.dashboard._loading = false;
         App.ui.showBanner('error', I18n.t('errors.server_unreachable'));
         return;
       }
@@ -482,7 +507,6 @@
       App.downloads.load();
       App.dashboard.loadNetworkData();
       App.networkCode.load();
-      App.dashboard._loading = false;
     },
 
     // The hardware panel, rendered from whichever payload carried it.
@@ -894,7 +918,62 @@
     },
 
 
+    // The model list is rebuilt whole on every `models_changed` (1 s debounce)
+    // and every 30-second poll. What the USER put on a card survives it: an
+    // open settings panel is carried into the new card as the same live
+    // element — its inputs as the user left them, focus and cursor too — and
+    // an open part row is opened again from the fresh data. Before this, a
+    // poll landing mid-edit closed the panel and threw the edit away ("a
+    // periodic refresher may repaint a display, never an input",
+    // arch-frontend.md). Prior art: Turbo's `data-turbo-permanent` and htmx's
+    // `hx-preserve` keep a marked element across a swap the same way, by id.
     renderModels: function(models, cloudModels) {
+      var list = document.getElementById('models-list');
+      if (!list) return;
+      function modelOf(el) {
+        var card = el.closest('[data-model-id]');
+        return card ? card.getAttribute('data-model-id') : null;
+      }
+      var panels = [];
+      list.querySelectorAll('.auto-manage-panel').forEach(function(panel) {
+        var id = modelOf(panel);
+        if (id) panels.push({ id: id, el: panel });
+      });
+      var openRows = [];
+      list.querySelectorAll('.shard-row.expanded').forEach(function(row) {
+        openRows.push({ model: row.getAttribute('data-shard-model'), index: row.getAttribute('data-shard-index') });
+      });
+      var active = document.activeElement;
+      var focusIn = null;
+      panels.forEach(function(p) { if (active && p.el.contains(active)) focusIn = active; });
+      var selection = null;
+      if (focusIn) {
+        try { selection = [focusIn.selectionStart, focusIn.selectionEnd]; } catch (e) { /* a checkbox has none */ }
+      }
+
+      try {
+        App.dashboard._renderModelsNow(models, cloudModels);
+      } finally {
+        panels.forEach(function(p) {
+          var card = list.querySelector('[data-model-id="' + U.cssSafeAttr(p.id) + '"]');
+          // A model that left the list takes its panel with it.
+          if (card && !card.querySelector('.auto-manage-panel')) card.appendChild(p.el);
+        });
+        if (focusIn && focusIn.isConnected) {
+          focusIn.focus({ preventScroll: true });
+          if (selection && selection[0] != null) {
+            try { focusIn.setSelectionRange(selection[0], selection[1]); } catch (e) { /* not a text field */ }
+          }
+        }
+        openRows.forEach(function(r) {
+          var row = list.querySelector('.shard-row[data-shard-model="' + U.cssSafeAttr(r.model) +
+            '"][data-shard-index="' + U.cssSafeAttr(r.index) + '"]');
+          if (row && !row.classList.contains('expanded')) App.dashboard.toggleShardRowExpand(row);
+        });
+      }
+    },
+
+    _renderModelsNow: function(models, cloudModels) {
       // models cached in App.data.cache.models
       var list = document.getElementById('models-list');
       var empty = document.getElementById('models-empty');
@@ -2539,7 +2618,7 @@
           // Keep activeAcquisitions entry with _completeFired flag for 30s so incoming
           // stats_update messages don't re-create the download bar (backend removes
           // acquisition_progress after 5s, but WS messages can arrive in between)
-          setTimeout(function() { App.dashboard.loadInitial(); }, 3500);
+          setTimeout(function() { App.dashboard.loadInitial({ force: true }); }, 3500);
           setTimeout(function() { delete S.activeAcquisitions[modelId]; }, 30000);
         } else if (!isComplete && (status.state === 'failed' || (typeof status.state === 'object' && status.state && status.state.failed)) && !S.activeAcquisitions[modelId]._failFired) {
           S.activeAcquisitions[modelId]._failFired = true;

@@ -448,7 +448,7 @@
           return;
         }
       } catch (e) {
-        App.ui.showBanner('error', I18n.t('setup.failed_save_error', { error: e.message || I18n.t('common.request_failed') }));
+        App.ui.showBanner('error', I18n.t('setup.failed_save_error', { error: U.failureText(e) }));
         return;
       }
       var nick = (document.getElementById('setup-nickname').value || '').trim();

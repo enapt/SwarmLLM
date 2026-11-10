@@ -651,6 +651,12 @@
     }
   }
 
+  // Only the LATEST search may paint. A HuggingFace search can take seconds,
+  // and with nothing tying a reply to its question, a slow "lla" landing after
+  // "llama" replaced the newer results (the stale-response race React's docs
+  // describe for fetching in effects; RxJS's `switchMap` drops the old one).
+  var _browseSeq = 0;
+
   function _browseSearch() {
     var input = document.getElementById('browse-search-input');
     var query = (input && input.value || '').trim();
@@ -658,8 +664,10 @@
     var section = document.getElementById('browse-results-section');
     var loading = document.getElementById('browse-loading');
     var list = document.getElementById('browse-results-list');
+    var seq = ++_browseSeq;
 
     if (!query && _browseState.tasks.length === 0) {
+      if (loading) loading.style.display = 'none';
       if (section) section.style.display = 'none';
       return;
     }
@@ -681,9 +689,11 @@
       if (!r.ok) throw new Error('search request failed: ' + r.status);
       return r.json();
     }).then(function (data) {
+      if (seq !== _browseSeq) return;
       if (loading) loading.style.display = 'none';
       _renderBrowseResults(data);
     }).catch(function () {
+      if (seq !== _browseSeq) return;
       if (loading) loading.style.display = 'none';
       var list2 = document.getElementById('browse-results-list');
       if (list2) list2.innerHTML = '<div class="browse-empty">' + U.escapeHtml(I18n.t('browse.error')) + '</div>';

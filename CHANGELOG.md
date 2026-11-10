@@ -2,6 +2,26 @@
 
 ## [Unreleased]
 
+**The dashboard keeps what you type.** A model's settings panel (the gear on its card) lost your edits
+whenever the model list refreshed — every 30 seconds, and on every change in the swarm. The panel now
+survives a refresh with your edits and cursor where you left them, and an open part row stays open.
+Saving changes only the settings you changed, and a setting that could not be read is greyed out and left
+alone — it used to be saved over with a default. Through the API, `PUT /api/admin/models/{id}/auto-manage`
+now changes only the fields it names.
+
+**Errors say what happened, in your language.** Messages from the browser itself ("Failed to fetch",
+"Unexpected token") were pasted into translated sentences in English; they now read "Can't reach SwarmLLM —
+is it running?" or "Request timed out". Requesting a model, locking a part and switching "Start and finish on
+this computer" now show the reason they were refused. In Claude Code, a refusal shows its reason instead of
+the raw reply, and an Allow or Deny that did not get through no longer shows "Allowed" while the session goes
+on waiting — the buttons stay so you can answer again.
+
+**Smaller fixes.** One error could stop the dashboard refreshing until the page was reloaded. A refresh right
+after removing a model, cancelling a download or saving settings was skipped if another had run in the last
+5 seconds. A slow model search could replace the results of a newer one. "Get the missing parts" said
+"Downloading…" when nothing was downloading — the parts were already here, or the model has no download link.
+A model's technical details that failed to load are tried again the next time its card opens.
+
 ## [0.3.280-alpha] — 2026-11-09
 
 **Replies take the fastest route by default.** "Start and finish on this computer" used to switch

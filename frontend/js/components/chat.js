@@ -654,7 +654,9 @@
             App.chat.flashSession(session.id);
           }
         } catch (e) {
-          contentEl.textContent = e.message || I18n.t('chat.connection_failed');
+          // An `Error` we threw carries the daemon's reason; anything else is
+          // the browser's own English ("Failed to fetch").
+          contentEl.textContent = (e && e.name === 'Error' && e.message) ? e.message : U.failureText(e);
           contentEl.classList.add('chat-error');
           if (assistantAvatarEl) { assistantAvatarEl.classList.remove('avatar-thinking', 'avatar-streaming'); assistantAvatarEl.classList.add('avatar-error'); }
         }

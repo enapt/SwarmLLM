@@ -38,7 +38,7 @@
       if (successMsg) App.notifications.showToast(successMsg, 'success');
       App.pool.load();
     } catch (e) {
-      App.notifications.showToast(I18n.t('pool.failed_generic', { error: e.message }), 'error');
+      App.notifications.showToast(I18n.t('pool.failed_generic', { error: U.failureText(e) }), 'error');
     }
   }
 
@@ -398,7 +398,7 @@
         setTimeout(function () { App.pool.load(); }, 5000);
         setTimeout(function () { App.pool.load(); }, 15000);
       } catch (e) {
-        App.notifications.showToast(I18n.t('pool.failed_generic', { error: e.message }), 'error');
+        App.notifications.showToast(I18n.t('pool.failed_generic', { error: U.failureText(e) }), 'error');
       }
     },
 
@@ -414,7 +414,7 @@
         if (codeVal) codeVal.textContent = code;
         this._lastCode = code;
       } catch (e) {
-        App.notifications.showToast(I18n.t('pool.failed_generic', { error: e.message }), 'error');
+        App.notifications.showToast(I18n.t('pool.failed_generic', { error: U.failureText(e) }), 'error');
       }
     },
 
@@ -450,7 +450,7 @@
         var data = await resp.json();
         _hasError(data);
       } catch (e) {
-        App.notifications.showToast(I18n.t('pool.failed_generic', { error: e.message }), 'error');
+        App.notifications.showToast(I18n.t('pool.failed_generic', { error: U.failureText(e) }), 'error');
       }
     },
 

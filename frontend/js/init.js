@@ -521,8 +521,18 @@
               encFetchEl.disabled = false;
               return;
             }
-            App.ui.showBanner('success', I18n.t(res.d.turns_on_when_they_arrive === false
-              ? 'enc.fetch_started_switch_on' : 'enc.fetch_started'));
+            // Each answer says what actually happened: "Downloading…" was
+            // shown for all three, though two of them download nothing.
+            var byItself = res.d.turns_on_when_they_arrive !== false;
+            if (res.d.status === 'already_available') {
+              // Both ends were here: the choice was recorded ON just now.
+              App.ui.showBanner('success', I18n.t('enc.fetch_already_here'));
+            } else if (res.d.status === 'no_download_source') {
+              App.ui.showBanner('info', I18n.t(byItself ? 'enc.fetch_no_source' : 'enc.fetch_no_source_switch_on'));
+              encFetchEl.disabled = false;
+            } else {
+              App.ui.showBanner('success', I18n.t(byItself ? 'enc.fetch_started' : 'enc.fetch_started_switch_on'));
+            }
             App.models.load();
           })
           .catch(function() {
@@ -534,64 +544,39 @@
         return;
       }
 
-      // Encrypted pipeline toggle
-      var encToggle = target.getAttribute('data-enc-toggle') || (target.closest('[data-enc-toggle]') || {}).getAttribute && (target.closest('[data-enc-toggle]') || {}).getAttribute('data-enc-toggle');
-      if (encToggle) {
-        var encReady = (target.getAttribute('data-enc-ready') || (target.closest('[data-enc-ready]') || {}).getAttribute && (target.closest('[data-enc-ready]') || {}).getAttribute('data-enc-ready')) === '1';
-        if (encReady) {
-          var encModelData = (App.data.cache.models || []).find(function(m) { return m.id === encToggle; });
-          // `encrypted_pipeline` is the EFFECTIVE value (setting AND both ends
-          // present), so a blocked model reports false — and clicking its
-          // toggle would have asked to ENABLE what is already on, which the API
-          // rightly refuses for the missing shards. Blocked means the setting IS
-          // on, so the only sensible intent is to turn it off.
-          var isActive = encModelData
-            ? (!!encModelData.encrypted_pipeline || !!encModelData.encrypted_pipeline_blocked)
-            : (target.classList.contains('active') || target.closest('.active') != null);
-          // Switching to what this computer decides on its own FORGETS the
-          // choice rather than storing it, so off-then-on returns the model to
-          // automatic instead of pinning it on for good (field report
-          // 2026-10-15). Without the model's data, store the choice as before.
-          var encBackToDefault = !!encModelData && (!isActive === !!encModelData.encrypted_pipeline_default);
-          App.authFetch(U.modelApiUrl(encToggle, 'encrypted-pipeline'), encBackToDefault
-            ? { method: 'DELETE' }
-            : {
-              method: 'PUT',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ enabled: !isActive }),
-            }).then(function(r) {
-            if (r.ok) {
-              var key = isActive ? 'enc.pipeline_disabled' : 'enc.pipeline_enabled';
-              App.ui.showBanner('success', I18n.t(key, { model: encToggle }));
-              App.models.load();
-            } else {
-              App.ui.showBanner('error', I18n.t('errors.failed_toggle_enc'));
-            }
-          });
-        } else {
-          if (confirm(I18n.t('init.confirm_download_shards'))) {
-            App.authFetch('/api/admin/hf/source/' + encodeURIComponent(encToggle)).then(function(r) {
-              if (!r.ok) { App.ui.showBanner('error', I18n.t('init.no_hf_source', { model: encToggle })); return; }
-              return r.json();
-            }).then(function(src) {
-              if (!src) return;
-              var modelData = (App.data.cache.models || []).find(function(mm) { return mm.id === encToggle; });
-              var missing = [];
-              if (modelData) {
-                var first = modelData.shards[0];
-                var last = modelData.shards[modelData.shards.length - 1];
-                if (first && !first.local) missing.push(first.index);
-                if (last && !last.local) missing.push(last.index);
-              }
-              if (missing.length === 0) { App.ui.showBanner('info', I18n.t('init.no_missing_shards')); return; }
-              App.hf.downloadShards({ repo_id: src.repo_id, filename: src.filename, shards: missing }).then(function(result) {
-                // Parts are numbered from 1 everywhere a person reads them.
-                if (result.ok) App.ui.showBanner('success', I18n.t('init.downloading_shards', { shards: missing.map(function(i) { return i + 1; }).join(', ') }));
-                else App.ui.showBanner('error', result.errorMsg);
-              });
-            });
-          }
-        }
+      // Encrypted pipeline toggle. Every toggle is rendered only where both
+      // ends are here (`data-enc-ready="1"`); a model missing one shows the
+      // "get the missing parts" button above, which asks the daemon for exactly
+      // the parts a reply starts and finishes on (#408). A second branch here
+      // fetched part 0 and the last-numbered part itself, and was unreachable.
+      var encToggleEl = target.closest('[data-enc-toggle]');
+      if (encToggleEl) {
+        var encToggle = encToggleEl.getAttribute('data-enc-toggle');
+        var encModelData = (App.data.cache.models || []).find(function(m) { return m.id === encToggle; });
+        // `encrypted_pipeline` is the EFFECTIVE value (setting AND both ends
+        // present), so a blocked model reports false — and clicking its
+        // toggle would have asked to ENABLE what is already on, which the API
+        // rightly refuses for the missing shards. Blocked means the setting IS
+        // on, so the only sensible intent is to turn it off.
+        var isActive = encModelData
+          ? (!!encModelData.encrypted_pipeline || !!encModelData.encrypted_pipeline_blocked)
+          : (encToggleEl.classList.contains('active') || encToggleEl.closest('.active') != null);
+        // Switching to what this computer decides on its own FORGETS the
+        // choice rather than storing it, so off-then-on returns the model to
+        // automatic instead of pinning it on for good (field report
+        // 2026-10-15). Without the model's data, store the choice as before.
+        var encBackToDefault = !!encModelData && (!isActive === !!encModelData.encrypted_pipeline_default);
+        U.apiAction(U.modelApiUrl(encToggle, 'encrypted-pipeline'), encBackToDefault
+          ? { method: 'DELETE' }
+          : {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ enabled: !isActive }),
+          }, function() {
+            var key = isActive ? 'enc.pipeline_disabled' : 'enc.pipeline_enabled';
+            App.ui.showBanner('success', I18n.t(key, { model: encToggle }));
+            App.models.load();
+          }, { fallback: I18n.t('errors.failed_toggle_enc') });
         return;
       }
 

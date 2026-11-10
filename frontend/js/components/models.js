@@ -377,17 +377,29 @@
     },
 
     request: async function(modelId) {
+      var resp;
       try {
-        var resp = await App.authFetch(U.modelApiUrl(modelId, 'add'), { method: 'POST' });
-        var data = await resp.json();
-        if (data.status === 'acquiring') {
-          S.activeAcquisitions[modelId] = { started: Date.now() };
-          App.dashboard.renderAcquisitionPanel(modelId, null);
-        } else {
-          App.ui.showBanner('warning', data.message || I18n.t('models.download_unavailable'));
-        }
+        resp = await App.authFetch(U.modelApiUrl(modelId, 'add'), { method: 'POST' });
       } catch (e) {
-        App.ui.showBanner('error', I18n.t('models.request_failed', { error: e.message }));
+        App.ui.showBanner('error', I18n.t('models.request_failed', { error: U.failureText(e) }));
+        return;
+      }
+      // A refusal carries its reason in `error.message` (and a hint): it
+      // used to be read for a top-level `message` it never has, so a full
+      // disk or a refused id showed only the generic warning.
+      if (!resp.ok) {
+        var reason = await U.getApiErrorMessage(resp, I18n.t('common.request_failed'));
+        App.ui.showBanner('error', I18n.t('models.request_failed', { error: reason }));
+        return;
+      }
+      var data = await resp.json().catch(function() { return {}; });
+      if (data.status === 'acquiring') {
+        S.activeAcquisitions[modelId] = { started: Date.now() };
+        App.dashboard.renderAcquisitionPanel(modelId, null);
+      } else {
+        // `unavailable`: a node with no download manager. Its `message` is
+        // English and names the mechanism; this says what it means.
+        App.ui.showBanner('warning', I18n.t('models.download_unavailable'));
       }
     },
 
@@ -427,7 +439,7 @@
             });
           }
           delete S.activeAcquisitions[modelId];
-          setTimeout(function() { App.dashboard.loadInitial(); }, 1000);
+          setTimeout(function() { App.dashboard.loadInitial({ force: true }); }, 1000);
         },
         { fallback: I18n.t('models.cancel_failed') }
       );
@@ -442,7 +454,7 @@
           App.ui.showBanner('success', I18n.t('models.model_removed', { model: modelId }));
           var card = document.querySelector('[data-model-id="' + U.cssSafeAttr(modelId) + '"]');
           if (card) card.remove();
-          setTimeout(function() { App.dashboard.loadInitial(); }, 1000);
+          setTimeout(function() { App.dashboard.loadInitial({ force: true }); }, 1000);
         },
         { fallback: I18n.t('models.remove_failed') }
       );
@@ -473,10 +485,12 @@
       var existing = card.querySelector('.auto-manage-panel');
       if (existing) { existing.remove(); return; }
 
-      var policy = { enabled: true, max_shards: 0, prune_enabled: true };
-      var encStatus = { encrypted_pipeline: false, ready: false, has_first_shard: false, has_last_shard: false, shard_count: 0 };
-      // null = not read: the checkbox is then disabled, so Save cannot write
-      // a default over the real setting.
+      // null = not read. A control whose setting was not read is disabled,
+      // and Save writes only what CHANGED from what was read, so a failed
+      // read can never write the panel's placeholders over the real policy
+      // (arch-frontend.md, "A panel that could not READ its settings").
+      var policy = null;
+      var encStatus = null;
       var keepStatus = null;
       try {
         var results = await Promise.all([
@@ -487,47 +501,62 @@
         if (results[0].ok) policy = await results[0].json();
         if (results[1].ok) encStatus = await results[1].json();
         if (results[2].ok) keepStatus = await results[2].json();
-      } catch (e) {
-        App.ui.showBanner('error', I18n.t('models.policy_load_failed'));
-      }
+      } catch (e) { /* whatever was not read stays null */ }
+      // A repaint may have replaced the card while the reads were out, and a
+      // second click may already have opened the panel.
+      card = document.querySelector('[data-model-id="' + U.cssSafeAttr(modelId) + '"]');
+      if (!card || card.querySelector('.auto-manage-panel')) return;
+      var policyOff = policy ? '' : ' disabled';
+      var unread = !policy || !encStatus || !keepStatus;
+      var shown = policy || { enabled: false, max_shards: 0, prune_enabled: false };
+      var enc = encStatus || { encrypted_pipeline: false, ready: false, has_first_shard: true, has_last_shard: true, shard_count: 0 };
 
-      var encReadyClass = encStatus.ready ? 'text-success' : 'text-warning';
-      var encReadyText = encStatus.ready ? I18n.t('models.enc_ready') :
-        (!encStatus.has_first_shard ? I18n.t('models.enc_missing_first') + ' ' : '') + (!encStatus.has_last_shard ? I18n.t('models.enc_missing_last') : '');
+      var encReadyClass = enc.ready ? 'text-success' : 'text-warning';
+      var encReadyText = !encStatus ? '' : enc.ready ? I18n.t('models.enc_ready') :
+        (!enc.has_first_shard ? I18n.t('models.enc_missing_first') + ' ' : '') + (!enc.has_last_shard ? I18n.t('models.enc_missing_last') : '');
       // Without both ends it cannot be switched ON here (the card's "Get the
       // missing parts" is the way) — but one that is on and cannot be met must
       // still be switchable OFF, or every request for the model keeps failing.
-      var encDisabled = (!encStatus.ready && !encStatus.encrypted_pipeline) ? ' disabled' : '';
-      var encOverheadNote = encStatus.shard_count <= 2
-        ? '<span class="text-warning" style="font-size:0.65rem">&#9888; ' + U.escapeHtml(I18n.t('models.enc_overhead_local', { count: encStatus.shard_count })) + '</span>'
+      var encDisabled = (!encStatus || (!enc.ready && !enc.encrypted_pipeline)) ? ' disabled' : '';
+      var encOverheadNote = !encStatus ? '' : enc.shard_count <= 2
+        ? '<span class="text-warning" style="font-size:0.65rem">&#9888; ' + U.escapeHtml(I18n.t('models.enc_overhead_local', { count: enc.shard_count })) + '</span>'
         : '<span class="text-muted" style="font-size:0.65rem">' + U.escapeHtml(I18n.t('models.enc_overhead')) + '</span>';
+      var maxShown = shown.max_shards || 0;
 
       var panel = document.createElement('div');
       panel.className = 'auto-manage-panel';
       panel.innerHTML =
+        (unread
+          ? '<div class="am-row text-warning" style="font-size:0.7rem">&#9888; ' + U.escapeHtml(I18n.t('models.policy_unreadable')) + '</div>'
+          : '') +
         '<div class="am-row">' +
-          '<label><input type="checkbox" id="am-enabled-' + U.safeId(modelId) + '"' + (policy.enabled ? ' checked' : '') + '> ' + U.escapeHtml(I18n.t('models.auto_manage_enabled')) + '</label>' +
+          '<label><input type="checkbox" id="am-enabled-' + U.safeId(modelId) + '"' +
+            ' data-initial="' + (shown.enabled ? '1' : '0') + '"' +
+            (shown.enabled ? ' checked' : '') + policyOff + '> ' + U.escapeHtml(I18n.t('models.auto_manage_enabled')) + '</label>' +
         '</div>' +
         '<div class="am-row">' +
-          '<label><input type="checkbox" id="am-prune-' + U.safeId(modelId) + '"' + (policy.prune_enabled !== false ? ' checked' : '') + '> ' + U.escapeHtml(I18n.t('models.auto_prune_enabled')) + '</label>' +
+          '<label><input type="checkbox" id="am-prune-' + U.safeId(modelId) + '"' +
+            ' data-initial="' + (shown.prune_enabled !== false ? '1' : '0') + '"' +
+            (shown.prune_enabled !== false ? ' checked' : '') + policyOff + '> ' + U.escapeHtml(I18n.t('models.auto_prune_enabled')) + '</label>' +
         '</div>' +
         '<div class="am-row">' +
           '<label>' + U.escapeHtml(I18n.t('models.max_shards')) + '</label>' +
-          '<input type="number" id="am-max-' + U.safeId(modelId) + '" value="' + (policy.max_shards || 0) + '" min="0" step="1">' +
+          '<input type="number" id="am-max-' + U.safeId(modelId) + '" value="' + maxShown + '" data-initial="' + maxShown + '" min="0" step="1"' + policyOff + '>' +
           '<span class="text-muted" style="font-size:0.7rem">' + U.escapeHtml(I18n.t('models.unlimited')) + '</span>' +
         '</div>' +
         '<hr style="margin:0.3rem 0;border-color:var(--border)">' +
         '<div class="am-row" style="flex-direction:column;gap:0.2rem">' +
           '<label><input type="checkbox" id="am-encrypted-' + U.safeId(modelId) + '"' +
-            ' data-initial="' + (encStatus.encrypted_pipeline ? '1' : '0') + '"' +
-            ' data-default="' + (encStatus.default_for_this_model ? '1' : '0') + '"' +
-            (encStatus.encrypted_pipeline ? ' checked' : '') + encDisabled +
+            ' data-initial="' + (enc.encrypted_pipeline ? '1' : '0') + '"' +
+            ' data-default="' + (enc.default_for_this_model ? '1' : '0') + '"' +
+            (enc.encrypted_pipeline ? ' checked' : '') + encDisabled +
             '> &#128274; ' + U.escapeHtml(I18n.t('models.encrypted_pipeline')) + '</label>' +
           '<span class="' + encReadyClass + '" style="font-size:0.65rem">' + encReadyText + '</span>' +
           encOverheadNote +
         '</div>' +
         '<div class="am-row" style="flex-direction:column;gap:0.2rem">' +
           '<label><input type="checkbox" id="am-keep-' + U.safeId(modelId) + '"' +
+            ' data-initial="' + (keepStatus && keepStatus.keep_on_this_computer ? '1' : '0') + '"' +
             (keepStatus && keepStatus.keep_on_this_computer ? ' checked' : '') + (keepStatus ? '' : ' disabled') +
             '> &#127968; ' + U.escapeHtml(I18n.t('models.keep_here')) + '</label>' +
           '<span class="text-muted" style="font-size:0.65rem">' + U.escapeHtml(I18n.t('models.keep_here_hint')) + '</span>' +
@@ -536,7 +565,8 @@
             : '') +
         '</div>' +
         '<div class="am-row">' +
-          '<button class="btn btn-sm btn-primary" data-am-save="' + U.escapeHtml(modelId) + '">' + U.escapeHtml(I18n.t('actions.save')) + '</button>' +
+          '<button class="btn btn-sm btn-primary" data-am-save="' + U.escapeHtml(modelId) + '"' +
+            (!policy && !encStatus && !keepStatus ? ' disabled' : '') + '>' + U.escapeHtml(I18n.t('actions.save')) + '</button>' +
         '</div>';
       card.appendChild(panel);
     },
@@ -549,25 +579,36 @@
       var encryptedEl = document.getElementById('am-encrypted-' + sid);
       var keepEl = document.getElementById('am-keep-' + sid);
       if (!enabledEl || !maxEl) return;
+      function changedBox(el) {
+        return el && !el.disabled && el.checked !== (el.getAttribute('data-initial') === '1');
+      }
 
       try {
-        var amResp = await App.authFetch(U.modelApiUrl(modelId, 'auto-manage'), {
-          method: 'PUT',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            enabled: enabledEl.checked,
-            max_shards: parseInt(maxEl.value, 10) || 0,
-            prune_enabled: pruneEl ? pruneEl.checked : true,
-          }),
-        });
+        // Only the fields that CHANGED: the server applies only what a PUT
+        // names, so a field the user did not touch keeps its stored value
+        // (a cap left at the node default stays "the default", not a pin).
+        var amChange = {};
+        if (changedBox(enabledEl)) amChange.enabled = enabledEl.checked;
+        if (changedBox(pruneEl)) amChange.prune_enabled = pruneEl.checked;
+        var maxValue = Math.max(0, parseInt(maxEl.value, 10) || 0);
+        if (!maxEl.disabled && String(maxValue) !== maxEl.getAttribute('data-initial')) {
+          amChange.max_shards = maxValue;
+        }
+        var amResp = { ok: true };
+        if (Object.keys(amChange).length > 0) {
+          amResp = await App.authFetch(U.modelApiUrl(modelId, 'auto-manage'), {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(amChange),
+          });
+        }
 
         var encErr = null;
         // Written only when the box CHANGED: Save re-sent it every time, so
         // saving the part limit pinned the automatic setting as a choice
         // (field report 2026-10-15). A change back to what this computer
         // decides on its own forgets the choice instead of storing one.
-        if (encryptedEl && !encryptedEl.disabled &&
-            encryptedEl.checked !== (encryptedEl.getAttribute('data-initial') === '1')) {
+        if (changedBox(encryptedEl)) {
           var encBackToDefault = encryptedEl.checked === (encryptedEl.getAttribute('data-default') === '1');
           var encResp = await App.authFetch(U.modelApiUrl(modelId, 'encrypted-pipeline'), encBackToDefault
             ? { method: 'DELETE' }
@@ -580,7 +621,7 @@
             encErr = await U.getApiErrorMessage(encResp, I18n.t('models.enc_pipeline_save_failed'));
           }
         }
-        if (!encErr && keepEl && !keepEl.disabled) {
+        if (!encErr && changedBox(keepEl)) {
           var keepResp = await App.authFetch(U.modelApiUrl(modelId, 'keep-on-this-computer'), {
             method: 'PUT',
             headers: { 'Content-Type': 'application/json' },
@@ -604,7 +645,7 @@
           App.ui.showBanner('error', errMsg);
         }
       } catch (e) {
-        App.ui.showBanner('error', I18n.t('models.save_error', { error: e.message }));
+        App.ui.showBanner('error', I18n.t('models.save_error', { error: U.failureText(e) }));
       }
     },
 
@@ -617,14 +658,16 @@
       var panel = document.querySelector('[data-meta-panel="' + U.cssSafeAttr(modelId) + '"]');
       if (!panel) return;
       panel.classList.remove('hidden');
-      if (panel.innerHTML) return;
+      // A panel holding the error from a failed load is loaded again: it
+      // used to count as filled, so nothing retried until the page reloaded.
+      if (panel.innerHTML && !panel.querySelector('.meta-error')) return;
 
       panel.innerHTML = '<div class="meta-loading"><span class="spinner" style="width:14px;height:14px;border-width:1.5px"></span> ' + U.escapeHtml(I18n.t('models.loading_metadata')) + '</div>';
       try {
         var data = S.metadataCache[modelId];
         if (!data) {
           var resp = await App.authFetch(U.modelApiUrl(modelId, 'metadata'));
-          if (!resp.ok) throw new Error('Failed to load metadata');
+          if (!resp.ok) throw new Error('metadata ' + resp.status);  // never shown: the catch says it in words
           data = await resp.json();
           S.metadataCache[modelId] = data;
         }

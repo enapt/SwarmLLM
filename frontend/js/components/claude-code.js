@@ -62,7 +62,9 @@
 
         // If resume failed (stale session from previous daemon run), retry without resume
         if (!resp.ok && body.resume_claude_session_id) {
-          var errText = await resp.text();
+          // The reason as every refusal is shown (message + hint), never the
+          // raw JSON body, which reached the chat window verbatim.
+          var errText = await U.getApiErrorMessage(resp, I18n.t('common.request_failed'));
           if (errText.indexOf('No Claude Code session') !== -1) {
             delete body.resume_claude_session_id;
             if (session && session.claude_code) session.claude_code.claude_session_id = null;
@@ -78,8 +80,7 @@
         }
 
         if (!resp.ok) {
-          var errText2 = await resp.text();
-          throw new Error(errText2);
+          throw new Error(await U.getApiErrorMessage(resp, I18n.t('common.request_failed')));
         }
 
         var data = await resp.json();
@@ -117,8 +118,7 @@
       });
 
       if (!resp.ok) {
-        var errText = await resp.text();
-        throw new Error(errText);
+        throw new Error(await U.getApiErrorMessage(resp, I18n.t('common.request_failed')));
       }
 
       var fullContent = '';
@@ -1288,55 +1288,77 @@
 
     // Send permission response — then collapse to one-liner
     _respondPermission: async function(sessionId, requestId, allow, input, panelEl) {
-      // Prevent double-click
-      if (panelEl.classList.contains('cc-perm-allowed') || panelEl.classList.contains('cc-perm-denied')) return;
+      // Prevent a double click, and Enter pressed again while one is sending.
+      if (panelEl._ccSending || panelEl.classList.contains('cc-perm-allowed') || panelEl.classList.contains('cc-perm-denied')) return;
+      panelEl._ccSending = true;
 
+      // The buttons are HIDDEN while sending, not replaced: they carry their
+      // own listeners, and a failed answer must leave them there to try again.
       var actionsEl = panelEl.querySelector('.cc-perm-actions');
-      actionsEl.innerHTML = '<span class="cc-perm-resolving">' + U.escapeHtml(I18n.t('claude_code.sending')) + '...</span>';
+      var buttons = actionsEl.querySelectorAll('button');
+      buttons.forEach(function(b) { b.style.display = 'none'; });
+      var earlier = actionsEl.querySelector('.cc-perm-resolving, .cc-perm-error');
+      if (earlier) earlier.remove();
+      var statusEl = document.createElement('span');
+      statusEl.className = 'cc-perm-resolving';
+      statusEl.textContent = I18n.t('claude_code.sending') + '...';
+      actionsEl.appendChild(statusEl);
 
+      // No `message` on a denial: the server's own default is what Claude
+      // reads, so the wording lives in one place.
+      var body = { request_id: requestId, allow: allow };
+      if (allow && input) body.updated_input = input;
+
+      // The answer is read. It was awaited and never looked at, so a refusal
+      // (the session already gone: 400) showed "Allowed" while Claude Code
+      // went on waiting for an answer that never came.
+      var failure = null;
       try {
-        var body = { request_id: requestId, allow: allow };
-        if (allow && input) body.updated_input = input;
-        if (!allow) body.message = 'User denied this action';
-
-        await App.authFetch('/api/claude-code/session/' + encodeURIComponent(sessionId) + '/permission', {
+        var resp = await App.authFetch('/api/claude-code/session/' + encodeURIComponent(sessionId) + '/permission', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(body),
         });
-
-        // Collapse to a slim one-liner
-        var toolName = panelEl._ccToolName || I18n.t('claude_code.tool_fallback');
-        var icon = panelEl._ccIcon || '⚡';
-        var hint = panelEl._ccHint || '';
-        var statusClass = allow ? 'cc-perm-allowed' : 'cc-perm-denied';
-        var statusIcon = allow ? '✓' : '✗';
-        var statusText = allow ? I18n.t('claude_code.allowed') : I18n.t('claude_code.denied');
-
-        panelEl.classList.remove('cc-perm-waiting');
-        panelEl.classList.add(statusClass, 'cc-perm-collapsed');
-        // Replace with a non-details div so it renders as a simple one-liner
-        var oneliner = document.createElement('div');
-        oneliner.className = 'cc-permission-prompt cc-perm-collapsed ' + statusClass;
-        oneliner.innerHTML =
-          '<div class="cc-perm-oneliner">' +
-            '<span class="cc-perm-status-badge ' + (allow ? 'cc-badge-allow' : 'cc-badge-deny') + '">' + statusIcon + ' ' + statusText + '</span>' +
-            '<span class="cc-tool-icon">' + icon + '</span>' +
-            '<span class="cc-perm-tool-name">' + U.escapeHtml(toolName) + '</span>' +
-            (hint ? '<span class="cc-tool-file">' + U.escapeHtml(hint) + '</span>' : '') +
-          '</div>';
-        panelEl.replaceWith(oneliner);
-
-        // Check if the parent group can now collapse
-        var group = oneliner.closest('.cc-tool-group');
-        if (group) {
-          App.claudeCode._updateGroupSummary(group);
-          App.claudeCode._maybeCollapseGroup(group);
-        }
+        if (!resp.ok) failure = await U.getApiErrorMessage(resp, I18n.t('common.request_failed'));
       } catch (e) {
-        actionsEl.innerHTML =
-          '<span class="cc-perm-resolved cc-perm-error">' + U.escapeHtml(I18n.t('common.request_failed')) + '</span>';
-        App.notifications.showToast(I18n.t('common.request_failed'), 'error', 3000);
+        failure = U.failureText(e);
+      }
+      panelEl._ccSending = false;
+      if (failure) {
+        statusEl.className = 'cc-perm-resolved cc-perm-error';
+        statusEl.textContent = failure;
+        buttons.forEach(function(b) { b.style.display = ''; });
+        App.notifications.showToast(failure, 'error', 5000);
+        return;
+      }
+
+      // Collapse to a slim one-liner
+      var toolName = panelEl._ccToolName || I18n.t('claude_code.tool_fallback');
+      var icon = panelEl._ccIcon || '⚡';
+      var hint = panelEl._ccHint || '';
+      var statusClass = allow ? 'cc-perm-allowed' : 'cc-perm-denied';
+      var statusIcon = allow ? '✓' : '✗';
+      var statusText = allow ? I18n.t('claude_code.allowed') : I18n.t('claude_code.denied');
+
+      panelEl.classList.remove('cc-perm-waiting');
+      panelEl.classList.add(statusClass, 'cc-perm-collapsed');
+      // Replace with a non-details div so it renders as a simple one-liner
+      var oneliner = document.createElement('div');
+      oneliner.className = 'cc-permission-prompt cc-perm-collapsed ' + statusClass;
+      oneliner.innerHTML =
+        '<div class="cc-perm-oneliner">' +
+          '<span class="cc-perm-status-badge ' + (allow ? 'cc-badge-allow' : 'cc-badge-deny') + '">' + statusIcon + ' ' + statusText + '</span>' +
+          '<span class="cc-tool-icon">' + icon + '</span>' +
+          '<span class="cc-perm-tool-name">' + U.escapeHtml(toolName) + '</span>' +
+          (hint ? '<span class="cc-tool-file">' + U.escapeHtml(hint) + '</span>' : '') +
+        '</div>';
+      panelEl.replaceWith(oneliner);
+
+      // Check if the parent group can now collapse
+      var group = oneliner.closest('.cc-tool-group');
+      if (group) {
+        App.claudeCode._updateGroupSummary(group);
+        App.claudeCode._maybeCollapseGroup(group);
       }
     },
 

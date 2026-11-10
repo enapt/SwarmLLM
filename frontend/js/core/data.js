@@ -33,7 +33,9 @@
       } catch (e) {
         clearTimeout(timer);
         if (e.name === 'AbortError') {
-          throw new Error(typeof I18n !== 'undefined' ? I18n.t('errors.request_timeout') : 'Request timed out');
+          var timedOut = new Error(typeof I18n !== 'undefined' ? I18n.t('errors.request_timeout') : 'Request timed out');
+          timedOut.name = 'TimeoutError';  // `U.failureText` reads the name
+          throw timedOut;
         }
         throw e;
       }

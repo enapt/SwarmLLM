@@ -504,9 +504,8 @@
       if (S.wsWasConnected) {
         showWsBanner('connected', I18n.t('connection.connected'));
         hideWsBanner(2000);
-        // Reload ALL data on reconnect — reset debounce so it's never skipped
-        App.dashboard._lastLoadTime = 0;
-        App.dashboard.loadInitial();
+        // Reload ALL data on reconnect, past the polls' debounce.
+        App.dashboard.loadInitial({ force: true });
         App.providerHealth.startHealthPolling();
       } else {
         // First connect this page load — clear stale events from previous session

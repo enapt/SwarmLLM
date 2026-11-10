@@ -72,7 +72,7 @@
         App.identity._populateLeaderboardFilters();
         App.identity.renderLeaderboard();
       } catch (e) {
-        tbody.innerHTML = '<tr><td colspan="6" class="text-muted" style="text-align:center">' + U.escapeHtml(I18n.t('leaderboard.load_error', { error: e.message })) + '</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="6" class="text-muted" style="text-align:center">' + U.escapeHtml(I18n.t('leaderboard.load_error', { error: U.failureText(e) })) + '</td></tr>';
       }
     },
 

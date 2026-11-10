@@ -474,7 +474,7 @@
       } catch (e) {
         App.settings._loadedConfig = null;
         App.settings._setSaveable('unreadable');
-        App.ui.showBanner('error', I18n.t('settings.load_failed') + ': ' + (e.message || I18n.t('common.request_failed')));
+        App.ui.showBanner('error', I18n.t('settings.load_failed') + ': ' + U.failureText(e));
       }
       App.settings.ensureApiKey();
       App.settings.loadProviders();
@@ -998,13 +998,13 @@
 
           App.ui.showBanner('success', I18n.t('settings.saved'));
           App.ui.closeSettings();
-          App.dashboard.loadInitial();
+          App.dashboard.loadInitial({ force: true });
         } else {
           var errMsg = await U.getApiErrorMessage(resp, I18n.t('settings.save_failed'));
           App.ui.showBanner('error', errMsg);
         }
       } catch (e) {
-        App.ui.showBanner('error', I18n.t('settings.save_error', { error: e.message }));
+        App.ui.showBanner('error', I18n.t('settings.save_error', { error: U.failureText(e) }));
       }
 
       if (saveBtn) { saveBtn.disabled = false; saveBtn.textContent = I18n.t('actions.save_settings'); }

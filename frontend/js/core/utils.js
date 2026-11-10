@@ -820,9 +820,15 @@
   // entirely, in a dashboard that ships 21 of them.
   function extractErrorMessage(data, fallback) {
     if (data && data.error) {
-      var msg = data.error.message || data.error || fallback;
-      var hint = data.error.hint;
-      var key = data.error.hint_key;
+      // `error` is an object (`{message, hint, hint_key}`) from this daemon
+      // and a bare string from some older paths. `message || error` returned
+      // the OBJECT when an object carried no message, and a caller printed
+      // "[object Object]".
+      var err = data.error;
+      var msg = typeof err === 'string' ? err
+        : (typeof err.message === 'string' && err.message) ? err.message : fallback;
+      var hint = err.hint;
+      var key = err.hint_key;
       if (typeof key === 'string' && key.length > 0) {
         var lookup = 'error_hint.' + key;
         var translated = I18n.t(lookup);
@@ -835,6 +841,24 @@
       return msg;
     }
     return fallback;
+  }
+
+  // A THROWN failure — fetch could not reach the daemon, timed out, or the
+  // reply was not JSON — as a sentence in the reader's language. The browser's
+  // own `e.message` ("Failed to fetch", "NetworkError when attempting to fetch
+  // resource.", "Load failed", "Unexpected token '<'") is English whatever the
+  // page's language and names the mechanism, not what to do; it was pasted
+  // into translated sentences at ~15 sites. A fetch failure is a TypeError
+  // whose wording each browser chooses, so it is matched by name AND wording:
+  // a TypeError from a bug in our own code is not "can't reach SwarmLLM".
+  // Usage: I18n.t('models.save_error', { error: U.failureText(e) })
+  function failureText(e) {
+    var name = e && e.name;
+    if (name === 'TimeoutError' || name === 'AbortError') return I18n.t('errors.request_timeout');
+    if (name === 'TypeError' && /fetch|network|load failed/i.test(String(e.message || ''))) {
+      return I18n.t('errors.server_unreachable');
+    }
+    return I18n.t('common.request_failed');
   }
 
   // Usage: var msg = await App.utils.getApiErrorMessage(resp, 'Action failed');
@@ -870,18 +894,21 @@
       if (useToast) App.notifications.showToast(msg, 'error');
       else App.ui.showBanner('error', msg);
     }
+    var resp;
     try {
-      var resp = await App.authFetch(url, fetchOpts);
-      if (resp.ok) {
-        if (onSuccess) await onSuccess(resp);
-        return true;
-      }
-      showErr(await getApiErrorMessage(resp, fallback));
-      return false;
+      resp = await App.authFetch(url, fetchOpts);
     } catch (e) {
-      showErr(fallback + ': ' + (e && e.message ? e.message : I18n.t('common.request_failed')));
+      showErr(fallback + ': ' + failureText(e));
       return false;
     }
+    if (!resp.ok) {
+      showErr(await getApiErrorMessage(resp, fallback));
+      return false;
+    }
+    // Outside the try: the write SUCCEEDED, so a fault in what the caller
+    // does next must not be announced as the write failing.
+    if (onSuccess) await onSuccess(resp);
+    return true;
   }
 
   // Copy text to the clipboard with an optional temporary button flash.
@@ -1441,6 +1468,7 @@
     updateChatAvailability: updateChatAvailability,
     updateChatDownloadProgress: updateChatDownloadProgress,
     extractErrorMessage: extractErrorMessage,
+    failureText: failureText,
     capitalize: capitalize,
     apiAction: apiAction,
     submitCodeForm: submitCodeForm,
