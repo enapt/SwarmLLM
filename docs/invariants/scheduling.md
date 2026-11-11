@@ -4793,11 +4793,15 @@ first-token wait less the round trip and one step, over layers × tokens, ≥ 1,
 tokens, a warm peer, none of the prompt believed held there) — and a wait that ran
 out is a sample too, a right-censored duration: the read took at least the wait.
 Each is a LOWER bound, so it is kept as one (`ModelSpeed::whole_prompt_floor_ms_per_layer_token`,
-an hour, first-hand only) and read as one: `parallax::prefill_ms_per_layer(.., whole_model)`
+an hour, first-hand only; a wait that came back binds only once a second agrees, at
+the lesser — alone it may hold a reload or another reply's work, and a peer priced
+out by it is not measured again; a wait that ran out binds alone) and read as one: `parallax::prefill_ms_per_layer(.., whole_model)`
 prices `max(floor × tokens, the price)` — never a discount, never for a segment of
 the model, which may run on the same machine's card. Rig (TinyLlama, A the header
-only, B every part on its processor): the prompt priced 29.9 s took ~100 s; the next
-was priced 101.0 s and took 103 s. Prior art: Petals times a prompt pass apart from
+only, B every part on its processor): the prompt priced 26.9 s took ~102 s, the next (one
+sample, waiting for a second) was priced 53.3 s, the third 101.4 s, and took ~102 s;
+with B on one processor a 1,702-token prompt ran past the 600 s wait and the next
+plan carried a floor of 16.0 ms a layer and token. Prior art: Petals times a prompt pass apart from
 a decode step (`forward_rps`, `server/throughput.py`); the floor-not-discount rule of
 a peer's own decode timing (#3 (f)).
 

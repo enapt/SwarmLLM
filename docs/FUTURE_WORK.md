@@ -3488,19 +3488,23 @@ a fallback only until its first decode step.
 `remote_generate` times the first token of a whole-model hand-off of ≥ 1,024 tokens (counted by the model's own
 tokenizer) to a WARM peer that this node believes holds none of the prompt (`handed_off_openings`, asked before the
 hand-off is noted): the wait less the round trip and one step, over layers × tokens; a first-token wait that ran out
-counts as at least itself. Averaged (α 0.3), believed an hour after its last sample (`WHOLE_PROMPT_FLOOR_FOR`, which
+counts as at least itself. A wait that ran out binds alone; one that came back binds only once a second agrees, at
+the lesser of the two (alone it may hold a reload or another reply's work — the review, 2026-11-12); then averaged
+(α 0.3), believed an hour after its last sample (`WHOLE_PROMPT_FLOOR_FOR`, which
 also keeps its model's entry from aging out), first-hand only. `parallax::prefill_ms_per_layer`'s `whole_model`
 takes `max(floor × tokens, the price)` — the search, greedy and the hand-off gate (`delegated_shape_cost_ms`) alike;
 a segment of the model on the same machine is priced as before. One change from the design below: the sample is
 taken only where none of the prompt is believed held, so it divides by every token and stays a LOWER bound even
 where a belief is stale. Rig (`split_rig.sh split` with the new `SHARDS_A=none`: TinyLlama, A the header only, B
-every part on the processor, a short ask then two ~1,220-token prompts): the second ask's prompt priced 29.9 s on
-the prior and took ~100 s; A timed it at 3.75 ms a layer and token (`waited_ms=100876`) and priced the third
-101.0 s, which took 103 s. Tests `a_whole_hand_off_is_priced_no_lower_than_its_prompts_were_timed`,
+every part on the processor, a short ask then two ~1,220-token prompts): the first long prompt priced 26.9 s on
+the prior and took ~102 s; the second — one sample, waiting for a second — was priced 53.3 s and took ~103 s; with
+two, the third was priced 101.4 s at the lesser (3.79 ms a layer and token) and took ~102 s. Tests `a_whole_hand_off_is_priced_no_lower_than_its_prompts_were_timed`,
 `a_whole_prompt_floor_lasts_an_hour_and_keeps_its_entry` (each red with its fix off),
 `a_whole_hand_offs_wait_times_its_prompt_less_the_trip_and_a_step` (arithmetic). Left: sizing the first-token wait
-from it (the 600 s cap, `architecture.md` § Timeouts); the censored arm is unit-tested only (no fault switch shortens
-a first-token wait).
+from it (the 600 s cap, `architecture.md` § Timeouts). The wait that ran out, on the same rig with B pinned to ONE
+logical CPU (`CPUS_B=0`) and a 1,702-token prompt: no first token in 600 s, A logged `waited_ms=600002 one_step_ms=0
+floor_ms_per_layer_token=16.02` (the build before the two-sample rule), reported the peer as silent (no other route), and its next plan carried
+`observed_whole_prompt_floor_ms_per_layer_token=Some(16.02393)`.
 
 **The design it was built from (2026-11-12):**
 - *Sample, at the coordinator* (`remote_generate`, beside the `Delegated` record): the first token's wait less

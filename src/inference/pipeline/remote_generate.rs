@@ -656,7 +656,8 @@ fn whole_prompt_floor(
     (read_ms > 0).then(|| read_ms as f32 / (layers as f32 * prompt_tokens as f32))
 }
 
-/// Record [`whole_prompt_floor`] for `segment`'s peer, the whole of `model_id`.
+/// Record [`whole_prompt_floor`] for `segment`'s peer, the whole of `model_id`;
+/// `ran_out`: no first token came within the wait.
 fn note_whole_prompt_floor(
     state: &crate::daemon::state::SharedState,
     segment: &crate::types::PipelineSegment,
@@ -664,6 +665,7 @@ fn note_whole_prompt_floor(
     waited_ms: u64,
     one_step_ms: u64,
     prompt_tokens: usize,
+    ran_out: bool,
 ) {
     let layers = segment.layer_range.1.saturating_sub(segment.layer_range.0);
     let round_trip_ms = state
@@ -679,10 +681,11 @@ fn note_whole_prompt_floor(
             waited_ms,
             prompt_tokens,
             one_step_ms,
+            ran_out,
             floor_ms_per_layer_token = floor,
             "remote-generate: a whole hand-off's prompt read timed"
         );
-        state.note_whole_prompt_read(&segment.node_id, model_id, floor);
+        state.note_whole_prompt_read(&segment.node_id, model_id, floor, ran_out);
     }
 }
 
@@ -1392,6 +1395,7 @@ impl PipelineExecutor {
                             sent_at.elapsed().as_millis() as u64,
                             0,
                             tokens,
+                            true,
                         );
                     }
                     if peer_left {
@@ -1760,6 +1764,7 @@ impl PipelineExecutor {
                     ttft.duration_since(sent_at).as_millis() as u64,
                     one_step_ms,
                     tokens,
+                    false,
                 );
             }
         }

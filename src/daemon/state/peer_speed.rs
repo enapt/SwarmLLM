@@ -257,6 +257,10 @@ pub struct ModelSpeed {
     /// (`parallax::prefill_ms_per_layer`), never a discount — and when it was
     /// last fed. See [`Self::note_whole_prompt_read`].
     whole_prompt_floor: Option<(f32, Instant)>,
+    /// A first-token wait that came back, waiting for a second before it binds:
+    /// alone it may hold a reload or another reply's work, and a peer priced out
+    /// by it is not re-measured (the pre-release review, 2026-11-12).
+    whole_prompt_unconfirmed: Option<(f32, Instant)>,
     /// EMA of ms per layer for a single-token decode step.
     decode_ms_per_layer: Option<f32>,
     /// EMA of ms per layer for one decode step of a WHOLE model run on the
@@ -300,6 +304,7 @@ impl ModelSpeed {
             warm_prefill_ms_per_layer_byte: None,
             prompt_ms_per_layer_token: None,
             whole_prompt_floor: None,
+            whole_prompt_unconfirmed: None,
             decode_ms_per_layer: gossip_seed.map(|s| s * layer_work),
             delegated_ms_per_layer: None,
             decode_fit: LinearFit::default(),
@@ -602,15 +607,34 @@ impl ModelSpeed {
     /// ever a floor ([`Self::whole_prompt_floor_ms_per_layer_token`]). Kept
     /// apart from [`Self::prompt_ms_per_layer_token`]: a split segment on the
     /// same machine may run on its card, a whole model mostly on its processor.
-    pub fn note_whole_prompt_read(&mut self, ms_per_layer_token: f32, now: Instant) {
+    ///
+    /// A wait that `ran_out` sets the floor by itself — it is the failure the
+    /// floor exists for, ten minutes a time. A wait that came back sets it only
+    /// once a second agrees, at the lesser of the two; once set, every sample
+    /// moves it (α).
+    pub fn note_whole_prompt_read(&mut self, ms_per_layer_token: f32, ran_out: bool, now: Instant) {
         if !ms_per_layer_token.is_finite() || ms_per_layer_token <= 0.0 {
             return;
         }
-        let next = match self.whole_prompt_floor_at(now) {
-            Some(prev) => ALPHA * ms_per_layer_token + (1.0 - ALPHA) * prev,
-            None => ms_per_layer_token,
+        let live = |sample: Option<(f32, Instant)>| {
+            sample
+                .filter(|(_, at)| now.saturating_duration_since(*at) < WHOLE_PROMPT_FLOOR_FOR)
+                .map(|(figure, _)| figure)
+        };
+        let next = match (
+            self.whole_prompt_floor_at(now),
+            live(self.whole_prompt_unconfirmed),
+        ) {
+            (Some(prev), _) => ALPHA * ms_per_layer_token + (1.0 - ALPHA) * prev,
+            (None, _) if ran_out => ms_per_layer_token,
+            (None, Some(first)) => first.min(ms_per_layer_token),
+            (None, None) => {
+                self.whole_prompt_unconfirmed = Some((ms_per_layer_token, now));
+                return;
+            }
         };
         self.whole_prompt_floor = Some((next, now));
+        self.whole_prompt_unconfirmed = None;
     }
 
     /// The least this peer's prompt costs a whole-model run, ms per layer and
@@ -630,10 +654,11 @@ impl ModelSpeed {
     /// The newest thing this model's entry learned: a sample, a gossip merge or
     /// a hand-off's prompt floor — what keeps the entry from being forgotten.
     fn last_touched(&self) -> Instant {
-        match self.whole_prompt_floor {
-            Some((_, at)) => at.max(self.updated_at),
-            None => self.updated_at,
-        }
+        [self.whole_prompt_floor, self.whole_prompt_unconfirmed]
+            .into_iter()
+            .flatten()
+            .map(|(_, at)| at)
+            .fold(self.updated_at, std::cmp::max)
     }
 
     /// Per-layer cost of running a **whole model** on this peer, in ms — the
@@ -1449,29 +1474,48 @@ mod ranking_trusts_only_what_it_measured {
         );
     }
 
-    /// A whole hand-off's prompt floor (#430): its samples averaged, a 0 or a
-    /// NaN no sample, believed for [`WHOLE_PROMPT_FLOOR_FOR`] after the last —
-    /// and while believed it keeps its model's entry, whose other figures may
-    /// have aged out: nothing re-measures a peer the floor steers requests from.
+    /// A whole hand-off's prompt floor (#430): a wait that came back binds only
+    /// once a second agrees, at the lesser; a wait that ran out binds alone;
+    /// then samples are averaged, a 0 or a NaN no sample, believed for
+    /// [`WHOLE_PROMPT_FLOOR_FOR`] after the last — and while believed it keeps
+    /// its model's entry, whose other figures may have aged out: nothing
+    /// re-measures a peer the floor steers requests from.
     #[test]
     fn a_whole_prompt_floor_lasts_an_hour_and_keeps_its_entry() {
         let t0 = Instant::now();
         let mut m = ModelSpeed::default();
-        m.note_whole_prompt_read(2.0, t0);
-        assert_eq!(m.whole_prompt_floor_at(t0), Some(2.0));
-        m.note_whole_prompt_read(1.0, t0);
-        let averaged = m.whole_prompt_floor_at(t0).expect("two samples");
+        m.note_whole_prompt_read(2.0, false, t0);
+        assert_eq!(
+            m.whole_prompt_floor_at(t0),
+            None,
+            "one wait may be a reload"
+        );
+        m.note_whole_prompt_read(3.0, false, t0);
+        assert_eq!(
+            m.whole_prompt_floor_at(t0),
+            Some(2.0),
+            "two agree on the lesser"
+        );
+        m.note_whole_prompt_read(1.0, false, t0);
+        let averaged = m.whole_prompt_floor_at(t0).expect("set");
         assert!((averaged - (ALPHA * 1.0 + (1.0 - ALPHA) * 2.0)).abs() < 1e-6);
-        m.note_whole_prompt_read(0.0, t0);
-        m.note_whole_prompt_read(f32::NAN, t0);
+        m.note_whole_prompt_read(0.0, true, t0);
+        m.note_whole_prompt_read(f32::NAN, true, t0);
         assert_eq!(m.whole_prompt_floor_at(t0), Some(averaged));
         assert_eq!(m.whole_prompt_floor_at(t0 + WHOLE_PROMPT_FLOOR_FOR), None);
+        let mut ran_out = ModelSpeed::default();
+        ran_out.note_whole_prompt_read(2.28, true, t0);
+        assert_eq!(
+            ran_out.whole_prompt_floor_at(t0),
+            Some(2.28),
+            "the failure binds alone"
+        );
 
         let model = ModelId("floor".into());
         let mut peer = PeerSpeed::default();
         let fed_at = t0 + Duration::from_secs(50 * 60);
         peer.model_mut(&model, || 1.0)
-            .note_whole_prompt_read(2.0, fed_at);
+            .note_whole_prompt_read(2.0, true, fed_at);
         let later = t0 + Duration::from_secs(70 * 60);
         peer.forget_models_idle_for(later, Duration::from_secs(3_600));
         assert!(

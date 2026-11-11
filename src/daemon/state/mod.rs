@@ -3655,14 +3655,16 @@ impl SharedState {
     }
 
     /// `node_id` was handed `model_id` whole and its first-token wait says it
-    /// reads a prompt at no less than `ms_per_layer_token`
-    /// (`ModelSpeed::note_whole_prompt_read`, #430). First-hand only: written
-    /// by `remote_generate`'s hand-off, never from gossip.
+    /// reads a prompt at no less than `ms_per_layer_token` — a wait that
+    /// `ran_out` included (`ModelSpeed::note_whole_prompt_read`, #430).
+    /// First-hand only: written by `remote_generate`'s hand-off, never from
+    /// gossip.
     pub fn note_whole_prompt_read(
         &self,
         node_id: &crate::types::NodeId,
         model_id: &crate::types::ModelId,
         ms_per_layer_token: f32,
+        ran_out: bool,
     ) {
         // As `record_peer_segment_latency`: the weight is asked before the
         // entry is held, since it may parse a header off the disk.
@@ -3678,7 +3680,7 @@ impl SharedState {
             .entry(node_id.clone())
             .or_default()
             .model_mut(model_id, || layer_work.unwrap_or(1.0))
-            .note_whole_prompt_read(ms_per_layer_token, std::time::Instant::now());
+            .note_whole_prompt_read(ms_per_layer_token, ran_out, std::time::Instant::now());
     }
 
     /// The least a whole-model run of `model_id` on `node_id` has been seen to
