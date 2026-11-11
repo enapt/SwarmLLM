@@ -117,6 +117,10 @@ struct NodeCandidate {
     /// ([`layer_work_for`]). The same for every candidate of one model; 1.0 when
     /// unknown, which prices as before #250.
     layer_work: f32,
+    /// What one token of a prompt weighs crossing to this candidate's
+    /// segment, in bytes ([`activation_bytes_per_token_for`]): the same for
+    /// every candidate of one model, the transfer term's unit.
+    activation_bytes_per_token: f32,
     /// What one decode step of THIS model costs the peer's own worker, per
     /// layer, in ms — the figure it publishes from timing the steps it ran
     /// (`ResidentModelLayers::decode_us_per_layer`, FUTURE_WORK #3 (f)), read
@@ -429,6 +433,33 @@ pub(crate) fn layer_work_for(state: &SharedState, model_id: &ModelId) -> f32 {
         .gguf_meta_for(model_id)
         .and_then(|meta| meta.active_bytes_per_layer());
     active.map_or(1.0, layer_work_from_bytes)
+}
+
+/// What one token of a prompt weighs crossing to a segment, in bytes: the
+/// model's own width in the wire's Q8_0 (34 bytes a 32 values), every node's
+/// default `inference.activation_compression` — the unit of the transfer term
+/// (`parallax::vertex_cost`), which divides it by a goodput measured in the
+/// bytes that CROSSED. The nominal 4,096 wide in f32
+/// (`parallax::ACTIVATION_BYTES_PER_TOKEN`) when this node holds no header, a
+/// width no model has, or under `SWARMLLM_TRANSFER_BYTES=nominal` (the A/B
+/// switch, read once). Priced at the nominal width, a 70B's prompt (8,192
+/// wide, 8,704 bytes a token) was charged 1.88× the bytes that cross, a
+/// 4,096-wide model's 3.8× (2026-11-12). Prior art: Petals'
+/// `measure_network_rps` — bandwidth over the model's `hidden_size` × the
+/// bits a value crosses as, per model.
+pub(crate) fn activation_bytes_per_token_for(state: &SharedState, model_id: &ModelId) -> f32 {
+    static NOMINAL_ONLY: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    let nominal = parallax::ACTIVATION_BYTES_PER_TOKEN as f32;
+    if *NOMINAL_ONLY
+        .get_or_init(|| std::env::var("SWARMLLM_TRANSFER_BYTES").is_ok_and(|v| v == "nominal"))
+    {
+        return nominal;
+    }
+    state
+        .gguf_meta_for(model_id)
+        .map(|meta| meta.embedding_length)
+        .filter(|&width| (64..=65_536).contains(&width))
+        .map_or(nominal, |width| width as f32 * 34.0 / 32.0)
 }
 
 /// A layer that reads `active_bytes_per_layer` per token, in reference layers:
@@ -4860,6 +4891,8 @@ impl PipelineScheduler {
         let ceiling_curve = std::cell::OnceCell::new();
         // One model, one weight per layer, for every candidate (#250).
         let layer_work = layer_work_for(&self.shared_state, &manifest.id);
+        let activation_bytes_per_token =
+            activation_bytes_per_token_for(&self.shared_state, &manifest.id);
 
         for (node_id, mut shard_indices) in node_shards {
             shard_indices.sort();
@@ -5607,6 +5640,7 @@ impl PipelineScheduler {
                 region_score,
                 est_tokens_per_sec,
                 layer_work,
+                activation_bytes_per_token,
                 stated_ms_per_layer: stated_decode_ms_per_layer(
                     reported.as_ref().and_then(|r| r.decode_us_per_layer),
                 ),

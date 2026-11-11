@@ -1791,6 +1791,19 @@ already carries the round trip, and a conservative stated term beats a
 speculative one on a cost model whose own calibration is an open question
 (`ASSUMED_FORWARD_PASSES`, `docs/FUTURE_WORK.md`).
 
+**The payload is priced as it crosses (2026-11-12).** The goodput divides the
+bytes that CROSSED, so the payload is the model's own width in the wire's Q8_0
+(34 bytes a 32 values, every node's default `activation_compression`):
+**`scheduler::activation_bytes_per_token_for`**, one figure a model, carried as
+`NodeCandidate::activation_bytes_per_token`. It was a nominal 4,096 in f32
+(16,384 bytes a token) for every model: a 70B's prompt (8,704 bytes a token)
+was charged 1.88× what crossed, a 4,096-wide model's 3.8×, so a split's later
+segments were priced dearer than the link made them. The nominal stays where
+no header is held. Prior art: Petals' `measure_network_rps` (bandwidth over
+`hidden_size` × the bits a value crosses as). A/B
+`SWARMLLM_TRANSFER_BYTES=nominal`; test
+`a_prompt_crossing_to_a_segment_is_charged_the_bytes_that_cross`.
+
 **Unknown charges nothing**, so a peer never sent a large forward is priced
 exactly as before this existed — the standing contract of every routing input
 here. Local and NEVER gossiped, like `ack_srtt_ms`: it describes OUR path to that

@@ -1083,6 +1083,7 @@ fn simple_candidate(byte: u8, ranges: Vec<(u32, u32)>) -> NodeCandidate {
         region_score: 1.0,
         est_tokens_per_sec: 0.0,
         layer_work: 1.0,
+        activation_bytes_per_token: parallax::ACTIVATION_BYTES_PER_TOKEN as f32,
         observed_latency_ms_per_layer: None,
         observed_latency_timed_on: None,
         observed_fixed_ms_per_visit: None,
@@ -1545,6 +1546,7 @@ fn greedy_assign_multi_range_candidate() {
             region_score: 1.0,
             est_tokens_per_sec: 0.0,
             layer_work: 1.0,
+            activation_bytes_per_token: parallax::ACTIVATION_BYTES_PER_TOKEN as f32,
             observed_latency_ms_per_layer: None,
             observed_latency_timed_on: None,
             observed_fixed_ms_per_visit: None,
@@ -1592,6 +1594,7 @@ fn greedy_assign_multi_range_candidate() {
             region_score: 0.7,
             est_tokens_per_sec: 0.0,
             layer_work: 1.0,
+            activation_bytes_per_token: parallax::ACTIVATION_BYTES_PER_TOKEN as f32,
             observed_latency_ms_per_layer: None,
             observed_latency_timed_on: None,
             observed_fixed_ms_per_visit: None,
@@ -2647,6 +2650,7 @@ fn cost_cand(
         region_score: 1.0,
         est_tokens_per_sec: 0.0,
         layer_work: 1.0,
+        activation_bytes_per_token: parallax::ACTIVATION_BYTES_PER_TOKEN as f32,
         observed_latency_ms_per_layer: ms_per_layer,
         observed_latency_timed_on: None,
         observed_fixed_ms_per_visit: None,
@@ -4058,6 +4062,7 @@ fn one_node_is_not_made_standby_for_more_layers_than_it_can_run() {
         region_score: 1.0,
         est_tokens_per_sec: 5.0,
         layer_work: 1.0,
+        activation_bytes_per_token: parallax::ACTIVATION_BYTES_PER_TOKEN as f32,
         observed_latency_ms_per_layer: None,
         observed_latency_timed_on: None,
         observed_fixed_ms_per_visit: None,
@@ -4168,6 +4173,7 @@ fn a_node_with_room_still_stands_in_for_every_segment() {
         region_score: 1.0,
         est_tokens_per_sec: 5.0,
         layer_work: 1.0,
+        activation_bytes_per_token: parallax::ACTIVATION_BYTES_PER_TOKEN as f32,
         observed_latency_ms_per_layer: None,
         observed_latency_timed_on: None,
         observed_fixed_ms_per_visit: None,
@@ -4278,6 +4284,7 @@ fn a_standby_is_chosen_by_cost_not_by_ping() {
         region_score: 1.0,
         est_tokens_per_sec: tps,
         layer_work: 1.0,
+        activation_bytes_per_token: parallax::ACTIVATION_BYTES_PER_TOKEN as f32,
         observed_latency_ms_per_layer: None,
         observed_latency_timed_on: None,
         observed_fixed_ms_per_visit: None,
@@ -8814,6 +8821,68 @@ fn a_measured_prompt_is_priced_at_the_time_it_took() {
     // And a prompt ten times as long, ten times as much.
     let longer = parallax::vertex_cost(cand, (0, 32), &local, 32, Some(10 * tokens)).prefill_ms;
     assert!((longer - 24_000.0).abs() < 240.0, "{longer}");
+}
+
+/// **A prompt crossing to a segment is charged the bytes that cross**
+/// (2026-11-12): the model's own width in the wire's Q8_0, never a nominal
+/// 4,096 in f32 — the goodput it divides by was measured in the bytes that
+/// crossed. A Llama-3.3-70B's 8,192 is 8,704 bytes a token; priced at the
+/// nominal 16,384, its prompt's transfer was 1.88x what it carries.
+#[test]
+fn a_prompt_crossing_to_a_segment_is_charged_the_bytes_that_cross() {
+    let (state, local, b, _c, model) = two_whole_model_card_peers();
+    state.gguf_meta.insert(
+        model.clone(),
+        crate::inference::split::GgufTensorMeta {
+            tensors: Default::default(),
+            tensor_data_offset: 0,
+            model_name: None,
+            head_count: 64,
+            head_count_kv: 8,
+            block_count: 32,
+            embedding_length: 8192,
+            head_dim: 128,
+            rope_dim: 128,
+            rope_freq_base: 500_000.0,
+            rms_norm_eps: 1e-5,
+            expert_count: 0,
+            expert_used_count: 0,
+            architecture: "llama".into(),
+            context_length: 8192,
+            pooling_type: 0,
+            kv_layout: None,
+            unbuilt_part: None,
+            shared_kv_layers: 0,
+        },
+    );
+    let scheduler =
+        PipelineScheduler::with_local_processor_speed(state.clone(), LOCAL_PROCESSOR_TPS);
+    let manifest = state.model_registry.get_manifest(&model).unwrap();
+    let got = scheduler.gather_candidates(
+        &manifest,
+        &local,
+        uuid::Uuid::new_v4(),
+        None.into(),
+        super::Purpose::Preview,
+        &|| true,
+        crate::types::KeepAsked::Unasked,
+    );
+    let mut cand = got.iter().find(|x| x.node_id == b).unwrap().clone();
+    assert!(
+        (cand.activation_bytes_per_token - 8_704.0).abs() < 0.5,
+        "an 8,192-wide model crosses as 8,704 bytes a token in Q8_0, read {}",
+        cand.activation_bytes_per_token
+    );
+    // A segment after the first receives the prompt's hidden states.
+    let bps: u64 = 10 * 1024 * 1024;
+    cand.goodput_bytes_per_sec = Some(bps);
+    let tokens: u32 = 4_000;
+    let transfer = parallax::vertex_cost(&cand, (8, 24), &local, 32, Some(tokens)).transfer_ms;
+    let crossing_ms = tokens as f32 * 8_704.0 / bps as f32 * 1000.0;
+    assert!(
+        (transfer - crossing_ms).abs() < crossing_ms * 0.01,
+        "{tokens} tokens of 8,704 bytes over {bps} B/s take {crossing_ms} ms, priced {transfer}"
+    );
 }
 
 fn whole_model_cold_load_ms(cands: &[NodeCandidate], node: &NodeId, local: &NodeId) -> f32 {

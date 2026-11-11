@@ -3433,8 +3433,11 @@ apart as `Delegated` is from `Decode`), and a first-token wait sized from it: th
 measured prompt rate is per layer × TOKEN (`ModelSpeed::prompt_ms_per_layer_token`, positions read off the
 hidden state that crossed), never per byte priced at a nominal width — the 70B's segment here was priced at
 1.88× its own time (Q8_0 at width 8,192); tests `a_prompt_is_priced_at_the_time_it_took_whatever_its_width`,
-`a_measured_prompt_is_priced_at_the_time_it_took`. Still per byte at the nominal width: the TRANSFER term
-(`parallax::ACTIVATION_BYTES_PER_TOKEN` over the link's goodput).
+`a_measured_prompt_is_priced_at_the_time_it_took`. And the TRANSFER term charges the bytes that cross: the
+model's own width in the wire's Q8_0 (`scheduler::activation_bytes_per_token_for`), not a nominal 4,096 in f32
+over a goodput measured in real bytes (Petals' `measure_network_rps`: bandwidth over `hidden_size` × the bits a
+value crosses as); test `a_prompt_crossing_to_a_segment_is_charged_the_bytes_that_cross`. A/B
+`SWARMLLM_TRANSFER_BYTES=nominal`.
 
 #### #428 — Every popular model guesses 4-5 tokens a round trip: a DFlash drafter at the split's far end
 `P1` · perf-split · **OPEN** (stage 1 built and measured: the reply is exact, acceptance matches llama.cpp's; stage 3 built and measured on the rig — a split over 130 ms, processors: code 1.6-1.8×, a story 1.10-1.15×, the same replies; on a card, whole: code 1.4-1.6×, a story 0.89-0.92× — (c2) done, the block's first rounds on prose, (c3); stage 6 built: the drafter fetched by a pin; next: the field model, Qwen3.6-35B-A3B) — 2026-11-08 · history: #427 (the measurement), #425 (the guess head), #411 (the flow)

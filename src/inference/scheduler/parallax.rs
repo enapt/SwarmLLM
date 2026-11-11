@@ -160,10 +160,11 @@ pub(super) const PREFILL_SPEEDUP_GPU: f32 = 40.0;
 /// long prompt off it, which is the safe direction.
 pub(super) const PREFILL_SPEEDUP_CPU: f32 = 4.5;
 
-/// Bytes of activation one token of prompt carries, at a typical hidden width
-/// in f32: what the transfer term below charges a prompt crossing a link
-/// (FUTURE_WORK #430's residual: the model's real width and the wire's Q8_0).
-/// The measured prompt PRICE is per token and never reads it.
+/// Bytes of activation one token of prompt carries at a nominal hidden width
+/// (4,096) in f32: the transfer term's stand-in where the model's own width is
+/// unknown (`scheduler::activation_bytes_per_token_for`, which prices the
+/// model's width in the wire's Q8_0). The measured prompt PRICE is per token
+/// and never reads it.
 pub(super) const ACTIVATION_BYTES_PER_TOKEN: usize =
     crate::daemon::state::peer_speed::NOMINAL_DECODE_ACTIVATION_BYTES;
 
@@ -792,7 +793,7 @@ fn vertex_cost_as(
         (Some(tokens), Some(bps))
             if tokens > 0 && bps > 0 && (entered_per_token || in_led_chain) && range.0 != 0 =>
         {
-            let bytes = tokens as f64 * ACTIVATION_BYTES_PER_TOKEN as f64;
+            let bytes = tokens as f64 * c.activation_bytes_per_token as f64;
             (bytes / bps as f64 * 1000.0) as f32
         }
         _ => 0.0,
@@ -2105,6 +2106,7 @@ mod tests {
             region_score: 1.0,
             est_tokens_per_sec,
             layer_work: 1.0,
+            activation_bytes_per_token: ACTIVATION_BYTES_PER_TOKEN as f32,
             observed_latency_ms_per_layer: None,
             observed_latency_timed_on: None,
             observed_fixed_ms_per_visit: None,
@@ -5486,6 +5488,7 @@ mod transfer_cost_tests {
             region_score: 1.0,
             est_tokens_per_sec: 20.0,
             layer_work: 1.0,
+            activation_bytes_per_token: ACTIVATION_BYTES_PER_TOKEN as f32,
             observed_latency_ms_per_layer: None,
             observed_latency_timed_on: None,
             observed_fixed_ms_per_visit: None,
