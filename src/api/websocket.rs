@@ -584,32 +584,15 @@ async fn build_stats_message(state: &SharedState) -> String {
     // signal (R134) — group by pool, trim stale, cap to keep the stats
     // payload small. Full data still reachable via REST.
     let foreign_pool_catalog_json = {
-        use std::collections::BTreeMap;
-        let now_ms = crate::types::unix_now_ms();
-        state.credits.trim_stale_foreign_pool_catalog(
-            now_ms,
-            crate::daemon::dispatch::FOREIGN_POOL_CATALOG_MAX_AGE_MS,
-        );
         const WS_POOL_CATALOG_MAX_POOLS: usize = 30;
         const WS_POOL_CATALOG_MAX_MODELS_PER_POOL: usize = 12;
-        let mut by_pool: BTreeMap<String, Vec<String>> = BTreeMap::new();
-        for entry in state.credits.foreign_pool_catalog.iter() {
-            let (pool, model) = entry.key();
-            by_pool
-                .entry(format!("{pool}"))
-                .or_default()
-                .push(model.0.clone());
-        }
-        let pools: Vec<serde_json::Value> = by_pool
-            .into_iter()
-            .take(WS_POOL_CATALOG_MAX_POOLS)
-            .map(|(pool_id, mut models)| {
-                models.sort();
-                models.truncate(WS_POOL_CATALOG_MAX_MODELS_PER_POOL);
-                serde_json::json!({ "pool_id": pool_id, "models": models })
-            })
-            .collect();
-        serde_json::json!({ "pools": pools })
+        crate::api::admin::foreign_pool_catalog_json(
+            state,
+            Some((
+                WS_POOL_CATALOG_MAX_POOLS,
+                WS_POOL_CATALOG_MAX_MODELS_PER_POOL,
+            )),
+        )
     };
 
     // Network mode flags. Folded into stats_update so the unified Network

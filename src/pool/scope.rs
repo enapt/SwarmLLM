@@ -232,6 +232,15 @@ pub fn count_allowed_holders(holders: &[NodeId], allowed_set: &Option<HashSet<No
     }
 }
 
+/// May another pool serve this computer's requests for a model none of its
+/// pool's devices holds? Private Mode on (off, every computer may already) AND
+/// the owner's `pool.allow_cross_pool_inference`, read LIVE — the one answer,
+/// for the routing (`cross_pool_extras`) and for what the dashboard says about
+/// the other pools it lists (`api::admin::foreign_pool_catalog_json`).
+pub fn other_pools_used(shared: &SharedState) -> bool {
+    shared.credits.private_mode.load(Relaxed) && shared.cfg().pool.allow_cross_pool_inference
+}
+
 /// R134.7: opt-in cross-pool routing. When `private_mode` AND
 /// `allow_cross_pool_inference` are both on AND no member of the local
 /// pool holds any shard of `model_id`, returns the set of NodeIds in
@@ -251,11 +260,7 @@ pub fn cross_pool_extras(
     shared: &SharedState,
     model_id: &crate::types::ModelId,
 ) -> HashSet<NodeId> {
-    use std::sync::atomic::Ordering::Relaxed;
-    // R137: read `allow_cross_pool_inference` from the runtime AtomicBool
-    // mirror on `state.credits` rather than the startup-frozen config.
-    // Identical semantics + value when no admin PUT has flipped it.
-    if !shared.credits.private_mode.load(Relaxed) || !shared.cfg().pool.allow_cross_pool_inference {
+    if !other_pools_used(shared) {
         return HashSet::new();
     }
     // Bail when the local pool already holds at least one shard of the
@@ -321,6 +326,42 @@ pub fn cross_pool_extras(
         }
     }
     extras
+}
+
+/// The models a pool serves: those every part of which has a holder among
+/// `members` (a holder of another build does not count — `shard_holders`).
+/// It is the catalog a pool owner lists for other pools
+/// (`HealthMonitor::broadcast_pool_model_availability`), which other pools read
+/// as "this pool serves the model" (`cross_pool_extras`, the dashboard's
+/// "Models other pools serve").
+///
+/// The registry alone is not that list: it holds every manifest gossip brought,
+/// and a catalog built from it told other pools this pool served every model it
+/// had heard of (#176). Prior art: a Kademlia provider record — a node provides
+/// only content it holds. Sorted by id.
+pub fn models_the_pool_serves(shared: &SharedState, members: &HashSet<NodeId>) -> Vec<ModelId> {
+    let registry = &shared.model_registry;
+    let mut served: Vec<ModelId> = registry
+        .model_ids()
+        .into_iter()
+        .filter(|id| {
+            registry.get_manifest(id).is_some_and(|manifest| {
+                !manifest.shards.is_empty()
+                    && manifest.shards.iter().all(|shard| {
+                        let part = crate::types::ShardId {
+                            model_id: id.clone(),
+                            index: shard.index,
+                        };
+                        registry
+                            .shard_holders(&part)
+                            .iter()
+                            .any(|h| members.contains(h))
+                    })
+            })
+        })
+        .collect();
+    served.sort_by(|a, b| a.0.cmp(&b.0));
+    served
 }
 
 #[cfg(test)]
@@ -641,6 +682,68 @@ mod tests {
         assert_eq!(extras.len(), 2);
         assert!(extras.contains(&foreign_member_a));
         assert!(extras.contains(&foreign_member_b));
+    }
+
+    /// A pool lists only the models its devices hold whole between them
+    /// (#176): one it has only heard of, one its devices hold part of and one
+    /// only a stranger holds are left out.
+    #[test]
+    fn a_pool_lists_only_the_models_its_devices_hold_whole() {
+        use crate::types::{ModelArchitecture, ModelManifest, Quantization, ShardId};
+        let state = make_state(Config::default());
+        let me = state.identity.node_id().clone();
+        let device = NodeId([3u8; 32]);
+        let stranger = NodeId([9u8; 32]);
+        let members: HashSet<NodeId> = [me.clone(), device.clone()].into_iter().collect();
+        let two_parts = |id: &str| ModelManifest {
+            id: ModelId(id.into()),
+            name: id.into(),
+            architecture: ModelArchitecture::Llama,
+            num_layers: 2,
+            num_params_billions: 0.001,
+            quantization: Quantization::Q4KM,
+            total_size_bytes: 2,
+            shard_count: 2,
+            shards: (0..2)
+                .map(|i| swarmllm_types::ShardInfo {
+                    index: i,
+                    layer_range: (i, i + 1),
+                    size_bytes: 1,
+                    hash: [0u8; 32],
+                    tensors: Vec::new(),
+                })
+                .collect(),
+            tokenizer_hash: [0u8; 32],
+            manifest_hash: [0u8; 32],
+            publisher: NodeId([0u8; 32]),
+            publish_date: chrono::Utc::now(),
+            license: "MIT".into(),
+            mmproj: None,
+            context_length: None,
+        };
+        for id in ["held-whole", "held-in-part", "heard-of", "strangers"] {
+            state.model_registry.register_manifest(two_parts(id));
+        }
+        let part = |model: &str, index: u32| ShardId {
+            model_id: ModelId(model.into()),
+            index,
+        };
+        let registry = &state.model_registry;
+        registry.record_shard_holder(part("held-whole", 0), me.clone());
+        registry.record_shard_holder(part("held-whole", 1), device.clone());
+        registry.record_shard_holder(part("held-in-part", 0), device.clone());
+        registry.record_shard_holder(part("strangers", 0), stranger.clone());
+        registry.record_shard_holder(part("strangers", 1), stranger.clone());
+        assert_eq!(
+            registry.model_ids().len(),
+            4,
+            "every manifest registered, or this proves nothing"
+        );
+
+        assert_eq!(
+            models_the_pool_serves(&state, &members),
+            vec![ModelId("held-whole".into())]
+        );
     }
 
     /// R135: when the local pool already hosts the model, extras MUST be

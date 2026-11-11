@@ -3869,6 +3869,7 @@ textarea:focus:not(:focus-visible) {
 .pool-cross-pool { display: flex; gap: 10px; align-items: flex-start; padding-bottom: 10px; margin-bottom: 10px; border-bottom: 1px solid var(--border); }
 .pool-cross-pool .toggle-switch { flex-shrink: 0; margin-top: 2px; }
 .pool-cross-pool-hint { margin: 4px 0 0; }
+.pool-cross-pool-alone { padding-bottom: 0; margin-bottom: 0; border-bottom: none; }
 /* v2 invite codes are ~300-500 chars (swarmpool:// blob), not 8 — wrap into a
    scrollable monospace box rather than blow up the layout. */
 .pool-invite-code {

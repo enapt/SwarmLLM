@@ -422,10 +422,10 @@
     });
   }
 
-  // R134.5: render the inter-pool catalog tile. Pure read-only discovery
-  // — for each foreign pool we know about, list the model_ids that pool
-  // claims to serve. Hidden when the catalog is empty so users not in a
-  // federated setup never see it.
+  // R134.5: render the inter-pool catalog tile — for each other pool we know
+  // about, the models it says its devices hold. Hidden when the catalog is
+  // empty so users not in a federated setup never see it. One shape from both
+  // the WebSocket and REST (`api::admin::foreign_pool_catalog_json`).
   function _renderForeignPoolCatalog(snapshot) {
     var tile = document.getElementById('foreign-pool-catalog');
     var list = document.getElementById('foreign-pool-catalog-list');
@@ -437,6 +437,16 @@
       return;
     }
     tile.style.display = '';
+    // Whether these pools can serve this computer's requests, as the node
+    // decides it (`pool::scope::other_pools_used`) — never a fixed promise.
+    var sub = document.getElementById('foreign-pool-catalog-sub');
+    if (sub) {
+      sub.textContent = !snapshot.private_mode
+        ? I18n.t('foreign_pool.tile_sub_open')
+        : snapshot.other_pools_used
+          ? I18n.t('foreign_pool.tile_sub_used')
+          : I18n.t('foreign_pool.tile_sub_private');
+    }
     pools.forEach(function (pool) {
       var row = document.createElement('div');
       row.className = 'foreign-pool-row';
@@ -450,8 +460,9 @@
 
       var models = document.createElement('div');
       models.className = 'foreign-pool-models text-xs';
+      // textContent, so the names go in as they are — escaped, an `&` read `&amp;`.
       var lines = (pool.models || []).map(function (m) {
-        return U.escapeHtml(_bestModelName('', m));
+        return _bestModelName('', m);
       });
       models.textContent = lines.join(' · ');
       row.appendChild(models);
@@ -1206,10 +1217,7 @@
     // told when the fetch did not arrive — see `_capacityPlanUnavailable`.
     _restFetch('/api/admin/swarm/capacity-plan', _renderCapacityPlan, _capacityPlanUnavailable);
     _restFetch('/api/admin/quant-recommendations', _renderQuantTips);
-    _restFetch('/api/admin/foreign-pool-catalog', function (data) {
-      // REST returns the same shape WS does, so reuse the renderer.
-      _renderForeignPoolCatalog(data);
-    });
+    _restFetch('/api/admin/foreign-pool-catalog', _renderForeignPoolCatalog);
   }
 
   // R113: render the Capacity Plan / What-If view. Three baked scenarios

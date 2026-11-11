@@ -1262,39 +1262,56 @@ pub async fn reference_models(State(state): State<AppState>) -> Json<serde_json:
     Json(serde_json::json!({ "models": entries }))
 }
 
-/// GET /api/admin/foreign-pool-catalog — R134 — cross-pool model
-/// availability discovery surface. Returns the cached signals from
-/// `PoolModelAvailability` gossip, grouped by pool, with stale entries
-/// trimmed against `FOREIGN_POOL_CATALOG_MAX_AGE_MS`. Pure discovery —
-/// does NOT bind routing decisions. Useful for the admin UI's
-/// "models the swarm knows about but this pool doesn't host yet" tile.
+/// GET /api/admin/foreign-pool-catalog — R134 — the models other pools say
+/// their devices hold, from `PoolModelAvailability` gossip:
+/// [`foreign_pool_catalog_json`], uncapped.
 pub async fn foreign_pool_catalog(State(state): State<AppState>) -> Json<serde_json::Value> {
+    Json(foreign_pool_catalog_json(&state.shared_state, None))
+}
+
+/// The other pools' catalog in the ONE shape both its readers get — this
+/// endpoint and the WebSocket's `stats_update` (capped there, `Some((pools,
+/// models a pool))`): `{pools: [{pool_id, models: [id]}], private_mode,
+/// other_pools_used, computed_at_ms}`. The REST copy carried each model as an
+/// object while the stats tick carried its id, and the dashboard drew both
+/// with one renderer, so the tile read `[object Object]` until the next tick.
+/// It also says whether those pools can serve this computer's requests
+/// (`pool::scope::other_pools_used`), so the tile never promises it either way.
+/// Stale entries are trimmed first (`FOREIGN_POOL_CATALOG_MAX_AGE_MS`).
+pub fn foreign_pool_catalog_json(
+    shared: &crate::daemon::SharedState,
+    cap: Option<(usize, usize)>,
+) -> serde_json::Value {
     use std::collections::BTreeMap;
     let now_ms = crate::types::unix_now_ms();
-    state.shared_state.credits.trim_stale_foreign_pool_catalog(
+    shared.credits.trim_stale_foreign_pool_catalog(
         now_ms,
         crate::daemon::dispatch::FOREIGN_POOL_CATALOG_MAX_AGE_MS,
     );
-    // Group by pool_id for the response shape.
-    let mut by_pool: BTreeMap<String, Vec<serde_json::Value>> = BTreeMap::new();
-    for entry in state.shared_state.credits.foreign_pool_catalog.iter() {
+    let mut by_pool: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for entry in shared.credits.foreign_pool_catalog.iter() {
         let (pool, model) = entry.key();
         by_pool
             .entry(format!("{pool}"))
             .or_default()
-            .push(serde_json::json!({
-                "model_id": model.0,
-                "received_at_ms": *entry.value(),
-            }));
+            .push(model.0.clone());
     }
+    let (most_pools, most_models) = cap.unwrap_or((usize::MAX, usize::MAX));
     let pools: Vec<serde_json::Value> = by_pool
         .into_iter()
-        .map(|(pool_id, models)| serde_json::json!({"pool_id": pool_id, "models": models}))
+        .take(most_pools)
+        .map(|(pool_id, mut models)| {
+            models.sort();
+            models.truncate(most_models);
+            serde_json::json!({ "pool_id": pool_id, "models": models })
+        })
         .collect();
-    Json(serde_json::json!({
+    serde_json::json!({
         "pools": pools,
+        "private_mode": shared.credits.private_mode.load(std::sync::atomic::Ordering::Relaxed),
+        "other_pools_used": crate::pool::scope::other_pools_used(shared),
         "computed_at_ms": now_ms,
-    }))
+    })
 }
 
 /// GET /api/admin/hf/trending — latest HuggingFace trending-GGUF snapshot
@@ -1569,6 +1586,9 @@ pub async fn get_config(State(state): State<AppState>) -> Json<serde_json::Value
         // so the dashboard reflects post-PUT state immediately.
         "allow_cross_pool_inference": state.shared_state.cfg().pool.allow_cross_pool_inference,
         "share_model_catalog": state.shared_state.cfg().pool.share_model_catalog,
+        // The devices a pool needs before its catalog is listed — the
+        // dashboard's listing switch says it.
+        "share_model_catalog_min_members": state.shared_state.cfg().pool.share_model_catalog_min_members,
         // Runtime value, same reason. Paired with `dashboard_on_overlay` so the
         // settings panel can say whether the overlay path is actually in play
         // on this node rather than just offering an abstract switch.
@@ -3240,6 +3260,59 @@ bootstrap_peers = ["/ip4/10.0.0.7/tcp/8810"]
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Both readers of the other pools' catalog get one shape — each model as
+    /// its id, capped only where asked — and are told whether those pools can
+    /// serve this computer's requests, as the routing decides it (#176).
+    #[test]
+    fn the_other_pools_catalog_has_one_shape_and_says_whether_it_is_used() {
+        let temp = tempfile::tempdir().unwrap();
+        let db = crate::storage::db::Database::open(temp.path()).unwrap();
+        let executor = std::sync::Arc::new(tokio::sync::Mutex::new(
+            crate::inference::executor::ModelExecutor::new(),
+        ));
+        let (state, _, _) = crate::daemon::SharedState::new(
+            crate::config::Config::default(),
+            crate::identity::Identity::generate(),
+            db,
+            executor,
+            None,
+        );
+        let pool = crate::types::NodeId([7u8; 32]);
+        let now = crate::types::unix_now_ms();
+        for model in ["b-model", "a-model"] {
+            state
+                .credits
+                .foreign_pool_catalog
+                .insert((pool.clone(), crate::types::ModelId(model.into())), now);
+        }
+
+        let whole = foreign_pool_catalog_json(&state, None);
+        assert_eq!(
+            whole["pools"][0]["models"],
+            serde_json::json!(["a-model", "b-model"])
+        );
+        assert_eq!(whole["private_mode"], false);
+        assert_eq!(whole["other_pools_used"], false);
+        let capped = foreign_pool_catalog_json(&state, Some((30, 1)));
+        assert_eq!(capped["pools"][0]["models"], serde_json::json!(["a-model"]));
+
+        // Private Mode on, the switch off: not used; switch on: used.
+        state
+            .credits
+            .private_mode
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(
+            foreign_pool_catalog_json(&state, None)["other_pools_used"],
+            false
+        );
+        let mut on = (**state.cfg()).clone();
+        on.pool.allow_cross_pool_inference = true;
+        state.apply_live_config(on);
+        let used = foreign_pool_catalog_json(&state, None);
+        assert_eq!(used["private_mode"], true);
+        assert_eq!(used["other_pools_used"], true);
+    }
 
     /// **What it is for**: the peer list shows what each computer and this one
     /// did for each other, both ways, so a computer that only takes is seen —

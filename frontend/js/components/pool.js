@@ -46,11 +46,45 @@
     return { method: method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) };
   }
 
+  // The two pool-to-pool switches (#176) are settings of THIS computer: read
+  // from its config, written back one field at a time (`PUT /api/admin/config`
+  // changes only the fields it is sent). Turning either on widens what leaves
+  // this pool, so it asks first, as Private Mode's own switch does; turning it
+  // off only narrows that again and asks nothing.
+  var POOL_SWITCHES = {
+    // Use another pool for a model none of this pool's devices holds. Acts only
+    // while Private Mode is on (`pool::scope::other_pools_used`), so it lives in
+    // the coverage panel that shows only then.
+    crossPool: {
+      checkbox: 'pool-cross-pool-checkbox',
+      unreadable: 'pool-cross-pool-unreadable',
+      field: 'allow_cross_pool_inference',
+      confirm: 'pool.cross_pool_confirm',
+      enabled: 'pool.cross_pool_enabled',
+      disabled: 'pool.cross_pool_disabled',
+      failed: 'pool.cross_pool_failed'
+    },
+    // The owner tells other pools which models this pool's devices hold
+    // (`HealthMonitor::broadcast_pool_model_availability`). Owner only.
+    listModels: {
+      checkbox: 'pool-list-models-checkbox',
+      unreadable: 'pool-list-models-unreadable',
+      field: 'share_model_catalog',
+      confirm: 'pool.list_models_confirm',
+      enabled: 'pool.list_models_enabled',
+      disabled: 'pool.list_models_disabled',
+      failed: 'pool.list_models_failed'
+    }
+  };
+
   App.pool = {
     _poolState: null,
     _isOwner: false,
     _myNodeId: null,
     _lastCode: null,
+    // Each POOL_SWITCHES value as last read: true / false, or null while it
+    // could not be read — then its switch stays disabled.
+    _switchValues: {},
 
     init: function () {
       var self = this;
@@ -137,10 +171,13 @@
           this._privateMode = !!data.private_mode;
           this.renderActivePool(data);
           this.updatePrivateModeUI();
-          if (this._privateMode) {
-            this.loadCoverage();
-            this.loadCrossPool();
-          }
+          if (this._privateMode) this.loadCoverage();
+          var listPanel = document.getElementById('pool-list-models-panel');
+          if (listPanel) listPanel.classList.toggle('hidden', !this._isOwner);
+          var wanted = [];
+          if (this._privateMode) wanted.push('crossPool');
+          if (this._isOwner) wanted.push('listModels');
+          if (wanted.length) this.loadPoolSwitches(wanted);
         } else {
           this._privateMode = false;
           this.updatePrivateModeUI();
@@ -522,60 +559,66 @@
           App.ui.switchTab('devices');
         });
       }
-      // Other pools (#176). Turning it on widens where messages may go, so it
-      // asks first, as Private Mode's own switch does; turning it off only
-      // narrows that again and asks nothing.
-      var crossPool = document.getElementById('pool-cross-pool-checkbox');
-      if (crossPool) {
-        crossPool.addEventListener('change', function () {
-          var cb = this;
-          if (cb.checked && !confirm(I18n.t('pool.cross_pool_confirm'))) {
-            cb.checked = self._crossPool === true;
+      Object.keys(POOL_SWITCHES).forEach(function (name) {
+        var cb = document.getElementById(POOL_SWITCHES[name].checkbox);
+        if (!cb) return;
+        cb.addEventListener('change', function () {
+          if (cb.checked && !confirm(I18n.t(POOL_SWITCHES[name].confirm))) {
+            cb.checked = self._switchValues[name] === true;
             return;
           }
-          self.setCrossPool(cb.checked);
+          self.setPoolSwitch(name, cb.checked);
         });
+      });
+    },
+
+    // A switch that could not read its setting stays disabled: it must never
+    // write a value it did not read (arch-frontend.md).
+    loadPoolSwitches: async function (names) {
+      var self = this;
+      var config = await App.data.loadConfig();
+      names.forEach(function (name) {
+        var field = POOL_SWITCHES[name].field;
+        self._switchValues[name] = config && typeof config[field] === 'boolean' ? config[field] : null;
+        self.renderPoolSwitch(name);
+      });
+      // The listing acts only from a number of devices this computer's own
+      // config sets (`share_model_catalog_min_members`), so the hint says it.
+      var hint = document.getElementById('pool-list-models-hint');
+      if (hint && names.indexOf('listModels') >= 0) {
+        var least = config && config.share_model_catalog_min_members;
+        hint.textContent = typeof least === 'number'
+          ? I18n.t('pool.list_models_hint', { count: Math.max(1, least) })
+          : '';
       }
     },
 
-    // Whether this computer may use another pool for a model none of its
-    // devices holds: `pool.allow_cross_pool_inference`, which acts only while
-    // Private Mode is on (`pool::scope::cross_pool_extras`) — so the switch
-    // lives in the panel that shows only then. A switch that could not read
-    // the setting stays disabled: it must never write a value it did not read.
-    loadCrossPool: async function () {
-      var config = await App.data.loadConfig();
-      this._crossPool = config && typeof config.allow_cross_pool_inference === 'boolean'
-        ? config.allow_cross_pool_inference
-        : null;
-      this.renderCrossPool();
-    },
-
-    renderCrossPool: function () {
-      var known = typeof this._crossPool === 'boolean';
-      var cb = document.getElementById('pool-cross-pool-checkbox');
+    renderPoolSwitch: function (name) {
+      var spec = POOL_SWITCHES[name];
+      var value = this._switchValues[name];
+      var known = typeof value === 'boolean';
+      var cb = document.getElementById(spec.checkbox);
       if (cb) {
-        cb.checked = this._crossPool === true;
+        cb.checked = value === true;
         cb.disabled = !known;
       }
-      var unreadable = document.getElementById('pool-cross-pool-unreadable');
+      var unreadable = document.getElementById(spec.unreadable);
       if (unreadable) unreadable.classList.toggle('hidden', known);
     },
 
-    setCrossPool: async function (enabled) {
+    setPoolSwitch: async function (name, enabled) {
       var self = this;
-      var cb = document.getElementById('pool-cross-pool-checkbox');
+      var spec = POOL_SWITCHES[name];
+      var cb = document.getElementById(spec.checkbox);
       if (cb) cb.disabled = true;
-      // `PUT /api/admin/config` changes only the fields it is sent.
-      await U.apiAction('/api/admin/config', _jsonOpts('PUT', { allow_cross_pool_inference: enabled }), function () {
-        self._crossPool = enabled;
-        App.notifications.showToast(
-          enabled ? I18n.t('pool.cross_pool_enabled') : I18n.t('pool.cross_pool_disabled'),
-          'info'
-        );
-      }, { fallback: I18n.t('pool.cross_pool_failed'), display: 'toast' });
+      var body = {};
+      body[spec.field] = enabled;
+      await U.apiAction('/api/admin/config', _jsonOpts('PUT', body), function () {
+        self._switchValues[name] = enabled;
+        App.notifications.showToast(I18n.t(enabled ? spec.enabled : spec.disabled), 'info');
+      }, { fallback: I18n.t(spec.failed), display: 'toast' });
       // Written or refused, the switch shows what the node holds now.
-      this.renderCrossPool();
+      this.renderPoolSwitch(name);
     },
 
     confirmPrivateMode: async function (enabled, onCancel) {
@@ -624,7 +667,7 @@
         this._privateMode = data.enabled;
         this.updatePrivateModeUI();
         if (data.coverage) this.renderCoverage(data.coverage);
-        if (data.enabled) this.loadCrossPool();
+        if (data.enabled) this.loadPoolSwitches(['crossPool']);
         App.notifications.showToast(
           data.enabled ? I18n.t('pool.private_mode_enabled') : I18n.t('pool.private_mode_disabled'),
           data.enabled ? 'info' : 'success'

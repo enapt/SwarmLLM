@@ -2166,8 +2166,8 @@ impl HealthMonitor {
     /// emits; only fires when `pool.share_model_catalog` is on AND the
     /// pool has at least `share_model_catalog_min_members` members
     /// (k-anonymity floor). Carries the model IDs the pool can currently
-    /// serve — derived from the local model registry — at the gossip
-    /// granularity that the wishlist announcement already operates at.
+    /// serve — `pool::scope::models_the_pool_serves`, every part held by a
+    /// member — at the gossip granularity the wishlist announcement uses.
     /// Pure discovery; routing across pool boundaries is NOT enabled.
     async fn broadcast_pool_model_availability(&self) {
         // Live config, not the boot snapshot: the operator can turn catalog
@@ -2179,29 +2179,25 @@ impl HealthMonitor {
         }
         let min_members = live.pool.share_model_catalog_min_members.max(1) as usize;
         let my_id = self.shared_state.identity.node_id().clone();
-        let pool_id = {
+        let (pool_id, members) = {
             let ps = self.shared_state.credits.pool_state.read().await;
             match ps.as_ref() {
-                Some(ps) if ps.pool_id == my_id && ps.members.len() >= min_members => {
-                    ps.pool_id.clone()
-                }
+                Some(ps) if ps.pool_id == my_id && ps.members.len() >= min_members => (
+                    ps.pool_id.clone(),
+                    ps.members
+                        .iter()
+                        .map(|m| m.node_id.clone())
+                        .collect::<std::collections::HashSet<_>>(),
+                ),
                 _ => return, // not owner, no pool, or below k-anonymity floor
             }
         };
 
-        // The pool serves any model whose shards are locally hosted by
-        // any pool member. For privacy + simplicity we use the owner's
-        // local model registry as the catalog source — distributing the
-        // per-member catalog would expose composition signals.
-        let mut model_ids: Vec<crate::types::ModelId> = self
-            .shared_state
-            .model_registry
-            .models()
-            .into_iter()
-            .map(|m| m.id)
-            .collect();
-        model_ids.sort_by(|a, b| a.0.cmp(&b.0));
-        model_ids.dedup_by(|a, b| a.0 == b.0);
+        // Only the models the pool's devices hold whole between them — never
+        // every model the registry has heard of (#176). Listed as the pool's
+        // union, so no member's own holdings are told apart.
+        let mut model_ids =
+            crate::pool::scope::models_the_pool_serves(&self.shared_state, &members);
         model_ids.truncate(crate::daemon::dispatch::MAX_POOL_MODEL_ANNOUNCE_ENTRIES);
         if model_ids.is_empty() {
             return;

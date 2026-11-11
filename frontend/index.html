@@ -1699,14 +1699,15 @@
                 </div>
                 <div class="quant-tips-list" id="quant-tips-list"></div>
               </div>
-              <!-- R134.5: inter-pool model availability discovery. Read-only
-                   — shows which other pools also serve which models, no
-                   routing across pools. Hidden when the catalog is empty
-                   so users not in a federated setup never see it. -->
+              <!-- R134.5: the models other pools say their devices hold.
+                   Hidden when the catalog is empty so users not in a
+                   federated setup never see it. The line under the title
+                   says whether they can serve this computer's requests
+                   (swarm-tab.js picks it). -->
               <div class="foreign-pool-catalog" id="foreign-pool-catalog" style="display:none">
                 <div class="foreign-pool-catalog-header">
                   <h3 data-i18n="foreign_pool.tile_title">Models other pools serve</h3>
-                  <span class="text-muted text-xs" data-i18n="foreign_pool.tile_sub">Discovery only — your inference stays in your pool.</span>
+                  <span class="text-muted text-xs" id="foreign-pool-catalog-sub"></span>
                 </div>
                 <div class="foreign-pool-catalog-list" id="foreign-pool-catalog-list"></div>
               </div>
@@ -1945,6 +1946,23 @@
               </div>
               <div class="panel-body" id="pool-members-list">
                 <div class="empty-state text-muted" data-i18n="pool.no_members">No devices linked yet. Generate an invite code to add your other machines.</div>
+              </div>
+            </div>
+
+            <!-- The owner's listing for other pools (#176). Owner only (pool.js). -->
+            <div class="panel mt-1 hidden" id="pool-list-models-panel">
+              <div class="panel-body">
+                <div class="pool-cross-pool pool-cross-pool-alone">
+                  <label class="toggle-switch">
+                    <input type="checkbox" id="pool-list-models-checkbox" aria-labelledby="pool-list-models-label" aria-describedby="pool-list-models-hint" disabled>
+                    <span class="toggle-slider"></span>
+                  </label>
+                  <div>
+                    <span id="pool-list-models-label" data-i18n="pool.list_models_label">Let other pools use the models your devices hold</span>
+                    <p id="pool-list-models-hint" class="text-muted field-hint pool-cross-pool-hint"></p>
+                    <p id="pool-list-models-unreadable" class="text-muted field-hint pool-cross-pool-hint hidden" data-i18n="pool.cross_pool_unreadable">This setting couldn't be read, so it can't be changed right now. Try again in a moment.</p>
+                  </div>
+                </div>
               </div>
             </div>
 

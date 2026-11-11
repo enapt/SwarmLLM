@@ -4952,26 +4952,6 @@ sees pins and no traffic. Seeding from the swarm's traffic needs a new gossiped 
 (an additive message and a feature bit) AND a privacy decision, since it would publish who
 served whom. Never fake it with sample data.
 
-#### #176 — Cross-pool inference: a pool owner's listing has no dashboard control
-`P3` · ux · **PARTIAL** — 2026-07 (R134) · history: archive § "Inter-pool model sharing policy"
-
-Discovery and opt-in routing between pools shipped (R134-R134.7:
-`PoolModelAvailability`, `foreign_pool_catalog`, `pool.allow_cross_pool_inference`), and R137
-made the setting live through `PUT /api/admin/config` (`allow_cross_pool_inference`).
-**Using another pool has its switch since 2026-11-11** (on main, not in a release yet): in the
-Private Mode coverage panel (`pool.js::loadCrossPool` / `setCrossPool`, disabled while the
-setting is unread), its consequence said beside it and asked before it turns on (7 keys ×21).
-Prior art: Tailscale's "Allow local network access" — off by default, labelled by what it
-allows, its warning about who then reaches you beside it.
-**Residual — the LISTING half**: `pool.share_model_catalog` (a pool owner tells other pools what
-the pool serves) is still config-file only, so the switch finds a pool only where its owner
-edited `config.toml`. And its catalog is every model the owner's REGISTRY knows
-(`health::monitor::broadcast_pool_model_availability` reads `model_registry.models()`, every
-manifest gossip brought), not the models the pool's devices hold a part of — what
-`cross_pool_extras` asks of the asking pool. Fix the catalog to that, then give the owner the
-switch (owner only, acting from `share_model_catalog_min_members` devices).
-Billing between pools waits on credits, which are dormant (`docs/CREDITS_DESIGN.md`).
-
 #### #261 — A model's manifest carries the file's own name and placeholder metadata
 `P3` · ux · **OPEN** — 2026-10-13 · history: none (a tester's report, 2026-10-13)
 
@@ -5660,6 +5640,21 @@ archive under the named heading. Reopen one only with the evidence its line name
 Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 19-28 were
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
+
+**Closed 2026-11-11, on main (not in a release yet)** (#176)
+- #176 — **Pools could reach each other only through `config.toml`.** Discovery and opt-in routing between
+  pools shipped in R134 with no dashboard control. Using another pool for a model none of your devices
+  holds is now a switch in the Private Mode coverage panel (`b7ea7c31`), and the pool owner's listing a
+  switch under Linked Devices; both say beside them what changes and who then sees what, ask before
+  turning on, and stay disabled while the setting cannot be read (`pool.js` `POOL_SWITCHES`). The owner's
+  catalog was every model its REGISTRY knew — every manifest gossip brought — and now names only the
+  models the pool's devices hold whole between them (`pool::scope::models_the_pool_serves`; test
+  `a_pool_lists_only_the_models_its_devices_hold_whole`, red with the old list). The "Models other pools
+  serve" tile said "your inference stays in your pool" in every state; it now says what is true
+  (`pool::scope::other_pools_used`, carried by `api::admin::foreign_pool_catalog_json`, which both the
+  REST list and the stats tick use — the REST copy's objects had drawn `[object Object]` until the next
+  tick). Prior art: Tailscale's "Allow local network access"; a Kademlia provider record names only
+  content its node holds. Billing between pools waits on credits, which are dormant.
 
 **Closed 2026-11-09, released in v0.3.280 (published 2026-11-09 14:21:54Z)** (#438)
 - #438 — **The model search judged "Runs locally" on a card computer by the card alone.** It asked
