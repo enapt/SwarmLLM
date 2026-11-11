@@ -4476,29 +4476,6 @@ StarCoder2, inert while refused).
 
 ### Memory and admission
 
-#### #442 — A drafter left on the card by a split route keeps the same model's later WHOLE placement off the card
-`P2` · memory · **OPEN** — 2026-11-11 · history: #355, #441
-
-Field report v0.3.280 (its run on v0.3.278, 2026-11-08 16:00Z, a 12 GB card with 4.5 GB in use by
-other programs): request 1 of Qwen2.5-14B went to a peer with this node's drafter, Qwen2.5-3B
-(2,137 MB), on the card. Request 2 placed the 14B here as a card/processor split, 10 of 48 layers on
-the card (`card_mb=1950`), and it ran at 5.4-5.6 tok/s — slower than the peer route before it. The
-drafter left at 16:05:55, and the 14B kept 10/48 for the rest of the block (17 requests).
-
-Cause, read from the code (not reproduced): the split's reclaim (`free_vram_for_split`) never takes
-a drafter (`split_reclaim_eligible`, #355), because a split of the model the drafter guesses for
-would trade its speed-up for a few layers. Here the model being placed was that same model, placed
-WHOLE here, and a whole local model never uses the engine drafter, so the exclusion protected
-nothing. After the drafter left, promotion back to the card waits for the worker to be out of use
-(#93), and back-to-back requests never left it so.
-
-Fix to build: let the split's reclaim, and the planner's count of it (`split_budget_for_planning`,
-the same predicate), take an idle drafter where every model it has guessed for is the model being
-placed whole here. The worker would record its targets beside `drafts_for_another_model`;
-`draft`'s `beside` (#441) already names them. Check: a test with the two models (a whole
-placement reclaims the idle drafter; a segment of the same model still does not, which keeps #355),
-red without the change.
-
 #### #376 — A near-full card loses a split's drafter to the processor: the planner's room for it is about a layer too generous
 `P2` · memory / scheduling · **PARTIAL** — 2026-10-30 · history: #275, #342's residual
 
@@ -5742,6 +5719,22 @@ Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
 
+**Closed 2026-11-11, on main (not in a release yet)** (#442)
+- #442 — **A guessing model left on the card by a split route kept the same model's later whole
+  placement off the card.** Field report v0.3.280, its run on v0.3.278: after one Qwen2.5-14B request
+  ran through a peer with this node's 3B drafter (2,137 MB) on a 12 GB card, the next placed the 14B
+  here with 10 of 48 layers on the card (5.4-5.6 tok/s) and kept that for 17 requests. A split's
+  reclaim never took a drafter (#355), but a whole model here is a local generation, which reads no
+  drafter. `split_reclaim_eligible` now takes `SplitFor`: a WHOLE placement (`split_for`: the ranges
+  cover every layer) may take an idle drafter that has guessed only for that model
+  (`WorkerHandle::guesses_only_for`); a segment, and a drafter of other models too, keep it. Spawn,
+  growth and the planner's whole run read the one predicate. Prior art: llama.cpp's server and vLLM
+  free a drafter with its target. Tests `a_whole_placement_takes_the_card_from_a_drafter_of_that_model_alone`,
+  `a_spawn_split_unloads_an_idle_model_that_adds_card_layers`,
+  `a_whole_run_is_planned_with_the_card_a_drafter_of_it_alone_gives` — red with the exception off.
+  Evidence: `docs/invariants/memory.md` § "A split takes idle models' card memory too" (the
+  drafter paragraphs).
+
 **Closed 2026-11-11, on main (not in a release yet)** (#441)
 - #441 — **The guessing model took the card room the model it guesses for needed for its
   conversations.** Field report v0.3.280: on a 12 GB card shared with a game streaming client,
@@ -5761,7 +5754,7 @@ grep `^| N |`).
   drafter before it sizes the target's cache; llama.cpp's server sizes both at start and
   `common/fit.cpp` sizes a load before allocating; Ollama's `updateFreeSpace` takes the same
   smaller-of-two reading as ours. Residual: #442 (a drafter blocking the same model's later whole
-  placement). Evidence: `docs/invariants/memory.md` § "A model loaded for another model's request
+  placement), closed the same day. Evidence: `docs/invariants/memory.md` § "A model loaded for another model's request
   is a guest".
 
 **Closed 2026-11-11, on main (not in a release yet)** (#176)

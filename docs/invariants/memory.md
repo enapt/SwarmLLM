@@ -308,6 +308,34 @@ the card between conversations, and the split would have unloaded it for about
 four layers; reloaded as a guest it gets only the memory standing free — none,
 beside a split that fills the card. The whole-model reclaim is unchanged.
 
+**Except for a whole placement of the one model it guesses for (2026-11-11,
+#442).** Field report v0.3.280, its run on v0.3.278: request 1 of Qwen2.5-14B
+went to a peer with the 3B drafter (2,137 MB) on this node's 12 GB card;
+request 2 placed the 14B here, and the split's reclaim, keeping the drafter,
+put 10 of 48 layers on the card (5.4-5.6 tok/s, slower than the peer route).
+The drafter left five minutes later; the 14B kept its 10/48 for 17 more
+requests, as promotion waits for a quiet worker (#93). A whole model here is a
+local generation (`try_local_generate_fastpath` → `ModelProcessPool::generate`),
+which no engine drafter guesses for — that is a split route's
+(`try_dsd_distributed`, the requester's guesses for a led split) — so the
+drafter protected nothing. `split_reclaim_eligible` now takes a `SplitFor`:
+`Whole` where the ranges placed cover every layer (`ModelProcessPool::split_for`
+— the spawn's segment, a growth's held ranges plus the new one), and then a
+drafter that has guessed ONLY for that model (`WorkerHandle::guesses_only_for`,
+recorded by `draft`'s `beside`) may go like any idle model. #972's case — the
+70B's segment beside its own drafter — is a `Part` and keeps it, as does a
+drafter that has guessed for another model too. The planner reads the same
+predicate (`split_budget_for_planning(model, SplitFor)`): the whole run in
+`fresh_run_layers_for_planning` and a fresh spawn's run; the share priced for
+any range (`card_share_for_planning`) stays a `Part`, which can only price a
+whole run's card short, never long. Prior art: llama.cpp's server and vLLM
+load a drafter with its target and free it with it. Tests
+`a_whole_placement_takes_the_card_from_a_drafter_of_that_model_alone` (pure),
+`a_spawn_split_unloads_an_idle_model_that_adds_card_layers` (cases
+`drafter-of-it` taken whole, kept for a part and when it guessed for another
+model too) and `a_whole_run_is_planned_with_the_card_a_drafter_of_it_alone_gives`
+— all three red with the exception switched off (2026-11-11).
+
 Tests: `a_split_takes_idle_models_card_memory_as_far_as_it_adds_layers`,
 `nothing_is_unloaded_for_a_split_it_would_not_widen` (pure);
 `a_plan_counts_the_card_an_idle_model_gives_a_split`,
