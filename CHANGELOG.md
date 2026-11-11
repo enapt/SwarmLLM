@@ -1,5 +1,82 @@
 # Changelog
 
+## [0.3.282-alpha] — 2026-11-12
+
+**SwarmLLM no longer drives a hot computer harder.** A node serving other computers could keep its graphics
+card at full load for as long as they asked, and nothing watched its heat — a laptop running a long card job
+locked up and would not power on until it had cooled. Now, when the card stays at its target temperature for
+two minutes, its hardware protection turns on, the processor stays at 93 °C or more for five minutes, or the
+graphics driver stops answering, this computer stops taking new work from other computers and tells you:
+"Your computer is running hot, so work for other computers is paused and your own chats run more slowly until
+it cools down." If it stays hot two minutes more (at once for a driver that stopped answering), the work it was
+already running for others stops too, and each of those replies carries on on another computer from where
+its reader was. Your own chats are never refused; they run at about half speed until it cools, resting in quarter-second pauses — on a laptop's
+graphics card that cut its power from 95 W to 68 W (pausing after every word, the card sped its clock up
+into the gaps and still drew 83 W). Everything resumes a minute after it has cooled. A card that touched its
+limit once and then ran just under it is not held back, and a temperature sensor that stops answering is
+never read as hot.
+On Windows the processor's temperature is now read without administrator rights. Other computers see the
+pause and plan around it, with no penalty to anyone.
+
+**A far split no longer loses its reply to one lost packet.** A computer sending a large prompt across a lossy
+link (a split to another continent) could lose the whole reply: one dropped packet early in the burst left the
+data behind it in more than 1,024 pieces, and the connection closed with "too many gaps in stream buffer". A
+12.9 MB prompt pass to Australia failed exactly that way. QUIC now runs with the fix proposed upstream
+(quinn PR #2976): the pieces that arrive in order are merged, and the number kept grows with the data buffered.
+
+**A split's first word comes sooner.** After a split reads your prompt, each computer in the chain keeps its
+part of the conversation so the next turn only reads what is new. Each one copied it BEFORE passing its answer
+on, so the copies ran one after another ahead of the first word; now each copies after its answer has left.
+On a two-computer test the prompt pass was 9-22% shorter on every turn that stores, replies identical.
+
+**A long prompt is no longer priced as if a computer's processor read it as fast as its graphics card.**
+Choosing where a request runs weighs how long each computer takes to read the prompt. For a computer whose
+speed had been measured, that was its reply speed divided by a graphics card's ratio whenever it had a card —
+even where most of the model runs on its processor, which reads a prompt about 4.5 times faster than it writes
+a reply where a card reads one 40 times faster. A 27B model held by a computer running 39 of its 64 layers on the processor had a 4,110-token prompt
+priced at 21 seconds; it took more than the ten minutes it was given. Each device's share is now priced at its
+own rate, as for a computer never measured: about 170 seconds there, so a split that reads it faster wins. A per-device ratio is still a guess, and that processor took 430-590 seconds: so a computer handed a whole model is now also timed reading a long prompt, and one that runs out of time counts as at least that slow. The next long prompt is never priced below what it has been seen to take there. When
+such a computer was the only one holding the model and never answered in time, you were told the model had
+gone from the swarm; you are now told that the computer took the request and no reply arrived in time.
+
+**A computer whose prompt speed was measured is no longer priced as slower than it is.** Once a computer has
+read part of a long prompt in a split, the time it took is kept to price the next one. It was kept per byte of
+what crossed the network and priced back at a fixed byte count a word; the network carries a compressed copy at
+the model's own width, so the two disagreed: a 70B model's part on this computer was priced at 1.88 times the
+time it had just taken, a smaller model's at nearly 4 times, and every measured computer read as slower than one
+never measured. The time is now kept per word of the prompt, as Petals measures it — including for the
+computer holding the END of the model, whose prompt time was never kept at all because it answers with a word
+rather than a large block of numbers, and for a prompt long enough to be read in pieces (any split prompt past
+about a thousand words), which was never timed either. The number of words is believed only when the bytes that arrived bear it
+out, so another computer cannot make itself look faster by mislabelling what it sent. Moving the prompt to a
+computer further along a split is likewise charged for what actually crosses — the model's own width, compressed
+as it is sent (or uncompressed, where that setting is off) — instead of a fixed size that made a 70B model's
+transfer look 1.88 times longer.
+
+**The guessing model no longer crowds out the model it guesses for.** On a graphics card shared with other
+programs, the small model loaded to guess ahead for a larger one could take the memory the larger one had been
+promised for its conversations: a 12 GB card refused 54 prompts in a row after a 3B guesser loaded beside a
+14B. It now goes on the card only where the card still leaves the main model its usual room, otherwise in
+system memory or not at all, and a guesser too big for the card is refused before it loads. A model run whole
+on this computer can also take the card back from an idle guesser left there by an earlier split — the same
+report's 14B had run with 10 of its 48 layers on the card at about 5.5 words a second.
+
+**Pools: two switches on the dashboard instead of config.toml.** With Private Mode on, the Model Coverage
+panel can now let requests for a model none of your devices holds go to another pool that lists it (those
+computers see what you send; it asks first). A pool owner can let other pools use the models its devices hold,
+from a switch under Linked Devices. The list a pool sends now names only models its devices hold every part
+of, not every model its owner's computer had heard of; the "Models other pools serve" panel says truthfully
+whether your inference stays in your pool, and no longer shows a model as [object Object]. The switch also says
+that anyone can start a pool, so those computers may belong to strangers. A pool with fewer devices than a
+listing needs is never used, however its listing arrived, and a pool lists a model only where its devices said
+themselves that they hold it.
+
+**Smaller fixes.** A long prompt sent in pieces skipped both "is this computer holding back?" and the rule that
+a computer must share to use the swarm; every piece that starts a request now asks both. A model's part limit
+said "0 = unlimited", which is true only while this computer's own default cap is 0; it now says
+"0 = this computer's default (N)" where a default is set. A split's speed is no longer measured from the first word after a turn, which waits while each computer keeps its part of the conversation, nor from a long prompt answered all at once, which read as taking no time, nor from a step sent again after the encrypted link changed its keys, which waited 2-10 seconds for the new key. Turning activation compression on or off now reaches the next model started, without a restart. German now says Sie throughout and Portuguese reads
+as Brazilian Portuguese with você; Japanese and Thai name the processor one way.
+
 ## [0.3.281-alpha] — 2026-11-11
 
 **The dashboard keeps what you type.** A model's settings panel (the gear on its card) lost your edits
