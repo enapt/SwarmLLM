@@ -256,6 +256,8 @@
 #          to resume, so the plan must pick the peer holding it.
 #          SHARDS_C=… adds C holding those parts instead (set SHARDS_B too): a
 #          three-machine split, A → B → C. B's and C's hits both count.
+#          TURNS=<n> (#433): an n-turn conversation instead; PASS = every turn
+#          past the first resumed further in than the last, B hit each time.
 #   remote  A holds NONE of the model (the header only) and REMOTE_NODES (2,
 #          default, or 3) other nodes hold it between them in contiguous parts
 #          — B the first, then C (and D) — the shape a user who stores nothing
@@ -1858,7 +1860,7 @@ fi
 if [ "$MODE" = splitcache ]; then
   # Two turns of an agent-shaped conversation through the split A -> B: a long
   # system prompt sent unchanged every turn, then the history grows.
-  python3 - "$MODEL" "$OUT" <<'PY'
+  python3 - "$MODEL" "$OUT" "${TURNS:-2}" <<'PY'
 import json, sys
 model, out = sys.argv[1], sys.argv[2]
 system = "You are a careful coding agent working in a user's repository. " + " ".join(
@@ -1867,9 +1869,16 @@ system = "You are a careful coding agent working in a user's repository. " + " "
 turn1 = [{"role": "system", "content": system}, {"role": "user", "content": "Say hello in one sentence."}]
 turn2 = turn1 + [{"role": "assistant", "content": "Hello! I am ready to help with your repository."},
                  {"role": "user", "content": "Name two of the rules above, one sentence each."}]
-for name, msgs in (("turn1", turn1), ("turn2", turn2)):
+turns = [turn1, turn2]
+# TURNS=<n> (#433): the conversation goes on, each turn adding a reply and a question.
+for k in range(3, int(sys.argv[3]) + 1):
+    turns.append(turns[-1] + [
+        {"role": "assistant", "content": f"Rule {k}: read the file before you change it, and keep every "
+                                         f"change small. Rule {k + 1}: run the tests after each change."},
+        {"role": "user", "content": f"Now explain rule {k + 10} in two sentences, and say why it matters."}])
+for i, msgs in enumerate(turns, 1):
     json.dump({"model": model, "max_tokens": 32, "temperature": 0, "messages": msgs},
-              open(f"{out}/{name}.json", "w"))
+              open(f"{out}/turn{i}.json", "w"))
 PY
   ask_turn() { # name
     local t
@@ -1886,6 +1895,44 @@ except Exception:
 print(json.dumps({"turn": name, "status": status, "seconds": float(t or 0), "content": content}))
 PY
   }
+  if [ "${TURNS:-2}" -gt 2 ]; then
+    # #433: a conversation of TURNS turns. A segment keeping the conversation's
+    # opening reads only each turn's new tokens, so every turn past the first must
+    # RESUME, each further in than the last, and B restore its part each time —
+    # a turn read from 0 is the field's first token growing with the conversation.
+    : > "$OUT/turn_from.txt"
+    for i in $(seq 1 "$TURNS"); do
+      echo "$(wc -l < "$BASE/A/node.log") $(wc -l < "$BASE/B/node.log")" >> "$OUT/turn_from.txt"
+      ask_turn "turn$i"
+    done
+    sleep 3
+    echo "$(wc -l < "$BASE/A/node.log") $(wc -l < "$BASE/B/node.log")" >> "$OUT/turn_from.txt"
+    python3 - "$BASE/A/node.log" "$BASE/B/node.log" "$OUT" <<'PY'
+import json, re, sys
+a = open(sys.argv[1], errors="replace").read().splitlines()
+b = open(sys.argv[2], errors="replace").read().splitlines()
+out = sys.argv[3]
+cuts = [tuple(map(int, l.split())) for l in open(f"{out}/turn_from.txt")]
+turns = [json.loads(l) for l in open(f"{out}/splitcache.jsonl")]
+ok = len(turns) == len(cuts) - 1 and all(" 200" in t["status"] for t in turns)
+last = -1
+for i, t in enumerate(turns):
+    (fa, fb), (ta, tb) = cuts[i], cuts[i + 1]
+    resumed = [int(m.group(1)) for l in a[fa:ta] if "a split prompt pass keeping its prompt" in l
+               for m in [re.search(r"resumed_from=(\d+)", l)] if m]
+    hits = sum("HIT on a split's stored prompt" in l for l in b[fb:tb])
+    misses = sum("Prompt cache miss" in l for l in a[fa:ta])
+    stores = sum("stored a split's prompt" in l for l in b[fb:tb])
+    print(f"splitcache {t['turn']}: {t['seconds']:.1f} s  resumed_from={resumed}  B hits={hits}  "
+          f"B stores={stores}  misses logged={misses}  {t['status']}")
+    if i > 0:
+        ok = ok and bool(resumed) and max(resumed) > last and hits >= 1
+    last = max(resumed) if resumed else 0
+print(f"splitcache [{len(turns)} turns]: {'PASS' if ok else 'FAIL'}")
+sys.exit(0 if ok else 1)
+PY
+    exit $?
+  fi
   ask_turn turn1
   if [ -n "${WARM_SPARE:-}" ]; then
     # Both peers WARM, only one with this conversation (FUTURE_WORK #10's
