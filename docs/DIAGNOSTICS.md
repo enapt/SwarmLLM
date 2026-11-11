@@ -613,7 +613,7 @@ metered connection: yes  setting: auto  holding back downloads and work for peer
 The diagnostics report has one line for it:
 
 ```
-heat: card 88 C (target 87 C), driver cooling it  processor 71 C  driver not answering: false  holding back work for peers: card_at_target
+heat: card 88 C (target 87 C), driver cooling it  processor 71 C  driver not answering: false  holding back work for peers: card_at_target  own work paused after each step: 100% of the step
 ```
 
 - `card` is the hottest NVIDIA card as `nvidia-smi` last answered (read every 30 s by the health
@@ -631,6 +631,13 @@ heat: card 88 C (target 87 C), driver cooling it  processor 71 C  driver not ans
   others stops too — every step refused, every reply it was writing for one ended, and the
   coordinator continues it elsewhere. `grep "stops too\|ending a reply this computer was writing"
   node.log` (WARN); on the coordinator, its failover or continuation lines.
+- `own work paused after each step` is the pace the model workers were last told (`no` while
+  cool): the owner's own chats are never refused while hot, but each step a worker runs — a token,
+  a prompt chunk, a batch, a block drafter's or guess head's draft — is followed by a pause as long as itself, so
+  the computer works half the time and a reply comes at about half speed. Told to the workers at the
+  next health round (≤ 30 s); in each worker's log `grep "each step is followed by a pause\|steps
+  run at full speed again" node.log` (INFO). Not paced: a guess head's guesses ahead while a far
+  check is out, and the old single-model setting (`inference.model_path`).
 - `SWARMLLM_HEAT_GUARD=0` turns the hold off (the rigs set it; the log then says what it WOULD have
   done). To see the hold without heating anything: `SWARMLLM_FAULT_HOST_HEAT=driver` (at once),
   `protecting` (at once), `card` (after 120 s), `processor` (after 5 min), `cool` — or

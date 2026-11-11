@@ -410,6 +410,13 @@ pub async fn run_worker(
                         tracing::debug!(%request_id, "model-worker: request cancelled by daemon");
                         continue;
                     }
+                    // A pace is read between steps by the thread running them
+                    // (`inference::pace`), so it takes effect inside the reply
+                    // under way, not after it.
+                    if let DaemonMsg::Pace { pause_permille } = msg {
+                        crate::inference::pace::set_pause_permille(pause_permille);
+                        continue;
+                    }
                     // Short-circuit cross-node prefix fetch results so
                     // `handle_generate` can await its oneshot without
                     // relying on the main loop to pump ipc_rx (which it
@@ -442,6 +449,12 @@ pub async fn run_worker(
             }
         }
     });
+
+    // The pace the daemon had when it spawned this worker (#440 step 4); a
+    // change afterwards arrives as `DaemonMsg::Pace`.
+    crate::inference::pace::set_pause_permille(crate::inference::pace::pace_at_spawn(
+        std::env::var_os(crate::inference::pace::WORKER_PACE_ENV).as_deref(),
+    ));
 
     // Read once: the daemon that spawned this worker decodes the card probe's
     // report (`worker_ipc::DAEMON_READS_CARD_PROBE`).
@@ -713,7 +726,9 @@ pub async fn run_worker(
                 .current_layer_range()
                 .and_then(|(ls, le)| models.get(&(ls, le, 0, 1)))
                 .is_some_and(SplitModel::runs_entirely_on_card);
-            let tick_started = std::time::Instant::now();
+            // A pause while the computer is hot (`inference::pace`) is not a
+            // stalled card: the tick is judged by the time it worked.
+            let tick_started = crate::inference::pace::Stopwatch::start();
             let tick = step_decode_pool(
                 &mut writer,
                 &mut models,
@@ -726,7 +741,7 @@ pub async fn run_worker(
             )
             .await;
             if let Some(stalled) = card_pace.observe(
-                tick_started.elapsed(),
+                tick_started.worked(),
                 running,
                 on_card,
                 std::time::Instant::now(),
@@ -4245,7 +4260,27 @@ impl MtpGuesses {
     }
 
     /// Up to `gamma` guesses after `next_token`, the token at `index_pos`.
+    /// One paced step while the computer is hot (`pace::Step`, #440): the
+    /// head's forwards run outside the executor's own entry points.
     fn guesses(
+        &mut self,
+        model: &crate::inference::split::SplitModel,
+        next_token: u32,
+        index_pos: usize,
+        gamma: usize,
+    ) -> Result<Vec<u32>, SwarmError> {
+        let step = crate::inference::pace::Step::begin();
+        let out = self.guesses_unpaced(model, next_token, index_pos, gamma);
+        step.end(
+            || {
+                let _ = model.device().synchronize();
+            },
+            || false,
+        );
+        out
+    }
+
+    fn guesses_unpaced(
         &mut self,
         model: &crate::inference::split::SplitModel,
         next_token: u32,
@@ -11346,6 +11381,10 @@ async fn handle_daemon_msg(
                 "model-worker: unexpected PrefixFetchResult in main loop (reader short-circuit missed?)"
             );
             let _ = pending_fetches; // quiet unused-param warning when the reader short-circuit is comprehensive
+        }
+        // The reader task takes every pace; one reaching here is set the same.
+        DaemonMsg::Pace { pause_permille } => {
+            crate::inference::pace::set_pause_permille(pause_permille);
         }
         DaemonMsg::Shutdown => {
             let _ = send_worker(writer, &WorkerMsg::Bye, &[]).await;

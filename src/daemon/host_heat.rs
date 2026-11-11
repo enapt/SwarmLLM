@@ -424,6 +424,16 @@ impl SharedState {
         if before.is_some() != cause.is_some() {
             self.tell_the_owner_about_heat(cause, &reading);
         }
+        // The owner's own work is never refused, only paced (step 4): every
+        // worker pauses after each step as long as the step took, while the
+        // hold lasts. Every round — the pool tells only the workers not yet
+        // at it. Off with the guard (`host_heat_hold_now` is then `None`).
+        let pace = if self.host_heat_hold_now().is_some() {
+            crate::inference::pace::HOT_PAUSE_PERMILLE
+        } else {
+            0
+        };
+        self.model_process_pool.pace_steps(pace).await;
         if stops_running && heat_guard_on() {
             // Every round while it holds, not only on the edge: a reply that
             // slipped in as the hold began is ended at the next.
@@ -459,11 +469,12 @@ impl SharedState {
             Some(_) => (
                 "heat_paused",
                 "Your computer is running hot, so work for other computers is paused \
-                 until it cools down. Your own chats still work.",
+                 and your own chats run more slowly until it cools down.",
             ),
             None => (
                 "heat_resumed",
-                "Your computer has cooled down, so work for other computers has resumed.",
+                "Your computer has cooled down, so work for other computers has resumed \
+                 and your own chats run at full speed again.",
             ),
         };
         if !heat_guard_on() {

@@ -154,6 +154,12 @@ Prune's soft-unload narrows a loaded model only when our CHARGED graphics memory
 
 → `docs/invariants/memory.md` § "A card that stalls is given less work (2026-09-28)"
 
+## A hot computer's own work is slowed, never refused (2026-11-11, #440 step 4)
+
+**`inference::pace::Step`** is the one place a worker's work is paced: opened at the top of each forward entry point — `SplitModel::forward_inner_impl` (every single forward), `forward_batch`, `forward_tp_phase`, `BlockDrafter::draft`, `MtpGuesses::guesses` — and ended after it; only the OUTERMOST on a thread pauses. While the daemon holds back for heat (`host_heat_hold_now`, told every health round: `ModelProcessPool::pace_steps` → `DaemonMsg::Pace`, only to workers whose `told_pace` differs; a spawn starts at `pace::WORKER_PACE_ENV`) it synchronizes the device and pauses `HOT_PAUSE_PERMILLE` of the step (half the duty cycle; ≤ 5 s, 50 ms slices a cancel cuts, a too-short pause carried). A new forward entry point opens a `Step`. **A timer judging a step's length reads `pace::Stopwatch::worked()`** — `CardPace`'s decode tick does — or a pause reads as a stall. Never fewer threads: measured to change nothing (2026-08).
+
+→ `docs/invariants/memory.md` § "A hot computer's own work is slowed, never refused"
+
 ## Machine memory is read in one place, under the cgroup's limit (2026-10-09)
 
 **`daemon::machine_memory::machine_memory()`** is the only reading of how much memory this process may use — host figures under its cgroup's limit (a container's `--memory`, a systemd `MemoryMax`), available = limit less what the kernel could not reclaim (`memory.current` − `active_file` − `inactive_file` − `slab_reclaimable`, LXCFS's `MemAvailable`) — never the kubelet's working set (counts ACTIVE cache as used: the .233 gate's nodes refused with nothing loaded) nor `sysinfo`'s cgroup "free" (counts all cache). Guard: `machine_memory_is_read_in_one_place`.

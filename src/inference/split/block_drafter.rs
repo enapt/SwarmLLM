@@ -645,8 +645,43 @@ impl BlockDrafter {
     /// block and its head reads the rows OUTSIDE the drafter's forward, so
     /// no closure here holds the target (a card build's `SplitModel` is not
     /// `Sync`, gotcha #912).
+    ///
+    /// One paced step (`inference::pace`, #440 step 4): a draft is a forward of
+    /// its own, beside the target's.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn draft(
+        &self,
+        target: &SplitModel,
+        cache: &mut BlockCache,
+        context: Option<&Tensor>,
+        anchor: u32,
+        guesses: usize,
+        kv_reserve: usize,
+        for_the_owner: bool,
+        over: super::GuessOver<'_>,
+    ) -> Result<Vec<u32>, SwarmError> {
+        let step = crate::inference::pace::Step::begin();
+        let out = self.draft_unpaced(
+            target,
+            cache,
+            context,
+            anchor,
+            guesses,
+            kv_reserve,
+            for_the_owner,
+            over,
+        );
+        step.end(
+            || {
+                let _ = self.device.synchronize();
+            },
+            || false,
+        );
+        out
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn draft_unpaced(
         &self,
         target: &SplitModel,
         cache: &mut BlockCache,

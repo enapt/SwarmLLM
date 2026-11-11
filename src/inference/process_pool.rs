@@ -1120,6 +1120,10 @@ struct WorkerHandle {
     /// `beside`), each once — what lets a WHOLE placement of the one model it
     /// guesses for take its card memory (`split_reclaim_eligible`, #442).
     guesses_for: std::sync::Mutex<Vec<ModelId>>,
+    /// The pace this worker was last told (`inference::pace`): at spawn, the
+    /// pool's then; after, each `DaemonMsg::Pace` it received. The fan-out
+    /// tells only the workers it differs for ([`ModelProcessPool::pace_steps`]).
+    told_pace: std::sync::atomic::AtomicU32,
 }
 
 /// Longest path a Unix domain socket may have, INCLUDING its NUL terminator.
@@ -3952,6 +3956,9 @@ pub struct ModelProcessPool {
     cpu_threads: std::sync::atomic::AtomicUsize,
     /// See [`Self::set_owner_prefill_threads`]. 0 = no wider owner pool.
     owner_prefill_threads: std::sync::atomic::AtomicUsize,
+    /// The pace every worker should run at (`inference::pace`, #440 step 4):
+    /// a spawn starts its worker at it, [`Self::pace_steps`] sets it.
+    pace_permille: std::sync::atomic::AtomicU32,
     /// GPU memory charged to each live worker, in MB.
     ///
     /// Admission needs to know what is already committed, and it cannot ask the
@@ -4293,6 +4300,7 @@ impl ModelProcessPool {
             card_read_at: std::sync::Mutex::new(None),
             cpu_threads: std::sync::atomic::AtomicUsize::new(0),
             owner_prefill_threads: std::sync::atomic::AtomicUsize::new(0),
+            pace_permille: std::sync::atomic::AtomicU32::new(0),
             vram_reserved_mb: dashmap::DashMap::new(),
             ram_budget_mb: std::sync::atomic::AtomicU64::new(0),
             ram_budget_provider: std::sync::OnceLock::new(),
@@ -10475,6 +10483,13 @@ impl ModelProcessPool {
         command.env(crate::inference::worker_ipc::DAEMON_READS_LOAD_TIMING, "1");
         // ...and the context its whole model holds (#252 (1)).
         command.env(crate::inference::worker_ipc::DAEMON_READS_CONTEXT_FITS, "1");
+        // The pace it starts at (#440 step 4): a worker spawned while the
+        // computer is hot is paced from its first step.
+        let pace_at_spawn = self.pace_permille.load(Ordering::Acquire);
+        command.env(
+            crate::inference::pace::WORKER_PACE_ENV,
+            pace_at_spawn.to_string(),
+        );
         // With a log file, the worker's output comes through this daemon into
         // the window AND the file — one writer for the file, so it can rotate.
         let piped = crate::logging::pipes_worker_output();
@@ -10655,6 +10670,7 @@ impl ModelProcessPool {
             own_decode: std::sync::Mutex::new(OwnDecodeSpeed::default()),
             drafts_for_another_model: AtomicBool::new(false),
             guesses_for: std::sync::Mutex::new(Vec::new()),
+            told_pace: std::sync::atomic::AtomicU32::new(pace_at_spawn),
         };
         Ok(SpawnedWorker {
             handle,
@@ -12097,31 +12113,43 @@ impl ModelProcessPool {
     /// The sends run concurrently, so the whole fan-out is bounded by one
     /// timeout rather than by the number of workers.
     async fn notify_every_worker(&self, msg: &DaemonMsg, what: &'static str) {
+        self.notify_workers(|_| true, msg, what).await;
+    }
+
+    /// [`Self::notify_every_worker`] to the live workers `which` names, by the
+    /// same two bounds; answers the workers the message reached.
+    async fn notify_workers(
+        &self,
+        which: impl Fn(&WorkerHandle) -> bool,
+        msg: &DaemonMsg,
+        what: &'static str,
+    ) -> Vec<Arc<WorkerHandle>> {
         // Collect handles before awaiting — never hold a DashMap ref across an
         // await point.
         let workers: Vec<(ModelId, Arc<WorkerHandle>)> = self
             .workers
             .iter()
-            .filter(|e| !e.value().dead.load(Ordering::Acquire))
+            .filter(|e| !e.value().dead.load(Ordering::Acquire) && which(e.value()))
             .map(|e| (e.key().clone(), e.value().clone()))
             .collect();
         if workers.is_empty() {
-            return;
+            return Vec::new();
         }
         let timeout = std::time::Duration::from_millis(WORKER_NOTIFY_TIMEOUT_MS);
-        futures::future::join_all(workers.iter().map(|(model_id, worker)| async move {
+        let reached = futures::future::join_all(workers.iter().map(|(model_id, worker)| async move {
             let Ok(mut writer) = tokio::time::timeout(timeout, worker.writer.lock()).await else {
                 tracing::debug!(
                     model = %model_id,
                     what,
                     "Worker writer busy — skipping this best-effort notification"
                 );
-                return;
+                return None;
             };
             match tokio::time::timeout(timeout, send_daemon(&mut *writer, msg, &[])).await {
-                Ok(Ok(())) => {}
+                Ok(Ok(())) => Some(worker.clone()),
                 Ok(Err(e)) => {
                     tracing::debug!(model = %model_id, what, error = %e, "Worker notification failed");
+                    None
                 }
                 Err(_) => {
                     worker.dead.store(true, Ordering::Release);
@@ -12133,10 +12161,38 @@ impl ModelProcessPool {
                          being retired rather than left holding a half-written \
                          message no later message could be parsed after."
                     );
+                    None
                 }
             }
         }))
         .await;
+        reached.into_iter().flatten().collect()
+    }
+
+    /// Run every worker's steps at `pause_permille` (`inference::pace`, #440
+    /// step 4): `pace::HOT_PAUSE_PERMILLE` while the computer is held back for
+    /// heat, `0` once it cools. Called every health round with the pace as it
+    /// stands; tells only the workers it differs for, so a worker spawned
+    /// while it changed, or one whose writer was busy, is told within a round,
+    /// and a steady pace sends nothing. A worker spawned after is started at
+    /// it (`pace::WORKER_PACE_ENV`).
+    pub async fn pace_steps(&self, pause_permille: u32) {
+        self.pace_permille.store(pause_permille, Ordering::Release);
+        let reached = self
+            .notify_workers(
+                |w| w.told_pace.load(Ordering::Acquire) != pause_permille,
+                &DaemonMsg::Pace { pause_permille },
+                "pace",
+            )
+            .await;
+        for worker in reached {
+            worker.told_pace.store(pause_permille, Ordering::Release);
+        }
+    }
+
+    /// The pace [`Self::pace_steps`] last set, in thousandths of a step.
+    pub fn pace_permille(&self) -> u32 {
+        self.pace_permille.load(Ordering::Acquire)
     }
 
     /// Tell every live worker that `request_id` is finished with its KV cache.
@@ -16245,6 +16301,61 @@ mod tests {
         handle
     }
 
+    /// #440 step 4: a pace reaches each worker once — a worker already at it
+    /// is sent nothing, round after round — and a change reaches it again; a
+    /// worker spawned meanwhile would start at the pool's pace.
+    #[tokio::test]
+    async fn a_pace_is_told_to_each_worker_once_and_again_when_it_changes() {
+        use crate::inference::worker_ipc::recv_daemon;
+        let p = ModelProcessPool::new(std::path::PathBuf::from("/tmp/swarmllm-pace"));
+        let (h, mut worker_end) = fake_worker_handle_split_with_its_end(
+            false,
+            None,
+            false,
+            std::time::Instant::now(),
+            None,
+        )
+        .await;
+        p.workers.insert(ModelId("paced".into()), h.clone());
+        async fn next(
+            worker_end: &mut interprocess::local_socket::tokio::Stream,
+        ) -> Option<DaemonMsg> {
+            tokio::time::timeout(
+                std::time::Duration::from_millis(300),
+                recv_daemon(worker_end),
+            )
+            .await
+            .ok()
+            .and_then(Result::ok)
+            .map(|(msg, _)| msg)
+        }
+
+        p.pace_steps(crate::inference::pace::HOT_PAUSE_PERMILLE)
+            .await;
+        assert!(matches!(
+            next(&mut worker_end).await,
+            Some(DaemonMsg::Pace {
+                pause_permille: 1000
+            })
+        ));
+        assert_eq!(
+            p.pace_permille(),
+            1000,
+            "a spawn now starts its worker paced"
+        );
+        p.pace_steps(crate::inference::pace::HOT_PAUSE_PERMILLE)
+            .await;
+        assert!(
+            next(&mut worker_end).await.is_none(),
+            "a worker at the pace is told nothing again"
+        );
+        p.pace_steps(0).await;
+        assert!(matches!(
+            next(&mut worker_end).await,
+            Some(DaemonMsg::Pace { pause_permille: 0 })
+        ));
+    }
+
     /// [`fake_worker_handle_split`], handing back the WORKER's end of the
     /// socket, so a test can read what the daemon told the worker.
     pub(super) async fn fake_worker_handle_split_with_its_end(
@@ -16305,6 +16416,7 @@ mod tests {
             own_decode: std::sync::Mutex::new(OwnDecodeSpeed::default()),
             drafts_for_another_model: AtomicBool::new(false),
             guesses_for: std::sync::Mutex::new(Vec::new()),
+            told_pace: std::sync::atomic::AtomicU32::new(0),
         });
         (handle, client)
     }

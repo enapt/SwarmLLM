@@ -2882,6 +2882,61 @@ nothing. A new device-bound step on the worker loop is timed into it; a new
 generation path is gated by it. Refusal = `LocalMemoryUnavailable` (the busy 503
 the router re-plans). A/B: `SWARMLLM_CARD_PACE=0`.
 
+## A hot computer's own work is slowed, never refused (2026-11-11, #440 step 4)
+
+**What it replaced.** Once the heat guard (`daemon::host_heat`) held back, work for other computers
+stopped (steps 2-3), but the owner's own chats ran at full power: a long reply kept the card at its
+target temperature for as long as it ran. Refusing the owner is not an option (it is their computer,
+and they asked), so the lever is TIME. The one earlier lever tried was WIDTH — half the processor's
+threads while the package was hot — and it measured nothing (`FUTURE_WORK_ARCHIVE.md` § "Thermal
+throttling had no measurable effect", 2026-08-10): the kernels are bandwidth-bound, so fewer threads
+finished in nearly the same time at nearly the same power.
+
+**Prior art.** BOINC's processor throttle runs work for a fraction of each second and suspends it for
+the rest (it never throttles graphics work, which it can only suspend). A frame-rate cap paces a
+card's work with gaps between frames, and lowers its power for it (AMD's Frame Rate Target Control,
+measured at the wall). Taken: a duty cycle. Not taken: a fixed window — a step here lasts 2 ms to
+seconds, so a fixed 1 s window would pause in the middle of nothing or never; a pause PROPORTIONAL to
+the step keeps each step's share of the time whatever its length.
+
+**How it works.** `pace::Step` opens at each forward entry point and ends after it; only the outermost
+on a thread pauses, so a batch of one (which runs through `forward`) or a block drafter's draft
+(inside a reply's round) pauses once. On a card the step synchronizes first: a launch returns at once,
+and the time that matters is the card's. The pause is `HOT_PAUSE_PERMILLE` (1000 = as long as the
+step: half the duty cycle) of the step, capped at 5 s (a long prompt read in one processor forward is
+paced only so far: the first word is not held back past it), slept in 50 ms slices so a cancel lands
+within one. A pause under 2 ms is carried into the next step and an overshoot credited back, so the
+cycle holds on average however coarse the timer. Proportional pauses keep the RATIOS the speculation
+controllers price steps by (a check against a plain step), so they choose as they would cool.
+
+**Two things a change must keep.**
+- **A step's timer leaves the pauses out.** `CardPace` reads a device-bound step of 2 s as a stall
+  and halves what the card may run; a paused tick read whole would trip it. `pace::Stopwatch`
+  subtracts the process's pauses (`paused_total`) from the section it times; the decode tick uses it.
+- **Told once per change, and again to whoever missed it.** The health round calls
+  `ModelProcessPool::pace_steps` every 30 s; it sends `DaemonMsg::Pace` only to workers whose
+  `told_pace` differs (the bounded fan-out, `notify_workers`), so a steady pace sends nothing, and a
+  worker spawned while it changed or whose writer was busy is told the next round. A spawn starts at
+  the current pace (`pace::WORKER_PACE_ENV`); the worker's reader task applies a pace at once, like a
+  cancel, so a worker in the middle of a long reply is paced from its next step.
+
+**What it was measured at.** One rig node, TinyLlama 1.1B whole on the processor, the same greedy
+160-token reply three times per arm, the heat faked by file (`SWARMLLM_FAULT_HOST_HEAT=file:`), the
+worker's processor time read from `/proc/<pid>/stat` (2026-11-11): cool 17.9-18.5 tok/s at 4.07 cores;
+hot 8.8-8.9 tok/s at 2.03-2.04 cores; cool again 17.0-18.3 at 4.01-4.09. A reply cost the same
+35-37 processor seconds in every arm — the work is the same, spread over twice the time, so the
+average draw halves — and its text was identical. Not measured on a card (a stress test, and the boot
+it was built on forbade card work); there the pause follows a synchronize, so it is the card's time.
+
+**Not paced.** The guess head's guesses ahead while a far check is out (`extend_ahead`, bounded by the
+chain), a worker's idle-time work (graph recording, refits), and the old single-model setting
+(`inference.model_path`, llama.cpp in the daemon).
+
+**Tests** (each fails with its part switched off): `pace::tests::*` — a hot step pauses as long as
+itself, a cool one never pauses or synchronizes, only the outermost pauses, an early return leaves the
+next step outermost, a cancel cuts the pause, short pauses are carried, the stopwatch leaves pauses
+out, the spawn pace is read and bounded; `a_pace_is_told_to_each_worker_once_and_again_when_it_changes`.
+
 ## A card's memory pool keeps what the worker frees (2026-09-28)
 
 **What it replaced.** cudarc allocates every candle buffer with `cuMemAllocAsync` from the

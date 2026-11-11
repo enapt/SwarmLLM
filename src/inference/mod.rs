@@ -25,6 +25,7 @@ pub(crate) mod model_arch;
 pub mod model_worker;
 pub mod ngram_lookup;
 pub mod owner_replies;
+pub(crate) mod pace;
 #[cfg(feature = "candle-cuda")]
 pub(crate) mod partial_rope;
 pub mod pipeline;

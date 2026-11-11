@@ -81,7 +81,8 @@ the top track (`docs/plans/large_model_splits.md`).
 2a. **#440** — FIRST by the user's direction (2026-11-11): a node's work can drive the computer it runs
    on into a thermal lock-up. "swarmllm cant be locking up peoples systems like that. it discourages
    use." PARTIAL: a hot computer takes no new work for others and, if the heat lasts, stops what it was
-   running for them; the owner's own pace next.
+   running for them; the owner's own chats run at half speed until it cools. Next: the Windows
+   processor's temperature (stage B), then macOS (C).
 3. **#1** — every Mac runs on the processor; no GPU backend is compiled for Apple Silicon (needs a
    Mac to verify on).
 4. **#220** — WATCH: a worker's card faulted once (illegal memory access, 2026-10-04) and the driver
@@ -488,7 +489,34 @@ Microsoft WDDM/TDR docs, Apple developer docs; issue trackers of Ollama, LM Stud
   "Skipping credit penalty" and continued it on C: PASS, 576 chunks after the stop, no error, the opening
   once, both computers in the route.
 
-**Next step:** step 4 (pace the owner's own steps), then (B) and (C).
+**Done (2026-11-11, step 4 — the owner's own work slowed, never refused; `inference::pace`):**
+- Prior art: BOINC's processor throttle (work a fraction of each second; it never throttles graphics
+  work), frame-rate caps (gaps between a card's frames lower its power — AMD's FRTC, measured at the
+  wall), and our own 2026-08 trial of fewer threads, which measured nothing (archive § "Thermal
+  throttling had no measurable effect"). Taken: a duty cycle, by TIME. Changed from both: the pause is
+  proportional to each step (a step lasts 2 ms to seconds, so a fixed window fits none), which also
+  keeps the ratios the speculation controllers price steps by.
+- `pace::Step` at each worker forward entry point (every single forward, a batch, a tensor-parallel
+  phase, a block drafter's draft, a guess head's draft); only the outermost pauses. While held, it
+  synchronizes the device and pauses as long as the step took (`HOT_PAUSE_PERMILLE` = 1000), ≤ 5 s, in
+  50 ms slices a cancel cuts; a pause under 2 ms is carried. The health round tells the pool
+  (`pace_steps` → `DaemonMsg::Pace`, only to workers whose `told_pace` differs; a spawn starts at
+  `SWARMLLM_WORKER_PACE_PERMILLE`). `CardPace`'s decode tick is timed by `pace::Stopwatch`, which
+  leaves the pauses out, so a paused tick is never read as a stalled card.
+- Toasts reworded in 21 languages ("…your own chats run more slowly until it cools down"; reviewed);
+  the diagnostics `heat:` line adds "own work paused after each step: 100% of the step".
+- Measured (one rig node, TinyLlama 1.1B whole on the processor, the same greedy 160-token reply 3×
+  per arm, heat faked by file, live node off, safety kit on): cool 17.9-18.5 tok/s with the worker
+  using 4.07 cores; hot 8.8-8.9 tok/s (48%) at 2.03-2.04 cores (50%) — the same 35-37 processor
+  seconds a reply, spread over twice the time; cool again 17.0-18.3 at 4.01-4.09. The reply was
+  identical in every arm; the worker logged the pause starting and ending once each.
+- Tests fail with each part switched off (7 parts, 7 tests).
+- Not paced: a guess head's guesses ahead while a far check is out (bounded by its chain), a worker's
+  idle-time work (graph recording, refits), the old single-model setting (`inference.model_path`).
+  Not measured on a card: the same pause follows a synchronize there, and a card run would be the
+  stress test this boot rules out (no card work after the 11-11 freeze).
+
+**Next step:** (B) the Windows processor through PDH, then (C) macOS.
 
 #### #167 — A speculative split decode has no mid-reply failover
 `P2` · reliability · **PARTIAL** — 2026-08-25 · history: archive § "Speculative distributed decode has no failover", archive row #149 item (d)

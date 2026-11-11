@@ -996,8 +996,48 @@ impl SplitModel {
     /// this, ANY such error ends the worker and pins the model to the
     /// processor (`worker_ipc::permanent_gpu_failure`). A/B
     /// `SWARMLLM_FORWARD_RERUN=0`.
+    ///
+    /// Every single forward is one paced step (`inference::pace`, #440 step
+    /// 4): while the computer is hot it is followed by a pause as long as it
+    /// took, cut short if the request is cancelled.
     #[allow(clippy::too_many_arguments)]
     fn forward_inner_impl(
+        &mut self,
+        input: &Tensor,
+        index_pos: usize,
+        kv_cache_store: &KvCacheStore,
+        request_id: &str,
+        lora_adapter: Option<&LoraAdapter>,
+        capture_layers: Option<Capture<'_>>,
+        skip_embedding: bool,
+        all_positions: bool,
+        skip_mask: Option<SkipLayers<'_>>,
+    ) -> Result<(Tensor, HashMap<usize, Tensor>), SwarmError> {
+        let step = crate::inference::pace::Step::begin();
+        let out = self.forward_inner_unpaced(
+            input,
+            index_pos,
+            kv_cache_store,
+            request_id,
+            lora_adapter,
+            capture_layers,
+            skip_embedding,
+            all_positions,
+            skip_mask,
+        );
+        step.end(
+            || {
+                let _ = self.device.synchronize();
+            },
+            || kv_cache_store.request_cancelled(request_id),
+        );
+        out
+    }
+
+    /// [`Self::forward_inner_impl`] before its pace: the forward, and its one
+    /// run again after the card's saved prompts go.
+    #[allow(clippy::too_many_arguments)]
+    fn forward_inner_unpaced(
         &mut self,
         input: &Tensor,
         index_pos: usize,
@@ -2547,6 +2587,28 @@ impl SplitModel {
         items: &[BatchItem<'_>],
         kv_cache_store: &KvCacheStore,
     ) -> Result<Vec<Tensor>, SwarmError> {
+        // One paced step for the whole batch (`inference::pace`, #440 step 4);
+        // a batch of one goes through `forward`, which does not pause again.
+        let step = crate::inference::pace::Step::begin();
+        let out = self.forward_batch_unpaced(items, kv_cache_store);
+        step.end(
+            || {
+                let _ = self.device.synchronize();
+            },
+            || {
+                items
+                    .iter()
+                    .all(|i| kv_cache_store.request_cancelled(i.request_id))
+            },
+        );
+        out
+    }
+
+    fn forward_batch_unpaced(
+        &mut self,
+        items: &[BatchItem<'_>],
+        kv_cache_store: &KvCacheStore,
+    ) -> Result<Vec<Tensor>, SwarmError> {
         if items.is_empty() {
             return Ok(Vec::new());
         }
@@ -3253,7 +3315,36 @@ impl SplitModel {
     /// - **FfnOnly**: ffn_norm → column-sliced FFN → return partial
     ///
     /// The model must have been pre-split via `pre_split_for_tp()`.
+    ///
+    /// One paced step (`inference::pace`, #440 step 4).
     pub fn forward_tp_phase(
+        &mut self,
+        input: &Tensor,
+        index_pos: usize,
+        kv_cache_store: &KvCacheStore,
+        request_id: &str,
+        abs_layer: usize,
+        phase: &crate::types::TpPhase,
+    ) -> Result<Tensor, SwarmError> {
+        let step = crate::inference::pace::Step::begin();
+        let out = self.forward_tp_phase_unpaced(
+            input,
+            index_pos,
+            kv_cache_store,
+            request_id,
+            abs_layer,
+            phase,
+        );
+        step.end(
+            || {
+                let _ = self.device.synchronize();
+            },
+            || kv_cache_store.request_cancelled(request_id),
+        );
+        out
+    }
+
+    fn forward_tp_phase_unpaced(
         &mut self,
         input: &Tensor,
         index_pos: usize,

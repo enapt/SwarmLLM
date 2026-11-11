@@ -682,13 +682,17 @@ pub async fn diagnostics(
             .map_or("unknown".to_string(), |t| format!("{t:.0} C"));
         let _ = writeln!(
             out,
-            "heat: card {card}  processor {processor}  driver not answering: {}  holding back work for peers: {}{}",
+            "heat: card {card}  processor {processor}  driver not answering: {}  holding back work for peers: {}{}  own work paused after each step: {}",
             r.is_some_and(|r| r.driver_not_answering),
             ss.host_heat_hold_now().map_or("no", |c| c.as_str()),
             if ss.running_peer_work_stops_now() {
                 " (work already running for them stopped too)"
             } else {
                 ""
+            },
+            match ss.model_process_pool.pace_permille() {
+                0 => "no".to_string(),
+                p => format!("{}% of the step", p / 10),
             }
         );
     }

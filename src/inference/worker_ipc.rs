@@ -153,6 +153,15 @@ pub enum DaemonMsg {
     /// Best-effort and idempotent, like `CancelRequest`: an unknown id is a
     /// no-op.
     ReleaseRequestKv { request_id: Uuid },
+    /// Pause after each step for `pause_permille` thousandths of the step's
+    /// own time; `0` is full speed (#440 step 4, `inference::pace`). The daemon
+    /// sends it while the computer is held back for heat, and again when it
+    /// cools; a worker spawned meanwhile starts at the pace its environment
+    /// names (`pace::WORKER_PACE_ENV`). Taken by the reader task at once, like
+    /// `CancelRequest`: a worker deep in a long reply must slow down within
+    /// that reply. A worker and its daemon are always one binary, so the
+    /// variant needs no feature gate.
+    Pace { pause_permille: u32 },
     /// Graceful shutdown — worker exits cleanly.
     Shutdown,
 }
