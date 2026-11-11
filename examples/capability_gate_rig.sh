@@ -26,6 +26,8 @@
 #
 # Usage: examples/capability_gate_rig.sh <binary> [out_dir] [window_s=420]
 set -u
+# Test nodes: no heat hold refuses their work (#440) — the safety kit guards this machine.
+export SWARMLLM_HEAT_GUARD="${SWARMLLM_HEAT_GUARD:-0}"
 if [ -z "${CAPGATE_IN_NETNS:-}" ]; then
   exec env CAPGATE_IN_NETNS=1 unshare -rn bash "$0" "$@"
 fi

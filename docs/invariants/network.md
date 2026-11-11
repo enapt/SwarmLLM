@@ -5945,6 +5945,73 @@ Wiring the hold into relaying found the relay switch did less than it said:
 network switch drops both with the connection; only a link that turns metered
 in place (Windows "set as metered", or `pause`) leaves one to run out.
 
+## A hot computer takes no new work for others (2026-11-11, FUTURE_WORK #440)
+
+**What happened.** The development laptop (Ryzen 7 5800H, RTX 3070 Laptop, 8 GB)
+hard-froze under twenty minutes of sustained graphics-card load and would not
+power on again until it had cooled (gotcha #1081). The load was a test of a
+third-party program, but a SwarmLLM node serving the swarm puts the same load
+on a volunteer's card for as long as peers ask. The telemetry showed every sign
+well before the freeze: the card held at its 87 °C TARGET with clocks cut to
+780 MHz (the driver's "SW Thermal Slowdown"), the processor's zone at 93-96 °C
+for ~11 minutes, and `nvidia-smi` blocked for up to 17 minutes. Nothing in the
+node read the card's heat at all; `inference::thermal` reads the processor,
+only warns, and only in the model worker. The user: "swarmllm cant be locking
+up peoples systems like that. it discourages use."
+
+**Prior art** (searched 2026-11-11). GPU miners stop a card at a temperature
+and start it again below a lower one (NBMiner: start = limit − 5; lolMiner
+`--tstop`/`--tstart`). BOINC suspends GPU work while the user is active and
+duty-cycles the processor, but reads no temperature. Apple's
+`ProcessInfo.thermalState` asks apps to do less from `fair` on. Ollama, LM
+Studio, llama.cpp, vLLM, Petals and exo have no guard. NVML's clock event
+reasons separate the driver's own cooling (`sw_thermal_slowdown`, at the
+target) from the hardware's protection (`hw_thermal_slowdown`, clocks at least
+halved, at the slowdown temperature — 98 °C on this card). Taken: two lines
+with a hold-off (no flapping), the card first, and the driver's word that it is
+cooling the card, because a card at its target is not yet throttled by its
+hardware.
+
+**The rule.** `daemon::host_heat::HeatTracker` decides over successive
+readings (pure, tested with a handed clock): a card at its target (within
+2 °C, or the driver cooling it) for 120 s, its hardware protection on (at
+once), the processor ≥ 93 °C for 300 s (laptop firmware holds ~95 °C under
+load by design, so seconds there are normal), or the driver not answering for
+a minute (`vram::graphics_driver_not_answering`, at once). It lets work back
+only after `COOL_FOR` (60 s) with the card 7 °C under its target and the
+processor ≤ 88 °C. An unknown reading is never hot and never cools a hot card
+(a blocked `nvidia-smi` is the driver watch's to judge). Healthy release checks
+touched 85.9-86.5 °C for a reading at most, so they never hold.
+
+**Where it applies — the metered rule's choke points.** The hold joins the
+metered hold in ONE answer, `SharedState::peer_work_hold_now` → `PeerWorkHold`,
+which every dispatch admission takes as a REQUIRED argument, the
+prompt-admission ask answers with, and the capability withdraws inference for.
+A peer that asks anyway is refused `ServiceUnavailable` ("this machine is
+cooling down"), which the coordinator reads as "re-plan elsewhere" with no
+penalty and nothing retracted. The owner gets one toast per change
+(`heat_paused`, `card_unresponsive_paused`, `heat_resumed`) and the diagnostics
+report a `heat:` line. The health tick reads the heat every round (30 s)
+whatever the swarm's size; the capability is rebuilt at the broadcast cadence.
+
+**Test nodes run without it.** `SWARMLLM_HEAT_GUARD=0` is set by every script
+that starts throwaway nodes (`examples/rig_share.sh`, the standalone rigs,
+`release_gate.sh`, the card rigs) — a rig measures, and the safety kit guards
+the test machine. Never in the safety kit itself: `live_node_swap.sh` sources
+it and restarts the user's own node with the inherited environment.
+
+**What it does not do yet** (#440's next steps): work already running for a
+peer runs out; the owner's own requests are not slowed; the processor reading
+is Linux's (Windows needs the `\Thermal Zone Information` counter, stage B).
+
+**Tests.** The pure tracker's (`daemon::host_heat::tests`: the lock-up's own
+readings hold after 120 s, a release check's burst never does, the two lines,
+the hold-off, unknown readings); the dispatcher's
+`a_held_back_node_refuses_new_work_and_lets_running_work_finish` for both
+reasons; the guard `every_new_request_a_peer_starts_asks_whether_this_node_holds_back`
+with its planted self-test; and a dev daemon started with
+`SWARMLLM_FAULT_HOST_HEAT=driver` (the hold, the toast, the capability).
+
 ## A computer that shares nothing may look at the swarm, not use it (2026-11-04)
 
 **What happened.** A node in Russia (`54c49961`, v0.3.268, 2026-11-02 → 11-04) held no parts,

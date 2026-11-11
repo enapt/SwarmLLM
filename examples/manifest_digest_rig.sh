@@ -34,6 +34,8 @@
 #   MODEL_DIR=~/.local/share/swarmllm/models/tinyllama-1.1b-chat-v1.0.q4-k-m
 #   BIN_A=, BIN_C=<binary for that node> (default: <binary>)
 set -u
+# Test nodes: no heat hold refuses their work (#440) — the safety kit guards this machine.
+export SWARMLLM_HEAT_GUARD="${SWARMLLM_HEAT_GUARD:-0}"
 if [ -z "${DIGEST_RIG_IN_NETNS:-}" ]; then
   exec env DIGEST_RIG_IN_NETNS=1 unshare -rn bash "$0" "$@"
 fi

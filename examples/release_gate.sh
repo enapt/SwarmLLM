@@ -25,6 +25,8 @@
 # and its commit carries the measurement. A rig that covers one subsystem runs when the
 # release touches that subsystem (the diff-scoped steps below).
 set -u
+# Test nodes: no heat hold refuses their work (#440) — the safety kit guards this machine.
+export SWARMLLM_HEAT_GUARD="${SWARMLLM_HEAT_GUARD:-0}"
 CAND=$(readlink -f "${1:?usage: release_gate.sh <candidate> <previous> <outdir>}")
 PREV=$(readlink -f "${2:?previous release binary}")
 OUT=$(mkdir -p "${3:?outdir}" && readlink -f "$3")

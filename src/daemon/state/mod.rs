@@ -1566,6 +1566,7 @@ impl SharedState {
                 peer_outliers: Default::default(),
                 declined_leads: Default::default(),
                 upnp_verdict: Default::default(),
+                host_heat: Default::default(),
                 peer_model_warm_at: DashMap::new(),
                 swarm_capacity: arc_swap::ArcSwap::from_pointee(SwarmCapacity::default()),
                 segment_latency: Arc::new(

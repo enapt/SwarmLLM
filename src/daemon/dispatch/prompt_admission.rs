@@ -62,11 +62,12 @@ pub(super) fn on_ask(
         tracing::debug!(sender = %asker, "PromptAdmissionAsk from a peer no longer connected");
         return;
     };
-    // A node on a metered connection takes no new work for other machines; its
-    // forwards would be refused, so the re-plan should plan none here.
-    if shared_state.metered_hold_now() {
+    // A node holding back new work for other machines — a metered connection,
+    // a computer cooling down (#440) — would refuse the forwards, so the
+    // re-plan should plan none here.
+    if let Some(hold) = shared_state.peer_work_hold_now() {
         let verdict = PromptAdmissionVerdict::Refused {
-            message: super::metered_refusal(),
+            message: super::hold_refusal(hold),
             layers_that_fit: 0,
             counted: swarmllm_types::LayersCounted::Loading,
         };

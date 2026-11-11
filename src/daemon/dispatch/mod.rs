@@ -70,12 +70,14 @@ fn max_forwards_per_peer(contribution: &swarmllm_types::ContributionMode) -> usi
 /// prompt pass, `sequence_num == 0`), a whole-model generation, an image
 /// encode — take a slot, with `available` of `total` node-wide slots free?
 ///
-/// Not while this node holds back on a metered connection (`metered_hold`,
-/// from `SharedState::metered_hold_now`; #277). Its capability already tells
-/// peers it takes no inference work, so a request arriving anyway comes from a
-/// peer still holding the last one, and is refused out loud like any other.
-/// Work already running here goes on, as a download already under way does.
-/// REQUIRED, so every path that admits a new request answers it.
+/// Not while this node holds back new work for other computers (`hold`, from
+/// `SharedState::peer_work_hold_now`): on a metered connection (#277), or
+/// while this computer is too hot or its graphics driver is not answering
+/// (#440, `daemon::host_heat`). Its capability already tells peers it takes no
+/// inference work, so a request arriving anyway comes from a peer still
+/// holding the last one, and is refused out loud like any other. Work already
+/// running here goes on, as a download already under way does. REQUIRED, so
+/// every path that admits a new request answers it.
 ///
 /// And only while a quarter of the slots (at least one) stays free: that
 /// reserve is for the next steps of requests already running here, which the
@@ -94,12 +96,14 @@ fn max_forwards_per_peer(contribution: &swarmllm_types::ContributionMode) -> usi
 fn admits_a_new_request(
     available: usize,
     total: usize,
-    metered_hold: bool,
+    hold: Option<PeerWorkHold>,
     requester: &SwarmUse,
 ) -> Result<(), ForwardRefused> {
     may_use_the_swarm(requester)?;
-    if metered_hold {
-        return Err(ForwardRefused::ConnectionMetered);
+    match hold {
+        Some(PeerWorkHold::Metered) => return Err(ForwardRefused::ConnectionMetered),
+        Some(PeerWorkHold::Heat) => return Err(ForwardRefused::Cooling),
+        None => {}
     }
     if available > (total / 4).max(1) {
         Ok(())
@@ -122,6 +126,7 @@ fn may_use_the_swarm(requester: &SwarmUse) -> Result<(), ForwardRefused> {
     }
 }
 
+use crate::daemon::host_heat::PeerWorkHold;
 use crate::daemon::state::swarm_use::SwarmUse;
 
 /// Per-peer counts of work in flight here, keyed by the authenticated sender.
@@ -194,10 +199,13 @@ struct StreamHold {
 }
 
 /// Why the dispatcher turned a peer's work away — each cap logs its own line.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum ForwardRefused {
     /// A new request while this node holds back on a metered connection (#277).
     ConnectionMetered,
+    /// A new request while this computer cools down, or its graphics driver
+    /// is not answering (#440).
+    Cooling,
     /// A new request from a computer that may not use the swarm: too few parts
     /// shared, or too far behind (`swarm_use`).
     RequesterMayNotUseTheSwarm(SwarmUse),
@@ -216,6 +224,7 @@ impl ForwardRefused {
     fn refusal(&self) -> String {
         match self {
             Self::ConnectionMetered => metered_refusal(),
+            Self::Cooling => heat_refusal(),
             Self::RequesterMayNotUseTheSwarm(why) => why.peer_refusal(),
             _ => peer_work_refusal(),
         }
@@ -244,6 +253,12 @@ impl ForwardRefused {
                 kind,
                 "request refused — this connection is metered, so no new work is taken for other machines"
             );
+        } else if *self == Self::Cooling {
+            tracing::info!(
+                sender = %sender,
+                kind,
+                "request refused — this computer is cooling down, so no new work is taken for other machines"
+            );
         } else {
             tracing::warn!(
                 sender = %sender,
@@ -258,6 +273,10 @@ impl ForwardRefused {
             Self::ConnectionMetered => tracing::info!(
                 sender = %sender,
                 "LayerForward refused — this connection is metered, so no new work is taken for other machines"
+            ),
+            Self::Cooling => tracing::info!(
+                sender = %sender,
+                "LayerForward refused — this computer is cooling down, so no new work is taken for other machines"
             ),
             Self::RequesterMayNotUseTheSwarm(_) => {
                 self.log_for("LayerForward", sender, per_peer_limit)
@@ -292,7 +311,7 @@ fn admit_own_forward(
     slot: Option<PeerWorkSlot>,
     semaphore: &Arc<tokio::sync::Semaphore>,
     forward_limit: usize,
-    metered_hold: bool,
+    hold: Option<PeerWorkHold>,
     // Asked only for a forward that starts a request: a decode step does not
     // pay for the verdict on every token.
     requester: impl FnOnce() -> SwarmUse,
@@ -310,7 +329,7 @@ fn admit_own_forward(
             admits_a_new_request(
                 semaphore.available_permits(),
                 forward_limit,
-                metered_hold,
+                hold,
                 &requester,
             )?;
         } else {
@@ -457,6 +476,28 @@ fn metered_refusal() -> String {
             .into(),
     )
     .to_string()
+}
+
+/// What a peer is told when this node takes no new work because its computer
+/// is too hot, or its graphics driver is not answering (#440). The metered
+/// answer's shape, for its reason: bar this node from the request's retry,
+/// re-plan elsewhere, no penalty, nothing retracted.
+fn heat_refusal() -> String {
+    crate::error::SwarmError::ServiceUnavailable(
+        "this machine is cooling down, so it is not taking new work for other \
+         machines — try another"
+            .into(),
+    )
+    .to_string()
+}
+
+/// What a peer is told when this node holds back new work for other computers,
+/// for `hold`'s reason — the one wording for the dispatcher and prompt admission.
+fn hold_refusal(hold: PeerWorkHold) -> String {
+    match hold {
+        PeerWorkHold::Metered => metered_refusal(),
+        PeerWorkHold::Heat => heat_refusal(),
+    }
 }
 
 /// What one inbound `LayerForward` has taken and must give back: its slot in
@@ -1093,7 +1134,7 @@ pub(crate) async fn dispatch_network_messages(
                                                 PeerWorkSlot::try_take(&peer_forward_counts, &peer_sender, per_peer_limit),
                                                 &forward_semaphore,
                                                 forward_limit,
-                                                shared_state.metered_hold_now(),
+                                                shared_state.peer_work_hold_now(),
                                                 || {
                                                     layer_forward::swarm_use_of_forward(
                                                         shared_state,
@@ -1301,7 +1342,7 @@ pub(crate) async fn dispatch_network_messages(
                                         if let Err(why) = admits_a_new_request(
                                             forward_semaphore.available_permits(),
                                             forward_limit,
-                                            shared_state.metered_hold_now(),
+                                            shared_state.peer_work_hold_now(),
                                             &shared_state.swarm_use_of_peer(&peer_sender),
                                         ) {
                                             drop(peer_slot);
@@ -1369,7 +1410,7 @@ pub(crate) async fn dispatch_network_messages(
                                         if let Err(why) = admits_a_new_request(
                                             forward_semaphore.available_permits(),
                                             forward_limit,
-                                            shared_state.metered_hold_now(),
+                                            shared_state.peer_work_hold_now(),
                                             &shared_state.swarm_use_of_peer(&peer_sender),
                                         ) {
                                             drop(peer_slot);
@@ -3844,7 +3885,7 @@ mod inbound_forward_slot_tests {
     #[test]
     fn a_new_request_leaves_a_reserve_for_running_ones() {
         let admits = |available, total| {
-            super::admits_a_new_request(available, total, false, &SwarmUse::Allowed).is_ok()
+            super::admits_a_new_request(available, total, None, &SwarmUse::Allowed).is_ok()
         };
         // Minimal: 8 slots, 2 kept.
         assert!(admits(8, 8));
@@ -3900,53 +3941,64 @@ mod inbound_forward_slot_tests {
         }
     }
 
-    /// #277: on a metered connection a peer's NEW request is refused however
-    /// free the node is — told why, in the words the coordinator reads as
-    /// "this peer cannot serve, re-plan elsewhere" — while the next step of a
-    /// request already running here is still served.
+    /// #277 and #440: on a metered connection, or while this computer cools
+    /// down, a peer's NEW request is refused however free the node is — told
+    /// why, in the words the coordinator reads as "this peer cannot serve,
+    /// re-plan elsewhere" — while the next step of a request already running
+    /// here is still served.
     #[test]
-    fn a_metered_connection_refuses_new_work_and_lets_running_work_finish() {
-        use super::{admit_own_forward, admits_a_new_request, ForwardRefused};
-        assert_eq!(
-            admits_a_new_request(8, 8, true, &SwarmUse::Allowed),
-            Err(ForwardRefused::ConnectionMetered),
-            "every slot free, and still no new request"
-        );
-        let counts: super::PeerWorkCounts = Arc::new(dashmap::DashMap::new());
-        let permits = Arc::new(tokio::sync::Semaphore::new(8));
-        let admit = |forward: &crate::types::LayerForward, metered: bool| {
-            admit_own_forward(
-                forward,
-                PeerWorkSlot::try_take(&counts, &peer(), 4),
-                &permits,
-                8,
-                metered,
-                || SwarmUse::Allowed,
-            )
-            .map(|_| ())
-        };
-        assert_eq!(
-            admit(&a_forward(0), true),
-            Err(ForwardRefused::ConnectionMetered),
-            "a prompt pass starts a request"
-        );
-        assert_eq!(
-            admit(&a_forward(0), false),
-            Ok(()),
-            "unmetered, it is served"
-        );
-        assert_eq!(
-            admit(&a_forward(7), true),
-            Ok(()),
-            "a request already running here goes on"
-        );
-        assert!(counts.get(&peer()).is_none(), "a refusal holds no slot");
-        let told = ForwardRefused::ConnectionMetered.refusal();
-        assert!(told.contains("metered"), "{told}");
-        assert!(
-            crate::inference::router::message_means_peer_cannot_serve(&told),
-            "the coordinator must bar this node and re-plan, not retract its parts: {told}"
-        );
+    fn a_held_back_node_refuses_new_work_and_lets_running_work_finish() {
+        use super::{admit_own_forward, admits_a_new_request, ForwardRefused, PeerWorkHold};
+        for (hold, refused, says) in [
+            (
+                PeerWorkHold::Metered,
+                ForwardRefused::ConnectionMetered,
+                "metered",
+            ),
+            (PeerWorkHold::Heat, ForwardRefused::Cooling, "cooling down"),
+        ] {
+            assert_eq!(
+                admits_a_new_request(8, 8, Some(hold), &SwarmUse::Allowed),
+                Err(refused.clone()),
+                "every slot free, and still no new request"
+            );
+            let counts: super::PeerWorkCounts = Arc::new(dashmap::DashMap::new());
+            let permits = Arc::new(tokio::sync::Semaphore::new(8));
+            let admit = |forward: &crate::types::LayerForward, hold: Option<PeerWorkHold>| {
+                admit_own_forward(
+                    forward,
+                    PeerWorkSlot::try_take(&counts, &peer(), 4),
+                    &permits,
+                    8,
+                    hold,
+                    || SwarmUse::Allowed,
+                )
+                .map(|_| ())
+            };
+            assert_eq!(
+                admit(&a_forward(0), Some(hold)),
+                Err(refused.clone()),
+                "a prompt pass starts a request"
+            );
+            assert_eq!(
+                admit(&a_forward(0), None),
+                Ok(()),
+                "not held back, it is served"
+            );
+            assert_eq!(
+                admit(&a_forward(7), Some(hold)),
+                Ok(()),
+                "a request already running here goes on"
+            );
+            assert!(counts.get(&peer()).is_none(), "a refusal holds no slot");
+            let told = refused.refusal();
+            assert!(told.contains(says), "{told}");
+            assert_eq!(told, super::hold_refusal(hold), "one wording per reason");
+            assert!(
+                crate::inference::router::message_means_peer_cannot_serve(&told),
+                "the coordinator must bar this node and re-plan, not retract its parts: {told}"
+            );
+        }
     }
 
     /// A computer that may not use the swarm (`swarm_use`) is refused every
@@ -3959,7 +4011,7 @@ mod inbound_forward_slot_tests {
         use super::{admit_own_forward, admits_a_new_request, ForwardRefused};
         let shares_nothing = SwarmUse::TooFewParts { held: 0 };
         assert_eq!(
-            admits_a_new_request(8, 8, false, &shares_nothing),
+            admits_a_new_request(8, 8, None, &shares_nothing),
             Err(ForwardRefused::RequesterMayNotUseTheSwarm(
                 shares_nothing.clone()
             )),
@@ -3974,7 +4026,7 @@ mod inbound_forward_slot_tests {
                 PeerWorkSlot::try_take(&counts, &peer(), 4),
                 &permits,
                 8,
-                false,
+                None,
                 || {
                     asked.set(asked.get() + 1);
                     shares_nothing.clone()

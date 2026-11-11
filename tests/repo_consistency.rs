@@ -14940,6 +14940,75 @@ fn every_upload_a_peer_starts_asks_whether_the_connection_is_metered() {
         "the capability must withdraw inference on a metered connection, or \
          planners keep choosing a node that refuses: `can_serve_inference:{field}`"
     );
+    assert!(
+        field.contains("heat_hold"),
+        "the capability must withdraw inference while this computer cools down \
+         (#440), or planners keep choosing a node that refuses: \
+         `can_serve_inference:{field}`"
+    );
+}
+
+/// The admission calls in `src` — `admits_a_new_request(` / `admit_own_forward(`
+/// outside their own definitions and outside `admit_own_forward`'s body, which
+/// passes its argument on — whose arguments do not ask `peer_work_hold_now()`.
+fn admission_calls_missing_the_hold(src: &str) -> (usize, Vec<String>) {
+    let mut code = production_code(src);
+    if let Some(body) = fn_body(&code, "fn admit_own_forward(") {
+        let blank = " ".repeat(body.len());
+        code = code.replacen(body, &blank, 1);
+    }
+    let mut calls = 0;
+    let mut missing = Vec::new();
+    for (line, stmt) in statements(&code) {
+        if !(stmt.contains("admits_a_new_request(") || stmt.contains("admit_own_forward(")) {
+            continue;
+        }
+        if stmt.trim_start().starts_with("fn ") || stmt.contains(" fn ") || stmt.starts_with("use ")
+        {
+            continue;
+        }
+        calls += 1;
+        if !stmt.contains("peer_work_hold_now()") {
+            missing.push(format!("line {line}: {stmt}"));
+        }
+    }
+    (calls, missing)
+}
+
+#[test]
+fn the_admission_hold_guard_sees_a_call_that_asks_nothing() {
+    let planted = "fn x() {\n    if let Err(why) = admits_a_new_request(\n        sem.available_permits(),\n        limit,\n        None,\n        &use_,\n    ) {\n        return;\n    }\n}\n";
+    let (calls, missing) = admission_calls_missing_the_hold(planted);
+    assert_eq!((calls, missing.len()), (1, 1), "{missing:?}");
+    let asked = planted.replace(
+        "        None,",
+        "        shared_state.peer_work_hold_now(),",
+    );
+    assert_eq!(admission_calls_missing_the_hold(&asked), (1, Vec::new()));
+}
+
+/// Every place the dispatcher starts a peer's request asks the ONE hold answer
+/// (`SharedState::peer_work_hold_now`: a metered connection, #277, or a computer
+/// cooling down, #440) — never `None`, never only one of the two reasons.
+#[test]
+fn every_new_request_a_peer_starts_asks_whether_this_node_holds_back() {
+    let src = std::fs::read_to_string("src/daemon/dispatch/mod.rs").expect("read dispatch/mod.rs");
+    let (calls, missing) = admission_calls_missing_the_hold(&src);
+    assert!(
+        calls >= 3,
+        "the forward, whole-model and image-encode admissions moved — re-point this guard ({calls} found)"
+    );
+    assert!(
+        missing.is_empty(),
+        "a peer's new request is admitted without asking `peer_work_hold_now()`:\n{}",
+        missing.join("\n")
+    );
+    let ask = std::fs::read_to_string("src/daemon/dispatch/prompt_admission.rs")
+        .expect("read prompt_admission.rs");
+    assert!(
+        ask.contains("peer_work_hold_now()") && !ask.contains("metered_hold_now()"),
+        "a peer's prompt-admission ask must be refused for the same reasons its forwards would be"
+    );
 }
 
 /// The names that read this computer's memory budget — an `nvidia-smi` on a

@@ -79,8 +79,8 @@ the top track (`docs/plans/large_model_splits.md`).
 
 **P1 — silent, or broken for a whole class of users**
 2a. **#440** — FIRST by the user's direction (2026-11-11): a node's work can drive the computer it runs
-   on into a thermal lock-up, and nothing watches the card. "swarmllm cant be locking up peoples
-   systems like that. it discourages use."
+   on into a thermal lock-up. "swarmllm cant be locking up peoples systems like that. it discourages
+   use." PARTIAL: a hot computer now takes no NEW work for others; running work and the owner's pace next.
 3. **#1** — every Mac runs on the processor; no GPU backend is compiled for Apple Silicon (needs a
    Mac to verify on).
 4. **#220** — WATCH: a worker's card faulted once (illegal memory access, 2026-10-04) and the driver
@@ -391,7 +391,7 @@ plants another build's manifest on a peer-only node.
 ### Reliability and failover
 
 #### #440 — A node's work can drive the computer it runs on into a thermal lock-up, and nothing watches the card
-`P1` · reliability · **OPEN** — 2026-11-11 · history: gotcha #1081 (the lock-up); archive § "Thermal throttling had no measurable effect" (2026-08-10)
+`P1` · reliability · **PARTIAL** — 2026-11-11 · history: gotcha #1081 (the lock-up); archive § "Thermal throttling had no measurable effect" (2026-08-10)
 
 The user, 2026-11-11, after this laptop hard-froze under sustained card load: "swarmllm cant be locking up
 peoples systems like that. it discourages use. i understand we run tests unhindered though". That freeze came
@@ -443,7 +443,27 @@ Microsoft WDDM/TDR docs, Apple developer docs; issue trackers of Ollama, LM Stud
 - **(B)** the Windows processor through the PDH counter `\Thermal Zone Information(*)\Temperature`, which needs no admin. It is a firmware zone, not the package, so it is coarse and lags; smooth it.
 - **(C)** macOS `thermalState`.
 
-**Next step:** stage (A).
+**Done (2026-11-11, steps 1, 2, 5, 6 of stage A — `daemon::host_heat`):**
+- The reading and the stop/start rule as designed (card at its target 120 s, hardware protection or a stuck
+  driver at once, processor ≥ 93 °C 5 min; back after 60 s 7 °C under the target / ≤ 88 °C), read by the
+  health tick every round (30 s, not 10: the round already exists and the hold needs minutes anyway).
+- New peer work refused at the one choke point: `SharedState::peer_work_hold_now` → `PeerWorkHold`
+  joins the metered hold, REQUIRED by `admits_a_new_request` / `admit_own_forward`, answered by prompt
+  admission, withdrawn from the capability. ⚠ Changed from the design: its OWN wording
+  (`ForwardRefused::Cooling`, "this machine is cooling down"), `ServiceUnavailable`-shaped like the metered
+  one, not NodeFull's — a peer reading "already doing as much work as its owner allows" would be told
+  something untrue. Still no wire change.
+- Toasts `heat_paused` / `card_unresponsive_paused` / `heat_resumed` in 21 languages; a `heat:` line in
+  the diagnostics report.
+- `SWARMLLM_HEAT_GUARD=0` in every script that starts test nodes, NOT in the safety kit
+  (`live_node_swap.sh` restarts the user's node from its environment). Faults
+  `SWARMLLM_FAULT_HOST_HEAT=card|protecting|processor|driver|cool`.
+- Guard `every_new_request_a_peer_starts_asks_whether_this_node_holds_back`; rule
+  `arch-network.md` § "A hot computer takes no new work for others".
+
+**Next step:** step 3 — stop peers' RUNNING work on a stuck driver or a hold past a second interval (a
+worker-side cancel the coordinator reads as a failover); then step 4 (pace the owner's own steps), then
+(B) and (C).
 
 #### #167 — A speculative split decode has no mid-reply failover
 `P2` · reliability · **PARTIAL** — 2026-08-25 · history: archive § "Speculative distributed decode has no failover", archive row #149 item (d)

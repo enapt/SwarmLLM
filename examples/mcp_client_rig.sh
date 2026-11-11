@@ -25,6 +25,8 @@
 # with the hint in the text and `_meta["com.swarmllm/error"]`; UNKNOWN stayed
 # -32602 on both. The model's answer then named the dashboard's Models tab.
 set -u
+# Test nodes: no heat hold refuses their work (#440) — the safety kit guards this machine.
+export SWARMLLM_HEAT_GUARD="${SWARMLLM_HEAT_GUARD:-0}"
 [ $# -ge 1 ] || { echo "usage: $0 <binary> [<binary> ...]"; exit 2; }
 HERE=$(cd "$(dirname "$0")" && pwd)
 OUT=${OUT:-$(mktemp -d /tmp/mcp_client_rig.XXXXXX)}

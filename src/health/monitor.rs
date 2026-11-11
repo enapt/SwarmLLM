@@ -800,6 +800,17 @@ impl HealthMonitor {
                     self.send_health_ping(nonce).await;
                     self.check_peer_health().await;
 
+                    // This computer's heat (#440, `daemon::host_heat`), every
+                    // round whatever the swarm's size: the hold it keeps stops
+                    // new work for other computers. The card and sensors are
+                    // asked off this loop, one refresh at a time.
+                    {
+                        let state = self.shared_state.clone();
+                        tokio::spawn(async move {
+                            state.refresh_host_heat().await;
+                        });
+                    }
+
                     // Heavy gossip broadcasts: scale frequency with network size.
                     // At ≤10 peers, every 30s (same as before).
                     // At 1K+ peers, every ~120s to reduce bandwidth.
@@ -1225,6 +1236,9 @@ impl HealthMonitor {
         // be refused. Read without waiting; the system is asked off this loop,
         // and a changed answer is news at the next tick (`capability_news`).
         let metered_hold = self.shared_state.metered_hold_now();
+        // And a computer cooling down (#440, `daemon::host_heat`): the same
+        // withdrawal, read the same way — the tick refreshes it every round.
+        let heat_hold = self.shared_state.host_heat_hold_now();
         {
             let state = self.shared_state.clone();
             tokio::spawn(async move {
@@ -1479,12 +1493,12 @@ impl HealthMonitor {
             // broken node in a peer list.
             anchor_mode: self.shared_state.config.node.anchor_mode,
             // Whether we can run a request at all, from the one predicate —
-            // and whether we will, on a metered connection. Rebuilt every
-            // broadcast like the rest of this struct, so the withdrawal
-            // reverses itself the moment the condition clears — a worker
-            // starting again, the dispatcher resuming, the connection no
-            // longer metered.
-            can_serve_inference: outage.is_none() && !metered_hold,
+            // and whether we will, on a metered connection or while this
+            // computer cools down. Rebuilt every broadcast like the rest of
+            // this struct, so the withdrawal reverses itself the moment the
+            // condition clears — a worker starting again, the dispatcher
+            // resuming, the connection no longer metered, the computer cool.
+            can_serve_inference: outage.is_none() && !metered_hold && heat_hold.is_none(),
             // Shown in peer lists, and a peer hands this node no part to fetch
             // while it is off (`NodeCapability::auto_manage`, #400): the live
             // switch, which `--anchor` holds off.

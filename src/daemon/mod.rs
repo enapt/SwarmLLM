@@ -18,6 +18,7 @@ mod background;
 pub(crate) mod dispatch;
 pub mod gpu_support;
 mod helpers;
+pub mod host_heat;
 pub mod machine_memory;
 pub mod manifest;
 pub mod metered;

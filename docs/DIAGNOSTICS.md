@@ -608,6 +608,28 @@ metered connection: yes  setting: auto  holding back downloads and work for peer
   node.log`. A download the owner asked for, a repair, the owner's own
   requests, work already running and gossip are never paused.
 
+## "Why has it stopped serving other computers while it is hot?" (2026-11-11, #440)
+
+The diagnostics report has one line for it:
+
+```
+heat: card 88 C (target 87 C), driver cooling it  processor 71 C  driver not answering: false  holding back work for peers: card_at_target
+```
+
+- `card` is the hottest NVIDIA card as `nvidia-smi` last answered (read every 30 s by the health
+  tick); `driver cooling it` = `clocks_event_reasons.sw_thermal_slowdown` is active, `hardware
+  protecting it` = `hw_thermal_slowdown`. `unknown` = no CUDA card, or `nvidia-smi` did not answer
+  within its 10 s bound (a driver stuck a minute shows as `driver not answering: true` instead).
+- `processor` is `inference::thermal`'s package sensor — Linux only for now (#440 stage B).
+- `holding back work for peers` names the cause (`card_at_target`, `card_protecting`,
+  `processor_hot`, `driver_not_answering`) or `no`. While held, the capability says the node takes no
+  inference work and a peer that asks anyway is refused: `grep "this computer is cooling down"
+  node.log` (info); the start and end are a WARN / INFO line worded as the owner's toast
+  (`grep "running hot\|stopped responding\|cooled down" node.log`).
+- `SWARMLLM_HEAT_GUARD=0` turns the hold off (the rigs set it; the log then says what it WOULD have
+  done). To see the hold without heating anything: `SWARMLLM_FAULT_HOST_HEAT=driver` (at once),
+  `protecting` (at once), `card` (after 120 s), `processor` (after 5 min), `cool`.
+
 ## "Why won't other computers run my chats?" / "Why did this node refuse a peer?" (v0.3.271)
 
 Other computers run a computer's requests only if it shares at least 2 model

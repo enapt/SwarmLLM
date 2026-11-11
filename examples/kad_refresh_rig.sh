@@ -28,6 +28,8 @@
 # Usage: examples/kad_refresh_rig.sh <binary> [out_dir] [window_s]
 #   window_s default 1500; WARMUP_S (default 120), SAMPLE_S (default 20)
 set -u
+# Test nodes: no heat hold refuses their work (#440) — the safety kit guards this machine.
+export SWARMLLM_HEAT_GUARD="${SWARMLLM_HEAT_GUARD:-0}"
 if [ -z "${KAD_RIG_IN_NETNS:-}" ]; then
   exec env KAD_RIG_IN_NETNS=1 unshare -rn bash "$0" "$@"
 fi

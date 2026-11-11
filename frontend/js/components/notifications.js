@@ -97,6 +97,9 @@
     'pool_member_removed': '\u26D4',     // ⛔
     'config_updated': '\u2699\uFE0F',    // ⚙️
     'download_slow': '\u26A0\uFE0F',    // ⚠️
+    'heat_paused': '\uD83C\uDF21\uFE0F', // 🌡️ work for other computers paused while this one cools (#440)
+    'card_unresponsive_paused': '\u26A0\uFE0F', // ⚠️
+    'heat_resumed': '\u2705',            // ✅
     'hf_sources_cap_reached': '\u26A0\uFE0F', // ⚠️ R141 (peer-gossip cap drops)
     'manifest_rejected': '\u274C',       // ❌ R126 (bad manifest from peer)
     'manifest_rejected_backup': '\u274C', // backup-copy model name refused from a peer

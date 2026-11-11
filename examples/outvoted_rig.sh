@@ -61,6 +61,8 @@
 # The live node must be STOPPED: every node on this machine finds the others
 # through its loopback probe (#708), and the rig's nodes would find it.
 set -u
+# Test nodes: no heat hold refuses their work (#440) — the safety kit guards this machine.
+export SWARMLLM_HEAT_GUARD="${SWARMLLM_HEAT_GUARD:-0}"
 BIN_AC="${1:?usage: outvoted_rig.sh <binary for A and C> [<binary for B>]}"
 BIN_B="${2:-$BIN_AC}"
 HFLESS="${HFLESS:-proxy}"

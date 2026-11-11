@@ -17,6 +17,9 @@
 #   rig_share_init <model under test> <models dir>   # once; exits 2 if unusable
 #   rig_share <node data dir>                        # links SHARE_MODEL whole into its models/
 
+# Test nodes: no heat hold refuses their work (#440) — the safety kit guards this machine.
+export SWARMLLM_HEAT_GUARD="${SWARMLLM_HEAT_GUARD:-0}"
+
 rig_share_init() {
   local target="$1"
   RIG_SHARE_MODELS_DIR="$2"

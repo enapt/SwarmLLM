@@ -654,6 +654,39 @@ pub async fn diagnostics(
             ss.models.metered.holding_back()
         );
     }
+    // This computer's heat as the guard last read it, and whether it holds
+    // back new work for other computers (#440, `daemon::host_heat`) — so a
+    // report from a computer that stopped serving says why.
+    {
+        let r = ss.metrics.host_heat.last_reading();
+        let card = r.and_then(|r| r.card).map_or("unknown".to_string(), |c| {
+            format!(
+                "{:.0} C (target {}){}{}",
+                c.temp_c,
+                c.target_c
+                    .map_or("unknown".to_string(), |t| format!("{t:.0} C")),
+                if c.driver_cooling {
+                    ", driver cooling it"
+                } else {
+                    ""
+                },
+                if c.hardware_protecting {
+                    ", hardware protecting it"
+                } else {
+                    ""
+                },
+            )
+        });
+        let processor = r
+            .and_then(|r| r.processor_c)
+            .map_or("unknown".to_string(), |t| format!("{t:.0} C"));
+        let _ = writeln!(
+            out,
+            "heat: card {card}  processor {processor}  driver not answering: {}  holding back work for peers: {}",
+            r.is_some_and(|r| r.driver_not_answering),
+            ss.host_heat_hold_now().map_or("no", |c| c.as_str())
+        );
+    }
     // Whether other computers run this node's requests, and the facts the
     // verdict read (`daemon::state::swarm_use`) — "the swarm never answers my
     // chats" is otherwise a report nobody can read the cause from.

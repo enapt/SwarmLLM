@@ -238,6 +238,12 @@ pub struct MetricsProviders {
     /// manager's `publish_upnp_verdict`, read ONLY by
     /// `SharedState::reachability_json`.
     pub upnp_verdict: parking_lot::Mutex<crate::network::manager::UpnpVerdict>,
+    /// This computer's heat and whether this node holds back new work for
+    /// other computers because of it (#440, `daemon::host_heat`): written ONLY
+    /// by `SharedState::refresh_host_heat` (the health tick), read without
+    /// asking by `SharedState::host_heat_hold_now` / `peer_work_hold_now` (the
+    /// dispatcher, prompt admission, the capability), `last_reading` for display.
+    pub host_heat: crate::daemon::host_heat::HostHeatWatch,
     /// Last time a segment forward for `(peer, model)` completed successfully.
     ///
     /// Its only job is to answer "might this peer have to LOAD the model
