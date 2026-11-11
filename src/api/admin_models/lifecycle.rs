@@ -369,6 +369,11 @@ pub(crate) fn load_ahead_for_the_owner(
 /// GET /api/admin/models/:model_id/auto-manage — this model's auto-manage
 /// policy, or the node's defaults (`enabled`, `prune_enabled`, the default
 /// part cap) when it has none of its own.
+///
+/// `default_max_shards` rides beside it in both cases: a `max_shards` of 0
+/// means "follow this node's default cap" (`scoring.rs`'s `effective_cap`),
+/// which is "no limit" only while that default is 0 — the panel's hint says
+/// which, instead of promising "0 = unlimited" on a node set to cap.
 pub async fn get_model_auto_manage(
     State(state): State<AppState>,
     Path(model_id): Path<String>,
@@ -380,24 +385,41 @@ pub async fn get_model_auto_manage(
         .auto_manage_default_model_cap
         .load(std::sync::atomic::Ordering::Relaxed);
 
-    match state
+    let stored = state
         .shared_state
         .models
         .model_auto_manage_policies
         .get(&mid)
-    {
-        Some(policy) => Json(serde_json::json!({
+        .map(|p| p.clone());
+    Json(auto_manage_policy_body(
+        &model_id,
+        stored.as_ref(),
+        default_cap,
+    ))
+}
+
+/// The body `get_model_auto_manage` answers with: the model's own policy, or
+/// the node's defaults with the default cap as its `max_shards`.
+fn auto_manage_policy_body(
+    model_id: &str,
+    stored: Option<&crate::config::ModelAutoManagePolicy>,
+    default_cap: u32,
+) -> serde_json::Value {
+    match stored {
+        Some(policy) => serde_json::json!({
             "model_id": model_id,
             "enabled": policy.enabled,
             "max_shards": policy.max_shards,
             "prune_enabled": policy.prune_enabled,
-        })),
-        None => Json(serde_json::json!({
+            "default_max_shards": default_cap,
+        }),
+        None => serde_json::json!({
             "model_id": model_id,
             "enabled": true,
             "max_shards": default_cap,
             "prune_enabled": true,
-        })),
+            "default_max_shards": default_cap,
+        }),
     }
 }
 
@@ -1000,6 +1022,29 @@ mod tests {
             (fresh.enabled, fresh.max_shards, fresh.prune_enabled),
             (false, 0, true)
         );
+    }
+
+    /// A model's cap of 0 follows the node's default cap, so the panel is
+    /// told that default beside the model's own figure: on a node capped at
+    /// 5 its hint read "0 = unlimited" while 0 meant 5.
+    #[test]
+    fn the_policy_read_names_the_default_a_cap_of_zero_follows() {
+        use super::auto_manage_policy_body;
+        let own = crate::config::ModelAutoManagePolicy {
+            enabled: true,
+            max_shards: 0,
+            prune_enabled: true,
+        };
+        let with_own = auto_manage_policy_body("m", Some(&own), 5);
+        assert_eq!(with_own["max_shards"], 0);
+        assert_eq!(with_own["default_max_shards"], 5);
+
+        let without = auto_manage_policy_body("m", None, 5);
+        assert_eq!(without["max_shards"], 5);
+        assert_eq!(without["default_max_shards"], 5);
+
+        let uncapped = auto_manage_policy_body("m", None, 0);
+        assert_eq!(uncapped["default_max_shards"], 0);
     }
 }
 

@@ -553,7 +553,11 @@
         '<div class="am-row">' +
           '<label>' + U.escapeHtml(I18n.t('models.max_shards')) + '</label>' +
           '<input type="number" id="am-max-' + U.safeId(modelId) + '" value="' + maxShown + '" data-initial="' + maxShown + '" min="0" step="1"' + policyOff + '>' +
-          '<span class="text-muted" style="font-size:0.7rem">' + U.escapeHtml(I18n.t('models.unlimited')) + '</span>' +
+          // 0 follows this computer's default cap, which is "no limit"
+          // only while that default is 0 (lifecycle.rs, default_max_shards).
+          '<span class="text-muted" style="font-size:0.7rem">' + U.escapeHtml(shown.default_max_shards > 0
+            ? I18n.t('models.max_parts_default', { count: shown.default_max_shards })
+            : I18n.t('models.unlimited')) + '</span>' +
         '</div>' +
         '<hr style="margin:0.3rem 0;border-color:var(--border)">' +
         '<div class="am-row" style="flex-direction:column;gap:0.2rem">' +

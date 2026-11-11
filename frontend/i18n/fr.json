@@ -722,6 +722,7 @@
   "models.keep_here_not_whole": "Cet ordinateur n'a pas encore tout le modèle, donc vos requêtes seront refusées jusqu'à ce qu'il l'ait.",
   "models.keep_here_save_failed": "Impossible d'enregistrer « Garder sur cet ordinateur »",
   "models.loading_metadata": "Chargement des métadonnées...",
+  "models.max_parts_default": "0 = la valeur par défaut de cet ordinateur ({count})",
   "models.max_shards": "Parties max :",
   "models.max_tokens_label": "{n} max",
   "models.meta_advanced": "Avancé",

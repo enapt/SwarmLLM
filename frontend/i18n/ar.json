@@ -722,6 +722,7 @@
   "models.keep_here_not_whole": "لا يملك هذا الحاسوب النموذج كاملًا بعد، لذا ستُرفض طلباتك له حتى يكتمل.",
   "models.keep_here_save_failed": "تعذّر حفظ «الإبقاء على هذا الحاسوب»",
   "models.loading_metadata": "جارٍ تحميل البيانات الوصفية...",
+  "models.max_parts_default": "0 = القيمة الافتراضية لهذا الجهاز ({count})",
   "models.max_shards": "أقصى عدد أجزاء:",
   "models.max_tokens_label": "{n} حد أقصى",
   "models.meta_advanced": "متقدم",

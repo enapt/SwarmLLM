@@ -722,6 +722,7 @@
   "models.keep_here_not_whole": "На цьому комп'ютері поки немає всієї моделі, тож ваші запити до неї відхилятимуться, доки вона не з'явиться повністю.",
   "models.keep_here_save_failed": "Не вдалося зберегти режим «Лише на цьому комп'ютері»",
   "models.loading_metadata": "Завантаження метаданих...",
+  "models.max_parts_default": "0 = типове значення цього комп’ютера ({count})",
   "models.max_shards": "Макс. частин:",
   "models.max_tokens_label": "{n} макс",
   "models.meta_advanced": "Розширені",

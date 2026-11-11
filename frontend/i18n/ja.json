@@ -722,6 +722,7 @@
   "models.keep_here_not_whole": "このコンピューターにはまだモデル全体がないため、そろうまでこのモデルへのリクエストは拒否されます。",
   "models.keep_here_save_failed": "「このコンピューターだけで実行」を保存できませんでした",
   "models.loading_metadata": "メタデータを読み込み中...",
+  "models.max_parts_default": "0 = このコンピューターの既定値（{count}）",
   "models.max_shards": "最大パーツ数:",
   "models.max_tokens_label": "{n}最大",
   "models.meta_advanced": "詳細設定",

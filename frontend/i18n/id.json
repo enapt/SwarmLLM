@@ -722,6 +722,7 @@
   "models.keep_here_not_whole": "Komputer ini belum memiliki seluruh model, jadi permintaan Anda untuknya akan ditolak sampai lengkap.",
   "models.keep_here_save_failed": "Tidak dapat menyimpan \"Tetap di komputer ini\"",
   "models.loading_metadata": "Memuat metadata...",
+  "models.max_parts_default": "0 = bawaan komputer ini ({count})",
   "models.max_shards": "Maks. bagian:",
   "models.max_tokens_label": "{n} maks",
   "models.meta_advanced": "Lanjutan",

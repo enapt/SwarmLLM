@@ -722,6 +722,7 @@
   "models.keep_here_not_whole": "Este computador ainda não tem o modelo inteiro, então seus pedidos para ele serão recusados até que tenha.",
   "models.keep_here_save_failed": "Não foi possível guardar «Manter neste computador»",
   "models.loading_metadata": "Carregando metadados...",
+  "models.max_parts_default": "0 = o padrão deste computador ({count})",
   "models.max_shards": "Máx. partes:",
   "models.max_tokens_label": "{n} máx",
   "models.meta_advanced": "Avançado",

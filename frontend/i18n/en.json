@@ -722,6 +722,7 @@
   "models.keep_here_not_whole": "This computer doesn't have all of this model yet, so your requests for it will be refused until it does.",
   "models.keep_here_save_failed": "Could not save “Keep on this computer”",
   "models.loading_metadata": "Loading metadata...",
+  "models.max_parts_default": "0 = this computer's default ({count})",
   "models.max_shards": "Max parts:",
   "models.max_tokens_label": "{n} max",
   "models.meta_advanced": "Advanced",

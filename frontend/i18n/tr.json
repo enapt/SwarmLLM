@@ -722,6 +722,7 @@
   "models.keep_here_not_whole": "Bu bilgisayarda henüz modelin tamamı yok, bu yüzden tamamlanana kadar bu modele yaptığınız istekler reddedilecek.",
   "models.keep_here_save_failed": "\"Bu bilgisayarda tut\" kaydedilemedi",
   "models.loading_metadata": "Meta veriler yükleniyor...",
+  "models.max_parts_default": "0 = bu bilgisayarın varsayılanı ({count})",
   "models.max_shards": "Azami parça:",
   "models.max_tokens_label": "{n} maks",
   "models.meta_advanced": "Gelişmiş",

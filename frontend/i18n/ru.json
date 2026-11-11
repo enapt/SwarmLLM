@@ -722,6 +722,7 @@
   "models.keep_here_not_whole": "На этом компьютере пока нет всей модели, поэтому ваши запросы к ней будут отклоняться, пока она не появится целиком.",
   "models.keep_here_save_failed": "Не удалось сохранить режим «Только на этом компьютере»",
   "models.loading_metadata": "Загрузка метаданных...",
+  "models.max_parts_default": "0 = значение по умолчанию для этого компьютера ({count})",
   "models.max_shards": "Макс. частей:",
   "models.max_tokens_label": "{n} макс",
   "models.meta_advanced": "Дополнительно",

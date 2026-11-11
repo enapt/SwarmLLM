@@ -722,6 +722,7 @@
   "models.keep_here_not_whole": "本机还没有完整的模型，因此在补齐之前，您对它的请求会被拒绝。",
   "models.keep_here_save_failed": "无法保存“仅在本机运行”",
   "models.loading_metadata": "正在加载元数据...",
+  "models.max_parts_default": "0 = 这台电脑的默认值（{count}）",
   "models.max_shards": "最大部分数：",
   "models.max_tokens_label": "{n} 最大",
   "models.meta_advanced": "高级选项",

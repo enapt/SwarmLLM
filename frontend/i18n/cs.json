@@ -722,6 +722,7 @@
   "models.keep_here_not_whole": "Tento počítač zatím nemá celý model, takže vaše požadavky na něj budou odmítnuty, dokud ho mít nebude.",
   "models.keep_here_save_failed": "Nastavení „Ponechat na tomto počítači“ se nepodařilo uložit",
   "models.loading_metadata": "Načítání metadat...",
+  "models.max_parts_default": "0 = výchozí hodnota tohoto počítače ({count})",
   "models.max_shards": "Max. částí:",
   "models.max_tokens_label": "{n} max",
   "models.meta_advanced": "Pokročilé",

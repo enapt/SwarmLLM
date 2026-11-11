@@ -722,6 +722,7 @@
   "models.keep_here_not_whole": "Ten komputer nie ma jeszcze całego modelu, więc Twoje żądania do niego będą odrzucane, dopóki go nie będzie miał.",
   "models.keep_here_save_failed": "Nie udało się zapisać „Zostaw na tym komputerze”",
   "models.loading_metadata": "Ładowanie metadanych...",
+  "models.max_parts_default": "0 = domyślna wartość tego komputera ({count})",
   "models.max_shards": "Maks. części:",
   "models.max_tokens_label": "{n} maks",
   "models.meta_advanced": "Zaawansowane",

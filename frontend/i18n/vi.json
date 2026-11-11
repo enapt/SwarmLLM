@@ -722,6 +722,7 @@
   "models.keep_here_not_whole": "Máy tính này chưa có toàn bộ mô hình, nên các yêu cầu của bạn cho mô hình này sẽ bị từ chối cho đến khi có đủ.",
   "models.keep_here_save_failed": "Không thể lưu \"Giữ trên máy tính này\"",
   "models.loading_metadata": "Đang tải metadata...",
+  "models.max_parts_default": "0 = mặc định của máy tính này ({count})",
   "models.max_shards": "Số phần tối đa:",
   "models.max_tokens_label": "{n} max",
   "models.meta_advanced": "Nâng cao",

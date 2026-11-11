@@ -722,6 +722,7 @@
   "models.keep_here_not_whole": "Dieser Computer hat noch nicht das ganze Modell, daher werden Ihre Anfragen daran abgelehnt, bis er es hat.",
   "models.keep_here_save_failed": "„Auf diesem Computer behalten“ konnte nicht gespeichert werden",
   "models.loading_metadata": "Metadaten werden geladen...",
+  "models.max_parts_default": "0 = Standardwert dieses Computers ({count})",
   "models.max_shards": "Max. Teile:",
   "models.max_tokens_label": "{n} max",
   "models.meta_advanced": "Erweitert",

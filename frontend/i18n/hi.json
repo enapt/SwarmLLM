@@ -722,6 +722,7 @@
   "models.keep_here_not_whole": "इस कंप्यूटर के पास अभी पूरा मॉडल नहीं है, इसलिए जब तक नहीं होगा, इसके लिए आपके अनुरोध अस्वीकार किए जाएँगे।",
   "models.keep_here_save_failed": "\"इसी कंप्यूटर पर रखें\" सहेजा नहीं जा सका",
   "models.loading_metadata": "मेटाडेटा लोड हो रहा है...",
+  "models.max_parts_default": "0 = इस कंप्यूटर का डिफ़ॉल्ट ({count})",
   "models.max_shards": "अधिकतम भाग:",
   "models.max_tokens_label": "{n} max",
   "models.meta_advanced": "उन्नत",

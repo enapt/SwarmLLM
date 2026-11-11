@@ -722,6 +722,7 @@
   "models.keep_here_not_whole": "เครื่องนี้ยังไม่มีโมเดลครบทั้งหมด คำขอของคุณสำหรับโมเดลนี้จึงจะถูกปฏิเสธจนกว่าจะครบ",
   "models.keep_here_save_failed": "บันทึก \"เก็บไว้บนเครื่องนี้\" ไม่สำเร็จ",
   "models.loading_metadata": "กำลังโหลด metadata...",
+  "models.max_parts_default": "0 = ค่าเริ่มต้นของคอมพิวเตอร์เครื่องนี้ ({count})",
   "models.max_shards": "จำนวนส่วนสูงสุด:",
   "models.max_tokens_label": "{n} สูงสุด",
   "models.meta_advanced": "ขั้นสูง",

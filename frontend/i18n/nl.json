@@ -722,6 +722,7 @@
   "models.keep_here_not_whole": "Deze computer heeft nog niet het hele model, dus je verzoeken ervoor worden geweigerd tot dat wel zo is.",
   "models.keep_here_save_failed": "Kon ‘Op deze computer houden’ niet opslaan",
   "models.loading_metadata": "Metadata laden...",
+  "models.max_parts_default": "0 = de standaardwaarde van deze computer ({count})",
   "models.max_shards": "Max. delen:",
   "models.max_tokens_label": "{n} max",
   "models.meta_advanced": "Geavanceerd",

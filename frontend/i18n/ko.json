@@ -722,6 +722,7 @@
   "models.keep_here_not_whole": "이 컴퓨터에 아직 모델 전체가 없어서, 모두 갖출 때까지 이 모델에 대한 요청은 거부됩니다.",
   "models.keep_here_save_failed": "'이 컴퓨터에서만 실행'을 저장하지 못했습니다",
   "models.loading_metadata": "메타데이터 로딩 중...",
+  "models.max_parts_default": "0 = 이 컴퓨터의 기본값({count})",
   "models.max_shards": "최대 부분 수:",
   "models.max_tokens_label": "최대 {n}",
   "models.meta_advanced": "고급",

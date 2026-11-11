@@ -722,6 +722,7 @@
   "models.keep_here_not_whole": "Den här datorn har ännu inte hela modellen, så dina förfrågningar till den nekas tills den har det.",
   "models.keep_here_save_failed": "Det gick inte att spara ”Behåll på den här datorn”",
   "models.loading_metadata": "Laddar metadata...",
+  "models.max_parts_default": "0 = den här datorns standardvärde ({count})",
   "models.max_shards": "Max antal delar:",
   "models.max_tokens_label": "{n} max",
   "models.meta_advanced": "Avancerat",
