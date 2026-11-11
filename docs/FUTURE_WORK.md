@@ -53,7 +53,9 @@ v0.3.274 (2026-11-06) #408, #409 and #410; v0.3.275 (2026-11-06) #367 (d)'s fix 
 nicknames, #417, #402, #191, #418, #419, #421, #420, #423 and #422's first steps. **2026-11-07, a performance
 round**: #424 (a model's first question waits for its load) is new at P2; #318 and #174 carry the round's
 other two measured-first levers. v0.3.278 (2026-11-08) carried #424's three steps, #174 and #425 (+ (b) on the
-processor). **2026-11-08:** #427 goes first by the user's direction — "we need to be able to use the models between
+processor). v0.3.279 (2026-11-09) carried #428's block drafter, #425 (a) and (f) and #431-#434; v0.3.280
+(2026-11-09) #427's chained-hop pricing, the fastest route by default and #438; v0.3.281 (2026-11-11) the
+dashboard round and the release cut-off at Identify for a computer whose Identify names no release. **2026-11-08:** #427 goes first by the user's direction — "we need to be able to use the models between
 also, like 14b 28b, also 70b": the next round is ranked by which tier (~14B, ~27-35B, 70B) a user can actually use,
 starting with measuring each as a user gets it — on the models people run most (#427 § Research 2026-11-08:
 Qwen3.8-27B, Qwen3.6-35B-A3B, Gemma 4, gpt-oss, Qwen3-14B, Llama 3.3 70B). The measurement's first half put every
@@ -133,7 +135,7 @@ the top track (`docs/plans/large_model_splits.md`).
    room) but prices every far segment a flat 300 ms and searches at most one segment past the fewest
    the ceilings allow — the Australian machine now carries all 80 alone, so a third card is never
    tried, and US 0-21 + AU 21-80 (1349 ms) is 93% of AU alone (1448), short of the 3/4 bar.
-   **Planner fixed on main (2026-11-05)**: far hops priced as the router prices them, from the
+   **Planner fixed 2026-11-05, released in v0.3.273**: far hops priced as the router prices them, from the
    published coordinates; every card in the search; a move judged on the slowest machine (Petals'
    bottleneck). Live on this node (`b269449d` at `-v`, 05:58Z): held here 0-13 + AU 13-80, 984 ms
    a token (the router's route); planned here 0-13, AU 13-36, the US card 36-59 and a fast
@@ -3103,7 +3105,7 @@ the two writers disagree today. Neither alone may move THIS route (Denmark's ~20
 Australia's 43 s on paper); the route that is faster in physics needs Denmark to hold 49-51 (above). Verify on the
 real route: the DIAG's source field, the logged prediction against the measured ~580 ms a token.
 
-**Done 11-09 (on main, not in a release yet).** (1) BUILT: `PeerSpeed::ranking` says what its figure was timed on
+**Done 11-09, released in v0.3.280.** (1) BUILT: `PeerSpeed::ranking` says what its figure was timed on
 (`peer_speed::Ranking` / `TimedOn::{DecodeSteps, PromptPasses}`), carried to `NodeCandidate::observed_latency_timed_on`
 (`SharedState::observed_ranking`), and `parallax::vertex_cost_as` keeps the vertex's round trip for a `PromptPasses`
 figure — a decode-step figure still carries its own; logged as the DIAG's `observed_timed_on`. Tests
@@ -5619,7 +5621,7 @@ Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
 
-**Closed 2026-11-09, on main (not in a release yet)** (#438)
+**Closed 2026-11-09, released in v0.3.280 (published 2026-11-09 14:21:54Z)** (#438)
 - #438 — **The model search judged "Runs locally" on a card computer by the card alone.** It asked
   `vram::node_model_budget_bytes` — the swarm's figure, the card's budget (6.33 GiB on this RTX 3070
   laptop at the Minimal contribution level) — so Gemma 4 12B Q4_K_M (6.6 GB), which this laptop runs
