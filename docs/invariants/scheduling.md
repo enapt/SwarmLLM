@@ -3234,7 +3234,7 @@ not fit), red with bare widths. `this_node_stands_in_for_a_range_it_holds_loaded
 (this node holding 0..13 loaded, room 7, primary on 13..20; a peer primary on
 0..13): a standby for 0..13, red with width charging; its null control, the held
 range cleared, is not. Both predate v0.3.255; neither was seen in a field log —
-found by the v0.3.256 pre-release sweep. `layers_offered_at` reads the same figure
+found by the v0.3.256 pre-release sweep. `layers_offered_at` (now `rooms_offered_at`) reads the same figure
 the same way (d5302e77).
 
 ## A wait on a peer's first answer allows for its load, on every path

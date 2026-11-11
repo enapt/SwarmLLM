@@ -6697,7 +6697,7 @@ alone, sustained", v0.3.262)
   `max_hostable_layers`, the first rung's figure, on every rung: AU's point was 53, and the 13-57
   vertex never existed. Now each rung cuts them at the bound it applies (`vertex_cap` against
   `capacity_charge`, beside the first rung's points), which for this node also cuts by what a
-  range adds beside what its worker holds. And `layers_offered_at` counts this node's held layers
+  range adds beside what its worker holds. And `layers_offered_at` (now `rooms_offered_at`) counts this node's held layers
   beside its room (the figure is room to ADD): the refusal read "room for about 67 of its 80
   layers", exactly the layers it did not hold. Tests
   `a_pass_holding_a_peer_to_its_ceiling_can_cut_its_range_there` (the request's four candidates,

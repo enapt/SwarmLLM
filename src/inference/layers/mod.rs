@@ -5533,9 +5533,12 @@ pub(crate) fn run_attention_windowed(
             //   n_head every token, and its cost climbs with KV (0.217 -> 9.416)
             //   while flash's stays roughly flat. Same mechanism as #255.
             //
-            // 1024 is the measured crossover: at 512 flash still loses (0.66x),
-            // at 1024 it wins. Prefill is unconditional — flash won every
-            // prefill shape measured, 2.4x-7.8x.
+            // 1024 was the measured crossover: at 512 flash still lost (0.66x),
+            // at 1024 it won. That GQA rule ended 2026-08-23, when standard
+            // decode stopped expanding the cache — every one-position decode
+            // now prefers standard (`cuda_decode_prefers_standard` says why).
+            // Prefill is unconditional — flash won every prefill shape
+            // measured, 2.4x-7.8x.
             let decode_prefers_standard = cuda_decode_prefers_standard(q_len, n_head, n_kv_head);
             let offset_causal = k_len > q_len && q_len > 1;
             if (offset_causal && !flash_handles_offset_causal())

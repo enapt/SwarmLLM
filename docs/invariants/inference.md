@@ -453,7 +453,7 @@ their scales with `to_f32` (once per 256 values, so a stall costs less) — unme
 before it announces itself sleepy. `SWARMLLM_RAYON_SPIN_US=0` is upstream (32 `yield_now` rounds,
 microseconds). Guard: `rayon_core_is_the_vendored_copy_that_spins_before_sleeping` (a `rayon` that
 needs a newer `rayon-core` leaves a `[patch]` unused with only a warning) + its planted-violation
-`the_rayon_core_guard_sees_a_registry_copy`.
+`the_vendored_crate_guard_sees_a_registry_copy` (named for rayon-core alone until c73742ca widened it).
 
 **What it replaced.** A decoded token runs several parallel regions a layer — RoPE twice
 (candle-nn's CPU `rope`/`rope_i` are `par_chunks` over heads), attention, the Q/K/V and output
@@ -4844,7 +4844,7 @@ The whole-step graph above cut ~4 ms of card-side gaps from a 7B token and then 
 recording it with the card idle (`recording_ms_per_launch` 4.5 of a 20.8 ms cycle). So the forward
 is now recorded in groups of `cuda_graph::group_layers()` layers (default 2,
 `SWARMLLM_CUDA_GRAPH_GROUP`, 0 = whole step): at every group boundary the forward's per-layer hook
-(`LayerEndHook`, `SplitModel::forward_inner_body`) resolves the residual stream into one of two
+(`RecordedStep::at_layer_end` — the `LayerEndHook` alias until 8374cf71 — and `SplitModel::forward_inner_body`) resolves the residual stream into one of two
 buffers made outside every capture (`DecodeGraph::boundaries`, alternating), and `Cutter::cut` ends
 the capture, updates that group's own exec and launches it, then begins the next. Only the card's
 first group waits for recording. A refusal after some groups ran is safe for the same reason a

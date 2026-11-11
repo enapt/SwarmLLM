@@ -657,7 +657,7 @@ peak is the new range LESS what they held — yet admission weighed the full
 width against a total still counting them, and refused a consolidation that
 fits: [0..2) + [14..40) → [0..40) of a 40-layer model was charged 40 new layers
 when it needed 12. `charge_additional_segment` now admits
-`delta − WorkerHandle::subsumed_charge_mb` (read-only, same predicate as the
+`delta − WorkerHandle::subsumed_charge(..).mb` (read-only, same predicate as the
 release, `strictly_subsumes`), then records the segment at its full cost and
 drops the subsumed records. **It must NOT release them from the pool as well**:
 `admit_to_*` both checks AND charges, so the pool already took the net figure,
