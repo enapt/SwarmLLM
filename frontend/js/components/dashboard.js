@@ -2544,26 +2544,29 @@
 
       // A computer whose requests the swarm does not run — too far behind the
       // newest release (cut off, it comes back to be judged again) or sharing
-      // too few parts — is listed in its own table below, so the table on top
-      // is the computers taking part. Decided by the same verdicts as the
-      // row's own tags (`swarm_use`; an anchor holds nothing by design).
-      // Prior art: Bitcoin Core's peers window (`RPCConsole::
-      // showOrHideBanTableIfRequired`) lists banned peers in a second table,
-      // with its own heading, under the peer table, shown only when needed.
+      // too few parts — is listed in its own section below, so the rows on
+      // top are the computers taking part. Decided by the same verdicts as
+      // the row's own tags (`swarm_use`; an anchor holds nothing by design).
+      // One table, a second <tbody> under its own heading row, so the columns
+      // line up and one header sorts both (two tables sized their columns
+      // apart). Prior art: Bitcoin Core's peers window (`RPCConsole::
+      // showOrHideBanTableIfRequired`) lists banned peers under the peer
+      // table, with their own heading, shown only when there are any.
       function _setAside(p) {
         return p.swarm_use === 'too_far_behind' ||
           (!p.is_anchor && p.swarm_use === 'too_few_parts');
       }
       var taking = sorted.filter(function(p) { return !_setAside(p); });
       var setAside = sorted.filter(_setAside);
-      var html = taking.length ? head + taking.map(_row).join('') + '</tbody></table>' : '';
+      var html = head + taking.map(_row).join('') + '</tbody>';
       if (setAside.length) {
-        html += '<div class="peers-set-aside">' +
+        html += '<tbody class="peers-set-aside">' +
+          '<tr class="peers-set-aside-head"><td colspan="8">' +
           '<div class="peers-set-aside-title">' + U.escapeHtml(I18n.t('dashboard.peers_set_aside', { count: setAside.length })) + '</div>' +
-          '<div class="text-muted text-2xs mb-1">' + U.escapeHtml(I18n.t('dashboard.peers_set_aside_desc')) + '</div>' +
-          head + setAside.map(_row).join('') + '</tbody></table></div>';
+          '<div class="text-muted text-2xs">' + U.escapeHtml(I18n.t('dashboard.peers_set_aside_desc')) + '</div>' +
+          '</td></tr>' + setAside.map(_row).join('') + '</tbody>';
       }
-      list.innerHTML = html;
+      list.innerHTML = html + '</table>';
     },
 
     loadNetworkData: async function() {
