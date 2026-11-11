@@ -3505,6 +3505,33 @@ from it (the 600 s cap, `architecture.md` § Timeouts). The wait that ran out, o
 logical CPU (`CPUS_B=0`) and a 1,702-token prompt: no first token in 600 s, A logged `waited_ms=600002 one_step_ms=0
 floor_ms_per_layer_token=16.02` (the build before the two-sample rule), reported the peer as silent (no other route), and its next plan carried
 `observed_whole_prompt_floor_ms_per_layer_token=Some(16.02393)`.
+Left from its review (P3, both err toward the price as it was): a peer's own prefix cache holding the prompt from
+ANOTHER coordinator, or from before this node restarted, reads the floor fast — the price then falls back to the
+ratio, never below it; a one-token reply leaves its step in the sample (`one_step_ms` 0), a step's worth slow.
+**Design for the first-token wait (2026-11-12, not built — the next residual):** the 600 s cap is a minimum prompt speed
+nobody chose (`architecture.md` § Timeouts, rule 1: prefer an inactivity timeout to a total one), and a sole holder
+that reads slower than it fails EVERY long prompt, knowably in advance. Prior art: llama.cpp's server streams
+`prompt_progress {total, cache, processed, time_ms}` while it reads a prompt when asked (`return_progress`, PR #15827;
+#18305 adds a 0% frame at the start), so a client can tell a slow read from a dead server; vLLM sends SSE keep-alive
+comments while a request is queued or in prefill (`entrypoints/serve/utils/sse_keep_alive`) because proxies close a
+stream that sends no bytes. Shape here:
+- The requester asks for it in the hand-off (`RemoteGenerateRequest`, a `#[serde(default)]` flag — so only a
+  requester that set it is ever sent a frame, an older one never; the peer advertises a feature bit the requester
+  checks first). The peer's worker reports each prompt piece it has read (its Generate path's own chunks — check that
+  a whole-model prompt is read in pieces there at all; if not, that is the first change) as a progress frame on the
+  existing token stream, which an older peer never sends.
+- The requester's first-token wait becomes an INACTIVITY wait: no frame and no token for a bound sized like a piece
+  (a few seconds of the floor's rate, capped), the total held only by a ceiling well past today's (a peer that streams
+  progress for ever is still bounded), and each frame must advance (`processed` rising, `≤ total`).
+- The frames make the floor EXACT: `(processed − cache) / time_ms` is the peer's own read, its cache held counted —
+  which retires both P3 residuals above and the censored guess. Believed as today's floor is: never faster than the
+  price, first-hand, and only for the request's own peer (a peer's word may price it SLOWER, never faster).
+- Security review before landing (a new frame, a new bit, and a peer-controlled wait); rig: `rig_floor2.sh`'s
+  one-CPU B with a 1,702-token prompt must now COMPLETE, the frames logged.
+**Also from the release's review (2026-11-12, P3):** a peer request stopped for heat (`stop_running_peer_work`, #440)
+is aborted without `release_request_kv`, so its target and any drafter stay `in_use` until `CONVERSATION_GAP_SECS`
+passes — a whole placement's reclaim of that idle drafter (#442) waits that long. The disconnect abort has the same
+delay; both would release at the abort.
 
 **The design it was built from (2026-11-12):**
 - *Sample, at the coordinator* (`remote_generate`, beside the `Delegated` record): the first token's wait less
