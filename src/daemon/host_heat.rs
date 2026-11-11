@@ -31,9 +31,22 @@
 //! the dispatcher reads before it starts a peer's request (`dispatch::
 //! admits_a_new_request`), and the capability reads for `can_serve_inference`
 //! — so planners leave this node out, and a peer that asks anyway is refused
-//! out loud, with no penalty to anyone. Work already running, the owner's own
-//! requests and serving the model pieces it holds all go on (the next steps of
-//! #440 slow those too). The owner is told once per change, in their words.
+//! out loud, with no penalty to anyone. The owner's own requests and serving
+//! the model pieces it holds go on (pacing the owner's is the next step of
+//! #440). The owner is told once per change, in their words.
+//!
+//! **Work already running for other computers stops too** once the hold has
+//! lasted [`RUNNING_WORK_STOPS_AFTER`], and at once when the driver stops
+//! answering or the card's hardware protection is on
+//! ([`PeerWorkHold::Heat`]'s `stops_running`): a split's next steps are
+//! refused (`dispatch::admit_own_forward`, `admit_stream_chunk`) and a whole
+//! reply running here is ended in words its coordinator reads as "continue
+//! elsewhere" ([`SharedState::stop_running_peer_work`]). Kubernetes' node-
+//! pressure eviction draws the same two lines — a soft threshold evicts after
+//! its grace period, a hard one at once — and BOINC's suspended GPU task
+//! loses only what came after its last checkpoint; ours is what the
+//! coordinator already received, which its continuation resumes from
+//! (`router::continuation_after`, #236).
 //!
 //! `SWARMLLM_HEAT_GUARD=0` turns the hold off (rigs and gates, whose safety
 //! kit guards the test machine); `SWARMLLM_FAULT_HOST_HEAT` fakes a reading.
@@ -68,6 +81,15 @@ const PROCESSOR_HOT_FOR: Duration = Duration::from_secs(300);
 /// a machine cooling across the line does not take a burst of work and heat
 /// straight back up.
 const COOL_FOR: Duration = Duration::from_secs(60);
+/// How long a hold lasts before the work for other computers ALREADY running
+/// here stops too — the grace period of a soft threshold (Kubernetes' node-
+/// pressure eviction). Most replies end inside it, so a computer that only
+/// touched its line finishes what it took on; one that stays hot stops being
+/// driven by strangers four minutes after its card reached its target (the
+/// laptop that froze held its card there for ~20 minutes, gotcha #1081). A
+/// driver that stopped answering or the card's own protection stops it at
+/// once — the hard thresholds.
+pub(crate) const RUNNING_WORK_STOPS_AFTER: Duration = Duration::from_secs(120);
 
 const _: () = assert!(PROCESSOR_COOL_C < PROCESSOR_HOT_C);
 const _: () = assert!(CARD_AT_TARGET_WITHIN_C < CARD_COOL_UNDER_TARGET_C);
@@ -136,6 +158,15 @@ impl HeatCause {
         }
     }
 
+    /// A hard threshold: the work already running for other computers stops
+    /// as soon as this is read, not after [`RUNNING_WORK_STOPS_AFTER`]. A
+    /// driver that does not answer is how the lock-up began (gotcha #1081),
+    /// and the hardware's protection means the card is past its slowdown
+    /// temperature.
+    fn stops_running_at_once(self) -> bool {
+        matches!(self, Self::DriverNotAnswering | Self::CardProtecting)
+    }
+
     fn to_u8(c: Option<Self>) -> u8 {
         match c {
             None => 0,
@@ -165,6 +196,12 @@ pub(crate) struct HeatTracker {
     processor_hot_since: Option<Instant>,
     cool_since: Option<Instant>,
     holding: Option<HeatCause>,
+    /// When the current hold began, whatever its cause since.
+    holding_since: Option<Instant>,
+    /// The work already running for other computers stops too. Latched for
+    /// the rest of the hold: a driver answering again inside the hold-off
+    /// does not hand a stopped split its next steps back.
+    stops_running: bool,
 }
 
 impl HeatTracker {
@@ -203,6 +240,7 @@ impl HeatTracker {
         };
         match (self.holding, cause) {
             (_, Some(c)) => {
+                self.holding_since.get_or_insert(now);
                 self.holding = Some(c);
                 self.cool_since = None;
             }
@@ -212,12 +250,23 @@ impl HeatTracker {
                     self.cool_since = None;
                 } else if held_for(Some(*self.cool_since.get_or_insert(now)), COOL_FOR) {
                     self.holding = None;
+                    self.holding_since = None;
                     self.cool_since = None;
                 }
             }
             (None, None) => {}
         }
+        self.stops_running = self.holding.is_some()
+            && (self.stops_running
+                || cause.is_some_and(HeatCause::stops_running_at_once)
+                || held_for(self.holding_since, RUNNING_WORK_STOPS_AFTER));
         self.holding
+    }
+
+    /// Does the work already running here for other computers stop too, as
+    /// of the last [`Self::observe`]? Only ever while it holds back.
+    pub(crate) fn stops_running(&self) -> bool {
+        self.stops_running
     }
 }
 
@@ -228,6 +277,8 @@ pub struct HostHeatWatch {
     /// The cause held back for ([`HeatCause::to_u8`]), read without a lock by
     /// the dispatcher and the capability.
     holding: AtomicU8,
+    /// [`HeatTracker::stops_running`], read without a lock by the dispatcher.
+    stops_running: AtomicBool,
     /// The last reading, for the diagnostics report.
     last: parking_lot::Mutex<Option<HeatReading>>,
     /// The card's target temperature once learned (it never changes).
@@ -257,10 +308,26 @@ impl Drop for Refreshing<'_> {
 /// two reasons can never be applied at different places.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PeerWorkHold {
-    /// The connection is metered (#277, `daemon::metered`).
+    /// The connection is metered (#277, `daemon::metered`). Work already
+    /// running goes on, as a download already under way does.
     Metered,
     /// The computer is too hot, or its graphics driver is not answering.
-    Heat,
+    /// `stops_running`: the work already running here for other computers
+    /// stops too ([`RUNNING_WORK_STOPS_AFTER`], or at once on a hard
+    /// threshold) — a split's next step is refused like a new request.
+    Heat { stops_running: bool },
+}
+
+impl PeerWorkHold {
+    /// Does work a peer ALREADY has running here stop?
+    pub fn stops_running_work(self) -> bool {
+        matches!(
+            self,
+            Self::Heat {
+                stops_running: true
+            }
+        )
+    }
 }
 
 impl SharedState {
@@ -274,16 +341,52 @@ impl SharedState {
         HeatCause::from_u8(self.metrics.host_heat.holding.load(Ordering::Relaxed))
     }
 
+    /// Does the work already running here for other computers stop, because
+    /// this computer has stayed hot or its driver stopped answering? Read
+    /// without asking anything; only ever while [`Self::host_heat_hold_now`]
+    /// holds.
+    pub fn running_peer_work_stops_now(&self) -> bool {
+        self.host_heat_hold_now().is_some()
+            && self.metrics.host_heat.stops_running.load(Ordering::Relaxed)
+    }
+
     /// The one answer to "does this node take no new work for other computers
-    /// now, and why" — the metered connection first, then the heat.
+    /// now, and why" — and whether the work already running stops too.
+    ///
+    /// A heat hold that stops running work comes first, whatever the
+    /// connection: a metered answer would let a split's next steps through
+    /// on a computer that must stop them. Otherwise the metered connection,
+    /// then the heat.
     pub fn peer_work_hold_now(&self) -> Option<PeerWorkHold> {
-        if self.metered_hold_now() {
-            Some(PeerWorkHold::Metered)
-        } else if self.host_heat_hold_now().is_some() {
-            Some(PeerWorkHold::Heat)
-        } else {
-            None
+        let heat = self
+            .host_heat_hold_now()
+            .map(|_| self.running_peer_work_stops_now());
+        peer_work_hold(heat, self.metered_hold_now())
+    }
+
+    /// End every whole reply this node is producing for another computer —
+    /// a whole model handed here, a split led here — while running work stops
+    /// for heat. Aborting the reply's task is what `CancelInference` does
+    /// (`inbound_generate_aborts`); its last frame then carries the cooling
+    /// words (`dispatch::remote_generate::ended_reply_words`), so the
+    /// coordinator continues the reply elsewhere from what it received. A
+    /// split's steps are refused at the dispatcher instead: each is its own
+    /// forward. How many were ended.
+    pub(crate) fn stop_running_peer_work(&self) -> usize {
+        // Collected first: no map guard is held while a task is aborted.
+        let running: Vec<(uuid::Uuid, tokio::task::AbortHandle)> = self
+            .inbound_generate_aborts
+            .iter()
+            .map(|e| (*e.key(), e.value().0.clone()))
+            .collect();
+        for (request_id, handle) in &running {
+            tracing::warn!(
+                %request_id,
+                "ending a reply this computer was writing for another computer — it is cooling down"
+            );
+            handle.abort();
         }
+        running.len()
     }
 
     /// Read the computer's heat (off the calling task: `nvidia-smi` and the
@@ -307,14 +410,39 @@ impl SharedState {
             *watch.card_target_c.lock() = Some(t);
         }
         *watch.last.lock() = Some(reading);
-        let cause = watch.tracker.lock().observe(&reading, Instant::now());
+        let (cause, stops_running) = {
+            let mut tracker = watch.tracker.lock();
+            let cause = tracker.observe(&reading, Instant::now());
+            (cause, tracker.stops_running())
+        };
         let before = HeatCause::from_u8(
             watch
                 .holding
                 .swap(HeatCause::to_u8(cause), Ordering::AcqRel),
         );
+        let stopped_before = watch.stops_running.swap(stops_running, Ordering::AcqRel);
         if before.is_some() != cause.is_some() {
             self.tell_the_owner_about_heat(cause, &reading);
+        }
+        if stops_running && heat_guard_on() {
+            // Every round while it holds, not only on the edge: a reply that
+            // slipped in as the hold began is ended at the next.
+            let ended = self.stop_running_peer_work();
+            if !stopped_before {
+                tracing::warn!(
+                    cause = cause.map(HeatCause::as_str),
+                    replies_ended = ended,
+                    "this computer is still too hot (or its graphics driver is not answering), \
+                     so the work it was running for other computers stops too — their replies \
+                     continue elsewhere"
+                );
+            }
+        } else if stops_running && !stopped_before {
+            tracing::info!(
+                cause = cause.map(HeatCause::as_str),
+                "heat guard is off (SWARMLLM_HEAT_GUARD=0): it would have stopped the work \
+                 running for other computers"
+            );
         }
     }
 
@@ -367,6 +495,22 @@ impl SharedState {
         self.emit_activity(
             ActivityEvent::new("system", kind, message.to_string()).with_toast("info", 10000),
         );
+    }
+}
+
+/// [`SharedState::peer_work_hold_now`]'s precedence: `heat` is `None` when
+/// the computer is not held back for heat, else whether its running work
+/// stops too.
+fn peer_work_hold(heat: Option<bool>, metered: bool) -> Option<PeerWorkHold> {
+    match (heat, metered) {
+        (Some(true), _) => Some(PeerWorkHold::Heat {
+            stops_running: true,
+        }),
+        (_, true) => Some(PeerWorkHold::Metered),
+        (Some(false), false) => Some(PeerWorkHold::Heat {
+            stops_running: false,
+        }),
+        (None, false) => None,
     }
 }
 
@@ -479,8 +623,18 @@ pub(crate) fn parse_card_target(out: &str) -> Option<f32> {
 /// `SWARMLLM_FAULT_HOST_HEAT=card|protecting|processor|driver|cool`: a reading
 /// that says so, for proving the hold on a computer that is not hot. `card`
 /// and `processor` hold back only after their minutes, as a real one would.
+/// `file:<path>` reads the fault from that file at every reading, and the
+/// real reading while the file is absent — so a rig can make a node hot in
+/// the middle of a reply it is serving.
 fn faked_reading() -> Option<HeatReading> {
     let fault = std::env::var("SWARMLLM_FAULT_HOST_HEAT").ok()?;
+    match fault.trim().strip_prefix("file:") {
+        Some(path) => faked(&std::fs::read_to_string(path).ok()?),
+        None => faked(&fault),
+    }
+}
+
+fn faked(fault: &str) -> Option<HeatReading> {
     let card = |temp_c, driver_cooling, hardware_protecting| CardHeat {
         temp_c,
         driver_cooling,
@@ -705,6 +859,129 @@ mod tests {
     fn the_first_hot_reading_alone_never_holds_back() {
         let mut t = HeatTracker::default();
         assert_eq!(t.observe(&card(95.0, true), Instant::now()), None);
+    }
+
+    /// The soft threshold: a hold that lasts stops the work already running
+    /// for other computers too, two minutes after it began — never with it.
+    #[test]
+    fn a_hold_that_lasts_stops_the_running_work_too() {
+        let t0 = Instant::now();
+        let mut t = HeatTracker::default();
+        let hot = card(87.7, true);
+        t.observe(&hot, t0);
+        assert_eq!(t.observe(&hot, t0 + secs(120)), Some(HeatCause::Card));
+        assert!(
+            !t.stops_running(),
+            "new work is held back; what runs finishes"
+        );
+        t.observe(&hot, t0 + secs(239));
+        assert!(!t.stops_running(), "119 s into the hold");
+        t.observe(&hot, t0 + secs(240));
+        assert!(t.stops_running(), "two minutes into the hold");
+    }
+
+    /// A hold that ends before its grace never stops running work, and the
+    /// next hold's grace starts again from nothing.
+    #[test]
+    fn a_short_hold_lets_running_work_finish() {
+        let t0 = Instant::now();
+        let mut t = HeatTracker::default();
+        t.observe(&card(88.0, true), t0);
+        t.observe(&card(88.0, true), t0 + secs(120));
+        t.observe(&card(79.0, false), t0 + secs(150));
+        assert_eq!(t.observe(&card(79.0, false), t0 + secs(210)), None);
+        assert!(!t.stops_running());
+        t.observe(&card(88.0, true), t0 + secs(300));
+        assert!(t.observe(&card(88.0, true), t0 + secs(420)).is_some());
+        t.observe(&card(88.0, true), t0 + secs(500));
+        assert!(
+            !t.stops_running(),
+            "80 s into the second hold, not 200 s into the first"
+        );
+    }
+
+    /// The hard thresholds stop running work at once, and the stop lasts the
+    /// whole hold — through the hold-off after the driver answers again — and
+    /// ends with it.
+    #[test]
+    fn a_stuck_driver_or_the_cards_protection_stops_running_work_at_once() {
+        let t0 = Instant::now();
+        let mut t = HeatTracker::default();
+        let stuck = HeatReading {
+            driver_not_answering: true,
+            ..Default::default()
+        };
+        t.observe(&stuck, t0);
+        assert!(t.stops_running(), "a stuck driver: at once");
+        t.observe(&card(60.0, false), t0 + secs(30));
+        assert!(t.stops_running(), "the hold-off keeps it stopped");
+        assert_eq!(t.observe(&card(60.0, false), t0 + secs(90)), None);
+        assert!(!t.stops_running(), "it ends with the hold");
+
+        let mut protecting = card(98.0, true);
+        protecting.card.as_mut().unwrap().hardware_protecting = true;
+        let mut t = HeatTracker::default();
+        t.observe(&protecting, t0);
+        assert!(t.stops_running(), "the card's own protection: at once");
+    }
+
+    /// The control: nothing hot, nothing stopped — and the processor's slow
+    /// hold is soft like the card's.
+    #[test]
+    fn running_work_stops_only_inside_a_hold() {
+        let t0 = Instant::now();
+        let mut t = HeatTracker::default();
+        t.observe(&card(50.0, false), t0);
+        assert!(!t.stops_running());
+        let p = HeatReading {
+            processor_c: Some(95.0),
+            ..Default::default()
+        };
+        t.observe(&p, t0);
+        assert!(t.observe(&p, t0 + secs(300)).is_some());
+        assert!(!t.stops_running(), "the processor's hold is soft");
+        t.observe(&p, t0 + secs(420));
+        assert!(t.stops_running());
+    }
+
+    /// A heat hold that stops running work wins over a metered connection,
+    /// whose answer would let a split's next steps through.
+    #[test]
+    fn a_hold_that_stops_running_work_is_never_hidden_by_a_metered_connection() {
+        assert_eq!(
+            peer_work_hold(Some(true), true),
+            Some(PeerWorkHold::Heat {
+                stops_running: true
+            })
+        );
+        assert_eq!(
+            peer_work_hold(Some(false), true),
+            Some(PeerWorkHold::Metered)
+        );
+        assert_eq!(
+            peer_work_hold(Some(false), false),
+            Some(PeerWorkHold::Heat {
+                stops_running: false
+            })
+        );
+        assert_eq!(peer_work_hold(None, true), Some(PeerWorkHold::Metered));
+        assert_eq!(peer_work_hold(None, false), None);
+        assert!(PeerWorkHold::Heat {
+            stops_running: true
+        }
+        .stops_running_work());
+        assert!(!PeerWorkHold::Metered.stops_running_work());
+    }
+
+    /// `file:<path>`: the fault in the file while it exists, the real reading
+    /// while it does not.
+    #[test]
+    fn a_fault_read_from_a_file_follows_the_file() {
+        assert_eq!(
+            faked("driver\n").map(|r| r.driver_not_answering),
+            Some(true)
+        );
+        assert_eq!(faked("nonsense"), None);
     }
 
     #[test]

@@ -187,6 +187,11 @@
 #          killed one saw the request too (#302; v0.3.244 named only the peer it
 #          finished on). BIN_A = v0.3.230 is the control: the stream ends with an
 #          error after the kill.
+#          CONTINUE_BY=heat (#440): the serving peer is not killed — its heat guard
+#          reads a file the rig flips to "driver stuck", and PASS adds that it
+#          ended the reply itself ("ending a reply this computer was writing").
+#          CONTINUE_MAX_TOKENS (default 300) lengthens the reply: the stop lands
+#          at that peer's next health round, up to 30 s later.
 #          NONSTREAM=1 asks the same question WITHOUT streaming and kills the
 #          worker KILL_AFTER_S (default 8) seconds in. Prints the reply's
 #          seconds, finish reason and length, which recovery A took (a re-plan
@@ -661,6 +666,13 @@ BASE=$(mktemp -d "$HOME/.split-rig.XXXXXX")
 OUT="${OUT:-$BASE/out}"
 mkdir -p "$OUT"
 export LD_LIBRARY_PATH=/usr/local/cuda/lib64:/usr/lib/wsl/lib
+if [ "$MODE" = continue ] && [ "${CONTINUE_BY:-kill}" = heat ]; then
+  # Each holder's heat guard reads its heat from a file (#440), "cool" until the
+  # rig makes the one serving the reply hot. Nothing here heats the machine.
+  for n in B C; do echo cool > "$BASE/$n.heat"; done
+  ENV_B="${ENV_B:-} SWARMLLM_HEAT_GUARD=1 SWARMLLM_FAULT_HOST_HEAT=file:$BASE/B.heat"
+  ENV_C="${ENV_C:-} SWARMLLM_HEAT_GUARD=1 SWARMLLM_FAULT_HOST_HEAT=file:$BASE/C.heat"
+fi
 
 # The asking node must SHARE (`swarm_use`, v0.3.271): a node holding fewer than
 # 2 parts of MODEL also holds SHARE_MODEL whole (`rig_share.sh`).
@@ -2217,25 +2229,40 @@ if [ "$MODE" = continue ]; then
     | python3 -c 'import sys,json; print(json.load(sys.stdin)["node_id"][:16])'; }
   IB=$(id16 "$BASE/B/api_key" 8920); IC=$(id16 "$BASE/C/api_key" 8940)
   Q="Explain in detail how a refrigerator works, step by step, covering the compressor, the condenser, the expansion valve and the evaporator."
-  BODY=$(python3 -c 'import json,sys; print(json.dumps({"model":sys.argv[1],"max_tokens":300,"temperature":0,"stream":True,"messages":[{"role":"user","content":sys.argv[2]}]}))' "$MODEL" "$Q")
+  BODY=$(python3 -c 'import json,sys; print(json.dumps({"model":sys.argv[1],"max_tokens":int(sys.argv[3]),"temperature":0,"stream":True,"messages":[{"role":"user","content":sys.argv[2]}]}))' "$MODEL" "$Q" "${CONTINUE_MAX_TOKENS:-300}")
   : > "$OUT/continue.sse"
   curl -s -N -m 900 -H "Authorization: Bearer $KA" -H "Content-Type: application/json" \
     -X POST localhost:8900/v1/chat/completions -d "$BODY" > "$OUT/continue.sse" &
   CURL=$!
-  chunks() { grep -c '"content"' "$OUT/continue.sse" 2>/dev/null || echo 0; }
+  # grep -c prints 0 AND fails on no match: `|| echo 0` printed "0" twice.
+  chunks() { local n; n=$(grep -c '"content"' "$OUT/continue.sse" 2>/dev/null); echo "${n:-0}"; }
   for _ in $(seq 1 600); do [ "$(chunks)" -ge "${KILL_AFTER:-24}" ] && break; kill -0 $CURL 2>/dev/null || break; sleep 0.5; done
   SERVER=$(grep -a 'remote-generate fast path: request sent' "$BASE/A/node.log" | tail -1 | grep -oE 'target=[0-9a-f]+' | cut -d= -f2)
-  case "$SERVER" in "$IB"*) VICTIM=$PB; OTHER=$IC ;; "$IC"*) VICTIM=$PC; OTHER=$IB ;; *) VICTIM=""; OTHER="" ;; esac
+  case "$SERVER" in "$IB"*) VICTIM=$PB; VN=B; OTHER=$IC ;; "$IC"*) VICTIM=$PC; VN=C; OTHER=$IB ;; *) VICTIM=""; VN=""; OTHER="" ;; esac
   AT_KILL=$(chunks)
   WPID=$( [ -n "$VICTIM" ] && pgrep -P "$VICTIM" -f model-worker | head -1 )
-  echo "continue: A handed it to ${SERVER:-?}; killing its worker (pid ${WPID:-none}) after $AT_KILL chunks"
-  [ -n "$WPID" ] && kill -9 "$WPID"
+  if [ "${CONTINUE_BY:-kill}" = heat ]; then
+    # The serving computer's driver "stops answering": its next health round
+    # (≤ 30 s) holds back and ends the reply it is writing for A.
+    echo "continue: A handed it to ${SERVER:-?}; its graphics driver stops answering after $AT_KILL chunks"
+    [ -n "$VN" ] && echo driver > "$BASE/$VN.heat"
+  else
+    echo "continue: A handed it to ${SERVER:-?}; killing its worker (pid ${WPID:-none}) after $AT_KILL chunks"
+    [ -n "$WPID" ] && kill -9 "$WPID"
+  fi
   wait $CURL
+  STOPPED=1
+  if [ "${CONTINUE_BY:-kill}" = heat ] && [ -n "$VN" ]; then
+    STOPPED=$(grep -c 'ending a reply this computer was writing' "$BASE/$VN/node.log")
+    echo "continue: $VN stopped its running work $(grep -c 'stops too' "$BASE/$VN/node.log") time(s), ended $STOPPED reply(ies)"
+    grep -a -iE 'penal|trust' "$BASE/A/node.log" | grep -a -i "${SERVER:0:8}" | head -3 | cut -c1-240
+  fi
   continued=$(grep -c "continuing it on a fresh route" "$BASE/A/node.log")
   served_by_other=$(grep -a 'remote-generate fast path: request sent' "$BASE/A/node.log" | grep -c "target=${OTHER:-none}")
-  python3 - "$OUT/continue.sse" "$AT_KILL" "$continued" "$served_by_other" "${WPID:-}" "$IB" "$IC" <<'PY'
+  python3 - "$OUT/continue.sse" "$AT_KILL" "$continued" "$served_by_other" "${WPID:-}" "$IB" "$IC" "$STOPPED" <<'PY'
 import json, sys
 path, at_kill, continued, other, wpid = sys.argv[1], int(sys.argv[2]), int(sys.argv[3]), int(sys.argv[4]), sys.argv[5]
+stopped = int(sys.argv[8])
 peers = {sys.argv[6][:8], sys.argv[7][:8]}
 text, chunks, finish, error, route = "", 0, None, None, None
 for line in open(path, errors="replace"):
@@ -2266,7 +2293,7 @@ print("continue: reply: " + text[:400].replace("\n", " "))
 print(f"continue: route {json.dumps(route)}")
 named_both = bool(route) and peers <= set(route.get("all_nodes") or [])
 print(f"continue: the route names both peers: {named_both}")
-ok = bool(wpid) and error is None and finish is not None and after > 0 and once and continued >= 1 and other >= 1 and named_both
+ok = bool(wpid) and error is None and finish is not None and after > 0 and once and continued >= 1 and other >= 1 and named_both and stopped >= 1
 print("continue: PASS" if ok else "continue: FAIL" + ("" if wpid else " (no worker was killed)"))
 sys.exit(0 if ok else 1)
 PY

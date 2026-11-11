@@ -511,11 +511,16 @@ async fn stream_reply_to_requester(
             }
         }
         Err(e) => {
-            tracing::warn!(%request_id, error = %e, "remote-generate task join failed");
+            let words = ended_reply_words(
+                e.is_cancelled(),
+                shared_state.running_peer_work_stops_now(),
+                &e,
+            );
+            tracing::warn!(%request_id, error = %e, told = %words, "remote-generate task join failed");
             StreamingToken {
                 request_id,
                 token_id: streamed_count,
-                finish_reason: Some(NetworkFinishReason::Error(format!("task join: {e}"))),
+                finish_reason: Some(NetworkFinishReason::Error(words)),
                 text: String::new(),
                 usage: None,
                 matched_stop_sequence: None,
@@ -561,6 +566,26 @@ async fn stream_reply_to_requester(
     // request ended and waits out its whole deadline before reporting the peer
     // silent. Send it more than once.
     resend_terminal_token(network_tx, terminal_target, terminal_copy);
+}
+
+/// What the requester is told when the task writing its reply ended without
+/// an answer. A reply this node ended because the computer must cool down
+/// (`SharedState::stop_running_peer_work`, #440) is said in the cooling
+/// words — "Service unavailable", which the coordinator continues elsewhere
+/// from what it received (`router::continuation_after`) with nobody charged
+/// — and never as a bare cancellation. Read off the hold that ended it: a
+/// `CancelInference` from the requester itself while the stop holds gets the
+/// same words, which nobody is waiting for any more.
+fn ended_reply_words(
+    cancelled: bool,
+    running_work_stops: bool,
+    e: &dyn std::fmt::Display,
+) -> String {
+    if cancelled && running_work_stops {
+        super::heat_stop_refusal()
+    } else {
+        format!("task join: {e}")
+    }
 }
 
 /// What a node answers when asked to LEAD a split of a model whose first
@@ -903,6 +928,34 @@ mod worker_failure_tests {
                     Some(SwarmError::MixedModelCopy(_))
                 ),
                 "{sent:?}"
+            );
+        }
+    }
+
+    /// #440 step 3: a reply ended because this computer must cool down tells
+    /// its requester in words it continues elsewhere from — "cannot serve",
+    /// classed `ServiceUnavailable`, charged to nobody — and any other ended
+    /// task keeps its own words.
+    #[test]
+    fn a_reply_ended_to_cool_down_is_continued_elsewhere_not_failed() {
+        let told = super::ended_reply_words(true, true, &"task 7 was cancelled");
+        assert!(told.contains("cooling down"), "{told}");
+        assert!(
+            crate::inference::router::message_means_peer_cannot_serve(&told),
+            "{told}"
+        );
+        assert!(
+            matches!(
+                crate::error::reclassify_flattened_error(&told),
+                Some(SwarmError::ServiceUnavailable(_))
+            ),
+            "{told}"
+        );
+        for (cancelled, cooling) in [(true, false), (false, true), (false, false)] {
+            assert_eq!(
+                super::ended_reply_words(cancelled, cooling, &"boom"),
+                "task join: boom",
+                "cancelled {cancelled}, cooling {cooling}"
             );
         }
     }

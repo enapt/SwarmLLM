@@ -14949,8 +14949,9 @@ fn every_upload_a_peer_starts_asks_whether_the_connection_is_metered() {
 }
 
 /// The admission calls in `src` — `admits_a_new_request(` / `admit_own_forward(`
-/// outside their own definitions and outside `admit_own_forward`'s body, which
-/// passes its argument on — whose arguments do not ask `peer_work_hold_now()`.
+/// / `admit_stream_chunk(` (a prompt piece starts a request too, #171) outside
+/// their own definitions and outside `admit_own_forward`'s body, which passes
+/// its argument on — whose arguments do not ask `peer_work_hold_now()`.
 fn admission_calls_missing_the_hold(src: &str) -> (usize, Vec<String>) {
     let mut code = production_code(src);
     if let Some(body) = fn_body(&code, "fn admit_own_forward(") {
@@ -14960,7 +14961,10 @@ fn admission_calls_missing_the_hold(src: &str) -> (usize, Vec<String>) {
     let mut calls = 0;
     let mut missing = Vec::new();
     for (line, stmt) in statements(&code) {
-        if !(stmt.contains("admits_a_new_request(") || stmt.contains("admit_own_forward(")) {
+        if !(stmt.contains("admits_a_new_request(")
+            || stmt.contains("admit_own_forward(")
+            || stmt.contains("admit_stream_chunk("))
+        {
             continue;
         }
         if stmt.trim_start().starts_with("fn ") || stmt.contains(" fn ") || stmt.starts_with("use ")
@@ -14985,6 +14989,9 @@ fn the_admission_hold_guard_sees_a_call_that_asks_nothing() {
         "        shared_state.peer_work_hold_now(),",
     );
     assert_eq!(admission_calls_missing_the_hold(&asked), (1, Vec::new()));
+    let stream = "fn x() {\n    let admitted = match forward.stream_seq {\n        Some(seq) => admit_stream_chunk(\n            &forward,\n            None,\n            || judge(),\n        )\n        .and_then(|()| take()),\n        None => own(),\n    };\n}\n";
+    let (calls, missing) = admission_calls_missing_the_hold(stream);
+    assert_eq!((calls, missing.len()), (1, 1), "{missing:?}");
 }
 
 /// Every place the dispatcher starts a peer's request asks the ONE hold answer
@@ -14995,8 +15002,8 @@ fn every_new_request_a_peer_starts_asks_whether_this_node_holds_back() {
     let src = std::fs::read_to_string("src/daemon/dispatch/mod.rs").expect("read dispatch/mod.rs");
     let (calls, missing) = admission_calls_missing_the_hold(&src);
     assert!(
-        calls >= 3,
-        "the forward, whole-model and image-encode admissions moved — re-point this guard ({calls} found)"
+        calls >= 4,
+        "the forward, stream, whole-model and image-encode admissions moved — re-point this guard ({calls} found)"
     );
     assert!(
         missing.is_empty(),

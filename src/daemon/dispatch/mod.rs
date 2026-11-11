@@ -76,8 +76,10 @@ fn max_forwards_per_peer(contribution: &swarmllm_types::ContributionMode) -> usi
 /// (#440, `daemon::host_heat`). Its capability already tells peers it takes no
 /// inference work, so a request arriving anyway comes from a peer still
 /// holding the last one, and is refused out loud like any other. Work already
-/// running here goes on, as a download already under way does. REQUIRED, so
-/// every path that admits a new request answers it.
+/// running here goes on, as a download already under way does — until a heat
+/// hold stops it too (`PeerWorkHold::stops_running_work`, read by
+/// [`admit_own_forward`] and [`admit_stream_chunk`] for every forward).
+/// REQUIRED, so every path that admits a new request answers it.
 ///
 /// And only while a quarter of the slots (at least one) stays free: that
 /// reserve is for the next steps of requests already running here, which the
@@ -100,11 +102,7 @@ fn admits_a_new_request(
     requester: &SwarmUse,
 ) -> Result<(), ForwardRefused> {
     may_use_the_swarm(requester)?;
-    match hold {
-        Some(PeerWorkHold::Metered) => return Err(ForwardRefused::ConnectionMetered),
-        Some(PeerWorkHold::Heat) => return Err(ForwardRefused::Cooling),
-        None => {}
-    }
+    refuse_for_the_hold(hold)?;
     if available > (total / 4).max(1) {
         Ok(())
     } else {
@@ -124,6 +122,51 @@ fn may_use_the_swarm(requester: &SwarmUse) -> Result<(), ForwardRefused> {
             requester.clone(),
         ))
     }
+}
+
+/// The hold's half of [`admits_a_new_request`]: no request starts here while
+/// this node holds back new work for other computers.
+fn refuse_for_the_hold(hold: Option<PeerWorkHold>) -> Result<(), ForwardRefused> {
+    match hold {
+        Some(PeerWorkHold::Metered) => Err(ForwardRefused::ConnectionMetered),
+        Some(PeerWorkHold::Heat { .. }) => Err(ForwardRefused::Cooling),
+        None => Ok(()),
+    }
+}
+
+/// May one chunk of a STREAM of forwards (`LayerForward::stream_seq`) run
+/// here? Asked before its stream's slot is taken ([`StreamWorkSlot`]).
+///
+/// A piece of a prompt pass (`sequence_num == 0` — #171 sends a long prompt
+/// in pieces, each a chunk of one stream) starts a request exactly as a whole
+/// prompt pass does, so it answers the same two rules: this node's hold
+/// (`hold`, from `SharedState::peer_work_hold_now`) and whether its requester
+/// may use the swarm (`requester`, asked only for such a piece). Until
+/// 2026-11-11 a stream asked neither: a prompt long enough to go in pieces
+/// was served on a metered connection, on a computer cooling down, and for a
+/// computer sharing nothing. Every piece is judged, as every whole prompt
+/// pass is — a stream with nothing in flight here cannot tell its first piece
+/// from a later one, and a request that has written nothing yet is still new.
+/// The slot reserve is not applied: a stream's pieces share one slot, and
+/// refusing a later piece under load would fail a prompt pass half read.
+///
+/// Any chunk — a streamed check of a reply under way too — stops while a
+/// heat hold stops running work (#440).
+fn admit_stream_chunk(
+    forward: &crate::types::LayerForward,
+    hold: Option<PeerWorkHold>,
+    requester: impl FnOnce() -> SwarmUse,
+) -> Result<(), ForwardRefused> {
+    if hold.is_some_and(PeerWorkHold::stops_running_work) {
+        return Err(ForwardRefused::CoolingStopsRunning);
+    }
+    if forward.sequence_num == 0 {
+        may_use_the_swarm(&requester())?;
+        if forward.tp_meta.is_none() {
+            refuse_for_the_hold(hold)?;
+        }
+    }
+    Ok(())
 }
 
 use crate::daemon::host_heat::PeerWorkHold;
@@ -206,6 +249,10 @@ enum ForwardRefused {
     /// A new request while this computer cools down, or its graphics driver
     /// is not answering (#440).
     Cooling,
+    /// A step of a request already running here, once this computer has
+    /// stayed hot long enough — or its driver stopped answering — that the
+    /// work it runs for others stops too (#440).
+    CoolingStopsRunning,
     /// A new request from a computer that may not use the swarm: too few parts
     /// shared, or too far behind (`swarm_use`).
     RequesterMayNotUseTheSwarm(SwarmUse),
@@ -225,6 +272,7 @@ impl ForwardRefused {
         match self {
             Self::ConnectionMetered => metered_refusal(),
             Self::Cooling => heat_refusal(),
+            Self::CoolingStopsRunning => heat_stop_refusal(),
             Self::RequesterMayNotUseTheSwarm(why) => why.peer_refusal(),
             _ => peer_work_refusal(),
         }
@@ -253,7 +301,7 @@ impl ForwardRefused {
                 kind,
                 "request refused — this connection is metered, so no new work is taken for other machines"
             );
-        } else if *self == Self::Cooling {
+        } else if matches!(self, Self::Cooling | Self::CoolingStopsRunning) {
             tracing::info!(
                 sender = %sender,
                 kind,
@@ -277,6 +325,13 @@ impl ForwardRefused {
             Self::Cooling => tracing::info!(
                 sender = %sender,
                 "LayerForward refused — this computer is cooling down, so no new work is taken for other machines"
+            ),
+            // At debug: a stopped split sends its next step or two before its
+            // coordinator moves it; the stop itself is said once, at WARN, by
+            // the heat guard (`refresh_host_heat`).
+            Self::CoolingStopsRunning => tracing::debug!(
+                sender = %sender,
+                "LayerForward refused — this computer is cooling down, so the work it was running for other machines has stopped"
             ),
             Self::RequesterMayNotUseTheSwarm(_) => {
                 self.log_for("LayerForward", sender, per_peer_limit)
@@ -335,6 +390,14 @@ fn admit_own_forward(
         } else {
             may_use_the_swarm(&requester)?;
         }
+    }
+    // A step of a request already running here — and a tensor-parallel
+    // layer's, whose coordinator then waits out one AllReduce (10 s) — stops
+    // while a heat hold stops running work (#440): the coordinator reads the
+    // refusal as "cannot serve", fails the segment over or continues the
+    // reply elsewhere, and charges nobody.
+    if hold.is_some_and(PeerWorkHold::stops_running_work) {
+        return Err(ForwardRefused::CoolingStopsRunning);
     }
     let permit = semaphore
         .clone()
@@ -491,12 +554,28 @@ fn heat_refusal() -> String {
     .to_string()
 }
 
+/// What a peer is told when work it ALREADY had running here stops because
+/// this computer stayed hot, or its graphics driver stopped answering (#440):
+/// a split's next step, or a whole reply ended part-way
+/// (`remote_generate::ended_reply_words`). The cooling answer's shape: the
+/// coordinator reads "cannot serve" — fails the segment over, or continues
+/// the reply from what it received (`router::continuation_after`) — with no
+/// penalty and nothing retracted.
+pub(super) fn heat_stop_refusal() -> String {
+    crate::error::SwarmError::ServiceUnavailable(
+        "this machine is cooling down, so it has stopped the work it was running \
+         for other machines — continue on another"
+            .into(),
+    )
+    .to_string()
+}
+
 /// What a peer is told when this node holds back new work for other computers,
 /// for `hold`'s reason — the one wording for the dispatcher and prompt admission.
 fn hold_refusal(hold: PeerWorkHold) -> String {
     match hold {
         PeerWorkHold::Metered => metered_refusal(),
-        PeerWorkHold::Heat => heat_refusal(),
+        PeerWorkHold::Heat { .. } => heat_refusal(),
     }
 }
 
@@ -1120,14 +1199,27 @@ pub(crate) async fn dispatch_network_messages(
                                         // stream's (`StreamWorkSlot`).
                                         let peer_sender = authenticated_sender.clone().expect("guarded by Some check above");
                                         let admitted = match forward.stream_seq {
-                                            Some(seq) => StreamWorkSlot::try_take(
-                                                &stream_work,
-                                                &peer_forward_counts,
-                                                &peer_sender,
-                                                (forward.request_id, forward.layer_range, seq),
-                                                per_peer_limit,
-                                                || forward_semaphore.clone().try_acquire_owned().ok(),
+                                            Some(seq) => admit_stream_chunk(
+                                                &forward,
+                                                shared_state.peer_work_hold_now(),
+                                                || {
+                                                    layer_forward::swarm_use_of_forward(
+                                                        shared_state,
+                                                        forward.requester_node_id,
+                                                        &peer_sender,
+                                                    )
+                                                },
                                             )
+                                            .and_then(|()| {
+                                                StreamWorkSlot::try_take(
+                                                    &stream_work,
+                                                    &peer_forward_counts,
+                                                    &peer_sender,
+                                                    (forward.request_id, forward.layer_range, seq),
+                                                    per_peer_limit,
+                                                    || forward_semaphore.clone().try_acquire_owned().ok(),
+                                                )
+                                            })
                                             .map(|share| (PeerWork::Stream { _share: share }, None)),
                                             None => admit_own_forward(
                                                 &forward,
@@ -3955,7 +4047,13 @@ mod inbound_forward_slot_tests {
                 ForwardRefused::ConnectionMetered,
                 "metered",
             ),
-            (PeerWorkHold::Heat, ForwardRefused::Cooling, "cooling down"),
+            (
+                PeerWorkHold::Heat {
+                    stops_running: false,
+                },
+                ForwardRefused::Cooling,
+                "cooling down",
+            ),
         ] {
             assert_eq!(
                 admits_a_new_request(8, 8, Some(hold), &SwarmUse::Allowed),
@@ -3997,6 +4095,134 @@ mod inbound_forward_slot_tests {
             assert!(
                 crate::inference::router::message_means_peer_cannot_serve(&told),
                 "the coordinator must bar this node and re-plan, not retract its parts: {told}"
+            );
+        }
+    }
+
+    /// #440 step 3: once a heat hold stops running work, a request already
+    /// running here is refused its next step — a decode step, a tensor-
+    /// parallel layer's — in the words its coordinator reads as "cannot serve,
+    /// continue elsewhere", holding no slot; a new request keeps the hold's
+    /// own refusal.
+    #[test]
+    fn a_hot_node_that_stops_running_work_refuses_a_running_requests_next_step() {
+        use super::{admit_own_forward, ForwardRefused, PeerWorkHold};
+        let stops = PeerWorkHold::Heat {
+            stops_running: true,
+        };
+        let counts: super::PeerWorkCounts = Arc::new(dashmap::DashMap::new());
+        let permits = Arc::new(tokio::sync::Semaphore::new(8));
+        let admit = |forward: &crate::types::LayerForward, hold: Option<PeerWorkHold>| {
+            admit_own_forward(
+                forward,
+                PeerWorkSlot::try_take(&counts, &peer(), 4),
+                &permits,
+                8,
+                hold,
+                || SwarmUse::Allowed,
+            )
+            .map(|_| ())
+        };
+        assert_eq!(
+            admit(&a_forward(7), Some(stops)),
+            Err(ForwardRefused::CoolingStopsRunning),
+            "a running request's next step stops"
+        );
+        assert_eq!(
+            admit(&a_forward(0), Some(stops)),
+            Err(ForwardRefused::Cooling),
+            "a new request is refused as before"
+        );
+        let mut tensor_parallel = a_forward(3);
+        tensor_parallel.tp_meta = Some(crate::types::TensorParallelMeta {
+            tp_rank: 1,
+            tp_size: 2,
+            single_layer: 0,
+            phase: Default::default(),
+        });
+        assert_eq!(
+            admit(&tensor_parallel, Some(stops)),
+            Err(ForwardRefused::CoolingStopsRunning)
+        );
+        assert!(counts.get(&peer()).is_none(), "a refusal holds no slot");
+        assert_eq!(permits.available_permits(), 8, "nor a node-wide permit");
+        // The control: the same step under a hold that does not stop running
+        // work, and under none, is served.
+        for hold in [
+            None,
+            Some(PeerWorkHold::Metered),
+            Some(PeerWorkHold::Heat {
+                stops_running: false,
+            }),
+        ] {
+            assert_eq!(admit(&a_forward(7), hold), Ok(()), "{hold:?}");
+        }
+        let told = ForwardRefused::CoolingStopsRunning.refusal();
+        assert!(told.contains("cooling down"), "{told}");
+        assert_ne!(told, super::heat_refusal(), "it does not say 'new work'");
+        assert!(
+            crate::inference::router::message_means_peer_cannot_serve(&told),
+            "the coordinator must move the work, not retract this node's parts: {told}"
+        );
+    }
+
+    fn a_stream_chunk(sequence_num: u32) -> crate::types::LayerForward {
+        let mut forward = a_forward(sequence_num);
+        forward.stream_seq = Some(0);
+        forward
+    }
+
+    /// A long prompt goes in pieces, each a chunk of one stream (#171). A
+    /// piece starts a request like a whole prompt pass does, so it answers the
+    /// hold and the swarm-use rule; a streamed check of a reply under way does
+    /// not — until a heat hold stops running work. Before 2026-11-11 the stream
+    /// path asked neither: every piece was admitted here whatever the hold or
+    /// the requester.
+    #[test]
+    fn a_prompt_piece_starts_a_request_and_a_streamed_check_continues_one() {
+        use super::{admit_stream_chunk, ForwardRefused, PeerWorkHold};
+        let piece = a_stream_chunk(0);
+        let check = a_stream_chunk(5);
+        let cool = PeerWorkHold::Heat {
+            stops_running: false,
+        };
+        let stops = PeerWorkHold::Heat {
+            stops_running: true,
+        };
+        let allowed = || SwarmUse::Allowed;
+        assert_eq!(
+            admit_stream_chunk(&piece, Some(PeerWorkHold::Metered), allowed),
+            Err(ForwardRefused::ConnectionMetered)
+        );
+        assert_eq!(
+            admit_stream_chunk(&piece, Some(cool), allowed),
+            Err(ForwardRefused::Cooling)
+        );
+        let shares_nothing = SwarmUse::TooFewParts { held: 0 };
+        assert_eq!(
+            admit_stream_chunk(&piece, None, || shares_nothing.clone()),
+            Err(ForwardRefused::RequesterMayNotUseTheSwarm(
+                shares_nothing.clone()
+            ))
+        );
+        assert_eq!(admit_stream_chunk(&piece, None, allowed), Ok(()));
+
+        let asked = std::cell::Cell::new(0);
+        for hold in [None, Some(PeerWorkHold::Metered), Some(cool)] {
+            assert_eq!(
+                admit_stream_chunk(&check, hold, || {
+                    asked.set(asked.get() + 1);
+                    shares_nothing.clone()
+                }),
+                Ok(()),
+                "a check of a reply under way goes on: {hold:?}"
+            );
+        }
+        assert_eq!(asked.get(), 0, "and its requester is not judged again");
+        for chunk in [&piece, &check] {
+            assert_eq!(
+                admit_stream_chunk(chunk, Some(stops), allowed),
+                Err(ForwardRefused::CoolingStopsRunning)
             );
         }
     }

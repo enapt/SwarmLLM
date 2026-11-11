@@ -682,9 +682,14 @@ pub async fn diagnostics(
             .map_or("unknown".to_string(), |t| format!("{t:.0} C"));
         let _ = writeln!(
             out,
-            "heat: card {card}  processor {processor}  driver not answering: {}  holding back work for peers: {}",
+            "heat: card {card}  processor {processor}  driver not answering: {}  holding back work for peers: {}{}",
             r.is_some_and(|r| r.driver_not_answering),
-            ss.host_heat_hold_now().map_or("no", |c| c.as_str())
+            ss.host_heat_hold_now().map_or("no", |c| c.as_str()),
+            if ss.running_peer_work_stops_now() {
+                " (work already running for them stopped too)"
+            } else {
+                ""
+            }
         );
     }
     // Whether other computers run this node's requests, and the facts the

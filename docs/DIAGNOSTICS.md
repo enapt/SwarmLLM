@@ -626,9 +626,16 @@ heat: card 88 C (target 87 C), driver cooling it  processor 71 C  driver not ans
   inference work and a peer that asks anyway is refused: `grep "this computer is cooling down"
   node.log` (info); the start and end are a WARN / INFO line worded as the owner's toast
   (`grep "running hot\|stopped responding\|cooled down" node.log`).
+- `(work already running for them stopped too)` after the cause: the hold has lasted 120 s more, or
+  the driver is stuck or the card's protection is on, so the work this node was already running for
+  others stops too — every step refused, every reply it was writing for one ended, and the
+  coordinator continues it elsewhere. `grep "stops too\|ending a reply this computer was writing"
+  node.log` (WARN); on the coordinator, its failover or continuation lines.
 - `SWARMLLM_HEAT_GUARD=0` turns the hold off (the rigs set it; the log then says what it WOULD have
   done). To see the hold without heating anything: `SWARMLLM_FAULT_HOST_HEAT=driver` (at once),
-  `protecting` (at once), `card` (after 120 s), `processor` (after 5 min), `cool`.
+  `protecting` (at once), `card` (after 120 s), `processor` (after 5 min), `cool` — or
+  `file:<path>`, read every round, the file holding one of those words (absent: the real reading), so
+  a rig can start and end the heat in the middle of a reply.
 
 ## "Why won't other computers run my chats?" / "Why did this node refuse a peer?" (v0.3.271)
 

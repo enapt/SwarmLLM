@@ -6000,15 +6000,66 @@ that starts throwaway nodes (`examples/rig_share.sh`, the standalone rigs,
 the test machine. Never in the safety kit itself: `live_node_swap.sh` sources
 it and restarts the user's own node with the inherited environment.
 
-**What it does not do yet** (#440's next steps): work already running for a
-peer runs out; the owner's own requests are not slowed; the processor reading
-is Linux's (Windows needs the `\Thermal Zone Information` counter, stage B).
+**Work already running stops too (step 3, 2026-11-11).** A split's every
+step is its own forward and a whole reply runs as one task, so a hold of NEW
+work alone left both running for as long as the peer kept asking. The tracker
+latches a second level, `HeatTracker::stops_running`: `RUNNING_WORK_STOPS_AFTER`
+(120 s) into a hold — four minutes after a card reached its target — or at once
+on a stuck driver or the card's hardware protection (`HeatCause::
+stops_running_at_once`); it clears only with the hold, so a driver answering
+again inside the hold-off does not hand a stopped split its steps back. It
+rides in the same answer, `PeerWorkHold::Heat { stops_running }`, and wins over a
+metered connection there (a metered answer would let running steps through).
+At that level `admit_own_forward` and `admit_stream_chunk` refuse EVERY forward
+(`ForwardRefused::CoolingStopsRunning`, `heat_stop_refusal`: "has stopped the
+work it was running for other machines"), and the health tick, every round
+while it holds, aborts each reply in `inbound_generate_aborts` — a whole model
+handed here, a split led here — whose last frame then says the same words
+(`remote_generate::ended_reply_words`) instead of "task join: cancelled". The
+coordinator reads `ServiceUnavailable`: a split segment fails over or the
+request re-plans; a reply that already reached its reader is CONTINUED from
+what it received (`router::continuation_after`, #236); a whole-model holder is
+held to one layer fewer (#378), and its next forward is refused by the hold and
+barred. Nobody is charged (`failure_is_penalty_worthy` exempts the class).
+Prior art: Kubernetes' node-pressure eviction (a soft threshold evicts after
+its grace period, a hard one at once, and the pressure condition is held a
+while after the signal recovers); BOINC's suspended GPU task restarts from its
+last checkpoint — ours is the coordinator's received text. Costs accepted: a
+tensor-parallel group's coordinator waits one AllReduce (10 s) and fails that
+request (`Internal`, not retried) — TP groups form only where a request needs
+one; a step already running finishes (a pause works only between steps).
+Fault for a rig: `SWARMLLM_FAULT_HOST_HEAT=file:<path>` reads the fault from the
+file at each reading, the real one while it is absent, so a node can be made
+hot mid-reply.
+
+**A prompt piece starts a request (found 2026-11-11 while doing step 3).** A
+long prompt goes in pieces (#171), each a chunk of ONE stream, and the stream
+branch of the dispatcher took only `StreamWorkSlot` — no hold, no swarm-use
+verdict. Every piece carries `sequence_num == 0` like a whole prompt pass, and
+the decode steps after it are continuing work, judged by neither rule. So a
+prompt long enough to go in pieces was served on a metered connection, on a
+computer cooling down, and for a computer that shares nothing — the one-
+invariant-N-paths shape: the rule lived in the path that admits a forward on
+its own, and the second path that admits one never called it. Now
+`admit_stream_chunk` judges every piece (a stream with nothing in flight here
+cannot tell its first piece from a later one, and a request that has written
+nothing is still new) by the hold and the requester's swarm use; the slot
+reserve is not applied to a piece (a stream's pieces share one slot, and a
+refusal under load would fail a pass half read). The guard counts
+`admit_stream_chunk(` calls too.
+
+**What it does not do yet** (#440's next steps): the owner's own requests are
+not slowed (step 4); the processor reading is Linux's (Windows needs the
+`\Thermal Zone Information` counter, stage B).
 
 **Tests.** The pure tracker's (`daemon::host_heat::tests`: the lock-up's own
 readings hold after 120 s, a release check's burst never does, the two lines,
-the hold-off, unknown readings); the dispatcher's
+the hold-off, unknown readings; the running-work stop's grace, its hard
+thresholds and its latch); the dispatcher's
 `a_held_back_node_refuses_new_work_and_lets_running_work_finish` for both
-reasons; the guard `every_new_request_a_peer_starts_asks_whether_this_node_holds_back`
+reasons, `a_hot_node_that_stops_running_work_refuses_a_running_requests_next_step`
+and `a_prompt_piece_starts_a_request_and_a_streamed_check_continues_one`;
+`a_reply_ended_to_cool_down_is_continued_elsewhere_not_failed`; the guard `every_new_request_a_peer_starts_asks_whether_this_node_holds_back`
 with its planted self-test; and a dev daemon started with
 `SWARMLLM_FAULT_HOST_HEAT=driver` (the hold, the toast, the capability).
 

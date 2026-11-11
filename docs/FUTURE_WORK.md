@@ -80,7 +80,8 @@ the top track (`docs/plans/large_model_splits.md`).
 **P1 — silent, or broken for a whole class of users**
 2a. **#440** — FIRST by the user's direction (2026-11-11): a node's work can drive the computer it runs
    on into a thermal lock-up. "swarmllm cant be locking up peoples systems like that. it discourages
-   use." PARTIAL: a hot computer now takes no NEW work for others; running work and the owner's pace next.
+   use." PARTIAL: a hot computer takes no new work for others and, if the heat lasts, stops what it was
+   running for them; the owner's own pace next.
 3. **#1** — every Mac runs on the processor; no GPU backend is compiled for Apple Silicon (needs a
    Mac to verify on).
 4. **#220** — WATCH: a worker's card faulted once (illegal memory access, 2026-10-04) and the driver
@@ -461,9 +462,33 @@ Microsoft WDDM/TDR docs, Apple developer docs; issue trackers of Ollama, LM Stud
 - Guard `every_new_request_a_peer_starts_asks_whether_this_node_holds_back`; rule
   `arch-network.md` § "A hot computer takes no new work for others".
 
-**Next step:** step 3 — stop peers' RUNNING work on a stuck driver or a hold past a second interval (a
-worker-side cancel the coordinator reads as a failover); then step 4 (pace the owner's own steps), then
-(B) and (C).
+**Done (2026-11-11, step 3 — work already running for others stops too):**
+- Prior art: Kubernetes node-pressure eviction (a soft threshold with a grace period, a hard one acted on
+  at once, the pressure condition held for a transition period after recovery) and BOINC's GPU suspend
+  (work stops on a computer that is in use or hot and resumes from its last checkpoint). Taken: two
+  levels and a latch; our "checkpoint" is the text the coordinator already received (#236).
+- `HeatTracker` latches `stops_running` inside a hold: once it has lasted `RUNNING_WORK_STOPS_AFTER`
+  (120 s, so ~4 min of heat in all), at once on a stuck driver or the card's hardware protection;
+  cleared only with the hold. `PeerWorkHold::Heat { stops_running }`; the stop wins over a metered answer.
+- Two mechanisms: every forward is refused (`ForwardRefused::CoolingStopsRunning`, `heat_stop_refusal`,
+  "cannot serve"-worded, penalty-exempt) — split steps, streamed checks, tensor-parallel layers (whose
+  coordinator waits out one 10 s AllReduce first: accepted, the computer is in trouble) — and the health
+  tick aborts each whole-model hand-off and led split in `inbound_generate_aborts` every round, its last
+  frame worded the same (`remote_generate::ended_reply_words`) so the coordinator continues the reply
+  elsewhere instead of failing it.
+- Found while doing it: a long prompt sent in pieces (#171, `stream_seq` with `sequence_num == 0`) went
+  through the stream path, which asked neither the hold nor the swarm-use rule. `admit_stream_chunk` asks
+  both for a piece, and the guard counts it.
+- Diagnostics: the `heat:` line adds "(work already running for them stopped too)". Fault
+  `SWARMLLM_FAULT_HOST_HEAT=file:<path>`, read every round, so a rig can flip it mid-reply.
+- Tests fail with each part switched off (7 of 7). Proven on a real reply: `split_rig.sh continue` with
+  `CONTINUE_BY=heat` (Llama 3.2 3B whole on B and C, processor only, 600 tokens streamed through A; the
+  serving node's fault file flipped to `driver` after 24 chunks) — B ended the reply at its next health
+  round, 20.8 s into it (A's `execute_ms=20817`), A logged
+  "Skipping credit penalty" and continued it on C: PASS, 576 chunks after the stop, no error, the opening
+  once, both computers in the route.
+
+**Next step:** step 4 (pace the owner's own steps), then (B) and (C).
 
 #### #167 — A speculative split decode has no mid-reply failover
 `P2` · reliability · **PARTIAL** — 2026-08-25 · history: archive § "Speculative distributed decode has no failover", archive row #149 item (d)
