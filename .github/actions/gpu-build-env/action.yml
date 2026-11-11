@@ -217,6 +217,13 @@ runs:
           exit 1
         fi
         echo "cuda-toolkit install failed (attempt $attempt) — refreshing and retrying"
+        # As in `apt-install`: a retry bypasses the runner's Azure mirror,
+        # which stopped resolving for hours on 2026-11-11.
+        src=/etc/apt/sources.list.d/ubuntu.sources
+        if [ -f "$src" ] && grep -q 'mirror+file:/etc/apt/apt-mirrors.txt' "$src"; then
+          sudo sed -i 's#mirror+file:/etc/apt/apt-mirrors.txt#http://archive.ubuntu.com/ubuntu/#' "$src"
+          echo "apt: the runner's mirror list replaced by archive.ubuntu.com for this job"
+        fi
         sudo apt-get clean
         sudo rm -rf /var/lib/apt/lists/*
         sudo apt-get update || true # apt-retry-loop
