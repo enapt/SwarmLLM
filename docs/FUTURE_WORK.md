@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #440**). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #441**). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -78,6 +78,9 @@ the top track (`docs/plans/large_model_splits.md`).
    has not recurred since 2026-10-04. Nothing to build until it does.
 
 **P1 — silent, or broken for a whole class of users**
+2a. **#440** — FIRST by the user's direction (2026-11-11): a node's work can drive the computer it runs
+   on into a thermal lock-up, and nothing watches the card. "swarmllm cant be locking up peoples
+   systems like that. it discourages use."
 3. **#1** — every Mac runs on the processor; no GPU backend is compiled for Apple Silicon (needs a
    Mac to verify on).
 4. **#220** — WATCH: a worker's card faulted once (illegal memory access, 2026-10-04) and the driver
@@ -386,6 +389,61 @@ match a build some holder or origin names; a truncated file matches none. Verify
 plants another build's manifest on a peer-only node.
 
 ### Reliability and failover
+
+#### #440 — A node's work can drive the computer it runs on into a thermal lock-up, and nothing watches the card
+`P1` · reliability · **OPEN** — 2026-11-11 · history: gotcha #1081 (the lock-up); archive § "Thermal throttling had no measurable effect" (2026-08-10)
+
+The user, 2026-11-11, after this laptop hard-froze under sustained card load: "swarmllm cant be locking up
+peoples systems like that. it discourages use. i understand we run tests unhindered though". That freeze came
+from a test rig (llama-cpp-python), but a node serving the swarm puts the same load on a volunteer's card for
+as long as peers ask, and nothing in the node watches the card. `inference::thermal` reads the processor
+only, only where `sysinfo` finds a sensor (Linux hwmon; on Windows it asks WMI's `MSAcpi_ThermalZoneTemperature`,
+which ordinary users are usually refused; nothing in WSL), in the model worker only, and only WARNS. Its
+thread-pool throttle was measured to do nothing and removed (2026-08-10). The one card signal acted on is
+`vram::graphics_driver_not_answering()` (nvidia-smi blocked 60 s), and only to put NEW workers on the processor.
+
+**What the lock-up looked like** (Ryzen 7 5800H + RTX 3070 Laptop, gotcha #1081): nvidia-smi blocked from
+2 min into the load, for up to 17 min, before Windows froze. The card sat at its 87 °C TARGET temperature
+with clocks cut to 780 MHz at 77 W; its slowdown (98 °C) and shutdown (101 °C) protections never engaged.
+The ACPI zone held 93-96 °C for ~11 min. There was no TDR, WHEA or BugCheck event. The laptop refused to power on until it had cooled.
+
+**Prior art** (searched 2026-11-11: BOINC source and mailing list, Folding@home docs, miner READMEs, NVML docs,
+Microsoft WDDM/TDR docs, Apple developer docs; issue trackers of Ollama, LM Studio, llama.cpp, vLLM, Petals, exo):
+- **What others do:**
+  - BOINC duty-cycles the processor ("use at most N% of CPU time": suspend and resume within each second) and suspends GPU work while the user is active. It reads no temperature.
+  - Folding@home pauses on battery and offers power levels.
+  - GPU miners stop a card at a temperature and restart it below a lower one: NBMiner's start = limit − 5, lolMiner's `--tstop`/`--tstart`, T-Rex's `--temperature-limit`. All are off by default.
+  - Ollama, LM Studio, llama.cpp, vLLM, Petals and exo have no thermal or responsiveness guard (none found).
+  - Apple's `ProcessInfo.thermalState`: cut work at `fair`, more at `serious`.
+- **What we take:** stop and start temperatures plus a hold-off, so the state never flaps. Duty cycling as the lever that lowers average power (BOINC's; our fewer-threads trial did not). The card as the primary signal.
+- **Traps:**
+  - A card at its target is not yet throttled by the hardware. Read `clocks_event_reasons.sw_thermal_slowdown` (the driver cutting clocks for heat), not only the temperature.
+  - `temperature.gpu.tlimit` and `power.limit` read N/A on this laptop's GPU.
+  - nvidia-smi hangs WITH the freeze it should warn of, so a reading that does not come back is itself the alarm (`BoundedCommand` already counts it).
+  - A pause works only BETWEEN steps, never inside one long kernel.
+
+**Design (decided 2026-11-11; thresholds are first values to calibrate):**
+1. **One reading, daemon-side, every ~10 s:**
+   - the card's temperature and its sw/hw thermal-slowdown bits (bounded nvidia-smi);
+   - the processor's temperature where readable;
+   - `graphics_driver_not_answering()`.
+
+   One `HostHeat` state, `Cool → Warm → Hot`, plus `DriverStuck`, with hysteresis.
+   - **Card:** Warm while the driver cuts clocks for heat or the card is within 2 °C of its target. Hot once Warm has held 2 min, or on a hardware slowdown.
+   - **Processor:** Hot at 93 °C or more for 5 min. Laptop firmware holds ~95 °C under load by design: seconds there are normal, minutes of strangers' work are not.
+   - **Resume:** 5 °C under, after a 60 s hold-off.
+2. **While Hot, peers' NEW work is refused** at the one choke point, `admits_a_new_request`, beside `metered_hold`. The refusal is the existing NodeFull-shaped one, so there is no wire change and peers re-plan. `can_serve_inference` goes false in the capability broadcast, so peers route elsewhere.
+3. **Peers' RUNNING work stops** if Hot holds past a second interval, and at once on DriverStuck. Their replies continue elsewhere (`continuation_after`, failover).
+4. **The owner's own work is never refused, but is paced while Hot:** a pause between worker steps (decode and prompt chunks) that halves the duty cycle to start with.
+5. **Told once, in words a non-technical user reads:** a toast and a diagnostics line, in all 21 languages. Something like "Your computer is running hot, so SwarmLLM has paused sharing with others until it cools".
+6. **Tests stay unhindered:** `SWARMLLM_HEAT_GUARD=0` for rigs and gates, whose kit guards the test machine (`~/swarmllm-gate-common/safety.sh`, gotcha #1081). Faults `SWARMLLM_FAULT_HOST_HEAT=warm|hot|driver` prove each step fired without heating a machine.
+
+**Stages:**
+- **(A)** card, driver and steps 2-6, on every OS with an NVIDIA card;
+- **(B)** the Windows processor through the PDH counter `\Thermal Zone Information(*)\Temperature`, which needs no admin. It is a firmware zone, not the package, so it is coarse and lags; smooth it.
+- **(C)** macOS `thermalState`.
+
+**Next step:** stage (A).
 
 #### #167 — A speculative split decode has no mid-reply failover
 `P2` · reliability · **PARTIAL** — 2026-08-25 · history: archive § "Speculative distributed decode has no failover", archive row #149 item (d)
