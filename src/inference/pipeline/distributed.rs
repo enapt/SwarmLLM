@@ -1287,6 +1287,8 @@ impl PipelineExecutor {
             // `result.activations` immediately after, so the previous buffer
             // is dead by then anyway.
             if segment.node_id == *self.shared_state.identity.node_id() {
+                let input_positions =
+                    Self::positions_worked(&activations, input_is_hidden_state, &[], false);
                 let prev_activations = std::mem::take(&mut activations);
                 let result = self
                     .process_local_segment(
@@ -1334,6 +1336,9 @@ impl PipelineExecutor {
                     segment_ms,
                     segment.layer_range.1 - segment.layer_range.0,
                     result.activations.len(),
+                    input_positions.or_else(|| {
+                        Self::positions_worked(&[], false, &result.activations, !is_last)
+                    }),
                 );
                 if is_last {
                     tracing::info!(
@@ -2016,6 +2021,12 @@ impl PipelineExecutor {
                                 seg_elapsed_ms,
                                 seg_layers,
                                 result.activations.len(),
+                                Self::positions_worked(
+                                    &activations,
+                                    input_is_hidden_state,
+                                    &result.activations,
+                                    !run_is_last,
+                                ),
                             );
                             // Per (model, segment, holder), for the peer
                             // performance table.
@@ -2334,6 +2345,25 @@ impl PipelineExecutor {
             .segments
             .splice(failed_idx..=failed_idx, cover.iter().cloned());
         true
+    }
+
+    /// How many positions a timed forward READ, for the prompt price
+    /// (`ModelSpeed::prompt_ms_per_layer_token`): the input's, where it is a
+    /// hidden state; else the hidden state the segment handed on, unless it
+    /// sampled — the end of the model answers with logits or a token, whose
+    /// shape says nothing of the prompt. `None` prices nothing.
+    fn positions_worked(
+        input: &[u8],
+        input_is_hidden_state: bool,
+        result: &[u8],
+        result_is_hidden_state: bool,
+    ) -> Option<u32> {
+        let read = |bytes: &[u8], hidden: bool| {
+            hidden
+                .then(|| crate::inference::tensor_util::activation_positions(bytes))
+                .flatten()
+        };
+        read(input, input_is_hidden_state).or_else(|| read(result, result_is_hidden_state))
     }
 
     /// How far into the conversation a forward's input reaches — `index_pos`

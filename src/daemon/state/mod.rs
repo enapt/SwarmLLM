@@ -2576,6 +2576,12 @@ impl SharedState {
     /// normalisation lets later lookups scale the cost to arbitrary widths.
     /// α = 0.3 (30% weight on the new sample) — responsive but smoothed. Skips
     /// zero-layer segments (shouldn't happen, defensive).
+    ///
+    /// `positions`: the token positions the forward carried, where the caller
+    /// can read them off its payload. A prompt is PRICED per layer and token
+    /// (`ModelSpeed::prompt_ms_per_layer_token`), so a prompt forward without
+    /// them prices nothing; `activation_bytes` still sizes the timeout.
+    #[allow(clippy::too_many_arguments)]
     pub fn record_peer_segment_latency(
         &self,
         node_id: &crate::types::NodeId,
@@ -2584,6 +2590,7 @@ impl SharedState {
         segment_ms: u64,
         layers: u32,
         activation_bytes: usize,
+        positions: Option<u32>,
     ) {
         // Was the model already resident when this segment ran? Read it BEFORE
         // marking it warm below — otherwise every sample looks warm, including
@@ -2605,7 +2612,14 @@ impl SharedState {
             .entry(node_id.clone())
             .or_default()
             .model_mut(model_id, || layer_work.unwrap_or(1.0))
-            .observe(kind, segment_ms, layers, activation_bytes, was_warm);
+            .observe(
+                kind,
+                segment_ms,
+                layers,
+                activation_bytes,
+                positions,
+                was_warm,
+            );
         // This peer has now demonstrably got the model resident, so the next
         // forward does not need the cold-load allowance.
         self.metrics
@@ -3583,20 +3597,20 @@ impl SharedState {
 
     /// The rate this node — a peer, or this one — reads a prompt of `model_id`
     /// at, MEASURED, in ms per (layer x activation byte): what a plan prices a
-    /// prompt by (`ModelSpeed::prompt_ms_per_layer_byte` — warm forwards large
-    /// enough to measure a rate). `None` when none has been timed, or the
-    /// figure has gone stale.
+    /// prompt by, in ms per (layer × token) (`ModelSpeed::prompt_ms_per_layer_token`
+    /// — warm forwards large enough to measure a rate). `None` when none has
+    /// been timed, or the figure has gone stale.
     ///
     /// Deliberately not folded into `observed_latency_ms_per_layer`: that one
     /// answers "how fast does this peer decode", which is what ranks a
     /// generated reply, and prefill is a different question that scales with
     /// prompt length instead of token count.
-    pub fn observed_prompt_ms_per_layer_byte(
+    pub fn observed_prompt_ms_per_layer_token(
         &self,
         node_id: &crate::types::NodeId,
         model_id: &crate::types::ModelId,
     ) -> Option<f32> {
-        self.peer_model_speed(node_id, model_id, |s| s.prompt_ms_per_layer_byte())
+        self.peer_model_speed(node_id, model_id, |s| s.prompt_ms_per_layer_token())
     }
 
     /// How many inference requests this node is working on **right now** — the

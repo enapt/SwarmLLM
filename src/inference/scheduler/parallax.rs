@@ -148,7 +148,7 @@ pub(super) const ASSUMED_FORWARD_PASSES: f32 = 64.0;
 /// | RTX 3070 laptop | ~2000 | 47 | 42x |
 ///
 /// They are a PRIOR and nothing more: the moment this node has actually
-/// prefilled through a peer, `observed_prefill_ms_per_layer_byte` replaces them
+/// prefilled through a peer, `observed_prompt_ms_per_layer_token` replaces them
 /// (`peer_speed` has tracked prefill separately since 2026-08-01). They exist so
 /// that a peer we have never measured is not priced as though reading a prompt
 /// were free, which is what the model did before — and the error that produces
@@ -160,9 +160,10 @@ pub(super) const PREFILL_SPEEDUP_GPU: f32 = 40.0;
 /// long prompt off it, which is the safe direction.
 pub(super) const PREFILL_SPEEDUP_CPU: f32 = 4.5;
 
-/// Bytes of activation one token of prompt carries, at a typical hidden width.
-/// Shared with `peer_speed` so the measured coefficient and the estimate below
-/// are expressed in the same units.
+/// Bytes of activation one token of prompt carries, at a typical hidden width
+/// in f32: what the transfer term below charges a prompt crossing a link
+/// (FUTURE_WORK #430's residual: the model's real width and the wire's Q8_0).
+/// The measured prompt PRICE is per token and never reads it.
 pub(super) const ACTIVATION_BYTES_PER_TOKEN: usize =
     crate::daemon::state::peer_speed::NOMINAL_DECODE_ACTIVATION_BYTES;
 
@@ -867,7 +868,7 @@ impl DecodePrice {
 /// of the decode time and read only 4.5× faster. Prior art: Petals measures a
 /// server's prompt rate on its own (`throughput.py`, `forward_rps` from a
 /// 1,024-token pass, apart from `inference_rps`); a measured prompt rate here
-/// still replaces this (`observed_prefill_ms_per_layer_byte`).
+/// still replaces this (`observed_prompt_ms_per_layer_token`).
 fn prompt_speedup_over(c: &NodeCandidate, range: (u32, u32), ahead: u32) -> f32 {
     let first_speedup = if c.has_gpu {
         PREFILL_SPEEDUP_GPU
@@ -915,11 +916,13 @@ pub(super) fn layers_ahead_in_run(same_machine_as_previous: bool, run_before: u3
 /// both charge. `decode` is whatever prices the candidate's decode in the
 /// caller's model, the stand-in until a prefill is measured.
 pub(super) fn prefill_ms_per_layer(c: &NodeCandidate, tokens: u32, decode: DecodePrice) -> f32 {
-    match c.observed_prefill_ms_per_layer_byte {
-        // Measured on this peer, for exactly this work. The coefficient
-        // is normalised by layers x activation bytes, so it carries
-        // across models.
-        Some(coeff) => coeff * tokens as f32 * ACTIVATION_BYTES_PER_TOKEN as f32,
+    match c.observed_prompt_ms_per_layer_token {
+        // Measured on this peer, for exactly this work: ms per layer per
+        // token of the prompts it read (`ModelSpeed::prompt_ms_per_layer_token`).
+        // Never per activation byte — hidden states cross as Q8_0 at the
+        // model's own width, so a byte figure priced at a nominal width read
+        // a 70B's own prompt at 1.88× its time (2026-11-12).
+        Some(rate) => rate * tokens as f32,
         // Never measured: derive from whatever prices its decode, using
         // the device-class prior. A decode figure is a per-TOKEN cost, so a
         // prompt of N tokens costs N of them, divided by how much faster this
@@ -2112,7 +2115,7 @@ mod tests {
             max_hostable_layers: None,
             max_hostable_layers_at_face_value: None,
             max_hostable_layers_at_ceiling: None,
-            observed_prefill_ms_per_layer_byte: None,
+            observed_prompt_ms_per_layer_token: None,
             has_gpu: false,
             held_ranges: Vec::new(),
             published_room: None,
@@ -2630,7 +2633,7 @@ mod tests {
         // A peer with no GPU, so the prior would price it at the slow CPU
         // ratio; but we have measured it prefilling very fast.
         let mut measured = cand(2, vec![(0, 32)], 20, 0.0, true, true, 8.0);
-        measured.observed_prefill_ms_per_layer_byte = Some(1.0e-9);
+        measured.observed_prompt_ms_per_layer_token = Some(1.0e-9);
         let prior_only = cand(3, vec![(0, 32)], 20, 0.0, true, true, 8.0);
 
         let with_measurement = vertex_cost(&measured, (0, 32), &local, 32, Some(4000)).prefill_ms;
@@ -5487,7 +5490,7 @@ mod transfer_cost_tests {
             observed_latency_timed_on: None,
             observed_fixed_ms_per_visit: None,
             observed_delegated_ms_per_layer: None,
-            observed_prefill_ms_per_layer_byte: None,
+            observed_prompt_ms_per_layer_token: None,
             expected_attempts: 1.0,
             goodput_bytes_per_sec: goodput,
             is_pool_member: false,

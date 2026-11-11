@@ -1093,7 +1093,7 @@ fn simple_candidate(byte: u8, ranges: Vec<(u32, u32)>) -> NodeCandidate {
         max_hostable_layers: None,
         max_hostable_layers_at_face_value: None,
         max_hostable_layers_at_ceiling: None,
-        observed_prefill_ms_per_layer_byte: None,
+        observed_prompt_ms_per_layer_token: None,
         has_gpu: false,
         held_ranges: Vec::new(),
         published_room: None,
@@ -1555,7 +1555,7 @@ fn greedy_assign_multi_range_candidate() {
             max_hostable_layers: None,
             max_hostable_layers_at_face_value: None,
             max_hostable_layers_at_ceiling: None,
-            observed_prefill_ms_per_layer_byte: None,
+            observed_prompt_ms_per_layer_token: None,
             has_gpu: false,
             held_ranges: Vec::new(),
             published_room: None,
@@ -1602,7 +1602,7 @@ fn greedy_assign_multi_range_candidate() {
             max_hostable_layers: None,
             max_hostable_layers_at_face_value: None,
             max_hostable_layers_at_ceiling: None,
-            observed_prefill_ms_per_layer_byte: None,
+            observed_prompt_ms_per_layer_token: None,
             has_gpu: false,
             held_ranges: Vec::new(),
             published_room: None,
@@ -2356,6 +2356,7 @@ fn peer_segment_latency_ema_math() {
         20,
         4,
         0,
+        None,
     );
     let v1 = state
         .observed_latency_ms_per_layer(&node, &speed_test_model())
@@ -2369,6 +2370,7 @@ fn peer_segment_latency_ema_math() {
         40,
         4,
         0,
+        None,
     );
     let v2 = state
         .observed_latency_ms_per_layer(&node, &speed_test_model())
@@ -2382,6 +2384,7 @@ fn peer_segment_latency_ema_math() {
         20,
         2,
         0,
+        None,
     );
     let v3 = state
         .observed_latency_ms_per_layer(&node, &speed_test_model())
@@ -2396,6 +2399,7 @@ fn peer_segment_latency_ema_math() {
         100,
         0,
         0,
+        None,
     );
     let v4 = state
         .observed_latency_ms_per_layer(&node, &speed_test_model())
@@ -2423,6 +2427,7 @@ fn a_peer_measured_on_one_model_is_unmeasured_for_another() {
             20,
             4,
             0,
+            None,
         );
     }
     let other = ModelId("a-much-larger-model".into());
@@ -2457,6 +2462,7 @@ fn merge_peer_segment_latency_zero_trust_is_noop() {
         20,
         4,
         0,
+        None,
     );
     let before = state
         .observed_latency_ms_per_layer(&node, &speed_test_model())
@@ -2514,6 +2520,7 @@ fn merge_peer_segment_latency_trust_weighted_ema() {
         20,
         2,
         0,
+        None,
     );
     let v0 = state
         .observed_latency_ms_per_layer(&node, &speed_test_model())
@@ -2542,6 +2549,7 @@ fn merge_peer_segment_latency_trust_weighted_ema() {
         20,
         2,
         0,
+        None,
     );
     state2.merge_peer_segment_latency(&node, 100.0, None, 0.5);
     let v2 = state2
@@ -2575,6 +2583,7 @@ fn merge_peer_segment_latency_preserves_direct_observations() {
             50,
             5,
             0,
+            None,
         );
     }
     let before = state
@@ -2648,7 +2657,7 @@ fn cost_cand(
         max_hostable_layers: None,
         max_hostable_layers_at_face_value: None,
         max_hostable_layers_at_ceiling: None,
-        observed_prefill_ms_per_layer_byte: None,
+        observed_prompt_ms_per_layer_token: None,
         has_gpu: false,
         held_ranges: Vec::new(),
         published_room: None,
@@ -3136,11 +3145,11 @@ fn a_peer_that_is_slow_at_reading_the_prompt_is_not_handed_a_long_one() {
     slow_prefill.gpu_vram_available_mb = None; // processor-only, like the M4
     slow_prefill.est_tokens_per_sec = 14.82; // flattering decode figure
                                              // Measured: this peer is dreadful at reading a prompt.
-    slow_prefill.observed_prefill_ms_per_layer_byte = Some(1.0);
+    slow_prefill.observed_prompt_ms_per_layer_token = Some(1.0);
 
     let mut local = local_full_coverage();
     local.est_tokens_per_sec = 6.46;
-    local.observed_prefill_ms_per_layer_byte = Some(0.000_01);
+    local.observed_prompt_ms_per_layer_token = Some(0.000_01);
 
     let cands = vec![local, slow_prefill];
     assert!(
@@ -3171,11 +3180,11 @@ fn a_short_prompt_still_goes_to_the_faster_processor() {
     let mut peer = willing_peer(0xBB, LAYERS);
     peer.gpu_vram_available_mb = None;
     peer.est_tokens_per_sec = 14.82;
-    peer.observed_prefill_ms_per_layer_byte = Some(0.000_01);
+    peer.observed_prompt_ms_per_layer_token = Some(0.000_01);
 
     let mut local = local_full_coverage();
     local.est_tokens_per_sec = 6.46;
-    local.observed_prefill_ms_per_layer_byte = Some(0.000_01);
+    local.observed_prompt_ms_per_layer_token = Some(0.000_01);
 
     let cands = vec![local, peer];
     assert_eq!(
@@ -3204,7 +3213,7 @@ fn a_short_prompt_still_goes_to_the_faster_processor() {
 #[test]
 fn an_unmeasured_peer_is_still_tried() {
     let mut peer = willing_peer(0xBB, LAYERS);
-    peer.observed_prefill_ms_per_layer_byte = None;
+    peer.observed_prompt_ms_per_layer_token = None;
     let cands = vec![local_full_coverage(), peer];
     assert_eq!(
         super::delegation_target(
@@ -3233,11 +3242,11 @@ fn an_unmeasured_peer_is_still_tried() {
 #[test]
 fn keeping_the_ends_local_prices_as_a_real_cost_on_a_long_prompt() {
     let mut peer = willing_peer(0xBB, LAYERS);
-    peer.observed_prefill_ms_per_layer_byte = Some(0.000_001); // a fast card
+    peer.observed_prompt_ms_per_layer_token = Some(0.000_001); // a fast card
 
     let mut local = local_full_coverage();
     // A processor that is dreadful at reading a prompt — the reported shape.
-    local.observed_prefill_ms_per_layer_byte = Some(0.01);
+    local.observed_prompt_ms_per_layer_token = Some(0.01);
 
     let cands = vec![local, peer.clone()];
     let extra = super::privacy_cost_ms(&peer, &cands, &local_id(), LAYERS, Some(10_000))
@@ -3254,10 +3263,10 @@ fn keeping_the_ends_local_prices_as_a_real_cost_on_a_long_prompt() {
 #[test]
 fn privacy_is_not_reported_as_expensive_when_it_is_cheap() {
     let mut peer = willing_peer(0xBB, LAYERS);
-    peer.observed_prefill_ms_per_layer_byte = Some(0.000_001);
+    peer.observed_prompt_ms_per_layer_token = Some(0.000_001);
 
     let mut local = local_full_coverage();
-    local.observed_prefill_ms_per_layer_byte = Some(0.000_001);
+    local.observed_prompt_ms_per_layer_token = Some(0.000_001);
 
     let cands = vec![local, peer.clone()];
     let extra = super::privacy_cost_ms(&peer, &cands, &local_id(), LAYERS, Some(10_000))
@@ -4059,7 +4068,7 @@ fn one_node_is_not_made_standby_for_more_layers_than_it_can_run() {
         max_hostable_layers: cap,
         max_hostable_layers_at_face_value: cap,
         max_hostable_layers_at_ceiling: None,
-        observed_prefill_ms_per_layer_byte: None,
+        observed_prompt_ms_per_layer_token: None,
         has_gpu: false,
         held_ranges: Vec::new(),
         published_room: None,
@@ -4169,7 +4178,7 @@ fn a_node_with_room_still_stands_in_for_every_segment() {
         max_hostable_layers: cap,
         max_hostable_layers_at_face_value: cap,
         max_hostable_layers_at_ceiling: None,
-        observed_prefill_ms_per_layer_byte: None,
+        observed_prompt_ms_per_layer_token: None,
         has_gpu: false,
         held_ranges: Vec::new(),
         published_room: None,
@@ -4279,7 +4288,7 @@ fn a_standby_is_chosen_by_cost_not_by_ping() {
         max_hostable_layers: None,
         max_hostable_layers_at_face_value: None,
         max_hostable_layers_at_ceiling: None,
-        observed_prefill_ms_per_layer_byte: None,
+        observed_prompt_ms_per_layer_token: None,
         has_gpu: gpu,
         held_ranges: Vec::new(),
         published_room: None,
@@ -8749,6 +8758,7 @@ fn a_peers_published_timing_reaches_its_candidate_as_a_floor_on_its_price() {
             64,
             32,
             0,
+            None,
         );
     }
     let measured = cand(&c);
@@ -8757,6 +8767,53 @@ fn a_peers_published_timing_reaches_its_candidate_as_a_floor_on_its_price() {
         compute(&measured) < compute(&slow),
         "this node's own measurement outranks the peer's figure"
     );
+}
+
+/// **A measured prompt is priced at the time it took, whatever its hidden
+/// states weigh on the wire** (2026-11-12). The figure was per byte of the
+/// forward's result and priced at a nominal 16,384 bytes a token; hidden
+/// states cross as Q8_0 by default, so a width of 8,192 (Llama-3.3-70B: 48
+/// tokens as 417,812 bytes, this node's own segment on 2026-11-09) priced the
+/// very prompt it timed at 1.88× its time — every measured split segment's
+/// prompt over-priced against an unmeasured peer's prior.
+#[test]
+fn a_measured_prompt_is_priced_at_the_time_it_took() {
+    let (state, local, b, _c, model) = two_whole_model_card_peers();
+    let tokens: u32 = 48;
+    let q8_bytes = 20 + tokens as usize * 8_192 * 34 / 32;
+    // Twice: the first sample on a peer is a cold one, which prices nothing.
+    for _ in 0..2 {
+        state.record_peer_segment_latency(
+            &b,
+            &model,
+            crate::daemon::state::peer_speed::WorkKind::Prefill,
+            2_400,
+            32,
+            q8_bytes,
+            Some(tokens),
+        );
+    }
+    let scheduler =
+        PipelineScheduler::with_local_processor_speed(state.clone(), LOCAL_PROCESSOR_TPS);
+    let manifest = state.model_registry.get_manifest(&model).unwrap();
+    let got = scheduler.gather_candidates(
+        &manifest,
+        &local,
+        uuid::Uuid::new_v4(),
+        None.into(),
+        super::Purpose::Preview,
+        &|| true,
+        crate::types::KeepAsked::Unasked,
+    );
+    let cand = got.iter().find(|x| x.node_id == b).unwrap();
+    let prompt = parallax::vertex_cost(cand, (0, 32), &local, 32, Some(tokens)).prefill_ms;
+    assert!(
+        (prompt - 2_400.0).abs() < 24.0,
+        "the prompt it timed in 2,400 ms is priced {prompt} ms"
+    );
+    // And a prompt ten times as long, ten times as much.
+    let longer = parallax::vertex_cost(cand, (0, 32), &local, 32, Some(10 * tokens)).prefill_ms;
+    assert!((longer - 24_000.0).abs() < 240.0, "{longer}");
 }
 
 fn whole_model_cold_load_ms(cands: &[NodeCandidate], node: &NodeId, local: &NodeId) -> f32 {
@@ -8832,6 +8889,7 @@ fn a_cold_candidate_is_charged_its_own_load_and_a_warm_one_nothing() {
         2_000,
         32,
         0,
+        None,
     );
     assert_eq!(whole_model_cold_load_ms(&cands(), &b, &local), 0.0);
 }

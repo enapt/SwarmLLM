@@ -54,8 +54,9 @@ not: over 333 lines (FUTURE_WORK #3, 2026-10-10) its error grew with the plan's
 segments (1.08×, 2.00×, 3.35×) and not at all with the reply's length.
 
 The `prompt:` term is priced from that node's measured prompt rate
-(`ModelSpeed::prompt_ms_per_layer_byte`) — this node's own split segments too — set only
-by warm forwards of at least 256 KB (`PROMPT_RATE_MIN_BYTES`); until one has been
+(`ModelSpeed::prompt_ms_per_layer_token`, ms a layer a token of the forwards timed) — this
+node's own split segments too — set only by warm forwards of at least 256 KB
+(`PROMPT_RATE_MIN_BYTES`); until one has been
 timed, the device prior stands. A `prompt:` in the millions of ms beside a
 `total_ms` of seconds is the mispricing v0.3.241 fixed (#287): a cold load or a
 tiny forward scaled up to a long prompt priced one route at 17.6 h.

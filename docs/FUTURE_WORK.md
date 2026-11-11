@@ -873,7 +873,7 @@ answers in ~5 s. Several contributors (diagnosis rule 6). Each is a hypothesis u
   this is the one place it is worked.) **Done since 2026-10-25** (re-read 2026-11-06, not updated
   here then): `parallax::prefill_ms_per_layer`'s prior prices a range PER DEVICE
   (`NodeCandidate::layers_by_device`: the card's layers at `PREFILL_SPEEDUP_GPU`, the rest at the
-  processor's `PREFILL_SPEEDUP_CPU`), and a measured prompt rate (`prompt_ms_per_layer_byte`) replaces
+  processor's `PREFILL_SPEEDUP_CPU`), and a measured prompt rate (`prompt_ms_per_layer_token`) replaces
   the prior once this node has read a long enough prompt; test
   `a_range_split_across_card_and_processor_is_priced_per_device` ("A prompt reads at each device's own
   rate"). Not modelled: a mixture-of-experts prompt's own ratio to its decode (the prior scales both
@@ -3402,7 +3402,7 @@ What it says (the user, 11-08: a split that fails or is slow is the defect — n
 Qwen3.8-27B with a 4,110-token prompt (#427's table) was handed whole to the only machine holding every layer, whose
 card holds part of a 27B and processor the rest; it reads such a prompt at ~7-9.5 tok/s (Qwen3.6-27B there: 432 s),
 so the 600 s first-token budget ran out and the request failed. Open questions, each to be measured before a
-design: (a) the prompt price the search used for that hand-off (`ModelSpeed::prompt_ms_per_layer_byte`) against the
+design: (a) the prompt price the search used for that hand-off (`ModelSpeed::prompt_ms_per_layer_token`) against the
 time it took — a priced 7-minute prompt should have lost to a split; (b) ANSWERED 2026-11-11 from the record: a
 split's prompt pass of two or more pieces already overlaps them across machines (one driver per segment, each piece
 handed on the moment it exists, at most two out to a peer — #171, `pipeline::prompt_chunks`, `docs/invariants/
@@ -3429,9 +3429,12 @@ figure (time to first token less the round trip and one step, over the UNREAD to
 apart as `Delegated` is from `Decode`), and a first-token wait sized from it: the 600 s ceiling
 (`FIRST_TOKEN_TIMEOUT_MAX`) is a minimum speed of ~8.6 tok/s for a 4,110-token prompt that nobody chose
 (`architecture.md` § Timeouts). Prior art: Petals measures `forward_rps` (a 1,024-token pass) apart from
-`inference_rps` and routes by each (`server/throughput.py`); a split's own forwards would also want their
-real activation bytes and the nominal width agreed (recorded with the real, priced with
-`NOMINAL_DECODE_ACTIVATION_BYTES`).
+`inference_rps` and routes by each (`server/throughput.py`). **Done 2026-11-12, beside it**: a split's
+measured prompt rate is per layer × TOKEN (`ModelSpeed::prompt_ms_per_layer_token`, positions read off the
+hidden state that crossed), never per byte priced at a nominal width — the 70B's segment here was priced at
+1.88× its own time (Q8_0 at width 8,192); tests `a_prompt_is_priced_at_the_time_it_took_whatever_its_width`,
+`a_measured_prompt_is_priced_at_the_time_it_took`. Still per byte at the nominal width: the TRANSFER term
+(`parallax::ACTIVATION_BYTES_PER_TOKEN` over the link's goodput).
 
 #### #428 — Every popular model guesses 4-5 tokens a round trip: a DFlash drafter at the split's far end
 `P1` · perf-split · **OPEN** (stage 1 built and measured: the reply is exact, acceptance matches llama.cpp's; stage 3 built and measured on the rig — a split over 130 ms, processors: code 1.6-1.8×, a story 1.10-1.15×, the same replies; on a card, whole: code 1.4-1.6×, a story 0.89-0.92× — (c2) done, the block's first rounds on prose, (c3); stage 6 built: the drafter fetched by a pin; next: the field model, Qwen3.6-35B-A3B) — 2026-11-08 · history: #427 (the measurement), #425 (the guess head), #411 (the flow)

@@ -50,7 +50,7 @@ Where this node cannot hold every layer, each planner FIRST plans with its bound
 
 ## A node is ranked on warm work only — including this node (2026-09-27)
 
-`PeerSpeed::ranking_ms_per_layer` ranks on the WARM coefficient only (the cold-inclusive one sizes timeouts). Keyed by node id, ours too: every path that times a segment, local ones included, records it. **A prompt is PRICED by a third figure, `ModelSpeed::prompt_ms_per_layer_byte`** — warm forwards of at least `PROMPT_RATE_MIN_BYTES`, a smaller one may only lower it (BBR's app-limited rule): a load or a round trip scaled to a long prompt priced one route at 17.6 h (#287). This node reads it too.
+`PeerSpeed::ranking_ms_per_layer` ranks on the WARM coefficient only (the cold-inclusive one sizes timeouts). Keyed by node id, ours too: every path that times a segment, local ones included, records it. **A prompt is PRICED by a third figure, `ModelSpeed::prompt_ms_per_layer_token`** — warm forwards of at least `PROMPT_RATE_MIN_BYTES`, a smaller one may only lower it (BBR's app-limited rule): a load or a round trip scaled to a long prompt priced one route at 17.6 h (#287). This node reads it too. **Per TOKEN, from the positions the hidden state carried, never per byte** — a byte figure priced at a nominal width read a 70B's own prompt at 1.88× its time (Q8_0 on the wire, 2026-11-12).
 
 → `docs/invariants/scheduling.md` § "A node is ranked on warm work only — including this node (2026-09-27)", § "A prompt is priced from warm forwards that carried enough to measure a rate"
 

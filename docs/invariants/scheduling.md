@@ -4618,16 +4618,18 @@ records it (`forward_verify_through_segments` did not, for ours).
 
 ### A prompt is priced from warm forwards that carried enough to measure a rate (2026-10-16, FUTURE_WORK #287)
 
-**`ModelSpeed::prompt_ms_per_layer_byte` is the one figure a prompt's price
-multiplies** (`SharedState::observed_prompt_ms_per_layer_byte` →
-`NodeCandidate::observed_prefill_ms_per_layer_byte` → `parallax::prefill_ms_per_layer`).
+**`ModelSpeed::prompt_ms_per_layer_token` is the one figure a prompt's price
+multiplies** (`SharedState::observed_prompt_ms_per_layer_token` →
+`NodeCandidate::observed_prompt_ms_per_layer_token` → `parallax::prefill_ms_per_layer`):
+ms per layer per TOKEN of the forward timed, its positions read off the hidden
+state that crossed (`PipelineExecutor::positions_worked`).
 Three figures come from the same prefill samples and want different things:
 
 | figure | reads | keeps |
 |---|---|---|
 | `prefill_ms_per_layer_byte` | the segment TIMEOUT (`predict_ms`) | every sample — cold ones are pessimism, which is safe for a wait |
 | `warm_prefill_ms_per_layer_byte` | RANKING, converted to ONE token (`ranking_ms_per_layer`) | warm samples — a visit's fixed cost belongs in a one-token figure |
-| `prompt_ms_per_layer_byte` | a prompt's PRICE, scaled to its tokens | warm samples of at least `PROMPT_RATE_MIN_BYTES`; a smaller one may only lower it |
+| `prompt_ms_per_layer_token` | a prompt's PRICE, scaled to its tokens | warm samples of at least `PROMPT_RATE_MIN_BYTES` that name their positions; a smaller one may only lower it |
 
 **What it replaced.** The price read the timeout's figure. Report #037 (a
 tester, v0.3.240): a 5-segment route through two peers was predicted
@@ -4658,6 +4660,23 @@ prompt many times its size scales that too. A two-term prefill fit (fixed +
 slope × bytes, as `LinearFit` does for decode) is the next step if a field
 trace shows the price still well above the time on long prompts — collect
 first (FUTURE_WORK #3).
+
+**Per token, never per byte (2026-11-12).** The figure was ms per (layer ×
+activation byte) of the forward's RESULT, priced at a nominal 16,384 bytes a
+token (width 4,096 in f32). Hidden states cross as Q8_0 by default (34 bytes a
+32 values) at the model's own width, so the unit and the price disagreed by the
+wire's format and the model's width together: this node's 70B segment carried
+48 tokens as 417,812 bytes (8,704 a token, width 8,192) and its own prompt was
+priced at 1.88× the time it took — 3.8× for a width-4,096 model — every
+measured split segment's prompt dearer than an unmeasured peer's prior. A
+forward's positions are the second-to-last dimension of the hidden state that
+crossed (the input's, else the output's where the segment did not sample; a
+sampled answer's shape says nothing of the prompt, and prices nothing). The
+byte threshold stays: it separates a payload from a round trip. Prior art:
+Petals prices a server's prompt per token per block (`server/throughput.py`,
+`forward_rps` from a 1,024-token pass). Tests
+`a_prompt_is_priced_at_the_time_it_took_whatever_its_width`,
+`a_measured_prompt_is_priced_at_the_time_it_took`.
 
 Test: `a_prompt_is_priced_from_warm_forwards_large_enough_to_measure_a_rate`.
 

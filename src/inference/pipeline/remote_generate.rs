@@ -1654,6 +1654,7 @@ impl PipelineExecutor {
                     per_token_ms,
                     layers,
                     0,
+                    None,
                 );
             }
         }

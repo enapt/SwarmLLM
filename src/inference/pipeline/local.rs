@@ -1162,7 +1162,7 @@ mod segment_budget_tests {
         model: &ModelId,
         kind: WorkKind,
     ) -> SegmentBudget {
-        state.record_peer_segment_latency(node, model, kind, 1, 1, 8);
+        state.record_peer_segment_latency(node, model, kind, 1, 1, 8, None);
         SegmentBudget::for_forward(
             state,
             node,
@@ -1564,7 +1564,7 @@ mod segment_budget_tests {
         assert!(first_token_timeout(24, load) > Duration::from_secs(300));
 
         // Once it has answered a forward of this model, neither path charges it.
-        state.record_peer_segment_latency(&node, &model, WorkKind::Delegated, 2_700, 32, 0);
+        state.record_peer_segment_latency(&node, &model, WorkKind::Delegated, 2_700, 32, 0, None);
         assert_eq!(
             LoadAllowance::for_peer(&state, &node, &model).cold_loads(),
             0
@@ -1596,7 +1596,7 @@ mod segment_budget_tests {
         let plan = vec![seg(&a, (0, 13)), seg(&b, (13, 25)), seg(&a, (25, 32))];
         assert_eq!(LoadAllowance::for_segments(&state, &plan).cold_loads(), 3);
 
-        state.record_peer_segment_latency(&b, &model, WorkKind::Prefill, 5_000, 12, 200_000);
+        state.record_peer_segment_latency(&b, &model, WorkKind::Prefill, 5_000, 12, 200_000, None);
         assert_eq!(LoadAllowance::for_segments(&state, &plan).cold_loads(), 2);
 
         let ours = vec![seg(&local, (0, 32))];
@@ -1612,7 +1612,15 @@ mod segment_budget_tests {
         let model = ModelId("m".into());
 
         // Peer prefilled this shape in 10.2s — the real measurement.
-        state.record_peer_segment_latency(&node, &model, WorkKind::Prefill, 10_199, 8, 213_268);
+        state.record_peer_segment_latency(
+            &node,
+            &model,
+            WorkKind::Prefill,
+            10_199,
+            8,
+            213_268,
+            None,
+        );
 
         let warm = SegmentBudget::for_forward(
             &state,
@@ -1641,8 +1649,24 @@ mod segment_budget_tests {
         let slow = NodeId([3u8; 32]);
         let fast = NodeId([4u8; 32]);
 
-        state.record_peer_segment_latency(&slow, &model, WorkKind::Prefill, 60_000, 8, 213_268);
-        state.record_peer_segment_latency(&fast, &model, WorkKind::Prefill, 2_000, 8, 213_268);
+        state.record_peer_segment_latency(
+            &slow,
+            &model,
+            WorkKind::Prefill,
+            60_000,
+            8,
+            213_268,
+            None,
+        );
+        state.record_peer_segment_latency(
+            &fast,
+            &model,
+            WorkKind::Prefill,
+            2_000,
+            8,
+            213_268,
+            None,
+        );
 
         let mk = |n: &NodeId| {
             SegmentBudget::for_forward(
@@ -1710,7 +1734,15 @@ mod segment_budget_tests {
         let state = test_state();
         let node = NodeId([5u8; 32]);
         let model = ModelId("m".into());
-        state.record_peer_segment_latency(&node, &model, WorkKind::Prefill, 10_199, 8, 213_268);
+        state.record_peer_segment_latency(
+            &node,
+            &model,
+            WorkKind::Prefill,
+            10_199,
+            8,
+            213_268,
+            None,
+        );
 
         let b = SegmentBudget::for_forward(
             &state,
@@ -1741,7 +1773,7 @@ mod segment_budget_tests {
         // A prefill sample marks the peer warm (so the cold-load allowance does
         // not blur the number) while leaving its decode speed unmeasured, which
         // is what sends the budget to the peer-agnostic fallback.
-        state.record_peer_segment_latency(&node, &model, WorkKind::Prefill, 4_900, 16, 146);
+        state.record_peer_segment_latency(&node, &model, WorkKind::Prefill, 4_900, 16, 146, None);
         // The exact shape observed live: one packed token id, 16 layers.
         let (token_bytes, layers) = (8usize, 16u32);
         let mk = |kind| {
@@ -1790,8 +1822,8 @@ mod segment_budget_tests {
         // a cold decode sample is a load time wearing a compute figure's
         // clothes (`PeerSpeed::observe`) — while marking the peer warm, so
         // the second is the one that counts. Exactly production's order.
-        state.record_peer_segment_latency(&node, &model, WorkKind::Decode, 600, 16, 8);
-        state.record_peer_segment_latency(&node, &model, WorkKind::Decode, 600, 16, 8);
+        state.record_peer_segment_latency(&node, &model, WorkKind::Decode, 600, 16, 8, None);
+        state.record_peer_segment_latency(&node, &model, WorkKind::Decode, 600, 16, 8, None);
 
         let decode = SegmentBudget::for_forward(
             &state,
@@ -1866,6 +1898,7 @@ mod segment_budget_tests {
             600_000,
             8,
             213_268,
+            None,
         );
         let slow = SegmentBudget::for_forward(
             &state,
@@ -1888,7 +1921,7 @@ mod segment_budget_tests {
         let state = test_state();
         let node = NodeId([6u8; 32]);
         let model = ModelId("m".into());
-        state.record_peer_segment_latency(&node, &model, WorkKind::Decode, 5, 8, 16_384);
+        state.record_peer_segment_latency(&node, &model, WorkKind::Decode, 5, 8, 16_384, None);
 
         let b = SegmentBudget::for_forward(
             &state,

@@ -826,6 +826,7 @@ pub(super) async fn forward_verify_through_segments(
                     seg_start.elapsed().as_millis() as u64,
                     num_layers,
                     result.activations.len(),
+                    None,
                 );
             }
             result
@@ -852,6 +853,7 @@ pub(super) async fn forward_verify_through_segments(
                     seg_start.elapsed().as_millis() as u64,
                     segment.layer_range.1 - segment.layer_range.0,
                     result.activations.len(),
+                    None,
                 );
             }
             result

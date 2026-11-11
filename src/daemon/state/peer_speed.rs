@@ -88,7 +88,7 @@ const RANKING_STALE_AFTER: Duration = Duration::from_secs(600);
 const MIN_INTACT_DELIVERY_RATIO: f32 = 0.05;
 
 /// The smallest prompt forward, in activation bytes, whose time measures a
-/// per-byte RATE ([`ModelSpeed::prompt_ms_per_layer_byte`]).
+/// per-byte RATE ([`ModelSpeed::prompt_ms_per_layer_token`]).
 ///
 /// **Below it the time is the visit, not the bytes.** A forward of "Hi" to a
 /// peer abroad spends its ~700 ms on the round trip and the peer's per-visit
@@ -226,13 +226,13 @@ pub struct ModelSpeed {
     /// layer — 224x its advertised figure — and it was the node's OWN price,
     /// since this map is keyed by node id, ours included.
     warm_prefill_ms_per_layer_byte: Option<f32>,
-    /// The same coefficient from WARM forwards large enough to measure a rate
-    /// ([`PROMPT_RATE_MIN_BYTES`]) — the one a prompt's PRICE multiplies
-    /// (`parallax::prefill_ms_per_layer`). Kept apart from the two above: the
+    /// The prompt's rate per layer and TOKEN from WARM forwards large enough
+    /// to measure one ([`PROMPT_RATE_MIN_BYTES`]) — the one a prompt's PRICE
+    /// multiplies (`parallax::prefill_ms_per_layer`). Kept apart from the two above: the
     /// timeout wants the pessimism of a cold sample, ranking converts this
     /// figure to ONE token where a visit's fixed cost belongs, and a prompt's
     /// price scales it to thousands, where it does not.
-    prompt_ms_per_layer_byte: Option<f32>,
+    prompt_ms_per_layer_token: Option<f32>,
     /// EMA of ms per layer for a single-token decode step.
     decode_ms_per_layer: Option<f32>,
     /// EMA of ms per layer for one decode step of a WHOLE model run on the
@@ -274,7 +274,7 @@ impl ModelSpeed {
         Self {
             prefill_ms_per_layer_byte: None,
             warm_prefill_ms_per_layer_byte: None,
-            prompt_ms_per_layer_byte: None,
+            prompt_ms_per_layer_token: None,
             decode_ms_per_layer: gossip_seed.map(|s| s * layer_work),
             delegated_ms_per_layer: None,
             decode_fit: LinearFit::default(),
@@ -303,12 +303,17 @@ impl ModelSpeed {
     /// must not update the DECODE coefficient, which is what ranks the peer:
     /// ranking on a load time is how a fast machine gets classified as slow and
     /// then never gets another chance to prove otherwise.
+    ///
+    /// `positions`: the token positions a prompt forward carried. The PRICE
+    /// figure is per layer and token, so a prompt sample without them prices
+    /// nothing ([`Self::prompt_ms_per_layer_token`]).
     pub fn observe(
         &mut self,
         kind: WorkKind,
         segment_ms: u64,
         layers: u32,
         activation_bytes: usize,
+        positions: Option<u32>,
         warm: bool,
     ) {
         if layers == 0 {
@@ -339,15 +344,22 @@ impl ModelSpeed {
                 Some(prev) => ALPHA * sample + (1.0 - ALPHA) * prev,
                 None => sample,
             });
-            // A forward too small to measure a rate may only lower it.
-            let rate = &mut self.prompt_ms_per_layer_byte;
-            *rate = match *rate {
-                Some(prev) if activation_bytes >= PROMPT_RATE_MIN_BYTES || sample < prev => {
-                    Some(ALPHA * sample + (1.0 - ALPHA) * prev)
-                }
-                None if activation_bytes >= PROMPT_RATE_MIN_BYTES => Some(sample),
-                kept => kept,
-            };
+            // The price, per layer and TOKEN. A forward too small to measure a
+            // rate may only lower it.
+            if let Some(per_token) = positions
+                .filter(|&p| p > 0)
+                .map(|p| (segment_ms as f64 / (layers as f64 * p as f64)) as f32)
+                .filter(|s| s.is_finite())
+            {
+                let rate = &mut self.prompt_ms_per_layer_token;
+                *rate = match *rate {
+                    Some(prev) if activation_bytes >= PROMPT_RATE_MIN_BYTES || per_token < prev => {
+                        Some(ALPHA * per_token + (1.0 - ALPHA) * prev)
+                    }
+                    None if activation_bytes >= PROMPT_RATE_MIN_BYTES => Some(per_token),
+                    kept => kept,
+                };
+            }
         }
         // The same sample, unnormalised, for the two-term fit. Fed the RAW
         // wall-clock and layer count rather than the per-layer figure above,
@@ -518,20 +530,30 @@ impl ModelSpeed {
     }
 
     /// The rate a prompt is PRICED at on this peer, in ms per (layer x
-    /// activation byte): warm forwards only, and only those large enough to
-    /// measure one (`prompt_ms_per_layer_byte`). `None` prices the prompt from
-    /// the device-class prior, as for a peer never measured.
+    /// token): warm forwards only, and only those large enough to measure one
+    /// (`prompt_ms_per_layer_token`). `None` prices the prompt from the
+    /// device-class prior, as for a peer never measured.
+    ///
+    /// **Per TOKEN, never per activation byte** (2026-11-12). It was per byte
+    /// of the forward's RESULT and priced at a nominal 16,384 bytes a token
+    /// (4,096 × f32) — but hidden states cross as Q8_0 by default, ~1.06
+    /// bytes a value, so Llama-3.3-70B's 8,704 bytes a token (width 8,192)
+    /// priced each measured segment's prompt 1.88× what it took, and a width
+    /// of 4,096 3.8× (this node's own 70B segment, 2026-11-09:
+    /// `activation_bytes=417812` for 48 tokens). A token is the unit the price
+    /// multiplies whatever the width and the encoding, as Petals states a
+    /// server's forward speed in tokens a second per block.
     ///
     /// **Why not the coefficient the timeout reads.** That one keeps cold
     /// samples, and a segment that paid for loading the model then priced every
     /// prompt sent there for ten minutes; and it keeps small ones, whose time is
     /// the round trip. A tester's route was priced `prompt:63277600` that way
     /// (report #037). Expires like the others.
-    pub fn prompt_ms_per_layer_byte(&self) -> Option<f32> {
+    pub fn prompt_ms_per_layer_token(&self) -> Option<f32> {
         if self.updated_at.elapsed() >= RANKING_STALE_AFTER {
             return None;
         }
-        self.prompt_ms_per_layer_byte
+        self.prompt_ms_per_layer_token
     }
 
     /// Per-layer cost of running a **whole model** on this peer, in ms — the
@@ -865,9 +887,9 @@ mod tests {
     fn prefill_and_decode_do_not_contaminate_each_other() {
         let mut s = ModelSpeed::default();
         // 8-layer segment, 213268 bytes of activations, 10199 ms.
-        s.observe(WorkKind::Prefill, 10_199, 8, 213_268, true);
+        s.observe(WorkKind::Prefill, 10_199, 8, 213_268, None, true);
         // Same peer, same segment, single-token decode: 150 ms.
-        s.observe(WorkKind::Decode, 150, 8, 16_384, true);
+        s.observe(WorkKind::Decode, 150, 8, 16_384, None, true);
 
         let p = s.predict_ms(WorkKind::Prefill, 8, 213_268).unwrap();
         let d = s.predict_ms(WorkKind::Decode, 8, 16_384).unwrap();
@@ -890,7 +912,7 @@ mod tests {
     #[test]
     fn prediction_scales_with_prompt_size_and_layers() {
         let mut s = ModelSpeed::default();
-        s.observe(WorkKind::Prefill, 1_000, 4, 100_000, true);
+        s.observe(WorkKind::Prefill, 1_000, 4, 100_000, None, true);
 
         let base = s.predict_ms(WorkKind::Prefill, 4, 100_000).unwrap();
         let double_tokens = s.predict_ms(WorkKind::Prefill, 4, 200_000).unwrap();
@@ -907,7 +929,7 @@ mod tests {
         assert_eq!(s.predict_ms(WorkKind::Prefill, 4, 1000), None);
         assert_eq!(s.predict_ms(WorkKind::Decode, 4, 1000), None);
 
-        s.observe(WorkKind::Decode, 100, 4, 16_384, true);
+        s.observe(WorkKind::Decode, 100, 4, 16_384, None, true);
         assert!(s.predict_ms(WorkKind::Decode, 4, 16_384).is_some());
         assert_eq!(
             s.predict_ms(WorkKind::Prefill, 4, 1000),
@@ -919,24 +941,24 @@ mod tests {
     #[test]
     fn unnormalisable_samples_are_ignored() {
         let mut s = ModelSpeed::default();
-        s.observe(WorkKind::Prefill, 500, 0, 1000, true); // zero layers
-        s.observe(WorkKind::Prefill, 500, 4, 0, true); // zero bytes
+        s.observe(WorkKind::Prefill, 500, 0, 1000, None, true); // zero layers
+        s.observe(WorkKind::Prefill, 500, 4, 0, None, true); // zero bytes
         assert_eq!(s.prefill_samples(), 0);
         assert_eq!(s.predict_ms(WorkKind::Prefill, 4, 1000), None);
 
-        s.observe(WorkKind::Decode, 500, 0, 1000, true);
+        s.observe(WorkKind::Decode, 500, 0, 1000, None, true);
         assert_eq!(s.decode_samples(), 0);
     }
 
     #[test]
     fn the_ema_follows_a_peer_that_changes_speed() {
         let mut s = ModelSpeed::default();
-        s.observe(WorkKind::Decode, 100, 1, 0, true);
+        s.observe(WorkKind::Decode, 100, 1, 0, None, true);
         let first = s.predict_ms(WorkKind::Decode, 1, 0).unwrap();
         assert!((first - 100.0).abs() < 0.01, "first sample seeds directly");
 
         for _ in 0..20 {
-            s.observe(WorkKind::Decode, 400, 1, 0, true);
+            s.observe(WorkKind::Decode, 400, 1, 0, None, true);
         }
         let settled = s.predict_ms(WorkKind::Decode, 1, 0).unwrap();
         assert!(
@@ -948,15 +970,15 @@ mod tests {
     #[test]
     fn ranking_prefers_decode_but_falls_back_to_prefill() {
         let mut only_prefill = ModelSpeed::default();
-        only_prefill.observe(WorkKind::Prefill, 10_199, 8, 213_268, true);
+        only_prefill.observe(WorkKind::Prefill, 10_199, 8, 213_268, None, true);
         assert!(
             only_prefill.ranking_ms_per_layer().is_some(),
             "a prefill-only peer must still be rankable"
         );
 
         let mut both = ModelSpeed::default();
-        both.observe(WorkKind::Prefill, 10_199, 8, 213_268, true);
-        both.observe(WorkKind::Decode, 150, 8, 16_384, true);
+        both.observe(WorkKind::Prefill, 10_199, 8, 213_268, None, true);
+        both.observe(WorkKind::Decode, 150, 8, 16_384, None, true);
         assert!((both.ranking_ms_per_layer().unwrap() - 18.75).abs() < 0.1);
     }
 
@@ -967,13 +989,13 @@ mod tests {
     #[test]
     fn the_ranking_figure_says_what_it_was_timed_on() {
         let mut s = ModelSpeed::default();
-        s.observe(WorkKind::Prefill, 10_199, 8, 213_268, true);
+        s.observe(WorkKind::Prefill, 10_199, 8, 213_268, None, true);
         let r = s.ranking().unwrap();
         assert_eq!(r.timed_on, TimedOn::PromptPasses);
         assert!(!r.timed_on.carries_the_round_trip());
         assert_eq!(Some(r.ms_per_layer), s.ranking_ms_per_layer());
 
-        s.observe(WorkKind::Decode, 150, 8, 16_384, true);
+        s.observe(WorkKind::Decode, 150, 8, 16_384, None, true);
         let r = s.ranking().unwrap();
         assert_eq!(r.timed_on, TimedOn::DecodeSteps { samples: 1 });
         assert!(r.timed_on.carries_the_round_trip());
@@ -1013,7 +1035,7 @@ mod tests {
     #[test]
     fn gossip_refines_but_does_not_overwrite_a_measurement() {
         let mut s = ModelSpeed::default();
-        s.observe(WorkKind::Decode, 100, 1, 0, true);
+        s.observe(WorkKind::Decode, 100, 1, 0, None, true);
         s.merge_ranking_sample(10_000.0, 1.0, 0.3);
         let after = s.ranking_ms_per_layer().unwrap();
         assert!(
@@ -1042,7 +1064,7 @@ mod ranking_staleness_tests {
     fn measured_slow() -> ModelSpeed {
         let mut s = ModelSpeed::default();
         // One slow decode sample, as a cold model load would produce.
-        s.observe(WorkKind::Decode, 2_200, 22, 4096, true);
+        s.observe(WorkKind::Decode, 2_200, 22, 4096, None, true);
         s
     }
 
@@ -1084,7 +1106,7 @@ mod ranking_staleness_tests {
             .checked_sub(RANKING_STALE_AFTER + Duration::from_secs(1))
             .expect("up for longer than the staleness window");
         assert!(s.ranking_ms_per_layer().is_none());
-        s.observe(WorkKind::Decode, 30, 22, 4096, true);
+        s.observe(WorkKind::Decode, 30, 22, 4096, None, true);
         assert!(
             s.ranking_ms_per_layer().is_some(),
             "a fresh sample must make the peer measurable again"
@@ -1122,7 +1144,7 @@ mod ranking_trusts_only_what_it_measured {
     #[test]
     fn our_own_measurement_ranks_and_gossip_may_then_refine_it() {
         let mut s = ModelSpeed::default();
-        s.observe(WorkKind::Decode, 160, 16, 16_384, true);
+        s.observe(WorkKind::Decode, 160, 16, 16_384, None, true);
         let mine = s.ranking_ms_per_layer().expect("our own sample must rank");
         assert!(
             (mine - 10.0).abs() < 0.01,
@@ -1140,7 +1162,7 @@ mod ranking_trusts_only_what_it_measured {
     #[test]
     fn a_cold_segment_does_not_set_the_ranking_figure() {
         let mut cold = ModelSpeed::default();
-        cold.observe(WorkKind::Decode, 17_000, 16, 16_384, false);
+        cold.observe(WorkKind::Decode, 17_000, 16, 16_384, None, false);
         assert_eq!(
             cold.ranking_ms_per_layer(),
             None,
@@ -1149,7 +1171,7 @@ mod ranking_trusts_only_what_it_measured {
 
         // The same segment once the model is resident is a real measurement.
         let mut warm = ModelSpeed::default();
-        warm.observe(WorkKind::Decode, 160, 16, 16_384, true);
+        warm.observe(WorkKind::Decode, 160, 16, 16_384, None, true);
         assert!(warm.ranking_ms_per_layer().is_some());
     }
 
@@ -1158,7 +1180,7 @@ mod ranking_trusts_only_what_it_measured {
     #[test]
     fn a_cold_segment_still_sizes_the_timeout() {
         let mut s = ModelSpeed::default();
-        s.observe(WorkKind::Prefill, 10_000, 8, 200_000, false);
+        s.observe(WorkKind::Prefill, 10_000, 8, 200_000, None, false);
         assert!(
             s.predict_ms(WorkKind::Prefill, 8, 200_000).is_some(),
             "timeout sizing must keep the cold sample — waiting too long is safe, \
@@ -1173,7 +1195,7 @@ mod ranking_trusts_only_what_it_measured {
     #[test]
     fn a_cold_prefill_sample_times_a_load_and_does_not_rank() {
         let mut cold = ModelSpeed::default();
-        cold.observe(WorkKind::Prefill, 2448, 1, 204_564, false);
+        cold.observe(WorkKind::Prefill, 2448, 1, 204_564, None, false);
         assert!(
             cold.predict_ms(WorkKind::Prefill, 1, 204_564).is_some(),
             "it still sizes the wait"
@@ -1187,7 +1209,7 @@ mod ranking_trusts_only_what_it_measured {
 
         // The control: the same segment once the model is resident ranks.
         let mut warm = ModelSpeed::default();
-        warm.observe(WorkKind::Prefill, 2448, 1, 204_564, true);
+        warm.observe(WorkKind::Prefill, 2448, 1, 204_564, None, true);
         let ranked = warm
             .ranking_ms_per_layer()
             .expect("a warm prefill sample ranks");
@@ -1197,7 +1219,7 @@ mod ranking_trusts_only_what_it_measured {
         );
 
         // And a cold sample after a warm one does not move the ranking figure.
-        warm.observe(WorkKind::Prefill, 60_000, 1, 204_564, false);
+        warm.observe(WorkKind::Prefill, 60_000, 1, 204_564, None, false);
         assert!((warm.ranking_ms_per_layer().unwrap() - 196.066).abs() < 0.01);
     }
 
@@ -1208,15 +1230,16 @@ mod ranking_trusts_only_what_it_measured {
     /// ninety. Neither sets the price; a small one may only lower it.
     #[test]
     fn a_prompt_is_priced_from_warm_forwards_large_enough_to_measure_a_rate() {
+        let (hi_tokens, long_tokens) = (10, 3_729);
         let hi = 10 * 4_096;
         let long = 3_729 * 4_096;
         assert!(hi < PROMPT_RATE_MIN_BYTES && long >= PROMPT_RATE_MIN_BYTES);
 
         let mut s = ModelSpeed::default();
-        s.observe(WorkKind::Prefill, 60_000, 2, long, false);
-        s.observe(WorkKind::Prefill, 700, 2, hi, true);
+        s.observe(WorkKind::Prefill, 60_000, 2, long, Some(long_tokens), false);
+        s.observe(WorkKind::Prefill, 700, 2, hi, Some(hi_tokens), true);
         assert_eq!(
-            s.prompt_ms_per_layer_byte(),
+            s.prompt_ms_per_layer_token(),
             None,
             "a load and a visit set no price: the prior stands, as for a node never measured"
         );
@@ -1225,16 +1248,46 @@ mod ranking_trusts_only_what_it_measured {
             "the timeout keeps both"
         );
 
-        // A warm prompt of its own size measures the rate.
-        s.observe(WorkKind::Prefill, 1_124, 2, long, true);
-        let rate = s.prompt_ms_per_layer_byte().expect("measured");
-        assert!((rate - 1_124.0 / (2.0 * long as f32)).abs() < 1e-9);
+        // A prompt forward whose positions were not read prices nothing.
+        s.observe(WorkKind::Prefill, 1_124, 2, long, None, true);
+        assert_eq!(s.prompt_ms_per_layer_token(), None);
+
+        // A warm prompt of its own size measures the rate, per layer and token.
+        s.observe(WorkKind::Prefill, 1_124, 2, long, Some(long_tokens), true);
+        let rate = s.prompt_ms_per_layer_token().expect("measured");
+        assert!((rate - 1_124.0 / (2.0 * long_tokens as f32)).abs() < 1e-6);
         // A short one after it is the visit again: it does not raise the price…
-        s.observe(WorkKind::Prefill, 700, 2, hi, true);
-        assert_eq!(s.prompt_ms_per_layer_byte(), Some(rate));
-        // …but one that ran faster still per byte may lower it.
-        s.observe(WorkKind::Prefill, 1, 2, hi, true);
-        assert!(s.prompt_ms_per_layer_byte().unwrap() < rate);
+        s.observe(WorkKind::Prefill, 700, 2, hi, Some(hi_tokens), true);
+        assert_eq!(s.prompt_ms_per_layer_token(), Some(rate));
+        // …but one that ran faster still per token may lower it.
+        s.observe(WorkKind::Prefill, 1, 2, hi, Some(hi_tokens), true);
+        assert!(s.prompt_ms_per_layer_token().unwrap() < rate);
+    }
+
+    /// **A prompt is priced per TOKEN, whatever the width or encoding of the
+    /// hidden states it timed** (2026-11-12). This node's own Llama-3.3-70B
+    /// segment carried 48 prompt tokens as 417,812 bytes (Q8_0 at width
+    /// 8,192, 8,704 a token); priced per byte at a nominal 16,384 a token,
+    /// that prompt cost 1.88× its time, a width of 4,096 3.8×. The price of
+    /// the prompt it timed is the time it took.
+    #[test]
+    fn a_prompt_is_priced_at_the_time_it_took_whatever_its_width() {
+        let tokens: u32 = 48;
+        for (width, bytes_a_value) in [
+            (8_192usize, 34.0 / 32.0),
+            (4_096, 34.0 / 32.0),
+            (5_120, 4.0),
+        ] {
+            let bytes = 20 + (tokens as f64 * width as f64 * bytes_a_value) as usize;
+            let bytes = bytes.max(PROMPT_RATE_MIN_BYTES);
+            let mut s = ModelSpeed::default();
+            s.observe(WorkKind::Prefill, 2_400, 4, bytes, Some(tokens), true);
+            let priced = s.prompt_ms_per_layer_token().expect("measured") * 4.0 * tokens as f32;
+            assert!(
+                (priced - 2_400.0).abs() < 1e-2,
+                "width {width}: the prompt it timed priced {priced} ms against 2,400"
+            );
+        }
     }
 
     /// The reliability figure must start optimistic, fall with losses, and
@@ -1288,8 +1341,14 @@ mod ranking_trusts_only_what_it_measured {
     #[test]
     fn a_delivery_sample_does_not_refresh_the_speed_clock() {
         let mut s = PeerSpeed::default();
-        s.model_mut(&ModelId("m".into()), || 1.0)
-            .observe(WorkKind::Decode, 160, 16, 16_384, true);
+        s.model_mut(&ModelId("m".into()), || 1.0).observe(
+            WorkKind::Decode,
+            160,
+            16,
+            16_384,
+            None,
+            true,
+        );
         let speed_clock = s.updated_at();
 
         s.observe_delivery(false);
@@ -1317,6 +1376,7 @@ mod two_term_tests {
                 fixed + per_layer * layers as u64,
                 layers,
                 4096,
+                None,
                 true,
             );
         }
@@ -1416,7 +1476,7 @@ mod two_term_tests {
         // Cost FALLING with width is not something a peer does; it is what a
         // one-off stall on a narrow segment looks like.
         for (layers, ms) in [(4u32, 5_000u64), (8, 3_000), (16, 1_500), (32, 400)] {
-            s.observe(WorkKind::Decode, ms, layers, 4096, true);
+            s.observe(WorkKind::Decode, ms, layers, 4096, None, true);
         }
         assert!(
             s.decode_terms().is_none(),
@@ -1452,8 +1512,14 @@ mod per_model_tests {
 
     fn decode_warm(s: &mut PeerSpeed, m: &ModelId, work: f32, ms_per_layer: u64) {
         for _ in 0..3 {
-            s.model_mut(m, || work)
-                .observe(WorkKind::Decode, ms_per_layer * 16, 16, 16_384, true);
+            s.model_mut(m, || work).observe(
+                WorkKind::Decode,
+                ms_per_layer * 16,
+                16,
+                16_384,
+                None,
+                true,
+            );
         }
     }
 

@@ -210,11 +210,11 @@ struct NodeCandidate {
     /// 2026-10-07). `None` for this node, whose loader decides, and for a peer
     /// that advertises no ceiling: unknown, never "no room".
     max_hostable_layers_at_ceiling: Option<u32>,
-    /// MEASURED prompt rate for this candidate, ms per (layer x activation
-    /// byte) — `SharedState::observed_prompt_ms_per_layer_byte`, warm forwards
-    /// large enough to measure one. `None` until one has been timed — see
+    /// MEASURED prompt rate for this candidate, ms per (layer x token) —
+    /// `SharedState::observed_prompt_ms_per_layer_token`, warm forwards large
+    /// enough to measure one. `None` until one has been timed — see
     /// `parallax::vertex_cost` for what stands in meanwhile.
-    observed_prefill_ms_per_layer_byte: Option<f32>,
+    observed_prompt_ms_per_layer_token: Option<f32>,
     /// Whether this peer has told us it has a graphics card. Used ONLY to pick
     /// which prefill-to-decode prior applies before a real measurement exists;
     /// never to rank peers against each other, which is what the peer's own
@@ -5081,9 +5081,9 @@ impl PipelineScheduler {
             // one for a processor, whichever a card/processor split whose
             // prompt is read on the card resembles. A whole-model run here is
             // not timed this way, so a model only ever run whole keeps the prior.
-            let observed_prefill_ms_per_layer_byte = self
+            let observed_prompt_ms_per_layer_token = self
                 .shared_state
-                .observed_prompt_ms_per_layer_byte(&node_id, &manifest.id);
+                .observed_prompt_ms_per_layer_token(&node_id, &manifest.id);
             // Which prefill prior applies — a card reads a prompt ~40x faster
             // than it writes a reply, a processor ~4.5x. It follows the device
             // the request would use, not the device the node owns: for a split
@@ -5620,7 +5620,7 @@ impl PipelineScheduler {
                 max_hostable_layers,
                 max_hostable_layers_at_face_value,
                 max_hostable_layers_at_ceiling,
-                observed_prefill_ms_per_layer_byte,
+                observed_prompt_ms_per_layer_token,
                 has_gpu,
                 held_ranges,
                 published_room,
@@ -5709,7 +5709,7 @@ impl PipelineScheduler {
                 // which is what makes the two distinguishable in a live log.
                 observed_fixed_ms_per_visit = ?c.observed_fixed_ms_per_visit,
                 observed_delegated_ms_per_layer = ?c.observed_delegated_ms_per_layer,
-                observed_prefill_ms_per_layer_byte = ?c.observed_prefill_ms_per_layer_byte,
+                observed_prompt_ms_per_layer_token = ?c.observed_prompt_ms_per_layer_token,
                 // The passes the per-token costs below are charged for: 64, or
                 // fewer where the reply may not use that many tokens (#3).
                 forward_passes = c.forward_passes(),
