@@ -70,7 +70,7 @@ Whenever code waits for a subprocess, handle it dying instead (`spawn_worker` ra
 
 ## A split's stored prompt lives in the worker's prefix cache (2026-10-09, #10)
 
-A segment keeps a split's prompt between turns as chain-keyed entries in the worker's `PrefixCache` (`lookup_chain` / `insert_chain_from_kv`), never a second store: one budget, one eviction (gotcha #440). In `handle_forward`: look up BEFORE admission, admit restored + computed positions, hydrate AFTER; any mismatch is `PromptCacheMiss`, never a forward from the wrong opening.
+A segment keeps a split's prompt between turns as chain-keyed entries in the worker's `PrefixCache` (`lookup_chain` / `insert_chain_from_kv`), never a second store: one budget, one eviction (gotcha #440). In `handle_forward`: look up BEFORE admission, admit restored + computed positions, hydrate AFTER; any mismatch is `PromptCacheMiss`, never a forward from the wrong opening. **The store is planned at the final piece and copied once the answer is SENT** (#433: `PrefixCache::plan_chain_insert` promises its blocks in the answer, `finish_chain_insert` copies after `send_worker`) — never between the prompt pass and the first token, where each segment's copy of the whole conversation ran in series (prompt pass −9-22% on the rig's turns that store). A copy that then fails stores nothing; the next turn misses and is read from 0. A/B `SWARMLLM_SPLIT_PROMPT_SAVE=before-answer`.
 
 → `docs/invariants/memory.md` § "A split's stored prompt lives in the worker's prefix cache"
 

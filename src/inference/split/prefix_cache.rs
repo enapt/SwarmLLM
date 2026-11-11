@@ -415,6 +415,43 @@ impl LetGo {
 /// [`LetGo`]. Production callers pass the worker's planner as a closure; a
 /// fixed room exists only for tests, so no caller can size a snapshot
 /// without being told what it replaces.
+/// A split prompt's store as [`PrefixCache::plan_chain_insert`] decided it,
+/// not yet copied (#433). `#[must_use]`: a plan dropped without
+/// [`PrefixCache::finish_chain_insert`] stores nothing it promised.
+#[must_use]
+pub struct ChainInsert(ChainPlan);
+
+enum ChainPlan {
+    /// Nothing to copy: the blocks already held, 0 for none.
+    Settled(u32),
+    Copy(PlannedCopy),
+}
+
+/// `positions` of the request's cache (`key`) to copy under `chain`.
+struct PlannedCopy {
+    key: String,
+    model_key: String,
+    chain: Vec<[u8; 32]>,
+    block_tokens: u32,
+    positions: usize,
+    serves: usize,
+    bytes: usize,
+    dim: usize,
+    max_seq_len: usize,
+    room: SnapshotRoom,
+}
+
+impl ChainInsert {
+    /// The blocks the coordinator may resume from next turn once the copy is
+    /// made — what the forward's answer promises.
+    pub fn blocks(&self) -> u32 {
+        match &self.0 {
+            ChainPlan::Settled(blocks) => *blocks,
+            ChainPlan::Copy(c) => c.chain.len() as u32,
+        }
+    }
+}
+
 pub trait RoomPlan {
     fn plan(self, let_go: LetGo) -> SnapshotRoom;
 }
@@ -1223,12 +1260,32 @@ impl PrefixCache {
     }
 
     /// Store this request's cache under a split prompt's block chain, for the
-    /// next turn's `lookup_chain`: as many WHOLE blocks as the cache holds,
-    /// `room` has space for (from `kv_budget::plan_snapshot` — gotcha #440)
-    /// and the byte ceiling allows.
-    /// Answers how many blocks it stored — what the coordinator may resume
-    /// from here next turn; 0 stores nothing.
+    /// next turn's `lookup_chain`: [`Self::plan_chain_insert`] and, at once,
+    /// [`Self::finish_chain_insert`]. Answers how many blocks it stored — what
+    /// the coordinator may resume from here next turn; 0 stores nothing.
     pub fn insert_chain_from_kv(
+        &self,
+        model_key: &str,
+        request_id: &str,
+        kv_store: &KvCacheStore,
+        block_tokens: u32,
+        keys: &[[u8; 32]],
+        room: impl RoomPlan,
+    ) -> u32 {
+        let plan =
+            self.plan_chain_insert(model_key, request_id, kv_store, block_tokens, keys, room);
+        self.finish_chain_insert(kv_store, plan)
+    }
+
+    /// Decide a split prompt's store without copying anything: as many WHOLE
+    /// blocks as the cache holds, `room` has space for (from
+    /// `kv_budget::plan_snapshot` — gotcha #440) and the byte ceiling allows.
+    /// [`ChainInsert::blocks`] is what the forward's answer promises; the copy
+    /// is [`Self::finish_chain_insert`], made once the answer is on its way
+    /// (#433): it copies the conversation from position 0, so made before the
+    /// answer it grew every turn's first token with the conversation, once per
+    /// segment in a row. Nothing may change the request's cache in between.
+    pub fn plan_chain_insert(
         &self,
         model_key: &str,
         request_id: &str,
@@ -1237,30 +1294,31 @@ impl PrefixCache {
         keys: &[[u8; 32]],
         // As on the token path: asked once the save knows what it replaces.
         room: impl RoomPlan,
-    ) -> u32 {
+    ) -> ChainInsert {
+        let settled = |blocks: u32| ChainInsert(ChainPlan::Settled(blocks));
         let bt = block_tokens as usize;
         if !self.enabled || bt == 0 || keys.is_empty() {
-            return 0;
+            return settled(0);
         }
         let key = KvCacheStore::cache_key(model_key, request_id);
         let Ok(held) = HeldCache::read(kv_store, &key) else {
-            return 0;
+            return settled(0);
         };
         // A split segment's state is refused: a chain entry carries
         // attention layers only.
         if !held.recurrent_at.is_empty() {
-            return 0;
+            return settled(0);
         }
         let ceiling = self.positions_ceiling(held.cost);
         let whole = held.positions.min(keys.len() * bt).min(ceiling) / bt * bt;
         if whole == 0 || whole < self.min_tokens {
-            return 0;
+            return settled(0);
         }
         // Already held, whole: nothing to copy, and nothing given up.
         if let Some(blocks) =
             self.covered_by_chain(model_key, &keys[..whole / bt], block_tokens, whole)
         {
-            return blocks;
+            return settled(blocks);
         }
         let serves = held.serves;
         let planned_let_go = self.let_go(model_key, |e| {
@@ -1270,7 +1328,7 @@ impl PrefixCache {
         let positions = whole.min(room.max_positions) / bt * bt;
         let blocks = positions / bt;
         if blocks == 0 || positions < self.min_tokens {
-            return 0;
+            return settled(0);
         }
         // As on the token path: a slid window cannot be saved short of where
         // it still answers (FUTURE_WORK #281).
@@ -1282,12 +1340,12 @@ impl PrefixCache {
                 "prefix-cache: not storing a split's prompt — the sliding-window layers no \
                  longer hold the opening that fits"
             );
-            return 0;
+            return settled(0);
         }
         let chain = &keys[..blocks];
         if positions < whole {
             if let Some(blocks) = self.covered_by_chain(model_key, chain, block_tokens, positions) {
-                return blocks;
+                return settled(blocks);
             }
             let let_go = self.let_go(model_key, |e| {
                 e.replaced_by_chain(chain, block_tokens, serves)
@@ -1300,9 +1358,46 @@ impl PrefixCache {
                     "prefix-cache: not storing a split's prompt — the room's cut keeps an entry \
                      the plan counted as let go"
                 );
-                return 0;
+                return settled(0);
             }
         }
+        ChainInsert(ChainPlan::Copy(PlannedCopy {
+            key,
+            model_key: model_key.to_string(),
+            chain: chain.to_vec(),
+            block_tokens,
+            positions,
+            serves,
+            bytes: held.cost.bytes_at(positions),
+            dim: held.dim,
+            max_seq_len: held.max_seq_len,
+            room,
+        }))
+    }
+
+    /// Make the copy [`Self::plan_chain_insert`] decided. Answers the blocks
+    /// stored: the plan's, or 0 where the copy failed or the cache no longer
+    /// holds the positions — the next turn then misses and is read from 0.
+    pub fn finish_chain_insert(&self, kv_store: &KvCacheStore, plan: ChainInsert) -> u32 {
+        let PlannedCopy {
+            key,
+            model_key,
+            chain,
+            block_tokens,
+            positions,
+            serves,
+            bytes,
+            dim,
+            max_seq_len,
+            room,
+        } = match plan.0 {
+            ChainPlan::Settled(blocks) => return blocks,
+            ChainPlan::Copy(c) => c,
+        };
+        let model_key = model_key.as_str();
+        let chain = chain.as_slice();
+        let blocks = chain.len();
+        let started = Instant::now();
         let Some(entry) = kv_store_get(kv_store, &key)
             .filter(|e| HeldCache::positions_of(&e.layers) >= positions)
         else {
@@ -1313,17 +1408,10 @@ impl PrefixCache {
         let room_made = self.make_room(
             model_key,
             |e| e.replaced_by_chain(chain, block_tokens, serves),
-            held.cost.bytes_at(positions),
+            bytes,
             room,
         );
-        let snap = match snapshot_at(
-            &entry.layers,
-            &[],
-            positions,
-            held.dim,
-            held.max_seq_len,
-            room.home,
-        ) {
+        let snap = match snapshot_at(&entry.layers, &[], positions, dim, max_seq_len, room.home) {
             Ok(s) => Arc::new(s),
             Err(e) => {
                 tracing::warn!(model_key, positions, replaced = room_made.replaced,
@@ -1366,6 +1454,8 @@ impl PrefixCache {
             home = ?room.home,
             replaced_before_copy = room_made.replaced,
             evicted_before_copy = room_made.evicted,
+            mb = bytes / (1024 * 1024),
+            copy_ms = started.elapsed().as_millis() as u64,
             "DIAG: prefix-cache stored a split's prompt"
         );
         if kept {
@@ -1609,14 +1699,26 @@ impl PrefixCache {
             *held = Some(SsmState::new(slot, snapshot.token_count));
         }
         entry.last_accessed = Instant::now();
+        let copy_ms = started.elapsed().as_millis() as u64;
         if snapshot.home() == SnapshotHome::HostRam {
             tracing::info!(
                 model_key,
                 request_id,
                 positions = snapshot.token_count,
                 mb = snapshot.bytes() / (1024 * 1024),
-                copy_ms = started.elapsed().as_millis() as u64,
+                copy_ms,
                 "DIAG: prefix-cache restored a snapshot from host RAM to the card"
+            );
+        } else {
+            // A restore copies the whole stored prompt into the live cache, in
+            // every segment of a split, before the forward runs (#433).
+            tracing::info!(
+                model_key,
+                request_id,
+                positions = snapshot.token_count,
+                mb = snapshot.bytes() / (1024 * 1024),
+                copy_ms,
+                "DIAG: prefix-cache restored a stored prompt beside the live cache"
             );
         }
         Ok(snapshot.token_count)
@@ -2712,6 +2814,41 @@ mod tests {
             pc.insert_chain_from_kv("seg", "none", &kv_store, 8, &keys, ANYWHERE),
             0
         );
+    }
+
+    /// A split prompt's store is decided before the forward answers and
+    /// copied after it (#433): the plan copies nothing and promises the blocks
+    /// the copy then stores; a plan whose cache went away stores nothing.
+    #[test]
+    fn a_planned_split_store_copies_only_when_finished() {
+        let pc = PrefixCache::new(true, 8, 0, 4, 0, 0);
+        let kv_store = KvCacheStore::new(std::time::Duration::from_secs(600));
+        make_fake_kv(&kv_store, "seg", "turn-1", 2, 40);
+        let keys: Vec<[u8; 32]> = (0..6u8).map(|i| [i; 32]).collect();
+        let plan = pc.plan_chain_insert("seg", "turn-1", &kv_store, 8, &keys, ANYWHERE);
+        assert_eq!(plan.blocks(), 5, "the answer promises five blocks");
+        assert_eq!(pc.entry_count("seg"), 0, "and the plan copied nothing");
+        assert!(pc.lookup_chain("seg", 8, &keys, 40).is_none());
+        assert_eq!(pc.finish_chain_insert(&kv_store, plan), 5);
+        assert_eq!(
+            pc.lookup_chain("seg", 8, &keys, 40)
+                .expect("stored once finished")
+                .token_count,
+            40
+        );
+        // Planned again: already held, nothing to copy, the same promise.
+        let again = pc.plan_chain_insert("seg", "turn-1", &kv_store, 8, &keys, ANYWHERE);
+        assert_eq!(again.blocks(), 5);
+        assert_eq!(pc.finish_chain_insert(&kv_store, again), 5);
+        assert_eq!(pc.entry_count("seg"), 1);
+        // The cache released between the plan and the copy: nothing stored.
+        make_fake_kv(&kv_store, "seg", "turn-2", 2, 48);
+        let grown: Vec<[u8; 32]> = (0..6u8).map(|i| [i + 50; 32]).collect();
+        let plan = pc.plan_chain_insert("seg", "turn-2", &kv_store, 8, &grown, ANYWHERE);
+        assert_eq!(plan.blocks(), 6);
+        kv_store.clear_request("seg", "turn-2");
+        assert_eq!(pc.finish_chain_insert(&kv_store, plan), 0);
+        assert!(pc.lookup_chain("seg", 8, &grown, 8).is_none());
     }
 
     /// Chain entries and token entries share one cache without disturbing

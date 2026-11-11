@@ -4108,14 +4108,38 @@ reply whose peers changed (failover) is not kept (`PipelineExecutor::exposure_of
 - Field measurement on an agent's replayed session (the rig measures the mechanism, below).
 
 #### #433 — A 70B split's first token grows with the conversation: 6.9 → 16.5 s over five turns
-`P2` · perf-split · **OPEN** — 2026-11-08 · history: #10 (a split's stored prompt), field report 2026-11-08
+`P2` · perf-split · **PARTIAL** (one cause fixed; the field's own cause undetermined) — 2026-11-11 · history: #10 (a split's stored prompt), field report 2026-11-08
 
 A tester's 70B, split over two computers by their harness (v0.3.278): 6/6 replies at 2.6 tok/s, the first token
 56 s cold, then 6.9, 7.4, 9.8, 13.1, 16.5 s as the conversation grew. A segment that kept the conversation's opening
-(#10) reads only each turn's new tokens, so the first token should stay roughly flat; growing with the conversation
-looks like each turn's prompt read from 0 — a `PromptCacheMiss` re-send, or entries let go between turns. **To do**:
-reproduce on `split_rig.sh splitcache` with a five-turn conversation on a 70B-shaped split and read
-`split prompt cache` / `PromptCacheMiss` lines per turn before any design.
+(#10) reads only each turn's new tokens, so the first token should stay roughly flat. The report carries no
+per-turn logs, prompt sizes or placements, so its cause cannot be read from it.
+
+**Reproduced 2026-11-11** (`split_rig.sh splitcache TURNS=5`, Llama-3.2-3B, A shard 0, B the rest, both on the
+processor): every turn resumed from all the whole blocks the turn before stored, B hit each time, no miss — the
+cache works on this shape. **One cost on the first token, fixed the same day**: each segment copied the WHOLE
+conversation into its store before answering the prompt pass (B: 450-475 MB, 150-580 ms), the copies of a chain in
+series. The store is now planned there and copied once the answer is sent (`PrefixCache::plan_chain_insert` /
+`finish_chain_insert`; A/B `SWARMLLM_SPLIT_PROMPT_SAVE=before-answer`): the prompt pass −22%, −11%, −9% on turns
+2, 4, 5 (ABBA, one binary), equal on turn 3, which stores nothing — the control. The copy delays the next forward
+instead; replies identical. Table: `docs/invariants/memory.md` § "A split's stored prompt lives in the worker's
+prefix cache". Prior art: llama.cpp's server saves a slot's prompt at slot reuse; vLLM and SGLang copy nothing.
+
+**Left**:
+1. **The field's cause.** Each candidate leaves its own line on the nodes (`docs/DIAGNOSTICS.md`, "a LATER turn
+   of a conversation slow through a SPLIT"): (a) the store cut short by memory — `snapshot cut to the room beside
+   the live cache` / `cut to the host memory the machine can spare` on a segment's node, after which every turn
+   re-reads past the cut, a cost that grows with the conversation; (b) the plan's split points moving between
+   turns — an opening is held for exactly its range (`held_openings`), so a moved boundary reads from 0; (c) a
+   miss — `Prompt cache miss` on the coordinator. Ask for the next report's node logs of both computers.
+2. **The restore copy** (`hydrate_request_from_snapshot`, 110-180 ms per 450 MB on the rig) is still before the
+   forward, in every segment. Removing it means the stored blocks ARE the live cache's (vLLM's paged blocks,
+   SGLang's radix tree, referenced, never copied) — a redesign of `LayerKv`.
+3. **The reply is never kept.** A turn stores only its prompt, so the next reads the previous reply again with
+   its own question. llama.cpp's slot keeps the generated tokens; SGLang's `cache_finished_req` inserts prompt AND
+   output when a request ends; vLLM caches full decode blocks. Here a segment learns a reply ended only from
+   `CancelInference` and never sees token ids: keeping the reply needs the coordinator to send the reply's block
+   keys at the end — a new message behind a feature bit (`architecture.md` § "Additive Protocol Evolution").
 
 ### Model families and platforms
 

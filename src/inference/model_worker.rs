@@ -2945,14 +2945,18 @@ async fn handle_forward(
     // coordinator may resume from here next turn.
     // A pass read in pieces is stored once, at its FINAL piece: earlier ones hold
     // only part of the prompt.
+    // The store is DECIDED here and its blocks promised in the answer; the
+    // copy — the conversation from position 0 — is made once the answer is
+    // sent (#433, `split_prompt_saved_after_the_answer`).
     let final_piece =
         prompt_span.is_none_or(|s| s.ends_with(fwd.index_pos, input_positions as u32));
+    let mut prompt_store = None;
     if let Some(hint) = prompt_cache
         .as_ref()
         .filter(|_| fwd.sequence_num == 0 && final_piece)
     {
         let held = kv_store.request_positions(&model_key, &req_id_str);
-        let blocks = prefix_cache.insert_chain_from_kv(
+        let plan = prefix_cache.plan_chain_insert(
             &model_key,
             &req_id_str,
             kv_store,
@@ -2969,12 +2973,14 @@ async fn handle_forward(
                 )
             },
         );
-        // Stored blocks kept beside the live cache are device memory the
-        // head-room guard must see.
-        if prefix_cache_charged() {
-            kv_store.set_external_reserved(prefix_cache.bytes_in(SnapshotHome::BesideLive) as u64);
+        if split_prompt_saved_after_the_answer() {
+            result.prompt_blocks_stored = Some(plan.blocks());
+            prompt_store = Some(plan);
+        } else {
+            let blocks = prefix_cache.finish_chain_insert(kv_store, plan);
+            reserve_beside_live(kv_store, prefix_cache);
+            result.prompt_blocks_stored = Some(blocks);
         }
-        result.prompt_blocks_stored = Some(blocks);
     }
     let computed = std::time::Instant::now();
 
@@ -3033,8 +3039,37 @@ async fn handle_forward(
         computed_to_sent_ms = format_args!("{:.2}", computed.elapsed().as_secs_f64() * 1000.0),
         "DIAG: worker forward answered"
     );
+    // The answer is on its way: now the copy it promised. The request's next
+    // forward waits for it here, but the coordinator's other segments, its
+    // own layers and the link run meanwhile. A failed copy stores nothing,
+    // and the next turn's resume misses and is read from 0.
+    if let Some(plan) = prompt_store {
+        let stored = prefix_cache.finish_chain_insert(kv_store, plan);
+        reserve_beside_live(kv_store, prefix_cache);
+        if stored == 0 {
+            tracing::debug!(%request_id, "a split's prompt promised to the coordinator was not stored");
+        }
+    }
 
     Ok(())
+}
+
+/// `SWARMLLM_SPLIT_PROMPT_SAVE=before-answer`: copy a split's prompt before
+/// the forward answers, the order before #433, for A/B inside one binary.
+/// Read once.
+fn split_prompt_saved_after_the_answer() -> bool {
+    static AFTER: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *AFTER.get_or_init(|| {
+        std::env::var("SWARMLLM_SPLIT_PROMPT_SAVE").as_deref() != Ok("before-answer")
+    })
+}
+
+/// Stored prompts kept beside the live cache are device memory the
+/// head-room guard must see.
+fn reserve_beside_live(kv_store: &KvCacheStore, prefix_cache: &PrefixCache) {
+    if prefix_cache_charged() {
+        kv_store.set_external_reserved(prefix_cache.bytes_in(SnapshotHome::BesideLive) as u64);
+    }
 }
 
 /// Item 8 Phase 2b: runtime timeout (in milliseconds) for the cross-node

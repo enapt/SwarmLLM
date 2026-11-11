@@ -257,7 +257,9 @@
 #          SHARDS_C=… adds C holding those parts instead (set SHARDS_B too): a
 #          three-machine split, A → B → C. B's and C's hits both count.
 #          TURNS=<n> (#433): an n-turn conversation instead; PASS = every turn
-#          past the first resumed further in than the last, B hit each time.
+#          past the first resumed from ALL the whole blocks the turn before
+#          held (a turn adding under a block resumes where the last one did),
+#          B hit each time.
 #   remote  A holds NONE of the model (the header only) and REMOTE_NODES (2,
 #          default, or 3) other nodes hold it between them in contiguous parts
 #          — B the first, then C (and D) — the shape a user who stores nothing
@@ -1915,19 +1917,30 @@ out = sys.argv[3]
 cuts = [tuple(map(int, l.split())) for l in open(f"{out}/turn_from.txt")]
 turns = [json.loads(l) for l in open(f"{out}/splitcache.jsonl")]
 ok = len(turns) == len(cuts) - 1 and all(" 200" in t["status"] for t in turns)
-last = -1
+# A prompt is stored in whole blocks, so a turn resumes from the last whole
+# block of the turn before it — the same place again where that turn added
+# less than a block. Every turn must resume from ALL its predecessor's whole
+# blocks: one resuming short of them re-reads part of the conversation again,
+# which is #433's symptom. The block size is turn 2's resume over turn 1's blocks.
+passes = []
 for i, t in enumerate(turns):
     (fa, fb), (ta, tb) = cuts[i], cuts[i + 1]
-    resumed = [int(m.group(1)) for l in a[fa:ta] if "a split prompt pass keeping its prompt" in l
-               for m in [re.search(r"resumed_from=(\d+)", l)] if m]
+    line = next((l for l in a[fa:ta] if "a split prompt pass keeping its prompt" in l), "")
+    num = lambda k: int(m.group(1)) if (m := re.search(rf"\b{k}=(\d+)", line)) else None
     hits = sum("HIT on a split's stored prompt" in l for l in b[fb:tb])
     misses = sum("Prompt cache miss" in l for l in a[fa:ta])
     stores = sum("stored a split's prompt" in l for l in b[fb:tb])
-    print(f"splitcache {t['turn']}: {t['seconds']:.1f} s  resumed_from={resumed}  B hits={hits}  "
-          f"B stores={stores}  misses logged={misses}  {t['status']}")
-    if i > 0:
-        ok = ok and bool(resumed) and max(resumed) > last and hits >= 1
-    last = max(resumed) if resumed else 0
+    passes.append((num("resumed_from"), num("blocks"), hits))
+    print(f"splitcache {t['turn']}: {t['seconds']:.1f} s  resumed_from={num('resumed_from')}  "
+          f"blocks={num('blocks')}  B hits={hits}  B stores={stores}  misses logged={misses}  {t['status']}")
+block = None
+if len(passes) > 1 and passes[0][1] and passes[1][0]:
+    block = passes[1][0] // passes[0][1]
+for i in range(1, len(passes)):
+    resumed, _, hits = passes[i]
+    held = passes[i - 1][1]
+    ok = ok and block is not None and held is not None and resumed == held * block and hits >= 1
+print(f"splitcache: block of {block} positions")
 print(f"splitcache [{len(turns)} turns]: {'PASS' if ok else 'FAIL'}")
 sys.exit(0 if ok else 1)
 PY

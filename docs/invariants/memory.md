@@ -4268,6 +4268,42 @@ entry (a chain the new one extends is dropped), as on the token path. A model
 with a recurrent state (Qwen 3.5's DeltaNet) stores nothing: its state cannot be
 cut at a block boundary.
 
+**When it is copied (2026-11-11, #433): after the answer is sent.** The store is
+PLANNED at the final piece (`plan_chain_insert`: the blocks, the room, what it
+replaces — answered in the `LayerResult` as `prompt_blocks_stored`) and COPIED
+once `send_worker` has handed the answer on (`finish_chain_insert`). Before,
+every segment copied the whole conversation from position 0 before answering, so
+the copies of a chain ran one after another in front of the first token. On
+`split_rig.sh splitcache TURNS=5` (Llama-3.2-3B, A shard 0, B the rest, both on
+the processor, one binary, arms ABBA), B's copy was 450-475 MB at 150-580 ms, and
+the coordinator's prompt pass read:
+
+| turn | stored after the answer | stored before (`SWARMLLM_SPLIT_PROMPT_SAVE=before-answer`) |
+|---|---|---|
+| 2 | 1541, 1303 ms | 1959, 1673 ms |
+| 3 (stores nothing: under a block added) | 1294, 1178 | 1257, 1225 |
+| 4 | 2332, 2379 | 2709, 2583 |
+| 5 | 2189, 2134 | 2385, 2349 |
+
+Turn 3 is the control: it copies nothing, and the arms agree. The copy now
+delays the request's NEXT forward instead (the first decode step, 200-630 ms
+against ~68 on one machine); over a real link part of it runs while the answer
+crosses back and the coordinator's own layers run. Replies identical in all four
+arms. Prior art: llama.cpp's server saves a slot's prompt when the slot is
+reused, after the reply (the whole-model path's `prompt_saved_when_done` follows
+it); vLLM and SGLang copy nothing — the cached blocks ARE the request's blocks,
+referenced (SGLang's `cache_finished_req` inserts prompt AND output at the end).
+**Still on the first token: the RESTORE** (`hydrate_request_from_snapshot`,
+110-180 ms for 450 MB here) copies the stored opening into a fresh live cache in
+every segment, before the forward; a cache whose stored blocks ARE the live
+ones (the paged designs above) would remove both copies and is a redesign.
+
+**Resumes come in whole blocks.** A turn resumes from the last WHOLE block the
+turn before it stored (64 positions): a turn adding less than a block stores
+nothing new (`covered_by_chain`), and the next resumes where it did — on the rig
+turn 4 resumed at 2304 like turn 3. The rig's PASS asks exactly that: each turn
+resumes from all its predecessor's whole blocks.
+
 ## A prompt pass read in pieces is admitted once, for its whole span (2026-10-10, FUTURE_WORK #171)
 
 A forward carrying `LayerForward::prompt_span` is one piece of a prompt pass
