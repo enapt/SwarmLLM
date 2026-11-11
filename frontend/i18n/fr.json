@@ -464,6 +464,8 @@
   "dashboard.peer_updates_off": "Mises à jour désactivées",
   "dashboard.peer_updates_off_tip": "Son propriétaire l'a réglé pour ne pas installer les mises à jour de lui-même.",
   "dashboard.peer_uptime": "en ligne depuis {time}",
+  "dashboard.peers_set_aside": "Pas à jour ou partagent trop peu ({count})",
+  "dashboard.peers_set_aside_desc": "Les autres ordinateurs n'exécutent pas les requêtes de ces ordinateurs : chacun a deux versions de retard ou plus sur la plus récente, ou partage moins de 2 parties de modèle.",
   "dashboard.peers_summary": "{count} ordinateur(s) · {lan} sur votre réseau · {healthy} en bon état",
   "dashboard.providers_count": "{count} fournisseur(s) · {models} modèles",
   "dashboard.prune_title": "Historique d'élagage",

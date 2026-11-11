@@ -464,6 +464,8 @@
   "dashboard.peer_updates_off": "Оновлення вимкнено",
   "dashboard.peer_updates_off_tip": "Власник налаштував комп'ютер так, щоб він сам не встановлював оновлення.",
   "dashboard.peer_uptime": "працює {time}",
+  "dashboard.peers_set_aside": "Застаріли або діляться замало ({count})",
+  "dashboard.peers_set_aside_desc": "Інші комп'ютери не виконують запити цих комп'ютерів: кожен відстає від найновішої версії на дві або більше або ділиться менш ніж 2 частинами моделі.",
   "dashboard.peers_summary": "{count} комп'ютер(ів) · {lan} у вашій мережі · {healthy} справні",
   "dashboard.providers_count": "{count} провайдер/провайдерів · {models} моделей",
   "dashboard.prune_title": "Історія обрізання",

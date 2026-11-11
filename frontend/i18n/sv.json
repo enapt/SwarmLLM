@@ -464,6 +464,8 @@
   "dashboard.peer_updates_off": "Uppdateringar av",
   "dashboard.peer_updates_off_tip": "Ägaren har ställt in den att inte installera uppdateringar själv.",
   "dashboard.peer_uptime": "igång i {time}",
+  "dashboard.peers_set_aside": "Inaktuella eller delar för lite ({count})",
+  "dashboard.peers_set_aside_desc": "Andra datorer kör inte de här datorernas förfrågningar: var och en ligger två eller fler versioner efter den senaste, eller delar färre än 2 modelldelar.",
   "dashboard.peers_summary": "{count} dator(er) · {lan} på ditt nätverk · {healthy} friska",
   "dashboard.providers_count": "{count} leverantör(er) · {models} modeller",
   "dashboard.prune_title": "Rensningshistorik",

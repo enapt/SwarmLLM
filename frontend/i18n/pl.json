@@ -464,6 +464,8 @@
   "dashboard.peer_updates_off": "Aktualizacje wyłączone",
   "dashboard.peer_updates_off_tip": "Właściciel ustawił, by komputer sam nie instalował aktualizacji.",
   "dashboard.peer_uptime": "działa od {time}",
+  "dashboard.peers_set_aside": "Nieaktualne lub udostępniają za mało ({count})",
+  "dashboard.peers_set_aside_desc": "Inne komputery nie wykonują zapytań tych komputerów: każdy jest dwie lub więcej wersji za najnowszą albo udostępnia mniej niż 2 części modelu.",
   "dashboard.peers_summary": "{count} komputer(ów) · {lan} w Twojej sieci · {healthy} sprawnych",
   "dashboard.providers_count": "{count} dostawca/dostawców · {models} modeli",
   "dashboard.prune_title": "Historia przycinania",

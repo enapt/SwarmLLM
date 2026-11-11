@@ -464,6 +464,8 @@
   "dashboard.peer_updates_off": "Aktualizace vypnuty",
   "dashboard.peer_updates_off_tip": "Vlastník nastavil, aby si sám neinstaloval aktualizace.",
   "dashboard.peer_uptime": "běží {time}",
+  "dashboard.peers_set_aside": "Zastaralé nebo sdílejí příliš málo ({count})",
+  "dashboard.peers_set_aside_desc": "Ostatní počítače požadavky těchto počítačů nezpracovávají: každý je o dvě a více verzí za nejnovější, nebo sdílí méně než 2 části modelu.",
   "dashboard.peers_summary": "{count} počítačů · {lan} ve vaší síti · {healthy} v pořádku",
   "dashboard.providers_count": "{count} poskytovatel(ů) · {models} modelů",
   "dashboard.prune_title": "Historie odstraňování",

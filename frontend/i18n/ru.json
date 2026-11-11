@@ -464,6 +464,8 @@
   "dashboard.peer_updates_off": "Обновления выключены",
   "dashboard.peer_updates_off_tip": "Владелец настроил компьютер так, чтобы он сам не устанавливал обновления.",
   "dashboard.peer_uptime": "работает {time}",
+  "dashboard.peers_set_aside": "Устарели или делятся слишком мало ({count})",
+  "dashboard.peers_set_aside_desc": "Другие компьютеры не выполняют запросы этих компьютеров: каждый отстаёт от новейшей версии на две или больше или делится менее чем 2 частями модели.",
   "dashboard.peers_summary": "{count} компьютер(ов) · {lan} в вашей сети · {healthy} в порядке",
   "dashboard.providers_count": "{count} провайдер(ов) · {models} моделей",
   "dashboard.prune_title": "История сжатия",

@@ -464,6 +464,8 @@
   "dashboard.peer_updates_off": "Güncellemeler kapalı",
   "dashboard.peer_updates_off_tip": "Sahibi, güncellemeleri kendiliğinden kurmayacak şekilde ayarladı.",
   "dashboard.peer_uptime": "{time} süredir açık",
+  "dashboard.peers_set_aside": "Güncel değil veya çok az paylaşıyor ({count})",
+  "dashboard.peers_set_aside_desc": "Diğer bilgisayarlar bu bilgisayarların isteklerini çalıştırmıyor: her biri en yeni sürümün iki veya daha fazla gerisinde ya da 2'den az model parçası paylaşıyor.",
   "dashboard.peers_summary": "{count} bilgisayar · {lan} ağınızda · {healthy} sağlıklı",
   "dashboard.providers_count": "{count} sağlayıcı · {models} model",
   "dashboard.prune_title": "Budama Geçmişi",

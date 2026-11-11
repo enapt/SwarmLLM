@@ -5029,6 +5029,10 @@ textarea.pool-code-input { min-height: 4.5em; }
 .peer-table .peer-name-cell .status-dot { flex-shrink: 0; }
 .peer-table .peer-name-cell .peer-nick { font-weight: 600; overflow: hidden; text-overflow: ellipsis; }
 .peer-table .peer-id-sub { font-size: var(--fs-2xs); color: var(--text-muted); font-family: var(--font-mono); }
+/* Computers whose requests the swarm does not run, in a quieter table below. */
+.peers-set-aside { margin-top: 16px; padding-top: 10px; border-top: 1px solid var(--border); }
+.peers-set-aside-title { font-weight: 600; font-size: var(--fs-sm); color: var(--text-secondary); margin-bottom: 2px; }
+.peers-set-aside .peer-table { opacity: 0.75; }
 /* The line under a computer's name wraps rather than widening the table. */
 .peer-table .peer-meta { font-size: 0.62rem; white-space: normal; }
 /* On a phone the eight columns are wider than the panel: the table scrolls

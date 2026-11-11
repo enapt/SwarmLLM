@@ -464,6 +464,8 @@
   "dashboard.peer_updates_off": "Pembaruan mati",
   "dashboard.peer_updates_off_tip": "Pemiliknya mengaturnya agar tidak memasang pembaruan sendiri.",
   "dashboard.peer_uptime": "aktif {time}",
+  "dashboard.peers_set_aside": "Usang atau berbagi terlalu sedikit ({count})",
+  "dashboard.peers_set_aside_desc": "Komputer lain tidak menjalankan permintaan komputer-komputer ini: masing-masing tertinggal dua rilis atau lebih dari yang terbaru, atau membagikan kurang dari 2 bagian model.",
   "dashboard.peers_summary": "{count} komputer · {lan} di jaringan Anda · {healthy} sehat",
   "dashboard.providers_count": "{count} penyedia · {models} model",
   "dashboard.prune_title": "Riwayat Pemangkasan",

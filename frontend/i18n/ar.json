@@ -464,6 +464,8 @@
   "dashboard.peer_updates_off": "التحديثات متوقفة",
   "dashboard.peer_updates_off_tip": "ضبطه مالكه على ألا يثبّت التحديثات من تلقاء نفسه.",
   "dashboard.peer_uptime": "يعمل منذ {time}",
+  "dashboard.peers_set_aside": "غير محدّثة أو تشارك القليل جداً ({count})",
+  "dashboard.peers_set_aside_desc": "لا تنفّذ الحواسيب الأخرى طلبات هذه الحواسيب: كلٌّ منها يعمل بإصدار متأخر بإصدارين أو أكثر عن الأحدث، أو يشارك أقل من جزأين من النماذج.",
   "dashboard.peers_summary": "{count} حاسوبًا · {lan} في شبكتك · {healthy} بحالة جيدة",
   "dashboard.providers_count": "{count} مزودين · {models} نماذج",
   "dashboard.prune_title": "سجل التقليم",

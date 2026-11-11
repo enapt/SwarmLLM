@@ -2390,7 +2390,7 @@
       }
       function _thClass(key) { return sortKey === key ? ' class="sorted"' : ''; }
 
-      var html = '<table class="peer-table"><thead><tr>' +
+      var head = '<table class="peer-table"><thead><tr>' +
         '<th data-peer-sort="name"' + _thClass('name') + '>' + U.escapeHtml(I18n.t('dashboard.peer_col_name')) + _sortArrow('name') + '</th>' +
         '<th data-peer-sort="location"' + _thClass('location') + '>' + U.escapeHtml(I18n.t('dashboard.peer_col_location')) + _sortArrow('location') + '</th>' +
         '<th data-peer-sort="latency"' + _thClass('latency') + '>' + U.escapeHtml(I18n.t('dashboard.peer_col_latency')) + _sortArrow('latency') + '</th>' +
@@ -2405,7 +2405,7 @@
         '<th data-peer-sort="status"' + _thClass('status') + '>' + U.escapeHtml(I18n.t('dashboard.section_status')) + _sortArrow('status') + '</th>' +
         '</tr></thead><tbody>';
 
-      sorted.forEach(function(p) {
+      function _row(p) {
         var name = p.nickname || (p.node_id || 'unknown').substring(0, 12);
         var idSub = p.nickname ? '<span class="peer-id-sub">' + (p.node_id || '').substring(0, 8) + '</span>' : '';
         // Every peer gets exactly one type tag (Pool > LAN > Internet) so it's
@@ -2530,7 +2530,7 @@
           ? '<span title="' + U.escapeHtml(I18n.t('dashboard.peer_location_tip')) + '">' + U.escapeHtml(_countryName(p.region)) + '</span>'
           : '<span class="text-muted">—</span>';
 
-        html += '<tr>' +
+        return '<tr>' +
           '<td><div class="peer-name-cell"><span class="status-dot ' + dotClass + '"></span><span class="peer-nick">' + U.escapeHtml(name) + '</span>' + idSub + lanBadge + '</div>' + gpu + '</td>' +
           '<td>' + where + '</td>' +
           '<td class="mono">' + latency + '</td>' +
@@ -2540,9 +2540,29 @@
           '<td class="mono">' + (ranForThem ? U.formatCount(ranForThem) : '\u2014') + '</td>' +
           '<td><span class="status-dot ' + dotClass + '" style="display:inline-block;vertical-align:middle;margin-right:4px"></span>' + U.escapeHtml(status) + '</td>' +
           '</tr>';
-      });
+      }
 
-      html += '</tbody></table>';
+      // A computer whose requests the swarm does not run — too far behind the
+      // newest release (cut off, it comes back to be judged again) or sharing
+      // too few parts — is listed in its own table below, so the table on top
+      // is the computers taking part. Decided by the same verdicts as the
+      // row's own tags (`swarm_use`; an anchor holds nothing by design).
+      // Prior art: Bitcoin Core's peers window (`RPCConsole::
+      // showOrHideBanTableIfRequired`) lists banned peers in a second table,
+      // with its own heading, under the peer table, shown only when needed.
+      function _setAside(p) {
+        return p.swarm_use === 'too_far_behind' ||
+          (!p.is_anchor && p.swarm_use === 'too_few_parts');
+      }
+      var taking = sorted.filter(function(p) { return !_setAside(p); });
+      var setAside = sorted.filter(_setAside);
+      var html = taking.length ? head + taking.map(_row).join('') + '</tbody></table>' : '';
+      if (setAside.length) {
+        html += '<div class="peers-set-aside">' +
+          '<div class="peers-set-aside-title">' + U.escapeHtml(I18n.t('dashboard.peers_set_aside', { count: setAside.length })) + '</div>' +
+          '<div class="text-muted text-2xs mb-1">' + U.escapeHtml(I18n.t('dashboard.peers_set_aside_desc')) + '</div>' +
+          head + setAside.map(_row).join('') + '</tbody></table></div>';
+      }
       list.innerHTML = html;
     },
 

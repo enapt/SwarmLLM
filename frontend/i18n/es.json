@@ -464,6 +464,8 @@
   "dashboard.peer_updates_off": "Actualizaciones desactivadas",
   "dashboard.peer_updates_off_tip": "Su propietario lo ha configurado para no instalar actualizaciones por sí mismo.",
   "dashboard.peer_uptime": "activo {time}",
+  "dashboard.peers_set_aside": "Desactualizados o comparten muy poco ({count})",
+  "dashboard.peers_set_aside_desc": "Otros ordenadores no ejecutan las peticiones de estos ordenadores: cada uno va dos o más versiones por detrás de la más reciente, o comparte menos de 2 partes de modelo.",
   "dashboard.peers_summary": "{count} ordenador(es) · {lan} en tu red · {healthy} en buen estado",
   "dashboard.providers_count": "{count} proveedor(es) · {models} modelos",
   "dashboard.prune_title": "Historial de Poda",

@@ -464,6 +464,8 @@
   "dashboard.peer_updates_off": "ปิดการอัปเดต",
   "dashboard.peer_updates_off_tip": "เจ้าของตั้งไว้ไม่ให้เครื่องนี้ติดตั้งอัปเดตเอง",
   "dashboard.peer_uptime": "ทำงานมา {time}",
+  "dashboard.peers_set_aside": "รุ่นเก่าหรือแบ่งปันน้อยเกินไป ({count})",
+  "dashboard.peers_set_aside_desc": "คอมพิวเตอร์เครื่องอื่นไม่รันคำขอของเครื่องเหล่านี้: แต่ละเครื่องใช้รุ่นที่ตามหลังรุ่นล่าสุดตั้งแต่สองรุ่นขึ้นไป หรือแบ่งปันส่วนของโมเดลน้อยกว่า 2 ส่วน",
   "dashboard.peers_summary": "คอมพิวเตอร์ {count} เครื่อง · {lan} เครื่องในเครือข่ายของคุณ · {healthy} เครื่องปกติดี",
   "dashboard.providers_count": "{count} ผู้ให้บริการ · {models} โมเดล",
   "dashboard.prune_title": "ประวัติการตัดแต่ง",

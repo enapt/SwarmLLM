@@ -464,6 +464,8 @@
   "dashboard.peer_updates_off": "Atualizações desligadas",
   "dashboard.peer_updates_off_tip": "O dono configurou-o para não instalar atualizações por si.",
   "dashboard.peer_uptime": "ativo há {time}",
+  "dashboard.peers_set_aside": "Desatualizados ou partilham pouco ({count})",
+  "dashboard.peers_set_aside_desc": "Outros computadores não executam os pedidos destes computadores: cada um está duas ou mais versões atrás da mais recente, ou partilha menos de 2 partes de modelo.",
   "dashboard.peers_summary": "{count} computador(es) · {lan} na sua rede · {healthy} saudáveis",
   "dashboard.providers_count": "{count} provedor(es) · {models} modelos",
   "dashboard.prune_title": "Histórico de Remoção",

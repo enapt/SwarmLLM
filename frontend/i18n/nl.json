@@ -464,6 +464,8 @@
   "dashboard.peer_updates_off": "Updates uit",
   "dashboard.peer_updates_off_tip": "De eigenaar heeft ingesteld dat hij updates niet zelf installeert.",
   "dashboard.peer_uptime": "actief sinds {time}",
+  "dashboard.peers_set_aside": "Verouderd of delen te weinig ({count})",
+  "dashboard.peers_set_aside_desc": "Andere computers voeren de verzoeken van deze computers niet uit: elk loopt twee of meer versies achter op de nieuwste, of deelt minder dan 2 modeldelen.",
   "dashboard.peers_summary": "{count} computer(s) · {lan} op je netwerk · {healthy} in orde",
   "dashboard.providers_count": "{count} provider(s) · {models} modellen",
   "dashboard.prune_title": "Snoeischiedsrechter",

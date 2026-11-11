@@ -464,6 +464,8 @@
   "dashboard.peer_updates_off": "업데이트 꺼짐",
   "dashboard.peer_updates_off_tip": "소유자가 업데이트를 스스로 설치하지 않도록 설정했습니다.",
   "dashboard.peer_uptime": "가동 {time}",
+  "dashboard.peers_set_aside": "구버전이거나 공유가 너무 적은 컴퓨터 ({count})",
+  "dashboard.peers_set_aside_desc": "다른 컴퓨터는 이 컴퓨터들의 요청을 실행하지 않습니다. 각 컴퓨터가 최신보다 두 릴리스 이상 뒤처져 있거나 모델 조각을 2개 미만 공유하기 때문입니다.",
   "dashboard.peers_summary": "컴퓨터 {count}대 · 내 네트워크 {lan}대 · 정상 {healthy}대",
   "dashboard.providers_count": "공급자 {count}개 · 모델 {models}개",
   "dashboard.prune_title": "정리 기록",

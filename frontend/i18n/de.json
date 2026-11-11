@@ -464,6 +464,8 @@
   "dashboard.peer_updates_off": "Updates aus",
   "dashboard.peer_updates_off_tip": "Sein Besitzer hat eingestellt, dass er Updates nicht selbst installiert.",
   "dashboard.peer_uptime": "läuft seit {time}",
+  "dashboard.peers_set_aside": "Veraltet oder teilen zu wenig ({count})",
+  "dashboard.peers_set_aside_desc": "Andere Computer führen die Anfragen dieser Computer nicht aus: Jeder läuft zwei oder mehr Versionen hinter der neuesten oder teilt weniger als 2 Modellteile.",
   "dashboard.peers_summary": "{count} Computer · {lan} in Ihrem Netzwerk · {healthy} in Ordnung",
   "dashboard.providers_count": "{count} Anbieter · {models} Modelle",
   "dashboard.prune_title": "Bereinigungsverlauf",

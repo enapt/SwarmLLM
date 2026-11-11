@@ -464,6 +464,8 @@
   "dashboard.peer_updates_off": "Đã tắt cập nhật",
   "dashboard.peer_updates_off_tip": "Chủ máy đã đặt để máy không tự cài cập nhật.",
   "dashboard.peer_uptime": "đã chạy {time}",
+  "dashboard.peers_set_aside": "Đã lỗi thời hoặc chia sẻ quá ít ({count})",
+  "dashboard.peers_set_aside_desc": "Các máy tính khác không chạy yêu cầu của những máy tính này: mỗi máy chậm hai phiên bản trở lên so với bản mới nhất, hoặc chia sẻ ít hơn 2 phần mô hình.",
   "dashboard.peers_summary": "{count} máy tính · {lan} trong mạng của bạn · {healthy} khỏe mạnh",
   "dashboard.providers_count": "{count} nhà cung cấp · {models} mô hình",
   "dashboard.prune_title": "Lịch sử cắt tỉa",

@@ -464,6 +464,8 @@
   "dashboard.peer_updates_off": "Updates off",
   "dashboard.peer_updates_off_tip": "Its owner has set it not to install updates by itself.",
   "dashboard.peer_uptime": "up {time}",
+  "dashboard.peers_set_aside": "Out of date or sharing too little ({count})",
+  "dashboard.peers_set_aside_desc": "Other computers do not run these computers' requests: each runs a release two or more behind the newest, or shares fewer than 2 model parts.",
   "dashboard.peers_summary": "{count} computer(s) · {lan} on your network · {healthy} healthy",
   "dashboard.providers_count": "{count} provider(s) · {models} models",
   "dashboard.prune_title": "Prune History",

@@ -464,6 +464,8 @@
   "dashboard.peer_updates_off": "अपडेट बंद",
   "dashboard.peer_updates_off_tip": "इसके मालिक ने इसे अपने आप अपडेट इंस्टॉल न करने पर सेट किया है।",
   "dashboard.peer_uptime": "{time} से चालू",
+  "dashboard.peers_set_aside": "पुराने संस्करण वाले या बहुत कम साझा करने वाले ({count})",
+  "dashboard.peers_set_aside_desc": "दूसरे कंप्यूटर इन कंप्यूटरों के अनुरोध नहीं चलाते: हर एक नवीनतम से दो या अधिक संस्करण पीछे है, या मॉडल के 2 से कम हिस्से साझा करता है।",
   "dashboard.peers_summary": "{count} कंप्यूटर · {lan} आपके नेटवर्क पर · {healthy} ठीक",
   "dashboard.providers_count": "{count} प्रदाता · {models} मॉडल",
   "dashboard.prune_title": "प्रून इतिहास",

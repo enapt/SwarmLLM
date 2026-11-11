@@ -464,6 +464,8 @@
   "dashboard.peer_updates_off": "更新がオフ",
   "dashboard.peer_updates_off_tip": "所有者が、更新を自動でインストールしないよう設定しています。",
   "dashboard.peer_uptime": "稼働 {time}",
+  "dashboard.peers_set_aside": "古いバージョンまたは共有が少なすぎるコンピューター ({count})",
+  "dashboard.peers_set_aside_desc": "他のコンピューターはこれらのコンピューターのリクエストを実行しません。それぞれ最新より 2 つ以上前のリリースを使っているか、共有するモデルのパーツが 2 個未満です。",
   "dashboard.peers_summary": "{count} 台 · うち {lan} 台はあなたのネットワーク · {healthy} 台は良好",
   "dashboard.providers_count": "{count}個のプロバイダー · {models}個のモデル",
   "dashboard.prune_title": "剪定履歴",

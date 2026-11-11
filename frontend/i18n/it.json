@@ -464,6 +464,8 @@
   "dashboard.peer_updates_off": "Aggiornamenti disattivati",
   "dashboard.peer_updates_off_tip": "Il proprietario lo ha impostato per non installare gli aggiornamenti da solo.",
   "dashboard.peer_uptime": "attivo da {time}",
+  "dashboard.peers_set_aside": "Non aggiornati o condividono troppo poco ({count})",
+  "dashboard.peers_set_aside_desc": "Gli altri computer non eseguono le richieste di questi computer: ciascuno è indietro di due o più versioni rispetto alla più recente, oppure condivide meno di 2 parti di modello.",
   "dashboard.peers_summary": "{count} computer · {lan} sulla tua rete · {healthy} in salute",
   "dashboard.providers_count": "{count} provider · {models} modelli",
   "dashboard.prune_title": "Cronologia rimozione",
