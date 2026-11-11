@@ -4634,8 +4634,9 @@ records it (`forward_verify_through_segments` did not, for ours).
 **`ModelSpeed::prompt_ms_per_layer_token` is the one figure a prompt's price
 multiplies** (`SharedState::observed_prompt_ms_per_layer_token` →
 `NodeCandidate::observed_prompt_ms_per_layer_token` → `parallax::prefill_ms_per_layer`):
-ms per layer per TOKEN of the forward timed, its positions read off the hidden
-state that crossed (`PipelineExecutor::positions_worked`).
+ms per layer per TOKEN of the forward timed: its positions read off the hidden
+state that crossed where its bytes bear them out (`PipelineExecutor::prompt_read`),
+or a prompt piece's own cut (`note_piece_timed`).
 Three figures come from the same prefill samples and want different things:
 
 | figure | reads | keeps |
@@ -4738,8 +4739,19 @@ computer is the cold sample, as a whole pass's is. Rig (`split_rig.sh split`,
 TinyLlama A [0,12) / B [12,22), processor, three ~1,220-token prompts, three
 pieces each): before, `None` for both on every request; after, A 4.17 / 4.09 and
 B 5.90 / 5.69 ms a layer and token on requests 2 and 3 — B's 24 s a piece × 3
-is the 72 s pass. (Higher than the same rig's whole ~420-token passes, 1.07 /
-1.81: both rig computers share one processor, and pieces run at once.) Test
+is the 72 s pass. **Pieces against a whole pass, each node on its own cores**
+(the same binary, `GATE_CPU_QUOTA=1600%`, A on CPUs 0-7 and B on 8-15 — four
+physical cores each — the same three prompts, `SWARMLLM_PROMPT_CHUNKS=0` for the
+whole arm, 2026-11-12): the pass took 66.1 / 70.1 / 69.5 s in pieces against
+82.1 / 83.9 / 82.6 s whole (−15-20%, the overlap #171 is for), and the figures
+read A 3.63 / 3.64, B 5.52 / 5.59 in pieces against A 2.42, B 3.96 whole —
+1.4-1.5× higher, each piece timed while the other computer computes beside it.
+Whole, A 12 × 1,220 × 2.42 = 35 s plus B 10 × 1,220 × 3.96 = 48 s is the 83 s
+pass, so the whole figure is the true one here. Two computers that share a
+processor package share its memory bandwidth, cache and boost; two machines do
+not — so the excess is read as the rig's until a pieced split between two
+machines is timed against a whole pass between the same two (#430's residual).
+Until then a piece's figure errs slow, never fast (#430's prices erred fast). Test
 `a_queued_piece_is_timed_from_the_answer_before_it`. A forward re-sent after its
 link was re-keyed (`ResendOnRefusal`, a 2-10 s wait for the new key) is not
 timed on either path — piece or whole pass — since its time is the re-key's,

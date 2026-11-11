@@ -3484,6 +3484,35 @@ that only read long prompts was never priced (rig: `None` → 4.1 / 5.8 ms a lay
 Left beside it: a peer with no DECODE sample is still ranked from the per-byte prompt figure times a nominal
 16,384 bytes (`PeerSpeed::ranking`, `NOMINAL_DECODE_ACTIVATION_BYTES`) — 1.88-3.8× slow on the same arithmetic;
 a fallback only until its first decode step.
+**Design for the hand-off's own figure (2026-11-12, not built — a design to check before code):**
+- *Sample, at the coordinator* (`remote_generate`, beside the `Delegated` record): the first token's wait less
+  the peer's round trip and one step of this reply (its steady ms a token), over the tokens it had to READ —
+  `prompt_ids` less what `handoff_prompt_cache` says this node handed it before (looked up BEFORE
+  `note_handed_off`), × the layers. Warm only (`peer_model_warm_at`), as every prompt figure.
+- *A floor, never a discount* — as a peer's own decode timing is (#3 (f)). The peer's prefix cache can hold more
+  than this node handed it (another coordinator's system prompt), so "unread" can be overstated and the rate read
+  too FAST — the direction #430 failed in. Taken as `max(floor × tokens, the price it has now)` for a WHOLE-model
+  vertex on that peer only (`prefill_ms_per_layer`'s caller knows the range), it can only correct an underprice.
+- *A wait that ran out is a sample too*: a warm hand-off whose first token never came within the deadline read
+  for at least that long — a right-censored duration (survival analysis: the true time ≥ the observed), so its
+  floor is `deadline ÷ (layers × unread)`. That is the case #430 actually hit, and without it the failure that
+  matters teaches nothing (no first token, no sample).
+- *Kept per (peer, model)* in `ModelSpeed` beside `delegated_ms_per_layer`, expiring with the ranking figures
+  (`RANKING_STALE_AFTER`); no wire change (first-hand only).
+- *Not in it*: sizing the first-token wait from the floor (the 600 s cap is its own question, `architecture.md`
+  § Timeouts); a peer-reported read count (a trailer + feature bit) would make the sample exact.
+- Rig: `split_rig.sh` with B holding the model whole and A none, `RIG_PROMPT_FILE` of long prompts, B's processor
+  capped (`MEM_`/`CPUS_B`) so its prompt runs past a short `SWARMLLM_FIRST_TOKEN_TIMEOUT`-style fault; the plan
+  line should carry the floor after one request and route the next as a split.
+Prior art: Petals' separate `forward_rps` (`server/throughput.py`); this repo's floor-not-discount rule for a
+peer's own timing (#3 (f), `OwnDecodeSpeed`); right-censoring (a timeout as a lower bound on a duration).
+**Also open (measured 2026-11-12):** a prompt read in pieces is timed piece by piece, and on the processor rig
+(both computers on one laptop processor, each pinned to its own four cores) the pieces' figure read 1.4-1.5× the
+whole pass's on the same cores while the pass itself was 15-20% shorter — each piece is timed while the other
+computer computes beside it, sharing the package's memory bandwidth and boost. Time a pieced split between TWO
+machines against a whole pass between the same two (`SWARMLLM_PROMPT_CHUNKS=0`) before trusting either reading;
+if the excess holds there, it is a per-piece cost the price should carry for pieced passes only
+(`docs/invariants/scheduling.md` § "A prompt read in pieces is priced piece by piece").
 
 #### #428 — Every popular model guesses 4-5 tokens a round trip: a DFlash drafter at the split's far end
 `P1` · perf-split · **OPEN** (stage 1 built and measured: the reply is exact, acceptance matches llama.cpp's; stage 3 built and measured on the rig — a split over 130 ms, processors: code 1.6-1.8×, a story 1.10-1.15×, the same replies; on a card, whole: code 1.4-1.6×, a story 0.89-0.92× — (c2) done, the block's first rounds on prose, (c3); stage 6 built: the drafter fetched by a pin; next: the field model, Qwen3.6-35B-A3B) — 2026-11-08 · history: #427 (the measurement), #425 (the guess head), #411 (the flow)
@@ -5971,6 +6000,9 @@ grep `^| N |`).
   `a_whole_run_is_planned_with_the_card_a_drafter_of_it_alone_gives` — red with the exception off.
   Evidence: `docs/invariants/memory.md` § "A split takes idle models' card memory too" (the
   drafter paragraphs).
+  **Residual (pre-release review 2026-11-12, P3):** `WorkerHandle::guesses_for` only grows, so a drafter that once
+  guessed for a second model is never given back to the first one's whole placement however long ago that was —
+  the #442 symptom where one drafter serves two targets (keeps the drafter: safe, partial).
 
 **Closed 2026-11-11, on main (not in a release yet)** (#441)
 - #441 — **The guessing model took the card room the model it guesses for needed for its
@@ -5993,6 +6025,13 @@ grep `^| N |`).
   smaller-of-two reading as ours. Residual: #442 (a drafter blocking the same model's later whole
   placement), closed the same day. Evidence: `docs/invariants/memory.md` § "A model loaded for another model's request
   is a guest".
+  **Residual (pre-release review 2026-11-12, P3, speed only — errs toward the target):** once the target's caches
+  HAVE grown into the card, they are in both the card's use and our charges, so `compute_vram_budget`'s "other
+  programs" is right and `room_a_guest_leaves_mb` counts that room a second time: a drafter that fits beside the
+  filled caches goes to system memory (short by up to one typical cache, `KvCharge::Typical`). The
+  exact term is the target's typical cache LESS what its worker has allocated — which needs the worker's card
+  occupancy per range at the daemon (`KvOccupancy::allocated_in`, reported nowhere outward today). It is also 0
+  while the target's worker is still spawning (`live_worker` / empty `charged_segments`), a narrower window.
 
 **Closed 2026-11-11, on main (not in a release yet)** (#176)
 - #176 — **Pools could reach each other only through `config.toml`.** Discovery and opt-in routing between
