@@ -957,7 +957,7 @@
   "pool.role_owner": "Appareil principal — envoie du travail à vos appareils reliés",
   "pool.share_code": "Copiez ce code et collez-le sur votre autre appareil :",
   "pool.slave_badge": "APPAREIL LIÉ",
-  "pool.slave_banner_detail": "Lié à {owner} — les frais d'inférence vont à votre appareil principal",
+  "pool.slave_banner_detail": "Lié à {owner} — cet appareil partage son matériel avec votre appareil principal",
   "pool.slave_banner_text": "Relié à votre appareil principal",
   "pool.slave_manage": "Gérer",
   "pool.stats_forwards": "{n} transferts",

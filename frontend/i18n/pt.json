@@ -957,7 +957,7 @@
   "pool.role_owner": "Dispositivo principal — envia trabalho para os seus dispositivos ligados",
   "pool.share_code": "Copie este código e cole no seu outro dispositivo:",
   "pool.slave_badge": "DISPOSITIVO VINCULADO",
-  "pool.slave_banner_detail": "Vinculado a {owner} — cobranças de inferência vão para seu dispositivo principal",
+  "pool.slave_banner_detail": "Vinculado a {owner} — este dispositivo partilha o seu hardware com o dispositivo principal",
   "pool.slave_banner_text": "Ligado ao seu dispositivo principal",
   "pool.slave_manage": "Gerenciar",
   "pool.stats_forwards": "{n} encaminhamentos",

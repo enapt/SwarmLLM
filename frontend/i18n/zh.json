@@ -957,7 +957,7 @@
   "pool.role_owner": "主设备——向您的关联设备派发任务",
   "pool.share_code": "复制此代码并粘贴到另一台设备上：",
   "pool.slave_badge": "已链接设备",
-  "pool.slave_banner_detail": "已链接到 {owner} — 推理费用将转到您的主设备",
+  "pool.slave_banner_detail": "已链接到 {owner} — 此设备正在向您的主设备提供硬件",
   "pool.slave_banner_text": "已关联到您的主设备",
   "pool.slave_manage": "管理",
   "pool.stats_forwards": "{n} 次转发",

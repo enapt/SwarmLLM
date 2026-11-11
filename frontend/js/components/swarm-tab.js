@@ -351,24 +351,13 @@
       btn.textContent = I18n.t('browse.action_download');
       btn.addEventListener('click', function () {
         btn.disabled = true;
-        App.hf.downloadShards({ repo_id: src.repo_id, filename: src.filename, all_shards: true }).then(function (result) {
-          App.notifications.showToast(result.ok
-            ? I18n.t('browse.download_started', { name: U.formatModelDisplayName(m.model_id) })
-            : (result.errorMsg || I18n.t('browse.download_failed')), result.ok ? 'success' : 'error');
-          if (!result.ok) btn.disabled = false;
-        }).catch(function () {
-          App.notifications.showToast(I18n.t('browse.download_failed'), 'error');
-          btn.disabled = false;
-        });
+        _toastDownload(App.hf.downloadShards({ repo_id: src.repo_id, filename: src.filename, all_shards: true }),
+          U.formatModelDisplayName(m.model_id), function () { btn.disabled = false; });
       });
     } else {
       // The swarm runs it either way: chatting with it is the thing to offer.
       btn.textContent = I18n.t('browse.action_chat');
-      btn.addEventListener('click', function () {
-        App.models.selectDropdown(m.model_id);
-        App.chat.newSession();
-        App.ui.switchTab('chat');
-      });
+      btn.addEventListener('click', function () { App.models.chatWith(m.model_id); });
     }
     foot.appendChild(btn);
     return foot;
@@ -813,9 +802,7 @@
         e.stopPropagation();
         if (actionBtn.disabled) return;
         if (fit.key === 'swarm') {
-          App.models.selectDropdown(repo.swarm_model_id);
-          App.chat.newSession();
-          App.ui.switchTab('chat');
+          App.models.chatWith(repo.swarm_model_id);
           return;
         }
         // The variant the user chose in the size dropdown, if they opened it —
@@ -922,22 +909,32 @@
     // An unknown budget counts as fitting, the same rule the search applies.
     var budget = repo.memory_budget_bytes;
     var whole = !budget || !variant.size_bytes || variant.size_bytes < budget;
-    App.hf.downloadShards({
+    _toastDownload(App.hf.downloadShards({
       repo_id: repo.repo_id,
       filename: filename,
       all_shards: whole,
       peer_fair_share: !whole,
-    }).then(function (result) {
+    }), _prettyRepoName(repo.repo_id));
+  }
+
+  // Say how a download request went: "started" naming the model, the node's
+  // own refusal, or a plain failure. `onFail` runs on either failure (a button
+  // re-enables itself there). Each caller writes its request out in full, as
+  // `every_shard_download_request_names_its_work` requires.
+  function _toastDownload(request, name, onFail) {
+    function toast(text, level) {
+      if (App.notifications && App.notifications.showToast) App.notifications.showToast(text, level);
+    }
+    request.then(function (result) {
       if (result.ok) {
-        App.notifications && App.notifications.showToast &&
-          App.notifications.showToast(I18n.t('browse.download_started', { name: _prettyRepoName(repo.repo_id) }), 'success');
+        toast(I18n.t('browse.download_started', { name: name }), 'success');
       } else {
-        App.notifications && App.notifications.showToast &&
-          App.notifications.showToast(result.errorMsg || I18n.t('browse.download_failed'), 'error');
+        toast(result.errorMsg || I18n.t('browse.download_failed'), 'error');
+        if (onFail) onFail();
       }
     }).catch(function () {
-      App.notifications && App.notifications.showToast &&
-        App.notifications.showToast(I18n.t('browse.download_failed'), 'error');
+      toast(I18n.t('browse.download_failed'), 'error');
+      if (onFail) onFail();
     });
   }
 
@@ -994,7 +991,11 @@
     // Colour tracks "how far did this go": local is free and instant, relayed
     // is the slowest path we have.
     var cls = { local: 'ok', split: 'ok', distributed: 'info', relayed: 'warning', cloud: 'info' }[route] || 'info';
-    return '<span class="badge badge-' + cls + '">' + U.escapeHtml(route) + '</span>';
+    // The chat status line's words for the same five routes; a route this
+    // build has no words for shows as the API names it.
+    var key = 'chat.status.route_' + route;
+    var label = I18n.t(key);
+    return '<span class="badge badge-' + cls + '">' + U.escapeHtml(label !== key ? label : String(route)) + '</span>';
   }
 
   function _renderPerformance(data) {
@@ -1118,7 +1119,7 @@
       if ((t.segments || []).some(function (s) { return !s.is_local; })) {
         t.segments.forEach(function (s) {
           html += '<tr class="text-muted text-sm"><td></td><td colspan="5">'
-            + 'seg' + s.index + ' · '
+            + '#' + (s.index + 1) + ' · '
             + (s.is_local ? I18n.t('perf.seg_local') : '<code>' + U.escapeHtml((s.node_id || '').slice(0, 8)) + '</code>')
             + ' · L' + s.layer_start + '–' + s.layer_end
             + (s.elapsed_ms != null ? ' · ' + _fmtMs(s.elapsed_ms) : '')

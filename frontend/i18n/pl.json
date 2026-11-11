@@ -957,7 +957,7 @@
   "pool.role_owner": "Urządzenie główne — rozsyła pracę do połączonych urządzeń",
   "pool.share_code": "Skopiuj ten kod i wklej go na drugim urządzeniu:",
   "pool.slave_badge": "POŁĄCZONE URZĄDZENIE",
-  "pool.slave_banner_detail": "Połączono z {owner} — opłaty za inferencję trafiają na Twoje główne urządzenie",
+  "pool.slave_banner_detail": "Połączono z {owner} — to urządzenie udostępnia swój sprzęt urządzeniu głównemu",
   "pool.slave_banner_text": "Połączono z urządzeniem głównym",
   "pool.slave_manage": "Zarządzaj",
   "pool.stats_forwards": "{n} przekazań",

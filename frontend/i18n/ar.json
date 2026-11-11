@@ -957,7 +957,7 @@
   "pool.role_owner": "الجهاز الرئيسي — يوزّع المهام على أجهزتك المربوطة",
   "pool.share_code": "انسخ هذا الرمز والصقه على جهازك الآخر:",
   "pool.slave_badge": "جهاز مرتبط",
-  "pool.slave_banner_detail": "مرتبط بـ {owner} — رسوم الاستدلال تُحوَّل إلى جهازك الرئيسي",
+  "pool.slave_banner_detail": "مرتبط بـ {owner} — يتيح هذا الجهاز عتاده لجهازك الرئيسي",
   "pool.slave_banner_text": "مرتبط بجهازك الرئيسي",
   "pool.slave_manage": "إدارة",
   "pool.stats_forwards": "{n} تحويلات",

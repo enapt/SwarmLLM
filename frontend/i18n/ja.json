@@ -957,7 +957,7 @@
   "pool.role_owner": "メイン端末 — 連携した端末に処理を割り当てます",
   "pool.share_code": "このコードをコピーして他のデバイスに貼り付けてください：",
   "pool.slave_badge": "リンク済みデバイス",
-  "pool.slave_banner_detail": "{owner} にリンク済み — 推論料金はメインデバイスに転送されます",
+  "pool.slave_banner_detail": "{owner} にリンク済み — この端末はメイン端末にハードウェアを提供しています",
   "pool.slave_banner_text": "メイン端末に連携済み",
   "pool.slave_manage": "管理",
   "pool.stats_forwards": "{n}件の転送",

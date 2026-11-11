@@ -957,7 +957,7 @@
   "pool.role_owner": "메인 기기 — 연결된 기기에 작업을 보냅니다",
   "pool.share_code": "이 코드를 복사해서 다른 기기에 붙여넣으세요:",
   "pool.slave_badge": "연결된 기기",
-  "pool.slave_banner_detail": "{owner}에 연결됨 — 추론 요금은 메인 장치로 전송됩니다",
+  "pool.slave_banner_detail": "{owner}에 연결됨 — 이 기기는 메인 기기에 하드웨어를 제공합니다",
   "pool.slave_banner_text": "메인 기기에 연결됨",
   "pool.slave_manage": "관리",
   "pool.stats_forwards": "{n}개의 전달",

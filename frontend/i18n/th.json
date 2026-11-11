@@ -957,7 +957,7 @@
   "pool.role_owner": "อุปกรณ์หลัก — ส่งงานไปยังอุปกรณ์ที่เชื่อมไว้",
   "pool.share_code": "คัดลอกรหัสนี้แล้ววางลงในอุปกรณ์อื่นของคุณ:",
   "pool.slave_badge": "อุปกรณ์ที่เชื่อมต่อ",
-  "pool.slave_banner_detail": "เชื่อมต่อกับ {owner} — ค่าใช้จ่าย inference จะถูกส่งไปยังอุปกรณ์หลักของคุณ",
+  "pool.slave_banner_detail": "เชื่อมต่อกับ {owner} — อุปกรณ์นี้แบ่งปันฮาร์ดแวร์ให้อุปกรณ์หลักของคุณ",
   "pool.slave_banner_text": "เชื่อมกับอุปกรณ์หลักของคุณแล้ว",
   "pool.slave_manage": "จัดการ",
   "pool.stats_forwards": "{n} ส่งต่อ",

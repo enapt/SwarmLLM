@@ -429,7 +429,7 @@
       if (selectId) { App.models.select(selectId); return; }
 
       var cloudRow = target.closest('[data-select-cloud]');
-      if (cloudRow) { App.models.selectDropdown(cloudRow.getAttribute('data-select-cloud')); App.chat.newSession(); App.ui.switchTab('chat'); return; }
+      if (cloudRow) { App.models.chatWith(cloudRow.getAttribute('data-select-cloud')); return; }
 
       var cancelId = target.getAttribute('data-cancel-download');
       if (cancelId) { App.models.cancelDownload(cancelId); return; }
@@ -661,9 +661,7 @@
           var cardReady = cardModel && (cardModel.status === 'loaded' || cardModel.status === 'ready' ||
             (cardModel.global_available === cardModel.shard_count && cardModel.shard_count > 0));
           if (cardReady) {
-            App.models.selectDropdown(cardModelId);
-            App.chat.newSession();
-            App.ui.switchTab('chat');
+            App.models.chatWith(cardModelId);
           } else {
             App.ui.showBanner('warning', I18n.t('init.model_not_ready'));
           }

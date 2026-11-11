@@ -957,7 +957,7 @@
   "pool.role_owner": "Hauptgerät — verteilt Arbeit an Ihre verbundenen Geräte",
   "pool.share_code": "Kopieren Sie diesen Code und fügen Sie ihn auf Ihrem anderen Gerät ein:",
   "pool.slave_badge": "VERKNÜPFTES GERÄT",
-  "pool.slave_banner_detail": "Verbunden mit {owner} — Inferenzkosten gehen an Ihr Hauptgerät",
+  "pool.slave_banner_detail": "Verbunden mit {owner} — dieses Gerät stellt seine Hardware Ihrem Hauptgerät zur Verfügung",
   "pool.slave_banner_text": "Mit Ihrem Hauptgerät verbunden",
   "pool.slave_manage": "Verwalten",
   "pool.stats_forwards": "{n} Weiterleitungen",

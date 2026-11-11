@@ -957,7 +957,7 @@
   "pool.role_owner": "Dispositivo principale — invia lavoro ai tuoi dispositivi collegati",
   "pool.share_code": "Copia questo codice e incollalo sul tuo altro dispositivo:",
   "pool.slave_badge": "DISPOSITIVO COLLEGATO",
-  "pool.slave_banner_detail": "Collegato a {owner} — i costi di inferenza vanno al tuo dispositivo principale",
+  "pool.slave_banner_detail": "Collegato a {owner} — questo dispositivo mette il proprio hardware a disposizione del dispositivo principale",
   "pool.slave_banner_text": "Collegato al tuo dispositivo principale",
   "pool.slave_manage": "Gestisci",
   "pool.stats_forwards": "{n} inoltri",

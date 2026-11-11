@@ -957,7 +957,7 @@
   "pool.role_owner": "Huvudenhet — skickar arbete till dina kopplade enheter",
   "pool.share_code": "Kopiera den här koden och klistra in den på din andra enhet:",
   "pool.slave_badge": "LÄNKAD ENHET",
-  "pool.slave_banner_detail": "Länkad till {owner} — inferenskostnader går till din huvudenhet",
+  "pool.slave_banner_detail": "Länkad till {owner} — den här enheten delar sin hårdvara med din huvudenhet",
   "pool.slave_banner_text": "Kopplad till din huvudenhet",
   "pool.slave_manage": "Hantera",
   "pool.stats_forwards": "{n} vidarebefordringar",

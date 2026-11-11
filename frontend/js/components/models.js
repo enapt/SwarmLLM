@@ -2,8 +2,9 @@
 
 // ============================================================================
 // SwarmLLM — Models Component
-// Model loading, dropdown, HF search/download, shard menu, metadata,
-// auto-manage, cancel/remove/unload, shutdown
+// Model loading, the model picker, the part-download request
+// (App.hf.downloadShards), metadata, auto-manage, cancel/remove/unload,
+// shutdown
 // ============================================================================
 
 (function() {
@@ -14,8 +15,8 @@
   // HuggingFace Module
   // Just download helpers now — the modal browser (search / sort /
   // _renderResults / toggleTaskChip) was replaced by the inline Models
-  // tab browser in swarm-tab.js. Surface trimmed to the two functions
-  // still called externally: downloadShards + download.
+  // tab browser in swarm-tab.js. Surface trimmed to the one function
+  // still called externally: downloadShards.
   // ========================================================================
   App.hf = {
     /**
@@ -266,6 +267,16 @@
         groupEl.appendChild(itemsEl);
         list.appendChild(groupEl);
       });
+    },
+
+    // Open a new chat on this model: pick it in both pickers, start a fresh
+    // session, show the Chat tab. Every "chat with this model" control calls
+    // this, so they cannot drift apart.
+    chatWith: function(modelId) {
+      if (!modelId) return;
+      App.models.selectDropdown(modelId);
+      if (App.chat && App.chat.newSession) App.chat.newSession();
+      if (App.ui && App.ui.switchTab) App.ui.switchTab('chat');
     },
 
     selectDropdown: function(modelId, opts) {

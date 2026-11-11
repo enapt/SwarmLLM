@@ -292,7 +292,13 @@
       if (csDetect) {
         csDetect.addEventListener('click', async function() {
           var info = document.getElementById('claude-subscription-info');
+          // The line under the status: the CLI's version and plan, or what to
+          // do next. Shown by `style.display`, never the `hidden` class (which
+          // wins over any display value — why 3f5428a7 removed the element, and
+          // left this handler throwing on every answer).
+          var detail = document.getElementById('claude-sub-status-detail');
           if (info) info.textContent = I18n.t('settings.detecting');
+          if (detail) detail.style.display = 'none';
           csDetect.disabled = true;
           try {
             // User-triggered refresh: clear in-flight dedup so we get fresh data
@@ -305,7 +311,7 @@
                 ? U.capitalize(data.subscription_type)
                 : '';
               if (info) info.textContent = I18n.t('settings.claude_sub_ready');
-              info.style.color = 'var(--green)';
+              if (info) info.style.color = 'var(--green)';
               if (detail) {
                 var parts = [
                   I18n.t('settings.cli_version') + ': ' + (data.cli_version || '?'),
@@ -327,7 +333,7 @@
               }
             } else if (data.cli_installed && !data.authenticated) {
               if (info) info.textContent = I18n.t('settings.claude_sub_not_logged_in');
-              info.style.color = 'var(--orange)';
+              if (info) info.style.color = 'var(--orange)';
               if (detail) {
                 detail.textContent = I18n.t('settings.claude_sub_login_hint');
                 detail.style.display = '';
@@ -335,7 +341,7 @@
               }
             } else {
               if (info) info.textContent = I18n.t('settings.cli_not_found');
-              info.style.color = 'var(--red)';
+              if (info) info.style.color = 'var(--red)';
               if (detail) {
                 detail.textContent = I18n.t('settings.claude_sub_install_hint');
                 detail.style.display = '';
@@ -519,6 +525,15 @@
           // this network. A key the user pasted on a previous visit is the
           // supported way through, so try that before declaring failure.
           var saved = App.settings._loadManualKey();
+          // A key pasted on an earlier visit stops working when the node's key
+          // changes. Asked once here: one the node refuses is forgotten, so the
+          // banner offers the way back in, rather than every panel failing on
+          // a key the user cannot see (RFC 6750 § 3.1: a client discards a
+          // token the server calls invalid). A node that did not answer keeps it.
+          if (saved && await App.settings.saveManualKey(saved) === 'rejected') {
+            App.settings.forgetManualKey();
+            saved = '';
+          }
           if (saved) {
             App.settings._apiKeyFull = saved;
             App.settings._apiKeyDenied = false;
@@ -686,6 +701,9 @@
     loadStorageInfo: async function() {
       try {
         var resp = await App.authFetch('/api/admin/shard-storage');
+        // A refusal's body is JSON too: read as data it showed "0 B used, no
+        // models" where the node had not answered (the catch below says so).
+        if (!resp.ok) throw new Error('shard-storage ' + resp.status);
         var data = await resp.json();
         document.getElementById('settings-storage-used').textContent = U.formatBytes(data.disk_usage_bytes || 0);
 

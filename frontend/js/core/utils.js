@@ -692,15 +692,7 @@
     // available). The session creates lazily on first send.
     var modelId = entry.model_id;
     if (!modelId) return;
-    if (App.models && App.models.selectDropdown) {
-      App.models.selectDropdown(modelId);
-    }
-    if (App.chat && App.chat.newSession) {
-      App.chat.newSession();
-    }
-    if (App.ui && App.ui.switchTab) {
-      App.ui.switchTab('chat');
-    }
+    if (App.models && App.models.chatWith) App.models.chatWith(modelId);
   }
 
   function autoResizeInput() {

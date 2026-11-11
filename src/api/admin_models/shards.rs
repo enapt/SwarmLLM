@@ -9,6 +9,9 @@ use crate::error::ApiError;
 use super::helpers::*;
 use super::validate_shard_params;
 
+/// POST /api/admin/models/:model_id/shards/:shard_index/unload — Unload a single shard from memory.
+///
+/// Narrows the shard window to exclude this shard, then restarts the model worker.
 pub async fn unload_shard(
     State(state): State<AppState>,
     Path((model_id, shard_index)): Path<(String, u32)>,

@@ -366,9 +366,9 @@ pub(crate) fn load_ahead_for_the_owner(
     LoadAhead::Loading
 }
 
-/// POST /api/admin/models/:model_id/shards/:shard_index/unload — Unload a single shard from memory.
-///
-/// Narrows the shard window to exclude this shard, then restarts the model worker.
+/// GET /api/admin/models/:model_id/auto-manage — this model's auto-manage
+/// policy, or the node's defaults (`enabled`, `prune_enabled`, the default
+/// part cap) when it has none of its own.
 pub async fn get_model_auto_manage(
     State(state): State<AppState>,
     Path(model_id): Path<String>,

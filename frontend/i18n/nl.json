@@ -957,7 +957,7 @@
   "pool.role_owner": "Hoofdapparaat — stuurt werk naar je gekoppelde apparaten",
   "pool.share_code": "Kopieer deze code en plak hem op je andere apparaat:",
   "pool.slave_badge": "GEKOPPELD APPARAAT",
-  "pool.slave_banner_detail": "Gekoppeld aan {owner} — inferentiekosten gaan naar uw hoofdapparaat",
+  "pool.slave_banner_detail": "Gekoppeld aan {owner} — dit apparaat stelt zijn hardware beschikbaar aan je hoofdapparaat",
   "pool.slave_banner_text": "Gekoppeld aan je hoofdapparaat",
   "pool.slave_manage": "Beheren",
   "pool.stats_forwards": "{n} doorgestuurd",

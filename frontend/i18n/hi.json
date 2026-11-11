@@ -957,7 +957,7 @@
   "pool.role_owner": "मुख्य डिवाइस — आपके जुड़े डिवाइसों को काम भेजता है",
   "pool.share_code": "इस कोड को कॉपी करके अपने दूसरे डिवाइस पर पेस्ट करें:",
   "pool.slave_badge": "जुड़ा डिवाइस",
-  "pool.slave_banner_detail": "{owner} से जुड़ा — अनुमान शुल्क आपके मुख्य डिवाइस पर जाएंगे",
+  "pool.slave_banner_detail": "{owner} से जुड़ा — यह डिवाइस अपना हार्डवेयर आपके मुख्य डिवाइस को देता है",
   "pool.slave_banner_text": "आपके मुख्य डिवाइस से जुड़ा हुआ",
   "pool.slave_manage": "प्रबंधित करें",
   "pool.stats_forwards": "{n} फॉरवर्ड",

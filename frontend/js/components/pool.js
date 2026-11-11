@@ -470,7 +470,8 @@
     },
 
     /// Show/hide the persistent slave banner at the top of every page.
-    /// The full dashboard remains usable — inference charges go to the master.
+    /// The full dashboard remains usable; this computer lends its hardware to
+    /// the main device (credits are dormant — nothing is charged anywhere).
     updateSlaveBanner: function (data) {
       var banner = document.getElementById('slave-top-banner');
       if (!banner) return;

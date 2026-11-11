@@ -957,7 +957,7 @@
   "pool.role_owner": "Hlavní zařízení — rozděluje práci mezi propojená zařízení",
   "pool.share_code": "Zkopírujte tento kód a vložte jej na druhé zařízení:",
   "pool.slave_badge": "PROPOJENÉ ZAŘÍZENÍ",
-  "pool.slave_banner_detail": "Propojeno s {owner} — poplatky za inferenci jdou na vaše hlavní zařízení",
+  "pool.slave_banner_detail": "Propojeno s {owner} — toto zařízení poskytuje svůj hardware vašemu hlavnímu zařízení",
   "pool.slave_banner_text": "Propojeno s vaším hlavním zařízením",
   "pool.slave_manage": "Spravovat",
   "pool.stats_forwards": "{n} přeposláno",

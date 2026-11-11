@@ -957,7 +957,7 @@
   "pool.role_owner": "Ana aygıt — bağlı aygıtlarınıza iş gönderir",
   "pool.share_code": "Bu kodu kopyalayın ve diğer cihazınıza yapıştırın:",
   "pool.slave_badge": "BAĞLI CİHAZ",
-  "pool.slave_banner_detail": "{owner} ile bağlantılı — çıkarım ücretleri ana cihazınıza gider",
+  "pool.slave_banner_detail": "{owner} ile bağlantılı — bu aygıt donanımını ana aygıtınızla paylaşıyor",
   "pool.slave_banner_text": "Ana aygıtınıza bağlı",
   "pool.slave_manage": "Yönet",
   "pool.stats_forwards": "{n} iletim",

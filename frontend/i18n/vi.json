@@ -957,7 +957,7 @@
   "pool.role_owner": "Thiết bị chính — gửi việc tới các thiết bị liên kết của bạn",
   "pool.share_code": "Sao chép mã này và dán vào thiết bị khác của bạn:",
   "pool.slave_badge": "THIẾT BỊ LIÊN KẾT",
-  "pool.slave_banner_detail": "Liên kết với {owner} — phí suy luận chuyển đến thiết bị chính của bạn",
+  "pool.slave_banner_detail": "Liên kết với {owner} — thiết bị này chia sẻ phần cứng với thiết bị chính của bạn",
   "pool.slave_banner_text": "Đã liên kết với thiết bị chính của bạn",
   "pool.slave_manage": "Quản lý",
   "pool.stats_forwards": "{n} chuyển tiếp",

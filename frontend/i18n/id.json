@@ -957,7 +957,7 @@
   "pool.role_owner": "Perangkat utama — mengirim pekerjaan ke perangkat tertaut Anda",
   "pool.share_code": "Salin kode ini dan tempel di perangkat lain Anda:",
   "pool.slave_badge": "PERANGKAT TERHUBUNG",
-  "pool.slave_banner_detail": "Terhubung ke {owner} — biaya inferensi diteruskan ke perangkat utama Anda",
+  "pool.slave_banner_detail": "Terhubung ke {owner} — perangkat ini membagikan perangkat kerasnya kepada perangkat utama Anda",
   "pool.slave_banner_text": "Tertaut ke perangkat utama Anda",
   "pool.slave_manage": "Kelola",
   "pool.stats_forwards": "{n} diteruskan",

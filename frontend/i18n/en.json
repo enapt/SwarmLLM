@@ -957,7 +957,7 @@
   "pool.role_owner": "Main device — sends work to your linked devices",
   "pool.share_code": "Copy this code and paste it on your other device:",
   "pool.slave_badge": "LINKED DEVICE",
-  "pool.slave_banner_detail": "Linked to {owner} — inference charges go to your main device",
+  "pool.slave_banner_detail": "Linked to {owner} — this device shares its hardware with your main device",
   "pool.slave_banner_text": "Linked to your main device",
   "pool.slave_manage": "Manage",
   "pool.stats_forwards": "{n} forwards",
