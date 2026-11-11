@@ -2157,6 +2157,25 @@ Tests: `the_strictest_instruction_wins`, `an_instruction_that_cannot_be_read_is_
 `private_mode_and_a_kept_model_refuse_the_cloud_for_a_model_of_the_swarm`; 7 mechanisms toggled
 off and shown red; `split_rig.sh keep` checks every form live against a second computer.
 
+### Another pool's listing is acted on only through `listed_pool_members` (2026-11-12, #443)
+
+`cross_pool_extras` widens a private-mode request to the devices of another pool that LISTS the
+model, and **`pool::scope::listed_pool_members`** is the one reading of such a pool: its state is
+known (`pool_registry`, every member's acceptance signature checked on arrival) and it has at least
+`share_model_catalog_min_members` devices (read live) — asked where the listing is USED, by the
+routing and by the dashboard's "Models other pools serve" (`api::admin::foreign_pool_catalog_json`),
+so neither shows or uses a pool the other would not. The receive side admits a listing whose pool
+state has not arrived ("the next state gossip will confirm or refute"), and nothing asked the count
+again once it had: one key could list models for a pool of one. A pool's own catalog counts a
+device only on its OWN word (`models_the_pool_serves` → `ModelRegistry::part_has_a_holder_where`):
+a DHT provider record can name any key, so a stranger could make a pool list a model its devices do
+not hold. Security review of the pool switches, 2026-11-12. Tests
+`cross_pool_extras_returns_foreign_members_when_eligible` (a two-device pool under a floor of
+three widens nothing), `a_pool_lists_only_the_models_its_devices_hold_whole` (a part only the DHT
+credits), `the_other_pools_catalog_has_one_shape_and_says_whether_it_is_used` — the first two red
+with each check switched off. What it does not answer: a pool costs whoever makes it three keys, so
+the switch says plainly that those computers may belong to strangers (FUTURE_WORK #443).
+
 ## A network coordinate must be published rough, and fed a MINIMUM
 
 **Rule**: `.claude/rules/arch-network.md` § "Network coordinates".

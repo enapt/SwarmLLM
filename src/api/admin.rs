@@ -1330,17 +1330,22 @@ pub fn foreign_pool_catalog_json(
         now_ms,
         crate::daemon::dispatch::FOREIGN_POOL_CATALOG_MAX_AGE_MS,
     );
-    let mut by_pool: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    let mut by_pool: BTreeMap<String, (crate::pool::types::PoolId, Vec<String>)> = BTreeMap::new();
     for entry in shared.credits.foreign_pool_catalog.iter() {
         let (pool, model) = entry.key();
         by_pool
             .entry(format!("{pool}"))
-            .or_default()
+            .or_insert_with(|| (pool.clone(), Vec::new()))
+            .1
             .push(model.0.clone());
     }
     let (most_pools, most_models) = cap.unwrap_or((usize::MAX, usize::MAX));
+    // Only a pool whose listing the routing would act on
+    // (`pool::scope::listed_pool_members`) is shown as serving anything.
     let pools: Vec<serde_json::Value> = by_pool
         .into_iter()
+        .filter(|(_, (pool, _))| crate::pool::scope::listed_pool_members(shared, pool).is_some())
+        .map(|(id, (_, models))| (id, models))
         .take(most_pools)
         .map(|(pool_id, mut models)| {
             models.sort();
@@ -3328,6 +3333,39 @@ mod tests {
                 .foreign_pool_catalog
                 .insert((pool.clone(), crate::types::ModelId(model.into())), now);
         }
+        // A pool this node has no state for is listed as serving nothing: the
+        // routing would not act on its listing (`listed_pool_members`).
+        assert_eq!(
+            foreign_pool_catalog_json(&state, None)["pools"],
+            serde_json::json!([])
+        );
+        let device = |n: u8| crate::pool::types::PoolMembership {
+            node_id: crate::types::NodeId([n; 32]),
+            credits_contributed: 0,
+            joined_at: chrono::Utc::now(),
+            acceptance_signature: vec![],
+            invitation_id: uuid::Uuid::new_v4(),
+            invitation_expires_at: chrono::Utc::now(),
+            device_name: None,
+            last_seen: None,
+            online: false,
+            device_stats: None,
+            contribution_level: 100,
+        };
+        state.credits.pool_registry.insert(
+            pool.clone(),
+            crate::pool::types::PoolState {
+                pool_id: pool.clone(),
+                name: "theirs".into(),
+                created_at: chrono::Utc::now(),
+                owner_signature: vec![],
+                members: (1..=3).map(device).collect(),
+                shard_pins: Default::default(),
+                total_lifetime_credits: 0,
+                member_credit_split_pct: 0,
+                generation: 0,
+            },
+        );
 
         let whole = foreign_pool_catalog_json(&state, None);
         assert_eq!(

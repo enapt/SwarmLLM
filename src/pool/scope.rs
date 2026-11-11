@@ -317,15 +317,37 @@ pub fn cross_pool_extras(
         if pool_id.0 == my_id.0 {
             continue;
         }
-        if let Some(pool_state) = shared.credits.pool_registry.get(pool_id) {
-            for m in &pool_state.value().members {
-                if m.node_id != my_id {
-                    extras.insert(m.node_id.clone());
-                }
+        for member in listed_pool_members(shared, pool_id).unwrap_or_default() {
+            if member != my_id {
+                extras.insert(member);
             }
         }
     }
     extras
+}
+
+/// The devices of another pool whose model listing this node may act on:
+/// `None` unless the pool's state is known (`pool_registry`, every member's
+/// acceptance signature checked on arrival) AND it has at least the members a
+/// listing needs (`share_model_catalog_min_members`, read live). Asked where
+/// the listing is USED — by the routing (`cross_pool_extras`) and the
+/// dashboard's "Models other pools serve" (`api::admin::foreign_pool_catalog_json`)
+/// — because a listing is admitted before its pool's state may have arrived,
+/// and nothing checked the count again once it did: one key could list
+/// models for a pool of one (security review, 2026-11-12).
+pub fn listed_pool_members(
+    shared: &SharedState,
+    pool_id: &crate::pool::types::PoolId,
+) -> Option<Vec<NodeId>> {
+    let floor = shared.cfg().pool.share_model_catalog_min_members.max(1) as usize;
+    let pool = shared.credits.pool_registry.get(pool_id)?;
+    let members: Vec<NodeId> = pool
+        .value()
+        .members
+        .iter()
+        .map(|m| m.node_id.clone())
+        .collect();
+    (members.len() >= floor).then_some(members)
 }
 
 /// The models a pool serves: those every part of which has a holder among
@@ -339,6 +361,10 @@ pub fn cross_pool_extras(
 /// and a catalog built from it told other pools this pool served every model it
 /// had heard of (#176). Prior art: a Kademlia provider record — a node provides
 /// only content it holds. Sorted by id.
+///
+/// A holder counts only on its OWN word (`part_has_a_holder_where`): a DHT
+/// provider record can name any key, so a stranger could make a pool list a
+/// model its devices do not hold (security review, 2026-11-12).
 pub fn models_the_pool_serves(shared: &SharedState, members: &HashSet<NodeId>) -> Vec<ModelId> {
     let registry = &shared.model_registry;
     let mut served: Vec<ModelId> = registry
@@ -352,10 +378,15 @@ pub fn models_the_pool_serves(shared: &SharedState, members: &HashSet<NodeId>) -
                             model_id: id.clone(),
                             index: shard.index,
                         };
-                        registry
+                        // This build's holders among the pool's devices, then
+                        // only those that said so themselves.
+                        let devices: HashSet<NodeId> = registry
                             .shard_holders(&part)
-                            .iter()
-                            .any(|h| members.contains(h))
+                            .into_iter()
+                            .filter(|h| members.contains(h))
+                            .collect();
+                        !devices.is_empty()
+                            && registry.part_has_a_holder_where(&part, |h| devices.contains(h))
                     })
             })
         })
@@ -618,6 +649,8 @@ mod tests {
         let mut config = Config::default();
         config.pool.private_mode = true;
         config.pool.allow_cross_pool_inference = true;
+        // Two devices: listed only where a listing needs two or fewer.
+        config.pool.share_model_catalog_min_members = 2;
         let state = make_state(config);
         state
             .credits
@@ -682,6 +715,18 @@ mod tests {
         assert_eq!(extras.len(), 2);
         assert!(extras.contains(&foreign_member_a));
         assert!(extras.contains(&foreign_member_b));
+
+        // **A pool with fewer devices than a listing needs widens nothing**
+        // (security review, 2026-11-12): its listing may have been admitted
+        // before its state arrived, so the count is asked where it is used.
+        let mut raised = (**state.cfg()).clone();
+        raised.pool.share_model_catalog_min_members = 3;
+        state.apply_live_config(raised);
+        assert!(
+            cross_pool_extras(&state, &model_id).is_empty(),
+            "a two-device pool's listing was acted on under a floor of three"
+        );
+        assert!(listed_pool_members(&state, &foreign_pool).is_none());
     }
 
     /// A pool lists only the models its devices hold whole between them
@@ -734,9 +779,16 @@ mod tests {
         registry.record_shard_holder(part("held-in-part", 0), device.clone());
         registry.record_shard_holder(part("strangers", 0), stranger.clone());
         registry.record_shard_holder(part("strangers", 1), stranger.clone());
+        // Only the DHT says the device holds this one's second part: any key
+        // can plant such a record (security review, 2026-11-12).
+        state
+            .model_registry
+            .register_manifest(two_parts("dht-says"));
+        registry.record_shard_holder(part("dht-says", 0), device.clone());
+        registry.merge_dht_providers(&part("dht-says", 1), std::slice::from_ref(&device));
         assert_eq!(
             registry.model_ids().len(),
-            4,
+            5,
             "every manifest registered, or this proves nothing"
         );
 

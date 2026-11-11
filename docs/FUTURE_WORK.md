@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #443**). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #444**). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -5341,6 +5341,38 @@ Credits are DORMANT — they gate nothing, and `credits_stay_dormant` fails the 
 starts. Read `docs/CREDITS_DESIGN.md` before touching them; the credit items below are
 preconditions for ever switching enforcement on, not work for now.
 
+#### #443 — "Another pool" costs whoever makes it three keys
+`P3` · privacy · **OPEN** (residual: which pools — the review's two fixes and the wording done 2026-11-12) — 2026-11-12 · history: #176 (the switches), the security review of `b7ea7c31` + `fba9b343`
+
+With Private Mode on and "Use other pools for models your devices don't have" switched on, a
+request for a model none of the user's devices holds goes to the devices of ANY pool that lists
+it (`pool::scope::cross_pool_extras` unions every such pool's members, no preference). A pool is
+three keys and signatures their maker holds; a listing needs its owner's signature and the
+member floor (`share_model_catalog_min_members`, 3), and a newcomer's trust (`DEFAULT_TRUST` 0.5)
+clears the plaintext-prompt bar. So a stranger can make a pool that lists the popular models and
+read the prompts of every user who turned the switch on. The switch always said "those computers
+will see what you send"; the gap was that "another pool" reads, to this audience, as someone's
+group of devices rather than anyone on the internet. Review: medium, plausible, consent-honest.
+
+**Done 2026-11-12.** The switch's confirm and hint say "Anyone can start a pool, so those
+computers may belong to strangers" (21 locales). The member floor is asked where the listing is
+USED (`listed_pool_members`, the routing and the dashboard alike): a listing is admitted before its
+pool's state may arrive, and nothing checked the count again once it did, so one key could list for
+a pool of one (review, low). A pool's own catalog counts a device only on its own word
+(`part_has_a_holder_where`), never a DHT provider record naming it (review, info). Tests in
+`docs/invariants/network.md` § "Another pool's listing is acted on only through `listed_pool_members`".
+
+**Residual — the owner cannot choose WHICH pools.** Not built, and why: a pool's id and name are its
+maker's choice, so a tick beside a name tells a non-technical owner nothing they could check; a
+trust bar above the newcomer's would never be met under private mode, where this node sends work
+only to its pool and the pools it uses (trust here is earned from this node's own requests). What
+would answer it: a pool reached by an invitation the owner accepted (Tailscale's node sharing — a
+device is shared to you by its owner, never discovered), which needs a wire message and a consent
+flow on both sides. Two smaller notes from the same review, kept here: a listing switched off is
+not retracted and stays in other pools' caches up to `FOREIGN_POOL_CATALOG_MAX_AGE_MS` (2 h) —
+no new exposure, since the pool's devices serve the open swarm anyway; and the switch's "ask
+first" is in the dashboard only — correct, as the API key is the owner's agent.
+
 #### #383 — A serving node's stream of checks is not tied to the peer that opened it
 `P4` · network · **OPEN** — 2026-10-30 · history: #382's security review (low, pre-existing)
 
@@ -5870,6 +5902,10 @@ grep `^| N |`).
   in stream buffer" — plus #2955's chunk state and randomized reassembly with compactions; 319 of 319.
   Guard `quic_runs_on_the_vendored_quinn_proto_that_keeps_a_lossy_stream`. Evidence:
   `docs/invariants/network.md` § "A QUIC stream behind lost packets is kept, not closed".
+  Security review (2026-11-11): sound — flow control, accounting, no reachable panic. One low note,
+  kept as the bound to hold on a re-vendor: a peer can make a compaction re-copy up to one stream
+  window, at most once per 2,049 frames — the same bound as upstream's assembler, reached by a
+  different layout.
 
 **Closed 2026-11-11, on main (not in a release yet)** (#442)
 - #442 — **A guessing model left on the card by a split route kept the same model's later whole
@@ -5922,7 +5958,8 @@ grep `^| N |`).
   (`pool::scope::other_pools_used`, carried by `api::admin::foreign_pool_catalog_json`, which both the
   REST list and the stats tick use — the REST copy's objects had drawn `[object Object]` until the next
   tick). Prior art: Tailscale's "Allow local network access"; a Kademlia provider record names only
-  content its node holds. Billing between pools waits on credits, which are dormant.
+  content its node holds. Billing between pools waits on credits, which are dormant. Its security
+  review (2026-11-12) left #443: a pool costs its maker three keys.
 
 **Closed 2026-11-09, released in v0.3.280 (published 2026-11-09 14:21:54Z)** (#438)
 - #438 — **The model search judged "Runs locally" on a card computer by the card alone.** It asked
