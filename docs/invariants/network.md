@@ -6026,6 +6026,27 @@ processor ≤ 88 °C. An unknown reading is never hot and never cools a hot card
 (a blocked `nvidia-smi` is the driver watch's to judge). Healthy release checks
 touched 85.9-86.5 °C for a reading at most, so they never hold.
 
+**The clock counts readings AT the hot line, and a known reading under it starts
+it again** (the pre-release review, 2026-11-11). The first version
+cleared the clock only at the COOL line, so between the two lines it ran on: a
+card that touched 85 °C once and then sat at 81-84 °C, its driver not cutting
+clocks, held after two minutes — and paced its owner's chats to half — on a
+laptop's ordinary long reply. The cool line now only ENDS a hold (`card_warm` /
+`processor_warm`, the last known reading above it). A card truly held at its
+target keeps its clock through a dip: its driver reports the cooling
+(`sw_thermal_slowdown`), which counts as at the target whatever the degrees.
+Prior art: Kubernetes keeps a soft eviction threshold's first-observed time only
+while the threshold is met (`thresholdsFirstObservedAt`,
+pkg/kubelet/eviction/helpers.go: a threshold not met this round is dropped and
+starts fresh), and the gate kit's sustained stops (`safety.sh`: card ≥ 87 °C for
+120 s, zone ≥ 93 °C for 300 s) reset the same way — checked against every release
+check's readings and the lock-up's. Tests
+`a_card_just_under_its_target_restarts_the_clock`,
+`a_processor_just_under_its_hot_line_restarts_the_clock` (red with the reset
+switched off). Also from the review: a card whose target reads N/A had
+`nvidia-smi -q` asked every round; the answer, N/A included, is now kept
+(`HostHeatWatch::card_target_c`).
+
 **Where it applies — the metered rule's choke points.** The hold joins the
 metered hold in ONE answer, `SharedState::peer_work_hold_now` → `PeerWorkHold`,
 which every dispatch admission takes as a REQUIRED argument, the

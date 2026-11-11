@@ -462,6 +462,11 @@ Microsoft WDDM/TDR docs, Apple developer docs; issue trackers of Ollama, LM Stud
   `SWARMLLM_FAULT_HOST_HEAT=card|protecting|processor|driver|cool`.
 - Guard `every_new_request_a_peer_starts_asks_whether_this_node_holds_back`; rule
   `arch-network.md` § "A hot computer takes no new work for others".
+- Fixed in the pre-release review (2026-11-11): the clock to a hold ran on between the hot and cool
+  lines, so a card that touched 85 °C once and sat at 81-84 °C held after two minutes. A known reading
+  under the hot line now starts it again (Kubernetes' `thresholdsFirstObservedAt`, the gate kit's
+  sustained stops); the cool line only ends a hold. A card target of N/A is no longer asked every round.
+  Evidence: `docs/invariants/network.md` § the heat rule.
 
 **Done (2026-11-11, step 3 — work already running for others stops too):**
 - Prior art: Kubernetes node-pressure eviction (a soft threshold with a grace period, a hard one acted on
@@ -536,6 +541,12 @@ Microsoft WDDM/TDR docs, Apple developer docs; issue trackers of Ollama, LM Stud
 - Checked ON Windows (MinGW cross-build, a throwaway node on this laptop, ordinary user, two health
   rounds each): the build before it showed `heat: card unknown  processor unknown` in the diagnostics;
   this one `processor 69 C`, then `68 C`.
+
+**Known gap (the pre-release review, 2026-11-11):** a NEW tensor-parallel prompt pass (`tp_meta`,
+`sequence_num == 0`) is admitted by `admit_own_forward` with the swarm-use rule only, so a node in the
+soft phase of a heat hold (`stops_running: false`) still joins one until the stop phase begins. The
+metered hold has the same gap, deliberately: a refusal there costs the coordinator a 10 s AllReduce
+timeout (the comment at the site). Closing it needs the coordinator to ask before the group forms.
 
 **Next step:** (C) macOS `thermalState`.
 

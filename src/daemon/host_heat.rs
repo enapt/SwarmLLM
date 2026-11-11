@@ -199,6 +199,10 @@ impl HeatCause {
 pub(crate) struct HeatTracker {
     card_hot_since: Option<Instant>,
     processor_hot_since: Option<Instant>,
+    /// The last known reading was above the cool line (or the driver was
+    /// cooling the card): a hold does not end while either is.
+    card_warm: bool,
+    processor_warm: bool,
     cool_since: Option<Instant>,
     holding: Option<HeatCause>,
     /// When the current hold began, whatever its cause since.
@@ -212,22 +216,36 @@ pub(crate) struct HeatTracker {
 impl HeatTracker {
     /// Take one reading at `now`; the cause held back for afterwards, if any.
     pub(crate) fn observe(&mut self, r: &HeatReading, now: Instant) -> Option<HeatCause> {
-        // Between the hot and cool lines — and an unknown reading — keep
-        // whatever was running: a blocked `nvidia-smi` is the driver watch's
-        // to judge, not a sign the card cooled.
+        // The clock to a hold counts readings AT the hot line, and a known
+        // reading under it starts it again: a card that touched its target
+        // once and then sat a few degrees under it, its driver not cutting
+        // clocks, never spent its cooling. Prior art: Kubernetes keeps a
+        // soft threshold's first-observed time only while the threshold is
+        // met (`thresholdsFirstObservedAt`, pkg/kubelet/eviction/helpers.go),
+        // and the gate kit's sustained stops do the same. The cool line only
+        // ENDS a hold. An unknown reading changes nothing: a blocked
+        // `nvidia-smi` is the driver watch's to judge, not a sign of cooling.
         match r.card {
             Some(c) if c.at_target() || c.hardware_protecting => {
                 self.card_hot_since.get_or_insert(now);
+                self.card_warm = true;
             }
-            Some(c) if c.cool() => self.card_hot_since = None,
-            _ => {}
+            Some(c) => {
+                self.card_hot_since = None;
+                self.card_warm = !c.cool();
+            }
+            None => {}
         }
         match r.processor_c {
             Some(t) if t >= PROCESSOR_HOT_C => {
                 self.processor_hot_since.get_or_insert(now);
+                self.processor_warm = true;
             }
-            Some(t) if t <= PROCESSOR_COOL_C => self.processor_hot_since = None,
-            _ => {}
+            Some(t) => {
+                self.processor_hot_since = None;
+                self.processor_warm = t > PROCESSOR_COOL_C;
+            }
+            None => {}
         }
         let held_for = |since: Option<Instant>, d: Duration| {
             since.is_some_and(|s| now.saturating_duration_since(s) >= d)
@@ -250,8 +268,7 @@ impl HeatTracker {
                 self.cool_since = None;
             }
             (Some(_), None) => {
-                let warm = self.card_hot_since.is_some() || self.processor_hot_since.is_some();
-                if warm {
+                if self.card_warm || self.processor_warm {
                     self.cool_since = None;
                 } else if held_for(Some(*self.cool_since.get_or_insert(now)), COOL_FOR) {
                     self.holding = None;
@@ -286,8 +303,10 @@ pub struct HostHeatWatch {
     stops_running: AtomicBool,
     /// The last reading, for the diagnostics report.
     last: parking_lot::Mutex<Option<HeatReading>>,
-    /// The card's target temperature once learned (it never changes).
-    card_target_c: parking_lot::Mutex<Option<f32>>,
+    /// The card's target temperature once the driver has ANSWERED the
+    /// question (it never changes): `Some(None)` for a card that names none,
+    /// so a target of N/A is not asked again every round.
+    card_target_c: parking_lot::Mutex<Option<Option<f32>>>,
     /// A refresh is running: the health tick never starts a second.
     refreshing: AtomicBool,
 }
@@ -408,11 +427,12 @@ impl SharedState {
             .as_ref()
             .is_some_and(|g| g.backend.eq_ignore_ascii_case("cuda"));
         let known_target = *watch.card_target_c.lock();
-        let reading = tokio::task::spawn_blocking(move || read_heat(reads_card, known_target))
-            .await
-            .unwrap_or_default();
-        if let Some(t) = reading.card.and_then(|c| c.target_c) {
-            *watch.card_target_c.lock() = Some(t);
+        let (reading, target) =
+            tokio::task::spawn_blocking(move || read_heat(reads_card, known_target))
+                .await
+                .unwrap_or_default();
+        if target.is_some() {
+            *watch.card_target_c.lock() = target;
         }
         *watch.last.lock() = Some(reading);
         let (cause, stops_running) = {
@@ -538,13 +558,19 @@ fn heat_guard_on() -> bool {
 }
 
 /// One reading, on a blocking thread.
-fn read_heat(reads_card: bool, known_target: Option<f32>) -> HeatReading {
+/// The reading, and the card's target as the driver answered it (`None` while
+/// it has not; see [`HostHeatWatch::card_target_c`]).
+fn read_heat(
+    reads_card: bool,
+    known_target: Option<Option<f32>>,
+) -> (HeatReading, Option<Option<f32>>) {
     if let Some(faked) = faked_reading() {
-        return faked;
+        return (faked, known_target);
     }
-    HeatReading {
+    let mut target = known_target;
+    let reading = HeatReading {
         card: if reads_card {
-            read_card(known_target)
+            read_card(&mut target)
         } else {
             None
         },
@@ -553,7 +579,8 @@ fn read_heat(reads_card: bool, known_target: Option<f32>) -> HeatReading {
         processor_c: crate::inference::thermal::read_package_temp_c()
             .or_else(crate::inference::thermal::read_thermal_zone_c),
         driver_not_answering: driver_not_answering(),
-    }
+    };
+    (reading, target)
 }
 
 #[cfg(feature = "candle-cuda")]
@@ -568,8 +595,9 @@ fn driver_not_answering() -> bool {
 
 /// The card's temperature and the driver's cooling flags, through the one
 /// bounded `nvidia-smi` (a driver that does not answer reads as unknown, and
-/// is the driver watch's to judge). Its target is asked once.
-fn read_card(known_target: Option<f32>) -> Option<CardHeat> {
+/// is the driver watch's to judge). Its target is asked until the driver
+/// answers once, N/A included: `target` holds the answer.
+fn read_card(target: &mut Option<Option<f32>>) -> Option<CardHeat> {
     use crate::model::auto_manage::vram::nvidia_smi;
     // `clocks_throttle_reasons` is the older spelling, which current drivers
     // still take (621.01 answers both, 2026-11-11).
@@ -588,9 +616,10 @@ fn read_card(known_target: Option<f32>) -> Option<CardHeat> {
             "--format=csv,noheader,nounits",
         ])
     })?;
-    let target = known_target
-        .or_else(|| nvidia_smi(&["-q", "-d", "TEMPERATURE"]).and_then(|q| parse_card_target(&q)));
-    parse_card_heat(&out, target)
+    if target.is_none() {
+        *target = nvidia_smi(&["-q", "-d", "TEMPERATURE"]).map(|q| parse_card_target(&q));
+    }
+    parse_card_heat(&out, target.flatten())
 }
 
 /// `temperature, sw_thermal, hw_thermal` per card, one line each: the hottest
@@ -736,6 +765,51 @@ mod tests {
             t.observe(&card(86.5, false), t0 + secs(200)),
             None,
             "the clock restarted when the card cooled at 30 s"
+        );
+    }
+
+    /// A card that touched its target once and then sat a few degrees under
+    /// it, its driver not cooling it (a laptop card under a long reply), never
+    /// held anything back: 83 °C is under the hot line (85), so the clock
+    /// starts again there — even though it is above the cool line (80).
+    #[test]
+    fn a_card_just_under_its_target_restarts_the_clock() {
+        let t0 = Instant::now();
+        let mut t = HeatTracker::default();
+        t.observe(&card(86.5, false), t0);
+        for s in [30, 60, 90, 120, 150, 180] {
+            assert_eq!(t.observe(&card(83.0, false), t0 + secs(s)), None, "{s} s");
+        }
+        assert_eq!(t.observe(&card(86.5, false), t0 + secs(210)), None);
+        assert_eq!(
+            t.observe(&card(86.5, false), t0 + secs(300)),
+            None,
+            "the clock began again at 210 s"
+        );
+        assert_eq!(
+            t.observe(&card(83.0, true), t0 + secs(330)),
+            Some(HeatCause::Card),
+            "83 °C with the driver cutting clocks IS at its target: the clock from 210 s ran on"
+        );
+    }
+
+    /// The processor's clock the same way: one reading at 91 °C between two
+    /// at 95 starts it again.
+    #[test]
+    fn a_processor_just_under_its_hot_line_restarts_the_clock() {
+        let t0 = Instant::now();
+        let mut t = HeatTracker::default();
+        let p = |c| HeatReading {
+            processor_c: Some(c),
+            ..Default::default()
+        };
+        t.observe(&p(95.0), t0);
+        t.observe(&p(91.0), t0 + secs(150));
+        t.observe(&p(95.0), t0 + secs(180));
+        assert_eq!(t.observe(&p(95.0), t0 + secs(310)), None);
+        assert_eq!(
+            t.observe(&p(95.0), t0 + secs(480)),
+            Some(HeatCause::Processor)
         );
     }
 
