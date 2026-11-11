@@ -159,6 +159,173 @@ pub fn read_package_temp_c() -> Option<f32> {
     }
 }
 
+/// The temperature Windows' ACPI thermal zones report, in °C — what the heat
+/// guard (`daemon::host_heat`) reads where [`read_package_temp_c`] has nothing.
+/// `None` off Windows, and on a Windows machine whose firmware feeds no zone.
+///
+/// **Why a second reading**: on Windows `sysinfo` asks WMI's
+/// `MSAcpi_ThermalZoneTemperature`, which refuses an ordinary user ("Access
+/// denied", measured on this laptop 2026-11-11), so the processor read
+/// "unknown" on every Windows computer the node does not run as administrator —
+/// and the heat guard watched the card alone while the laptop froze at 93-96 °C
+/// (gotcha #1081). The same zones are open to any user through the Performance
+/// Data Helper: `\Thermal Zone Information(*)\High Precision Temperature`,
+/// tenths of a kelvin, read 3492 → 76 °C here as an ordinary user, valid on
+/// the first sample, one instance (`\_TZ.THRM`).
+///
+/// A zone is a sensor the firmware names, never marked as the processor, so
+/// this is the heat guard's reading only — the processor warning
+/// ([`poll_and_report`]) stays on the package sensor it was tuned for.
+///
+/// Prior art: windows_exporter's `thermalzone` collector (v0.30.0
+/// `thermalzone.go`: `High Precision Temperature / 10 - 273.15`, fallback
+/// `Temperature` in whole kelvin) and Netdata's (`Temperature - 273.15`) read
+/// these counters; windows_exporter removed it 2026-10-10 (#2659) because many
+/// vendors feed no zone — hence `None` there, never "cool". The English path
+/// (`PdhAddEnglishCounterW`) because the counter names are localised.
+/// LibreHardwareMonitor's package reading needs a ring-0 driver (administrator)
+/// and was not taken.
+pub fn read_thermal_zone_c() -> Option<f32> {
+    #[cfg(windows)]
+    {
+        let precise =
+            windows_zone::values(r"\Thermal Zone Information(*)\High Precision Temperature");
+        hottest_zone_c(
+            precise
+                .into_iter()
+                .flatten()
+                .map(|decikelvin| decikelvin / 10.0),
+        )
+        .or_else(|| {
+            hottest_zone_c(windows_zone::values(
+                r"\Thermal Zone Information(*)\Temperature",
+            )?)
+        })
+    }
+    #[cfg(not(windows))]
+    {
+        None
+    }
+}
+
+/// A zone colder than this or hotter than [`ZONE_MOST_C`] is not believed: a
+/// zone the firmware never fills reads 0 K (−273 °C), and nothing still running
+/// reads 125 °C.
+#[cfg(any(windows, test))]
+const ZONE_LEAST_C: f64 = 5.0;
+#[cfg(any(windows, test))]
+const ZONE_MOST_C: f64 = 125.0;
+
+/// The hottest believable zone, in °C, from readings in kelvin. Pure, so the
+/// rule is tested off Windows.
+#[cfg(any(windows, test))]
+fn hottest_zone_c(kelvin: impl IntoIterator<Item = f64>) -> Option<f32> {
+    kelvin
+        .into_iter()
+        .map(|k| k - 273.15)
+        .filter(|c| c.is_finite() && (ZONE_LEAST_C..=ZONE_MOST_C).contains(c))
+        .fold(None::<f64>, |hottest, c| {
+            Some(hottest.map_or(c, |h| h.max(c)))
+        })
+        .map(|c| c as f32)
+}
+
+/// Windows' thermal zones through the Performance Data Helper (`pdh.dll`), the
+/// interface `typeperf` and Performance Monitor read, open to an ordinary user.
+#[cfg(windows)]
+mod windows_zone {
+    use windows_sys::Win32::System::Performance::{
+        PdhAddEnglishCounterW, PdhCloseQuery, PdhCollectQueryData, PdhGetFormattedCounterArrayW,
+        PdhOpenQueryW, PDH_CSTATUS_NEW_DATA, PDH_CSTATUS_VALID_DATA, PDH_FMT_COUNTERVALUE_ITEM_W,
+        PDH_FMT_DOUBLE, PDH_HQUERY, PDH_MORE_DATA,
+    };
+
+    /// pdh.h's `PDH_FMT_NOCAP100`, which windows-sys does not carry: a value
+    /// over 100 is not cut to 100 (a zone reads ~3,500 tenths of a kelvin).
+    const PDH_FMT_NOCAP100: u32 = 0x0000_8000;
+
+    /// The query, closed however the reading ends.
+    struct Query(PDH_HQUERY);
+
+    impl Drop for Query {
+        fn drop(&mut self) {
+            // SAFETY: the handle came from a successful `PdhOpenQueryW`, and
+            // this is the only place it is closed.
+            unsafe { PdhCloseQuery(self.0) };
+        }
+    }
+
+    /// Every valid instance of the English counter `path`, in the counter's
+    /// own unit; `None` on any PDH failure (no such counter, no instance, a
+    /// damaged performance registry).
+    pub(super) fn values(path: &str) -> Option<Vec<f64>> {
+        let path: Vec<u16> = path.encode_utf16().chain(Some(0)).collect();
+        let mut handle: PDH_HQUERY = std::ptr::null_mut();
+        // SAFETY: a null data source is this machine's live data; `handle` is
+        // written only on success.
+        if unsafe { PdhOpenQueryW(std::ptr::null(), 0, &mut handle) } != 0 {
+            return None;
+        }
+        let query = Query(handle);
+        let mut counter = std::ptr::null_mut();
+        // SAFETY: `path` is NUL-terminated and outlives the call; the query is open.
+        if unsafe { PdhAddEnglishCounterW(query.0, path.as_ptr(), 0, &mut counter) } != 0 {
+            return None;
+        }
+        // SAFETY: the query is open and holds the counter. A temperature is an
+        // instantaneous counter, so one collection gives a value.
+        if unsafe { PdhCollectQueryData(query.0) } != 0 {
+            return None;
+        }
+        let format = PDH_FMT_DOUBLE | PDH_FMT_NOCAP100;
+        let (mut size, mut count) = (0u32, 0u32);
+        // SAFETY: a null buffer with a size of 0 asks only for the size needed.
+        let asked = unsafe {
+            PdhGetFormattedCounterArrayW(
+                counter,
+                format,
+                &mut size,
+                &mut count,
+                std::ptr::null_mut(),
+            )
+        };
+        if asked != PDH_MORE_DATA || size == 0 {
+            return None;
+        }
+        // The items and their names share one buffer; `u64`s keep it aligned
+        // for the `f64` inside each item.
+        let mut buffer = vec![0u64; (size as usize).div_ceil(8)];
+        let items = buffer.as_mut_ptr().cast::<PDH_FMT_COUNTERVALUE_ITEM_W>();
+        // SAFETY: `buffer` holds at least `size` bytes, aligned for an item.
+        if unsafe { PdhGetFormattedCounterArrayW(counter, format, &mut size, &mut count, items) }
+            != 0
+        {
+            return None;
+        }
+        let bytes =
+            (count as usize).checked_mul(std::mem::size_of::<PDH_FMT_COUNTERVALUE_ITEM_W>())?;
+        if bytes > buffer.len() * 8 {
+            return None;
+        }
+        // SAFETY: PDH wrote `count` items at the start of `buffer`, which
+        // holds them (checked above) and outlives the slice.
+        let items = unsafe { std::slice::from_raw_parts(items, count as usize) };
+        Some(
+            items
+                .iter()
+                .filter(|item| {
+                    matches!(
+                        item.FmtValue.CStatus,
+                        PDH_CSTATUS_VALID_DATA | PDH_CSTATUS_NEW_DATA
+                    )
+                })
+                // SAFETY: `PDH_FMT_DOUBLE` fills the union's `doubleValue`.
+                .map(|item| unsafe { item.FmtValue.Anonymous.doubleValue })
+                .collect(),
+        )
+    }
+}
+
 /// Last temperature observed, for reporting. `None` when never read or unknown.
 pub fn last_temp_c() -> Option<f32> {
     match LAST_TEMP_MC.load(Ordering::Relaxed) {
@@ -248,6 +415,42 @@ mod tests {
     #[test]
     fn it_clears_once_actually_cool() {
         assert!(!is_hot(Some(WARN_OFF_C - 1.0), true));
+    }
+
+    /// This laptop's zone as an ordinary user read it (2026-11-11): 3492
+    /// tenths of a kelvin. The reading is in kelvin by the time it gets here.
+    #[test]
+    fn a_zone_reading_is_kelvin_less_273() {
+        let c = hottest_zone_c([3492.0 / 10.0]).expect("a real zone is believed");
+        assert!((c - 76.05).abs() < 0.01, "{c}");
+    }
+
+    /// Several zones, no flag saying which is the processor: the hottest.
+    #[test]
+    fn the_hottest_zone_is_taken() {
+        assert_eq!(hottest_zone_c([310.15, 366.15, 330.15]), Some(93.0));
+    }
+
+    /// A zone the firmware never fills reads 0 K; one out of reason must not
+    /// trip the guard or hide a real zone beside it.
+    #[test]
+    fn an_unfilled_or_impossible_zone_is_not_believed() {
+        assert_eq!(hottest_zone_c([0.0]), None);
+        assert_eq!(hottest_zone_c([273.15 + 200.0]), None);
+        assert_eq!(hottest_zone_c([f64::NAN, 0.0, 340.15]), Some(67.0));
+    }
+
+    /// No zone at all (a desktop or a VM) is "unknown", never "cool".
+    #[test]
+    fn no_zone_is_no_reading() {
+        assert_eq!(hottest_zone_c(std::iter::empty()), None);
+    }
+
+    /// Off Windows there is nothing to read; the guard keeps its package sensor.
+    #[cfg(not(windows))]
+    #[test]
+    fn off_windows_the_zone_reads_nothing() {
+        assert_eq!(read_thermal_zone_c(), None);
     }
 }
 

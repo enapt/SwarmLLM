@@ -48,6 +48,11 @@
 //! coordinator already received, which its continuation resumes from
 //! (`router::continuation_after`, #236).
 //!
+//! The processor is read by its package sensor, and on Windows — where that
+//! sensor needs an administrator — by the ACPI thermal zone
+//! (`inference::thermal::read_thermal_zone_c`, #440 stage B); a computer with
+//! neither is guarded by its card alone.
+//!
 //! `SWARMLLM_HEAT_GUARD=0` turns the hold off (rigs and gates, whose safety
 //! kit guards the test machine); `SWARMLLM_FAULT_HOST_HEAT` fakes a reading.
 
@@ -543,7 +548,10 @@ fn read_heat(reads_card: bool, known_target: Option<f32>) -> HeatReading {
         } else {
             None
         },
-        processor_c: crate::inference::thermal::read_package_temp_c(),
+        // On Windows the package sensor needs an administrator; the thermal
+        // zone does not (#440 stage B).
+        processor_c: crate::inference::thermal::read_package_temp_c()
+            .or_else(crate::inference::thermal::read_thermal_zone_c),
         driver_not_answering: driver_not_answering(),
     }
 }

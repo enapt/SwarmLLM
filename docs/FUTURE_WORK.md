@@ -393,7 +393,7 @@ plants another build's manifest on a peer-only node.
 ### Reliability and failover
 
 #### #440 — A node's work can drive the computer it runs on into a thermal lock-up, and nothing watches the card
-`P1` · reliability · **PARTIAL** — 2026-11-11 · history: gotcha #1081 (the lock-up); archive § "Thermal throttling had no measurable effect" (2026-08-10)
+`P1` · reliability · **PARTIAL** (stages A and B done, C open) — 2026-11-11 · history: gotcha #1081 (the lock-up); archive § "Thermal throttling had no measurable effect" (2026-08-10)
 
 The user, 2026-11-11, after this laptop hard-froze under sustained card load: "swarmllm cant be locking up
 peoples systems like that. it discourages use. i understand we run tests unhindered though". That freeze came
@@ -511,12 +511,33 @@ Microsoft WDDM/TDR docs, Apple developer docs; issue trackers of Ollama, LM Stud
   seconds a reply, spread over twice the time; cool again 17.0-18.3 at 4.01-4.09. The reply was
   identical in every arm; the worker logged the pause starting and ending once each.
 - Tests fail with each part switched off (7 parts, 7 tests).
-- Not paced: a guess head's guesses ahead while a far check is out (bounded by its chain), a worker's
-  idle-time work (graph recording, refits), the old single-model setting (`inference.model_path`).
-  Not measured on a card: the same pause follows a synchronize there, and a card run would be the
-  stress test this boot rules out (no card work after the 11-11 freeze).
+- Not paced: a worker's idle-time work (graph recording, refits), the old single-model setting
+  (`inference.model_path`). Not measured on a card: the same pause follows a synchronize there, and a
+  card run would be the stress test this boot rules out (no card work after the 11-11 freeze).
+- **A guess head's guesses ahead do not run at all while paced** (2026-11-11, `pace::work_ahead_may_run`,
+  asked by `model_worker`'s `guess_ahead`): that work only fills the time a far check is out, where the
+  device would otherwise rest, and no reply waits for it. Test `work_ahead_waits_while_the_computer_is_paced`.
 
-**Next step:** (B) the Windows processor through PDH, then (C) macOS.
+**Done (2026-11-11, stage B — the Windows processor, `inference::thermal::read_thermal_zone_c`):**
+- Checked on this laptop first, as an ordinary user: WMI's `MSAcpi_ThermalZoneTemperature` (what
+  `sysinfo` asks) is refused ("Access denied"), so the heat guard's processor read "unknown" on every
+  Windows computer not run as administrator; PDH's `\Thermal Zone Information(*)\High Precision
+  Temperature` reads 3492 (tenths of a kelvin, 76 °C), valid on the first sample, one instance
+  (`\_TZ.THRM`).
+- Prior art: windows_exporter's `thermalzone` collector (v0.30.0: High Precision / 10 − 273.15, fallback
+  `Temperature` in whole kelvin; removed 2026-10-10, #2659, because many vendors feed no zone) and
+  Netdata's (`Temperature − 273.15`); LibreHardwareMonitor's package reading needs a ring-0 driver
+  (administrator), not taken. Taken: the English counter path (`PdhAddEnglishCounterW` — names are
+  localised), the hottest instance (no zone is marked as the processor), 5-125 °C believed, any PDH
+  failure "no reading", never "cool". Not taken: smoothing — the guard already needs 5 min at 93 °C.
+- The heat guard reads the package sensor, else the zone (`host_heat::read_heat`); the processor warning
+  (`thermal::poll_and_report`, 85 °C) stays on the package sensor it was tuned for.
+- Tests: the conversion, the hottest, an unfilled or impossible zone, none at all, nothing off Windows.
+- Checked ON Windows (MinGW cross-build, a throwaway node on this laptop, ordinary user, two health
+  rounds each): the build before it showed `heat: card unknown  processor unknown` in the diagnostics;
+  this one `processor 69 C`, then `68 C`.
+
+**Next step:** (C) macOS `thermalState`.
 
 #### #167 — A speculative split decode has no mid-reply failover
 `P2` · reliability · **PARTIAL** — 2026-08-25 · history: archive § "Speculative distributed decode has no failover", archive row #149 item (d)

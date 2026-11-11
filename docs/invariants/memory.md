@@ -2928,9 +2928,14 @@ hot 8.8-8.9 tok/s at 2.03-2.04 cores; cool again 17.0-18.3 at 4.01-4.09. A reply
 average draw halves — and its text was identical. Not measured on a card (a stress test, and the boot
 it was built on forbade card work); there the pause follows a synchronize, so it is the card's time.
 
-**Not paced.** The guess head's guesses ahead while a far check is out (`extend_ahead`, bounded by the
-chain), a worker's idle-time work (graph recording, refits), and the old single-model setting
+**Not paced.** A worker's idle-time work (graph recording, refits), and the old single-model setting
 (`inference.model_path`, llama.cpp in the daemon).
+
+**Not run at all while paced: the guess head's guesses ahead** (2026-11-11, `pace::work_ahead_may_run`,
+asked first by `model_worker`'s `guess_ahead`). That work (#425 (f), `extend_ahead`) runs only while a
+far check is out — exactly when the device would otherwise rest — and no reply waits for it: the next
+draft is made fresh where nothing was grown. Pacing it would still keep the device busy in those gaps;
+skipping it gives them back. Test `work_ahead_waits_while_the_computer_is_paced`.
 
 **Tests** (each fails with its part switched off): `pace::tests::*` — a hot step pauses as long as
 itself, a cool one never pauses or synchronizes, only the outermost pauses, an early return leaves the

@@ -5057,12 +5057,16 @@ impl SplitBlockDrafts {
     }
 
     /// Grow every chain whose check is abroad while no message waits. True
-    /// where a step ran.
+    /// where a step ran. None while the computer is paced for heat: no reply
+    /// waits for this work (`pace::work_ahead_may_run`, #440 step 4).
     fn guess_ahead(
         &mut self,
         models: &HashMap<RangeKey, SplitModel>,
         keep_going: &dyn Fn() -> bool,
     ) -> bool {
+        if !crate::inference::pace::work_ahead_may_run() {
+            return false;
+        }
         let mut any = false;
         for g in self.0.values_mut() {
             if !keep_going() {

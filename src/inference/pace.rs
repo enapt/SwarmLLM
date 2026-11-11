@@ -94,6 +94,14 @@ pub(crate) fn pause_permille() -> u32 {
     PAUSE_PERMILLE.load(Ordering::Relaxed)
 }
 
+/// May a worker do work no reply is waiting for — a guess head guessing on
+/// while its check is abroad (`model_worker`'s `guess_ahead`, #425 (f))? Not
+/// while the computer is paced: that work only runs where the device would
+/// otherwise rest, and resting is what a hot computer needs (#440 step 4).
+pub(crate) fn work_ahead_may_run() -> bool {
+    pause_permille() == 0
+}
+
 /// The pace a worker's environment names at spawn ([`WORKER_PACE_ENV`]).
 pub(crate) fn pace_at_spawn(value: Option<&std::ffi::OsStr>) -> u32 {
     value
@@ -386,5 +394,18 @@ mod tests {
         set_pause_permille(1_000_000);
         assert_eq!(pause_permille(), MOST_PERMILLE);
         set_pause_permille(0);
+    }
+
+    /// Guessing on while a check is abroad waits while the computer is hot,
+    /// and comes back when it cools.
+    #[test]
+    fn work_ahead_waits_while_the_computer_is_paced() {
+        let _lock = pace_lock();
+        set_pause_permille(0);
+        assert!(work_ahead_may_run());
+        set_pause_permille(HOT_PAUSE_PERMILLE);
+        assert!(!work_ahead_may_run());
+        set_pause_permille(0);
+        assert!(work_ahead_may_run());
     }
 }
