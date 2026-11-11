@@ -53,17 +53,12 @@ runs:
             exit 1
           fi
           echo "apt-get install failed (attempt $attempt) — refreshing indexes and retrying"
-          # The runner image sends every Ubuntu fetch through its Azure mirror
-          # first (`mirror+file:/etc/apt/apt-mirrors.txt`, written by
-          # actions/runner-images' configure-apt-sources.sh). On 2026-11-11 that
-          # host stopped resolving for hours and every attempt still failed on
-          # it, so a retry asks Ubuntu's own archive directly. Same packages,
+          # The runner image sends every Ubuntu fetch through its own mirror
+          # list, all *.ubuntu.com. On 2026-11-11 the runner could not resolve
+          # any of those names for hours, so a retry puts Ubuntu mirrors on
+          # other domains first (`apt-update/other-mirrors.sh`). Same packages,
           # same signing keys; only after a failure.
-          src=/etc/apt/sources.list.d/ubuntu.sources
-          if [ -f "$src" ] && grep -q 'mirror+file:/etc/apt/apt-mirrors.txt' "$src"; then
-            sudo sed -i 's#mirror+file:/etc/apt/apt-mirrors.txt#http://archive.ubuntu.com/ubuntu/#' "$src"
-            echo "apt: the runner's mirror list replaced by archive.ubuntu.com for this job"
-          fi
+          bash "$GITHUB_ACTION_PATH/../apt-update/other-mirrors.sh"
           sudo apt-get clean
           sudo rm -rf /var/lib/apt/lists/*
           # A failure here is not fatal: the install retry below reports the
