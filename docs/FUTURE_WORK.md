@@ -3403,9 +3403,11 @@ Qwen3.8-27B with a 4,110-token prompt (#427's table) was handed whole to the onl
 card holds part of a 27B and processor the rest; it reads such a prompt at ~7-9.5 tok/s (Qwen3.6-27B there: 432 s),
 so the 600 s first-token budget ran out and the request failed. Open questions, each to be measured before a
 design: (a) the prompt price the search used for that hand-off (`ModelSpeed::prompt_ms_per_layer_byte`) against the
-time it took — a priced 7-minute prompt should have lost to a split; (b) whether a split's prompt pass overlaps its
-pieces across machines (machine A reading piece k+1 while B reads piece k — pipeline-parallel chunked prefill, as
-vLLM and SGLang run it) or reads them one machine at a time; (c) the report: a silent-but-present holder is not
+time it took — a priced 7-minute prompt should have lost to a split; (b) ANSWERED 2026-11-11 from the record: a
+split's prompt pass of two or more pieces already overlaps them across machines (one driver per segment, each piece
+handed on the moment it exists, at most two out to a peer — #171, `pipeline::prompt_chunks`, `docs/invariants/
+network.md` § "A split reads its prompt in pieces, every machine at once"), so the split this hand-off should have
+lost to would have overlapped; what is left is (a), the price; (c) the report: a silent-but-present holder is not
 "has gone".
 
 #### #428 — Every popular model guesses 4-5 tokens a round trip: a DFlash drafter at the split's far end
