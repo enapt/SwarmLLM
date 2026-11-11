@@ -4627,6 +4627,21 @@ one cold 1-layer segment (a worker spawn) priced this RTX 3070 at 196 ms/layer,
 224× its advertised speed. Every path that times a segment — local ones too —
 records it (`forward_verify_through_segments` did not, for ours).
 
+**A decode step that waited for a saved prompt copy is a COLD sample** (v0.3.282
+review). Since #433 a segment copies the conversation's opening into its store
+AFTER it answers the prompt (`docs/invariants/memory.md` § "When it is copied"),
+so the request's first decode step there waits for that copy — 200-630 ms
+against ~68 on the rig — and read warm it priced the peer's DECODE at 3-9× its
+step. The step that follows a promised copy (`LayerResult::prompt_blocks_stored`
+> 0, noted by `PipelineExecutor::note_prompt_blocks_stored` →
+`SharedState::note_prompt_copy_promised`) is recorded cold by
+`record_peer_segment_latency` when it STARTED within `PROMPT_COPY_DELAYS_FOR`
+(10 s) of the promise, and the promise is taken by that one step either way —
+Karn's algorithm (RFC 6298 § 3): a sample whose time includes something other
+than the thing measured is not taken. It still sizes the timeout. Test
+`a_decode_step_that_waited_for_a_prompt_copy_prices_nothing` (red with the skip
+off).
+
 → `docs/invariants/scheduling.md` § "A node is ranked on warm work only"
 
 ### A prompt is priced from warm forwards that carried enough to measure a rate (2026-10-16, FUTURE_WORK #287)
@@ -4636,7 +4651,7 @@ multiplies** (`SharedState::observed_prompt_ms_per_layer_token` →
 `NodeCandidate::observed_prompt_ms_per_layer_token` → `parallax::prefill_ms_per_layer`):
 ms per layer per TOKEN of the forward timed: its positions read off the hidden
 state that crossed where its bytes bear them out (`PipelineExecutor::prompt_read`),
-or a prompt piece's own cut (`note_piece_timed`).
+or a prompt piece's own cut (`note_prompt_timed`).
 Three figures come from the same prefill samples and want different things:
 
 | figure | reads | keeps |
@@ -4729,13 +4744,23 @@ prompt past ~1,000 tokens is read in pieces (`pipeline::prompt_chunks`, 512
 tokens a piece, #171), and no piece was ever timed: the price came only from
 prompts short enough to read whole, and a computer that only ever read long ones
 — a coding agent's 10K-token prompts — stayed on the prior. Each piece is now
-recorded (`PipelineExecutor::note_piece_timed`) with its positions taken from
+timed with its positions taken from
 the coordinator's OWN cut, never a peer's bytes; a local piece is timed around
 its forward, a peer's by the FIFO service time `answered − max(sent, the answer
 before it)` (`piece_service_ms`, Lindley's recursion: the peer runs its pieces in
 order, and a piece queued behind another must not be charged that one's work),
-the answer stamped on its own wait's task at arrival. The first piece on a cold
-computer is the cold sample, as a whole pass's is. Rig (`split_rig.sh split`,
+the answer stamped as the driver polls the waits. **A peer's pass is ONE sample**:
+its pieces' service times, positions and bytes summed (`PassTimed`) and recorded
+once the pass ends (`PipelineExecutor::note_prompt_timed`; a local piece is its
+own sample) — recorded piece by piece, a peer that holds its answers and lets
+them go together read as one long piece and a run of 0-ms ones, each pulling
+the price toward nothing, and an answer that overtakes the one before it moved
+time out of the pass (v0.3.282 review). On a cold computer the pass is the
+cold sample, as a whole pass's is. **A prompt timed at 0 ms prices nothing**
+(`peer_speed`'s price filter, `s > 0`): a forward timed at nothing measured
+nothing, on any path. Tests `a_pass_answered_all_at_once_is_timed_as_the_time_it_took`
+(the sum's arithmetic only) and `a_prompt_timed_at_nothing_prices_nothing` (red
+with the filter back at `is_finite`). Rig (`split_rig.sh split`,
 TinyLlama A [0,12) / B [12,22), processor, three ~1,220-token prompts, three
 pieces each): before, `None` for both on every request; after, A 4.17 / 4.09 and
 B 5.90 / 5.69 ms a layer and token on requests 2 and 3 — B's 24 s a piece × 3

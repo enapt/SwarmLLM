@@ -171,7 +171,9 @@ fn shape_reads_in_pieces(
 type DriverResult = Result<Option<LayerResult>, SwarmError>;
 
 /// A piece out to a peer: which piece, its answer, and when the answer
-/// ARRIVED — stamped on the wait's own task, never when the driver got to it.
+/// ARRIVED — stamped as the driver polls the waits, which it does while it
+/// waits for the next piece or answer; it never blocks on its output (each
+/// channel holds every piece), only while it sends one.
 type PieceWait<'a> =
     Pin<Box<dyn Future<Output = (usize, Result<LayerResult, SwarmError>, Instant)> + Send + 'a>>;
 
@@ -188,6 +190,25 @@ fn piece_service_ms(
 ) -> u64 {
     let began = previous_answer.map_or(sent_at, |p| p.max(sent_at));
     answered_at.saturating_duration_since(began).as_millis() as u64
+}
+
+/// Pieces timed for one prompt sample: their service time, positions, the
+/// bytes they READ (`PromptRead::bytes`) and the bytes they answered, summed.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct PassTimed {
+    ms: u64,
+    positions: u32,
+    read_bytes: usize,
+    answer_bytes: usize,
+}
+
+impl PassTimed {
+    fn add(&mut self, ms: u64, (from, to): (u32, u32), read_bytes: usize, answer_bytes: usize) {
+        self.ms = self.ms.saturating_add(ms);
+        self.positions = self.positions.saturating_add(to.saturating_sub(from));
+        self.read_bytes = self.read_bytes.saturating_add(read_bytes);
+        self.answer_bytes = self.answer_bytes.saturating_add(answer_bytes);
+    }
 }
 
 impl PipelineExecutor {
@@ -502,14 +523,18 @@ impl PipelineExecutor {
             if let Some(err) = super::peer_error_from_result(&result) {
                 return Err(err);
             }
-            self.note_piece_timed(
-                segment,
-                idx,
-                (from, to),
+            let mut piece = PassTimed::default();
+            piece.add(
                 started.elapsed().as_millis() as u64,
-                input_bytes,
-                &result,
+                (from, to),
+                if idx > 0 {
+                    input_bytes
+                } else {
+                    result.activations.len()
+                },
+                result.activations.len(),
             );
+            self.note_prompt_timed(segment, piece);
             if final_piece {
                 self.note_prompt_blocks_stored(idx, 0, &result);
             }
@@ -557,6 +582,14 @@ impl PipelineExecutor {
         let mut out_sent: std::collections::VecDeque<(usize, Instant)> =
             std::collections::VecDeque::new();
         let mut last_answer: Option<Instant> = None;
+        // This pass's pieces summed into ONE sample, recorded once it ends: a
+        // peer that holds its answers and lets them go together reads as the
+        // time it took overall, never as one long piece and a run of
+        // zero-time ones that each pull the price toward nothing (the
+        // pre-release review, 2026-11-12) — and an answer that overtakes the
+        // one before it on the link moves time between two pieces, not out
+        // of the pass.
+        let mut pass = PassTimed::default();
         let mut sent = 0usize;
         let mut answered = 0usize;
         let mut input_open = true;
@@ -613,13 +646,11 @@ impl PipelineExecutor {
                                         .rekeyed_since(&segment.node_id, sent_at)
                             });
                             if let Some((bytes, sent_at)) = timed {
-                                self.note_piece_timed(
-                                    segment,
-                                    idx,
-                                    cuts[k],
+                                pass.add(
                                     piece_service_ms(sent_at, previous_answer, answered_at),
-                                    bytes,
-                                    &result,
+                                    cuts[k],
+                                    if idx > 0 { bytes } else { result.activations.len() },
+                                    result.activations.len(),
                                 );
                             }
                             let final_piece = k + 1 == cuts.len();
@@ -684,7 +715,10 @@ impl PipelineExecutor {
         }
         match error {
             Some(e) => Err(e),
-            None => Ok(answer),
+            None => {
+                self.note_prompt_timed(segment, pass);
+                Ok(answer)
+            }
         }
     }
 
@@ -841,37 +875,28 @@ impl PipelineExecutor {
         }))
     }
 
-    /// One piece's time, for its segment's prompt PRICE
+    /// Pieces' time, for their segment's prompt PRICE
     /// (`ModelSpeed::prompt_ms_per_layer_token`), recorded as a whole pass's is
-    /// (`forward_through_segments_inner`): its positions are this node's own
-    /// cut, never read off a peer's bytes, and its size the hidden state it
-    /// READ — its input, or for the first segment, which reads ids, the state
-    /// it handed on (`PromptRead`). Without it a prompt read in pieces — every
+    /// (`forward_through_segments_inner`): a local piece by itself, a peer's
+    /// pass as one sum ([`PassTimed`]). Its positions are this node's own cut,
+    /// never read off a peer's bytes, and its size the hidden state it READ —
+    /// its input, or for the first segment, which reads ids, the state it
+    /// handed on (`PromptRead`). Without it a prompt read in pieces — every
     /// split prompt past ~1,000 tokens — was never priced (2026-11-12).
-    fn note_piece_timed(
-        &self,
-        segment: &PipelineSegment,
-        idx: usize,
-        (from, to): (u32, u32),
-        ms: u64,
-        input_bytes: usize,
-        result: &LayerResult,
-    ) {
-        let read = if idx > 0 {
-            input_bytes
-        } else {
-            result.activations.len()
-        };
+    fn note_prompt_timed(&self, segment: &PipelineSegment, timed: PassTimed) {
+        if timed.positions == 0 {
+            return;
+        }
         self.shared_state.record_peer_segment_latency(
             &segment.node_id,
             &segment.shard_id.model_id,
             crate::daemon::state::WorkKind::Prefill,
-            ms,
+            timed.ms,
             segment.layer_range.1 - segment.layer_range.0,
-            result.activations.len(),
+            timed.answer_bytes,
             Some(crate::daemon::state::PromptRead {
-                positions: to.saturating_sub(from),
-                bytes: read,
+                positions: timed.positions,
+                bytes: timed.read_bytes,
             }),
         );
     }
@@ -1006,6 +1031,26 @@ mod tests {
         assert_eq!(piece_service_ms(at(10), Some(at(100)), at(190)), 90);
         // Sent at 300, after the one before was answered at 190: from 300.
         assert_eq!(piece_service_ms(at(300), Some(at(190)), at(380)), 80);
+    }
+
+    /// A peer that holds its answers and lets them go together: one piece
+    /// takes all the time and the rest none, and the pass's ONE sample is the
+    /// time it took overall over every position it read — never a run of
+    /// zero-time pieces that each pull the price toward nothing.
+    #[test]
+    fn a_pass_answered_all_at_once_is_timed_as_the_time_it_took() {
+        let t0 = Instant::now();
+        let at = |ms: u64| t0 + std::time::Duration::from_millis(ms);
+        let mut pass = PassTimed::default();
+        let mut previous = None;
+        for (k, sent) in [0u64, 0, 5, 10].into_iter().enumerate() {
+            let answered = at(3_000);
+            let ms = piece_service_ms(at(sent), previous.replace(answered), answered);
+            pass.add(ms, (k as u32 * 512, (k as u32 + 1) * 512), 1 << 20, 1 << 20);
+        }
+        assert_eq!(pass.ms, 3_000, "the pass's time, not one piece's");
+        assert_eq!(pass.positions, 2_048);
+        assert_eq!(pass.read_bytes, 4 << 20);
     }
 
     /// The cause of a failed pass is kept over the drivers that stopped

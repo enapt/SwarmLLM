@@ -411,6 +411,15 @@ impl super::PipelineExecutor {
         if sequence_num != 0 {
             return;
         }
+        if let Some(segment) = self
+            .assignment
+            .segments
+            .get(idx)
+            .filter(|_| result.prompt_blocks_stored.is_some_and(|n| n > 0))
+        {
+            self.shared_state
+                .note_prompt_copy_promised(&segment.node_id, &segment.shard_id.model_id);
+        }
         if let (Some(hint), Some(segment)) =
             (&self.prompt_cache_hint, self.assignment.segments.get(idx))
         {

@@ -4604,6 +4604,13 @@ impl ModelProcessPool {
             .store(enabled, std::sync::atomic::Ordering::Relaxed);
     }
 
+    /// What [`Self::set_activation_compression`] last set.
+    #[cfg(test)]
+    pub(crate) fn activation_compression(&self) -> bool {
+        self.activation_compression
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
     /// Set the device placement for future-spawned workers.
     /// `-1` = auto (GPU when available), `0` = CPU only, `>0` = GPU.
     pub fn set_gpu_layers(&self, gpu_layers: i32) {

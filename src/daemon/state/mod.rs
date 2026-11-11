@@ -255,6 +255,14 @@ const GEOMETRY_PROBE_BUDGET: std::time::Duration = std::time::Duration::from_sec
 /// enough that a transient outage costs one cooldown, not a restart.
 const GEOMETRY_PROBE_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(600);
 
+/// How long after a segment promised to copy a prompt behind its answer (#433)
+/// a decode step that started may have waited for that copy: generous against
+/// the copies measured (150-630 ms for 450 MB, `docs/invariants/memory.md` §
+/// "When it is copied"). A step started later is timed as usual; one honest
+/// step lost inside it costs nothing, a copy priced as a step skews the next
+/// plans ([`SharedState::record_peer_segment_latency`]).
+const PROMPT_COPY_DELAYS_FOR: std::time::Duration = std::time::Duration::from_secs(10);
+
 /// Where the "a remote machine has successfully dialled us" observation is kept
 /// so it survives a restart. See [`SharedState::observed_inbound_connection`]
 /// for why it has to: the fact being recorded is a property of the machine's
@@ -1568,6 +1576,7 @@ impl SharedState {
                 upnp_verdict: Default::default(),
                 host_heat: Default::default(),
                 peer_model_warm_at: DashMap::new(),
+                prompt_copy_promised_at: DashMap::new(),
                 swarm_capacity: arc_swap::ArcSwap::from_pointee(SwarmCapacity::default()),
                 segment_latency: Arc::new(
                     crate::inference::segment_latency::SegmentLatencyTracker::new(),
@@ -2121,6 +2130,13 @@ impl SharedState {
     fn apply_what_subsystems_hold(&self, previous: &Config) {
         let live = self.cfg();
         self.set_worker_threads_from(&live);
+        // The next worker encodes what crosses as this says, and the planner
+        // charges a transfer by it live (`scheduler::activation_bytes_per_token_for`):
+        // kept only from the boot snapshot, a reload left the two 3.76× apart
+        // (the pre-release review, 2026-11-12). Workers already running keep
+        // theirs, as their threads.
+        self.model_process_pool
+            .set_activation_compression(live.inference.activation_compression);
         let enabled = live.auto_manage.enabled;
         let was = self
             .models
@@ -2597,6 +2613,24 @@ impl SharedState {
         // the very first one, which is the one that paid to load the model.
         let key = (node_id.clone(), model_id.clone());
         let was_warm = self.metrics.peer_model_warm_at.contains_key(&key);
+        // A step that waited for the worker's copy of the prompt it stored
+        // after answering (#433) is that copy's time, 200-630 ms against a
+        // ~68 ms step on the rig: read as cold, it prices nothing — as TCP takes
+        // no round-trip sample from a retransmitted segment (Karn's algorithm,
+        // RFC 6298 §3). The first decode step after the promise only, and only
+        // one that started while the copy could still be running.
+        let waited_for_a_copy = kind == peer_speed::WorkKind::Decode
+            && self
+                .metrics
+                .prompt_copy_promised_at
+                .remove(&key)
+                .is_some_and(|(_, promised_at)| {
+                    let started = std::time::Instant::now()
+                        .checked_sub(std::time::Duration::from_millis(segment_ms))
+                        .unwrap_or(promised_at);
+                    started.saturating_duration_since(promised_at) < PROMPT_COPY_DELAYS_FOR
+                });
+        let was_warm = was_warm && !waited_for_a_copy;
         // The model's weight is asked only for its first sample on this peer,
         // and BEFORE the entry is held: `gguf_meta_for` may parse a header off
         // the disk, which must not stall every reader of this map's shard.
@@ -2618,6 +2652,20 @@ impl SharedState {
         self.metrics
             .peer_model_warm_at
             .insert(key, std::time::Instant::now());
+    }
+
+    /// `node_id`'s worker for `model_id` answered a prompt pass with a prompt it
+    /// copies after the answer (#433): its next decode step's time is not its
+    /// layers' ([`Self::record_peer_segment_latency`]).
+    pub fn note_prompt_copy_promised(
+        &self,
+        node_id: &crate::types::NodeId,
+        model_id: &crate::types::ModelId,
+    ) {
+        self.metrics.prompt_copy_promised_at.insert(
+            (node_id.clone(), model_id.clone()),
+            std::time::Instant::now(),
+        );
     }
 
     /// Predicted wall-clock ms for a segment of `model_id` of this shape on
@@ -6963,6 +7011,58 @@ mod live_config_tests {
     /// from its request, so a reload of a hand-edited contribution level or
     /// `[auto_manage] enabled` reached neither (v0.3.259 pre-release review),
     /// and a save turned an anchor's forced-off auto-manage back on.
+    /// The first decode step after a segment promised to copy its prompt behind
+    /// its answer (#433) waited for that copy — 200-630 ms against a ~68 ms
+    /// step on the rig — so it prices nothing; the steps after it do. A step
+    /// that started long after the promise was not held up, and counts.
+    #[test]
+    fn a_decode_step_that_waited_for_a_prompt_copy_prices_nothing() {
+        use crate::daemon::state::WorkKind;
+        let state = test_state();
+        let node = crate::types::NodeId([7; 32]);
+        let model = crate::types::ModelId("copy-test".into());
+        let decode = |ms| {
+            state.record_peer_segment_latency(&node, &model, WorkKind::Decode, ms, 10, 8, None)
+        };
+        let figure = || {
+            state
+                .observed_latency_ms_per_layer(&node, &model)
+                .expect("measured")
+        };
+        decode(68); // cold: the first on this model
+        decode(68);
+        let before = figure();
+        assert!((before - 6.8).abs() < 0.01, "{before}");
+
+        state.note_prompt_copy_promised(&node, &model);
+        decode(630);
+        assert!(
+            (figure() - before).abs() < 0.01,
+            "the step that waited for the copy is not the layers' time: {}",
+            figure()
+        );
+        decode(68);
+        assert!(
+            (figure() - before).abs() < 0.01,
+            "the next step is timed as usual: {}",
+            figure()
+        );
+
+        let long_ago = std::time::Instant::now()
+            .checked_sub(super::PROMPT_COPY_DELAYS_FOR + std::time::Duration::from_secs(5))
+            .expect("the clock reaches back 15 s");
+        state
+            .metrics
+            .prompt_copy_promised_at
+            .insert((node.clone(), model.clone()), long_ago);
+        decode(680);
+        assert!(
+            figure() > before + 1.0,
+            "a step started after the copy could have run is timed: {}",
+            figure()
+        );
+    }
+
     #[test]
     fn a_config_made_live_sets_what_subsystems_keep_outside_it() {
         use std::sync::atomic::Ordering;
@@ -6974,7 +7074,14 @@ mod live_config_tests {
         file.resources.max_cpu_threads = asked as u32;
         let flipped = !state.models.auto_manage_enabled.load(Ordering::Acquire);
         file.auto_manage.enabled = flipped;
+        let compress = !file.inference.activation_compression;
+        file.inference.activation_compression = compress;
         state.make_config_live(file);
+        assert_eq!(
+            state.model_process_pool.activation_compression(),
+            compress,
+            "the next worker encodes as the file says, as the planner charges it"
+        );
         assert_eq!(
             state.model_process_pool.cpu_threads(),
             asked.clamp(1, logical),

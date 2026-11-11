@@ -4317,6 +4317,10 @@ referenced (SGLang's `cache_finished_req` inserts prompt AND output at the end).
 110-180 ms for 450 MB here) copies the stored opening into a fresh live cache in
 every segment, before the forward; a cache whose stored blocks ARE the live
 ones (the paged designs above) would remove both copies and is a redesign.
+**The delayed decode step is never a speed** (v0.3.282 review): the coordinator
+notes each segment that promised a copy and records that segment's next decode
+step cold (`SharedState::note_prompt_copy_promised`, `PROMPT_COPY_DELAYS_FOR`) —
+`docs/invariants/scheduling.md` § "A node is ranked on warm work only".
 
 **Resumes come in whole blocks.** A turn resumes from the last WHOLE block the
 turn before it stored (64 positions): a turn adding less than a block stores

@@ -4235,6 +4235,14 @@ reply whose peers changed (failover) is not kept (`PipelineExecutor::exposure_of
 #### #433 — A 70B split's first token grows with the conversation: 6.9 → 16.5 s over five turns
 `P2` · perf-split · **PARTIAL** (one cause fixed; the field's own cause undetermined) — 2026-11-11 · history: #10 (a split's stored prompt), field report 2026-11-08
 
+**Fixed 2026-11-12 (v0.3.282 review):** the decode step that waits for the copy now made after the answer was
+read as a warm step and priced the peer's decode at 3-9× its step; it is a cold sample now
+(`SharedState::note_prompt_copy_promised`; Karn's algorithm, RFC 6298 § 3). **Residuals (P3):** (a) "warm" is a
+TTL since the last forward, not "the worker is resident" — the first piece after an unload inside the TTL is timed
+as warm and carries a load; reading residency from the worker's own answer would end it. (b) segment 0's
+whole-pass positions come off the peer's answer (`positions_borne_out` checks them against the width), where the
+coordinator's own id count is exact — the pieces path already uses its own cut.
+
 A tester's 70B, split over two computers by their harness (v0.3.278): 6/6 replies at 2.6 tok/s, the first token
 56 s cold, then 6.9, 7.4, 9.8, 13.1, 16.5 s as the conversation grew. A segment that kept the conversation's opening
 (#10) reads only each turn's new tokens, so the first token should stay roughly flat. The report carries no

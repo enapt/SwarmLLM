@@ -255,6 +255,14 @@ pub struct MetricsProviders {
     /// in 10s.
     pub peer_model_warm_at:
         DashMap<(crate::types::NodeId, crate::types::ModelId), std::time::Instant>,
+    /// When a segment of `(node, model)` last answered a prompt pass with a
+    /// prompt it will copy AFTER the answer (`prompt_blocks_stored`, #433):
+    /// the next forward that worker takes waits for the copy, so its timing is
+    /// the copy's. Written ONLY by `SharedState::note_prompt_copy_promised`
+    /// (`PipelineExecutor::note_prompt_blocks_stored`), taken ONLY by
+    /// `record_peer_segment_latency`.
+    pub prompt_copy_promised_at:
+        DashMap<(crate::types::NodeId, crate::types::ModelId), std::time::Instant>,
     /// Cached snapshot of swarm-wide capacity (online nodes, total VRAM,
     /// serveable models, ...). Refreshed on gossip ticks via
     /// `capacity::refresh_swarm_capacity`. ArcSwap so dashboard / WS / REST

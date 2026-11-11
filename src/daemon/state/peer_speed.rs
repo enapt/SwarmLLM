@@ -343,7 +343,9 @@ impl ModelSpeed {
                         (segment_ms as f64 / (layers as f64 * p.positions as f64)) as f32;
                     (per_token, p.bytes >= PROMPT_RATE_MIN_BYTES)
                 })
-                .filter(|(s, _)| s.is_finite())
+                // Under the clock's millisecond: not a measurement, and a 0
+                // seeds the price at nothing (the pre-release review, 2026-11-12).
+                .filter(|(s, _)| s.is_finite() && *s > 0.0)
             {
                 let rate = &mut self.prompt_ms_per_layer_token;
                 *rate = match *rate {
@@ -1365,6 +1367,28 @@ mod ranking_trusts_only_what_it_measured {
         });
         t.observe(WorkKind::Prefill, 700, 10, 1_000_000, ten, true);
         assert_eq!(t.prompt_ms_per_layer_token(), None);
+    }
+
+    /// A prompt timed at 0 ms — under the clock's millisecond, or a piece
+    /// answered no later than the one before it — is not a measurement: it
+    /// neither seeds the price at nothing nor drags a measured one down.
+    #[test]
+    fn a_prompt_timed_at_nothing_prices_nothing() {
+        let read = Some(PromptRead {
+            positions: 512,
+            bytes: 1_114_112,
+        });
+        let mut s = ModelSpeed::default();
+        s.observe(WorkKind::Prefill, 0, 12, 1_114_112, read, true);
+        assert_eq!(s.prompt_ms_per_layer_token(), None, "never seeded at 0");
+        s.observe(WorkKind::Prefill, 6_144, 12, 1_114_112, read, true);
+        let measured = s.prompt_ms_per_layer_token().expect("a real sample");
+        s.observe(WorkKind::Prefill, 0, 12, 1_114_112, read, true);
+        assert_eq!(
+            s.prompt_ms_per_layer_token(),
+            Some(measured),
+            "not dragged down"
+        );
     }
 
     /// The reliability figure must start optimistic, fall with losses, and

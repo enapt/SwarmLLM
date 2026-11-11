@@ -718,7 +718,11 @@ auto-manage pass when the switch turns on or the metered rule changes; startup
 derives the threads through the same `set_worker_threads_from`. Test
 `a_config_made_live_sets_what_subsystems_keep_outside_it` (red with the call
 removed). **A new copy of a setting outside `cfg()` is set there**, never in a
-handler.
+handler. The v0.3.282 review found a third: `inference.activation_compression`,
+copied into the model process pool at startup only (`ModelProcessPool::set_activation_compression`),
+so a saved change reached no model process until the node restarted; set there
+now, it reaches every model process started after the save (a running one keeps
+its own), and the test flips it (red with the line removed).
 - The staging-and-rename half (a bare `std::fs::write` truncates first, and a
   crash mid-save left a file the daemon refuses to start on) was fixed earlier
   and is separate; keep both.
