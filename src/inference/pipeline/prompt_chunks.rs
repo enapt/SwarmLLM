@@ -33,6 +33,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::OnceLock;
+use std::time::Instant;
 
 use futures::stream::{FuturesOrdered, StreamExt};
 use tokio::sync::mpsc;
@@ -169,9 +170,25 @@ fn shape_reads_in_pieces(
 /// segment samples, nothing where it hands its output on.
 type DriverResult = Result<Option<LayerResult>, SwarmError>;
 
-/// A piece out to a peer: which piece, and its answer.
+/// A piece out to a peer: which piece, its answer, and when the answer
+/// ARRIVED — stamped on the wait's own task, never when the driver got to it.
 type PieceWait<'a> =
-    Pin<Box<dyn Future<Output = (usize, Result<LayerResult, SwarmError>)> + Send + 'a>>;
+    Pin<Box<dyn Future<Output = (usize, Result<LayerResult, SwarmError>, Instant)> + Send + 'a>>;
+
+/// How long a peer took over one piece, seen from outside: from when it was
+/// sent — or, where it waited behind the piece before it, from that piece's
+/// answer — to its own answer. A FIFO server's service time from arrivals and
+/// departures alone, `S_k = D_k - max(A_k, D_{k-1})` (Lindley's recursion):
+/// the peer runs its pieces in order (`forward_streams`), so a queued piece's
+/// wait is the one before it, not its own work.
+fn piece_service_ms(
+    sent_at: Instant,
+    previous_answer: Option<Instant>,
+    answered_at: Instant,
+) -> u64 {
+    let began = previous_answer.map_or(sent_at, |p| p.max(sent_at));
+    answered_at.saturating_duration_since(began).as_millis() as u64
+}
 
 impl PipelineExecutor {
     /// May this plan's prompt pass be read in pieces — the plan's half of the
@@ -279,7 +296,7 @@ impl PipelineExecutor {
         }
         let span = PromptSpan { start, end };
         let segments = &self.assignment.segments;
-        let started = std::time::Instant::now();
+        let started = Instant::now();
         tracing::info!(
             %request_id,
             pieces = cuts.len(),
@@ -456,6 +473,8 @@ impl PipelineExecutor {
                 return Err(knock_on());
             }
             let final_piece = k + 1 == cuts.len();
+            let input_bytes = activations.len();
+            let started = Instant::now();
             let result = self
                 .run_local_forward(
                     segment,
@@ -483,6 +502,14 @@ impl PipelineExecutor {
             if let Some(err) = super::peer_error_from_result(&result) {
                 return Err(err);
             }
+            self.note_piece_timed(
+                segment,
+                idx,
+                (from, to),
+                started.elapsed().as_millis() as u64,
+                input_bytes,
+                &result,
+            );
             if final_piece {
                 self.note_prompt_blocks_stored(idx, 0, &result);
             }
@@ -524,9 +551,12 @@ impl PipelineExecutor {
             })?;
         let attempt = NEXT_ATTEMPT.fetch_add(1, Ordering::Relaxed) & stream_seq::MAX_ATTEMPT;
         let mut out: FuturesOrdered<PieceWait<'_>> = FuturesOrdered::new();
-        // The bytes of each piece out, in order: a piece queued behind another
-        // waits for that one's compute too, and its deadline must cover it.
-        let mut out_bytes: std::collections::VecDeque<usize> = std::collections::VecDeque::new();
+        // The bytes of each piece out and when it was sent, in order: a piece
+        // queued behind another waits for that one's compute too, and its
+        // deadline must cover it; its own time starts where that one's ends.
+        let mut out_sent: std::collections::VecDeque<(usize, Instant)> =
+            std::collections::VecDeque::new();
+        let mut last_answer: Option<Instant> = None;
         let mut sent = 0usize;
         let mut answered = 0usize;
         let mut input_open = true;
@@ -552,8 +582,9 @@ impl PipelineExecutor {
             }
             tokio::select! {
                 biased;
-                Some((k, result)) = out.next(), if !out.is_empty() => {
-                    out_bytes.pop_front();
+                Some((k, result, answered_at)) = out.next(), if !out.is_empty() => {
+                    let sent_piece = out_sent.pop_front();
+                    let previous_answer = last_answer.replace(answered_at);
                     // An answer is a result that came FROM the peer. A wait that
                     // timed out, was dropped, or was ended by this node's own
                     // machinery (`locally_constructed`) leaves the piece
@@ -571,6 +602,17 @@ impl PipelineExecutor {
                     match result {
                         Ok(result) => {
                             answered += 1;
+                            let timed = sent_piece.filter(|_| !result.locally_constructed);
+                            if let Some((bytes, sent_at)) = timed {
+                                self.note_piece_timed(
+                                    segment,
+                                    idx,
+                                    cuts[k],
+                                    piece_service_ms(sent_at, previous_answer, answered_at),
+                                    bytes,
+                                    &result,
+                                );
+                            }
                             let final_piece = k + 1 == cuts.len();
                             if final_piece {
                                 self.note_prompt_blocks_stored(idx, 0, &result);
@@ -597,7 +639,7 @@ impl PipelineExecutor {
                         None => input_open = false,
                         Some(activations) => {
                             let k = sent;
-                            let queued: usize = out_bytes.iter().sum();
+                            let queued: usize = out_sent.iter().map(|(b, _)| b).sum();
                             let bytes = activations.len();
                             match self
                                 .send_piece(
@@ -618,7 +660,7 @@ impl PipelineExecutor {
                             {
                                 Ok(wait) => {
                                     out.push_back(wait);
-                                    out_bytes.push_back(bytes);
+                                    out_sent.push_back((bytes, Instant::now()));
                                     sent += 1;
                                 }
                                 Err(e) => {
@@ -786,8 +828,43 @@ impl PipelineExecutor {
                 },
             )
             .await;
-            (k, result)
+            (k, result, Instant::now())
         }))
+    }
+
+    /// One piece's time, for its segment's prompt PRICE
+    /// (`ModelSpeed::prompt_ms_per_layer_token`), recorded as a whole pass's is
+    /// (`forward_through_segments_inner`): its positions are this node's own
+    /// cut, never read off a peer's bytes, and its size the hidden state it
+    /// READ — its input, or for the first segment, which reads ids, the state
+    /// it handed on (`PromptRead`). Without it a prompt read in pieces — every
+    /// split prompt past ~1,000 tokens — was never priced (2026-11-12).
+    fn note_piece_timed(
+        &self,
+        segment: &PipelineSegment,
+        idx: usize,
+        (from, to): (u32, u32),
+        ms: u64,
+        input_bytes: usize,
+        result: &LayerResult,
+    ) {
+        let read = if idx > 0 {
+            input_bytes
+        } else {
+            result.activations.len()
+        };
+        self.shared_state.record_peer_segment_latency(
+            &segment.node_id,
+            &segment.shard_id.model_id,
+            crate::daemon::state::WorkKind::Prefill,
+            ms,
+            segment.layer_range.1 - segment.layer_range.0,
+            result.activations.len(),
+            Some(crate::daemon::state::PromptRead {
+                positions: to.saturating_sub(from),
+                bytes: read,
+            }),
+        );
     }
 }
 
@@ -909,6 +986,21 @@ mod tests {
 
     /// The cause of a failed pass is kept over the drivers that stopped
     /// because of it.
+    /// A piece queued behind another is timed from that one's answer, not
+    /// from when it was sent: the peer runs its pieces in order, and a piece
+    /// that waited was charged its wait as work (Lindley's recursion).
+    #[test]
+    fn a_queued_piece_is_timed_from_the_answer_before_it() {
+        let t0 = Instant::now();
+        let at = |ms: u64| t0 + std::time::Duration::from_millis(ms);
+        // Sent alone: its whole wait is its own.
+        assert_eq!(piece_service_ms(at(0), None, at(100)), 100);
+        // Sent at 10 behind the one answered at 100: its work began there.
+        assert_eq!(piece_service_ms(at(10), Some(at(100)), at(190)), 90);
+        // Sent at 300, after the one before was answered at 190: from 300.
+        assert_eq!(piece_service_ms(at(300), Some(at(190)), at(380)), 80);
+    }
+
     #[test]
     fn a_knock_on_is_told_from_a_cause() {
         assert!(is_knock_on(&knock_on()));

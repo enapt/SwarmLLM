@@ -4723,6 +4723,25 @@ Tests: `a_prompt_is_priced_from_warm_forwards_large_enough_to_measure_a_rate`,
 `a_price_believes_only_the_positions_its_bytes_carried` (each red with its fix
 switched off, in one build).
 
+**A prompt read in pieces is priced piece by piece (2026-11-12).** Every split
+prompt past ~1,000 tokens is read in pieces (`pipeline::prompt_chunks`, 512
+tokens a piece, #171), and no piece was ever timed: the price came only from
+prompts short enough to read whole, and a computer that only ever read long ones
+— a coding agent's 10K-token prompts — stayed on the prior. Each piece is now
+recorded (`PipelineExecutor::note_piece_timed`) with its positions taken from
+the coordinator's OWN cut, never a peer's bytes; a local piece is timed around
+its forward, a peer's by the FIFO service time `answered − max(sent, the answer
+before it)` (`piece_service_ms`, Lindley's recursion: the peer runs its pieces in
+order, and a piece queued behind another must not be charged that one's work),
+the answer stamped on its own wait's task at arrival. The first piece on a cold
+computer is the cold sample, as a whole pass's is. Rig (`split_rig.sh split`,
+TinyLlama A [0,12) / B [12,22), processor, three ~1,220-token prompts, three
+pieces each): before, `None` for both on every request; after, A 4.17 / 4.09 and
+B 5.90 / 5.69 ms a layer and token on requests 2 and 3 — B's 24 s a piece × 3
+is the 72 s pass. (Higher than the same rig's whole ~420-token passes, 1.07 /
+1.81: both rig computers share one processor, and pieces run at once.) Test
+`a_queued_piece_is_timed_from_the_answer_before_it`.
+
 ## A split between two machines that could each run the model is measured by restricting BOTH (2026-09-27)
 
 **`swarm_route.pretend_peer_holds` — `{"<prefix>": "4-7"}` — plans as though

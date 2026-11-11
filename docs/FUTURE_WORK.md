@@ -466,7 +466,12 @@ Microsoft WDDM/TDR docs, Apple developer docs; issue trackers of Ollama, LM Stud
   lines, so a card that touched 85 °C once and sat at 81-84 °C held after two minutes. A known reading
   under the hot line now starts it again (Kubernetes' `thresholdsFirstObservedAt`, the gate kit's
   sustained stops); the cool line only ends a hold. A card target of N/A is no longer asked every round.
-  Evidence: `docs/invariants/network.md` § the heat rule.
+  Evidence: `docs/invariants/network.md` § the heat rule. Considered again in the 11-12 review (a card
+  hovering a degree around its line, its driver NOT cutting clocks, never runs the clock out; Linux
+  thermal's trip `hyst` would keep it) and not taken: at its target the driver cuts clocks, which IS the
+  hot reading whatever the degrees (`CardHeat::at_target`), and the lock-up read exactly that (87.7 °C,
+  780 MHz) and then a stuck driver, held at once; a card a degree under its line with full clocks has
+  cooling left. Pinned by `a_card_just_under_its_target_restarts_the_clock`.
 
 **Done (2026-11-11, step 3 — work already running for others stops too):**
 - Prior art: Kubernetes node-pressure eviction (a soft threshold with a grace period, a hard one acted on
@@ -3443,6 +3448,10 @@ model answers with a token and was never priced (rig: the far computer `None` af
 layer and token once fixed) — and a shape is believed only where its bytes bear it out
 (`tensor_util::positions_borne_out`: a head's forged header would have priced its prompts at nothing; review);
 tests `the_end_of_the_model_is_priced_from_the_prompt_it_read`, `a_price_believes_only_the_positions_its_bytes_carried`.
+And a prompt read in PIECES (#171, every split prompt past ~1,000 tokens) is timed piece by piece
+(`note_piece_timed`; a queued piece from the answer before it, `piece_service_ms`): never timed before, a computer
+that only read long prompts was never priced (rig: `None` → 4.1 / 5.8 ms a layer and token); test
+`a_queued_piece_is_timed_from_the_answer_before_it`.
 Left beside it: a peer with no DECODE sample is still ranked from the per-byte prompt figure times a nominal
 16,384 bytes (`PeerSpeed::ranking`, `NOMINAL_DECODE_ACTIVATION_BYTES`) — 1.88-3.8× slow on the same arithmetic;
 a fallback only until its first decode step.
