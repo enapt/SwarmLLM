@@ -391,7 +391,8 @@
 # usage: split_rig.sh split|reasoning|kill|failover|failover_mid|context|whole|continue|repeat|fetch|cache|splitcache|remote|mixed|disputed|spliced|disconnect|softunload|layerprice|keep|route|latekv|peerkv|peerload|refusepiece|owntiming|holdings <binary> [<binary for B>]
 #   MODEL      model id (default: tinyllama for split, llama-3.2-3b for kill
 #              and failover)
-#   SHARDS_A   shard indices A holds, comma-separated (default 0; kill: 0,LAST)
+#   SHARDS_A   shard indices A holds, comma-separated (default 0; kill: 0,LAST;
+#              split: none = the header only, every request handed to B whole)
 #   SHARDS_B   shard indices B holds (default: every shard A lacks; kill: all)
 #   GPU_A/B    SWARMLLM_INFERENCE_GPU_LAYERS for each node ("" = auto)
 #   ENV_A/B/…  extra VAR=value words for that node alone (e.g.
@@ -511,6 +512,9 @@ N=$(echo "$SHARDS" | wc -l)
 if [ "$MODE" = split ] || [ "$MODE" = repeat ] || [ "$MODE" = disconnect ] || [ "$MODE" = keep ] || [ "$MODE" = route ] || [ "$MODE" = owntiming ] || [ "$MODE" = reasoning ] || [ "$MODE" = holdings ]; then
   SHARDS_A="${SHARDS_A:-0}"
   SHARDS_B="${SHARDS_B:-$(echo "$SHARDS" | grep -vxF -f <(echo "$SHARDS_A" | tr ',' '\n') | paste -sd,)}"
+  # SHARDS_A=none: A holds the header only and B every part, so each request is
+  # handed to B whole (FUTURE_WORK #430's prompt floor, read on A's plan lines).
+  [ "$SHARDS_A" = none ] && SHARDS_A=""
   # Processor unless asked otherwise: the reference is scored on the processor.
   [ "$MODE" = repeat ] && { GPU_A="${GPU_A:-0}"; GPU_B="${GPU_B:-0}"; }
   [ "$MODE" = holdings ] && { GPU_A="${GPU_A:-0}"; GPU_B="${GPU_B:-0}"; }

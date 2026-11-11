@@ -4783,6 +4783,24 @@ timed on either path — piece or whole pass — since its time is the re-key's,
 not the peer's work (`SessionManager::rekeyed_since`, the predicate the resend
 waits on; v0.3.282 review). No test of its own: one inline condition.
 
+**A whole hand-off's prompt is FLOORED by what its first tokens took (2026-11-12, #430).**
+A split's prompt forwards are timed per (peer, model), but a WHOLE hand-off's prompt
+never was — its first token was read only as decode — so the price of handing a
+machine the whole model came from a ratio, and #430's processor read a 4,110-token
+prompt in 430-590 s against a price of ~170 s and ran out of its 600 s wait.
+`remote_generate` now times it at the coordinator (`whole_prompt_floor`: the
+first-token wait less the round trip and one step, over layers × tokens, ≥ 1,024
+tokens, a warm peer, none of the prompt believed held there) — and a wait that ran
+out is a sample too, a right-censored duration: the read took at least the wait.
+Each is a LOWER bound, so it is kept as one (`ModelSpeed::whole_prompt_floor_ms_per_layer_token`,
+an hour, first-hand only) and read as one: `parallax::prefill_ms_per_layer(.., whole_model)`
+prices `max(floor × tokens, the price)` — never a discount, never for a segment of
+the model, which may run on the same machine's card. Rig (TinyLlama, A the header
+only, B every part on its processor): the prompt priced 29.9 s took ~100 s; the next
+was priced 101.0 s and took 103 s. Prior art: Petals times a prompt pass apart from
+a decode step (`forward_rps`, `server/throughput.py`); the floor-not-discount rule of
+a peer's own decode timing (#3 (f)).
+
 ## A split between two machines that could each run the model is measured by restricting BOTH (2026-09-27)
 
 **`swarm_route.pretend_peer_holds` — `{"<prefix>": "4-7"}` — plans as though

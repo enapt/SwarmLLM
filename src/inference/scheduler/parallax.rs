@@ -744,7 +744,9 @@ fn vertex_cost_as(
     let prefill_ms = match prompt_tokens {
         None => 0.0,
         Some(0) => 0.0,
-        Some(tokens) => prefill_ms_per_layer(c, tokens, decode_price) * layers,
+        Some(tokens) => {
+            prefill_ms_per_layer(c, tokens, decode_price, range == (0, num_layers)) * layers
+        }
     };
 
     // Scale the whole vertex by how many attempts it takes to get one intact
@@ -915,9 +917,23 @@ pub(super) fn layers_ahead_in_run(same_machine_as_previous: bool, run_before: u3
 /// What reading `tokens` of a prompt costs `c`, in ms per layer — the ONE
 /// prefill rate, which the search's [`vertex_cost`] and the greedy fallback
 /// both charge. `decode` is whatever prices the candidate's decode in the
-/// caller's model, the stand-in until a prefill is measured.
-pub(super) fn prefill_ms_per_layer(c: &NodeCandidate, tokens: u32, decode: DecodePrice) -> f32 {
-    match c.observed_prompt_ms_per_layer_token {
+/// caller's model, the stand-in until a prefill is measured. `whole_model`:
+/// the vertex is every layer of the model on `c` — a hand-off, whose prompt
+/// the peer's own hand-offs have timed at no less than
+/// `observed_whole_prompt_floor_ms_per_layer_token` (#430). That figure is a
+/// FLOOR, never a discount: a 27B priced 170 s on a peer that took 430-590 s
+/// ran out of its 600 s wait, and only a price that can rise corrects it.
+pub(super) fn prefill_ms_per_layer(
+    c: &NodeCandidate,
+    tokens: u32,
+    decode: DecodePrice,
+    whole_model: bool,
+) -> f32 {
+    let floor = c
+        .observed_whole_prompt_floor_ms_per_layer_token
+        .filter(|_| whole_model)
+        .map_or(0.0, |floor| floor * tokens as f32);
+    let priced = match c.observed_prompt_ms_per_layer_token {
         // Measured on this peer, for exactly this work: ms per layer per
         // token of the prompts it read (`ModelSpeed::prompt_ms_per_layer_token`).
         // Never per activation byte — hidden states cross as Q8_0 at the
@@ -934,7 +950,8 @@ pub(super) fn prefill_ms_per_layer(c: &NodeCandidate, tokens: u32, decode: Decod
             let (range, ahead) = decode.range_ahead();
             decode.ms_per_layer(c) * tokens as f32 / prompt_speedup_over(c, range, ahead)
         }
-    }
+    };
+    priced.max(floor)
 }
 
 /// What a whole chain is priced at: the sum of its segments' vertex costs, in
@@ -2118,6 +2135,7 @@ mod tests {
             max_hostable_layers_at_face_value: None,
             max_hostable_layers_at_ceiling: None,
             observed_prompt_ms_per_layer_token: None,
+            observed_whole_prompt_floor_ms_per_layer_token: None,
             has_gpu: false,
             held_ranges: Vec::new(),
             published_room: None,
@@ -5340,6 +5358,7 @@ mod tests {
                 range: (0, 17),
                 ahead: 0,
             },
+            false,
         ) * 17.0;
         let expected_prompt =
             1000.0 * (12.0 * at(56.0) / PREFILL_SPEEDUP_GPU + 5.0 * at(6.3) / PREFILL_SPEEDUP_CPU);
@@ -5395,6 +5414,46 @@ mod tests {
             "39 of the 64 layers read on the processor: priced {split} ms, \
              the card's ratio gave {card_only}"
         );
+    }
+
+    /// #430's machine once its own hand-offs have been timed: a 4,110-token
+    /// prompt that ran past the 600 s wait floors the price of handing it the
+    /// whole 27B again at 600 s, where the per-device ratio priced ~170 s. A
+    /// floor under the price changes nothing, and a SEGMENT on the same machine
+    /// is priced as before — a split segment there may run on its card.
+    #[test]
+    fn a_whole_hand_off_is_priced_no_lower_than_its_prompts_were_timed() {
+        const LAYERS: u32 = 64;
+        const TOKENS: u32 = 4_110;
+        let here = NodeId([1; 32]);
+        let mut c = cand(2, vec![(0, LAYERS)], 134, 0.0, true, true, 45.0);
+        c.layer_work = 1.9;
+        c.has_gpu = true;
+        c.card_layers = Some(25);
+        c.processor_tokens_per_sec = 5.74;
+        c.observed_delegated_ms_per_layer = Some(3.125);
+        let prompt_ms = |c: &NodeCandidate, range: (u32, u32)| {
+            vertex_cost(c, range, &here, LAYERS, Some(TOKENS)).prefill_ms
+        };
+        let priced = prompt_ms(&c, (0, LAYERS));
+        let segment = prompt_ms(&c, (0, 32));
+        assert!(priced < 300_000.0, "priced before: {priced}");
+
+        let ran_out = 600_000.0 / (LAYERS as f32 * TOKENS as f32);
+        c.observed_whole_prompt_floor_ms_per_layer_token = Some(ran_out);
+        let floored = prompt_ms(&c, (0, LAYERS));
+        assert!(
+            (floored - 600_000.0).abs() / 600_000.0 < 1e-3,
+            "the wait that ran out: {floored}"
+        );
+        assert_eq!(
+            prompt_ms(&c, (0, 32)),
+            segment,
+            "a segment is not a hand-off"
+        );
+
+        c.observed_whole_prompt_floor_ms_per_layer_token = Some(ran_out / 100.0);
+        assert_eq!(prompt_ms(&c, (0, LAYERS)), priced, "never a discount");
     }
 
     /// **A machine's run cut into back-to-back segments is priced as the one
@@ -5494,6 +5553,7 @@ mod transfer_cost_tests {
             observed_fixed_ms_per_visit: None,
             observed_delegated_ms_per_layer: None,
             observed_prompt_ms_per_layer_token: None,
+            observed_whole_prompt_floor_ms_per_layer_token: None,
             expected_attempts: 1.0,
             goodput_bytes_per_sec: goodput,
             is_pool_member: false,

@@ -78,6 +78,14 @@ const ALPHA: f32 = 0.3;
 /// below the timescale over which hardware actually changes.
 const RANKING_STALE_AFTER: Duration = Duration::from_secs(600);
 
+/// How long a whole hand-off's prompt floor
+/// ([`ModelSpeed::whole_prompt_floor_ms_per_layer_token`]) is believed after its
+/// last sample — the health monitor's `PEER_SPEED_MAX_AGE`. Longer than the
+/// ranking figures' ten minutes on purpose: the floor steers requests AWAY from
+/// the peer, so nothing re-measures it while it holds, and a prompt that ran
+/// out of time teaches the next request only while it is remembered (#430).
+const WHOLE_PROMPT_FLOOR_FOR: Duration = Duration::from_secs(3_600);
+
 /// How much of a reply may go missing before a peer is priced as unreliable.
 ///
 /// Bounds the penalty rather than letting a run of losses price a peer out
@@ -244,6 +252,11 @@ pub struct ModelSpeed {
     /// figure to ONE token where a visit's fixed cost belongs, and a prompt's
     /// price scales it to thousands, where it does not.
     prompt_ms_per_layer_token: Option<f32>,
+    /// A WHOLE hand-off's prompt read, timed at the coordinator — ms per layer
+    /// and token, a FLOOR under the price of handing this peer the whole model
+    /// (`parallax::prefill_ms_per_layer`), never a discount — and when it was
+    /// last fed. See [`Self::note_whole_prompt_read`].
+    whole_prompt_floor: Option<(f32, Instant)>,
     /// EMA of ms per layer for a single-token decode step.
     decode_ms_per_layer: Option<f32>,
     /// EMA of ms per layer for one decode step of a WHOLE model run on the
@@ -286,6 +299,7 @@ impl ModelSpeed {
             prefill_ms_per_layer_byte: None,
             warm_prefill_ms_per_layer_byte: None,
             prompt_ms_per_layer_token: None,
+            whole_prompt_floor: None,
             decode_ms_per_layer: gossip_seed.map(|s| s * layer_work),
             delegated_ms_per_layer: None,
             decode_fit: LinearFit::default(),
@@ -578,6 +592,50 @@ impl ModelSpeed {
         self.prompt_ms_per_layer_token
     }
 
+    /// One whole hand-off's prompt read, timed at the coordinator (#430), in ms
+    /// per layer and token: its first token's wait less the round trip and one
+    /// step, over the model's layers and the prompt's tokens — or, where no
+    /// first token came, the wait that ran out (a right-censored duration: the
+    /// read took at least that). Both are LOWER bounds on what the peer's
+    /// prompt costs — the peer may have held part of the prompt already, and a
+    /// read that was cut off took longer than the wait — so the figure is only
+    /// ever a floor ([`Self::whole_prompt_floor_ms_per_layer_token`]). Kept
+    /// apart from [`Self::prompt_ms_per_layer_token`]: a split segment on the
+    /// same machine may run on its card, a whole model mostly on its processor.
+    pub fn note_whole_prompt_read(&mut self, ms_per_layer_token: f32, now: Instant) {
+        if !ms_per_layer_token.is_finite() || ms_per_layer_token <= 0.0 {
+            return;
+        }
+        let next = match self.whole_prompt_floor_at(now) {
+            Some(prev) => ALPHA * ms_per_layer_token + (1.0 - ALPHA) * prev,
+            None => ms_per_layer_token,
+        };
+        self.whole_prompt_floor = Some((next, now));
+    }
+
+    /// The least this peer's prompt costs a whole-model run, ms per layer and
+    /// token, while [`WHOLE_PROMPT_FLOOR_FOR`] has not passed since its last
+    /// sample. A price reads it as `max(it × tokens, its own figure)`, never in
+    /// place of one.
+    pub fn whole_prompt_floor_ms_per_layer_token(&self) -> Option<f32> {
+        self.whole_prompt_floor_at(Instant::now())
+    }
+
+    fn whole_prompt_floor_at(&self, now: Instant) -> Option<f32> {
+        self.whole_prompt_floor
+            .filter(|(_, at)| now.saturating_duration_since(*at) < WHOLE_PROMPT_FLOOR_FOR)
+            .map(|(floor, _)| floor)
+    }
+
+    /// The newest thing this model's entry learned: a sample, a gossip merge or
+    /// a hand-off's prompt floor — what keeps the entry from being forgotten.
+    fn last_touched(&self) -> Instant {
+        match self.whole_prompt_floor {
+            Some((_, at)) => at.max(self.updated_at),
+            None => self.updated_at,
+        }
+    }
+
     /// Per-layer cost of running a **whole model** on this peer, in ms — the
     /// delegated shape, with no per-token round trip in it.
     ///
@@ -796,14 +854,14 @@ impl PeerSpeed {
     /// Drop the models this peer has not run for us within `ttl`.
     pub fn forget_models_idle_for(&mut self, now: Instant, ttl: Duration) {
         self.models
-            .retain(|_, m| now.duration_since(m.updated_at) <= ttl);
+            .retain(|_, m| now.saturating_duration_since(m.last_touched()) <= ttl);
     }
 
     /// The newest speed sample or gossip merge, on any model.
     pub fn updated_at(&self) -> Instant {
         self.models
             .values()
-            .map(|m| m.updated_at)
+            .map(ModelSpeed::last_touched)
             .fold(self.updated_at, std::cmp::max)
     }
 
@@ -1389,6 +1447,38 @@ mod ranking_trusts_only_what_it_measured {
             Some(measured),
             "not dragged down"
         );
+    }
+
+    /// A whole hand-off's prompt floor (#430): its samples averaged, a 0 or a
+    /// NaN no sample, believed for [`WHOLE_PROMPT_FLOOR_FOR`] after the last —
+    /// and while believed it keeps its model's entry, whose other figures may
+    /// have aged out: nothing re-measures a peer the floor steers requests from.
+    #[test]
+    fn a_whole_prompt_floor_lasts_an_hour_and_keeps_its_entry() {
+        let t0 = Instant::now();
+        let mut m = ModelSpeed::default();
+        m.note_whole_prompt_read(2.0, t0);
+        assert_eq!(m.whole_prompt_floor_at(t0), Some(2.0));
+        m.note_whole_prompt_read(1.0, t0);
+        let averaged = m.whole_prompt_floor_at(t0).expect("two samples");
+        assert!((averaged - (ALPHA * 1.0 + (1.0 - ALPHA) * 2.0)).abs() < 1e-6);
+        m.note_whole_prompt_read(0.0, t0);
+        m.note_whole_prompt_read(f32::NAN, t0);
+        assert_eq!(m.whole_prompt_floor_at(t0), Some(averaged));
+        assert_eq!(m.whole_prompt_floor_at(t0 + WHOLE_PROMPT_FLOOR_FOR), None);
+
+        let model = ModelId("floor".into());
+        let mut peer = PeerSpeed::default();
+        let fed_at = t0 + Duration::from_secs(50 * 60);
+        peer.model_mut(&model, || 1.0)
+            .note_whole_prompt_read(2.0, fed_at);
+        let later = t0 + Duration::from_secs(70 * 60);
+        peer.forget_models_idle_for(later, Duration::from_secs(3_600));
+        assert!(
+            peer.model(&model).is_some(),
+            "a floor fed 20 min ago keeps an entry last sampled 70 min ago"
+        );
+        assert!(!peer.is_stale(later, Duration::from_secs(3_600)));
     }
 
     /// The reliability figure must start optimistic, fall with losses, and

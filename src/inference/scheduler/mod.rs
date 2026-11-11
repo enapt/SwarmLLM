@@ -219,6 +219,13 @@ struct NodeCandidate {
     /// enough to measure one. `None` until one has been timed — see
     /// `parallax::vertex_cost` for what stands in meanwhile.
     observed_prompt_ms_per_layer_token: Option<f32>,
+    /// The least a WHOLE-model run on this peer has been seen to pay per layer
+    /// and prompt token — its hand-offs' first-token waits, a wait that ran
+    /// out included (`SharedState::observed_whole_prompt_floor_ms_per_layer_token`,
+    /// #430). A floor under a whole-model vertex's prompt price only
+    /// (`parallax::prefill_ms_per_layer`); `None` for this node, which is never
+    /// handed off to.
+    observed_whole_prompt_floor_ms_per_layer_token: Option<f32>,
     /// Whether this peer has told us it has a graphics card. Used ONLY to pick
     /// which prefill-to-decode prior applies before a real measurement exists;
     /// never to rank peers against each other, which is what the peer's own
@@ -5125,6 +5132,12 @@ impl PipelineScheduler {
             let observed_prompt_ms_per_layer_token = self
                 .shared_state
                 .observed_prompt_ms_per_layer_token(&node_id, &manifest.id);
+            let observed_whole_prompt_floor_ms_per_layer_token = if &node_id == local_node_id {
+                None
+            } else {
+                self.shared_state
+                    .observed_whole_prompt_floor_ms_per_layer_token(&node_id, &manifest.id)
+            };
             // Which prefill prior applies — a card reads a prompt ~40x faster
             // than it writes a reply, a processor ~4.5x. It follows the device
             // the request would use, not the device the node owns: for a split
@@ -5663,6 +5676,7 @@ impl PipelineScheduler {
                 max_hostable_layers_at_face_value,
                 max_hostable_layers_at_ceiling,
                 observed_prompt_ms_per_layer_token,
+                observed_whole_prompt_floor_ms_per_layer_token,
                 has_gpu,
                 held_ranges,
                 published_room,
@@ -5752,6 +5766,8 @@ impl PipelineScheduler {
                 observed_fixed_ms_per_visit = ?c.observed_fixed_ms_per_visit,
                 observed_delegated_ms_per_layer = ?c.observed_delegated_ms_per_layer,
                 observed_prompt_ms_per_layer_token = ?c.observed_prompt_ms_per_layer_token,
+                observed_whole_prompt_floor_ms_per_layer_token =
+                    ?c.observed_whole_prompt_floor_ms_per_layer_token,
                 // The passes the per-token costs below are charged for: 64, or
                 // fewer where the reply may not use that many tokens (#3).
                 forward_passes = c.forward_passes(),
@@ -6036,7 +6052,9 @@ impl PipelineScheduler {
         }) {
             None | Some(0) => 0.0,
             Some(tokens) => {
-                parallax::prefill_ms_per_layer(candidate, tokens, decode_price) / rounds
+                let whole_model = (current_layer, range.1) == (0, num_layers);
+                parallax::prefill_ms_per_layer(candidate, tokens, decode_price, whole_model)
+                    / rounds
             }
         };
         candidate.latency_ms as f32 / covered

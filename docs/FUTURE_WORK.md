@@ -3431,7 +3431,7 @@ What it says (the user, 11-08: a split that fails or is slow is the defect — n
   ONE such computer; read across several in pieces it need not be (#430).
 
 #### #430 — A long prompt read on ONE computer that cannot read it fast: no first token in 10 minutes
-`P2` · perf-split · **OPEN** (residual: a measured prompt rate for a whole hand-off; (a)'s ratio and (c) fixed 2026-11-11) — 2026-11-08 · history: #427 (measured), #171 (a prompt pass read in pieces)
+`P2` · perf-split · **OPEN** (residual: the first-token wait sized from a measured rate, and pieces timed between two machines; (a)'s ratio and (c) fixed 2026-11-11, the hand-off's prompt floor built 2026-11-12) — 2026-11-08 · history: #427 (measured), #171 (a prompt pass read in pieces)
 
 Qwen3.8-27B with a 4,110-token prompt (#427's table) was handed whole to the only machine holding every layer, whose
 card holds part of a 27B and processor the rest; it reads such a prompt at ~7-9.5 tok/s (Qwen3.6-27B there: 432 s),
@@ -3484,7 +3484,25 @@ that only read long prompts was never priced (rig: `None` → 4.1 / 5.8 ms a lay
 Left beside it: a peer with no DECODE sample is still ranked from the per-byte prompt figure times a nominal
 16,384 bytes (`PeerSpeed::ranking`, `NOMINAL_DECODE_ACTIVATION_BYTES`) — 1.88-3.8× slow on the same arithmetic;
 a fallback only until its first decode step.
-**Design for the hand-off's own figure (2026-11-12, not built — a design to check before code):**
+**Built 2026-11-12 — a whole hand-off's prompt FLOOR** (`ModelSpeed::whole_prompt_floor_ms_per_layer_token`):
+`remote_generate` times the first token of a whole-model hand-off of ≥ 1,024 tokens (counted by the model's own
+tokenizer) to a WARM peer that this node believes holds none of the prompt (`handed_off_openings`, asked before the
+hand-off is noted): the wait less the round trip and one step, over layers × tokens; a first-token wait that ran out
+counts as at least itself. Averaged (α 0.3), believed an hour after its last sample (`WHOLE_PROMPT_FLOOR_FOR`, which
+also keeps its model's entry from aging out), first-hand only. `parallax::prefill_ms_per_layer`'s `whole_model`
+takes `max(floor × tokens, the price)` — the search, greedy and the hand-off gate (`delegated_shape_cost_ms`) alike;
+a segment of the model on the same machine is priced as before. One change from the design below: the sample is
+taken only where none of the prompt is believed held, so it divides by every token and stays a LOWER bound even
+where a belief is stale. Rig (`split_rig.sh split` with the new `SHARDS_A=none`: TinyLlama, A the header only, B
+every part on the processor, a short ask then two ~1,220-token prompts): the second ask's prompt priced 29.9 s on
+the prior and took ~100 s; A timed it at 3.75 ms a layer and token (`waited_ms=100876`) and priced the third
+101.0 s, which took 103 s. Tests `a_whole_hand_off_is_priced_no_lower_than_its_prompts_were_timed`,
+`a_whole_prompt_floor_lasts_an_hour_and_keeps_its_entry` (each red with its fix off),
+`a_whole_hand_offs_wait_times_its_prompt_less_the_trip_and_a_step` (arithmetic). Left: sizing the first-token wait
+from it (the 600 s cap, `architecture.md` § Timeouts); the censored arm is unit-tested only (no fault switch shortens
+a first-token wait).
+
+**The design it was built from (2026-11-12):**
 - *Sample, at the coordinator* (`remote_generate`, beside the `Delegated` record): the first token's wait less
   the peer's round trip and one step of this reply (its steady ms a token), over the tokens it had to READ —
   `prompt_ids` less what `handoff_prompt_cache` says this node handed it before (looked up BEFORE

@@ -625,6 +625,67 @@ pub(crate) fn first_token_timeout(prompt_tokens: usize, load: super::LoadAllowan
         .saturating_add(load.duration())
 }
 
+/// The shortest prompt whose whole hand-off times the peer's prompt rate
+/// ([`whole_prompt_floor`]): two of a split's prompt pieces. Below it the wait
+/// is mostly the round trip and the first step, and what the floor exists for —
+/// a long prompt a peer reads slowly (#430) — is not what it measures.
+const WHOLE_PROMPT_FLOOR_MIN_TOKENS: usize = 1024;
+
+/// What a whole hand-off's first-token wait says of the peer's prompt rate, in
+/// ms per layer and token (#430): the wait less the round trip and one step of
+/// the reply, over the model's layers and the prompt's tokens. A LOWER bound —
+/// the peer may have held part of the prompt, and a wait that ran out
+/// (`one_step_ms` 0) stopped before the read did — so it is kept only as a
+/// floor under the peer's whole-model price (`ModelSpeed::note_whole_prompt_read`).
+/// Prior art: Petals times a prompt pass apart from a decode step and routes
+/// by each (`forward_rps`, `server/throughput.py`); a wait that ran out is a
+/// right-censored duration.
+fn whole_prompt_floor(
+    waited_ms: u64,
+    round_trip_ms: Option<u32>,
+    one_step_ms: u64,
+    layers: u32,
+    prompt_tokens: usize,
+) -> Option<f32> {
+    if layers == 0 || prompt_tokens < WHOLE_PROMPT_FLOOR_MIN_TOKENS {
+        return None;
+    }
+    let read_ms = waited_ms
+        .saturating_sub(u64::from(round_trip_ms.unwrap_or(0)))
+        .saturating_sub(one_step_ms);
+    (read_ms > 0).then(|| read_ms as f32 / (layers as f32 * prompt_tokens as f32))
+}
+
+/// Record [`whole_prompt_floor`] for `segment`'s peer, the whole of `model_id`.
+fn note_whole_prompt_floor(
+    state: &crate::daemon::state::SharedState,
+    segment: &crate::types::PipelineSegment,
+    model_id: &crate::types::ModelId,
+    waited_ms: u64,
+    one_step_ms: u64,
+    prompt_tokens: usize,
+) {
+    let layers = segment.layer_range.1.saturating_sub(segment.layer_range.0);
+    let round_trip_ms = state
+        .peer_registry
+        .get(&segment.node_id)
+        .and_then(|p| p.round_trip_ms());
+    if let Some(floor) =
+        whole_prompt_floor(waited_ms, round_trip_ms, one_step_ms, layers, prompt_tokens)
+    {
+        tracing::debug!(
+            peer = %segment.node_id,
+            model = %model_id,
+            waited_ms,
+            prompt_tokens,
+            one_step_ms,
+            floor_ms_per_layer_token = floor,
+            "remote-generate: a whole hand-off's prompt read timed"
+        );
+        state.note_whole_prompt_read(&segment.node_id, model_id, floor);
+    }
+}
+
 /// How often a wait for a peer's first token looks up whether the peer is
 /// still connected.
 ///
@@ -935,6 +996,25 @@ impl PipelineExecutor {
         };
         let load = super::LoadAllowance::for_segments(&self.shared_state, waited_on);
         let first_token_budget = first_token_timeout(prompt_tokens_est, load);
+        // May this wait time the peer's prompt (#430, `whole_prompt_floor`)? A
+        // whole model, a prompt counted by the model's own tokenizer, a peer
+        // that need not load first, and none of the prompt believed held there
+        // — asked before this hand-off is noted at the end.
+        let prompt_floor_tokens = prompt_ids
+            .as_deref()
+            .filter(|ids| {
+                whole_model
+                    && ids.len() >= WHOLE_PROMPT_FLOOR_MIN_TOKENS
+                    && load.cold_loads() == 0
+                    && !super::handoff_prompt_cache::handed_off_openings(
+                        &self.request.model_id,
+                        ids,
+                        std::time::Instant::now(),
+                    )
+                    .iter()
+                    .any(|(peer, _)| peer == &segment.node_id)
+            })
+            .map(<[u32]>::len);
 
         // A head leading a split for us guesses with what IT holds; this node
         // may hold a small model of the family whole. Where the head takes
@@ -1301,6 +1381,19 @@ impl PipelineExecutor {
                         self.shared_state
                             .blacklist_holder_for_request(request_id, &segment.node_id);
                     }
+                    // No first token within the wait: the read took at least
+                    // the wait — a right-censored duration, and the case #430
+                    // hit (a 27B's prompt past its 600 s).
+                    if let Some(tokens) = prompt_floor_tokens.filter(|_| first && !peer_left) {
+                        note_whole_prompt_floor(
+                            &self.shared_state,
+                            &segment,
+                            &self.request.model_id,
+                            sent_at.elapsed().as_millis() as u64,
+                            0,
+                            tokens,
+                        );
+                    }
                     if peer_left {
                         tracing::warn!(
                             %request_id,
@@ -1645,8 +1738,10 @@ impl PipelineExecutor {
                 .elapsed()
                 .saturating_sub(ttft.duration_since(sent_at));
             let layers = segment.layer_range.1.saturating_sub(segment.layer_range.0);
+            let mut one_step_ms = 0;
             if delegated_sample_is_usable(stream_was_truncated, completion_tokens, layers) {
                 let per_token_ms = steady.as_millis() as u64 / u64::from(completion_tokens - 1);
+                one_step_ms = per_token_ms;
                 self.shared_state.record_peer_segment_latency(
                     &segment.node_id,
                     &self.request.model_id,
@@ -1655,6 +1750,16 @@ impl PipelineExecutor {
                     layers,
                     0,
                     None,
+                );
+            }
+            if let Some(tokens) = prompt_floor_tokens {
+                note_whole_prompt_floor(
+                    &self.shared_state,
+                    &segment,
+                    &self.request.model_id,
+                    ttft.duration_since(sent_at).as_millis() as u64,
+                    one_step_ms,
+                    tokens,
                 );
             }
         }
@@ -1725,6 +1830,24 @@ impl PipelineExecutor {
 #[cfg(test)]
 mod first_token_budget_tests {
     use super::*;
+
+    /// What a whole hand-off's wait says of the peer's prompt (#430): the wait
+    /// less the round trip and a step, over layers × tokens; a wait that ran
+    /// out (no step) says at least as much; a short prompt or a wait inside
+    /// the round trip says nothing.
+    #[test]
+    fn a_whole_hand_offs_wait_times_its_prompt_less_the_trip_and_a_step() {
+        let read = whole_prompt_floor(600_000, Some(300), 200, 64, 4_110).expect("timed");
+        assert!((read - 599_500.0 / (64.0 * 4_110.0)).abs() < 1e-6, "{read}");
+        let ran_out = whole_prompt_floor(600_000, Some(300), 0, 64, 4_110).expect("censored");
+        assert!(ran_out > read);
+        assert_eq!(
+            whole_prompt_floor(600_000, None, 0, 64, WHOLE_PROMPT_FLOOR_MIN_TOKENS - 1),
+            None
+        );
+        assert_eq!(whole_prompt_floor(250, Some(300), 0, 64, 4_110), None);
+        assert_eq!(whole_prompt_floor(600_000, None, 0, 0, 4_110), None);
+    }
 
     fn warm() -> super::super::LoadAllowance {
         super::super::LoadAllowance::none()

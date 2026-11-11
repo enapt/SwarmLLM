@@ -3654,6 +3654,45 @@ impl SharedState {
         self.peer_model_speed(node_id, model_id, |s| s.prompt_ms_per_layer_token())
     }
 
+    /// `node_id` was handed `model_id` whole and its first-token wait says it
+    /// reads a prompt at no less than `ms_per_layer_token`
+    /// (`ModelSpeed::note_whole_prompt_read`, #430). First-hand only: written
+    /// by `remote_generate`'s hand-off, never from gossip.
+    pub fn note_whole_prompt_read(
+        &self,
+        node_id: &crate::types::NodeId,
+        model_id: &crate::types::ModelId,
+        ms_per_layer_token: f32,
+    ) {
+        // As `record_peer_segment_latency`: the weight is asked before the
+        // entry is held, since it may parse a header off the disk.
+        let first_on_this_model = !self
+            .metrics
+            .peer_speed
+            .get(node_id)
+            .is_some_and(|s| s.model(model_id).is_some());
+        let layer_work = first_on_this_model
+            .then(|| crate::inference::scheduler::layer_work_for(self, model_id));
+        self.metrics
+            .peer_speed
+            .entry(node_id.clone())
+            .or_default()
+            .model_mut(model_id, || layer_work.unwrap_or(1.0))
+            .note_whole_prompt_read(ms_per_layer_token, std::time::Instant::now());
+    }
+
+    /// The least a whole-model run of `model_id` on `node_id` has been seen to
+    /// pay per layer and prompt token (`ModelSpeed::whole_prompt_floor_ms_per_layer_token`).
+    pub fn observed_whole_prompt_floor_ms_per_layer_token(
+        &self,
+        node_id: &crate::types::NodeId,
+        model_id: &crate::types::ModelId,
+    ) -> Option<f32> {
+        self.peer_model_speed(node_id, model_id, |s| {
+            s.whole_prompt_floor_ms_per_layer_token()
+        })
+    }
+
     /// How many inference requests this node is working on **right now** — the
     /// single answer to "how busy am I", for our own router and for every peer.
     ///
@@ -7041,12 +7080,17 @@ mod live_config_tests {
             "the step that waited for the copy is not the layers' time: {}",
             figure()
         );
-        decode(68);
         assert!(
-            (figure() - before).abs() < 0.01,
+            state.metrics.prompt_copy_promised_at.is_empty(),
+            "the one delayed step takes the promise"
+        );
+        decode(130);
+        assert!(
+            figure() > before + 1.0,
             "the next step is timed as usual: {}",
             figure()
         );
+        let before = figure();
 
         let long_ago = std::time::Instant::now()
             .checked_sub(super::PROMPT_COPY_DELAYS_FOR + std::time::Duration::from_secs(5))
