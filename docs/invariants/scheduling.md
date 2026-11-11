@@ -4642,7 +4642,7 @@ Three figures come from the same prefill samples and want different things:
 |---|---|---|
 | `prefill_ms_per_layer_byte` | the segment TIMEOUT (`predict_ms`) | every sample — cold ones are pessimism, which is safe for a wait |
 | `warm_prefill_ms_per_layer_byte` | RANKING, converted to ONE token (`ranking_ms_per_layer`) | warm samples — a visit's fixed cost belongs in a one-token figure |
-| `prompt_ms_per_layer_token` | a prompt's PRICE, scaled to its tokens | warm samples of at least `PROMPT_RATE_MIN_BYTES` that name their positions; a smaller one may only lower it |
+| `prompt_ms_per_layer_token` | a prompt's PRICE, scaled to its tokens | warm samples whose PROMPT (`PromptRead`, the hidden state that carried it) was at least `PROMPT_RATE_MIN_BYTES`; a smaller one may only lower it |
 
 **What it replaced.** The price read the timeout's figure. Report #037 (a
 tester, v0.3.240): a 5-segment route through two peers was predicted
@@ -4691,7 +4691,37 @@ Petals prices a server's prompt per token per block (`server/throughput.py`,
 `a_prompt_is_priced_at_the_time_it_took_whatever_its_width`,
 `a_measured_prompt_is_priced_at_the_time_it_took`.
 
-Test: `a_prompt_is_priced_from_warm_forwards_large_enough_to_measure_a_rate`.
+**Judged by what it READ; believed only where the bytes bear it out
+(2026-11-12).** Two defects in the per-token change, one found live and one in
+review:
+
+- *The end of the model was never priced.* The size check read the bytes the
+  segment SENT BACK, and a last segment answers with a token — 0 bytes, under
+  256 KB, so its sample could only lower a price it never had (per byte, the
+  figure returned on the 0 before it got that far). A two-computer TinyLlama
+  split (`split_rig.sh split`, processor, three different ~420-token prompts)
+  read `observed_prompt_ms_per_layer_token=None` for the far computer after
+  three warm asks of a 909,588-byte prompt read in 7.6 s each. The forward now
+  carries a `PromptRead` — the positions AND the size of the hidden state they
+  were read from — and the size check reads that; the per-byte figure keeps its
+  own early return. Re-run: the far end priced 1.81 ms a layer and token on the
+  third ask (7,592 ms ÷ 10 layers ÷ 418), this node 1.08.
+- *A peer's header was taken on its word.* `activation_positions` reads the
+  shape without the payload, and nothing checks a first segment's answer (its
+  input is token ids, so `activation_shape_matches` is skipped): a head claiming
+  4e9 positions in a 256 KB answer would have priced its own prompts at nothing
+  and pulled the rate down on every later answer. `PipelineExecutor::prompt_read`
+  reads positions only through **`tensor_util::positions_borne_out`** — the
+  model's own width last, a payload holding every value the shape names — so
+  every position counted crossed as bytes, the bound the per-byte figure had
+  (architecture.md § "A size the other computer chose is checked before it sizes
+  anything"). The width is read once per prompt pass (`gguf_meta_for`); without
+  a header, nothing is priced.
+
+Tests: `a_prompt_is_priced_from_warm_forwards_large_enough_to_measure_a_rate`,
+`the_end_of_the_model_is_priced_from_the_prompt_it_read`,
+`a_price_believes_only_the_positions_its_bytes_carried` (each red with its fix
+switched off, in one build).
 
 ## A split between two machines that could each run the model is measured by restricting BOTH (2026-09-27)
 

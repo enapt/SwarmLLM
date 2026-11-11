@@ -3436,8 +3436,16 @@ hidden state that crossed), never per byte priced at a nominal width — the 70B
 `a_measured_prompt_is_priced_at_the_time_it_took`. And the TRANSFER term charges the bytes that cross: the
 model's own width in the wire's Q8_0 (`scheduler::activation_bytes_per_token_for`), not a nominal 4,096 in f32
 over a goodput measured in real bytes (Petals' `measure_network_rps`: bandwidth over `hidden_size` × the bits a
-value crosses as); test `a_prompt_crossing_to_a_segment_is_charged_the_bytes_that_cross`. A/B
-`SWARMLLM_TRANSFER_BYTES=nominal`.
+value crosses as), f32 where `inference.activation_compression` is off (read live); test
+`a_prompt_crossing_to_a_segment_is_charged_the_bytes_that_cross`. A/B `SWARMLLM_TRANSFER_BYTES=nominal`. A
+forward is judged big enough to price by the prompt it READ (`PromptRead`), never its answer — the end of the
+model answers with a token and was never priced (rig: the far computer `None` after three warm asks, 1.81 ms a
+layer and token once fixed) — and a shape is believed only where its bytes bear it out
+(`tensor_util::positions_borne_out`: a head's forged header would have priced its prompts at nothing; review);
+tests `the_end_of_the_model_is_priced_from_the_prompt_it_read`, `a_price_believes_only_the_positions_its_bytes_carried`.
+Left beside it: a peer with no DECODE sample is still ranked from the per-byte prompt figure times a nominal
+16,384 bytes (`PeerSpeed::ranking`, `NOMINAL_DECODE_ACTIVATION_BYTES`) — 1.88-3.8× slow on the same arithmetic;
+a fallback only until its first decode step.
 
 #### #428 — Every popular model guesses 4-5 tokens a round trip: a DFlash drafter at the split's far end
 `P1` · perf-split · **OPEN** (stage 1 built and measured: the reply is exact, acceptance matches llama.cpp's; stage 3 built and measured on the rig — a split over 130 ms, processors: code 1.6-1.8×, a story 1.10-1.15×, the same replies; on a card, whole: code 1.4-1.6×, a story 0.89-0.92× — (c2) done, the block's first rounds on prose, (c3); stage 6 built: the drafter fetched by a pin; next: the field model, Qwen3.6-35B-A3B) — 2026-11-08 · history: #427 (the measurement), #425 (the guess head), #411 (the flow)

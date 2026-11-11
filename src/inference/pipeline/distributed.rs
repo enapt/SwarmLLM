@@ -1093,6 +1093,17 @@ impl PipelineExecutor {
             }
         }
         let mut activations = initial_activations;
+        // The model's width, the one a prompt's shape is believed at
+        // (`prompt_read`); read once, and only for a prompt pass, the only
+        // forward priced by it.
+        let prompt_width: Option<u32> = (sequence_num == 0)
+            .then(|| {
+                self.shared_state
+                    .gguf_meta_for(&self.request.model_id)
+                    .map(|meta| meta.embedding_length)
+            })
+            .flatten()
+            .and_then(|width| u32::try_from(width).ok());
         // Read LIVE, never cached across the loop.
         //
         // A failover can now replace one segment with SEVERAL — when no single
@@ -1287,8 +1298,13 @@ impl PipelineExecutor {
             // `result.activations` immediately after, so the previous buffer
             // is dead by then anyway.
             if segment.node_id == *self.shared_state.identity.node_id() {
-                let input_positions =
-                    Self::positions_worked(&activations, input_is_hidden_state, &[], false);
+                let input_read = Self::prompt_read(
+                    prompt_width,
+                    &activations,
+                    input_is_hidden_state,
+                    &[],
+                    false,
+                );
                 let prev_activations = std::mem::take(&mut activations);
                 let result = self
                     .process_local_segment(
@@ -1336,8 +1352,8 @@ impl PipelineExecutor {
                     segment_ms,
                     segment.layer_range.1 - segment.layer_range.0,
                     result.activations.len(),
-                    input_positions.or_else(|| {
-                        Self::positions_worked(&[], false, &result.activations, !is_last)
+                    input_read.or_else(|| {
+                        Self::prompt_read(prompt_width, &[], false, &result.activations, !is_last)
                     }),
                 );
                 if is_last {
@@ -2021,7 +2037,8 @@ impl PipelineExecutor {
                                 seg_elapsed_ms,
                                 seg_layers,
                                 result.activations.len(),
-                                Self::positions_worked(
+                                Self::prompt_read(
+                                    prompt_width,
                                     &activations,
                                     input_is_hidden_state,
                                     &result.activations,
@@ -2347,21 +2364,32 @@ impl PipelineExecutor {
         true
     }
 
-    /// How many positions a timed forward READ, for the prompt price
-    /// (`ModelSpeed::prompt_ms_per_layer_token`): the input's, where it is a
+    /// The prompt a timed forward READ, for its price
+    /// (`ModelSpeed::prompt_ms_per_layer_token`): the input, where it is a
     /// hidden state; else the hidden state the segment handed on, unless it
     /// sampled — the end of the model answers with logits or a token, whose
-    /// shape says nothing of the prompt. `None` prices nothing.
-    fn positions_worked(
+    /// shape says nothing of the prompt. A shape is believed only where the
+    /// bytes bear it out at the model's own `width`
+    /// (`tensor_util::positions_borne_out`): a header alone is the word of the
+    /// computer that wrote it, and nothing else checks a first segment's
+    /// answer — 4e9 positions in a 256 KB answer would price its prompts at
+    /// nothing (v0.3.282 review). `None` prices nothing.
+    fn prompt_read(
+        width: Option<u32>,
         input: &[u8],
         input_is_hidden_state: bool,
         result: &[u8],
         result_is_hidden_state: bool,
-    ) -> Option<u32> {
+    ) -> Option<crate::daemon::state::PromptRead> {
+        let width = width?;
         let read = |bytes: &[u8], hidden: bool| {
             hidden
-                .then(|| crate::inference::tensor_util::activation_positions(bytes))
+                .then(|| crate::inference::tensor_util::positions_borne_out(bytes, width))
                 .flatten()
+                .map(|positions| crate::daemon::state::PromptRead {
+                    positions,
+                    bytes: bytes.len(),
+                })
         };
         read(input, input_is_hidden_state).or_else(|| read(result, result_is_hidden_state))
     }

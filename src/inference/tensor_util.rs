@@ -414,6 +414,24 @@ pub fn activation_positions(bytes: &[u8]) -> Option<u32> {
     dim(ndim - 2)
 }
 
+/// How many positions a hidden state carries, believed only where its bytes
+/// bear the header out: `[1.., seq, width]` at the model's own `width`, with a
+/// payload holding every value that shape names (`PositionsPart::parse`).
+///
+/// For a PRICE read off bytes another computer may have written
+/// (`ModelSpeed::prompt_ms_per_layer_token` divides a forward's time by it):
+/// [`activation_positions`] takes the header on its writer's word, and a first
+/// segment's answer is checked by nothing else, so 4e9 positions claimed in a
+/// 256 KB answer would have priced that computer's prompts at nothing
+/// (v0.3.282 review). Here every position counted is one that crossed as
+/// bytes — the bound the per-byte price had (architecture.md § "A size the
+/// other computer chose is checked before it sizes anything").
+pub(crate) fn positions_borne_out(bytes: &[u8], width: u32) -> Option<u32> {
+    let part = PositionsPart::parse(bytes)?;
+    let n = part.shape.len();
+    (part.shape[n - 1] == width).then_some(part.shape[n - 2])
+}
+
 /// How many token positions a forward carries — the ONE answer, read by the
 /// serving node's "tokens served" and serve credit (`dispatch::layer_forward`)
 /// and by the worker's own decode timing, which times a step of exactly one
@@ -803,6 +821,36 @@ mod activation_shape_tests {
 mod retention_header_tests {
     use super::*;
     use candle_core::{Device, Tensor};
+
+    /// A shape is believed for a price only where the bytes that crossed bear
+    /// it out, at the model's own width (v0.3.282 review): a forged header is
+    /// read by the unchecked reader and refused by the checked one.
+    #[test]
+    fn a_price_believes_only_the_positions_its_bytes_carried() {
+        let prompt = Tensor::zeros((1, 7, 32), candle_core::DType::F32, &Device::Cpu).unwrap();
+        let f32_bytes = tensor_to_bytes(&prompt).unwrap();
+        let q8_bytes = tensor_to_bytes_q8_0(&prompt).unwrap();
+        assert_eq!(positions_borne_out(&f32_bytes, 32), Some(7));
+        assert_eq!(positions_borne_out(&q8_bytes, 32), Some(7));
+        // Another model's width is not this model's hidden state.
+        assert_eq!(positions_borne_out(&f32_bytes, 64), None);
+
+        // The header claims four billion positions; the payload is 7's.
+        let mut forged = q8_bytes.clone();
+        forged[8..12].copy_from_slice(&4_000_000_000u32.to_le_bytes());
+        assert_eq!(activation_positions(&forged), Some(4_000_000_000));
+        assert_eq!(positions_borne_out(&forged, 32), None);
+        // Nor may the width be moved into the positions: [1, 224, 1].
+        let mut flattened = f32_bytes.clone();
+        flattened[8..12].copy_from_slice(&224u32.to_le_bytes());
+        flattened[12..16].copy_from_slice(&1u32.to_le_bytes());
+        assert_eq!(activation_positions(&flattened), Some(224));
+        assert_eq!(positions_borne_out(&flattened, 32), None);
+        // A payload cut short of its shape counts nothing.
+        let mut short = f32_bytes.clone();
+        short.truncate(short.len() - 4);
+        assert_eq!(positions_borne_out(&short, 32), None);
+    }
 
     #[test]
     fn a_forwards_position_count_is_read_from_its_header() {

@@ -103,6 +103,17 @@ const MIN_INTACT_DELIVERY_RATIO: f32 = 0.05;
 /// the goodput estimator from the RTT one.
 pub(crate) const PROMPT_RATE_MIN_BYTES: usize = 256 * 1024;
 
+/// The prompt a timed forward READ, from the hidden state that carried it: its
+/// positions and that hidden state's size. Built only by
+/// `PipelineExecutor::prompt_read`, which believes a shape only where the bytes
+/// that arrived bear it out. The size, not the segment's answer, says whether
+/// the forward was big enough to measure a rate ([`PROMPT_RATE_MIN_BYTES`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PromptRead {
+    pub positions: u32,
+    pub bytes: usize,
+}
+
 /// Least samples before a two-term fit is trusted over the proportional EMA.
 ///
 /// Two points define a line, so three is the first count that can disagree with
@@ -304,20 +315,45 @@ impl ModelSpeed {
     /// ranking on a load time is how a fast machine gets classified as slow and
     /// then never gets another chance to prove otherwise.
     ///
-    /// `positions`: the token positions a prompt forward carried. The PRICE
-    /// figure is per layer and token, so a prompt sample without them prices
-    /// nothing ([`Self::prompt_ms_per_layer_token`]).
+    /// `prompt`: the prompt a forward read ([`PromptRead`]). The PRICE figure
+    /// is per layer and token, so a prompt sample without it prices nothing
+    /// ([`Self::prompt_ms_per_layer_token`]).
     pub fn observe(
         &mut self,
         kind: WorkKind,
         segment_ms: u64,
         layers: u32,
         activation_bytes: usize,
-        positions: Option<u32>,
+        prompt: Option<PromptRead>,
         warm: bool,
     ) {
         if layers == 0 {
             return;
+        }
+        // The price, per layer and TOKEN, from warm prompt forwards only. A
+        // forward too small to measure a rate may only lower it — judged by the
+        // hidden state that carried the prompt, before the byte figure below
+        // returns on an answer of no bytes: the end of the model answers with a
+        // token, and a last segment's prompt was never priced (rig, 2026-11-12).
+        if warm && kind == WorkKind::Prefill {
+            if let Some((per_token, measurable)) = prompt
+                .filter(|p| p.positions > 0)
+                .map(|p| {
+                    let per_token =
+                        (segment_ms as f64 / (layers as f64 * p.positions as f64)) as f32;
+                    (per_token, p.bytes >= PROMPT_RATE_MIN_BYTES)
+                })
+                .filter(|(s, _)| s.is_finite())
+            {
+                let rate = &mut self.prompt_ms_per_layer_token;
+                *rate = match *rate {
+                    Some(prev) if measurable || per_token < prev => {
+                        Some(ALPHA * per_token + (1.0 - ALPHA) * prev)
+                    }
+                    None if measurable => Some(per_token),
+                    kept => kept,
+                };
+            }
         }
         let sample = match kind {
             WorkKind::Prefill => {
@@ -344,22 +380,6 @@ impl ModelSpeed {
                 Some(prev) => ALPHA * sample + (1.0 - ALPHA) * prev,
                 None => sample,
             });
-            // The price, per layer and TOKEN. A forward too small to measure a
-            // rate may only lower it.
-            if let Some(per_token) = positions
-                .filter(|&p| p > 0)
-                .map(|p| (segment_ms as f64 / (layers as f64 * p as f64)) as f32)
-                .filter(|s| s.is_finite())
-            {
-                let rate = &mut self.prompt_ms_per_layer_token;
-                *rate = match *rate {
-                    Some(prev) if activation_bytes >= PROMPT_RATE_MIN_BYTES || per_token < prev => {
-                        Some(ALPHA * per_token + (1.0 - ALPHA) * prev)
-                    }
-                    None if activation_bytes >= PROMPT_RATE_MIN_BYTES => Some(per_token),
-                    kept => kept,
-                };
-            }
         }
         // The same sample, unnormalised, for the two-term fit. Fed the RAW
         // wall-clock and layer count rather than the per-layer figure above,
@@ -1235,9 +1255,17 @@ mod ranking_trusts_only_what_it_measured {
         let long = 3_729 * 4_096;
         assert!(hi < PROMPT_RATE_MIN_BYTES && long >= PROMPT_RATE_MIN_BYTES);
 
+        let read = |positions: u32, bytes: usize| Some(PromptRead { positions, bytes });
         let mut s = ModelSpeed::default();
-        s.observe(WorkKind::Prefill, 60_000, 2, long, Some(long_tokens), false);
-        s.observe(WorkKind::Prefill, 700, 2, hi, Some(hi_tokens), true);
+        s.observe(
+            WorkKind::Prefill,
+            60_000,
+            2,
+            long,
+            read(long_tokens, long),
+            false,
+        );
+        s.observe(WorkKind::Prefill, 700, 2, hi, read(hi_tokens, hi), true);
         assert_eq!(
             s.prompt_ms_per_layer_token(),
             None,
@@ -1253,14 +1281,21 @@ mod ranking_trusts_only_what_it_measured {
         assert_eq!(s.prompt_ms_per_layer_token(), None);
 
         // A warm prompt of its own size measures the rate, per layer and token.
-        s.observe(WorkKind::Prefill, 1_124, 2, long, Some(long_tokens), true);
+        s.observe(
+            WorkKind::Prefill,
+            1_124,
+            2,
+            long,
+            read(long_tokens, long),
+            true,
+        );
         let rate = s.prompt_ms_per_layer_token().expect("measured");
         assert!((rate - 1_124.0 / (2.0 * long_tokens as f32)).abs() < 1e-6);
         // A short one after it is the visit again: it does not raise the price…
-        s.observe(WorkKind::Prefill, 700, 2, hi, Some(hi_tokens), true);
+        s.observe(WorkKind::Prefill, 700, 2, hi, read(hi_tokens, hi), true);
         assert_eq!(s.prompt_ms_per_layer_token(), Some(rate));
         // …but one that ran faster still per token may lower it.
-        s.observe(WorkKind::Prefill, 1, 2, hi, Some(hi_tokens), true);
+        s.observe(WorkKind::Prefill, 1, 2, hi, read(hi_tokens, hi), true);
         assert!(s.prompt_ms_per_layer_token().unwrap() < rate);
     }
 
@@ -1273,6 +1308,7 @@ mod ranking_trusts_only_what_it_measured {
     #[test]
     fn a_prompt_is_priced_at_the_time_it_took_whatever_its_width() {
         let tokens: u32 = 48;
+        let read = |positions: u32, bytes: usize| Some(PromptRead { positions, bytes });
         for (width, bytes_a_value) in [
             (8_192usize, 34.0 / 32.0),
             (4_096, 34.0 / 32.0),
@@ -1281,13 +1317,54 @@ mod ranking_trusts_only_what_it_measured {
             let bytes = 20 + (tokens as f64 * width as f64 * bytes_a_value) as usize;
             let bytes = bytes.max(PROMPT_RATE_MIN_BYTES);
             let mut s = ModelSpeed::default();
-            s.observe(WorkKind::Prefill, 2_400, 4, bytes, Some(tokens), true);
+            s.observe(
+                WorkKind::Prefill,
+                2_400,
+                4,
+                bytes,
+                read(tokens, bytes),
+                true,
+            );
             let priced = s.prompt_ms_per_layer_token().expect("measured") * 4.0 * tokens as f32;
             assert!(
                 (priced - 2_400.0).abs() < 1e-2,
                 "width {width}: the prompt it timed priced {priced} ms against 2,400"
             );
         }
+    }
+
+    /// **The end of the model is priced from the prompt it READ** (rig,
+    /// 2026-11-12): a last segment answers with a token — no bytes — and judged
+    /// by its answer the far computer of a two-machine TinyLlama split was
+    /// never priced (`observed_prompt_ms_per_layer_token=None` after three warm
+    /// asks, a 909,588-byte prompt read in 7.6 s each time). And a forward is
+    /// big enough to measure a rate by what it READ, never by what it sent on.
+    #[test]
+    fn the_end_of_the_model_is_priced_from_the_prompt_it_read() {
+        let mut s = ModelSpeed::default();
+        let read_it = Some(PromptRead {
+            positions: 423,
+            bytes: 920_468,
+        });
+        s.observe(WorkKind::Prefill, 7_592, 10, 0, read_it, true);
+        let rate = s
+            .prompt_ms_per_layer_token()
+            .expect("priced from what it read");
+        assert!((rate - 7_592.0 / (10.0 * 423.0)).abs() < 1e-4);
+        assert_eq!(
+            s.prefill_ms_per_layer_byte(),
+            None,
+            "an answer of no bytes still feeds no per-byte figure"
+        );
+
+        // Ten tokens read is the visit, however much the segment handed on.
+        let mut t = ModelSpeed::default();
+        let ten = Some(PromptRead {
+            positions: 10,
+            bytes: 21_780,
+        });
+        t.observe(WorkKind::Prefill, 700, 10, 1_000_000, ten, true);
+        assert_eq!(t.prompt_ms_per_layer_token(), None);
     }
 
     /// The reliability figure must start optimistic, fall with losses, and

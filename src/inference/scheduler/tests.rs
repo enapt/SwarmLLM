@@ -3148,12 +3148,13 @@ fn a_peer_that_is_slow_at_reading_the_prompt_is_not_handed_a_long_one() {
     let mut slow_prefill = willing_peer(0xBB, LAYERS);
     slow_prefill.gpu_vram_available_mb = None; // processor-only, like the M4
     slow_prefill.est_tokens_per_sec = 14.82; // flattering decode figure
-                                             // Measured: this peer is dreadful at reading a prompt.
-    slow_prefill.observed_prompt_ms_per_layer_token = Some(1.0);
+                                             // Measured: this peer is dreadful at reading a prompt —
+                                             // ms a layer and token: 12,000 tokens over 32 layers, 13 min.
+    slow_prefill.observed_prompt_ms_per_layer_token = Some(2.0);
 
     let mut local = local_full_coverage();
     local.est_tokens_per_sec = 6.46;
-    local.observed_prompt_ms_per_layer_token = Some(0.000_01);
+    local.observed_prompt_ms_per_layer_token = Some(0.16); // the same prompt in a minute
 
     let cands = vec![local, slow_prefill];
     assert!(
@@ -3184,11 +3185,11 @@ fn a_short_prompt_still_goes_to_the_faster_processor() {
     let mut peer = willing_peer(0xBB, LAYERS);
     peer.gpu_vram_available_mb = None;
     peer.est_tokens_per_sec = 14.82;
-    peer.observed_prompt_ms_per_layer_token = Some(0.000_01);
+    peer.observed_prompt_ms_per_layer_token = Some(0.16);
 
     let mut local = local_full_coverage();
     local.est_tokens_per_sec = 6.46;
-    local.observed_prompt_ms_per_layer_token = Some(0.000_01);
+    local.observed_prompt_ms_per_layer_token = Some(0.16);
 
     let cands = vec![local, peer];
     assert_eq!(
@@ -3246,11 +3247,11 @@ fn an_unmeasured_peer_is_still_tried() {
 #[test]
 fn keeping_the_ends_local_prices_as_a_real_cost_on_a_long_prompt() {
     let mut peer = willing_peer(0xBB, LAYERS);
-    peer.observed_prompt_ms_per_layer_token = Some(0.000_001); // a fast card
+    peer.observed_prompt_ms_per_layer_token = Some(0.016); // a fast card, ms a layer and token
 
     let mut local = local_full_coverage();
     // A processor that is dreadful at reading a prompt — the reported shape.
-    local.observed_prompt_ms_per_layer_token = Some(0.01);
+    local.observed_prompt_ms_per_layer_token = Some(1.5);
 
     let cands = vec![local, peer.clone()];
     let extra = super::privacy_cost_ms(&peer, &cands, &local_id(), LAYERS, Some(10_000))
@@ -3267,10 +3268,10 @@ fn keeping_the_ends_local_prices_as_a_real_cost_on_a_long_prompt() {
 #[test]
 fn privacy_is_not_reported_as_expensive_when_it_is_cheap() {
     let mut peer = willing_peer(0xBB, LAYERS);
-    peer.observed_prompt_ms_per_layer_token = Some(0.000_001);
+    peer.observed_prompt_ms_per_layer_token = Some(0.016);
 
     let mut local = local_full_coverage();
-    local.observed_prompt_ms_per_layer_token = Some(0.000_001);
+    local.observed_prompt_ms_per_layer_token = Some(0.016);
 
     let cands = vec![local, peer.clone()];
     let extra = super::privacy_cost_ms(&peer, &cands, &local_id(), LAYERS, Some(10_000))
@@ -8797,7 +8798,10 @@ fn a_measured_prompt_is_priced_at_the_time_it_took() {
             2_400,
             32,
             q8_bytes,
-            Some(tokens),
+            Some(crate::daemon::state::PromptRead {
+                positions: tokens,
+                bytes: q8_bytes,
+            }),
         );
     }
     let scheduler =
@@ -8882,6 +8886,16 @@ fn a_prompt_crossing_to_a_segment_is_charged_the_bytes_that_cross() {
     assert!(
         (transfer - crossing_ms).abs() < crossing_ms * 0.01,
         "{tokens} tokens of 8,704 bytes over {bps} B/s take {crossing_ms} ms, priced {transfer}"
+    );
+    // With compression off this node writes f32 — four bytes a value cross —
+    // and the switch is read live (v0.3.282 review).
+    let mut uncompressed = (**state.cfg()).clone();
+    uncompressed.inference.activation_compression = false;
+    state.apply_live_config(uncompressed);
+    assert_eq!(
+        super::activation_bytes_per_token_for(&state, &model),
+        8_192.0 * 4.0,
+        "with compression off a token crosses as f32"
     );
 }
 

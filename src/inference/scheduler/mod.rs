@@ -436,10 +436,13 @@ pub(crate) fn layer_work_for(state: &SharedState, model_id: &ModelId) -> f32 {
 }
 
 /// What one token of a prompt weighs crossing to a segment, in bytes: the
-/// model's own width in the wire's Q8_0 (34 bytes a 32 values), every node's
-/// default `inference.activation_compression` — the unit of the transfer term
-/// (`parallax::vertex_cost`), which divides it by a goodput measured in the
-/// bytes that CROSSED. The nominal 4,096 wide in f32
+/// model's own width in the encoding this node writes hidden states in — Q8_0
+/// (34 bytes a 32 values) under `inference.activation_compression`, every
+/// node's default, read LIVE; f32 (4 a value) with it off, or a prompt was
+/// charged a quarter of the bytes that cross (v0.3.282 review). A peer's own
+/// setting is not known here; its default is assumed. The unit of the transfer
+/// term (`parallax::vertex_cost`), which divides it by a goodput measured in
+/// the bytes that CROSSED. The nominal 4,096 wide in f32
 /// (`parallax::ACTIVATION_BYTES_PER_TOKEN`) when this node holds no header, a
 /// width no model has, or under `SWARMLLM_TRANSFER_BYTES=nominal` (the A/B
 /// switch, read once). Priced at the nominal width, a 70B's prompt (8,192
@@ -455,11 +458,16 @@ pub(crate) fn activation_bytes_per_token_for(state: &SharedState, model_id: &Mod
     {
         return nominal;
     }
+    let bytes_a_value = if state.cfg().inference.activation_compression {
+        34.0 / 32.0
+    } else {
+        4.0
+    };
     state
         .gguf_meta_for(model_id)
         .map(|meta| meta.embedding_length)
         .filter(|&width| (64..=65_536).contains(&width))
-        .map_or(nominal, |width| width as f32 * 34.0 / 32.0)
+        .map_or(nominal, |width| width as f32 * bytes_a_value)
 }
 
 /// A layer that reads `active_bytes_per_layer` per token, in reference layers:
