@@ -6066,6 +6066,37 @@ switched off). Also from the review: a card whose target reads N/A had
 `nvidia-smi -q` asked every round; the answer, N/A included, is now kept
 (`HostHeatWatch::card_target_c`).
 
+**Unknown is never hot — for long, either (the pre-release review, 2026-11-12).**
+An unknown reading kept the clock running and the warm flag set, so one reading
+at the target followed by a sensor that stopped answering held at 120 s,
+stopped running work at 240 s and never resumed — a Linux driver updated under
+a running system answers every `nvidia-smi` with an error at once, which is not
+a STUCK call, so the driver watch never took over. Now a hold needs a reading at
+the line NOW (`card_at_line` / `processor_at_line`), and a sensor with no known
+reading for `READING_GONE_AFTER` (5 min) is forgotten — clock and warm flag —
+so the hold it started ends after the hold-off. The running-work stop latched
+on the hold's AGE, so a hold whose card had cooled, still in its 60 s hold-off at
+120 s, stopped every peer's reply; it now latches only while a cause is present.
+And the sensors themselves: only `nvidia-smi` was bounded, and the refresh held
+its one-at-a-time flag while it waited for sysinfo's WMI or PDH, so a call that
+never returned froze the guard in whatever state it was in — a stuck driver
+unseen, a held computer held. `read_sensors_within` waits `SENSOR_READ_LIMIT`
+(40 s: `nvidia-smi`'s three bounded calls at 10 s each, with room) and reads
+unknown past it; while that read is still out, the next round asks no sensor
+(`sensors_out`, one stuck reader at a time, as `BoundedCommand` keeps one stuck
+copy) and reads only the driver watch, which asks nothing. Prior art: kubelet's
+eviction manager (`pkg/kubelet/eviction/helpers.go`): a threshold whose signal
+has no observation is not met (`thresholdsMet`), a soft threshold evicts only
+once MET for its grace period (`thresholdsMetGracePeriod`), a pressure condition
+lasts only while observed within the transition period
+(`nodeConditionsObservedSince`, kubelet's default 5 min). Tests
+`a_hot_reading_followed_by_silence_holds_nothing_back`,
+`a_hold_ends_once_its_sensor_has_been_silent_five_minutes`,
+`running_work_is_not_stopped_on_a_computer_that_has_cooled`,
+`a_sensor_that_does_not_return_is_unknown_and_never_asked_twice` — each red
+with its fix off. Left (FUTURE_WORK #440): a desktop card held at its target by
+its fan curve cycles; a paced step's pause is inside the timings peers keep.
+
 **Where it applies — the metered rule's choke points.** The hold joins the
 metered hold in ONE answer, `SharedState::peer_work_hold_now` → `PeerWorkHold`,
 which every dispatch admission takes as a REQUIRED argument, the

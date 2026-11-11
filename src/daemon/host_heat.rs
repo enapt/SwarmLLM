@@ -95,6 +95,18 @@ const COOL_FOR: Duration = Duration::from_secs(60);
 /// driver that stopped answering or the card's own protection stops it at
 /// once — the hard thresholds.
 pub(crate) const RUNNING_WORK_STOPS_AFTER: Duration = Duration::from_secs(120);
+/// A sensor that has given no reading this long is forgotten — its clock and
+/// its warm flag — so a hold it started can end: unknown is never hot. A
+/// driver that stopped answering is the driver watch's, which holds back on its
+/// own. Kubernetes keeps a node's pressure condition only while it was observed
+/// within the pressure-transition period (`nodeConditionsObservedSince`,
+/// kubelet's default 5 min).
+const READING_GONE_AFTER: Duration = Duration::from_secs(300);
+/// How long one reading of every sensor may take. `nvidia-smi` is bounded
+/// (`vram::nvidia_smi`: 10 s a call, three calls at most); the processor's
+/// sensors are not (sysinfo's WMI, PDH), and one that never returned froze the
+/// guard in whatever state it was in.
+const SENSOR_READ_LIMIT: Duration = Duration::from_secs(40);
 
 const _: () = assert!(PROCESSOR_COOL_C < PROCESSOR_HOT_C);
 const _: () = assert!(CARD_AT_TARGET_WITHIN_C < CARD_COOL_UNDER_TARGET_C);
@@ -203,6 +215,9 @@ pub(crate) struct HeatTracker {
     /// cooling the card): a hold does not end while either is.
     card_warm: bool,
     processor_warm: bool,
+    /// The last KNOWN reading of each sensor ([`READING_GONE_AFTER`]).
+    card_read_at: Option<Instant>,
+    processor_read_at: Option<Instant>,
     cool_since: Option<Instant>,
     holding: Option<HeatCause>,
     /// When the current hold began, whatever its cause since.
@@ -223,16 +238,34 @@ impl HeatTracker {
         // soft threshold's first-observed time only while the threshold is
         // met (`thresholdsFirstObservedAt`, pkg/kubelet/eviction/helpers.go),
         // and the gate kit's sustained stops do the same. The cool line only
-        // ENDS a hold. An unknown reading changes nothing: a blocked
-        // `nvidia-smi` is the driver watch's to judge, not a sign of cooling.
+        // ENDS a hold. An unknown reading neither starts nor resets the clock
+        // (a blocked `nvidia-smi` is the driver watch's to judge, not a sign of
+        // cooling) — but a hold needs a reading at the line NOW, and a sensor
+        // silent for `READING_GONE_AFTER` is forgotten: one hot reading
+        // followed by a sensor that stopped answering (a driver updated under
+        // a running system, a broken WMI) held for good, and stopped the work
+        // running for others two minutes later (the pre-release review,
+        // 2026-11-12). Kubernetes the same way: a threshold whose signal has
+        // no observation is not met (`thresholdsMet`, "no observation found
+        // for eviction signal").
+        let held_for = |since: Option<Instant>, d: Duration| {
+            since.is_some_and(|s| now.saturating_duration_since(s) >= d)
+        };
         match r.card {
             Some(c) if c.at_target() || c.hardware_protecting => {
                 self.card_hot_since.get_or_insert(now);
                 self.card_warm = true;
+                self.card_read_at = Some(now);
             }
             Some(c) => {
                 self.card_hot_since = None;
                 self.card_warm = !c.cool();
+                self.card_read_at = Some(now);
+            }
+            None if held_for(self.card_read_at, READING_GONE_AFTER) => {
+                self.card_hot_since = None;
+                self.card_warm = false;
+                self.card_read_at = None;
             }
             None => {}
         }
@@ -240,23 +273,31 @@ impl HeatTracker {
             Some(t) if t >= PROCESSOR_HOT_C => {
                 self.processor_hot_since.get_or_insert(now);
                 self.processor_warm = true;
+                self.processor_read_at = Some(now);
             }
             Some(t) => {
                 self.processor_hot_since = None;
                 self.processor_warm = t > PROCESSOR_COOL_C;
+                self.processor_read_at = Some(now);
+            }
+            None if held_for(self.processor_read_at, READING_GONE_AFTER) => {
+                self.processor_hot_since = None;
+                self.processor_warm = false;
+                self.processor_read_at = None;
             }
             None => {}
         }
-        let held_for = |since: Option<Instant>, d: Duration| {
-            since.is_some_and(|s| now.saturating_duration_since(s) >= d)
-        };
+        let card_at_line = r
+            .card
+            .is_some_and(|c| c.at_target() || c.hardware_protecting);
+        let processor_at_line = r.processor_c.is_some_and(|t| t >= PROCESSOR_HOT_C);
         let cause = if r.driver_not_answering {
             Some(HeatCause::DriverNotAnswering)
         } else if r.card.is_some_and(|c| c.hardware_protecting) {
             Some(HeatCause::CardProtecting)
-        } else if held_for(self.card_hot_since, CARD_HOT_FOR) {
+        } else if card_at_line && held_for(self.card_hot_since, CARD_HOT_FOR) {
             Some(HeatCause::Card)
-        } else if held_for(self.processor_hot_since, PROCESSOR_HOT_FOR) {
+        } else if processor_at_line && held_for(self.processor_hot_since, PROCESSOR_HOT_FOR) {
             Some(HeatCause::Processor)
         } else {
             None
@@ -278,10 +319,16 @@ impl HeatTracker {
             }
             (None, None) => {}
         }
+        // The grace ends on a computer that is STILL hot: a hold in its cool
+        // hold-off, or one kept only by a warm reading under the hot line, had
+        // its running work stopped 120 s in although it had cooled (the
+        // pre-release review, 2026-11-12). Kubernetes' soft threshold evicts
+        // only once it has been MET for its grace period
+        // (`thresholdsMetGracePeriod`).
         self.stops_running = self.holding.is_some()
             && (self.stops_running
                 || cause.is_some_and(HeatCause::stops_running_at_once)
-                || held_for(self.holding_since, RUNNING_WORK_STOPS_AFTER));
+                || (cause.is_some() && held_for(self.holding_since, RUNNING_WORK_STOPS_AFTER)));
         self.holding
     }
 
@@ -309,6 +356,10 @@ pub struct HostHeatWatch {
     card_target_c: parking_lot::Mutex<Option<Option<f32>>>,
     /// A refresh is running: the health tick never starts a second.
     refreshing: AtomicBool,
+    /// A reading of the sensors is still out on a blocking thread, past
+    /// [`SENSOR_READ_LIMIT`] or not: the next round never starts a second
+    /// (one stuck reader at a time, as `vram::nvidia_smi` keeps one stuck copy).
+    sensors_out: AtomicBool,
 }
 
 impl HostHeatWatch {
@@ -318,7 +369,8 @@ impl HostHeatWatch {
     }
 }
 
-/// Clears [`HostHeatWatch::refreshing`] however the refresh ends.
+/// Clears its flag ([`HostHeatWatch::refreshing`], `sensors_out`) however
+/// what set it ends — a panic included.
 struct Refreshing<'a>(&'a AtomicBool);
 
 impl Drop for Refreshing<'_> {
@@ -427,10 +479,11 @@ impl SharedState {
             .as_ref()
             .is_some_and(|g| g.backend.eq_ignore_ascii_case("cuda"));
         let known_target = *watch.card_target_c.lock();
-        let (reading, target) =
-            tokio::task::spawn_blocking(move || read_heat(reads_card, known_target))
-                .await
-                .unwrap_or_default();
+        let (reading, target) = self
+            .read_sensors_within(SENSOR_READ_LIMIT, move || {
+                read_heat(reads_card, known_target)
+            })
+            .await;
         if target.is_some() {
             *watch.card_target_c.lock() = target;
         }
@@ -478,6 +531,54 @@ impl SharedState {
                 "heat guard is off (SWARMLLM_HEAT_GUARD=0): it would have stopped the work \
                  running for other computers"
             );
+        }
+    }
+
+    /// `read` ([`read_heat`]) on a blocking thread, waited for at most `limit`
+    /// ([`SENSOR_READ_LIMIT`]). A reading that took longer, or one still out
+    /// from an earlier round, is unknown — but for the driver watch, which asks
+    /// nothing and is read every round: a sensor call that never returned had
+    /// left the guard frozen, a stuck driver included (the pre-release review,
+    /// 2026-11-12).
+    async fn read_sensors_within<F>(
+        self: &std::sync::Arc<Self>,
+        limit: Duration,
+        read: F,
+    ) -> (HeatReading, Option<Option<f32>>)
+    where
+        F: FnOnce() -> (HeatReading, Option<Option<f32>>) + Send + 'static,
+    {
+        let unknown = || {
+            let reading = HeatReading {
+                driver_not_answering: driver_not_answering(),
+                ..Default::default()
+            };
+            (reading, None)
+        };
+        if self
+            .metrics
+            .host_heat
+            .sensors_out
+            .swap(true, Ordering::AcqRel)
+        {
+            return unknown();
+        }
+        let state = std::sync::Arc::clone(self);
+        let reading = tokio::task::spawn_blocking(move || {
+            let _back = Refreshing(&state.metrics.host_heat.sensors_out);
+            read()
+        });
+        match tokio::time::timeout(limit, reading).await {
+            Ok(Ok(answer)) => answer,
+            Ok(Err(_)) => unknown(),
+            Err(_) => {
+                tracing::warn!(
+                    limit_s = limit.as_secs_f32(),
+                    "reading this computer's temperature has not returned; it counts as unknown \
+                     until it does"
+                );
+                unknown()
+            }
         }
     }
 
@@ -899,6 +1000,140 @@ mod tests {
             Some(HeatCause::Card),
             "and did not reset the card's clock either"
         );
+    }
+
+    /// One hot reading, then a sensor that stopped answering (a driver
+    /// updated under a running system answers every `nvidia-smi` with an
+    /// error at once, never a stuck call): nothing is known to be hot, so
+    /// nothing is held back and nothing running is stopped. It held for good,
+    /// and stopped the work for others at 240 s (the pre-release review,
+    /// 2026-11-12).
+    #[test]
+    fn a_hot_reading_followed_by_silence_holds_nothing_back() {
+        let t0 = Instant::now();
+        let mut t = HeatTracker::default();
+        t.observe(&card(88.0, true), t0);
+        for s in (30..=900).step_by(30) {
+            assert_eq!(
+                t.observe(&HeatReading::default(), t0 + secs(s)),
+                None,
+                "{s} s"
+            );
+            assert!(!t.stops_running(), "{s} s");
+        }
+    }
+
+    /// A hold whose sensor then says nothing is kept while what was last known
+    /// stands — new work stays refused — but stops nothing running (nothing
+    /// is known hot), and ends once the sensor has been silent five minutes.
+    #[test]
+    fn a_hold_ends_once_its_sensor_has_been_silent_five_minutes() {
+        let t0 = Instant::now();
+        let mut t = HeatTracker::default();
+        let hot = card(88.0, true);
+        t.observe(&hot, t0);
+        assert_eq!(t.observe(&hot, t0 + secs(120)), Some(HeatCause::Card));
+        let silent = HeatReading::default();
+        for s in (150..=390).step_by(30) {
+            assert_eq!(
+                t.observe(&silent, t0 + secs(s)),
+                Some(HeatCause::Card),
+                "{s} s: the last reading known stands"
+            );
+            assert!(!t.stops_running(), "{s} s: nothing is known hot");
+        }
+        assert!(
+            t.observe(&silent, t0 + secs(420)).is_some(),
+            "silent five minutes: forgotten, and the hold-off starts"
+        );
+        assert_eq!(t.observe(&silent, t0 + secs(480)), None);
+    }
+
+    /// The grace ends on a computer that is still hot: a hold whose card has
+    /// cooled, inside its hold-off at 120 s into the hold, lets what runs
+    /// finish. It was stopped there (the pre-release review, 2026-11-12).
+    #[test]
+    fn running_work_is_not_stopped_on_a_computer_that_has_cooled() {
+        let t0 = Instant::now();
+        let mut t = HeatTracker::default();
+        let hot = card(88.0, true);
+        t.observe(&hot, t0);
+        assert_eq!(t.observe(&hot, t0 + secs(120)), Some(HeatCause::Card));
+        t.observe(&hot, t0 + secs(180));
+        t.observe(&card(79.0, false), t0 + secs(210));
+        assert!(
+            t.observe(&card(79.0, false), t0 + secs(240)).is_some(),
+            "the hold-off still runs"
+        );
+        assert!(
+            !t.stops_running(),
+            "120 s into a hold whose card has cooled"
+        );
+        assert_eq!(t.observe(&card(79.0, false), t0 + secs(270)), None);
+        assert!(!t.stops_running());
+    }
+
+    fn test_state() -> std::sync::Arc<SharedState> {
+        use crate::identity::Identity;
+        use crate::inference::executor::ModelExecutor;
+        use crate::storage::db::Database;
+
+        let temp = tempfile::tempdir().unwrap();
+        let db = Database::open(temp.path()).unwrap();
+        let executor = std::sync::Arc::new(tokio::sync::Mutex::new(ModelExecutor::new()));
+        let (state, _, _) = SharedState::new(
+            crate::config::Config::default(),
+            Identity::generate(),
+            db,
+            executor,
+            None,
+        );
+        state
+    }
+
+    /// A sensor call that does not return in time is unknown, and while it is
+    /// still out the next round asks nothing of the sensors — one stuck reader
+    /// at a time — until it returns. A call that never returned had frozen the
+    /// guard (the pre-release review, 2026-11-12).
+    #[tokio::test]
+    async fn a_sensor_that_does_not_return_is_unknown_and_never_asked_twice() {
+        use std::sync::atomic::AtomicUsize;
+        use std::sync::Arc;
+        let state = test_state();
+        let asked = Arc::new(AtomicUsize::new(0));
+        let reader = |asked: Arc<AtomicUsize>, takes: Duration| {
+            move || {
+                asked.fetch_add(1, Ordering::SeqCst);
+                std::thread::sleep(takes);
+                (card(95.0, true), None)
+            }
+        };
+        let (r, _) = state
+            .read_sensors_within(
+                Duration::from_millis(50),
+                reader(asked.clone(), Duration::from_millis(800)),
+            )
+            .await;
+        assert_eq!(r.card, None, "past its limit: unknown");
+        let (r, _) = state
+            .read_sensors_within(secs(5), reader(asked.clone(), Duration::ZERO))
+            .await;
+        assert_eq!(r.card, None, "the first is still out: nothing is asked");
+        assert_eq!(asked.load(Ordering::SeqCst), 1);
+        let deadline = Instant::now() + secs(10);
+        while state.metrics.host_heat.sensors_out.load(Ordering::Acquire) {
+            assert!(Instant::now() < deadline, "the slow reading never returned");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let (r, _) = state
+            .read_sensors_within(secs(5), reader(asked.clone(), Duration::ZERO))
+            .await;
+        assert_eq!(
+            r.card.map(|c| c.temp_c),
+            Some(95.0),
+            "asked again once back"
+        );
+        assert_eq!(asked.load(Ordering::SeqCst), 2);
     }
 
     #[test]

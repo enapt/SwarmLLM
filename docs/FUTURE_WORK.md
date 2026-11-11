@@ -473,6 +473,35 @@ Microsoft WDDM/TDR docs, Apple developer docs; issue trackers of Ollama, LM Stud
   780 MHz) and then a stuck driver, held at once; a card a degree under its line with full clocks has
   cooling left. Pinned by `a_card_just_under_its_target_restarts_the_clock`.
 
+**Done (2026-11-12, the pre-release review of stages A-B):** three ways the guard could hold a computer that
+was not known to be hot, or never see one that was, fixed in `daemon::host_heat`:
+- *One hot reading, then silence, held for good.* An unknown reading kept the clock running, so a card at its
+  target once and then a sensor that stopped answering (a driver updated under a running system answers
+  `nvidia-smi` with an error at once, never a stuck call) held at 120 s, stopped running work at 240 s and,
+  its warm flag never cleared, never resumed. A hold now needs a reading at the line NOW, and a sensor silent
+  `READING_GONE_AFTER` (5 min) is forgotten. Kubernetes: a threshold with no observation is not met
+  (`thresholdsMet`), a pressure condition lasts only while observed within the transition period
+  (`nodeConditionsObservedSince`, 5 min default). Tests `a_hot_reading_followed_by_silence_holds_nothing_back`,
+  `a_hold_ends_once_its_sensor_has_been_silent_five_minutes`.
+- *Running work stopped on a computer that had cooled.* The running-work stop latched on the hold's AGE, so a
+  hold in its cool hold-off at 120 s stopped every peer's reply. It now latches only while a cause is present
+  (Kubernetes' soft threshold must be MET for its grace, `thresholdsMetGracePeriod`). Test
+  `running_work_is_not_stopped_on_a_computer_that_has_cooled`.
+- *A sensor call that never returned froze the guard.* Only `nvidia-smi` was bounded; sysinfo's WMI and PDH
+  are not, and the refresh waited for them with its one-at-a-time flag set, so every later round returned at
+  once — a stuck driver included. The read is now waited for `SENSOR_READ_LIMIT` (40 s) and is unknown past
+  it; one read stays out at a time, and the driver watch (which asks nothing) is read every round.
+  Test `a_sensor_that_does_not_return_is_unknown_and_never_asked_twice`.
+- Left from the same review (P2, not built): (a) a DESKTOP card whose fan curve holds it at its target under
+  sustained load (reference coolers, ~83 °C) reads "at target" and will cycle — hold, stop, cool, resume —
+  rather than serve flat out; that is the card at its limit, which the guard is for, but it is calibrated on
+  one laptop card only — check a desktop peer's `heat:` diagnostics line before changing it. `parse_card_heat`
+  takes the hottest card and the lowest target, so a second card this node does not use counts too. (b) A
+  paced step's pause is inside its forward, so the peer's timing of this node and this node's own speed
+  figures record the slower steps while it is held; the EMAs recover after it cools, and a paced step (at most
+  2× — the pause equals the step, capped at 5 s) stays inside a segment's deadline, 3× the predicted step and
+  at least 30 s (`pipeline::local`, `SEGMENT_TIMEOUT_SAFETY_FACTOR`).
+
 **Done (2026-11-11, step 3 — work already running for others stops too):**
 - Prior art: Kubernetes node-pressure eviction (a soft threshold with a grace period, a hard one acted on
   at once, the pressure condition held for a transition period after recovery) and BOINC's GPU suspend
