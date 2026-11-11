@@ -2925,8 +2925,28 @@ controllers price steps by (a check against a plain step), so they choose as the
 worker's processor time read from `/proc/<pid>/stat` (2026-11-11): cool 17.9-18.5 tok/s at 4.07 cores;
 hot 8.8-8.9 tok/s at 2.03-2.04 cores; cool again 17.0-18.3 at 4.01-4.09. A reply cost the same
 35-37 processor seconds in every arm — the work is the same, spread over twice the time, so the
-average draw halves — and its text was identical. Not measured on a card (a stress test, and the boot
-it was built on forbade card work); there the pause follows a synchronize, so it is the card's time.
+average draw halves — and its text was identical.
+
+**On a card, the pause is slept in pieces of 250 ms (`pace::PAUSE_PIECE`), never after every step**
+(#440 step 4 (a), 2026-11-11). A throwaway node, Llama-3.1-8B Q4_K_M whole on this laptop's RTX 3070
+Laptop (power-capped ~95 W), the same greedy 256-token reply three times an arm, `nvidia-smi` every
+500 ms, arms alternating in ONE binary (`SWARMLLM_PACE_PAUSE_FROM_MS`), safety kit on, 0 driver
+events. First run: cool 94-95 W at 60 tok/s, 95% busy, 1150 MHz; paused after every step (each decode
+step ~16 ms, its pause as long) 82 W at 30-32 tok/s, 47% busy — **at 1600 MHz**. Half the work, 13%
+less power: the card's power limit is an AVERAGE, and gaps of 16 ms let it boost the clock instead of
+resting (NVIDIA's TensorRT measurement guide: "the gaps cause the GPU to consume less power on
+average, so the clock is throttled less"). Second run, ABBA over the piece: per step 82.5 / 82.9 W,
+250 ms 67.5 / 67.8 W, 1000 ms 66.2 / 66.7 W, cool 94.7 / 94.6 W; every arm hot at 30-35 tok/s, the
+hottest reading 76 °C per step against 72 °C in pieces (arms of ~25 s, so not settled). 250 ms keeps
+almost all of 1000 ms's saving with a quarter of its gaps in the stream. The measured replies were
+identical in every arm (each node's FIRST reply differed in cool arms too — its n-gram checks' batch
+shape, gotcha index "a speed A/B on ONE greedy prompt can compare two REPLIES"). Prior art for the
+piece: BOINC's throttle runs and suspends work in seconds (5 s of every 10 at 50%). Not taken: 1 s —
+no saving over 250 ms here, and the stream would arrive in second-long bursts. **Time the thread
+rested since its last step pays what it owes** (`pace::after_rest`), so a piece owed at the end of
+one reply never lands on the next one's first word. A pause in pieces lands in ONE timed step in
+~15; the speculation controllers read it as one slow check and hold it back (`CheckCost::record`),
+and the plain step is a median. A/B `SWARMLLM_PACE_PAUSE_FROM_MS=2` (after every step).
 
 **Not paced.** A worker's idle-time work (graph recording, refits), and the old single-model setting
 (`inference.model_path`, llama.cpp in the daemon).

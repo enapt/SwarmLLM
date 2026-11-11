@@ -517,8 +517,16 @@ Microsoft WDDM/TDR docs, Apple developer docs; issue trackers of Ollama, LM Stud
   identical in every arm; the worker logged the pause starting and ending once each.
 - Tests fail with each part switched off (7 parts, 7 tests).
 - Not paced: a worker's idle-time work (graph recording, refits), the old single-model setting
-  (`inference.model_path`). Not measured on a card: the same pause follows a synchronize there, and a
-  card run would be the stress test this boot rules out (no card work after the 11-11 freeze).
+  (`inference.model_path`).
+- **Measured on the card (step 4 (a), 2026-11-11, a boot with no driver events) — and changed by it**:
+  Llama-3.1-8B whole on the RTX 3070 Laptop, cool 94.7 W at 60 tok/s; paused after every ~16 ms step
+  82.5 W at 30-32 tok/s — the card was busy half the time but boosted its clock 1150 → 1610 MHz into the
+  gaps (its power limit is an average; NVIDIA's TensorRT measurement guide says the same of gaps between
+  inferences). The pause is now slept in pieces of 250 ms (`pace::PAUSE_PIECE`): 67.5 W at the same half
+  speed (1000 ms: 66.5 W), replies identical, ABBA in one binary. Time rested between steps pays what is
+  owed (`pace::after_rest`). A/B `SWARMLLM_PACE_PAUSE_FROM_MS`. Evidence: `docs/invariants/memory.md`
+  § the pace. Not measured: the processor's package power under the same pieces (the 2026-11-11 processor
+  rig read cores busy, not watts).
 - **A guess head's guesses ahead do not run at all while paced** (2026-11-11, `pace::work_ahead_may_run`,
   asked by `model_worker`'s `guess_ahead`): that work only fills the time a far check is out, where the
   device would otherwise rest, and no reply waits for it. Test `work_ahead_waits_while_the_computer_is_paced`.
