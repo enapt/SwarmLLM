@@ -103,6 +103,59 @@ learn the block layout before a second stream can share it. First step: the
 authors' own reference against llama.cpp on ONE computer with a reasoning model
 of ~8B or more, then the two-stream layout on a split this node leads.
 
+**Researched 2026-11-11, before any code** (the paper, its code `eqimp/hogwild_llm` read
+whole, later work, this repo's split cache). What it changed:
+
+- **The mechanism, exactly.** The layout the paper uses is "combined": each worker sees
+  [common history][the others' current paragraphs][its own current paragraph]. A paragraph
+  ends at a blank line after a sentence, outside code and maths (`formatting.py:64`), and
+  then joins the common history, its keys rotated once to their new place. The fast
+  implementation keeps every key at its block-local position and rotates each worker's
+  QUERY once per block, in one fused kernel a layer ("like paged attention, except that
+  each page uses a differently rotated version of the query", App. B). The reference
+  implementation re-rotates every block's keys for every view, every step. Prompts: a
+  collaboration preamble in the user turn, workers opening `**Alice [1]:**` /
+  `**Bob [1]:**`, a "Quick check: am I doing redundant work? (yes/no):" every 1024 tokens.
+  It stops when any worker ends, and a forced-answer prompt reads every worker's text.
+- **The evidence is narrower than §3 assumed.** Everything is maths, code or physics
+  reasoning, scored per SEQUENTIAL PASS with forced early answers. Qwen3-8B on LIMO
+  reaches a given accuracy in about 1.5-1.7× fewer passes (read off Fig. 4). 1.7B fails
+  and 4B partly fails. There is nothing on chat, nothing across a pipeline or a WAN
+  (App. B only says each device would hold its own layers' blocks), and no llama.cpp,
+  vLLM or SGLang implementation (issue searches returned 0).
+- **A recurrent layer has no per-view form.** In the combined layout, another worker's
+  token lands INSIDE every worker's view on every step. One DeltaNet state per sequence
+  cannot absorb that, so the combined layout cannot serve Qwen 3.5/3.6/3.8 (the two most
+  popular models here, `memory/model_popularity_1108.md`). It fits the attention-only
+  families: Qwen3 8-32B and 30B-A3B, the R1 distills, Llama 3.3 70B, and gpt-oss and
+  Gemma 4 once their windows are handled.
+- **The paper's other layout is a tree we already carry.** In the "interleaved" layout,
+  workers see only each other's FINISHED paragraphs. The history is then one trunk, and
+  each worker's current paragraph is a branch at the trunk's end, at the same positions
+  for every worker, so no view needs its own rotation. When a paragraph finishes it joins
+  the trunk, and every other branch moves behind it: its keys are rotated, or its tokens
+  are re-read (about one row a token on average, riding the same passes). The speculative
+  tree already sends rows of one request at `base + depth` with an ancestors-only mask
+  (`draft_tree::RowVisibility`, CPU and card). It lacks branches that LAST across rounds
+  and a recurrent state per branch (trees are refused on recurrent layers today). The
+  paper's ablation (Fig. 10): interleaved is worse at small budgets and catches up at
+  long ones; contiguous is close early and falls behind. Nobody has measured interleaved
+  with re-reading, or any layout on a Q4_K_M file.
+- **Decision: measure before designing further.** Rig (llama.cpp, Qwen3-8B Q4_K_M, a LIMO
+  subset): 1 worker against 2 workers interleaved (rotated, and re-read), scored as
+  accuracy at budgets of sequential passes. The 1-worker curve is first checked against
+  the paper's baseline, a known answer. If interleaved keeps most of the gain, build it
+  on the tree: no new kernel, and hybrids become possible with a state per branch. If it
+  does not, build multi-block attention (prerequisite 4) for the attention-only families.
+
+Prior art: Hogwild! (arXiv 2504.06261, `github.com/eqimp/hogwild_llm`, read) shares one
+cache among workers through per-block query rotation, with 1/2/4 workers at 20.1/36.3/68.9
+tok/s and 49.7-58.1 ms a pass on QwQ-32B-AWQ (L40S). Its relatives are Group Think
+(2505.11107, prompt-only, positions set aside per agent) and AsyncReasoning (2512.10931,
+thinking and answering at once). APR, ParaThinker and Multiverse need training, so they are
+out. We take the layouts, prompts and finisher. We do not take its speed or the 8B quality
+claim unchecked.
+
 **Parallel sections (outline, then expand; SoT 2307.15337, Jupiter INFOCOM'25).**
 Measured here on the live node (`~/swarmllm-ref/spec/parallel_reply.py`,
 llama-3.1-8B, 16 prompts): where the answer is list-shaped (how-to, plans,
