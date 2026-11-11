@@ -675,7 +675,11 @@ fn vertex_cost_as(
         (network, DecodePrice::Prior { range, ahead }.ms_per_layer(c))
     };
     let decode_price = if observation.is_some() {
-        DecodePrice::Measured(per_layer_ms)
+        DecodePrice::Measured {
+            ms: per_layer_ms,
+            range,
+            ahead,
+        }
     } else {
         DecodePrice::Prior { range, ahead }
     };
@@ -815,9 +819,15 @@ fn vertex_cost_as(
 /// range's layers runs on (`NodeCandidate::layers_by_device`).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(super) enum DecodePrice {
-    /// ms per layer, measured (or a neutral stand-in): one figure for every
-    /// layer, whatever device it ran on.
-    Measured(f32),
+    /// `ms` per layer, measured (or a neutral stand-in) over `range`: one
+    /// figure for every layer, whatever device it ran on. The range is kept
+    /// for the PROMPT, which reads at each device's own rate
+    /// ([`prompt_speedup_over`]).
+    Measured {
+        ms: f32,
+        range: (u32, u32),
+        ahead: u32,
+    },
     /// The static prior over `range`, `ahead` layers of the same machine's
     /// run before it ([`layers_ahead_in_run`]).
     Prior { range: (u32, u32), ahead: u32 },
@@ -827,10 +837,54 @@ impl DecodePrice {
     /// ms per layer of one decode pass.
     pub(super) fn ms_per_layer(self, c: &NodeCandidate) -> f32 {
         match self {
-            Self::Measured(ms) => ms,
+            Self::Measured { ms, .. } => ms,
             Self::Prior { range, ahead } => c.prior_ms_per_layer_over(range, ahead),
         }
     }
+
+    /// The range this decode figure prices, and how many layers of the same
+    /// machine's run come before it.
+    fn range_ahead(self) -> ((u32, u32), u32) {
+        match self {
+            Self::Measured { range, ahead, .. } | Self::Prior { range, ahead } => (range, ahead),
+        }
+    }
+}
+
+/// How many times faster `c` reads a prompt over `range` than it writes one
+/// token there, from the device-class priors: each device's share of the
+/// decode time at its own ratio ([`PREFILL_SPEEDUP_GPU`] for the layers on
+/// the card, [`PREFILL_SPEEDUP_CPU`] for those beside it). One device's ratio
+/// where every layer runs on one.
+///
+/// ⚠ **A measured decode figure is a blend of both devices, and so is the
+/// ratio it is divided by** (#430, 2026-11-11). It was divided by the CARD's
+/// 40 whenever the machine had one: Qwen3.8-27B handed whole to a computer
+/// whose card runs 25 of its 64 layers and processor the other 39 (5.7 tok/s)
+/// was measured at 200 ms a token, so its 4,110-token prompt was priced 20.8 s;
+/// it read for ten minutes and the first-token wait ran out (2026-11-08). By
+/// device the same figures give 4.8×, ~170 s — the processor's layers are ~90%
+/// of the decode time and read only 4.5× faster. Prior art: Petals measures a
+/// server's prompt rate on its own (`throughput.py`, `forward_rps` from a
+/// 1,024-token pass, apart from `inference_rps`); a measured prompt rate here
+/// still replaces this (`observed_prefill_ms_per_layer_byte`).
+fn prompt_speedup_over(c: &NodeCandidate, range: (u32, u32), ahead: u32) -> f32 {
+    let first_speedup = if c.has_gpu {
+        PREFILL_SPEEDUP_GPU
+    } else {
+        PREFILL_SPEEDUP_CPU
+    };
+    let (first, beside) = c.layers_by_device(range, ahead);
+    if beside == 0 {
+        return first_speedup;
+    }
+    let card = first as f32 * c.prior_ms_per_layer();
+    let processor = beside as f32 * c.processor_prior_ms_per_layer();
+    let read = card / first_speedup + processor / PREFILL_SPEEDUP_CPU;
+    if !read.is_finite() || read <= 0.0 {
+        return first_speedup;
+    }
+    (card + processor) / read
 }
 
 /// How many layers of the same machine's run come before a segment of a
@@ -869,25 +923,12 @@ pub(super) fn prefill_ms_per_layer(c: &NodeCandidate, tokens: u32, decode: Decod
         // Never measured: derive from whatever prices its decode, using
         // the device-class prior. A decode figure is a per-TOKEN cost, so a
         // prompt of N tokens costs N of them, divided by how much faster this
-        // class of machine reads than writes — per device where the range
-        // runs on two, the processor's layers reading at the processor's rate
-        // (a card reads ~40x faster than it writes, a processor ~4.5x).
+        // machine reads than writes over the range — per device where it runs
+        // on two (`prompt_speedup_over`), whether the decode figure is the
+        // prior or measured: a measured one is the same blend of both.
         None => {
-            let first_speedup = if c.has_gpu {
-                PREFILL_SPEEDUP_GPU
-            } else {
-                PREFILL_SPEEDUP_CPU
-            };
-            match decode {
-                DecodePrice::Measured(ms) => ms * tokens as f32 / first_speedup,
-                DecodePrice::Prior { range, ahead } => {
-                    let (first, beside) = c.layers_by_device(range, ahead);
-                    let width = (first + beside).max(1) as f32;
-                    let per_token = first as f32 * c.prior_ms_per_layer() / first_speedup
-                        + beside as f32 * c.processor_prior_ms_per_layer() / PREFILL_SPEEDUP_CPU;
-                    per_token * tokens as f32 / width
-                }
-            }
+            let (range, ahead) = decode.range_ahead();
+            decode.ms_per_layer(c) * tokens as f32 / prompt_speedup_over(c, range, ahead)
         }
     }
 }
@@ -5298,6 +5339,57 @@ mod tests {
         let expected_prompt =
             1000.0 * (12.0 * at(56.0) / PREFILL_SPEEDUP_GPU + 5.0 * at(6.3) / PREFILL_SPEEDUP_CPU);
         assert!((prompt - expected_prompt).abs() / expected_prompt < 1e-4);
+    }
+
+    /// **A MEASURED decode figure on a card-and-processor machine prices its
+    /// prompt per device too** (#430, 2026-11-11). The field's figures, from
+    /// the plan line of the request that failed (2026-11-08 01:01Z):
+    /// Qwen3.8-27B handed whole to a computer whose card runs 25 of its 64
+    /// layers, processor 5.74 tok/s, measured 3.125 ms a layer (200 ms a
+    /// token). Its 4,110-token prompt was priced 20.8 s — the measured figure
+    /// over the CARD's 40 — and took more than the ten minutes it was given.
+    /// Per device it is ~170 s. The control: the same machine with every
+    /// layer on its card keeps the card's ratio.
+    #[test]
+    fn a_measured_figure_prices_a_prompt_per_device() {
+        const LAYERS: u32 = 64;
+        const TOKENS: u32 = 4_110;
+        let here = NodeId([1; 32]);
+        let machine = |card_layers: Option<u32>| {
+            let mut c = cand(2, vec![(0, LAYERS)], 134, 0.0, true, true, 45.0);
+            c.layer_work = 1.9;
+            c.has_gpu = true;
+            c.card_layers = card_layers;
+            c.processor_tokens_per_sec = 5.74;
+            c.observed_delegated_ms_per_layer = Some(3.125);
+            c
+        };
+        let prompt_ms =
+            |c: &NodeCandidate| vertex_cost(c, (0, LAYERS), &here, LAYERS, Some(TOKENS)).prefill_ms;
+
+        let measured_ms_a_token = 3.125 * LAYERS as f32;
+        let on_the_card = prompt_ms(&machine(None));
+        let card_only = measured_ms_a_token * TOKENS as f32 / PREFILL_SPEEDUP_GPU;
+        assert!(
+            (on_the_card - card_only).abs() / card_only < 1e-3,
+            "every layer on the card reads at the card's ratio: {on_the_card} vs {card_only}"
+        );
+
+        let split = prompt_ms(&machine(Some(25)));
+        // Each device's share of a token's decode time, read at its own ratio.
+        let (card, processor) = (25.0 / 45.0, 39.0 / 5.74);
+        let ratio =
+            (card + processor) / (card / PREFILL_SPEEDUP_GPU + processor / PREFILL_SPEEDUP_CPU);
+        let expected = measured_ms_a_token * TOKENS as f32 / ratio;
+        assert!(
+            (split - expected).abs() / expected < 1e-3,
+            "{split} vs {expected}"
+        );
+        assert!(
+            split > 150_000.0 && split > 8.0 * card_only,
+            "39 of the 64 layers read on the processor: priced {split} ms, \
+             the card's ratio gave {card_only}"
+        );
     }
 
     /// **A machine's run cut into back-to-back segments is priced as the one

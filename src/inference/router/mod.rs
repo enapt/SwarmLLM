@@ -250,12 +250,14 @@ fn a_peer_declined(err: &SwarmError, used_remote_segment: bool) -> bool {
 
 /// Is this failure one the caller should hear if the re-plan after it finds
 /// nothing better? The single answer for the dispatch loop's ONE slot: our own
-/// memory shortfall, a peer's context limit (#111), or a peer that said no
-/// (#218). Pure, so the rule is testable without building a router.
+/// memory shortfall, a peer's context limit (#111), a peer that said no
+/// (#218), or a peer that took the request and went silent (#430 (c)). Pure,
+/// so the rule is testable without building a router.
 fn a_refusal_the_caller_should_hear(err: &SwarmError, used_remote_segment: bool) -> bool {
     local_memory_refused_the_load(err)
         || peer_serves_shorter_context(err)
         || a_peer_declined(err, used_remote_segment)
+        || (used_remote_segment && peer_went_silent(err))
 }
 
 /// A holder's refusal in its own words: the text after the innermost
@@ -297,6 +299,14 @@ fn refusal_in_the_holders_words(err: &SwarmError) -> String {
 /// the re-plan's own `SwarmShortOfMemory` included, which weighs the refusing
 /// holder at what fit that one prompt. A re-plan that failed some OTHER way
 /// (a peer went silent) is a different failure and is reported as itself.
+///
+/// **A peer that went silent and was the only route is reported as silent**
+/// (#430 (c), 2026-11-11). Every producer of `PeerUnresponsive` bars the
+/// silent peer from the request, so a re-plan with no one else to ask found
+/// "no reachable node holds layers 0-63" and the caller was told the model
+/// had GONE — of a computer still connected, which had held the request for
+/// ten minutes reading a 4,110-token prompt (2026-11-08). Its own error says
+/// what happened: it took the request and no reply arrived in time.
 pub(crate) fn report_after_a_replan(
     first: SwarmError,
     later: SwarmError,
@@ -329,6 +339,9 @@ pub(crate) fn report_after_a_replan(
             | SwarmError::InsufficientCapacity(_)
             | SwarmError::SwarmShortOfMemory { .. }
     );
+    if peer_went_silent(&first) {
+        return if no_route { first } else { later };
+    }
     if !(declined_again || no_route) {
         return later;
     }

@@ -3397,7 +3397,7 @@ What it says (the user, 11-08: a split that fails or is slow is the defect — n
   ONE such computer; read across several in pieces it need not be (#430).
 
 #### #430 — A long prompt read on ONE computer that cannot read it fast: no first token in 10 minutes
-`P2` · perf-split · **OPEN** — 2026-11-08 · history: #427 (measured), #171 (a prompt pass read in pieces)
+`P2` · perf-split · **OPEN** (residual: a measured prompt rate for a whole hand-off; (a)'s ratio and (c) fixed 2026-11-11) — 2026-11-08 · history: #427 (measured), #171 (a prompt pass read in pieces)
 
 Qwen3.8-27B with a 4,110-token prompt (#427's table) was handed whole to the only machine holding every layer, whose
 card holds part of a 27B and processor the rest; it reads such a prompt at ~7-9.5 tok/s (Qwen3.6-27B there: 432 s),
@@ -3409,6 +3409,29 @@ handed on the moment it exists, at most two out to a peer — #171, `pipeline::p
 network.md` § "A split reads its prompt in pieces, every machine at once"), so the split this hand-off should have
 lost to would have overlapped; what is left is (a), the price; (c) the report: a silent-but-present holder is not
 "has gone".
+
+**Fixed 2026-11-11.** (a) The plan line (01:01Z 11-08) priced that prompt `prompt:20760` — the measured
+3.125 ms a layer (200 ms a token) over the CARD's prompt ratio, 40, because the machine has a card; 39 of
+its 64 layers run on its processor (5.74 tok/s). A measured figure's prompt now reads at the range's
+per-device ratio, as the prior's already did (`parallax::prompt_speedup_over`, one formula for both): 4.8×,
+~170 s. (c) A peer that went silent and was the only route is reported as `PeerUnresponsive` — "took
+this request and no reply arrived in time" — never "has gone" (`router::report_after_a_replan`). Tests
+`a_measured_figure_prices_a_prompt_per_device`, `a_silent_holder_that_was_the_only_route_is_not_reported_as_gone`,
+both red with the fix switched off.
+
+**Residual — a whole hand-off's prompt rate is never MEASURED.** 170 s is still under the 430-590 s that
+processor took: it reads a prompt ~1.5-2× faster than it writes (memory bandwidth high beside its
+arithmetic), not the 4.5× the class prior assumes, and no ratio can know that. A hand-off's first token
+is timed but recorded only as decode (`WorkKind::Delegated`, the steady part); a split's prompt forwards
+are recorded per (peer, model) in the same figure a hand-off reads, though a split segment on that machine
+runs on its card and the whole model mostly on its processor. Wanted: a whole hand-off's own prompt
+figure (time to first token less the round trip and one step, over the UNREAD tokens, warm only — kept
+apart as `Delegated` is from `Decode`), and a first-token wait sized from it: the 600 s ceiling
+(`FIRST_TOKEN_TIMEOUT_MAX`) is a minimum speed of ~8.6 tok/s for a 4,110-token prompt that nobody chose
+(`architecture.md` § Timeouts). Prior art: Petals measures `forward_rps` (a 1,024-token pass) apart from
+`inference_rps` and routes by each (`server/throughput.py`); a split's own forwards would also want their
+real activation bytes and the nominal width agreed (recorded with the real, priced with
+`NOMINAL_DECODE_ACTIVATION_BYTES`).
 
 #### #428 — Every popular model guesses 4-5 tokens a round trip: a DFlash drafter at the split's far end
 `P1` · perf-split · **OPEN** (stage 1 built and measured: the reply is exact, acceptance matches llama.cpp's; stage 3 built and measured on the rig — a split over 130 ms, processors: code 1.6-1.8×, a story 1.10-1.15×, the same replies; on a card, whole: code 1.4-1.6×, a story 0.89-0.92× — (c2) done, the block's first rounds on prose, (c3); stage 6 built: the drafter fetched by a pin; next: the field model, Qwen3.6-35B-A3B) — 2026-11-08 · history: #427 (the measurement), #425 (the guess head), #411 (the flow)

@@ -1351,12 +1351,19 @@ not a total — and `rooms_offered`, the figure the caller is shown, with each h
   route lined it up, which a later attempt may get past; never "room for about 50
   of its 48 layers".
 
-Four things a change here must keep:
+What a change here must keep:
 
 - **The figure is read at the refusal**, not at the end: the re-plan runs with the
   refusing holder barred, so a later total describes fewer computers.
 - **A re-plan that failed another way is that failure** — a peer that then went
   silent, our own loader's shortfall (actionable on this machine), any 4xx.
+- **A peer that went SILENT and was the only route is reported as silent**
+  (2026-11-11, #430 (c)). `PeerUnresponsive` after a remote segment is kept in the
+  slot too, and where the re-plan found no route it is the answer — its hint says
+  only what is known: the computer took the request and no reply arrived in time.
+  It was "the peer that held that piece has gone", of the one holder of a 27B,
+  still connected, that had held a 4,110-token prompt for ten minutes (2026-11-08).
+  Test `a_silent_holder_that_was_the_only_route_is_not_reported_as_gone`.
 - **A peer that DIED did not say no.** `SegmentFailoverExhausted` with "connection
   closed" is not kept, and "has gone" is then the right answer.
 - **The re-plan's own `SwarmShortOfMemory` is no route, like "has gone"** (2026-10-22,
@@ -3563,7 +3570,17 @@ states nothing and is planned exactly as before.
 loader's order (`split::hybrid`: `offset < gpu_layers`) — and the rest at
 `processor_tokens_per_sec`: decode by `prior_ms_per_layer_over` (`parallax::DecodePrice::Prior`,
 greedy and `vertex_cost` alike), the prompt by `prefill_ms_per_layer` at each device's speed-up. A
-MEASURED figure is still taken as it is. The local candidate is `has_gpu` at the card's speed with
+MEASURED decode figure is still taken as it is — and since 2026-11-11 its PROMPT reads at the same
+per-device ratio (`parallax::prompt_speedup_over`, one formula for both branches, #430 (a)). Divided
+by the card's 40 whenever the machine had one, Qwen3.8-27B handed whole to a computer running 25 of
+its 64 layers on the card (processor 5.74 tok/s) and measured at 200 ms a token was priced 20.8 s for
+a 4,110-token prompt; it read for ten minutes and the first-token wait ran out (plan line, 2026-11-08
+01:01Z, `predicted_terms=…/prompt:20760`). By device the ratio is 4.8× — the processor's 39 layers are
+~90% of a token's time and read 4.5× faster — so ~170 s. Still under the truth: that processor read
+the prompt only ~1.5-2× faster than it writes a reply, which no class prior knows; Petals measures a
+server's prompt rate on its own (`throughput.py`'s `forward_rps`, a 1,024-token pass), the residual
+in FUTURE_WORK #430. Test `a_measured_figure_prices_a_prompt_per_device` (red with the card's ratio
+put back). The local candidate is `has_gpu` at the card's speed with
 `card_layers = on_card` wherever the loader splits; `local_speed_off_the_card` keeps the blend for
 the hand-off gate, which compares whole models.
 (3) **`fresh_run_layers_for_planning` offers a SEGMENT card+processor run** where the whole model's

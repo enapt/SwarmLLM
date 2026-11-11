@@ -122,7 +122,7 @@ Under `SharedState::local_embedding_privacy` (the one, live reading) token ids n
 
 ## A holder's refusal is reported as what it was (2026-10-04, #218)
 
-A re-plan with the refusing holder barred can only describe its own search ("has gone"). **`router::report_after_a_replan`** reports the refusal: `SwarmShortOfMemory` when the refused plan went past what the holders OFFER (`plan_exceeds_offered_memory`, recorded per request at the planner's exit), else `HoldersDeclined` in their own words. Ask `a_refusal_the_caller_should_hear`, never re-derive it. **The re-plan's own `SwarmShortOfMemory` is "no route" there, never the answer**: it weighs the refusing peer at what fit THAT prompt (`layers_that_fit`, 0 on a busy moment), not what it could ever hold (2026-10-22, gotcha #931).
+A re-plan with the refusing holder barred can only describe its own search ("has gone"). **`router::report_after_a_replan`** reports the refusal: `SwarmShortOfMemory` when the refused plan went past what the holders OFFER (`plan_exceeds_offered_memory`, recorded per request at the planner's exit), else `HoldersDeclined` in their own words. Ask `a_refusal_the_caller_should_hear`, never re-derive it. **The re-plan's own `SwarmShortOfMemory` is "no route" there, never the answer**: it weighs the refusing peer at what fit THAT prompt (`layers_that_fit`, 0 on a busy moment), not what it could ever hold (2026-10-22, gotcha #931). **A peer that went SILENT and was the only route is reported as silent** (`PeerUnresponsive` kept in the same slot after a remote segment; #430 (c)) — never "has gone" of a computer still connected.
 
 → `docs/invariants/scheduling.md` § "A holder's refusal is reported as what it was"
 
@@ -221,6 +221,8 @@ range is then priced PER DEVICE — **`NodeCandidate::layers_by_device`**: its f
 card's speed (the loader's order), the rest at `processor_tokens_per_sec`
 (`prior_ms_per_layer_over`, `parallax::DecodePrice`, `prefill_ms_per_layer`) — never at one blended
 speed, which priced this node's 17 layers of a 70B as if it ran all 80 and sent them to Italy.
+A MEASURED decode figure is that blend already, so its prompt is divided by the range's per-device
+ratio (`parallax::prompt_speedup_over`), never the card's 40 alone (#430 (a): a 27B's prompt priced 21 s, read for 10 min).
 **A machine's back-to-back segments are ONE run there** (`merge_contiguous`): each is priced with the
 run before it ahead on the card, **`parallax::layers_ahead_in_run`** → `vertex_cost_as`'s REQUIRED
 `ahead`, in the search's DP and `chain_cost_terms` alike — priced per piece, a 14B cut in three read 45 of

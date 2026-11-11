@@ -599,6 +599,49 @@ fn a_holder_that_said_no_is_not_reported_as_gone() {
     }
 }
 
+/// A peer that took the request and went silent, followed by a re-plan with
+/// nobody else to ask — the silent peer is barred — was reported as the model
+/// having GONE, of a computer still connected (#430 (c): a 27B read a
+/// 4,110-token prompt for ten minutes on its only holder, 2026-11-08). It is
+/// reported as what it was.
+#[test]
+fn a_silent_holder_that_was_the_only_route_is_not_reported_as_gone() {
+    use crate::error::SwarmError;
+    let silent = || {
+        SwarmError::PeerUnresponsive(
+            "remote-generate timed out waiting for token (first=true)".into(),
+        )
+    };
+    assert!(super::a_refusal_the_caller_should_hear(&silent(), true));
+    assert!(
+        !super::a_refusal_the_caller_should_hear(&silent(), false),
+        "no peer took part: the variant came back some other way"
+    );
+    for later in [
+        SwarmError::ModelIncompleteInSwarm {
+            model_id: "m".into(),
+            layer: 0,
+            span: crate::error::describe_missing_layers(0, 64),
+        },
+        SwarmError::InsufficientCapacity(crate::types::ModelId("m".into())),
+    ] {
+        let reported = super::report_after_a_replan(silent(), later, "m", None);
+        assert!(
+            matches!(reported, SwarmError::PeerUnresponsive(_)),
+            "a silent holder was reported as {reported}"
+        );
+        let (key, _) = crate::error::error_hint_with_key(&reported).expect("a hint");
+        assert_eq!(key, "peer_unresponsive");
+    }
+    // A re-plan that failed some other way is reported as itself.
+    let elsewhere =
+        SwarmError::SegmentFailoverExhausted("Segment 1 failed with no standby available".into());
+    assert!(matches!(
+        super::report_after_a_replan(silent(), elsewhere, "m", None),
+        SwarmError::SegmentFailoverExhausted(_)
+    ));
+}
+
 /// When the refused plan had gone past the memory the holders offered, the
 /// swarm has no room for the model and retrying will not find any — the
 /// Qwen3-30B-A3B shape: four holders offering room for 17 of its 48 layers.

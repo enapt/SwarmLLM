@@ -5941,7 +5941,11 @@ impl PipelineScheduler {
         // neutral figure so an unrated peer is neither favoured nor
         // disqualified — weighed by the model the same way.
         let decode_price = match measured {
-            Some(ms) => parallax::DecodePrice::Measured(ms),
+            Some(ms) => parallax::DecodePrice::Measured {
+                ms,
+                range: (current_layer, range.1),
+                ahead: 0,
+            },
             // Nothing of the same run ahead: greedy hands a node one segment
             // per step, as far as its bound or its range goes, so the next
             // segment is never that node's again.
@@ -5949,9 +5953,11 @@ impl PipelineScheduler {
                 range: (current_layer, range.1),
                 ahead: 0,
             },
-            None => {
-                parallax::DecodePrice::Measured(DEFAULT_COMPUTE_MS_PER_LAYER * candidate.layer_work)
-            }
+            None => parallax::DecodePrice::Measured {
+                ms: DEFAULT_COMPUTE_MS_PER_LAYER * candidate.layer_work,
+                range: (current_layer, range.1),
+                ahead: 0,
+            },
         };
         let compute_per_layer = decode_price.ms_per_layer(candidate);
 
