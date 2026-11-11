@@ -473,6 +473,21 @@ pub fn estimate_worker_vram_mb_without(
         / (1024 * 1024)
 }
 
+/// The conversation caches alone of [`estimate_worker_vram_mb_for`]: what a
+/// segment shaped `i` keeps for `kv`'s positions on a card, in MB rounded up.
+/// What a guest leaves standing beside the model it guesses for
+/// (`process_pool::ModelProcessPool::room_a_guest_leaves_mb`).
+pub fn card_kv_mb_for(i: &VramFootprintInputs, kv: KvCharge) -> u64 {
+    resident_footprint_on(
+        i,
+        i.embedding_gatherable,
+        kv.positions(i),
+        crate::inference::prefill_pacer::PromptReader::Card,
+    )
+    .kv_bytes
+    .div_ceil(1024 * 1024)
+}
+
 /// Estimate a worker's system-RAM footprint in MB from the same geometry.
 ///
 /// Identical to [`estimate_worker_vram_mb`] but for the per-process overhead —

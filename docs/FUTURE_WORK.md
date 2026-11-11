@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #441**). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #443**). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -4476,6 +4476,29 @@ StarCoder2, inert while refused).
 
 ### Memory and admission
 
+#### #442 — A drafter left on the card by a split route keeps the same model's later WHOLE placement off the card
+`P2` · memory · **OPEN** — 2026-11-11 · history: #355, #441
+
+Field report v0.3.280 (its run on v0.3.278, 2026-11-08 16:00Z, a 12 GB card with 4.5 GB in use by
+other programs): request 1 of Qwen2.5-14B went to a peer with this node's drafter, Qwen2.5-3B
+(2,137 MB), on the card. Request 2 placed the 14B here as a card/processor split, 10 of 48 layers on
+the card (`card_mb=1950`), and it ran at 5.4-5.6 tok/s — slower than the peer route before it. The
+drafter left at 16:05:55, and the 14B kept 10/48 for the rest of the block (17 requests).
+
+Cause, read from the code (not reproduced): the split's reclaim (`free_vram_for_split`) never takes
+a drafter (`split_reclaim_eligible`, #355), because a split of the model the drafter guesses for
+would trade its speed-up for a few layers. Here the model being placed was that same model, placed
+WHOLE here, and a whole local model never uses the engine drafter, so the exclusion protected
+nothing. After the drafter left, promotion back to the card waits for the worker to be out of use
+(#93), and back-to-back requests never left it so.
+
+Fix to build: let the split's reclaim, and the planner's count of it (`split_budget_for_planning`,
+the same predicate), take an idle drafter where every model it has guessed for is the model being
+placed whole here. The worker would record its targets beside `drafts_for_another_model`;
+`draft`'s `beside` (#441) already names them. Check: a test with the two models (a whole
+placement reclaims the idle drafter; a segment of the same model still does not, which keeps #355),
+red without the change.
+
 #### #376 — A near-full card loses a split's drafter to the processor: the planner's room for it is about a layer too generous
 `P2` · memory / scheduling · **PARTIAL** — 2026-10-30 · history: #275, #342's residual
 
@@ -5718,6 +5741,28 @@ archive under the named heading. Reopen one only with the evidence its line name
 Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 19-28 were
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
+
+**Closed 2026-11-11, on main (not in a release yet)** (#441)
+- #441 — **The guessing model took the card room the model it guesses for needed for its
+  conversations.** Field report v0.3.280: on a 12 GB card shared with a game streaming client,
+  Qwen2.5-3B (2,137 MB) was admitted 3 s after Qwen2.5-14B's [12,48), and the 14B's conversation
+  room went from 1,946 MB to 0 — 54 prompts refused in a row. A load's room is `min(free now, total
+  − committed) − reserve`, and while other programs keep the card full, free-now still includes the
+  target's conversation room that is charged but not yet allocated, so a guest weighed on its own
+  figure took it. A guest now goes on the card only where the room covers its estimate plus
+  `room_a_guest_leaves_mb(target)` (the target's typical conversation cache on the card, by its
+  share of layers there), one check (`guest_fits_the_card`) asked by `guest_fit` before the drafter
+  is chosen and by the spawn (`Tenancy::Guest { leaves_mb }`); otherwise it goes to system memory or
+  is not used. Tests `a_guest_on_the_card_leaves_its_target_the_room_for_its_conversations` (red
+  with the leave term zeroed) and `the_room_a_guest_leaves_is_the_targets_card_share`. The same
+  report's Qwen3.6-27B block drafter (1.85 GB) ran a 12 GB card holding 27 of 64 layers out of
+  memory on every load: it is now weighed off its header before it loads (`weights_in`), with the
+  rule that ran only after the load (`fits_beside_one_conversation`). Prior art: vLLM loads the
+  drafter before it sizes the target's cache; llama.cpp's server sizes both at start and
+  `common/fit.cpp` sizes a load before allocating; Ollama's `updateFreeSpace` takes the same
+  smaller-of-two reading as ours. Residual: #442 (a drafter blocking the same model's later whole
+  placement). Evidence: `docs/invariants/memory.md` § "A model loaded for another model's request
+  is a guest".
 
 **Closed 2026-11-11, on main (not in a release yet)** (#176)
 - #176 — **Pools could reach each other only through `config.toml`.** Discovery and opt-in routing between

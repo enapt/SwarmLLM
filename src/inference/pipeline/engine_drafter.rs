@@ -39,6 +39,9 @@ pub(crate) struct DrafterSpec {
     pub layer_range: (u32, u32),
     /// Token ids below this are the drafter's own; see `compatible_vocabularies`.
     pub reads: u32,
+    /// The target it guesses for, whose conversation room on the card its
+    /// load leaves standing (`ModelProcessPool::draft`'s `beside`).
+    pub guesses_for: ModelId,
 }
 
 /// `(target, drafter) → how many token ids the drafter reads`, or `None` when
@@ -274,6 +277,7 @@ fn could_draft(state: &SharedState, target: &ModelId, drafter: ModelId) -> Optio
         model_id: drafter,
         layer_range: (0, layers),
         reads,
+        guesses_for: target.clone(),
     })
 }
 
@@ -648,7 +652,7 @@ fn admitted(
             here.requester,
         )
     } else {
-        pool.guest_fit(&spec.model_id, spec.layer_range, kv, here.requester)
+        pool.guest_fit(&spec.model_id, spec.layer_range, kv, here.requester, target)
     };
     if !fit.admitted() {
         tracing::debug!(
@@ -816,11 +820,12 @@ pub(super) fn read_ahead(
         flow: None,
     };
     let release = release_of(state.clone(), key);
+    let target = spec.guesses_for.clone();
     ReadAhead::new(
         tokio::spawn(async move {
             state
                 .model_process_pool
-                .draft(d, cancel)
+                .draft(d, &target, cancel)
                 .await
                 .map(|drafted| drafted.tokens)
         }),
@@ -1129,7 +1134,10 @@ impl EngineDrafter {
             tree: None,
             flow: None,
         };
-        let drafted = state.model_process_pool.draft(d, cancel).await?;
+        let drafted = state
+            .model_process_pool
+            .draft(d, &self.spec.guesses_for, cancel)
+            .await?;
         self.open = Some((self.seq.len(), drafted.tokens.len()));
         Ok(drafted)
     }
@@ -1207,7 +1215,10 @@ impl EngineDrafter {
             }),
             flow: None,
         };
-        let drafted = state.model_process_pool.draft(d, cancel).await?;
+        let drafted = state
+            .model_process_pool
+            .draft(d, &self.spec.guesses_for, cancel)
+            .await?;
         if drafted.parents.len() != drafted.tokens.len()
             || drafted.scores.len() != drafted.tokens.len()
         {
@@ -1303,7 +1314,10 @@ impl EngineDrafter {
                 live_most,
             }),
         };
-        let drafted = state.model_process_pool.draft(d, cancel).await?;
+        let drafted = state
+            .model_process_pool
+            .draft(d, &self.spec.guesses_for, cancel)
+            .await?;
         if drafted.parents.len() != drafted.tokens.len() || drafted.parents.contains(&0) {
             return Err(SwarmError::Internal(format!(
                 "the drafter proposed {} rows with {} parents",
@@ -1424,6 +1438,7 @@ mod tests {
                 model_id: ModelId("d".into()),
                 layer_range: (0, 24),
                 reads: 1000,
+                guesses_for: ModelId("target".into()),
             },
             uuid::Uuid::nil(),
             prompt.to_vec(),
@@ -1552,6 +1567,7 @@ mod tests {
             model_id: ModelId(name.into()),
             layer_range: (0, 1),
             reads: 1,
+            guesses_for: ModelId("target".into()),
         }
     }
 
@@ -2113,6 +2129,7 @@ mod tests {
                 model_id: ModelId("d".into()),
                 layer_range: (0, 24),
                 reads: 1000,
+                guesses_for: ModelId("target".into()),
             },
             draft_key(),
             vec![1, 2, 3],
@@ -2160,6 +2177,7 @@ mod tests {
                 model_id: m,
                 layer_range: (0, 24),
                 reads: 151_936,
+                guesses_for: ModelId("target".into()),
             })
         };
         let only = |have: &'static [&'static str]| move |m: &ModelId| have.contains(&m.0.as_str());
@@ -2258,6 +2276,7 @@ mod tests {
                 model_id: m,
                 layer_range: (0, 28),
                 reads: 151_936,
+                guesses_for: ModelId("target".into()),
             })
         };
         let headers =

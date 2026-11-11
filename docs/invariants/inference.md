@@ -8595,6 +8595,18 @@ it where 3,580 MB was left beside a whole 8,192-position conversation of 256.
 A drafter that does not fit drops the head it borrowed. No planner charges
 either (`a_drafter_takes_room_while_one_whole_conversation_still_fits`).
 
+**Weighed before it loads (2026-11-11, field report v0.3.280).** The rule above
+ran only AFTER `BlockDrafter::load` had put every tensor on the device. On a
+12 GB card holding 27 of Qwen3.6-27B's 64 layers, the 1.85 GB drafter never got
+that far: the card refused its memory (`CUDA_ERROR_OUT_OF_MEMORY`) on every
+load. `attach_block_drafter` now reads the drafter's weights off its header
+(`weights_in`, the sum `tensor_byte_size` gives the load) and asks the same
+`fits_beside_one_conversation` BEFORE loading. That can only refuse earlier,
+never more: a pinned file holds only the tensors the load reads (both reference
+conversions, 69 of 69), and the load's own figure adds its 8,192-position
+cache and hot rows on top. Prior art: llama.cpp's `common/fit.cpp` sizes what
+a load takes before it allocates anything.
+
 **Measured (stage 1, 2026-11-08)** — Qwen3.5-9B Q4_K_M on this laptop's
 processor with `z-lab/Qwen3.5-9B-DFlash` as llama.cpp converts it (1.69 GB),
 greedy, 96 tokens, chat prompts with thinking off:

@@ -752,6 +752,23 @@ impl BlockDrafter {
     }
 }
 
+/// The bytes of every tensor in the drafter file at `path`, read off its
+/// header alone — what [`BlockDrafter::load`] counts as its weights. A pinned
+/// file holds only the tensors the load reads (both reference conversions:
+/// 69 of 69), and the load's own figure adds its cache too, so this is never
+/// more than what the rule after the load weighs. `None` where the header
+/// cannot be read (the load then says why).
+fn weights_in(path: &Path) -> Option<u64> {
+    let file = std::fs::File::open(path).ok()?;
+    let ct = gguf_file::Content::read(&mut std::io::BufReader::new(file)).ok()?;
+    Some(
+        ct.tensor_infos
+            .values()
+            .map(super::tensor_byte_size)
+            .fold(0u64, u64::saturating_add),
+    )
+}
+
 /// May a drafter taking `takes` bytes come off a conversation `budget`?
 /// Only while one conversation of the model's whole context
 /// (`one_conversation`) still fits in what is left; an unknown budget refuses
@@ -806,6 +823,32 @@ impl SplitModel {
             );
             self.drop_drafter_head();
             return;
+        }
+        // Its weights are known off its header before any is loaded, and the
+        // rule below can only refuse more (its cache and hot rows join them):
+        // a device they do not fit beside one conversation is never handed
+        // them. Loaded first, Qwen3.6-27B's 1.85 GB drafter beside the 27 of
+        // 64 layers a 12 GB card held ran the card out of memory on every
+        // load (field report v0.3.280, 2026-11-11). Prior art: llama.cpp's
+        // `common/fit.cpp` sizes what a load takes before it allocates.
+        if let Some(weights) = weights_in(&path) {
+            let at_least = weights.saturating_add(if head_charged {
+                0
+            } else {
+                self.drafter_head_bytes
+            });
+            let one_conversation = self.kv_growth.bytes_for(self.max_seq_len);
+            if !fits_beside_one_conversation(self.kv_budget_bytes, at_least, one_conversation) {
+                tracing::info!(
+                    weights_mb = at_least >> 20,
+                    budget_mb = ?self.kv_budget_bytes.map(|b| b >> 20),
+                    one_conversation_mb = one_conversation >> 20,
+                    "block drafter not attached: its weights do not fit beside one conversation \
+                     of this model on its device"
+                );
+                self.drop_drafter_head();
+                return;
+            }
         }
         let drafter = match BlockDrafter::load(&path, self) {
             Ok(d) => d,

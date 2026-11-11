@@ -2736,6 +2736,45 @@ sizes a device by the tensors each layer holds, for the same reason. Test
 target and a 1.7B guest: at the room the guest is admitted, one layer more it
 is refused) — red with `SWARMLLM_DRAFTER_ROOM_FIRST=average`, the A/B.
 
+**A guest on the card leaves its target the room for its conversations
+(2026-11-11, field report v0.3.280).** A 12 GB RTX 3060 shared with a game
+streaming client: Qwen2.5-14B's [12,48) loaded on the card, and 3 s later its
+drafter, Qwen2.5-3B (2,137 MB), was admitted beside it. The 14B's worker had
+1,946 MB for conversations at load; afterwards it had 0 and refused 54 prompts
+in a row ("short by 144 MB"). Nothing was mis-charged — the guest's estimate was
+right and the target's spawn had been charged its typical conversation cache
+(`KvCharge::Typical`, `ADMISSION_KV_CONTEXT`). The gap is what a charge that is
+not yet ALLOCATED protects: `compute_vram_budget` counts other programs as
+`used − committed`, so a load's room is `min(free now, total − committed) −
+reserve` (Ollama's `updateFreeSpace` takes the same smaller of the two). While
+other programs keep the card full, free-now binds, and free-now still includes
+the target's unallocated conversation room — so a guest weighed on its own
+figure takes it, and the worker's own reading (`live + cached + free −
+device_free_margin_bytes`) finds nothing left. The pool's reserve (≥ 512 MB)
+and the worker's margin (5% of the card, ≥ 256 MB) are close to the same size,
+so neither leaves a slice the other cannot spend.
+
+A guest is now admitted on the card only where the room covers its estimate
+PLUS **`ModelProcessPool::room_a_guest_leaves_mb(target)`**: the target's
+typical conversation cache on the card (`vram::card_kv_mb_for` with
+`KvCharge::Typical`, the figure its spawn charged), scaled by the share of its
+layers the card holds; 0 with no live worker or one in system memory. The ONE
+check is `guest_fits_the_card`, asked by `guest_fit` (before the drafter is
+chosen, `beside` the target) and by `admit_to_gpu_as` for `Tenancy::Guest {
+leaves_mb }` (the spawn), so the two answers cannot part; `draft`'s `beside` is
+REQUIRED, from `DrafterSpec::guesses_for`. The guest is still CHARGED only its
+own figure — the room it leaves is the target's charge already. Where the card
+cannot leave it, the guest goes to system memory if that fits, else nowhere.
+Prior art: vLLM loads the drafter before `determine_available_memory`, so the
+target's cache is sized with the drafter already resident; llama.cpp's server
+sizes both contexts at start. Neither ever lets the drafter land in memory the
+target's cache was sized for — here a guest arrives later, so it must leave
+what the target was promised. Tests
+`a_guest_on_the_card_leaves_its_target_the_room_for_its_conversations` (one MB
+short of the room: system memory and the spawn refused; at the room: the card,
+charged only its own figure — red with the leave term zeroed, checked
+2026-11-11) and `the_room_a_guest_leaves_is_the_targets_card_share`.
+
 **From the rules file (moved 2026-10-02):**
 
 **`process_pool::Tenancy` is a REQUIRED argument of `get_or_spawn`.** A `Guest`
