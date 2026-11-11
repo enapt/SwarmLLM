@@ -106,6 +106,11 @@ swarmllm/
 │   │                          slots, an unanswered read never taken as empty); the router-facing address only, and
 │   │                          another of the listener's when it goes; no "mapping should exist" panic (libp2p #6377);
 │   │                          re-search on a backoff (#329); 20 tests, `--features tokio --lib`, CI `vendored.yml`)
+│   ├── quinn-proto/           (0.11.18 + ONE patch, quinn PR #2976: the stream assembler merges each run of
+│   │                          contiguous data into one buffer and its gap limit grows with the data buffered
+│   │                          (1,024 → 8,192) — a stream behind lost packets is kept, not closed "too many gaps"
+│   │                          (#429); 319 tests, `--lib`, CI `vendored.yml`; guard
+│   │                          `quic_runs_on_the_vendored_quinn_proto_that_keeps_a_lossy_stream`)
 │   └── rayon-core/            (1.13.0 + ONE patch: an idle worker spins 200 µs before it sleeps — `sleep/mod.rs`
 │                              `spin_budget`, `SWARMLLM_RAYON_SPIN_US=0` = upstream; small decode regions stop
 │                              paying a wake per worker, FUTURE_WORK #137; guard

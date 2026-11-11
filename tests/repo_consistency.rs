@@ -12986,6 +12986,42 @@ fn rayon_core_is_the_vendored_copy_that_spins_before_sleeping() {
     );
 }
 
+/// Every QUIC connection runs on the vendored `quinn-proto`, whose stream assembler
+/// merges each run of contiguous data into one buffer and lets the gaps it keeps grow
+/// with the data buffered (quinn-rs/quinn PR #2976, issue #2955). Upstream 0.11.18-19
+/// keep the data behind ONE lost packet as alternating pieces and close the connection
+/// "too many gaps in stream buffer" past 1,024 of them — a split's 12.9 MB prompt pass to
+/// Australia lost its reply that way (FUTURE_WORK #429). The patch adds no API, so a
+/// `quinn` needing a newer `quinn-proto` would leave it unused with only a warning.
+#[test]
+fn quic_runs_on_the_vendored_quinn_proto_that_keeps_a_lossy_stream() {
+    let packages = resolved_packages();
+    let outside = copies_outside_vendor(&packages, "quinn-proto");
+    assert!(
+        outside.is_empty(),
+        "quinn-proto resolves outside vendor/quinn-proto: {outside:?}. If that release \
+         carries quinn PR #2976 (\"bound assembler gaps by the data buffered\"), drop the \
+         vendored copy and this guard; otherwise re-vendor it and carry the assembler patch \
+         over (vendor/quinn-proto/src/connection/assembler.rs, `push_merged`, `max_spans`)."
+    );
+    assert!(
+        packages
+            .iter()
+            .any(|p| p["name"].as_str() == Some("quinn-proto")),
+        "no quinn-proto in the resolved tree at all — this guard is reading the wrong tree"
+    );
+    let assembler =
+        std::fs::read_to_string(repo_root().join("vendor/quinn-proto/src/connection/assembler.rs"))
+            .expect("vendor/quinn-proto/src/connection/assembler.rs");
+    assert!(
+        assembler.contains("fn push_merged(")
+            && assembler.contains("fn max_spans(")
+            && assembler.contains("self.defragment(start) > max_spans(self.buffered)"),
+        "the vendored quinn-proto no longer merges contiguous data or scales its gap limit \
+         with the data buffered (quinn PR #2976)"
+    );
+}
+
 /// The planted violation: a registry copy beside (or instead of) the vendored
 /// one is reported, the vendored one alone is not — for each crate asked about.
 #[test]

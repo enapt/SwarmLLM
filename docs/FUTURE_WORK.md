@@ -3356,22 +3356,6 @@ What it says (the user, 11-08: a split that fails or is slow is the defect — n
   (`ModelIncompleteInSwarm`) though the holder was there and only slow. A 4K prompt of a 27B is ~7 minutes on
   ONE such computer; read across several in pieces it need not be (#430).
 
-#### #429 — A far split's connection dies on quinn's assembler bug ("too many gaps in stream buffer")
-`P1` · split reliability · **OPEN** — 2026-11-08 · history: #112 (the 0.11.17 regression, fixed by 0.11.18)
-
-2026-11-08 01:23:35Z: the Gemma 4 26B split's 4,298-token prompt pass sent 12.9 MB to Australia (~130 ms); 260 ms
-later the connection closed `INTERNAL_ERROR: too many gaps in stream buffer`, segment failover had no standby and the
-re-plan found no holder for 10-28 — the reply lost in 3.4 s. Once in the node log's ~8 days, on quinn-proto 0.11.18
-(the fix for #112). **Prior art** (quinn tracker, read 11-08): quinn-rs/quinn#2955 (open, 2026-10-26) — after ONE lost
-packet early in a burst, everything behind the gap is contiguous but `Assembler::defragment` keeps it as alternating
-large and small chunks (a retained chunk is never merged with its neighbours), so past `MAX_CHUNKS` (1024) the stream
-is refused with a single real gap; reproduced at 150 ms / 3% loss, 1 in 10-20 transfers of 180 MB. Fix in review:
-PR #2976 ("bound assembler gaps by the data buffered": each contiguous run coalesced into one buffer, the limit
-scaled with buffered bytes, 1024-8192); no release carries it (0.11.19, 2026-09-30, does not). **Next**: vendor
-quinn-proto with #2976's change (`[patch.crates-io]`, the pattern of `vendor/libp2p-quic`), a test that fails on
-0.11.18 with #2955's chunk state, and a guard that the patch is applied — rather than a smaller stream window
-(`max_stream_data` 10 MB caps a far link's speed) or a retry after the connection is gone.
-
 #### #430 — A long prompt read on ONE computer that cannot read it fast: no first token in 10 minutes
 `P2` · perf-split · **OPEN** — 2026-11-08 · history: #427 (measured), #171 (a prompt pass read in pieces)
 
@@ -5776,6 +5760,23 @@ archive under the named heading. Reopen one only with the evidence its line name
 Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 19-28 were
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
+
+**Closed 2026-11-11, on main (not in a release yet)** (#429)
+- #429 — **A far split's connection died on quinn's assembler bug ("too many gaps in stream
+  buffer").** 2026-11-08 01:23:35Z: a Gemma 4 26B split's 4,298-token prompt pass (12.9 MB to
+  Australia, ~130 ms) closed its connection 260 ms later and the reply was lost in 3.4 s, on
+  quinn-proto 0.11.18. quinn-rs/quinn#2955 (open): after one lost packet the assembler kept the
+  contiguous data behind it as alternating pieces it never merged, and refused the stream past a
+  fixed 1,024. 0.11.19 has the same code; the fix, PR #2976, is in review. QUIC now runs on a
+  VENDORED quinn-proto 0.11.18 with PR #2976 ported onto its heap (`vendor/quinn-proto`,
+  `[patch.crates-io]`): each contiguous run merged into one buffer, gaps allowed in proportion to the
+  data buffered (1,024-8,192). Prior art: the PR itself (its benchmarks level with quinn main);
+  rejected a smaller stream window (caps a far link's speed) and a retry after the connection is gone.
+  Tests (vendored, CI `vendored.yml`): `every_other_packet_lost_in_large_window` — a real connection
+  losing every other datagram of a 6 MB stream, red on unpatched 0.11.18 with exactly "too many gaps
+  in stream buffer" — plus #2955's chunk state and randomized reassembly with compactions; 319 of 319.
+  Guard `quic_runs_on_the_vendored_quinn_proto_that_keeps_a_lossy_stream`. Evidence:
+  `docs/invariants/network.md` § "A QUIC stream behind lost packets is kept, not closed".
 
 **Closed 2026-11-11, on main (not in a release yet)** (#442)
 - #442 — **A guessing model left on the card by a split route kept the same model's later whole

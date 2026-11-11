@@ -3,7 +3,8 @@ name: Vendored patches
 # The crates under `vendor/` are workspace-`exclude`d, so nothing in CI compiles
 # them and their tests ran nowhere at all. `vendor/libp2p-request-response`
 # (pipeline message delivery), `vendor/libp2p-quic` (the congestion
-# controller our QUIC connections run), `vendor/libp2p-upnp` (the external
+# controller our QUIC connections run), `vendor/quinn-proto` (a QUIC stream
+# behind lost packets kept, not closed), `vendor/libp2p-upnp` (the external
 # port a mapping asks for) and `vendor/libp2p-gossipsub` (subscriptions told
 # again to a peer that reconnects) carry tests covering patches this
 # project depends on — a patch to someone else's crate is exactly the code most
@@ -65,7 +66,10 @@ jobs:
     name: libp2p-quic patch
     # `Config::congestion` (vendor/libp2p-quic/src/config.rs): our QUIC
     # connections run quinn's BBR. The test dials a real connection and asks
-    # quinn which controller it runs.
+    # quinn which controller it runs. And quinn-proto's stream assembler
+    # (vendor/quinn-proto/src/connection/assembler.rs, quinn PR #2976): a
+    # stream behind lost packets is kept, not closed "too many gaps" — the
+    # crate's whole suite runs, the assembler sits under every stream.
     timeout-minutes: 30
     runs-on: ubuntu-latest
     steps:
@@ -73,12 +77,16 @@ jobs:
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
-          key: vendored-quic-v1
-          workspaces: vendor/libp2p-quic
+          key: vendored-quic-v2  # v1 cached libp2p-quic alone
+          workspaces: |
+            vendor/libp2p-quic
+            vendor/quinn-proto
           cache-bin: false
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Run patch tests
         run: cargo test --locked --manifest-path vendor/libp2p-quic/Cargo.toml --features tokio --lib
+      - name: Run quinn-proto patch tests
+        run: cargo test --locked --manifest-path vendor/quinn-proto/Cargo.toml --lib
 
   upnp:
     name: libp2p-upnp patch

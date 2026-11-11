@@ -8,6 +8,7 @@ exclude = [
     "vendor/libp2p-quic",
     "vendor/libp2p-request-response",
     "vendor/libp2p-upnp",
+    "vendor/quinn-proto",
     "vendor/rayon-core",
     "vendor/candle",
 ]
@@ -464,6 +465,17 @@ libp2p-gossipsub = { path = "vendor/libp2p-gossipsub" }
 # libp2p-quic would leave this patch unused, and the build then fails:
 # `network::manager` calls `Config::congestion`, which upstream does not have.
 libp2p-quic = { path = "vendor/libp2p-quic" }
+# quinn-proto 0.11.18 with ONE change: the stream assembler
+# (src/connection/assembler.rs) merges each run of contiguous data into one
+# buffer and lets the gaps it keeps grow with the data buffered (1,024 to
+# 8,192) — quinn-rs/quinn PR #2976 for issue #2955, unreleased on 2026-11-11.
+# Without it ONE lost packet early in a burst can leave the data behind it as
+# over 1,024 pieces, and the connection closes "too many gaps in stream buffer":
+# a split's 12.9 MB prompt pass to Australia lost its reply that way
+# (FUTURE_WORK #429). A quinn needing a newer quinn-proto would leave this
+# patch unused with only a warning:
+# `quic_runs_on_the_vendored_quinn_proto_that_keeps_a_lossy_stream` fails instead.
+quinn-proto = { path = "vendor/quinn-proto" }
 # libp2p-upnp 0.6.0 with three changes. (1) igd-next 0.18 instead of 0.16: 0.16
 # builds a router's control URL as `http://{address}{control_url}`, which breaks
 # on a router that lists the URL absolute (`http://192.168.1.1:5555/ctrl?11`):

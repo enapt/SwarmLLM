@@ -4344,6 +4344,49 @@ real connection and asks quinn which controller it runs — red with the BBR
 mapping removed), `quic_connections_run_bbr_unless_switched_back_to_cubic` (red
 with the default flipped). A/B `SWARMLLM_QUIC_CC=cubic`.
 
+## A QUIC stream behind lost packets is kept, not closed (2026-11-11, #429)
+
+**What happened.** 2026-11-08 01:23:35Z: a Gemma 4 26B split's 4,298-token prompt pass sent
+12.9 MB to Australia (~130 ms); 260 ms later the connection closed `INTERNAL_ERROR: too many
+gaps in stream buffer`, no standby covered the segment and the reply was lost in 3.4 s. The
+receiving side raises it, so the far computer killed what we sent it. Once in ~8 days of the
+node log, on quinn-proto 0.11.18 — the release that fixed #112's version of the same error.
+
+**The cause (quinn-rs/quinn#2955, open).** The stream assembler keeps received frames as
+chunks and compacts them when they hold too much memory or number over 2,048. 0.11.18's
+compaction KEPT a chunk that used its allocation well, without copying, and never merged it
+with its neighbours — so after ONE lost packet early in a burst, the contiguous data behind it
+stayed as alternating large (kept) and small (merged) pieces, and past `MAX_CHUNKS` (1,024)
+the stream was refused although it had a single real gap. And the bound was fixed: a window
+of 10 MB (ours, `vendor/libp2p-quic` `max_stream_data`) under a queue losing every other
+packet holds ~4,000 real gaps. The reporter reproduced it at 150 ms / 3% loss, 1 in 10-20
+transfers of 180 MB. 0.11.19 (2026-09-30) has the same assembler; quinn main replaced its heap
+with a sorted queue and kept the defect.
+
+**The fix (vendored, `vendor/quinn-proto`).** quinn PR #2976 ("bound assembler gaps by the
+data buffered", in review, benchmarks level with main), ported from main's queue onto
+0.11.18's heap: compaction copies each run of contiguous data into ONE buffer (a copy of our
+own of at least 16 KiB that still uses half its bytes stays as it is, so a long run is not
+copied again), counts the DISJOINT spans, and refuses only past `max_spans(buffered)` — one
+span per 1,024 bytes buffered, never below 1,024 or above 8,192. Compaction is triggered by
+the chunks not yet copied (`fresh`), so data read as it arrives never compacts. Switching to
+unordered reads drops copies of data already read (upstream 38b9f52f, which the PR's base
+carries).
+
+**Rejected**: a smaller stream window (10 MB is what keeps a far link's speed — the window is
+the bound on bytes in flight) and retrying after the connection is gone (every request on it
+dies with it).
+
+**What a change must keep:** quinn-proto resolves from `vendor/quinn-proto` — guard
+`quic_runs_on_the_vendored_quinn_proto_that_keeps_a_lossy_stream` (cargo only WARNS when a
+`[patch]` goes unused). When a quinn release carries PR #2976, drop the copy and the guard.
+Tests (vendored, CI `vendored.yml`): `every_other_packet_lost_in_large_window` (a real
+connection losing every other datagram of a 6 MB stream in an 8 MiB window — red on unpatched
+0.11.18 with exactly "too many gaps in stream buffer"), `many_chunks_behind_one_gap_are_not_rejected`
+(#2955's chunk state) and `every_other_packet_lost_is_not_rejected` (both red unpatched), and
+randomized reassembly with compactions at random points checking the counts the assembler keeps
+(`assemble_random*_compacted`).
+
 ## One upload per model id, on every node (2026-10-02, FUTURE_WORK #151)
 
 **What it replaced.** A model id is derived from a GGUF's FILE NAME
