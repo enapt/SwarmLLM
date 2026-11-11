@@ -753,7 +753,6 @@
   "models.no_models": "Henüz kullanılabilir model yok",
   "models.no_models_hint": "Paylaşılan modellere erişmek için ağa bağlanın veya Ayarlar'a bir bulut sağlayıcısı ekleyin",
   "models.not_a_chat_model": "Sohbet modeli değil",
-  "models.policy_load_failed": "Model politikası yüklenemedi",
   "models.policy_saved": "Model politikası kaydedildi",
   "models.policy_unreadable": "Bu modelin bazı ayarları okunamadı, bu yüzden şu anda değiştirilemiyor. Bu paneli kapatıp birazdan yeniden açın.",
   "models.pricing_in": "${price}/1K giriş",

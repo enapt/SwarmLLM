@@ -753,7 +753,6 @@
   "models.no_models": "暂无可用模型",
   "models.no_models_hint": "连接到网络以访问共享模型，或在设置中添加云服务提供商",
   "models.not_a_chat_model": "不是聊天模型",
-  "models.policy_load_failed": "无法加载模型策略",
   "models.policy_saved": "模型策略已保存",
   "models.policy_unreadable": "无法读取该模型的部分设置，所以现在无法修改。请关闭此面板，稍后重新打开。",
   "models.pricing_in": "${price}/1K 输入",

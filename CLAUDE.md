@@ -70,7 +70,7 @@ Four carry contracts, not just versions:
 ### Frontend
 - Vanilla HTML/CSS/JS, no framework or build step, embedded via `include_dir!` (rules: `arch-frontend.md`).
 - **5** WS message types, **2** broadcast channels. Do not add to either set.
-- i18n: **1464 translation keys** (**1466 entries per locale** incl. `_lang` + `_dir`) × 21,
+- i18n: **1463 translation keys** (**1465 entries per locale** incl. `_lang` + `_dir`) × 21,
   sorted. Counts asserted — **update BOTH CLAUDE.md and `docs/ARCHITECTURE.md`**.
   A new key — from the frontend OR minted in Rust — MUST be translated into all 21; never rely on
   the runtime English fallback.
@@ -93,7 +93,7 @@ cargo dev-test                        # lib + integration; counts below come fro
 cargo dev-run -- run -p 8800 -v       # start a daemon serving the frontend from disk
 ```
 
-**Counts, measured at v0.3.280 (dev,claude-subscription)**: **4460 lib** (+26 ignored),
+**Counts, measured at v0.3.281 (dev,claude-subscription)**: **4462 lib** (+26 ignored),
 80 integration (32 + 34 + 14 `yamux_substream`), **269 repo-consistency**,
 1 `api_key_side_effects`, 83 `swarmllm-types`, 12 in the vendored
 request-response patch, 152 in the libp2p-gossipsub one, 5 in the libp2p-quic one and 20 in the libp2p-upnp one — plus 26 in the `swarmllm` BIN target (`cli::*`, counted

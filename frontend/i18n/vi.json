@@ -753,7 +753,6 @@
   "models.no_models": "Chưa có mô hình nào khả dụng",
   "models.no_models_hint": "Kết nối với mạng để truy cập mô hình được chia sẻ, hoặc thêm nhà cung cấp đám mây trong Cài đặt",
   "models.not_a_chat_model": "Không phải mô hình trò chuyện",
-  "models.policy_load_failed": "Không thể tải chính sách mô hình",
   "models.policy_saved": "Đã lưu chính sách mô hình",
   "models.policy_unreadable": "Không đọc được một số cài đặt của mô hình này nên bây giờ chưa thể thay đổi. Hãy đóng bảng này và mở lại sau giây lát.",
   "models.pricing_in": "${price}/1K in",

@@ -753,7 +753,6 @@
   "models.no_models": "Zatím nejsou k dispozici žádné modely",
   "models.no_models_hint": "Připojte se k síti pro přístup ke sdíleným modelům nebo přidejte cloudového poskytovatele v Nastavení",
   "models.not_a_chat_model": "Není to model pro chat",
-  "models.policy_load_failed": "Nepodařilo se načíst politiku modelu",
   "models.policy_saved": "Politika modelu uložena",
   "models.policy_unreadable": "Některá nastavení tohoto modelu se nepodařilo načíst, takže je teď nelze změnit. Zavřete tento panel a za chvíli ho otevřete znovu.",
   "models.pricing_in": "${price}/1K vstup",

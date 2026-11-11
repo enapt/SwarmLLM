@@ -753,7 +753,6 @@
   "models.no_models": "Noch keine Modelle verfügbar",
   "models.no_models_hint": "Verbinde dich mit dem Netzwerk, um geteilte Modelle zu nutzen, oder füge einen Cloud-Anbieter in den Einstellungen hinzu",
   "models.not_a_chat_model": "Kein Chat-Modell",
-  "models.policy_load_failed": "Modell-Richtlinie konnte nicht geladen werden",
   "models.policy_saved": "Modell-Richtlinie gespeichert",
   "models.policy_unreadable": "Einige Einstellungen dieses Modells konnten nicht gelesen werden, deshalb lassen sie sich gerade nicht ändern. Schließen Sie dieses Feld und öffnen Sie es gleich noch einmal.",
   "models.pricing_in": "${price}/1K ein",

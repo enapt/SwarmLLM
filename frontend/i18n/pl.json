@@ -753,7 +753,6 @@
   "models.no_models": "Brak dostępnych modeli",
   "models.no_models_hint": "Połącz się z siecią, aby uzyskać dostęp do udostępnionych modeli, lub dodaj dostawcę chmury w Ustawieniach",
   "models.not_a_chat_model": "To nie jest model do czatu",
-  "models.policy_load_failed": "Nie można załadować polityki modelu",
   "models.policy_saved": "Polityka modelu zapisana",
   "models.policy_unreadable": "Nie udało się odczytać niektórych ustawień tego modelu, więc na razie nie można ich zmienić. Zamknij ten panel i za chwilę otwórz go ponownie.",
   "models.pricing_in": "${price}/1K wej",

@@ -753,7 +753,6 @@
   "models.no_models": "Nessun modello disponibile al momento",
   "models.no_models_hint": "Connettiti alla rete per accedere ai modelli condivisi, o aggiungi un provider cloud nelle Impostazioni",
   "models.not_a_chat_model": "Non è un modello di chat",
-  "models.policy_load_failed": "Impossibile caricare i criteri del modello",
   "models.policy_saved": "Criteri del modello salvati",
   "models.policy_unreadable": "Non è stato possibile leggere alcune impostazioni di questo modello, quindi per ora non si possono modificare. Chiudi questo pannello e riaprilo tra un momento.",
   "models.pricing_in": "${price}/1K in",

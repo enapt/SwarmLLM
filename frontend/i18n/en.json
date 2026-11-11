@@ -753,7 +753,6 @@
   "models.no_models": "No models available yet",
   "models.no_models_hint": "Connect to the network to access shared models, or add a cloud provider in Settings",
   "models.not_a_chat_model": "Not a chat model",
-  "models.policy_load_failed": "Could not load model policy",
   "models.policy_saved": "Model policy saved",
   "models.policy_unreadable": "Some of this model's settings couldn't be read, so they can't be changed right now. Close this and open it again in a moment.",
   "models.pricing_in": "${price}/1K in",

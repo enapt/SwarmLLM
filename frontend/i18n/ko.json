@@ -753,7 +753,6 @@
   "models.no_models": "아직 사용 가능한 모델이 없습니다",
   "models.no_models_hint": "공유 모델에 접근하려면 네트워크에 연결하거나, 설정에서 클라우드 공급자를 추가하세요",
   "models.not_a_chat_model": "채팅 모델이 아닙니다",
-  "models.policy_load_failed": "모델 정책을 불러올 수 없습니다",
   "models.policy_saved": "모델 정책이 저장되었습니다",
   "models.policy_unreadable": "이 모델의 일부 설정을 읽지 못해 지금은 변경할 수 없습니다. 이 패널을 닫고 잠시 후에 다시 열어 주세요.",
   "models.pricing_in": "${price}/1K 입력",

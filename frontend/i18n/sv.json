@@ -753,7 +753,6 @@
   "models.no_models": "Inga modeller tillgängliga ännu",
   "models.no_models_hint": "Anslut till nätverket för att komma åt delade modeller, eller lägg till en molnleverantör i Inställningar",
   "models.not_a_chat_model": "Inte en chattmodell",
-  "models.policy_load_failed": "Kunde inte ladda modellpolicy",
   "models.policy_saved": "Modellpolicy sparad",
   "models.policy_unreadable": "Vissa av den här modellens inställningar kunde inte läsas, så de går inte att ändra just nu. Stäng den här panelen och öppna den igen om en stund.",
   "models.pricing_in": "${price}/1K in",

@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## [0.3.281-alpha] — 2026-11-11
 
 **The dashboard keeps what you type.** A model's settings panel (the gear on its card) lost your edits
 whenever the model list refreshed — every 30 seconds, and on every change in the swarm. The panel now
@@ -21,6 +21,28 @@ after removing a model, cancelling a download or saving settings was skipped if 
 5 seconds. A slow model search could replace the results of a newer one. "Get the missing parts" said
 "Downloading…" when nothing was downloading — the parts were already here, or the model has no download link.
 A model's technical details that failed to load are tried again the next time its card opens.
+
+**Out-of-date computers have their own place in the list.** The Dashboard's list of computers now shows
+the ones taking part on top, and below them, under "Out of date or sharing too little", computers the swarm
+does not run requests for: those two or more releases behind the newest, and those sharing fewer than two
+model parts. Both sections share one set of columns and one sort.
+
+**A computer far behind the newest release is disconnected as it connects, whatever release it runs.**
+Releases before v0.3.271 state their version only after their first health check, so one that connected
+in the first half-minute after this computer started — before it had loaded the list of releases — was
+never checked again: a v0.3.268 computer, twelve releases behind, stayed connected for 7.5 hours (#415).
+Those releases connect under libp2p's default name, which is now read as v0.3.270 at most and judged at
+the handshake; on the live swarm the same computer was disconnected a quarter of a second after it
+reconnected.
+
+**Smaller dashboard fixes.** Settings → Claude subscription → Check Status always said "Request failed"
+(builds with the subscription feature only); it now shows the Claude CLI's version and plan, or what to
+do next. A dashboard opened from another computer with a key pasted on an earlier visit kept using it
+after the node's key changed, so every panel failed with nothing saying why; the saved key is now checked
+when the page opens, and a refused one is forgotten so the way back in is shown again. The storage panel
+showed "0 B used" when the node refused the request; it now says it could not be read. Models →
+Performance names each reply's route in your language. A device linked to your main device no longer
+says "inference charges go to your main device" — nothing is charged; it shares its hardware.
 
 ## [0.3.280-alpha] — 2026-11-09
 

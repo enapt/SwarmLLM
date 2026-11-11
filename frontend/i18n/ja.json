@@ -753,7 +753,6 @@
   "models.no_models": "まだ利用可能なモデルがありません",
   "models.no_models_hint": "ネットワークに接続して共有モデルにアクセスするか、設定でクラウドプロバイダーを追加してください",
   "models.not_a_chat_model": "チャット用のモデルではありません",
-  "models.policy_load_failed": "モデルポリシーを読み込めませんでした",
   "models.policy_saved": "モデルポリシーを保存しました",
   "models.policy_unreadable": "このモデルの設定の一部を読み込めなかったため、今は変更できません。このパネルを閉じて、しばらくしてから開き直してください。",
   "models.pricing_in": "${price}/1K入力",

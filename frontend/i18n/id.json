@@ -753,7 +753,6 @@
   "models.no_models": "Belum ada model yang tersedia",
   "models.no_models_hint": "Hubungkan ke jaringan untuk mengakses model bersama, atau tambahkan penyedia cloud di Pengaturan",
   "models.not_a_chat_model": "Bukan model obrolan",
-  "models.policy_load_failed": "Tidak bisa memuat kebijakan model",
   "models.policy_saved": "Kebijakan model disimpan",
   "models.policy_unreadable": "Beberapa pengaturan model ini tidak dapat dibaca, jadi belum bisa diubah sekarang. Tutup panel ini dan buka lagi sebentar lagi.",
   "models.pricing_in": "${price}/1K masuk",

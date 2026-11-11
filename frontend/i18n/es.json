@@ -753,7 +753,6 @@
   "models.no_models": "Aún no hay modelos disponibles",
   "models.no_models_hint": "Conéctate a la red para acceder a modelos compartidos, o añade un proveedor cloud en Configuración",
   "models.not_a_chat_model": "No es un modelo de chat",
-  "models.policy_load_failed": "No se pudo cargar la política del modelo",
   "models.policy_saved": "Política del modelo guardada",
   "models.policy_unreadable": "No se pudieron leer algunos ajustes de este modelo, así que ahora mismo no se pueden cambiar. Cierra este panel y vuelve a abrirlo en un momento.",
   "models.pricing_in": "${price}/1K entrada",
