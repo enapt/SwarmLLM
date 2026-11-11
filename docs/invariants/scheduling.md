@@ -4740,7 +4740,11 @@ pieces each): before, `None` for both on every request; after, A 4.17 / 4.09 and
 B 5.90 / 5.69 ms a layer and token on requests 2 and 3 — B's 24 s a piece × 3
 is the 72 s pass. (Higher than the same rig's whole ~420-token passes, 1.07 /
 1.81: both rig computers share one processor, and pieces run at once.) Test
-`a_queued_piece_is_timed_from_the_answer_before_it`.
+`a_queued_piece_is_timed_from_the_answer_before_it`. A forward re-sent after its
+link was re-keyed (`ResendOnRefusal`, a 2-10 s wait for the new key) is not
+timed on either path — piece or whole pass — since its time is the re-key's,
+not the peer's work (`SessionManager::rekeyed_since`, the predicate the resend
+waits on; v0.3.282 review). No test of its own: one inline condition.
 
 ## A split between two machines that could each run the model is measured by restricting BOTH (2026-09-27)
 

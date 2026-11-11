@@ -2030,21 +2030,30 @@ impl PipelineExecutor {
                                 .map(|h| h.layer_range.1)
                                 .unwrap_or(segment.layer_range.1)
                                 - segment.layer_range.0;
-                            self.shared_state.record_peer_segment_latency(
-                                &segment.node_id,
-                                &segment.shard_id.model_id,
-                                super::work_kind_for(sequence_num),
-                                seg_elapsed_ms,
-                                seg_layers,
-                                result.activations.len(),
-                                Self::prompt_read(
-                                    prompt_width,
-                                    &activations,
-                                    input_is_hidden_state,
-                                    &result.activations,
-                                    !run_is_last,
-                                ),
-                            );
+                            // Not a forward re-sent after the link was re-keyed
+                            // (`ResendOnRefusal`): its time is the re-key's wait,
+                            // 2-10 s, not the peer's work (v0.3.282 review).
+                            if !self
+                                .shared_state
+                                .session_manager
+                                .rekeyed_since(&segment.node_id, segment_start)
+                            {
+                                self.shared_state.record_peer_segment_latency(
+                                    &segment.node_id,
+                                    &segment.shard_id.model_id,
+                                    super::work_kind_for(sequence_num),
+                                    seg_elapsed_ms,
+                                    seg_layers,
+                                    result.activations.len(),
+                                    Self::prompt_read(
+                                        prompt_width,
+                                        &activations,
+                                        input_is_hidden_state,
+                                        &result.activations,
+                                        !run_is_last,
+                                    ),
+                                );
+                            }
                             // Per (model, segment, holder), for the peer
                             // performance table.
                             self.shared_state.record_segment_latency(

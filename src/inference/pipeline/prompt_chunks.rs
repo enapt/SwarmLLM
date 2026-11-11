@@ -602,7 +602,16 @@ impl PipelineExecutor {
                     match result {
                         Ok(result) => {
                             answered += 1;
-                            let timed = sent_piece.filter(|_| !result.locally_constructed);
+                            // Neither made up here nor re-sent after the link
+                            // was re-keyed (`ResendOnRefusal`): either's time is
+                            // not the peer's work.
+                            let timed = sent_piece.filter(|&(_, sent_at)| {
+                                !result.locally_constructed
+                                    && !self
+                                        .shared_state
+                                        .session_manager
+                                        .rekeyed_since(&segment.node_id, sent_at)
+                            });
                             if let Some((bytes, sent_at)) = timed {
                                 self.note_piece_timed(
                                     segment,
@@ -984,8 +993,6 @@ mod tests {
         assert!(!shape_reads_in_pieces(&three, &me, not_three, true));
     }
 
-    /// The cause of a failed pass is kept over the drivers that stopped
-    /// because of it.
     /// A piece queued behind another is timed from that one's answer, not
     /// from when it was sent: the peer runs its pieces in order, and a piece
     /// that waited was charged its wait as work (Lindley's recursion).
@@ -1001,6 +1008,8 @@ mod tests {
         assert_eq!(piece_service_ms(at(300), Some(at(190)), at(380)), 80);
     }
 
+    /// The cause of a failed pass is kept over the drivers that stopped
+    /// because of it.
     #[test]
     fn a_knock_on_is_told_from_a_cause() {
         assert!(is_knock_on(&knock_on()));
