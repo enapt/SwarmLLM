@@ -3476,6 +3476,11 @@ on prose (10-38 of ~105 at 42-77 tokens/s against plain steps' ~83, card run 18)
 (~27 ms a round for ~1.7 tokens, against ~11 ms a token from the head) before its record sets it aside. Next for it: start
 a reply's block at a narrow count until its record says it pays (a probe at the full block costs the most where it keeps
 the least), or let the head go first on a reply whose prompt asks for prose.
+**Field, 2026-11-11 (report v0.3.280, RTX 3060 12 GB, a game streaming client sharing the card)**: Qwen3.5-9B
+(a file with no guess head of its own) with the block drafter attached (`mb=1693`): code 46-67 tok/s, prose mostly
+32-42, against a flat 51 for both on v0.3.278 without it; the speed over the whole block the same (36.2). The prose
+shape is this residual's, larger, but the other program on the card confounds it; re-measure on an idle card before
+reading a number off it.
 **Tried and dropped 2026-11-08 night: a card's chain check carrying the whole block (16) in one graph** instead of 8
 (`cuda_graph::MAX_CHAIN_POSITIONS`, A/B against the same binary capped at 8; card run 19, three runs a side, idle box,
 every width 9-16 captured and recorded while idle): the palindrome 167-188 tok/s against 180-184 at 8, a BST class
