@@ -727,7 +727,9 @@ pub struct SharedState {
     /// close); read ONLY by [`SharedState::holder_standing`] (#339).
     pub connected_networks: DashMap<NodeId, crate::network::helpers::NetGroup>,
     /// The release each connected node said it runs ITSELF — its Identify
-    /// agent version, or a capability it sent direct; the newest wins. Written
+    /// agent version (libp2p's own agent, sent by every release before
+    /// v0.3.271, read as v0.3.270 at most: `swarm_use::release_in_agent`), or
+    /// a capability it sent direct; the newest wins. Written
     /// ONLY by `note_peers_own_version` (the identify handler, dispatch's
     /// capability arm while connected), removed ONLY by
     /// `forget_peers_own_version` (the network manager, on the last close);

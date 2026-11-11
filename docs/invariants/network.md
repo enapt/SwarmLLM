@@ -6154,6 +6154,22 @@ computers, the one on 0.3.268 (`54c49961`, `releases_behind=2`) was disconnected
 liveness tick, 33 s after it connected, from the capability it sent as it connected; the seven on
 0.3.270 stayed (`releases_behind=0`), and it did not get back in over the 2.5 min watched.
 
+**An older release is judged at Identify too (2026-11-11, gotcha #1079).** A release before
+v0.3.271 names no release in Identify, so it was judged only by the capability it sends DIRECT as
+it connects — and that message went missing twice. On 11-06 it arrived before Identify and was
+dropped (#415, fixed by holding it). On 11-10 the v0.3.268 computer `54c49961` was cut 30 times in
+a row, then reconnected at 17:38:54Z, the second it started (its `uptime_seconds`, 27210 at
+01:12:24Z), and stayed connected 7.5 h, 12 releases behind, while our own peer list rated it
+`too_far_behind`: a release that old sends its catch-up only once its first health round has set
+`local_capability` (`git show v0.3.268-alpha:src/network/manager/identify.rs`), and its later
+capabilities go by gossip, which this rule never reads. Its Identify said enough all along:
+libp2p's own agent (`rust-libp2p/<identify version>`, `libp2p-identify` 0.47's default) means a
+build before `agent_version` landed (e641dd2a, Cargo.toml then 0.3.270-alpha), so it runs v0.3.270
+at most. `swarm_use::release_in_agent` reads it so at Identify — the newest such a computer can
+run, so never judged further behind than it is; asked only of a computer that speaks SwarmLLM, on
+its own authenticated connection, so the only computer it can cut off is the one that sent it. Any
+other agent naming no release is judged by its capability, as before. No wire change.
+
 **What a change must keep.** One judgment (`SharedState::cut_off_for`) and one actor (the network
 loop); never a gossiped or DHT capability as the evidence; one release behind keeps everything;
 "newest" signed, never a peer's claim; a pool device exempt; the list only lowers the count, and
@@ -6162,6 +6178,7 @@ Tests: `a_computer_two_releases_behind_is_cut_off_and_a_pool_device_never_is`,
 `a_computer_is_judged_on_the_release_it_stated_itself`,
 `a_release_number_never_published_does_not_count_as_a_release`,
 `this_build_names_its_release_in_identify_and_older_ones_do_not`,
+`an_older_release_is_judged_by_the_libp2p_agent_it_sends`,
 `a_computer_two_releases_behind_is_cut_off_at_identify`,
 `the_liveness_tick_cuts_a_computer_whose_own_capability_names_an_old_release` (all red with
 `cut_off_for` answering `None` / the list ignored), `computers_cut_off_are_blocked_only_up_to_a_cap`,

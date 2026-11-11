@@ -415,11 +415,14 @@ impl NetworkManager {
         };
 
         // A computer too far behind is cut off here, before it is registered
-        // or caught up — when its Identify names its release (v0.3.271 on).
-        // An older one names it in the capability it sends as it connects,
-        // and the liveness tick cuts it then (`cut_off_peers_too_far_behind`).
+        // or caught up — on the release its Identify names (v0.3.271 on), or
+        // for libp2p's own agent, which every older release sends, the newest
+        // such a release can be (`swarm_use::release_in_agent`): waiting for an
+        // older one's direct capability missed it twice (#415, gotcha #1079).
+        // The liveness tick judges it again as releases are published
+        // (`cut_off_peers_too_far_behind`).
         if let Some(running) =
-            crate::daemon::state::swarm_use::version_in_agent(&info.agent_version)
+            crate::daemon::state::swarm_use::release_in_agent(&info.agent_version)
         {
             if let Some(verdict) = self.shared_state.cut_off_for(&node_id, running) {
                 self.cut_off_peer(peer_id, &node_id, &verdict);
@@ -990,9 +993,11 @@ mod cut_off_tests {
             capabilities_dispatched(&mut dispatched).is_empty(),
             "held until its Identify"
         );
+        // An agent naming no release, so its capability is its only word on
+        // one (libp2p's own agent is judged at Identify since gotcha #1079).
         manager.handle_identify_received(
             peer,
-            identify_from(&key, "rust-libp2p/0.47.0".into()),
+            identify_from(&key, "another-agent/1.0".into()),
             ConnectionId::new_unchecked(1),
         );
         let handed_on = capabilities_dispatched(&mut dispatched);
@@ -1102,11 +1107,28 @@ mod cut_off_tests {
             .blocked_peers()
             .contains(&old_peer));
 
-        // THE CONTROL: one release behind, and an older release's Identify
-        // that names none, are registered as before.
+        // An older release names none: libp2p's own agent, sent by every
+        // release before v0.3.271, is cut off here too, as v0.3.270 at most —
+        // waiting for its direct capability left one connected 7.5 h, 12
+        // releases behind (gotcha #1079). This build is v0.3.272 or newer.
+        let older = libp2p::identity::Keypair::generate_ed25519();
+        let older_peer = older.public().to_peer_id();
+        manager.handle_identify_received(
+            older_peer,
+            identify_from(&older, "rust-libp2p/0.47.0".into()),
+            ConnectionId::new_unchecked(4),
+        );
+        assert!(manager.cut_off.contains_key(&older_peer));
+        assert!(!manager
+            .shared_state
+            .peer_registry
+            .contains_key(&node_of(&older)));
+
+        // THE CONTROL: one release behind, and an Identify from another agent
+        // that names no release, are registered as before.
         for (n, agent) in [
             (2, format!("swarmllm/{}", own_patch(-1))),
-            (3, "rust-libp2p/0.47.0".to_string()),
+            (3, "another-agent/1.0".to_string()),
         ] {
             let key = libp2p::identity::Keypair::generate_ed25519();
             let peer = key.public().to_peer_id();
@@ -1129,8 +1151,8 @@ mod cut_off_tests {
     }
 
     /// **The liveness tick cuts a connected computer on the release it
-    /// stated itself** — an older release states it in the capability it
-    /// sends as it connects, after Identify.
+    /// stated itself** — one whose Identify named no release states it in the
+    /// capability it sends as it connects, after Identify.
     #[tokio::test]
     async fn the_liveness_tick_cuts_a_computer_whose_own_capability_names_an_old_release() {
         let mut manager = manager();
@@ -1139,7 +1161,7 @@ mod cut_off_tests {
         let node = node_of(&key);
         manager.handle_identify_received(
             peer,
-            identify_from(&key, "rust-libp2p/0.47.0".into()),
+            identify_from(&key, "another-agent/1.0".into()),
             ConnectionId::new_unchecked(1),
         );
         assert!(manager.peer_to_node.contains_key(&peer));

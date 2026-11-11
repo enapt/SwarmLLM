@@ -124,6 +124,40 @@ pub fn version_in_agent(agent: &str) -> Option<&str> {
     (version.len() <= MAX_VERSION_LEN && version_triple(version).is_some()).then_some(version)
 }
 
+/// libp2p's own Identify agent, sent unless a build sets one
+/// (`libp2p-identify` 0.47: `rust-libp2p/<its version>`) — what every
+/// SwarmLLM release before v0.3.271 sent.
+const LIBP2P_DEFAULT_AGENT_PREFIX: &str = "rust-libp2p/";
+
+/// The newest release that sent libp2p's own agent: [`agent_version`] landed
+/// (e641dd2a) while Cargo.toml read 0.3.270-alpha, and first shipped in
+/// v0.3.271-alpha.
+const NEWEST_RELEASE_WITHOUT_AN_AGENT_VERSION: &str = "0.3.270-alpha";
+
+/// The newest release a SwarmLLM computer's Identify says it runs: the one
+/// its agent names, or — for libp2p's own agent, which every release before
+/// v0.3.271 sent — [`NEWEST_RELEASE_WITHOUT_AN_AGENT_VERSION`], the newest
+/// such a computer can run. `None` for any other agent. Asked only of a
+/// computer that speaks SwarmLLM (`peer_speaks_swarmllm`), on its own
+/// authenticated connection, so the only computer an answer can cut off is
+/// the one that sent it.
+///
+/// Without the second half an older release was judged only by the
+/// capability it sends DIRECT as it connects, and that message went missing
+/// twice: it arrived before Identify and was dropped (#415, 2026-11-06), and
+/// it was never sent — an older release sends it only once its first health
+/// round has run, so one that connected in its first seconds after a restart
+/// sent none, its later ones went by gossip (never read for this,
+/// [`SharedState::note_peers_own_version`]), and it stayed connected 12
+/// releases behind (2026-11-10, gotcha #1079).
+pub fn release_in_agent(agent: &str) -> Option<&str> {
+    version_in_agent(agent).or_else(|| {
+        agent
+            .starts_with(LIBP2P_DEFAULT_AGENT_PREFIX)
+            .then_some(NEWEST_RELEASE_WITHOUT_AN_AGENT_VERSION)
+    })
+}
+
 /// May a computer have other computers run its requests?
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SwarmUse {
@@ -759,6 +793,37 @@ mod tests {
         assert_eq!(
             version_in_agent(&format!("swarmllm/1.2.3-{}", "x".repeat(80))),
             None
+        );
+    }
+
+    /// **An older release is judged at Identify too** (gotcha #1079): its
+    /// libp2p agent names no release, so it runs v0.3.270 at most — two or
+    /// more behind once v0.3.272 is out, cut before its first message. The
+    /// 0.3.268 computer that connected in its first seconds after a restart
+    /// sent no direct capability and stayed connected 7.5 h, 12 behind.
+    #[test]
+    fn an_older_release_is_judged_by_the_libp2p_agent_it_sends() {
+        assert_eq!(
+            release_in_agent(&agent_version()),
+            Some(env!("CARGO_PKG_VERSION"))
+        );
+        assert_eq!(
+            release_in_agent("rust-libp2p/0.47.0"),
+            Some("0.3.270-alpha"),
+            "what every release before v0.3.271 sends"
+        );
+        assert_eq!(release_in_agent("go-libp2p/0.33.0"), None);
+        assert_eq!(release_in_agent(""), None);
+        assert_eq!(release_in_agent("swarmllm/not-a-version"), None);
+        // The newest it can be: never judged further behind than that.
+        assert_eq!(known("0.3.271-alpha").behind("0.3.270-alpha"), Some(1));
+        assert_eq!(known("0.3.280-alpha").behind("0.3.270-alpha"), Some(10));
+        let peer = NodeId([0x44; 32]);
+        let running = release_in_agent("rust-libp2p/0.47.0").unwrap();
+        assert_eq!(
+            state().cut_off_for(&peer, running).map(|v| v.key()),
+            Some("too_far_behind"),
+            "this build is v0.3.272 or newer"
         );
     }
 
