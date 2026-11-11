@@ -4952,13 +4952,24 @@ sees pins and no traffic. Seeding from the swarm's traffic needs a new gossiped 
 (an additive message and a feature bit) AND a privacy decision, since it would publish who
 served whom. Never fake it with sample data.
 
-#### #176 — Cross-pool inference has an admin-API switch but no dashboard control
+#### #176 — Cross-pool inference: a pool owner's listing has no dashboard control
 `P3` · ux · **PARTIAL** — 2026-07 (R134) · history: archive § "Inter-pool model sharing policy"
 
 Discovery and opt-in routing between pools shipped (R134-R134.7:
 `PoolModelAvailability`, `foreign_pool_catalog`, `pool.allow_cross_pool_inference`), and R137
-made the setting live through `PUT /api/admin/config` (`allow_cross_pool_inference`); no
-dashboard control or consent banner exists. Add the toggle with its consent wording (i18n ×21).
+made the setting live through `PUT /api/admin/config` (`allow_cross_pool_inference`).
+**Using another pool has its switch since 2026-11-11** (on main, not in a release yet): in the
+Private Mode coverage panel (`pool.js::loadCrossPool` / `setCrossPool`, disabled while the
+setting is unread), its consequence said beside it and asked before it turns on (7 keys ×21).
+Prior art: Tailscale's "Allow local network access" — off by default, labelled by what it
+allows, its warning about who then reaches you beside it.
+**Residual — the LISTING half**: `pool.share_model_catalog` (a pool owner tells other pools what
+the pool serves) is still config-file only, so the switch finds a pool only where its owner
+edited `config.toml`. And its catalog is every model the owner's REGISTRY knows
+(`health::monitor::broadcast_pool_model_availability` reads `model_registry.models()`, every
+manifest gossip brought), not the models the pool's devices hold a part of — what
+`cross_pool_extras` asks of the asking pool. Fix the catalog to that, then give the owner the
+switch (owner only, acting from `share_model_catalog_min_members` devices).
 Billing between pools waits on credits, which are dormant (`docs/CREDITS_DESIGN.md`).
 
 #### #261 — A model's manifest carries the file's own name and placeholder metadata

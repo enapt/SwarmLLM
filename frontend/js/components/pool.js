@@ -137,7 +137,10 @@
           this._privateMode = !!data.private_mode;
           this.renderActivePool(data);
           this.updatePrivateModeUI();
-          if (this._privateMode) this.loadCoverage();
+          if (this._privateMode) {
+            this.loadCoverage();
+            this.loadCrossPool();
+          }
         } else {
           this._privateMode = false;
           this.updatePrivateModeUI();
@@ -519,6 +522,60 @@
           App.ui.switchTab('devices');
         });
       }
+      // Other pools (#176). Turning it on widens where messages may go, so it
+      // asks first, as Private Mode's own switch does; turning it off only
+      // narrows that again and asks nothing.
+      var crossPool = document.getElementById('pool-cross-pool-checkbox');
+      if (crossPool) {
+        crossPool.addEventListener('change', function () {
+          var cb = this;
+          if (cb.checked && !confirm(I18n.t('pool.cross_pool_confirm'))) {
+            cb.checked = self._crossPool === true;
+            return;
+          }
+          self.setCrossPool(cb.checked);
+        });
+      }
+    },
+
+    // Whether this computer may use another pool for a model none of its
+    // devices holds: `pool.allow_cross_pool_inference`, which acts only while
+    // Private Mode is on (`pool::scope::cross_pool_extras`) — so the switch
+    // lives in the panel that shows only then. A switch that could not read
+    // the setting stays disabled: it must never write a value it did not read.
+    loadCrossPool: async function () {
+      var config = await App.data.loadConfig();
+      this._crossPool = config && typeof config.allow_cross_pool_inference === 'boolean'
+        ? config.allow_cross_pool_inference
+        : null;
+      this.renderCrossPool();
+    },
+
+    renderCrossPool: function () {
+      var known = typeof this._crossPool === 'boolean';
+      var cb = document.getElementById('pool-cross-pool-checkbox');
+      if (cb) {
+        cb.checked = this._crossPool === true;
+        cb.disabled = !known;
+      }
+      var unreadable = document.getElementById('pool-cross-pool-unreadable');
+      if (unreadable) unreadable.classList.toggle('hidden', known);
+    },
+
+    setCrossPool: async function (enabled) {
+      var self = this;
+      var cb = document.getElementById('pool-cross-pool-checkbox');
+      if (cb) cb.disabled = true;
+      // `PUT /api/admin/config` changes only the fields it is sent.
+      await U.apiAction('/api/admin/config', _jsonOpts('PUT', { allow_cross_pool_inference: enabled }), function () {
+        self._crossPool = enabled;
+        App.notifications.showToast(
+          enabled ? I18n.t('pool.cross_pool_enabled') : I18n.t('pool.cross_pool_disabled'),
+          'info'
+        );
+      }, { fallback: I18n.t('pool.cross_pool_failed'), display: 'toast' });
+      // Written or refused, the switch shows what the node holds now.
+      this.renderCrossPool();
     },
 
     confirmPrivateMode: async function (enabled, onCancel) {
@@ -567,6 +624,7 @@
         this._privateMode = data.enabled;
         this.updatePrivateModeUI();
         if (data.coverage) this.renderCoverage(data.coverage);
+        if (data.enabled) this.loadCrossPool();
         App.notifications.showToast(
           data.enabled ? I18n.t('pool.private_mode_enabled') : I18n.t('pool.private_mode_disabled'),
           data.enabled ? 'info' : 'success'

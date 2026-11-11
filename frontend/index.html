@@ -1955,6 +1955,18 @@
                 <span id="pool-coverage-summary" class="text-muted" style="font-size:0.78rem"></span>
               </div>
               <div class="panel-body" id="pool-coverage-body">
+                <!-- What happens to a model the list below shows unavailable (#176). -->
+                <div class="pool-cross-pool">
+                  <label class="toggle-switch">
+                    <input type="checkbox" id="pool-cross-pool-checkbox" aria-labelledby="pool-cross-pool-label" aria-describedby="pool-cross-pool-hint" disabled>
+                    <span class="toggle-slider"></span>
+                  </label>
+                  <div>
+                    <span id="pool-cross-pool-label" data-i18n="pool.cross_pool_label">Use other pools for models your devices don't have</span>
+                    <p id="pool-cross-pool-hint" class="text-muted field-hint pool-cross-pool-hint" data-i18n="pool.cross_pool_hint">When none of your devices holds a model, requests for it can go to computers in another pool that lists it — and those computers see what you send. Requests for a model your devices hold any part of never go to another pool.</p>
+                    <p id="pool-cross-pool-unreadable" class="text-muted field-hint pool-cross-pool-hint hidden" data-i18n="pool.cross_pool_unreadable">This setting couldn't be read, so it can't be changed right now. Try again in a moment.</p>
+                  </div>
+                </div>
                 <div id="pool-coverage-list"></div>
               </div>
             </div>
