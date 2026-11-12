@@ -5719,13 +5719,15 @@ escrow release clamps only at 0. Cheap bound: clamp to the request's `max_tokens
 coordinator's own prompt-token count, and always take the completion count from tokens the
 coordinator received (`stream.emitted()`). Belongs with credits enforcement.
 
-#### #268 — Six DNS advisories wait on the libp2p 0.57 upgrade
-`P3` · security · **OPEN** — 2026-10-14 (the v0.3.237 gate's `cargo audit`) · history: `SECURITY.md` rows RUSTSEC-2026-0118/0119; 0487/0489/0490/0491 added 2026-11-11 (CI's audit failed on them)
+#### #268 — Eleven DNS advisories wait on the libp2p 0.57 upgrade
+`P3` · security · **OPEN** — 2026-10-14 (the v0.3.237 gate's `cargo audit`) · history: `SECURITY.md` rows RUSTSEC-2026-0118/0119; 0487/0489/0490/0491 added 2026-11-11 (CI's audit failed on them); 0504/0505/0511/0512/0514 added 2026-11-12 (the same)
 
 `hickory-proto 0.25.2` (an NSEC3 proof loop, an O(n²) name-compression cost, ~18 MB reserved off a
 header's record counts per crafted packet, three panics parsing DNS TEXT the daemon never parses)
 reaches the daemon only through `libp2p-dns` (bootstrap multiaddrs at startup) and `libp2p-mdns`
-(link-local), which is why `SECURITY.md` accepts them. All six are fixed in `hickory ≥ 0.26.2`. libp2p 0.57.0 (2026-09-11) ships `libp2p-dns 0.45` on
+(link-local), which is why `SECURITY.md` accepts them. Five more (2026-11-12) are in DNSSEC validation, which
+hickory 0.25 compiles only with a `dnssec-*` feature no build of ours enables — not in the binary at all. All
+eleven are fixed in `hickory ≥ 0.26.2`. libp2p 0.57.0 (2026-09-11) ships `libp2p-dns 0.45` on
 `hickory-resolver ^0.26`, the fixed line. The upgrade is not a version bump: the vendored
 `libp2p-request-response` patch must be re-applied to 0.57's crate, the direct `libp2p-gossipsub`
 pin must move with the facade (two copies otherwise, see CLAUDE.md), and a 0.56 node must still
