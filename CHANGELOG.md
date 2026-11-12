@@ -1,5 +1,53 @@
 # Changelog
 
+## [0.3.283-alpha] — 2026-11-12
+
+**A long prompt sent to a slow computer is waited for while that computer reads it.** When a model runs whole on
+another computer, this one waited at most ten minutes for the first word of the reply, however long the prompt.
+A computer that reads a long prompt more slowly than that — a 27B model's 4,000-word prompt on a modest machine
+— failed every such request, even while it was working through it, and the next one the same way. Now the
+computer reading the prompt says how far it has got (only to a computer that asked and understands the
+message), and the wait goes on while the reading keeps moving: two minutes past the last report, or twice the
+longest gap between two reports, never more than an hour. A computer measured to read slowly is also given
+twice its measured time from the start. A report never shortens a wait and never changes which computer is
+chosen, and it says only how much of its own reading is done, never anything that could tell you what another
+person's earlier request left in that computer's memory. On a two-computer test (one on a single processor
+core), a 1,999-word prompt the build before gave up on at 600 seconds was answered at 898 seconds, the same
+reply word for word. A computer that answered with a single word is now also marked as having the model
+loaded, so it is no longer treated as cold and given four extra minutes for a load that never comes.
+
+**A long prompt turned down by several computers in turn is planned until a route fits.** Each refusal tells
+the planner what that computer can take, and the next plan uses it, but a request was planned at most three
+times. A 4,304-word prompt to Gemma 4 31B was refused by one computer for the whole model, then by the same
+computer for part of it, then by a second computer for its part, all within about two seconds, and failed
+with a plan that fitted still untried. A request may now be planned up to six times while every refusal comes
+back within a few seconds; a computer that went quiet still gets only one more try, so no request waits out a
+second deadline.
+
+**A computer that has just started no longer answers "model not found" for up to four minutes.** It learned
+which models its peers hold only at their next regular exchange: every 30 seconds in a small swarm, up to 240
+in a large one. Each peer now tells a new connection its model list the moment it connects. On a two-computer
+test the new computer knew its peer's model 16 milliseconds after connecting, against 29 seconds before.
+
+**An update no longer cuts off replies it was serving for other computers.** Before restarting for an update,
+a node waits for the requests it is serving to finish, but it kept accepting new ones from other computers
+during that wait, so the wait could run to its limit and the restart then cut those replies off. From the
+start of that wait it now turns new work from other computers away with an answer they already route around,
+and tells the swarm at once, so nobody plans through it. Your own chats are unaffected, and if no restart
+follows it takes work again.
+
+**A model split across a chain of computers is priced from each computer's own timing.** The requester saw
+only the whole chain's time, so each computer in the middle was priced from the speed it claimed for itself.
+Each computer in the chain now reports how long it held each step once the reply is over. A report can only
+make that computer look slower than it claims, never faster, is believed only from a computer that served
+that reply, and is never passed on as this computer's own measurement.
+
+**Smaller changes.** Every line the planner writes for a request names that request, so a computer that was
+passed over can be told from one that was chosen. Dependencies updated (tokio 1.54.1, redb 4.5.0, toml 1.2.1,
+rustix 1.1.6 and five smaller crates); the pipe between a node and its model processes moved off an API its
+crate deprecated, with no change in behaviour. The traffic split shows the two new messages (prompt progress and
+each hop's timing) as inference traffic.
+
 ## [0.3.282-alpha] — 2026-11-12
 
 **SwarmLLM no longer drives a hot computer harder.** A node serving other computers could keep its graphics
