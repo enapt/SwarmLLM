@@ -1070,6 +1070,59 @@ fn only_a_prompt_peer_refusal_earns_a_second_replan() {
     assert!(!super::a_further_replan_is_earned(&silent, true, quick));
 }
 
+/// A chain of fast refusals, each a fact the next plan reads, is followed to
+/// the route the facts allow (#446). Gemma 4 31B on 2026-11-12, a 4,304-token
+/// prompt: the whole-model peer refused (0.2 s), the split after it was refused
+/// by the same peer (0.7 s), the next by another (0.6 s) — and with only two
+/// re-plans the request failed 2.2 s in, with the fourth plan never tried.
+#[test]
+fn a_chain_of_fast_refusals_is_planned_through_to_the_cap() {
+    use crate::error::SwarmError;
+    use std::time::Duration;
+
+    let refused = SwarmError::ServiceUnavailable(
+        "Not enough free memory on this node for a 4304-token prompt".into(),
+    );
+    let fast = [
+        Duration::from_millis(224),
+        Duration::from_millis(742),
+        Duration::from_millis(631),
+    ];
+    // Each of the measured refusals earns the next plan: the third earns the
+    // fourth attempt, which two re-plans never reached.
+    for (replans, took) in fast.iter().enumerate() {
+        assert!(
+            super::another_replan_is_due(replans as u32, &refused, true, *took),
+            "re-plan {} after a {took:?} refusal",
+            replans + 1
+        );
+    }
+    // The cap still ends it: a peer that refuses every plan quickly costs
+    // MAX_REPLANS round trips, never an unbounded walk.
+    let quick = Duration::from_millis(600);
+    for replans in 0..super::MAX_REPLANS {
+        assert!(super::another_replan_is_due(replans, &refused, true, quick));
+    }
+    assert!(!super::another_replan_is_due(
+        super::MAX_REPLANS,
+        &refused,
+        true,
+        quick
+    ));
+
+    // A slow failure gets the one unconditional re-plan and nothing after it,
+    // however many re-plans the cap would allow.
+    let silent = SwarmError::PeerUnresponsive(
+        "remote-generate timed out waiting for token (first=true)".into(),
+    );
+    let deadline = Duration::from_secs(600);
+    assert!(super::another_replan_is_due(0, &silent, true, deadline));
+    assert!(!super::another_replan_is_due(1, &silent, true, deadline));
+    assert!(!super::another_replan_is_due(1, &refused, true, deadline));
+    // Our own worker's identical wording earns nothing past the first.
+    assert!(!super::another_replan_is_due(1, &refused, false, quick));
+}
+
 /// A request's peers are told it is over once, when it is over (#238): one
 /// `CancelInference` per peer any attempt ran a segment on, this node never,
 /// and nothing for a second call — the record is taken. A peer serving a

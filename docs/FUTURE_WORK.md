@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #446**). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #448**). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -3413,8 +3413,65 @@ What it says (the user, 11-08: a split that fails or is slow is the defect — n
   (`ModelIncompleteInSwarm`) though the holder was there and only slow. A 4K prompt of a 27B is ~7 minutes on
   ONE such computer; read across several in pieces it need not be (#430).
 
+**Measured again 2026-11-12 06:39-07:57Z** (live node on v0.3.282, the same models, order and shape;
+records `~/swarmllm-gate/tier427/1112a/{run.log,asks.jsonl}`, the safety kit's driver watch 155 polls, 0 events).
+"Here" is this laptop; pieces equalled tokens on every split again.
+
+| Model | Route | Reply tok/s | ~4.1K prompt: first token (prompt tok/s) / reply |
+|---|---|---|---|
+| Qwen3.8-27B | AU whole | 6.0-6.7 | 413 s (10.1) / 2.5 — completed (11-08: failed at 600 s) |
+| Qwen3.6-27B | AU whole | 5.0-7.0 | 424 s (9.7) / 2.7 |
+| Qwen3.6-35B-A3B | AU whole | 31-34 | 18 s (225) / 35.4 |
+| Ornith-1.5-35B-A3B | AU whole (11-08: split IT ↔ AU) | 39.7-39.8 | 17.5 s (235) / 36.9 |
+| Gemma 4 31B | AU whole | 2.4-2.6 | **failed** in 2.2 s: three fast refusals, each a new fact, ended by the re-plan cap (#446) |
+| Gemma 4 26B-A4B | split here ↔ AU; the long one here ↔ IT ↔ AU ↔ here, 2 attempts | 2.8-10.9 | 55 s (79) / 3.5 — completed (11-08: #429) |
+| Gemma 4 12B | AU whole; the long one here | 4.75 | 26 s (164) / 5.2 |
+| gpt-oss-20b MXFP4 / Q4_K_M | here / AU whole | 20.9-22.7 / 12.3-13.8 | 30 s (137) / 20.2 · 115 s (35) / 11.0 |
+| Qwen3-14B | AU whole (the warm-up AU ↔ IT) | 3.8-4.6 | 199 s (20.5) / 3.2 |
+| Qwen2.5-14B | here | 9.1-13.7 | 6.1 s (670) / 10.2 |
+| Qwen3-30B-A3B-2507 | split IT ↔ AU (11-08: AU whole) | 3.0-3.4 | 57 s (72) / 3.0 |
+| Llama 3.3 70B | — | **refused** ×3 in 1-2 s: "room for about 50 of its 80 layers", AU "room for 5 of the 80 layers it holds" (11-08: 64 there) |
+
+What it says: both 11-08 long-prompt failures are gone (#429, #430), the MoE models run whole on AU at 31-40 tok/s, and
+the Gemma 4 31B failed only at the re-plan cap (#446). But the DENSE models AU ran late in the run ran 3-4× below
+11-08 (Qwen3-14B 3.8 against 15.7-17.1, gpt-oss Q4 12-14 against 36-44), the 30B-A3B split where it had run whole,
+and the 70B was refused: the planner saw AU's card with room for 3 of the 14B's layers (`card_layers=Some(3)
+max_hostable_layers=Some(19) held_ranges=[]`) after AU had served ten models in turn — its card and memory held
+by the earlier models' idle workers (#447).
+
+#### #447 — A computer that has served several models in turn is offered as full while its idle workers would make room
+`P1` · perf-split · **OPEN** — 2026-11-12 · history: #427 (measured 11-12), #125 (the same fix for this node), #276
+(left as it is there)
+
+A node plans ITSELF counting the card and machine memory its admission would take back from idle workers of other
+models (`ModelProcessPool::idle_vram_reclaimable_mb` / `idle_ram_reclaimable_mb`, #125: an idle 3B sent an 8B held
+here to Belgium). What it ADVERTISES counts those workers as spent: `gpu.vram_available_mb` is the card's raw free
+memory (`health/monitor.rs`, `vram::query_gpu_vram_free_mb`), `ram_model_budget_mb` and `machine_room_beside_card_mb`
+the cap less every worker's reservation (`vram::ram_room_now_mb`); `ResidentModelLayers` names what is loaded, never
+what an idle worker would give back. `docs/invariants/memory.md` § "A model is admitted against the card as it stands
+NOW" and #276 both record it as left unfixed. Only the relaxed ceiling rung plans past it.
+
+Measured (#427's 11-12 table): after the Australian RTX 3060 (`aa3d1e66`) had served ten models one after another,
+the planner saw it with card room for 3 of Qwen3-14B's 40 layers (`card_layers=Some(3) max_hostable_layers=Some(19)
+held_ranges=[]`), split the 30B-A3B across Italy where it had run whole there, and refused Llama 3.3 70B — "room for
+5 of the 80 layers it holds" (64 on 11-08). One "one invariant, N paths" defect: the local half was fixed by #125.
+Not yet known: whether that computer's OWN admission then reclaimed for the work it was handed — the 14B, handed
+whole at the ceiling rung, ran at 3.8 tok/s against 15.7-17.1 on 11-08, which reads as most layers on its processor;
+its log is not ours. Seen again 08:06-08:44Z (#446's live check, `~/swarmllm-gate/replan446/`): the same
+4,304-token 31B ask planned Italy [0,34) + Australia [34,60), and Italy refused its part for memory after 37 s
+("its worker is already holding 7979 MB"); on the official build the same ask ran 27 min and ended on a refusal for
+conversation memory ("other conversations on this node are using 1139 MB of the 1386 MB available"). First a rig on
+this machine's card (live node stopped): a node serving three models in turn, then
+a dense model handed whole — where does its spawn place it, and what does it advertise before and after?
+Design to weigh: a "room after reclaim" figure in the capability (additive, `#[serde(default)]`, the same predicate
+`vram_reclaim_eligible` / `ram_reclaim_eligible` admission uses, so the advertisement can never promise more than the
+spawn takes), or each idle worker's releasable memory in `ResidentModelLayers`. Prior art to read first: Ollama's
+scheduler (`server/sched.go`: an idle runner is unloaded to fit a new model, and its free-VRAM reading counts what
+unloading would give back), vLLM's sleep mode. A capability change → `security-reviewer` (a peer may advertise room
+it will not honour: the up-front prompt admission, #252 (b), still asks before the pass).
+
 #### #430 — A long prompt read on ONE computer that cannot read it fast: no first token in 10 minutes
-`P2` · perf-split · **OPEN** (residual: the floor read exactly from the frames, pieces timed between two machines, a led split's first-token wait; (a)'s ratio and (c) fixed 2026-11-11, the hand-off's prompt floor, the wait sized from it and the progress frames that make it an inactivity wait built 2026-11-12) — 2026-11-08 · history: #427 (measured), #171 (a prompt pass read in pieces)
+`P2` · perf-split · **OPEN** (residual: pieces timed between two machines, a led split's first-token wait; (a)'s ratio and (c) fixed 2026-11-11, the hand-off's prompt floor, the wait sized from it and the progress frames that make it an inactivity wait built 2026-11-12) — 2026-11-08 · history: #427 (measured), #171 (a prompt pass read in pieces)
 
 Qwen3.8-27B with a 4,110-token prompt (#427's table) was handed whole to the only machine holding every layer, whose
 card holds part of a 27B and processor the rest; it reads such a prompt at ~7-9.5 tok/s (Qwen3.6-27B there: 432 s),
@@ -3555,11 +3612,16 @@ above LOW; this was one). The requester keeps a report from the attempt's own pe
 it measured) — past the last, up to an hour (`first_token_deadline_after`). Rig (`~/rig430/rig_floor5.sh`, `out-on`):
 q2, 1,999 tokens to a peer never measured (`measured_read=Unknown`, budget 600 s), drew 21 reports 39.4-40.3 s
 apart (one a layer) and its reply came at 898 s, 200 — the build before ran it out at 600 s. q3 (1,978 tokens, still unmeasured: a wait that came back is believed once a second agrees) the same — 21 reports, its reply at 867 s; both replies the build before's word for word. On the final build (the share, the gap rule): q2 again, 885 s, reports 45 → 954 thousandths. Tests red-checked (each mechanism switched off: the cache's share, the advancing check, the gap rule, the once-a-second throttle).
-Evidence: `docs/invariants/network.md` § "A hand-off's prompt read is reported while it runs". Left: the floor read
-from the frames — the time from the first share to the last times the READ, without the queue or load before it (a
-review leftover: the floor includes the peer's queue wait), and a wait that runs out still has its frames;
-divided by every token it stays a lower bound where the peer's cache held part, as the floor is today — and a LED
-split's first-token wait, still the fixed budget (no frame comes from a head's split yet).
+Evidence: `docs/invariants/network.md` § "A hand-off's prompt read is reported while it runs". **Decided 2026-11-12 — the floor is NOT read from the frames.** A frame is the
+peer's word, and a peer's word may price it slower, never faster (`arch-scheduling.md` § "A layer is priced as the
+model it belongs to"; the floor is `max(floor × tokens, price)`). For an honest peer the read the frames time is
+SHORTER than the wait this node times itself (the wait holds the read plus the queue and the trip), so as a floor it
+binds nowhere; any use that subtracts the time before the first frame is a discount the peer controls (a first frame
+held back until the read is nearly over prices the read at nothing). Its one slower use — a wait that ran out,
+extrapolated from the share read — is gone with the inactivity wait: a wait now runs out only on a stall or at the
+hour. The queue wait inside today's sample stays answered as it is (the two-sample rule, at the lesser). Left: a LED
+split's first-token wait, still the fixed budget (the head drives the chain's prompt in pieces, #171, and could
+report the pieces done the same way — no head sends a frame yet).
 **Also from the release's review (2026-11-12, P3):** a peer request stopped for heat (`stop_running_peer_work`, #440)
 is aborted without `release_request_kv`, so its target and any drafter stay `in_use` until `CONVERSATION_GAP_SECS`
 passes — a whole placement's reclaim of that idle drafter (#442) waits that long. The disconnect abort has the same
@@ -6058,6 +6120,22 @@ archive under the named heading. Reopen one only with the evidence its line name
 Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 19-28 were
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
+
+**Closed 2026-11-12, on main (not in a release yet)** (#446)
+- #446 — **A long prompt refused by several computers in turn failed with a fitting plan untried.**
+  Gemma 4 31B from the live node, a 4,304-token prompt (tier re-measure, #427): the computer handed
+  the whole model refused it, the split after it was refused up front by the same computer (45
+  layers fit), the next by another (19 from layer 1) — three fast refusals in 2.2 s, each a fact the
+  next plan read — and the request ended at the cap of two re-plans. `MAX_REPLANS` is 5 and the cap
+  and the earning rule are one function, `router::another_replan_is_due`: the first re-plan
+  unconditional, each later one only for a refusal from a remote segment of that attempt's own
+  plan in under 5 s, so a slow
+  failure still gets one and the worst case is five fast refusals, never a second deadline. Prior
+  art: Petals' client retries without a cap by default (`max_retries = None`, backoff 1 s doubling
+  to 60, a failed server banned 15 s); its retries are blind, ours each carry a fact. Live check 11-12 (`~/swarmllm-gate/replan446/`): the shape did not recur — the peers were by then full of
+  idle workers (#447); on main a 37 s refusal earned no further re-plan, as written. Verified by the test.
+  Test `a_chain_of_fast_refusals_is_planned_through_to_the_cap` (red at 2). Evidence:
+  `docs/invariants/scheduling.md` § "A re-plan is warranted by a changed fact".
 
 **Closed 2026-11-12, on main (not in a release yet)** (#445)
 - #445 — **A computer that had just started answered "model not found" for up to four minutes

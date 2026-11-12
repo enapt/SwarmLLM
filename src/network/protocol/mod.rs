@@ -253,6 +253,8 @@ fn counts_as_inference(req: &SwarmRequest) -> bool {
                 | crate::types::SwarmMessage::ResendTokens(_)
                 | crate::types::SwarmMessage::RequesterGuesses(_)
                 | crate::types::SwarmMessage::CancelInference(_)
+                | crate::types::SwarmMessage::HopTimings(_)
+                | crate::types::SwarmMessage::PromptProgress(_)
         ),
         SwarmRequest::ShardTransfer(_)
         | SwarmRequest::RelayedTensor(_)

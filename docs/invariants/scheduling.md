@@ -1173,6 +1173,30 @@ streamed sibling, `only_a_memory_refusal_with_someone_to_ask_is_planned_again`,
 the publish guard off). The admission that let a 14B in whole with no room for its
 caches is the other half, still open (FUTURE_WORK).
 
+**A chain of fast refusals is followed to the plan they allow (2026-11-12, #446).**
+Gemma 4 31B from the live node (tier re-measure `~/swarmllm-gate/tier427/1112a`), a
+4,304-token prompt, request `1ba3e6a5`: the Australian computer handed the whole
+model refused it for its caches (0.22 s; `after_the_whole_model_was_refused` held it
+to 59 layers), the split after it was refused up front by the same computer
+(`layers_that_fit=45`, 0.74 s), the next by the Italian one (`layers_that_fit=19
+counted_from=1 counted=Loading`, 0.63 s) — and the request failed 2.2 s in, at
+`MAX_REPLANS = 2`, its third refusal reported. Each refusal was a fact the next plan
+read (#252 (b), #378), so each plan differed from the last; the cap, not the facts,
+ended it. `MAX_REPLANS` is now 5, and the cap and the earning rule are one function,
+`router::another_replan_is_due`: the first re-plan unconditional, every later one
+only for a refusal from a remote segment in under
+`A_REFUSAL_THIS_FAST_COSTS_NOTHING_TO_RETRY` (5 s) — a remote segment of the
+refused attempt's OWN plan (the trace's `assemblies` read before and after it: the
+trace keeps the last plan's segments, so an attempt that failed before assembling
+one would read the one before it; pre-release review, 2026-11-12). A silent peer or any slow
+failure still earns ONE re-plan, so the bound's worst case is five fast refusals
+(< 25 s), never a second deadline — the 2026-09-16 reason for the cap. Petals'
+client has no cap by default (`max_retries = None`, 1 s doubling to 60 s backoff,
+a failed server banned 15 s, `client/config.py`): its retries are blind, ours each
+carry a fact, so a bound past what a measured request needed is enough and a
+backoff would only delay a plan the facts already allow. Live check (`~/swarmllm-gate/replan446/`, 08:06-08:44Z, the official v0.3.282 then main swapped in, the same ask): the shape did not recur — the swarm had moved on. On main the whole-model refusal (0.6 s) earned the first re-plan; the split after it waited 37 s for the Italian computer to refuse its [0,34) for memory ("its worker is already holding 7979 MB"), past the 5 s line, so no further re-plan was earned — the rule as written. Its peers were full of the tier run's idle workers (#447). Test:
+`a_chain_of_fast_refusals_is_planned_through_to_the_cap` (red at `MAX_REPLANS = 2`).
+
 **From the rules file (moved 2026-10-02):**
 
 **`SwarmError::LocalMemoryUnavailable`** is what this node's own loader returns

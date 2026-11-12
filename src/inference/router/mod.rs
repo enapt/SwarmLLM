@@ -411,9 +411,25 @@ fn should_retry_after(
 ///   user got a 137 s 503 quoting a memory shortfall, having never been told the
 ///   real problem was that nobody free was holding the weights.
 ///
-/// Three attempts, not more: the point is to honour a re-plan the scheduler
-/// already decided was warranted, not to keep dialling.
-const MAX_REPLANS: u32 = 2;
+/// Past the first, every re-plan is paid for by the attempt before it
+/// ([`another_replan_is_due`]): a peer said what it could not take, in about a
+/// round trip, and the next plan reads what it said. One fact can need more
+/// than one plan to use. Gemma 4 31B on 2026-11-12 (#446), a 4,304-token
+/// prompt: the computer handed the whole model refused it (0.2 s, held to 59
+/// layers), the split that followed was refused up front by the same computer
+/// (45 layers fit, 0.7 s) and the next by the one in Italy (19 from layer 1,
+/// 0.6 s). The request then had no attempt left, 2.2 s in, with a route those
+/// three answers allowed. Five lets a chain of such answers reach it; a slow
+/// failure still earns no second re-plan, so the worst case adds five fast
+/// refusals (under 5 s each), never another deadline.
+///
+/// Prior art: Petals' client (`client/config.py`) retries a failed route without
+/// a limit by default (`max_retries = None`), backing off 1 s doubling to 60 s
+/// and banning a failed server for 15 s. Its retries are blind and slow by
+/// design; ours carry a fact each and are fast, so a bound a little past what a
+/// measured request needed is enough, and backing off would only delay a plan
+/// the facts already allow.
+const MAX_REPLANS: u32 = 5;
 
 /// How many times one reply may be continued after its machine failed
 /// mid-stream (`continuation_after`). Each continuation re-reads the whole
@@ -504,6 +520,22 @@ fn a_further_replan_is_earned(
     used_remote_segment
         && (remote_peer_could_not_serve(err) || peer_serves_shorter_context(err))
         && attempt_took < A_REFUSAL_THIS_FAST_COSTS_NOTHING_TO_RETRY
+}
+
+/// May a request that failed with `err` after `replans` re-plans be planned
+/// again? The cap and the earning rule in one place, so the loop cannot read
+/// one without the other: the first re-plan is unconditional, as it always
+/// has been; every later one must be earned ([`a_further_replan_is_earned`]);
+/// none past [`MAX_REPLANS`]. Whether the failure is retryable at all is
+/// [`should_retry_after`]'s question, asked beside this one.
+fn another_replan_is_due(
+    replans: u32,
+    err: &SwarmError,
+    used_remote_segment: bool,
+    attempt_took: std::time::Duration,
+) -> bool {
+    replans < MAX_REPLANS
+        && (replans == 0 || a_further_replan_is_earned(err, used_remote_segment, attempt_took))
 }
 
 /// Hand back the work a definitively-failed request had already done.
@@ -1466,11 +1498,18 @@ impl InferenceRouter {
             // which filters out the dead/dropped peer via `connected_node_ids`
             // and picks a different holder.
             //
-            // The first re-plan is unconditional, as it has always been. A
-            // second is earned only by `a_further_replan_is_earned` — a peer
-            // that answered "I cannot serve this" in about a round trip — so a
-            // request can never spend two deadlines waiting on silence.
+            // The first re-plan is unconditional, as it has always been. Each
+            // later one, up to `MAX_REPLANS`, is earned only by
+            // `a_further_replan_is_earned` — a peer that answered "I cannot
+            // serve this" in about a round trip — so a request can never spend
+            // two deadlines waiting on silence (`another_replan_is_due`).
             let mut attempt_took;
+            // Plans assembled before the attempt now running: the trace's
+            // segments are the LAST plan's, so an attempt that failed before
+            // assembling one still reads the attempt before it. A further
+            // re-plan is earned only by a remote segment of the attempt that
+            // was refused (#446 review).
+            let mut assemblies_before = trace.snapshot().assemblies;
             let mut output = {
                 let started = std::time::Instant::now();
                 let out = execute_request(
@@ -1500,7 +1539,7 @@ impl InferenceRouter {
             let mut first_refusal: Option<SwarmError> = None;
             let mut offered_when_refused: Option<crate::daemon::state::OfferedMemory> = None;
             let mut replans = 0;
-            while replans < MAX_REPLANS {
+            loop {
                 // A peer reporting it cannot serve is retryable, but only when a
                 // remote segment was actually part of this attempt — otherwise
                 // the identical message from our own worker would retry
@@ -1518,6 +1557,8 @@ impl InferenceRouter {
                 // be the change that needs justifying, not this.
                 let snapshot = trace.snapshot();
                 let used_remote_segment = snapshot.remote_segments() > 0;
+                let this_attempt_used_a_peer =
+                    used_remote_segment && snapshot.assemblies > assemblies_before;
                 let (retry, local_memory) = match &output {
                     Err(err) => {
                         let retryable = should_retry_after(
@@ -1526,8 +1567,12 @@ impl InferenceRouter {
                             request.is_cancelled(),
                             snapshot.ttft_ms.is_some(),
                         );
-                        let earned = replans == 0
-                            || a_further_replan_is_earned(err, used_remote_segment, attempt_took);
+                        let earned = another_replan_is_due(
+                            replans,
+                            err,
+                            this_attempt_used_a_peer,
+                            attempt_took,
+                        );
                         let local_memory = local_memory_refused_the_load(err);
                         // Not "transient": the re-plan is handed the refusal
                         // as a fact (`note_local_memory_refusal`), and a
@@ -1578,6 +1623,7 @@ impl InferenceRouter {
                     first_refusal = output.err();
                 }
                 replans += 1;
+                assemblies_before = trace.snapshot().assemblies;
                 let started = std::time::Instant::now();
                 output = execute_request(
                     shared_state.clone(),
