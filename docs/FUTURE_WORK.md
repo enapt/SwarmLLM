@@ -4505,7 +4505,12 @@ cannot tell an earlier attempt's range from a second range of this one without t
    client's stream closes. Only a party SEEN since the pass began can leave (its review: a later hop may never have
    the coordinator on record); the sender, and a coordinator that is the sender, start seen (`seen_at_arrival`) —
    left to the first 30 s idle tick, a coordinator killed 0.2 s after its pass arrived was never seen and never
-   released (rig `~/rig448/rig448d.sh` run4, 2026-11-12: 0 releases, 0 unloads in 13 min). Tests `a_prompt_pass_whose_sender_or_coordinator_left_is_released`,
+   released (rig `~/rig448/rig448d.sh` run4, 2026-11-12: 0 releases, 0 unloads in 13 min). **Verified on that rig
+   after the fix** (`dde7557a`, run5: `split_rig.sh split`, A holds 0,3 with start-and-finish-here, B the middle 1,2,
+   both on the processor, `idle_unload_secs = 20`, A SIGKILLed 0.7 s after B's first prompt piece): B logged
+   "released a prompt pass…" at 19:30:04 and its idle unload freed the model 22 ms later (`idle_secs=426`) — 300 s
+   after its first idle tick (the auto-manage loop starts ~2.5 min into a node's life, at 19:25:11 here); the
+   arm before (d) (run4, `swarmllm-448c`) released nothing and unloaded nothing in 13 min. Tests `a_prompt_pass_whose_sender_or_coordinator_left_is_released`,
    `a_passes_parties_are_its_authenticated_sender_and_the_coordinator_it_names`,
    `still_in_the_swarm_is_this_node_a_connected_computer_or_one_in_the_registry`. Still open from the same
    review (LOW): a cancel arriving while a cold model loads can be followed by the pass's `note_forward_sent`,
