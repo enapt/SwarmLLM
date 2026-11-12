@@ -170,9 +170,33 @@ pub struct ManifestSync {
     /// its way (`catching_up`). Removed with the peer's LAST connection.
     connections: DashMap<NodeId, Connection>,
     next_connection: std::sync::atomic::AtomicU64,
+    /// Rung when a connected peer's own capability arrives
+    /// ([`Self::want_catch_up`]); the health monitor waits on it
+    /// ([`Self::catch_up_wanted`]) and tells a peer on a new connection the
+    /// versions at once, not at its next round (30-240 s): until then a
+    /// computer that had just started knew none of its peers' models, and
+    /// a question for one was answered "not found" (2026-11-12).
+    /// Prior art: go-ethereum's `runEthPeer` sends a new peer what its pool
+    /// holds at connect (`syncTransactions`: "new transactions appearing after
+    /// this will be sent via broadcasts"); BEP 3's bitfield, the first message
+    /// on a connection.
+    catch_up: tokio::sync::Notify,
 }
 
 impl ManifestSync {
+    /// A connected peer's own capability arrived — the moment this node
+    /// learns whether it takes digests. Asked only by
+    /// `SharedState::note_capability_heard`; several before the monitor wakes
+    /// count as one.
+    pub fn want_catch_up(&self) {
+        self.catch_up.notify_one();
+    }
+
+    /// What the health monitor's loop waits on (`catch_up_new_connections`).
+    pub async fn catch_up_wanted(&self) {
+        self.catch_up.notified().await;
+    }
+
     /// A verified manifest of `model` at version `manifest_hash` arrived, by
     /// any transport, declaring `context_length`. Ends the pull of exactly
     /// that version — whoever sent it.

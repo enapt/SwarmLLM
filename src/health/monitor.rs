@@ -53,6 +53,10 @@ pub struct HealthMonitor {
     /// last sent our `ManifestDigest` — at its catch-up, then every
     /// `MANIFEST_QUIET_WINDOW` (FUTURE_WORK #91 (2)).
     digest_sent_at: std::collections::HashMap<crate::types::NodeId, std::time::Instant>,
+    /// When a peer's arriving capability last woke a catch-up
+    /// (`catch_up_new_connections`): at most one per `CATCH_UP_WAKE_GAP`,
+    /// however often a peer sends one.
+    last_catch_up_wake: Option<std::time::Instant>,
     /// `models.manifest_heard_changes` as the last stored copy of
     /// `manifest_heard` saw it (`SharedState::persist_manifests_heard`). Zero
     /// at boot: what was just read back is what is stored.
@@ -175,6 +179,12 @@ fn manifest_quiet_window(connected: usize, taking_digests: usize) -> Duration {
         MANIFEST_QUIET_WINDOW
     }
 }
+
+/// The shortest gap between two catch-ups a peer's arriving capability wakes
+/// (`HealthMonitor::catch_up_new_connections`). A burst of connections — a
+/// restart's dials — is caught up in one or two; a peer sending capabilities
+/// without pause costs one look at the connected set a second.
+const CATCH_UP_WAKE_GAP: Duration = Duration::from_secs(1);
 
 /// Is a peer that takes digests owed our versions again? Every
 /// `MANIFEST_QUIET_WINDOW` since the last digest or catch-up it was sent; one
@@ -674,6 +684,7 @@ impl HealthMonitor {
             manifest_announce_counter: 0,
             peers_told_about_manifests: std::collections::HashMap::new(),
             digest_sent_at: std::collections::HashMap::new(),
+            last_catch_up_wake: None,
             manifests_heard_stored: 0,
             last_published_capability: None,
             acq_liveness: std::collections::HashMap::new(),
@@ -789,6 +800,18 @@ impl HealthMonitor {
                 // drain starts, for the same reason.
                 _ = self.shared_state.events.update_drain.started() => {
                     self.broadcast_capabilities().await;
+                }
+                // A connected peer's own capability arrived: a new connection
+                // is told our manifest versions now, not at the next round.
+                _ = self.shared_state.models.manifest_sync.catch_up_wanted() => {
+                    if let Some(wait) = self
+                        .last_catch_up_wake
+                        .and_then(|at| CATCH_UP_WAKE_GAP.checked_sub(at.elapsed()))
+                    {
+                        tokio::time::sleep(wait).await;
+                    }
+                    self.last_catch_up_wake = Some(std::time::Instant::now());
+                    self.catch_up_new_connections().await;
                 }
                 _ = interval.tick() => {
                     nonce = nonce.wrapping_add(1);
@@ -1751,25 +1774,7 @@ impl HealthMonitor {
             .models
             .forget_manifests_heard_before(MANIFEST_QUIET_WINDOW_WITH_DIGESTS);
 
-        // Anyone connected that the last round did not reach. Compared as a set
-        // rather than a count so a simultaneous join and leave is still a join:
-        // the newcomer is the whole reason this branch exists.
-        let connected: std::collections::HashSet<crate::types::NodeId> = self
-            .shared_state
-            .connected_node_ids
-            .iter()
-            .map(|p| p.key().clone())
-            .collect();
-        // Those told the versions in place of the manifests (#91 (2)). Unknown
-        // is no: a peer whose capability has not arrived is sent manifests.
-        let takes_digests: std::collections::HashSet<crate::types::NodeId> = connected
-            .iter()
-            .filter(|node_id| {
-                self.shared_state
-                    .peer_advertises_feature(node_id, crate::types::features::MANIFEST_DIGESTS)
-            })
-            .cloned()
-            .collect();
+        let (connected, takes_digests) = self.connected_and_taking_digests();
         let quiet = manifest_quiet_window(connected.len(), takes_digests.len());
         self.retry_overdue_manifest_pulls(&takes_digests).await;
         self.shared_state.models.manifest_sync.forget_stale();
@@ -1874,117 +1879,23 @@ impl HealthMonitor {
             }
         }
 
-        // Catch up anyone we have never announced to, point to point.
+        // Catch up anyone we have never announced to, point to point
+        // (`catch_up_peers`) — a peer whose own capability arrived was
+        // usually caught up already, the moment it did
+        // (`catch_up_new_connections`).
         //
-        // This is the anti-entropy the per-tick flood used to pay for, aimed at
-        // the node that actually needs it. `SwarmRequest::Message` carries any
-        // `SwarmMessage` over request_response and the receiver dispatches it
-        // exactly as it would a gossiped one, so an older peer needs no new
-        // message type and no feature bit to understand this.
-        //
-        // A peer that takes digests is caught up again once it is on a newer
-        // connection than the one it was told on: ~200 bytes a model, and it
-        // pulls only what it lacks. An older peer is sent every manifest in
-        // full, so it keeps the rule of a peer a round found gone.
-        let shared = self.shared_state.clone();
-        let sync = &shared.models.manifest_sync;
-        let to_catch_up: Vec<crate::types::NodeId> = connected
-            .iter()
-            .filter(
-                |node_id| match self.peers_told_about_manifests.get(*node_id) {
-                    None => true,
-                    Some(told_on) => {
-                        takes_digests.contains(*node_id) && *told_on != sync.connection_of(node_id)
-                    }
-                },
-            )
-            .cloned()
-            .collect();
-        let mut caught_up = std::collections::HashSet::new();
-        for node_id in &to_catch_up {
-            let Some(target_peer_bytes) =
-                self.shared_state.resolve_connected_peer_id_bytes(node_id)
-            else {
-                // Not resolvable right now — leave it out of the told set so
-                // the next tick tries again.
-                continue;
-            };
-            if takes_digests.contains(node_id) {
-                // The versions alone, ~200 bytes a model: the peer pulls only
-                // what it lacks, so one reconnecting with every version pulls
-                // nothing. Every manifest in full was ~2.9 MB from six peers
-                // to one probe node in 20 s (#91 (2), 2026-10-16).
-                if self
-                    .send_manifest_digest(&target_peer_bytes, &manifests, &our_id)
-                    .await
-                {
-                    caught_up.insert(node_id.clone());
-                }
-                tracing::debug!(
-                    peer = %node_id,
-                    versions = manifests.len(),
-                    "DIAG: caught a new peer up on manifests with a digest"
-                );
-                continue;
-            }
-            let mut delivered = 0usize;
-            for manifest in &manifests {
-                // The claim travels WITH the manifest. Without it a newcomer
-                // learned which upload a model is only from a broadcast, and
-                // those are suppressed while the swarm has heard the manifest
-                // (up to `MANIFEST_QUIET_WINDOW`): meanwhile it could register
-                // the first manifest it was sent and fetch against it. One
-                // upload per model is a max-register (`model::canonical`), and
-                // a max-register converges only on claims every node is
-                // eventually DELIVERED — this is that delivery's anti-entropy
-                // half, as Demers et al.'s epidemic algorithms pair rumour
-                // mongering with it.
-                let mut messages = vec![SwarmMessage::ModelManifest(manifest.clone())];
-                messages.extend(upload_claim(&self.shared_state, &manifest.id, &our_id));
-                let mut sent_all = true;
-                for message in messages {
-                    let msg = NetworkCommand::SendDirectMessage {
-                        target_peer_bytes: target_peer_bytes.clone(),
-                        message,
-                        delivery_request_id: None,
-                    };
-                    if self.network_tx.send(msg).await.is_err() {
-                        sent_all = false;
-                        break;
-                    }
-                }
-                if !sent_all {
-                    break;
-                }
-                delivered += 1;
-            }
-            if delivered == manifests.len() {
-                caught_up.insert(node_id.clone());
-            }
-            tracing::debug!(
-                peer = %node_id,
-                delivered,
-                of = manifests.len(),
-                "DIAG: caught a new peer up on manifests directly"
-            );
-        }
-
         // Only peers actually reached may be recorded as told; a peer left out
         // is retried next tick rather than latched as done. A full round used
         // to mark EVERY connected peer told, on the grounds that the broadcast
         // had just reached them — no longer true once a full round can be
         // suppressed, and a newcomer whose direct catch-up failed would then
         // be latched as told with nothing sent to it at all.
+        let to_catch_up = self.peers_owed_a_catch_up(&connected, &takes_digests);
+        let caught_up = self
+            .catch_up_peers(&to_catch_up, &takes_digests, &manifests, &our_id)
+            .await;
         let now = std::time::Instant::now();
-        for node_id in &caught_up {
-            // A peer just caught up — in full or by digest — holds every
-            // version as of now, so its first repeat digest is a window away.
-            self.digest_sent_at.insert(node_id.clone(), now);
-        }
-        for node_id in caught_up {
-            let told_on = sync.connection_of(&node_id);
-            self.peers_told_about_manifests.insert(node_id, told_on);
-        }
+        self.note_caught_up(caught_up, now);
         self.peers_told_about_manifests
             .retain(|node_id, _| connected.contains(node_id));
         self.digest_sent_at
@@ -2031,6 +1942,189 @@ impl HealthMonitor {
                  that exact manifest within the quiet window)"
             );
         }
+    }
+
+    /// Who is connected now, and which of them take manifest digests
+    /// (#91 (2)). Unknown is no: a peer whose capability has not arrived is
+    /// not counted as taking them, and the round sends it manifests in full.
+    fn connected_and_taking_digests(
+        &self,
+    ) -> (
+        std::collections::HashSet<crate::types::NodeId>,
+        std::collections::HashSet<crate::types::NodeId>,
+    ) {
+        let connected: std::collections::HashSet<crate::types::NodeId> = self
+            .shared_state
+            .connected_node_ids
+            .iter()
+            .map(|p| p.key().clone())
+            .collect();
+        let takes_digests = connected
+            .iter()
+            .filter(|node_id| {
+                self.shared_state
+                    .peer_advertises_feature(node_id, crate::types::features::MANIFEST_DIGESTS)
+            })
+            .cloned()
+            .collect();
+        (connected, takes_digests)
+    }
+
+    /// The connected peers owed a catch-up on manifests: never told, or —
+    /// taking digests — told on an older connection than the one they are on
+    /// now (BEP 3's bitfield, per connection). Compared as a set rather than a
+    /// count, so a simultaneous join and leave is still a join. An older peer
+    /// sent every manifest in full keeps the rule of a peer a round found gone.
+    fn peers_owed_a_catch_up(
+        &self,
+        connected: &std::collections::HashSet<crate::types::NodeId>,
+        takes_digests: &std::collections::HashSet<crate::types::NodeId>,
+    ) -> Vec<crate::types::NodeId> {
+        let sync = &self.shared_state.models.manifest_sync;
+        connected
+            .iter()
+            .filter(
+                |node_id| match self.peers_told_about_manifests.get(*node_id) {
+                    None => true,
+                    Some(told_on) => {
+                        takes_digests.contains(*node_id) && *told_on != sync.connection_of(node_id)
+                    }
+                },
+            )
+            .cloned()
+            .collect()
+    }
+
+    /// Catch each of `to_catch_up` up on `manifests`, point to point: the
+    /// versions to a peer that takes digests (it pulls only what it lacks),
+    /// every manifest with its upload claim to one that does not. This is the
+    /// anti-entropy the per-tick flood used to pay for, aimed at the node
+    /// that needs it; `SwarmRequest::Message` carries any `SwarmMessage` and
+    /// the receiver dispatches it as it would a gossiped one, so an older peer
+    /// needs no new message type. Returns the peers every message reached.
+    async fn catch_up_peers(
+        &self,
+        to_catch_up: &[crate::types::NodeId],
+        takes_digests: &std::collections::HashSet<crate::types::NodeId>,
+        manifests: &[crate::types::ModelManifest],
+        our_id: &crate::types::NodeId,
+    ) -> std::collections::HashSet<crate::types::NodeId> {
+        let mut caught_up = std::collections::HashSet::new();
+        for node_id in to_catch_up {
+            let Some(target_peer_bytes) =
+                self.shared_state.resolve_connected_peer_id_bytes(node_id)
+            else {
+                // Not resolvable right now — leave it out of the told set so
+                // the next tick tries again.
+                continue;
+            };
+            if takes_digests.contains(node_id) {
+                // The versions alone, ~200 bytes a model: the peer pulls only
+                // what it lacks, so one reconnecting with every version pulls
+                // nothing. Every manifest in full was ~2.9 MB from six peers
+                // to one probe node in 20 s (#91 (2), 2026-10-16).
+                if self
+                    .send_manifest_digest(&target_peer_bytes, manifests, our_id)
+                    .await
+                {
+                    caught_up.insert(node_id.clone());
+                }
+                tracing::debug!(
+                    peer = %node_id,
+                    versions = manifests.len(),
+                    "DIAG: caught a new peer up on manifests with a digest"
+                );
+                continue;
+            }
+            let mut delivered = 0usize;
+            for manifest in manifests {
+                // The claim travels WITH the manifest. Without it a newcomer
+                // learned which upload a model is only from a broadcast, and
+                // those are suppressed while the swarm has heard the manifest
+                // (up to `MANIFEST_QUIET_WINDOW`): meanwhile it could register
+                // the first manifest it was sent and fetch against it. One
+                // upload per model is a max-register (`model::canonical`), and
+                // a max-register converges only on claims every node is
+                // eventually DELIVERED — this is that delivery's anti-entropy
+                // half, as Demers et al.'s epidemic algorithms pair rumour
+                // mongering with it.
+                let mut messages = vec![SwarmMessage::ModelManifest(manifest.clone())];
+                messages.extend(upload_claim(&self.shared_state, &manifest.id, our_id));
+                let mut sent_all = true;
+                for message in messages {
+                    let msg = NetworkCommand::SendDirectMessage {
+                        target_peer_bytes: target_peer_bytes.clone(),
+                        message,
+                        delivery_request_id: None,
+                    };
+                    if self.network_tx.send(msg).await.is_err() {
+                        sent_all = false;
+                        break;
+                    }
+                }
+                if !sent_all {
+                    break;
+                }
+                delivered += 1;
+            }
+            if delivered == manifests.len() {
+                caught_up.insert(node_id.clone());
+            }
+            tracing::debug!(
+                peer = %node_id,
+                delivered,
+                of = manifests.len(),
+                "DIAG: caught a new peer up on manifests directly"
+            );
+        }
+        caught_up
+    }
+
+    /// Record `caught_up` as told, on the connection each is on now. A peer
+    /// just caught up — in full or by digest — holds every version as of
+    /// `now`, so its first repeat digest is a window away.
+    fn note_caught_up(
+        &mut self,
+        caught_up: std::collections::HashSet<crate::types::NodeId>,
+        now: std::time::Instant,
+    ) {
+        let shared = self.shared_state.clone();
+        let sync = &shared.models.manifest_sync;
+        for node_id in caught_up {
+            self.digest_sent_at.insert(node_id.clone(), now);
+            let told_on = sync.connection_of(&node_id);
+            self.peers_told_about_manifests.insert(node_id, told_on);
+        }
+    }
+
+    /// A connected peer's own capability arrived (`ManifestSync::catch_up_wanted`,
+    /// rung by `SharedState::note_capability_heard`): every peer that takes
+    /// digests and is owed a catch-up is told our versions now, not at the
+    /// next round (30-240 s, `gossip_broadcast_interval`) — until then a
+    /// computer that had just started knew none of its peers' models, and a
+    /// question for one was answered "not found" (2026-11-12). Only peers that
+    /// take digests: ~200 bytes a model, and a peer whose capability has not
+    /// arrived is left to the round, which sends it manifests in full.
+    async fn catch_up_new_connections(&mut self) {
+        let (connected, takes_digests) = self.connected_and_taking_digests();
+        let to_catch_up: Vec<crate::types::NodeId> = self
+            .peers_owed_a_catch_up(&connected, &takes_digests)
+            .into_iter()
+            .filter(|node_id| takes_digests.contains(node_id))
+            .collect();
+        if to_catch_up.is_empty() {
+            return;
+        }
+        let our_id = self.shared_state.identity.node_id().clone();
+        self.shared_state.fill_declared_contexts();
+        let manifests = self
+            .shared_state
+            .model_registry
+            .manifests_to_gossip(&our_id);
+        let caught_up = self
+            .catch_up_peers(&to_catch_up, &takes_digests, &manifests, &our_id)
+            .await;
+        self.note_caught_up(caught_up, std::time::Instant::now());
     }
 
     /// Ask every connected peer that takes digests for each manifest version
@@ -3964,6 +4058,75 @@ pub(crate) mod tests {
         assert!(
             direct_sends(&mut rx).is_empty(),
             "told on this connection, it is owed nothing more"
+        );
+    }
+
+    /// A computer that had just started knew none of its peers' models until
+    /// their next manifest round (30-240 s), and a question for one was
+    /// answered "not found" (a rig's requester, 2026-11-12). A connected
+    /// peer's own capability now rings the catch-up, and the monitor tells a
+    /// peer that takes digests the versions at once; one that does not is
+    /// left to the round, which sends it every manifest in full.
+    #[tokio::test]
+    async fn a_peer_whose_capability_arrives_is_told_the_versions_at_once() {
+        use crate::types::MessageTransport::{Direct, Gossip};
+        let (state, mut monitor, mut rx) = monitor_for_test();
+        publish_test_manifest(&state, [5; 32]);
+        let sync = &state.models.manifest_sync;
+        let rung = || async {
+            tokio::time::timeout(Duration::from_millis(50), sync.catch_up_wanted())
+                .await
+                .is_ok()
+        };
+        let version = env!("CARGO_PKG_VERSION");
+        let new = connect_peer(&state, 1, crate::types::features::ALL);
+        let older = connect_peer(&state, 2, 0);
+        for node in [&new, &older] {
+            sync.note_new_connection(node);
+        }
+
+        state.note_capability_heard(&new, version, Gossip);
+        assert!(
+            !rung().await,
+            "a gossiped capability is not the peer's own word"
+        );
+        state.note_capability_heard(&crate::types::NodeId([3; 32]), version, Direct);
+        assert!(!rung().await, "nor one from a computer not connected here");
+        state.note_capability_heard(&new, version, Direct);
+        assert!(
+            rung().await,
+            "a connected peer's own capability rings the catch-up"
+        );
+
+        monitor.catch_up_new_connections().await;
+        let sent = direct_sends(&mut rx);
+        assert!(
+            sent.get(&vec![1u8; 4]).is_some_and(|m| m
+                .iter()
+                .any(|m| matches!(m, SwarmMessage::ManifestDigest(_)))),
+            "a peer that takes digests is told the versions at once"
+        );
+        assert!(
+            !sent.contains_key(&vec![2u8; 4]),
+            "a peer that does not is left to the round"
+        );
+        monitor.catch_up_new_connections().await;
+        assert!(
+            direct_sends(&mut rx).is_empty(),
+            "told on this connection, it is owed nothing more"
+        );
+
+        monitor.broadcast_manifests().await;
+        let sent = direct_sends(&mut rx);
+        assert!(
+            !sent.contains_key(&vec![1u8; 4]),
+            "the round does not tell it again"
+        );
+        assert!(
+            sent.get(&vec![2u8; 4]).is_some_and(|m| m
+                .iter()
+                .any(|m| matches!(m, SwarmMessage::ModelManifest(_)))),
+            "the round still catches the older peer up in full"
         );
     }
 

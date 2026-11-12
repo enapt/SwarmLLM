@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #445**). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #446**). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -6058,6 +6058,24 @@ archive under the named heading. Reopen one only with the evidence its line name
 Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 19-28 were
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
+
+**Closed 2026-11-12, on main (not in a release yet)** (#445)
+- #445 — **A computer that had just started answered "model not found" for up to four minutes
+  while its peers already held the model.** A new connection was caught up on its peers' model
+  versions only at the next manifest round, every `gossip_broadcast_interval` (30 s up to 10 peers,
+  60-240 s beyond), and the cold-start wait for a model gives up after 10 s: a rig's requester
+  holding only the header had its first two asks 404ed, its catch-up going out 30 s after it
+  connected (`split_rig.sh`, 2026-11-12). The catch-up now goes the moment the peer's own
+  capability arrives — the moment this node learns the peer takes digests:
+  `SharedState::note_capability_heard` (direct, from a connected peer) rings
+  `ManifestSync::want_catch_up`, and the health monitor's loop runs `catch_up_new_connections`,
+  which tells each digest-taking peer owed a catch-up the versions (the round's own rule,
+  `peers_owed_a_catch_up`), at most once a second. A peer without the digest bit is still caught
+  up in full by the round. No new message. Prior art: go-ethereum's `runEthPeer` sends a new peer
+  its pool at connect (`syncTransactions`); BEP 3's bitfield goes first on a new connection.
+  Test `a_peer_whose_capability_arrives_is_told_the_versions_at_once` (red with the ring or the
+  catch-up taken out). On the rig the requester had its peer's model 16 ms after connecting, against
+  29 s before. Evidence: `docs/invariants/network.md` § "A new connection is a new catch-up".
 
 **Closed 2026-11-12, on main (not in a release yet)** (#444)
 - #444 — **An update's drain kept taking new work from other computers, so a busy node could

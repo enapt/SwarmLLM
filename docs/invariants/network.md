@@ -7052,7 +7052,27 @@ itself is the announcement:
   at most two answers of a model to one identity in ten minutes.
   (Tests `a_peer_that_reconnects_is_answered_again_within_the_window_budget`,
   `a_peer_back_on_a_new_connection_is_told_the_versions_again`,
-  `a_peers_manifests_are_awaited_only_while_its_catch_up_can_be_on_its_way`.) A connected peer can
+  `a_peers_manifests_are_awaited_only_while_its_catch_up_can_be_on_its_way`.)
+  **The catch-up goes the moment the peer's own capability arrives, not at the next round**
+  (2026-11-12). The round runs every `gossip_broadcast_interval` (30 s up to 10 peers, 60-240 s
+  beyond), so a computer that had just started knew none of its peers' models for up to that
+  long, and the cold-start poll above gives up after 10 s: a rig's requester holding only the
+  header was answered "not found" twice, its catch-up digest going out 30 s after it connected
+  (`split_rig.sh`, 03:07:52 → 03:08:22). The capability is the moment this node learns whether
+  the peer takes digests — sent direct by the peer as it identifies us — so
+  `SharedState::note_capability_heard` (direct, connected) rings `ManifestSync::want_catch_up`
+  and the monitor's loop runs `catch_up_new_connections`: the peers that take digests and are
+  owed a catch-up (`peers_owed_a_catch_up`, the round's own rule) are told the versions, ~200
+  bytes a model. A peer without the bit is left to the round, which sends it every manifest in
+  full. At most one such catch-up a second (`CATCH_UP_WAKE_GAP`); a peer sending capabilities
+  without pause costs one look at the connected set a second, and a peer told on its connection
+  is owed nothing more. Prior art: go-ethereum's `runEthPeer` sends a new peer what its pool
+  holds at connect (`syncTransactions`), later arrivals by broadcast. Test
+  `a_peer_whose_capability_arrives_is_told_the_versions_at_once`; red with the ring taken
+  out of `note_capability_heard` and with the catch-up emptied. Verified on the same rig: the
+  requester registered its peer's model 16 ms after connecting (03:37:31.119 → .135, digest →
+  pull → manifest `transport=Direct`, each side's catch-up 2 ms after the connect and 24 s before
+  its round) where the build before took 29 s. A connected peer can
   name made-up models as fast as it sends digests, so at most
   `MAX_PULLS_IN_FLIGHT` (1024) pulls are out at once. One peer may hold no more of them than it
   would answer in a window (128), so it cannot fill the bound and starve every other peer. At most

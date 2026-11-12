@@ -444,7 +444,10 @@ impl SharedState {
     /// A capability `node` sent (dispatch, after its sender check), naming `version`:
     /// its version is the node's own word only when it came DIRECT and the
     /// node is connected — a gossiped one may be another node playing an old
-    /// one back, and its node stays judged on what it said itself.
+    /// one back, and its node stays judged on what it said itself. That
+    /// capability is also when this node learns whether the peer takes
+    /// manifest digests, so the health monitor is woken to catch a new
+    /// connection up on manifests now (`ManifestSync::want_catch_up`).
     pub fn note_capability_heard(
         &self,
         node: &NodeId,
@@ -455,6 +458,7 @@ impl SharedState {
             && self.connected_node_ids.contains(node)
         {
             self.note_peers_own_version(node, version);
+            self.models.manifest_sync.want_catch_up();
         }
     }
 
