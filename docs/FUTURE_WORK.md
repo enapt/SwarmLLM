@@ -4495,14 +4495,17 @@ cannot tell an earlier attempt's range from a second range of this one without t
    segment's model for an hour instead of the old 5-10 minutes. Each waiting pass records `PassParties` (the network
    layer's authenticated sender, the coordinator it names); the idle tick, before the unload, releases through
    `release_request_kv` a pass whose party was seen since the pass began and has since been out of `SharedState::still_in_the_swarm` (this node, a connected
-   computer, or one in the peer registry — every node hears every other's `HealthPing` through gossip) for
-   `PASS_PARTY_GONE_AFTER` (300 s, from the first tick that finds it gone, restarted when it is seen again). NOT the
-   direct link: a quiet one closes after `IDLE_CONNECTION_TIMEOUT_SECS` (120 s) unless gossipsub keeps it, which it
-   does only for mesh peers (`connection_keep_alive` = `in_mesh`), so on a large swarm it would drop the hold during
-   the read it is for. Prior art: a lease renewed by the holder's own heartbeat and ended by its silence after a grace
+   computer, or one in the peer registry — in practice the connected set: an entry goes with the last connection
+   but a relayed origin's or one in this node's pipelines) for `PASS_PARTY_GONE_AFTER` (300 s, from the first tick
+   that finds it gone, restarted when it is seen again). A live pair's connection is the beat: every connected
+   computer answers each `HealthPing` with a direct `HealthPong`, so it never idles to the 120 s timeout, and a closed
+   one is redialled (the pre-release review, 2026-11-12, corrected the first write-up, which had the registry outlive
+   the connection and a quiet link close at 120 s — neither is so; the release rule was right, its reason was not). Prior art: a lease renewed by the holder's own heartbeat and ended by its silence after a grace
    (Chubby KeepAlives, etcd `LeaseKeepAlive`, Kubernetes' node lease KEP-589); Petals frees a session's cache when its
    client's stream closes. Only a party SEEN since the pass began can leave (its review: a later hop may never have
-   the coordinator on record). Tests `a_prompt_pass_whose_sender_or_coordinator_left_is_released`,
+   the coordinator on record); the sender, and a coordinator that is the sender, start seen (`seen_at_arrival`) —
+   left to the first 30 s idle tick, a coordinator killed 0.2 s after its pass arrived was never seen and never
+   released (rig `~/rig448/rig448d.sh` run4, 2026-11-12: 0 releases, 0 unloads in 13 min). Tests `a_prompt_pass_whose_sender_or_coordinator_left_is_released`,
    `a_passes_parties_are_its_authenticated_sender_and_the_coordinator_it_names`,
    `still_in_the_swarm_is_this_node_a_connected_computer_or_one_in_the_registry`. Still open from the same
    review (LOW): a cancel arriving while a cold model loads can be followed by the pass's `note_forward_sent`,

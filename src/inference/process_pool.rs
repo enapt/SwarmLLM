@@ -1068,8 +1068,12 @@ impl PassParties {
 /// gossiped capability installs only into an entry that exists —
 /// `docs/invariants/network.md` § the swarm-use gate's `NotHeardFrom`), so its
 /// absence proves nothing and the pass keeps the hold's own bound (review of
-/// #448 (d), 2026-11-12). The sender is seen at the first idle tick: it has
-/// just sent the pass over a link that stays open two minutes.
+/// #448 (d), 2026-11-12). The SENDER starts seen, and so does a coordinator
+/// that is the sender ([`AwaitedPass::seen_at_arrival`]): it has just delivered
+/// the pass over a connection the network layer authenticated, as a lease is
+/// granted to a live holder. Left to the first idle tick (30 s), a computer that
+/// died right after sending was never seen and its pass kept the whole hold —
+/// the vanished-coordinator rig killed one 0.2 s after its pass arrived.
 fn a_party_left(
     parties: &PassParties,
     seen: &mut [bool; 2],
@@ -1093,8 +1097,7 @@ fn a_party_left(
 /// How long a prompt pass's sender or coordinator may be absent from the swarm
 /// before the pass is released (#448 (d)) — the default idle unload's five
 /// minutes, which is what such a pass was given before its hold, counted from
-/// the first idle tick that finds it gone (the registry has already waited out
-/// its own missed pings by then).
+/// the first idle tick that finds it gone.
 pub(crate) const PASS_PARTY_GONE_AFTER: std::time::Duration = std::time::Duration::from_secs(300);
 
 /// A prompt pass sent to a worker that still awaits its first step (#448 (b)).
@@ -1107,6 +1110,15 @@ struct AwaitedPass {
     seen: [bool; 2],
     /// The first idle tick that found a seen party gone; cleared when it is back.
     missing_since: Option<std::time::Instant>,
+}
+
+impl AwaitedPass {
+    /// Who is seen the moment the pass arrives: its authenticated sender, and
+    /// the coordinator where it IS the sender — never a coordinator only named.
+    fn seen_at_arrival(parties: &PassParties) -> [bool; 2] {
+        let sender = parties.sender.is_some();
+        [sender, sender && parties.requester == parties.sender]
+    }
 }
 
 /// A handle to a running model worker subprocess.
@@ -2256,8 +2268,8 @@ impl WorkerHandle {
                 request_id,
                 AwaitedPass {
                     sent: std::time::Instant::now(),
+                    seen: AwaitedPass::seen_at_arrival(&parties),
                     parties,
-                    seen: [false; 2],
                     missing_since: None,
                 },
             );
@@ -12925,11 +12937,12 @@ impl ModelProcessPool {
     /// [`Self::models_awaiting_a_first_step`], its loaded model — for the whole
     /// `kv_cache::PROMPT_PASS_HOLD`. Released as a cancel's release is
     /// ([`Self::release_request_kv`]: every worker, the worker's own hold
-    /// with it). `still_here` is the caller's view of the swarm — this node,
-    /// a connected computer, or one heard within the registry's window — never
-    /// a direct link alone: a quiet link closes after two minutes unless gossip
-    /// keeps it, which it does only for mesh peers. From the idle tick, before
-    /// the idle unload reads the waits. How many were released.
+    /// with it). `still_here` is the caller's view of the swarm
+    /// (`SharedState::still_in_the_swarm`: in practice the connected set, a
+    /// live pair's connection kept by its `HealthPong`s, a closed one
+    /// redialled), so a party counts as gone only after five minutes in which
+    /// neither end could hold or remake a connection. From the idle tick,
+    /// before the idle unload reads the waits. How many were released.
     ///
     /// Prior art: a lease kept alive by its holder's heartbeats — Chubby's
     /// session KeepAlives, etcd's `LeaseKeepAlive`, Kubernetes' node lease
@@ -13663,8 +13676,9 @@ mod tests {
     /// from the first tick that finds it gone — not before, and seen again
     /// restarts the count — is released as a cancel's release is (the
     /// conversation it noted is forgotten too), so the idle unload is free
-    /// again. A party never seen proves nothing (a later hop may never have the
-    /// coordinator on record), and a pass naming nobody (this node's own
+    /// again. The sender starts seen (it just delivered the pass), and so does a
+    /// coordinator that is the sender; a party never seen proves nothing (a later
+    /// hop may never have the coordinator on record), and a pass naming nobody (this node's own
     /// pipeline) is never released this way.
     #[tokio::test]
     async fn a_prompt_pass_whose_sender_or_coordinator_left_is_released() {
@@ -13673,7 +13687,8 @@ mod tests {
         let h = fake_worker_handle(false).await;
         p.workers.insert(m.clone(), h.clone());
         let (hop, coordinator) = (crate::types::NodeId([1; 32]), crate::types::NodeId([2; 32]));
-        let (pass, sent_only, unheard, local) = (
+        let (pass, sent_only, vanished, unheard, local) = (
+            Uuid::new_v4(),
             Uuid::new_v4(),
             Uuid::new_v4(),
             Uuid::new_v4(),
@@ -13742,6 +13757,28 @@ mod tests {
         assert_eq!(release!(&no_hop, 10), 0);
         assert_eq!(release!(&no_hop, 310), 1);
 
+        // A coordinator that sent its own pass and died before any tick saw it
+        // (the rig killed one 0.2 s after the pass arrived): it delivered the
+        // pass over a live connection, so it starts seen and its absence counts.
+        h.note_forward_sent(
+            vanished,
+            0,
+            PassParties {
+                sender: Some(hop.clone()),
+                requester: Some(hop.clone()),
+            },
+        );
+        assert_eq!(
+            release!(&nobody, 0),
+            0,
+            "gone at the very first tick: the count starts"
+        );
+        assert_eq!(
+            release!(&nobody, 300),
+            1,
+            "a coordinator that died before any tick is released too"
+        );
+
         // A coordinator this node never had on record is no evidence: only the
         // sender is watched for that pass.
         h.note_forward_sent(unheard, 0, both);
@@ -13754,7 +13791,7 @@ mod tests {
         assert_eq!(
             release!(&nobody, 9_000),
             0,
-            "the sender, seen at the first tick, only starts its count"
+            "the sender's absence only starts its count"
         );
         assert_eq!(
             release!(&nobody, 9_300),

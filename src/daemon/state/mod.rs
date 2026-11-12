@@ -4122,15 +4122,18 @@ impl SharedState {
     }
 
     /// Is `node` still in the swarm as this node sees it — this node itself, a
-    /// computer it is connected to, or one still in the peer registry (heard
-    /// within its missed-ping window: every node's `HealthPing` reaches every
-    /// other through gossip, so a computer two hops away counts while it beats)?
-    /// The one answer the release of an abandoned prompt pass reads (#448 (d),
-    /// `ModelProcessPool::release_abandoned_prompt_passes`). Never a direct
-    /// link alone: a quiet link closes after two minutes unless gossip keeps
-    /// it, which it does only for mesh peers. Not the question `resolve_connected_peer_id_bytes`
-    /// answers (may a direct-only send go now): a computer two hops away is in
-    /// the swarm without being reachable from here.
+    /// computer it is connected to, or one still in the peer registry? The one
+    /// answer the release of an abandoned prompt pass reads (#448 (d),
+    /// `ModelProcessPool::release_abandoned_prompt_passes`). In practice it is
+    /// the CONNECTED set: the network manager drops a registry entry with its
+    /// last connection (`connections.rs`), keeping only a relayed origin's and
+    /// a computer's in one of THIS node's pipelines. A connection to a live
+    /// computer is itself kept by a beat — every node gossips a `HealthPing`
+    /// each health round and every connected computer answers it with a direct
+    /// `HealthPong`, so a live pair never idles to `IDLE_CONNECTION_TIMEOUT_SECS`
+    /// — and a closed one is redialled. A computer two hops away is not on
+    /// record here at all (the pass's `seen` rule). Not the question
+    /// `resolve_connected_peer_id_bytes` answers (may a direct-only send go now).
     pub fn still_in_the_swarm(&self, node: &crate::types::NodeId) -> bool {
         node == self.identity.node_id()
             || self.connected_node_ids.contains(node)
@@ -6309,8 +6312,8 @@ mod connected_peer_resolution_tests {
     }
 
     /// **`still_in_the_swarm`** (#448 (d)): this node, a connected computer, or
-    /// one still in the registry (the health monitor evicts a computer after its
-    /// missed pings unless it is connected) — nobody else.
+    /// one still in the registry (an entry the last connection's close kept: a
+    /// relayed origin, a computer in one of this node's pipelines) — nobody else.
     #[test]
     fn still_in_the_swarm_is_this_node_a_connected_computer_or_one_in_the_registry() {
         let state = test_state();
@@ -6348,7 +6351,7 @@ mod connected_peer_resolution_tests {
         );
         assert!(
             state.still_in_the_swarm(&node),
-            "in the registry: heard within its missed pings, through gossip"
+            "in the registry: an entry its last connection's close kept"
         );
     }
 }

@@ -204,13 +204,18 @@ coordinator that sleeps, crashes or loses its network mid-pass sends no cancel
 (`release_request_on_peers` is a best-effort `try_send`, and nothing on a peer's
 disconnect ends the forwards it sent), so its pass kept each segment's cache and a
 waiting segment's loaded model for the whole hour instead of the old five to ten
-minutes. Watching the direct link to the hop was the first idea and is wrong: a
-quiet link closes after `IDLE_CONNECTION_TIMEOUT_SECS` (120 s) unless a behaviour
-keeps it, and gossipsub keeps only a MESH peer's (`connection_keep_alive` is
-`in_mesh`), so on a large swarm it would drop the hold during the very read it is
-for. What every node does hear is the coordinator's own beat: `HealthPing` gossip
-refreshes `last_seen` on every node, and the registry evicts a computer after its
-missed pings unless it is connected. So each waiting pass records its parties
+minutes. The beat that says a party is still there is its CONNECTION to this node.
+(The first write-up said otherwise — a quiet link closes after
+`IDLE_CONNECTION_TIMEOUT_SECS` (120 s) unless gossipsub keeps a mesh peer's, so the
+peer registry, refreshed by `HealthPing` gossip, would be the beat — and the
+pre-release review of 2026-11-12 found both halves wrong: the network manager drops a
+registry entry with its last connection (`connections.rs`, keeping only a relayed
+origin's and a computer's in one of THIS node's pipelines), and a connected pair is
+never quiet: every node gossips a `HealthPing` each round and every CONNECTED
+computer answers it with a direct `HealthPong` over request-response
+(`dispatch/mod.rs`'s `HealthPing` arm), which resets the idle timeout both ways; a
+connection that closes anyway is redialled. So `still_in_the_swarm` is in practice
+the connected set, and a computer two hops away is not on record at all.) So each waiting pass records its parties
 (`PassParties`: the network layer's authenticated sender and the coordinator it
 names — naming an absent one releases only the namer's pass), and the idle tick,
 before the unload, releases a pass whose party was SEEN since the pass began and
@@ -225,8 +230,13 @@ reasoning `health::monitor` already cites for the capability's repeat). Only a p
 this change): a later hop of a chain may never have the coordinator on record — a
 gossiped capability installs only into an entry that exists (§ the swarm-use gate's
 `NotHeardFrom`) — so its absence proves nothing, and that pass is watched by its
-sender alone, which the first idle tick always sees (it has just sent the pass over
-a link that stays open two minutes). Tests
+sender alone. The SENDER starts seen, and so does a coordinator that is the sender
+(`AwaitedPass::seen_at_arrival`): it has just delivered the pass over an
+authenticated connection, as a lease is granted to a live holder. The first cut left
+that to the first idle tick, and the vanished-coordinator rig (`~/rig448/rig448d.sh`,
+run4, 2026-11-12) showed the hole: the coordinator, killed 0.2 s after its pass
+reached the middle segment, left the registry before any tick (every 30 s) saw it,
+so the pass was never released (0 releases, 0 unloads in 13 min). Tests
 `a_prompt_pass_whose_sender_or_coordinator_left_is_released` (the count's start, its
 restart, the sender alone, a coordinator never seen, a pass naming nobody, and the
 release forgetting the conversation as a cancel does),
