@@ -709,6 +709,8 @@ make_node() { # dir shards bootstrap
     && am=$'enabled = true\nprune_enabled = true\ninterval_seconds = 30\nhf_watcher_enabled = false'
   [ -n "${FETCH_DRAFTER:-}" ] && [ "$(basename "$d")" = A ] \
     && am=$'enabled = true\nprune_enabled = false\ninterval_seconds = 30\nhf_watcher_enabled = false\n\n[auto_manage.model_policies."'"$MODEL"$'"]\nenabled = false'
+  # AM_EXTRA: more [auto_manage] keys for every node, e.g. "idle_unload_secs = 20" (#448's idle-unload check).
+  [ -n "${AM_EXTRA:-}" ] && [ -z "${FETCH_DRAFTER:-}" ] && am="$am"$'\n'"$AM_EXTRA"
   # The shard-0 sidecars travel with the header, as on a real node that fetched
   # any shard from HuggingFace: a later-layer node needs rope_freqs.bin on a
   # Llama 3 model (#124) and tied_output_weight.bin on a weight-tied one.

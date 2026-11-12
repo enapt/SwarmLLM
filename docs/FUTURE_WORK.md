@@ -4462,6 +4462,13 @@ Tests `a_cache_whose_prompt_pass_waits_for_the_chain_outlives_the_ttl`,
 `a_peers_question_names_its_request_but_is_answered_by_a_fresh_id`,
 `a_prompt_pass_awaits_its_first_step_until_a_step_or_a_release`,
 `a_segment_whose_prompt_pass_awaits_its_first_step_is_not_unloaded_as_idle` (each new one fails with its fix off).
+Rig (2026-11-12, `~/rig448/rig448c.sh`, `run3`: `split_rig.sh split`, llama-3.2-3b on the processor, A holds parts 0
+and 3 with "Start and finish on this computer", B parts 1-2, both on 2 CPUs, a 1,152-token prompt, KV TTL 5 s,
+`AM_EXTRA="idle_unload_secs = 20"`): ON — 200, B unloaded nothing, no step refused; OFF (`SWARMLLM_PROMPT_PASS_HOLD=0`
+on both) — B's idle unload freed the waiting middle segment at `idle_secs=27`, its first step was refused ("no longer
+holds the conversation"), the re-plan read the whole prompt again and the request ran out the rig's wait. Fix 3 fired
+and its absence is the failure. No worker sweep found an entry past the TTL in EITHER arm (A's first part was still
+young at each 30 s tick), so fix 1 rests on its tests and the field log, not this rig.
 Security review of 2 (2026-11-12): no high or medium; two low — a refusal's `live_mb` lets a peer that already knows a
 request id learn how much of it this node holds (route members know it anyway; relays see request ids in the seal's
 AAD), and a "go ahead" a question earns may load ahead what a forward could load anyway.
@@ -4481,6 +4488,18 @@ layers under the same id: the question no longer counts it as freeable (it spare
 own admission does) and the new pass does not clear it, so it stands in the way until the request ends or the TTL
 sweeps it (security review's note, 2026-11-12). The up-front admission clears all of the request's caches; a peer
 cannot tell an earlier attempt's range from a second range of this one without the plan.
+(d) A coordinator that VANISHES mid-pass — its computer sleeps, crashes or loses the network before the first step —
+sends no `CancelInference` (`release_request_on_peers` is a best-effort `try_send`; nothing on a peer's disconnect
+ends the requests it sent), so each segment keeps the pass's cache, and a waiting middle segment its loaded model, for
+`PROMPT_PASS_HOLD` (an hour) instead of the old 300 s idle unload / 600 s TTL. Bounded, and never against the owner:
+both pressure paths in (a) still release it (delta review of `d3078823`, 2026-11-12, MEDIUM). A cancel arriving
+while a cold model loads can likewise be followed by the pass's `note_forward_sent`, re-arming an hour (LOW; the
+dispatcher aborts the handler, narrowing it). Prior art: Petals ties a server's inference-session cache to the
+client's open stream and its `step_timeout` (closed stream or no next step → cache freed). The shape here: honour the
+hold only while the forward's previous hop (`sender_peer_bytes`) stays in `connected_node_ids`, read lazily at the
+idle tick, so a reconnect restores it. NOT built on 11-12 because libp2p's idle-connection timeout can close a live
+chain's quiet link during exactly the long read this hold exists for — measure first whether a waiting segment's link
+to its previous hop survives a 30-minute read (gossip keeps it in a small swarm; a large one may not).
 
 ### Model families and platforms
 
