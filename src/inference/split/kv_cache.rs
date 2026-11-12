@@ -1183,6 +1183,33 @@ pub struct KvCacheStore {
     /// admitting it again would weigh the request against its own promise.
     /// Released with the rest of a request's bookkeeping, and swept like it.
     ranges_admitted: dashmap::DashMap<String, (Vec<(u32, u32)>, std::time::Instant)>,
+    /// Requests whose prompt pass ran here and that no later step has reached
+    /// yet: `request_id -> when the pass last ran` (#448). Their caches and
+    /// bookkeeping outlive `ttl`, up to `prompt_pass_hold`: a split's earlier
+    /// segments sit untouched while every later machine reads the prompt, and
+    /// the coordinator waits for that read up to an hour
+    /// (`remote_generate::MEASURED_FIRST_TOKEN_MAX`). Swept at the 600 s TTL, a
+    /// Gemma 4 31B's first segment here was gone 12.6 min into a 4,306-token
+    /// read through two peers abroad — twice — and the reply failed after
+    /// 28 min (2026-11-12). Ended by the request's next step or its release.
+    awaiting_first_step: dashmap::DashMap<String, std::time::Instant>,
+    /// How long a request in `awaiting_first_step` keeps its caches past `ttl`.
+    prompt_pass_hold: std::time::Duration,
+}
+
+/// How long a cache whose prompt pass ran here is kept for the request's first
+/// step, however long the TTL (#448): the longest the coordinator waits for
+/// another machine to read the prompt — ONE figure, so the hold can never be
+/// the tighter ceiling again (`architecture.md` § Timeouts, rule 4).
+pub(crate) const PROMPT_PASS_HOLD: std::time::Duration =
+    crate::inference::pipeline::remote_generate::MEASURED_FIRST_TOKEN_MAX;
+
+/// `SWARMLLM_PROMPT_PASS_HOLD=0` holds nothing past the TTL (#448's A/B, one
+/// binary): a split's earlier segments are swept at the TTL as before. Read once.
+fn prompt_pass_hold_enabled() -> bool {
+    use std::sync::OnceLock;
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| std::env::var("SWARMLLM_PROMPT_PASS_HOLD").map_or(true, |v| v != "0"))
 }
 
 /// `SWARMLLM_KV_RESERVE=0` records no reservation, so a prompt grows into its
@@ -1630,7 +1657,70 @@ impl KvCacheStore {
             reserved_positions: dashmap::DashMap::new(),
             owner_requests: dashmap::DashMap::new(),
             ranges_admitted: dashmap::DashMap::new(),
+            awaiting_first_step: dashmap::DashMap::new(),
+            prompt_pass_hold: PROMPT_PASS_HOLD,
         }
+    }
+
+    /// A store whose prompt-pass hold is `hold` — tests only, which cannot
+    /// wait an hour.
+    #[cfg(test)]
+    pub(crate) fn with_prompt_pass_hold(mut self, hold: std::time::Duration) -> Self {
+        self.prompt_pass_hold = hold;
+        self
+    }
+
+    /// A forward of `request_id` ran here (#448): a prompt pass
+    /// (`sequence_num` 0, any piece of it) holds the request's caches past the
+    /// TTL until its next step, which ends the hold. Called once per forward
+    /// by the worker, after the pass's clear (`clear_request` forgets it).
+    pub(crate) fn note_forward_ran(&self, request_id: &str, sequence_num: u32) {
+        if sequence_num == 0 && prompt_pass_hold_enabled() {
+            self.awaiting_first_step
+                .insert(request_id.to_string(), std::time::Instant::now());
+        } else if !self.awaiting_first_step.is_empty() {
+            self.awaiting_first_step.remove(request_id);
+        }
+    }
+
+    /// Bytes in `home` that a prompt pass of `request_id` over the ranges
+    /// keyed `model_keys` gives back before it writes (#448): the caches its
+    /// first piece clears ([`a_prompt_pass_clears`]) and what is still owed
+    /// on the request's own admission claim, which the new admission
+    /// replaces (`record_prompt_admission`). A re-plan keeps the request id,
+    /// so an earlier attempt's caches are still here when the next is
+    /// admitted; weighed as another conversation's, they refused the request
+    /// on the peer that held them (2026-11-12, the third attempt of the
+    /// 28-minute Gemma 4 31B reply). vLLM frees a preempted request's blocks
+    /// before it is scheduled again.
+    pub(crate) fn bytes_a_prompt_pass_replaces(
+        &self,
+        home: KvHome,
+        request_id: &str,
+        model_keys: &[&str],
+    ) -> u64 {
+        let mut written = 0u64;
+        let mut cleared = 0u64;
+        for e in self.caches.iter() {
+            if request_of_key(e.key()) != request_id {
+                continue;
+            }
+            let bytes = e.value().occupancy().allocated_in(home);
+            // The claim is drawn down by everything the request wrote, as
+            // `outstanding_admission_bytes` draws it.
+            written = written.saturating_add(bytes);
+            if model_keys
+                .iter()
+                .any(|mk| a_prompt_pass_clears(e.key(), mk, request_id))
+            {
+                cleared = cleared.saturating_add(bytes);
+            }
+        }
+        let owed = self
+            .admitted_claims
+            .get(request_id)
+            .map_or(0, |c| c.value().0[home.index()].saturating_sub(written));
+        cleared.saturating_add(owed)
     }
 
     /// Record how many positions this request's caches should hold from
@@ -2122,30 +2212,58 @@ impl KvCacheStore {
         let key = Self::cache_key(model_key, request_id);
         self.caches.remove(key.as_str());
         // Also clear TP-keyed cache entries for the same request
-        let suffix = format!("\0{request_id}");
         self.caches
-            .retain(|k, _| !(k.ends_with(&suffix) && k.contains(model_key)));
+            .retain(|k, _| !a_prompt_pass_clears(k, model_key, request_id));
     }
 
     /// Clean up all expired cache entries. Returns the number of entries removed.
     pub fn cleanup_expired(&self) -> usize {
         let ttl = self.ttl;
+        // A request whose prompt pass ran here and is waiting for its first
+        // step keeps everything past the TTL, up to the hold (#448).
+        let hold = self.prompt_pass_hold;
+        self.awaiting_first_step
+            .retain(|_, at| at.elapsed() <= hold);
+        let held: std::collections::HashSet<String> = self
+            .awaiting_first_step
+            .iter()
+            .map(|e| e.key().clone())
+            .collect();
+        let kept = |request_id: &str, at: std::time::Instant| {
+            at.elapsed() <= ttl || held.contains(request_id)
+        };
         // A claim outlives its request only if something failed to clear it.
         // The draw-down already makes a stale one contribute nothing once its
         // prefill finished, so this is the belt to that braces: it bounds a
         // claim from a prompt that was admitted and then never prefilled at
         // all, which nothing else would ever remove.
         self.admitted_claims
-            .retain(|_, (_, at)| at.elapsed() <= ttl);
+            .retain(|request_id, (_, at)| kept(request_id, *at));
         self.reserved_positions
-            .retain(|_, (_, at)| at.elapsed() <= ttl);
-        self.owner_requests.retain(|_, at| at.elapsed() <= ttl);
+            .retain(|request_id, (_, at)| kept(request_id, *at));
+        self.owner_requests
+            .retain(|request_id, at| kept(request_id, *at));
         self.ranges_admitted
-            .retain(|_, (_, at)| at.elapsed() <= ttl);
+            .retain(|request_id, (_, at)| kept(request_id, *at));
         let before = self.caches.len();
-        self.caches
-            .retain(|_, entry| entry.last_accessed.elapsed() <= ttl);
+        let mut held_past_ttl = 0usize;
+        self.caches.retain(|key, entry| {
+            if entry.last_accessed.elapsed() <= ttl {
+                return true;
+            }
+            let held = held.contains(request_of_key(key));
+            held_past_ttl += usize::from(held);
+            held
+        });
         let removed = before - self.caches.len();
+        if held_past_ttl > 0 {
+            tracing::debug!(
+                held_past_ttl,
+                ttl_secs = ttl.as_secs(),
+                hold_secs = hold.as_secs(),
+                "DIAG: KV-cache store cleanup — kept past the TTL: their prompt pass waits for the rest of the chain to read it"
+            );
+        }
         if removed > 0 {
             tracing::info!(
                 removed,
@@ -2176,6 +2294,7 @@ impl KvCacheStore {
         self.reserved_positions.remove(request_id);
         self.owner_requests.remove(request_id);
         self.ranges_admitted.remove(request_id);
+        self.awaiting_first_step.remove(request_id);
     }
 
     /// Drop the cache of every conversation nobody has touched for `idle` — a
@@ -2295,6 +2414,17 @@ impl KvCacheStore {
 /// The request a store key belongs to (`cache_key`: `model\0request`).
 fn request_of_key(key: &str) -> &str {
     key.split('\0').nth(1).unwrap_or_default()
+}
+
+/// Does a prompt pass of `request_id` over the range keyed `model_key` clear
+/// the entry under `key` — its own key or a tensor-parallel one of the same
+/// request? The ONE rule behind [`KvCacheStore::clear_request_caches`] and
+/// [`KvCacheStore::bytes_a_prompt_pass_replaces`] (#448), so admission
+/// counts exactly what the pass gives back.
+fn a_prompt_pass_clears(key: &str, model_key: &str, request_id: &str) -> bool {
+    key.strip_suffix(request_id)
+        .is_some_and(|head| head.ends_with('\0'))
+        && key.contains(model_key)
 }
 
 /// Has the conversation under `key` ended: silent for `idle`, and not `keep`'s
@@ -3007,6 +3137,96 @@ mod tests {
         conversation(&store, "recent", 4, std::time::Duration::ZERO);
         assert_eq!(store.cleanup_expired(), 1);
         assert!(store.request_holds_state("m", "recent"));
+    }
+
+    /// **A cache whose prompt pass ran here outlives the TTL until its first
+    /// step** (#448, 2026-11-12): a split's first segment sat untouched while
+    /// two peers abroad read a 4,306-token prompt for 12.6 min, the 600 s
+    /// sweep took it, and the reply was refused at its first step — twice,
+    /// 28 min in all. Controls: a request that has stepped since its pass,
+    /// and one never noted, are swept as before; the hold ends at its own
+    /// limit, and with the request's release.
+    #[test]
+    fn a_cache_whose_prompt_pass_waits_for_the_chain_outlives_the_ttl() {
+        let ttl = std::time::Duration::from_secs(600);
+        let past_ttl = std::time::Duration::from_secs(601);
+        let store = KvCacheStore::new(ttl);
+        for request in ["waiting", "stepped", "never-noted"] {
+            conversation(&store, request, 4, past_ttl);
+            store.mark_owner_request(request);
+        }
+        store.note_forward_ran("waiting", 0);
+        store.note_forward_ran("stepped", 0);
+        store.note_forward_ran("stepped", 1);
+        assert_eq!(store.cleanup_expired(), 2);
+        assert!(
+            store.request_holds_state("m", "waiting"),
+            "the cache waiting for its first step is kept past the TTL"
+        );
+        assert!(
+            store.serves_the_owner("waiting"),
+            "and its bookkeeping with it"
+        );
+        assert!(!store.request_holds_state("m", "stepped"));
+        assert!(!store.request_holds_state("m", "never-noted"));
+
+        // Its first step ends the hold.
+        store.note_forward_ran("waiting", 1);
+        assert_eq!(store.cleanup_expired(), 1);
+        assert!(!store.request_holds_state("m", "waiting"));
+
+        // The hold has a limit of its own.
+        let short = KvCacheStore::new(ttl).with_prompt_pass_hold(std::time::Duration::ZERO);
+        conversation(&short, "waiting", 4, past_ttl);
+        short.note_forward_ran("waiting", 0);
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        assert_eq!(short.cleanup_expired(), 1, "past the hold, swept");
+
+        // A released request is not held.
+        let released = KvCacheStore::new(ttl);
+        conversation(&released, "waiting", 4, past_ttl);
+        released.note_forward_ran("waiting", 0);
+        released.clear_request("other-range", "waiting");
+        assert_eq!(released.cleanup_expired(), 1, "the release ended the hold");
+    }
+
+    /// **A prompt pass gives back what its request already holds over the
+    /// same ranges** (#448): a re-plan keeps the request id, and the earlier
+    /// attempt's cache on a peer was weighed as another conversation's — the
+    /// third attempt of the 28-minute reply was refused by its own leftovers.
+    /// Only the ranges the pass clears count, and never another request's.
+    #[test]
+    fn a_prompt_pass_replaces_its_own_earlier_caches_and_claim() {
+        let store = KvCacheStore::new(std::time::Duration::from_secs(600));
+        conversation(&store, "r", 64, std::time::Duration::ZERO);
+        let own = store.occupancy().allocated_in(KvHome::Host);
+        assert!(own > 0);
+        conversation(&store, "other", 64, std::time::Duration::ZERO);
+        assert_eq!(
+            store.bytes_a_prompt_pass_replaces(KvHome::Host, "r", &["m"]),
+            own,
+            "its own cache over the range, never the other request's"
+        );
+        assert_eq!(
+            store.bytes_a_prompt_pass_replaces(KvHome::Host, "r", &["another-range"]),
+            0,
+            "a range the pass does not clear stays counted"
+        );
+        assert_eq!(
+            store.bytes_a_prompt_pass_replaces(KvHome::Card, "r", &["m"]),
+            0,
+            "nothing of it is in the card's memory"
+        );
+        // What its own claim still owes is replaced by the new admission.
+        store.record_prompt_admission("r", KvHome::Host, own + 5_000);
+        assert_eq!(
+            store.bytes_a_prompt_pass_replaces(KvHome::Host, "r", &["m"]),
+            own + 5_000
+        );
+        assert_eq!(
+            store.bytes_a_prompt_pass_replaces(KvHome::Host, "nobody", &["m"]),
+            0
+        );
     }
 
     /// An empty store reports nothing rather than dividing by zero.

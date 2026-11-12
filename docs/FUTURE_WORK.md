@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #448**). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #449**). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -4422,6 +4422,46 @@ prefix cache". Prior art: llama.cpp's server saves a slot's prompt at slot reuse
    request id a middle peer knows, so only the peer that ran the request's forwards may send it (it also ends the
    request) — `security-reviewer`. Rig: `split_rig.sh splitcache TURNS=5`, prompt pass per turn on/off, replies
    identical.
+
+#### #448 — A long prompt read by a split's later machines lost the earlier segments' caches at 10 minutes
+`P2` · perf-split · **PARTIAL** (the cause fixed 2026-11-12; two residuals) — 2026-11-12 · history: #430 (the hour-long wait), #235 (the worker's TTL sweep)
+
+**Seen on this node (2026-11-12 08:10Z, read from its log):** Gemma 4 31B, a 4,306-token prompt, split four ways —
+this node [0,1) and [59,60), Australia [1,38), Italy [38,59). The two peers read the prompt in 360 + 411 s; this
+node's [0,1) cache, untouched since its own pass, was taken by the worker's 600 s TTL sweep (`DIAG: KV-cache store
+cleanup — expired entries removed` at the moment [59,60)'s forward arrived), and the first step was refused: "this
+computer no longer holds the conversation … (layers 0..1)". The router continued it on a fresh route under the same
+request id — the same 13-minute read, the same loss — and the third attempt was refused up front by Italy: "other
+conversations on this node are using" its room — the previous attempt's own cache, still held under that request
+id. 28 min, no reply. #430 had raised the coordinator's wait for a peer's read to an hour while the cache it waits
+to use stayed swept at ten minutes: the tightest ceiling sat in another file (`architecture.md` § Timeouts, rule 4).
+
+**Fixed 2026-11-12 (on main, not in a release yet)**, both in the worker, no wire change:
+1. **A cache whose prompt pass ran here is held past the TTL until the request's first step**
+   (`KvCacheStore::note_forward_ran`, called by `handle_forward` after the pass's clear and by the fused batch path;
+   swept in `cleanup_expired`, bookkeeping included), up to `kv_cache::PROMPT_PASS_HOLD` — the coordinator's own
+   longest wait, `remote_generate::MEASURED_FIRST_TOKEN_MAX` (one figure). A step, a release or the hold's end
+   lets it go; a leak is still bounded by the hold, by memory pressure (below) and by the idle unload.
+2. **A prompt pass's admission leaves out what its request already holds over the same ranges**
+   (`KvCacheStore::bytes_a_prompt_pass_replaces`, read by `admit_prompt_in` for all three kinds of admission —
+   a forward's own, up front, and a peer's question): the earlier attempt's caches the pass's first piece clears
+   (`a_prompt_pass_clears`, the ONE rule `clear_request_caches` uses) and what its claim still owes.
+Tests `a_cache_whose_prompt_pass_waits_for_the_chain_outlives_the_ttl`,
+`a_prompt_pass_replaces_its_own_earlier_caches_and_claim`, `a_replanned_prompt_is_weighed_without_its_own_earlier_cache`.
+
+Prior art: Petals' server waits a fixed `step_timeout` (5 min) for a session's next inputs inside a 30-min
+`session_timeout` (`src/petals/server/server.py`) — the same exposure to a slow later server's prefill; vLLM keeps a
+running request's blocks until it finishes or is aborted (no TTL) and frees a preempted request's blocks before it is
+scheduled again (recompute). We take vLLM's two rules within our leak guard: held while its coordinator may still be
+waiting, and never weighed against itself.
+
+**Left**: (a) under memory pressure a cache silent for `FINISHED_CONVERSATION_AFTER` (120 s) is still released for a
+live prompt (`release_finished_conversations`) — a prompt pass waiting for its chain included, as designed in #235;
+holding it would let a leaked one refuse prompts for an hour. (b) A MIDDLE peer's daemon reads its worker as idle
+120 s after the last forward (`WorkerHandle::in_use`, `CONVERSATION_GAP_SECS`) and its model as idle by the time since
+it last served (`prune::effective_idle_secs`), so a peer whose later machines read for more than the idle unload
+(300 s) could unload the segment it is waiting with; Australia's [1,38) waited 6.7 min here and survived — why is not
+read (no log from it). Both want the same fact the worker now keeps (a pass awaiting its first step) at the daemon.
 
 ### Model families and platforms
 

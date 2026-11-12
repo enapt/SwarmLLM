@@ -865,6 +865,14 @@ A split reply that came back one token after a router retry, with speculation
 on, is #749's shape: check for `no longer holds the conversation` beside a
 `superseding the earlier attempt` line.
 
+A split's FIRST step refused with `no longer holds the conversation (layers a..b,
+position N)` after a long prompt read by later machines is #448's shape: the
+`DIAG: KV-cache store cleanup — expired entries removed` line comes on the same
+node at the moment its next forward arrives (the sweep runs at the worker's next
+message). Since #448 such a cache is held for its first step — with
+`SWARMLLM_LOGGING_LEVEL=debug`, `kept past the TTL` says it was; a build before it,
+or `SWARMLLM_PROMPT_PASS_HOLD=0`, sweeps it at `kv_cache_ttl_secs`.
+
 ## "Something is slow" — split user time from kernel time FIRST
 
 Before theorising about which code is slow, spend one command finding out
@@ -1392,6 +1400,7 @@ now means the peer stayed connected and silent. A peer serving one of our pipeli
 | Level | What | Where |
 |-------|------|-------|
 | INFO  | `DIAG: KV-cache store cleanup — expired entries removed` — `removed`, `remaining` | split/kv_cache.rs |
+| DEBUG | `DIAG: KV-cache store cleanup — kept past the TTL: their prompt pass waits for the rest of the chain to read it` — `held_past_ttl`, `ttl_secs`, `hold_secs` (#448) | split/kv_cache.rs |
 | INFO  | `DIAG: KV admission — evicted cached prompts so this prompt's cache fits on the device` — `budget_mb` (as the card can honour it NOW), `load_time_budget_mb`, `live_mb`, `cached_mb`, `freed_mb` | model_worker.rs |
 | WARN  | `DIAG: KV admission — refusing this prompt before prefill: it would not fit on the device` — the 503 that re-routes; `short_by_mb` is against the reconciled budget | model_worker.rs |
 | INFO  | `DIAG: KV admission up front — this node's segments of the plan cannot hold the prompt; …` — on the COORDINATOR, `layers_that_fit`: every local segment of a split with a peer in it was weighed at once before any peer read the prompt (#263), and the re-plan holds this node to that many layers (`prompt_memory_refused=true` on its candidate line). The WARN above, on a forward with no such line before it, is a late refusal — a plan of this node alone, or a worker not running the model when the pass began | process_pool.rs |

@@ -601,8 +601,10 @@ const FIRST_TOKEN_TIMEOUT_MAX: Duration = Duration::from_secs(600);
 const MEASURED_READ_MARGIN: u32 = 2;
 /// Ceiling on a wait sized from a measured read. Past it the reply is not worth
 /// waiting for; a caller who stops reading is still noticed at once (the wait
-/// is watched for a cancel).
-const MEASURED_FIRST_TOKEN_MAX: Duration = Duration::from_secs(3600);
+/// is watched for a cancel). A worker holds a cache whose prompt pass ran for
+/// this long too (`split::kv_cache::PROMPT_PASS_HOLD`, #448), so the wait is
+/// never longer than what it waits for is kept.
+pub(crate) const MEASURED_FIRST_TOKEN_MAX: Duration = Duration::from_secs(3600);
 
 /// How long a first-token wait lasts, at least, past the peer's last report
 /// that its prompt read MOVED (#430, `SwarmMessage::PromptProgress`). A report

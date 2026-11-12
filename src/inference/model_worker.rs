@@ -1516,6 +1516,11 @@ async fn run_fused_batch_forward(
             lost.request_id
         )));
     }
+    // Each item is a step: it ends its request's prompt-pass hold (#448), as
+    // a step through `handle_forward` does.
+    for r in requests {
+        kv_store.note_forward_ran(&r.request_id.to_string(), r.sequence_num);
+    }
 
     // Slice payload per request and build tensor inputs.
     let mut input_tensors: Vec<candle_core::Tensor> = Vec::with_capacity(requests.len());
@@ -2112,6 +2117,10 @@ async fn handle_forward(
             kv_store.clear_request(&model_key, &req_id_str);
         }
     }
+    // A prompt pass holds the request's caches here past the TTL until its
+    // first step; that step ends the hold (#448). After the clear, which
+    // forgets it.
+    kv_store.note_forward_ran(&req_id_str, fwd.sequence_num);
 
     // The owner's own segment of a request this node coordinates is the
     // owner's, as its `Generate` is: marked before any layer of it picks a
@@ -7917,13 +7926,20 @@ fn admit_prompt_in(
     // memory the previous one has already been promised. Drawn down by what
     // each has actually allocated, so nothing is charged twice.
     let promised = kv_store.outstanding_admission_bytes(home);
-    let mut live = in_home.saturating_add(promised);
+    // What this request itself still holds over these ranges — an earlier
+    // attempt's caches and claim, kept under the same request id across a
+    // re-plan — is given back by the pass's first piece before it writes, so
+    // it is never "another conversation's" room (#448). Read once: a release
+    // below keeps this request's caches (`keep`).
+    let model_keys: Vec<&str> = ranges.iter().map(|(m, _)| m.kv_model_key()).collect();
+    let replaced = kv_store.bytes_a_prompt_pass_replaces(home, request_id, &model_keys);
+    let mut live = in_home.saturating_add(promised).saturating_sub(replaced);
     let cached = prefix_cache.bytes_in(SnapshotHome::BesideLive) as u64;
-    // Nothing of THIS request is in the store yet, so anything live belongs to
-    // an earlier one — a request still decoding, or one whose cache outlived
-    // its reply. The store's figure was seen to wander by ~1 GB across
-    // identical sequential prompts (2856 → 4200 MB, 2026-09-02) and this is
-    // the line that says whose bytes those are.
+    // Anything live past what this pass replaces belongs to another request
+    // — one still decoding, or one whose cache outlived its reply. The
+    // store's figure was seen to wander by ~1 GB across identical sequential
+    // prompts (2856 → 4200 MB, 2026-09-02) and this is the line that says
+    // whose bytes those are.
     if live > 0 {
         tracing::debug!(
             request_id,
@@ -7986,7 +8002,8 @@ fn admit_prompt_in(
             live = kv_store
                 .occupancy()
                 .allocated_in(home)
-                .saturating_add(kv_store.outstanding_admission_bytes(home));
+                .saturating_add(kv_store.outstanding_admission_bytes(home))
+                .saturating_sub(replaced);
             verdict = admit_prompt(budget, live, cached, claim);
         }
     }
@@ -14005,6 +14022,69 @@ mod up_front_admission_tests {
             "a prompt that cannot fit is refused up front"
         );
         assert!(kept, "and its refusal evicted nothing");
+    }
+
+    /// **A re-planned prompt is weighed without its own earlier attempt's
+    /// cache** (#448, 2026-11-12): the router re-plans under the same request
+    /// id, so a peer still held the previous attempt's 4,306-token cache when
+    /// it was asked again, counted it as another conversation's, and refused
+    /// the request it belonged to. The pass's first piece clears that cache
+    /// before writing. Control, on every kind of admission: the same cache
+    /// under another request, touched just now, still stands in the way.
+    #[test]
+    fn a_replanned_prompt_is_weighed_without_its_own_earlier_cache() {
+        let prompt = 100;
+        let per_position = 1000;
+        let claim = per_position
+            * crate::inference::layers::kv_cache_reservation(prompt + REPLY_RESERVE_POSITIONS)
+                as u64;
+        let admit = |holder: &str, admitting: Admitting| {
+            let model = windowed_model_with_budget(
+                8192,
+                &[None, None],
+                KvGrowth::flat(per_position),
+                claim + 1024,
+            );
+            let kv = KvCacheStore::new(std::time::Duration::from_secs(600));
+            let pc = PrefixCache::new(true, 8, 0, 4, 8192, 0);
+            {
+                let mut entry = kv.get_or_create(model.kv_model_key(), holder, 2);
+                for slot in entry.layers.iter_mut() {
+                    let k = Tensor::zeros((1usize, 1, 128, 64), DType::F32, &Device::Cpu).unwrap();
+                    let mut layer = LayerKv::with_capacity(2, 4096, 4096);
+                    layer.append(&k, &k).unwrap();
+                    *slot = Some(layer);
+                }
+            }
+            assert!(
+                kv.occupancy().allocated_bytes > 1024,
+                "fixture: the earlier cache is more than the room left beside the claim"
+            );
+            let width = model.layer_end.saturating_sub(model.layer_start) as u32;
+            admit_prompt_over(
+                &[(&model, width)],
+                KvGrowth::default(),
+                &kv,
+                &pc,
+                "r",
+                prompt,
+                REPLY_RESERVE_POSITIONS,
+                0,
+                admitting,
+            )
+            .map(|_| ())
+            .map_err(|refused| refused.short_by)
+        };
+        for admitting in [Admitting::OnlyWeigh, Admitting::UpFront, Admitting::Record] {
+            assert!(
+                admit("r", admitting).is_ok(),
+                "{admitting:?}: the request's own earlier cache is given back by its pass"
+            );
+            assert!(
+                admit("other", admitting).is_err(),
+                "{admitting:?}: control — another request's cache, touched just now, is in the way"
+            );
+        }
     }
 
     /// **A card with no room for a prompt's copy beside its live cache keeps

@@ -129,6 +129,39 @@ the peer logged that request's `CancelInference` ~10 ms later, its worker
 remains: seeing the peer's room before choosing it (#237); a reply whose peer
 refuses mid-stream still ends (#236).
 
+### A cache whose prompt pass ran here waits for its first step (2026-11-12, #448)
+
+The TTL sweep above bounds what nobody released, and measures "nobody" as ten
+minutes since the entry's last forward. A split's EARLIER segments are untouched
+for as long as every later machine takes to read the prompt, and #430 made the
+coordinator wait for that read up to an hour. On this node a Gemma 4 31B with a
+4,306-token prompt, split [0,1) here / [1,38) Australia / [38,59) Italy / [59,60)
+here, lost [0,1) to the sweep 12.6 min into the peers' 771 s read — the sweep runs
+at the worker's next message, which was [59,60)'s forward — and its first step was
+refused (`forward_lacks_its_conversation`, correctly: the alternative is an answer
+from nothing). The re-plan read it again and lost it again. So a prompt pass marks
+its request (`note_forward_ran`, sequence 0, after the pass's clear; any later step
+ends it), and the sweep keeps such a request's caches and bookkeeping up to
+`PROMPT_PASS_HOLD`, defined AS the coordinator's ceiling
+(`MEASURED_FIRST_TOKEN_MAX`) so the two cannot drift apart. Pressure still
+releases it after `FINISHED_CONVERSATION_AFTER`, as before (#448 (a)).
+
+The third attempt met a second defect: a router re-plan (and a continuation)
+keeps the REQUEST id, and the caches are keyed by it, so the previous attempt's
+cache was still on the Italian peer when it was asked again — and its question
+(`Admitting::OnlyWeigh`) weighed it as "other conversations", which the release
+rule spares (`keep` is the asker). The pass's first piece would have cleared it.
+`admit_prompt_in` now takes off `bytes_a_prompt_pass_replaces` — the entries the
+clear removes, matched by the clear's own predicate (`a_prompt_pass_clears`), and
+what the request's own claim still owes, which the new admission replaces — for
+every kind of admission. vLLM's recompute frees a preempted sequence's blocks
+before it is scheduled again; Petals holds a session's state for a fixed 5-min
+`step_timeout`. Tests `a_cache_whose_prompt_pass_waits_for_the_chain_outlives_the_ttl`
+(controls: a request that stepped, one never noted, the hold's own limit, a
+release), `a_prompt_pass_replaces_its_own_earlier_caches_and_claim`,
+`a_replanned_prompt_is_weighed_without_its_own_earlier_cache` (control: the same
+cache under another request refuses, on all three admissions).
+
 ## `inference::worker_ipc::worker_error_is_fatal`
 
 (R146) — the single
