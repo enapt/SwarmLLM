@@ -3414,6 +3414,16 @@ impl PipelineScheduler {
         // (2b)) — required, so no plan is made without its scope.
         keep: crate::types::KeepAsked,
     ) -> Result<PipelineAssignment, SwarmError> {
+        // Every routing line of a real request's plan names the request: the
+        // log prints a span's fields before each line inside it. Without it a
+        // `DIAG: pipeline candidate` line — already at tracing's 32-field cap —
+        // could not be tied to the `Pipeline segment` lines that say which
+        // candidates the request went to, so "was that peer passed over?" had
+        // no answer once two requests planned at once (field report 11-12).
+        // Synchronous to its return, so the guard never crosses an `.await`.
+        let _plan = purpose
+            .explains_a_real_request()
+            .then(|| tracing::info_span!("plan", request_id = %request_id).entered());
         let plan = self.assemble_any_pipeline_for(
             model_id,
             local_node_id,

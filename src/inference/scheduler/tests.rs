@@ -108,6 +108,80 @@ fn assemble_single_node_pipeline() {
     assert_eq!(assignment.segments[0].node_id, local_id);
 }
 
+/// The log a reader opens to ask "was that peer passed over for my request?"
+/// must tie each priced candidate to the request, so it can be read beside the
+/// `Pipeline segment` lines that name where the request went.
+#[test]
+fn every_candidate_a_request_prices_names_the_request_in_the_log() {
+    #[derive(Clone, Default)]
+    struct Captured(Arc<std::sync::Mutex<Vec<u8>>>);
+    impl std::io::Write for Captured {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    let state = make_shared_state();
+    let local_id = state.identity.node_id().clone();
+    let model = ModelId("test-model".into());
+    state.model_registry.register_manifest(make_manifest(
+        "test-model",
+        32,
+        vec![ShardInfo {
+            index: 0,
+            layer_range: (0, 32),
+            size_bytes: 4_000_000_000,
+            hash: [0u8; 32],
+            tensors: vec![],
+        }],
+    ));
+    state.model_registry.record_shard_holder(
+        ShardId {
+            model_id: model.clone(),
+            index: 0,
+        },
+        local_id.clone(),
+    );
+    let scheduler = PipelineScheduler::new(state);
+    let request_id = uuid::Uuid::new_v4();
+    let log = Captured::default();
+    let writer = log.clone();
+    let subscriber = tracing_subscriber::fmt()
+        .with_ansi(false)
+        .with_max_level(tracing::Level::INFO)
+        .with_writer(move || writer.clone())
+        .finish();
+    tracing::subscriber::with_default(subscriber, || {
+        scheduler
+            .assemble_pipeline_for(
+                &model,
+                &local_id,
+                request_id,
+                Purpose::Route,
+                None,
+                crate::types::KeepAsked::Unasked,
+            )
+            .expect("a plan");
+    });
+    let text = String::from_utf8(log.0.lock().unwrap().clone()).unwrap();
+    let candidates: Vec<&str> = text
+        .lines()
+        .filter(|l| l.contains("DIAG: pipeline candidate"))
+        .collect();
+    assert!(!candidates.is_empty(), "no candidate line logged:\n{text}");
+    let named = format!("request_id={request_id}");
+    for line in candidates {
+        assert!(
+            line.contains(&named),
+            "a candidate line that does not name its request: {line}"
+        );
+    }
+}
+
 #[test]
 fn assemble_multi_node_pipeline() {
     let state = make_shared_state();

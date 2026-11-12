@@ -273,8 +273,15 @@ delegated split: the delegate declined to lead it — coordinating the same plan
          passed_over_secs (5 min, doubling to 60 while it keeps declining).
          A refused route, a too-long prompt or a late first token passes
          nobody over; `SWARMLLM_DECLINED_LEADS=0` turns it off)
-DIAG: pipeline candidate  node= est_tokens_per_sec= has_gpu= cost_prefill_ms= cost_compute_ms= ...
-        (every holder priced over the whole model — the LOCAL line's
+plan{request_id=…}: … DIAG: pipeline candidate  node= est_tokens_per_sec= has_gpu= cost_prefill_ms= cost_compute_ms= ...
+        (WAS A PEER PASSED OVER? Every routing line of a real request's
+         plan carries `plan{request_id=…}` (2026-11-12; a route preview's
+         lines are debug and carry none). The candidates CHOSEN are the
+         `Pipeline segment … node=` lines with that request_id; a
+         candidate missing there was passed over, and the lines between
+         say why. Only the REQUESTER's log has these — a peer cannot see
+         from its own log that it was not chosen.
+         Every holder priced over the whole model — the LOCAL line's
          est_tokens_per_sec and has_gpu describe the device the request
          would USE: on a node whose card is too small they are the
          processor's figures, gotcha #444. Priced as a WHOLE model, so a
@@ -1032,7 +1039,7 @@ cargo dev-run -- run -vv 2>&1 | grep "request_id=<UUID>"
 
 1. **API entry** → `Queued inference request` (router/mod.rs)
 2. **Dispatch** → `DIAG: dispatch_single starting inference` (router/mod.rs)
-3. **Pipeline assembly** → `DIAG: pipeline assembled` with `segments`, `standbys`, `schedule_ms` (router/distributed_exec.rs)
+3. **Pipeline assembly** → every planning line under `plan{request_id=…}` (scheduler/mod.rs, `assemble_pipeline_for`), then `DIAG: pipeline assembled` with `segments`, `standbys`, `schedule_ms` and one `Pipeline segment` line per chosen node (router/distributed_exec.rs)
 4. **Forward start** → `DIAG: starting forward_through_segments` with `seq_num`, `index_pos`, `activation_bytes` (pipeline/distributed.rs)
 5. **Tensor forward send** → DEBUG `DIAG: sent tensor forward via send_request (verbose)` with `peer_established_count`, `is_rr_pending`, `total_connections`, `pending_tensor_count`, `outbound_id` (manager/tensors.rs)
 6. **Codec write** → `DIAG: codec write_request start/done` with `frame_len` (network/protocol/mod.rs, trace)
