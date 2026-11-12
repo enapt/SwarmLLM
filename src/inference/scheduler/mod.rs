@@ -550,6 +550,24 @@ impl NodeCandidate {
     /// whole while the new field adds no way to look FASTER than the stated
     /// speed already allows — a peer that wants work can only state a speed
     /// it was always able to state.
+    /// A figure that is the peer's own word (`TimedOn::HeldSteps`: a chain
+    /// hop's report of how long it held our steps, #427) never prices it
+    /// FASTER than its stated speed — the rule its own published timing keeps
+    /// (#3 (f)). Applied as the candidate is built, so the search, greedy and
+    /// delegation all read the floored figure.
+    fn floor_a_peers_own_word(mut self) -> Self {
+        if self
+            .observed_latency_timed_on
+            .is_some_and(crate::daemon::state::TimedOn::is_the_peers_own_word)
+        {
+            let prior = self.prior_ms_per_layer();
+            self.observed_latency_ms_per_layer = self
+                .observed_latency_ms_per_layer
+                .map(|held| held.max(prior));
+        }
+        self
+    }
+
     fn prior_ms_per_layer(&self) -> f32 {
         let stated_speed = stated_layer_ms(self.est_tokens_per_sec, self.layer_work);
         self.stated_ms_per_layer
@@ -5647,78 +5665,81 @@ impl PipelineScheduler {
                     chains_forwards: self.shared_state.peer_supports_pipeline_chain(&node_id),
                 }
             };
-            candidates.push(NodeCandidate {
-                // Measured on real forwards to this peer, like `ack_srtt_ms`
-                // one line below — and `None` for the local node, which sends
-                // nothing over a network to itself.
-                goodput_bytes_per_sec: if is_local {
-                    None
-                } else {
-                    self.shared_state
-                        .peer_registry
-                        .get(&node_id)
-                        .and_then(|p| p.goodput_bytes_per_sec)
-                },
-                node_id,
-                shard_id: first_shard_id,
-                available_ranges: ranges,
-                reach,
-                latency_ms,
-                load: active_load,
-                trust_score,
-                can_be_first,
-                can_be_last,
-                region_score,
-                est_tokens_per_sec,
-                layer_work,
-                activation_bytes_per_token,
-                stated_ms_per_layer: stated_decode_ms_per_layer(
-                    reported.as_ref().and_then(|r| r.decode_us_per_layer),
-                ),
-                observed_latency_ms_per_layer,
-                observed_latency_timed_on,
-                observed_fixed_ms_per_visit,
-                observed_delegated_ms_per_layer,
-                expected_attempts,
-                is_pool_member: is_pool,
-                gpu_vram_available_mb,
-                max_hostable_layers,
-                max_hostable_layers_at_face_value,
-                max_hostable_layers_at_ceiling,
-                observed_prompt_ms_per_layer_token,
-                observed_whole_prompt_floor_ms_per_layer_token,
-                has_gpu,
-                held_ranges,
-                published_room,
-                // Ours, or what a peer was handed — see the field.
-                cached_prefix_tokens: if is_local {
-                    prompt.cached_locally
-                } else {
-                    handed_off_tokens
-                },
-                split_openings,
-                cold_load_ms_per_layer: cold_load_per_layer,
-                reply_tokens_at_most: prompt.reply_tokens_at_most,
-                reply_tokens_expected,
-                split_tokens_per_round,
-                fresh_run_layers,
-                card_layers,
-                processor_tokens_per_sec,
-                prompt_fit_counts_caches,
-                prompt_memory_refused: peer_prompt_fit.is_some()
-                    || is_local
-                        && self
-                            .shared_state
-                            .local_layers_fitting_for_request(request_id)
-                            .is_some(),
-                memory_refused_this_request: peer_prompt_fit.is_some()
-                    || is_local
-                        && self
-                            .shared_state
-                            .local_memory_refused_for_request(request_id),
-                ring,
-                range_weights,
-            });
+            candidates.push(
+                NodeCandidate {
+                    // Measured on real forwards to this peer, like `ack_srtt_ms`
+                    // one line below — and `None` for the local node, which sends
+                    // nothing over a network to itself.
+                    goodput_bytes_per_sec: if is_local {
+                        None
+                    } else {
+                        self.shared_state
+                            .peer_registry
+                            .get(&node_id)
+                            .and_then(|p| p.goodput_bytes_per_sec)
+                    },
+                    node_id,
+                    shard_id: first_shard_id,
+                    available_ranges: ranges,
+                    reach,
+                    latency_ms,
+                    load: active_load,
+                    trust_score,
+                    can_be_first,
+                    can_be_last,
+                    region_score,
+                    est_tokens_per_sec,
+                    layer_work,
+                    activation_bytes_per_token,
+                    stated_ms_per_layer: stated_decode_ms_per_layer(
+                        reported.as_ref().and_then(|r| r.decode_us_per_layer),
+                    ),
+                    observed_latency_ms_per_layer,
+                    observed_latency_timed_on,
+                    observed_fixed_ms_per_visit,
+                    observed_delegated_ms_per_layer,
+                    expected_attempts,
+                    is_pool_member: is_pool,
+                    gpu_vram_available_mb,
+                    max_hostable_layers,
+                    max_hostable_layers_at_face_value,
+                    max_hostable_layers_at_ceiling,
+                    observed_prompt_ms_per_layer_token,
+                    observed_whole_prompt_floor_ms_per_layer_token,
+                    has_gpu,
+                    held_ranges,
+                    published_room,
+                    // Ours, or what a peer was handed — see the field.
+                    cached_prefix_tokens: if is_local {
+                        prompt.cached_locally
+                    } else {
+                        handed_off_tokens
+                    },
+                    split_openings,
+                    cold_load_ms_per_layer: cold_load_per_layer,
+                    reply_tokens_at_most: prompt.reply_tokens_at_most,
+                    reply_tokens_expected,
+                    split_tokens_per_round,
+                    fresh_run_layers,
+                    card_layers,
+                    processor_tokens_per_sec,
+                    prompt_fit_counts_caches,
+                    prompt_memory_refused: peer_prompt_fit.is_some()
+                        || is_local
+                            && self
+                                .shared_state
+                                .local_layers_fitting_for_request(request_id)
+                                .is_some(),
+                    memory_refused_this_request: peer_prompt_fit.is_some()
+                        || is_local
+                            && self
+                                .shared_state
+                                .local_memory_refused_for_request(request_id),
+                    ring,
+                    range_weights,
+                }
+                .floor_a_peers_own_word(),
+            );
         }
 
         // At `info`, and for the same reason the parallax/greedy choice above is

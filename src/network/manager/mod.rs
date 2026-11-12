@@ -27,6 +27,7 @@ mod dht;
 mod events;
 pub(crate) use events::GOSSIP_AHEAD_SECS;
 mod hop_forwards;
+mod hop_timings;
 /// Shared with `network::peer_cache` so the advertise path and the cache path
 /// apply one reachability predicate rather than two that can drift.
 pub(crate) use events::addr_is_remotely_reachable;
@@ -565,6 +566,10 @@ pub struct NetworkManager {
     /// When each forward served here arrived, for its answer's served time
     /// (#388, `features::SERVED_TIME`). See `served_time`.
     served_since: served_time::ServedSince,
+    /// How long this node held each request's decode steps as a hop of a
+    /// chain another node coordinates, told to that coordinator when it
+    /// cancels the request (#427, `features::HOP_TIMINGS`). See `hop_timings`.
+    hop_held: hop_timings::HopHeld,
     /// Results `SWARMLLM_FAULT_RESULT` held back, resent on the sweep tick.
     /// Always empty in production.
     parked_result_resends: Vec<tensors::ParkedResultResend>,
@@ -1080,6 +1085,7 @@ impl NetworkManager {
             hop_forwards: hop_forwards::HopForwards::default(),
             pending_tensor_result_outbound: HashMap::new(),
             served_since: served_time::ServedSince::default(),
+            hop_held: hop_timings::HopHeld::default(),
             parked_result_resends: Vec::new(),
             result_fault_fired: false,
             pending_rr_observability: HashMap::new(),
@@ -2121,6 +2127,13 @@ impl NetworkManager {
                             removed = removed_shard,
                             remaining = self.pending_shard_responses.len(),
                             "Swept stale pending_shard_responses tickets"
+                        );
+                    }
+                    let unasked = self.hop_held.expire(std::time::Instant::now());
+                    if unasked > 0 {
+                        tracing::debug!(
+                            unasked,
+                            "forgot chain-hop timings no coordinator asked for"
                         );
                     }
                     let forgotten = self.hop_forwards.expire(std::time::Instant::now());

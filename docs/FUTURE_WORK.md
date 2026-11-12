@@ -3333,38 +3333,21 @@ within 1-4% of each warm reply (36.8-37.2 s against 35.6-36.3); with Australia e
 (1.51 ms a layer) from the third ask, and the prediction carried its round trips — the first, uncopied reply priced
 545 ms a pass against ~600 measured (this morning: 358 against ~590). Later asks repeated the prompt and copied the
 earlier reply (#337), 4.7-8.8 tok/s, so they price nothing.
-**Residual**: each hop of a chain timed by the hop itself — a chained hop sends no `served_us` today, so a chain
-driven from here is priced from the requester's view alone (a wire trailer, a feature bit and a security review: the
-next round); re-measure Gemma 4 31B once Denmark holds it whole.
-
-**Design 2026-11-11 (not built).** Code map, read: `served_us` has one setter, `handle_send_tensor_result`
-(`network/manager/tensors.rs:577`), keyed by the AUTHENTICATED peer that sent the forward. A middle hop hands on through
-`handle_send_tensor`, which never asks, and a tail answers a coordinator that did not send it the forward, so no hop of
-a chain ever finds its stamp. That is the keying, not a condition. Its one reader (`dsd_flow.rs:2399`) also stands
-aside for a chain. What a chain already has: every hop publishes its own compute (`OwnDecodeSpeed`, the fastest of 32
-decode steps it ran for peers, gossiped, a floor under its stated speed), and a led chain's links are priced from
-coordinates (`parallax::led_hop_ms`). What it lacks is each hop's per-visit time as THIS requester meets it (dispatch,
-both crypto passes, queueing behind other work), and with it each link's share of the delay: 545 ms predicted against
-~600 measured a pass on 11-09's chain.
-- **Rejected: a list every hop appends to on the forward** (in-band network telemetry's hop-by-hop metadata stack).
-  Each hop re-seals the forward for the next, so a later hop could rewrite an earlier hop's entry, and an inflated
-  entry is believed (a reported time may price a peer SLOWER, never faster). A middle computer could push a rival out
-  of routes. Per-entry signatures would fix it, at 64 bytes and a verify per hop per pass.
-- **Chosen: each hop reports straight to the requester, once a reply** (OpenTelemetry's span export: each service
-  reports its own span to the collector, never through the next service). A hop that handed a forward on, or a tail
-  answering a requester other than the sender, notes its held time (the existing arrival stamp, keyed by the
-  predecessor, to the onward send). It keeps decode steps only, as `OwnDecodeSpeed` does. When the requester's
-  `CancelInference` arrives (`release_request_on_peers`, once per request), it answers with a new
-  `SwarmMessage::HopTimings { request_id, steps, median_held_us, layers }`, over its own authenticated session. It
-  sends one ONLY to a requester advertising a new feature bit (gated at the sender). An older hop sends nothing, and
-  its figure stays as today's.
-- **The requester believes it only for a hop of that request's own chain.** It records it per (peer, model) as a
-  figure timed on held decode steps: priced WITH the vertex's link term (like `TimedOn::PromptPasses`), and never
-  faster than the stated speed (#3 (f)). A held time longer than the chain's whole measured delay is dropped.
-- **Verify** on `split_rig.sh` with a three-node chain under `RIG_NETNS=1` (the predicted pass against the measured,
-  with and without the reports), then a security review (a new message and bit). Prior art: In-band Network Telemetry
-  (P4.org INT spec: a per-hop metadata stack, sink-stripped; its integrity is not authenticated) and OpenTelemetry
-  (each span exported directly to the collector); the second is the shape that survives a dishonest middle hop.
+**Built 2026-11-12: each hop of a chain tells the requester its own time.** `served_us` reaches only the peer that
+sent a forward, so no hop of a chain was ever timed by itself. Each hop now notes how long it held each one-position
+decode step (arrival to its onward send or answer, `network/manager/hop_timings.rs`) and, on the requester's own
+`CancelInference`, sends one `SwarmMessage::HopTimings` (feature bit 40, gated at the sender, not relay-eligible). The
+requester believes it only from a hop of that reply's last plan, of its width, once, within 120 s, over ≥ 4 steps and
+no longer than a round took, and prices that hop as `TimedOn::HeldSteps`: with its link term, floored at the stated
+speed, never gossiped (`daemon/state/hop_reports.rs`). Prior art: OpenTelemetry's span export (chosen) against P4
+INT's per-hop metadata stack (rejected: each hop re-seals the forward, so a later hop could rewrite an earlier entry).
+Security review (Mythos): nothing above LOW; the one fix, each sending peer its own share of a hop's records. Rig
+(three processor nodes, Llama 3.2 3B, 120 tokens): every report believed, 8 of 8 a run, none with
+`SWARMLLM_HOP_TIMINGS=0`; with B throttled 63.1-63.6 s off against 63.3-64.6 s on — no regression, and no price moved,
+because every truthful hop sat under a pessimistic stated speed and the floor kept it. → `docs/invariants/network.md`
+§ "A chain hop tells its coordinator its own time", `scheduling.md` § "A chain hop's own report prices it".
+**Residual**: the case the reports are for — a hop that states itself faster than it runs (Denmark on 11-09,
+`PromptPasses` 1.51 ms a layer) — measured on Gemma 4 31B live once Denmark holds it whole.
 
 **Research 2026-11-08 — which models people actually run, and the round uses them.** Three web searches (Hugging Face
 downloads and trending, the Ollama library, OpenRouter's rankings and its usage study arXiv 2601.10088, the Steam

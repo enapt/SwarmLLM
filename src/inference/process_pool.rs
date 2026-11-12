@@ -4214,7 +4214,7 @@ enum BatchSchedulerMsg {
 /// refuses those, and a chain driven that way was never timed (the
 /// `split_rig.sh owntiming` run of 2026-10-18: a peer served 5 such steps and
 /// published nothing). A check of several positions is not one step.
-fn forward_is_one_decode_step(f: &crate::types::LayerForward) -> bool {
+pub(crate) fn forward_is_one_decode_step(f: &crate::types::LayerForward) -> bool {
     f.sequence_num != 0
         && f.index_pos != 0
         && f.prompt_cache.is_none()

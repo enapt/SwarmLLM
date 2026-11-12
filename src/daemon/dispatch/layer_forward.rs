@@ -51,6 +51,27 @@ pub(super) async fn handle_layer_forward(
             return;
         }
     };
+    // What this node holds the forward for as a hop of a chain another node
+    // coordinates (#427): told to the network manager just before the forward
+    // leaves — handed on, or the tail's answer to a coordinator that did not
+    // send it — and reported to that coordinator when it cancels the request.
+    // Only for a coordinator that takes the report (`features::HOP_TIMINGS`).
+    let held_as_hop = forward
+        .requester_node_id
+        .map(crate::types::NodeId)
+        .filter(|coordinator| {
+            coordinator != shared_state.identity.node_id()
+                && shared_state
+                    .peer_advertises_feature(coordinator, crate::types::features::HOP_TIMINGS)
+        })
+        .map(|coordinator| crate::types::HeldAsHop {
+            request_id,
+            coordinator,
+            predecessor_peer_bytes: sender_peer_bytes.clone(),
+            step: answering,
+            decode_step: crate::inference::process_pool::forward_is_one_decode_step(&forward),
+            layers: forward.layer_range.1.saturating_sub(forward.layer_range.0),
+        });
     // Whoever is WAITING for our answer — see `reply_target`. EVERY reply this
     // handler sends goes through it, failures included. The early failures
     // (no manifest, no shards, a bad range, the worker refusing) used to answer
@@ -641,6 +662,9 @@ pub(super) async fn handle_layer_forward(
                         remaining = chain.len() - 1,
                         "DIAG: chaining activations to the next segment"
                     );
+                    if let Some(held) = held_as_hop.clone() {
+                        let _ = network_tx.send(NetworkCommand::NoteHeldAsHop(held)).await;
+                    }
                     if let Err(e) = network_tx
                         .send(NetworkCommand::SendTensor {
                             target_peer_bytes: next_peer_bytes,
@@ -723,7 +747,15 @@ pub(super) async fn handle_layer_forward(
     // across disconnects, so the ungated one hands back targets the send path
     // can only drop (gotcha #220). Not connected means fall back to the sender,
     // which is correct for every unchained forward and no worse than before.
-    send_result_timed(&network_tx, &reply_to(), result).await;
+    let reply = reply_to();
+    // A chain's tail answering a coordinator that did not send it the forward:
+    // its own time goes in its report (#427), not on this answer.
+    if reply.0 != sender_peer_bytes {
+        if let Some(held) = held_as_hop {
+            let _ = network_tx.send(NetworkCommand::NoteHeldAsHop(held)).await;
+        }
+    }
+    send_result_timed(&network_tx, &reply, result).await;
 }
 
 /// Hand a result to the network manager — the ONE place this handler does it,

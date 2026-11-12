@@ -23,6 +23,7 @@ pub(crate) mod declined_leads;
 mod events;
 pub(crate) mod forward_streams;
 mod hf;
+pub(crate) mod hop_reports;
 pub(crate) mod lifetime;
 mod load_rate;
 pub(crate) mod manifest_sync;
@@ -174,6 +175,12 @@ fn unix_ms_now() -> u64 {
 /// control arm of `declined_leads`.
 fn remember_declined_leads() -> bool {
     std::env::var("SWARMLLM_DECLINED_LEADS").map_or(true, |v| v.trim() != "0")
+}
+
+/// `SWARMLLM_HOP_TIMINGS=0` asks no chain hop how long it held this node's
+/// steps — the control arm of `hop_reports` (#427).
+fn ask_hops_their_timings() -> bool {
+    std::env::var("SWARMLLM_HOP_TIMINGS").map_or(true, |v| v.trim() != "0")
 }
 
 #[cfg(test)]
@@ -1573,6 +1580,7 @@ impl SharedState {
                 peer_speed: DashMap::new(),
                 peer_outliers: Default::default(),
                 declined_leads: Default::default(),
+                hop_reports_awaited: Default::default(),
                 upnp_verdict: Default::default(),
                 host_heat: Default::default(),
                 peer_model_warm_at: DashMap::new(),
@@ -2671,6 +2679,74 @@ impl SharedState {
             (node_id.clone(), model_id.clone()),
             std::time::Instant::now(),
         );
+    }
+
+    /// A reply this node drove through `hops` (peer, layers of its segment)
+    /// ended after `rounds` decode rounds in `took`: each hop may now report
+    /// how long it held the steps (#427, [`hop_reports`]). The model's weight
+    /// is read here, on the reply's task, so the dispatcher taking a report
+    /// never parses a header.
+    pub fn expect_hop_reports(
+        &self,
+        request_id: uuid::Uuid,
+        model_id: &crate::types::ModelId,
+        hops: Vec<(crate::types::NodeId, u32)>,
+        rounds: u32,
+        took: std::time::Duration,
+    ) {
+        if hops.is_empty() || rounds == 0 || !ask_hops_their_timings() {
+            return;
+        }
+        let round_us_at_most =
+            u64::try_from(took.as_micros() / u128::from(rounds)).unwrap_or(u64::MAX);
+        let layer_work = crate::inference::scheduler::layer_work_for(self, model_id);
+        self.metrics.hop_reports_awaited.expect(
+            request_id,
+            model_id.clone(),
+            hops,
+            round_us_at_most,
+            layer_work,
+            std::time::Instant::now(),
+        );
+    }
+
+    /// `from` (the authenticated sender, never gossip — `HopTimings` is never
+    /// relayed) reported how long it held a chain's
+    /// steps: priced where this node asked ([`hop_reports`]), into the
+    /// figure only the scheduler reads (`ModelSpeed::note_held_steps`).
+    pub fn note_hop_report(&self, from: &crate::types::NodeId, report: &crate::types::HopTimings) {
+        let now = std::time::Instant::now();
+        match self.metrics.hop_reports_awaited.take(from, report, now) {
+            hop_reports::HopReport::Priced {
+                model,
+                ms_per_layer,
+                layer_work,
+            } => {
+                tracing::debug!(
+                    request_id = %report.request_id,
+                    peer = %from,
+                    model_id = %model,
+                    layers = report.layers,
+                    steps = report.steps,
+                    median_held_us = report.median_held_us,
+                    ms_per_layer,
+                    "DIAG: a chain hop said how long it held this node's steps"
+                );
+                self.metrics
+                    .peer_speed
+                    .entry(from.clone())
+                    .or_default()
+                    .model_mut(&model, || layer_work)
+                    .note_held_steps(ms_per_layer, now);
+            }
+            hop_reports::HopReport::Unasked => {}
+            hop_reports::HopReport::Implausible(why) => tracing::debug!(
+                request_id = %report.request_id,
+                peer = %from,
+                why,
+                "a chain hop's report of its held time was not believed"
+            ),
+        }
     }
 
     /// `node_id`'s worker for `model_id` answered a prompt pass with a prompt it

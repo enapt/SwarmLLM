@@ -1960,6 +1960,17 @@ pub(crate) async fn dispatch_network_messages(
                                             }
                                         }
                                     }
+                                    // A chain hop's own report of how long it held
+                                    // a reply's steps (#427): point to point, from
+                                    // the hop itself — believed only as an answer
+                                    // to a chain this node drove through it.
+                                    SwarmMessage::HopTimings(report) => {
+                                        if transport == crate::types::MessageTransport::Direct {
+                                            if let Some(from) = authenticated_sender.as_ref() {
+                                                shared_state.note_hop_report(from, &report);
+                                            }
+                                        }
+                                    }
                                     // Process model manifests from peers — register in model_registry
                                     SwarmMessage::ModelManifest(manifest) => {
                                         // SEC: Require transport-authenticated sender (prevents anonymous injection).
@@ -3621,6 +3632,19 @@ pub(crate) async fn dispatch_network_messages(
                                             .model_process_pool
                                             .cancel_request(cancel.request_id)
                                             .await;
+                                        // The reply is over: a chain hop tells its
+                                        // coordinator how long it held the request's
+                                        // steps (#427). Asked by its own cancel, never gossip;
+                                        // the network manager answers only the
+                                        // coordinator the steps were held for.
+                                        if transport == crate::types::MessageTransport::Direct {
+                                            if let Some(by) = authenticated_sender.clone() {
+                                                let _ = network_tx.try_send(NetworkCommand::ReportHopTimings {
+                                                    request_id: cancel.request_id,
+                                                    by,
+                                                });
+                                            }
+                                        }
                                     }
                                     // Other messages handled by NetworkManager
                                     _ => {}

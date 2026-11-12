@@ -274,6 +274,12 @@ pub struct ModelSpeed {
     prefill_samples: u32,
     decode_samples: u32,
     delegated_samples: u32,
+    /// What the peer itself said it held each decode step of a chain this
+    /// node drove, per layer (`SwarmMessage::HopTimings`, #427): an EMA of its
+    /// reports, how many, and when the last came. The peer's own word, on its
+    /// own clock — it never refreshes `updated_at`, so it cannot keep a figure
+    /// this node measured alive past its expiry. See [`Self::note_held_steps`].
+    held: Option<(f32, u32, Instant)>,
     updated_at: Instant,
     /// What one of this model's layers weighs, in reference layers
     /// (`scheduler::layer_work_for`), taken at the model's first sample. Only
@@ -311,9 +317,45 @@ impl ModelSpeed {
             prefill_samples: 0,
             decode_samples: 0,
             delegated_samples: 0,
+            held: None,
             updated_at: Instant::now(),
             layer_work,
         }
+    }
+
+    /// A chain hop's own report of how long it held this node's decode steps,
+    /// per layer of its segment (#427) — the per-visit work no chained answer
+    /// carries: the inbound open, the dispatch, the wait for its turn, the
+    /// worker and the queue out. Timed end to end, a chain shows only its
+    /// whole round; scaled from prompt passes, a hop priced 545 ms a pass
+    /// against ~600 measured.
+    ///
+    /// It ranks only where this node timed no decode step of the peer, and
+    /// reaches only the scheduler's price ([`Self::ranking`]), which floors it
+    /// at the peer's stated speed: a peer's word may price it slower, never
+    /// faster. Never gossiped ([`Self::ranking_ms_per_layer`]).
+    pub fn note_held_steps(&mut self, ms_per_layer: f32, now: Instant) {
+        if !ms_per_layer.is_finite() || ms_per_layer <= 0.0 {
+            return;
+        }
+        let fresh = self
+            .held
+            .filter(|(_, _, at)| now.saturating_duration_since(*at) < RANKING_STALE_AFTER);
+        self.held = Some(match fresh {
+            Some((prev, reports, _)) => (
+                ALPHA * ms_per_layer + (1.0 - ALPHA) * prev,
+                reports.saturating_add(1),
+                now,
+            ),
+            None => (ms_per_layer, 1, now),
+        });
+    }
+
+    /// The hops' own figure while it is fresh, and how many reports it holds.
+    fn held_now(&self) -> Option<(f32, u32)> {
+        self.held
+            .filter(|(_, _, at)| at.elapsed() < RANKING_STALE_AFTER)
+            .map(|(ms, reports, _)| (ms, reports))
     }
 
     /// Fold one completed segment into the matching EMA.
@@ -486,15 +528,45 @@ impl ModelSpeed {
     /// here to decay *toward*, and the capability estimate the caller already
     /// falls back to is exactly that prior. Falling back cannot price a peer
     /// worse than one that was never measured at all, which bounds the risk.
+    ///
+    /// **Only what THIS node timed** — what is gossiped (`ranking_for_gossip`)
+    /// and what sorts holders. A hop's own report is not in it: it reaches the
+    /// scheduler's price alone, through [`Self::ranking`].
     pub fn ranking_ms_per_layer(&self) -> Option<f32> {
-        self.ranking().map(|r| r.ms_per_layer)
+        self.ranking_timed_here().map(|r| r.ms_per_layer)
     }
 
-    /// The ranking figure AND what it was timed on — one answer, so a reader
-    /// that needs to know whether the figure carries the round trip
-    /// (`parallax::vertex_cost_as`) cannot get the number from one function
-    /// and its source from another.
+    /// The figure the scheduler PRICES the peer by, AND what it was timed on —
+    /// one answer, so a reader that needs to know whether the figure carries
+    /// the round trip (`parallax::vertex_cost_as`) cannot get the number from
+    /// one function and its source from another.
+    ///
+    /// Decode steps this node timed first; else the hops' own reports of a
+    /// chain (`TimedOn::HeldSteps`, #427), never under what this node timed of
+    /// the peer's prompt passes; else those passes. The scheduler floors a
+    /// `HeldSteps` figure at the peer's stated speed (`gather_candidates`).
     pub fn ranking(&self) -> Option<Ranking> {
+        let timed_here = self.ranking_timed_here();
+        if let Some(
+            r @ Ranking {
+                timed_on: TimedOn::DecodeSteps { .. },
+                ..
+            },
+        ) = timed_here
+        {
+            return Some(r);
+        }
+        match self.held_now() {
+            Some((held, reports)) => Some(Ranking {
+                ms_per_layer: timed_here.map_or(held, |r| held.max(r.ms_per_layer)),
+                timed_on: TimedOn::HeldSteps { reports },
+            }),
+            None => timed_here,
+        }
+    }
+
+    /// The ranking figure from what this node timed alone.
+    fn ranking_timed_here(&self) -> Option<Ranking> {
         if self.updated_at.elapsed() >= RANKING_STALE_AFTER {
             return None;
         }
@@ -658,6 +730,7 @@ impl ModelSpeed {
             .into_iter()
             .flatten()
             .map(|(_, at)| at)
+            .chain(self.held.map(|(_, _, at)| at))
             .fold(self.updated_at, std::cmp::max)
     }
 
@@ -972,6 +1045,11 @@ pub enum TimedOn {
     /// forward) has only this — `forward_verify_through_segments` times no
     /// chained check (gotcha #1073).
     PromptPasses,
+    /// The peer's own reports of how long it held each decode step of a chain
+    /// this node drove (#427, `ModelSpeed::note_held_steps`): its per-visit
+    /// work, none of the link. Its word, so the scheduler floors it at the
+    /// peer's stated speed (`NodeCandidate::floor_a_peers_own_word`).
+    HeldSteps { reports: u32 },
 }
 
 impl TimedOn {
@@ -979,6 +1057,12 @@ impl TimedOn {
     /// to the peer, so a price must not charge it again.
     pub fn carries_the_round_trip(self) -> bool {
         matches!(self, TimedOn::DecodeSteps { .. })
+    }
+
+    /// Whether the figure is the peer's own word rather than this node's
+    /// timing — never priced faster than the peer's stated speed.
+    pub fn is_the_peers_own_word(self) -> bool {
+        matches!(self, TimedOn::HeldSteps { .. })
     }
 }
 
@@ -1105,6 +1189,64 @@ mod tests {
         assert_eq!(r.timed_on, TimedOn::DecodeSteps { samples: 1 });
         assert!(r.timed_on.carries_the_round_trip());
         assert_eq!(Some(r.ms_per_layer), s.ranking_ms_per_layer());
+    }
+
+    /// A chain hop's own report (#427) prices the peer only where this node
+    /// timed no decode step of it, never under what this node timed of its
+    /// prompt passes — and never reaches the figure that is gossiped or sorts
+    /// holders (`ranking_ms_per_layer`).
+    #[test]
+    fn a_hops_own_report_prices_it_but_is_never_passed_on() {
+        let now = Instant::now();
+        let mut s = ModelSpeed::default();
+        s.note_held_steps(5.0, now);
+        assert_eq!(
+            s.ranking(),
+            Some(Ranking {
+                ms_per_layer: 5.0,
+                timed_on: TimedOn::HeldSteps { reports: 1 },
+            })
+        );
+        assert!(!s.ranking().unwrap().timed_on.carries_the_round_trip());
+        assert_eq!(
+            s.ranking_ms_per_layer(),
+            None,
+            "a peer's word is not ours to gossip"
+        );
+
+        // A prompt-pass figure of 8 ms a layer (8 ms over one layer of the
+        // nominal width): the hop's 5 may not undercut it.
+        s.observe(
+            WorkKind::Prefill,
+            8,
+            1,
+            NOMINAL_DECODE_ACTIVATION_BYTES,
+            None,
+            true,
+        );
+        let r = s.ranking().unwrap();
+        assert_eq!(r.timed_on, TimedOn::HeldSteps { reports: 1 });
+        assert!((r.ms_per_layer - 8.0).abs() < 1e-3, "{}", r.ms_per_layer);
+        assert!((s.ranking_ms_per_layer().unwrap() - 8.0).abs() < 1e-3);
+        s.note_held_steps(20.0, now);
+        let r = s.ranking().unwrap();
+        assert_eq!(r.timed_on, TimedOn::HeldSteps { reports: 2 });
+        assert!((r.ms_per_layer - (0.3 * 20.0 + 0.7 * 5.0)).abs() < 1e-3);
+
+        // A decode step this node timed outranks every report.
+        s.observe(WorkKind::Decode, 30, 10, 16_384, None, true);
+        assert_eq!(
+            s.ranking().unwrap().timed_on,
+            TimedOn::DecodeSteps { samples: 1 }
+        );
+        assert_eq!(s.ranking_ms_per_layer(), Some(3.0));
+
+        // Nonsense is no report.
+        let mut t = ModelSpeed::default();
+        for bad in [0.0, -1.0, f32::NAN, f32::INFINITY] {
+            t.note_held_steps(bad, now);
+        }
+        assert_eq!(t.ranking(), None);
     }
 
     /// Gossip must not be able to shorten a timeout we size from our own

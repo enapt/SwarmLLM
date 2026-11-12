@@ -4917,6 +4917,66 @@ guard reads whole delays — a gap, not a hazard); a result's integrity is the t
 other trailer's (a result is not sealed end to end); and a result carrying an error (`finish_reason`)
 skips its trailers, served time included.
 
+## A chain hop tells its coordinator its own time, once a reply (2026-11-12, FUTURE_WORK #427)
+
+A coordinator times a chained split only end to end. A middle hop hands its output to the next hop,
+and the tail answers a coordinator that did not send it the forward, so `LayerResult::served_us`
+(keyed by the peer that SENT the forward, § above) never reaches a coordinator from a chain hop.
+Every hop of a chain was priced from its stated speed or from prompt passes, which carry none of a
+visit's fixed cost: on 11-09's live chain (here → Denmark → Proxmox → Denmark → here, Gemma 4 31B)
+545 ms predicted a pass against ~600 measured.
+
+**The shape, after OpenTelemetry**: each service exports its own finished span straight to the
+collector, never through the next service. Here each hop notes its held time per decode step
+(`network/manager/hop_timings.rs::HopHeld`) and answers the coordinator's own `CancelInference`,
+sent once a reply to every peer of the request (`release_request_on_peers`), with one
+`SwarmMessage::HopTimings { request_id, layers, steps, median_held_us }`. **Rejected: P4 INT's
+hop-by-hop metadata stack** carried on the forward. Every hop re-seals the forward for the next, so
+a later hop could rewrite an earlier hop's entry; INT's spec leaves the stack unauthenticated, and
+per-entry signatures would cost 64 bytes and a verify per hop per pass.
+
+**What "held" is**: from the forward's arrival stamp (`ServedSince`, keyed by the authenticated
+predecessor, taken before the inbound seal is opened) to the moment the hop starts its onward send,
+or its answer to a coordinator that did not send it the forward — `layer_forward.rs` sends
+`NetworkCommand::NoteHeldAsHop` just before each. It holds the inbound open, the dispatch, the wait
+for the stream's turn, the worker and the queue back; the onward seal (~50-200 µs, off the loop)
+comes after it. One-position decode steps only (`process_pool::forward_is_one_decode_step`, the
+rule `OwnDecodeSpeed` uses). An unchained forward names no requester (`requester_of`), so nothing is
+noted and `served_us` keeps its contract.
+
+Rules a change must keep:
+
+- **Gated at the sender** on `features::HOP_TIMINGS` (bit 40): a hop reports only to a connected
+  coordinator advertising it. An older hop sends nothing and is priced as before; an older
+  coordinator is never sent one.
+- **Taken once, by the coordinator the FIRST step named**, and only in answer to that node's own
+  authenticated `CancelInference`. A forward naming another coordinator, width or sending peer for
+  the same request id spoils the record rather than redirect it. A forged `requester_node_id` is only
+  ever recorded: the named node must itself cancel that id.
+- **Not relay-eligible**: `HopTimings` is not in `relay::is_relay_eligible`, so an envelope carrying
+  one is refused before dispatch. The dispatch arm's `MessageTransport::Direct` check excludes
+  gossip only — `dispatch_authenticated_as` stamps every point-to-point message Direct, relayed
+  inners included.
+- **Bounded**: 256 requests, 512 steps each, forgotten 30 min after their last step, and each sending
+  peer its own share of 64, so a peer minting request ids pushes out only its own records
+  (`ServedSince`'s per-peer share; Bitcoin Core evicts from the largest netgroup the same way).
+- What a report may move on the coordinator is in `scheduling.md` § "A chain hop's own report prices it".
+
+**Security review (Mythos, 2026-11-12): nothing above LOW.**
+
+1. LOW, fixed — the first build kept one table for every peer: any connected peer could evict a
+   coordinator's honest records with 256 forwards under fresh ids (one admitted decode forward
+   each). Now the per-peer share above; `a_flooding_peer_pushes_out_only_its_own` is red without it.
+2. LOW, left — a predecessor that knows a request id can queue extra one-position forwards at its
+   successor and RAISE that hop's held time. It can only price the hop slower, bounded by a round's
+   own time and floored at the stated speed, and a predecessor already controls that hop's share of
+   the end-to-end time: no new power.
+3. INFO, fixed — "believed only direct" overstated the guard (the third rule above); the wording
+   was corrected in five places.
+4. INFO, left — a report's `steps` is the hop's word, checked only against `LEAST_STEPS` (4). It
+   gates and is logged, never weights; hold it to the reply's round count if it ever weights.
+5. INFO — one `try_send` per inbound cancel; a full channel loses only a report.
+
 ## "Is this connection direct?" — `network::relay::addr_is_direct_transport`
 
 The single answer, for BOTH layers that choose a connection. A relay-carried

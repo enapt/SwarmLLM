@@ -109,6 +109,8 @@ impl NetworkManager {
             NetworkCommand::SendEncodedTensor { .. } => "SendEncodedTensor",
             NetworkCommand::FailEncodedTensor { .. } => "FailEncodedTensor",
             NetworkCommand::SendTensorResult { .. } => "SendTensorResult",
+            NetworkCommand::NoteHeldAsHop(_) => "NoteHeldAsHop",
+            NetworkCommand::ReportHopTimings { .. } => "ReportHopTimings",
             NetworkCommand::SendStreamingToken { .. } => "SendStreamingToken",
             NetworkCommand::SendShardRequest { .. } => "SendShardRequest",
             NetworkCommand::ResumeShardAfterBusy { .. } => "ResumeShardAfterBusy",
@@ -163,6 +165,12 @@ impl NetworkManager {
                 result,
             } => {
                 self.handle_send_tensor_result(target_peer_bytes, result);
+            }
+            NetworkCommand::NoteHeldAsHop(held) => {
+                self.note_held_as_hop(held, std::time::Instant::now());
+            }
+            NetworkCommand::ReportHopTimings { request_id, by } => {
+                self.report_hop_timings(request_id, &by);
             }
             NetworkCommand::SendStreamingToken {
                 target_peer_bytes,

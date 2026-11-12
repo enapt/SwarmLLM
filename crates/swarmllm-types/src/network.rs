@@ -192,6 +192,11 @@ pub enum SwarmMessage {
     // A requester's guesses for a split its head leads (#318). Point to point,
     // gated on `features::REQUESTER_GUESSES` at the sender.
     RequesterGuesses(RequesterGuesses),
+
+    // A chain hop's own report of how long it held a request's forwards, to
+    // that request's coordinator once the reply is over (#427). Point to
+    // point, gated on `features::HOP_TIMINGS` at the sender.
+    HopTimings(HopTimings),
 }
 
 impl SwarmMessage {
@@ -244,6 +249,7 @@ impl SwarmMessage {
             Self::PromptAdmissionAsk(_) => "PromptAdmissionAsk",
             Self::PromptAdmissionAnswer(_) => "PromptAdmissionAnswer",
             Self::RequesterGuesses(_) => "RequesterGuesses",
+            Self::HopTimings(_) => "HopTimings",
         }
     }
 }
@@ -283,6 +289,48 @@ pub struct RelayedEnvelope {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CancelInference {
     pub request_id: uuid::Uuid,
+}
+
+/// How long one hop of a chained split held a request's forwards, said by the
+/// hop itself to the request's coordinator once the reply is over (#427). The
+/// coordinator times a chain only end to end — a middle hop hands its output
+/// to the next, and the tail answers a coordinator that did not send it the
+/// forward — so each hop's part is otherwise unknown there. Held: from the
+/// forward's arrival at this hop to its hand-off onward (or the tail's answer),
+/// one-position decode steps only. Sent in answer to the coordinator's
+/// `CancelInference`, over the hop's own session, only to a coordinator
+/// advertising `features::HOP_TIMINGS`. The hop's word about itself: the
+/// coordinator believes it only from a hop of that request's own plan, and
+/// only to price the hop SLOWER than its stated speed. As OpenTelemetry's
+/// services export their own spans straight to the collector, never through
+/// the next service — a report handed along the chain could be rewritten by
+/// a later hop.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct HopTimings {
+    pub request_id: uuid::Uuid,
+    /// Layers this hop ran each step.
+    pub layers: u32,
+    /// One-position decode steps it held.
+    pub steps: u32,
+    /// Their median held time, in microseconds rounded to the millisecond.
+    pub median_held_us: u32,
+}
+
+/// What a chain hop held a forward for (#427), handed from the forward's
+/// dispatch to the network manager, which stamped its arrival: the peer that
+/// sent it and the step it answers — the key that arrival is kept under
+/// (`ServedSince`) — whether it was ONE decode step, and the layers it ran.
+/// Local only, never on the wire.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HeldAsHop {
+    pub request_id: uuid::Uuid,
+    /// The request's coordinator (`LayerForward::requester_node_id`).
+    pub coordinator: NodeId,
+    /// Who handed this hop the forward (`LayerForward::sender_peer_bytes`).
+    pub predecessor_peer_bytes: Vec<u8>,
+    pub step: ResultStep,
+    pub decode_step: bool,
+    pub layers: u32,
 }
 
 /// Ask the node serving a remote-generate reply to send some of its content
@@ -930,6 +978,15 @@ pub enum NetworkCommand {
         target_peer_bytes: Vec<u8>,
         result: LayerResult,
     },
+    /// Local (#427): a chain hop is about to hand a forward on, or its tail to
+    /// answer the coordinator for a forward another hop sent — note how long
+    /// it held it. Sent on the same channel just BEFORE that send, so the
+    /// network manager reads it as the send goes.
+    NoteHeldAsHop(HeldAsHop),
+    /// Local (#427): `by`'s `CancelInference` for `request_id` arrived. The
+    /// network manager answers with this hop's `HopTimings` where `by` is the
+    /// coordinator it held the request's forwards for and takes them.
+    ReportHopTimings { request_id: uuid::Uuid, by: NodeId },
     /// Send a streaming token to a specific peer (originator of the request).
     SendStreamingToken {
         target_peer_bytes: Vec<u8>,

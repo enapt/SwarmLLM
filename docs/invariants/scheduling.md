@@ -6975,6 +6975,57 @@ never count it as this node's measurement. A model run here only WHOLE (`Generat
 this way, so a node that never serves a segment of it publishes no figure; its peers keep the
 stated speed for it, as before.
 
+## A chain hop's own report prices it (2026-11-12, FUTURE_WORK #427)
+
+**What it replaced.** A chain this node drives was priced per hop from what this node could see: a
+hop's own published timing as a floor under its stated speed (§ above), a `PromptPasses` figure (a
+whole prompt over its layers, none of a visit's fixed cost), or a `DecodeSteps` figure where this
+node had its decode forwards answered. 11-09's live chain read Denmark at `PromptPasses` 1.51 ms a
+layer: 545 ms predicted a pass against ~600 measured.
+
+**The change.** `PipelineExecutor::execute`, for a reply with two or more peer segments, records
+what it awaits (`SharedState::expect_hop_reports` → `state.metrics.hop_reports_awaited`,
+`daemon/state/hop_reports.rs`): the plan's (peer, layers), the reply's whole time over its rounds
+and its `layer_work`. Dispatch's `HopTimings` arm calls `note_hop_report`, which believes a report
+only from a peer of that reply's LAST plan, of the width it ran, once, within 120 s of the reply's
+end (at most 256 replies waiting), over at least 4 steps, and no longer than a round took. A believed
+report goes to `ModelSpeed::note_held_steps` and reads as `TimedOn::HeldSteps`. How the hop measures
+and sends it: `network.md` § "A chain hop tells its coordinator its own time".
+
+What it may and may never do:
+
+- `DecodeSteps` outranks it. It outranks `PromptPasses`, but `ranking()` takes the larger of the two
+  where both exist: a hop's word never prices it under what this node timed.
+- It is priced WITH its link term (`carries_the_round_trip` false), as a prompt-pass figure is: a
+  held time holds no wire.
+- **It is floored at the stated speed** when the candidate is built (`scheduler::floor_a_peers_own_word`):
+  a report can price a hop slower, never faster — believed as far as it costs the hop.
+- **It is never gossiped and never sorts holders**: `ranking_ms_per_layer`, which
+  `ranking_for_gossip` and holder sorting read, is `ranking_timed_here()`, which leaves it out. A
+  peer's word about itself must not travel as this node's measurement.
+- A/B: `SWARMLLM_HOP_TIMINGS=0` on the coordinator stops it asking.
+
+**Measured (2026-11-12, `~/rig427/ab.sh`)**: three processor nodes, A driving B [0, 12) → C [12, 28)
+→ A on Llama 3.2 3B, `RIG_NETNS=1`, `C_MEETS_B=1`, 120 tokens a reply, four asks an arm.
+
+- Unthrottled: 8 of 8 reports believed. B held 110-113 ms over 12 layers, C 159-162 ms over 16; both
+  under their stated priors (13.3-13.7 ms a layer), so both floored to them. ~445 ms predicted a
+  pass against ~404 measured; asks 2-4 took 48.5-48.8 s.
+- B held to two cores, one binary: off 63.1-63.6 s, on 63.3-64.6 s — no regression. Reports
+  believed: 0 off (the hops still told, four each), 8 on. B held 204-207 ms, 17 ms a layer, under
+  the 36.26 ms a layer its stated 0.45 tok/s gives, and the floor kept the prior. From the third ask
+  both arms read a `DecodeSteps` figure for B (~16.3 ms a layer), which outranks a report, and
+  predicted the same ~516-521 ms a pass against ~525 measured.
+- **What that proves and does not.** The mechanism fires end to end: `DIAG` lines on both sides and
+  `HeldSteps` in A's plan. The PRICE could not move on a processor rig, because every truthful
+  report sat under a pessimistic stated speed, where the floor holds. The case it is for is a hop
+  that states itself FASTER than it runs — 11-09's Denmark. Re-measure on Gemma 4 31B live once
+  Denmark holds it whole (FUTURE_WORK #427's residual).
+
+**Tests**, each red with its part switched off: `hop_reports::tests` (4, including
+`a_report_reaches_the_price_and_nothing_else`), `peer_speed`'s `HeldSteps` test, and the parallax
+floor test.
+
 ## Inference Router Queue
 
 `drain_queue` only fires on `RouterCommand::Submit` / `StreamSubmit` or

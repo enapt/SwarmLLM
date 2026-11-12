@@ -438,6 +438,13 @@ pub mod features {
     /// Asked only of a peer advertising this.
     pub const SENDS_BLOCK_ROWS: u64 = 1 << 39;
 
+    /// Takes a chain hop's own report of how long it held this node's
+    /// forwards (`SwarmMessage::HopTimings`, #427): a coordinator times a
+    /// chain only end to end, so each hop says its own part, once a reply, in
+    /// answer to the coordinator's `CancelInference`. A hop sends one only to
+    /// a coordinator advertising this.
+    pub const HOP_TIMINGS: u64 = 1 << 40;
+
     /// The full feature set THIS build implements. Advertised by every node,
     /// with [`KV_HALF_ON_CARD`], [`KV_WINDOW_SLIDES`] and
     /// [`REQUESTER_GUESSES`] beside it where they apply.
@@ -477,7 +484,8 @@ pub mod features {
         | SERVED_TIME
         | TEMPLATE_VARS
         | JUDGES_THE_COORDINATOR
-        | SENDS_BLOCK_ROWS;
+        | SENDS_BLOCK_ROWS
+        | HOP_TIMINGS;
 
     /// Does `advertised` include every bit in `needed`?
     pub fn supports(advertised: u64, needed: u64) -> bool {

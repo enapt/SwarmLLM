@@ -1960,9 +1960,11 @@ impl PipelineExecutor {
         if let Some(tx) = &token_tx {
             tx.note_prompt_opened(self.prompt_opened().await);
         }
+        let started = std::time::Instant::now();
         let outcome = self.execute_attempt(token_tx).await;
         if let (Ok(out), Some(before)) = (&outcome, rounds_before) {
             self.note_split_rounds(out, before);
+            self.expect_hop_reports(before, started.elapsed());
         }
         let ended_with = self.assignment.segments.iter().map(|s| s.node_id.clone());
         self.shared_state
@@ -1994,6 +1996,41 @@ impl PipelineExecutor {
             &self.request.model_id.0,
             out.completion_tokens,
             rounds.saturating_add(1),
+        );
+    }
+
+    /// A reply whose decode ran HERE through two or more peer segments may
+    /// have chained them, and a chain's hops report how long they held its
+    /// steps once told it is over (#427, `SharedState::expect_hop_reports`).
+    /// The plan as it ENDED — a stand-in that took a segment over reports as
+    /// that segment. A hop that did not chain records nothing and sends
+    /// nothing; its wait expires.
+    fn expect_hop_reports(&self, rounds_before: u32, took: std::time::Duration) {
+        let Some(after) = self.shared_state.decode_rounds_of(self.request.id) else {
+            return;
+        };
+        let here = self.shared_state.identity.node_id();
+        let hops: Vec<(crate::types::NodeId, u32)> = self
+            .assignment
+            .segments
+            .iter()
+            .filter(|s| s.node_id != *here)
+            .map(|s| {
+                (
+                    s.node_id.clone(),
+                    s.layer_range.1.saturating_sub(s.layer_range.0),
+                )
+            })
+            .collect();
+        if hops.len() < 2 {
+            return;
+        }
+        self.shared_state.expect_hop_reports(
+            self.request.id,
+            &self.request.model_id,
+            hops,
+            after.saturating_sub(rounds_before),
+            took,
         );
     }
 

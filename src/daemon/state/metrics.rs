@@ -233,6 +233,11 @@ pub struct MetricsProviders {
     /// `note_head_led` (`remote_generate::try_delegated_split`), read ONLY by
     /// `SharedState::peer_may_lead`.
     pub declined_leads: super::declined_leads::DeclinedLeads,
+    /// Chains driven from here waiting for each hop's own report of how long
+    /// it held their decode steps (#427, `hop_reports`). Written ONLY by
+    /// `SharedState::expect_hop_reports` (`PipelineExecutor::execute`), taken
+    /// ONLY by `SharedState::note_hop_report` (dispatch's `HopTimings` arm).
+    pub hop_reports_awaited: super::hop_reports::HopReportsAwaited,
     /// What stands between this node and a computer connecting to it
     /// directly (`network::manager::UpnpVerdict`): written ONLY by the network
     /// manager's `publish_upnp_verdict`, read ONLY by

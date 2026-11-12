@@ -2968,6 +2968,49 @@ mod tests {
         assert_eq!(v.compute_ms, 31.4 * 8.0 * ASSUMED_FORWARD_PASSES);
     }
 
+    /// A chain hop's own report of its held time (#427) never prices it
+    /// faster than its stated speed, may price it slower, and carries none of
+    /// our round trip, which its vertex therefore pays.
+    #[test]
+    fn a_hops_own_report_is_floored_at_its_stated_speed() {
+        use crate::daemon::state::TimedOn;
+        let local = NodeId([9u8; 32]);
+        let mut c = cand(2, vec![(0, 48)], 120, 0.0, false, false, 20.0);
+        let prior = c.prior_ms_per_layer();
+        assert!(prior > 1.0, "{prior}");
+        c.observed_latency_timed_on = Some(TimedOn::HeldSteps { reports: 3 });
+
+        c.observed_latency_ms_per_layer = Some(0.01);
+        let floored = c.clone().floor_a_peers_own_word();
+        assert_eq!(
+            floored.observed_latency_ms_per_layer,
+            Some(prior),
+            "never faster"
+        );
+
+        c.observed_latency_ms_per_layer = Some(prior * 3.0);
+        let slower = c.clone().floor_a_peers_own_word();
+        assert_eq!(
+            slower.observed_latency_ms_per_layer,
+            Some(prior * 3.0),
+            "slower stands"
+        );
+        let v = vertex_cost(&slower, (0, 48), &local, 60, None);
+        assert_eq!(
+            v.network_ms,
+            120.0 * ASSUMED_FORWARD_PASSES,
+            "the trip is not in it"
+        );
+
+        // Only the peer's own word is floored: what this node timed stands.
+        c.observed_latency_ms_per_layer = Some(0.01);
+        c.observed_latency_timed_on = Some(TimedOn::PromptPasses);
+        assert_eq!(
+            c.floor_a_peers_own_word().observed_latency_ms_per_layer,
+            Some(0.01)
+        );
+    }
+
     /// A figure timed only on PROMPT passes carries almost none of our round
     /// trip — the pass crossed it once for every position — so its vertex pays
     /// the trip a pass as an unmeasured peer does; the same figure timed on
