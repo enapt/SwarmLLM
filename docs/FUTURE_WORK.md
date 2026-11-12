@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #444**). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #445**). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -5507,6 +5507,33 @@ flow on both sides. Two smaller notes from the same review, kept here: a listing
 not retracted and stays in other pools' caches up to `FOREIGN_POOL_CATALOG_MAX_AGE_MS` (2 h) —
 no new exposure, since the pool's devices serve the open swarm anyway; and the switch's "ask
 first" is in the dashboard only — correct, as the API key is the owner's agent.
+
+#### #444 — An update's drain keeps taking new work from other computers, so a busy node can restart mid-reply
+`P2` · reliability · **OPEN** — 2026-11-12 · history: field report 11-12 (the AU tester's node `aa3d1e66`); `acc7d512` + `1554a457` (what the drain counts)
+
+`update_restart::drain` (called from `update::install_and_restart`) waits up to `DRAIN_TIMEOUT` (600 s) for three
+counters to reach zero — pipelines this node coordinates, in-flight requests (`active_inference_load`, which counts
+the owner's chats and each `ServingGuard` a peer's forward or whole-model hand-off holds) and replies held between a
+peer's forwards (`models_with_inflight_requests`) — then restarts into the update whether or not they did. Nothing
+stops NEW peer work arriving during that wait: admission runs as usual, every new forward takes a `ServingGuard`, and
+peers learn the node is going only when `restart_into` closes its connections in the last ~3 s. A node other
+computers keep busy may never reach zero, and its restart then cuts whatever it was running for them.
+
+Field data: the tester's log digest (11-12) reads updates to .272-.275, .278 and .279 as "restarted with requests in
+flight" and .271, .276, .277, .280, .281 as drained clean. A node drains with its OLD binary, and before `acc7d512`
+(in .279) the drain counted every model the node had EVER served, so an idle node that once served a peer waited the
+full 600 s and logged `drained_cleanly=false` — most of those entries are that old false flag, not cut work. The gap
+above is what remains.
+
+**Next step**: while draining, hold new peer work the way the heat guard holds it (#440): refuse new peer forwards
+and hand-offs at admission, advertise it (`can_serve_inference` is already false under `host_heat_hold_now()` and the
+metered hold, `health/monitor.rs`) so peers plan around the node, and send the announcement at drain START, not at
+the next heartbeat. Keep serving what is in flight; keep the 600 s ceiling. Test: a draining node refuses a new peer
+forward and finishes an in-flight one; toggled off, the new forward is accepted (red). Check every admission path
+(layer forward, stream, whole-model hand-off, relay) refuses through ONE predicate.
+Prior art: Kubernetes graceful termination — the pod is marked not-ready and leaves the Service endpoints, in-flight
+requests finish within `terminationGracePeriodSeconds`, then SIGKILL; Envoy's drain — health checks fail first
+(`/healthcheck/fail`), listeners drain over `--drain-time-s`. Both stop ADMISSION before waiting; ours waits only.
 
 #### #383 — A serving node's stream of checks is not tied to the peer that opened it
 `P4` · network · **OPEN** — 2026-10-30 · history: #382's security review (low, pre-existing)
