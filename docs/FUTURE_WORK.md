@@ -3465,10 +3465,22 @@ this machine's card (live node stopped): a node serving three models in turn, th
 a dense model handed whole — where does its spawn place it, and what does it advertise before and after?
 Design to weigh: a "room after reclaim" figure in the capability (additive, `#[serde(default)]`, the same predicate
 `vram_reclaim_eligible` / `ram_reclaim_eligible` admission uses, so the advertisement can never promise more than the
-spawn takes), or each idle worker's releasable memory in `ResidentModelLayers`. Prior art to read first: Ollama's
-scheduler (`server/sched.go`: an idle runner is unloaded to fit a new model, and its free-VRAM reading counts what
-unloading would give back), vLLM's sleep mode. A capability change → `security-reviewer` (a peer may advertise room
-it will not honour: the up-front prompt admission, #252 (b), still asks before the pass).
+spawn takes), or each idle worker's releasable memory in `ResidentModelLayers`. A capability change →
+`security-reviewer` (a peer may advertise room it will not honour: the up-front prompt admission, #252 (b), still
+asks before the pass).
+
+Prior art (2026-11-12, Ollama read from source, the rest from docs): **Ollama** (`server/sched.go`) sums nothing
+reclaimable up front — a failed fit evicts ONE idle runner (`findRunnerToUnload`: idle first, shortest keep_alive, not
+LRU) and tries again, and `waitForVRAMRecovery` polls the driver every 250 ms until free memory rose by 0.75 × that
+runner's size, giving up after 5 s ("free memory reporting on GPUs can lag"); its free figure is the lower of the
+driver's and total − its own runners' predicted use (`updateFreeSpace`). **vLLM** sleep mode level 1 moves weights to
+host RAM, so reclaiming the card can spend the RAM room also advertised — the two figures are computed together.
+**KServe ModelMesh** places by LRU cache age and keeps a new model from displacing a recently used one
+(`LASTUSED_AGE_ON_ADD_MS`, `minChurnAgeMs`); **LocalAI** evicts LRU, skipping busy models. Not found anywhere: an
+outside party allowed to evict the owner's models. What we take: a NEW field beside the raw figure (older peers keep
+reading the raw one); computed from our own worker accounting, never a driver re-query after an eviction; only
+workers idle past a threshold, never the owner's just-used model; the advertisement is a hint, so admission re-checks
+on arrival and refuses fast; hysteresis so the figure does not flap.
 
 #### #430 — A long prompt read on ONE computer that cannot read it fast: no first token in 10 minutes
 `P2` · perf-split · **OPEN** (residual: pieces timed between two machines, a led split's first-token wait; (a)'s ratio and (c) fixed 2026-11-11, the hand-off's prompt floor, the wait sized from it and the progress frames that make it an inactivity wait built 2026-11-12) — 2026-11-08 · history: #427 (measured), #171 (a prompt pass read in pieces)
