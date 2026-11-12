@@ -146,6 +146,29 @@ ends it), and the sweep keeps such a request's caches and bookkeeping up to
 (`MEASURED_FIRST_TOKEN_MAX`) so the two cannot drift apart. Pressure still
 releases it after `FINISHED_CONVERSATION_AFTER`, as before (#448 (a)).
 
+The worker's hold is half of it. Reading the daemon's unload path after it (an
+agent's trace, then the code) found the other half: the idle unload judges a model
+by `effective_idle_secs` and skips only what `models_with_inflight_requests` names,
+and `in_use` stops naming a remote coordinator's conversation 120 s after its last
+forward — a figure chosen because "its coordinator abandons a decode step long
+before two minutes" (§ "Why a conversation stops counting after two minutes"),
+which #430's hour-long wait for a prompt read made untrue. So a segment silent
+past 300 s while later machines read was unloaded, cache and all, and the reply
+failed at its first word (`forward_lacks_its_conversation`) — on a card peer, the
+same shape as the sweep. `WorkerHandle::note_forward_sent` now marks a prompt pass
+as the daemon SENDS it (both forward paths; a step, `forget_conversation` or
+`PROMPT_PASS_HOLD` ends it), and `try_idle_vram_unload` keeps every model in
+`models_awaiting_a_first_step`. Not `in_use`: the two minutes stay what a reclaim
+for another model reads, so a leaked hold cannot refuse the owner's own request
+for an hour — the line the worker's pressure release draws too. Petals bounds a
+session's server-side cache by a wait per step and one per session and reports
+free cache for routing; vLLM frees a running request's blocks on finish, abort or
+preemption under pressure, never on idle time. Tests
+`a_prompt_pass_awaits_its_first_step_until_a_step_or_a_release`,
+`a_segment_whose_prompt_pass_awaits_its_first_step_is_not_unloaded_as_idle`
+(control: an hour-silent worker with nothing awaited is unloaded; fails with the
+unload's check removed).
+
 The third attempt met a second defect: a router re-plan (and a continuation)
 keeps the REQUEST id, and the caches are keyed by it, so the previous attempt's
 cache was still on the Italian peer when it was asked again — and its question

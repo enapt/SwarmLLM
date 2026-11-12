@@ -1205,8 +1205,9 @@ pub(crate) const PROMPT_PASS_HOLD: std::time::Duration =
     crate::inference::pipeline::remote_generate::MEASURED_FIRST_TOKEN_MAX;
 
 /// `SWARMLLM_PROMPT_PASS_HOLD=0` holds nothing past the TTL (#448's A/B, one
-/// binary): a split's earlier segments are swept at the TTL as before. Read once.
-fn prompt_pass_hold_enabled() -> bool {
+/// binary): a split's earlier segments are swept at the TTL as before, and the
+/// daemon's idle unload no longer waits for their first step. Read once.
+pub(crate) fn prompt_pass_hold_enabled() -> bool {
     use std::sync::OnceLock;
     static ON: OnceLock<bool> = OnceLock::new();
     *ON.get_or_init(|| std::env::var("SWARMLLM_PROMPT_PASS_HOLD").map_or(true, |v| v != "0"))

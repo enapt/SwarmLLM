@@ -1132,6 +1132,22 @@ struct WorkerHandle {
     /// has, since nothing tells this node that reply finished. Read only
     /// through [`WorkerHandle::in_use`].
     kv_holders: std::sync::Mutex<std::collections::HashMap<Uuid, std::time::Instant>>,
+    /// Requests whose prompt pass was sent to this worker and whose first step
+    /// has not come yet, by when the pass was sent (#448 (b)) — the daemon's
+    /// half of the worker's own hold (`KvCacheStore::note_forward_ran`). A
+    /// split's later machines can read a long prompt for longer than the
+    /// conversation gap and the idle unload, so a segment silent past 300 s
+    /// was unloaded with the cache its first step needs. Written by
+    /// [`WorkerHandle::note_forward_sent`], dropped with the conversation, held
+    /// at most `kv_cache::PROMPT_PASS_HOLD`; read only by the idle unload
+    /// ([`ModelProcessPool::models_awaiting_a_first_step`]) — never by
+    /// [`WorkerHandle::in_use`], whose two minutes keep a peer's silent cache
+    /// from refusing the owner's own request for memory. Prior art: Petals'
+    /// server keeps a session's attention cache between steps up to a wait per
+    /// step and one per session, and reports its free cache so clients route
+    /// around full servers; vLLM frees a running request's blocks only when it
+    /// finishes, is aborted or is preempted under pressure, never on idle time.
+    awaiting_first_step: std::sync::Mutex<std::collections::HashMap<Uuid, std::time::Instant>>,
     /// Why this node put this worker on the processor — `None` means it was
     /// spawned for the graphics card.
     ///
@@ -2149,6 +2165,40 @@ impl WorkerHandle {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .remove(&request_id);
+        self.awaiting_first_step
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&request_id);
+    }
+
+    /// A forward for `request_id` is being sent to this worker: sequence 0 is
+    /// a prompt pass, whose first step is now awaited; anything later is a
+    /// step, and ends the wait (#448 (b), as the worker's
+    /// `KvCacheStore::note_forward_ran` does; off with the same
+    /// `SWARMLLM_PROMPT_PASS_HOLD=0`).
+    fn note_forward_sent(&self, request_id: Uuid, sequence_num: u32) {
+        let mut waiting = self
+            .awaiting_first_step
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if sequence_num == 0 && crate::inference::split::kv_cache::prompt_pass_hold_enabled() {
+            waiting.insert(request_id, std::time::Instant::now());
+        } else {
+            waiting.remove(&request_id);
+        }
+    }
+
+    /// Does a prompt pass sent here still await its first step? Entries older
+    /// than `kv_cache::PROMPT_PASS_HOLD` — the coordinator's own longest wait —
+    /// are dropped as they are found.
+    fn awaits_a_first_step(&self) -> bool {
+        let hold = crate::inference::split::kv_cache::PROMPT_PASS_HOLD;
+        let mut waiting = self
+            .awaiting_first_step
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        waiting.retain(|_, sent| sent.elapsed() <= hold);
+        !waiting.is_empty()
     }
 
     /// What this worker is charged now, as (graphics card, the machine's
@@ -4513,6 +4563,36 @@ impl ModelProcessPool {
     #[cfg(test)]
     pub(crate) fn observe_load_for_test(&self, bytes: u64, ms: u32) {
         self.load_rate.observe(bytes, ms);
+    }
+
+    /// A worker for `model` loaded an hour ago and silent since — for tests
+    /// outside the pool. With `prompt_pass_of`, that request's prompt pass was
+    /// its last forward and its first step has not come (#448 (b)); the
+    /// conversation's two minutes are long gone either way.
+    #[cfg(test)]
+    pub(crate) async fn a_silent_worker_for_test(
+        &self,
+        model: ModelId,
+        prompt_pass_of: Option<Uuid>,
+    ) -> bool {
+        let Some(an_hour_ago) =
+            std::time::Instant::now().checked_sub(std::time::Duration::from_secs(3_600))
+        else {
+            return false; // a clock this young cannot place a worker an hour back
+        };
+        let h = tests::fake_worker_handle_spawned(
+            false,
+            Some(CpuReason::Configured),
+            true,
+            an_hour_ago,
+        )
+        .await;
+        h.last_used.store(7, Ordering::Relaxed);
+        if let Some(request) = prompt_pass_of {
+            h.note_forward_sent(request, 0);
+        }
+        self.workers.insert(model, h);
+        true
     }
 
     /// A worker for `model` holding `request`'s conversation between two
@@ -10879,6 +10959,7 @@ impl ModelProcessPool {
             last_used: AtomicU64::new(0),
             ran_a_request: AtomicBool::new(false),
             kv_holders: std::sync::Mutex::new(std::collections::HashMap::new()),
+            awaiting_first_step: std::sync::Mutex::new(std::collections::HashMap::new()),
             placed_on_cpu_because,
             charged_mb: AtomicU64::new(charge.mb),
             charged_segments: std::sync::Mutex::new(Vec::new()),
@@ -11181,6 +11262,7 @@ impl ModelProcessPool {
         // A forward leaves this request's cache on the worker for the next one,
         // so the worker stays in use after `guard` is gone (`kv_holders`).
         handle.note_conversation(request_id);
+        handle.note_forward_sent(request_id, sequence_num);
 
         let payload_buf: Vec<u8> = if vision_len == 0 {
             activations
@@ -11623,6 +11705,7 @@ impl ModelProcessPool {
             // Matches `cancelled_request_id`'s exclusion.
             let (g, _) = handle.register_response(f.request_id, tx, false);
             handle.note_conversation(f.request_id);
+            handle.note_forward_sent(f.request_id, f.sequence_num);
             receivers.push((f.request_id, g.token, rx));
             guards.push(g);
         }
@@ -12708,6 +12791,21 @@ impl ModelProcessPool {
             .collect()
     }
 
+    /// The models whose worker read a prompt pass that still awaits its first
+    /// step (#448 (b)) — a split segment waiting while the machines after it
+    /// read the prompt, up to `kv_cache::PROMPT_PASS_HOLD`. Read by the idle
+    /// unload ONLY: a time rule must not end what the coordinator is still
+    /// waiting on, while a reclaim for another model's memory still goes by
+    /// [`Self::models_with_inflight_requests`] and its two minutes, as the
+    /// worker's own pressure release does (#448 (a)).
+    pub fn models_awaiting_a_first_step(&self) -> Vec<ModelId> {
+        self.workers
+            .iter()
+            .filter(|e| e.value().awaits_a_first_step())
+            .map(|e| e.key().clone())
+            .collect()
+    }
+
     /// How long each loaded model's worker has existed. Upper bound on how long
     /// it can possibly have been idle.
     pub fn model_residency_secs(&self) -> Vec<(ModelId, u64)> {
@@ -13353,6 +13451,46 @@ mod tests {
         assert!(
             p.live_worker(&m).is_some(),
             "a busy worker is not a dead one"
+        );
+    }
+
+    /// **A prompt pass sent to a worker awaits its first step, and only the
+    /// idle unload reads it** (#448 (b)): a step ends the wait, a release or a
+    /// cancel ends it, another request's step does not; the conversation's two
+    /// minutes (`in_use`, what a reclaim for another model reads) are not
+    /// lengthened by it.
+    #[tokio::test]
+    async fn a_prompt_pass_awaits_its_first_step_until_a_step_or_a_release() {
+        let p = ModelProcessPool::new(std::path::PathBuf::from("/tmp/swarmllm-first-step"));
+        let m = ModelId("waiting".into());
+        let h = fake_worker_handle(false).await;
+        p.workers.insert(m.clone(), h.clone());
+        let (pass, other) = (Uuid::new_v4(), Uuid::new_v4());
+        assert!(p.models_awaiting_a_first_step().is_empty());
+
+        h.note_forward_sent(pass, 0);
+        assert_eq!(p.models_awaiting_a_first_step(), vec![m.clone()]);
+        assert!(
+            !h.in_use(std::time::Duration::from_secs(120)),
+            "the wait is not use: nothing noted a conversation"
+        );
+        h.note_forward_sent(other, 3);
+        assert_eq!(
+            p.models_awaiting_a_first_step(),
+            vec![m.clone()],
+            "another request's step leaves the wait"
+        );
+        h.note_forward_sent(pass, 1);
+        assert!(
+            p.models_awaiting_a_first_step().is_empty(),
+            "its step ends it"
+        );
+
+        h.note_forward_sent(pass, 0);
+        h.forget_conversation(pass);
+        assert!(
+            p.models_awaiting_a_first_step().is_empty(),
+            "a release or a cancel ends it"
         );
     }
 
@@ -16612,7 +16750,7 @@ mod tests {
     /// [`fake_worker_handle_on`] with the spawn time chosen: `idle_secs` counts
     /// from it, so a worker "spawned an hour ago and never used" is idle past
     /// the reclaim floor, where one spawned now is protected by it.
-    async fn fake_worker_handle_spawned(
+    pub(super) async fn fake_worker_handle_spawned(
         dead_now: bool,
         placed_on_cpu_because: Option<CpuReason>,
         charged_against_ram: bool,
@@ -16753,6 +16891,7 @@ mod tests {
             last_used: AtomicU64::new(0),
             ran_a_request: AtomicBool::new(false),
             kv_holders: std::sync::Mutex::new(std::collections::HashMap::new()),
+            awaiting_first_step: std::sync::Mutex::new(std::collections::HashMap::new()),
             charged_mb: AtomicU64::new(0),
             charged_segments: std::sync::Mutex::new(Vec::new()),
             placed_on_cpu_because,

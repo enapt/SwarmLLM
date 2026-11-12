@@ -4424,7 +4424,7 @@ prefix cache". Prior art: llama.cpp's server saves a slot's prompt at slot reuse
    identical.
 
 #### #448 — A long prompt read by a split's later machines lost the earlier segments' caches at 10 minutes
-`P2` · perf-split · **PARTIAL** (the cause fixed 2026-11-12; two residuals) — 2026-11-12 · history: #430 (the hour-long wait), #235 (the worker's TTL sweep)
+`P2` · perf-split · **PARTIAL** (the cause fixed 2026-11-12; two residuals, one minor) — 2026-11-12 · history: #430 (the hour-long wait), #235 (the worker's TTL sweep)
 
 **Seen on this node (2026-11-12 08:10Z, read from its log):** Gemma 4 31B, a 4,306-token prompt, split four ways —
 this node [0,1) and [59,60), Australia [1,38), Italy [38,59). The two peers read the prompt in 360 + 411 s; this
@@ -4449,10 +4449,22 @@ to use stayed swept at ten minutes: the tightest ceiling sat in another file (`a
    `clear_request_caches` uses) and what its claim still owes. This node's own admissions clear first and are
    unchanged. (The first cut, 299c93ca, took it off for every admission and missed that the question never named
    the request — caught by the delta review the same evening.)
+3. **The daemon's idle unload waits for a prompt pass's first step too** (#448 (b), found by reading the unload
+   path after the worker fix): `WorkerHandle::note_forward_sent` marks a prompt pass sent to a worker (sequence 0;
+   a step, a release or a cancel ends it, at most `PROMPT_PASS_HOLD`), and `try_idle_vram_unload` keeps every model
+   in `ModelProcessPool::models_awaiting_a_first_step` — a segment silent while the machines after it read is no
+   longer unloaded at 300 s with the cache its step needs (the conversation's 120 s ended long before). Read by the
+   idle unload ONLY: the reclaims for another model's memory keep `in_use`'s two minutes, as the worker's pressure
+   release keeps its own (Left (a)). Same switch, `SWARMLLM_PROMPT_PASS_HOLD=0`.
 Tests `a_cache_whose_prompt_pass_waits_for_the_chain_outlives_the_ttl`,
 `a_prompt_pass_replaces_its_own_earlier_caches_and_claim`,
 `a_peers_question_for_a_replanned_prompt_leaves_out_that_requests_earlier_cache`,
-`a_peers_question_names_its_request_but_is_answered_by_a_fresh_id`.
+`a_peers_question_names_its_request_but_is_answered_by_a_fresh_id`,
+`a_prompt_pass_awaits_its_first_step_until_a_step_or_a_release`,
+`a_segment_whose_prompt_pass_awaits_its_first_step_is_not_unloaded_as_idle` (each new one fails with its fix off).
+Security review of 2 (2026-11-12): no high or medium; two low — a refusal's `live_mb` lets a peer that already knows a
+request id learn how much of it this node holds (route members know it anyway; relays see request ids in the seal's
+AAD), and a "go ahead" a question earns may load ahead what a forward could load anyway.
 
 Prior art: Petals' server waits a fixed `step_timeout` (5 min) for a session's next inputs inside a 30-min
 `session_timeout` (`src/petals/server/server.py`) — the same exposure to a slow later server's prefill; vLLM keeps a
@@ -4461,12 +4473,14 @@ scheduled again (recompute). We take vLLM's two rules within our leak guard: hel
 waiting, and never weighed against itself.
 
 **Left**: (a) under memory pressure a cache silent for `FINISHED_CONVERSATION_AFTER` (120 s) is still released for a
-live prompt (`release_finished_conversations`) — a prompt pass waiting for its chain included, as designed in #235;
-holding it would let a leaked one refuse prompts for an hour. (b) A MIDDLE peer's daemon reads its worker as idle
-120 s after the last forward (`WorkerHandle::in_use`, `CONVERSATION_GAP_SECS`) and its model as idle by the time since
-it last served (`prune::effective_idle_secs`), so a peer whose later machines read for more than the idle unload
-(300 s) could unload the segment it is waiting with; Australia's [1,38) waited 6.7 min here and survived — why is not
-read (no log from it). Both want the same fact the worker now keeps (a pass awaiting its first step) at the daemon.
+live prompt (`release_finished_conversations`), and a reclaim for another model's memory may still retire a segment
+silent past the conversation's 120 s (`in_use`) — a prompt pass waiting for its chain included, as designed in #235;
+holding either would let a leaked one refuse prompts, the owner's included, for an hour. (b) Fixed above (3).
+(c) A re-plan that moves a request to OTHER layers on the same peer leaves the earlier attempt's cache of the old
+layers under the same id: the question no longer counts it as freeable (it spares its own request, as the forward's
+own admission does) and the new pass does not clear it, so it stands in the way until the request ends or the TTL
+sweeps it (security review's note, 2026-11-12). The up-front admission clears all of the request's caches; a peer
+cannot tell an earlier attempt's range from a second range of this one without the plan.
 
 ### Model families and platforms
 

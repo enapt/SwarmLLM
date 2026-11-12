@@ -1961,6 +1961,13 @@ impl AutoShardManager {
         for model_id in pool.models_with_inflight_requests() {
             active_models.insert(model_id);
         }
+        // And a split segment whose prompt pass awaits its first step while the
+        // machines after it read the prompt (#448 (b)): silent past this window,
+        // it was unloaded with the cache that step needs, and the reply failed
+        // at its first word. Held up to the coordinator's own longest wait.
+        for model_id in pool.models_awaiting_a_first_step() {
+            active_models.insert(model_id);
+        }
 
         let now = chrono::Utc::now();
         let residency: std::collections::HashMap<ModelId, u64> =
@@ -2893,6 +2900,39 @@ mod idle_unload_tests {
     #[test]
     fn the_idle_check_runs_well_inside_the_default_window() {
         assert!(super::IDLE_UNLOAD_CHECK_EVERY.as_secs() <= 30);
+    }
+
+    /// **A split segment whose prompt pass awaits its first step is not
+    /// unloaded as idle** (#448 (b), 2026-11-12): while the machines after it
+    /// read a long prompt, a segment is silent for longer than the
+    /// conversation's two minutes and the 300 s window, and unloading it lost
+    /// the cache its first step needs. Both workers here are an hour old and
+    /// silent; only the one whose prompt pass awaits a step stays. Control:
+    /// the other goes, through the same unload.
+    #[tokio::test]
+    async fn a_segment_whose_prompt_pass_awaits_its_first_step_is_not_unloaded_as_idle() {
+        use crate::types::ModelId;
+        let (state, manager) = crate::model::auto_manage::test_support::make_test_manager();
+        let pool = &state.model_process_pool;
+        let waiting = ModelId("waiting-for-its-chain".into());
+        let silent = ModelId("silent".into());
+        if !pool
+            .a_silent_worker_for_test(waiting.clone(), Some(uuid::Uuid::new_v4()))
+            .await
+            || !pool.a_silent_worker_for_test(silent.clone(), None).await
+        {
+            return; // a clock this young cannot place a worker an hour back
+        }
+        manager.try_idle_vram_unload(300).await;
+        let loaded = pool.loaded_model_ids();
+        assert!(
+            loaded.contains(&waiting),
+            "a prompt pass awaiting its first step keeps its segment"
+        );
+        assert!(
+            !loaded.contains(&silent),
+            "control: a silent worker with nothing awaited is unloaded"
+        );
     }
 }
 
