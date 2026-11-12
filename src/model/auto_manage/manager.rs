@@ -489,6 +489,17 @@ impl AutoShardManager {
                     // reach for. Unloading changes nothing the swarm can see:
                     // shards stay on disk, holder status is unchanged, and a cold
                     // start costs one reload.
+                    //
+                    // First, a prompt pass whose sender or coordinator left the
+                    // swarm before its first step lets go of its cache and of
+                    // the model it kept loaded (#448 (d)) — whatever
+                    // `idle_unload_secs` says, since the worker's own hold is not
+                    // the unload's to end.
+                    let state = &self.shared_state;
+                    state
+                        .model_process_pool
+                        .release_abandoned_prompt_passes(&|node| state.still_in_the_swarm(node))
+                        .await;
                     self.try_idle_vram_unload(
                         self.shared_state.cfg().auto_manage.idle_unload_secs,
                     )

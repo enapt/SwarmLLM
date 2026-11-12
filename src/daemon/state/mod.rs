@@ -4121,6 +4121,22 @@ impl SharedState {
             .note_ran_for_us(request_id, node_id);
     }
 
+    /// Is `node` still in the swarm as this node sees it — this node itself, a
+    /// computer it is connected to, or one still in the peer registry (heard
+    /// within its missed-ping window: every node's `HealthPing` reaches every
+    /// other through gossip, so a computer two hops away counts while it beats)?
+    /// The one answer the release of an abandoned prompt pass reads (#448 (d),
+    /// `ModelProcessPool::release_abandoned_prompt_passes`). Never a direct
+    /// link alone: a quiet link closes after two minutes unless gossip keeps
+    /// it, which it does only for mesh peers. Not the question `resolve_connected_peer_id_bytes`
+    /// answers (may a direct-only send go now): a computer two hops away is in
+    /// the swarm without being reachable from here.
+    pub fn still_in_the_swarm(&self, node: &crate::types::NodeId) -> bool {
+        node == self.identity.node_id()
+            || self.connected_node_ids.contains(node)
+            || self.peer_registry.contains_key(node)
+    }
+
     /// May `head` be handed `model`'s split to lead? It advertises `needed`
     /// (`remote_generate::features_a_head_needs`) AND has not declined to lead
     /// this model lately (`declined_leads`). The ONE answer, asked by the
@@ -6290,6 +6306,50 @@ mod connected_peer_resolution_tests {
             "precondition: the registry fallback resolves"
         );
         assert_eq!(state.resolve_connected_peer_id_bytes(&node), None);
+    }
+
+    /// **`still_in_the_swarm`** (#448 (d)): this node, a connected computer, or
+    /// one still in the registry (the health monitor evicts a computer after its
+    /// missed pings unless it is connected) — nobody else.
+    #[test]
+    fn still_in_the_swarm_is_this_node_a_connected_computer_or_one_in_the_registry() {
+        let state = test_state();
+        assert!(
+            state.still_in_the_swarm(state.identity.node_id()),
+            "this node"
+        );
+        let node = NodeId([17u8; 32]);
+        assert!(!state.still_in_the_swarm(&node), "never heard of");
+        state.connected_node_ids.insert(node.clone());
+        assert!(state.still_in_the_swarm(&node), "connected");
+        state.connected_node_ids.remove(&node);
+        assert!(
+            !state.still_in_the_swarm(&node),
+            "its link closed and nothing else knows it"
+        );
+        state.peer_registry.insert(
+            node.clone(),
+            crate::types::PeerInfo {
+                node_id: node.clone(),
+                addresses: vec![],
+                capability: None,
+                last_seen: chrono::Utc::now(),
+                latency_ms: None,
+                trust_score: 0.5,
+                peer_id_bytes: Some(peer_bytes()),
+                ack_srtt_ms: None,
+                active_request_count: 0,
+                first_seen: 0,
+                verified_transaction_count: 0,
+                is_lan_peer: false,
+                goodput_bytes_per_sec: None,
+                goodput_samples: 0,
+            },
+        );
+        assert!(
+            state.still_in_the_swarm(&node),
+            "in the registry: heard within its missed pings, through gossip"
+        );
     }
 }
 

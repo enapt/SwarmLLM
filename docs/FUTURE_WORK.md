@@ -4488,18 +4488,25 @@ layers under the same id: the question no longer counts it as freeable (it spare
 own admission does) and the new pass does not clear it, so it stands in the way until the request ends or the TTL
 sweeps it (security review's note, 2026-11-12). The up-front admission clears all of the request's caches; a peer
 cannot tell an earlier attempt's range from a second range of this one without the plan.
-(d) A coordinator that VANISHES mid-pass — its computer sleeps, crashes or loses the network before the first step —
-sends no `CancelInference` (`release_request_on_peers` is a best-effort `try_send`; nothing on a peer's disconnect
-ends the requests it sent), so each segment keeps the pass's cache, and a waiting middle segment its loaded model, for
-`PROMPT_PASS_HOLD` (an hour) instead of the old 300 s idle unload / 600 s TTL. Bounded, and never against the owner:
-both pressure paths in (a) still release it (delta review of `d3078823`, 2026-11-12, MEDIUM). A cancel arriving
-while a cold model loads can likewise be followed by the pass's `note_forward_sent`, re-arming an hour (LOW; the
-dispatcher aborts the handler, narrowing it). Prior art: Petals ties a server's inference-session cache to the
-client's open stream and its `step_timeout` (closed stream or no next step → cache freed). The shape here: honour the
-hold only while the forward's previous hop (`sender_peer_bytes`) stays in `connected_node_ids`, read lazily at the
-idle tick, so a reconnect restores it. NOT built on 11-12 because libp2p's idle-connection timeout can close a live
-chain's quiet link during exactly the long read this hold exists for — measure first whether a waiting segment's link
-to its previous hop survives a 30-minute read (gossip keeps it in a small swarm; a large one may not).
+(d) Fixed (4), below.
+4. **A pass whose sender or coordinator left the swarm is released** (#448 (d), from the delta review of `d3078823`,
+   MEDIUM): a coordinator that sleeps, crashes or loses its network mid-pass sends no `CancelInference`
+   (`release_request_on_peers` is a best-effort `try_send`), so the hold kept each segment's cache and a waiting
+   segment's model for an hour instead of the old 5-10 minutes. Each waiting pass records `PassParties` (the network
+   layer's authenticated sender, the coordinator it names); the idle tick, before the unload, releases through
+   `release_request_kv` a pass whose party was seen since the pass began and has since been out of `SharedState::still_in_the_swarm` (this node, a connected
+   computer, or one in the peer registry — every node hears every other's `HealthPing` through gossip) for
+   `PASS_PARTY_GONE_AFTER` (300 s, from the first tick that finds it gone, restarted when it is seen again). NOT the
+   direct link: a quiet one closes after `IDLE_CONNECTION_TIMEOUT_SECS` (120 s) unless gossipsub keeps it, which it
+   does only for mesh peers (`connection_keep_alive` = `in_mesh`), so on a large swarm it would drop the hold during
+   the read it is for. Prior art: a lease renewed by the holder's own heartbeat and ended by its silence after a grace
+   (Chubby KeepAlives, etcd `LeaseKeepAlive`, Kubernetes' node lease KEP-589); Petals frees a session's cache when its
+   client's stream closes. Only a party SEEN since the pass began can leave (its review: a later hop may never have
+   the coordinator on record). Tests `a_prompt_pass_whose_sender_or_coordinator_left_is_released`,
+   `a_passes_parties_are_its_authenticated_sender_and_the_coordinator_it_names`,
+   `still_in_the_swarm_is_this_node_a_connected_computer_or_one_in_the_registry`. Still open from the same
+   review (LOW): a cancel arriving while a cold model loads can be followed by the pass's `note_forward_sent`,
+   re-arming the hold — now bounded by (4) too once the coordinator is gone, and the dispatcher aborts the handler.
 
 ### Model families and platforms
 

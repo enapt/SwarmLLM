@@ -1041,6 +1041,74 @@ impl OwnDecodeSpeed {
     }
 }
 
+/// The computers a prompt pass waiting here depends on (#448 (d)): the one that
+/// SENT it (the network layer's authenticated peer, `LayerForward::sender_peer_bytes`)
+/// and the coordinator it NAMES (`requester_node_id`, the sender's word). Either
+/// gone, no first step will come. Naming an absent coordinator can only release
+/// the namer's own pass. A pass from this node's own pipeline names this node,
+/// or nobody.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct PassParties {
+    pub(crate) sender: Option<crate::types::NodeId>,
+    pub(crate) requester: Option<crate::types::NodeId>,
+}
+
+impl PassParties {
+    fn of(sender_peer_bytes: Option<&[u8]>, requester_node_id: Option<[u8; 32]>) -> Self {
+        Self {
+            sender: sender_peer_bytes.and_then(crate::network::transport::node_id_of_peer_bytes),
+            requester: requester_node_id.map(crate::types::NodeId),
+        }
+    }
+}
+
+/// Whether a pass's parties have LEFT: a party counts as gone only once this
+/// node has seen it in the swarm since the pass began (`seen`, one flag per
+/// party). A later hop of a chain may never have the coordinator on record (a
+/// gossiped capability installs only into an entry that exists —
+/// `docs/invariants/network.md` § the swarm-use gate's `NotHeardFrom`), so its
+/// absence proves nothing and the pass keeps the hold's own bound (review of
+/// #448 (d), 2026-11-12). The sender is seen at the first idle tick: it has
+/// just sent the pass over a link that stays open two minutes.
+fn a_party_left(
+    parties: &PassParties,
+    seen: &mut [bool; 2],
+    still_here: &dyn Fn(&crate::types::NodeId) -> bool,
+) -> bool {
+    let mut left = false;
+    for (party, seen) in [&parties.sender, &parties.requester]
+        .into_iter()
+        .zip(seen.iter_mut())
+    {
+        let Some(node) = party else { continue };
+        if still_here(node) {
+            *seen = true;
+        } else if *seen {
+            left = true;
+        }
+    }
+    left
+}
+
+/// How long a prompt pass's sender or coordinator may be absent from the swarm
+/// before the pass is released (#448 (d)) — the default idle unload's five
+/// minutes, which is what such a pass was given before its hold, counted from
+/// the first idle tick that finds it gone (the registry has already waited out
+/// its own missed pings by then).
+pub(crate) const PASS_PARTY_GONE_AFTER: std::time::Duration = std::time::Duration::from_secs(300);
+
+/// A prompt pass sent to a worker that still awaits its first step (#448 (b)).
+#[derive(Debug)]
+struct AwaitedPass {
+    sent: std::time::Instant,
+    parties: PassParties,
+    /// Whether each party (sender, requester) has been seen in the swarm since
+    /// the pass began ([`a_party_left`]).
+    seen: [bool; 2],
+    /// The first idle tick that found a seen party gone; cleared when it is back.
+    missing_since: Option<std::time::Instant>,
+}
+
 /// A handle to a running model worker subprocess.
 ///
 /// The socket is split into a shared writer (one-at-a-time under `Mutex`) and
@@ -1147,7 +1215,9 @@ struct WorkerHandle {
     /// step and one per session, and reports its free cache so clients route
     /// around full servers; vLLM frees a running request's blocks only when it
     /// finishes, is aborted or is preempted under pressure, never on idle time.
-    awaiting_first_step: std::sync::Mutex<std::collections::HashMap<Uuid, std::time::Instant>>,
+    /// A pass whose sender or coordinator has left the swarm is released
+    /// ([`ModelProcessPool::release_abandoned_prompt_passes`], #448 (d)).
+    awaiting_first_step: std::sync::Mutex<std::collections::HashMap<Uuid, AwaitedPass>>,
     /// Why this node put this worker on the processor — `None` means it was
     /// spawned for the graphics card.
     ///
@@ -2176,16 +2246,55 @@ impl WorkerHandle {
     /// step, and ends the wait (#448 (b), as the worker's
     /// `KvCacheStore::note_forward_ran` does; off with the same
     /// `SWARMLLM_PROMPT_PASS_HOLD=0`).
-    fn note_forward_sent(&self, request_id: Uuid, sequence_num: u32) {
+    fn note_forward_sent(&self, request_id: Uuid, sequence_num: u32, parties: PassParties) {
         let mut waiting = self
             .awaiting_first_step
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if sequence_num == 0 && crate::inference::split::kv_cache::prompt_pass_hold_enabled() {
-            waiting.insert(request_id, std::time::Instant::now());
+            waiting.insert(
+                request_id,
+                AwaitedPass {
+                    sent: std::time::Instant::now(),
+                    parties,
+                    seen: [false; 2],
+                    missing_since: None,
+                },
+            );
         } else {
             waiting.remove(&request_id);
         }
+    }
+
+    /// The passes waiting here whose sender or coordinator has been out of the
+    /// swarm (`still_here` false) for `gone_after` as of `now`, taken out of the
+    /// wait (#448 (d)). A party seen again clears the count, so a reconnect or
+    /// a late registry entry keeps the pass.
+    fn take_abandoned_passes(
+        &self,
+        still_here: &dyn Fn(&crate::types::NodeId) -> bool,
+        now: std::time::Instant,
+        gone_after: std::time::Duration,
+    ) -> Vec<Uuid> {
+        let mut waiting = self
+            .awaiting_first_step
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut abandoned = Vec::new();
+        for (request_id, pass) in waiting.iter_mut() {
+            if !a_party_left(&pass.parties, &mut pass.seen, still_here) {
+                pass.missing_since = None;
+                continue;
+            }
+            let since = *pass.missing_since.get_or_insert(now);
+            if now.saturating_duration_since(since) >= gone_after {
+                abandoned.push(*request_id);
+            }
+        }
+        for request_id in &abandoned {
+            waiting.remove(request_id);
+        }
+        abandoned
     }
 
     /// Does a prompt pass sent here still await its first step? Entries older
@@ -2197,7 +2306,7 @@ impl WorkerHandle {
             .awaiting_first_step
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        waiting.retain(|_, sent| sent.elapsed() <= hold);
+        waiting.retain(|_, pass| pass.sent.elapsed() <= hold);
         !waiting.is_empty()
     }
 
@@ -4589,7 +4698,7 @@ impl ModelProcessPool {
         .await;
         h.last_used.store(7, Ordering::Relaxed);
         if let Some(request) = prompt_pass_of {
-            h.note_forward_sent(request, 0);
+            h.note_forward_sent(request, 0, PassParties::default());
         }
         self.workers.insert(model, h);
         true
@@ -11178,7 +11287,7 @@ impl ModelProcessPool {
             tp_meta,
             vision_embeddings,
             chain: _,
-            sender_peer_bytes: _,
+            sender_peer_bytes,
             requester_node_id,
             pre_embedded,
             generated_ids,
@@ -11201,6 +11310,7 @@ impl ModelProcessPool {
             block_rows_wanted,
             stream_branch: _,
         } = forward;
+        let pass_parties = PassParties::of(sender_peer_bytes.as_deref(), requester_node_id);
 
         // Split vision embeddings out of the JSON header into the binary
         // payload prefix — serde_json encodes `Vec<u8>` as a JSON array of
@@ -11262,7 +11372,7 @@ impl ModelProcessPool {
         // A forward leaves this request's cache on the worker for the next one,
         // so the worker stays in use after `guard` is gone (`kv_holders`).
         handle.note_conversation(request_id);
-        handle.note_forward_sent(request_id, sequence_num);
+        handle.note_forward_sent(request_id, sequence_num, pass_parties);
 
         let payload_buf: Vec<u8> = if vision_len == 0 {
             activations
@@ -11705,7 +11815,9 @@ impl ModelProcessPool {
             // Matches `cancelled_request_id`'s exclusion.
             let (g, _) = handle.register_response(f.request_id, tx, false);
             handle.note_conversation(f.request_id);
-            handle.note_forward_sent(f.request_id, f.sequence_num);
+            // A batch carries decode steps only (`model_worker` refuses a
+            // sequence-0 member), so this only ever ends a wait.
+            handle.note_forward_sent(f.request_id, f.sequence_num, PassParties::default());
             receivers.push((f.request_id, g.token, rx));
             guards.push(g);
         }
@@ -12806,6 +12918,58 @@ impl ModelProcessPool {
             .collect()
     }
 
+    /// Release every prompt pass waiting here whose sender or coordinator has
+    /// been out of the swarm for [`PASS_PARTY_GONE_AFTER`] (#448 (d)): a
+    /// coordinator that slept, crashed or lost its network mid-pass sends no
+    /// cancel, so without this its pass kept a worker's cache — and, through
+    /// [`Self::models_awaiting_a_first_step`], its loaded model — for the whole
+    /// `kv_cache::PROMPT_PASS_HOLD`. Released as a cancel's release is
+    /// ([`Self::release_request_kv`]: every worker, the worker's own hold
+    /// with it). `still_here` is the caller's view of the swarm — this node,
+    /// a connected computer, or one heard within the registry's window — never
+    /// a direct link alone: a quiet link closes after two minutes unless gossip
+    /// keeps it, which it does only for mesh peers. From the idle tick, before
+    /// the idle unload reads the waits. How many were released.
+    ///
+    /// Prior art: a lease kept alive by its holder's heartbeats — Chubby's
+    /// session KeepAlives, etcd's `LeaseKeepAlive`, Kubernetes' node lease
+    /// (KEP-589): the holder's own beat renews it and its silence ends it after
+    /// a grace, never a probe from the waiting side. Here the beat is the
+    /// coordinator's `HealthPing` gossip, which already refreshes `last_seen`.
+    pub async fn release_abandoned_prompt_passes(
+        &self,
+        still_here: &(dyn Fn(&crate::types::NodeId) -> bool + Sync),
+    ) -> usize {
+        self.release_abandoned_prompt_passes_at(
+            still_here,
+            std::time::Instant::now(),
+            PASS_PARTY_GONE_AFTER,
+        )
+        .await
+    }
+
+    async fn release_abandoned_prompt_passes_at(
+        &self,
+        still_here: &(dyn Fn(&crate::types::NodeId) -> bool + Sync),
+        now: std::time::Instant,
+        gone_after: std::time::Duration,
+    ) -> usize {
+        // Collected first: no map guard is held across the releases' awaits.
+        let abandoned: std::collections::HashSet<Uuid> = self
+            .workers
+            .iter()
+            .flat_map(|e| e.value().take_abandoned_passes(still_here, now, gone_after))
+            .collect();
+        for request_id in &abandoned {
+            tracing::info!(
+                %request_id,
+                "DIAG: released a prompt pass whose sender or coordinator left the swarm before its first step"
+            );
+            self.release_request_kv(*request_id).await;
+        }
+        abandoned.len()
+    }
+
     /// How long each loaded model's worker has existed. Upper bound on how long
     /// it can possibly have been idle.
     pub fn model_residency_secs(&self) -> Vec<(ModelId, u64)> {
@@ -13468,29 +13632,171 @@ mod tests {
         let (pass, other) = (Uuid::new_v4(), Uuid::new_v4());
         assert!(p.models_awaiting_a_first_step().is_empty());
 
-        h.note_forward_sent(pass, 0);
+        h.note_forward_sent(pass, 0, PassParties::default());
         assert_eq!(p.models_awaiting_a_first_step(), vec![m.clone()]);
         assert!(
             !h.in_use(std::time::Duration::from_secs(120)),
             "the wait is not use: nothing noted a conversation"
         );
-        h.note_forward_sent(other, 3);
+        h.note_forward_sent(other, 3, PassParties::default());
         assert_eq!(
             p.models_awaiting_a_first_step(),
             vec![m.clone()],
             "another request's step leaves the wait"
         );
-        h.note_forward_sent(pass, 1);
+        h.note_forward_sent(pass, 1, PassParties::default());
         assert!(
             p.models_awaiting_a_first_step().is_empty(),
             "its step ends it"
         );
 
-        h.note_forward_sent(pass, 0);
+        h.note_forward_sent(pass, 0, PassParties::default());
         h.forget_conversation(pass);
         assert!(
             p.models_awaiting_a_first_step().is_empty(),
             "a release or a cancel ends it"
+        );
+    }
+
+    /// **A prompt pass whose sender or coordinator left the swarm is released**
+    /// (#448 (d)): a party SEEN since the pass began and absent for `gone_after`
+    /// from the first tick that finds it gone — not before, and seen again
+    /// restarts the count — is released as a cancel's release is (the
+    /// conversation it noted is forgotten too), so the idle unload is free
+    /// again. A party never seen proves nothing (a later hop may never have the
+    /// coordinator on record), and a pass naming nobody (this node's own
+    /// pipeline) is never released this way.
+    #[tokio::test]
+    async fn a_prompt_pass_whose_sender_or_coordinator_left_is_released() {
+        let p = ModelProcessPool::new(std::path::PathBuf::from("/tmp/swarmllm-pass-parties"));
+        let m = ModelId("waiting".into());
+        let h = fake_worker_handle(false).await;
+        p.workers.insert(m.clone(), h.clone());
+        let (hop, coordinator) = (crate::types::NodeId([1; 32]), crate::types::NodeId([2; 32]));
+        let (pass, sent_only, unheard, local) = (
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+        );
+        let both = PassParties {
+            sender: Some(hop.clone()),
+            requester: Some(coordinator.clone()),
+        };
+        h.note_conversation(pass);
+        h.note_forward_sent(pass, 0, both.clone());
+        h.note_forward_sent(local, 0, PassParties::default());
+        let gone = std::time::Duration::from_secs(300);
+        let window = std::time::Duration::from_secs(120);
+        let at = |secs: u64| std::time::Instant::now() + std::time::Duration::from_secs(secs);
+        let everyone = |_: &crate::types::NodeId| true;
+        let nobody = |_: &crate::types::NodeId| false;
+        let no_coordinator = |n: &crate::types::NodeId| *n != coordinator;
+        let no_hop = |n: &crate::types::NodeId| *n != hop;
+        macro_rules! release {
+            ($here:expr, $secs:expr) => {
+                p.release_abandoned_prompt_passes_at($here, at($secs), gone)
+                    .await
+            };
+        }
+
+        assert_eq!(release!(&everyone, 0), 0, "both seen");
+        assert_eq!(
+            release!(&no_coordinator, 0),
+            0,
+            "the first tick that finds it gone only starts the count"
+        );
+        assert_eq!(release!(&everyone, 100), 0);
+        assert_eq!(release!(&no_coordinator, 200), 0);
+        assert_eq!(
+            release!(&no_coordinator, 450),
+            0,
+            "seen again at 100, so the count restarted at 200"
+        );
+        assert!(h.in_use(window), "control: the pass's conversation is held");
+        assert_eq!(
+            release!(&no_coordinator, 500),
+            1,
+            "gone for the whole wait: released"
+        );
+        assert!(
+            !h.in_use(window),
+            "released as a cancel is: its conversation is forgotten on every worker"
+        );
+        assert_eq!(
+            p.models_awaiting_a_first_step(),
+            vec![m.clone()],
+            "the pass naming nobody still waits"
+        );
+
+        // The authenticated sender's absence counts the same.
+        h.note_forward_sent(
+            sent_only,
+            0,
+            PassParties {
+                sender: Some(hop.clone()),
+                requester: None,
+            },
+        );
+        assert_eq!(release!(&everyone, 0), 0);
+        assert_eq!(release!(&no_hop, 10), 0);
+        assert_eq!(release!(&no_hop, 310), 1);
+
+        // A coordinator this node never had on record is no evidence: only the
+        // sender is watched for that pass.
+        h.note_forward_sent(unheard, 0, both);
+        assert_eq!(release!(&no_coordinator, 0), 0);
+        assert_eq!(
+            release!(&no_coordinator, 9_000),
+            0,
+            "a coordinator never seen is not a coordinator that left"
+        );
+        assert_eq!(
+            release!(&nobody, 9_000),
+            0,
+            "the sender, seen at the first tick, only starts its count"
+        );
+        assert_eq!(
+            release!(&nobody, 9_300),
+            1,
+            "then the sender's absence releases it"
+        );
+
+        assert_eq!(
+            release!(&nobody, 20_000),
+            0,
+            "a pass naming nobody is never released for absence"
+        );
+        h.forget_conversation(local);
+        assert!(
+            p.models_awaiting_a_first_step().is_empty(),
+            "every released pass left the wait"
+        );
+    }
+
+    /// **A pass's parties are its authenticated sender and the coordinator it
+    /// names** (#448 (d)) — the sender read as the registry and the connection
+    /// list key it (`peer_id_to_node_id`), so the presence check finds it.
+    #[test]
+    fn a_passes_parties_are_its_authenticated_sender_and_the_coordinator_it_names() {
+        let sender = libp2p::identity::Keypair::generate_ed25519()
+            .public()
+            .to_peer_id();
+        let parties = PassParties::of(Some(&sender.to_bytes()), Some([2; 32]));
+        assert!(
+            parties.sender.is_some(),
+            "control: an ed25519 peer has a node id"
+        );
+        assert_eq!(
+            parties.sender,
+            crate::network::transport::peer_id_to_node_id(&sender)
+        );
+        assert_eq!(parties.requester, Some(crate::types::NodeId([2; 32])));
+        assert_eq!(PassParties::of(None, None), PassParties::default());
+        assert_eq!(
+            PassParties::of(Some(&[0xff, 0x00]), None).sender,
+            None,
+            "bytes that are no peer id name nobody"
         );
     }
 

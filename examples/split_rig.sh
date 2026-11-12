@@ -1562,6 +1562,10 @@ if [ "$MODE" = split ] && [ -n "${RIG_PROMPT:-}" ]; then
   for i in $(seq 1 "${RIG_ASKS:-1}"); do
     ask "$RIG_PROMPT" "${RIG_MAX_TOKENS:-128}" "q$i" | tee -a "$OUT/replies.jsonl"
   done
+  # RIG_LINGER_S: keep the nodes up that long after the asks, for a step that
+  # watches what a node does on its own afterwards (#448 (d): a coordinator
+  # killed mid-pass, its peer's release of the pass).
+  [ -n "${RIG_LINGER_S:-}" ] && { echo "rig: lingering ${RIG_LINGER_S} s"; sleep "$RIG_LINGER_S"; }
   exit 0
 fi
 if [ "$MODE" = split ]; then

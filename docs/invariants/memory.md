@@ -199,6 +199,40 @@ cache, and the up-front admission's own clear) and
 `a_peers_question_names_its_request_but_is_answered_by_a_fresh_id`; both fail with
 the naming turned off.
 
+The hold made one failure longer (#448 (d), delta review of the daemon half): a
+coordinator that sleeps, crashes or loses its network mid-pass sends no cancel
+(`release_request_on_peers` is a best-effort `try_send`, and nothing on a peer's
+disconnect ends the forwards it sent), so its pass kept each segment's cache and a
+waiting segment's loaded model for the whole hour instead of the old five to ten
+minutes. Watching the direct link to the hop was the first idea and is wrong: a
+quiet link closes after `IDLE_CONNECTION_TIMEOUT_SECS` (120 s) unless a behaviour
+keeps it, and gossipsub keeps only a MESH peer's (`connection_keep_alive` is
+`in_mesh`), so on a large swarm it would drop the hold during the very read it is
+for. What every node does hear is the coordinator's own beat: `HealthPing` gossip
+refreshes `last_seen` on every node, and the registry evicts a computer after its
+missed pings unless it is connected. So each waiting pass records its parties
+(`PassParties`: the network layer's authenticated sender and the coordinator it
+names — naming an absent one releases only the namer's pass), and the idle tick,
+before the unload, releases a pass whose party was SEEN since the pass began and
+has since been out of
+`SharedState::still_in_the_swarm` (this node, a connected computer, or one in the
+registry) for `PASS_PARTY_GONE_AFTER` — 300 s, the idle unload's own default,
+counted from the first tick that finds it gone and restarted when it is seen again
+— through `release_request_kv`, which ends the worker's hold too. A lease renewed
+by its holder's heartbeat and ended by its silence after a grace: Chubby's session
+KeepAlives, etcd's `LeaseKeepAlive`, Kubernetes' node lease (KEP-589, the same
+reasoning `health::monitor` already cites for the capability's repeat). Only a party SEEN since the pass began can leave (`a_party_left`, the review of
+this change): a later hop of a chain may never have the coordinator on record — a
+gossiped capability installs only into an entry that exists (§ the swarm-use gate's
+`NotHeardFrom`) — so its absence proves nothing, and that pass is watched by its
+sender alone, which the first idle tick always sees (it has just sent the pass over
+a link that stays open two minutes). Tests
+`a_prompt_pass_whose_sender_or_coordinator_left_is_released` (the count's start, its
+restart, the sender alone, a coordinator never seen, a pass naming nobody, and the
+release forgetting the conversation as a cancel does),
+`a_passes_parties_are_its_authenticated_sender_and_the_coordinator_it_names`,
+`still_in_the_swarm_is_this_node_a_connected_computer_or_one_in_the_registry`.
+
 ## `inference::worker_ipc::worker_error_is_fatal`
 
 (R146) — the single
