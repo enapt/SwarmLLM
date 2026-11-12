@@ -241,7 +241,7 @@ pub async fn run_worker(
             std::process::exit(1);
         }
     };
-    let (mut reader, mut writer) = stream.split();
+    let (mut reader, mut writer) = crate::inference::process_pool::split_ipc(stream);
 
     // Send Ready
     if let Err(e) = send_worker(&mut writer, &WorkerMsg::Ready, &[]).await {

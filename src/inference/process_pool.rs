@@ -21,8 +21,72 @@ use crate::types::{ModelId, PrefixBlockEntry, SamplingParams};
 /// Cross-platform IPC stream halves between daemon and model worker.
 /// Unix: AF_UNIX socket with 0o600 filesystem perms (current user only).
 /// Windows: named pipe with default DACL (current logon session only).
-pub(crate) type IpcReader = interprocess::local_socket::tokio::RecvHalf;
-pub(crate) type IpcWriter = interprocess::local_socket::tokio::SendHalf;
+///
+/// Both halves hold the one stream through an `Arc`: `&Stream` reads and
+/// writes, so neither half needs a lock. Dropping one half closes nothing —
+/// the stream closes once both are gone. Nothing here relies on a half-close:
+/// a retired worker is told `DaemonMsg::Shutdown` and killed, and a Windows
+/// pipe's halves never closed on drop anyway.
+///
+/// Prior art: interprocess 2.4.7 deprecated its own `split()` for this shape,
+/// and tokio's `UnixStream::into_split` halves are built the same way.
+pub(crate) struct IpcReader(Arc<interprocess::local_socket::tokio::Stream>);
+pub(crate) struct IpcWriter(Arc<interprocess::local_socket::tokio::Stream>);
+
+/// The one place a connected IPC stream becomes its two halves — the
+/// daemon's end in `spawn_worker` and the worker's in `run_worker`.
+pub(crate) fn split_ipc(
+    stream: interprocess::local_socket::tokio::Stream,
+) -> (IpcReader, IpcWriter) {
+    let stream = Arc::new(stream);
+    (IpcReader(Arc::clone(&stream)), IpcWriter(stream))
+}
+
+impl tokio::io::AsyncRead for IpcReader {
+    fn poll_read(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut &*self.0).poll_read(cx, buf)
+    }
+}
+
+impl tokio::io::AsyncWrite for IpcWriter {
+    fn poll_write(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &[u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        std::pin::Pin::new(&mut &*self.0).poll_write(cx, buf)
+    }
+
+    fn poll_write_vectored(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        bufs: &[std::io::IoSlice<'_>],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        std::pin::Pin::new(&mut &*self.0).poll_write_vectored(cx, bufs)
+    }
+
+    fn is_write_vectored(&self) -> bool {
+        tokio::io::AsyncWrite::is_write_vectored(&&*self.0)
+    }
+
+    fn poll_flush(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut &*self.0).poll_flush(cx)
+    }
+
+    fn poll_shutdown(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut &*self.0).poll_shutdown(cx)
+    }
+}
 
 /// Item 8 Phase 1: each prefix-cache insert in a worker emits one of these
 /// over the pool's `prefix_manifest_tx`. The daemon-side forwarder drains
@@ -10558,7 +10622,7 @@ impl ModelProcessPool {
             }
         };
 
-        let (mut read_half, mut write_half) = conn.split();
+        let (mut read_half, mut write_half) = split_ipc(conn);
 
         // Read Ready message
         let (ready_msg, _) = recv_worker(&mut read_half)
@@ -16391,7 +16455,7 @@ mod tests {
         });
         let server = listener.accept().await.expect("accept");
         let client = connect.await.expect("join").expect("connect");
-        let (read_half, write_half) = server.split();
+        let (read_half, write_half) = split_ipc(server);
         let responses: ResponseMap = Arc::new(DashMap::new());
         let dead = Arc::new(AtomicBool::new(dead_now));
         let reader_handle = tokio::spawn(async move {
