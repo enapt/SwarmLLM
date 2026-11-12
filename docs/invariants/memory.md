@@ -151,16 +151,30 @@ keeps the REQUEST id, and the caches are keyed by it, so the previous attempt's
 cache was still on the Italian peer when it was asked again — and its question
 (`Admitting::OnlyWeigh`) weighed it as "other conversations", which the release
 rule spares (`keep` is the asker). The pass's first piece would have cleared it.
-`admit_prompt_in` now takes off `bytes_a_prompt_pass_replaces` — the entries the
-clear removes, matched by the clear's own predicate (`a_prompt_pass_clears`), and
-what the request's own claim still owes, which the new admission replaces — for
-every kind of admission. vLLM's recompute frees a preempted sequence's blocks
-before it is scheduled again; Petals holds a session's state for a fixed 5-min
-`step_timeout`. Tests `a_cache_whose_prompt_pass_waits_for_the_chain_outlives_the_ttl`
-(controls: a request that stepped, one never noted, the hold's own limit, a
-release), `a_prompt_pass_replaces_its_own_earlier_caches_and_claim`,
-`a_replanned_prompt_is_weighed_without_its_own_earlier_cache` (control: the same
-cache under another request refuses, on all three admissions).
+The question reaches the worker under a FRESH correlation id (security review
+2026-10-18: the worker routes answers by id), so it now also NAMES the request it
+weighs for — `IpcAdmitPrompt::weighs_for`, from `PromptAdmissionAsk::request_id`
+through `weigh_peer_prompt`'s required `for_request` — and `admit_prompt_in`, for
+`OnlyWeigh` only, takes off `bytes_a_prompt_pass_replaces`: the entries the clear
+removes, matched by the clear's own predicate (`a_prompt_pass_clears`), and what
+the request's own claim still owes. The named id keys, holds and records nothing;
+a route member could learn from it only how much of that request this node holds,
+which it already knows from the activations it handles. Only the question: this
+node's own forward admits after its first piece's clear and its up-front admission
+clears first (`cleanup_request_id`), so there is nothing to take off, and a
+whole-model generate or a drafter may go on from the cache it holds (the first cut
+took it off for every admission; review 2026-11-12 found the question — the path
+that refused — never named the request, so it took off nothing). vLLM's recompute
+frees a preempted sequence's blocks before it is scheduled again; Petals holds a
+session's state for a fixed 5-min `step_timeout`. Tests
+`a_cache_whose_prompt_pass_waits_for_the_chain_outlives_the_ttl` (controls: a
+request that stepped, one never noted, the hold's own limit, a release),
+`a_prompt_pass_replaces_its_own_earlier_caches_and_claim`,
+`a_peers_question_for_a_replanned_prompt_leaves_out_that_requests_earlier_cache`
+(through the worker's handler; controls: no request named, another request's
+cache, and the up-front admission's own clear) and
+`a_peers_question_names_its_request_but_is_answered_by_a_fresh_id`; both fail with
+the naming turned off.
 
 ## `inference::worker_ipc::worker_error_is_fatal`
 

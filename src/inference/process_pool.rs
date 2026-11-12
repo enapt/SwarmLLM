@@ -276,6 +276,26 @@ pub const DEFAULT_KV_CACHE_TTL_SECS: u64 = 600;
 /// (`KvCacheStore::release_finished_conversations`).
 pub(crate) const CONVERSATION_GAP_SECS: u64 = 120;
 
+/// The `DaemonMsg::AdmitPrompt` a peer's question becomes
+/// ([`ModelProcessPool::weigh_peer_prompt`]): weighed only, under a FRESH
+/// correlation id — the worker routes its answer by it — and naming the
+/// request it weighs for, whose own earlier caches the pass replaces (#448).
+fn peer_question(
+    model_id: &ModelId,
+    layer_ranges: Vec<(u32, u32)>,
+    prompt_tokens: u32,
+    for_request: Uuid,
+) -> IpcAdmitPrompt {
+    IpcAdmitPrompt {
+        request_id: Uuid::new_v4(),
+        model_id: model_id.clone(),
+        layer_ranges,
+        prompt_tokens,
+        only_weigh: true,
+        weighs_for: Some(for_request),
+    }
+}
+
 /// What a worker said to one `DaemonMsg::AdmitPrompt`
 /// ([`ModelProcessPool::send_admission`]).
 enum Admission {
@@ -8893,6 +8913,7 @@ impl ModelProcessPool {
         // question goes through `weigh_peer_prompt`, never here.
         let admit = IpcAdmitPrompt {
             only_weigh: false,
+            weighs_for: None,
             ..admit
         };
         let request_id = admit.request_id;
@@ -8971,11 +8992,19 @@ impl ModelProcessPool {
     /// or the growth would weigh it, charging nothing
     /// ([`Self::peer_load_refusal`], #345, #349); with no worker that is the
     /// whole answer.
+    ///
+    /// `for_request` is the request the asker names, REQUIRED: the pass's
+    /// first piece clears that request's own caches over the ranges, so the
+    /// worker weighs without them (`IpcAdmitPrompt::weighs_for`, #448) — a
+    /// re-plan keeps its id, and Italy refused a third attempt for the
+    /// second's cache. It keys and holds nothing; the answer is still routed
+    /// by the fresh id.
     pub(crate) async fn weigh_peer_prompt(
         &self,
         model_id: &ModelId,
         layer_ranges: Vec<(u32, u32)>,
         prompt_tokens: u32,
+        for_request: Uuid,
     ) -> PeerPromptWeight {
         let worker = self.live_worker(model_id);
         let holds_the_first = worker
@@ -9001,13 +9030,7 @@ impl ModelProcessPool {
                 return PeerPromptWeight::Fits;
             }
         }
-        let ask = IpcAdmitPrompt {
-            request_id: Uuid::new_v4(),
-            model_id: model_id.clone(),
-            layer_ranges,
-            prompt_tokens,
-            only_weigh: true,
-        };
+        let ask = peer_question(model_id, layer_ranges, prompt_tokens, for_request);
         match self.send_admission(ask, None).await {
             Ok(Admission::Refused {
                 message,
@@ -13316,6 +13339,7 @@ mod tests {
             layer_ranges: vec![(0, 4)],
             prompt_tokens: 6002,
             only_weigh: false,
+            weighs_for: None,
         };
         let started = std::time::Instant::now();
         let answer = p.admit_prompt(admit, Requester::Swarm, None).await;
@@ -13329,6 +13353,26 @@ mod tests {
         assert!(
             p.live_worker(&m).is_some(),
             "a busy worker is not a dead one"
+        );
+    }
+
+    /// **A peer's question names the request it weighs for, under an id of its
+    /// own** (#448): the worker leaves that request's earlier caches out of the
+    /// weighing (`model_worker`'s
+    /// `a_peers_question_for_a_replanned_prompt_leaves_out_that_requests_earlier_cache`),
+    /// and routes its answer by the fresh id, never the request's (security
+    /// review 2026-10-18).
+    #[test]
+    fn a_peers_question_names_its_request_but_is_answered_by_a_fresh_id() {
+        let request = Uuid::new_v4();
+        let ask = peer_question(&ModelId("asked".into()), vec![(0, 4)], 64, request);
+        assert!(ask.only_weigh);
+        assert_eq!(ask.weighs_for, Some(request));
+        assert_ne!(ask.request_id, request);
+        assert_ne!(
+            ask.request_id,
+            peer_question(&ModelId("asked".into()), vec![(0, 4)], 64, request).request_id,
+            "every question gets an id of its own"
         );
     }
 
@@ -13348,7 +13392,9 @@ mod tests {
         const LONG_AGO: u64 = 7;
         h.last_used.store(LONG_AGO, Ordering::Relaxed);
 
-        let weight = p.weigh_peer_prompt(&m, vec![(0, 4)], 6002).await;
+        let weight = p
+            .weigh_peer_prompt(&m, vec![(0, 4)], 6002, Uuid::new_v4())
+            .await;
         assert_eq!(weight, PeerPromptWeight::Fits);
         assert_eq!(h.last_used.load(Ordering::Relaxed), LONG_AGO);
         assert!(h.responses.is_empty(), "the question's slot is gone");
@@ -13359,6 +13405,7 @@ mod tests {
             layer_ranges: vec![(0, 4)],
             prompt_tokens: 6002,
             only_weigh: false,
+            weighs_for: None,
         };
         assert!(p.admit_prompt(admit, Requester::Swarm, None).await.is_ok());
         assert_ne!(
@@ -13736,6 +13783,7 @@ mod tests {
             layer_ranges,
             prompt_tokens: 52,
             only_weigh: false,
+            weighs_for: None,
         };
 
         h.last_used.store(LONG_AGO, Ordering::Relaxed);
@@ -15646,7 +15694,10 @@ mod tests {
         let (p, dir) = setup("refused");
         p.set_ram_budget_mb(three_mb);
         let _h = cpu_worker_holding(&p, &model, held, held_mb).await;
-        match p.weigh_peer_prompt(&model, vec![asked], 64).await {
+        match p
+            .weigh_peer_prompt(&model, vec![asked], 64, Uuid::new_v4())
+            .await
+        {
             PeerPromptWeight::DoesNotFit {
                 message,
                 layers_that_fit,
@@ -15672,7 +15723,8 @@ mod tests {
         p.set_ram_budget_mb(asked_mb);
         let _h = cpu_worker_holding(&p, &model, held, held_mb).await;
         assert!(matches!(
-            p.weigh_peer_prompt(&model, vec![asked], 64).await,
+            p.weigh_peer_prompt(&model, vec![asked], 64, Uuid::new_v4())
+                .await,
             PeerPromptWeight::Fits
         ));
         let _ = std::fs::remove_dir_all(&dir);
@@ -15682,7 +15734,10 @@ mod tests {
         p.set_ram_budget_mb(asked_mb);
         let h = cpu_worker_holding(&p, &model, held, held_mb).await;
         h.note_conversation(Uuid::new_v4());
-        match p.weigh_peer_prompt(&model, vec![asked], 64).await {
+        match p
+            .weigh_peer_prompt(&model, vec![asked], 64, Uuid::new_v4())
+            .await
+        {
             PeerPromptWeight::DoesNotFit {
                 layers_that_fit, ..
             } => assert!(layers_that_fit < 4, "{layers_that_fit}"),
@@ -18185,7 +18240,10 @@ mod tests {
         // Room for a five-layer run from the asked start, not a six-layer one.
         p.set_ram_budget_mb(machine_mb((0, 5)));
 
-        match p.weigh_peer_prompt(&model, vec![(0, 8)], 64).await {
+        match p
+            .weigh_peer_prompt(&model, vec![(0, 8)], 64, Uuid::new_v4())
+            .await
+        {
             PeerPromptWeight::DoesNotFit {
                 message,
                 layers_that_fit,
@@ -18203,17 +18261,20 @@ mod tests {
         // A run the spawn takes is go ahead, and so is a range no forward
         // could load (past the model's end) — its forward's checks answer it.
         assert!(matches!(
-            p.weigh_peer_prompt(&model, vec![(0, 5)], 64).await,
+            p.weigh_peer_prompt(&model, vec![(0, 5)], 64, Uuid::new_v4())
+                .await,
             PeerPromptWeight::Fits
         ));
         assert!(matches!(
-            p.weigh_peer_prompt(&model, vec![(0, 9)], 64).await,
+            p.weigh_peer_prompt(&model, vec![(0, 9)], 64, Uuid::new_v4())
+                .await,
             PeerPromptWeight::Fits
         ));
         // The control: room for every layer asked.
         p.set_ram_budget_mb(machine_mb((0, 8)));
         assert!(matches!(
-            p.weigh_peer_prompt(&model, vec![(0, 8)], 64).await,
+            p.weigh_peer_prompt(&model, vec![(0, 8)], 64, Uuid::new_v4())
+                .await,
             PeerPromptWeight::Fits
         ));
         let _ = std::fs::remove_dir_all(&data_dir);
@@ -20458,6 +20519,7 @@ mod admission_tests {
             layer_ranges: vec![(0, 1), (8, 20), (32, 48)],
             prompt_tokens: 6002,
             only_weigh: false,
+            weighs_for: None,
         };
         assert!(p.admit_prompt(admit, Requester::Swarm, None).await.is_ok());
         assert_eq!(p.take_layers_fitting(rid), None, "nothing refused");

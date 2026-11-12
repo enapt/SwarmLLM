@@ -434,6 +434,14 @@ pub struct IpcAdmitPrompt {
     /// that runs here must not displace its forwards' answers.
     #[serde(default)]
     pub only_weigh: bool,
+    /// The request a peer's question weighs a prompt pass for (`only_weigh`
+    /// only; `None` everywhere else). Never a correlation key and never
+    /// recorded: the pass's first piece clears that request's own caches over
+    /// these ranges before it writes, so the weighing leaves them out — a
+    /// re-plan keeps its request's id, and a peer refused the next attempt for
+    /// its earlier attempt's caches (#448).
+    #[serde(default)]
+    pub weighs_for: Option<Uuid>,
 }
 
 /// Forward-pass request header (activation bytes are the binary payload).

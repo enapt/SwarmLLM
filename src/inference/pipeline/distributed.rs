@@ -958,6 +958,7 @@ impl PipelineExecutor {
                 layer_ranges,
                 prompt_tokens,
                 only_weigh: false,
+                weighs_for: None,
             };
             self.shared_state
                 .model_process_pool

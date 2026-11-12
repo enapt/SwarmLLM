@@ -7926,13 +7926,21 @@ fn admit_prompt_in(
     // memory the previous one has already been promised. Drawn down by what
     // each has actually allocated, so nothing is charged twice.
     let promised = kv_store.outstanding_admission_bytes(home);
-    // What this request itself still holds over these ranges — an earlier
-    // attempt's caches and claim, kept under the same request id across a
-    // re-plan — is given back by the pass's first piece before it writes, so
-    // it is never "another conversation's" room (#448). Read once: a release
-    // below keeps this request's caches (`keep`).
-    let model_keys: Vec<&str> = ranges.iter().map(|(m, _)| m.kv_model_key()).collect();
-    let replaced = kv_store.bytes_a_prompt_pass_replaces(home, request_id, &model_keys);
+    // A peer's question weighs the pass of the request it names
+    // (`IpcAdmitPrompt::weighs_for`): what that request still holds over these
+    // ranges — an earlier attempt's caches and claim, kept under the same id
+    // across a re-plan — is given back by the pass's first piece before it
+    // writes, so it is never "another conversation's" room (#448). Only a
+    // question: this node's own admissions clear the request first
+    // (`handle_forward`'s first piece, `admit_prompt_up_front`), and a
+    // generate or a draft may go on from the cache it holds. Read once: a
+    // release below keeps this request's caches (`keep`).
+    let replaced = if admitting == Admitting::OnlyWeigh {
+        let model_keys: Vec<&str> = ranges.iter().map(|(m, _)| m.kv_model_key()).collect();
+        kv_store.bytes_a_prompt_pass_replaces(home, request_id, &model_keys)
+    } else {
+        0
+    };
     let mut live = in_home.saturating_add(promised).saturating_sub(replaced);
     let cached = prefix_cache.bytes_in(SnapshotHome::BesideLive) as u64;
     // Anything live past what this pass replaces belongs to another request
@@ -8149,16 +8157,22 @@ fn admit_prompt_up_front(
     // The pass starts every range's cache afresh, so an earlier attempt's
     // caches for this request (a re-plan keeps the request's id) are not
     // weighed against it; the forwards would clear them anyway. A peer's
-    // question names a fresh id and clears nothing.
+    // question clears nothing: it comes under a fresh id, and is weighed as
+    // the request it names (`weighs_for`), whose own caches the weighing
+    // leaves out instead (#448) — that id keys and records nothing.
     if admitting.writes() {
         kv_store.cleanup_request_id(&request_id);
     }
+    let weighed_as = match admit.weighs_for {
+        Some(asked_for) if admitting == Admitting::OnlyWeigh => asked_for.to_string(),
+        _ => request_id.clone(),
+    };
     match admit_prompt_over(
         &loaded,
         unloaded,
         kv_store,
         prefix_cache,
-        &request_id,
+        &weighed_as,
         admit.prompt_tokens as usize,
         REPLY_RESERVE_POSITIONS,
         0,
@@ -14024,21 +14038,25 @@ mod up_front_admission_tests {
         assert!(kept, "and its refusal evicted nothing");
     }
 
-    /// **A re-planned prompt is weighed without its own earlier attempt's
-    /// cache** (#448, 2026-11-12): the router re-plans under the same request
-    /// id, so a peer still held the previous attempt's 4,306-token cache when
-    /// it was asked again, counted it as another conversation's, and refused
-    /// the request it belonged to. The pass's first piece clears that cache
-    /// before writing. Control, on every kind of admission: the same cache
-    /// under another request, touched just now, still stands in the way.
+    /// **A peer's question about a re-planned prompt is weighed without that
+    /// request's own earlier cache** (#448, 2026-11-12): the router re-plans
+    /// under the same request id, so Italy still held the previous attempt's
+    /// 4,306-token cache when it was asked again, counted it as another
+    /// conversation's, and refused the request it belonged to. The question
+    /// comes under a FRESH id (its answer is routed by it) and names the
+    /// request it weighs for (`weighs_for`); the pass's first piece clears that
+    /// request's cache before writing. Through the worker's own handler, as
+    /// the daemon sends it. Controls: a question naming no request, or another
+    /// one, still finds the cache in the way, and none of them clears it.
     #[test]
-    fn a_replanned_prompt_is_weighed_without_its_own_earlier_cache() {
+    fn a_peers_question_for_a_replanned_prompt_leaves_out_that_requests_earlier_cache() {
         let prompt = 100;
         let per_position = 1000;
         let claim = per_position
             * crate::inference::layers::kv_cache_reservation(prompt + REPLY_RESERVE_POSITIONS)
                 as u64;
-        let admit = |holder: &str, admitting: Admitting| {
+        let replanned = Uuid::new_v4();
+        let ask = |held_by: &str, weighs_for: Option<Uuid>, only_weigh: bool| {
             let model = windowed_model_with_budget(
                 8192,
                 &[None, None],
@@ -14048,7 +14066,7 @@ mod up_front_admission_tests {
             let kv = KvCacheStore::new(std::time::Duration::from_secs(600));
             let pc = PrefixCache::new(true, 8, 0, 4, 8192, 0);
             {
-                let mut entry = kv.get_or_create(model.kv_model_key(), holder, 2);
+                let mut entry = kv.get_or_create(model.kv_model_key(), held_by, 2);
                 for slot in entry.layers.iter_mut() {
                     let k = Tensor::zeros((1usize, 1, 128, 64), DType::F32, &Device::Cpu).unwrap();
                     let mut layer = LayerKv::with_capacity(2, 4096, 4096);
@@ -14056,35 +14074,55 @@ mod up_front_admission_tests {
                     *slot = Some(layer);
                 }
             }
+            let earlier = kv.occupancy().allocated_bytes;
             assert!(
-                kv.occupancy().allocated_bytes > 1024,
+                earlier > 1024,
                 "fixture: the earlier cache is more than the room left beside the claim"
             );
-            let width = model.layer_end.saturating_sub(model.layer_start) as u32;
-            admit_prompt_over(
-                &[(&model, width)],
-                KvGrowth::default(),
-                &kv,
-                &pc,
-                "r",
-                prompt,
-                REPLY_RESERVE_POSITIONS,
-                0,
-                admitting,
-            )
-            .map(|_| ())
-            .map_err(|refused| refused.short_by)
+            let admit = IpcAdmitPrompt {
+                // A question's own id is fresh; this node's own admission names the request.
+                request_id: if only_weigh {
+                    Uuid::new_v4()
+                } else {
+                    replanned
+                },
+                model_id: crate::types::ModelId("m".into()),
+                layer_ranges: vec![(model.layer_start as u32, model.layer_end as u32)],
+                prompt_tokens: prompt as u32,
+                only_weigh,
+                weighs_for,
+            };
+            let mut models = HashMap::new();
+            models.insert((model.layer_start, model.layer_end, 0, 1), model);
+            let answer = admit_prompt_up_front(&models, &kv, &pc, &admit).map_err(|(_, fit)| fit);
+            (answer, kv.occupancy().allocated_bytes == earlier)
         };
-        for admitting in [Admitting::OnlyWeigh, Admitting::UpFront, Admitting::Record] {
-            assert!(
-                admit("r", admitting).is_ok(),
-                "{admitting:?}: the request's own earlier cache is given back by its pass"
-            );
-            assert!(
-                admit("other", admitting).is_err(),
-                "{admitting:?}: control — another request's cache, touched just now, is in the way"
-            );
-        }
+        let ours = replanned.to_string();
+        let (answer, untouched) = ask(&ours, Some(replanned), true);
+        assert!(
+            answer.is_ok(),
+            "the question for the request whose earlier attempt holds the cache: it fits"
+        );
+        assert!(untouched, "and the question cleared nothing");
+        let (answer, untouched) = ask(&ours, None, true);
+        assert!(
+            answer.is_err(),
+            "control: a question naming no request weighs the cache as another conversation's"
+        );
+        assert!(untouched);
+        let (answer, untouched) = ask("other", Some(replanned), true);
+        assert!(
+            answer.is_err(),
+            "control: another request's cache, touched just now, is in the way"
+        );
+        assert!(untouched);
+        // This node's own up-front admission clears the request first, as it always did.
+        let (answer, untouched) = ask(&ours, None, false);
+        assert!(answer.is_ok());
+        assert!(
+            !untouched,
+            "up front, the earlier attempt's cache is cleared"
+        );
     }
 
     /// **A card with no room for a prompt's copy beside its live cache keeps

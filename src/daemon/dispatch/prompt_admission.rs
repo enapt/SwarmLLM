@@ -85,7 +85,12 @@ pub(super) fn on_ask(
     tokio::spawn(async move {
         let weight = shared_state
             .model_process_pool
-            .weigh_peer_prompt(&ask.model_id, ask.layer_ranges.clone(), ask.prompt_tokens)
+            .weigh_peer_prompt(
+                &ask.model_id,
+                ask.layer_ranges.clone(),
+                ask.prompt_tokens,
+                ask.request_id,
+            )
             .await;
         let verdict = match weight {
             PeerPromptWeight::Fits => PromptAdmissionVerdict::Proceed,

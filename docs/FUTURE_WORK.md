@@ -4436,18 +4436,23 @@ conversations on this node are using" its room — the previous attempt's own ca
 id. 28 min, no reply. #430 had raised the coordinator's wait for a peer's read to an hour while the cache it waits
 to use stayed swept at ten minutes: the tightest ceiling sat in another file (`architecture.md` § Timeouts, rule 4).
 
-**Fixed 2026-11-12 (on main, not in a release yet)**, both in the worker, no wire change:
+**Fixed 2026-11-12 (on main, not in a release yet)**, in the worker and its daemon, no wire change:
 1. **A cache whose prompt pass ran here is held past the TTL until the request's first step**
    (`KvCacheStore::note_forward_ran`, called by `handle_forward` after the pass's clear and by the fused batch path;
    swept in `cleanup_expired`, bookkeeping included), up to `kv_cache::PROMPT_PASS_HOLD` — the coordinator's own
    longest wait, `remote_generate::MEASURED_FIRST_TOKEN_MAX` (one figure). A step, a release or the hold's end
    lets it go; a leak is still bounded by the hold, by memory pressure (below) and by the idle unload.
-2. **A prompt pass's admission leaves out what its request already holds over the same ranges**
-   (`KvCacheStore::bytes_a_prompt_pass_replaces`, read by `admit_prompt_in` for all three kinds of admission —
-   a forward's own, up front, and a peer's question): the earlier attempt's caches the pass's first piece clears
-   (`a_prompt_pass_clears`, the ONE rule `clear_request_caches` uses) and what its claim still owes.
+2. **A peer's question about a prompt leaves out what that request already holds over the same ranges**: the
+   question, under a fresh correlation id, NAMES the request (`IpcAdmitPrompt::weighs_for`, from
+   `PromptAdmissionAsk::request_id`), and `admit_prompt_in` takes off `KvCacheStore::bytes_a_prompt_pass_replaces`
+   for `OnlyWeigh` — the earlier attempt's caches the pass's first piece clears (`a_prompt_pass_clears`, the ONE rule
+   `clear_request_caches` uses) and what its claim still owes. This node's own admissions clear first and are
+   unchanged. (The first cut, 299c93ca, took it off for every admission and missed that the question never named
+   the request — caught by the delta review the same evening.)
 Tests `a_cache_whose_prompt_pass_waits_for_the_chain_outlives_the_ttl`,
-`a_prompt_pass_replaces_its_own_earlier_caches_and_claim`, `a_replanned_prompt_is_weighed_without_its_own_earlier_cache`.
+`a_prompt_pass_replaces_its_own_earlier_caches_and_claim`,
+`a_peers_question_for_a_replanned_prompt_leaves_out_that_requests_earlier_cache`,
+`a_peers_question_names_its_request_but_is_answered_by_a_fresh_id`.
 
 Prior art: Petals' server waits a fixed `step_timeout` (5 min) for a session's next inputs inside a 30-min
 `session_timeout` (`src/petals/server/server.py`) — the same exposure to a slow later server's prefill; vLLM keeps a
