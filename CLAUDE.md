@@ -27,7 +27,7 @@ No stubs. Deferred items go in `docs/ARCHITECTURE.md` § "Deferred Items", never
 
 libp2p 0.56, axum 0.8, candle 0.10 (CUDA, **vendored + patched**, see `vendor/`),
 redb 4, dalek 2, chacha20poly1305, blake3, dashmap 6, tokio, clap 4, tracing.
-Four carry contracts, not just versions:
+Five carry contracts, not just versions:
 
 - **minijinja 2.24 + minijinja-contrib (pycompat)** renders chat templates — the
   engine HF's TGI and SGLang use. Its `trim_blocks` / `lstrip_blocks` /
@@ -43,6 +43,9 @@ Four carry contracts, not just versions:
 - **`rayon-core` is vendored for ONE patch**: idle workers spin 200 µs before they
   sleep (8-thread processor decode 172 → 123-127 ms, #137). A `rayon` needing a newer
   core leaves the `[patch]` unused with only a warning. Guarded.
+- **`quinn-proto` is vendored for ONE patch** (upstream PR #2976): a stream behind lost
+  packets is merged, not closed at 1,024 gaps — a far split's 12.9 MB prompt died there (#429). A
+  `quinn`/`libp2p-quic` needing a newer quinn-proto leaves the patch unused. Guarded.
 
 ## Coding Conventions
 
