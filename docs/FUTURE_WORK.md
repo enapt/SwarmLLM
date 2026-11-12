@@ -4401,6 +4401,27 @@ prefix cache". Prior art: llama.cpp's server saves a slot's prompt at slot reuse
    output when a request ends; vLLM caches full decode blocks. Here a segment learns a reply ended only from
    `CancelInference` and never sees token ids: keeping the reply needs the coordinator to send the reply's block
    keys at the end — a new message behind a feature bit (`architecture.md` § "Additive Protocol Evolution").
+   **Designed 2026-11-12 (not built — too much to prove before that night's cut).** Prior art read at the source:
+   SGLang's `cache_finished_req` stores `(origin_input_ids + output_ids)[:kv_committed_len]` — PR #16521 (merged
+   2026-02-10) fixed the regression where only the prompt was kept ("forces unnecessary prefill over
+   already-generated continuation tokens"); the detail that transfers is the COMMITTED length, never the reply's.
+   What a segment holds at a reply's end (code map, 2026-11-12): NOT only the committed path — a chain check's
+   rejected rows stay until the next forward's `truncate_kv_to` (`dsd.rs` `pending_truncate`), a tree's off-path
+   rows past `rows_in_place`, a flow's rows in sent order, a stream's last chunk; nothing cuts them at the end
+   (`send_kv_truncate_to_segments` only for a stop string with a `session_id`). So the bound must be a MARK the
+   segment keeps itself, one rule at `handle_forward` whatever the path: every forward at `index_pos` (after its
+   truncate) relies on `[0, index_pos)` being the committed conversation, and a forward carrying a tree on `[0,
+   draft_tree_from)` — the mark is that start, kept per request entry. The store is then `plan_chain_insert` with
+   `held.positions` capped at the mark and keys `chain_keys(prompt ids ++ reply ids)` (content-keyed: a turn that
+   re-tokenizes the reply differently only misses from that block, never matches wrong text). The coordinator
+   counts the blocks from the segment's ANSWER (`note_stored`): a belief past what is held is a miss, and a miss
+   re-reads from 0. **Ordering is the hard part**: the release is fire-and-forget (`finalize_request` →
+   `release_request_on_peers`, `CancelInference`; a worker drops a cancelled request's cache), and this node's own
+   worker is released on its own path — the keep must reach each worker before its release, so the release waits
+   for the keep's answer (bounded) in a task of its own, never the reply's end. Also: a `KeepReply` names a
+   request id a middle peer knows, so only the peer that ran the request's forwards may send it (it also ends the
+   request) — `security-reviewer`. Rig: `split_rig.sh splitcache TURNS=5`, prompt pass per turn on/off, replies
+   identical.
 
 ### Model families and platforms
 
