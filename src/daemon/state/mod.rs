@@ -2650,9 +2650,27 @@ impl SharedState {
             .observe(kind, segment_ms, layers, activation_bytes, prompt, was_warm);
         // This peer has now demonstrably got the model resident, so the next
         // forward does not need the cold-load allowance.
-        self.metrics
-            .peer_model_warm_at
-            .insert(key, std::time::Instant::now());
+        self.note_peer_model_resident(node_id, model_id);
+    }
+
+    /// `node_id` has just served `model_id` — a timed forward, or a whole
+    /// hand-off's first token — so the model is resident there: the next wait
+    /// on it needs no cold-load allowance, and the planner may read it as warm
+    /// ([`Self::peer_model_is_warm`]). A reply too short to time (one token,
+    /// a "yes") proves it as well as a long one: marked only through a timing
+    /// sample, a whole hand-off answered "Ready" left its peer cold for every
+    /// later wait, and a long prompt there was never timed (#430's rig,
+    /// 2026-11-12). Prior art: Ollama restarts a model's keep-alive when ANY
+    /// request to it finishes, whatever the reply's length.
+    pub fn note_peer_model_resident(
+        &self,
+        node_id: &crate::types::NodeId,
+        model_id: &crate::types::ModelId,
+    ) {
+        self.metrics.peer_model_warm_at.insert(
+            (node_id.clone(), model_id.clone()),
+            std::time::Instant::now(),
+        );
     }
 
     /// `node_id`'s worker for `model_id` answered a prompt pass with a prompt it

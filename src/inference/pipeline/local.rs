@@ -1538,7 +1538,7 @@ mod segment_budget_tests {
     /// just restarted failed inside a flat 120 s (FUTURE_WORK #129).
     #[test]
     fn a_hand_off_and_a_segment_give_a_cold_peer_the_same_room_to_load() {
-        use crate::inference::pipeline::remote_generate::first_token_timeout;
+        use crate::inference::pipeline::remote_generate::{first_token_timeout, MeasuredRead};
         let state = test_state();
         let node = NodeId([7u8; 32]);
         let model = ModelId("qwen3.5-9b-q4-k-m".into());
@@ -1558,10 +1558,10 @@ mod segment_budget_tests {
         // 24 prompt tokens, the request that failed live: 132 s warm, and the
         // cold load on top of it.
         assert_eq!(
-            first_token_timeout(24, load),
-            first_token_timeout(24, LoadAllowance::none()) + load.duration()
+            first_token_timeout(24, load, MeasuredRead::Unknown),
+            first_token_timeout(24, LoadAllowance::none(), MeasuredRead::Unknown) + load.duration()
         );
-        assert!(first_token_timeout(24, load) > Duration::from_secs(300));
+        assert!(first_token_timeout(24, load, MeasuredRead::Unknown) > Duration::from_secs(300));
 
         // Once it has answered a forward of this model, neither path charges it.
         state.record_peer_segment_latency(&node, &model, WorkKind::Delegated, 2_700, 32, 0, None);
@@ -1570,8 +1570,12 @@ mod segment_budget_tests {
             0
         );
         assert_eq!(
-            first_token_timeout(24, LoadAllowance::for_peer(&state, &node, &model)),
-            first_token_timeout(24, LoadAllowance::none())
+            first_token_timeout(
+                24,
+                LoadAllowance::for_peer(&state, &node, &model),
+                MeasuredRead::Unknown
+            ),
+            first_token_timeout(24, LoadAllowance::none(), MeasuredRead::Unknown)
         );
     }
 

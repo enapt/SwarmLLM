@@ -1029,6 +1029,17 @@ if [ "${n:-0}" -ne "$PEERS_EXPECTED" ]; then
   exit 1
 fi
 echo "rig: A sees exactly its $PEERS_EXPECTED rig peer(s)"
+# A holding only the header (SHARDS_A=none) learns the model from its holders'
+# manifest, which a new connection is caught up on at the next manifest round, not
+# at connect: asked at once, the first two asks 404ed (2026-11-12). Wait until A
+# lists the model, so an ask measures the route, not that round.
+model_listed() {
+  curl -s -m 5 -H "Authorization: Bearer $KA" localhost:8900/v1/models | python3 -c 'import sys,json
+try: print(int(any(m.get("id")==sys.argv[1] for m in json.load(sys.stdin).get("data",[]))))
+except Exception: print(0)' "$MODEL"
+}
+for _ in $(seq 1 60); do [ "$(model_listed)" = 1 ] && break; sleep 2; done
+[ "$(model_listed)" = 1 ] || echo "rig: A still does not list $MODEL after 120 s — its asks may 404"
 
 ask() { # prompt max_tokens label  (writes $OUT/<label>.{hdr,body}, prints a JSON line)
   local body

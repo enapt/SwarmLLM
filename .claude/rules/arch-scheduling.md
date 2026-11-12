@@ -293,7 +293,7 @@ width, a full card holding the range loaded was never a standby for it (#354 (a)
 
 ## A wait on a peer's first answer allows for its load, on every path (2026-10-07)
 
-**`pipeline::LoadAllowance` is the single answer to "may this peer first have to load the model"**: a REQUIRED argument of `remote_generate::first_token_timeout` (hand-off, HTTP pool forward), asked by `SegmentBudget::for_forward`; outside tests it is built only by asking (`for_peer` / `for_segments`). The first-token wait ends when the peer's last connection closes. Rig: `examples/cold_load_test.sh`.
+**`pipeline::LoadAllowance` is the single answer to "may this peer first have to load the model"**: a REQUIRED argument of `remote_generate::first_token_timeout` (hand-off, HTTP pool forward), asked by `SegmentBudget::for_forward`; outside tests it is built only by asking (`for_peer` / `for_segments`). The first-token wait ends when the peer's last connection closes. Rig: `examples/cold_load_test.sh`. **Its third REQUIRED argument, `remote_generate::MeasuredRead`** (#430): a whole hand-off to a peer with a believed prompt floor (`MeasuredRead::of_whole_model`) waits `2 × floor × layers × tokens` past the 600 s cap, up to an hour, never less than the allowance; a led split and the HTTP forward pass `Unknown`. **"Warm" is set by ANY answer** — `SharedState::note_peer_model_resident` is the mark's one writer, called by every timing sample and by a whole hand-off's reply of any length (`note_a_whole_reply`): marked only by a sample, a one-token reply left its peer cold and its next long prompt untimed (2026-11-12).
 
 → `docs/invariants/scheduling.md` § "A wait on a peer's first answer allows for its load, on every path"
 

@@ -1984,9 +1984,15 @@ Rules that follow:
    one alone, and requires no guess about size or bandwidth. Use it for every
    download and every streamed proxy response.
 2. **Where inactivity does not apply, scale the budget by the input and cap it** —
-   `pipeline::remote_generate::first_token_timeout(prompt_tokens)` is the shared
-   helper; call it rather than inventing another rule. Prefill is linear in
-   prompt length and is ~99% of a long request.
+   `pipeline::remote_generate::first_token_timeout(prompt_tokens, load, read)` is
+   the shared helper; call it rather than inventing another rule. Prefill is
+   linear in prompt length and is ~99% of a long request. The cap was itself a
+   minimum prompt speed nobody chose: a sole holder reading a 27B's 4,110-token
+   prompt at 7-9 tok/s failed every such request at 600 s (#430). Where the peer
+   has been MEASURED reading prompts of that model whole (`MeasuredRead`, its
+   believed floor × layers × tokens), the wait is twice that, up to an hour; a
+   wait that still runs out raises the floor, so the next is longer (RFC 6298's
+   back-off on expiry).
 3. **Generation gets no blanket deadline.** Routes that can run a model are
    merged into the router OUTSIDE the `TimeoutLayer` (`generation_routes` in
    `api/server.rs`). The merge MUST stay before the auth layer or those

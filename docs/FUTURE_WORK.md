@@ -3431,7 +3431,7 @@ What it says (the user, 11-08: a split that fails or is slow is the defect — n
   ONE such computer; read across several in pieces it need not be (#430).
 
 #### #430 — A long prompt read on ONE computer that cannot read it fast: no first token in 10 minutes
-`P2` · perf-split · **OPEN** (residual: the first-token wait sized from a measured rate, and pieces timed between two machines; (a)'s ratio and (c) fixed 2026-11-11, the hand-off's prompt floor built 2026-11-12) — 2026-11-08 · history: #427 (measured), #171 (a prompt pass read in pieces)
+`P2` · perf-split · **OPEN** (residual: an inactivity wait fed by progress frames, and pieces timed between two machines; (a)'s ratio and (c) fixed 2026-11-11, the hand-off's prompt floor and the wait sized from it built 2026-11-12) — 2026-11-08 · history: #427 (measured), #171 (a prompt pass read in pieces)
 
 Qwen3.8-27B with a 4,110-token prompt (#427's table) was handed whole to the only machine holding every layer, whose
 card holds part of a 27B and processor the rest; it reads such a prompt at ~7-9.5 tok/s (Qwen3.6-27B there: 432 s),
@@ -3500,15 +3500,47 @@ every part on the processor, a short ask then two ~1,220-token prompts): the fir
 the prior and took ~102 s; the second — one sample, waiting for a second — was priced 53.3 s and took ~103 s; with
 two, the third was priced 101.4 s at the lesser (3.79 ms a layer and token) and took ~102 s. Tests `a_whole_hand_off_is_priced_no_lower_than_its_prompts_were_timed`,
 `a_whole_prompt_floor_lasts_an_hour_and_keeps_its_entry` (each red with its fix off),
-`a_whole_hand_offs_wait_times_its_prompt_less_the_trip_and_a_step` (arithmetic). Left: sizing the first-token wait
-from it (the 600 s cap, `architecture.md` § Timeouts). The wait that ran out, on the same rig with B pinned to ONE
+`a_whole_hand_offs_wait_times_its_prompt_less_the_trip_and_a_step` (arithmetic). Then: sizing the first-token wait
+from it (the 600 s cap, `architecture.md` § Timeouts) — built below. The wait that ran out, on the same rig with B pinned to ONE
 logical CPU (`CPUS_B=0`) and a 1,702-token prompt: no first token in 600 s, A logged `waited_ms=600002 one_step_ms=0
 floor_ms_per_layer_token=16.02` (the build before the two-sample rule), reported the peer as silent (no other route), and its next plan carried
 `observed_whole_prompt_floor_ms_per_layer_token=Some(16.02393)`.
 Left from its review (P3, both err toward the price as it was): a peer's own prefix cache holding the prompt from
 ANOTHER coordinator, or from before this node restarted, reads the floor fast — the price then falls back to the
 ratio, never below it; a one-token reply leaves its step in the sample (`one_step_ms` 0), a step's worth slow.
-**Design for the first-token wait (2026-11-12, not built — the next residual):** the 600 s cap is a minimum prompt speed
+**Built 2026-11-12, on main (not in a release yet) — the first-token wait sized from the floor**
+(`remote_generate::MeasuredRead`, a REQUIRED third argument of `first_token_timeout`): a whole hand-off to a peer
+with a believed floor waits `120 s + 2 × floor × layers × tokens`, past the old 600 s ceiling up to an hour
+(`MEASURED_FIRST_TOKEN_MAX`), never less than the prompt-scaled allowance; a led split and the HTTP pool forward pass
+`Unknown` (no whole-model figure describes them). A wait that still runs out is a censored sample that raises the
+floor (α 0.3), so each failure lengthens the next wait ~1.3× — TCP's retransmission timer, sized from the measured
+round trip and backed off on expiry (RFC 6298 § 5.5). The rig's case: 16.02 ms × 22 layers × 1,702 tokens ≈ 600 s
+→ the next such prompt waits ~1,320 s. Logged as `measured_read=` on "remote-generate fast path: request sent".
+Tests `a_peer_measured_to_read_slowly_is_waited_for_past_the_old_ceiling` (red with the margin at 0),
+`a_fast_measurement_never_shortens_the_wait`, `a_measured_wait_is_capped_at_an_hour`. **Verified on its rig**
+(`~/rig430/rig_floor5.sh`, `out-1112d`: B on ONE logical CPU, TinyLlama whole, A the header only): q2 (1,999 tokens)
+ran out at 600 s and was timed at 13.64 ms a layer and token; q3 (1,978 tokens, another opening) went out
+`measured_read=AtLeast(593.7s)` with a 1,307 s budget and COMPLETED in 897 s, the reply right. It still fails the
+FIRST long prompt to a peer never measured — what the progress frames below are for.
+**Found by its rig (2026-11-12): a peer that answered with ONE token stayed "cold".** Only a timing sample marked
+a peer's model resident (`peer_model_warm_at`), and a whole hand-off's sample needs two tokens: the rig's warm-up
+answered "Ready", so every later ask carried a 240 s load allowance (`cold_loads=1`), the long prompt's run-out was
+not timed (a cold wait is not the peer's read), and the next ask went out `measured_read=Unknown` with the same
+840 s (`~/rig430/floor5/out-1112c`). The planner reads the same mark (`PeerResidency::WarmAmountUnknown`, a warm
+peer charged no weights), so any one-token reply — a "yes", a classification — left its peer planned cold for five
+minutes. Now a whole hand-off's reply of any length marks it (`remote_generate::note_a_whole_reply` →
+`SharedState::note_peer_model_resident`, after the sample so a first sample is judged as before; a truncated reply
+too). Prior art: Ollama restarts a model's keep-alive when any request to it finishes. Test
+`a_one_token_reply_marks_the_model_resident_on_its_peer`.
+**Found 2026-11-12 for the frames: the worker's SEQUENTIAL generate reads the prompt in ONE forward**
+(`model_worker::handle_generate`'s prefill: `model.forward(&rest, from, ..)`), so it has no pieces to report; only
+the batched slot path (`step_decode_pool`, Sarathi chunks) sends `WorkerMsg::Progress`, and a lone request that may
+guess ahead takes the sequential path (`slot_admission_eligible`). That progress also stops at the peer's own trace
+(`daemon::background::spawn_progress_forwarder` → `active_traces`, which a peer's hand-off has no entry in). The
+first change is progress from the sequential prefill — read in chunks (every local reply's prompt speed, so A/B on a
+card and a processor first) or reported per layer of the one forward — then a subscriber in that forwarder for the
+hand-off's request id.
+**Design for the first-token wait (2026-11-12, the next residual):** the 600 s cap is a minimum prompt speed
 nobody chose (`architecture.md` § Timeouts, rule 1: prefer an inactivity timeout to a total one), and a sole holder
 that reads slower than it fails EVERY long prompt, knowably in advance. Prior art: llama.cpp's server streams
 `prompt_progress {total, cache, processed, time_ms}` while it reads a prompt when asked (`return_progress`, PR #15827;
@@ -3531,7 +3563,13 @@ stream that sends no bytes. Shape here:
 **Also from the release's review (2026-11-12, P3):** a peer request stopped for heat (`stop_running_peer_work`, #440)
 is aborted without `release_request_kv`, so its target and any drafter stay `in_use` until `CONVERSATION_GAP_SECS`
 passes — a whole placement's reclaim of that idle drafter (#442) waits that long. The disconnect abort has the same
-delay; both would release at the abort.
+delay; both would release at the abort. **Checked 2026-11-12: not so, nothing to build.** A whole hand-off's
+`ModelProcessPool::generate` never notes a held conversation (`note_conversation`'s only callers are `admit_prompt`,
+`forward_direct`, `draft` and `forward_batch`), and its `ResponseGuard` drop removes the response and sends the worker
+`CancelRequest`, so `in_use` is false at the abort. A led split's abort drops `CancelOnDrop`: the router's own task
+reads the cancel, and `finalize_request` runs on that ending too (`release_request_kv` + `release_request_on_peers`
+for the led id), once the forward in flight returns. A drafter's cache is keyed per attempt and released by the
+`ReadAhead` / `EngineDrafter` drop.
 
 **The design it was built from (2026-11-12):**
 - *Sample, at the coordinator* (`remote_generate`, beside the `Delegated` record): the first token's wait less

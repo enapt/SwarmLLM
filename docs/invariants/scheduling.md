@@ -3272,6 +3272,40 @@ chosen). Outside tests a `LoadAllowance` can only be built by asking about
 peers (`none()` is `#[cfg(test)]`), so no caller can pass a bare duration.
 The allowance is added ON TOP of the prompt's cap, as on the segment path.
 
+**And the prompt's cap gives way to a measured read (2026-11-12, #430).**
+`first_token_timeout`'s third REQUIRED argument, `remote_generate::MeasuredRead`,
+is `MeasuredRead::of_whole_model` for a whole hand-off — the peer's believed
+prompt floor (`observed_whole_prompt_floor_ms_per_layer_token`) × the layers ×
+the prompt's tokens — and `Unknown` for a led split and the HTTP forward, whose
+shape no whole-model figure describes. Known, the wait is
+`120 s + 2 × that`, past the 600 s cap up to `MEASURED_FIRST_TOKEN_MAX` (an
+hour), never below the prompt-scaled allowance. The rig that produced the
+floor: B on one logical CPU, a 1,702-token prompt, no first token in 600 s,
+recorded at 16.02 ms a layer and token over TinyLlama's 22 layers (~600 s) —
+the next such prompt waits ~1,320 s. A wait that still runs out is a censored
+sample averaged into the floor (α 0.3), so each failure lengthens the next wait
+~1.3×. On the rig (`~/rig430/rig_floor5.sh`, 2026-11-12): the next 1,978-token ask
+went out `measured_read=AtLeast(593.7s)`, budget 1,307 s, and completed in 897 s
+where the build before failed it at 600. Tests `a_peer_measured_to_read_slowly_is_waited_for_past_the_old_ceiling`
+(red with the margin at 0), `a_fast_measurement_never_shortens_the_wait`,
+`a_measured_wait_is_capped_at_an_hour`.
+
+**"Answered" is any answer, however short (2026-11-12).** The warm mark
+(`peer_model_warm_at`) was set only by a timing sample
+(`record_peer_segment_latency`), and a whole hand-off's sample needs two
+tokens. The floor's rig warmed its peer with "Say the single word: ready" — one
+token, no sample — so the peer stayed cold: every later ask carried 240 s for a
+load that never came (`cold_loads=1`), the long prompt's run-out was not timed
+(a cold wait is not the peer's read), and the ask after it went out
+`measured_read=Unknown` with the same 840 s (`~/rig430/floor5/out-1112c`). The
+planner reads the same mark (`PeerResidency::WarmAmountUnknown`), so a one-token
+reply also left its peer planned as cold. A whole hand-off's reply now marks the
+model resident whatever its length, after its sample so a first sample is
+judged as before (`remote_generate::note_a_whole_reply` →
+`SharedState::note_peer_model_resident`, the mark's one writer; a truncated
+reply too). Prior art: Ollama restarts a model's keep-alive when any request to
+it finishes. Test `a_one_token_reply_marks_the_model_resident_on_its_peer`.
+
 **What it replaced.** The 2026-08-01 fix (archive § "The three follow-ups",
 1) gave the allowance to the segment path only, for "a CPU peer took ~120 s to
 load an 8B model and was cut off by a flat 120 s deadline". The hand-off — the

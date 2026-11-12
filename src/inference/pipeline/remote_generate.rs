@@ -595,6 +595,53 @@ const PREFILL_ALLOWANCE_PER_TOKEN: Duration = Duration::from_millis(500);
 /// Ceiling on the first-token budget, so a genuinely dead peer is still
 /// detected in bounded time no matter how long the prompt is.
 const FIRST_TOKEN_TIMEOUT_MAX: Duration = Duration::from_secs(600);
+/// What a peer's own measured read of a prompt is multiplied by before the wait
+/// is sized from it (#430): the measurement is a FLOOR (the lesser of two
+/// samples, or a wait that ran out), so the read itself can take longer.
+const MEASURED_READ_MARGIN: u32 = 2;
+/// Ceiling on a wait sized from a measured read. Past it the reply is not worth
+/// waiting for; a caller who stops reading is still noticed at once (the wait
+/// is watched for a cancel).
+const MEASURED_FIRST_TOKEN_MAX: Duration = Duration::from_secs(3600);
+
+/// What this node has measured of a peer reading a prompt of this length.
+///
+/// A REQUIRED argument of [`first_token_timeout`]: the 600 s ceiling alone was a
+/// minimum prompt speed nobody chose — a sole holder that reads a 27B's
+/// 4,110-token prompt at 7-9 tok/s failed every such request, knowably in
+/// advance (#430, `architecture.md` § Timeouts).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum MeasuredRead {
+    /// Nothing measured for this shape: a split led by its head, an HTTP
+    /// forward, a peer never timed reading a long prompt of this model.
+    Unknown,
+    /// The least time the peer has been seen to take for a prompt this long.
+    AtLeast(Duration),
+}
+
+impl MeasuredRead {
+    /// The peer's believed floor for reading `prompt_tokens` through `layers`
+    /// layers of `model_id` whole (`SharedState::observed_whole_prompt_floor_ms_per_layer_token`,
+    /// first-hand: a wait it ran out of counts as at least itself).
+    pub(crate) fn of_whole_model(
+        state: &crate::daemon::state::SharedState,
+        node: &crate::types::NodeId,
+        model_id: &crate::types::ModelId,
+        layers: u32,
+        prompt_tokens: usize,
+    ) -> Self {
+        match state.observed_whole_prompt_floor_ms_per_layer_token(node, model_id) {
+            Some(ms) if ms.is_finite() && ms > 0.0 => {
+                let read_ms = f64::from(ms) * f64::from(layers) * prompt_tokens as f64;
+                // Saturates at the ceiling: anything past it is capped there.
+                Self::AtLeast(Duration::from_millis(
+                    read_ms.min(MEASURED_FIRST_TOKEN_MAX.as_millis() as f64) as u64,
+                ))
+            }
+            _ => Self::Unknown,
+        }
+    }
+}
 /// Fallback characters-per-token divisor, used only when the model's tokenizer
 /// isn't available locally (the coordinator of a remote generate often holds no
 /// shard of the model, so it has no header to load one from).
@@ -617,12 +664,32 @@ const PROMPT_CHARS_PER_TOKEN: usize = 2;
 /// ceiling, as the segment path does — a cold load is not prompt work and must
 /// not be clipped away by the prompt's cap. Required, so no caller can wait on
 /// a peer's first answer without having asked whether that peer is cold.
-pub(crate) fn first_token_timeout(prompt_tokens: usize, load: super::LoadAllowance) -> Duration {
+///
+/// `read` is what the peer has been MEASURED to take for a prompt this long
+/// (#430). Where it is known the wait is at least twice it, past the 600 s
+/// ceiling up to an hour — never shorter than the prompt-scaled allowance, so a
+/// fast measurement takes nothing away. A wait that still runs out is itself a
+/// sample (a right-censored read: `note_whole_prompt_floor`'s `ran_out`), which
+/// raises the floor (averaged in, α 0.3), so the next wait is longer — as TCP's
+/// retransmission timer is sized from the measured round trip and backed off on
+/// each expiry (RFC 6298 § 5.5), where a fixed wait would fail a slow but
+/// working peer for ever.
+pub(crate) fn first_token_timeout(
+    prompt_tokens: usize,
+    load: super::LoadAllowance,
+    read: MeasuredRead,
+) -> Duration {
     let tokens = u32::try_from(prompt_tokens).unwrap_or(u32::MAX);
-    FIRST_TOKEN_TIMEOUT
+    let allowance = FIRST_TOKEN_TIMEOUT
         .saturating_add(PREFILL_ALLOWANCE_PER_TOKEN.saturating_mul(tokens))
-        .min(FIRST_TOKEN_TIMEOUT_MAX)
-        .saturating_add(load.duration())
+        .min(FIRST_TOKEN_TIMEOUT_MAX);
+    let measured = match read {
+        MeasuredRead::Unknown => Duration::ZERO,
+        MeasuredRead::AtLeast(floor) => FIRST_TOKEN_TIMEOUT
+            .saturating_add(floor.saturating_mul(MEASURED_READ_MARGIN))
+            .min(MEASURED_FIRST_TOKEN_MAX),
+    };
+    allowance.max(measured).saturating_add(load.duration())
 }
 
 /// The shortest prompt whose whole hand-off times the peer's prompt rate
@@ -687,6 +754,52 @@ fn note_whole_prompt_floor(
         );
         state.note_whole_prompt_read(&segment.node_id, model_id, floor, ran_out);
     }
+}
+
+/// What a whole hand-off's reply, delivered intact, tells this node of
+/// `segment`'s peer: its steady decode rate (tokens after the first, at least
+/// two), its prompt floor where the wait may time it (`prompt_floor_tokens`,
+/// #430), and — whatever the reply's length — that the model is resident
+/// there. A one-token answer takes no sample, and marked only through one it
+/// left its peer cold for every later wait (`SharedState::note_peer_model_resident`).
+/// The mark comes after the sample, so the first sample is judged as before.
+fn note_a_whole_reply(
+    state: &crate::daemon::state::SharedState,
+    segment: &crate::types::PipelineSegment,
+    model_id: &crate::types::ModelId,
+    first_token_after: Duration,
+    reply_took: Duration,
+    completion_tokens: u32,
+    prompt_floor_tokens: Option<usize>,
+) {
+    let steady = reply_took.saturating_sub(first_token_after);
+    let layers = segment.layer_range.1.saturating_sub(segment.layer_range.0);
+    let mut one_step_ms = 0;
+    if delegated_sample_is_usable(false, completion_tokens, layers) {
+        let per_token_ms = steady.as_millis() as u64 / u64::from(completion_tokens - 1);
+        one_step_ms = per_token_ms;
+        state.record_peer_segment_latency(
+            &segment.node_id,
+            model_id,
+            crate::daemon::state::WorkKind::Delegated,
+            per_token_ms,
+            layers,
+            0,
+            None,
+        );
+    }
+    if let Some(tokens) = prompt_floor_tokens {
+        note_whole_prompt_floor(
+            state,
+            segment,
+            model_id,
+            first_token_after.as_millis() as u64,
+            one_step_ms,
+            tokens,
+            false,
+        );
+    }
+    state.note_peer_model_resident(&segment.node_id, model_id);
 }
 
 /// How often a wait for a peer's first token looks up whether the peer is
@@ -998,7 +1111,20 @@ impl PipelineExecutor {
             HandOff::DelegatedSplit => &self.assignment.segments[..],
         };
         let load = super::LoadAllowance::for_segments(&self.shared_state, waited_on);
-        let first_token_budget = first_token_timeout(prompt_tokens_est, load);
+        // What the peer has been measured to take for a prompt this long — a
+        // whole model only: a delegate reads its prompt in pieces across the
+        // split it leads, which no whole-model figure describes (#430).
+        let measured_read = match hand_off {
+            HandOff::WholeModel => MeasuredRead::of_whole_model(
+                &self.shared_state,
+                &segment.node_id,
+                &self.request.model_id,
+                segment.layer_range.1.saturating_sub(segment.layer_range.0),
+                prompt_tokens_est,
+            ),
+            HandOff::DelegatedSplit => MeasuredRead::Unknown,
+        };
+        let first_token_budget = first_token_timeout(prompt_tokens_est, load, measured_read);
         // May this wait time the peer's prompt (#430, `whole_prompt_floor`)? A
         // whole model, a prompt counted by the model's own tokenizer, a peer
         // that need not load first, and none of the prompt believed held there
@@ -1126,6 +1252,8 @@ impl PipelineExecutor {
             ?hand_off,
             first_token_budget_s = first_token_budget.as_secs(),
             cold_loads = load.cold_loads(),
+            // The peer's measured read of this prompt, when known (#430).
+            ?measured_read,
             "remote-generate fast path: request sent"
         );
 
@@ -1729,6 +1857,11 @@ impl PipelineExecutor {
         // deliberately absent from `is_transient_remote_failure`, because that
         // retry reuses this same token channel and would emit the reply twice.
         if stream_was_truncated {
+            // Tokens arrived, so the model is resident there all the same.
+            if whole_model && first_token_at.is_some() {
+                self.shared_state
+                    .note_peer_model_resident(&segment.node_id, &self.request.model_id);
+            }
             return Err(SwarmError::ReplyTruncated(format!(
                 "{} of {} tokens arrived from {}",
                 delivered, claimed_by_peer, segment.node_id
@@ -1738,35 +1871,15 @@ impl PipelineExecutor {
         // A delegated split's pace is its PLAN's — the delegate and every peer
         // it chose — and recorded as the delegate's it would misprice it.
         if let Some(ttft) = first_token_at.filter(|_| whole_model) {
-            let steady = sent_at
-                .elapsed()
-                .saturating_sub(ttft.duration_since(sent_at));
-            let layers = segment.layer_range.1.saturating_sub(segment.layer_range.0);
-            let mut one_step_ms = 0;
-            if delegated_sample_is_usable(stream_was_truncated, completion_tokens, layers) {
-                let per_token_ms = steady.as_millis() as u64 / u64::from(completion_tokens - 1);
-                one_step_ms = per_token_ms;
-                self.shared_state.record_peer_segment_latency(
-                    &segment.node_id,
-                    &self.request.model_id,
-                    crate::daemon::state::WorkKind::Delegated,
-                    per_token_ms,
-                    layers,
-                    0,
-                    None,
-                );
-            }
-            if let Some(tokens) = prompt_floor_tokens {
-                note_whole_prompt_floor(
-                    &self.shared_state,
-                    &segment,
-                    &self.request.model_id,
-                    ttft.duration_since(sent_at).as_millis() as u64,
-                    one_step_ms,
-                    tokens,
-                    false,
-                );
-            }
+            note_a_whole_reply(
+                &self.shared_state,
+                &segment,
+                &self.request.model_id,
+                ttft.duration_since(sent_at),
+                sent_at.elapsed(),
+                completion_tokens,
+                prompt_floor_tokens,
+            );
         }
 
         // The peer's worker read this prompt through `Generate`, which keeps
@@ -1868,13 +1981,35 @@ mod first_token_budget_tests {
         let cold = LoadAllowance::for_segments(&state, &[segment([1u8; 32]), segment([2u8; 32])]);
         assert_eq!(cold.cold_loads(), 2);
         assert_eq!(
-            first_token_timeout(usize::MAX, cold),
+            first_token_timeout(usize::MAX, cold, MeasuredRead::Unknown),
             FIRST_TOKEN_TIMEOUT_MAX + cold.duration()
         );
         assert_eq!(
-            first_token_timeout(0, cold),
+            first_token_timeout(0, cold, MeasuredRead::Unknown),
             FIRST_TOKEN_TIMEOUT + cold.duration()
         );
+    }
+
+    /// #430's rig, 2026-11-12: a peer that answered a whole hand-off with ONE
+    /// token ("Ready") took no timing sample, and only a sample marked the
+    /// model resident — so the next long prompt's wait carried a load
+    /// allowance and could not time the peer's read (`measured_read=Unknown`
+    /// on the ask after a wait that ran out). A reply of any length marks it.
+    #[test]
+    fn a_one_token_reply_marks_the_model_resident_on_its_peer() {
+        use crate::inference::pipeline::LoadAllowance;
+        let state = test_state();
+        let seg = segment([4u8; 32]);
+        let model = seg.shard_id.model_id.clone();
+        let cold_loads = || LoadAllowance::for_peer(&state, &seg.node_id, &model).cold_loads();
+        assert_eq!(cold_loads(), 1, "never served here: cold");
+        let first_token = Duration::from_millis(900);
+        note_a_whole_reply(&state, &seg, &model, first_token, first_token, 1, None);
+        assert!(
+            state.metrics.peer_speed.get(&seg.node_id).is_none(),
+            "one token times no decode step"
+        );
+        assert_eq!(cold_loads(), 0, "but it proves the model is loaded there");
     }
 
     #[test]
@@ -1933,8 +2068,14 @@ mod first_token_budget_tests {
     #[test]
     fn short_prompt_keeps_the_original_budget() {
         // A handful of tokens must not shift the long-standing default.
-        assert_eq!(first_token_timeout(0, warm()), FIRST_TOKEN_TIMEOUT);
-        assert!(first_token_timeout(10, warm()) < FIRST_TOKEN_TIMEOUT + Duration::from_secs(6));
+        assert_eq!(
+            first_token_timeout(0, warm(), MeasuredRead::Unknown),
+            FIRST_TOKEN_TIMEOUT
+        );
+        assert!(
+            first_token_timeout(10, warm(), MeasuredRead::Unknown)
+                < FIRST_TOKEN_TIMEOUT + Duration::from_secs(6)
+        );
     }
 
     /// CJK sits near one token per character, so a divisor tuned for Latin
@@ -1965,7 +2106,7 @@ mod first_token_budget_tests {
     fn budget_never_shrinks_below_the_base() {
         for tokens in [0, 1, 10, 100, 1_000, 100_000] {
             assert!(
-                first_token_timeout(tokens, warm()) >= FIRST_TOKEN_TIMEOUT,
+                first_token_timeout(tokens, warm(), MeasuredRead::Unknown) >= FIRST_TOKEN_TIMEOUT,
                 "prompt of {tokens} tokens shortened the budget"
             );
         }
@@ -1975,7 +2116,7 @@ mod first_token_budget_tests {
     /// a 6-core CPU node and was cut off by the flat 120s budget.
     #[test]
     fn covers_the_prompt_that_timed_out_live() {
-        let budget = first_token_timeout(613, warm());
+        let budget = first_token_timeout(613, warm(), MeasuredRead::Unknown);
         assert!(
             budget > Duration::from_secs(285),
             "budget {budget:?} still cuts off the prompt that measured 285s"
@@ -1985,7 +2126,7 @@ mod first_token_budget_tests {
     /// A second live measurement, on a longer prompt: 1322 tokens took 319s.
     #[test]
     fn covers_the_longer_measured_prompt() {
-        let budget = first_token_timeout(1322, warm());
+        let budget = first_token_timeout(1322, warm(), MeasuredRead::Unknown);
         assert!(
             budget > Duration::from_secs(319),
             "budget {budget:?} cuts off a prompt measured at 319s"
@@ -1996,7 +2137,7 @@ mod first_token_budget_tests {
     fn budget_is_monotonic_in_prompt_length() {
         let mut prev = Duration::ZERO;
         for tokens in [0, 100, 500, 1_000, 5_000, 50_000] {
-            let b = first_token_timeout(tokens, warm());
+            let b = first_token_timeout(tokens, warm(), MeasuredRead::Unknown);
             assert!(b >= prev, "budget went backwards at {tokens} tokens");
             prev = b;
         }
@@ -2006,12 +2147,90 @@ mod first_token_budget_tests {
     fn absurd_prompt_is_capped_not_overflowed() {
         // A dead peer must still be detected in bounded time.
         assert_eq!(
-            first_token_timeout(usize::MAX, warm()),
+            first_token_timeout(usize::MAX, warm(), MeasuredRead::Unknown),
             FIRST_TOKEN_TIMEOUT_MAX
         );
         assert_eq!(
-            first_token_timeout(10_000_000, warm()),
+            first_token_timeout(10_000_000, warm(), MeasuredRead::Unknown),
             FIRST_TOKEN_TIMEOUT_MAX
+        );
+    }
+
+    /// #430's rig: a peer on one logical CPU ran out of the 600 s wait on a
+    /// 1,702-token prompt and was recorded at 16.02 ms a layer and token over
+    /// TinyLlama's 22 layers — ~600 s, a floor. The next such prompt is waited
+    /// for twice that, past the old ceiling; with nothing measured it is not.
+    #[test]
+    fn a_peer_measured_to_read_slowly_is_waited_for_past_the_old_ceiling() {
+        let state = test_state();
+        let node = crate::types::NodeId([9u8; 32]);
+        let model = crate::types::ModelId("tinyllama".into());
+        assert_eq!(
+            MeasuredRead::of_whole_model(&state, &node, &model, 22, 1702),
+            MeasuredRead::Unknown,
+            "never timed: nothing measured"
+        );
+        // A wait that ran out binds alone (`ModelSpeed::note_whole_prompt_read`).
+        state.note_whole_prompt_read(&node, &model, 16.02, true);
+        let read = MeasuredRead::of_whole_model(&state, &node, &model, 22, 1702);
+        let MeasuredRead::AtLeast(floor) = read else {
+            panic!("a floor was recorded: {read:?}");
+        };
+        assert!(
+            floor > Duration::from_secs(595) && floor < Duration::from_secs(605),
+            "16.02 ms × 22 layers × 1,702 tokens is ~600 s, read {floor:?}"
+        );
+        let budget = first_token_timeout(1702, warm(), read);
+        assert_eq!(budget, FIRST_TOKEN_TIMEOUT + floor * MEASURED_READ_MARGIN);
+        assert!(budget > Duration::from_secs(1300));
+        assert_eq!(
+            first_token_timeout(1702, warm(), MeasuredRead::Unknown),
+            FIRST_TOKEN_TIMEOUT_MAX,
+            "unmeasured, the old ceiling still holds"
+        );
+    }
+
+    /// A measurement can only lengthen the wait: a fast peer keeps the
+    /// prompt-scaled allowance, and a cold load still goes on top.
+    #[test]
+    fn a_fast_measurement_never_shortens_the_wait() {
+        let fast = MeasuredRead::AtLeast(Duration::from_secs(1));
+        for tokens in [0, 24, 613, 1702, 100_000] {
+            let unmeasured = first_token_timeout(tokens, warm(), MeasuredRead::Unknown);
+            assert!(
+                first_token_timeout(tokens, warm(), fast) >= unmeasured,
+                "{tokens} tokens"
+            );
+            // Past a handful of tokens the allowance is the larger: unchanged.
+            if tokens >= 24 {
+                assert_eq!(first_token_timeout(tokens, warm(), fast), unmeasured);
+            }
+        }
+        let state = test_state();
+        let cold = super::super::LoadAllowance::for_segments(&state, &[segment([3u8; 32])]);
+        let slow = MeasuredRead::AtLeast(Duration::from_secs(900));
+        assert_eq!(
+            first_token_timeout(1702, cold, slow),
+            first_token_timeout(1702, warm(), slow) + cold.duration()
+        );
+    }
+
+    /// A measured wait is still bounded, however slow the measurement.
+    #[test]
+    fn a_measured_wait_is_capped_at_an_hour() {
+        let glacial = MeasuredRead::AtLeast(Duration::from_secs(36_000));
+        assert_eq!(
+            first_token_timeout(1702, warm(), glacial),
+            MEASURED_FIRST_TOKEN_MAX
+        );
+        let state = test_state();
+        let node = crate::types::NodeId([4u8; 32]);
+        let model = crate::types::ModelId("m".into());
+        state.note_whole_prompt_read(&node, &model, f32::MAX, true);
+        assert_eq!(
+            MeasuredRead::of_whole_model(&state, &node, &model, 80, usize::MAX),
+            MeasuredRead::AtLeast(MEASURED_FIRST_TOKEN_MAX),
+            "an absurd product saturates instead of overflowing"
         );
     }
 }

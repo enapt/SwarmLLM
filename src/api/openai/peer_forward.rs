@@ -170,9 +170,12 @@ pub(super) async fn forward_to_peer(
     // (JSON punctuation, base64) — the safe direction here, since the budget is
     // capped anyway and an image prompt genuinely is the expensive kind.
     let prompt_chars = serde_json::to_string(req).map(|s| s.len()).unwrap_or(0);
+    // The pool member runs the request through its own router, in whatever
+    // shape it chooses, so no whole-model reading of ours describes it.
     let budget = crate::inference::pipeline::remote_generate::first_token_timeout(
         prompt_chars.div_ceil(2),
         peer.load,
+        crate::inference::pipeline::remote_generate::MeasuredRead::Unknown,
     );
 
     let mut builder = client
