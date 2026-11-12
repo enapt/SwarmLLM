@@ -102,9 +102,7 @@ impl ReplayWindow {
             for i in (word_shift..REPLAY_BITMAP_WORDS).rev() {
                 self.bitmap[i] = self.bitmap[i - word_shift];
             }
-            for i in 0..word_shift {
-                self.bitmap[i] = 0;
-            }
+            self.bitmap[..word_shift].fill(0);
         } else {
             for i in (0..REPLAY_BITMAP_WORDS).rev() {
                 let lo = if i >= word_shift {

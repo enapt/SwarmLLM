@@ -594,14 +594,9 @@ pub(super) fn eligible(exec: &PipelineExecutor, guessed: bool) -> bool {
         );
         return false;
     }
-    if exec
-        .shared_state
+    exec.shared_state
         .standalone_tokenizer(&exec.request.model_id)
-        .is_none()
-    {
-        return false;
-    }
-    true
+        .is_some()
 }
 
 impl PipelineExecutor {

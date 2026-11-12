@@ -401,20 +401,20 @@ fn kv_truncate_all_layers_aligned() {
     let store = KvCacheStore::new(std::time::Duration::from_secs(600));
     {
         let mut entry = store.get_or_create("m", "r", 4);
-        for layer_idx in 0..4 {
+        for slot in entry.layers.iter_mut().take(4) {
             let mut cache = LayerKv::with_capacity(2, 128, 128);
             append_pos(&mut cache, 1.0, 10.0);
             append_pos(&mut cache, 2.0, 20.0);
             append_pos(&mut cache, 3.0, 30.0);
             append_pos(&mut cache, 4.0, 40.0);
-            entry.layers[layer_idx] = Some(cache);
+            *slot = Some(cache);
         }
     }
     store.truncate_request_to("m", "r", 2).unwrap();
 
     let entry = store.get_or_create("m", "r", 4);
-    for layer_idx in 0..4 {
-        let cache = entry.layers[layer_idx].as_ref().unwrap();
+    for (layer_idx, slot) in entry.layers.iter().enumerate().take(4) {
+        let cache = slot.as_ref().unwrap();
         assert_eq!(
             cache.current_seq_len(),
             2,

@@ -973,7 +973,7 @@ impl SplitModel {
     /// When `skip_mask` is `Some`, layers `i` for which `skip_mask[abs_layer_i]`
     /// is true are skipped entirely (identity pass-through, no KV write) — the
     /// SWIFT self-speculative draft path.
-    #[allow(clippy::too_many_arguments)]
+    ///
     /// Phase-dispatching wrapper around [`Self::forward_inner_body`].
     ///
     /// **The single place a forward pass is bound to a CPU thread pool.**

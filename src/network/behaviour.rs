@@ -87,64 +87,82 @@ const MDNS_TTL_SECS: u64 = 300;
 /// mDNS active query interval — how often to probe the LAN for new peers.
 const MDNS_QUERY_INTERVAL_SECS: u64 = 10;
 
-/// Combined network behaviour for the SwarmLLM node.
-///
-/// Uses the libp2p `NetworkBehaviour` derive macro to combine multiple
-/// sub-protocols into a single behaviour.
-///
-/// Tensor activation forwarding uses the same `request_response` protocol as
-/// control messages (unified codec with a type-tag byte to distinguish JSON
-/// from binary payloads). This avoids dual-protocol connection routing issues
-/// that cause silent message loss when mDNS creates duplicate connections.
-#[derive(NetworkBehaviour)]
-pub struct SwarmBehaviour {
-    /// request_response MUST be first: the NetworkBehaviour derive macro polls
-    /// sub-behaviours in field order, and Connection::poll returns immediately on
-    /// NotifyBehaviour events (exiting its handler-poll loop). If kademlia or
-    /// gossipsub are polled first, their continuous NotifyBehaviour events starve
-    /// request_response's OutboundSubstreamRequest — preventing tensor forwards
-    /// from ever reaching the codec.
-    pub request_response: request_response::Behaviour<SwarmCodec>,
-    pub kademlia: kad::Behaviour<MemoryStore>,
-    pub gossipsub: gossipsub::Behaviour,
-    pub identify: identify::Behaviour,
-    /// AutoNAT v2 client — tests whether OUR advertised addresses are reachable
-    /// (drives auto-relay when they're not). Toggleable; disabled on WSL2.
-    pub autonat_client: libp2p::swarm::behaviour::toggle::Toggle<autonat::v2::client::Behaviour>,
-    /// AutoNAT v2 server — answers other nodes' dial-back probes so they can
-    /// detect their own NAT status. An anchor running this helps the swarm.
-    pub autonat_server: libp2p::swarm::behaviour::toggle::Toggle<autonat::v2::server::Behaviour>,
-    pub dcutr: libp2p::swarm::behaviour::toggle::Toggle<dcutr::Behaviour>,
-    /// UPnP/IGD automatic gateway port-mapping (toggleable — disable on WSL2).
-    /// On a home router with UPnP enabled this maps the P2P TCP/QUIC ports on
-    /// the gateway and confirms the resulting public address with the swarm,
-    /// which flows into the invite code via `refresh_listen_multiaddrs`.
-    pub upnp: libp2p::swarm::behaviour::toggle::Toggle<upnp::tokio::Behaviour>,
-    pub relay_client: relay::client::Behaviour,
-    /// Relay server: accepts reservations from NAT'd peers and forwards circuits.
-    pub relay_server: relay::Behaviour,
-    /// NET-I5: Connection limits to prevent resource exhaustion.
-    pub connection_limits: connection_limits::Behaviour,
-    /// Peers Identify has shown do not speak SwarmLLM. Blocking them refuses
-    /// both directions at the swarm level.
+pub use derived::{SwarmBehaviour, SwarmBehaviourEvent};
+
+// Rust 1.100 makes `Infallible` an alias of `!`, so the derive's arms for the
+// fields whose events cannot exist (`connection_limits`, the block list) are
+// unreachable calls, and `-D warnings` fails the build. The allow covers this
+// module alone, where nothing but the struct and the derive's output lives —
+// never `build_behaviour`. Prior art: libp2p issue #6600 (the fix, PR #6602,
+// emits the allow from the derive and is not in a release); Lighthouse took a
+// module-wide allow (sigp/lighthouse#10153). Drop this module once
+// `libp2p-swarm-derive` ships #6602.
+#[allow(unreachable_code)]
+mod derived {
+    use super::*;
+
+    /// Combined network behaviour for the SwarmLLM node.
     ///
-    /// **Declining to register them was not enough.** `identify::
-    /// peer_speaks_swarmllm` stops a foreign node becoming a peer and
-    /// disconnects it, and every one of our own six dial sites now routes
-    /// through `dial_checked`, which consults `foreign_peers` — and still, on a
-    /// public network, three `openhydra` nodes accounted for ~16 connections in
-    /// seven minutes, each closed 43 ms later by the Identify gate and then
-    /// re-established. `dial_checked` refused none of them across two runs, so
-    /// the dials come from inside libp2p rather than from us; which behaviour
-    /// was never pinned down, and with this it does not need to be.
-    pub blocked_peers: libp2p::allow_block_list::Behaviour<libp2p::allow_block_list::BlockedPeers>,
-    /// mDNS for automatic LAN peer discovery (zero-config).
-    pub mdns: libp2p::swarm::behaviour::toggle::Toggle<mdns::tokio::Behaviour>,
-    /// Persistent bidirectional stream protocol for per-pipeline inference
-    /// sessions. Coexists with `request_response` — the latter remains the
-    /// fallback and covers all non-streaming traffic. Only used when
-    /// `config.inference.persistent_pipeline_stream` is on.
-    pub pipeline_stream: libp2p_stream::Behaviour,
+    /// Uses the libp2p `NetworkBehaviour` derive macro to combine multiple
+    /// sub-protocols into a single behaviour.
+    ///
+    /// Tensor activation forwarding uses the same `request_response` protocol as
+    /// control messages (unified codec with a type-tag byte to distinguish JSON
+    /// from binary payloads). This avoids dual-protocol connection routing issues
+    /// that cause silent message loss when mDNS creates duplicate connections.
+    #[derive(NetworkBehaviour)]
+    pub struct SwarmBehaviour {
+        /// request_response MUST be first: the NetworkBehaviour derive macro polls
+        /// sub-behaviours in field order, and Connection::poll returns immediately on
+        /// NotifyBehaviour events (exiting its handler-poll loop). If kademlia or
+        /// gossipsub are polled first, their continuous NotifyBehaviour events starve
+        /// request_response's OutboundSubstreamRequest — preventing tensor forwards
+        /// from ever reaching the codec.
+        pub request_response: request_response::Behaviour<SwarmCodec>,
+        pub kademlia: kad::Behaviour<MemoryStore>,
+        pub gossipsub: gossipsub::Behaviour,
+        pub identify: identify::Behaviour,
+        /// AutoNAT v2 client — tests whether OUR advertised addresses are reachable
+        /// (drives auto-relay when they're not). Toggleable; disabled on WSL2.
+        pub autonat_client:
+            libp2p::swarm::behaviour::toggle::Toggle<autonat::v2::client::Behaviour>,
+        /// AutoNAT v2 server — answers other nodes' dial-back probes so they can
+        /// detect their own NAT status. An anchor running this helps the swarm.
+        pub autonat_server:
+            libp2p::swarm::behaviour::toggle::Toggle<autonat::v2::server::Behaviour>,
+        pub dcutr: libp2p::swarm::behaviour::toggle::Toggle<dcutr::Behaviour>,
+        /// UPnP/IGD automatic gateway port-mapping (toggleable — disable on WSL2).
+        /// On a home router with UPnP enabled this maps the P2P TCP/QUIC ports on
+        /// the gateway and confirms the resulting public address with the swarm,
+        /// which flows into the invite code via `refresh_listen_multiaddrs`.
+        pub upnp: libp2p::swarm::behaviour::toggle::Toggle<upnp::tokio::Behaviour>,
+        pub relay_client: relay::client::Behaviour,
+        /// Relay server: accepts reservations from NAT'd peers and forwards circuits.
+        pub relay_server: relay::Behaviour,
+        /// NET-I5: Connection limits to prevent resource exhaustion.
+        pub connection_limits: connection_limits::Behaviour,
+        /// Peers Identify has shown do not speak SwarmLLM. Blocking them refuses
+        /// both directions at the swarm level.
+        ///
+        /// **Declining to register them was not enough.** `identify::
+        /// peer_speaks_swarmllm` stops a foreign node becoming a peer and
+        /// disconnects it, and every one of our own six dial sites now routes
+        /// through `dial_checked`, which consults `foreign_peers` — and still, on a
+        /// public network, three `openhydra` nodes accounted for ~16 connections in
+        /// seven minutes, each closed 43 ms later by the Identify gate and then
+        /// re-established. `dial_checked` refused none of them across two runs, so
+        /// the dials come from inside libp2p rather than from us; which behaviour
+        /// was never pinned down, and with this it does not need to be.
+        pub blocked_peers:
+            libp2p::allow_block_list::Behaviour<libp2p::allow_block_list::BlockedPeers>,
+        /// mDNS for automatic LAN peer discovery (zero-config).
+        pub mdns: libp2p::swarm::behaviour::toggle::Toggle<mdns::tokio::Behaviour>,
+        /// Persistent bidirectional stream protocol for per-pipeline inference
+        /// sessions. Coexists with `request_response` — the latter remains the
+        /// fallback and covers all non-streaming traffic. Only used when
+        /// `config.inference.persistent_pipeline_stream` is on.
+        pub pipeline_stream: libp2p_stream::Behaviour,
+    }
 }
 
 /// Build the combined network behaviour with all sub-protocols configured.
