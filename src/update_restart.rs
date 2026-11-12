@@ -56,7 +56,23 @@ const DRAIN_POLL: Duration = Duration::from_secs(2);
 /// releases stops counting after `CONVERSATION_GAP_SECS`. Prior art: Envoy's
 /// drain and Kubernetes' connection draining wait for ACTIVE requests and
 /// open streams to reach zero — a stream counts between its frames.
-pub async fn drain(state: &Arc<SharedState>) -> bool {
+///
+/// **New work for other computers stops FIRST** (#444): from the drain's
+/// start this node refuses a peer's new request (`PeerWorkHold::Updating`,
+/// through `SharedState::peer_work_hold_now`, the one answer every admission
+/// asks), its capability says it takes no inference work, and the health
+/// monitor sends that at once ([`UpdateDrain::started`]) rather than at its
+/// next round. Work already running here goes on. Without it, a node peers
+/// kept busy took new work all through the wait and its restart cut whatever
+/// was running (field report 2026-11-12). The hold lasts as long as the
+/// returned [`Drained`], which [`restart_into`] requires: dropped — the update
+/// abandoned, its restart failed — the node takes work again. Prior art:
+/// Kubernetes marks a terminating pod not-ready (it leaves the Service's
+/// endpoints) before its grace period runs; Envoy fails its health check
+/// (`/healthcheck/fail`) before `--drain-time-s`. Both stop admission, then
+/// wait.
+pub async fn drain(state: &Arc<SharedState>) -> Drained {
+    let hold = DrainHold::start(state);
     // Tokio's clock, the one its sleep below runs on: the same instant in a
     // running node, and the one a paused-time test advances.
     let started = tokio::time::Instant::now();
@@ -68,7 +84,10 @@ pub async fn drain(state: &Arc<SharedState>) -> bool {
             .models_with_inflight_requests()
             .len();
         if coordinating == 0 && in_flight == 0 && replies_held == 0 {
-            return true;
+            return Drained {
+                went_idle: true,
+                _hold: hold,
+            };
         }
         if started.elapsed() >= DRAIN_TIMEOUT {
             tracing::warn!(
@@ -78,9 +97,92 @@ pub async fn drain(state: &Arc<SharedState>) -> bool {
                 timeout_secs = DRAIN_TIMEOUT.as_secs(),
                 "Still busy after the drain window — restarting into the update anyway"
             );
-            return false;
+            return Drained {
+                went_idle: false,
+                _hold: hold,
+            };
         }
         tokio::time::sleep(DRAIN_POLL).await;
+    }
+}
+
+/// What [`drain`] ends with: whether the node went idle, and the hold on new
+/// work for other computers, which lasts until this is dropped. [`restart_into`]
+/// takes it, so no restart skips the drain and a caller keeps the hold up to
+/// the restart — or, the restart failing, until it gives up.
+#[must_use = "dropping it lets other computers' new work in before the restart"]
+pub struct Drained {
+    went_idle: bool,
+    _hold: DrainHold,
+}
+
+impl Drained {
+    /// `true` when nothing was running by the end; `false` when
+    /// [`DRAIN_TIMEOUT`] expired first.
+    pub fn went_idle(&self) -> bool {
+        self.went_idle
+    }
+}
+
+/// Whether an update is draining this node (#444), and the wake-up that tells
+/// the swarm so at once. Started ONLY by [`drain`] (its `DrainHold`); read by
+/// `SharedState::peer_work_hold_now` and, through [`Self::started`], by the
+/// health monitor's loop.
+#[derive(Default)]
+pub struct UpdateDrain {
+    /// Drains under way — two when the dashboard's Apply & Restart and the
+    /// automatic install overlap, so the first to end lifts nothing.
+    draining: std::sync::atomic::AtomicUsize,
+    started: tokio::sync::Notify,
+}
+
+impl UpdateDrain {
+    /// Is an update draining this node now? Read without waiting.
+    pub fn now(&self) -> bool {
+        self.draining.load(std::sync::atomic::Ordering::Acquire) > 0
+    }
+
+    /// Resolves once a drain has started. A start while the listener was busy
+    /// elsewhere is kept until it asks (`Notify::notify_one`'s one permit).
+    pub async fn started(&self) {
+        self.started.notified().await
+    }
+}
+
+/// Holds new work for other computers back from the start of a drain until it
+/// is dropped.
+struct DrainHold(Arc<SharedState>);
+
+impl DrainHold {
+    fn start(state: &Arc<SharedState>) -> Self {
+        let drain = &state.events.update_drain;
+        if drain
+            .draining
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel)
+            == 0
+        {
+            tracing::info!(
+                "Finishing current work before the update — taking no new work from other computers meanwhile"
+            );
+        }
+        drain.started.notify_one();
+        Self(state.clone())
+    }
+}
+
+impl Drop for DrainHold {
+    fn drop(&mut self) {
+        let before = self
+            .0
+            .events
+            .update_drain
+            .draining
+            .fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+        if before == 1 && !*self.0.shutdown_rx().borrow() {
+            tracing::info!(
+                "No restart followed the update's drain — taking work from other computers again"
+            );
+        }
     }
 }
 
@@ -328,7 +430,14 @@ pub enum NotRestarted {
 /// Before it restarts, the network manager closes every connection
 /// ([`CloseBeforeRestart`]), for at most [`CLOSE_BEFORE_RESTART_WAIT`]; the stop
 /// is asked about again after that wait.
-pub async fn restart_into(state: &SharedState, exe: &std::path::Path) -> NotRestarted {
+///
+/// `_drained` is REQUIRED (#444): a restart follows a [`drain`], and the drain's
+/// hold on new work for other computers lasts up to the exec.
+pub async fn restart_into(
+    state: &SharedState,
+    exe: &std::path::Path,
+    _drained: &Drained,
+) -> NotRestarted {
     if stop_asked(state) {
         return NotRestarted::StopAsked;
     }
@@ -788,16 +897,17 @@ mod tests {
             None,
         );
         let missing = dir.path().join("no-such-swarmllm");
+        let drained = drain(&state).await;
 
         assert!(
             matches!(
-                restart_into(&state, &missing).await,
+                restart_into(&state, &missing, &drained).await,
                 NotRestarted::Failed(_)
             ),
             "a node not asked to stop must still try to restart into its update"
         );
         state.shutdown();
-        let outcome = restart_into(&state, &missing).await;
+        let outcome = restart_into(&state, &missing, &drained).await;
         assert!(
             matches!(outcome, NotRestarted::StopAsked),
             "a node asked to stop tried to restart into its update: {outcome:?}"
@@ -856,7 +966,8 @@ mod tests {
         let (asked, listening) = answer_the_close(&state, |_| {});
         listening.await.unwrap();
 
-        let outcome = restart_into(&state, &dir.path().join("no-such-swarmllm")).await;
+        let drained = drain(&state).await;
+        let outcome = restart_into(&state, &dir.path().join("no-such-swarmllm"), &drained).await;
         assert!(matches!(outcome, NotRestarted::Failed(_)), "{outcome:?}");
         assert!(
             asked.load(std::sync::atomic::Ordering::SeqCst),
@@ -871,7 +982,8 @@ mod tests {
         let (_, listening) = answer_the_close(&state, |state| state.shutdown());
         listening.await.unwrap();
 
-        let outcome = restart_into(&state, &dir.path().join("no-such-swarmllm")).await;
+        let drained = drain(&state).await;
+        let outcome = restart_into(&state, &dir.path().join("no-such-swarmllm"), &drained).await;
         assert!(
             matches!(outcome, NotRestarted::StopAsked),
             "a stop asked while the connections closed became a restart: {outcome:?}"
@@ -1024,11 +1136,14 @@ mod tests {
             model.clone(),
         ));
         assert!(state.serving_models.contains_key(&model));
-        assert!(drain(&state).await, "nothing is running: the drain is over");
+        assert!(
+            drain(&state).await.went_idle(),
+            "nothing is running: the drain is over"
+        );
 
         let _serving = crate::daemon::state::ServingGuard::new(&state, model);
         assert!(
-            !drain(&state).await,
+            !drain(&state).await.went_idle(),
             "a peer's request under way holds the update to the window"
         );
     }
@@ -1064,11 +1179,69 @@ mod tests {
             "between two forwards nothing is in flight"
         );
         assert!(
-            !drain(&state).await,
+            !drain(&state).await.went_idle(),
             "the reply's conversation holds the update to the window"
         );
         state.model_process_pool.release_request_kv(reply).await;
-        assert!(drain(&state).await, "the reply is over: the drain is too");
+        assert!(
+            drain(&state).await.went_idle(),
+            "the reply is over: the drain is too"
+        );
+    }
+
+    /// #444: from the moment an update starts draining, this node takes no new
+    /// work for other computers — the one hold every admission asks names it,
+    /// and the health monitor is woken to say so at once — while the work
+    /// already running here goes on to the end of the drain. The hold lasts
+    /// until the drain's result is dropped (a restart that never came), and
+    /// two drains at once hold it until both end.
+    #[tokio::test(start_paused = true)]
+    async fn an_update_takes_no_new_work_from_other_computers_while_it_drains() {
+        use crate::daemon::host_heat::PeerWorkHold;
+        let (_dir, state) = restart_test_state();
+        assert_eq!(state.peer_work_hold_now(), None);
+        let serving = crate::daemon::state::ServingGuard::new(
+            &state,
+            crate::types::ModelId("running-for-a-peer".into()),
+        );
+        let draining = tokio::spawn({
+            let state = state.clone();
+            async move { drain(&state).await }
+        });
+        tokio::time::timeout(Duration::from_secs(1), state.events.update_drain.started())
+            .await
+            .expect("the health monitor is woken when a drain starts");
+        assert_eq!(
+            state.peer_work_hold_now(),
+            Some(PeerWorkHold::Updating),
+            "new work from other computers stops at the drain's start"
+        );
+        assert!(
+            !PeerWorkHold::Updating.stops_running_work(),
+            "the work already running here goes on"
+        );
+
+        drop(serving);
+        let drained = draining.await.unwrap();
+        assert!(drained.went_idle());
+        assert_eq!(
+            state.peer_work_hold_now(),
+            Some(PeerWorkHold::Updating),
+            "held from the drain's end up to the restart"
+        );
+        let second = drain(&state).await;
+        drop(drained);
+        assert_eq!(
+            state.peer_work_hold_now(),
+            Some(PeerWorkHold::Updating),
+            "another drain still under way keeps it"
+        );
+        drop(second);
+        assert_eq!(
+            state.peer_work_hold_now(),
+            None,
+            "no restart came: the node takes work again"
+        );
     }
 
     #[test]

@@ -1517,13 +1517,15 @@ impl UpdateChecker {
 
         // Waiting out in-flight work is the whole point: replacing the binary
         // under a running request is what made an "updated" node fail every
-        // inference until someone restarted it by hand.
-        let idle = crate::update_restart::drain(shared).await;
+        // inference until someone restarted it by hand. From its start, no
+        // new work for other computers until the restart (#444); a return
+        // below drops the hold and the node takes work again.
+        let drained = crate::update_restart::drain(shared).await;
         if stop_asked("after finishing current work") {
             return;
         }
         tracing::info!(
-            drained_cleanly = idle,
+            drained_cleanly = drained.went_idle(),
             version = %info.latest_version,
             "Applying update"
         );
@@ -1543,7 +1545,7 @@ impl UpdateChecker {
         }
         // A stop asked by now is honoured inside `restart_into`, which logs it.
         if let crate::update_restart::NotRestarted::Failed(err) =
-            crate::update_restart::restart_into(shared, &self.binary_path).await
+            crate::update_restart::restart_into(shared, &self.binary_path, &drained).await
         {
             // exec only returns on failure. The binary IS updated at this point,
             // so the node keeps running the old image until something restarts

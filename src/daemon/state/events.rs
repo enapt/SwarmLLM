@@ -36,6 +36,11 @@ pub struct EventBus {
     /// Asked ONLY by `restart_into`; answered ONLY by the network manager's
     /// loop (`NetworkManager::close_every_connection`).
     pub close_before_restart: crate::update_restart::CloseBeforeRestart,
+    /// An update draining this node takes no new work for other computers
+    /// (#444). Started ONLY by `update_restart::drain`; read by
+    /// `SharedState::peer_work_hold_now`, and its start wakes the health
+    /// monitor to send the capability at once (`UpdateDrain::started`).
+    pub update_drain: crate::update_restart::UpdateDrain,
 }
 
 impl EventBus {

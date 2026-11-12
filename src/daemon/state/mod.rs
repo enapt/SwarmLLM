@@ -1763,6 +1763,7 @@ impl SharedState {
                 peer_versions: parking_lot::Mutex::new(crate::update::PeerVersionWatch::default()),
                 update_nudge: tokio::sync::Notify::new(),
                 close_before_restart: crate::update_restart::CloseBeforeRestart::default(),
+                update_drain: crate::update_restart::UpdateDrain::default(),
             },
             // Root-level fields (not sub-structed)
             executor,

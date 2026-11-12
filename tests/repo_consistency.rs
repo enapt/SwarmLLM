@@ -14971,17 +14971,35 @@ fn every_upload_a_peer_starts_asks_whether_the_connection_is_metered() {
         .nth(1)
         .and_then(|rest| rest.split(',').next())
         .unwrap_or("");
+    // One answer for the capability and the dispatcher (#444): the field reads
+    // the hold `peer_work_hold_now()` returns, and that answer asks every reason
+    // — so a reason added there withdraws inference here too.
     assert!(
-        field.contains("metered_hold"),
-        "the capability must withdraw inference on a metered connection, or \
+        field.contains("peer_work_hold"),
+        "the capability must withdraw inference while this node holds back new \
+         work for other computers, from the one answer the dispatcher reads, or \
          planners keep choosing a node that refuses: `can_serve_inference:{field}`"
     );
     assert!(
-        field.contains("heat_hold"),
-        "the capability must withdraw inference while this computer cools down \
-         (#440), or planners keep choosing a node that refuses: \
-         `can_serve_inference:{field}`"
+        statements(body)
+            .iter()
+            .any(|(_, s)| s.contains("peer_work_hold_now()")),
+        "broadcast_capabilities must read its hold from `peer_work_hold_now()`"
     );
+    let heat = std::fs::read_to_string("src/daemon/host_heat.rs").expect("read host_heat.rs");
+    let answer = method_body(&heat, "    pub fn peer_work_hold_now(")
+        .expect("peer_work_hold_now was renamed — re-point this guard");
+    for (asks, reason) in [
+        ("metered_hold_now()", "a metered connection (#277)"),
+        ("host_heat_hold_now()", "a computer cooling down (#440)"),
+        ("update_drain.now()", "an update draining this node (#444)"),
+    ] {
+        assert!(
+            statements(answer).iter().any(|(_, s)| s.contains(asks)),
+            "`peer_work_hold_now` must hold back for {reason} (`{asks}`), or a \
+             node in that state keeps taking new work and keeps being offered it"
+        );
+    }
 }
 
 /// The admission calls in `src` — `admits_a_new_request(` / `admit_own_forward(`

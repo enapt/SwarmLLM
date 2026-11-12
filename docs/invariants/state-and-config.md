@@ -948,6 +948,50 @@ Test: `a_peers_reply_between_two_forwards_holds_an_update` (a held conversation,
 `active_inference_load() == 0`, the drain holds to the window; released, it
 returns).
 
+### The drain stops new work for other computers first (2026-11-12, #444)
+
+The drain only WAITED: for up to `DRAIN_TIMEOUT` (600 s) it polled the work in
+flight while admission ran as usual, and peers learned the node was going only
+when `restart_into` closed its connections in the last ~3 s. A node other
+computers kept busy took new work all through the wait, never reached zero, and
+its restart cut what it was running (field report 2026-11-12, the AU tester's
+node; most of its "restarted with requests in flight" entries were the pre-.279
+false flag above, this was the residual).
+
+Now the drain stops admission before it waits. `update_restart::drain` takes a
+`DrainHold` at its start (`state.events.update_drain`, a COUNT: the dashboard's
+Apply & Restart and the automatic install can overlap, and the first to end must
+not lift the other's hold), and `SharedState::peer_work_hold_now` — the one
+answer every dispatch admission and prompt admission already takes — answers
+`PeerWorkHold::Updating`: a peer's new request is refused out loud
+(`update_refusal`, `ServiceUnavailable`: the coordinator bars this node for the
+request and re-plans, no penalty), the next step of work already running is
+served. The capability's `can_serve_inference` now reads the same predicate
+(it read the metered and heat holds one by one), and the drain's start wakes the
+health monitor (`UpdateDrain::started`, a `Notify`'s single permit) to broadcast
+at once rather than at its next 30 s round.
+
+The hold lives in the drain's result, `Drained`, which `restart_into` takes as a
+REQUIRED argument: a restart without a drain cannot be written, and the caller
+keeps the hold up to the exec. Dropped — the install failed, the exec failed,
+the stop was asked — the node takes work again (said in the log unless a stop
+was asked). Precedence: a heat hold that stops running work first (an update's
+answer would let a split's next steps through), then the update, then the
+metered connection, then a soft heat hold.
+
+Prior art: Kubernetes marks a terminating pod not-ready, so it leaves the
+Service's endpoints, before `terminationGracePeriodSeconds` runs; Envoy fails
+its health check (`/healthcheck/fail`) before `--drain-time-s`. Both stop
+admission, then wait — a drain that only waits is the gap they close. Their
+known trap, endpoints learning the change late, is why the capability goes out
+at the drain's start. Tests: `an_update_takes_no_new_work_from_other_computers_while_it_drains`
+(paused time: the hold from the start, the monitor woken, a running request
+finishing the drain, the hold kept until the result drops, a second drain
+keeping it; red with the hold not taken), the dispatch tables
+`a_held_back_node_refuses_new_work_and_lets_running_work_finish` and
+`a_prompt_piece_starts_a_request_and_a_streamed_check_continues_one`, and
+`a_hold_that_stops_running_work_is_never_hidden_by_a_metered_connection`.
+
 ## Single-source-of-truth helpers — SharedState, live config and credits
 
 Each names the ONE place a decision is made. A second implementation of any of

@@ -5508,33 +5508,6 @@ not retracted and stays in other pools' caches up to `FOREIGN_POOL_CATALOG_MAX_A
 no new exposure, since the pool's devices serve the open swarm anyway; and the switch's "ask
 first" is in the dashboard only — correct, as the API key is the owner's agent.
 
-#### #444 — An update's drain keeps taking new work from other computers, so a busy node can restart mid-reply
-`P2` · reliability · **OPEN** — 2026-11-12 · history: field report 11-12 (the AU tester's node `aa3d1e66`); `acc7d512` + `1554a457` (what the drain counts)
-
-`update_restart::drain` (called from `update::install_and_restart`) waits up to `DRAIN_TIMEOUT` (600 s) for three
-counters to reach zero — pipelines this node coordinates, in-flight requests (`active_inference_load`, which counts
-the owner's chats and each `ServingGuard` a peer's forward or whole-model hand-off holds) and replies held between a
-peer's forwards (`models_with_inflight_requests`) — then restarts into the update whether or not they did. Nothing
-stops NEW peer work arriving during that wait: admission runs as usual, every new forward takes a `ServingGuard`, and
-peers learn the node is going only when `restart_into` closes its connections in the last ~3 s. A node other
-computers keep busy may never reach zero, and its restart then cuts whatever it was running for them.
-
-Field data: the tester's log digest (11-12) reads updates to .272-.275, .278 and .279 as "restarted with requests in
-flight" and .271, .276, .277, .280, .281 as drained clean. A node drains with its OLD binary, and before `acc7d512`
-(in .279) the drain counted every model the node had EVER served, so an idle node that once served a peer waited the
-full 600 s and logged `drained_cleanly=false` — most of those entries are that old false flag, not cut work. The gap
-above is what remains.
-
-**Next step**: while draining, hold new peer work the way the heat guard holds it (#440): refuse new peer forwards
-and hand-offs at admission, advertise it (`can_serve_inference` is already false under `host_heat_hold_now()` and the
-metered hold, `health/monitor.rs`) so peers plan around the node, and send the announcement at drain START, not at
-the next heartbeat. Keep serving what is in flight; keep the 600 s ceiling. Test: a draining node refuses a new peer
-forward and finishes an in-flight one; toggled off, the new forward is accepted (red). Check every admission path
-(layer forward, stream, whole-model hand-off, relay) refuses through ONE predicate.
-Prior art: Kubernetes graceful termination — the pod is marked not-ready and leaves the Service endpoints, in-flight
-requests finish within `terminationGracePeriodSeconds`, then SIGKILL; Envoy's drain — health checks fail first
-(`/healthcheck/fail`), listeners drain over `--drain-time-s`. Both stop ADMISSION before waiting; ours waits only.
-
 #### #383 — A serving node's stream of checks is not tied to the peer that opened it
 `P4` · network · **OPEN** — 2026-10-30 · history: #382's security review (low, pre-existing)
 
@@ -6047,6 +6020,30 @@ archive under the named heading. Reopen one only with the evidence its line name
 Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 19-28 were
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
+
+**Closed 2026-11-12, on main (not in a release yet)** (#444)
+- #444 — **An update's drain kept taking new work from other computers, so a busy node could
+  restart mid-reply.** Field report 2026-11-12 (the AU tester's node): `update_restart::drain`
+  waited up to 600 s for in-flight work to reach zero while admission ran as usual, so a node peers
+  kept busy never got there and its restart cut what it was running. Now the drain stops ADMISSION
+  first: from its start `PeerWorkHold::Updating` is the answer of `SharedState::peer_work_hold_now`,
+  the one predicate every admission path already takes as a REQUIRED argument (a layer forward, a
+  stream's prompt pieces, a whole-model hand-off, an image encode, prompt admission's answer), so a
+  peer's new request is refused out loud (`ServiceUnavailable`: re-plan, no penalty) while work
+  already running goes on; the capability says `can_serve_inference = false` (now read from the same
+  predicate) and the health monitor sends it at once (`UpdateDrain::started`), not at its next round.
+  The hold lasts as long as the drain's result (`Drained`), which `restart_into` REQUIRES — so
+  neither restart path (the automatic install, the dashboard's Apply & Restart) can skip the drain,
+  and a restart that never comes (the install failed, the exec failed) drops it and the node takes
+  work again; a count, so the two paths overlapping cannot lift each other's hold. The 600 s ceiling
+  is unchanged. Prior art: Kubernetes marks a terminating pod not-ready before its grace period;
+  Envoy fails its health check before `--drain-time-s` — both stop admission, then wait. Tests:
+  `an_update_takes_no_new_work_from_other_computers_while_it_drains` (red with the hold not taken),
+  the dispatch table `a_held_back_node_refuses_new_work_and_lets_running_work_finish` and
+  `a_prompt_piece_starts_a_request_and_a_streamed_check_continues_one` (a new request refused, a
+  running one's next step served), `a_hold_that_stops_running_work_is_never_hidden_by_a_metered_connection`
+  (precedence). Evidence: `docs/invariants/state-and-config.md` § "The drain stops new work for
+  other computers first".
 
 **Closed 2026-11-11, on main (not in a release yet)** (#429)
 - #429 — **A far split's connection died on quinn's assembler bug ("too many gaps in stream

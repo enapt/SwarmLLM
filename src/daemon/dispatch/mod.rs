@@ -71,9 +71,10 @@ fn max_forwards_per_peer(contribution: &swarmllm_types::ContributionMode) -> usi
 /// encode — take a slot, with `available` of `total` node-wide slots free?
 ///
 /// Not while this node holds back new work for other computers (`hold`, from
-/// `SharedState::peer_work_hold_now`): on a metered connection (#277), or
-/// while this computer is too hot or its graphics driver is not answering
-/// (#440, `daemon::host_heat`). Its capability already tells peers it takes no
+/// `SharedState::peer_work_hold_now`): on a metered connection (#277), while
+/// this computer is too hot or its graphics driver is not answering (#440,
+/// `daemon::host_heat`), or while an update drains it before its restart
+/// (#444, `update_restart::drain`). Its capability already tells peers it takes no
 /// inference work, so a request arriving anyway comes from a peer still
 /// holding the last one, and is refused out loud like any other. Work already
 /// running here goes on, as a download already under way does — until a heat
@@ -130,6 +131,7 @@ fn refuse_for_the_hold(hold: Option<PeerWorkHold>) -> Result<(), ForwardRefused>
     match hold {
         Some(PeerWorkHold::Metered) => Err(ForwardRefused::ConnectionMetered),
         Some(PeerWorkHold::Heat { .. }) => Err(ForwardRefused::Cooling),
+        Some(PeerWorkHold::Updating) => Err(ForwardRefused::Updating),
         None => Ok(()),
     }
 }
@@ -253,6 +255,9 @@ enum ForwardRefused {
     /// stayed hot long enough — or its driver stopped answering — that the
     /// work it runs for others stops too (#440).
     CoolingStopsRunning,
+    /// A new request while an update drains this node before it restarts
+    /// (#444).
+    Updating,
     /// A new request from a computer that may not use the swarm: too few parts
     /// shared, or too far behind (`swarm_use`).
     RequesterMayNotUseTheSwarm(SwarmUse),
@@ -273,6 +278,7 @@ impl ForwardRefused {
             Self::ConnectionMetered => metered_refusal(),
             Self::Cooling => heat_refusal(),
             Self::CoolingStopsRunning => heat_stop_refusal(),
+            Self::Updating => update_refusal(),
             Self::RequesterMayNotUseTheSwarm(why) => why.peer_refusal(),
             _ => peer_work_refusal(),
         }
@@ -307,6 +313,12 @@ impl ForwardRefused {
                 kind,
                 "request refused — this computer is cooling down, so no new work is taken for other machines"
             );
+        } else if *self == Self::Updating {
+            tracing::info!(
+                sender = %sender,
+                kind,
+                "request refused — this computer is about to restart into an update, so no new work is taken for other machines"
+            );
         } else {
             tracing::warn!(
                 sender = %sender,
@@ -332,6 +344,10 @@ impl ForwardRefused {
             Self::CoolingStopsRunning => tracing::debug!(
                 sender = %sender,
                 "LayerForward refused — this computer is cooling down, so the work it was running for other machines has stopped"
+            ),
+            Self::Updating => tracing::info!(
+                sender = %sender,
+                "LayerForward refused — this computer is about to restart into an update, so no new work is taken for other machines"
             ),
             Self::RequesterMayNotUseTheSwarm(_) => {
                 self.log_for("LayerForward", sender, per_peer_limit)
@@ -570,12 +586,25 @@ pub(super) fn heat_stop_refusal() -> String {
     .to_string()
 }
 
+/// What a peer is told when an update drains this node before it restarts
+/// (#444). The metered answer's shape, for its reason: bar this node from the
+/// request's retry, re-plan elsewhere, no penalty, nothing retracted.
+fn update_refusal() -> String {
+    crate::error::SwarmError::ServiceUnavailable(
+        "this machine is about to restart into an update, so it is not taking new \
+         work for other machines — try another"
+            .into(),
+    )
+    .to_string()
+}
+
 /// What a peer is told when this node holds back new work for other computers,
 /// for `hold`'s reason — the one wording for the dispatcher and prompt admission.
 fn hold_refusal(hold: PeerWorkHold) -> String {
     match hold {
         PeerWorkHold::Metered => metered_refusal(),
         PeerWorkHold::Heat { .. } => heat_refusal(),
+        PeerWorkHold::Updating => update_refusal(),
     }
 }
 
@@ -4033,8 +4062,9 @@ mod inbound_forward_slot_tests {
         }
     }
 
-    /// #277 and #440: on a metered connection, or while this computer cools
-    /// down, a peer's NEW request is refused however free the node is — told
+    /// #277, #440 and #444: on a metered connection, while this computer cools
+    /// down, or while an update drains it, a peer's NEW request is refused
+    /// however free the node is — told
     /// why, in the words the coordinator reads as "this peer cannot serve,
     /// re-plan elsewhere" — while the next step of a request already running
     /// here is still served.
@@ -4053,6 +4083,11 @@ mod inbound_forward_slot_tests {
                 },
                 ForwardRefused::Cooling,
                 "cooling down",
+            ),
+            (
+                PeerWorkHold::Updating,
+                ForwardRefused::Updating,
+                "restart into an update",
             ),
         ] {
             assert_eq!(
@@ -4198,6 +4233,10 @@ mod inbound_forward_slot_tests {
             admit_stream_chunk(&piece, Some(cool), allowed),
             Err(ForwardRefused::Cooling)
         );
+        assert_eq!(
+            admit_stream_chunk(&piece, Some(PeerWorkHold::Updating), allowed),
+            Err(ForwardRefused::Updating)
+        );
         let shares_nothing = SwarmUse::TooFewParts { held: 0 };
         assert_eq!(
             admit_stream_chunk(&piece, None, || shares_nothing.clone()),
@@ -4208,7 +4247,12 @@ mod inbound_forward_slot_tests {
         assert_eq!(admit_stream_chunk(&piece, None, allowed), Ok(()));
 
         let asked = std::cell::Cell::new(0);
-        for hold in [None, Some(PeerWorkHold::Metered), Some(cool)] {
+        for hold in [
+            None,
+            Some(PeerWorkHold::Metered),
+            Some(cool),
+            Some(PeerWorkHold::Updating),
+        ] {
             assert_eq!(
                 admit_stream_chunk(&check, hold, || {
                     asked.set(asked.get() + 1);

@@ -1169,11 +1169,12 @@ pub async fn apply_update(
     let shared = state.shared_state.clone();
     let version = info.latest_version.clone();
     tokio::spawn(async move {
-        let idle = crate::update_restart::drain(&shared).await;
-        tracing::info!(drained_cleanly = idle, version = %version, "Restarting into applied update");
+        // No new work for other computers from here to the restart (#444).
+        let drained = crate::update_restart::drain(&shared).await;
+        tracing::info!(drained_cleanly = drained.went_idle(), version = %version, "Restarting into applied update");
         // A node asked to stop while this drained stops (`restart_into` says so).
         if let crate::update_restart::NotRestarted::Failed(err) =
-            crate::update_restart::restart_into(&shared, &binary_path).await
+            crate::update_restart::restart_into(&shared, &binary_path, &drained).await
         {
             tracing::error!(
                 error = %err,

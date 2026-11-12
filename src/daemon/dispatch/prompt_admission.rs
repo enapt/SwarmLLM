@@ -63,8 +63,8 @@ pub(super) fn on_ask(
         return;
     };
     // A node holding back new work for other machines — a metered connection,
-    // a computer cooling down (#440) — would refuse the forwards, so the
-    // re-plan should plan none here.
+    // a computer cooling down (#440), an update draining it (#444) — would
+    // refuse the forwards, so the re-plan should plan none here.
     if let Some(hold) = shared_state.peer_work_hold_now() {
         let verdict = PromptAdmissionVerdict::Refused {
             message: super::hold_refusal(hold),

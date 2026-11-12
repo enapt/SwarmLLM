@@ -381,7 +381,7 @@ impl Drop for Refreshing<'_> {
 
 /// Why this node takes no new work for other computers right now. One answer
 /// for the dispatcher, the prompt-admission ask and the capability, so the
-/// two reasons can never be applied at different places.
+/// reasons can never be applied at different places.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PeerWorkHold {
     /// The connection is metered (#277, `daemon::metered`). Work already
@@ -392,6 +392,10 @@ pub enum PeerWorkHold {
     /// stops too ([`RUNNING_WORK_STOPS_AFTER`], or at once on a hard
     /// threshold) — a split's next step is refused like a new request.
     Heat { stops_running: bool },
+    /// An update is draining this node before it restarts (#444,
+    /// `update_restart::drain`): work already running finishes, nothing new
+    /// starts — Kubernetes' not-ready pod, Envoy's failed health check.
+    Updating,
 }
 
 impl PeerWorkHold {
@@ -430,14 +434,19 @@ impl SharedState {
     /// now, and why" — and whether the work already running stops too.
     ///
     /// A heat hold that stops running work comes first, whatever the
-    /// connection: a metered answer would let a split's next steps through
-    /// on a computer that must stop them. Otherwise the metered connection,
-    /// then the heat.
+    /// connection or an update: either answer would let a split's next steps
+    /// through on a computer that must stop them. Then an update draining this
+    /// node (#444: the restart takes it off the swarm, the clearest reason to
+    /// give), then the metered connection, then the heat.
     pub fn peer_work_hold_now(&self) -> Option<PeerWorkHold> {
         let heat = self
             .host_heat_hold_now()
             .map(|_| self.running_peer_work_stops_now());
-        peer_work_hold(heat, self.metered_hold_now())
+        peer_work_hold(
+            heat,
+            self.events.update_drain.now(),
+            self.metered_hold_now(),
+        )
     }
 
     /// End every whole reply this node is producing for another computer —
@@ -637,17 +646,18 @@ impl SharedState {
 
 /// [`SharedState::peer_work_hold_now`]'s precedence: `heat` is `None` when
 /// the computer is not held back for heat, else whether its running work
-/// stops too.
-fn peer_work_hold(heat: Option<bool>, metered: bool) -> Option<PeerWorkHold> {
-    match (heat, metered) {
-        (Some(true), _) => Some(PeerWorkHold::Heat {
+/// stops too; `updating` while an update drains this node.
+fn peer_work_hold(heat: Option<bool>, updating: bool, metered: bool) -> Option<PeerWorkHold> {
+    match (heat, updating, metered) {
+        (Some(true), _, _) => Some(PeerWorkHold::Heat {
             stops_running: true,
         }),
-        (_, true) => Some(PeerWorkHold::Metered),
-        (Some(false), false) => Some(PeerWorkHold::Heat {
+        (_, true, _) => Some(PeerWorkHold::Updating),
+        (_, false, true) => Some(PeerWorkHold::Metered),
+        (Some(false), false, false) => Some(PeerWorkHold::Heat {
             stops_running: false,
         }),
-        (None, false) => None,
+        (None, false, false) => None,
     }
 }
 
@@ -1272,33 +1282,46 @@ mod tests {
         assert!(t.stops_running());
     }
 
-    /// A heat hold that stops running work wins over a metered connection,
-    /// whose answer would let a split's next steps through.
+    /// A heat hold that stops running work wins over a metered connection and
+    /// an update's drain, whose answers would let a split's next steps through.
+    /// A drain names itself over the metered connection and a soft heat hold.
     #[test]
     fn a_hold_that_stops_running_work_is_never_hidden_by_a_metered_connection() {
+        for updating in [false, true] {
+            assert_eq!(
+                peer_work_hold(Some(true), updating, true),
+                Some(PeerWorkHold::Heat {
+                    stops_running: true
+                })
+            );
+        }
         assert_eq!(
-            peer_work_hold(Some(true), true),
-            Some(PeerWorkHold::Heat {
-                stops_running: true
-            })
-        );
-        assert_eq!(
-            peer_work_hold(Some(false), true),
+            peer_work_hold(Some(false), false, true),
             Some(PeerWorkHold::Metered)
         );
         assert_eq!(
-            peer_work_hold(Some(false), false),
+            peer_work_hold(Some(false), false, false),
             Some(PeerWorkHold::Heat {
                 stops_running: false
             })
         );
-        assert_eq!(peer_work_hold(None, true), Some(PeerWorkHold::Metered));
-        assert_eq!(peer_work_hold(None, false), None);
+        assert_eq!(
+            peer_work_hold(None, false, true),
+            Some(PeerWorkHold::Metered)
+        );
+        assert_eq!(peer_work_hold(None, false, false), None);
+        for (heat, metered) in [(None, false), (None, true), (Some(false), true)] {
+            assert_eq!(
+                peer_work_hold(heat, true, metered),
+                Some(PeerWorkHold::Updating)
+            );
+        }
         assert!(PeerWorkHold::Heat {
             stops_running: true
         }
         .stops_running_work());
         assert!(!PeerWorkHold::Metered.stops_running_work());
+        assert!(!PeerWorkHold::Updating.stops_running_work());
     }
 
     /// `file:<path>`: the fault in the file while it exists, the real reading

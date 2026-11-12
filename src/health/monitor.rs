@@ -782,6 +782,14 @@ impl HealthMonitor {
                         break;
                     }
                 }
+                // An update started draining this node (#444): peers learn it
+                // takes no new work now, not at the next round — its last
+                // minutes are when a stale capability sends it a reply its
+                // restart would cut. Envoy fails its health check the moment a
+                // drain starts, for the same reason.
+                _ = self.shared_state.events.update_drain.started() => {
+                    self.broadcast_capabilities().await;
+                }
                 _ = interval.tick() => {
                     nonce = nonce.wrapping_add(1);
 
@@ -1230,15 +1238,15 @@ impl HealthMonitor {
         // the whole reason this is a withdrawal of inference and not of the
         // node (docs/FUTURE_WORK.md #89, #90).
         let outage = self.shared_state.inference_outage();
-        // A metered connection (#277, `daemon::metered`): no new work for
-        // other computers, so say so and planners skip this node the way they
-        // skip one that cannot run a request — a peer that asked anyway would
-        // be refused. Read without waiting; the system is asked off this loop,
-        // and a changed answer is news at the next tick (`capability_news`).
-        let metered_hold = self.shared_state.metered_hold_now();
-        // And a computer cooling down (#440, `daemon::host_heat`): the same
-        // withdrawal, read the same way — the tick refreshes it every round.
-        let heat_hold = self.shared_state.host_heat_hold_now();
+        // No new work for other computers — a metered connection (#277), a
+        // computer cooling down (#440), an update draining this node (#444):
+        // say so, and planners skip this node the way they skip one that
+        // cannot run a request — a peer that asked anyway would be refused.
+        // The one answer the dispatcher reads too, read without waiting: the
+        // system and the sensors are asked off this loop, and a changed answer
+        // is news at the next tick (`capability_news`) — or at once, for a
+        // drain (`UpdateDrain::started` wakes this loop).
+        let peer_work_hold = self.shared_state.peer_work_hold_now();
         {
             let state = self.shared_state.clone();
             tokio::spawn(async move {
@@ -1493,12 +1501,13 @@ impl HealthMonitor {
             // broken node in a peer list.
             anchor_mode: self.shared_state.config.node.anchor_mode,
             // Whether we can run a request at all, from the one predicate —
-            // and whether we will, on a metered connection or while this
-            // computer cools down. Rebuilt every broadcast like the rest of
-            // this struct, so the withdrawal reverses itself the moment the
-            // condition clears — a worker starting again, the dispatcher
-            // resuming, the connection no longer metered, the computer cool.
-            can_serve_inference: outage.is_none() && !metered_hold && heat_hold.is_none(),
+            // and whether we will, from the other: not on a metered connection,
+            // while this computer cools down or while an update drains it.
+            // Rebuilt every broadcast like the rest of this struct, so the
+            // withdrawal reverses itself the moment the condition clears — a
+            // worker starting again, the dispatcher resuming, the connection
+            // no longer metered, the computer cool, an update abandoned.
+            can_serve_inference: outage.is_none() && peer_work_hold.is_none(),
             // Shown in peer lists, and a peer hands this node no part to fetch
             // while it is off (`NodeCapability::auto_manage`, #400): the live
             // switch, which `--anchor` holds off.
