@@ -81,6 +81,9 @@ pub struct Slot {
     pub sampling: SamplingParams,
     /// Total prompt token count — set at admission, used in `GenerateDone`.
     pub prompt_tokens: usize,
+    /// Where the prompt pass began: the positions before it were restored
+    /// from the prompt cache (#430, `WorkerMsg::Progress::from`).
+    pub prompt_read_from: usize,
     /// Full prompt token IDs — held so the prefix-cache can snapshot the
     /// completed prefill back into the radix tree for future hits. Cleared
     /// once the snapshot is inserted.
@@ -387,6 +390,7 @@ mod tests {
                 generated_count: 0,
                 index_pos: 5,
             },
+            prompt_read_from: 0,
             max_tokens: 16,
             use_logprobs: false,
             eos: vec![2],
@@ -437,6 +441,7 @@ mod tests {
                 remaining_ids,
                 next_chunk_index_pos: prefilled,
             },
+            prompt_read_from: prefilled,
             max_tokens: 16,
             use_logprobs: false,
             eos: vec![2],

@@ -604,6 +604,55 @@ const MEASURED_READ_MARGIN: u32 = 2;
 /// is watched for a cancel).
 const MEASURED_FIRST_TOKEN_MAX: Duration = Duration::from_secs(3600);
 
+/// How long a first-token wait lasts, at least, past the peer's last report
+/// that its prompt read MOVED (#430, `SwarmMessage::PromptProgress`). A report
+/// comes at most every `prompt_progress::EVERY` (2 s), and the worker's read
+/// moves layer by layer, so this is a layer of a long prompt on a slow
+/// processor with room to spare — a read that stops moving for it has
+/// stalled. Where the reports showed a longer layer, twice the longest gap
+/// between two of them (`PROGRESS_GAPS_ALLOWED`).
+const PROMPT_PROGRESS_SILENCE: Duration = Duration::from_secs(120);
+
+/// The silence allowed past the last report, in the longest gaps seen
+/// between two that moved: TCP's retransmission timer is sized from the round
+/// trips it measured, never one constant (RFC 6298 § 2). One layer's read on
+/// the rig took ~40 s; a model of few layers reading a long prompt on a slow
+/// processor can take longer than [`PROMPT_PROGRESS_SILENCE`] for one.
+const PROGRESS_GAPS_ALLOWED: u32 = 2;
+
+/// The first-token deadline as the peer's reports leave it: the budget's
+/// own (`base`), or later — the silence past the last report that advanced
+/// ([`PROMPT_PROGRESS_SILENCE`], or [`PROGRESS_GAPS_ALLOWED`] of its longest
+/// gap), never past [`MEASURED_FIRST_TOKEN_MAX`] from the send. A report only
+/// ever lengthens the wait (a peer that says nothing is waited for exactly as
+/// before), and the ceiling holds a peer that reports for ever or slowly.
+fn first_token_deadline_after(
+    base: std::time::Instant,
+    sent_at: std::time::Instant,
+    last_advance: Option<crate::daemon::state::prompt_progress::LastAdvance>,
+) -> std::time::Instant {
+    match last_advance {
+        Some(last) => {
+            let silence =
+                PROMPT_PROGRESS_SILENCE.max(last.longest_gap.saturating_mul(PROGRESS_GAPS_ALLOWED));
+            base.max((last.at + silence).min(sent_at + MEASURED_FIRST_TOKEN_MAX))
+        }
+        None => base,
+    }
+}
+
+/// `SWARMLLM_PROMPT_PROGRESS=0` asks no peer for prompt progress (#430), so a
+/// first-token wait is the fixed budget it was — the control arm. Read once.
+fn prompt_progress_disabled_by_env() -> bool {
+    use std::sync::OnceLock;
+    static OFF: OnceLock<bool> = OnceLock::new();
+    *OFF.get_or_init(|| {
+        std::env::var("SWARMLLM_PROMPT_PROGRESS")
+            .map(|v| v == "0" || v.eq_ignore_ascii_case("false"))
+            .unwrap_or(false)
+    })
+}
+
 /// What this node has measured of a peer reading a prompt of this length.
 ///
 /// A REQUIRED argument of [`first_token_timeout`]: the 600 s ceiling alone was a
@@ -1167,6 +1216,21 @@ impl PipelineExecutor {
             (Some(asked), Some(guessing))
         });
 
+        // A whole model's prompt is read on the peer in one go, before any
+        // token: ask how far it has got while it reads (#430), so the wait
+        // below lasts as long as the read keeps moving. Only of a peer that
+        // advertises the reports; a delegate's prompt is a split's, timed by
+        // its own pipeline.
+        let prompt_progress = (matches!(hand_off, HandOff::WholeModel)
+            && !prompt_progress_disabled_by_env()
+            && self.shared_state.peer_advertises_feature(
+                &segment.node_id,
+                crate::types::features::PROMPT_PROGRESS,
+            ))
+        .then(|| {
+            std::sync::Arc::new(crate::daemon::state::prompt_progress::ProgressSeen::default())
+        });
+
         // Register an inbound StreamingToken channel before sending the
         // request so we never miss an early token.
         let (stream_tx, mut stream_rx) = tokio::sync::mpsc::channel::<crate::types::StreamingToken>(
@@ -1179,6 +1243,7 @@ impl PipelineExecutor {
                 // A retry keeps the request id, so the peer is what
                 // distinguishes this attempt from the one it replaced.
                 expected_peer: segment.node_id.clone(),
+                prompt_progress: prompt_progress.clone(),
             },
         );
 
@@ -1223,6 +1288,7 @@ impl PipelineExecutor {
             sampling,
             session_id: self.request.session_id.clone(),
             delegation,
+            wants_prompt_progress: prompt_progress.is_some(),
             sender_peer_bytes: None,
         });
         if self
@@ -1276,6 +1342,41 @@ impl PipelineExecutor {
         let sent_at = std::time::Instant::now();
         // Absolute, so the slices the wait is taken in cannot restart it.
         let first_token_deadline = sent_at + first_token_budget;
+        // The deadline as the peer's prompt reports leave it (#430), read at
+        // every slice of the wait; said once when it carries the wait past
+        // the budget.
+        let mut said_reading_past_budget = false;
+        let deadline_now = |said: &mut bool| {
+            let last = prompt_progress.as_ref().and_then(|p| p.last_advance());
+            let deadline = first_token_deadline_after(first_token_deadline, sent_at, last);
+            if let (
+                Some(crate::daemon::state::prompt_progress::LastAdvance {
+                    processed,
+                    total,
+                    longest_gap,
+                    ..
+                }),
+                false,
+            ) = (last, *said)
+            {
+                if deadline > first_token_deadline
+                    && std::time::Instant::now() > first_token_deadline
+                {
+                    *said = true;
+                    tracing::info!(
+                        %request_id,
+                        peer = %segment.node_id,
+                        processed,
+                        total,
+                        longest_gap_s = longest_gap.as_secs(),
+                        budget_s = first_token_budget.as_secs(),
+                        "remote-generate: the peer is still reading the prompt — waiting on past \
+                         the first-token budget while its read keeps moving"
+                    );
+                }
+            }
+            deadline
+        };
         let mut first_token_at: Option<std::time::Instant> = None;
 
         // Reassembly of an unordered stream — see `StreamReassembler`.
@@ -1370,7 +1471,11 @@ impl PipelineExecutor {
             } else if first {
                 // In slices, so a peer that has left is noticed in seconds
                 // rather than at the end of a budget that may hold a cold load.
-                match first_token_wait(std::time::Instant::now(), first_token_deadline, true) {
+                match first_token_wait(
+                    std::time::Instant::now(),
+                    deadline_now(&mut said_reading_past_budget),
+                    true,
+                ) {
                     FirstTokenWait::Again(slice) => slice,
                     FirstTokenWait::PeerLeft | FirstTokenWait::Expired => Duration::ZERO,
                 }
@@ -1407,7 +1512,7 @@ impl PipelineExecutor {
             if maybe.is_err() && first {
                 match first_token_wait(
                     std::time::Instant::now(),
-                    first_token_deadline,
+                    deadline_now(&mut said_reading_past_budget),
                     self.shared_state
                         .connected_node_ids
                         .contains(&segment.node_id),
@@ -1948,6 +2053,60 @@ impl PipelineExecutor {
 #[cfg(test)]
 mod first_token_budget_tests {
     use super::*;
+
+    /// A peer's reports of its prompt read (#430) only ever lengthen the
+    /// first-token wait: past the budget to the silence after the last one
+    /// that moved, never past the ceiling from the send, and never shorter
+    /// than the budget a peer that says nothing gets.
+    #[test]
+    fn a_moving_prompt_read_holds_the_first_token_wait_open_to_a_ceiling() {
+        let sent = std::time::Instant::now();
+        let base = sent + Duration::from_secs(600);
+        let at = |at, longest_gap| {
+            Some(crate::daemon::state::prompt_progress::LastAdvance {
+                at,
+                processed: 1,
+                total: 1_000,
+                longest_gap,
+            })
+        };
+        let layer = Duration::from_secs(40);
+        assert_eq!(first_token_deadline_after(base, sent, None), base);
+        let early = sent + Duration::from_secs(10);
+        assert_eq!(
+            first_token_deadline_after(base, sent, at(early, layer)),
+            base,
+            "a report inside the budget leaves it"
+        );
+        let late = sent + Duration::from_secs(590);
+        assert_eq!(
+            first_token_deadline_after(base, sent, at(late, layer)),
+            late + PROMPT_PROGRESS_SILENCE
+        );
+        let slow_layer = Duration::from_secs(200);
+        assert_eq!(
+            first_token_deadline_after(base, sent, at(late, slow_layer)),
+            late + slow_layer * PROGRESS_GAPS_ALLOWED,
+            "a layer slower than the silence is waited for twice over"
+        );
+        let very_late = sent + MEASURED_FIRST_TOKEN_MAX;
+        assert_eq!(
+            first_token_deadline_after(base, sent, at(very_late, layer)),
+            sent + MEASURED_FIRST_TOKEN_MAX,
+            "the ceiling holds a peer that reports for ever"
+        );
+        assert_eq!(
+            first_token_deadline_after(base, sent, at(late, MEASURED_FIRST_TOKEN_MAX)),
+            sent + MEASURED_FIRST_TOKEN_MAX,
+            "and one that reports slowly"
+        );
+        let long_base = sent + MEASURED_FIRST_TOKEN_MAX + Duration::from_secs(240);
+        assert_eq!(
+            first_token_deadline_after(long_base, sent, at(very_late, layer)),
+            long_base,
+            "a measured budget with a load allowance past the ceiling stands"
+        );
+    }
 
     /// What a whole hand-off's wait says of the peer's prompt (#430): the wait
     /// less the round trip and a step, over layers × tokens; a wait that ran

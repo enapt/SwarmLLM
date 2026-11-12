@@ -2056,6 +2056,20 @@ impl SplitModel {
                         super::kv_cache::CANCELLED_MID_FORWARD.to_string(),
                     ));
                 }
+                // And how far it has got, for a worker reading a long prompt
+                // in this ONE forward to say so while it reads (#430). A prompt
+                // pass only; nothing is told where nobody listens.
+                if layer_idx > 0 {
+                    kv_cache_store.note_prompt_progress(
+                        request_id,
+                        super::kv_cache::PassProgress {
+                            index_pos,
+                            positions: seq_len,
+                            layers_done: layer_idx,
+                            layers: self.layers.len(),
+                        },
+                    );
+                }
                 let lora_param = lora_adapter.map(|a| (a, abs_layer));
 
                 // SWIFT skip: identity pass-through, no attention, no MLP, no KV write.

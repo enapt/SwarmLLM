@@ -50,6 +50,12 @@ A resource taken before an `.await` is returned by a guard that releases on DROP
 
 → `docs/invariants/memory.md` § "The contribution level caps the swarm's work, not the owner's prompt (2026-09-26)"
 
+## A worker's stream has ONE writer at a time (2026-11-12, #430)
+
+The worker's IPC writer is the main loop's (`&mut IpcWriter`). **`IpcWriter::second_handle`** exists for ONE use: `model_worker::PromptProgressOut::open`, whose window (`ReadingPrompt`) BORROWS the writer for its whole life and closes on drop, so the sequential prompt pass can send `WorkerMsg::Progress` between its layers (`Handle::block_on`, once a second) while nothing else can write. Two writers at once would interleave frames and desynchronise the daemon's reader. A forward tells its progress through `KvCacheStore::note_prompt_progress` (≥ 64 positions, beside the cancel probe); a sink that is not open sends nothing.
+
+→ `docs/invariants/network.md` § "A hand-off's prompt read is reported while it runs"
+
 ## A subprocess you are waiting for can die instead, and the graphics stack can go mid-run
 
 Whenever code waits for a subprocess, handle it dying instead (`spawn_worker` races `child.wait()` against `listener.accept()`). **`daemon::gpu_support::gpu_runtime_has_failed`** is the single answer to "has the graphics stack stopped working since we started?" (health monitor withdraws the GPU). ⚠ Never tell the owner the processor takes over — a CPU-only worker dies the same way. **`SharedState::inference_outage`** is "can this node run a request" (`can_serve_inference`); shard serving stays up. Guard: `both_inference_outages_withdraw_through_one_predicate`.

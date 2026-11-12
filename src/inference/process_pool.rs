@@ -33,6 +33,16 @@ use crate::types::{ModelId, PrefixBlockEntry, SamplingParams};
 pub(crate) struct IpcReader(Arc<interprocess::local_socket::tokio::Stream>);
 pub(crate) struct IpcWriter(Arc<interprocess::local_socket::tokio::Stream>);
 
+impl IpcWriter {
+    /// A second handle on the same stream, for ONE writer that writes only
+    /// while the caller's `&mut` borrow of this one is held — so frames never
+    /// interleave: `model_worker::PromptProgressOut::open` (#430), whose window
+    /// holds that borrow and drops the handle when it closes.
+    pub(crate) fn second_handle(&mut self) -> IpcWriter {
+        IpcWriter(Arc::clone(&self.0))
+    }
+}
+
 /// The one place a connected IPC stream becomes its two halves — the
 /// daemon's end in `spawn_worker` and the worker's in `run_worker`.
 pub(crate) fn split_ipc(
@@ -108,6 +118,9 @@ pub struct ProgressEvent {
     pub phase: crate::inference::worker_ipc::ProgressPhase,
     pub done: u32,
     pub total: u32,
+    /// Where the pass began reading — the positions before it came from the
+    /// cache (`WorkerMsg::Progress::from`, #430).
+    pub from: u32,
 }
 
 /// Item 8 Phase 2b: worker-initiated cross-node prefix-KV probe. The
@@ -1574,6 +1587,7 @@ async fn reader_actor(
                     phase,
                     done,
                     total,
+                    from,
                 } = msg
                 {
                     if let Some(tx) = progress_tx.as_ref() {
@@ -1582,6 +1596,7 @@ async fn reader_actor(
                             phase,
                             done,
                             total,
+                            from,
                         });
                     }
                     continue;

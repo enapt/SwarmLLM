@@ -41,6 +41,11 @@ pub struct EventBus {
     /// `SharedState::peer_work_hold_now`, and its start wakes the health
     /// monitor to send the capability at once (`UpdateDrain::started`).
     pub update_drain: crate::update_restart::UpdateDrain,
+    /// Whole-model hand-offs served here whose requesters asked to be told
+    /// how far the prompt has been read (#430). Started ONLY by the
+    /// remote-generate handler (`ProgressTargets::start`); read ONLY by the
+    /// progress forwarder (`ProgressTargets::frame_due`).
+    pub prompt_progress_to: super::prompt_progress::ProgressTargets,
 }
 
 impl EventBus {

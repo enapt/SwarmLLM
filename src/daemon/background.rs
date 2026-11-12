@@ -949,9 +949,15 @@ pub(super) fn spawn_browser_open(
 /// Reports for unknown request ids are dropped without complaint: the request
 /// finished (or was cancelled) between the worker sending and this draining,
 /// which is normal and not worth a log line per chunk.
+///
+/// A prompt read for a PEER's whole-model hand-off has no trace here; where
+/// its requester asked (#430), the read goes to it instead
+/// (`SwarmMessage::PromptProgress`, `ProgressTargets::frame_due`: at most
+/// every 2 s, only when it moved). Fire-and-forget, as the worker's report is.
 pub(super) fn spawn_progress_forwarder(
     tasks: &mut BackgroundTasks,
     shared_state: Arc<SharedState>,
+    network_tx: mpsc::Sender<NetworkCommand>,
     mut rx: mpsc::Receiver<crate::inference::process_pool::ProgressEvent>,
     mut shutdown_rx: watch::Receiver<bool>,
 ) {
@@ -961,6 +967,27 @@ pub(super) fn spawn_progress_forwarder(
                 _ = shutdown_rx.changed() => break,
                 msg = rx.recv() => {
                     let Some(event) = msg else { break };
+                    if let Some((target_peer_bytes, progress)) =
+                        shared_state.events.prompt_progress_to.frame_due(
+                            event.request_id,
+                            event.done,
+                            event.total,
+                            event.from,
+                            std::time::Instant::now(),
+                        )
+                    {
+                        tracing::debug!(
+                            request_id = %event.request_id,
+                            processed = progress.processed,
+                            total = progress.total,
+                            "DIAG: told a hand-off's requester how far its prompt has been read"
+                        );
+                        let _ = network_tx.try_send(NetworkCommand::SendDirectMessage {
+                            target_peer_bytes,
+                            message: crate::types::SwarmMessage::PromptProgress(progress),
+                            delivery_request_id: None,
+                        });
+                    }
                     let Some(trace) = shared_state.active_traces.get(&event.request_id) else {
                         continue;
                     };

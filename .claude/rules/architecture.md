@@ -113,7 +113,10 @@ complete an update.
 2. **Where inactivity does not apply, scale by the input and cap it** —
    `pipeline::remote_generate::first_token_timeout(prompt_tokens, load, read)`
    is the shared helper; do not invent another rule. Where the peer's read was
-   MEASURED (`MeasuredRead`, #430) the cap gives way to twice it, up to an hour.
+   MEASURED (`MeasuredRead`, #430) the cap gives way to twice it, up to an hour;
+   while the peer REPORTS its read moving (`PromptProgress`, #430) the wait lasts
+   120 s (or twice the longest gap between two reports) past the last, up to the
+   same hour (`first_token_deadline_after`).
 3. **Generation gets no blanket deadline.** `generation_routes` in
    `api/server.rs` merge OUTSIDE the `TimeoutLayer`, and that merge MUST stay
    before the auth layer — pinned by `generation_routes_still_require_a_key`.

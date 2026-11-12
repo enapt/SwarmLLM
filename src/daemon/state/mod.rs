@@ -35,6 +35,7 @@ mod peer_outliers;
 pub(crate) mod peer_speed;
 mod perf_history;
 pub(crate) mod prompt_admission;
+pub(crate) mod prompt_progress;
 pub(crate) mod recent_by_model;
 mod relay;
 mod removed_shards;
@@ -566,6 +567,11 @@ pub struct StreamingTokenSink {
     /// The peer this attempt is being served by. A token from anyone else
     /// belongs to an attempt that is over.
     pub expected_peer: crate::types::NodeId,
+    /// How far that peer says it has read the prompt (#430), where the
+    /// attempt asked (`RemoteGenerateRequest::wants_prompt_progress`):
+    /// written by dispatch's `PromptProgress` arm for `expected_peer` only,
+    /// read by the first-token wait.
+    pub prompt_progress: Option<Arc<prompt_progress::ProgressSeen>>,
 }
 
 /// How many split-model metadata entries this node keeps cached.
@@ -1772,6 +1778,7 @@ impl SharedState {
                 update_nudge: tokio::sync::Notify::new(),
                 close_before_restart: crate::update_restart::CloseBeforeRestart::default(),
                 update_drain: crate::update_restart::UpdateDrain::default(),
+                prompt_progress_to: prompt_progress::ProgressTargets::default(),
             },
             // Root-level fields (not sub-structed)
             executor,
@@ -7047,6 +7054,7 @@ mod pending_layer_result_tests {
         let sink = super::StreamingTokenSink {
             tx,
             expected_peer: serving.clone(),
+            prompt_progress: None,
         };
 
         let accepts = |sender: Option<&NodeId>| sender.is_some_and(|s| s == &sink.expected_peer);

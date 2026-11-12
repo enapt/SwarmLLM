@@ -197,6 +197,12 @@ pub enum SwarmMessage {
     // that request's coordinator once the reply is over (#427). Point to
     // point, gated on `features::HOP_TIMINGS` at the sender.
     HopTimings(HopTimings),
+
+    // How far a peer serving a whole-model hand-off has read its prompt, to
+    // the requester that asked for it (#430). Point to point, sent only where
+    // the request asked (`RemoteGenerateRequest::wants_prompt_progress`) and
+    // the requester advertises `features::PROMPT_PROGRESS`.
+    PromptProgress(PromptProgress),
 }
 
 impl SwarmMessage {
@@ -250,6 +256,7 @@ impl SwarmMessage {
             Self::PromptAdmissionAnswer(_) => "PromptAdmissionAnswer",
             Self::RequesterGuesses(_) => "RequesterGuesses",
             Self::HopTimings(_) => "HopTimings",
+            Self::PromptProgress(_) => "PromptProgress",
         }
     }
 }
@@ -314,6 +321,27 @@ pub struct HopTimings {
     pub steps: u32,
     /// Their median held time, in microseconds rounded to the millisecond.
     pub median_held_us: u32,
+}
+
+/// How far a peer serving a whole-model hand-off has read the request's
+/// prompt (#430), while no token has come yet: `processed` of `total` parts
+/// of what it has to READ — a share (1,000 parts), never a position. The
+/// positions its prompt cache already held are not counted: other people's
+/// requests fill that cache, and a position would tell the requester how
+/// much of its prompt's opening someone else had sent. A requester waits for a first token as long as these keep ADVANCING — an
+/// inactivity wait, where a fixed one set a minimum prompt speed nobody chose
+/// (`architecture.md` § Timeouts) — up to a ceiling. The peer's word: it only
+/// ever lengthens a wait, never prices anything. Prior art: llama.cpp's server
+/// streams `prompt_progress {total, cache, processed, time_ms}` while it reads
+/// a prompt when asked (`return_progress`), and pings a silent stream every
+/// 30 s, so a client tells a slow read from a dead server.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PromptProgress {
+    pub request_id: uuid::Uuid,
+    /// Parts of the peer's own read done.
+    pub processed: u32,
+    /// Parts in all (the same in every report of one read).
+    pub total: u32,
 }
 
 /// What a chain hop held a forward for (#427), handed from the forward's

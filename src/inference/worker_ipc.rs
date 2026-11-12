@@ -382,6 +382,13 @@ pub enum WorkerMsg {
         done: u32,
         /// Prompt tokens in total. Zero when not meaningful for the phase.
         total: u32,
+        /// Where this pass began reading (#430): the tokens before it were
+        /// restored from the prompt cache, not read. What the daemon tells
+        /// ANOTHER computer counts only the tokens from here
+        /// (`ProgressTargets::frame_due`) — the cached ones would tell it
+        /// what other people's prompts left in the cache.
+        #[serde(default)]
+        from: u32,
     },
     /// Worker is about to exit.
     Bye,

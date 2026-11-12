@@ -36,6 +36,7 @@ fn relay_round_trip_relay_blind_target_recovers() {
         sampling: SamplingParams::default(),
         session_id: None,
         delegation: None,
+        wants_prompt_progress: false,
         sender_peer_bytes: None,
     });
 

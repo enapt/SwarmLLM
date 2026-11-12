@@ -445,6 +445,13 @@ pub mod features {
     /// a coordinator advertising this.
     pub const HOP_TIMINGS: u64 = 1 << 40;
 
+    /// Reports how far it has read a whole-model hand-off's prompt
+    /// (`SwarmMessage::PromptProgress`, #430) to a requester that asked for it
+    /// (`RemoteGenerateRequest::wants_prompt_progress`), and takes such
+    /// reports: a requester asks only a peer advertising this, and a peer
+    /// reports only to a requester advertising it.
+    pub const PROMPT_PROGRESS: u64 = 1 << 41;
+
     /// The full feature set THIS build implements. Advertised by every node,
     /// with [`KV_HALF_ON_CARD`], [`KV_WINDOW_SLIDES`] and
     /// [`REQUESTER_GUESSES`] beside it where they apply.
@@ -485,7 +492,8 @@ pub mod features {
         | TEMPLATE_VARS
         | JUDGES_THE_COORDINATOR
         | SENDS_BLOCK_ROWS
-        | HOP_TIMINGS;
+        | HOP_TIMINGS
+        | PROMPT_PROGRESS;
 
     /// Does `advertised` include every bit in `needed`?
     pub fn supports(advertised: u64, needed: u64) -> bool {

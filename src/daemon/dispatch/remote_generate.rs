@@ -281,6 +281,23 @@ pub(super) async fn handle_remote_generate_request(
         .retained_replies
         .start(request_id, sender_bytes.clone());
 
+    // The requester asked to be told how far its prompt has been read while
+    // no token has come (#430): its first-token wait then lasts as long as
+    // the read keeps moving. Reported only to a requester advertising the
+    // reports, until the reply ends.
+    let progress_reported = (req.wants_prompt_progress
+        && requester.as_ref().is_some_and(|r| {
+            shared_state.peer_advertises_feature(r, crate::types::features::PROMPT_PROGRESS)
+        }))
+    .then(|| {
+        crate::daemon::state::prompt_progress::ProgressTargets::start(
+            &shared_state,
+            request_id,
+            sender_bytes.clone(),
+        )
+    })
+    .flatten();
+
     // Channel from the worker (via ModelProcessPool::generate) → the network
     // forwarding task below. Must be bounded to apply back-pressure if the
     // network can't keep up.
@@ -298,6 +315,7 @@ pub(super) async fn handle_remote_generate_request(
     let serving_guard = crate::daemon::state::ServingGuard::new(&shared_state, model_id.clone());
     let gen_fut = tokio::spawn(async move {
         let _serving_guard = serving_guard;
+        let _progress_reported = progress_reported;
         // Read off the prompt the coordinator rendered. Only this node's own
         // record of the reply reads it: the coordinator finalises the reply
         // from the raw tokens, with its own verdict (#392).

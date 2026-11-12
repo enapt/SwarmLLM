@@ -45,10 +45,11 @@ pub use network::{
     EphemeralKeyExchange, HeldAsHop, HfSourceGossip, HopTimings, LayersCounted, ManifestDigest,
     ManifestPull, ManifestVersion, MessageTransport, ModelDemandGossip, NetworkCommand,
     PoolModelAvailability, PrefixBlockEntry, PrefixCacheAnnounce, PromptAdmissionAnswer,
-    PromptAdmissionAsk, PromptAdmissionVerdict, PruneEvent, RebalanceEvent, RegionShardSummary,
-    RelayedEnvelope, RequesterGuesses, ResendTokens, SessionKeyConfirm, ShardAnnounce,
-    ShardDownloadProgress, ShardRequest, ShardResponse, SwarmMessage, WishlistAnnouncement,
-    WishlistAnnouncementEntry, BUILD_TAG_UNKNOWN, MAX_REQUESTER_GUESSES, MAX_SHARDS_PER_ANNOUNCE,
+    PromptAdmissionAsk, PromptAdmissionVerdict, PromptProgress, PruneEvent, RebalanceEvent,
+    RegionShardSummary, RelayedEnvelope, RequesterGuesses, ResendTokens, SessionKeyConfirm,
+    ShardAnnounce, ShardDownloadProgress, ShardRequest, ShardResponse, SwarmMessage,
+    WishlistAnnouncement, WishlistAnnouncementEntry, BUILD_TAG_UNKNOWN, MAX_REQUESTER_GUESSES,
+    MAX_SHARDS_PER_ANNOUNCE,
 };
 pub use node::{
     features, ContributionLevel, CpuInfo, GpuInfo, LatencyObservation, NodeCapability, NodeStats,

@@ -359,6 +359,15 @@ pub async fn run_worker(
                 .unwrap_or(false)
         }));
     }
+    // And between layers a prompt pass tells how far it has got (#430), which
+    // a sequential pass sends while it reads (`PromptProgressOut`).
+    let prompt_progress = Arc::new(PromptProgressOut::default());
+    {
+        let out = Arc::clone(&prompt_progress);
+        kv_store.set_prompt_progress_sink(Box::new(move |request_id, progress| {
+            out.tell(request_id, progress, std::time::Instant::now())
+        }));
+    }
 
     // Temperature reporting. Polled in the worker because this is the process
     // actually doing the arithmetic, so it is the one whose heat is worth
@@ -550,6 +559,7 @@ pub async fn run_worker(
                 &mut flow_sessions,
                 &mut far_runs,
                 &mut block_drafts,
+                &prompt_progress,
             )
             .await;
 
@@ -582,6 +592,7 @@ pub async fn run_worker(
                             &mut flow_sessions,
                             &mut far_runs,
                             &mut block_drafts,
+                            &prompt_progress,
                         )
                         .await;
                     }
@@ -8618,6 +8629,214 @@ fn prompt_refusal_message(
     }
 }
 
+/// How often a sequential prompt pass reports its read (#430).
+const PROMPT_PROGRESS_EVERY: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// A sequential prompt pass says how far it has read while it reads (#430).
+///
+/// `handle_generate` reads a prompt in ONE forward inside `block_in_place`,
+/// holding the worker's only writer, so nothing could go out until the pass
+/// was over: a peer's requester could not tell a 10-minute read from a dead
+/// computer, and gave up at its fixed budget. The forward tells the KV store
+/// between its layers (`KvCacheStore::note_prompt_progress`, beside the
+/// cancel probe); while [`Self::open`]'s window is open, this sends the read
+/// as `WorkerMsg::Progress` — the batched path's message — on a second handle
+/// of that writer, at most every [`PROMPT_PROGRESS_EVERY`] and only once it
+/// has moved. The window BORROWS the writer for its whole life, so nothing
+/// else writes on the stream while it is open.
+#[derive(Default)]
+pub(crate) struct PromptProgressOut {
+    open: parking_lot::Mutex<Option<OpenRead>>,
+}
+
+struct OpenRead {
+    report: ReadReport,
+    writer: IpcWriter,
+    runtime: tokio::runtime::Handle,
+}
+
+/// What an open read has reported so far, and the rule for the next report.
+struct ReadReport {
+    request: String,
+    request_id: uuid::Uuid,
+    /// Where the pass begins: the positions before it came from the cache.
+    from: usize,
+    total: usize,
+    opened: std::time::Instant,
+    last_sent: Option<std::time::Instant>,
+    last_processed: usize,
+}
+
+impl ReadReport {
+    /// The report due at `now`, if one is: the request's own, moved past the
+    /// last report, [`PROMPT_PROGRESS_EVERY`] after the last (or the
+    /// opening). Marks it sent.
+    fn due(
+        &mut self,
+        request: &str,
+        progress: crate::inference::split::kv_cache::PassProgress,
+        now: std::time::Instant,
+    ) -> Option<WorkerMsg> {
+        if self.request != request {
+            return None;
+        }
+        let processed = progress.processed().min(self.total);
+        let since = self.last_sent.unwrap_or(self.opened);
+        if processed <= self.last_processed
+            || now.saturating_duration_since(since) < PROMPT_PROGRESS_EVERY
+        {
+            return None;
+        }
+        self.last_sent = Some(now);
+        self.last_processed = processed;
+        Some(WorkerMsg::Progress {
+            request_id: self.request_id,
+            phase: crate::inference::worker_ipc::ProgressPhase::Prefill,
+            done: u32::try_from(processed).unwrap_or(u32::MAX),
+            total: u32::try_from(self.total).unwrap_or(u32::MAX),
+            from: u32::try_from(self.from).unwrap_or(u32::MAX),
+        })
+    }
+}
+
+/// While it lives, `PromptProgressOut` may write on the writer it borrows.
+pub(crate) struct ReadingPrompt<'w> {
+    out: &'w PromptProgressOut,
+    _writer: std::marker::PhantomData<&'w mut IpcWriter>,
+}
+
+impl Drop for ReadingPrompt<'_> {
+    fn drop(&mut self) {
+        *self.out.open.lock() = None;
+    }
+}
+
+impl PromptProgressOut {
+    /// `request` (its `request_id`) reads a prompt of `total` positions now,
+    /// from `from` (the positions before it came from the cache).
+    pub(crate) fn open<'w>(
+        &'w self,
+        writer: &'w mut IpcWriter,
+        request: &str,
+        request_id: uuid::Uuid,
+        from: usize,
+        total: usize,
+    ) -> ReadingPrompt<'w> {
+        *self.open.lock() = Some(OpenRead {
+            report: ReadReport {
+                request: request.to_string(),
+                request_id,
+                from,
+                total,
+                opened: std::time::Instant::now(),
+                last_sent: None,
+                last_processed: 0,
+            },
+            writer: writer.second_handle(),
+            runtime: tokio::runtime::Handle::current(),
+        });
+        ReadingPrompt {
+            out: self,
+            _writer: std::marker::PhantomData,
+        }
+    }
+
+    /// Told by a forward between its layers (any thread the pass runs on).
+    fn tell(
+        &self,
+        request: &str,
+        progress: crate::inference::split::kv_cache::PassProgress,
+        now: std::time::Instant,
+    ) {
+        let mut open = self.open.lock();
+        let Some(read) = open.as_mut() else {
+            return;
+        };
+        let Some(msg) = read.report.due(request, progress, now) else {
+            return;
+        };
+        // On the pass's own thread, outside the runtime (`block_in_place`, or
+        // a pool thread): a small frame, at most once a second.
+        let runtime = read.runtime.clone();
+        if runtime
+            .block_on(send_worker(&mut read.writer, &msg, &[]))
+            .is_err()
+        {
+            // The stream failed; the main loop finds out on its next write.
+            *open = None;
+        }
+    }
+}
+
+#[cfg(test)]
+mod prompt_progress_out_tests {
+    use super::*;
+    use crate::inference::split::kv_cache::PassProgress;
+
+    fn pass(index_pos: usize, positions: usize, layers_done: usize) -> PassProgress {
+        PassProgress {
+            index_pos,
+            positions,
+            layers_done,
+            layers: 32,
+        }
+    }
+
+    /// A sequential prompt pass reports its own read, counted from the
+    /// positions it held already, once a second and only once it moved; a
+    /// forward of another request reports nothing.
+    #[test]
+    fn a_prompt_pass_reports_its_read_once_a_second_while_it_moves() {
+        let t0 = std::time::Instant::now();
+        let rid = uuid::Uuid::new_v4();
+        let mut report = ReadReport {
+            request: rid.to_string(),
+            request_id: rid,
+            from: 100,
+            total: 1_100,
+            opened: t0,
+            last_sent: None,
+            last_processed: 0,
+        };
+        let second = PROMPT_PROGRESS_EVERY;
+        assert!(
+            report
+                .due(&rid.to_string(), pass(100, 1_000, 8), t0)
+                .is_none(),
+            "too soon"
+        );
+        assert!(
+            report
+                .due("another", pass(100, 1_000, 8), t0 + second)
+                .is_none(),
+            "not this read"
+        );
+        match report.due(&rid.to_string(), pass(100, 1_000, 8), t0 + second) {
+            Some(WorkerMsg::Progress {
+                done, total, from, ..
+            }) => {
+                assert_eq!((done, total, from), (350, 1_100, 100))
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(
+            report
+                .due(&rid.to_string(), pass(100, 1_000, 16), t0 + second * 3 / 2)
+                .is_none(),
+            "within the second"
+        );
+        assert!(
+            report
+                .due(&rid.to_string(), pass(100, 1_000, 8), t0 + second * 3)
+                .is_none(),
+            "a forward run again does not go back"
+        );
+        assert!(report
+            .due(&rid.to_string(), pass(100, 1_000, 16), t0 + second * 3)
+            .is_some());
+    }
+}
+
 /// Handle a Generate IPC message — run a full tokenize+decode loop.
 #[allow(clippy::too_many_arguments)]
 async fn handle_generate(
@@ -8634,6 +8853,7 @@ async fn handle_generate(
     max_seq_len_override: Option<usize>,
     pending_fetches: &PrefixFetchWaiterMap,
     cancelled: &CancelledSet,
+    prompt_progress: &PromptProgressOut,
 ) -> Result<(), SwarmError> {
     let _ = max_seq_len_override; // applied at worker startup (process-global)
     let request_id = gen.request_id;
@@ -8805,8 +9025,17 @@ async fn handle_generate(
         gen.reads_owner_replies,
     );
 
-    // Prefill — block_in_place for CPU-bound inference
+    // Prefill — block_in_place for CPU-bound inference. While it reads, the
+    // pass says how far it has got (#430), on this function's writer: the
+    // window holds it, so nothing else writes until the pass is over.
     let mut manifest = Vec::new();
+    let reading = prompt_progress.open(
+        writer,
+        &req_id_str,
+        request_id,
+        index_pos_start,
+        prompt_ids.len(),
+    );
     let prefill = tokio::task::block_in_place(|| {
         let _g = crate::inference::attn_kernel::ForceStandardAttnGuard::new(force_attn);
         let mut from = index_pos_start;
@@ -8857,6 +9086,7 @@ async fn handle_generate(
                 .map(|logits| (logits, None)),
         }
     });
+    drop(reading);
     // What the pass kept for the stand-in, learned once the first token is out
     // (`CardGuesses::take_the_prompt`).
     let mut prompt_caught: Option<(HashMap<usize, candle_core::Tensor>, usize)> = None;
@@ -10423,6 +10653,7 @@ async fn try_register_generate_slot(
             remaining_ids,
             next_chunk_index_pos: prefix_len,
         },
+        prompt_read_from: prefix_len,
         max_tokens,
         use_logprobs,
         eos,
@@ -10669,7 +10900,7 @@ async fn step_decode_pool(
             // prefix-cache insert + promote-to-decoding on the final chunk).
             // Announces are accumulated here and dispatched after the
             // mutable borrow on `active` drops below.
-            let mut pending_progress: Vec<(uuid::Uuid, u32, u32)> = Vec::new();
+            let mut pending_progress: Vec<(uuid::Uuid, u32, u32, u32)> = Vec::new();
             let mut pending_announces: Vec<(
                 crate::types::ModelId,
                 Vec<crate::types::PrefixBlockEntry>,
@@ -10691,6 +10922,7 @@ async fn step_decode_pool(
                     request_id,
                     (step.pos + step.chunk_len) as u32,
                     (step.pos + step.chunk_len + step.remaining_after) as u32,
+                    slot.prompt_read_from as u32,
                 ));
                 // The chunk that ends at the slot's save point — the prompt's
                 // end, or short of it for a recurrent model (#228) — saves the
@@ -10753,7 +10985,7 @@ async fn step_decode_pool(
             // a long prompt reads as progress rather than as a hang. Same
             // collect-then-send shape as the announces above: the `active`
             // borrow has to end before we can touch the writer.
-            for (request_id, done, total) in pending_progress {
+            for (request_id, done, total, from) in pending_progress {
                 let _ = send_worker(
                     writer,
                     &WorkerMsg::Progress {
@@ -10761,6 +10993,7 @@ async fn step_decode_pool(
                         phase: crate::inference::worker_ipc::ProgressPhase::Prefill,
                         done,
                         total,
+                        from,
                     },
                     &[],
                 )
@@ -11094,6 +11327,7 @@ async fn handle_daemon_msg(
     flow_sessions: &mut FlowSessions,
     far_runs: &mut FarRuns,
     block_drafts: &mut SplitBlockDrafts,
+    prompt_progress: &PromptProgressOut,
 ) -> bool {
     let activation_compression = options.activation_compression;
     let force_standard_attn = options.force_standard_attn;
@@ -11270,6 +11504,7 @@ async fn handle_daemon_msg(
                     max_seq_len_override,
                     pending_fetches,
                     cancelled,
+                    prompt_progress,
                 )
                 .await
                 {

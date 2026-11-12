@@ -1137,6 +1137,11 @@ pub struct KvCacheStore {
     /// running to the end for nobody (gotcha #441). Installed by the worker
     /// over its cancelled-request set; `None` means never cancelled here.
     cancel_oracle: std::sync::Mutex<Option<CancelOracle>>,
+    /// Told between layers how far a prompt pass has got (#430), so a worker
+    /// reading a long prompt in ONE forward can say so while it reads.
+    /// Installed by the worker (`model_worker::PromptProgressOut`); `None`
+    /// tells nobody.
+    prompt_progress: std::sync::Mutex<Option<PromptProgressSink>>,
     /// Prompts admitted whose cache has not been fully written yet:
     /// `request_id -> (bytes admission promised in each KvHome, when)`.
     ///
@@ -1196,6 +1201,32 @@ fn kv_reserve_enabled() -> bool {
 
 /// Given a request id, is that request cancelled?
 pub type CancelOracle = Box<dyn Fn(&str) -> bool + Send + Sync>;
+
+/// How far one forward of a prompt pass has got, told between its layers
+/// (#430): `layers_done` of `layers` have run over `positions` positions from
+/// `index_pos`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PassProgress {
+    pub index_pos: usize,
+    pub positions: usize,
+    pub layers_done: usize,
+    pub layers: usize,
+}
+
+impl PassProgress {
+    /// The positions of the prompt read so far, counting the layers run of
+    /// this forward as that share of its positions.
+    pub fn processed(&self) -> usize {
+        self.index_pos + self.positions * self.layers_done / self.layers.max(1)
+    }
+}
+
+/// The forwards this many positions wide or wider tell their progress
+/// (#430): a prompt pass, never a decode step or a speculative check.
+pub const PROGRESS_FROM_POSITIONS: usize = 64;
+
+/// Told a request's [`PassProgress`] between the layers of a forward.
+pub type PromptProgressSink = Box<dyn Fn(&str, PassProgress) + Send + Sync>;
 
 /// The message a forward returns when the request behind it was cancelled
 /// partway through. Matched by `forward_was_cancelled` on the worker, which
@@ -1594,6 +1625,7 @@ impl KvCacheStore {
             external_reserved: std::sync::atomic::AtomicU64::new(0),
             external_evictor: std::sync::Mutex::new(None),
             cancel_oracle: std::sync::Mutex::new(None),
+            prompt_progress: std::sync::Mutex::new(None),
             admitted_claims: dashmap::DashMap::new(),
             reserved_positions: dashmap::DashMap::new(),
             owner_requests: dashmap::DashMap::new(),
@@ -1815,6 +1847,27 @@ impl KvCacheStore {
     pub fn set_cancel_oracle(&self, f: CancelOracle) {
         if let Ok(mut slot) = self.cancel_oracle.lock() {
             *slot = Some(f);
+        }
+    }
+
+    /// Install what a prompt pass tells its progress to between layers (#430).
+    pub fn set_prompt_progress_sink(&self, f: PromptProgressSink) {
+        if let Ok(mut slot) = self.prompt_progress.lock() {
+            *slot = Some(f);
+        }
+    }
+
+    /// A forward of `progress.positions` positions has run
+    /// `progress.layers_done` of its layers: tell the sink, for a prompt
+    /// pass only ([`PROGRESS_FROM_POSITIONS`]). One lock, as the cancel probe.
+    pub fn note_prompt_progress(&self, request_id: &str, progress: PassProgress) {
+        if progress.positions < PROGRESS_FROM_POSITIONS {
+            return;
+        }
+        if let Ok(slot) = self.prompt_progress.lock() {
+            if let Some(f) = slot.as_ref() {
+                f(request_id, progress);
+            }
         }
     }
 

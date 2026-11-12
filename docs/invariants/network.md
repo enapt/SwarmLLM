@@ -7834,3 +7834,107 @@ segment.
 `a_block_drafters_rows_ride_after_the_served_time`, and the worker's
 `split_block_rows_tests` (which layers and rows a segment sends, how the drafter
 joins them).
+
+## A hand-off's prompt read is reported while it runs (2026-11-12, FUTURE_WORK #430)
+
+**Why.** A whole-model hand-off's first token waits for the peer to read the whole
+prompt. The requester waited a fixed budget for it — 600 s, or twice a believed
+floor where an earlier wait was MEASURED (`MeasuredRead`) — so a peer that reads
+slower than that failed every such prompt, and the FIRST long prompt to a peer
+never measured always waited the fixed 600 s: a minimum prompt speed nobody chose
+(`architecture.md` § Timeouts, rule 1: prefer an inactivity timeout to a total
+one). On the rig (B on ONE logical CPU, TinyLlama whole, A the header only) a
+1,999-token prompt ran out at 600 s on the build before (`~/rig430/floor5/out-1112d`).
+
+**Prior art.** llama.cpp's server streams `prompt_progress {total, cache,
+processed, time_ms}` while it reads a prompt when the client asks
+(`return_progress`, PR #15827; #18305 adds a 0% frame at the start) and pings a
+silent stream every 30 s (`--sse-ping-interval`), its own timeout an hour; vLLM
+sends SSE keep-alive comments while a request is queued or in prefill, because
+proxies close a stream that sends no bytes; `reqwest`'s `read_timeout` is the
+inactivity wait this repo already uses for downloads. What we take: the client
+ASKS, the server reports how far it has read, and the client's wait is an
+inactivity wait under a ceiling. What we do not: llama.cpp's frame names the
+`cache` it held — fine for a server's own client, not for a peer whose cache other
+people's requests fill (below).
+
+**The wire.** `SwarmMessage::PromptProgress {request_id, processed, total}`, point
+to point (never gossip, never relayed). The requester sets
+`RemoteGenerateRequest::wants_prompt_progress` (`#[serde(default)]`, skipped when
+false, so an older peer sees the request it always did) only for a WHOLE-model
+hand-off to a peer advertising `features::PROMPT_PROGRESS` (bit 41, in `ALL`);
+the serving peer reports only where the request asked AND the requester advertises
+the bit (`dispatch::remote_generate`, `ProgressTargets::start`, at most 256 at once,
+ended by a guard when the generate task ends). A/B `SWARMLLM_PROMPT_PROGRESS=0` on
+the requester.
+
+**Where the numbers come from.** The worker's SEQUENTIAL generate reads a prompt
+in ONE forward inside `block_in_place`, holding the worker's only IPC writer, so
+nothing could go out until the pass was over. The forward now tells the KV store
+between its layers (`KvCacheStore::note_prompt_progress`, beside the cancel probe,
+for forwards of ≥ 64 positions); `model_worker::PromptProgressOut` sends it as
+`WorkerMsg::Progress` — the batched path's message — at most once a second, on a
+second handle of the writer (`IpcWriter::second_handle`) that only exists while the
+pass's window BORROWS the main one, so two writers never interleave frames
+(`arch-worker-memory.md` § "A worker's stream has ONE writer at a time"). Sound
+because `block_in_place` runs its closure outside the runtime context (tokio
+1.54.1 `worker.rs:415`, `context::exit_runtime`), where `Handle::block_on` may
+run. The daemon's progress forwarder turns a worker report into a frame at most
+every 2 s and only once it moved (`ProgressTargets::frame_due`).
+
+**A report is a share, never a position** (security review, 2026-11-12, LOW).
+The first build sent `processed` as the absolute position read, which counts the
+positions the peer's prompt cache restored before the pass began: its first frame
+would tell the requester how much of its prompt's opening someone ELSE had sent
+that computer — an exact cross-user prefix-cache probe, where the first token's
+time is a noisy one. The worker now names where its pass began
+(`WorkerMsg::Progress::from`, the sequential pass's `index_pos_start`, the batched
+slot's `Slot::prompt_read_from`), and `frame_due` — the one builder of a frame —
+sends the pass's own read in thousandths (`OUT_OF`): `(done − from) × 1000 /
+(total − from)`, `total` always 1,000. Test `what_the_cache_held_is_never_reported`
+(a cold and a half-cached pass report the same share), red with `from` taken as 0.
+The owner's own progress display (`RequestTrace::set_progress`) keeps positions.
+
+**The requester.** Dispatch's `PromptProgress` arm keeps a frame only over the
+Direct transport, from an authenticated sender that is the attempt's
+`expected_peer`, and only where it ADVANCES (`ProgressSeen::note`: the same total
+as the first, `processed` rising, ≤ total). The first-token deadline becomes
+`max(budget, min(last advance + silence, sent + 1 h))`
+(`remote_generate::first_token_deadline_after`), the silence the larger of 120 s
+and twice the longest gap between two advances — the reports come a layer apart
+and a layer's time is the peer's; TCP sizes its retransmission timer from the round
+trips it measured the same way (RFC 6298 § 2). A report never shortens a wait and
+never prices anything; a peer that says nothing is waited for exactly as before.
+
+**What a peer can do with it** (the same review). Hold an unmeasured hand-off up to
+the hour's ceiling by reporting slow progress — about 6× the 600 s it could hold
+before (LOW, accepted: the requester's reader can still leave at once, the wait is
+watched for a cancel, and a peer that took the request could always answer
+slowly; the ceiling is llama.cpp's own timeout). A retry to the same peer under the
+same id gets no frames (its target is taken, `ProgressTargets::start` answers
+`None`) and waits as before. Relay and gossip never carry the frame; a frame from
+any other peer, or for another attempt, is dropped.
+
+**Measured.** `~/rig430/rig_floor5.sh` (`out-on`, the build with the frames, before
+the share and the gap rule): q2, 1,999 tokens to a peer never measured
+(`measured_read=Unknown`, budget 600 s), drew 21 reports — one a layer of 22, the
+first 40 s in at 90 positions, then every 39.4-40.3 s, none refused — and at 600 s
+A logged `the peer is still reading the prompt` and waited on; the reply came at
+898 s (200, 12 tokens). The build before ran the same prompt out at 600 s.
+q3 (1,978 tokens, another opening) went out the same way — one wait that came
+back is not believed until a second agrees, so still `Unknown`, 600 s — drew 21
+reports 37.9-39.7 s apart and came back at 867 s. Both replies are the build
+before's word for word (TinyLlama names Record 1 for both; the reports read the pass
+between layers and change no arithmetic). Safety kit: 59 driver polls, 0 events.
+On the final build (the share and the gap rule, `~/rig430/prog/final`, q1 + q2):
+q2 again `Unknown` at 600 s, 21 reports from 45 to 954 thousandths (`total=1000`),
+38.7-40.2 s apart; at 600 s A logged `longest_gap_s=40` and waited on; the reply
+came at 885 s, the same words.
+
+**Tests.** `a_hand_off_is_reported_to_its_requester_while_it_reads`,
+`the_reports_are_bounded`, `what_the_cache_held_is_never_reported`,
+`only_an_advancing_report_is_kept` (`daemon::state::prompt_progress`);
+`a_prompt_pass_reports_its_read_once_a_second_while_it_moves` (`model_worker`);
+`a_moving_prompt_read_holds_the_first_token_wait_open_to_a_ceiling`
+(`remote_generate`); `only_a_request_asking_for_prompt_progress_carries_the_field`
+(types crate).

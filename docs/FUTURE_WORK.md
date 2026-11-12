@@ -3414,7 +3414,7 @@ What it says (the user, 11-08: a split that fails or is slow is the defect — n
   ONE such computer; read across several in pieces it need not be (#430).
 
 #### #430 — A long prompt read on ONE computer that cannot read it fast: no first token in 10 minutes
-`P2` · perf-split · **OPEN** (residual: an inactivity wait fed by progress frames, and pieces timed between two machines; (a)'s ratio and (c) fixed 2026-11-11, the hand-off's prompt floor and the wait sized from it built 2026-11-12) — 2026-11-08 · history: #427 (measured), #171 (a prompt pass read in pieces)
+`P2` · perf-split · **OPEN** (residual: the floor read exactly from the frames, pieces timed between two machines, a led split's first-token wait; (a)'s ratio and (c) fixed 2026-11-11, the hand-off's prompt floor, the wait sized from it and the progress frames that make it an inactivity wait built 2026-11-12) — 2026-11-08 · history: #427 (measured), #171 (a prompt pass read in pieces)
 
 Qwen3.8-27B with a 4,110-token prompt (#427's table) was handed whole to the only machine holding every layer, whose
 card holds part of a 27B and processor the rest; it reads such a prompt at ~7-9.5 tok/s (Qwen3.6-27B there: 432 s),
@@ -3543,6 +3543,23 @@ stream that sends no bytes. Shape here:
   price, first-hand, and only for the request's own peer (a peer's word may price it SLOWER, never faster).
 - Security review before landing (a new frame, a new bit, and a peer-controlled wait); rig: `rig_floor2.sh`'s
   one-CPU B with a 1,702-token prompt must now COMPLETE, the frames logged.
+**Built 2026-11-12, on main (not in a release yet) — the progress frames, and the first-token wait an inactivity
+wait.** `SwarmMessage::PromptProgress` (bit 41, `features::PROMPT_PROGRESS`), asked by the requester
+(`RemoteGenerateRequest::wants_prompt_progress`) for a whole-model hand-off only. The worker's ONE-forward prompt
+pass tells its read between layers (`KvCacheStore::note_prompt_progress`) and sends it once a second on a second
+handle of its writer while the pass borrows the first (`model_worker::PromptProgressOut`); the serving daemon
+reports at most every 2 s, only once it moved, and only the pass's OWN share in thousandths — never a position,
+which would tell the requester what another user's prompt left in that computer's cache (security review: nothing
+above LOW; this was one). The requester keeps a report from the attempt's own peer only where it advances, and waits
+120 s — or twice the longest gap between two reports, a layer of the peer's read (RFC 6298's timer, sized from what
+it measured) — past the last, up to an hour (`first_token_deadline_after`). Rig (`~/rig430/rig_floor5.sh`, `out-on`):
+q2, 1,999 tokens to a peer never measured (`measured_read=Unknown`, budget 600 s), drew 21 reports 39.4-40.3 s
+apart (one a layer) and its reply came at 898 s, 200 — the build before ran it out at 600 s. q3 (1,978 tokens, still unmeasured: a wait that came back is believed once a second agrees) the same — 21 reports, its reply at 867 s; both replies the build before's word for word. On the final build (the share, the gap rule): q2 again, 885 s, reports 45 → 954 thousandths. Tests red-checked (each mechanism switched off: the cache's share, the advancing check, the gap rule, the once-a-second throttle).
+Evidence: `docs/invariants/network.md` § "A hand-off's prompt read is reported while it runs". Left: the floor read
+from the frames — the time from the first share to the last times the READ, without the queue or load before it (a
+review leftover: the floor includes the peer's queue wait), and a wait that runs out still has its frames;
+divided by every token it stays a lower bound where the peer's cache held part, as the floor is today — and a LED
+split's first-token wait, still the fixed budget (no frame comes from a head's split yet).
 **Also from the release's review (2026-11-12, P3):** a peer request stopped for heat (`stop_running_peer_work`, #440)
 is aborted without `release_request_kv`, so its target and any drafter stay `in_use` until `CONVERSATION_GAP_SECS`
 passes — a whole placement's reclaim of that idle drafter (#442) waits that long. The disconnect abort has the same

@@ -660,6 +660,7 @@ impl Daemon {
         background::spawn_progress_forwarder(
             &mut background_tasks,
             shared_state.clone(),
+            network_tx.clone(),
             progress_rx,
             shutdown_rx.clone(),
         );

@@ -1384,6 +1384,12 @@ pub struct RemoteGenerateRequest {
     /// one would refuse it as a whole model it does not hold.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub delegation: Option<DelegatedSplit>,
+    /// The requester asks to be told how far the prompt has been read while
+    /// it waits for the first token (`SwarmMessage::PromptProgress`, #430).
+    /// Set only for a whole-model hand-off to a peer advertising
+    /// `features::PROMPT_PROGRESS`; an older peer never sees it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub wants_prompt_progress: bool,
     /// Populated locally after receiving from the network — never on the wire.
     #[serde(skip)]
     pub sender_peer_bytes: Option<Vec<u8>>,
@@ -1828,6 +1834,7 @@ mod delegated_split_wire_tests {
             sampling: SamplingParams::default(),
             session_id: None,
             delegation,
+            wants_prompt_progress: false,
             sender_peer_bytes: None,
         }
     }
@@ -1841,6 +1848,23 @@ mod delegated_split_wire_tests {
         assert!(json.get("delegation").is_none(), "{json}");
         let back: RemoteGenerateRequest = serde_json::from_value(json).unwrap();
         assert!(back.delegation.is_none());
+    }
+
+    /// A hand-off that does not ask for prompt progress (#430) is encoded as
+    /// before the field existed, and one from an older requester decodes as
+    /// not asking; one that asks says so on the wire.
+    #[test]
+    fn only_a_request_asking_for_prompt_progress_carries_the_field() {
+        let json = serde_json::to_value(request(None)).unwrap();
+        assert!(json.get("wants_prompt_progress").is_none(), "{json}");
+        let back: RemoteGenerateRequest = serde_json::from_value(json).unwrap();
+        assert!(!back.wants_prompt_progress);
+        let mut asking = request(None);
+        asking.wants_prompt_progress = true;
+        let json = serde_json::to_value(&asking).unwrap();
+        assert_eq!(json["wants_prompt_progress"], serde_json::json!(true));
+        let back: RemoteGenerateRequest = serde_json::from_value(json).unwrap();
+        assert!(back.wants_prompt_progress);
     }
 
     /// A delegated split carries the conversation and the tools as given.
