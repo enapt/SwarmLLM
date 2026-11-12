@@ -422,7 +422,8 @@ fn capability_news(
     // build. Where that reader would not see it, it is not news at any size.
     let mut unread = now.clone();
     unread.ram_available_mb = sent.ram_available_mb;
-    if unread.memory_for_model_layers_mb() == now.memory_for_model_layers_mb() {
+    // Any model id: the two differ only in `ram_available_mb`.
+    if unread.memory_for_model_layers_mb("") == now.memory_for_model_layers_mb("") {
         now.ram_available_mb = sent.ram_available_mb;
     } else {
         hold(
@@ -474,6 +475,22 @@ fn capability_news(
             if speed_within_deadband(n, s) {
                 entry.decode_us_per_layer = Some(s);
             }
+        }
+        // What an idle worker gives way moves with the machine's free memory
+        // (#447): inside the memory deadband it is the figure already sent.
+        // Starting or stopping to give way is news whatever the size.
+        let gave = sent
+            .resident_layers
+            .iter()
+            .find(|s| s.model_id == entry.model_id)
+            .and_then(|s| s.gives_way);
+        if let (Some(n), Some(s)) = (entry.gives_way.as_mut(), gave) {
+            hold(&mut n.card_mb, s.card_mb, CAPABILITY_MEMORY_DEADBAND_MB);
+            hold(
+                &mut n.machine_mb,
+                s.machine_mb,
+                CAPABILITY_MEMORY_DEADBAND_MB,
+            );
         }
     }
     // A capability that cannot be serialized cannot be compared: say it is
@@ -3234,6 +3251,7 @@ pub(crate) mod tests {
                 ranges: Vec::new(),
                 decode_us_per_layer: speed,
                 card_layers: None,
+                gives_way: None,
             }];
             c
         };
@@ -3319,6 +3337,7 @@ pub(crate) mod tests {
                         ranges: Vec::new(),
                         decode_us_per_layer: None,
                         card_layers: None,
+                        gives_way: None,
                     })
                 }),
             ),

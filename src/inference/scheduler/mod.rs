@@ -870,12 +870,16 @@ enum PeerResidency {
 /// fastest advertised — and which refused it in 3 s, because its 6 GB card
 /// cannot take an 8 GB model and its processor budget was already full. The
 /// information to route around it was on the wire and nothing consulted it.
+#[allow(clippy::too_many_arguments)]
 fn max_hostable_layers(
     // The model's own layer count, and a ceiling on the answer. Nothing can
     // host more layers of a model than the model has, and without this the
     // warm branch below reports figures that are not about hosting at all.
     model_layers: u32,
     capability: Option<&swarmllm_types::NodeCapability>,
+    // The model being planned: its own workers are held layers, other models'
+    // idle ones room (`NodeCapability::memory_for_model_layers_mb`, #447).
+    model_id: &str,
     bytes_per_layer: u64,
     residency: PeerResidency,
     // Headroom on top of the advertised figure: `DELEGATE_VRAM_MARGIN` for the
@@ -919,7 +923,7 @@ fn max_hostable_layers(
         PeerResidency::Cold | PeerResidency::Layers(_) if bytes_per_layer == 0 => return None,
         _ => {}
     }
-    let usable_bytes = usable_bytes_for_layers(capability, margin, committed_mb)?;
+    let usable_bytes = usable_bytes_for_layers(capability, model_id, margin, committed_mb)?;
     // Clamped by the model, because the warm branch above answers a narrower
     // question than its name. A warm peer is charged KV only, so with a short
     // prompt the divisor is a few hundred KB and the quotient is thousands —
@@ -973,13 +977,14 @@ fn max_hostable_layers(
 /// is never "no room" ([`max_hostable_layers`]'s doc says why).
 fn usable_bytes_for_layers(
     capability: Option<&swarmllm_types::NodeCapability>,
+    model_id: &str,
     margin: f64,
     committed_mb: u64,
 ) -> Option<u64> {
     // A GPU node is judged on its card; a node with no card, on its RAM. This
     // mirrors `allocate_offline`, which asks the same question for capacity
     // planning — the worker subprocess can host layers in either.
-    let free_mb = capability?.memory_for_model_layers_mb();
+    let free_mb = capability?.memory_for_model_layers_mb(model_id);
     if free_mb == 0 {
         // Not "no room": no information.
         return None;
@@ -999,6 +1004,7 @@ fn usable_bytes_for_layers(
 fn room_for_new_layers(
     model_layers: u32,
     capability: Option<&swarmllm_types::NodeCapability>,
+    model_id: &str,
     bytes_per_layer: u64,
     margin: f64,
     prompt_kv_bytes_per_layer: u64,
@@ -1007,7 +1013,7 @@ fn room_for_new_layers(
     if bytes_per_layer == 0 {
         return None;
     }
-    let usable_bytes = usable_bytes_for_layers(capability, margin, committed_mb)?;
+    let usable_bytes = usable_bytes_for_layers(capability, model_id, margin, committed_mb)?;
     let full_price = bytes_per_layer.saturating_add(prompt_kv_bytes_per_layer);
     Some((usable_bytes as f64 / full_price as f64).min(f64::from(model_layers)))
 }
@@ -1022,11 +1028,12 @@ fn room_for_new_layers(
 /// processor's speed ([`NodeCandidate::card_layers`]).
 fn layers_beside_card(
     capability: Option<&swarmllm_types::NodeCapability>,
+    model_id: &str,
     bytes_per_layer: u64,
     prompt_kv_bytes_per_layer: u64,
     margin: f64,
 ) -> f64 {
-    let Some((room_mb, _)) = capability.and_then(|c| c.processor_beside_card()) else {
+    let Some((room_mb, _)) = capability.and_then(|c| c.processor_beside_card(model_id)) else {
         return 0.0;
     };
     let full_price = bytes_per_layer.saturating_add(prompt_kv_bytes_per_layer);
@@ -5395,6 +5402,7 @@ impl PipelineScheduler {
                         max_hostable_layers(
                             manifest.num_layers,
                             p.capability.as_ref(),
+                            &manifest.id.0,
                             held_bytes_per_layer,
                             residency,
                             margin,
@@ -5419,6 +5427,7 @@ impl PipelineScheduler {
                         .map_or(0.0, |p| {
                             layers_beside_card(
                                 p.capability.as_ref(),
+                                &manifest.id.0,
                                 beside_bytes_per_layer,
                                 beside_kv_per_layer,
                                 margin,
@@ -5473,6 +5482,7 @@ impl PipelineScheduler {
                             room_for_new_layers(
                                 manifest.num_layers,
                                 p.capability.as_ref(),
+                                &manifest.id.0,
                                 held_bytes_per_layer,
                                 margin,
                                 prompt_kv_per_layer,
@@ -5609,12 +5619,14 @@ impl PipelineScheduler {
                         .as_ref()
                         .filter(|c| c.models_run_on_card())
                         .and_then(|c| {
-                            c.gpu.as_ref().map(|g| {
+                            // With what its idle workers of other models give
+                            // back (#447), as every other room reading.
+                            c.card_free_for_mb(&manifest.id.0).map(|free| {
                                 // Same deduction as the bound above, for the same
                                 // reason: this figure is a snapshot the peer sends
                                 // every 30 s, and it cannot know what this node
                                 // booked onto it since.
-                                g.vram_available_mb.saturating_sub(committed_mb)
+                                free.saturating_sub(committed_mb)
                             })
                         })
                 })
@@ -5639,7 +5651,7 @@ impl PipelineScheduler {
                     .and_then(|p| {
                         p.capability
                             .as_ref()
-                            .and_then(|c| c.processor_beside_card())
+                            .and_then(|c| c.processor_beside_card(&manifest.id.0))
                     })
                     .map_or(0.0, |(_, processor)| processor)
             };
@@ -6921,7 +6933,7 @@ impl PipelineScheduler {
             let available_mb = peer
                 .capability
                 .as_ref()
-                .map(|c| c.memory_for_model_layers_mb())
+                .map(|c| c.memory_for_model_layers_mb(&manifest.id.0))
                 .unwrap_or(0);
             let available_bytes = available_mb.saturating_mul(1_048_576);
             let bytes_per_layer = weight_bytes_per_layer(
@@ -6932,6 +6944,7 @@ impl PipelineScheduler {
             // Plus what its processor takes beside its card, where it says.
             let beside = layers_beside_card(
                 peer.capability.as_ref(),
+                &manifest.id.0,
                 weight_bytes_per_layer(&manifest, host_resident_bytes, false),
                 0,
                 1.0,

@@ -780,6 +780,7 @@ fn a_warm_peers_card_layers_are_the_ones_its_card_runs() {
             }],
             decode_us_per_layer: None,
             card_layers: card_share,
+            gives_way: None,
         }];
         state.peer_registry.insert(
             peer.clone(),
@@ -4629,6 +4630,7 @@ fn a_peer_that_publishes_its_ranges_is_priced_by_them() {
             ranges,
             decode_us_per_layer: None,
             card_layers: None,
+            gives_way: None,
         }];
         state.peer_registry.insert(
             node.clone(),
@@ -4713,6 +4715,7 @@ fn only_the_layers_a_peer_actually_holds_are_exempt_from_their_weight() {
     let reported = super::max_hostable_layers(
         32,
         Some(&cap),
+        "test-model",
         bytes_per_layer,
         super::PeerResidency::Layers(8),
         1.0,
@@ -4735,6 +4738,7 @@ fn only_the_layers_a_peer_actually_holds_are_exempt_from_their_weight() {
     let silent = super::max_hostable_layers(
         32,
         Some(&cap),
+        "test-model",
         bytes_per_layer,
         super::PeerResidency::WarmAmountUnknown,
         1.0,
@@ -4747,6 +4751,7 @@ fn only_the_layers_a_peer_actually_holds_are_exempt_from_their_weight() {
     let cold = super::max_hostable_layers(
         32,
         Some(&cap),
+        "test-model",
         bytes_per_layer,
         super::PeerResidency::Cold,
         1.0,
@@ -4766,6 +4771,7 @@ fn a_resident_layer_still_pays_for_this_prompts_kv() {
     let answer = super::max_hostable_layers(
         32,
         Some(&cap),
+        "test-model",
         3_000u64 * 1_048_576 / 32,
         super::PeerResidency::Layers(8),
         1.0,
@@ -4797,6 +4803,7 @@ fn a_warm_peers_bound_cannot_exceed_the_layers_the_model_has() {
     let unclamped = super::max_hostable_layers(
         u32::MAX,
         Some(&cap),
+        "test-model",
         3_000u64 * 1_048_576 / 32,
         super::PeerResidency::WarmAmountUnknown,
         super::DELEGATE_VRAM_MARGIN,
@@ -4811,6 +4818,7 @@ fn a_warm_peers_bound_cannot_exceed_the_layers_the_model_has() {
     let clamped = super::max_hostable_layers(
         32,
         Some(&cap),
+        "test-model",
         3_000u64 * 1_048_576 / 32,
         super::PeerResidency::WarmAmountUnknown,
         super::DELEGATE_VRAM_MARGIN,
@@ -4834,6 +4842,7 @@ fn a_peer_already_serving_the_model_is_not_capped_by_its_free_memory() {
     let cold = super::max_hostable_layers(
         u32::MAX,
         Some(&cap),
+        "test-model",
         bytes_per_layer,
         super::PeerResidency::Cold,
         super::DELEGATE_VRAM_MARGIN,
@@ -4848,6 +4857,7 @@ fn a_peer_already_serving_the_model_is_not_capped_by_its_free_memory() {
     let warm = super::max_hostable_layers(
         u32::MAX,
         Some(&cap),
+        "test-model",
         bytes_per_layer,
         super::PeerResidency::WarmAmountUnknown,
         super::DELEGATE_VRAM_MARGIN,
@@ -4874,6 +4884,7 @@ fn a_long_prompt_shrinks_the_layers_a_peer_may_take() {
     let short = super::max_hostable_layers(
         u32::MAX,
         Some(&cap),
+        "test-model",
         bytes_per_layer,
         super::PeerResidency::Cold,
         super::DELEGATE_VRAM_MARGIN,
@@ -4883,6 +4894,7 @@ fn a_long_prompt_shrinks_the_layers_a_peer_may_take() {
     let long = super::max_hostable_layers(
         u32::MAX,
         Some(&cap),
+        "test-model",
         bytes_per_layer,
         super::PeerResidency::Cold,
         super::DELEGATE_VRAM_MARGIN,
@@ -4915,6 +4927,7 @@ fn a_warm_peer_is_still_bounded_by_the_prompts_kv() {
         super::max_hostable_layers(
             u32::MAX,
             Some(&cap),
+            "test-model",
             bytes_per_layer,
             super::PeerResidency::WarmAmountUnknown,
             super::DELEGATE_VRAM_MARGIN,
@@ -4927,6 +4940,7 @@ fn a_warm_peer_is_still_bounded_by_the_prompts_kv() {
     let capped = super::max_hostable_layers(
         u32::MAX,
         Some(&cap),
+        "test-model",
         bytes_per_layer,
         super::PeerResidency::WarmAmountUnknown,
         super::DELEGATE_VRAM_MARGIN,
@@ -4978,6 +4992,51 @@ fn the_cheapest_peer_that_was_passed_over_can_be_named() {
     );
 }
 
+/// **A peer's idle workers of OTHER models are room for this one** (#447).
+/// After serving ten models in turn, a computer's card read 3 free layers of a
+/// 14B to every coordinator while its own admission would have reclaimed the
+/// rest. The bound counts what those workers give way — and never a worker of
+/// the model being planned, whose layers are held ranges.
+#[test]
+fn a_peers_idle_workers_of_other_models_are_room_for_this_one() {
+    let mut cap = capability_with_gpu(Some(300));
+    cap.resident_layers = vec![swarmllm_types::ResidentModelLayers {
+        model_id: "idle-other".into(),
+        layers: 26,
+        ranges: Vec::new(),
+        decode_us_per_layer: None,
+        card_layers: Some(26),
+        gives_way: Some(swarmllm_types::GivesWay {
+            card_mb: 4_000,
+            machine_mb: 0,
+        }),
+    }];
+    let bytes_per_layer = 100 * 1_048_576;
+    let bound = |model: &str| {
+        super::max_hostable_layers(
+            u32::MAX,
+            Some(&cap),
+            model,
+            bytes_per_layer,
+            super::PeerResidency::Cold,
+            1.0,
+            0,
+            0,
+        )
+        .unwrap()
+    };
+    assert_eq!(
+        bound("a-14b"),
+        43,
+        "300 MB free + 4,000 given way, 100 MB a layer"
+    );
+    assert_eq!(
+        bound("idle-other"),
+        3,
+        "a worker of the model itself is never room for it"
+    );
+}
+
 /// Two requests scheduled inside one 30-second gossip window must not both be
 /// told the peer has all its memory free.
 ///
@@ -4996,6 +5055,7 @@ fn memory_already_booked_on_a_peer_is_not_offered_twice() {
     let free = super::max_hostable_layers(
         u32::MAX,
         Some(&cap),
+        "test-model",
         bytes_per_layer,
         super::PeerResidency::Cold,
         super::DELEGATE_VRAM_MARGIN,
@@ -5006,6 +5066,7 @@ fn memory_already_booked_on_a_peer_is_not_offered_twice() {
     let booked = super::max_hostable_layers(
         u32::MAX,
         Some(&cap),
+        "test-model",
         bytes_per_layer,
         super::PeerResidency::Cold,
         super::DELEGATE_VRAM_MARGIN,
@@ -5025,6 +5086,7 @@ fn memory_already_booked_on_a_peer_is_not_offered_twice() {
         super::max_hostable_layers(
             u32::MAX,
             Some(&cap),
+            "test-model",
             bytes_per_layer,
             super::PeerResidency::Cold,
             super::DELEGATE_VRAM_MARGIN,
@@ -5041,6 +5103,7 @@ fn memory_already_booked_on_a_peer_is_not_offered_twice() {
         super::max_hostable_layers(
             u32::MAX,
             Some(&silent),
+            "test-model",
             bytes_per_layer,
             super::PeerResidency::Cold,
             super::DELEGATE_VRAM_MARGIN,
@@ -5232,6 +5295,7 @@ fn an_unreadable_memory_figure_never_caps_a_peer() {
         super::max_hostable_layers(
             u32::MAX,
             None,
+            "test-model",
             1024,
             super::PeerResidency::Cold,
             super::DELEGATE_VRAM_MARGIN,
@@ -5246,6 +5310,7 @@ fn an_unreadable_memory_figure_never_caps_a_peer() {
         super::max_hostable_layers(
             u32::MAX,
             Some(&zeroed),
+            "test-model",
             1024,
             super::PeerResidency::Cold,
             super::DELEGATE_VRAM_MARGIN,
@@ -8769,6 +8834,7 @@ fn publish_resident(state: &SharedState, node: &NodeId, model: &ModelId, range: 
         }],
         decode_us_per_layer: None,
         card_layers: None,
+        gives_way: None,
     }];
 }
 

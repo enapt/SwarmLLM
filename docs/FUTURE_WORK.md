@@ -3439,49 +3439,6 @@ and the 70B was refused: the planner saw AU's card with room for 3 of the 14B's 
 max_hostable_layers=Some(19) held_ranges=[]`) after AU had served ten models in turn — its card and memory held
 by the earlier models' idle workers (#447).
 
-#### #447 — A computer that has served several models in turn is offered as full while its idle workers would make room
-`P1` · perf-split · **OPEN** — 2026-11-12 · history: #427 (measured 11-12), #125 (the same fix for this node), #276
-(left as it is there)
-
-A node plans ITSELF counting the card and machine memory its admission would take back from idle workers of other
-models (`ModelProcessPool::idle_vram_reclaimable_mb` / `idle_ram_reclaimable_mb`, #125: an idle 3B sent an 8B held
-here to Belgium). What it ADVERTISES counts those workers as spent: `gpu.vram_available_mb` is the card's raw free
-memory (`health/monitor.rs`, `vram::query_gpu_vram_free_mb`), `ram_model_budget_mb` and `machine_room_beside_card_mb`
-the cap less every worker's reservation (`vram::ram_room_now_mb`); `ResidentModelLayers` names what is loaded, never
-what an idle worker would give back. `docs/invariants/memory.md` § "A model is admitted against the card as it stands
-NOW" and #276 both record it as left unfixed. Only the relaxed ceiling rung plans past it.
-
-Measured (#427's 11-12 table): after the Australian RTX 3060 (`aa3d1e66`) had served ten models one after another,
-the planner saw it with card room for 3 of Qwen3-14B's 40 layers (`card_layers=Some(3) max_hostable_layers=Some(19)
-held_ranges=[]`), split the 30B-A3B across Italy where it had run whole there, and refused Llama 3.3 70B — "room for
-5 of the 80 layers it holds" (64 on 11-08). One "one invariant, N paths" defect: the local half was fixed by #125.
-Not yet known: whether that computer's OWN admission then reclaimed for the work it was handed — the 14B, handed
-whole at the ceiling rung, ran at 3.8 tok/s against 15.7-17.1 on 11-08, which reads as most layers on its processor;
-its log is not ours. Seen again 08:06-08:44Z (#446's live check, `~/swarmllm-gate/replan446/`): the same
-4,304-token 31B ask planned Italy [0,34) + Australia [34,60), and Italy refused its part for memory after 37 s
-("its worker is already holding 7979 MB"); on the official build the same ask ran 27 min and ended on a refusal for
-conversation memory ("other conversations on this node are using 1139 MB of the 1386 MB available"). First a rig on
-this machine's card (live node stopped): a node serving three models in turn, then
-a dense model handed whole — where does its spawn place it, and what does it advertise before and after?
-Design to weigh: a "room after reclaim" figure in the capability (additive, `#[serde(default)]`, the same predicate
-`vram_reclaim_eligible` / `ram_reclaim_eligible` admission uses, so the advertisement can never promise more than the
-spawn takes), or each idle worker's releasable memory in `ResidentModelLayers`. A capability change →
-`security-reviewer` (a peer may advertise room it will not honour: the up-front prompt admission, #252 (b), still
-asks before the pass).
-
-Prior art (2026-11-12, Ollama read from source, the rest from docs): **Ollama** (`server/sched.go`) sums nothing
-reclaimable up front — a failed fit evicts ONE idle runner (`findRunnerToUnload`: idle first, shortest keep_alive, not
-LRU) and tries again, and `waitForVRAMRecovery` polls the driver every 250 ms until free memory rose by 0.75 × that
-runner's size, giving up after 5 s ("free memory reporting on GPUs can lag"); its free figure is the lower of the
-driver's and total − its own runners' predicted use (`updateFreeSpace`). **vLLM** sleep mode level 1 moves weights to
-host RAM, so reclaiming the card can spend the RAM room also advertised — the two figures are computed together.
-**KServe ModelMesh** places by LRU cache age and keeps a new model from displacing a recently used one
-(`LASTUSED_AGE_ON_ADD_MS`, `minChurnAgeMs`); **LocalAI** evicts LRU, skipping busy models. Not found anywhere: an
-outside party allowed to evict the owner's models. What we take: a NEW field beside the raw figure (older peers keep
-reading the raw one); computed from our own worker accounting, never a driver re-query after an eviction; only
-workers idle past a threshold, never the owner's just-used model; the advertisement is a hint, so admission re-checks
-on arrival and refuses fast; hysteresis so the figure does not flap.
-
 #### #430 — A long prompt read on ONE computer that cannot read it fast: no first token in 10 minutes
 `P2` · perf-split · **OPEN** (residual: pieces timed between two machines, a led split's first-token wait; (a)'s ratio and (c) fixed 2026-11-11, the hand-off's prompt floor, the wait sized from it and the progress frames that make it an inactivity wait built 2026-11-12) — 2026-11-08 · history: #427 (measured), #171 (a prompt pass read in pieces)
 
@@ -6132,6 +6089,35 @@ archive under the named heading. Reopen one only with the evidence its line name
 Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 19-28 were
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
+
+**Closed 2026-11-12, on main (not in a release yet)** (#447)
+- #447 — **A computer that had served several models in turn was offered as full while its idle
+  workers would make room.** After the Australian RTX 3060 had served ten models one after another,
+  every coordinator saw its card with room for 3 of Qwen3-14B's 40 layers and the 70B was refused
+  ("room for 5 of the 80 layers"): its card and memory were held by idle workers of the earlier
+  models, which its own admission would have unloaded (#125) — counted when it planned for itself,
+  advertised as spent. Each `ResidentModelLayers` entry now carries `gives_way`
+  (`#[serde(default)]`): what its worker would give another model's work — the card charge, and its
+  share of the machine room's gain after the unload (`RamBudget::headroom_after_reclaim`) — only where
+  admission would reclaim it, idle ≥ 30 s, not a drafter (`ModelProcessPool::gives_way`). The reader
+  takes the planned model as a REQUIRED argument (`NodeCapability::memory_for_model_layers_mb`,
+  `card_free_for_mb`, `processor_beside_card`): another model's idle worker is room, the planned
+  model's own is held layers. Security review: nothing above MEDIUM; its MEDIUM — the first design
+  left out workers the owner had used last, which told every peer when the owner last asked which
+  model while admission reclaimed them all the same — was dropped before landing, and its LOW — a
+  peer's prompt-cache snapshot fetch marked the worker used, holding off the idle unload and both
+  reclaims — fixed (`register_unseen`). Prior art: Ollama evicts one idle runner and polls the
+  driver's free figure until it recovers; vLLM sleep mode; ModelMesh keeps a recently used model.
+  Rig `split_rig.sh givesway` (`~/rig447/`, processor, llama-3.2-3b with B's 7 last layers only
+  there, B also serving qwen2.5-coder-0.5b for A then idle 90 s): RAM_B 1700 — A priced B at 14
+  layers, and at 8 with `SWARMLLM_GIVES_WAY=0` on B; RAM_B 1400 — 11 against 4, where B's segment needs 7. Both arms planned the same split and answered (B is the only holder of those layers, so the relaxed ceiling rung takes it either way): the rig proves the figure reaches the planner, not a routing change, which needs other candidates. Tests
+  `an_idle_worker_of_another_model_is_offered_as_room_and_only_as_admission_would_take_it`,
+  `a_peers_idle_workers_of_other_models_are_room_for_this_one`,
+  `idle_workers_of_other_models_are_room_and_the_planned_models_own_is_not` (types crate),
+  `a_peers_snapshot_fetch_does_not_mark_the_worker_used` — each red with its mechanism off.
+  Evidence: `docs/invariants/memory.md` § "A model is admitted against the card as it stands NOW".
+  Left as it is: admission lets a peer's work reclaim an idle model the owner used (#125); whether
+  it should keep the owner's recently used model is its own question.
 
 **Closed 2026-11-12, on main (not in a release yet)** (#446)
 - #446 — **A long prompt refused by several computers in turn failed with a fitting plan untried.**

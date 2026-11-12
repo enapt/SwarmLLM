@@ -580,6 +580,27 @@ enum Growth {
 /// `docs/FUTURE_WORK.md` carries it with the measurements that justify it.
 const VRAM_MAKE_ROOM_MIN_IDLE_SECS_DEFAULT: u64 = 5;
 
+/// How long a worker is idle before peers are told it would give way to
+/// another model's work (`ModelProcessPool::gives_way`, #447). One capability
+/// round (the health monitor broadcasts every 30 s): a worker used between two
+/// rounds is not offered in the next, so a model in steady use never flaps in
+/// and out of the advertisement — and by the time a peer acts on the figure the
+/// worker has been idle well past the reclaim's own floor
+/// ([`VRAM_MAKE_ROOM_MIN_IDLE_SECS_DEFAULT`]), so admission takes the room.
+const GIVES_WAY_AFTER_IDLE_SECS: u64 = 30;
+
+/// `SWARMLLM_GIVES_WAY=0` tells peers no idle worker's room — the
+/// advertisement before #447, for A/B inside one binary.
+fn gives_way_advertised() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        !matches!(
+            std::env::var("SWARMLLM_GIVES_WAY").ok().as_deref(),
+            Some("0")
+        )
+    })
+}
+
 /// `SWARMLLM_VRAM_SWAP_MIN_IDLE_SECS` — pin the floor, for A/B measurement.
 ///
 /// Same discipline as `SWARMLLM_DECODE_THREADS` and `SWARMLLM_DECODE_ATTN`:
@@ -4542,8 +4563,13 @@ impl ModelProcessPool {
         let request_id = Uuid::new_v4();
         let (tx, mut rx) = mpsc::channel::<(WorkerMsg, Vec<u8>)>(2);
         // Snapshot export is a cheap metadata read, not a decode loop — there
-        // is no meaningful compute to abandon.
-        let (_guard, _) = handle.register_response(request_id, tx, false);
+        // is no meaningful compute to abandon. And a PEER's read (its
+        // `PrefixKvFetch`), no work for this node's users: the slot without
+        // marking the worker used, as a peer's question takes
+        // (`register_question`) — one fetch every few seconds held off the idle
+        // unload and both reclaims, and kept this model's `gives_way` (#447)
+        // coming and going in the capability (security review, 2026-11-12).
+        let (_guard, _) = handle.register_unseen(request_id, tx, false);
         {
             let mut writer = handle.writer.lock().await;
             let msg = DaemonMsg::ExportPrefixSnapshot {
@@ -8004,6 +8030,7 @@ impl ModelProcessPool {
             .filter(|e| !e.value().dead.load(Ordering::Acquire))
             .map(|e| (e.key().clone(), e.value().clone()))
             .collect();
+        let giving_way = self.gives_way(&live);
         let mut out = Vec::new();
         for (model_id, handle) in live {
             // The same ranges, and the same releasable figure, that this
@@ -8035,11 +8062,98 @@ impl ModelProcessPool {
                     // Which of them its card runs (#361) — the answer this
                     // node's own planner reads (`card_share_for_planning`).
                     card_layers: Some(handle.layers_on_card()),
+                    // What it would give back to another model's work (#447).
+                    gives_way: giving_way.get(&model_id).copied(),
                 });
             }
         }
         out.sort_by(|a, b| a.model_id.cmp(&b.model_id));
         out
+    }
+
+    /// What each of `live`'s workers would give back were ANOTHER model's work
+    /// to need the room, as peers are told it (`ResidentModelLayers::gives_way`,
+    /// #447) — only workers this node's own admission would reclaim
+    /// ([`vram_reclaim_eligible`], [`Self::ram_reclaim_eligible`]), and of those
+    /// only ones idle past [`GIVES_WAY_AFTER_IDLE_SECS`] and not guessing for
+    /// another model (a split never reclaims a drafter, [`split_reclaim_eligible`])
+    /// — so the advertisement can promise less than admission takes, never more.
+    ///
+    /// **Whoever used a worker last does not enter into it.** Leaving out the
+    /// workers the owner used last would tell every peer, round by round,
+    /// when the owner last asked which model — what [`OwnDecodeSpeed`] keeps
+    /// from peers — while admission reclaims them all the same (security
+    /// review, 2026-11-12).
+    ///
+    /// **The planner's half of the reclaim, said to peers.** This node plans
+    /// ITSELF counting its idle workers' memory (#125); it told peers that
+    /// memory was spent — the card's raw free figure, the machine's room less
+    /// every reservation — so a computer that had served ten models in turn was
+    /// offered room for 3 of a 14B's 40 card layers (2026-11-12).
+    ///
+    /// The card's figure is each worker's charge there, which leaving gives
+    /// back to the driver's free figure the advertisement reads. The machine's
+    /// is the gain of the stated room itself — the swarm's cap less what is
+    /// committed, never past the live headroom, as `vram::ram_room_now_mb`
+    /// states it — after unloading every such worker
+    /// ([`crate::model::auto_manage::vram::RamBudget::headroom_after_reclaim`],
+    /// the planner's own reading, which counts 70% of what an unload frees
+    /// where the headroom binds), shared out by each worker's reservation. The
+    /// room after reclaiming is concave in the memory reclaimed, so a peer
+    /// adding the shares of any subset of these workers never counts more than
+    /// unloading that subset gives.
+    fn gives_way(
+        &self,
+        live: &[(ModelId, Arc<WorkerHandle>)],
+    ) -> std::collections::HashMap<ModelId, swarmllm_types::GivesWay> {
+        if !gives_way_advertised() {
+            return std::collections::HashMap::new();
+        }
+        let floor = GIVES_WAY_AFTER_IDLE_SECS.max(vram_make_room_min_idle_secs());
+        let window = self.conversation_window();
+        let mut each: Vec<(ModelId, u64, u64)> = Vec::new();
+        for (model, handle) in live {
+            if handle.in_use(window)
+                || handle.idle_secs() < floor
+                || handle.drafts_for_another_model.load(Ordering::Acquire)
+            {
+                continue;
+            }
+            let card_mb = self.vram_reserved_mb.get(model).map_or(0, |mb| *mb);
+            let ram_mb = self.ram_reserved_mb.get(model).map_or(0, |mb| *mb);
+            if card_mb > 0 || ram_mb > 0 {
+                each.push((model.clone(), card_mb, ram_mb));
+            }
+        }
+        let ram_total: u64 = each.iter().map(|(_, _, ram)| *ram).sum();
+        let machine_gain = match self.ram_budget_now(Requester::Swarm) {
+            Some(budget) if ram_total > 0 => {
+                let committed = self.ram_committed_mb();
+                budget
+                    .headroom_after_reclaim(committed, ram_total)
+                    .saturating_sub(budget.headroom_after_reclaim(committed, 0))
+            }
+            _ => 0,
+        };
+        each.into_iter()
+            .map(|(model, card_mb, ram_mb)| {
+                let machine_mb = if ram_total == 0 {
+                    0
+                } else {
+                    u64::try_from(
+                        u128::from(machine_gain) * u128::from(ram_mb) / u128::from(ram_total),
+                    )
+                    .unwrap_or(u64::MAX)
+                };
+                (
+                    model,
+                    swarmllm_types::GivesWay {
+                        card_mb,
+                        machine_mb,
+                    },
+                )
+            })
+            .collect()
     }
 
     /// Is a live worker already holding this whole model?
@@ -13086,6 +13200,100 @@ mod tests {
     /// `child: None` — `Drop` skips the kill and marks `exited` directly.
     pub(super) async fn fake_worker_handle(dead_now: bool) -> Arc<WorkerHandle> {
         fake_worker_handle_on(dead_now, Some(CpuReason::Configured), true).await
+    }
+
+    /// **Peers are told what an idle worker of another model would give back,
+    /// and only what admission would take** (#447). Idle past the floor and not
+    /// a drafter: offered — its card charge, and its share of what the machine
+    /// room gains. Used seconds ago, or guessing for another model: not offered.
+    #[tokio::test]
+    async fn an_idle_worker_of_another_model_is_offered_as_room_and_only_as_admission_would_take_it(
+    ) {
+        let p = ModelProcessPool::new(std::path::PathBuf::from("/tmp/swarmllm-gives-way"));
+        p.set_ram_budget_mb(10_000);
+        let Some(an_hour_ago) =
+            std::time::Instant::now().checked_sub(std::time::Duration::from_secs(3_600))
+        else {
+            return; // a clock this young cannot place an idle worker an hour back
+        };
+        let mut live = Vec::new();
+        for (name, card_mb, ram_mb, spawned_at) in [
+            ("on-card", 3_000, 0, an_hour_ago),
+            ("in-ram", 0, 2_000, an_hour_ago),
+            ("fresh", 1_000, 0, std::time::Instant::now()),
+            ("drafter", 500, 0, an_hour_ago),
+            ("both", 700, 300, an_hour_ago),
+        ] {
+            let m = ModelId(name.into());
+            let h = fake_worker_handle_spawned(false, None, ram_mb > 0, spawned_at).await;
+            if card_mb > 0 {
+                p.vram_reserved_mb.insert(m.clone(), card_mb);
+            }
+            if ram_mb > 0 {
+                p.ram_reserved_mb.insert(m.clone(), ram_mb);
+            }
+            p.workers.insert(m.clone(), h.clone());
+            live.push((m, h));
+        }
+        let handle = |name: &str| live.iter().find(|(m, _)| m.0 == name).unwrap().1.clone();
+        handle("drafter")
+            .drafts_for_another_model
+            .store(true, Ordering::Release);
+
+        let given = p.gives_way(&live);
+        assert_eq!(
+            given.get(&ModelId("on-card".into())),
+            Some(&swarmllm_types::GivesWay {
+                card_mb: 3_000,
+                machine_mb: 0
+            })
+        );
+        // The machine room is the cap less 2,300 committed: unloading the
+        // 2,300 offered gains exactly that under a cap with no live headroom,
+        // shared out by each worker's reservation.
+        assert_eq!(
+            given.get(&ModelId("in-ram".into())),
+            Some(&swarmllm_types::GivesWay {
+                card_mb: 0,
+                machine_mb: 2_000
+            })
+        );
+        assert_eq!(
+            given.get(&ModelId("both".into())),
+            Some(&swarmllm_types::GivesWay {
+                card_mb: 700,
+                machine_mb: 300
+            })
+        );
+        for kept in ["fresh", "drafter"] {
+            assert_eq!(given.get(&ModelId(kept.into())), None, "{kept}");
+        }
+    }
+
+    /// **A peer's snapshot fetch is a question, not a use** (security review,
+    /// 2026-11-12). `fetch_local_snapshot` answers a peer's `PrefixKvFetch`; it
+    /// marked the worker used, so one fetch every few seconds held off the idle
+    /// unload and both reclaims, and kept the model's `gives_way` (#447) coming
+    /// and going in the capability. The fake worker never answers, so the fetch
+    /// waits its bound out — the slot is taken all the same.
+    #[tokio::test]
+    async fn a_peers_snapshot_fetch_does_not_mark_the_worker_used() {
+        let p = ModelProcessPool::new(std::path::PathBuf::from("/tmp/swarmllm-snapshot-use"));
+        let Some(an_hour_ago) =
+            std::time::Instant::now().checked_sub(std::time::Duration::from_secs(3_600))
+        else {
+            return; // a clock this young cannot place an idle worker an hour back
+        };
+        let m = ModelId("idle".into());
+        let h = fake_worker_handle_spawned(false, None, false, an_hour_ago).await;
+        p.workers.insert(m.clone(), h.clone());
+        assert!(h.idle_secs() >= 3_599);
+        assert_eq!(p.fetch_local_snapshot(&m, [7; 32]).await, None);
+        assert!(
+            h.idle_secs() >= 3_599,
+            "a peer's fetch left the worker idle (idle {} s)",
+            h.idle_secs()
+        );
     }
 
     /// **An up-front admission never holds a pipeline for a worker busy with

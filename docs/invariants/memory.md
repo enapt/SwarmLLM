@@ -4122,6 +4122,50 @@ filled, unchecked. The explicit-ceiling branch already floored it at 1; now both
 place the figure is made. Test `a_card_another_program_has_filled_admits_nothing_rather_than_anything`
 (red without the floor: `Some(0)`).
 
+**Peers are told the room an idle worker of another model would give back (2026-11-12, #447).**
+This node plans ITSELF counting the memory its admission would take back from idle workers of
+other models (#125, #276); what it ADVERTISED counted that memory as spent — `gpu.vram_available_mb`
+the card's raw free figure, `ram_model_budget_mb` / `machine_room_beside_card_mb` the swarm's cap
+less every reservation. Measured on #427's 11-12 tier run: after the Australian RTX 3060 had served
+ten models in turn, every coordinator saw its card with room for 3 of Qwen3-14B's 40 layers
+(`card_layers=Some(3) max_hostable_layers=Some(19)`), split the 30B-A3B across Italy where it had run
+whole, and refused Llama 3.3 70B ("room for 5 of the 80 layers it holds", 64 on 11-08). One
+invariant, two paths: the local half was fixed by #125. Now each `ResidentModelLayers` entry carries
+`gives_way` (`#[serde(default)]`, older peers read past it): **`ModelProcessPool::gives_way`** offers a
+worker only where admission would reclaim it (`vram_reclaim_eligible` / `ram_reclaim_eligible`: not
+in use) AND it is idle past `GIVES_WAY_AFTER_IDLE_SECS` (30, one capability round — a model in
+steady use never flaps in and out) and not a drafter (a split never reclaims one) — so the
+advertisement can promise less than admission takes, never more. **Whoever used a worker last does
+not enter into it**: the first design also left out workers the owner had used last (ModelMesh's
+recently-used age), and its security review found that told every peer, round by round, when the
+owner last asked which model — what `OwnDecodeSpeed` keeps from peers — while admission reclaims
+those workers all the same (#125); dropped before it landed. The same review found a peer's
+prompt-cache snapshot fetch (`fetch_local_snapshot`, a `PrefixKvFetch`) marking the worker used: one
+every few seconds held off the idle unload and both reclaims and kept `gives_way` coming and going in
+the capability; it now takes the slot as a peer's question does (`register_unseen`, test
+`a_peers_snapshot_fetch_does_not_mark_the_worker_used`). Its card figure is the worker's charge; its machine figure is that worker's share of what
+the STATED room gains after unloading every offered worker (`RamBudget::headroom_after_reclaim`, the
+planner's own reading, 70% of what an unload frees where the live headroom binds) — the gain is
+concave in what is reclaimed, so any subset's shares never exceed what unloading that subset gives.
+The reader is **`NodeCapability::memory_for_model_layers_mb(model_id)`** (and
+`processor_beside_card(model_id)`, `card_free_for_mb(model_id)`): the model is a REQUIRED argument,
+and a worker OF that model gives nothing (its layers are held ranges). Prior art (FUTURE_WORK #447):
+Ollama evicts one idle runner and polls the driver until 0.75× its size comes back; ModelMesh keeps
+a recently used model from being displaced. Admission here lets a peer's work reclaim an idle model
+the owner used (#125, unchanged) — no system found lets an outside party do that, so whether
+admission should keep the owner's recently used model is its own question, not this one.
+The figure is a hint: the up-front prompt admission (#252 (b)) and the spawn still decide, and a
+refusal still holds the peer to `layers_that_fit`. Tests
+`an_idle_worker_of_another_model_is_offered_as_room_and_only_as_admission_would_take_it`,
+`a_peers_idle_workers_of_other_models_are_room_for_this_one`,
+`idle_workers_of_other_models_are_room_and_the_planned_models_own_is_not` (types crate),
+`a_peers_snapshot_fetch_does_not_mark_the_worker_used`. A/B `SWARMLLM_GIVES_WAY=0` (B tells peers
+nothing of its idle workers). Rig `split_rig.sh givesway` (`~/rig447/rig_givesway.sh`, 2026-11-12,
+processor, llama-3.2-3b with B's 7 last layers held only there, B serving qwen2.5-coder-0.5b for A
+then idle 90 s): A priced B at 14 layers against 8 with the switch off (RAM_B 1700), 11 against 4
+(1400) — the figure reaches the planner. Both arms ran the same split there: B is the only holder, so
+the relaxed ceiling rung takes it either way.
+
 ## "Used recently" has four answers, and one of them is never written locally
 
 `model::auto_manage::prune::effective_idle_secs` combines all of them — a

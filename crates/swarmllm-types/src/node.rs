@@ -876,6 +876,39 @@ pub struct ResidentModelLayers {
     /// `ranges` is); a peer then bounds it by the card's total memory.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub card_layers: Option<u32>,
+    /// What this model's worker would give back were ANOTHER model's work to
+    /// need the room — `Some` only while it is idle as this node's own
+    /// admission would reclaim it (no reply or held conversation, idle past
+    /// the advertised floor, not a drafter, last used by a peer rather than
+    /// this computer's owner). A peer planning a DIFFERENT model counts it as
+    /// room ([`NodeCapability::memory_for_model_layers_mb`]); the model's own
+    /// layers are its `ranges` (#447: a computer that had served ten models in
+    /// turn was offered room for 3 of a 14B's 40 layers on its card and 5 of a
+    /// 70B's 80, while its own admission would have reclaimed the room).
+    ///
+    /// A hint, never a promise: the node re-checks on arrival and refuses out
+    /// loud. `None` from an older node and from a worker in use — read past by
+    /// older nodes, as `ranges` is. Prior art (FUTURE_WORK #447): Ollama evicts
+    /// one idle runner and re-reads the driver; ModelMesh keeps a recently used
+    /// model from being displaced — hence the idle floor and the owner rule.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gives_way: Option<GivesWay>,
+}
+
+/// The memory an idle worker gives back to another model's work — see
+/// [`ResidentModelLayers::gives_way`]. Each figure is in the unit of the room
+/// the node states beside it: `card_mb` of the card's free memory
+/// (`GpuInfo::vram_available_mb`), `machine_mb` of the system-memory room
+/// (`ram_model_budget_mb` or `machine_room_beside_card_mb`), already scaled to
+/// what that figure would read after the unload — a node's machine room is
+/// capped by the memory the operating system reports free, of which an unload
+/// returns only part, so a peer adds these and never re-derives them.
+#[derive(Debug, Clone, Copy, Default, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct GivesWay {
+    #[serde(default)]
+    pub card_mb: u64,
+    #[serde(default)]
+    pub machine_mb: u64,
 }
 
 /// One range a node's worker holds, and what loading a range that strictly
@@ -921,14 +954,46 @@ impl NodeCapability {
     /// operating system's free-memory reading, exactly as before this field
     /// existed: that reading is not a promise the node can keep, and routing
     /// on it produced segments the receiving node refused on arrival.
-    pub fn memory_for_model_layers_mb(&self) -> u64 {
+    ///
+    /// **For `model_id`, a REQUIRED argument (#447):** the stated room plus what
+    /// the node's idle workers of OTHER models would give back
+    /// ([`Self::given_way_for`]) — the reclaim its own admission makes for that
+    /// model's work, and the room its own planner counts for itself (#125). A
+    /// worker of `model_id` itself gives nothing: its layers are held ranges.
+    pub fn memory_for_model_layers_mb(&self, model_id: &str) -> u64 {
+        let given = self.given_way_for(model_id);
         match self.ram_model_budget_mb {
-            Some(mb) => mb,
+            Some(mb) => mb.saturating_add(given.machine_mb),
             None => match &self.gpu {
-                Some(g) => g.vram_available_mb,
+                Some(g) => g.vram_available_mb.saturating_add(given.card_mb),
                 None => self.ram_available_mb,
             },
         }
+    }
+
+    /// The card's free memory for `model_id`'s layers: its stated free memory
+    /// plus what idle workers of other models would give back there — `None`
+    /// without a card. The card's half of [`Self::memory_for_model_layers_mb`],
+    /// for a reader that asks about the card whatever the placement.
+    pub fn card_free_for_mb(&self, model_id: &str) -> Option<u64> {
+        let g = self.gpu.as_ref()?;
+        Some(
+            g.vram_available_mb
+                .saturating_add(self.given_way_for(model_id).card_mb),
+        )
+    }
+
+    /// What this node's idle workers of models OTHER than `model_id` would
+    /// give back, summed — the one reading of [`ResidentModelLayers::gives_way`].
+    pub fn given_way_for(&self, model_id: &str) -> GivesWay {
+        self.resident_layers
+            .iter()
+            .filter(|r| r.model_id != model_id)
+            .filter_map(|r| r.gives_way)
+            .fold(GivesWay::default(), |sum, g| GivesWay {
+                card_mb: sum.card_mb.saturating_add(g.card_mb),
+                machine_mb: sum.machine_mb.saturating_add(g.machine_mb),
+            })
     }
 
     /// Do this node's model layers run on its graphics card?
@@ -956,7 +1021,10 @@ impl NodeCapability {
     /// [`Self::memory_for_model_layers_mb`] already, and must not be counted
     /// twice. A speed that is not a finite positive number states nothing: an
     /// infinite one would price the layers beside the card at nothing.
-    pub fn processor_beside_card(&self) -> Option<(u64, f32)> {
+    ///
+    /// For `model_id`, REQUIRED as in [`Self::memory_for_model_layers_mb`]: the
+    /// room plus what idle workers of other models give back in system memory.
+    pub fn processor_beside_card(&self, model_id: &str) -> Option<(u64, f32)> {
         if !self.models_run_on_card() {
             return None;
         }
@@ -964,7 +1032,10 @@ impl NodeCapability {
             self.machine_room_beside_card_mb,
             self.processor_tokens_per_sec_7b,
         ) {
-            (Some(mb), Some(speed)) if speed.is_finite() && speed > 0.0 => Some((mb, speed)),
+            (Some(mb), Some(speed)) if speed.is_finite() && speed > 0.0 => Some((
+                mb.saturating_add(self.given_way_for(model_id).machine_mb),
+                speed,
+            )),
             _ => None,
         }
     }
@@ -1172,7 +1243,7 @@ mod version_compat_tests {
         let cap: NodeCapability = serde_json::from_value(base_fields()).unwrap();
         assert!(cap.ram_model_budget_mb.is_none());
         assert_eq!(
-            cap.memory_for_model_layers_mb(),
+            cap.memory_for_model_layers_mb("m"),
             4096,
             "with no budget stated, the raw figure is all there is"
         );
@@ -1184,7 +1255,7 @@ mod version_compat_tests {
             .unwrap()
             .insert("ram_model_budget_mb".into(), serde_json::json!(2048u64));
         let cap: NodeCapability = serde_json::from_value(v).unwrap();
-        assert_eq!(cap.memory_for_model_layers_mb(), 2048);
+        assert_eq!(cap.memory_for_model_layers_mb("m"), 2048);
 
         // A card answers when the node has stated no system-memory budget —
         // which is what a node running its models ON the card reports. Its
@@ -1202,7 +1273,7 @@ mod version_compat_tests {
         );
         let cap: NodeCapability = serde_json::from_value(v).unwrap();
         assert!(cap.ram_model_budget_mb.is_none());
-        assert_eq!(cap.memory_for_model_layers_mb(), 6000);
+        assert_eq!(cap.memory_for_model_layers_mb("m"), 6000);
     }
 
     /// The processor's room beside a card is read only from a node whose
@@ -1223,7 +1294,7 @@ mod version_compat_tests {
             .unwrap()
             .insert("gpu".into(), card.clone());
         let cap: NodeCapability = serde_json::from_value(older.clone()).unwrap();
-        assert_eq!(cap.processor_beside_card(), None, "an older card node");
+        assert_eq!(cap.processor_beside_card("m"), None, "an older card node");
 
         let mut stating = older;
         let obj = stating.as_object_mut().unwrap();
@@ -1236,9 +1307,9 @@ mod version_compat_tests {
             serde_json::json!(6.5f32),
         );
         let cap: NodeCapability = serde_json::from_value(stating.clone()).unwrap();
-        assert_eq!(cap.processor_beside_card(), Some((24000, 6.5)));
+        assert_eq!(cap.processor_beside_card("m"), Some((24000, 6.5)));
         assert_eq!(
-            cap.memory_for_model_layers_mb(),
+            cap.memory_for_model_layers_mb("m"),
             1000,
             "the card's figure is still the card's"
         );
@@ -1250,7 +1321,7 @@ mod version_compat_tests {
             .unwrap()
             .insert("ram_model_budget_mb".into(), serde_json::json!(4096u64));
         let cap: NodeCapability = serde_json::from_value(stating).unwrap();
-        assert_eq!(cap.processor_beside_card(), None);
+        assert_eq!(cap.processor_beside_card("m"), None);
 
         // A speed that is not a number a processor could run at states nothing.
         let mut card = NodeCapability {
@@ -1260,10 +1331,74 @@ mod version_compat_tests {
         };
         for speed in [f32::INFINITY, f32::NAN, 0.0, -1.0] {
             card.processor_tokens_per_sec_7b = Some(speed);
-            assert_eq!(card.processor_beside_card(), None, "speed {speed}");
+            assert_eq!(card.processor_beside_card("m"), None, "speed {speed}");
         }
         card.processor_tokens_per_sec_7b = Some(6.5);
-        assert_eq!(card.processor_beside_card(), Some((24000, 6.5)));
+        assert_eq!(card.processor_beside_card("m"), Some((24000, 6.5)));
+    }
+
+    /// **What idle workers of OTHER models give back is room for a model; a
+    /// worker of that model itself gives nothing** (#447). Every room reading
+    /// — the card, the machine beside it, a processor node's budget — adds the
+    /// others' and only the others'.
+    #[test]
+    fn idle_workers_of_other_models_are_room_and_the_planned_models_own_is_not() {
+        let card = serde_json::json!({
+            "name": "card",
+            "vram_total_mb": 12288u64,
+            "vram_available_mb": 1000u64,
+            "memory_bandwidth_gbps": 360.0f32,
+        });
+        let mut fields = base_fields();
+        let obj = fields.as_object_mut().unwrap();
+        obj.insert("gpu".into(), card);
+        obj.insert(
+            "machine_room_beside_card_mb".into(),
+            serde_json::json!(2000u64),
+        );
+        obj.insert(
+            "processor_tokens_per_sec_7b".into(),
+            serde_json::json!(6.5f32),
+        );
+        let mut cap: NodeCapability = serde_json::from_value(fields).unwrap();
+        let resident = |model: &str, gives_way: Option<GivesWay>| ResidentModelLayers {
+            model_id: model.into(),
+            layers: 10,
+            ranges: Vec::new(),
+            decode_us_per_layer: None,
+            card_layers: None,
+            gives_way,
+        };
+        cap.resident_layers = vec![
+            resident(
+                "idle-a",
+                Some(GivesWay {
+                    card_mb: 3000,
+                    machine_mb: 500,
+                }),
+            ),
+            resident(
+                "idle-b",
+                Some(GivesWay {
+                    card_mb: 2000,
+                    machine_mb: 0,
+                }),
+            ),
+            resident("busy", None),
+        ];
+
+        // A third model: both idle workers give way.
+        assert_eq!(cap.memory_for_model_layers_mb("other"), 1000 + 3000 + 2000);
+        assert_eq!(cap.card_free_for_mb("other"), Some(6000));
+        assert_eq!(cap.processor_beside_card("other"), Some((2500, 6.5)));
+        // Model `idle-a` itself: its own worker is held layers, not room.
+        assert_eq!(cap.memory_for_model_layers_mb("idle-a"), 1000 + 2000);
+        assert_eq!(cap.processor_beside_card("idle-a"), Some((2000, 6.5)));
+
+        // A processor node: its machine budget gains the machine figures.
+        cap.ram_model_budget_mb = Some(4096);
+        assert_eq!(cap.memory_for_model_layers_mb("other"), 4096 + 500);
+        assert_eq!(cap.memory_for_model_layers_mb("idle-a"), 4096);
     }
 
     /// A card is where models run only when the node says so by stating NO
@@ -1322,7 +1457,7 @@ mod version_compat_tests {
         );
         let cap: NodeCapability = serde_json::from_value(v).unwrap();
         assert_eq!(
-            cap.memory_for_model_layers_mb(),
+            cap.memory_for_model_layers_mb("m"),
             2048,
             "the models load in RAM, so the RAM budget is what bounds them"
         );
@@ -1490,24 +1625,32 @@ mod resident_ranges_tests {
             ],
             decode_us_per_layer: Some(1_250),
             card_layers: Some(9),
+            gives_way: Some(GivesWay {
+                card_mb: 900,
+                machine_mb: 300,
+            }),
         };
         let back: ResidentModelLayers =
             serde_json::from_str(&serde_json::to_string(&entry).unwrap()).unwrap();
         assert_eq!(back, entry);
 
-        // A worker's own decode speed (#3 (f)) and its card's share (#361): an
-        // older build's entry has neither, and an entry without them sends
-        // nothing an older build would have to read past.
+        // A worker's own decode speed (#3 (f)), its card's share (#361) and
+        // what it gives way (#447): an older build's entry has none, and an
+        // entry without them sends nothing an older build would have to read
+        // past.
         assert_eq!(old.resident_layers[0].decode_us_per_layer, None);
         assert_eq!(old.resident_layers[0].card_layers, None);
+        assert_eq!(old.resident_layers[0].gives_way, None);
         let unmeasured = ResidentModelLayers {
             decode_us_per_layer: None,
             card_layers: None,
+            gives_way: None,
             ..entry
         };
         let sent = serde_json::to_string(&unmeasured).unwrap();
         assert!(!sent.contains("decode_us_per_layer"));
         assert!(!sent.contains("card_layers"));
+        assert!(!sent.contains("gives_way"));
 
         // A range whose sender left `releasable_layers` out releases nothing —
         // the side that cannot over-credit a peer.

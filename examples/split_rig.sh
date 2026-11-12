@@ -387,8 +387,19 @@
 #          the connection), A logged B's announce before the ask, and the ask is
 #          a 200. Control arm: ENV_B="SWARMLLM_HOLDINGS_CATCH_UP=0" — B sends
 #          none, A's first plan has no B, and the ask leans on its DHT wait.
+#   givesway FUTURE_WORK #447: peerload's topology, but B's other model
+#          (BUSY_MODEL, default qwen2.5-coder-0.5b-instruct-q8-0 here) is served
+#          FOR A — A asks it, holds none of it, and hands it to B whole — and
+#          then sits idle GIVESWAY_WAIT_S (default 90: past the 30 s a worker
+#          must idle, plus a capability round). A is then asked MODEL, whose
+#          last part only B holds. Size RAM_B so B's range fits only without the
+#          idle worker (1700 for the default model). PASS = A priced B at its
+#          whole range (`A priced B: max_hostable_layers=Some(n)`, n ≥ B's
+#          layers) and q1 is a 200 that ran a segment on B. Control arm:
+#          ENV_B="SWARMLLM_GIVES_WAY=0" — B tells A nothing of the idle worker,
+#          and A prices B at what is left beside it.
 #
-# usage: split_rig.sh split|reasoning|kill|failover|failover_mid|context|whole|continue|repeat|fetch|cache|splitcache|remote|mixed|disputed|spliced|disconnect|softunload|layerprice|keep|route|latekv|peerkv|peerload|refusepiece|owntiming|holdings <binary> [<binary for B>]
+# usage: split_rig.sh split|reasoning|kill|failover|failover_mid|context|whole|continue|repeat|fetch|cache|splitcache|remote|mixed|disputed|spliced|disconnect|softunload|layerprice|keep|route|latekv|peerkv|peerload|refusepiece|owntiming|holdings|givesway <binary> [<binary for B>]
 #   MODEL      model id (default: tinyllama for split, llama-3.2-3b for kill
 #              and failover)
 #   SHARDS_A   shard indices A holds, comma-separated (default 0; kill: 0,LAST;
@@ -406,7 +417,7 @@
 #              default 400%) and reads it as its machine, so the room it advertises
 #              follows its own use, not the machine's free RAM (#162 b)
 #   EXTRA_TOML appended to EVERY node's config.toml (default: nothing)
-#   RAM_B      peerkv, peerload: B's `resources.max_ram_mb`, the same way
+#   RAM_B      peerkv, peerload, givesway: B's `resources.max_ram_mb`, the same way
 #   RAM_A      latekv: A's `resources.max_ram_mb` (EXTRA_TOML may not open
 #              [resources] beside it)
 #   MODELS_DIR where the shards come from (default: the live node's)
@@ -470,7 +481,7 @@ rig_addr() {
 MODE="${1:?usage: split_rig.sh split|kill|failover|context|repeat|fetch|cache|remote|mixed|softunload <binary> [<binary for B>]}"
 BIN_A="${2:?binary}"
 BIN_B="${3:-$BIN_A}"
-case "$MODE" in split|reasoning|kill|failover|failover_mid|context|whole|continue|repeat|fetch|cache|handoffcache|splitcache|remote|mixed|disputed|spliced|disconnect|softunload|layerprice|keep|route|latekv|peerkv|peerload|refusepiece|refusechain|killchain|owntiming|holdings) ;; *) echo "mode must be split, reasoning, kill, failover, failover_mid, context, whole, continue, repeat, fetch, cache, handoffcache, splitcache, remote, mixed, disputed, spliced, disconnect, softunload, layerprice, keep, route, latekv, peerkv, peerload, refusepiece, refusechain, killchain, owntiming or holdings"; exit 2 ;; esac
+case "$MODE" in split|reasoning|kill|failover|failover_mid|context|whole|continue|repeat|fetch|cache|handoffcache|splitcache|remote|mixed|disputed|spliced|disconnect|softunload|layerprice|keep|route|latekv|peerkv|peerload|refusepiece|refusechain|killchain|owntiming|holdings|givesway) ;; *) echo "mode must be split, reasoning, kill, failover, failover_mid, context, whole, continue, repeat, fetch, cache, handoffcache, splitcache, remote, mixed, disputed, spliced, disconnect, softunload, layerprice, keep, route, latekv, peerkv, peerload, refusepiece, refusechain, killchain, owntiming, holdings or givesway"; exit 2 ;; esac
 # refusechain is remote's topology with one fault on C (#305).
 REFUSECHAIN=""; KILLCHAIN=""
 if [ "$MODE" = killchain ]; then
@@ -526,7 +537,7 @@ if [ "$MODE" = split ] || [ "$MODE" = repeat ] || [ "$MODE" = disconnect ] || [ 
     for s in $SHARDS; do case ",$SHARDS_A," in *",$s,"*) ;; *) WHOLE_A=0 ;; esac; done
     GPU_A="${GPU_A:-0}"; GPU_B="${GPU_B:-0}"
   fi
-elif [ "$MODE" = peerkv ] || [ "$MODE" = peerload ] || [ "$MODE" = refusepiece ]; then
+elif [ "$MODE" = peerkv ] || [ "$MODE" = peerload ] || [ "$MODE" = refusepiece ] || [ "$MODE" = givesway ]; then
   [ "$N" -ge 3 ] || { echo "$MODE needs a model with at least 3 shard files here; $MODEL has $N"; exit 2; }
   PREV=$(echo "$SHARDS" | tail -2 | head -1)
   SHARDS_B="${SHARDS_B:-$PREV,$LAST}"
@@ -815,9 +826,15 @@ if [ -n "${BLOCK_DRAFTER:-}" ]; then
   ln "$BLOCK_DRAFTER" "$BASE/A/models/$MODEL/block_drafter.gguf" \
     || cp "$BLOCK_DRAFTER" "$BASE/A/models/$MODEL/block_drafter.gguf" || exit 2
 fi
-if [ "$MODE" = peerload ]; then
-  # What keeps B busy: another model, held whole there.
-  BUSY_MODEL="${BUSY_MODEL:-tinyllama-1.1b-chat-v1.0.q4-k-m}"
+if [ "$MODE" = peerload ] || [ "$MODE" = givesway ]; then
+  # What keeps B busy: another model, held whole there. givesway: one A does
+  # not hold (A's shared model is tinyllama for the default MODEL), so A hands
+  # it to B whole and B's worker serves it for a PEER.
+  if [ "$MODE" = givesway ]; then
+    BUSY_MODEL="${BUSY_MODEL:-qwen2.5-coder-0.5b-instruct-q8-0}"
+  else
+    BUSY_MODEL="${BUSY_MODEL:-tinyllama-1.1b-chat-v1.0.q4-k-m}"
+  fi
   BSRC="$MODELS_DIR/$BUSY_MODEL"
   [ -f "$BSRC/manifest.json" ] || { echo "no manifest for $BUSY_MODEL in $MODELS_DIR"; exit 2; }
   mkdir -p "$BASE/B/models/$BUSY_MODEL"
@@ -1390,6 +1407,35 @@ if [ "$MODE" = peerkv ]; then
   grep -m3 -oE 'route=[a-z_]+ segments=[0-9]+ nodes=[0-9a-f,]+' "$OUT/A.q2.log" | sed 's/^/peerkv: /'
   grep -m2 -oE 'verdict=Refused.{0,200}' "$OUT/B.q2.log" | sed 's/^/peerkv: B asked: /'
   grep -m2 -oE 'refusing this prompt before prefill.{0,200}' "$OUT/B.q2.log" | sed 's/^/peerkv: B forward: /'
+  exit 0
+fi
+if [ "$MODE" = givesway ]; then
+  KB=$(cat "$BASE/B/api_key")
+  IDB=$(curl -s -m 5 -H "Authorization: Bearer $KB" localhost:8920/api/admin/network-code \
+    | python3 -c 'import sys,json; print(json.load(sys.stdin)["node_id"][:16])')
+  echo "givesway: B is $IDB; B's environment: ${ENV_B:-default}"
+  sleep 20
+  MARK_B0=$(wc -l < "$BASE/B/node.log")
+  # A holds none of BUSY_MODEL: the ask is handed to B whole, so B's worker
+  # last served a PEER — the only kind of use that gives way (the owner's never).
+  ( MODEL="$BUSY_MODEL"; ask "Name three colours. Answer in one line." 16 busy ) | tee "$OUT/replies.jsonl"
+  tail -n +"$((MARK_B0 + 1))" "$BASE/B/node.log" | grep -aq "Model loaded model=$BUSY_MODEL" \
+    || echo "givesway: B did not load $BUSY_MODEL for A — the check below proves nothing"
+  echo "givesway: B's $BUSY_MODEL worker idles ${GIVESWAY_WAIT_S:-90} s from $(date -u +%T)"
+  sleep "${GIVESWAY_WAIT_S:-90}"
+  MARK_A=$(wc -l < "$BASE/A/node.log"); MARK_B=$(wc -l < "$BASE/B/node.log")
+  T0=$(date +%s.%N)
+  ask "What is the capital of France? Answer in one sentence." 16 q1 | tee -a "$OUT/replies.jsonl"
+  echo "givesway: q1 took $(python3 -c "print(round($(date +%s.%N) - $T0, 1))") s"
+  tail -n +"$((MARK_A + 1))" "$BASE/A/node.log" > "$OUT/A.q1.log"
+  tail -n +"$((MARK_B + 1))" "$BASE/B/node.log" > "$OUT/B.q1.log"
+  grep -a "DIAG: pipeline candidate node=$IDB" "$OUT/A.q1.log" \
+    | grep -oE '(max_hostable_layers|fresh_run_layers|held_ranges)=[^ ]+' | paste -sd' ' | sed 's/^/givesway: A priced B: /'
+  grep -a -oE 'Pipeline segment request_id=[0-9a-f-]+ segment=[0-9]+ node=[0-9a-f]+ layer_start=[0-9]+ layer_end=[0-9]+' \
+    "$OUT/A.q1.log" | sed -E 's/request_id=[0-9a-f-]+ //; s/^/givesway: /'
+  grep -a -oE 'route=[a-z_]+ segments=[0-9]+ nodes=[0-9a-f,]+' "$OUT/A.q1.log" | sed 's/^/givesway: /'
+  echo "givesway: B unloaded an idle worker for the ask: $(grep -aEc 'reclaim|unload' "$OUT/B.q1.log")," \
+    "A re-planned: $(grep -ac 'retrying with fresh pipeline' "$OUT/A.q1.log")"
   exit 0
 fi
 if [ "$MODE" = peerload ]; then

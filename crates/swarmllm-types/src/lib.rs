@@ -52,8 +52,9 @@ pub use network::{
     MAX_SHARDS_PER_ANNOUNCE,
 };
 pub use node::{
-    features, ContributionLevel, CpuInfo, GpuInfo, LatencyObservation, NodeCapability, NodeStats,
-    PeerExchangeResponse, PeerInfo, ResidentLayerRange, ResidentModelLayers, PROTOCOL_VERSION,
+    features, ContributionLevel, CpuInfo, GivesWay, GpuInfo, LatencyObservation, NodeCapability,
+    NodeStats, PeerExchangeResponse, PeerInfo, ResidentLayerRange, ResidentModelLayers,
+    PROTOCOL_VERSION,
 };
 pub use pool::{
     BlindedPoolInvitation, ContributionMode, PoolAcceptance, PoolCreditForward, PoolDeviceStats,

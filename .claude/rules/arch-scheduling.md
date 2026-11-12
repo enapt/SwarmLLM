@@ -209,7 +209,10 @@ State scoped to one attempt (e.g. `engine_drafter::draft_key`) is keyed by the a
 **`NodeCapability::memory_for_model_layers_mb` is the single answer to "how much
 memory can this peer give a model's layers"**, and `ram_model_budget_mb` is the
 figure a node without a graphics card puts behind it. That figure (`vram::live_headroom_mb`) is never more
-than the worker's own admission honours (`kv_budget::device_free_margin_bytes`; #219).
+than the worker's own admission honours (`kv_budget::device_free_margin_bytes`; #219). **It is asked FOR a
+model** (REQUIRED `model_id`, #447): the stated room plus what the peer's idle workers of OTHER models give
+way (`ResidentModelLayers::gives_way`, summed by `NodeCapability::given_way_for`) — on the card, beside it
+(`processor_beside_card(model_id)`) and in `card_free_for_mb(model_id)`; never the model's own worker.
 
 **A card node's machine memory is offered BESIDE its card (2026-10-25)**: `machine_room_beside_card_mb` +
 `processor_tokens_per_sec_7b`, read only through **`NodeCapability::processor_beside_card`**, added to
