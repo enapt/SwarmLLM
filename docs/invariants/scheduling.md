@@ -6691,7 +6691,14 @@ ms over its draft and check, `note_judgement`); being chosen restarts nothing, a
 it did until a story's block, chosen 15-19 times while keeping ~1 in 5, was set
 aside only at token ~64 (`~/rig428/fieldc1` → `fieldc2`: 50-56, once 93) — it is set aside for the reply and the rows ask narrows to the head's layer
 (`block_drafter_set_aside`; a segment running none of the asked layers sends
-none). A/B `SWARMLLM_SPLIT_GUESS_PRICE=geometric` (the rule before). Measured
+none). **The worker is told in the same message** (`IpcBlockDraft::block_aside`,
+from `SplitBlockDrafter::block_aside_for_the_worker`: the coordinator asks the block
+nothing more, and never takes one back within a reply) and lets its block go before
+taking the rows in — the rows no longer carry the block's layers, and until
+2026-11-12 the worker's block read them and stopped itself with a WARN, "block
+drafter rows: layer 1's rows start at 113, not by 112": the same second as 10 of the
+11 set-asides in the live node's 11-09 field runs (`~/rig428/fieldc*`). The head
+went on either way; only the log said otherwise. A/B `SWARMLLM_SPLIT_GUESS_PRICE=geometric` (the rule before). Measured
 (`~/rig428/fieldc1`, one build, arms on/old/head/off/off/head/old/on, decode tok/s
 of two replies an arm): palindrome both 14.3/14.9, old rule 11.6/9.8, head 11.1/12.3,
 drafter 12.5/12.5; BST class 10.4/13.7, 10.6/13.5, 12.4/9.9, 13.6/10.1; story

@@ -596,6 +596,14 @@ pub struct IpcBlockDraft {
     /// (#425 (a)), not the block drafter's. Both take in the rows either way.
     #[serde(default)]
     pub by_head: bool,
+    /// The coordinator asks the block drafter nothing more in this reply —
+    /// set aside, stopped, or never asked — so the worker lets it go before
+    /// taking the rows in: once a block is set aside its forwards carry only
+    /// the head's layer, and reading them failed the block with a warning
+    /// ("layer 1's rows start at …", every set-aside of 2026-11-09's field
+    /// runs).
+    #[serde(default)]
+    pub block_aside: bool,
 }
 
 /// Forward-pass result header.

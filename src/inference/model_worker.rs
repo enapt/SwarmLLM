@@ -5400,6 +5400,14 @@ async fn handle_block_draft(
         if let Some(words) = g.words.as_mut().filter(|_| !created) {
             words.note(&d.words);
         }
+        // A block the coordinator asks nothing more of goes before the rows:
+        // they no longer carry its layers, and reading them was a failure.
+        if d.block_aside && g.block.take().is_some() {
+            tracing::debug!(
+                request_id = %d.request_id,
+                "block drafter let go: the coordinator asks it nothing more in this reply"
+            );
+        }
         // Every guesser takes in the rows; a failure stops only its own.
         if let Some(b) = g.block.as_mut().filter(|b| b.active()) {
             if let Err(e) = block_takes_rows(b, model, &d.rows, payload, upto) {

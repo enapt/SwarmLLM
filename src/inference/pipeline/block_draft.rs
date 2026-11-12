@@ -600,6 +600,14 @@ impl SplitBlockDrafter {
         self.block.is_none() && self.head.is_none()
     }
 
+    /// This reply asks the block drafter beside the first segment nothing
+    /// more — set aside, stopped, or never here — and a block is never taken
+    /// back within a reply, so the worker may let its own go
+    /// (`IpcBlockDraft::block_aside`).
+    pub(super) fn block_aside_for_the_worker(&self) -> bool {
+        self.block.is_none()
+    }
+
     /// Hand the worker every row the segments sent since the last call — up
     /// to `upto`, the position after the last one committed — and ask `by`
     /// for up to `gamma` guesses after `token`, the token at `upto`
@@ -660,6 +668,7 @@ impl SplitBlockDrafter {
                     first: self.calls == 0,
                     words,
                     by_head: by == By::Head,
+                    block_aside: self.block_aside_for_the_worker(),
                 },
                 &payload,
             )
@@ -742,6 +751,7 @@ impl SplitBlockDrafter {
                     first: false,
                     words: Vec::new(),
                     by_head: false,
+                    block_aside: self.block_aside_for_the_worker(),
                 },
                 &[],
             )
@@ -1254,6 +1264,7 @@ mod tests {
         let mut b = judged_pair();
         for i in 0..SET_ASIDE_AFTER_JUDGED as usize {
             assert!(b.block.is_some(), "still guessing after {i} judged");
+            assert!(!b.block_aside_for_the_worker(), "the worker keeps it");
             judge(&mut b, 100 + 20 * i, 0);
             for _ in 0..FIRST_PROBE_AFTER + MOST_ROUNDS_SAT_OUT {
                 let (by, gamma) = b.gamma(200);
@@ -1267,6 +1278,10 @@ mod tests {
             }
         }
         assert!(b.block.is_none(), "set aside");
+        assert!(
+            b.block_aside_for_the_worker(),
+            "and the worker is told, before rows that carry only the head's layer reach it"
+        );
         assert_eq!(b.set_aside_at, Some(100 + 20 * 7));
         assert_eq!(b.rows_now_read(), Some(vec![40]), "the head's layer");
         assert_eq!(b.rows_now_read(), None, "once");
