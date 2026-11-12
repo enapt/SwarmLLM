@@ -3440,7 +3440,7 @@ max_hostable_layers=Some(19) held_ranges=[]`) after AU had served ten models in 
 by the earlier models' idle workers (#447).
 
 #### #430 — A long prompt read on ONE computer that cannot read it fast: no first token in 10 minutes
-`P2` · perf-split · **OPEN** (residual: pieces timed between two machines, a led split's first-token wait; (a)'s ratio and (c) fixed 2026-11-11, the hand-off's prompt floor, the wait sized from it and the progress frames that make it an inactivity wait built 2026-11-12) — 2026-11-08 · history: #427 (measured), #171 (a prompt pass read in pieces)
+`P2` · perf-split · **OPEN** (residual: pieces timed between two machines; (a)'s ratio and (c) fixed 2026-11-11, the hand-off's prompt floor, the wait sized from it, the progress frames that make it an inactivity wait and a led split's frames built 2026-11-12) — 2026-11-08 · history: #427 (measured), #171 (a prompt pass read in pieces)
 
 Qwen3.8-27B with a 4,110-token prompt (#427's table) was handed whole to the only machine holding every layer, whose
 card holds part of a 27B and processor the rest; it reads such a prompt at ~7-9.5 tok/s (Qwen3.6-27B there: 432 s),
@@ -3588,9 +3588,19 @@ SHORTER than the wait this node times itself (the wait holds the read plus the q
 binds nowhere; any use that subtracts the time before the first frame is a discount the peer controls (a first frame
 held back until the read is nearly over prices the read at nothing). Its one slower use — a wait that ran out,
 extrapolated from the share read — is gone with the inactivity wait: a wait now runs out only on a stall or at the
-hour. The queue wait inside today's sample stays answered as it is (the two-sample rule, at the lesser). Left: a LED
-split's first-token wait, still the fixed budget (the head drives the chain's prompt in pieces, #171, and could
-report the pieces done the same way — no head sends a frame yet).
+hour. The queue wait inside today's sample stays answered as it is (the two-sample rule, at the lesser). **Built 2026-11-12, on
+main (not in a release yet) — a LED split's frames too**: the head of a split led for another computer
+(`HandOff::DelegatedSplit`) reports the pieces its chain's last segment has read (`prompt_chunks`'
+`tell_the_requester_how_far`, both drivers, only where `output` is the last segment's), as a share under the
+requester's wire id (`ProgressTargets::start_led`, `ReadBy::Chain` — a worker's report never speaks for a led split's
+target, nor the chain's for a hand-off's); the requester's wait is the hand-off's inactivity wait
+(`first_token_deadline_after`). A chain's pass that began past 0 is never reported (its security review, MEDIUM: the
+fixed 512-token pieces would let the requester solve for how much of its opening the split's prompt cache held —
+`docs/invariants/network.md`). Test `a_led_split_is_reported_from_its_chain_under_the_requesters_id` (red with the
+source check off, with the frame named by the head's key, and with the resumed-pass rule off). **Verified on its rig**
+(`~/rig430/rig_led_progress.sh`, `led1`: `split_rig.sh remote`, A asks, B leads B+C with
+`SWARMLLM_PROMPT_CHUNK_TOKENS=64`): ON — B told A 9 times (113 → 1000 of 1000), A kept 9, reply PASS; OFF (A asks
+for no frames) — B told A 0, A kept 0, reply PASS (246.9 s against ON's 252.0 s: the frames cost nothing a run can see).
 **Also from the release's review (2026-11-12, P3):** a peer request stopped for heat (`stop_running_peer_work`, #440)
 is aborted without `release_request_kv`, so its target and any drafter stay `in_use` until `CONVERSATION_GAP_SECS`
 passes — a whole placement's reclaim of that idle drafter (#442) waits that long. The disconnect abort has the same

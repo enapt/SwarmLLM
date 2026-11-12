@@ -1971,10 +1971,11 @@ pub(crate) async fn dispatch_network_messages(
                                             }
                                         }
                                     }
-                                    // How far a peer serving our whole-model hand-off has
-                                    // read its prompt (#430): kept only from the peer
-                                    // serving that attempt, only where the attempt asked —
-                                    // it can only lengthen that attempt's first-token wait.
+                                    // How far a peer serving our whole-model hand-off, or
+                                    // leading our split, has read its prompt (#430): kept
+                                    // only from the peer serving that attempt, only where
+                                    // the attempt asked — it can only lengthen that
+                                    // attempt's first-token wait.
                                     SwarmMessage::PromptProgress(progress) => {
                                         if transport == crate::types::MessageTransport::Direct {
                                             if let Some(from) = authenticated_sender.as_ref() {

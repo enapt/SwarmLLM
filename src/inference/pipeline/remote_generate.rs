@@ -1216,13 +1216,15 @@ impl PipelineExecutor {
             (Some(asked), Some(guessing))
         });
 
-        // A whole model's prompt is read on the peer in one go, before any
-        // token: ask how far it has got while it reads (#430), so the wait
-        // below lasts as long as the read keeps moving. Only of a peer that
-        // advertises the reports; a delegate's prompt is a split's, timed by
-        // its own pipeline.
-        let prompt_progress = (matches!(hand_off, HandOff::WholeModel)
-            && !prompt_progress_disabled_by_env()
+        // A whole model's prompt is read on the peer in one go, and a
+        // delegate's in pieces through its chain, before any token: ask how
+        // far it has got while it reads (#430), so the wait below lasts as
+        // long as the read keeps moving. Only of a peer that advertises the
+        // reports. A delegate reports the pieces its chain's last segment has
+        // answered (`ProgressTargets::start_led`); one that predates that, or
+        // a pass not read in pieces, says nothing, and the wait is the fixed
+        // budget it was — a report only ever lengthens it.
+        let prompt_progress = (!prompt_progress_disabled_by_env()
             && self.shared_state.peer_advertises_feature(
                 &segment.node_id,
                 crate::types::features::PROMPT_PROGRESS,

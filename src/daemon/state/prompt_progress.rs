@@ -1,5 +1,5 @@
-//! A whole-model hand-off's prompt read, reported while it runs (#430,
-//! `SwarmMessage::PromptProgress`).
+//! A whole-model hand-off's prompt read — and a split led here for a peer —
+//! reported while it runs (#430, `SwarmMessage::PromptProgress`).
 //!
 //! A requester waited a fixed budget for a hand-off's first token: 600 s, or
 //! longer where the peer's read was measured (`MeasuredRead`). A peer reading
@@ -12,6 +12,10 @@
 //! Two halves, one per end:
 //! - [`ProgressTargets`] (the serving peer): which hand-offs asked to be told,
 //!   and to whom; each report at most every [`EVERY`], and only one that moved.
+//!   A whole hand-off is read by this node's worker in one pass; a split LED
+//!   here reads it in pieces through every machine of its chain, and a piece
+//!   the chain's last segment has answered has been read by every layer
+//!   ([`ReadBy`]: each target takes reports from its own source only).
 //! - [`ProgressSeen`] (the requester): the last report that ADVANCED, from the
 //!   peer serving the attempt — what the first-token wait reads.
 //!
@@ -37,16 +41,36 @@ pub(crate) const OUT_OF: u32 = 1_000;
 /// requester waits as it did before the reports existed).
 const MOST_TARGETS: usize = 256;
 
+/// What reads the prompt a target's reports count — and so the ONE source
+/// that may report it (#430).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ReadBy {
+    /// A whole-model hand-off: this node's worker, in one pass
+    /// (`WorkerMsg::Progress` → the progress forwarder).
+    Worker,
+    /// A split led here for a peer: the pieces its chain's LAST segment has
+    /// answered (`pipeline::prompt_chunks`). The head's own segment is not the
+    /// chain — its share of a piece says nothing of the machines after it.
+    Chain,
+}
+
 struct Target {
     requester_peer: Vec<u8>,
+    /// Who may report it.
+    read_by: ReadBy,
+    /// The id the requester knows the request by: a whole hand-off's own; a
+    /// led split's requester id, while this node runs it under its own.
+    reported_as: uuid::Uuid,
     last_sent: Option<Instant>,
     last_processed: u32,
 }
 
-/// Lives on `state.events`. Started ONLY by the remote-generate handler for a
-/// whole-model hand-off that asked (`ProgressTargets::start`, ended by the
-/// guard's drop); read ONLY by the daemon's progress forwarder
-/// (`daemon::background::spawn_progress_forwarder`).
+/// Lives on `state.events`. Started ONLY by the remote-generate handlers, for
+/// a whole-model hand-off ([`ProgressTargets::start`]) or a split led here
+/// ([`ProgressTargets::start_led`]) that asked, ended by the guard's drop;
+/// read ONLY by the daemon's progress forwarder
+/// (`daemon::background::spawn_progress_forwarder`, [`ReadBy::Worker`]) and the
+/// prompt-pieces drivers (`pipeline::prompt_chunks`, [`ReadBy::Chain`]).
 #[derive(Default)]
 pub struct ProgressTargets {
     map: parking_lot::Mutex<HashMap<uuid::Uuid, Target>>,
@@ -78,6 +102,35 @@ impl ProgressTargets {
         request_id: uuid::Uuid,
         requester_peer: Vec<u8>,
     ) -> Option<ProgressTargetGuard> {
+        Self::start_reading(
+            state,
+            request_id,
+            ReadBy::Worker,
+            request_id,
+            requester_peer,
+        )
+    }
+
+    /// Report a split led here — run under this node's own `led_id` — to its
+    /// `requester_peer` under the id it knows it by (`requester_id`), from the
+    /// pieces the chain's last segment answers ([`ReadBy::Chain`]) until the
+    /// guard drops. `None` as [`Self::start`].
+    pub(crate) fn start_led(
+        state: &Arc<crate::daemon::SharedState>,
+        led_id: uuid::Uuid,
+        requester_id: uuid::Uuid,
+        requester_peer: Vec<u8>,
+    ) -> Option<ProgressTargetGuard> {
+        Self::start_reading(state, led_id, ReadBy::Chain, requester_id, requester_peer)
+    }
+
+    fn start_reading(
+        state: &Arc<crate::daemon::SharedState>,
+        request_id: uuid::Uuid,
+        read_by: ReadBy,
+        reported_as: uuid::Uuid,
+        requester_peer: Vec<u8>,
+    ) -> Option<ProgressTargetGuard> {
         let mut map = state.events.prompt_progress_to.map.lock();
         if map.len() >= MOST_TARGETS || map.contains_key(&request_id) {
             return None;
@@ -86,6 +139,8 @@ impl ProgressTargets {
             request_id,
             Target {
                 requester_peer,
+                read_by,
+                reported_as,
                 last_sent: None,
                 last_processed: 0,
             },
@@ -96,10 +151,12 @@ impl ProgressTargets {
         })
     }
 
-    /// The worker has read up to `done` of the prompt's `total` positions, in
+    /// `read_by` has read up to `done` of the prompt's `total` positions, in
     /// a pass that began at `from`: the report to send, and to whom — where
-    /// this request reports, the read moved since the last report and
-    /// [`EVERY`] has passed since it.
+    /// this request reports, from that source ([`ReadBy`], REQUIRED: a
+    /// split's head would otherwise report its own segment's read as the
+    /// chain's), the read moved since the last report and [`EVERY`] has passed
+    /// since it. The report names the request as its requester knows it.
     ///
     /// The report is the PASS'S OWN share, in [`OUT_OF`]ths — never a
     /// position. The positions before `from` came from this node's prompt
@@ -107,15 +164,27 @@ impl ProgressTargets {
     /// report would tell the requester how much of its prompt's opening
     /// someone else had sent here, exactly (security review, 2026-11-12).
     /// A share of the pass tells it no more than its first token's time does.
+    ///
+    /// **A chain's pass that began past 0 is never reported** (security
+    /// review, 2026-11-12, MEDIUM). A split led here resumes where the split's
+    /// prompt cache already holds the prompt's opening (#10, `resume_at`), a
+    /// cache other conversations fill, and reads the rest in pieces of a
+    /// fixed, public size: its share after k pieces is `k × piece / (total −
+    /// from)`, so the requester, who knows `total`, would solve for `from` —
+    /// how much of its opening someone else had sent through this head, to
+    /// the block. A worker's pass moves layer by layer, a share of layers,
+    /// and keeps its reports. A resumed pass reads only the new turn, and
+    /// unreported its requester waits the fixed budget, as before.
     pub(crate) fn frame_due(
         &self,
         request_id: uuid::Uuid,
+        read_by: ReadBy,
         done: u32,
         total: u32,
         from: u32,
         now: Instant,
     ) -> Option<(Vec<u8>, PromptProgress)> {
-        if done > total {
+        if done > total || (read_by == ReadBy::Chain && from > 0) {
             return None;
         }
         let to_read = total.checked_sub(from).filter(|n| *n > 0)?;
@@ -124,7 +193,7 @@ impl ProgressTargets {
             u32::try_from(u64::from(read) * u64::from(OUT_OF) / u64::from(to_read)).ok()?;
         let mut map = self.map.lock();
         let target = map.get_mut(&request_id)?;
-        if processed <= target.last_processed {
+        if target.read_by != read_by || processed <= target.last_processed {
             return None;
         }
         if target
@@ -138,7 +207,7 @@ impl ProgressTargets {
         Some((
             target.requester_peer.clone(),
             PromptProgress {
-                request_id,
+                request_id: target.reported_as,
                 processed,
                 total: OUT_OF,
             },
@@ -149,6 +218,20 @@ impl ProgressTargets {
     fn reporting(&self) -> usize {
         self.map.lock().len()
     }
+}
+
+/// Send a report [`ProgressTargets::frame_due`] answered. Fire-and-forget, as
+/// the worker's report is: a report lost only leaves the requester's wait as it
+/// was before the reports existed.
+pub(crate) fn send_report(
+    network_tx: &tokio::sync::mpsc::Sender<crate::types::NetworkCommand>,
+    (target_peer_bytes, progress): (Vec<u8>, PromptProgress),
+) {
+    let _ = network_tx.try_send(crate::types::NetworkCommand::SendDirectMessage {
+        target_peer_bytes,
+        message: crate::types::SwarmMessage::PromptProgress(progress),
+        delivery_request_id: None,
+    });
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -249,31 +332,43 @@ mod tests {
         let rid = uuid::Uuid::new_v4();
         let t0 = Instant::now();
         assert!(
-            targets.frame_due(rid, 10, 100, 0, t0).is_none(),
+            targets
+                .frame_due(rid, ReadBy::Worker, 10, 100, 0, t0)
+                .is_none(),
             "not asked"
         );
         let guard = ProgressTargets::start(&state, rid, vec![7]).expect("started");
         let (to, frame) = targets
-            .frame_due(rid, 10, 100, 0, t0)
+            .frame_due(rid, ReadBy::Worker, 10, 100, 0, t0)
             .expect("first report");
         assert_eq!(to, vec![7]);
         assert_eq!((frame.processed, frame.total), (100, OUT_OF));
         assert!(
-            targets.frame_due(rid, 20, 100, 0, t0 + EVERY / 2).is_none(),
+            targets
+                .frame_due(rid, ReadBy::Worker, 20, 100, 0, t0 + EVERY / 2)
+                .is_none(),
             "too soon"
         );
         assert!(
-            targets.frame_due(rid, 10, 100, 0, t0 + EVERY).is_none(),
+            targets
+                .frame_due(rid, ReadBy::Worker, 10, 100, 0, t0 + EVERY)
+                .is_none(),
             "did not move"
         );
         assert!(
-            targets.frame_due(rid, 101, 100, 0, t0 + EVERY).is_none(),
+            targets
+                .frame_due(rid, ReadBy::Worker, 101, 100, 0, t0 + EVERY)
+                .is_none(),
             "past the prompt"
         );
-        assert!(targets.frame_due(rid, 30, 100, 0, t0 + EVERY).is_some());
+        assert!(targets
+            .frame_due(rid, ReadBy::Worker, 30, 100, 0, t0 + EVERY)
+            .is_some());
         drop(guard);
         assert_eq!(targets.reporting(), 0);
-        assert!(targets.frame_due(rid, 40, 100, 0, t0 + EVERY * 2).is_none());
+        assert!(targets
+            .frame_due(rid, ReadBy::Worker, 40, 100, 0, t0 + EVERY * 2)
+            .is_none());
     }
 
     /// What this node's prompt cache held is never told: two passes over the
@@ -287,8 +382,12 @@ mod tests {
         let _c = ProgressTargets::start(&state, cold, vec![1]).expect("started");
         let _w = ProgressTargets::start(&state, warm, vec![1]).expect("started");
         let t0 = Instant::now();
-        let (_, cold_frame) = targets.frame_due(cold, 200, 1_000, 0, t0).expect("cold");
-        let (_, warm_frame) = targets.frame_due(warm, 600, 1_000, 500, t0).expect("warm");
+        let (_, cold_frame) = targets
+            .frame_due(cold, ReadBy::Worker, 200, 1_000, 0, t0)
+            .expect("cold");
+        let (_, warm_frame) = targets
+            .frame_due(warm, ReadBy::Worker, 600, 1_000, 500, t0)
+            .expect("warm");
         assert_eq!((cold_frame.processed, cold_frame.total), (200, OUT_OF));
         assert_eq!(
             (warm_frame.processed, warm_frame.total),
@@ -297,16 +396,62 @@ mod tests {
         );
         assert!(
             targets
-                .frame_due(warm, 400, 1_000, 500, t0 + EVERY)
+                .frame_due(warm, ReadBy::Worker, 400, 1_000, 500, t0 + EVERY)
                 .is_none(),
             "a position inside what the cache held is no read"
         );
         assert!(
             targets
-                .frame_due(warm, 1_000, 1_000, 1_000, t0 + EVERY)
+                .frame_due(warm, ReadBy::Worker, 1_000, 1_000, 1_000, t0 + EVERY)
                 .is_none(),
             "nothing to read, nothing to tell"
         );
+    }
+
+    /// A split led here is reported from its chain's last segment only, and
+    /// under the id its requester knows it by — never from the worker's read
+    /// of the head's own segment, and never under the id it runs by here.
+    #[test]
+    fn a_led_split_is_reported_from_its_chain_under_the_requesters_id() {
+        let state = state();
+        let targets = &state.events.prompt_progress_to;
+        let (led, wire) = (uuid::Uuid::new_v4(), uuid::Uuid::new_v4());
+        let t0 = Instant::now();
+        let _guard = ProgressTargets::start_led(&state, led, wire, vec![9]).expect("started");
+        assert!(
+            targets
+                .frame_due(led, ReadBy::Worker, 900, 1_000, 0, t0)
+                .is_none(),
+            "the head's own segment is not the chain"
+        );
+        assert!(
+            targets
+                .frame_due(wire, ReadBy::Chain, 500, 1_000, 0, t0)
+                .is_none(),
+            "the requester's id is not the key here"
+        );
+        let (to, frame) = targets
+            .frame_due(led, ReadBy::Chain, 500, 1_000, 0, t0)
+            .expect("the chain's read");
+        assert_eq!(to, vec![9]);
+        assert_eq!(frame.request_id, wire, "named as the requester knows it");
+        assert_eq!((frame.processed, frame.total), (500, OUT_OF));
+        assert!(
+            targets
+                .frame_due(led, ReadBy::Chain, 900, 1_000, 256, t0 + EVERY)
+                .is_none(),
+            "a resumed pass's pieces would tell how much the cache held"
+        );
+        // And a whole hand-off takes no chain report.
+        let rid = uuid::Uuid::new_v4();
+        let _whole = ProgressTargets::start(&state, rid, vec![1]).expect("started");
+        assert!(targets
+            .frame_due(rid, ReadBy::Chain, 500, 1_000, 0, t0)
+            .is_none());
+        let (_, own) = targets
+            .frame_due(rid, ReadBy::Worker, 500, 1_000, 0, t0)
+            .expect("the worker's read");
+        assert_eq!(own.request_id, rid);
     }
 
     /// Only so many hand-offs report at once, and one id once.

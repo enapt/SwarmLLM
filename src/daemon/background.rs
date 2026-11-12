@@ -970,6 +970,7 @@ pub(super) fn spawn_progress_forwarder(
                     if let Some((target_peer_bytes, progress)) =
                         shared_state.events.prompt_progress_to.frame_due(
                             event.request_id,
+                            crate::daemon::state::prompt_progress::ReadBy::Worker,
                             event.done,
                             event.total,
                             event.from,
@@ -982,11 +983,10 @@ pub(super) fn spawn_progress_forwarder(
                             total = progress.total,
                             "DIAG: told a hand-off's requester how far its prompt has been read"
                         );
-                        let _ = network_tx.try_send(NetworkCommand::SendDirectMessage {
-                            target_peer_bytes,
-                            message: crate::types::SwarmMessage::PromptProgress(progress),
-                            delivery_request_id: None,
-                        });
+                        crate::daemon::state::prompt_progress::send_report(
+                            &network_tx,
+                            (target_peer_bytes, progress),
+                        );
                     }
                     let Some(trace) = shared_state.active_traces.get(&event.request_id) else {
                         continue;

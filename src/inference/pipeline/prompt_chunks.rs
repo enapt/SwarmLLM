@@ -419,6 +419,31 @@ impl PipelineExecutor {
         Ok(result)
     }
 
+    /// The chain's LAST segment answered the piece ending at `read_to`, so
+    /// every layer has read the prompt that far: where this pass is a split
+    /// led here for a peer that asked (#430, `ProgressTargets::start_led`),
+    /// tell it — at most every 2 s, only once moved, as its share of the pass
+    /// (`span`), never a position. Its first-token wait lasts while the read
+    /// moves; for a request that did not ask it is a lookup that finds nothing.
+    fn tell_the_requester_how_far(&self, request_id: uuid::Uuid, read_to: u32, span: PromptSpan) {
+        if let Some(report) = self.shared_state.events.prompt_progress_to.frame_due(
+            request_id,
+            crate::daemon::state::prompt_progress::ReadBy::Chain,
+            read_to,
+            span.end,
+            span.start,
+            Instant::now(),
+        ) {
+            tracing::debug!(
+                %request_id,
+                processed = report.1.processed,
+                total = report.1.total,
+                "DIAG: told a led split's requester how far its prompt has been read"
+            );
+            crate::daemon::state::prompt_progress::send_report(&self.network_tx, report);
+        }
+    }
+
     /// One segment's driver: its inputs in order, its segment run on each, each
     /// output handed on. The last segment's answer to the final piece is the
     /// pass's.
@@ -438,6 +463,7 @@ impl PipelineExecutor {
     ) -> DriverResult {
         let outcome = if segment.node_id == *self.shared_state.identity.node_id() {
             self.drive_local(
+                request_id,
                 idx,
                 segment,
                 cuts,
@@ -476,6 +502,7 @@ impl PipelineExecutor {
     #[allow(clippy::too_many_arguments)]
     async fn drive_local(
         &self,
+        request_id: uuid::Uuid,
         idx: usize,
         segment: &PipelineSegment,
         cuts: &[(u32, u32)],
@@ -539,6 +566,9 @@ impl PipelineExecutor {
                 self.note_prompt_blocks_stored(idx, 0, &result);
             }
             self.note_block_rows(&result, segment, rows_asked_of(span, to));
+            if output.is_none() {
+                self.tell_the_requester_how_far(request_id, to, span);
+            }
             match output {
                 Some(next) => next
                     .send(result.activations)
@@ -658,6 +688,9 @@ impl PipelineExecutor {
                                 self.note_prompt_blocks_stored(idx, 0, &result);
                             }
                             self.note_block_rows(&result, segment, rows_asked_of(span, cuts[k].1));
+                            if output.is_none() {
+                                self.tell_the_requester_how_far(request_id, cuts[k].1, span);
+                            }
                             match output {
                                 Some(next) => {
                                     if next.send(result.activations).await.is_err() {

@@ -773,6 +773,26 @@ pub(super) async fn handle_delegated_split(
     request.cancel = Some(cancel.clone());
     request.route_override = Some(route);
     let led_id = request.id;
+    // The requester asked to be told how far its prompt has been read (#430):
+    // a split led here reads it in pieces through every machine of the chain,
+    // and a piece the chain's LAST segment has answered has been read by every
+    // layer — reported from those answers only (`ReadBy::Chain`,
+    // `pipeline::prompt_chunks`), under the requester's id, until the reply
+    // ends. A pass not read in pieces sends nothing, and the requester waits
+    // as it did before.
+    let progress_reported = (req.wants_prompt_progress
+        && requester.as_ref().is_some_and(|r| {
+            shared_state.peer_advertises_feature(r, crate::types::features::PROMPT_PROGRESS)
+        }))
+    .then(|| {
+        crate::daemon::state::prompt_progress::ProgressTargets::start_led(
+            &shared_state,
+            led_id,
+            request_id,
+            sender_bytes.clone(),
+        )
+    })
+    .flatten();
     // Open while the reply runs, on every way it ends (the guard drops with
     // this handler, aborted or not). None where the requester's id is already
     // open here, or where this node's owner turned speculation off — checking
@@ -831,6 +851,7 @@ pub(super) async fn handle_delegated_split(
     )
     .await;
     drop(guess_slot);
+    drop(progress_reported);
 }
 
 /// May this node lead a split of `model_id` — does it hold the model's first

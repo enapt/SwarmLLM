@@ -7931,9 +7931,53 @@ q2 again `Unknown` at 600 s, 21 reports from 45 to 954 thousandths (`total=1000`
 38.7-40.2 s apart; at 600 s A logged `longest_gap_s=40` and waited on; the reply
 came at 885 s, the same words.
 
+**A split led by a peer is reported too** (2026-11-12, #430's residual). A
+requester holding none of a plan hands the whole request to the head of the split
+(`HandOff::DelegatedSplit`), which drives the chain's prompt pass; its first token
+waited the fixed budget, because only a whole hand-off asked for reports. The head
+reads a long prompt in pieces through every machine at once (#171,
+`pipeline::prompt_chunks`), and a piece the chain's LAST segment has answered has
+been read by every layer — the one place that knows how far the whole chain has
+read. So the requester now asks a delegate too, the head starts a target for it
+under the requester's own id (`ProgressTargets::start_led`: the head runs the split
+under a fresh `led_id`, and the frame must name the id the requester's sink is
+keyed by), and each piece the last segment answers is reported through the same
+`frame_due` (`PipelineExecutor::tell_the_requester_how_far`, the share of the pass from
+`span.start`, at most every 2 s). **A target takes reports from ONE source**
+(`ReadBy`, a REQUIRED argument of `frame_due`): the head's own segment runs on its
+worker too, and its share of a piece says nothing of the machines after it — mixed
+into the chain's reports it would have advanced first and stopped every chain
+report behind it (`processed` must rise). A pass the head does not read in pieces
+(under ~1,000 tokens, or one that keeps its prompt, #10) sends nothing, and an older
+head ignores the flag (`#[serde(default)]`): the requester waits the fixed budget,
+as before. Prior art: as above (llama.cpp `return_progress`); a pipeline's progress
+is its last stage's completed micro-batches (GPipe's schedule), which is what the
+head reads.
+
+**A chain's pass that began past 0 is never reported** (its security review,
+2026-11-12, MEDIUM). A split led here resumes where the split's prompt cache holds
+the prompt's opening (#10: `resume_at`, believed by content chain, not by
+requester) and `prompt_pass_in_pieces` cuts the rest from there in pieces of a
+fixed, public size (512 tokens). Its share after k pieces is `k × 512 × 1000 /
+(total − from)`; the requester knows `total` (it tokenized the same prompt), so the
+first report solves for `from` — how much of its opening another conversation had
+sent through this head, to the block: the cross-user probe the share was built to
+close, reopened by the piece size. `frame_due` refuses a `ReadBy::Chain` report with
+`from > 0` (one rule at the one builder, tested in
+`a_led_split_is_reported_from_its_chain_under_the_requesters_id`). A worker's pass
+moves layer by layer, a share of layers, unrelated to the token count, and keeps
+its reports. A resumed pass reads only the new turn; unreported, its requester
+waits the fixed budget. Accepted from the same review (both LOW): a head can hold a
+delegating requester's wait to the hour's ceiling with advancing reports — as a
+whole hand-off's peer can, and the head is the computer the requester chose to read
+its prompt; and a re-plan on the head keeps the request's `led_id`, so the second
+pass's reports stay muted until it passes the first one's mark (`processed` must
+rise) — the wait never falls below the fixed budget meanwhile.
+
 **Tests.** `a_hand_off_is_reported_to_its_requester_while_it_reads`,
 `the_reports_are_bounded`, `what_the_cache_held_is_never_reported`,
-`only_an_advancing_report_is_kept` (`daemon::state::prompt_progress`);
+`only_an_advancing_report_is_kept`,
+`a_led_split_is_reported_from_its_chain_under_the_requesters_id` (`daemon::state::prompt_progress`);
 `a_prompt_pass_reports_its_read_once_a_second_while_it_moves` (`model_worker`);
 `a_moving_prompt_read_holds_the_first_token_wait_open_to_a_ceiling`
 (`remote_generate`); `only_a_request_asking_for_prompt_progress_carries_the_field`
