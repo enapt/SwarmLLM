@@ -278,6 +278,8 @@ pub fn serialize_peer_to_json(
                         "ranges": r.ranges.iter().map(|g| [g.start, g.end]).collect::<Vec<_>>(),
                         "card_layers": r.card_layers,
                         "decode_us_per_layer": r.decode_us_per_layer,
+                        // The card's free memory its load read (#3 (j13)).
+                        "card_free_at_load_mb": r.card_free_at_load_mb,
                     })
                 })
                 .collect::<Vec<_>>()

@@ -2937,7 +2937,9 @@ Routes Claude model requests through a locally-authenticated `claude` CLI subpro
   text) and `gpu_vram_mb` its card's memory; the dashboard's peer list shows
   both (2026-10-31). `gpu_vram_available_mb` is what it says is free on that
   card at its last broadcast (display only; with `resident`'s `card_layers`
-  it reads a far card filling with another program's work, #3 (j8)). `swarm_use` (`allowed` / `too_few_parts` /
+  it reads a far card filling with another program's work, #3 (j8)); each
+  `resident` entry's `card_free_at_load_mb` is the card's free memory its
+  load READ when it placed the layers (diagnostic, #3 (j13)). `swarm_use` (`allowed` / `too_few_parts` /
   `too_far_behind` / `not_heard_from` — not connected and nothing on record, a
   relayed origin, #403) is whether this node would start that peer's requests,
   with `releases_behind`, and `auto_manage` / `updates_itself` the peer's own

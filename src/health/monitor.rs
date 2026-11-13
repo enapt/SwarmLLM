@@ -3256,6 +3256,7 @@ pub(crate) mod tests {
                 decode_us_per_layer: speed,
                 card_layers: None,
                 gives_way: None,
+                card_free_at_load_mb: None,
             }];
             c
         };
@@ -3342,6 +3343,7 @@ pub(crate) mod tests {
                         decode_us_per_layer: None,
                         card_layers: None,
                         gives_way: None,
+                        card_free_at_load_mb: None,
                     })
                 }),
             ),

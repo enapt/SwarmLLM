@@ -919,6 +919,16 @@ pub struct ResidentModelLayers {
     /// model from being displaced — hence the idle floor and the owner rule.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gives_way: Option<GivesWay>,
+    /// The graphics card's free memory, in MB, as this model's worker READ it
+    /// when its load placed the layers (`WorkerMsg::CardFree`, #365). It is
+    /// diagnostic only and nothing plans on it. With `card_layers` it tells a
+    /// reload that read memory still held by the worker it replaced from one
+    /// sized short on a true reading (FUTURE_WORK #3 (j13): a far computer's
+    /// 14B reloaded with 17 of its 48 layers on a 12 GB card). `None` comes
+    /// from an older node, from a placement that did not read the card, and
+    /// from one placed by growth.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub card_free_at_load_mb: Option<u64>,
 }
 
 /// The memory an idle worker gives back to another model's work — see
@@ -1394,6 +1404,7 @@ mod version_compat_tests {
             decode_us_per_layer: None,
             card_layers: None,
             gives_way,
+            card_free_at_load_mb: None,
         };
         cap.resident_layers = vec![
             resident(
@@ -1655,6 +1666,7 @@ mod resident_ranges_tests {
                 card_mb: 900,
                 machine_mb: 300,
             }),
+            card_free_at_load_mb: Some(5_748),
         };
         let back: ResidentModelLayers =
             serde_json::from_str(&serde_json::to_string(&entry).unwrap()).unwrap();
@@ -1667,16 +1679,19 @@ mod resident_ranges_tests {
         assert_eq!(old.resident_layers[0].decode_us_per_layer, None);
         assert_eq!(old.resident_layers[0].card_layers, None);
         assert_eq!(old.resident_layers[0].gives_way, None);
+        assert_eq!(old.resident_layers[0].card_free_at_load_mb, None);
         let unmeasured = ResidentModelLayers {
             decode_us_per_layer: None,
             card_layers: None,
             gives_way: None,
+            card_free_at_load_mb: None,
             ..entry
         };
         let sent = serde_json::to_string(&unmeasured).unwrap();
         assert!(!sent.contains("decode_us_per_layer"));
         assert!(!sent.contains("card_layers"));
         assert!(!sent.contains("gives_way"));
+        assert!(!sent.contains("card_free_at_load_mb"));
 
         // A range whose sender left `releasable_layers` out releases nothing —
         // the side that cannot over-credit a peer.

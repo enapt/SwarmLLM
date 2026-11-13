@@ -1289,6 +1289,12 @@ struct WorkerHandle {
     /// #322) — what promotion must see the card gain before it moves the
     /// model whole again ([`should_return_to_gpu`]).
     split_by_the_load: Option<SplitByTheLoad>,
+    /// The card's free memory, in MB, as this worker's load READ it before
+    /// placing its layers (`WorkerMsg::CardFree`, #365); `None` where the
+    /// spawn did not ask. Diagnostic only: gossiped as
+    /// `ResidentModelLayers::card_free_at_load_mb`, so a far computer's
+    /// placement can be told from the reading it was sized on (#3 (j13)).
+    card_free_at_load_mb: Option<u64>,
     /// What this worker put into the pool's reserved-memory map, in MB — its
     /// spawn's admission charge plus every additional segment charged to it.
     /// `charged_against_ram` says which of the two maps.
@@ -8537,6 +8543,8 @@ impl ModelProcessPool {
                     card_layers: Some(handle.layers_on_card()),
                     // What it would give back to another model's work (#447).
                     gives_way: giving_way.get(&model_id).copied(),
+                    // What its load read of the card (#3 (j13), diagnostic).
+                    card_free_at_load_mb: handle.card_free_at_load_mb,
                 });
             }
         }
@@ -10760,6 +10768,7 @@ impl ModelProcessPool {
                     }
                     _ => {}
                 }
+                handle.card_free_at_load_mb = card_free_bytes.map(|b| b / (1024 * 1024));
                 // Reset the failure counter on first success.
                 self.spawn_failures.remove(model_id);
                 let handle = Arc::new(handle);
@@ -11423,6 +11432,7 @@ impl ModelProcessPool {
             // says so through `placed_on_cpu_because: None` alone.
             card_split: card_split.filter(|_| placed_on_cpu_because.is_none()),
             split_by_the_load: None,
+            card_free_at_load_mb: None,
             context_fits,
             own_decode: std::sync::Mutex::new(OwnDecodeSpeed::default()),
             drafts_for_another_model: AtomicBool::new(false),
@@ -13347,8 +13357,9 @@ impl ModelProcessPool {
     }
 
     /// Seconds since each resident worker last had a request registered
-    /// against it — `WorkerHandle::last_used`, stamped in `register_response`,
-    /// which every execution path passes through (local, distributed,
+    /// against it or a reply end — `WorkerHandle::last_used`, stamped by
+    /// `register_response` and its slot's end, which every execution path
+    /// passes through (local, distributed,
     /// peer-served). This is the fact the idle unload must read: the
     /// `model_trust.last_request_at` it used to rely on has NO writer in the
     /// current code, so for a model in constant local use the only evidence
@@ -17995,6 +18006,7 @@ mod tests {
             gpu_estimate_mb: 0,
             card_split,
             split_by_the_load: None,
+            card_free_at_load_mb: None,
             context_fits: Arc::new(std::sync::atomic::AtomicU32::new(0)),
             own_decode: std::sync::Mutex::new(OwnDecodeSpeed::default()),
             drafts_for_another_model: AtomicBool::new(false),
@@ -18127,6 +18139,29 @@ mod tests {
         q.workers.insert(m.clone(), h);
         assert_eq!(q.card_share_for_planning(&m), None);
         assert_eq!(q.resident_model_layers()[0].card_layers, Some(0));
+        assert_eq!(
+            q.resident_model_layers()[0].card_free_at_load_mb,
+            None,
+            "a spawn that did not read the card says nothing"
+        );
+
+        // What a spawn's load read of the card reaches peers with the layers
+        // it placed (#3 (j13)): a far computer's reload is then told apart
+        // from the reading it was sized on.
+        let r = test_pool();
+        let Ok(mut read) = Arc::try_unwrap(
+            fake_worker_handle_spawned(false, None, false, std::time::Instant::now()).await,
+        ) else {
+            panic!("a fresh handle has one owner");
+        };
+        read.card_free_at_load_mb = Some(5_748);
+        let read = Arc::new(read);
+        read.record_segment_placed_as_spawned((0, 28));
+        r.workers.insert(m.clone(), read);
+        assert_eq!(
+            r.resident_model_layers()[0].card_free_at_load_mb,
+            Some(5_748)
+        );
     }
 
     /// **A worker holding part of a model too big for the card, all of it on

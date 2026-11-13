@@ -781,6 +781,7 @@ fn a_run_inside_a_peers_loaded_range_costs_no_load_where_it_serves_slices() {
             decode_us_per_layer: None,
             card_layers: Some(48),
             gives_way: None,
+            card_free_at_load_mb: None,
         }];
         state.peer_registry.insert(
             peer.clone(),
@@ -886,6 +887,7 @@ fn a_warm_peers_card_layers_are_the_ones_its_card_runs() {
             decode_us_per_layer: None,
             card_layers: card_share,
             gives_way: None,
+            card_free_at_load_mb: None,
         }];
         state.peer_registry.insert(
             peer.clone(),
@@ -4748,6 +4750,7 @@ fn a_peer_that_publishes_its_ranges_is_priced_by_them() {
             decode_us_per_layer: None,
             card_layers: None,
             gives_way: None,
+            card_free_at_load_mb: None,
         }];
         state.peer_registry.insert(
             node.clone(),
@@ -5128,6 +5131,7 @@ fn a_peers_idle_workers_of_other_models_are_room_for_this_one() {
             card_mb: 4_000,
             machine_mb: 0,
         }),
+        card_free_at_load_mb: None,
     }];
     let bytes_per_layer = 100 * 1_048_576;
     let bound = |model: &str| {
@@ -9124,6 +9128,7 @@ fn publish_resident(state: &SharedState, node: &NodeId, model: &ModelId, range: 
         decode_us_per_layer: None,
         card_layers: None,
         gives_way: None,
+        card_free_at_load_mb: None,
     }];
 }
 

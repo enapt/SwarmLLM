@@ -707,6 +707,20 @@ once a window per relay: `refusing a relayed envelope: its origin is cut off`
 on any release reads the answer as "this peer cannot serve" and re-plans without
 a penalty. The peer list (`/api/admin/peers`) carries each peer's `swarm_use`.
 
+## "A far computer runs our model with too few layers on its card" (2026-11-14, #3 (j13))
+
+Each `resident` entry in the peer list (`/api/admin/peers`) says how the far computer placed
+the model: `ranges`, `card_layers` (how many run on its card), and `card_free_at_load_mb`, the
+card's free memory its load READ when it placed them (`None` from an older release, a placement
+on the processor, or layers added by growth). Rough check: the load gives the card about 85% of
+that reading, less the token table and output head (~1.1 GB for a 14B) and the cache. If
+`card_layers` fits the reading but the reading is low, look at what held the card at load time,
+such as the worker this load replaced (Ollama waits for that memory to come back,
+`waitForVRAMRecovery`). If the reading was high and `card_layers` still low, look at the sizing
+(`fit_whole_placement_to_the_load`, `refit_split_to_the_load`). `gpu_vram_available_mb` is free
+memory as of its last broadcast; it is re-sent only when it moves by more than 256 MB.
+`~/swarmllm-gate/deep/fr/real_link.sh` writes all three after every request (`peers_seen.jsonl`).
+
 ## "A computer shows no location" / "its figures never change" (2026-11-05, #406 #407)
 
 Read the peer TWICE, a minute or more apart (`/api/admin/peers`, `swarmllm peers`). A computer whose
