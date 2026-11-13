@@ -6328,6 +6328,16 @@ grep `^| N |`).
   Evidence: `docs/invariants/scheduling.md` § "A split is priced for the rounds it takes" ("Each tail of a split").
   On the real link (`real_link.sh` `TAG=j5`, 18:13Z): the third request's exploration priced `tail=Far` at 8.0 and
   ran the split here-first (`30a0e2fd:0-24 + aa3d1e66:24-48`, 16.7 tok/s prose); every split after it ran here-first.
+- #3 (j10) — **The planner left a card drafter less room than the drafter's own check asks.** Since 11-11 a guest is
+  admitted to the card only beside the conversation room of the target's card layers (`guest_fits_the_card` +
+  `room_a_guest_leaves_mb`), but the planner's room beside it (`local_layers_leaving`) was still the budget less the
+  guest's estimate: a plan cut to it loaded its layers, and the drafter went to system memory, where no tree flows.
+  Now the room counts what the guest must leave — the target's card layers held now, and each layer the plan adds
+  (`room_a_guest_leaves_per_card_layer_mb`). On an 11,000 MB card (Qwen2.5-14B beside Qwen3-1.7B) the cut went 37 → 32
+  layers; 32 left the guest 13 MB and 33 were 226 MB over. Test
+  `the_room_beside_a_guest_on_the_card_is_the_one_its_own_check_admits` (red with the fix off). Prior art: Ollama's
+  `updateFreeSpace` weighs a load with the same per-runner prediction its fit used. Evidence:
+  `docs/invariants/memory.md` § "A guest on the card leaves its target the room for its conversations".
 - #3 (j9) — **Once every request ran a split of one tail, the other tail was never tried.** The count to the next
   exploration restarted whenever any split of the model finished, so in the real link's second arm (`TAG=j5`,
   18:16-18:20Z) — both tails at the prior, the stream (tail here) winning the tie — five streams ran at 9.7-12.5

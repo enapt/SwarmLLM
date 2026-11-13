@@ -3113,6 +3113,26 @@ short of the room: system memory and the spawn refused; at the room: the card,
 charged only its own figure — red with the leave term zeroed, checked
 2026-11-11) and `the_room_a_guest_leaves_is_the_targets_card_share`.
 
+**The planner leaves the same room (2026-11-13, FUTURE_WORK #3 (j10)).** The
+11-11 rule reached `guest_fit` and the spawn, not the third asker: the
+planner's room beside a guest on the card (`local_layers_leaving`, through
+`max_hostable_layers_beside_guest`, which `guest_fit_beside` and the drafter
+room's cut both read) was still the budget less the guest's estimate. A plan cut
+to it loaded the target's layers, and the guest then found the card short by
+their conversation room and went to system memory — where a split's tree of
+guesses cannot flow (`dsd_tree::trees_wanted`), the drafter room's whole point
+(#275 (4), #3 (j1)). Now the room is also less `room_a_guest_leaves_mb` (the
+target's card layers held now) and each layer the plan adds costs
+`room_a_guest_leaves_per_card_layer_mb` beside its own price; the first-range
+check adds `card_kv_mb_for` of the range, as the spawn will read it. On the
+test's 11,000 MB card (Qwen2.5-14B, Qwen3-1.7B guest at 3,017 MB) the old figure
+cut 37 layers and the guest was refused beside them; the cut is now 32, which
+left the guest 13 MB (charge 6,946 + room 1,024 + guest 3,017), and 33 were 226
+MB over. Test `the_room_beside_a_guest_on_the_card_is_the_one_its_own_check_admits`
+(red with the three terms zeroed: the planner cut 37). Prior art as above:
+Ollama's `updateFreeSpace` weighs a load with the same per-runner prediction its
+fit used.
+
 **From the rules file (moved 2026-10-02):**
 
 **`process_pool::Tenancy` is a REQUIRED argument of `get_or_spawn`.** A `Guest`

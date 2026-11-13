@@ -6480,6 +6480,23 @@ impl ModelProcessPool {
             .fold(0u64, u64::saturating_add)
     }
 
+    /// [`Self::room_a_guest_leaves_mb`] for each layer of `target` a plan
+    /// would ADD to the card, before any is charged: its typical conversation
+    /// cache over the whole model, a layer's share rounded up — what the
+    /// planner leaves beside a guest per layer
+    /// ([`Self::local_layers_leaving`]), so its cut is one the guest's own
+    /// check ([`Self::guest_fits_the_card`]) admits. 0 where the geometry
+    /// cannot be read.
+    fn room_a_guest_leaves_per_card_layer_mb(&self, target: &ModelId) -> u64 {
+        self.footprint_inputs(target, None).map_or(0, |i| {
+            if i.segment_layers == 0 {
+                return 0;
+            }
+            crate::model::auto_manage::vram::card_kv_mb_for(&i, KvCharge::Typical)
+                .div_ceil(i.segment_layers)
+        })
+    }
+
     /// Wait for a killed worker to actually be reaped, up to `limit`.
     ///
     /// Returns `true` if the process is confirmed gone. `false` means the wait
@@ -8734,8 +8751,16 @@ impl ModelProcessPool {
                 // The guest is admitted to the card after these layers load,
                 // against what then stands free — with NO reclaim counted, as
                 // in system memory below: a guest makes none, and the target's
-                // own stops once the target fits.
-                Some(mb) => own.min(budget.saturating_sub(committed).saturating_sub(mb)),
+                // own stops once the target fits. And beside the conversation
+                // room it must leave the target's card layers
+                // (`guest_fits_the_card`): those held now here, the ones the
+                // plan adds in each layer's price below.
+                Some(mb) => own.min(
+                    budget
+                        .saturating_sub(committed)
+                        .saturating_sub(mb)
+                        .saturating_sub(self.room_a_guest_leaves_mb(model_id)),
+                ),
                 None => own,
             }
         } else {
@@ -8764,8 +8789,23 @@ impl ModelProcessPool {
                 None => own,
             }
         };
+        // Beside a guest on the card, each layer the plan puts there is also
+        // left its conversation room by the guest: `guest_fits_the_card` asks
+        // the guest's estimate PLUS that room (#3 (j10)). Cut to the estimate
+        // alone, the plan handed the target the layers whose room the guest
+        // then could not leave, and the drafter guessed from system memory —
+        // no tree flows from there.
+        let leaves_per_layer_mb = if on_gpu && guest_mb.is_some() {
+            self.room_a_guest_leaves_per_card_layer_mb(model_id)
+        } else {
+            0
+        };
         // The fixed terms are paid once, whatever the segment's length.
-        let fits = layers_that_fit(free_mb, fixed_mb, per_layer_mb)?;
+        let fits = layers_that_fit(
+            free_mb,
+            fixed_mb,
+            per_layer_mb.saturating_add(leaves_per_layer_mb),
+        )?;
         if guest_mb.is_none() || fixed_mb == 0 || !first_range_priced_beside_guest() {
             return Some(fits);
         }
@@ -8785,7 +8825,12 @@ impl ModelProcessPool {
         let first_range_mb = |layers: u32| {
             let range = Some((0, layers));
             if on_gpu {
+                // With the room the guest leaves those layers' conversations,
+                // as `room_a_guest_leaves_mb` will read the range once charged.
                 self.estimate_gpu_footprint_mb(model_id, range, KvCharge::Typical)
+                    .saturating_add(self.footprint_inputs(model_id, range).map_or(0, |i| {
+                        crate::model::auto_manage::vram::card_kv_mb_for(&i, KvCharge::Typical)
+                    }))
             } else {
                 self.estimate_cpu_footprint_mb(model_id, range, KvCharge::Typical)
             }
@@ -15699,6 +15744,97 @@ mod tests {
             ),
             None
         );
+    }
+
+    /// **The room left beside a guest on the card is the one its own check
+    /// admits** (#3 (j10), 2026-11-13). Since 11-11 a guest is admitted to the
+    /// card only beside the conversation room of the target's card layers
+    /// (`guest_fits_the_card` + `room_a_guest_leaves_mb`), but the planner
+    /// still cut the target to the guest's estimate alone: the plan's layers
+    /// loaded, the guest found the card short by their conversation room, and
+    /// the drafter guessed from system memory — where no tree flows. Here a
+    /// 14B's first layers and its drafter share an 11 GB card: the cut the
+    /// planner offers is taken by the guest's own check once those layers are
+    /// charged, and the cut the old figure offered is not.
+    #[tokio::test]
+    async fn the_room_beside_a_guest_on_the_card_is_the_one_its_own_check_admits() {
+        let target = ModelId("qwen2.5-14b".into());
+        let drafter = ModelId("qwen3-1.7b-q8-0".into());
+        let range = (0, 28);
+        // A card the 14B fits alone, and not beside its drafter.
+        const CARD_MB: u64 = 11_000;
+        let pool_with = |name: &str| {
+            let p = ModelProcessPool::new(std::path::PathBuf::from(name));
+            p.test_card_in_play.store(true, Ordering::Relaxed);
+            p.set_gpu_layers(-1);
+            p.set_vram_budget_mb(CARD_MB);
+            p.set_ram_budget_mb(32_000);
+            p.test_footprint_inputs
+                .insert(target.clone(), qwen2_5_14b());
+            p.test_footprint_inputs
+                .insert(drafter.clone(), qwen3_1_7b());
+            p
+        };
+        let pool = pool_with("/tmp/swarmllm-beside-guest-leaves");
+        assert!(pool.planning_on_card(&target), "fixture: a card plan");
+        let beside = pool
+            .max_hostable_layers_beside_guest(
+                &target,
+                Requester::Swarm,
+                &drafter,
+                range,
+                KvCharge::Typical,
+            )
+            .expect("room is left on the card");
+        let whole = u32::try_from(qwen2_5_14b().segment_layers).expect("layers");
+        assert!(
+            beside > 0 && beside < whole,
+            "fixture: part of the 14B fits beside its drafter: {beside}"
+        );
+        let guest_mb = pool.estimate_gpu_footprint_mb(&drafter, Some(range), KvCharge::Typical);
+        // The old cut: the most first layers whose spawn leaves the guest's
+        // estimate free, and nothing for the layers' conversations.
+        let mut old = whole;
+        while old > 0
+            && pool
+                .estimate_gpu_footprint_mb(&target, Some((0, old)), KvCharge::Typical)
+                .saturating_add(guest_mb)
+                > CARD_MB
+        {
+            old -= 1;
+        }
+        assert!(old > beside, "the old cut gave {old}, this one {beside}");
+
+        // Each cut's layers loaded on the card as their spawn charges them;
+        // then the guest's own placement, as `guest_fit` and its spawn ask it.
+        // The cut is the guest's edge: one layer more and it is refused
+        // (32 layers left it 13 MB of an 11,000 MB card, 33 were 226 MB over).
+        for (layers, on_card) in [(beside, true), (beside + 1, false), (old, false)] {
+            let p = pool_with("/tmp/swarmllm-beside-guest-leaves-load");
+            let charge = p.estimate_gpu_footprint_mb(&target, Some((0, layers)), KvCharge::Typical);
+            let h =
+                admit_and_insert_gpu_worker(&p, &target, charge, std::time::Duration::ZERO).await;
+            h.record_charged_segment((0, layers), 0);
+            let leaves = p.room_a_guest_leaves_mb(&target);
+            assert!(leaves > 0, "the target's conversations take card memory");
+            assert_eq!(
+                !p.guest_charges_ram(&drafter, range, KvCharge::Typical, leaves),
+                on_card,
+                "the drafter beside {layers} layers ({charge} MB charged, {leaves} MB of \
+                 conversation room, {guest_mb} MB its own)"
+            );
+            assert_eq!(
+                p.guest_fit(
+                    &drafter,
+                    range,
+                    KvCharge::Typical,
+                    Requester::Swarm,
+                    &target
+                ) == GuestFit::OnCard,
+                on_card,
+                "the drafter's choice agrees beside {layers} layers"
+            );
+        }
     }
 
     /// **The processor's bound counts the memory an idle model would give
