@@ -304,6 +304,15 @@ plan{request_id=…}: … DIAG: the cheapest split this plan passed over — one
          segment's price with the candidate line of its node — on 2026-11-13
          this node's own part read `has_gpu=false card_layers=None` there,
          priced at its processor's speed (#3 (j7)))
+plan{…}: … DIAG: a split of this model is priced from the drafter's prior … tail=Far|Here
+        split_tokens_per_round= split_yield_from=Prior|PriorAndSplits
+        (WHICH END RAN ITS LAST LAYERS? #3 (j5), 2026-11-14: a split's yield is
+         kept per tail — Far, a split ending on another computer (its tree can
+         flow there), or Here (the stream). One line per tail not yet trusted;
+         "priced OPTIMISTICALLY" names the ONE tail an exploration tries. The
+         candidate lines carry both figures (`split_tokens_per_round`,
+         `split_tokens_per_round_far_tail`); a plan that ends on a peer was
+         priced with the second)
 This node holds the whole model but would run it on its processor; a pipeline across
   peers' cards is priced faster, so the request goes there
         local_processor_cost_ms= pipeline_cost_ms= segments= prompt_tokens=

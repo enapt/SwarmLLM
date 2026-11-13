@@ -1285,6 +1285,7 @@ fn simple_candidate(byte: u8, ranges: Vec<(u32, u32)>) -> NodeCandidate {
         reply_tokens_at_most: None,
         reply_tokens_expected: None,
         split_tokens_per_round: None,
+        split_tokens_per_round_far_tail: None,
         ring: Default::default(),
         stated_ms_per_layer: None,
         fresh_run_layers: None,
@@ -1750,6 +1751,7 @@ fn greedy_assign_multi_range_candidate() {
             reply_tokens_at_most: None,
             reply_tokens_expected: None,
             split_tokens_per_round: None,
+            split_tokens_per_round_far_tail: None,
             ring: Default::default(),
             stated_ms_per_layer: None,
             fresh_run_layers: None,
@@ -1799,6 +1801,7 @@ fn greedy_assign_multi_range_candidate() {
             reply_tokens_at_most: None,
             reply_tokens_expected: None,
             split_tokens_per_round: None,
+            split_tokens_per_round_far_tail: None,
             ring: Default::default(),
             stated_ms_per_layer: None,
             fresh_run_layers: None,
@@ -2856,6 +2859,7 @@ fn cost_cand(
         reply_tokens_at_most: None,
         reply_tokens_expected: None,
         split_tokens_per_round: None,
+        split_tokens_per_round_far_tail: None,
         ring: Default::default(),
         stated_ms_per_layer: None,
         fresh_run_layers: None,
@@ -4272,6 +4276,7 @@ fn one_node_is_not_made_standby_for_more_layers_than_it_can_run() {
         reply_tokens_at_most: None,
         reply_tokens_expected: None,
         split_tokens_per_round: None,
+        split_tokens_per_round_far_tail: None,
         ring: Default::default(),
         stated_ms_per_layer: None,
         fresh_run_layers: None,
@@ -4384,6 +4389,7 @@ fn a_node_with_room_still_stands_in_for_every_segment() {
         reply_tokens_at_most: None,
         reply_tokens_expected: None,
         split_tokens_per_round: None,
+        split_tokens_per_round_far_tail: None,
         ring: Default::default(),
         stated_ms_per_layer: None,
         fresh_run_layers: None,
@@ -4496,6 +4502,7 @@ fn a_standby_is_chosen_by_cost_not_by_ping() {
         reply_tokens_at_most: None,
         reply_tokens_expected: None,
         split_tokens_per_round: None,
+        split_tokens_per_round_far_tail: None,
         ring: Default::default(),
         stated_ms_per_layer: None,
         fresh_run_layers: None,
@@ -5957,7 +5964,7 @@ fn the_next_turn_of_a_split_goes_to_the_peer_holding_its_opening() {
                     head_features: 0,
                     handed_off: Vec::new(),
                     may_guess_ahead: false,
-                    yield_prior: YieldPrior::None,
+                    yield_prior: YieldPrior::None.into(),
                 },
                 crate::types::KeepAsked::Unasked,
             )
@@ -7587,7 +7594,14 @@ fn a_split_whose_rounds_carry_three_tokens_is_priced_for_a_third_of_the_rounds()
         "an explored request is priced as the routes run once loaded"
     );
     for _ in 0..crate::daemon::state::recent_by_model::BEFORE_TRUSTED {
-        state.metrics.split_rounds.record("split-14b", 300, 100);
+        // Both tails (#3 (j5)): the greedy fallback this test plans with prices
+        // the near one, the plan's own price its own.
+        for tail in crate::daemon::state::split_rounds::SplitTail::BOTH {
+            state
+                .metrics
+                .split_rounds
+                .record("split-14b", tail, 300, 100);
+        }
     }
     assert_eq!(
         priced(plan().with_guessing_ahead(true, YieldPrior::Drafter)).assumed_tokens_per_round,

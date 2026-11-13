@@ -1087,12 +1087,8 @@ card (its worker was spawned after the question), so no tree could flow. **OPEN*
 node's own first load is charged `UNMEASURED_LOAD_MS_PER_GIB` (10 s/GiB, ~85 s for the 14B) until a load is timed,
 and a node that always routes away never times one: its whole run was priced 87-121 s per 160-token reply, 19-30 s
 on the explored requests.
-(j4) ~~the runner-up's price is not logged~~ — logged (§ Closed). (j5) **orientation**: a split
-whose far end is a card flows only with its TAIL there (`dsd_tree::FlowDraws::AtTheFarEnd`, the 120 ms line; a tail
-here keeps 300), yet here-first is charged the hidden state's `transfer_ms` and peer-first is not, so the price
-leans to the shape that cannot flow — on the real link every explored split ran peer-first, `[0..24)` on the
-3060's whole copy + `[24..48)` here, streamed checks, 41 round trips waited for 160 tokens. Price the flow for a
-chain whose tail is a far card (its yield per shape), never a bias constant. (j6) a fresh node prices the hand-off
+(j4) ~~the runner-up's price is not logged~~ — logged (§ Closed). (j5) ~~orientation~~ — each tail of a split is
+priced and measured apart (§ Closed). (j6) a fresh node prices the hand-off
 from the peer's stated 45 tok/s (5.3 s for 160 tokens) against the 24 it delivered.
 
 `scheduler/parallax.rs` charges a remote hop a flat `ASSUMED_FORWARD_PASSES = 64.0`. The error
@@ -6301,6 +6297,20 @@ grep `^| N |`).
   the search with every whole-model vertex removed; "DIAG: the cheapest split this plan passed over", `chosen_ms`,
   `split_ms`, `split`). Diagnosis only. Test:
   `the_split_a_whole_model_plan_passed_over_is_the_cheapest_of_two_or_more_segments`.
+- #3 (j5) — **A split was priced the same whichever end ran its last layers, so the planner chose the slower
+  orientation.** A tail on a card far away lets the drafter's tree flow there; a tail here keeps the stream. On the
+  real link the 14B's here-first split ran 15.8 / 39.0 tok/s prose / code against 11.5 / 27.4 for the same halves
+  turned round, and 7.6 / 17.5 against 6.8 / 13.2 with the far card slowed: here-first faster in 4 pairs of 4
+  (`real_link.sh` `TAG=j7`, 2026-11-13). One yield per model priced them alike and the hop charges leaned to the
+  tail here: the one split the real link explored ran peer-first. Now `split_rounds::SplitTail` keys every figure
+  (stored figures of `counted_as` 1 dropped), an exploration tries the untrusted tail measured least (the far one on
+  a tie), and `parallax::route_each_tail` searches once per tail where the two figures differ, keeping the cheaper;
+  a plan's price reads its own tail. Residual: the greedy fallback (`parallax_routing = false`) reads the near
+  figure. Tests: `a_split_is_planned_and_priced_for_the_tail_it_ends_on`,
+  `each_tail_of_a_split_is_measured_and_explored_apart`. Prior art: per-arm statistics (UCB, Auer et al. 2002).
+  Evidence: `docs/invariants/scheduling.md` § "A split is priced for the rounds it takes" ("Each tail of a split").
+  On the real link (`real_link.sh` `TAG=j5`, 18:13Z): the third request's exploration priced `tail=Far` at 8.0 and
+  ran the split here-first (`30a0e2fd:0-24 + aa3d1e66:24-48`, 16.7 tok/s prose); every split after it ran here-first.
 - #3 (j7) — **After the first split here, this computer priced its own card's layers at its processor's speed.** Found
   reading the same run: once the explored split left `[24..48)` of the 14B loaded on this card, every later plan read
   this node `has_gpu=false card_layers=None` at 6.4 tok/s (a whole run 61.7 s against the hand-off's 10.7), so no split
@@ -6309,8 +6319,8 @@ grep `^| N |`).
   reports `(its card layers, the model's)` — what peers are told of it. Test:
   `a_worker_holding_part_of_a_model_too_big_for_the_card_reports_the_cards_layers`. Evidence: `docs/invariants/
   scheduling.md` § "A range that runs partly on a card is priced per device" (its last paragraph).
-  Not yet exercised on the real link: in `real_link.sh` `TAG=j7` (17:29Z) each arm starts the node over and every
-  free plan came before any split there.
+  On the real link (`real_link.sh` `TAG=j5`, 18:15Z): after the explored split, the next plan read this node
+  `has_gpu=true card_layers=Some(24)`, est 56 tok/s.
 
 **Closed 2026-11-13, released in v0.3.285 (published 2026-11-13 16:21:16Z)** (#3 (j), three of its parts)
 - #3 (j) — **A computer holding the whole model, with part of it on its processor, ran it all itself even where a

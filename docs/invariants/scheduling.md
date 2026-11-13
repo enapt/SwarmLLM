@@ -2210,6 +2210,44 @@ figures are measured only. Tests: `a_split_with_a_drafter_starts_from_the_prior_
 `Explore` arms of `a_split_whose_rounds_carry_three_tokens_is_priced_for_a_third_of_the_rounds`
 (compute ÷ the prior; the explored plan at 8 a round with no load charged).
 
+**Each tail of a split is its own arm** (2026-11-14, FUTURE_WORK #3 (j5)). Which computer runs a
+split's LAST layers decides how its guesses travel: a tail on a card far away draws the flowing tree
+there (`dsd_tree::FlowDraws::AtTheFarEnd`, the flow's 120 ms line, `stream_shape`'s `far_walks`), a
+tail here keeps the stream (the tree rounds' 300 ms line, under which the far link streams). Measured
+on the real link (`real_link.sh` `TAG=j7`, 2026-11-13 17:29-17:41Z, Qwen2.5-14B Q4_K_M, this laptop's
+3070 ↔ AU's 3060, 125-134 ms, 0.5B drafter on the card in every split), decode tok/s prose / code:
+
+| arms | here-first (flow: here [0..24) + AU [24..48)) | peer-first (stream: AU [0..24) + here [24..48)) |
+|---|---|---|
+| 2 / 3 (adjacent) | 15.8 / 39.0 | 11.5 / 27.4 |
+| 5 / 6 (AU's card slowed: checks 365-382 ms against 226-259) | 7.6 / 17.5 | 6.8 / 13.2 |
+
+Here-first faster in 4 pairs of 4 (+37 / +42 %, +12 / +32 %); the flow proposed 1,900-4,200
+guesses a reply at 0.6-1.0 ms each, the stream 216-279 at 3.0-4.8 ms. One figure per model priced
+both alike, so the hop charges chose — and they lean to the tail here: the prompt pass's hidden
+states are charged only where a PEER receives them (`vertex_cost`'s `transfer_ms`). The one split
+the real link explored (`real_link_j1drafter`, 11-13 16:38Z) ran peer-first (`aa3d1e66:0-24`, then
+this node `24-48`). Now: `SplitTail` keys the figures (`record` / `tokens_per_round` REQUIRE it;
+`counted_as` 2 drops the pooled figures), `YieldPriors` carries one prior per tail and an
+exploration prices ONE tail optimistically — the untrusted one measured least, the far tail first on
+a tie (`SplitTail::BOTH`) — and `parallax::route_each_tail` searches once per tail where the two
+figures differ: each pass holds a split's tail to its side and prices every vertex with that side's
+figure (`priced_for_tail`; the head of a split does not know its tail, so no vertex can be priced for
+it alone), whole-model vertices in both, the cheaper plan kept. `chain_cost_terms` and
+`chain_tokens_per_round` price a plan by its own tail, so the logged prediction, the privacy price
+and j4's runner-up read what the search read. Residual: the greedy fallback
+(`parallax_routing = false`) builds layer by layer and reads the near figure.
+Prior art: per-arm statistics — a bandit keeps one estimate per arm and pulls each untried arm
+before trusting any (UCB, Auer et al. 2002), since an estimate pooled over two arms hides the better
+one; PipeSpec (arXiv 2505.01572) and SpecPipe/PipeDec (2504.04104) arrange drafts across pipeline
+stages but do not choose an orientation.
+What a change must keep: a split's yield is measured, trusted, explored and priced for its tail;
+the two passes together offer every route one search would; a plan's price reads its own tail.
+Tests: `a_split_is_planned_and_priced_for_the_tail_it_ends_on` (parallax — red with one search
+for both), `each_tail_of_a_split_is_measured_and_explored_apart` and the per-tail arms of
+`an_untried_split_is_explored_on_a_doubling_schedule` (`split_rounds`),
+`a_finished_split_is_recorded_at_its_tokens_a_round_only_where_it_is_priced_so` (pipeline).
+
 ## An unmeasured peer is charged one round trip a pass (2026-10-29, #3 (h))
 
 `parallax::vertex_cost_as` prices a peer with no measured figure from priors:

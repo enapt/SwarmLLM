@@ -890,7 +890,9 @@ pub(super) async fn execute_request(
                         request.id,
                     )
                 } else {
-                    crate::daemon::state::split_rounds::YieldPrior::None
+                    crate::daemon::state::split_rounds::YieldPriors::both(
+                        crate::daemon::state::split_rounds::YieldPrior::None,
+                    )
                 },
             );
     if prompt_plan.cached_locally > 0 {

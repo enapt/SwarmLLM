@@ -1635,10 +1635,11 @@ fn drafter_may_guess_for(state: &SharedState, model_id: &ModelId) -> bool {
 /// (`PromptPlan::with_guessing_ahead`). A/B `SWARMLLM_SPLIT_YIELD_PRIOR=none`
 /// (read once): no prior anywhere.
 ///
-/// Now and then the drafter's prior is the OPTIMISTIC one, so a split that
-/// would win at a better yield runs and is measured
-/// (`SplitRounds::prior_for_request`, the one schedule, per `request_id`).
-/// A/B `SWARMLLM_SPLIT_EXPLORE=0` (read once): never.
+/// Now and then the drafter's prior is the OPTIMISTIC one for one tail of the
+/// split, so a split that would win at a better yield runs and is measured
+/// (`SplitRounds::prior_for_request`, the one schedule, per `request_id`; the
+/// tail measured least, #3 (j5)). A/B `SWARMLLM_SPLIT_EXPLORE=0` (read once):
+/// never.
 ///
 /// Why a prior at all: priced at one round a token, a split loses to a whole
 /// hand-off wherever its gain is its guesses, never runs, and so is never
@@ -1651,22 +1652,22 @@ pub(crate) fn split_yield_prior(
     state: &SharedState,
     model_id: &ModelId,
     request_id: uuid::Uuid,
-) -> crate::daemon::state::split_rounds::YieldPrior {
-    use crate::daemon::state::split_rounds::YieldPrior;
+) -> crate::daemon::state::split_rounds::YieldPriors {
+    use crate::daemon::state::split_rounds::{YieldPrior, YieldPriors};
     static NONE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     static NO_EXPLORING: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     if *NONE.get_or_init(|| std::env::var("SWARMLLM_SPLIT_YIELD_PRIOR").is_ok_and(|v| v == "none"))
     {
-        return YieldPrior::None;
+        return YieldPriors::both(YieldPrior::None);
     }
     if !(drafter_may_guess_for(state, model_id)
         && drafter_to_leave_room_for(state, model_id).is_some())
     {
-        return YieldPrior::None;
+        return YieldPriors::both(YieldPrior::None);
     }
     if *NO_EXPLORING.get_or_init(|| std::env::var("SWARMLLM_SPLIT_EXPLORE").is_ok_and(|v| v == "0"))
     {
-        return YieldPrior::Drafter;
+        return YieldPriors::both(YieldPrior::Drafter);
     }
     state
         .metrics
@@ -2049,8 +2050,17 @@ impl PipelineExecutor {
         {
             return;
         }
+        // Per tail (#3 (j5)): the plan as it ENDED — a stand-in that took the
+        // last segment over is where the reply's last layers ran.
+        let Some(last) = self.assignment.segments.last() else {
+            return;
+        };
         self.shared_state.metrics.split_rounds.record(
             &self.request.model_id.0,
+            crate::daemon::state::split_rounds::SplitTail::of(
+                &last.node_id,
+                self.shared_state.identity.node_id(),
+            ),
             out.completion_tokens,
             rounds.saturating_add(1),
         );
@@ -4286,13 +4296,18 @@ mod tests {
             };
             executor.note_split_rounds(&out, 0);
         };
-        let per_round = || {
+        let per_round = |tail| {
             state
                 .metrics
                 .split_rounds
-                .tokens_per_round("test", crate::daemon::state::split_rounds::YieldPrior::None)
+                .tokens_per_round(
+                    "test",
+                    tail,
+                    crate::daemon::state::split_rounds::YieldPrior::None,
+                )
                 .map(|y| y.tokens_per_round)
         };
+        use crate::daemon::state::split_rounds::SplitTail::{Far, Here};
 
         // Not a split, no round here, an adapter (one round a token, which
         // would lower the figure for the requests it prices): none recorded.
@@ -4310,7 +4325,7 @@ mod tests {
             finish(&executor_for(adapted, split()), 9, 30);
         }
         assert_eq!(
-            per_round(),
+            per_round(Far),
             None,
             "only a split this node drove may be recorded"
         );
@@ -4319,7 +4334,21 @@ mod tests {
         for _ in 0..crate::daemon::state::recent_by_model::BEFORE_TRUSTED {
             finish(&executor_for(make_test_request(&state), split()), 9, 30);
         }
-        assert_eq!(per_round(), Some(3.0));
+        assert_eq!(per_round(Far), Some(3.0));
+        // Recorded by its tail (#3 (j5)): this split's last layers ran on a peer.
+        assert_eq!(per_round(Here), None);
+        // One that ends here is counted apart.
+        let ends_here = || {
+            vec![
+                remote_segment(&a, (0, 16)),
+                remote_segment(state.identity.node_id(), (16, 32)),
+            ]
+        };
+        for _ in 0..crate::daemon::state::recent_by_model::BEFORE_TRUSTED {
+            finish(&executor_for(make_test_request(&state), ends_here()), 4, 20);
+        }
+        assert_eq!(per_round(Here), Some(4.0));
+        assert_eq!(per_round(Far), Some(3.0));
     }
 
     /// Drive one verify round to completion and answer it, so

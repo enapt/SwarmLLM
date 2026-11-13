@@ -291,8 +291,17 @@ struct NodeCandidate {
     /// yielded (`SplitRounds::tokens_per_round`), for a request that may guess
     /// ahead (`PromptPlan::may_guess_ahead`); the same on every candidate of a
     /// plan. `None` = one round a token. Read only through
-    /// [`Self::rounds_entered`].
+    /// [`Self::rounds_entered`] — for a split whose LAST layers run here
+    /// (`SplitTail::Here`); the search prices a split whose tail is another
+    /// computer with [`Self::split_tokens_per_round_far_tail`] in its place
+    /// (`parallax::priced_for_tail`, #3 (j5)). The greedy fallback, which
+    /// cannot know a plan's tail while it builds it, reads this one.
     split_tokens_per_round: Option<f32>,
+    /// The same for a split whose last layers run on ANOTHER computer
+    /// (`SplitTail::Far`) — the shape whose guesses can flow to a card far
+    /// away (`dsd_tree::FlowDraws::AtTheFarEnd`), measured apart (#3 (j5)).
+    /// Read only by `parallax::priced_for_tail`.
+    split_tokens_per_round_far_tail: Option<f32>,
     /// For THIS node only: how wide one run of layers a fresh worker would take,
     /// card and processor together, for a model the loader would split across
     /// them (`ModelProcessPool::fresh_run_layers_for_planning`). `None` for every
@@ -4842,38 +4851,49 @@ impl PipelineScheduler {
             .expected(&manifest.id.0);
         // And for the yield of a split's round, where this request may guess
         // ahead (FUTURE_WORK #3 (d)) — from the drafter's prior until the
-        // model's own splits are trusted (#3 (j)).
-        let split_yield = if prompt.may_guess_ahead {
-            self.shared_state
-                .metrics
-                .split_rounds
-                .tokens_per_round(&manifest.id.0, prompt.yield_prior)
-        } else {
-            None
-        };
-        if let Some(y) =
-            split_yield.filter(|y| y.from != crate::daemon::state::split_rounds::YieldFrom::Splits)
-        {
-            if prompt.yield_prior == crate::daemon::state::split_rounds::YieldPrior::Explore {
-                route_info!(purpose,
-                    model = %manifest.id,
-                    split_tokens_per_round = y.tokens_per_round,
-                    split_yield_from = ?y.from,
-                    "DIAG: a split of this model is priced OPTIMISTICALLY for this request, so a \
-                     split that would win at a better yield runs and is measured \
-                     (split_rounds::prior_for_request)"
-                );
+        // model's own splits are trusted (#3 (j)), per tail of the split: here
+        // or on another computer, which decides whether its guesses can flow
+        // (#3 (j5)).
+        let split_yield = |tail: crate::daemon::state::split_rounds::SplitTail| {
+            let prior = prompt.yield_prior.of(tail);
+            let split_yield = if prompt.may_guess_ahead {
+                self.shared_state
+                    .metrics
+                    .split_rounds
+                    .tokens_per_round(&manifest.id.0, tail, prior)
             } else {
-                route_info!(purpose,
-                    model = %manifest.id,
-                    split_tokens_per_round = y.tokens_per_round,
-                    split_yield_from = ?y.from,
-                    "DIAG: a split of this model is priced from the drafter's prior — too few of its \
-                     splits have run here to price it alone"
-                );
+                None
+            };
+            if let Some(y) = split_yield
+                .filter(|y| y.from != crate::daemon::state::split_rounds::YieldFrom::Splits)
+            {
+                if prior == crate::daemon::state::split_rounds::YieldPrior::Explore {
+                    route_info!(purpose,
+                        model = %manifest.id,
+                        tail = ?tail,
+                        split_tokens_per_round = y.tokens_per_round,
+                        split_yield_from = ?y.from,
+                        "DIAG: a split of this model is priced OPTIMISTICALLY for this request, so \
+                         a split that would win at a better yield runs and is measured \
+                         (split_rounds::prior_for_request)"
+                    );
+                } else {
+                    route_info!(purpose,
+                        model = %manifest.id,
+                        tail = ?tail,
+                        split_tokens_per_round = y.tokens_per_round,
+                        split_yield_from = ?y.from,
+                        "DIAG: a split of this model is priced from the drafter's prior — too few \
+                         of its splits have run here to price it alone"
+                    );
+                }
             }
-        }
-        let split_tokens_per_round = split_yield.map(|y| y.tokens_per_round);
+            split_yield.map(|y| y.tokens_per_round)
+        };
+        let split_tokens_per_round =
+            split_yield(crate::daemon::state::split_rounds::SplitTail::Here);
+        let split_tokens_per_round_far_tail =
+            split_yield(crate::daemon::state::split_rounds::SplitTail::Far);
 
         // Average bytes a layer occupies, for a load's price below. The
         // manifest is the only size the coordinator has; it is the on-disk
@@ -5886,9 +5906,7 @@ impl PipelineScheduler {
                     // however fast it ran warm (the `flowall` arms, 2026-11-13:
                     // a load here priced ~4 s against the 3060's warm 14B). Bounded
                     // as the exploration is (`SplitRounds::prior_for_request`).
-                    cold_load_ms_per_layer: if prompt.yield_prior
-                        == crate::daemon::state::split_rounds::YieldPrior::Explore
-                    {
+                    cold_load_ms_per_layer: if prompt.yield_prior.explores() {
                         0.0
                     } else {
                         cold_load_per_layer
@@ -5896,6 +5914,7 @@ impl PipelineScheduler {
                     reply_tokens_at_most: prompt.reply_tokens_at_most,
                     reply_tokens_expected,
                     split_tokens_per_round,
+                    split_tokens_per_round_far_tail,
                     fresh_run_layers,
                     card_layers,
                     processor_tokens_per_sec,
@@ -5981,6 +6000,7 @@ impl PipelineScheduler {
                 // What a round of this model's splits has yielded, for a
                 // request that may guess ahead (#3 (d)); `None` = one a token.
                 split_tokens_per_round = ?c.split_tokens_per_round,
+                split_tokens_per_round_far_tail = ?c.split_tokens_per_round_far_tail,
                 has_gpu = c.has_gpu,
                 max_hostable_layers = ?c.max_hostable_layers,
                 max_hostable_layers_at_ceiling = ?c.max_hostable_layers_at_ceiling,

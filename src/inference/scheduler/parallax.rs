@@ -38,6 +38,7 @@ use crate::types::{NodeId, PipelineSegment};
 use swarmllm_types::netcoord::NetworkCoord;
 
 use super::NodeCandidate;
+use crate::daemon::state::split_rounds::SplitTail;
 
 /// Per-vertex cost components. All in milliseconds.
 #[derive(Debug, Clone, Copy, Default)]
@@ -437,6 +438,9 @@ pub(super) fn chain_tokens_per_round(
     if chain_is_led_by_its_head(segments, candidates, local) {
         return None;
     }
+    // The figure the plan's own tail was priced with (#3 (j5)).
+    let priced = tail_of_split(segments, local).map(|tail| priced_for_tail(candidates, tail));
+    let candidates: &[NodeCandidate] = priced.as_deref().unwrap_or(candidates);
     let c = candidates.iter().find(|c| c.node_id == first.node_id)?;
     let passes = c.forward_passes();
     let rounds = c.rounds_entered(first.layer_range, num_layers);
@@ -1011,6 +1015,10 @@ pub(super) fn chain_cost_terms(
     num_layers: u32,
     prompt_tokens: Option<u32>,
 ) -> VertexCost {
+    // A split is priced for its own tail (#3 (j5), [`route_each_tail`]).
+    let priced =
+        tail_of_split(segments, local_node_id).map(|tail| priced_for_tail(candidates, tail));
+    let candidates: &[NodeCandidate] = priced.as_deref().unwrap_or(candidates);
     let find = |id: &NodeId| candidates.iter().find(|c| &c.node_id == id);
     let led = chain_is_led_by_its_head(segments, candidates, local_node_id);
     let role = |i: usize| match (led, i) {
@@ -1130,16 +1138,25 @@ pub(super) fn route_shortest_path(
     // model exactly as it stood before prefill was priced.
     prompt_tokens: Option<u32>,
 ) -> Result<Vec<PipelineSegment>, SwarmError> {
-    let routed = route_over(
+    let routed = route_each_tail(
         num_layers,
         candidates,
         local_node_id,
-        encrypted_pipeline,
-        partial_ranges,
-        capacity,
         prompt_tokens,
-        false,
-        false,
+        |c, tail| {
+            route_over(
+                num_layers,
+                c,
+                local_node_id,
+                encrypted_pipeline,
+                partial_ranges,
+                capacity,
+                prompt_tokens,
+                false,
+                false,
+                tail,
+            )
+        },
     );
     // **A range a machine already holds must be reachable by its neighbours,
     // not only by the machine itself.** Held-range endpoints are split points
@@ -1158,16 +1175,25 @@ pub(super) fn route_shortest_path(
     // vertices are offered only when the alternative is no plan. (A machine's
     // OWN held range cuts nobody else's and is offered on every pass, #3 (e).)
     if routed.is_err() && !partial_ranges && candidates.iter().any(|c| !c.held_ranges.is_empty()) {
-        if let Ok(segments) = route_over(
+        if let Ok(segments) = route_each_tail(
             num_layers,
             candidates,
             local_node_id,
-            encrypted_pipeline,
-            partial_ranges,
-            capacity,
             prompt_tokens,
-            true,
-            false,
+            |c, tail| {
+                route_over(
+                    num_layers,
+                    c,
+                    local_node_id,
+                    encrypted_pipeline,
+                    partial_ranges,
+                    capacity,
+                    prompt_tokens,
+                    true,
+                    false,
+                    tail,
+                )
+            },
         ) {
             tracing::info!(
                 rung = ?capacity,
@@ -1196,24 +1222,122 @@ pub(super) fn cheapest_split(
     capacity: CapacityBound,
     prompt_tokens: Option<u32>,
 ) -> Result<Vec<PipelineSegment>, SwarmError> {
-    route_over(
+    route_each_tail(
         num_layers,
         candidates,
         local_node_id,
-        encrypted_pipeline,
-        partial_ranges,
-        capacity,
         prompt_tokens,
-        false,
-        true,
+        |c, tail| {
+            route_over(
+                num_layers,
+                c,
+                local_node_id,
+                encrypted_pipeline,
+                partial_ranges,
+                capacity,
+                prompt_tokens,
+                false,
+                true,
+                tail,
+            )
+        },
     )
+}
+
+/// The search once for each TAIL a split can have — its last layers here, or
+/// on another computer — where the two are priced apart, keeping the cheaper
+/// plan (FUTURE_WORK #3 (j5)); one search, every tail, where they are not.
+///
+/// A split's yield a round depends on its tail: a tail on a card far away lets
+/// the drafter's tree FLOW there (`dsd_tree::FlowDraws::AtTheFarEnd`, the
+/// 120 ms line), a tail here keeps the stream (300 ms). The yield divides
+/// every segment's per-token costs, so no vertex can be priced for it alone —
+/// the head of a split does not know its tail. Each pass restricts a split's
+/// tail to one side and prices every vertex for that side
+/// ([`priced_for_tail`]); every whole-model vertex is in both. Together the
+/// two passes offer every route the one search did. Priced with one figure
+/// for both, the hop charges decided, and they lean to the tail here — the
+/// prompt pass's hidden states are charged only where a PEER receives them
+/// (`transfer_ms`) — while on the real link the 14B's here-first split (the
+/// flow) ran 1.1-1.4x the same halves turned round (`real_link.sh`
+/// `TAG=j7`, 2026-11-13; `split_rounds` § "Each shape of a split").
+fn route_each_tail(
+    num_layers: u32,
+    candidates: &[NodeCandidate],
+    local_node_id: &NodeId,
+    prompt_tokens: Option<u32>,
+    search: impl Fn(&[NodeCandidate], Option<SplitTail>) -> Result<Vec<PipelineSegment>, SwarmError>,
+) -> Result<Vec<PipelineSegment>, SwarmError> {
+    if !tails_priced_apart(candidates) {
+        return search(candidates, None);
+    }
+    let here = search(candidates, Some(SplitTail::Here));
+    let far = search(
+        &priced_for_tail(candidates, SplitTail::Far),
+        Some(SplitTail::Far),
+    );
+    match (here, far) {
+        (Ok(here), Ok(far)) => {
+            let price = |plan: &[PipelineSegment]| {
+                chain_cost_ms(plan, candidates, local_node_id, num_layers, prompt_tokens)
+            };
+            Ok(if price(&far) < price(&here) {
+                far
+            } else {
+                here
+            })
+        }
+        (Ok(plan), Err(_)) | (Err(_), Ok(plan)) => Ok(plan),
+        (Err(e), Err(_)) => Err(e),
+    }
+}
+
+/// Is a split with its tail on another computer priced from another yield
+/// than one with its tail here (#3 (j5))?
+fn tails_priced_apart(candidates: &[NodeCandidate]) -> bool {
+    candidates
+        .iter()
+        .any(|c| c.split_tokens_per_round != c.split_tokens_per_round_far_tail)
+}
+
+/// `candidates` as a split whose last layers run at `tail` is priced: the
+/// far tail's yield a round in place of the near one's
+/// (`NodeCandidate::split_tokens_per_round_far_tail`, #3 (j5)) — the one
+/// place the far figure is read, by the search ([`route_each_tail`]) and by
+/// the price of a plan ([`chain_cost_terms`], [`chain_tokens_per_round`]).
+fn priced_for_tail(
+    candidates: &[NodeCandidate],
+    tail: SplitTail,
+) -> std::borrow::Cow<'_, [NodeCandidate]> {
+    if tail == SplitTail::Here || !tails_priced_apart(candidates) {
+        return std::borrow::Cow::Borrowed(candidates);
+    }
+    std::borrow::Cow::Owned(
+        candidates
+            .iter()
+            .map(|c| NodeCandidate {
+                split_tokens_per_round: c.split_tokens_per_round_far_tail,
+                ..c.clone()
+            })
+            .collect(),
+    )
+}
+
+/// The tail a plan of two or more segments has; `None` for one segment,
+/// whose price no yield moves.
+fn tail_of_split(segments: &[PipelineSegment], local_node_id: &NodeId) -> Option<SplitTail> {
+    match segments {
+        [_, .., last] => Some(SplitTail::of(&last.node_id, local_node_id)),
+        _ => None,
+    }
 }
 
 /// [`route_shortest_path`]'s search. `meet_held`: also offer each candidate
 /// the parts of its range that end or begin where some machine's held range
 /// does, with partial ranges off. (Its OWN held ranges are offered on every
 /// pass — FUTURE_WORK #3 (e).) `split_only`: no whole-model vertex
-/// ([`cheapest_split`]).
+/// ([`cheapest_split`]). `tail`: a split's last layers only on this node, or
+/// only on another ([`route_each_tail`]); `None`, either.
 #[allow(clippy::too_many_arguments)]
 fn route_over(
     num_layers: u32,
@@ -1225,6 +1349,7 @@ fn route_over(
     prompt_tokens: Option<u32>,
     meet_held: bool,
     split_only: bool,
+    tail: Option<SplitTail>,
 ) -> Result<Vec<PipelineSegment>, SwarmError> {
     if num_layers == 0 {
         return Err(SwarmError::PipelineError("num_layers=0".into()));
@@ -1611,6 +1736,15 @@ fn route_over(
     // every vertex but the whole model's.
     if split_only {
         vertices.retain(|v| !(v.range.0 == 0 && v.range.1 >= num_layers));
+    }
+    // One tail of a split ([`route_each_tail`]): a vertex ending the model
+    // part-way in is kept only on that side; a whole-model vertex on both.
+    if let Some(tail) = tail {
+        vertices.retain(|v| {
+            v.range.1 < num_layers
+                || v.range.0 == 0
+                || SplitTail::of(&candidates[v.cand_idx].node_id, local_node_id) == tail
+        });
     }
     if vertices.is_empty() {
         return Err(SwarmError::PipelineError(
@@ -2234,6 +2368,7 @@ mod tests {
             reply_tokens_at_most: None,
             reply_tokens_expected: None,
             split_tokens_per_round: None,
+            split_tokens_per_round_far_tail: None,
             ring: Default::default(),
             stated_ms_per_layer: None,
             fresh_run_layers: None,
@@ -2414,6 +2549,78 @@ mod tests {
             vec![(3, (0, 16)), (4, (16, 32))]
         );
         assert!(search(true, &[whole, slow_whole]).is_err());
+    }
+
+    /// FUTURE_WORK #3 (j5): a split is searched once per TAIL where the two
+    /// are priced apart, and the plan kept is the cheaper — with the far
+    /// tail's yield (the flow) above the near one's, the split ends on the
+    /// peer; turned round, it ends here. A plan is priced by its own tail.
+    /// Both computers hold the whole model with room for half, so either
+    /// orientation can be planned.
+    #[test]
+    fn a_split_is_planned_and_priced_for_the_tail_it_ends_on() {
+        let local = NodeId([1; 32]);
+        let peer = NodeId([2; 32]);
+        let with = |here: f32, far: f32| {
+            let mut me = cand(1, vec![(0, 32)], 0, 0.0, true, true, 30.0);
+            me.max_hostable_layers = Some(16);
+            let mut p = cand(2, vec![(0, 32)], 60, 0.0, true, true, 30.0);
+            p.max_hostable_layers = Some(16);
+            for c in [&mut me, &mut p] {
+                c.split_tokens_per_round = Some(here);
+                c.split_tokens_per_round_far_tail = Some(far);
+            }
+            vec![me, p]
+        };
+        let plan = |cands: &[NodeCandidate]| {
+            route_shortest_path(
+                32,
+                cands,
+                &local,
+                false,
+                false,
+                CapacityBound::Everyone,
+                None,
+            )
+            .expect("routable")
+        };
+        let tail = |segs: &[PipelineSegment]| segs.last().map(|s| s.node_id.clone());
+
+        let flows = with(1.0, 8.0);
+        let segs = plan(&flows);
+        assert!(segs.len() >= 2, "{segs:?}");
+        assert_eq!(
+            tail(&segs),
+            Some(peer.clone()),
+            "the far tail flows: {segs:?}"
+        );
+
+        let streams = with(8.0, 1.0);
+        let segs = plan(&streams);
+        assert!(segs.len() >= 2, "{segs:?}");
+        assert_eq!(
+            tail(&segs),
+            Some(local.clone()),
+            "the near tail yields more: {segs:?}"
+        );
+
+        // The price of a plan reads its own tail's figure.
+        let ends_far = plan(&flows);
+        let price = |cands: &[NodeCandidate]| chain_cost_ms(&ends_far, cands, &local, 32, None);
+        assert!(
+            price(&flows) < price(&with(1.0, 1.0)),
+            "a far-tailed plan is priced at the far tail's yield"
+        );
+        assert_eq!(
+            price(&with(1.0, 8.0)),
+            price(&with(4.0, 8.0)),
+            "and never at the near one's"
+        );
+        assert_eq!(
+            chain_tokens_per_round(&ends_far, &flows, &local, 32),
+            Some(8.0),
+            "the completion line reports the figure the plan was priced at"
+        );
     }
 
     /// FUTURE_WORK #3 (j3): this node's whole run is priced from what its
@@ -5335,6 +5542,7 @@ mod tests {
                 None,
                 meet_held,
                 false,
+                None,
             )
         };
 
@@ -5394,6 +5602,7 @@ mod tests {
             None,
             true,
             false,
+            None,
         )
         .expect("routable");
         assert!(recut.len() > 1, "the control must split: {recut:?}");
@@ -5804,6 +6013,7 @@ mod transfer_cost_tests {
             reply_tokens_at_most: None,
             reply_tokens_expected: None,
             split_tokens_per_round: None,
+            split_tokens_per_round_far_tail: None,
             ring: Default::default(),
             stated_ms_per_layer: None,
             fresh_run_layers: None,
