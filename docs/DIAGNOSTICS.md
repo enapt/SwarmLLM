@@ -711,8 +711,9 @@ a penalty. The peer list (`/api/admin/peers`) carries each peer's `swarm_use`.
 
 Each `resident` entry in the peer list (`/api/admin/peers`) says how the far computer placed
 the model: `ranges`, `card_layers` (how many run on its card), and `card_free_at_load_mb`, the
-card's free memory its load READ when it placed them (`None` from an older release, a placement
-on the processor, or layers added by growth). Rough check: the load gives the card about 85% of
+card's free memory its load READ when it placed them (`None` from an older release or a placement
+on the processor). It is the worker's SPAWN reading. Layers grown onto the worker later were placed
+on the room at that time, so compare the two only while `ranges` is the one range it loaded. Rough check: the load gives the card about 85% of
 that reading, less the token table and output head (~1.1 GB for a 14B) and the cache. If
 `card_layers` fits the reading but the reading is low, look at what held the card at load time,
 such as the worker this load replaced (Ollama waits for that memory to come back,

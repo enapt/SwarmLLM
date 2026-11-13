@@ -924,9 +924,12 @@ pub struct ResidentModelLayers {
     /// diagnostic only and nothing plans on it. With `card_layers` it tells a
     /// reload that read memory still held by the worker it replaced from one
     /// sized short on a true reading (FUTURE_WORK #3 (j13): a far computer's
-    /// 14B reloaded with 17 of its 48 layers on a 12 GB card). `None` comes
-    /// from an older node, from a placement that did not read the card, and
-    /// from one placed by growth.
+    /// 14B reloaded with 17 of its 48 layers on a 12 GB card). It is the
+    /// reading of the worker's SPAWN: layers a live worker added later by
+    /// growth were placed on the room then, not on this figure, so read it
+    /// against `card_layers` only while `ranges` is the one range it loaded.
+    /// `None` comes from an older node and from a spawn that did not read
+    /// the card.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub card_free_at_load_mb: Option<u64>,
 }
