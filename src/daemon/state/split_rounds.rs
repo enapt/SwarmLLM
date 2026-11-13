@@ -230,8 +230,8 @@ pub const MOST_EXPLORE_AFTER: u32 = 64;
 /// When a model's split is next priced at [`YieldPrior::Explore`].
 #[derive(Clone, Copy, Debug)]
 struct Exploring {
-    /// Requests priced from the prior since a split of the model finished
-    /// here or was explored.
+    /// Requests priced from the prior since a split of the tail the next
+    /// exploration would try finished here, or since the last exploration.
     since: u32,
     /// How many of them the next exploration waits for.
     after: u32,
@@ -337,20 +337,42 @@ impl SplitRounds {
     /// tells nothing and is not recorded.
     pub fn record(&self, model: &str, tail: SplitTail, tokens: u32, rounds: u32) {
         if usable(&(tokens, rounds)) {
+            // A split of the tail the next exploration would try has measured
+            // it: the count to that exploration starts again. A split of the
+            // OTHER tail measures nothing about it — counted so, a model whose
+            // every request ran a split here-last never tried the far tail
+            // (the real link's second arm, 2026-11-13: five streams at
+            // ~10 tok/s, the flow that ran 16.7 never priced off the prior).
+            // UCB keeps a count per arm for the same reason.
+            let measures_the_next = self.tail_to_explore(model) == Some(tail);
             self.recent.push(&tail.key(model), (tokens, rounds));
-            // A split that ran is measured: the count to the next exploration
-            // starts again.
-            if let Some(mut e) = self.exploring.get_mut(model) {
-                e.since = 0;
+            if measures_the_next {
+                if let Some(mut e) = self.exploring.get_mut(model) {
+                    e.since = 0;
+                }
             }
         }
+    }
+
+    /// The tail an exploration of `model` would try now: the untrusted one
+    /// with the fewest splits recorded, [`SplitTail::BOTH`]'s order on a tie;
+    /// `None` once both are trusted.
+    fn tail_to_explore(&self, model: &str) -> Option<SplitTail> {
+        SplitTail::BOTH
+            .into_iter()
+            .filter(|tail| self.recent.with_trusted(&tail.key(model), |_| ()).is_none())
+            .min_by_key(|tail| {
+                self.recent
+                    .with_any(&tail.key(model), |r| r.len())
+                    .unwrap_or(0)
+            })
     }
 
     /// The priors `request` for `model` is priced with: `prior` for both
     /// tails, but [`YieldPrior::Explore`] for ONE where `prior` is the
     /// drafter's, a tail's splits are not yet trusted, and this is the
-    /// [`FIRST_EXPLORE_AFTER`]th request so priced since a split of the model
-    /// finished here — then twice as many after each exploration, up to
+    /// [`FIRST_EXPLORE_AFTER`]th request so priced since a split of the tail
+    /// it would explore finished here — then twice as many after each exploration, up to
     /// [`MOST_EXPLORE_AFTER`]. The tail explored is the untrusted one with the
     /// fewest splits recorded, [`SplitTail::BOTH`]'s order on a tie (#3 (j5)).
     /// Asked once a planning attempt (`pipeline::split_yield_prior`); the same
@@ -361,14 +383,7 @@ impl SplitRounds {
         request: uuid::Uuid,
         prior: YieldPrior,
     ) -> YieldPriors {
-        let untried = SplitTail::BOTH
-            .into_iter()
-            .filter(|tail| self.recent.with_trusted(&tail.key(model), |_| ()).is_none())
-            .min_by_key(|tail| {
-                self.recent
-                    .with_any(&tail.key(model), |r| r.len())
-                    .unwrap_or(0)
-            });
+        let untried = self.tail_to_explore(model);
         let (YieldPrior::Drafter, Some(untried)) = (prior, untried) else {
             return YieldPriors::both(prior);
         };
@@ -589,8 +604,9 @@ mod tests {
     /// **An untried split is priced optimistically now and then** (#3 (j)):
     /// the third request priced from the drafter's prior explores, then the
     /// sixth after it, doubling to the cap; a re-plan of one request keeps its
-    /// answer; a split that finishes starts the count again; four finished
-    /// end it, and no other prior is ever explored.
+    /// answer; a split of the tail it would explore starts the count again, a
+    /// split of the other tail does not; four finished of each end it, and no
+    /// other prior is ever explored.
     #[test]
     fn an_untried_split_is_explored_on_a_doubling_schedule() {
         let rounds = SplitRounds::default();
@@ -628,22 +644,35 @@ mod tests {
             "the re-plan explores too"
         );
 
-        // A split that finished starts the count again.
+        // A split of the OTHER tail does not start the count again: the
+        // real link's second arm ran a stream (tail here) on every request and
+        // the far tail was never tried.
         let ran = SplitRounds::default();
         ran.prior_for_request("m", uuid::Uuid::new_v4(), D);
         ran.prior_for_request("m", uuid::Uuid::new_v4(), D);
         ran.record("m", Here, 160, 40);
-        assert_eq!(ran.prior_for_request("m", uuid::Uuid::new_v4(), D), dd);
-        assert_eq!(ran.prior_for_request("m", uuid::Uuid::new_v4(), D), dd);
-        // The tail with fewer splits is the one explored.
+        // The tail with fewer splits is the one explored, on time.
         assert_eq!(ran.prior_for_request("m", uuid::Uuid::new_v4(), D), xf);
-        ran.record("m", Far, 160, 40);
-        ran.record("m", Far, 160, 40);
-        // (The wait has doubled to six.)
+        ran.record("m", Here, 160, 40);
+        ran.record("m", Here, 160, 40);
+        // (The wait has doubled to six, and splits here-last never move it.)
         for _ in 0..5 {
             assert_eq!(ran.prior_for_request("m", uuid::Uuid::new_v4(), D), dd);
+            ran.record("m", Here, 160, 40);
         }
-        assert_eq!(ran.prior_for_request("m", uuid::Uuid::new_v4(), D), xh);
+        assert_eq!(ran.prior_for_request("m", uuid::Uuid::new_v4(), D), xf);
+        // A split of the tail it would explore does start it again.
+        ran.record("m", Far, 160, 40);
+        for _ in 0..11 {
+            assert_eq!(ran.prior_for_request("m", uuid::Uuid::new_v4(), D), dd);
+        }
+        assert_eq!(ran.prior_for_request("m", uuid::Uuid::new_v4(), D), xf);
+        // The tail with fewer splits is the one explored, Here too.
+        let other = SplitRounds::default();
+        other.record("m", Far, 160, 40);
+        assert_eq!(other.prior_for_request("m", uuid::Uuid::new_v4(), D), dd);
+        assert_eq!(other.prior_for_request("m", uuid::Uuid::new_v4(), D), dd);
+        assert_eq!(other.prior_for_request("m", uuid::Uuid::new_v4(), D), xh);
 
         // Both trusted: no prior, nothing explored.
         for _ in 1..BEFORE_TRUSTED {

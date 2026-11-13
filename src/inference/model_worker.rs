@@ -1184,6 +1184,12 @@ fn fault_load_delay_secs() -> Option<u64> {
     })
 }
 
+/// Whether this model process has loaded any range of its model from disk —
+/// set by [`ensure_model_loaded`] at each load, never cleared — so a later
+/// read from disk with nothing resident says the copy was taken away
+/// ([`crate::types::LayersFrom::DiskAgain`]), not that the process is new.
+static LOADED_A_RANGE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 /// Loads this worker has timed and not yet reported, as `(bytes, ms)`.
 /// Filled by [`ensure_model_loaded`] — the one place a model is loaded — and
 /// drained by the main loop beside the card probe (`WorkerMsg::ModelLoadTimed`).
@@ -1228,6 +1234,13 @@ fn load_for_a_forward(
 ) -> Result<crate::types::HowServed, SwarmError> {
     let key = (layer_start, layer_end, tp_rank, tp_size);
     let held = models.contains_key(&key);
+    let before = WhatWasHeld {
+        covering: models.keys().any(|(ls, le, tr, ts)| {
+            *tr == tp_rank && *ts == tp_size && *ls <= layer_start && *le >= layer_end
+        }),
+        any: !models.is_empty(),
+        loaded_before: LOADED_A_RANGE.load(std::sync::atomic::Ordering::Relaxed),
+    };
     let started = std::time::Instant::now();
     ensure_model_loaded(
         models,
@@ -1246,22 +1259,49 @@ fn load_for_a_forward(
         layers: layers_from(
             models.get(&key).is_some_and(|m| m.viewed_from().is_some()),
             held,
+            before,
         ),
         load_us,
         worker_us: 0,
     })
 }
 
+/// What this model process held of the model just before a forward's load —
+/// the facts a read from disk is explained by.
+#[derive(Clone, Copy, Debug)]
+struct WhatWasHeld {
+    /// A loaded range of the same shape held the forward's whole run.
+    covering: bool,
+    /// Any range of the model was loaded.
+    any: bool,
+    /// The process had loaded a range from disk before ([`LOADED_A_RANGE`]).
+    loaded_before: bool,
+}
+
 /// Where a forward's layers came from: a view of a loaded copy whenever the
 /// run is served as one (built now or before), else loaded already, else read
-/// from disk now.
-fn layers_from(served_as_a_view: bool, held_before: bool) -> crate::types::LayersFrom {
+/// from disk now — and then why (#3 (j8), 2026-11-14): the real link's far end
+/// read a split's run from disk right after its whole copy had served, and
+/// the bare "disk" could not say whether its model process was new, had had
+/// its copy taken away, or held a copy covering the run that did not serve it.
+fn layers_from(
+    served_as_a_view: bool,
+    held_before: bool,
+    before: WhatWasHeld,
+) -> crate::types::LayersFrom {
+    use crate::types::LayersFrom;
     if served_as_a_view {
-        crate::types::LayersFrom::Copy
+        LayersFrom::Copy
     } else if held_before {
-        crate::types::LayersFrom::Loaded
+        LayersFrom::Loaded
+    } else if before.covering {
+        LayersFrom::DiskBesideCover
+    } else if before.any {
+        LayersFrom::DiskBesideOthers
+    } else if before.loaded_before {
+        LayersFrom::DiskAgain
     } else {
-        crate::types::LayersFrom::Disk
+        LayersFrom::DiskFirst
     }
 }
 
@@ -1480,6 +1520,7 @@ fn ensure_model_loaded(
         "model-worker: Model loaded"
     );
     models.insert(key, model);
+    LOADED_A_RANGE.store(true, std::sync::atomic::Ordering::Relaxed);
     // On the planner's basis — the model's size × the share of its layers —
     // so a rate measured here prices a load there in the same units.
     let bytes = manifest
@@ -7588,7 +7629,26 @@ mod subsumption_tests {
         assert_eq!(load(1, 3), LayersFrom::Copy, "a view built now");
         assert_eq!(load(1, 3), LayersFrom::Copy, "the same view, already built");
         assert_eq!(load(0, 4), LayersFrom::Loaded);
-        assert_eq!(super::layers_from(false, false), LayersFrom::Disk);
+        // A read from disk says why, from what the process held before it.
+        let held = |covering, any, loaded_before| super::WhatWasHeld {
+            covering,
+            any,
+            loaded_before,
+        };
+        let disk = |before| super::layers_from(false, false, before);
+        assert_eq!(disk(held(false, false, false)), LayersFrom::DiskFirst);
+        assert_eq!(disk(held(false, false, true)), LayersFrom::DiskAgain);
+        assert_eq!(disk(held(false, true, true)), LayersFrom::DiskBesideOthers);
+        assert_eq!(disk(held(true, true, true)), LayersFrom::DiskBesideCover);
+        // A view or a held run is never a disk read, whatever was held.
+        assert_eq!(
+            super::layers_from(true, false, held(true, true, true)),
+            LayersFrom::Copy
+        );
+        assert_eq!(
+            super::layers_from(false, true, held(true, true, true)),
+            LayersFrom::Loaded
+        );
     }
 
     /// #449's bound: a peer naming run after run inside a loaded range does not

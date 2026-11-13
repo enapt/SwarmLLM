@@ -4951,6 +4951,19 @@ What a change must keep:
    ours. Tests: `how_a_segment_served_rides_after_every_older_trailer`,
    `a_forward_reports_whether_its_layers_came_from_a_loaded_copy`,
    `a_segments_prompt_and_steps_are_reported_apart`.
+4. **A disk read names WHY, only to a recipient that reads it** (2026-11-14, `HOW_SERVED_WHY`,
+   bit 44, FUTURE_WORK #3 (j8)). On the real link the far end read a split's run from disk
+   (868 ms, 11-13) right after its whole copy had served two hand-offs, and "disk" could not say
+   whether its model process was new, had had its copy unloaded, or held a covering copy that did
+   not serve the run — three different causes in three different subsystems, none readable from
+   here. Kubernetes' kubelet is the shape taken: an image pull says `Pulling` or "already present
+   on machine", a restart its reason (`OOMKilled`) beside its count. Codes 4-7 (`DiskFirst`,
+   `DiskAgain`, `DiskBesideCover`, `DiskBesideOthers`), from what the model process held just
+   before the load (`model_worker::WhatWasHeld`; "loaded before" is the process-wide
+   `LOADED_A_RANGE`, a worker serving one model). **A recipient without the bit is told a plain
+   `Disk`** (`LayersFrom::without_reason`, inside `tell_the_recipient`): an older coordinator reads
+   an unknown code as no report and would lose the timings with it. Test
+   `why_a_read_was_from_disk_goes_only_to_a_recipient_that_reads_it`.
 
 ## A chain hop tells its coordinator its own time, once a reply (2026-11-12, FUTURE_WORK #427)
 

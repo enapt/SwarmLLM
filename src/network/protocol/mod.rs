@@ -2333,6 +2333,10 @@ mod tests {
             crate::types::LayersFrom::Loaded,
             crate::types::LayersFrom::Copy,
             crate::types::LayersFrom::Disk,
+            crate::types::LayersFrom::DiskFirst,
+            crate::types::LayersFrom::DiskAgain,
+            crate::types::LayersFrom::DiskBesideCover,
+            crate::types::LayersFrom::DiskBesideOthers,
         ] {
             let mut bare = LayerResult::error(rid, "x");
             bare.how_served = Some(crate::types::HowServed { layers, ..how });

@@ -169,15 +169,20 @@ pub(in crate::network) fn tell_the_recipient(
     held: Option<u32>,
     reads: impl Fn(u64) -> bool,
 ) {
-    use crate::types::features::{HOW_SERVED, SERVED_TIME};
+    use crate::types::features::{HOW_SERVED, HOW_SERVED_WHY, SERVED_TIME};
     let to_the_ms = |us: u32| micros_to_the_millisecond(Duration::from_micros(u64::from(us)));
+    let why = reads(HOW_SERVED_WHY);
     result.how_served = result
         .how_served
         .filter(|_| sent_the_forward && reads(HOW_SERVED))
         .map(|how| crate::types::HowServed {
+            layers: if why {
+                how.layers
+            } else {
+                how.layers.without_reason()
+            },
             load_us: to_the_ms(how.load_us),
             worker_us: to_the_ms(how.worker_us),
-            ..how
         });
     result.served_us = held
         .filter(|_| sent_the_forward && reads(SERVED_TIME))
@@ -355,6 +360,42 @@ mod tests {
         assert!(reads_how.how_served.is_some());
         // No held time (a stream keeps none): the pool's value never leaves.
         assert_eq!(reads_how.served_us, None);
+    }
+
+    /// Why a segment read from disk goes only to a recipient that reads it;
+    /// any other is told a plain "disk", which every build since
+    /// `HOW_SERVED` reads — a code it did not know would be no report at all.
+    #[test]
+    fn why_a_read_was_from_disk_goes_only_to_a_recipient_that_reads_it() {
+        use crate::types::features::{HOW_SERVED, HOW_SERVED_WHY};
+        use crate::types::LayersFrom;
+        let again = || {
+            let mut r = served(800_000, 900_000);
+            r.how_served.as_mut().unwrap().layers = LayersFrom::DiskAgain;
+            r
+        };
+        let mut reads_why = again();
+        tell_the_recipient(&mut reads_why, true, None, |f| {
+            f == HOW_SERVED || f == HOW_SERVED_WHY
+        });
+        assert_eq!(reads_why.how_served.unwrap().layers, LayersFrom::DiskAgain);
+        let mut older = again();
+        tell_the_recipient(&mut older, true, None, |f| f == HOW_SERVED);
+        let how = older.how_served.expect("still told how it served");
+        assert_eq!(how.layers, LayersFrom::Disk);
+        assert_eq!((how.load_us, how.worker_us), (800_000, 900_000));
+        // Every reason maps down, and nothing else changes.
+        for layers in [LayersFrom::Loaded, LayersFrom::Copy, LayersFrom::Disk] {
+            assert_eq!(layers.without_reason(), layers);
+        }
+        for layers in [
+            LayersFrom::DiskFirst,
+            LayersFrom::DiskAgain,
+            LayersFrom::DiskBesideCover,
+            LayersFrom::DiskBesideOthers,
+        ] {
+            assert_eq!(layers.without_reason(), LayersFrom::Disk);
+        }
     }
 
     /// Both ways an answer leaves go through the one rule — the stream's

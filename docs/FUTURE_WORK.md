@@ -1090,6 +1090,20 @@ on the explored requests.
 (j4) ~~the runner-up's price is not logged~~ — logged (§ Closed). (j5) ~~orientation~~ — each tail of a split is
 priced and measured apart (§ Closed). (j6) a fresh node prices the hand-off
 from the peer's stated 45 tok/s (5.3 s for 160 tokens) against the 24 it delivered.
+(j8) **the far end reads a split's run from disk after its whole copy served** — real link, TAG=j7 and TAG=j5
+(2026-11-13): the first split after two whole hand-offs had AU report `layers_from=disk` for [24..48) (868 ms of a
+1,480 ms forward, its worker's own 1,479 — no spawn inside the forward), then its card held 45, then 44 of 48 layers
+and its hand-offs fell from ~24 to ~10 tok/s; later splits were served as views (`copy`). Its daemon charged no
+covering range (else the forward would carry `served_from`) and its worker held none (else a view). Local rigs do
+not reproduce it: `split_rig.sh slices` with `SLICES_FIRST=handoff` (B's whole copy from A's two hand-offs) passed
+on the processor (tinyllama) and on the card (llama-3.2-3b). Hypotheses, unranked: the idle copy was unloaded
+between requests (prune's soft-unload under another program's card pressure, the idle unload), or the worker was
+retired and respawned before the forward — a growth's `Respawn`, or `get_or_spawn_once`'s `retire_for_gpu`: a worker
+short of its card, idle past the promotion floor, is unloaded and the fresh spawn places only the REQUESTED segment,
+so a forward for [24..48) of a worker that held (0,48) reads [24..48) from disk (`disk_first`) and the next whole
+hand-off loads the rest again. The report now says which (`disk_first` /
+`disk_again` / `disk_beside_cover` / `disk_beside_others`, `features::HOW_SERVED_WHY`); read it on the next real
+link once AU runs the release that carries it.
 
 `scheduler/parallax.rs` charges a remote hop a flat `ASSUMED_FORWARD_PASSES = 64.0`. The error
 grows with reply length — 1.0 at 8 tokens, 2.4-3.3 at 120-239 — and biases every delegation
@@ -6295,7 +6309,9 @@ grep `^| N |`).
 - #3 (j4) — **A split the planner passed over could not be read off the plan.** A whole-model choice now logs the
   cheapest route of two or more segments beside it, priced by the same `chain_cost_ms` (`parallax::cheapest_split`:
   the search with every whole-model vertex removed; "DIAG: the cheapest split this plan passed over", `chosen_ms`,
-  `split_ms`, `split`). Diagnosis only. Test:
+  `split_ms`, `split`). Diagnosis only. On the real link (TAG=j5, 2026-11-13) it once logged `[(0,24), (24,48)]`
+  both on one computer — that machine's whole run, priced as one — so it never steps from one of a machine's ranges
+  onto its next (`route_over`'s `split_only`, 2026-11-14). Test:
   `the_split_a_whole_model_plan_passed_over_is_the_cheapest_of_two_or_more_segments`.
 - #3 (j5) — **A split was priced the same whichever end ran its last layers, so the planner chose the slower
   orientation.** A tail on a card far away lets the drafter's tree flow there; a tail here keeps the stream. On the
@@ -6311,6 +6327,13 @@ grep `^| N |`).
   Evidence: `docs/invariants/scheduling.md` § "A split is priced for the rounds it takes" ("Each tail of a split").
   On the real link (`real_link.sh` `TAG=j5`, 18:13Z): the third request's exploration priced `tail=Far` at 8.0 and
   ran the split here-first (`30a0e2fd:0-24 + aa3d1e66:24-48`, 16.7 tok/s prose); every split after it ran here-first.
+- #3 (j9) — **Once every request ran a split of one tail, the other tail was never tried.** The count to the next
+  exploration restarted whenever any split of the model finished, so in the real link's second arm (`TAG=j5`,
+  18:16-18:20Z) — both tails at the prior, the stream (tail here) winning the tie — five streams ran at 9.7-12.5
+  tok/s and the flow (16.7 prose in the arm before) was never priced off the prior. Now only a split of the tail
+  the next exploration would try restarts its count (`SplitRounds::tail_to_explore`). Prior art: UCB keeps its count
+  per arm (Auer et al. 2002). Test: `an_untried_split_is_explored_on_a_doubling_schedule` (red with any split
+  restarting the count).
 - #3 (j7) — **After the first split here, this computer priced its own card's layers at its processor's speed.** Found
   reading the same run: once the explored split left `[24..48)` of the 14B loaded on this card, every later plan read
   this node `has_gpu=false card_layers=None` at 6.4 tok/s (a whole run 61.7 s against the hand-off's 10.7), so no split

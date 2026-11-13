@@ -405,7 +405,9 @@
 #          B logs "serving a run of layers from the copy already loaded" and no
 #          "Model loaded" for that request, and the split's reply is B's own.
 #          Control arm: ENV_B="SWARMLLM_ELASTIC_SPANS=0" — B loads the run from
-#          disk beside its whole copy.
+#          disk beside its whole copy. SLICES_FIRST=handoff: B's whole copy is
+#          A's two whole hand-offs instead of B's own request (the real link's
+#          order, where B read the split's run from disk).
 #
 # usage: split_rig.sh split|reasoning|kill|failover|failover_mid|context|whole|continue|repeat|fetch|cache|splitcache|remote|mixed|disputed|spliced|disconnect|softunload|layerprice|keep|route|latekv|peerkv|peerload|refusepiece|owntiming|holdings|givesway|slices <binary> [<binary for B>]
 #   MODEL      model id (default: tinyllama for split, llama-3.2-3b for kill
@@ -1561,11 +1563,18 @@ if [ "$MODE" = slices ]; then
   IDB=$(curl -s -m 5 -H "Authorization: Bearer $KB" localhost:8920/api/admin/network-code \
     | python3 -c 'import sys,json; print(json.load(sys.stdin)["node_id"][:16])')
   Q="What is the capital of France? Answer in one sentence."
-  # B's own request first: it runs the model whole, so B's worker holds every layer.
-  body=$(python3 -c 'import json,sys
+  if [ "${SLICES_FIRST:-own}" = handoff ]; then
+    # A hands B the whole model twice (A plans as holding nothing), as the real
+    # link's first requests did: B's whole copy is then a PEER's hand-off.
+    RIG_ROUTE='{"pretend_local_holds":"none"}' ask "$Q" 32 whole | cut -c1-200
+    RIG_ROUTE='{"pretend_local_holds":"none"}' ask "$Q" 32 whole2 | cut -c1-200
+  else
+    # B's own request first: it runs the model whole, so B's worker holds every layer.
+    body=$(python3 -c 'import json,sys
 print(json.dumps({"model":sys.argv[1],"max_tokens":32,"temperature":0,"messages":[{"role":"user","content":sys.argv[2]}]}))' "$MODEL" "$Q")
-  curl -s -m 600 -o "$OUT/whole.body" -H "Authorization: Bearer $KB" -H "Content-Type: application/json" \
-       -X POST localhost:8920/v1/chat/completions -d "$body"
+    curl -s -m 600 -o "$OUT/whole.body" -H "Authorization: Bearer $KB" -H "Content-Type: application/json" \
+         -X POST localhost:8920/v1/chat/completions -d "$body"
+  fi
   grep -aq "model-worker: Model loaded" "$BASE/B/node.log" \
     || echo "slices: B logged no load for its own request — the check below proves nothing"
   MARK_B=$(wc -l < "$BASE/B/node.log")

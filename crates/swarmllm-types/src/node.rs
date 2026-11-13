@@ -468,6 +468,14 @@ pub mod features {
     /// peer that sent the forward, and only where that peer advertises this.
     pub const HOW_SERVED: u64 = 1 << 43;
 
+    /// Reads WHY a segment read its layers from disk in that report
+    /// (`LayersFrom`'s codes 4-7: a new model process, a copy taken away, a
+    /// covering copy that did not serve the run, other ranges only). A
+    /// serving node sends a recipient without this bit a plain "disk"
+    /// (`LayersFrom::without_reason`), which every build since
+    /// [`HOW_SERVED`] reads.
+    pub const HOW_SERVED_WHY: u64 = 1 << 44;
+
     /// The full feature set THIS build implements. Advertised by every node,
     /// with [`KV_HALF_ON_CARD`], [`KV_WINDOW_SLIDES`], [`REQUESTER_GUESSES`]
     /// and [`SERVES_SLICES`] beside it where they apply.
@@ -510,7 +518,8 @@ pub mod features {
         | SENDS_BLOCK_ROWS
         | HOP_TIMINGS
         | PROMPT_PROGRESS
-        | HOW_SERVED;
+        | HOW_SERVED
+        | HOW_SERVED_WHY;
 
     /// Does `advertised` include every bit in `needed`?
     pub fn supports(advertised: u64, needed: u64) -> bool {

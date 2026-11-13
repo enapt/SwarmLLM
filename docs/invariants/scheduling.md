@@ -2241,8 +2241,17 @@ Prior art: per-arm statistics — a bandit keeps one estimate per arm and pulls 
 before trusting any (UCB, Auer et al. 2002), since an estimate pooled over two arms hides the better
 one; PipeSpec (arXiv 2505.01572) and SpecPipe/PipeDec (2504.04104) arrange drafts across pipeline
 stages but do not choose an orientation.
+**The count to an exploration is the explored tail's, too** (2026-11-14, #3 (j9)). `record` once
+restarted the count whenever ANY split of the model finished. On the real link's second free arm
+(`real_link.sh` `TAG=j5`, 18:16-18:20Z) both tails started at the prior 2.19, the stream (tail here)
+won the tie and ran on every request after — five streams at 9.7-12.5 tok/s, each restarting the
+count — so the flow (tail far), which had run 16.7 prose in the arm before, was never priced off the
+prior. Now only a split of the tail the next exploration would try (`tail_to_explore`, the one
+answer `prior_for_request` asks too) restarts it: UCB's count is per arm, and pulling one arm says
+nothing about another.
 What a change must keep: a split's yield is measured, trusted, explored and priced for its tail;
-the two passes together offer every route one search would; a plan's price reads its own tail.
+the two passes together offer every route one search would; a plan's price reads its own tail; a
+split of one tail never delays the other's exploration.
 Tests: `a_split_is_planned_and_priced_for_the_tail_it_ends_on` (parallax — red with one search
 for both), `each_tail_of_a_split_is_measured_and_explored_apart` and the per-tail arms of
 `an_untried_split_is_explored_on_a_doubling_schedule` (`split_rounds`),

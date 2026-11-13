@@ -1152,8 +1152,22 @@ pub enum LayersFrom {
     Loaded,
     /// Served from a longer run already loaded, sharing its weights (#449).
     Copy,
-    /// Read from disk for this forward.
+    /// Read from disk for this forward — the report of a peer that does not
+    /// say why (an older build, or a coordinator not reading
+    /// `features::HOW_SERVED_WHY`). A newer peer names one of the four below.
     Disk,
+    /// Read from disk: the model process had never loaded this model (it is
+    /// new — started for this run, or restarted since).
+    DiskFirst,
+    /// Read from disk: the model process had loaded this model before and
+    /// held none of it now — its copy was taken away (an unload).
+    DiskAgain,
+    /// Read from disk although a loaded range held the whole run — the copy
+    /// did not serve it (its views all in use, or layers that cannot be
+    /// served apart), so those layers are now held twice.
+    DiskBesideCover,
+    /// Read from disk beside other ranges of the model, none holding the run.
+    DiskBesideOthers,
 }
 
 impl LayersFrom {
@@ -1163,6 +1177,23 @@ impl LayersFrom {
             Self::Loaded => 1,
             Self::Copy => 2,
             Self::Disk => 3,
+            Self::DiskFirst => 4,
+            Self::DiskAgain => 5,
+            Self::DiskBesideCover => 6,
+            Self::DiskBesideOthers => 7,
+        }
+    }
+
+    /// The report for a recipient that does not read the reason
+    /// (`features::HOW_SERVED_WHY`): every disk read as [`Self::Disk`] — an
+    /// older build reads a code it does not know as no report at all, and
+    /// would lose the timings with it.
+    pub fn without_reason(self) -> Self {
+        match self {
+            Self::DiskFirst | Self::DiskAgain | Self::DiskBesideCover | Self::DiskBesideOthers => {
+                Self::Disk
+            }
+            other => other,
         }
     }
 
@@ -1173,6 +1204,10 @@ impl LayersFrom {
             1 => Some(Self::Loaded),
             2 => Some(Self::Copy),
             3 => Some(Self::Disk),
+            4 => Some(Self::DiskFirst),
+            5 => Some(Self::DiskAgain),
+            6 => Some(Self::DiskBesideCover),
+            7 => Some(Self::DiskBesideOthers),
             _ => None,
         }
     }
@@ -1183,6 +1218,10 @@ impl LayersFrom {
             Self::Loaded => "loaded",
             Self::Copy => "copy",
             Self::Disk => "disk",
+            Self::DiskFirst => "disk_first",
+            Self::DiskAgain => "disk_again",
+            Self::DiskBesideCover => "disk_beside_cover",
+            Self::DiskBesideOthers => "disk_beside_others",
         }
     }
 }

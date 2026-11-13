@@ -1206,8 +1206,10 @@ pub(super) fn route_shortest_path(
     routed
 }
 
-/// The cheapest route of two or more segments — the split a plan that chose ONE
-/// machine for the whole model passed over (FUTURE_WORK #3 (j4)). Logged beside
+/// The cheapest route of two or more segments on two or more machines — the
+/// split a plan that chose ONE machine for the whole model passed over
+/// (FUTURE_WORK #3 (j4)); one machine's ranges back to back are its whole run,
+/// never a split (`route_over`'s `split_only`). Logged beside
 /// that choice with the same pricing (`chain_cost_ms`), so a split that lost can
 /// be read off the plan: on 2026-11-13 the real link's lost splits showed only
 /// the winner's price, and why this node's part was priced at its processor's
@@ -2081,6 +2083,16 @@ fn route_over(
                 if vertices[w_idx].range.0 != v_end {
                     continue;
                 }
+                // The split a whole-model plan passed over ([`cheapest_split`])
+                // never steps from one of a machine's ranges onto its next:
+                // that chain is the machine's whole run, priced as one
+                // ([`layers_ahead_in_run`]) — the vertex this pass leaves out
+                // — and reported as a split it read `[(0,24), (24,48)]` on one
+                // computer (#3 (j4), real link 2026-11-13). Coming back to a
+                // machine after another is a split.
+                if split_only && vertices[w_idx].cand_idx == vertices[v_idx].cand_idx {
+                    continue;
+                }
                 let w_bit = bit_of(w_idx);
                 if w_bit != 0 && used_capped[v_idx] & w_bit != 0 {
                     // This capped node is already carrying part of the chain.
@@ -2511,9 +2523,10 @@ mod tests {
     }
 
     /// FUTURE_WORK #3 (j4): the split a whole-model plan passed over is the
-    /// cheapest route of two or more segments, never the whole model's vertex
-    /// — and where every holder holds the whole model and none may be cut,
-    /// there is none to log.
+    /// cheapest route of two or more segments on two or more machines, never
+    /// the whole model's vertex nor one machine's ranges back to back — and
+    /// where every holder holds the whole model and none may be cut, there is
+    /// none to log.
     #[test]
     fn the_split_a_whole_model_plan_passed_over_is_the_cheapest_of_two_or_more_segments() {
         let local = NodeId([1; 32]);
@@ -2549,6 +2562,15 @@ mod tests {
             vec![(3, (0, 16)), (4, (16, 32))]
         );
         assert!(search(true, &[whole, slow_whole]).is_err());
+        // A machine holding the model as two ranges back to back is ONE run
+        // there, never a split — the real link's runner-up read so.
+        let two_ranges = cand(6, vec![(0, 16), (16, 32)], 20, 0.0, true, true, 40.0);
+        assert!(search(true, std::slice::from_ref(&two_ranges)).is_err());
+        let slower_tail = cand(7, vec![(16, 32)], 20, 0.0, false, true, 10.0);
+        assert_eq!(
+            search(true, &[two_ranges, slower_tail]).unwrap(),
+            vec![(6, (0, 16)), (7, (16, 32))]
+        );
     }
 
     /// FUTURE_WORK #3 (j5): a split is searched once per TAIL where the two
