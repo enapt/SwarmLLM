@@ -931,9 +931,6 @@ pub(super) fn draft_prefill(
     ))
 }
 
-/// Advance the draft model by feeding `bootstrap` (the last accepted target
-/// token) then greedily sampling γ tokens from the draft. Returns the γ
-/// tokens. Draft KV ends γ+1 positions ahead of where it started.
 /// How a drafter picks each drafted token: its argmax (a deterministic draft,
 /// accepted with probability p(draft)), or a draw from the request's SHARED
 /// noise with the caller's own sampling parameters — the same draw the sampling
@@ -950,6 +947,10 @@ pub(super) struct DraftPick<'a> {
     pub history: &'a [u32],
 }
 
+/// Advance the draft model by feeding `bootstrap` (the last accepted target
+/// token) then sampling γ tokens from the draft — its argmax, or as `pick`
+/// says. Returns the γ tokens. Draft KV ends γ+1 positions ahead of where it
+/// started.
 #[cfg(feature = "llama")]
 pub(super) fn draft_next_gamma(
     state: &mut DraftState,

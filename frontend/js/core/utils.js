@@ -152,13 +152,6 @@
 
   function capitalize(s) { return s.charAt(0).toUpperCase() + s.slice(1); }
 
-  function setTierBadge(elementId, tier) {
-    var el = document.getElementById(elementId);
-    if (!el) return;
-    el.textContent = capitalize(tier);
-    el.className = 'tier-badge ' + tier.toLowerCase();
-  }
-
   function getModelSource(modelId) {
     if (!modelId) return 'local';
     var match = S._modelDropdownData.find(function(m) { return m.id === modelId; });
@@ -1449,7 +1442,6 @@
     formatSpeed: formatSpeed,
     formatEta: formatEta,
     timeAgo: timeAgo,
-    setTierBadge: setTierBadge,
     getModelSource: getModelSource,
     formatModelDisplayName: formatModelDisplayName,
     applyMessageGrouping: applyMessageGrouping,

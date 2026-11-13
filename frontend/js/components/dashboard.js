@@ -812,9 +812,6 @@
         }
       }
       if (data.version) document.getElementById('version').textContent = 'v' + data.version;
-      if (data.tier) {
-        U.setTierBadge('tier-badge', data.tier);
-      }
 
       // The uptime and the hardware panel are `updateStats`'s (the 2-second
       // tick renders them too); rendering them here as well did each twice.

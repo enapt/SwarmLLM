@@ -1056,22 +1056,6 @@ a:hover { color: var(--accent-hover); }
 
 /* ---- Model Browser ---- */
 
-/* ---- Tier badges ---- */
-.tier-badge {
-  display: inline-flex;
-  align-items: center;
-  padding: 2px 8px;
-  border-radius: var(--radius-pill);
-  font-size: var(--fs-2xs);
-  font-weight: 700;
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-}
-.tier-badge.bronze { background: rgba(180, 130, 70, 0.2); color: #e8a955; border: 1px solid rgba(180, 130, 70, 0.3); box-shadow: 0 0 8px rgba(180,130,70,0.15); }
-.tier-badge.silver { background: rgba(148, 163, 184, 0.15); color: #94a3b8; border: 1px solid rgba(148, 163, 184, 0.2); box-shadow: 0 0 8px rgba(148,163,184,0.1); }
-.tier-badge.gold { background: rgba(234, 179, 8, 0.15); color: #eab308; border: 1px solid rgba(234, 179, 8, 0.25); box-shadow: 0 0 10px rgba(234,179,8,0.2); }
-.tier-badge.platinum { background: var(--purple-dim); color: var(--purple-text); border: 1px solid rgba(167, 139, 250, 0.3); box-shadow: 0 0 12px rgba(167,139,250,0.2); }
-
 /* ---- Layout ---- */
 .container {
   max-width: 100%;
