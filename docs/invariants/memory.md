@@ -4202,6 +4202,37 @@ second request took 23.2 s (it reloaded). Main: no narrowing in two passes, seco
 The rig prints both counts and the time; it did not reproduce the report's detour through peers
 (FUTURE_WORK #250 keeps that).
 
+**A promotion never narrows what a worker holds (2026-11-13, FUTURE_WORK #3 (j12)).** The
+promotion back to the card is weighed on the WORKER's estimate (`promotion_weighed`:
+`gpu_estimate_mb` less its own card share against the card's room), but the slow path of
+`get_or_spawn_once` spawns the range the REQUEST named. Asked for a slice of a whole copy short of
+the card, the replacement held the slice alone. The far computer of the real link's 14B split
+(`real_link.sh` `TAG=j11`, with the new per-request peer snapshots `peers_seen.jsonl`): before the
+first split it advertised `[0..48)` with 45 layers on its card and 2,042 MB free; the split asked
+it for `[23..48)` seconds after its last whole reply — past the promotion's 5 s idle floor
+(`VRAM_MAKE_ROOM_MIN_IDLE_SECS_DEFAULT`) — and after it advertised `[23..48)` alone, 25 card layers,
+5,748 MB free; the next whole reply reloaded `[0..48)` with 17 layers on the card, and its
+hand-offs ran 9-10 tokens a second for the rest of the session against 24 before. The same shape on
+`TAG=j5`, `j7`, `j9` and `j10` (its forward read the range from disk, 868 ms). INFERRED from its
+broadcasts — the far side's own log is not visible from here — and one of two mechanisms that fit
+(prune's narrowing, below, is the other). `promotion_keeps_what_it_holds(held, asked)`: a
+replacement spawned for `asked` must hold every range the worker holds; else the worker serves the
+slice as it stands (it serves any run inside a range it loaded, #449) and is promoted by a request
+for everything it holds. Prior art: Ollama never re-places a loaded runner while it can serve the
+request (`server/sched.go`, `needsReload`). Test `a_promotion_for_a_slice_never_narrows_the_worker`
+(red with the predicate always true). Why the reload placed 17 layers with 5.7 GB free is not
+known from here; `gpu_vram_available_mb` and the snapshots read it after the release.
+
+**A worker's idle time starts at its last reply's end (2026-11-13, pre-release review).**
+`last_used` was stamped only in `register_response`, at a request's START, so a reply that ran
+longer than a window read idle the moment it ended — two minutes into a long owner reply, the
+narrowing below and the idle unload could take the model just used (peer work was covered by
+`ServingGuard`'s stamp at its end, `serving_models.last_served_at`). `ResponseGuard::used_until_now`
+(set by `register_response` alone; a peer's question still marks nothing, the 2026-10-18 security
+review) stamps `mark_used_now` (`fetch_max`) when the slot closes. Ollama resets a runner's
+keep-alive when a request finishes (`server/sched.go`, `finishedReqCh`). Test
+`a_replys_end_starts_its_workers_idle_time_over_and_a_question_does_not` (red without the stamp).
+
 **Nor a model that served within two minutes (2026-11-13, FUTURE_WORK #3 (j8)).** "Other
 programs" is the card's used memory less our CHARGES, and a worker's pool keeps what it freed
 until it has been idle `cuda_pool::IDLE_TRIM` (60 s) — a long reply's scratch, a speculative

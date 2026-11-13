@@ -790,6 +790,27 @@ fn should_return_to_gpu(i: &PromotionInputs) -> bool {
 /// The guards of [`should_return_to_gpu`] that need no reading of the card —
 /// so the card is read only for a worker that could actually move
 /// ([`ModelProcessPool::promotion_weighed`]).
+/// Does a promotion's replacement, spawned for `asked`, hold at least what the
+/// worker it retires holds (`held`)? The promotion is weighed on the WORKER's
+/// estimate — the card has room for everything it holds — but the slow path
+/// spawns the range the request asked for. Asked for a slice of a whole copy
+/// short of the card, it threw the rest away: the far computer of a 14B split
+/// held `[0..48)` with 45 layers on its card, the split's first forward asked
+/// `[23..48)` seconds after its last whole reply (past the promotion's 5 s idle
+/// floor), the copy was replaced by `[23..48)` alone, all on its card, and the
+/// next whole reply reloaded the model with 17 of its layers on the card:
+/// hand-offs fell from 24 to 9-10 tokens a second for the rest of the session
+/// (real link `TAG=j11`, its peer snapshots, 2026-11-13; the same shape on
+/// `TAG=j5`, `j7`, `j9`, `j10` — inferred from the far side's broadcasts, its
+/// own log unseen). A worker serves a slice of what it holds (#449), so it
+/// serves it as it stands, and is promoted by a request for everything it
+/// holds. Ollama never re-places a loaded runner while it can serve the
+/// request (`server/sched.go` `needsReload`). An empty `held` keeps nothing.
+fn promotion_keeps_what_it_holds(held: &[(u32, u32)], asked: (u32, u32)) -> bool {
+    held.iter()
+        .all(|&(start, end)| start >= end || (asked.0 <= start && end <= asked.1))
+}
+
 fn promotion_is_worth_weighing(i: &PromotionInputs) -> bool {
     i.short_of_the_card
         && !i.permanently_cpu_bound
@@ -1182,7 +1203,9 @@ struct WorkerHandle {
     /// used since, and those deserve opposite treatment when something has to
     /// give up the card. Stamped in `register_response`, which is the ONE place
     /// every execution path (local, distributed, peer-served) passes through,
-    /// so no caller can forget it.
+    /// so no caller can forget it — and again when that slot closes
+    /// (`ResponseGuard::used_until_now`), so a long reply is not idle the
+    /// moment it ends.
     ///
     /// Stored as seconds since `spawned_at` rather than a wall-clock stamp, so
     /// a clock step cannot make a busy worker look idle for hours.
@@ -2113,6 +2136,17 @@ struct ResponseGuard {
     /// suppresses the cancel entirely (used where the request is known to have
     /// already reached the worker's terminal state).
     worker: Option<Arc<WorkerHandle>>,
+    /// Worker to mark USED when the slot closes — its reply's end, as its
+    /// start was ([`WorkerHandle::register_response`]); `None` for a peer's
+    /// question, which marks nothing ([`WorkerHandle::register_question`]).
+    ///
+    /// Stamped at the start alone, a reply that ran longer than a window read
+    /// idle the moment it ended: two minutes into a long reply here, prune's
+    /// narrowing (`NARROW_ONLY_AFTER_IDLE_SECS`, #3 (j8)) and the idle unload
+    /// could take the model its user had just used (pre-release review,
+    /// 2026-11-13). Ollama resets a runner's keep-alive when a request
+    /// FINISHES (`server/sched.go`, `finishedReqCh` → `expireTimer`).
+    used_until_now: Option<Arc<WorkerHandle>>,
 }
 
 /// Claim `request_id` in `map` for a fresh attempt. Returns the new attempt's
@@ -2516,10 +2550,19 @@ impl WorkerHandle {
         tx: ResponseTx,
         cancel_on_drop: bool,
     ) -> (ResponseGuard, Option<u64>) {
+        self.mark_used_now();
+        self.ran_a_request.store(true, Ordering::Relaxed);
+        let (mut guard, displaced) = self.register_unseen(request_id, tx, cancel_on_drop);
+        guard.used_until_now = Some(self.clone());
+        (guard, displaced)
+    }
+
+    /// This worker did work for a request just now: its idle time starts
+    /// over ([`Self::idle_secs`]). A plain store, as the stamp always was: the
+    /// clock only moves forward, and two stamps racing differ by a second.
+    fn mark_used_now(&self) {
         self.last_used
             .store(self.spawned_at.elapsed().as_secs(), Ordering::Relaxed);
-        self.ran_a_request.store(true, Ordering::Relaxed);
-        self.register_unseen(request_id, tx, cancel_on_drop)
     }
 
     /// [`Self::register_response`] for a PEER's question
@@ -2556,6 +2599,7 @@ impl WorkerHandle {
                 request_id,
                 token,
                 worker: cancel_on_drop.then(|| self.clone()),
+                used_until_now: None,
             },
             displaced,
         )
@@ -2618,6 +2662,9 @@ impl Drop for ResponseGuard {
         // would fail a request that is still perfectly healthy.
         self.responses
             .remove_if(&self.request_id, |_, (tok, _)| *tok == self.token);
+        if let Some(worker) = self.used_until_now.take() {
+            worker.mark_used_now();
+        }
 
         // Still armed → the caller went away before a terminal reply arrived:
         // client disconnected, or a `tokio::select!` timeout fired. Tell the
@@ -6710,8 +6757,32 @@ impl ModelProcessPool {
     /// dismissed by them; the atomics and the small `vram_reserved_mb` sum are
     /// only reached for a model this node has actually demoted. Nothing here
     /// touches the disk.
-    fn worker_should_return_to_gpu(&self, model_id: &ModelId, handle: &WorkerHandle) -> bool {
+    ///
+    /// **`segment` is the range the replacement will be spawned for**, REQUIRED:
+    /// a promotion that would hold less than the worker holds is never taken
+    /// ([`promotion_keeps_what_it_holds`], #3 (j12)).
+    fn worker_should_return_to_gpu(
+        &self,
+        model_id: &ModelId,
+        handle: &WorkerHandle,
+        segment: (u32, u32),
+    ) -> bool {
         if !handle.short_of_the_card() {
+            return false;
+        }
+        let held: Vec<(u32, u32)> = handle
+            .charged_segments
+            .lock()
+            .map(|v| v.iter().map(|c| c.range).collect())
+            .unwrap_or_default();
+        if !promotion_keeps_what_it_holds(&held, segment) {
+            tracing::debug!(
+                model = %model_id,
+                held = ?held,
+                asked = format!("[{}..{})", segment.0, segment.1),
+                "DIAG: not moving this model's worker to the card for a request it serves \
+                 from what it holds — the replacement would hold only the range asked for"
+            );
             return false;
         }
         self.promotion_weighed(model_id, handle, !self.gpu_is_usable())
@@ -10175,7 +10246,7 @@ impl ModelProcessPool {
                      failing the request"
                 );
                 self.retire_dead_worker(model_id).await;
-            } else if guest || !self.worker_should_return_to_gpu(model_id, &handle) {
+            } else if guest || !self.worker_should_return_to_gpu(model_id, &handle, segment) {
                 // A guest is never promoted: moving it to the card means
                 // taking memory, which it may not do (`Tenancy::Guest`).
                 if handle.serves_segment(segment, shape) {
@@ -10232,7 +10303,7 @@ impl ModelProcessPool {
                 false
             }
             Some(handle) => {
-                if guest || !self.worker_should_return_to_gpu(model_id, &handle) {
+                if guest || !self.worker_should_return_to_gpu(model_id, &handle, segment) {
                     // Another task spawned it while this one waited. Hand it
                     // back only if it holds THIS range: returned uncharged, the
                     // worker loads whatever a forward names, and memory the pool
@@ -13691,6 +13762,61 @@ mod tests {
         );
     }
 
+    /// **A promotion never narrows what a worker holds** (#3 (j12), the real
+    /// link's far computer): asked for a slice of a whole copy short of the
+    /// card, the replacement held the slice alone and the next whole reply
+    /// reloaded the model with 17 of 48 layers on the card. A request for
+    /// everything it holds, or more, still promotes it.
+    #[test]
+    fn a_promotion_for_a_slice_never_narrows_the_worker() {
+        use super::promotion_keeps_what_it_holds as keeps;
+        assert!(
+            !keeps(&[(0, 48)], (23, 48)),
+            "a whole copy asked for its last 25 layers serves them as it stands"
+        );
+        assert!(keeps(&[(0, 48)], (0, 48)), "the whole model, asked whole");
+        assert!(keeps(&[(23, 48)], (0, 48)), "a segment, asked for more");
+        assert!(keeps(&[(0, 4), (44, 48)], (0, 48)));
+        assert!(
+            !keeps(&[(0, 4), (44, 48)], (0, 30)),
+            "one held range outside the ask is lost"
+        );
+        assert!(keeps(&[], (10, 20)), "nothing recorded: nothing to lose");
+    }
+
+    /// **A reply's end marks its worker used, as its start does; a peer's
+    /// question marks nothing** (pre-release review, 2026-11-13, beside #3
+    /// (j8)). Stamped at the start alone, a reply longer than prune's
+    /// `NARROW_ONLY_AFTER_IDLE_SECS` read idle the moment it ended.
+    #[tokio::test]
+    async fn a_replys_end_starts_its_workers_idle_time_over_and_a_question_does_not() {
+        const LONG_AGO: u64 = 0;
+        let h = fake_worker_handle_spawned(
+            false,
+            None,
+            false,
+            std::time::Instant::now()
+                .checked_sub(std::time::Duration::from_secs(600))
+                .expect("a clock old enough"),
+        )
+        .await;
+        let (guard, _) = h.register_response(Uuid::new_v4(), dummy_tx(), false);
+        // Ten minutes into the reply, as a long one would be.
+        h.last_used.store(LONG_AGO, Ordering::Relaxed);
+        assert!(h.idle_secs() >= 600, "fixture: reads idle mid-reply");
+        drop(guard);
+        assert!(
+            h.idle_secs() < 5,
+            "the reply just ended: idle {}",
+            h.idle_secs()
+        );
+
+        h.last_used.store(LONG_AGO, Ordering::Relaxed);
+        let (question, _) = h.register_question(Uuid::new_v4(), dummy_tx());
+        drop(question);
+        assert!(h.idle_secs() >= 600, "a peer's question keeps nothing busy");
+    }
+
     /// Builds a guard the way `register_response` does, for map-level tests.
     fn guard_for(map: &ResponseMap, request_id: Uuid, token: u64) -> ResponseGuard {
         ResponseGuard {
@@ -13698,6 +13824,7 @@ mod tests {
             request_id,
             token,
             worker: None,
+            used_until_now: None,
         }
     }
 

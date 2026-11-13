@@ -215,6 +215,11 @@ DIAG: admitting model to GPU  model=X
 model-worker: Model loaded ... device=Cuda(...)
 ```
 
+Never for a request the worker serves as a slice of what it holds (#3 (j12)): at `-v`,
+`DIAG: not moving this model's worker to the card for a request it serves`
+names `held` and `asked`; the slice runs on the worker as it stands, and the next request for
+everything it holds promotes it.
+
 A worker already running a model that is handed a LATER run of layers its card cannot hold
 whole (v0.3.241+, #265) places that run across the card and the processor instead of failing
 the request:

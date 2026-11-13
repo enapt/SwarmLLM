@@ -1090,9 +1090,10 @@ on the explored requests.
 (j4) ~~the runner-up's price is not logged~~ — logged (§ Closed). (j5) ~~orientation~~ — each tail of a split is
 priced and measured apart (§ Closed). (j6) a fresh node prices the hand-off
 from the peer's stated 45 tok/s (5.3 s for 160 tokens) against the 24 it delivered.
-(j8) **the far end reads a split's run from disk after its whole copy served** — ~~cause unknown~~ likely cause
-fixed 2026-11-13 (§ Closed, on main, not in a release yet): prune's phase 0 narrowed the copy that had just served,
-reading our own pool's freed memory as another program's. Real link TAG=j7, j5, j9, j10: the first split after whole
+(j8) **the far end reads a split's run from disk after its whole copy served** — ~~cause unknown~~ two likely
+causes fixed 2026-11-13 (§ Closed, on main, not in a release yet): prune's phase 0 narrowed the copy that had just
+served, reading our own pool's freed memory as another program's (j8); and the promotion to the card replaced a copy
+short of the card with the split's slice alone (j12, `TAG=j11` peer snapshots). Real link TAG=j7, j5, j9, j10: the first split after whole
 hand-offs had AU report `layers_from=disk` for [24..48) (868-869 ms of ~1,470), AU then advertised `(24, 48)` alone,
 its card held 45, then 44 of 48 layers and its hand-offs fell from 23-25 to 9.8-12.0 tok/s. **Open: verify on the
 real link** once AU runs the release carrying the fix — AU keeps `(0, 48)` and 48 card layers through the first
@@ -6321,6 +6322,18 @@ grep `^| N |`).
   Evidence: `docs/invariants/scheduling.md` § "A split is priced for the rounds it takes" ("Each tail of a split").
   On the real link (`real_link.sh` `TAG=j5`, 18:13Z): the third request's exploration priced `tail=Far` at 8.0 and
   ran the split here-first (`30a0e2fd:0-24 + aa3d1e66:24-48`, 16.7 tok/s prose); every split after it ran here-first.
+- #3 (j12) — **A far computer's whole copy was replaced by the split's slice, and its next whole reply ran at 10
+  tokens a second instead of 24.** The promotion back to the card is weighed on the worker's estimate but spawned for
+  the range the request named, so a split's first forward on a whole copy short of the card (5 s past its last reply)
+  narrowed it to that slice. Real link `TAG=j11` peer snapshots (`real_link_j11/peers_seen.jsonl`): AU `[0..48)` 45
+  card layers, 2,042 MB free → after the split `[23..48)` 25 card, 5,748 MB free → after the next hand-off `[0..48)`
+  with 17 card layers, hand-offs 9-10 tok/s. INFERRED from its broadcasts (one of two mechanisms that fit; j8's prune
+  narrowing is the other). Now `promotion_keeps_what_it_holds`: a promotion never holds less than the worker holds
+  (`segment` REQUIRED in `worker_should_return_to_gpu`); the slice is served from the copy as it stands (#449). Test
+  `a_promotion_for_a_slice_never_narrows_the_worker`. Prior art: Ollama re-places a runner only when it cannot serve
+  the request (`needsReload`). Also from the pre-release review: a worker's idle time now starts at its last reply's
+  END (`ResponseGuard::used_until_now`; test `a_replys_end_starts_its_workers_idle_time_over_and_a_question_does_not`).
+  Open: why AU's reload placed 17 layers with 5.7 GB free; verify both on the real link once AU runs the release.
 - #3 (j11) — **After a split left a few layers here, this computer priced every further layer at its processor's
   speed.** The j7 fix read a worker holding part of a model too big for the card, all of it on the card, as `(its card
   layers, the model's)` — so the first split's shape decided every later one. On the real link (`TAG=j10`, arm 2) the
