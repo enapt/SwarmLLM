@@ -530,6 +530,18 @@ async fn handle_inbound_stream(
             }
         };
 
+        // The frame goes back to the peer that wrote the forward on this
+        // stream, and is told only what that peer reads, to the millisecond —
+        // the one rule both ways an answer leaves ask. A stream keeps no held
+        // time of its own (`served_us` rides the request-response answer only).
+        let mut result = result;
+        let reads = |feature| {
+            shared_state
+                .peer_to_node_id_from_registry(&peer_id)
+                .is_some_and(|node| shared_state.peer_advertises_feature(&node, feature))
+        };
+        crate::network::manager::served_time::tell_the_recipient(&mut result, true, None, reads);
+
         // Encode result and write frame back.
         let encoded = match protocol::encode_layer_result(&result) {
             Ok(bytes) => bytes,

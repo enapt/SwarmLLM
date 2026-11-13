@@ -1231,7 +1231,8 @@ reply; with the switch off it loaded the run from disk beside its whole copy). *
 day**: a forward for a contained run names the charged range it is counted against
 (`IpcForward::served_from`), and the worker loads that range and serves the run from it or refuses
 — never the run on its own, which overlapping runs could stack past the charge; and a copy keeps
-at most eight views (`view::MOST_VIEWS_A_COPY`), the oldest idle one giving way, a run refused
+at most eight views (`view::MOST_VIEWS_A_COPY`), the least recently used one not in use giving way
+(in use: a conversation holds it and used it within 30 s — security review 2026-11-13), a run refused
 where every one is in use (prior art: vLLM's fixed `cudagraph_capture_sizes`); a tensor-parallel
 share inside a charged range is charged as itself (`process_pool::RunShape`), as before.
 

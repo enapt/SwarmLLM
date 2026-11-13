@@ -36,7 +36,7 @@ mod loop_stall;
 mod receipts;
 mod relay;
 mod requests;
-mod served_time;
+pub(in crate::network) mod served_time;
 mod shard_transfer;
 mod stale_peers;
 mod tensors;

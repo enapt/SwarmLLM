@@ -861,8 +861,6 @@ fn hand_back_idle_card_memory(models: &HashMap<(usize, usize, usize, usize), Spl
     }
 }
 
-/// Send a `WorkerMsg::Error` back to the daemon. Used by the `run_worker`
-/// dispatch loop to report handler failures without crashing the subprocess.
 /// Loaded ranges that `incoming` entirely covers, and which are therefore
 /// about to be redundant.
 ///
@@ -886,10 +884,6 @@ fn subsumed_segment_keys<'a>(
         .collect()
 }
 
-/// Drop every view of the loaded range `held` (#449, `split::view`): a view
-/// runs that instance's weights, so one kept after it would keep their memory
-/// alive after the daemon released it. Asked wherever a loaded range leaves
-/// the map — the daemon's `Unload`, and a larger range superseding it.
 /// Serve a run inside a range this worker loaded from that instance's own
 /// weights (#449, `split::view`): no layer read from disk or held a second
 /// time. Always from an instance that LOADED its weights, never another view,
@@ -897,7 +891,8 @@ fn subsumed_segment_keys<'a>(
 /// `Ok(false)` where no loaded instance holds the run or can be cut there
 /// (`SplitModel::view_of`); an error where the instance already keeps
 /// [`MOST_VIEWS_A_COPY`](crate::inference::split::view::MOST_VIEWS_A_COPY)
-/// views and a conversation is using every one.
+/// views and every one is in use — a conversation holds it and a forward ran
+/// on it within [`VIEW_BUSY_FOR`](crate::inference::split::view::VIEW_BUSY_FOR).
 fn serve_from_a_loaded_copy(
     models: &mut HashMap<(usize, usize, usize, usize), SplitModel>,
     kv_store: &KvCacheStore,
@@ -918,25 +913,29 @@ fn serve_from_a_loaded_copy(
     else {
         return Ok(false);
     };
-    // The copy's views, oldest first; one no conversation uses gives way.
+    // The copy's views, least recently used first; one not in use gives way —
+    // in use being a conversation that holds it AND used it lately
+    // (`VIEW_BUSY_FOR`). Its caches stay, keyed by its range.
+    let now = std::time::Instant::now();
     let mut views: Vec<_> = models
         .iter()
         .filter(|(_, m)| m.viewed_from() == Some(root))
         .map(|(k, m)| {
             (
                 *k,
-                m.view_built().unwrap_or(0),
+                m.view_used().unwrap_or(0),
+                m.view_busy(now),
                 m.kv_model_key().to_string(),
             )
         })
         .collect();
-    views.sort_by_key(|(_, built, _)| *built);
+    views.sort_by_key(|(_, used, _, _)| *used);
     let mut held = views.len();
-    for (k, _, model_key) in &views {
+    for (k, _, busy, model_key) in &views {
         if held < MOST_VIEWS_A_COPY {
             break;
         }
-        if kv_store.holds_a_conversation_of(model_key) {
+        if *busy && kv_store.holds_a_conversation_of(model_key) {
             continue;
         }
         models.remove(k);
@@ -945,7 +944,7 @@ fn serve_from_a_loaded_copy(
             model = %model_id,
             gave_way = format!("[{}..{})", k.0, k.1),
             to = format!("[{layer_start}..{layer_end})"),
-            "model-worker: a run of layers no conversation was using gave its place to another"
+            "model-worker: a run of layers not in use gave its place to another"
         );
     }
     if held >= MOST_VIEWS_A_COPY {
@@ -965,6 +964,10 @@ fn serve_from_a_loaded_copy(
     Ok(true)
 }
 
+/// Drop every view of the loaded range `held` (#449, `split::view`): a view
+/// runs that instance's weights, so one kept after it would keep their memory
+/// alive after the daemon released it. Asked wherever a loaded range leaves
+/// the map — the daemon's `Unload`, and a larger range superseding it.
 fn drop_views_of(
     models: &mut HashMap<(usize, usize, usize, usize), SplitModel>,
     held: (usize, usize),
@@ -972,6 +975,8 @@ fn drop_views_of(
     models.retain(|_, m| m.viewed_from() != Some(held));
 }
 
+/// Send a `WorkerMsg::Error` back to the daemon. Used by the `run_worker`
+/// dispatch loop to report handler failures without crashing the subprocess.
 async fn send_worker_error(writer: &mut IpcWriter, request_id: uuid::Uuid, err: SwarmError) {
     let message = err.to_string();
     let fatal = crate::inference::worker_ipc::worker_error_is_fatal(&message);
@@ -1277,7 +1282,9 @@ fn ensure_model_loaded(
     served_from: Option<(usize, usize)>,
 ) -> Result<(), SwarmError> {
     let key = (layer_start, layer_end, tp_rank, tp_size);
-    if models.contains_key(&key) {
+    if let Some(model) = models.get_mut(&key) {
+        // A view's place goes to the least recently used (`VIEW_BUSY_FOR`).
+        model.note_view_used();
         return Ok(());
     }
     if tp_size == 1 && crate::inference::split::view::elastic_spans_on() {
@@ -7462,7 +7469,7 @@ const _: () = assert!(DRAFT_MARGIN_POSITIONS > crate::config::MAX_GUESSES_PER_CH
 mod subsumption_tests {
     use super::{drop_views_of, ensure_model_loaded, subsumed_segment_keys, KvCacheStore};
     use crate::error::SwarmError;
-    use crate::inference::split::view::MOST_VIEWS_A_COPY;
+    use crate::inference::split::view::{MOST_VIEWS_A_COPY, VIEW_BUSY_FOR};
     use std::collections::HashMap;
 
     fn store() -> KvCacheStore {
@@ -7663,6 +7670,40 @@ mod subsumption_tests {
         }
         assert_eq!(views(&models), before);
         assert!(models.contains_key(&(0, 4, 0, 1)), "the copy itself stays");
+
+        // A conversation that holds a view but has not used it for
+        // `VIEW_BUSY_FOR` is not using it: eight such conversations do not
+        // keep every other run out (security review 2026-11-13). The least
+        // recently used goes, its cache kept for when it comes back.
+        let quiet_since = std::time::Instant::now()
+            .checked_sub(VIEW_BUSY_FOR + std::time::Duration::from_secs(1))
+            .expect("the clock has run past the busy window");
+        for (k, m) in models.iter_mut() {
+            if m.viewed_from().is_some() && (k.0, k.1) != (2, 4) {
+                m.set_view_used_at(quiet_since);
+            }
+        }
+        // (2, 4) used just now: it is the most recent, and stays.
+        serve(&mut models, (2, 4)).unwrap();
+        let quiet_cache = models[&(0, 2, 0, 1)].kv_model_key().to_string();
+        serve(&mut models, (1, 2)).unwrap();
+        assert!(models.contains_key(&(1, 2, 0, 1)), "the run is served");
+        assert!(
+            !models.contains_key(&(0, 2, 0, 1)),
+            "the least recently used quiet view went"
+        );
+        assert!(
+            models.contains_key(&(2, 4, 0, 1)),
+            "the one used lately stood"
+        );
+        assert_eq!(views(&models).len(), 8);
+        assert!(
+            kv.holds_a_conversation_of(&quiet_cache),
+            "a view that gave way keeps its conversation's cache"
+        );
+        // Its conversation comes back: the view is built again over that cache.
+        serve(&mut models, (0, 2)).unwrap();
+        assert_eq!(models[&(0, 2, 0, 1)].kv_model_key(), quiet_cache);
     }
 
     /// #449: a forward the daemon counted against a range it charged

@@ -2888,11 +2888,20 @@ weights, but what a forward keeps per model is its own — on a card each decode
 graph holds its working memory while the view lives — and the daemon charges a
 view nothing, so a peer naming run after run inside a loaded range could grow
 the worker without end. Past the bound, `model_worker::serve_from_a_loaded_copy`
-removes the oldest view no conversation is using
-(`KvCacheStore::holds_a_conversation_of`: any cache entry under its key; its
-caches stay, keyed by its range, and it is rebuilt on its next forward), INFO
-"a run of layers no conversation was using gave its place to another"; where a
-conversation is using every one, the run is refused. Prior art: vLLM records
+removes the least recently used view not in use — in use meaning a
+conversation holds it (`KvCacheStore::holds_a_conversation_of`: any cache entry
+under its key) AND a forward ran on it within `view::VIEW_BUSY_FOR` (30 s,
+`SplitModel::note_view_used` on every forward served from it); its caches stay,
+keyed by its range, and it is rebuilt on its next forward — INFO "a run of
+layers not in use gave its place to another"; where every one is in use, the run
+is refused. **Busy, not merely held** (security review 2026-11-13): held by the
+existence of a conversation alone, eight one-token conversations kept alive once
+a cache TTL held every place, and every other coordinator's run inside the range
+was refused and re-planned; now that takes eight runs kept busy — load any peer
+can send anyway. A model instance keeps no conversation's state of its own (the
+picture spans and a guess tree are set for one call only), so a view rebuilt
+between two forwards loses nothing. Test:
+`a_copy_keeps_a_bounded_number_of_views_and_an_idle_one_gives_way`. Prior art: vLLM records
 graphs only for a fixed list of batch sizes (`cudagraph_capture_sizes`), so their
 memory is bounded before the first request; NVIDIA's forum (threads 294148,
 244901) — a graph's memory nodes stay with it, and destroying one does not hand

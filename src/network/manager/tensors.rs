@@ -579,30 +579,10 @@ impl NetworkManager {
             self.served_since
                 .answered(&peer_id, result.request_id, step, std::time::Instant::now())
         });
-        // How the segment served it goes by the same rule: only to the peer
-        // that sent the forward — a chained tail answering a coordinator it
-        // was not sent by would have its report read as the run's head's —
-        // and only to one that reads it (`features::HOW_SERVED`).
-        let answers_its_sender = held.is_some();
-        // To the millisecond, as the served time is.
-        let to_the_ms = |us: u32| {
-            super::served_time::micros_to_the_millisecond(std::time::Duration::from_micros(
-                u64::from(us),
-            ))
-        };
-        result.how_served = result
-            .how_served
-            .filter(|_| {
-                answers_its_sender
-                    && self.coordinator_advertises(&peer_id, crate::types::features::HOW_SERVED)
-            })
-            .map(|how| crate::types::HowServed {
-                load_us: to_the_ms(how.load_us),
-                worker_us: to_the_ms(how.worker_us),
-                ..how
-            });
-        result.served_us = held
-            .filter(|_| self.coordinator_advertises(&peer_id, crate::types::features::SERVED_TIME));
+        // Only to the peer that sent the forward, and only what it reads: the
+        // one rule both ways an answer leaves ask.
+        let reads = |feature| self.coordinator_advertises(&peer_id, feature);
+        super::served_time::tell_the_recipient(&mut result, held.is_some(), held, reads);
         self.send_tensor_result_as_request(&peer_id, &result, is_connected);
     }
 

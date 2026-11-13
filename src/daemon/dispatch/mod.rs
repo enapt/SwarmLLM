@@ -2354,6 +2354,7 @@ pub(crate) async fn dispatch_network_messages(
                                                 node_id = %cap.node_id,
                                                 obs = cap.observed_latencies.len(),
                                                 hosted = cap.hosted_shards.len(),
+                                                resident = cap.resident_layers.len(),
                                                 "NodeCapabilityUpdate: payload exceeds caps — dropping"
                                             );
                                             continue;
@@ -3698,11 +3699,29 @@ pub(crate) async fn dispatch_network_messages(
 /// the dispatcher's `NodeCapabilityUpdate` arm, and by the network manager
 /// before it holds one that arrived ahead of its sender's Identify
 /// (`network::manager::before_identify`).
+///
+/// `resident_layers` and its ranges too (security review 2026-11-13): each
+/// entry is iterated by the planner and re-serialized into every dashboard's
+/// peer list (`serialize_peer_to_json`, the WebSocket's `peer_list` on each
+/// connect and change), so a 100k-range list was megabytes a frame per viewer.
+/// A node lists one entry per loaded model and a few ranges each.
 pub(crate) fn capability_fits(cap: &crate::types::NodeCapability) -> bool {
     const MAX_OBSERVED_LATENCIES: usize = 256;
     const MAX_HOSTED_SHARDS_IN_CAP: usize = 1024;
+    const MAX_RESIDENT_MODELS_IN_CAP: usize = 256;
+    const MAX_RESIDENT_RANGES_IN_CAP: usize = 1024;
     cap.observed_latencies.len() <= MAX_OBSERVED_LATENCIES
         && cap.hosted_shards.len() <= MAX_HOSTED_SHARDS_IN_CAP
+        && cap.resident_layers.len() <= MAX_RESIDENT_MODELS_IN_CAP
+        && cap
+            .resident_layers
+            .iter()
+            .map(|r| r.ranges.len())
+            .try_fold(0usize, |sum, n| {
+                sum.checked_add(n)
+                    .filter(|total| *total <= MAX_RESIDENT_RANGES_IN_CAP)
+            })
+            .is_some()
 }
 
 pub(crate) mod layer_forward;
@@ -3710,6 +3729,56 @@ mod manifest_sync;
 mod prompt_admission;
 pub(crate) mod remote_generate;
 mod vision;
+
+#[cfg(test)]
+mod capability_fits_tests {
+    use super::capability_fits;
+
+    fn resident(ranges: usize) -> swarmllm_types::ResidentModelLayers {
+        swarmllm_types::ResidentModelLayers {
+            model_id: "m".to_string(),
+            layers: 1,
+            ranges: (0..ranges)
+                .map(|i| swarmllm_types::ResidentLayerRange {
+                    start: i as u32,
+                    end: i as u32 + 1,
+                    releasable_layers: 0,
+                })
+                .collect(),
+            decode_us_per_layer: None,
+            card_layers: None,
+            gives_way: None,
+        }
+    }
+
+    /// A peer's loaded-layer list is held to what a node could list — one
+    /// entry a loaded model, a few ranges each — before the planner iterates
+    /// it or a dashboard is sent it (security review 2026-11-13).
+    #[test]
+    fn a_capability_listing_more_loaded_ranges_than_a_node_could_is_refused() {
+        let mut cap: crate::types::NodeCapability = serde_json::from_value(serde_json::json!({
+            "node_id": vec![0u8; 32],
+            "gpu": null,
+            "ram_total_mb": 8192u64,
+            "ram_available_mb": 4096u64,
+            "disk_available_mb": 100000u64,
+            "bandwidth_mbps": 100.0f32,
+            "hosted_shards": [],
+            "max_contribution": "Moderate",
+            "uptime_seconds": 100u64,
+            "version": "0.3.284-alpha"
+        }))
+        .expect("a bare capability");
+        cap.resident_layers = vec![resident(8); 12];
+        assert!(capability_fits(&cap), "an ordinary node's list");
+        cap.resident_layers = vec![resident(1025)];
+        assert!(!capability_fits(&cap), "too many ranges in one entry");
+        cap.resident_layers = vec![resident(600), resident(600)];
+        assert!(!capability_fits(&cap), "too many ranges across entries");
+        cap.resident_layers = vec![resident(0); 257];
+        assert!(!capability_fits(&cap), "too many entries");
+    }
+}
 
 #[cfg(test)]
 mod shard_download_progress_tests {

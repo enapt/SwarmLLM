@@ -82,7 +82,7 @@ enum Drafter {
 }
 
 /// A split about to run without guessing, said at INFO once per (model,
-/// reason) and again only after [`SAY_AGAIN_AFTER`] with the count since —
+/// reason) and again only after `SAY_AGAIN_AFTER` (10 min) with the count since —
 /// at debug every time. A split that runs without a drafter is ~11 against
 /// ~18-20 tok/s on a far link, and at info nothing said so (sweep 2026-11-13).
 pub(super) fn say_running_without_guesses(

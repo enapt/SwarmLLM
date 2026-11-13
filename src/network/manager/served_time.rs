@@ -150,6 +150,40 @@ pub(super) fn micros_to_the_millisecond(held: Duration) -> u32 {
     u32::try_from(ms * 1000).unwrap_or(u32::MAX)
 }
 
+/// What an answer tells the computer it goes to about how this node served
+/// the forward — the ONE rule for both ways an answer leaves: as its own
+/// request (`NetworkManager::handle_send_tensor_result`) and as a frame on a
+/// persistent pipeline stream (`pipeline_stream::handle_inbound_stream`). The
+/// stream's frame once left with the model process's report unrounded and to
+/// a coordinator that never advertised it (security review 2026-11-13).
+///
+/// Each field goes only where the recipient SENT the forward — a chained
+/// tail's report would be read as the run's head's — and READS it (`reads`,
+/// asked of the recipient's advertised features), to the millisecond;
+/// otherwise it is cleared, so nothing the pool filled leaves by accident.
+/// `held` is this node's time for the recipient's own forward
+/// ([`ServedSince::answered`]); a stream does not keep one.
+pub(in crate::network) fn tell_the_recipient(
+    result: &mut crate::types::LayerResult,
+    sent_the_forward: bool,
+    held: Option<u32>,
+    reads: impl Fn(u64) -> bool,
+) {
+    use crate::types::features::{HOW_SERVED, SERVED_TIME};
+    let to_the_ms = |us: u32| micros_to_the_millisecond(Duration::from_micros(u64::from(us)));
+    result.how_served = result
+        .how_served
+        .filter(|_| sent_the_forward && reads(HOW_SERVED))
+        .map(|how| crate::types::HowServed {
+            load_us: to_the_ms(how.load_us),
+            worker_us: to_the_ms(how.worker_us),
+            ..how
+        });
+    result.served_us = held
+        .filter(|_| sent_the_forward && reads(SERVED_TIME))
+        .map(to_the_ms);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -277,6 +311,68 @@ mod tests {
         assert_eq!(served.peers.len(), MOST_PEERS);
         assert!(!served.peers.contains_key(&stale));
         assert!(served.peers.contains_key(&busy));
+    }
+
+    fn served(load_us: u32, worker_us: u32) -> crate::types::LayerResult {
+        let mut result: crate::types::LayerResult = serde_json::from_value(serde_json::json!({
+            "request_id": uuid::Uuid::nil(),
+            "token_ids": [],
+            "finish_reason": null,
+        }))
+        .expect("a bare result");
+        result.how_served = Some(crate::types::HowServed {
+            layers: crate::types::LayersFrom::Copy,
+            load_us,
+            worker_us,
+        });
+        result.served_us = Some(77);
+        result
+    }
+
+    #[test]
+    fn an_answer_tells_only_the_sender_that_reads_it_and_to_the_millisecond() {
+        use crate::types::features::{HOW_SERVED, SERVED_TIME};
+        let every = |_: u64| true;
+        // The forward's sender, reading both: both go, to the millisecond —
+        // `served_us` from this node's own held time, never the pool's.
+        let mut told = served(2_400, 31_499);
+        tell_the_recipient(&mut told, true, Some(12_345), every);
+        let how = told.how_served.expect("the sender reads it");
+        assert_eq!((how.load_us, how.worker_us), (2_000, 31_000));
+        assert_eq!(how.layers, crate::types::LayersFrom::Copy);
+        assert_eq!(told.served_us, Some(12_000));
+        // A recipient that did not send the forward is told neither.
+        let mut chained = served(2_400, 31_499);
+        tell_the_recipient(&mut chained, false, Some(12_000), every);
+        assert_eq!((chained.how_served, chained.served_us), (None, None));
+        // Each field only to a recipient that advertises it.
+        let mut older = served(2_400, 31_499);
+        tell_the_recipient(&mut older, true, Some(12_000), |f| f == SERVED_TIME);
+        assert_eq!(older.how_served, None);
+        assert_eq!(older.served_us, Some(12_000));
+        let mut reads_how = served(2_400, 31_499);
+        tell_the_recipient(&mut reads_how, true, None, |f| f == HOW_SERVED);
+        assert!(reads_how.how_served.is_some());
+        // No held time (a stream keeps none): the pool's value never leaves.
+        assert_eq!(reads_how.served_us, None);
+    }
+
+    /// Both ways an answer leaves go through the one rule — the stream's
+    /// frame skipped it before 2026-11-13.
+    #[test]
+    fn both_ways_an_answer_leaves_ask_the_one_rule() {
+        for (path, src) in [
+            ("network/manager/tensors.rs", include_str!("tensors.rs")),
+            (
+                "network/pipeline_stream.rs",
+                include_str!("../pipeline_stream.rs"),
+            ),
+        ] {
+            assert!(
+                src.contains("served_time::tell_the_recipient("),
+                "{path} sends a LayerResult without `tell_the_recipient`"
+            );
+        }
     }
 
     #[test]

@@ -4930,9 +4930,15 @@ view of a longer loaded run; `disk`: read now), the model process's `load_us`
 the load and the work). With `served_us` that splits a forward's wait into link (`elapsed −
 served`), the node's network side (`served − worker`), and its queue and work (`worker − load`).
 What a change must keep:
-1. **Sent by `served_us`'s rule** — only to the peer that sent the forward (a chained tail's report
-   would be read as the run's head's), only where it advertises `HOW_SERVED`, after `0x0B` so an
-   older decoder has stopped, and rounded to the millisecond like the served time.
+1. **Sent by `served_us`'s rule, on both ways an answer leaves** — only to the peer that sent the
+   forward (a chained tail's report would be read as the run's head's), only where it advertises
+   `HOW_SERVED`, after `0x0B` so an older decoder has stopped, and rounded to the millisecond like
+   the served time. **`served_time::tell_the_recipient`** is the one rule, asked by the
+   request-response answer (`handle_send_tensor_result`) AND a persistent pipeline stream's frame
+   (`pipeline_stream::handle_inbound_stream`, which every node arms whatever its own setting): the
+   stream's frame first left with the model process's report unrounded and to a coordinator that
+   never advertised it (security review 2026-11-13). Guard:
+   `both_ways_an_answer_leaves_ask_the_one_rule`.
 2. **The peer's word, for the log only** — `DIAG: segment result received` (`served_ms`,
    `link_ms`, `layers_from`, `load_ms`, `worker_ms`) and the request line (`segN_from`,
    `segN_load_ms`, the prompt pass and the steps' medians apart); nothing prices or routes on it.

@@ -43,13 +43,34 @@ pub(crate) fn serves_inside(held: (usize, usize), range: (usize, usize)) -> bool
 }
 
 /// Where a view's weights come from: the range of the instance that loaded
-/// them, and the view's place in the order views were built — the oldest idle
-/// one is the first to go when a copy has [`MOST_VIEWS_A_COPY`].
+/// them, and when a forward last ran on it — the least recently used view not
+/// busy is the first to go when a copy has [`MOST_VIEWS_A_COPY`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct ViewOf {
     pub(crate) root: (usize, usize),
-    pub(crate) built: u64,
+    /// Its place in the order views were last used (built counts as a use).
+    pub(crate) used: u64,
+    /// When it was last used.
+    pub(crate) used_at: std::time::Instant,
 }
+
+/// The next place in the order views are used.
+fn next_use() -> u64 {
+    static USED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    USED.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
+/// How long after its last forward a view counts as in use. A conversation's
+/// steps come well inside it (a far link's round trip is under a second, a
+/// prompt piece is one forward); a conversation quiet past it — a turn being
+/// typed, a peer still reading the prompt ahead — loses only the view, never
+/// its caches, which are keyed by the range: its next forward builds the view
+/// again. Held by the existence of a conversation alone, eight conversations
+/// kept alive once a TTL held every place a copy has, and every other
+/// coordinator's run inside the range was refused (security review
+/// 2026-11-13); now that takes eight runs kept BUSY, which is load any peer
+/// can send.
+pub(crate) const VIEW_BUSY_FOR: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// How many views one loaded copy keeps at once. A view costs no weights, but
 /// what a forward keeps per model is its own — on a card each decode graph
@@ -57,9 +78,10 @@ pub(crate) struct ViewOf {
 /// view nothing (`WorkerHandle::serves_segment`), so a peer naming run after
 /// run inside a loaded range must not grow it without end. A split names a few
 /// runs of a model; eight leaves room for several coordinators' plans at once.
-/// Past it the oldest view no conversation is using goes (rebuilt on its next
-/// forward; its caches stay, keyed by its range), and where every one is in
-/// use the run is refused.
+/// Past it the least recently used view not in use goes (rebuilt on its next
+/// forward; its caches stay, keyed by its range) — in use meaning a
+/// conversation holds it AND a forward ran on it within [`VIEW_BUSY_FOR`] —
+/// and where every one is in use the run is refused.
 ///
 /// Prior art: vLLM records graphs only for a fixed list of batch sizes
 /// (`cudagraph_capture_sizes`), so their memory is bounded before the first
@@ -78,10 +100,33 @@ impl SplitModel {
         self.viewed_from.map(|v| v.root)
     }
 
-    /// Where this view stands in the order views were built (`None` for an
-    /// instance loaded from disk).
-    pub(crate) fn view_built(&self) -> Option<u64> {
-        self.viewed_from.map(|v| v.built)
+    /// Where this view stands in the order views were last used (`None` for
+    /// an instance loaded from disk).
+    pub(crate) fn view_used(&self) -> Option<u64> {
+        self.viewed_from.map(|v| v.used)
+    }
+
+    /// Note a forward served from this view (nothing for a loaded instance).
+    pub(crate) fn note_view_used(&mut self) {
+        if let Some(v) = self.viewed_from.as_mut() {
+            v.used = next_use();
+            v.used_at = std::time::Instant::now();
+        }
+    }
+
+    /// Was this view used within [`VIEW_BUSY_FOR`] of `now`? (`false` for a
+    /// loaded instance, which is never given way.)
+    pub(crate) fn view_busy(&self, now: std::time::Instant) -> bool {
+        self.viewed_from
+            .is_some_and(|v| now.saturating_duration_since(v.used_at) < VIEW_BUSY_FOR)
+    }
+
+    /// Set when this view was last used (tests).
+    #[cfg(test)]
+    pub(crate) fn set_view_used_at(&mut self, at: std::time::Instant) {
+        if let Some(v) = self.viewed_from.as_mut() {
+            v.used_at = at;
+        }
     }
 
     /// A model over exactly `[start..end)` that runs this instance's own
@@ -198,11 +243,8 @@ impl SplitModel {
                 root: self
                     .viewed_from()
                     .unwrap_or((self.layer_start, self.layer_end)),
-                built: {
-                    static BUILT: std::sync::atomic::AtomicU64 =
-                        std::sync::atomic::AtomicU64::new(0);
-                    BUILT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-                },
+                used: next_use(),
+                used_at: std::time::Instant::now(),
             }),
         })
     }
