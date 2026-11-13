@@ -2336,11 +2336,40 @@ impl WorkerHandle {
         }
     }
 
-    /// Has this worker already been charged for `segment`?
+    /// Has this worker already been charged for exactly `segment`? The charge
+    /// RECORD; whether a forward for it would load anything is
+    /// [`Self::serves_segment`].
+    #[cfg(test)]
     fn segment_is_charged(&self, segment: (u32, u32)) -> bool {
         self.charged_segments
             .lock()
             .map(|v| v.iter().any(|c| c.range == segment))
+            .unwrap_or(false)
+    }
+
+    /// Does this worker run `segment` with nothing more loaded — a range it
+    /// was charged for, or a run inside one, which its worker serves from that
+    /// range's weights (#449, `split::view`; `SWARMLLM_ELASTIC_SPANS=0` asks
+    /// for the exact range only)? **The one answer to "would a forward for
+    /// this load anything here"**: growth, the guest's fit, a peer's question
+    /// and the load ahead all ask it, so none of them charges or loads a run
+    /// the worker already serves — read as "charged" only when equal, a 14B
+    /// held whole was charged and grown for the 25 layers a split gave it
+    /// (2026-11-13), and the worker read them from disk again.
+    fn serves_segment(&self, segment: (u32, u32)) -> bool {
+        let slices = crate::inference::split::view::elastic_spans_on();
+        self.charged_segments
+            .lock()
+            .map(|v| {
+                v.iter().any(|c| {
+                    c.range == segment
+                        || (slices
+                            && crate::inference::split::view::serves_inside(
+                                (c.range.0 as usize, c.range.1 as usize),
+                                (segment.0 as usize, segment.1 as usize),
+                            ))
+                })
+            })
             .unwrap_or(false)
     }
 
@@ -3300,7 +3329,7 @@ pub(crate) fn bytes_added_by(
     num_layers: u32,
     on_card: bool,
 ) -> u64 {
-    if held.iter().any(|h| h.range == range) {
+    if held.iter().any(|h| h.covers_without_a_load(range)) {
         return 0;
     }
     let loads = |(start, end): (u32, u32)| {
@@ -3425,6 +3454,23 @@ fn strictly_subsumes(incoming: (u32, u32), held: (u32, u32)) -> bool {
 pub struct HeldRange {
     pub range: (u32, u32),
     pub releasable_layers: u32,
+    /// Its holder serves any run inside it from its weights (#449,
+    /// `split::view`): such a run adds nothing. This node's own ranges where
+    /// `SWARMLLM_ELASTIC_SPANS` is on; a peer's where it advertises
+    /// `features::SERVES_SLICES` — an older peer loads the run again.
+    pub serves_slices: bool,
+}
+
+impl HeldRange {
+    /// Is `range` run by this held range with nothing loaded: the range
+    /// itself, or a run inside it its holder serves from these weights?
+    fn covers_without_a_load(&self, range: (u32, u32)) -> bool {
+        self.range == range
+            || (self.serves_slices
+                && self.range.0 <= range.0
+                && range.1 <= self.range.1
+                && range.0 < range.1)
+    }
 }
 
 /// What a spawn refused system memory says when no itemised footprint can be
@@ -3444,16 +3490,20 @@ fn ram_refusal_words(model: &str, needed_mb: u64, budget_mb: u64, in_use_mb: u64
 /// Mirrors the worker, case by case (`model_worker::ensure_model_loaded`):
 ///
 /// - a range it already holds EXACTLY is a cache hit — nothing is loaded;
+/// - a range CONTAINED in a held one whose holder serves slices
+///   ([`HeldRange::serves_slices`], #449) runs on those weights — nothing is
+///   loaded either;
 /// - a range that strictly contains held ones drops them BEFORE it loads, so
 ///   it costs its width less what the daemon will release for them;
-/// - a range CONTAINED in a held superset is read from disk and held a second
-///   time (report #021), so it costs its full width, as does a partial overlap.
+/// - a range contained in a held superset whose holder does NOT serve slices
+///   is read from disk and held a second time (report #021), so it costs its
+///   full width, as does a partial overlap.
 ///
 /// With nothing held this is the width, so a node with no live worker — and
 /// every peer, which carries no held ranges — is priced exactly as before.
 pub(crate) fn layers_added_by(range: (u32, u32), held: &[HeldRange]) -> u32 {
     let width = range.1.saturating_sub(range.0);
-    if held.iter().any(|h| h.range == range) {
+    if held.iter().any(|h| h.covers_without_a_load(range)) {
         return 0;
     }
     let released: u32 = held
@@ -7077,7 +7127,7 @@ impl ModelProcessPool {
         beside: &ModelId,
     ) -> GuestFit {
         if let Some(handle) = self.live_worker(model_id) {
-            return if !handle.segment_is_charged(segment) {
+            return if !handle.serves_segment(segment) {
                 GuestFit::Refused
             } else if self.runs_whole_on_the_card(model_id) {
                 GuestFit::OnCard
@@ -7185,7 +7235,7 @@ impl ModelProcessPool {
     ) -> Option<u32> {
         if self
             .live_worker(guest)
-            .is_some_and(|h| h.segment_is_charged(guest_range))
+            .is_some_and(|h| h.serves_segment(guest_range))
         {
             return None;
         }
@@ -7464,7 +7514,7 @@ impl ModelProcessPool {
         // Serialised against spawns for the same read-decide-charge atomicity
         // the admission gates already rely on.
         let _guard = self.spawn_lock.lock().await;
-        if handle.segment_is_charged(segment) {
+        if handle.serves_segment(segment) {
             return Ok(());
         }
         // Which budget this worker is charged against was decided ONCE, at
@@ -7930,7 +7980,7 @@ impl ModelProcessPool {
         requester: Requester,
     ) -> Result<bool, GrowthRefused> {
         let _guard = self.spawn_lock.lock().await;
-        if handle.segment_is_charged(segment) {
+        if handle.serves_segment(segment) {
             return Ok(true);
         }
         let Some((split, room_mb)) = self.growth_split(model_id, segment, handle, 0) else {
@@ -8213,7 +8263,7 @@ impl ModelProcessPool {
         requester: Requester,
     ) -> bool {
         match worker {
-            Some(h) if h.segment_is_charged(run) => true,
+            Some(h) if h.serves_segment(run) => true,
             Some(h) => {
                 self.growth_would_be_admitted(model_id, run, h, requester)
                     || (!h.in_use(self.conversation_window())
@@ -8238,7 +8288,7 @@ impl ModelProcessPool {
         h: &WorkerHandle,
         requester: Requester,
     ) -> bool {
-        !h.segment_is_charged(run)
+        !h.serves_segment(run)
             && !h.in_use(self.conversation_window())
             && !self.growth_would_be_admitted(model_id, run, h, requester)
             && self.a_fresh_spawn_fits_in_place_of_the_worker(model_id, run, requester)
@@ -8525,6 +8575,8 @@ impl ModelProcessPool {
                     .mb
                     .checked_div(per_layer_mb)
                     .map_or(0, |layers| u32::try_from(layers).unwrap_or(u32::MAX)),
+                // The worker serves a run inside it from its weights (#449).
+                serves_slices: crate::inference::split::view::elastic_spans_on(),
             })
             .collect()
     }
@@ -9275,7 +9327,7 @@ impl ModelProcessPool {
         let holds_the_first = worker
             .as_ref()
             .zip(layer_ranges.first())
-            .is_some_and(|(h, &first)| h.segment_is_charged(first));
+            .is_some_and(|(h, &first)| h.serves_segment(first));
         let no_worker = worker.is_none();
         // Not held across the wait below: a handle is how a retirement signals.
         drop(worker);
@@ -9354,7 +9406,7 @@ impl ModelProcessPool {
     pub(crate) fn holds_range(&self, model_id: &ModelId, range: (u32, u32)) -> bool {
         self.workers
             .get(model_id)
-            .is_some_and(|h| !h.dead.load(Ordering::Acquire) && h.segment_is_charged(range))
+            .is_some_and(|h| !h.dead.load(Ordering::Acquire) && h.serves_segment(range))
     }
 
     /// The one loader behind both: through `get_or_spawn` as the work it
@@ -9852,7 +9904,7 @@ impl ModelProcessPool {
     /// compete with that range's load for memory — see [`Tenancy::Guest`].
     pub fn holds_segment(&self, model_id: &ModelId, segment: (u32, u32)) -> bool {
         self.live_worker(model_id)
-            .is_some_and(|h| h.segment_is_charged(segment))
+            .is_some_and(|h| h.serves_segment(segment))
     }
 
     /// Admit `estimated` MB to the card for a spawn, reclaiming idle models'
@@ -9987,7 +10039,7 @@ impl ModelProcessPool {
             } else if guest || !self.worker_should_return_to_gpu(model_id, &handle) {
                 // A guest is never promoted: moving it to the card means
                 // taking memory, which it may not do (`Tenancy::Guest`).
-                if handle.segment_is_charged(segment) {
+                if handle.serves_segment(segment) {
                     return Ok(Some(handle));
                 }
                 if guest {
@@ -10048,7 +10100,7 @@ impl ModelProcessPool {
                     // never admitted is in use (found in pre-release review
                     // 2026-09-27; `grow_worker`'s retirement sends traffic here).
                     // Otherwise go round again, and the fast path grows it.
-                    return Ok(handle.segment_is_charged(segment).then(|| handle.clone()));
+                    return Ok(handle.serves_segment(segment).then(|| handle.clone()));
                 }
                 true
             }
@@ -14125,6 +14177,37 @@ mod tests {
         );
     }
 
+    /// #449: a run inside a range the worker was charged for loads nothing —
+    /// its worker serves it from that range's weights (`split::view`) — so it
+    /// is neither charged nor grown for; a run reaching outside every charged
+    /// range still is. Asked as `serves_segment` by every "would this load"
+    /// question: growth, the guest's fit, a peer's question, the load ahead.
+    #[tokio::test]
+    async fn a_run_inside_a_charged_range_is_served_without_a_charge() {
+        let pool = ModelProcessPool::new(std::path::PathBuf::from("/tmp/swarmllm-serves-slices"));
+        let model = ModelId("served-slices".into());
+        pool.set_ram_budget_mb(4000);
+        let h = worker_holding_both_ends(&pool, &model).await;
+        let before = pool.ram_committed_mb();
+        assert!(h.serves_segment((14, 40)), "a charged range");
+        assert!(
+            h.serves_segment((20, 30)) && h.serves_segment((1, 2)),
+            "a run inside one"
+        );
+        assert!(
+            !h.serves_segment((10, 20)),
+            "a run reaching outside every charged range loads"
+        );
+        pool.charge_additional_segment(&model, (20, 30), &h, Requester::Swarm)
+            .await
+            .expect("nothing to add");
+        assert_eq!(pool.ram_committed_mb(), before, "charged nothing");
+        assert!(
+            !h.segment_is_charged((20, 30)),
+            "and the record keeps only what was charged"
+        );
+    }
+
     /// The control: when even the peak does not fit, the refusal leaves every
     /// charge standing, because the worker never drops anything — "admission
     /// before release" is kept. And the message names the NET shortfall.
@@ -15559,9 +15642,10 @@ mod tests {
     }
 
     /// A drafter already loaded for its range is the answer whatever memory is
-    /// left; one loaded for another range is not — a guest does not grow it
-    /// (`a_guest_does_not_grow_a_worker_it_finds`) — and neither is a model
-    /// inside its spawn's crash-loop backoff.
+    /// left — and so is a run inside it, which its worker serves from the same
+    /// weights (#449); one loaded for a range that does not hold the run is
+    /// not — a guest does not grow it (`a_guest_does_not_grow_a_worker_it_finds`)
+    /// — and neither is a model inside its spawn's crash-loop backoff.
     #[tokio::test]
     async fn a_loaded_drafter_is_asked_about_its_own_range() {
         let pool = ModelProcessPool::new(std::path::PathBuf::from("/tmp/swarmllm-guest-held"));
@@ -15570,25 +15654,24 @@ mod tests {
         pool.test_footprint_inputs
             .insert(drafter.clone(), qwen3_1_7b());
         let h = admit_and_insert_cpu_worker(&pool, &drafter, 3_900, false).await;
-        h.record_charged_segment((0, 28), 0);
-        assert!(pool
-            .guest_fit(
+        h.record_charged_segment((0, 14), 0);
+        let fits = |range| {
+            pool.guest_fit(
                 &drafter,
-                (0, 28),
+                range,
                 KvCharge::Typical,
                 Requester::Swarm,
-                &unguessed_for()
+                &unguessed_for(),
             )
-            .admitted());
-        assert!(!pool
-            .guest_fit(
-                &drafter,
-                (0, 14),
-                KvCharge::Typical,
-                Requester::Swarm,
-                &unguessed_for()
-            )
-            .admitted());
+            .admitted()
+        };
+        assert!(fits((0, 14)), "its own range");
+        assert_eq!(
+            fits((2, 9)),
+            crate::inference::split::view::elastic_spans_on(),
+            "a run inside it"
+        );
+        assert!(!fits((0, 28)), "a range it would have to grow into");
 
         let crashed = ModelId("crashing-0.5b".into());
         pool.spawn_failures
@@ -16747,11 +16830,15 @@ mod tests {
             vec![
                 HeldRange {
                     range: (0, 2),
-                    releasable_layers: 0
+                    releasable_layers: 0,
+                    // Its worker serves any run inside it (#449), unless
+                    // `SWARMLLM_ELASTIC_SPANS=0`.
+                    serves_slices: crate::inference::split::view::elastic_spans_on(),
                 },
                 HeldRange {
                     range: (14, 40),
-                    releasable_layers: 26
+                    releasable_layers: 26,
+                    serves_slices: crate::inference::split::view::elastic_spans_on(),
                 },
             ]
         );
@@ -17042,6 +17129,7 @@ mod tests {
         let held = [HeldRange {
             range: (8, 10),
             releasable_layers: 2,
+            serves_slices: false,
         }];
         assert_eq!(bytes_added_by((8, 10), &held, &w, 10, false), 0);
         // [6..10) loads afresh and gives back [8..10): two more layers.
@@ -17119,10 +17207,12 @@ mod tests {
             HeldRange {
                 range: (0, 2),
                 releasable_layers: 0,
+                serves_slices: false,
             },
             HeldRange {
                 range: (14, 40),
                 releasable_layers: 26,
+                serves_slices: false,
             },
         ];
         // An exact hit loads nothing.
@@ -17136,6 +17226,22 @@ mod tests {
         assert_eq!(layers_added_by((10, 20), &held), 10);
         // Nothing held: the width, which is how every peer is priced.
         assert_eq!(layers_added_by((3, 9), &[]), 6);
+
+        // A holder that serves a run inside a loaded range from its weights
+        // (#449, `split::view`) adds nothing for it — the 14B's [0..25) of a
+        // resident [0..48) was read from disk again (2026-11-13).
+        let serving = held.map(|h| HeldRange {
+            serves_slices: true,
+            ..h
+        });
+        assert_eq!(layers_added_by((22, 40), &serving), 0);
+        assert_eq!(layers_added_by((0, 1), &serving), 0);
+        assert_eq!(
+            layers_added_by((10, 20), &serving),
+            10,
+            "a partial overlap still loads all of it"
+        );
+        assert_eq!(layers_added_by((0, 40), &serving), 40 - 26);
     }
 
     /// The regression the whole-model capacity check would otherwise have been.

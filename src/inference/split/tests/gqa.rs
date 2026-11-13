@@ -282,6 +282,8 @@ fn qwen2_forward_with_biases() {
         device,
         vocabulary: None,
         tokenizer: None,
+        kv_layout: None,
+        viewed_from: None,
         eos_tokens: vec![2],
         chat_template: None,
         bos_token: String::new(),

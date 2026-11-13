@@ -4035,10 +4035,12 @@ mod tests {
             crate::inference::process_pool::HeldRange {
                 range: (0, 20),
                 releasable_layers: 0,
+                serves_slices: false,
             },
             crate::inference::process_pool::HeldRange {
                 range: (30, 40),
                 releasable_layers: 0,
+                serves_slices: false,
             },
         ];
         me.max_hostable_layers = Some(0);
@@ -4997,6 +4999,7 @@ mod tests {
         crate::inference::process_pool::HeldRange {
             range,
             releasable_layers,
+            serves_slices: false,
         }
     }
 

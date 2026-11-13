@@ -5261,6 +5261,19 @@ impl PipelineScheduler {
             // the device `has_gpu` prices the speed of: a model too big for the
             // card is priced near the processor (#444) yet placed partly on the
             // card (#129).
+            let peer_serves_slices = !is_local
+                && self
+                    .shared_state
+                    .peer_registry
+                    .get(&node_id)
+                    .is_some_and(|p| {
+                        p.capability.as_ref().is_some_and(|c| {
+                            swarmllm_types::features::supports(
+                                c.features,
+                                swarmllm_types::features::SERVES_SLICES,
+                            )
+                        })
+                    });
             let held_ranges = if is_local {
                 self.shared_state
                     .model_process_pool
@@ -5274,6 +5287,10 @@ impl PipelineScheduler {
                             .map(|h| crate::inference::process_pool::HeldRange {
                                 range: (h.start, h.end),
                                 releasable_layers: h.releasable_layers,
+                                // Its own word that a run inside a loaded
+                                // range loads nothing (#449); an older peer
+                                // loads it again, and is charged for it.
+                                serves_slices: peer_serves_slices,
                             })
                             .collect()
                     })

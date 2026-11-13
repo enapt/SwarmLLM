@@ -15254,8 +15254,10 @@ fn the_capacity_snapshot_built_on_the_network_loop_reads_nothing_from_the_card()
 ///
 /// Outside that one method the table may only be asked about (`is_some`,
 /// `is_none`, how many rows it has — `SplitModel::embedding_rows`, which a
-/// forward's token ids are checked against), set aside (`take`) or put back
-/// (`=`). Anything else reads it.
+/// forward's token ids are checked against), set aside (`take`), put back
+/// (`=`) or handed on whole to a view of the model (`split::view`, #449: a
+/// `.clone()` the statement does nothing else with — the view's own lookups go
+/// through ITS `embed_tokens`). Anything else reads it.
 fn token_table_reads_outside_embed_tokens(text: &str) -> Vec<(usize, String)> {
     let body = method_body(text, "fn embed_tokens(").unwrap_or("");
     // Blank the one method out, keeping its line breaks so a reported line
@@ -15279,7 +15281,11 @@ fn token_table_reads_outside_embed_tokens(text: &str) -> Vec<(usize, String)> {
                 ".as_ref().map(TokenEmbedding::rows)",
             ]
             .iter()
-            .any(|ok| after.starts_with(ok));
+            .any(|ok| after.starts_with(ok))
+                || after.strip_prefix(".clone()").is_some_and(|rest| {
+                    let rest = rest.trim_start();
+                    rest.is_empty() || rest.starts_with('}') || rest.starts_with(',')
+                });
             if !allowed {
                 out.push((line_no, st.trim().to_string()));
                 break;
@@ -15331,13 +15337,14 @@ fn every_token_lookup_goes_through_embed_tokens() {
 
 /// The scan above must see the two shapes that shipped: a lookup chained off
 /// `.as_ref()` and one bound by `if let Some(ref ..)`, each wrapped by rustfmt.
-/// Asking the row count is not a lookup; a lookup through `.map` still is.
+/// Asking the row count is not a lookup; a lookup through `.map` still is;
+/// handing the table on whole to a view is not, a lookup off its clone is.
 #[test]
 fn the_token_lookup_guard_catches_both_shapes_that_shipped() {
-    let planted = "impl SplitModel {\n    fn embed_tokens(&self, input: &Tensor) -> Result<Tensor, SwarmError> {\n        let emb = self\n            .tok_embeddings\n            .as_ref()\n            .unwrap()\n            .forward(input)?;\n        Ok(emb)\n    }\n    fn splice(&self) {\n        let is_first = self.tok_embeddings.is_some();\n        let tok_emb_layer = self\n            .tok_embeddings\n            .as_ref()\n            .unwrap();\n    }\n    fn tp(&mut self) {\n        if let Some(ref emb) = self.tok_embeddings {\n            emb.forward(&input);\n        }\n        let t = self.tok_embeddings.take();\n        self.tok_embeddings = t;\n    }\n    fn rows(&self) -> Option<usize> {\n        self.tok_embeddings\n            .as_ref()\n            .map(TokenEmbedding::rows)\n    }\n    fn mapped(&self) {\n        let e = self.tok_embeddings.as_ref().map(|t| t.forward(&input));\n    }\n}\n";
+    let planted = "impl SplitModel {\n    fn embed_tokens(&self, input: &Tensor) -> Result<Tensor, SwarmError> {\n        let emb = self\n            .tok_embeddings\n            .as_ref()\n            .unwrap()\n            .forward(input)?;\n        Ok(emb)\n    }\n    fn splice(&self) {\n        let is_first = self.tok_embeddings.is_some();\n        let tok_emb_layer = self\n            .tok_embeddings\n            .as_ref()\n            .unwrap();\n    }\n    fn tp(&mut self) {\n        if let Some(ref emb) = self.tok_embeddings {\n            emb.forward(&input);\n        }\n        let t = self.tok_embeddings.take();\n        self.tok_embeddings = t;\n    }\n    fn rows(&self) -> Option<usize> {\n        self.tok_embeddings\n            .as_ref()\n            .map(TokenEmbedding::rows)\n    }\n    fn mapped(&self) {\n        let e = self.tok_embeddings.as_ref().map(|t| t.forward(&input));\n    }\n    fn view(&self) -> Self {\n        Self {\n            tok_embeddings: if first {\n                self.tok_embeddings.clone()\n            } else {\n                None\n            },\n        }\n    }\n    fn cloned_lookup(&self) {\n        let e = self.tok_embeddings.clone().unwrap().forward(&input);\n    }\n}\n";
     let hits = token_table_reads_outside_embed_tokens(planted);
     let lines: Vec<usize> = hits.iter().map(|(l, _)| *l).collect();
-    assert_eq!(lines, vec![12, 18, 30], "found {hits:?}");
+    assert_eq!(lines, vec![12, 18, 30, 42], "found {hits:?}");
 }
 
 /// Every node an integration test builds names a data directory of its own.

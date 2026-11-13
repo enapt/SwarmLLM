@@ -3505,14 +3505,16 @@ impl SplitModel {
                 crate::inference::prof::set_sync_device(&device);
                 device
             },
-            vocabulary,
-            tokenizer,
+            vocabulary: vocabulary.map(std::sync::Arc::new),
+            tokenizer: tokenizer.map(std::sync::Arc::new),
             eos_tokens,
             chat_template,
             bos_token,
             eos_token,
             max_seq_len: context_length,
             kv_model_key: format!("{layer_start}-{layer_end}-{block_count}"),
+            kv_layout: Some(std::sync::Arc::new(kv_layout)),
+            viewed_from: None,
             final_logit_softcap,
             suppressed_logits,
             batch_calls: 0,

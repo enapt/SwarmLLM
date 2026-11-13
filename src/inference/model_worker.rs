@@ -886,6 +886,17 @@ fn subsumed_segment_keys<'a>(
         .collect()
 }
 
+/// Drop every view of the loaded range `held` (#449, `split::view`): a view
+/// runs that instance's weights, so one kept after it would keep their memory
+/// alive after the daemon released it. Asked wherever a loaded range leaves
+/// the map — the daemon's `Unload`, and a larger range superseding it.
+fn drop_views_of(
+    models: &mut HashMap<(usize, usize, usize, usize), SplitModel>,
+    held: (usize, usize),
+) {
+    models.retain(|_, m| m.viewed_from() != Some(held));
+}
+
 async fn send_worker_error(writer: &mut IpcWriter, request_id: uuid::Uuid, err: SwarmError) {
     let message = err.to_string();
     let fatal = crate::inference::worker_ipc::worker_error_is_fatal(&message);
@@ -1136,6 +1147,38 @@ fn ensure_model_loaded(
     if models.contains_key(&key) {
         return Ok(());
     }
+    // A range inside one this worker loaded is served from that instance's
+    // own weights (#449, `split::view`): no layer is read from disk or held a
+    // second time. Always from an instance that LOADED its weights, never
+    // from another view, so dropping that instance drops every view of it
+    // (`drop_views_of`).
+    if tp_size == 1 && crate::inference::split::view::elastic_spans_on() {
+        let view = models
+            .iter()
+            .filter(|((ls, le, tr, ts), m)| {
+                *tr == 0
+                    && *ts == 1
+                    && m.viewed_from().is_none()
+                    && crate::inference::split::view::serves_inside(
+                        (*ls, *le),
+                        (layer_start, layer_end),
+                    )
+            })
+            .find_map(|((ls, le, _, _), m)| {
+                m.view_of(layer_start, layer_end).map(|v| ((*ls, *le), v))
+            });
+        if let Some(((ls, le), view)) = view {
+            tracing::info!(
+                model = %model_id,
+                layers = format!("[{layer_start}..{layer_end})"),
+                from_resident = format!("[{ls}..{le})"),
+                "model-worker: serving a run of layers from the copy already loaded — \
+                 nothing read from disk"
+            );
+            models.insert(key, view);
+            return Ok(());
+        }
+    }
     // From here on this IS a load; the fault delay below stands in for a slow
     // disk, so it is timed like one.
     let load_started = std::time::Instant::now();
@@ -1165,6 +1208,7 @@ fn ensure_model_loaded(
     // would cost a reload for nothing.
     for stale in subsumed_segment_keys(models.keys(), key) {
         models.remove(&stale);
+        drop_views_of(models, (stale.0, stale.1));
         tracing::info!(
             model = %model_id,
             dropped = format!("[{}..{})", stale.0, stale.1),
@@ -1173,23 +1217,17 @@ fn ensure_model_loaded(
         );
     }
 
-    // The reverse of the case above, which this cannot fix and must not hide.
-    // A range CONTAINED IN one already resident is a miss on the exact key, so
-    // the layers it shares with the resident copy are about to be read from
-    // disk and held a second time — 19 of 48 layers in the reported case,
-    // roughly 3.4 GB of a 14B on a machine with 16 GB (report #021).
-    //
-    // Serving it from the resident superset is not available: the layer loop
-    // walks all of `self.layers` with no offset, and `is_first`/`is_last` are
-    // baked in at load time from which components were loaded, so a resident
-    // whole-model instance would run 48 layers and apply the output head to a
-    // middle segment's hidden states. Dropping the superset instead is worse —
-    // it is very likely serving other conversations whose KV entries are keyed
-    // by its range, and they would silently read an empty cache.
-    //
-    // So this is reported rather than repaired. It is real memory, the charge
-    // the daemon makes for it is accurate, and until now the only evidence was
-    // two "Model loaded" lines a minute apart that looked like a retry.
+    // The reverse of the case above, where no view could serve it. A range
+    // CONTAINED IN one already resident is otherwise served from it (above);
+    // what reaches here is a tensor-parallel shape, a model whose layers read
+    // each other's caches (`SplitModel::view_of`'s refusals), or
+    // `SWARMLLM_ELASTIC_SPANS=0` — and then the layers it shares with the
+    // resident copy are read from disk and held a second time (19 of 48
+    // layers, ~3.4 GB of a 14B, in report #021). Dropping the superset instead
+    // would be worse: it is very likely serving other conversations whose KV
+    // entries are keyed by its range, and they would silently read an empty
+    // cache. So this is reported, never hidden: until then the only evidence
+    // was two "Model loaded" lines a minute apart that looked like a retry.
     if let Some((rs, re)) = models
         .keys()
         .find(|(ls, le, tr, ts)| {
@@ -7268,7 +7306,8 @@ const _: () = assert!(DRAFT_MARGIN_POSITIONS > crate::config::MAX_GUESSES_PER_CH
 /// so the two arms can be compared inside ONE binary. Read once.
 #[cfg(test)]
 mod subsumption_tests {
-    use super::subsumed_segment_keys;
+    use super::{drop_views_of, ensure_model_loaded, subsumed_segment_keys};
+    use std::collections::HashMap;
 
     /// The reported sequence (#010): a worker holding [16..48) and [0..16) is
     /// asked for [0..48). Both are covered, so both are redundant — before
@@ -7316,6 +7355,40 @@ mod subsumption_tests {
         assert!(subsumed_segment_keys(loaded.iter(), (0, 48, 0, 1)).is_empty());
         let loaded = [(0, 16, 0, 2)];
         assert!(subsumed_segment_keys(loaded.iter(), (0, 48, 0, 1)).is_empty());
+    }
+
+    /// #449: a range inside one this worker loaded is served from that copy's
+    /// weights — nothing read from disk (this data directory holds no model,
+    /// so a load fails) — always as a view of the copy that LOADED them, and
+    /// it goes with that copy: the daemon's `Unload` of it, or a larger range
+    /// superseding it, leaves no view keeping its weights alive.
+    #[test]
+    fn a_run_inside_a_loaded_range_is_served_from_it_and_goes_with_it() {
+        let empty = tempfile::tempdir().unwrap();
+        let id = crate::types::ModelId("m".into());
+        let mut models = HashMap::new();
+        models.insert(
+            (0, 4, 0, 1),
+            crate::inference::split::tests::plain_test_model(4, 64),
+        );
+        ensure_model_loaded(&mut models, empty.path(), &id, 1, 3, 0, 1, &None)
+            .expect("served from the loaded copy, not read from disk");
+        assert!(crate::inference::split::view::shares_weights_with(
+            &models[&(1, 3, 0, 1)],
+            &models[&(0, 4, 0, 1)]
+        ));
+        // Inside the view too, and still from the loaded copy.
+        ensure_model_loaded(&mut models, empty.path(), &id, 2, 3, 0, 1, &None).unwrap();
+        assert_eq!(models[&(2, 3, 0, 1)].viewed_from(), Some((0, 4)));
+        // A tensor-parallel shape is never a view: it would load (and here fail).
+        assert!(ensure_model_loaded(&mut models, empty.path(), &id, 1, 3, 0, 2, &None).is_err());
+        // Reaching outside the loaded copy loads (and here fails).
+        assert!(ensure_model_loaded(&mut models, empty.path(), &id, 2, 5, 0, 1, &None).is_err());
+
+        // The copy goes, and its views with it.
+        models.retain(|&(ls, le, _, _), _| !(ls == 0 && le == 4));
+        drop_views_of(&mut models, (0, 4));
+        assert!(models.is_empty(), "{:?}", models.keys().collect::<Vec<_>>());
     }
 }
 
@@ -11597,6 +11670,7 @@ async fn handle_daemon_msg(
             layer_end,
         } => {
             models.retain(|&(ls, le, _, _), _| !(ls == layer_start && le == layer_end));
+            drop_views_of(models, (layer_start, layer_end));
             tracing::info!(layer_start, layer_end, "model-worker: unloaded shard range");
         }
         DaemonMsg::PlaceRange {

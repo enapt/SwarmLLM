@@ -25,6 +25,7 @@ mod stand_in;
 #[cfg(test)]
 pub(crate) mod tests;
 mod token_embedding;
+pub(crate) mod view;
 
 // Re-export types from extracted modules so external `crate::inference::split::X` paths still work.
 pub(crate) use super::layers::{

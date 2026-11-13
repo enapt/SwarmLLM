@@ -357,7 +357,8 @@ fn speed_within_deadband(now: u32, sent: u32) -> bool {
 /// takes a requester's guesses (#318: none is offered by a head that would
 /// check none), it keeps the half KV cache on its card, and only a window in a
 /// sliding-window layer's cache (so a coordinator prices its room for a prompt
-/// as it will be held).
+/// as it will be held), and it serves any run of layers inside one it loaded
+/// (#449).
 fn advertised_features(shared: &SharedState) -> u64 {
     use swarmllm_types::features;
     let cfg = shared.cfg();
@@ -372,6 +373,9 @@ fn advertised_features(shared: &SharedState) -> u64 {
         cfg.inference.prefill_chunk_tokens as usize,
     ) {
         bits |= features::KV_WINDOW_SLIDES;
+    }
+    if crate::inference::split::view::elastic_spans_on() {
+        bits |= features::SERVES_SLICES;
     }
     bits
 }

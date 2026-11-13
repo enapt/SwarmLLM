@@ -398,8 +398,16 @@
 #          layers) and q1 is a 200 that ran a segment on B. Control arm:
 #          ENV_B="SWARMLLM_GIVES_WAY=0" — B tells A nothing of the idle worker,
 #          and A prices B at what is left beside it.
+#   slices FUTURE_WORK #449: split's topology on the processor with B holding
+#          every part. B is asked first, so its worker loads the model whole;
+#          then A is asked with B planned as holding only the parts past A's
+#          (`pretend_peer_holds`), so B serves the back of the model. PASS =
+#          B logs "serving a run of layers from the copy already loaded" and no
+#          "Model loaded" for that request, and the split's reply is B's own.
+#          Control arm: ENV_B="SWARMLLM_ELASTIC_SPANS=0" — B loads the run from
+#          disk beside its whole copy.
 #
-# usage: split_rig.sh split|reasoning|kill|failover|failover_mid|context|whole|continue|repeat|fetch|cache|splitcache|remote|mixed|disputed|spliced|disconnect|softunload|layerprice|keep|route|latekv|peerkv|peerload|refusepiece|owntiming|holdings|givesway <binary> [<binary for B>]
+# usage: split_rig.sh split|reasoning|kill|failover|failover_mid|context|whole|continue|repeat|fetch|cache|splitcache|remote|mixed|disputed|spliced|disconnect|softunload|layerprice|keep|route|latekv|peerkv|peerload|refusepiece|owntiming|holdings|givesway|slices <binary> [<binary for B>]
 #   MODEL      model id (default: tinyllama for split, llama-3.2-3b for kill
 #              and failover)
 #   SHARDS_A   shard indices A holds, comma-separated (default 0; kill: 0,LAST;
@@ -481,7 +489,7 @@ rig_addr() {
 MODE="${1:?usage: split_rig.sh split|kill|failover|context|repeat|fetch|cache|remote|mixed|softunload <binary> [<binary for B>]}"
 BIN_A="${2:?binary}"
 BIN_B="${3:-$BIN_A}"
-case "$MODE" in split|reasoning|kill|failover|failover_mid|context|whole|continue|repeat|fetch|cache|handoffcache|splitcache|remote|mixed|disputed|spliced|disconnect|softunload|layerprice|keep|route|latekv|peerkv|peerload|refusepiece|refusechain|killchain|owntiming|holdings|givesway) ;; *) echo "mode must be split, reasoning, kill, failover, failover_mid, context, whole, continue, repeat, fetch, cache, handoffcache, splitcache, remote, mixed, disputed, spliced, disconnect, softunload, layerprice, keep, route, latekv, peerkv, peerload, refusepiece, refusechain, killchain, owntiming, holdings or givesway"; exit 2 ;; esac
+case "$MODE" in split|reasoning|kill|failover|failover_mid|context|whole|continue|repeat|fetch|cache|handoffcache|splitcache|remote|mixed|disputed|spliced|disconnect|softunload|layerprice|keep|route|latekv|peerkv|peerload|refusepiece|refusechain|killchain|owntiming|holdings|givesway|slices) ;; *) echo "mode must be split, reasoning, kill, failover, failover_mid, context, whole, continue, repeat, fetch, cache, handoffcache, splitcache, remote, mixed, disputed, spliced, disconnect, softunload, layerprice, keep, route, latekv, peerkv, peerload, refusepiece, refusechain, killchain, owntiming, holdings, givesway or slices"; exit 2 ;; esac
 # refusechain is remote's topology with one fault on C (#305).
 REFUSECHAIN=""; KILLCHAIN=""
 if [ "$MODE" = killchain ]; then
@@ -502,7 +510,7 @@ fi
 [ -x "$BIN_A" ] && [ -x "$BIN_B" ] || { echo "binary not executable"; exit 2; }
 if [ "$MODE" = reasoning ]; then
   MODEL="${MODEL:-qwen3-1.7b-q8-0}"
-elif [ "$MODE" = split ] || [ "$MODE" = mixed ] || [ "$MODE" = disputed ] || [ "$MODE" = spliced ] || [ "$MODE" = disconnect ] || [ "$MODE" = keep ] || [ "$MODE" = route ] || [ "$MODE" = owntiming ] || [ "$MODE" = holdings ]; then
+elif [ "$MODE" = split ] || [ "$MODE" = mixed ] || [ "$MODE" = disputed ] || [ "$MODE" = spliced ] || [ "$MODE" = disconnect ] || [ "$MODE" = keep ] || [ "$MODE" = route ] || [ "$MODE" = owntiming ] || [ "$MODE" = holdings ] || [ "$MODE" = slices ]; then
   MODEL="${MODEL:-tinyllama-1.1b-chat-v1.0.q4-k-m}"
 elif [ "$MODE" = cache ] || [ "$MODE" = handoffcache ]; then
   MODEL="${MODEL:-qwen2.5-0.5b-instruct-fp16}"
@@ -520,6 +528,11 @@ SHARDS=$(ls "$SRC" | sed -n 's/^shard_\([0-9]*\)\.bin$/\1/p' | sed 's/^0*\([0-9]
 LAST=$(echo "$SHARDS" | tail -1)
 N=$(echo "$SHARDS" | wc -l)
 [ "$N" -ge 2 ] || { echo "$MODEL has $N shard file(s) here; a split needs at least 2"; exit 2; }
+if [ "$MODE" = slices ]; then
+  SHARDS_A="${SHARDS_A:-0}"
+  SHARDS_B="${SHARDS_B:-$(echo "$SHARDS" | paste -sd,)}"
+  GPU_A="${GPU_A:-0}"; GPU_B="${GPU_B:-0}"
+fi
 if [ "$MODE" = split ] || [ "$MODE" = repeat ] || [ "$MODE" = disconnect ] || [ "$MODE" = keep ] || [ "$MODE" = route ] || [ "$MODE" = owntiming ] || [ "$MODE" = reasoning ] || [ "$MODE" = holdings ]; then
   SHARDS_A="${SHARDS_A:-0}"
   SHARDS_B="${SHARDS_B:-$(echo "$SHARDS" | grep -vxF -f <(echo "$SHARDS_A" | tr ',' '\n') | paste -sd,)}"
@@ -1543,6 +1556,39 @@ PY
   exit $?
 fi
 
+if [ "$MODE" = slices ]; then
+  KB=$(cat "$BASE/B/api_key")
+  IDB=$(curl -s -m 5 -H "Authorization: Bearer $KB" localhost:8920/api/admin/network-code \
+    | python3 -c 'import sys,json; print(json.load(sys.stdin)["node_id"][:16])')
+  Q="What is the capital of France? Answer in one sentence."
+  # B's own request first: it runs the model whole, so B's worker holds every layer.
+  body=$(python3 -c 'import json,sys
+print(json.dumps({"model":sys.argv[1],"max_tokens":32,"temperature":0,"messages":[{"role":"user","content":sys.argv[2]}]}))' "$MODEL" "$Q")
+  curl -s -m 600 -o "$OUT/whole.body" -H "Authorization: Bearer $KB" -H "Content-Type: application/json" \
+       -X POST localhost:8920/v1/chat/completions -d "$body"
+  grep -aq "model-worker: Model loaded" "$BASE/B/node.log" \
+    || echo "slices: B logged no load for its own request — the check below proves nothing"
+  MARK_B=$(wc -l < "$BASE/B/node.log")
+  # A plans B as holding only the parts past A's, so the split is the only plan.
+  RIG_ROUTE="{\"pretend_peer_holds\":{\"$IDB\":\"1-$LAST\"}}" \
+    ask "$Q" 32 q1 | tee "$OUT/replies.jsonl" | cut -c1-200
+  tail -n +"$((MARK_B + 1))" "$BASE/B/node.log" > "$OUT/B.q1.log"
+  echo "slices: B is $IDB; B's environment: ${ENV_B:-default}"
+  echo "slices: B served a run from its loaded copy: $(grep -ac 'serving a run of layers from the copy already loaded' "$OUT/B.q1.log")," \
+    "B loaded from disk: $(grep -ac 'model-worker: Model loaded' "$OUT/B.q1.log")"
+  grep -a -m2 -oE 'serving a run of layers.{0,160}' "$OUT/B.q1.log" | sed 's/^/slices: /'
+  python3 - "$OUT/whole.body" "$OUT/q1.body" <<'PY'
+import json, sys
+def reply(p):
+    try: return json.load(open(p))["choices"][0]["message"]["content"]
+    except Exception as e: return f"ERR {e}"
+w, s = reply(sys.argv[1]), reply(sys.argv[2])
+print(f"slices: B whole: {w!r}")
+print(f"slices: split:   {s!r}")
+print(f"slices: same reply: {w == s}")
+PY
+  exit 0
+fi
 if [ "$MODE" = split ] && [ -n "${RIG_PROMPT_FILE:-}" ]; then
   i=0
   while IFS= read -r line || [ -n "$line" ]; do

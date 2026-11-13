@@ -1213,24 +1213,27 @@ real link ran no faster than the hand-off — the peer loaded its share again be
 (#449). The flip, general or narrow, waits for #449.
 
 #### #449 — A computer serves only the exact layer range it loaded, so a part of a loaded model is loaded again
-`P2` · routing / spreading the load · **OPEN** — 2026-11-13
+`P2` · routing / spreading the load · **PARTIAL** — 2026-11-13: built on main (not in a release yet); the peers' half waits for a release
 
-A model worker keys its loaded ranges by `(start, end, tp)` and runs every layer it loaded: the
-layer loop has no offset and the token table and output head are fixed at load time
-(`model_worker.rs`, "A range CONTAINED IN one already resident"). So a peer with a model loaded
-whole that is planned `[22..48)` reads 26 layers from disk again and holds them twice (report
-#021: 19 of 48 layers, ~3.4 GB of a 14B), and the planner rightly charges it as a cold load
-(`process_pool::layers_added_by` credits only an exact or strictly-subsumed range). Every split
-of computers that hold a model whole pays it — which is most of the swarm for the popular
-models, and the load-spreading goal (each computer runs as little as it can, more computers
-make it faster) needs a computer to serve ANY slice of what it holds: Petals servers serve any
-sub-span of their loaded blocks (the client names the block ids it wants; the server's
-`handler.py` runs exactly those of the ones it hosts). Needs: a forward over `[a..b)` of a loaded `[s..e)` (skip the token table
-unless `a == 0`, skip the head unless `b == num_layers`), a KV cache per request sized and keyed
-by the range it runs, the prefix cache keyed the same (`lookup_chain`), admission over that
-range, and `layers_added_by` crediting a contained range — then #180's A/B and #3 (j1). Prior
-art: Petals (above). Measured cost on the real link 2026-11-13: #3 (j1)'s split had its peer load
-`[0..25)` beside its resident `[0..48)` (first token 4.4-4.6 s).
+A model worker keyed its loaded ranges by `(start, end, tp)` and ran every layer it loaded, so a
+peer with a model loaded whole that was planned `[22..48)` read 26 layers from disk again and held
+them twice (report #021: 19 of 48 layers, ~3.4 GB of a 14B; the real link 2026-11-13: #3 (j1)'s
+peer loaded `[0..25)` beside its resident `[0..48)`, first token 4.4-4.6 s against 0.4-0.6), and
+the planner rightly charged it as a cold load. **Built 2026-11-13** (`docs/invariants/memory.md`
+§ "A worker serves any run inside a range it loaded"): a run inside a loaded range is a VIEW of
+that copy (`split::view::view_of` — the weights shared, its own KV key, graphs and masks), the
+daemon charges nothing for it (`WorkerHandle::serves_segment`), and the planner credits it
+(`HeldRange::serves_slices`) for this node and for a peer advertising `features::SERVES_SLICES`
+(bit 42). Prior art: Petals' `handler.py` (a server runs exactly the blocks a request names of
+the ones it hosts, with a cache for those alone). A/B `SWARMLLM_ELASTIC_SPANS=0`; rig
+`split_rig.sh slices` (2026-11-13: B served `[12..22)` of its loaded `[0..22)` with no load and the same
+reply; with the switch off it loaded the run from disk beside its whole copy).
+
+**Residual**: (1) a peer serves slices only once it runs a release carrying this — then #180's
+A/B and #3 (j1) on the real link (the j1 patch is kept outside the repo, with drafter room and
+the orientation pricing it also lacks); (2) tensor-parallel ranges still load as themselves;
+(3) a view's prompt-cache entries are its own, so a conversation a split stored under `[0..25)`
+is not found by a whole-model request on the same copy (as before).
 
 #### #129 — A model a few MB too large for the card is sent on a boomerang across continents
 `P2` · routing · **PARTIAL** — 2026-09-27, narrowed 2026-10-04 and 2026-10-05 (fit verdict fixed in v0.3.227), 2026-10-07 (cold loads waited for and priced, released in v0.3.230) · history: archive row #129

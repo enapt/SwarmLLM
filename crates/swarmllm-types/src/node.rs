@@ -452,9 +452,18 @@ pub mod features {
     /// reports only to a requester advertising it.
     pub const PROMPT_PROGRESS: u64 = 1 << 41;
 
+    /// Serves any run of layers inside a range it has loaded from that range's
+    /// own weights (FUTURE_WORK #449): a forward naming `[a..b)` of a resident
+    /// `[s..e)` loads nothing. A coordinator credits such a peer's held ranges
+    /// for the runs inside them (`process_pool::HeldRange::serves_slices`) —
+    /// an older peer reads those layers from disk again, so it is charged the
+    /// load. NOT in [`ALL`]: advertised only where the node's setting serves
+    /// them (`SWARMLLM_ELASTIC_SPANS`, on by default).
+    pub const SERVES_SLICES: u64 = 1 << 42;
+
     /// The full feature set THIS build implements. Advertised by every node,
-    /// with [`KV_HALF_ON_CARD`], [`KV_WINDOW_SLIDES`] and
-    /// [`REQUESTER_GUESSES`] beside it where they apply.
+    /// with [`KV_HALF_ON_CARD`], [`KV_WINDOW_SLIDES`], [`REQUESTER_GUESSES`]
+    /// and [`SERVES_SLICES`] beside it where they apply.
     pub const ALL: u64 = RELAY
         | TENSOR_RELAY
         | PIPELINE_CHAIN

@@ -61,7 +61,9 @@ use super::loader::EMBEDDING_DTYPE;
 /// How a segment reads its token-embedding table.
 ///
 /// Both variants return [`EMBEDDING_DTYPE`], so every call site is identical
-/// and the choice is invisible above this type.
+/// and the choice is invisible above this type. Cloned for a view of the
+/// segment (`split::view`): both variants hold reference-counted tables.
+#[derive(Clone)]
 pub(crate) enum TokenEmbedding {
     /// The whole table, dequantized at load. Used for a GGUF that ships an
     /// unquantized `token_embd.weight` (there is nothing to save), for a row
@@ -203,6 +205,7 @@ pub(crate) fn rows_are_block_aligned(hidden: usize, block_size: usize) -> bool {
 /// Row addressing (byte offsets, bounds checks, block arithmetic) lives in
 /// `QTensor::gather_rows` rather than here, so the CPU and CUDA implementations
 /// cannot disagree about where a row is.
+#[derive(Clone)]
 pub(crate) struct QuantizedRows {
     table: Arc<QTensor>,
     hidden: usize,

@@ -23,3 +23,10 @@ mod kv_refresh;
 mod llama4_glm4;
 mod moe_mla;
 mod per_layer_and_shared_kv;
+mod views;
+
+/// A small model of `num_layers` real layers on the processor, no token table
+/// or head — a middle segment — for a test outside `split` (the worker's).
+pub(crate) fn plain_test_model(num_layers: usize, hidden_dim: usize) -> super::SplitModel {
+    common::make_test_split_model(num_layers, hidden_dim)
+}

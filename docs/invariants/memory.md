@@ -2784,6 +2784,132 @@ refuse on the first rung, and a partial worker then wedged its model — every
 chat request refused in ~50 ms — until it aged out. A worker in use keeps the
 refusal; never retire one mid-conversation (#93).
 
+## A worker serves any run inside a range it loaded (2026-11-13, FUTURE_WORK #449)
+
+### What it replaced
+
+A worker keyed its loaded copies by the exact `(start, end, tp_rank, tp_size)`
+and ran every layer a copy held: the layer loop had no offset, and the token
+table and output head were fixed at load. So a computer with a model loaded
+WHOLE that a split planned `[0..25)` read those 25 layers from disk again and
+held them twice — report #021 (19 of 48 layers, ~3.4 GB of a 14B), and the
+2026-11-13 real-link run of #3 (j1): the Australian peer loaded `[0..25)`
+beside its resident `[0..48)`, first token 4.4-4.6 s against 0.4-0.6 s for the
+hand-off it replaced. The planner was right to charge it as a cold load
+(`layers_added_by` credited only an exact or strictly-subsumed range), which is
+why no split of computers that each hold a model whole ever looked cheaper than
+a hand-off — and load spreading (each computer running as little as it can)
+needs a computer to serve any slice of what it holds.
+
+### Prior art
+
+Petals (`petals/server/handler.py`, read 2026-11-13): a server keeps one
+backend per hosted block, a request names the blocks it wants as a chain of
+ids, `_check_uids` refuses any it does not host, and `rpc_inference` runs
+exactly those (`requested_backends`) with an attention cache allocated for them
+alone (`_allocate_cache(requested_backends, …)`) — never a reload. Taken: a run
+inside a loaded range is served from it, with a cache of its own sized by its
+own layers.
+
+### The design: a view, not an offset
+
+The alternative — teach every forward an offset into its instance — touches
+every path keyed by a range: the KV store (`"{model_key}\0{request}"`), the
+prefix cache's chains, admission's layer count, the decode graphs (a captured
+step replays the WHOLE loop), the masks. A view is a `SplitModel` over exactly
+`[a..b)` (`split::view::view_of`): the layer clones are shallow (candle's
+tensors and quantized matrices are `Arc`s), the token table is taken only where
+`a == 0`, norm, head and suppressed logits only where `b == total`, and it
+keeps its own `kv_model_key` (`"{a}-{b}-{total}"`), decode graph, masks and
+prompt room — so every one of those paths runs it unchanged. The vocabulary
+and tokenizer became `Arc`s for the same reason. No guess head, block drafter,
+drafter head or stand-in prior: each belongs to a whole model or a first
+segment loaded beside the head's part.
+
+- **One budget.** A view keeps its parent's `kv_budget_bytes` and
+  `host_kv_budget_bytes`: `claim_room` weighs the whole store's allocation in a
+  home against the budget, every model's conversations included, so a view adds
+  no room it does not have. Its `KvGrowth` is the loader's own price
+  (`KvLayout`, now kept on `SplitModel`), per run of the parent's device
+  placement — card-held layers to the main budget, processor-held to the host's.
+- **Table and head as the parent has them.** A first refusal (no view where the
+  parent lacked a table or head the run would need) was dropped: a load of the
+  same run from the same disk would lack them too (`shard::compute_first_last`),
+  and the daemon — which counts the run served without a load — must agree with
+  the worker.
+- **Always from a root.** A view is built only from an instance that LOADED its
+  weights (`viewed_from() == None`) and records that range; `drop_views_of`
+  removes every view of a range when the daemon unloads it or a larger load
+  supersedes it, so no view keeps weights the daemon has released.
+- **Refused**: tensor parallelism (a rank's weights are cut, and the daemon
+  never charged a tp range by its tp anyway), and a model whose layers read
+  another layer's cache or take per-layer inputs from the tokens (Gemma 4
+  E2B/E4B — `runs_only_whole`, so no split names a part of it).
+
+### The daemon and the planner
+
+`WorkerHandle::serves_segment` — exact, or inside a charged range while
+`elastic_spans_on()` — replaced the exact `segment_is_charged` at all eleven
+production sites (spawn, growth both ways, `forward_would_load`,
+`forward_replaces_the_worker`, the guest fit, `holds_range` / `holds_segment`,
+`peer_load_refusal`): a contained run is charged nothing and never retires a
+worker. A run asked for while its charged copy has not loaded yet is loaded
+from disk on its own — inside memory the copy's charge already holds — and the
+copy's later load drops it first (`subsumed_segment_keys`), so the process never
+holds more than the charge.
+
+The planner's credit is `HeldRange::serves_slices` (`covers_without_a_load`, read
+by `layers_added_by` and `bytes_added_by`): this node's ranges by the switch, a
+peer's only where it advertises `features::SERVES_SLICES` (bit 42, not in
+`ALL` — `advertised_features` sets it with the switch, so a node run with
+`SWARMLLM_ELASTIC_SPANS=0` tells peers the truth). A peer on an older release
+loads a contained run again, so it is charged as one.
+
+### Tests
+
+- `split::tests::views::a_view_runs_its_layers_of_the_loaded_copy` — a view's
+  forward over a prompt and a step is bit-for-bit its parent's with the other
+  layers skipped; another run's differs.
+- `split::tests::views::a_view_is_only_a_run_inside_a_model_that_may_be_cut` —
+  the range itself, a run outside it and an empty run are refused, and a layer
+  with `kv_source` refuses every view.
+- `model_worker::…::a_run_inside_a_loaded_range_is_served_from_it_and_goes_with_it`
+  — in a data directory with no model (a load fails): served, sharing the
+  parent's weights, a view inside a view is still the root's, tp and a run
+  reaching outside load (and fail), and `drop_views_of` empties the map.
+- `process_pool::…::a_run_inside_a_charged_range_is_served_without_a_charge`
+  and `layers_added_by_mirrors_what_the_worker_loads` (its `serves_slices`
+  block) — the daemon charges nothing for a contained run;
+  `a_loaded_drafter_is_asked_about_its_own_range` — a guest's run inside its
+  loaded range fits (no growth), a range it would grow into still does not.
+- `scheduler::tests::a_run_inside_a_peers_loaded_range_costs_no_load_where_it_serves_slices`
+  — through `gather_candidates`: with the peer's bit, `[0..25)` of its resident
+  `[0..48)` adds 0 layers and 0 ms of cold load; without it 25 and > 0.
+
+**Rig, 2026-11-13** (`RIG_NETNS=1 examples/split_rig.sh slices target/debug/swarmllm`,
+TinyLlama, both nodes on the processor): B ran its own request whole, then A's
+split gave B `[12..22)` — B logged "serving a run of layers from the copy already
+loaded … layers=[12..22) from_resident=[0..22)" and no load; route `distributed`,
+2 segments, the reply B's own word for word. Control `ENV_B=SWARMLLM_ELASTIC_SPANS=0`:
+no view, `Model loaded … layers="[12..22)" load_ms=445` beside the whole copy, the
+same reply.
+
+### What a change must keep
+
+- A view never outlives the copy it shares weights with.
+- The worker's rule (`ensure_model_loaded`), the daemon's (`serves_segment`)
+  and the advertisement (`SERVES_SLICES`) read the ONE switch; a refusal the
+  worker adds must be one the daemon also makes, or the daemon charges nothing
+  for a run the worker then loads.
+- A peer's contained run is credited only on its bit.
+
+### Residual
+
+A view's prompt-cache entries are its own (keyed by its range): a conversation a
+split stored under `[0..25)` is not found by a later whole-model request on the
+same copy, as it was not before. Tensor-parallel ranges still load as
+themselves.
+
 ## A model loaded for another model's request is a guest (2026-09-28)
 
 ### What it replaced

@@ -108,9 +108,11 @@ pub struct SplitModel {
     /// hot path. See `hybrid::LayerPlacement`.
     pub(super) layer_devices: Vec<Device>,
     /// Vocabulary from GGUF (token ID → string), for decoding generated tokens.
-    pub(super) vocabulary: Option<Vec<String>>,
+    /// Shared with the views of this instance (`split::view`).
+    pub(super) vocabulary: Option<std::sync::Arc<Vec<String>>>,
     /// Tokenizer (BPE or sentencepiece/unigram) built from GGUF metadata.
-    pub(super) tokenizer: Option<SplitTokenizer>,
+    /// Shared with the views of this instance (`split::view`).
+    pub(super) tokenizer: Option<std::sync::Arc<SplitTokenizer>>,
     /// EOS token IDs loaded from GGUF metadata.
     pub(super) eos_tokens: Vec<u32>,
     /// Chat template from GGUF `tokenizer.chat_template` (Jinja2 format).
@@ -151,6 +153,15 @@ pub struct SplitModel {
     /// Pre-computed KV cache store key: "{layer_start}-{layer_end}-{total_layers}".
     /// Avoids a `format!` allocation on every forward pass.
     pub(super) kv_model_key: String,
+    /// The loader's reading of what this model's caches cost a position, layer
+    /// by layer (`kv_budget::KvLayout`), kept so a view of a run of these
+    /// layers prices its own cache by the one layout (#449). `None` in test
+    /// fixtures.
+    pub(super) kv_layout: Option<std::sync::Arc<super::kv_budget::KvLayout>>,
+    /// The range of the instance loaded from disk whose weights this one runs,
+    /// where it is a view of it (`split::view`, #449); `None` for an instance
+    /// that loaded its own.
+    pub(super) viewed_from: Option<(usize, usize)>,
     /// Gemma 2 final logit soft-capping value (e.g. 30.0).
     pub(super) final_logit_softcap: Option<f32>,
     /// What the head adds to every row of logits so the tokens the model file
@@ -726,12 +737,12 @@ impl SplitModel {
 
     /// Return a reference to the loaded vocabulary, if available.
     pub fn vocab(&self) -> Option<&Vec<String>> {
-        self.vocabulary.as_ref()
+        self.vocabulary.as_deref()
     }
 
     /// Return a reference to the tokenizer, if available.
     pub fn tokenizer(&self) -> Option<&SplitTokenizer> {
-        self.tokenizer.as_ref()
+        self.tokenizer.as_deref()
     }
 
     /// This model's vocabulary as a reply held to JSON reads it (#336), built

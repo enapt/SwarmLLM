@@ -74,6 +74,12 @@ Whenever code waits for a subprocess, handle it dying instead (`spawn_worker` ra
 
 → `docs/invariants/memory.md` § "A worker that cannot grow gets the spawn's ladder (2026-09-27)"
 
+## A worker serves any run inside a range it loaded (2026-11-13, #449)
+
+A range inside one the worker LOADED is served from that copy's weights: **`split::view::view_of`** builds a `SplitModel` over exactly that run (the weights' `Arc`s shared; the token table only from layer 0, the head only to the last layer; its own KV key, graphs and masks; no guess head, block drafter or stand-in prior), filed under its own key by `ensure_model_loaded` — never a view of a view — and **`drop_views_of`** removes every view with the copy it came from (an `Unload`, a larger range superseding it). Refused for tensor parallelism and for layers reading another layer's cache (Gemma 4 E2B/E4B): those load as before. The daemon charges nothing for it: **`WorkerHandle::serves_segment`** (exact, or contained while `elastic_spans_on()`) is the ONE answer at every charge, load and residency site; `segment_is_charged` (exact) is test-only. The planner credits it through **`HeldRange::serves_slices`** (`covers_without_a_load`): this node by the switch, a peer only where it advertises **`features::SERVES_SLICES`** (bit 42, not in `ALL` — `advertised_features` sets it with the switch). A/B `SWARMLLM_ELASTIC_SPANS=0` (worker, daemon and advertisement together).
+
+→ `docs/invariants/memory.md` § "A worker serves any run inside a range it loaded"
+
 ## A split's stored prompt lives in the worker's prefix cache (2026-10-09, #10)
 
 A segment keeps a split's prompt between turns as chain-keyed entries in the worker's `PrefixCache` (`lookup_chain` / `insert_chain_from_kv`), never a second store: one budget, one eviction (gotcha #440). In `handle_forward`: look up BEFORE admission, admit restored + computed positions, hydrate AFTER; any mismatch is `PromptCacheMiss`, never a forward from the wrong opening. **The store is planned at the final piece and copied once the answer is SENT** (#433: `PrefixCache::plan_chain_insert` promises its blocks in the answer, `finish_chain_insert` copies after `send_worker`) — never between the prompt pass and the first token, where each segment's copy of the whole conversation ran in series (prompt pass −9-22% on the rig's turns that store). A copy that then fails stores nothing; the next turn misses and is read from 0. A/B `SWARMLLM_SPLIT_PROMPT_SAVE=before-answer`.

@@ -730,6 +730,110 @@ fn a_head_that_declined_to_lead_is_not_priced_as_leading_the_model() {
     assert!(leads(), "a split it leads forgets the decline");
 }
 
+/// **A run inside a range a peer has LOADED is charged no load where the peer
+/// serves slices** (FUTURE_WORK #449, `features::SERVES_SLICES`): it runs that
+/// run on the weights it holds (`split::view`). An older peer reads the run
+/// from disk again beside its copy — the 14B's `[0..25)` beside a resident
+/// `[0..48)`, first token 4.4-4.6 s (2026-11-13) — so it is charged the load,
+/// as before. The range itself is warm for both.
+#[test]
+fn a_run_inside_a_peers_loaded_range_costs_no_load_where_it_serves_slices() {
+    const MIB: u64 = 1024 * 1024;
+    let peer = NodeId([2u8; 32]);
+    let run = |features: u64| {
+        let state = make_shared_state();
+        let local_id = state.identity.node_id().clone();
+        let model = ModelId("fourteen".into());
+        let mut manifest = make_manifest(
+            "fourteen",
+            48,
+            vec![ShardInfo {
+                index: 0,
+                layer_range: (0, 48),
+                size_bytes: 9_000 * MIB,
+                hash: [0u8; 32],
+                tensors: vec![],
+            }],
+        );
+        manifest.total_size_bytes = 9_000 * MIB;
+        state.model_registry.register_manifest(manifest);
+        state.model_registry.record_shard_holder(
+            ShardId {
+                model_id: model.clone(),
+                index: 0,
+            },
+            peer.clone(),
+        );
+        let mut cap = capability_with_gpu(Some(4_000));
+        cap.gpu.as_mut().unwrap().vram_total_mb = 12_288;
+        cap.node_id = peer.clone();
+        cap.est_tokens_per_sec_7b = 45.0;
+        cap.features = features;
+        cap.model_load_ms_per_gib = Some(1_000);
+        cap.resident_layers = vec![swarmllm_types::ResidentModelLayers {
+            model_id: model.0.clone(),
+            layers: 48,
+            ranges: vec![swarmllm_types::ResidentLayerRange {
+                start: 0,
+                end: 48,
+                releasable_layers: 0,
+            }],
+            decode_us_per_layer: None,
+            card_layers: Some(48),
+            gives_way: None,
+        }];
+        state.peer_registry.insert(
+            peer.clone(),
+            PeerInfo {
+                node_id: peer.clone(),
+                addresses: vec![],
+                capability: Some(cap),
+                last_seen: chrono::Utc::now(),
+                latency_ms: Some(140),
+                trust_score: 0.8,
+                peer_id_bytes: None,
+                ack_srtt_ms: None,
+                active_request_count: 0,
+                first_seen: 0,
+                verified_transaction_count: 0,
+                is_lan_peer: false,
+                goodput_bytes_per_sec: None,
+                goodput_samples: 0,
+            },
+        );
+        state.connected_node_ids.insert(peer.clone());
+        let manifest = state.model_registry.get_manifest(&model).unwrap();
+        PipelineScheduler::new(state.clone())
+            .gather_candidates(
+                &manifest,
+                &local_id,
+                uuid::Uuid::new_v4(),
+                None.into(),
+                super::Purpose::Route,
+                &|| false,
+                crate::types::KeepAsked::Unasked,
+            )
+            .into_iter()
+            .find(|c| c.node_id == peer)
+            .unwrap()
+    };
+    use swarmllm_types::features::{ALL, SERVES_SLICES};
+    let serving = run(ALL | SERVES_SLICES);
+    let older = run(ALL);
+    assert_eq!(serving.layers_it_would_add((0, 25)), 0);
+    assert_eq!(serving.cold_load_ms((0, 25)), 0.0);
+    assert_eq!(
+        older.layers_it_would_add((0, 25)),
+        25,
+        "read from disk again"
+    );
+    assert!(older.cold_load_ms((0, 25)) > 0.0);
+    for c in [&serving, &older] {
+        assert_eq!(c.layers_it_would_add((0, 48)), 0, "the range itself");
+        assert_eq!(c.cold_load_ms((0, 48)), 0.0);
+    }
+}
+
 /// **A warm peer's layers are the card's only as far as its card runs them**
 /// (FUTURE_WORK #361). The RTX 3060 in Australia (12 GB) held 57 of a 70B's 80
 /// layers, about 20 on its card, and read `card_layers=Some(59)`: every held
@@ -1417,6 +1521,7 @@ fn this_nodes_offer_counts_the_layers_its_worker_holds() {
     me.held_ranges = vec![crate::inference::process_pool::HeldRange {
         range: (0, 13),
         releasable_layers: 13,
+        serves_slices: false,
     }];
     let mut rest = simple_candidate(2, vec![(13, 80)]);
     rest.max_hostable_layers_at_face_value = Some(67);
@@ -2961,6 +3066,7 @@ fn greedy_keeps_a_segment_on_the_warm_holder_over_a_cold_spare() {
     warm.held_ranges = vec![crate::inference::process_pool::HeldRange {
         range: (21, 28),
         releasable_layers: 0,
+        serves_slices: false,
     }];
     warm.cold_load_ms_per_layer = 752.0;
     let mut spare = cost_cand(
@@ -3018,6 +3124,7 @@ fn greedy_next_turn(other_ms_per_layer: f32, other_has_gpu: bool) -> NodeId {
         c.held_ranges = vec![crate::inference::process_pool::HeldRange {
             range: (21, 28),
             releasable_layers: 0,
+            serves_slices: false,
         }];
         c.cold_load_ms_per_layer = 752.0;
         c
@@ -4522,6 +4629,7 @@ fn a_layer_a_peer_already_holds_still_costs_this_prompts_kv() {
     c.held_ranges = vec![crate::inference::process_pool::HeldRange {
         range: (0, 20),
         releasable_layers: 0,
+        serves_slices: false,
     }];
     let room = |reused_share: f64| super::PublishedRoom {
         new_layers: Some(8.0),
@@ -4565,6 +4673,7 @@ fn a_peer_with_less_than_a_layer_free_still_runs_the_range_it_holds() {
     c.held_ranges = vec![crate::inference::process_pool::HeldRange {
         range: (18, 48),
         releasable_layers: 0,
+        serves_slices: false,
     }];
     // ~1.5 MB of KV over 30 layers of ~360 MB each: share ~1.4e-4.
     c.published_room = Some(super::PublishedRoom {
@@ -4673,6 +4782,7 @@ fn a_peer_that_publishes_its_ranges_is_priced_by_them() {
         vec![crate::inference::process_pool::HeldRange {
             range: (2, 14),
             releasable_layers: 0,
+            serves_slices: false,
         }]
     );
     let room = a
@@ -6929,6 +7039,7 @@ fn this_node_stands_in_for_a_range_it_holds_loaded() {
     here.held_ranges = vec![crate::inference::process_pool::HeldRange {
         range: (0, 13),
         releasable_layers: 13,
+        serves_slices: false,
     }];
     here.max_hostable_layers = Some(7);
     let mut first = simple_candidate(0xF1, vec![(0, 13)]);
@@ -7766,10 +7877,12 @@ fn holding_part_of_a_model_counts_toward_holding_all_of_it() {
         HeldRange {
             range: (0, 2),
             releasable_layers: 0,
+            serves_slices: false,
         },
         HeldRange {
             range: (14, 40),
             releasable_layers: 26,
+            serves_slices: false,
         },
     ];
     c.max_hostable_layers = Some(14);
