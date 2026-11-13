@@ -1108,11 +1108,15 @@ reaped (`await_worker_exit`, 5 s), not for the card's free figure to recover. `f
 later snapshot, consistent with that, but the 256 MB deadband (`CAPABILITY_MEMORY_DEADBAND_MB`) blurs it. Prior art:
 Ollama `server/sched.go` `waitForVRAMRecovery` reads free before the unload, then polls every 250 ms until 75% of the
 runner's memory is back, up to 5 s ("subsequent model loads will get far less layers loaded"). **Not seen here**:
-on WSL2 with an 8 GB card, 2 GB held by a process was back within 0.07 s of `kill -9`, 3 of 3. A wait is therefore
-not built until a reading shows it would fire. **Diagnostic shipped (on main, not in a release yet)**: each
-residency carries the card's free memory its load read (`ResidentModelLayers::card_free_at_load_mb`, the peer
-list's `resident[].card_free_at_load_mb`). Next real link, read it beside `card_layers`: ~5.7 GB on a reload means
-the reading came too early (build Ollama's wait); ~10 GB means the sizing (`fit_whole_placement_to_the_load`).
+on WSL2 with an 8 GB card, 2 GB held by a process was back within 0.07 s of `kill -9`, 3 of 3. **`TAG=j13` (21:40Z)
+repeated it with a control**: in one arm, AU's cold load of the 14B placed 45 card layers, and its reload right
+after the `[24..48)` worker's retirement placed 18. It is the same model, computer and kind of request, so the
+sizing is not the cause. **Built 2026-11-14 (on main, not in a release yet)**: `unload_model` waits for the
+memory as Ollama does (`await_card_memory_back`, A/B `SWARMLLM_CARD_MEMORY_BACK=0`; invariants/memory.md). Each
+residency also carries the card's free memory its load read (`ResidentModelLayers::card_free_at_load_mb`, the
+peer list's `resident[].card_free_at_load_mb`). **Open: verify on the real link** once AU runs the release. A
+reload should then read ~10 GB and place ~45. ~5.7 GB means the wait did not cover the lag: read the INFO
+`DIAG: a stopped worker's card memory` lines where a node's log is at hand.
 
 `scheduler/parallax.rs` charges a remote hop a flat `ASSUMED_FORWARD_PASSES = 64.0`. The error
 grows with reply length — 1.0 at 8 tokens, 2.4-3.3 at 120-239 — and biases every delegation

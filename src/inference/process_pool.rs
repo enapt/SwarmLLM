@@ -2015,6 +2015,28 @@ const WORKER_DRAIN_WAIT: std::time::Duration = std::time::Duration::from_secs(10
 /// Poll interval while waiting for a worker to be reaped.
 const WORKER_EXIT_POLL: std::time::Duration = std::time::Duration::from_millis(20);
 
+/// How long a stopped card worker's memory is waited for after its process
+/// is gone ([`ModelProcessPool::await_card_memory_back`], #3 (j13)). Ollama's
+/// `waitForRecovery`, 5 s ("typical convergence is 0.5-1.5s").
+const CARD_MEMORY_BACK_WITHIN: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// How often the card is read while that memory is waited for — Ollama's
+/// 250 ms. One `nvidia-smi` reading took 56 ms on the WSL2 laptop.
+const CARD_MEMORY_POLL: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// What became of the card memory a stopped worker held
+/// ([`ModelProcessPool::await_card_memory_back`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CardMemoryBack {
+    /// The card's free memory rose by three quarters of what the worker was
+    /// charged, `waited_ms` after its process was gone.
+    Back { waited_ms: u64 },
+    /// It had not by [`CARD_MEMORY_BACK_WITHIN`]; `free_mb` was the last reading.
+    NotBack { free_mb: u64 },
+    /// The card could not be read (no `nvidia-smi`, or one stuck).
+    Unread,
+}
+
 /// Put a model worker in the one Windows job this daemon keeps, which ends
 /// every member when its last handle closes — when this daemon exits, however
 /// it exits (FUTURE_WORK #153).
@@ -3213,6 +3235,24 @@ impl From<&WorkerHandle> for DepartedWorker {
             host_share_mb: h.host_share_mb.load(Ordering::Acquire),
         }
     }
+}
+
+impl DepartedWorker {
+    /// The card memory this worker was charged and gives back on exit — 0 for
+    /// a worker in system memory (its processor share is `host_share_mb`).
+    fn card_mb_it_frees(&self) -> u64 {
+        if self.freed_gpu_memory && !self.charged_against_ram {
+            self.charged_mb
+        } else {
+            0
+        }
+    }
+}
+
+/// Is a retired card worker's memory waited for before the next load reads
+/// the card (#3 (j13))? A/B `SWARMLLM_CARD_MEMORY_BACK=0` turns the wait off.
+fn card_memory_back_on() -> bool {
+    std::env::var("SWARMLLM_CARD_MEMORY_BACK").as_deref() != Ok("0")
 }
 
 /// Take `mb` back off a model's recorded charge. Returns whether the model is
@@ -13037,6 +13077,28 @@ impl ModelProcessPool {
                 );
             }
 
+            // What this worker owes, taken BEFORE the handle is dropped — the
+            // waits below outlive it, and the release needs this worker's own
+            // figure rather than the model's whole entry.
+            let departed = DepartedWorker::from(&*handle);
+            // The card's free memory while the worker still holds its share,
+            // so the wait after its exit knows when that share is back (#3
+            // (j13)). Only a worker with a process of its own holds any — a
+            // test's stand-in has none, and would wait out the bound on a
+            // card that has nothing to give back.
+            let card_owed_mb = if handle.child.is_some() {
+                departed.card_mb_it_frees()
+            } else {
+                0
+            };
+            let card_before_mb = (card_owed_mb > 0 && card_memory_back_on())
+                .then(|| {
+                    crate::inference::executor::without_starving_the_runtime(
+                        crate::model::auto_manage::vram::query_gpu_vram_free_mb,
+                    )
+                })
+                .flatten();
+
             // Try graceful shutdown first
             if let Ok(mut writer) = handle.writer.try_lock() {
                 let _ = send_daemon(&mut *writer, &DaemonMsg::Shutdown, &[]).await;
@@ -13048,10 +13110,6 @@ impl ModelProcessPool {
             // CUDA_ERROR_OUT_OF_MEMORY — the exact failure admission exists to
             // prevent.
             let exited = handle.exited.clone();
-            // What this worker owes, taken BEFORE the handle is dropped — the
-            // wait below outlives it, and the release needs this worker's own
-            // figure rather than the model's whole entry.
-            let departed = DepartedWorker::from(&*handle);
             drop(handle);
             let freed_cleanly = Self::await_worker_exit(&exited, WORKER_EXIT_WAIT).await;
             if !freed_cleanly {
@@ -13065,7 +13123,97 @@ impl ModelProcessPool {
                      a load starting now could still find the device occupied"
                 );
             }
+            // A process gone is not its card memory back: the driver's free
+            // figure can lag the exit, and a load reading it meanwhile places
+            // the next model as if the old one were still there. A far
+            // computer's 14B reloaded with 17-18 of 48 layers on its card just
+            // after its [24..48) worker was retired, where its cold load of
+            // the same model placed 45 (`TAG=j11`, `TAG=j13`; #3 (j13)).
+            // Waited for here, the one funnel of every retirement, before the
+            // budget is released — so a spawn under the same lock reads the
+            // card after it. Prior art: Ollama `server/sched.go`
+            // `waitForVRAMRecovery`.
+            if let Some(before_mb) = card_before_mb {
+                let back = Self::await_card_memory_back(
+                    before_mb,
+                    card_owed_mb,
+                    || {
+                        crate::inference::executor::without_starving_the_runtime(
+                            crate::model::auto_manage::vram::query_gpu_vram_free_mb,
+                        )
+                    },
+                    CARD_MEMORY_BACK_WITHIN,
+                    CARD_MEMORY_POLL,
+                )
+                .await;
+                match back {
+                    CardMemoryBack::Back { waited_ms }
+                        if u128::from(waited_ms) < CARD_MEMORY_POLL.as_millis() =>
+                    {
+                        tracing::debug!(
+                            model_id = %model_id,
+                            card_owed_mb,
+                            waited_ms,
+                            "DIAG: a stopped worker's card memory is back"
+                        );
+                    }
+                    CardMemoryBack::Back { waited_ms } => {
+                        tracing::info!(
+                            model_id = %model_id,
+                            card_owed_mb,
+                            waited_ms,
+                            "DIAG: a stopped worker's card memory came back only after its process \
+                             had gone — the next load waited for it"
+                        );
+                    }
+                    CardMemoryBack::NotBack { free_mb } => {
+                        tracing::info!(
+                            model_id = %model_id,
+                            card_owed_mb,
+                            before_mb,
+                            free_mb,
+                            waited_ms = CARD_MEMORY_BACK_WITHIN.as_millis() as u64,
+                            "DIAG: a stopped worker's card memory was not back in time — \
+                             a load starting now may place fewer layers on the card"
+                        );
+                    }
+                    CardMemoryBack::Unread => {}
+                }
+            }
             self.after_worker_gone_charge(model_id, departed, "stopped");
+        }
+    }
+
+    /// Wait for the card's free memory to rise by three quarters of `owed_mb`
+    /// above `before_mb` (read while the stopped worker still held it), up to
+    /// `within`, reading it every `poll` — Ollama's `waitForVRAMRecovery`:
+    /// "Free memory reporting on GPUs can lag for a while even after the
+    /// runner exits ... otherwise subsequent model loads will get far less
+    /// layers loaded". Three quarters, as Ollama's, because what a worker is
+    /// charged is an estimate. Returns at the first reading where nothing
+    /// lags (2 GB back 0.07 s after `kill -9` on the WSL2 laptop, 3 of 3).
+    async fn await_card_memory_back(
+        before_mb: u64,
+        owed_mb: u64,
+        mut read_free_mb: impl FnMut() -> Option<u64>,
+        within: std::time::Duration,
+        poll: std::time::Duration,
+    ) -> CardMemoryBack {
+        let start = std::time::Instant::now();
+        let wanted_mb = owed_mb.saturating_mul(3) / 4;
+        loop {
+            let Some(free_mb) = read_free_mb() else {
+                return CardMemoryBack::Unread;
+            };
+            if free_mb.saturating_sub(before_mb) >= wanted_mb {
+                return CardMemoryBack::Back {
+                    waited_ms: u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX),
+                };
+            }
+            if start.elapsed() >= within {
+                return CardMemoryBack::NotBack { free_mb };
+            }
+            tokio::time::sleep(poll).await;
         }
     }
 
@@ -22425,6 +22573,74 @@ mod admission_tests {
         p.release_vram_charge(&a, 5000);
         assert_eq!(p.vram_committed_mb(), 0);
         assert!(p.admit_to_gpu(&ModelId("b".into()), 2000));
+    }
+
+    /// **A retired card worker's memory is waited for, as Ollama waits for a
+    /// runner's** (#3 (j13), `waitForVRAMRecovery`): a far computer's reload
+    /// read the card before the worker it replaced had given its memory back
+    /// and placed 17-18 of 48 layers where its cold load placed 45.
+    #[tokio::test]
+    async fn a_stopped_card_workers_memory_is_waited_for_until_it_is_back() {
+        use std::time::Duration;
+        let within = Duration::from_millis(400);
+        let poll = Duration::from_millis(10);
+
+        // Back at the first reading: no wait at all.
+        let back =
+            ModelProcessPool::await_card_memory_back(5_700, 4_300, || Some(10_000), within, poll)
+                .await;
+        assert!(
+            matches!(back, CardMemoryBack::Back { waited_ms } if waited_ms < 10),
+            "{back:?}"
+        );
+
+        // Lagging: unchanged twice, then three quarters back.
+        let mut readings = [5_700, 5_710, 8_950].into_iter();
+        let back = ModelProcessPool::await_card_memory_back(
+            5_700,
+            4_300,
+            move || readings.next(),
+            within,
+            poll,
+        )
+        .await;
+        assert!(
+            matches!(back, CardMemoryBack::Back { waited_ms } if waited_ms >= 20),
+            "the load waits for the lagging memory: {back:?}"
+        );
+
+        // Never back: the wait ends at its bound and says how far it got.
+        let started = std::time::Instant::now();
+        let back =
+            ModelProcessPool::await_card_memory_back(5_700, 4_300, || Some(6_000), within, poll)
+                .await;
+        assert_eq!(back, CardMemoryBack::NotBack { free_mb: 6_000 });
+        assert!(started.elapsed() < within + Duration::from_millis(300));
+
+        // Unreadable: nothing to wait on.
+        let back =
+            ModelProcessPool::await_card_memory_back(5_700, 4_300, || None, within, poll).await;
+        assert_eq!(back, CardMemoryBack::Unread);
+    }
+
+    /// What a retired worker gives back to the CARD: its charge when it held
+    /// card memory, nothing when it ran in system memory.
+    #[test]
+    fn a_retired_workers_card_share_is_its_card_charge_alone() {
+        let card = DepartedWorker {
+            freed_gpu_memory: true,
+            charged_mb: 4_300,
+            charged_against_ram: false,
+            host_share_mb: 1_200,
+        };
+        assert_eq!(card.card_mb_it_frees(), 4_300);
+        let machine = DepartedWorker {
+            freed_gpu_memory: false,
+            charged_mb: 9_000,
+            charged_against_ram: true,
+            host_share_mb: 0,
+        };
+        assert_eq!(machine.card_mb_it_frees(), 0);
     }
 
     /// The budget must not come back before the memory does.

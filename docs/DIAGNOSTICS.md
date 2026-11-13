@@ -721,6 +721,12 @@ such as the worker this load replaced (Ollama waits for that memory to come back
 (`fit_whole_placement_to_the_load`, `refit_split_to_the_load`). `gpu_vram_available_mb` is free
 memory as of its last broadcast; it is re-sent only when it moves by more than 256 MB.
 `~/swarmllm-gate/deep/fr/real_link.sh` writes all three after every request (`peers_seen.jsonl`).
+Since 2026-11-14 a retirement waits for the card's memory to come back before the next load reads it
+(`await_card_memory_back`). On this node, a wait shows in the log as INFO
+`DIAG: a stopped worker's card memory came back only after its process`, with `waited_ms`, or as
+`DIAG: a stopped worker's card memory was not back in time`, with `before_mb` and `free_mb`.
+At `-v` a wait that was not needed shows as `DIAG: a stopped worker's card memory is back`. A/B
+`SWARMLLM_CARD_MEMORY_BACK=0`.
 
 ## "A computer shows no location" / "its figures never change" (2026-11-05, #406 #407)
 

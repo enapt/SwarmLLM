@@ -883,6 +883,28 @@ worse failure than the race. It reports what it stranded. Retirement only ever
 targets idle models, so the common path returns without sleeping at all, and a
 test pins that so no unload pays for a race that is not happening.
 
+**And a retired card worker's memory is waited for, not only its process**
+(2026-11-14, FUTURE_WORK #3 (j13)). A process that has been reaped has not
+necessarily given its memory back by the driver's reading. A far computer's 14B
+was reloaded right after its `[24..48)` worker was retired, and placed 17-18 of
+48 layers on its 12 GB card. Its cold load of the same model in the same run had
+placed 45. Two runs showed it (`TAG=j11`, `TAG=j13`). The layer count fits a
+reading of about 5.7 GB free, the figure with the old worker's ~4.3 GB still
+held. `unload_model` now reads the card's free memory before `Shutdown`. After
+the reap, `await_card_memory_back` waits until free memory has risen by three
+quarters of the worker's card charge (`DepartedWorker::card_mb_it_frees`). It
+reads every 250 ms (`CARD_MEMORY_POLL`) for up to 5 s (`CARD_MEMORY_BACK_WITHIN`),
+and only then releases the budget. A spawn under the same `spawn_lock` (growth's
+retirement, promotion) reads the card after that.
+Prior art: Ollama `server/sched.go` `waitForVRAMRecovery`, whose figures and 75%
+are taken as is. Their rationale is our symptom: "subsequent model loads will
+get far less layers loaded". It was not seen on the WSL2 laptop: 2 GB came back
+0.07 s after `kill -9`, 3 of 3, so the wait returns at its first reading here.
+Whether it fires on the far computer is read from that computer's
+`card_free_at_load_mb` after the release. Only a worker with a process waits; a
+test's stand-in has none and would wait out the bound. A/B
+`SWARMLLM_CARD_MEMORY_BACK=0`.
+
 ## `model::auto_manage::storage_budget` is the ONE answer to "how much shard storage may this node hold?", and `held_shard_bytes` the one answer to "how much does it hold?"
 
 (2026-09-03, gotcha #448). `storage_budget_now(&state)`

@@ -136,6 +136,12 @@ The loader records the card's KV budget with or without `inference.max_seq_len_o
 
 → `docs/invariants/memory.md` § "A card's KV budget is kept whatever the context setting"
 
+## A retired card worker's memory is waited for before the next load reads the card (2026-11-14, #3 (j13))
+
+`unload_model` (every retirement) reads the card before `Shutdown` and, once the process is reaped, waits until three quarters of its card charge reads free again (`await_card_memory_back`: 250 ms polls, 5 s bound — Ollama's `waitForVRAMRecovery`), THEN releases the budget: a reaped process is not memory back, and a reload reading it meanwhile placed 17 of 48 layers where 45 fit. A/B `SWARMLLM_CARD_MEMORY_BACK=0`.
+
+→ `docs/invariants/memory.md` § "Graphics memory has ONE owner" (**And a retired card worker's memory is waited for**)
+
 ## The daemon holds no CUDA context — only workers do (2026-10-05)
 
 **`gpu_support::describe_local_gpu`** (driver API: `cuInit`, name, total — no context) is how the daemon learns its card. Never llama.cpp's device list or `Device::cuda_if_available` in the daemon: each leaves a context that held 137 MiB of an 8 GB card for the node's life. Free card memory is read live (`vram::query_gpu_vram_free_mb`), never kept from startup — `GpuInfo` has no free field.
