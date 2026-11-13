@@ -1080,6 +1080,15 @@ each server benchmark itself at startup). Not obviously wrong for chat on this m
 (prose: local ~13 tok/s against the boomerang flow's 7.4-8.3), wrong for code (13.6-15.4 against
 17-20). A candidate figure this node already measures: the drafter's acceptance on its OWN
 guessed replies (`LocalSpec`), the same drafter and target a split would use.
+**Measured against the WHOLE hand-off too (2026-11-13, v0.3.284, `real_link.sh` arm `flowall`, Qwen2.5-14B Q4_K_M
+held whole here AND on an RTX 3060 in Australia, ~150 ms, 0.5B drafter here, fresh data dir):** every candidate read
+`split_tokens_per_round=None` and the plan handed the whole model to the 3060 ("holds the whole model but would run
+it on its processor", `local_processor_cost_ms` ~98 s against `pipeline_cost_ms` ~14.8 s, segments=1): code
+17.2-18.0, prose 13.6-17.4 tok/s. The same machines as a split it never priced right (`flowhalf`, half here with the
+drafter on this card, `readme284`, same day): code 34.0-37.5, prose 15.5-17.1 — the trap costs ~2× on code. Caveat:
+the rig starts every arm on an empty node (no history, nothing loaded), which is also a new user's first hour; the
+hand-off's own price (the peer's stated 45 tok/s in 7B units) was optimistic as well, so fixing the prior alone may
+not flip the choice — model both before building.
 
 `scheduler/parallax.rs` charges a remote hop a flat `ASSUMED_FORWARD_PASSES = 64.0`. The error
 grows with reply length — 1.0 at 8 tokens, 2.4-3.3 at 120-239 — and biases every delegation
