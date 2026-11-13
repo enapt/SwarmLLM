@@ -2752,7 +2752,14 @@ pub async fn network_map(State(state): State<AppState>) -> Json<serde_json::Valu
         out
     };
 
-    Json(serde_json::json!({ "regions": region_json, "recent_routes": recent_routes }))
+    // `self_region`: where this computer is counted, so the map can ring it
+    // (`network-map.js::renderThisComputer`) — a person checks the map
+    // against where they are. `??` when its country is not known.
+    Json(serde_json::json!({
+        "regions": region_json,
+        "recent_routes": recent_routes,
+        "self_region": self_region,
+    }))
 }
 
 /// GET /api/admin/network-code — Return this node's network invite code.

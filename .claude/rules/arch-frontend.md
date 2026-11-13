@@ -173,6 +173,12 @@ over it.
 
 → `docs/invariants/frontend.md` § "One choice is shown by every control that shows it, and a model by its id"
 
+## A country's mark on the map is its label point (2026-11-13)
+
+**`network-map.js::regionCenter`** is the one place a two-letter code becomes a point on the map (dots, route arcs, the planned path, the "This computer" ring): Natural Earth's label point, the `points` object of `data/countries.json`. Never an outline's `getBBox` middle — 20 of 166 fell outside their country (Russia's at 0°, France's in the Atlantic). That file is built ALREADY PROJECTED by `examples/build_map_data.sh` (mapshaper `-proj` + `-o width=`, us-atlas's approach): the browser does no map arithmetic — a hand-written antimeridian rule is wrong for a filled ring. Each outline carries its code (`c`) in two border views, `default` and `IN` (India's official boundaries, `worldviewFor`); an outline with no shape is dropped in the build and drawn as its dot (read as a shape, one stopped every later outline being drawn). A lit country is lit by its fill, never a stroke or glow that lies over the shared border. Guard `every_country_the_map_draws_has_a_code_and_a_marker`.
+
+→ `docs/invariants/frontend.md` § "A country's mark is its label point, never its outline's middle"
+
 ## Frontend Event Handling
 
 All WS events are handled by `_handleActivityEvent()` in notifications.js. Do NOT:

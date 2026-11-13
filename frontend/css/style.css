@@ -3953,13 +3953,27 @@ textarea.pool-code-input { min-height: 4.5em; }
 }
 .world-svg .map-region:hover {
   stroke: rgba(100,210,255,0.95) !important;
-  stroke-width: 1.8 !important;
-  fill: rgba(59,130,246,0.18) !important;
-  filter: drop-shadow(0 0 6px rgba(80,180,255,0.5)) drop-shadow(0 0 12px rgba(59,130,246,0.25)) !important;
+  stroke-width: 1 !important;
+  fill: rgba(59,130,246,0.32) !important;
 }
 .world-svg .map-node-dot {
   pointer-events: none;
   animation: pulse-map-dot 2s ease-in-out infinite;
+}
+/* A country too small for the outlines (Singapore, Hong Kong, Malta) is only
+   its dot, so the dot takes the pointer for its tooltip. */
+.world-svg .map-node-dot.alone {
+  pointer-events: auto;
+  cursor: pointer;
+}
+/* The ring round this computer's country (`renderThisComputer`), and its key.
+   In the text colour: the map's yellow already means a coverage gap. */
+.map-this-computer {
+  fill: none;
+  stroke: var(--text-primary);
+  stroke-width: 1.5;
+  stroke-dasharray: 3 2;
+  pointer-events: none;
 }
 @keyframes pulse-map-dot {
   0%, 100% { opacity: 0.7; }

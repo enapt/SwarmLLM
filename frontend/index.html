@@ -1480,6 +1480,11 @@
                 <div class="legend-bar"></div>
                 <span class="text-muted" style="font-size:0.7rem" id="map-legend-max">0</span>
               </div>
+              <!-- The ring `renderThisComputer` draws; shown only while it is. -->
+              <span id="map-legend-self" class="map-route-key-item" style="display:none">
+                <svg class="map-route-key-swatch" viewBox="0 0 22 22" style="width:12px;height:12px" aria-hidden="true"><circle cx="11" cy="11" r="8" class="map-this-computer"/></svg>
+                <span class="text-muted" style="font-size:0.75rem" data-i18n="chat.status.on_this_computer">This computer</span>
+              </span>
             </div>
             <!-- The lines the map draws had no key at all — two colours, one
                  meaning "a request ran this way" and one "and it failed",

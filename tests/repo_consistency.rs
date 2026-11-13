@@ -10147,6 +10147,108 @@ fn the_windows_gpu_update_swaps_one_file_and_the_cuda_pin_still_allows_that() {
     );
 }
 
+/// Every outline the Network map draws is named by a two-letter code, has a
+/// shape, and every code it can name has a marker — in every border view the
+/// outlines carry.
+///
+/// The map read world-atlas's outlines through a numeric-id table typed by hand
+/// in `network-map.js`, which lacked nine — Slovenia, Serbia, Armenia,
+/// Azerbaijan, North Macedonia, Montenegro, Kosovo, Eswatini, Puerto Rico — so
+/// computers there never lit the map (2026-11-13). `frontend/data/countries.json`
+/// (built by `examples/build_map_data.sh` from Natural Earth, already projected)
+/// carries each outline's code itself, in two views: `default` (de facto
+/// borders) and `IN` (India's official boundaries, for a viewer in India); each
+/// code's label point is in its `points` object, where the dot and the route arcs
+/// start, never at an outline's middle (Russia's and Fiji's middles were 0°). An
+/// outline with NO shape (Vatican City, too small for the quantization) once made
+/// the drawing throw and every outline after it — Australia, Japan, Iceland and
+/// 30 more — went undrawn; the build drops it, and the country is a dot.
+#[test]
+fn every_country_the_map_draws_has_a_code_and_a_marker() {
+    let p = repo_root().join("frontend/data/countries.json");
+    let topo: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&p).expect("read the map data"))
+            .expect("countries.json is JSON");
+    let objects = topo["objects"].as_object().expect("a TopoJSON topology");
+    for drawn in ["frame", "grid", "equator"] {
+        assert!(
+            objects.contains_key(drawn),
+            "no `{drawn}` object in countries.json"
+        );
+    }
+    let mut at = BTreeSet::new();
+    for g in objects["points"]["geometries"]
+        .as_array()
+        .expect("a `points` object of label points")
+    {
+        assert_eq!(g["type"], "Point", "a label point that is not a point: {g}");
+        at.insert(
+            g["properties"]["c"]
+                .as_str()
+                .expect("a label point names its country")
+                .to_string(),
+        );
+    }
+    let mut india = std::collections::BTreeMap::new();
+    for view in ["default", "IN"] {
+        let geometries = objects
+            .get(view)
+            .and_then(|o| o["geometries"].as_array())
+            .unwrap_or_else(|| panic!("no `{view}` border view in countries.json"));
+        assert!(
+            geometries.len() > 150,
+            "the `{view}` view has only {} outlines — the build changed and this checks nothing",
+            geometries.len()
+        );
+        let mut codes = BTreeSet::new();
+        for g in geometries {
+            assert!(
+                matches!(g["type"].as_str(), Some("Polygon" | "MultiPolygon")),
+                "an outline in `{view}` has no shape ({g}) — topojson-client hands it back as \
+                 `geometry: null`; drop it in the build and draw the country from its point"
+            );
+            match &g["properties"]["c"] {
+                serde_json::Value::Null => {}
+                serde_json::Value::String(c)
+                    if c.len() == 2 && c.bytes().all(|b| b.is_ascii_uppercase()) =>
+                {
+                    if c == "IN" {
+                        india.insert(view, g["arcs"].clone());
+                    }
+                    codes.insert(c.clone());
+                }
+                other => {
+                    panic!("an outline in `{view}` has code {other} — two capital letters or null")
+                }
+            }
+        }
+        let no_marker: Vec<&String> = codes.iter().filter(|c| !at.contains(*c)).collect();
+        assert!(
+            no_marker.is_empty(),
+            "in the `{view}` view these countries have an outline but no label point, so \
+             their dot and route arcs have nowhere to go: {no_marker:?}"
+        );
+        for once_missing in [
+            "SI", "RS", "AM", "AZ", "MK", "ME", "SZ", "PR", "IN", "PK", "CN", "AU", "JP", "IS",
+            "NZ",
+        ] {
+            assert!(
+                codes.contains(once_missing),
+                "the `{view}` view has no outline for {once_missing}"
+            );
+        }
+    }
+    assert_ne!(
+        india.get("default"),
+        india.get("IN"),
+        "India's outline is the same in both views — the India edition was not built in"
+    );
+    // A computer in a country too small for the outlines is still drawn.
+    for small in ["SG", "HK", "MT", "BH", "XK", "VA"] {
+        assert!(at.contains(small), "no marker for {small}");
+    }
+}
+
 /// Every `vh` length in the stylesheets is paired with a `dvh` one.
 ///
 /// `100vh` on iOS Safari means the viewport with the browser chrome COLLAPSED,

@@ -3032,7 +3032,7 @@ Routes Claude model requests through a locally-authenticated `claude` CLI subpro
 - `GET    /api/admin/network-map` — Network topology heatmap data, plus
   `recent_routes` (up to 24, newest first): the regions each recent request
   actually passed through, projected from `recent_traces`. The Network view
-  draws them as arcs.
+  draws them as arcs. `self_region`: the country this node is counted in.
 - `GET    /api/admin/models/{id}/metadata` — GGUF metadata (context length, quantization, layers)
 - `GET/PUT/DELETE /api/admin/models/{id}/encrypted-pipeline` — Per-model "Start and finish on this computer": `{enabled: true|false|null}` in (null or DELETE forgets the choice); `decided_by` + `default_for_this_model` out
 - `GET/PUT /api/admin/models/{id}/keep-on-this-computer` — Per-model "Keep on this computer": `{enabled}` in; `keep_on_this_computer` + `whole_model_here` out (#251)
@@ -3080,9 +3080,13 @@ Routes Claude model requests through a locally-authenticated `claude` CLI subpro
   - `frontend/js/components/downloads.js` — download queue, prune history, resource schedule
   - `frontend/js/components/notifications.js` — unified event handler, toasts, WebSocket, REST polling, provider health
   - `frontend/js/components/identity.js` — network invite code, nickname, leaderboard
-  - `frontend/js/components/network-map.js` — regional network map, the
-    scheduler's planned path, and the arcs for routes that actually ran
-    (`renderRecentRoutes`, sharing `regionCenter`/`arcPath` with the plan)
+  - `frontend/js/components/network-map.js` — regional network map, drawn
+    from `data/countries.json` (TopoJSON already projected to Equal Earth
+    pixels by `examples/build_map_data.sh` from Natural Earth: outlines in two
+    border views, `default` and `IN`, chosen by `worldviewFor`; each country's
+    marker at its label point, `points`), the scheduler's planned path, and the
+    arcs for routes that actually ran (`renderRecentRoutes`, sharing
+    `regionCenter`/`arcPath` with the plan)
   - `frontend/js/components/compare.js` — multi-model comparison tool; streams `/v1/messages` and re-assembles the SSE into the same non-streaming shape the card renderer and the history entry read
   - `frontend/js/components/responses.js` — `/v1/responses` dashboard panel: retrieve-by-id, status-filtered list, cancel/delete/view per row, 5-second polling refresh while visible
   - `frontend/js/components/pool.js` — device pool management (create, join, members, contribution)

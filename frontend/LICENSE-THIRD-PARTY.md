@@ -11,6 +11,19 @@ upstream license terms apply to the bundled copies.
 - License: BSD 3-Clause
   https://github.com/topojson/topojson-client/blob/master/LICENSE
 
+## World map outlines and country points
+
+- File: `data/countries.json` — country outlines (Natural Earth v5.1.2's
+  1:10m admin-0 countries and its India point-of-view edition, simplified
+  together) and each country's label point (LABEL_X / LABEL_Y, from the 1:50m
+  admin-0 countries and map units), projected into one TopoJSON by
+  `examples/build_map_data.sh` with mapshaper (MPL-2.0; a build tool, not
+  bundled)
+- Upstream: https://www.naturalearthdata.com/ ·
+  https://github.com/nvkelso/natural-earth-vector
+- Natural Earth is in the public domain
+  https://www.naturalearthdata.com/about/terms-of-use/
+
 ## IBM Plex Sans / IBM Plex Mono
 
 - Files: `fonts/ibm-plex-sans-latin-wght-normal.woff2` (variable, wght 100–700),

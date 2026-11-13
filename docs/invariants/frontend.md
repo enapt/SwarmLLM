@@ -577,3 +577,93 @@ and matched only lines STARTING with `cache.`: it could not see
 - **The Settings form is still never populated from a held config**: it reads
   `loadReachedDaemon('config')` too, because that read is the baseline Save
   diffs against (§ "A panel that could not READ its settings").
+
+## A country's mark is its label point, never its outline's middle (2026-11-13)
+
+The Network map put each country's dot, and the end of every route arc, at the
+middle of the bounding box of the country's outline (`getBBox`), on a plate
+carrée projection. A new user reported the map did not look accurate. Measured
+over the 166 outlines it could name, **20 of those middles fell outside the
+country**: Russia's and Fiji's outlines reach both sides of the 180th meridian,
+so their middle was 0° (Russia's dot in Norway, Fiji's in Africa); France's box
+takes in French Guiana (a dot in the Atlantic off West Africa); Japan, Norway,
+Vietnam, Croatia, Malaysia, the Philippines, Indonesia, Israel and the UAE were
+all off their own land. Nine outlines had no code at all in the hand-typed
+numeric-id table (Slovenia, Serbia, Armenia, Azerbaijan, North Macedonia,
+Montenegro, Kosovo, Eswatini, Puerto Rico), so a computer there never lit the
+map, and a country too small for 1:110m outlines (Singapore, Hong Kong, Malta,
+Bahrain) had no dot.
+
+Prior art: Natural Earth publishes `LABEL_X` / `LABEL_Y` on every admin-0
+feature, placed by hand for exactly this, a point label inside the main body
+(the alternative, Mapbox's polylabel, computes a pole of inaccessibility, and
+d3's `geoCentroid` has the same far-territory problem as a bounding box). The
+projection is Equal Earth (Šavrič, Patterson & Jenny 2018, EPSG:1078, the
+equations of d3-geo's `geoEqualEarth`): equal-area and closed-form, where plate
+carrée drew Russia, Canada and Greenland several times their size.
+
+What it is now: ONE file, `frontend/data/countries.json`, built by
+`examples/build_map_data.sh` from Natural Earth v5.1.2 (mapshaper 0.6.121, both
+pinned) and **already projected**: TopoJSON in the pixels of a 1000-wide frame,
+origin top left, drawn as it is. Objects: `default` and `IN`, the outlines in two
+border views (below), each carrying `c`, its two-letter code from `ISO_A2_EH`
+(Northern Cyprus and Somaliland have none and are drawn with Cyprus and Somalia,
+as an address lookup answers for a computer there); `points`, each code's label
+point from the 1:50m countries and map units (246 codes); `frame`, `grid`,
+`equator`. `network-map.js::regionCenter` is the ONE place a code becomes a point:
+dots, recent routes, the planned path, the "This computer" ring.
+
+**Why pre-projected, not projected in the browser** (2026-11-13, after the user
+asked for the common way to do it). A first version projected each point in
+`network-map.js` by hand and started a new piece of a ring wherever two points
+lay more than 180° apart — the classic antimeridian hack, wrong for a FILLED ring
+(the piece is left open and its fill runs a chord across the map). Prior art: the
+standard browser answer is d3-geo (`geoEqualEarth` + `geoPath`, which cuts on the
+sphere with `geoClipAntimeridian`), ~36 KB + d3-array for a map that never moves;
+for a static map Bostock's "Command-Line Cartography" and us-atlas v3 ship
+PRE-PROJECTED TopoJSON drawn with no projection at all, which mapshaper's
+`-o width=` writes. Its `-proj` cuts and closes rings at the antimeridian,
+`densify` bends a straight edge as the projection does, `clip-bbox` cuts the
+frame at 84° N / 58° S (Antarctica is not drawn), and simplifying AFTER the
+projection keeps the added points only where a line bends (Equal Earth keeps
+areas true, so the 300 km² island cut is in real km²). The graticule is projected
+in a run of its own: in the outlines' topology every crossing of a grid line and
+a border split both, and the file grew by half; the same frame in both runs gives
+both the same fit and quantization, so its arcs are appended as they are. At
+quantization 10000 (0.1 px) the file is 126.5 KB, 28.5 KB gzipped.
+
+**An outline with no shape.** Vatican City is too small to survive the
+quantization and came out as a geometry with no type; topojson-client hands that
+back as `geometry: null` (its documented answer), the drawing threw on it, the
+`try` around the loop swallowed it, and every outline after it in the file —
+Australia, Japan, New Zealand, Iceland, Greenland and ~30 more — went undrawn,
+silently. The build now drops such an outline (and fails if its country has no
+label point), and `geomToPath(null)` draws nothing.
+
+**Border views.** A new user in India reported the map overlapped into Myanmar.
+Two causes: the de facto borders cut India short of its official boundaries (all
+of Jammu and Kashmir and Aksai Chin as India), and a lit country's thick centred
+stroke and glow lay over the border it shares (a lit India spilled into Myanmar
+and Bangladesh). Prior art: Natural Earth 5.0 ships point-of-view editions of its
+admin-0 countries (31, India's among them); Google Maps shows a viewer in India
+India's borders (google.co.in) and a de facto view elsewhere; Mapbox calls it a
+`worldview` filter, HERE a geopolitical view; Highcharts keeps de facto by default
+with a separate India-disputed map. India's 2021 geospatial guidelines name Survey
+of India boundaries as the standard for political maps. So `worldviewFor` draws
+the `IN` view where this computer is placed in India (`self_region`) or the
+browser's locale region is IN, else `default`; and a lit country is lit by its
+FILL, its border 0.7 like its neighbours', no glow.
+
+### What a change must keep
+
+- **A mark on the map goes through `regionCenter`**, never an element's
+  `getBBox` (wrong for a country in pieces, and zero while the tab is hidden).
+- **Every outline has a code and a shape, and every code a point.** Guard
+  `every_country_the_map_draws_has_a_code_and_a_marker`, which also fails if the
+  India edition is not built in.
+- **The browser does no map arithmetic.** A new mark is projected by the build;
+  never re-add a projection or an antimeridian rule to `network-map.js`.
+- **A country with no outline still gets its dot**, which then answers the
+  pointer for its tooltip (`.map-node-dot.alone`).
+- **A highlight stays inside its border**: fill, not a thick stroke or a filter,
+  on a line two countries share.

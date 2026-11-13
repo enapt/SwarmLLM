@@ -73,12 +73,14 @@ Response:
   },
   "recent_routes": [
     { "model": "qwen2.5-coder-7b-instruct-q4-k-m", "regions": ["TH", "IT"], "ok": true }
-  ]
+  ],
+  "self_region": "TH"
 }
 ```
 
 `recent_routes` lists this node's recent requests that left its region: the
 regions each one crossed, starting here, and whether it succeeded.
+`self_region` is the country this node is counted in (`??` when not known).
 
 ### GET/PUT /api/admin/config
 Read or update daemon configuration. Both need the API key.

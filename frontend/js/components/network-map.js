@@ -27,125 +27,180 @@
           el.style.strokeWidth = '0.5';
           el.removeAttribute('filter');
         } else {
+          // Lit by its FILL, with a border as thin as its neighbours'. A
+          // border is drawn centred on the line two countries share, so a
+          // thick one — and the 3-unit glow it had — lay over the neighbour:
+          // a lit India read as spilling into Myanmar and Bangladesh.
           var intensity = Math.max(0.25, n / Math.max(maxCount, 1));
-          var fillAlpha = (0.06 + intensity * 0.14).toFixed(2);
-          var strokeAlpha = (0.5 + intensity * 0.5).toFixed(2);
+          var fillAlpha = (0.14 + intensity * 0.3).toFixed(2);
+          var strokeAlpha = (0.55 + intensity * 0.45).toFixed(2);
           el.style.fill = 'rgba(59,130,246,' + fillAlpha + ')';
           el.style.stroke = 'rgba(100,180,255,' + strokeAlpha + ')';
-          el.style.strokeWidth = (0.8 + intensity * 1.2).toFixed(1);
-          el.setAttribute('filter', 'url(#glow-md)');
+          el.style.strokeWidth = '0.7';
+          el.removeAttribute('filter');
         }
       }
     },
 
-    numToAlpha2: {
-      '004':'AF','008':'AL','012':'DZ','024':'AO','032':'AR','036':'AU','040':'AT',
-      '044':'BS','050':'BD','056':'BE','064':'BT','068':'BO','070':'BA','072':'BW',
-      '076':'BR','084':'BZ','090':'SB','096':'BN','100':'BG','104':'MM','108':'BI',
-      '112':'BY','116':'KH','120':'CM','124':'CA','140':'CF','144':'LK','148':'TD',
-      '152':'CL','156':'CN','158':'TW','170':'CO','178':'CG','180':'CD','188':'CR',
-      '191':'HR','192':'CU','196':'CY','203':'CZ','204':'BJ','208':'DK','214':'DO',
-      '218':'EC','222':'SV','226':'GQ','231':'ET','232':'ER','233':'EE','238':'FK',
-      '242':'FJ','246':'FI','250':'FR','260':'TF','262':'DJ','266':'GA','268':'GE',
-      '270':'GM','275':'PS','276':'DE','288':'GH','296':'KI','300':'GR','304':'GL',
-      '320':'GT','324':'GN','328':'GY','332':'HT','340':'HN','344':'HK','348':'HU',
-      '352':'IS','356':'IN','360':'ID','364':'IR','368':'IQ','372':'IE','376':'IL',
-      '380':'IT','384':'CI','388':'JM','392':'JP','398':'KZ','400':'JO','404':'KE',
-      '408':'KP','410':'KR','414':'KW','417':'KG','418':'LA','422':'LB','426':'LS',
-      '428':'LV','430':'LR','434':'LY','440':'LT','442':'LU','450':'MG','454':'MW',
-      '458':'MY','462':'MV','466':'ML','478':'MR','484':'MX','496':'MN','498':'MD',
-      '504':'MA','508':'MZ','512':'OM','516':'NA','524':'NP','528':'NL','540':'NC',
-      '548':'VU','554':'NZ','558':'NI','562':'NE','566':'NG','578':'NO','586':'PK',
-      '591':'PA','598':'PG','600':'PY','604':'PE','608':'PH','616':'PL','620':'PT',
-      '624':'GW','626':'TL','634':'QA','642':'RO','643':'RU','646':'RW','682':'SA',
-      '686':'SN','694':'SL','702':'SG','703':'SK','704':'VN','706':'SO','710':'ZA',
-      '716':'ZW','724':'ES','728':'SS','729':'SD','732':'EH','740':'SR','752':'SE',
-      '756':'CH','760':'SY','762':'TJ','764':'TH','768':'TG','780':'TT','784':'AE',
-      '788':'TN','792':'TR','795':'TM','800':'UG','804':'UA','818':'EG','826':'GB',
-      '834':'TZ','840':'US','854':'BF','858':'UY','860':'UZ','862':'VE','887':'YE',
-      '894':'ZM',
+    // THE MAP — `/static/data/countries.json`, built from Natural Earth
+    // (public domain) by `examples/build_map_data.sh`: TopoJSON already
+    // PROJECTED (Equal Earth, areas true) and fitted to a 1000-pixel frame
+    // with its origin at the top left, so it is drawn as it is and this file
+    // does no map arithmetic. Prior art: us-atlas ships pre-projected files for
+    // the same reason, and mapshaper's `-o width=` writes them. This file once
+    // projected by hand and started a new piece of a ring wherever it crossed
+    // the 180th meridian — wrong for a FILLED shape, which mapshaper's `-proj`
+    // cuts and closes properly. Objects:
+    //
+    // - `default`, `IN` — the outlines, one object per BORDER VIEW
+    //   (`worldviewFor`): Natural Earth's de facto borders, and its India
+    //   edition — India's official boundaries (all of Jammu and Kashmir and
+    //   Aksai Chin as India), which a viewer in India expects and the de facto
+    //   map cuts short. Prior art: Google Maps shows each country its own
+    //   borders; Mapbox calls it a `worldview`, HERE a geopolitical view. Each
+    //   outline carries `c`, its two-letter code (null for an area no code
+    //   names). The map read world-atlas's outlines through a numeric-id table
+    //   typed by hand here, which lacked nine — Slovenia, Serbia, Armenia,
+    //   Azerbaijan, North Macedonia, Montenegro, Kosovo, Eswatini, Puerto Rico
+    //   — so their computers never lit the map.
+    // - `points` — each code's label point (Natural Earth's LABEL_X / LABEL_Y,
+    //   placed by hand inside a country's main body). A computer's dot and
+    //   every route arc start there. They started at the middle of the
+    //   OUTLINE's bounding box, which for a country with land far apart is open
+    //   sea or another country: Russia's and Fiji's reach both sides of the
+    //   180th meridian, so their middle was 0° (Russia's dot in Norway, Fiji's
+    //   in Africa); France's box takes in French Guiana (a dot in the
+    //   Atlantic). It is also how a country too small to keep an outline
+    //   (Vatican City, Singapore, Malta) gets a dot.
+    // - `frame`, `grid`, `equator` — the map's edge (cut at 84° N and 58° S:
+    //   Antarctica is not drawn, nor the empty band below Cape Horn) and a 30°
+    //   graticule.
+    //
+    // Guard: `every_country_the_map_draws_has_a_code_and_a_marker`.
+    points: {},
+    worldview: null,
+    _shapes: null,
+    _loadShapes: async function() {
+      if (App.networkMap._shapes) return App.networkMap._shapes;
+      var topo = await fetch('/static/data/countries.json').then(function(r) { return r.json(); });
+      var at = {};
+      topojson.feature(topo, topo.objects.points).features.forEach(function(f) {
+        if (f.geometry && f.properties && f.properties.c) at[f.properties.c] = f.geometry.coordinates;
+      });
+      // The frame's margin is the same on every side, so the canvas is the
+      // drawing's far corner plus its near one.
+      var b = topojson.bbox(topo);
+      App.networkMap._shapes = { topo: topo, at: at, w: Math.ceil(b[2] + b[0]), h: Math.ceil(b[3] + b[1]) };
+      App.networkMap.points = at;
+      return App.networkMap._shapes;
     },
 
-    projectCoord: function(lon, lat) {
-      var x = (lon + 180) / 360 * 1000;
-      var y = (90 - lat) / 180 * 500;
-      return [Math.round(x * 10) / 10, Math.round(y * 10) / 10];
-    },
-
-    ringToPath: function(ring) {
-      var parts = [];
-      for (var i = 0; i < ring.length; i++) {
-        var p = App.networkMap.projectCoord(ring[i][0], ring[i][1]);
-        if (i === 0) {
-          parts.push('M' + p[0] + ',' + p[1]);
-        } else {
-          var lonDiff = Math.abs(ring[i][0] - ring[i - 1][0]);
-          if (lonDiff > 180) {
-            parts.push('M' + p[0] + ',' + p[1]);
-          } else {
-            parts.push('L' + p[0] + ',' + p[1]);
-          }
-        }
+    // WHOSE BORDERS TO DRAW: the view named for this computer's country
+    // (`self_region`), else for the browser's region (`en-IN`, `hi-IN`), when
+    // the outlines carry one; otherwise Natural Earth's de facto borders.
+    worldviewFor: function(selfRegion) {
+      var objs = (App.networkMap._shapes && App.networkMap._shapes.topo.objects) || {};
+      var asked = [selfRegion, App.networkMap._browserRegion()];
+      for (var i = 0; i < asked.length; i++) {
+        if (asked[i] && asked[i] !== 'default' && objs[asked[i]]) return asked[i];
       }
-      parts.push('Z');
-      return parts.join('');
+      return 'default';
+    },
+    _browserRegion: function() {
+      try {
+        var langs = navigator.languages && navigator.languages.length ? navigator.languages : [navigator.language];
+        for (var i = 0; i < langs.length; i++) {
+          var m = /-([A-Za-z]{2})(?:-|$)/.exec(langs[i] || '');
+          if (m) return m[1].toUpperCase();
+        }
+      } catch (e) {}
+      return null;
     },
 
-    geomToPath: function(geom) {
+    // The frame, a 30° graticule and the equator, as the file draws them. The
+    // old straight grid every 50 px matched no round number of degrees.
+    _graticuleSvg: function(topo) {
+      var d = function(name) { return App.networkMap._objectPath(topo, name); };
+      return '<path d="' + d('frame') + '" fill="var(--accent)" fill-opacity="0.025" stroke="var(--accent)" stroke-width="0.5" stroke-opacity="0.3"/>'
+        + '<path d="' + d('grid') + '" fill="none" stroke="var(--accent)" stroke-width="0.3" stroke-opacity="0.15"/>'
+        + '<path d="' + d('equator') + '" fill="none" stroke="var(--accent)" stroke-width="0.5" stroke-opacity="0.18" stroke-dasharray="8,4"/>';
+    },
+
+    // One object of the file as SVG path data.
+    _objectPath: function(topo, name) {
+      if (!topo.objects[name]) return '';
+      return topojson.feature(topo, topo.objects[name]).features
+        .map(function(f) { return App.networkMap.geomToPath(f.geometry); }).join('');
+    },
+
+    // A line through points already in the map's pixels; `closed` for a ring.
+    lineToPath: function(pts, closed) {
       var d = '';
-      if (geom.type === 'Polygon') {
-        for (var i = 0; i < geom.coordinates.length; i++) {
-          d += App.networkMap.ringToPath(geom.coordinates[i]);
-        }
-      } else if (geom.type === 'MultiPolygon') {
-        for (var i = 0; i < geom.coordinates.length; i++) {
-          for (var j = 0; j < geom.coordinates[i].length; j++) {
-            d += App.networkMap.ringToPath(geom.coordinates[i][j]);
-          }
-        }
+      for (var i = 0; i < pts.length; i++) {
+        d += (i ? 'L' : 'M') + (Math.round(pts[i][0] * 10) / 10) + ',' + (Math.round(pts[i][1] * 10) / 10);
       }
-      return d;
+      return pts.length && closed ? d + 'Z' : d;
+    },
+
+    // A geometry as SVG path data. `null` — topojson-client's answer for an
+    // outline with no shape — is drawn as nothing; read as a shape, one threw
+    // and every outline after it went undrawn.
+    geomToPath: function(geom) {
+      var nm = App.networkMap;
+      if (!geom) return '';
+      var rings = function(list) { return list.map(function(r) { return nm.lineToPath(r, true); }).join(''); };
+      switch (geom.type) {
+        case 'Polygon': return rings(geom.coordinates);
+        case 'MultiPolygon': return geom.coordinates.map(rings).join('');
+        case 'LineString': return nm.lineToPath(geom.coordinates, false);
+        case 'MultiLineString': return geom.coordinates.map(function(l) { return nm.lineToPath(l, false); }).join('');
+        default: return '';
+      }
     },
 
     paths: {},
 
-    buildSvg: async function() {
+    buildSvg: async function(view) {
       var container = document.getElementById('world-map');
       if (!container) return;
 
+      // Without the file the map is an empty canvas of the same shape, and
+      // the stats line under it still counts.
+      App.networkMap.paths = {};
+      var unnamed = '';
+      var lines = '';
+      var w = 1000, h = 440;
+      view = view || 'default';
       try {
-        var resp = await fetch('/static/data/countries-110m.json');
-        var topo = await resp.json();
-        var geojson = topojson.feature(topo, topo.objects.countries);
-        var features = geojson.features;
-
-        App.networkMap.paths = {};
+        var shapes = await App.networkMap._loadShapes();
+        w = shapes.w;
+        h = shapes.h;
+        lines = App.networkMap._graticuleSvg(shapes.topo);
+        var objs = shapes.topo.objects;
+        if (!objs[view]) view = 'default';
+        var features = topojson.feature(shapes.topo, objs[view]).features;
         for (var i = 0; i < features.length; i++) {
-          var f = features[i];
-          var numId = String(f.id);
-          var alpha2 = App.networkMap.numToAlpha2[numId];
-          if (!alpha2) continue;
-          var d = App.networkMap.geomToPath(f.geometry);
-          App.networkMap.paths[alpha2] = d;
+          var code = features[i].properties && features[i].properties.c;
+          var d = App.networkMap.geomToPath(features[i].geometry);
+          // An area no code names (a disputed glacier, a buffer zone) is
+          // drawn and never lit. Two outlines can share a code (Northern
+          // Cyprus with Cyprus, Somaliland with Somalia — what an address
+          // lookup answers for a computer there): one element each, or the
+          // ids would collide.
+          if (!code) unnamed += d;
+          else App.networkMap.paths[code] = (App.networkMap.paths[code] || '') + d;
         }
       } catch (e) {
       }
+      App.networkMap.worldview = view;
 
-      var svg = '<svg viewBox="0 0 1000 500" xmlns="http://www.w3.org/2000/svg" class="world-svg">';
+      var svg = '<svg viewBox="0 0 ' + w + ' ' + h + '" xmlns="http://www.w3.org/2000/svg" class="world-svg">';
       svg += '<defs>';
       svg += '<filter id="glow-sm"><feGaussianBlur stdDeviation="1.5" result="blur"/><feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge></filter>';
       svg += '<filter id="glow-md"><feGaussianBlur stdDeviation="3" result="blur"/><feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge></filter>';
       svg += '</defs>';
-      svg += '<rect width="1000" height="500" fill="transparent" rx="4"/>';
-      for (var x = 0; x <= 1000; x += 50) {
-        var op = (x % 100 === 0) ? '0.25' : '0.1';
-        svg += '<line x1="' + x + '" y1="0" x2="' + x + '" y2="500" stroke="var(--accent)" stroke-width="0.3" opacity="' + op + '"/>';
-      }
-      for (var y = 0; y <= 500; y += 50) {
-        var opy = (y % 100 === 0) ? '0.25' : '0.1';
-        svg += '<line x1="0" y1="' + y + '" x2="1000" y2="' + y + '" stroke="var(--accent)" stroke-width="0.3" opacity="' + opy + '"/>';
-      }
-      svg += '<line x1="0" y1="250" x2="1000" y2="250" stroke="var(--accent)" stroke-width="0.5" opacity="0.15" stroke-dasharray="8,4"/>';
+      svg += lines;
+      if (unnamed) svg += '<path d="' + unnamed + '" fill="rgba(59,130,246,0.04)" stroke="rgba(59,130,246,0.3)" stroke-width="0.5"/>';
       var codes = Object.keys(App.networkMap.paths);
       for (var i = 0; i < codes.length; i++) {
         var code = codes[i];
@@ -157,19 +212,55 @@
       container.innerHTML = svg;
 
       container.querySelectorAll('.map-region').forEach(function(el) {
-        el.addEventListener('mouseenter', function(e) { App.networkMap.showTooltip(e, el.dataset.code); });
-        el.addEventListener('mousemove', function(e) { App.networkMap.moveTooltip(e); });
-        el.addEventListener('mouseleave', function() { App.networkMap.hideTooltip(); });
+        App.networkMap._hoverShows(el, el.dataset.code);
       });
 
       App.networkMap.mapRendered = true;
     },
 
+    _hoverShows: function(el, code) {
+      el.addEventListener('mouseenter', function(e) { App.networkMap.showTooltip(e, code); });
+      el.addEventListener('mousemove', function(e) { App.networkMap.moveTooltip(e); });
+      el.addEventListener('mouseleave', function() { App.networkMap.hideTooltip(); });
+    },
+
+    // A ring round THIS computer's country, so a person can check the map
+    // against where they are. Named in the key (`#map-legend`), which lists
+    // every mark the map paints. `selfRegion` is the code the daemon placed
+    // this computer in (`api::admin::map_region_of_this_computer`), `??`
+    // when its country is not known — then there is no ring, as there is no
+    // dot.
+    renderThisComputer: function(svg, selfRegion) {
+      svg.querySelectorAll('.map-this-computer').forEach(function(el) { el.remove(); });
+      var key = document.getElementById('map-legend-self');
+      var at = App.networkMap.regionCenter(selfRegion);
+      if (key) key.style.display = at ? '' : 'none';
+      if (!at) return;
+      var ring = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+      ring.setAttribute('cx', at[0]);
+      ring.setAttribute('cy', at[1]);
+      ring.setAttribute('r', 11);
+      ring.setAttribute('class', 'map-this-computer');
+      var t = document.createElementNS('http://www.w3.org/2000/svg', 'title');
+      t.textContent = I18n.t('chat.status.on_this_computer');
+      ring.appendChild(t);
+      svg.appendChild(ring);
+    },
+
+    // The data first: whose borders to draw depends on where this computer
+    // is (`worldviewFor`), and the outlines are drawn again if that changed.
     refresh: async function() {
-      if (!App.networkMap.mapRendered) await App.networkMap.buildSvg();
+      var data = null;
       try {
-        var resp = await App.authFetch('/api/admin/network-map');
-        var data = await resp.json();
+        data = await (await App.authFetch('/api/admin/network-map')).json();
+      } catch (e) {}
+      try { await App.networkMap._loadShapes(); } catch (e) {}
+      var view = App.networkMap.worldviewFor(data && data.self_region);
+      if (!App.networkMap.mapRendered || App.networkMap.worldview !== view) {
+        await App.networkMap.buildSvg(view);
+      }
+      if (!data) return;
+      try {
         App.networkMap.data = data;
         App.networkMap.render(data);
         App.networkMap.populateModelFilter(data);
@@ -207,27 +298,28 @@
 
       App.networkMap._applyRegionColors(counts, maxCount);
 
-      // Pulsing dots
+      // Pulsing dots, one per country with a computer in it, at the country's
+      // marker (`regionCenter`). A country too small for the outlines has
+      // only its dot, so its dot is what answers the pointer.
       var svg = document.querySelector('.world-svg');
       if (svg) {
         svg.querySelectorAll('.map-node-dot').forEach(function(d) { d.remove(); });
         var activeCodes = Object.keys(counts);
         for (var k = 0; k < activeCodes.length; k++) {
           var cc = activeCodes[k];
-          var regionEl = document.getElementById('region-' + cc);
-          if (!regionEl) continue;
-          var bbox = regionEl.getBBox();
-          var cx = bbox.x + bbox.width / 2;
-          var cy = bbox.y + bbox.height / 2;
-          var dotR = Math.max(3, Math.min(8, counts[cc] * 2));
+          var at = App.networkMap.regionCenter(cc);
+          if (!at) continue;
+          var alone = !App.networkMap.paths[cc];
           var dot = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
-          dot.setAttribute('cx', cx);
-          dot.setAttribute('cy', cy);
-          dot.setAttribute('r', dotR);
+          dot.setAttribute('cx', at[0]);
+          dot.setAttribute('cy', at[1]);
+          dot.setAttribute('r', Math.max(3, Math.min(8, counts[cc] * 2)));
           dot.setAttribute('fill', 'rgba(59,130,246,0.7)');
-          dot.setAttribute('class', 'map-node-dot');
+          dot.setAttribute('class', 'map-node-dot' + (alone ? ' alone' : ''));
+          if (alone) App.networkMap._hoverShows(dot, cc);
           svg.appendChild(dot);
         }
+        App.networkMap.renderThisComputer(svg, data.self_region);
       }
 
       // Coverage health coloring
@@ -302,12 +394,13 @@
       return code !== '??';
     },
 
+    // A country's marker: its label point (`points`, see above), never the
+    // middle of its outline. Also needs no layout, so it is right while the
+    // tab is hidden — `getBBox` there reads an unrendered element.
     regionCenter: function(code) {
-      if (!code) return null;
-      var el = document.getElementById('region-' + code);
-      if (!el) return null;
-      var bb = el.getBBox();
-      return [bb.x + bb.width / 2, bb.y + bb.height / 2];
+      if (!code || !App.networkMap.isPlaced(code)) return null;
+      var at = App.networkMap.points[code];
+      return at ? [Math.round(at[0] * 10) / 10, Math.round(at[1] * 10) / 10] : null;
     },
 
     arcPath: function(a, b) {
