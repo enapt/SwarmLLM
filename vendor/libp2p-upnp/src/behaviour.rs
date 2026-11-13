@@ -579,7 +579,9 @@ impl NetworkBehaviour for Behaviour {
         _connection_id: ConnectionId,
         event: libp2p_swarm::THandlerOutEvent<Self>,
     ) {
-        libp2p_core::util::unreachable(event)
+        // SwarmLLM: an empty match, not `util::unreachable(event)`, which Rust 1.100 lints as
+        // an unreachable call now that `Infallible` is `!` (libp2p #6600).
+        match event {}
     }
 
     #[tracing::instrument(level = "trace", name = "NetworkBehaviour::poll", skip(self, cx))]

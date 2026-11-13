@@ -263,7 +263,9 @@ where
                 self.pending_events
                     .push_back(Event::OutboundUnsupportedProtocols(message.request_id));
             }
-            StreamUpgradeError::Apply(e) => libp2p_core::util::unreachable(e),
+            // SwarmLLM: empty matches, not `util::unreachable(e)`, which Rust 1.100 lints as
+            // an unreachable call now that `Infallible` is `!` (libp2p #6600).
+            StreamUpgradeError::Apply(e) => match e {},
             StreamUpgradeError::Io(e) => {
                 self.pending_events.push_back(Event::OutboundStreamFailed {
                     request_id: message.request_id,
@@ -279,7 +281,7 @@ where
             <Self as ConnectionHandler>::InboundProtocol,
         >,
     ) {
-        libp2p_core::util::unreachable(error)
+        match error {}
     }
 }
 

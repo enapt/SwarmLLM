@@ -24,7 +24,6 @@ default-run = "swarmllm"
 description = "Decentralized peer-to-peer LLM inference network"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/enapt/SwarmLLM"
-homepage = "https://github.com/enapt/SwarmLLM"
 keywords = ["llm", "p2p", "inference", "distributed", "decentralized"]
 categories = ["network-programming", "command-line-utilities"]
 rust-version = "1.90"
