@@ -1,5 +1,50 @@
 # Changelog
 
+## [0.3.286-alpha] — 2026-11-14
+
+**A split between two computers far apart now runs the way round that is faster.** A split can start on this
+computer and finish on the other, or the other way round. When the far computer finishes it, the small helper
+model's guesses flow there without waiting for each answer; when this one finishes it, they wait. The planner priced
+both the same, and the one split the real link tried went the slower way. On a 14B split between Thailand and
+Australia (about 130 ms apart, a graphics card at each end), finishing on the far computer ran prose at 15.8 and
+code at 39.0 tokens a second, against 11.5 and 27.4 the other way round. Now each way is measured and priced on its
+own, and a way not yet measured is tried now and then, even when every request has run the other.
+
+**A computer whose card holds only part of a model splits it with a faster computer.** A computer that held a whole
+model, with part of it on its processor, could only hand the whole model over or run it alone: the planner would not
+cut a range held whole. Now it may share the part its card cannot hold, cut exactly where its card stops, and it
+leaves its small helper model room on the card beside its layers so guesses can flow. That room now includes the
+space the helper must leave for the larger model's conversations, as the helper's own check counts it. Before, a
+plan cut to the helper's size alone was turned away from the card it promised, and the helper guessed from the
+processor, where guesses cannot flow. The helper model reads the
+prompt before the reply's shape is chosen, so the first split after a start no longer runs without it. This computer's
+own whole run is priced from what its replies delivered. After the first split here, this computer priced its own
+card's layers at its processor's speed, and no later split could win. It now prices them at the card's speed, and
+the layers its card still has room for too: after a split left only a few layers here, every later plan priced the
+rest at the processor's speed and gave the far computer nearly all of the model.
+
+**A far computer keeps its copy of a model loaded after it answers.** When a computer's graphics card looked short of
+room, it could unload part of a model that had answered a moment before, because memory its own card had just freed
+still counted as another program's, and its next answer then read those layers from disk. A model that answered in
+the last two minutes is no longer unloaded for room. This is the most likely reason, not yet a proven one, that a far
+computer on a 14B split between Thailand and Australia went from about 24 to about 10 tokens a second after its first
+split, four times. A second likely cause is fixed too: a computer that held a whole model with a few layers off its
+card, asked for part of it by a split, replaced its whole copy with that part to fit it on the card; its next whole
+answer loaded the model again with most of it on the processor. It now serves the part from the copy it holds. Both
+are checked on that link once the far computer runs this release. And when a computer stops one model to load
+another on its graphics card, it now waits up to 5 seconds for the card to report the memory free, or until
+the memory stops coming back, before the next load reads it. On that link, a far computer's reload, right after it stopped a smaller part of the model,
+placed 17-18 of its 48 layers on the card. Its first load of the same model had placed 45. The likely cause is
+that the reload read the card before the stopped part's memory was back. And a model's idle time now starts when its last
+answer ends, not when it started, so a long answer is not unloaded the moment it finishes.
+
+**A split can be diagnosed further from the computer that leads it.** A computer that reads a split's layers from
+disk now says why: it had just started, its copy had been unloaded, a copy it had loaded did not serve them, or it
+held only other layers. It sends this only to computers on this release, and others see "disk" as before. The peer
+list shows how much of each computer's card was free when it last reported, and for each model it runs, how much was
+free when its load placed the layers on the card. Each plan
+that hands the whole model to one computer logs the cheapest split it passed over, at the same prices.
+
 ## [0.3.285-alpha] — 2026-11-13
 
 **A computer that already has a model loaded serves part of it to a split without loading it again.** When a
