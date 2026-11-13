@@ -239,6 +239,14 @@ struct Exploring {
     /// request (`router::another_replan_is_due`) is answered the same and
     /// moves nothing.
     last: Option<(uuid::Uuid, YieldPriors)>,
+    /// The tail the last exploration aimed at, until a split of it is
+    /// recorded. An aim nothing came of passes the next exploration to the
+    /// other untrusted tail: a tail no route here can form (a peer holding
+    /// only the first layers cannot run the last) had the fewest splits for
+    /// ever, so every exploration aimed at it and the tail that CAN run was
+    /// never explored (pre-release review 2026-11-14). A bandit counts a pull
+    /// whether or not it paid.
+    fruitless: Option<SplitTail>,
 }
 
 /// The tokens one reply of the prior counts for: the planner's assumed reply
@@ -346,9 +354,12 @@ impl SplitRounds {
             // UCB keeps a count per arm for the same reason.
             let measures_the_next = self.tail_to_explore(model) == Some(tail);
             self.recent.push(&tail.key(model), (tokens, rounds));
-            if measures_the_next {
-                if let Some(mut e) = self.exploring.get_mut(model) {
+            if let Some(mut e) = self.exploring.get_mut(model) {
+                if measures_the_next {
                     e.since = 0;
+                }
+                if e.fruitless == Some(tail) {
+                    e.fruitless = None;
                 }
             }
         }
@@ -360,12 +371,17 @@ impl SplitRounds {
     fn tail_to_explore(&self, model: &str) -> Option<SplitTail> {
         SplitTail::BOTH
             .into_iter()
-            .filter(|tail| self.recent.with_trusted(&tail.key(model), |_| ()).is_none())
+            .filter(|&tail| !self.trusted(model, tail))
             .min_by_key(|tail| {
                 self.recent
                     .with_any(&tail.key(model), |r| r.len())
                     .unwrap_or(0)
             })
+    }
+
+    /// Are `model`'s splits with `tail` trusted alone?
+    fn trusted(&self, model: &str, tail: SplitTail) -> bool {
+        self.recent.with_trusted(&tail.key(model), |_| ()).is_some()
     }
 
     /// The priors `request` for `model` is priced with: `prior` for both
@@ -374,7 +390,9 @@ impl SplitRounds {
     /// [`FIRST_EXPLORE_AFTER`]th request so priced since a split of the tail
     /// it would explore finished here — then twice as many after each exploration, up to
     /// [`MOST_EXPLORE_AFTER`]. The tail explored is the untrusted one with the
-    /// fewest splits recorded, [`SplitTail::BOTH`]'s order on a tie (#3 (j5)).
+    /// fewest splits recorded, [`SplitTail::BOTH`]'s order on a tie (#3 (j5)) —
+    /// or the other untrusted tail where the last exploration aimed there and
+    /// no split of it has been recorded since (`Exploring::fruitless`).
     /// Asked once a planning attempt (`pipeline::split_yield_prior`); the same
     /// request asked again gets the same answer.
     pub fn prior_for_request(
@@ -394,6 +412,7 @@ impl SplitRounds {
                 since: 0,
                 after: FIRST_EXPLORE_AFTER,
                 last: None,
+                fruitless: None,
             });
         if let Some((asked, answer)) = e.last {
             if asked == request {
@@ -405,7 +424,17 @@ impl SplitRounds {
         if e.since >= e.after {
             e.since = 0;
             e.after = e.after.saturating_mul(2).min(MOST_EXPLORE_AFTER);
-            match untried {
+            let other = match untried {
+                SplitTail::Here => SplitTail::Far,
+                SplitTail::Far => SplitTail::Here,
+            };
+            let aim = if e.fruitless == Some(untried) && !self.trusted(model, other) {
+                other
+            } else {
+                untried
+            };
+            e.fruitless = Some(aim);
+            match aim {
                 SplitTail::Here => answer.here = YieldPrior::Explore,
                 SplitTail::Far => answer.far = YieldPrior::Explore,
             }
@@ -616,12 +645,13 @@ mod tests {
         let answers: Vec<_> = (0..9).map(|_| ask("m")).collect();
         use YieldPrior::{Drafter as D, Explore as X};
         let dd = YieldPriors::both(D);
-        // Nothing measured: the flow's tail first (#3 (j5)), then the stream's.
+        // Nothing measured: the flow's tail first (#3 (j5)), then — nothing
+        // having come of it — the stream's.
         let xf = YieldPriors { here: D, far: X };
         let xh = YieldPriors { here: X, far: D };
         assert_eq!(
             answers,
-            [dd, dd, xf, dd, dd, dd, dd, dd, xf],
+            [dd, dd, xf, dd, dd, dd, dd, dd, xh],
             "3rd, then 6 later"
         );
 
@@ -739,6 +769,53 @@ mod tests {
         let (a, b) = (crate::types::NodeId([1; 32]), crate::types::NodeId([2; 32]));
         assert_eq!(SplitTail::of(&a, &a), Here);
         assert_eq!(SplitTail::of(&b, &a), Far);
+    }
+
+    /// **A tail no route can form does not take every exploration** (pre-release
+    /// review 2026-11-14): this node holds the whole model and the only peer
+    /// the first layers, so no plan has its last layers far away. The far tail
+    /// has the fewest splits for ever; aimed at alone, the tail that CAN run
+    /// was priced at the plain prior every time, and where that lost to the
+    /// whole run here it was never tried.
+    #[test]
+    fn an_exploration_nothing_came_of_passes_to_the_other_tail() {
+        let rounds = SplitRounds::default();
+        let mut aimed = Vec::new();
+        for _ in 0..400 {
+            let p = rounds.prior_for_request("m", uuid::Uuid::new_v4(), YieldPrior::Drafter);
+            if p.far == YieldPrior::Explore {
+                aimed.push(Far);
+            }
+            if p.here == YieldPrior::Explore {
+                aimed.push(Here);
+                // The explored split here-last runs and is measured.
+                rounds.record("m", Here, 160, 40);
+            }
+        }
+        assert_eq!(aimed[..2], [Far, Here], "{aimed:?}");
+        // Once the far aim came to nothing, the tail that runs is explored
+        // until it is trusted; then only the far tail is left to aim at.
+        let here = aimed.iter().filter(|&&t| t == Here).count();
+        assert_eq!(here, BEFORE_TRUSTED, "{aimed:?}");
+        assert!(rounds.trusted("m", Here));
+
+        // A far aim that DID come to something is not passed on: with two
+        // splits here-last already, the far tail stays the one with fewer.
+        let far = SplitRounds::default();
+        far.record("m", Here, 160, 40);
+        far.record("m", Here, 160, 40);
+        let mut aims = Vec::new();
+        for _ in 0..40 {
+            let p = far.prior_for_request("m", uuid::Uuid::new_v4(), YieldPrior::Drafter);
+            if p.far == YieldPrior::Explore {
+                aims.push(Far);
+                far.record("m", Far, 160, 40);
+            }
+            if p.here == YieldPrior::Explore {
+                aims.push(Here);
+            }
+        }
+        assert_eq!(aims[..2], [Far, Far], "{aims:?}");
     }
 
     #[test]

@@ -2249,9 +2249,20 @@ count — so the flow (tail far), which had run 16.7 prose in the arm before, wa
 prior. Now only a split of the tail the next exploration would try (`tail_to_explore`, the one
 answer `prior_for_request` asks too) restarts it: UCB's count is per arm, and pulling one arm says
 nothing about another.
+**And an aim nothing came of passes to the other tail** (pre-release review 2026-11-14). The tail
+measured least is the one aimed at, but a tail NO route here can form is measured least for ever: this
+node holding the whole model and the only peer the first layers, no plan ends far away, so every
+exploration priced the far tail at 8.0 and the split that CAN run (tail here) stayed at the prior 2.19
+— where that lost to the whole run here, it was never tried, though the one pooled figure before
+#3 (j5) did explore it. `Exploring::fruitless` holds the tail the last exploration aimed at until a
+split of it is recorded; while it does, the next exploration goes to the other untrusted tail. A
+bandit counts a pull whether or not it paid; a memory of one aim, not a count, so a tail out of reach
+for a long time is not owed explorations once it can run. Test
+`an_exploration_nothing_came_of_passes_to_the_other_tail` (red with either half off).
 What a change must keep: a split's yield is measured, trusted, explored and priced for its tail;
 the two passes together offer every route one search would; a plan's price reads its own tail; a
-split of one tail never delays the other's exploration.
+split of one tail never delays the other's exploration; a tail no route can form never takes every
+exploration.
 Tests: `a_split_is_planned_and_priced_for_the_tail_it_ends_on` (parallax — red with one search
 for both), `each_tail_of_a_split_is_measured_and_explored_apart` and the per-tail arms of
 `an_untried_split_is_explored_on_a_doubling_schedule` (`split_rounds`),

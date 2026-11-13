@@ -1116,7 +1116,13 @@ memory as Ollama does (`await_card_memory_back`, A/B `SWARMLLM_CARD_MEMORY_BACK=
 residency also carries the card's free memory its load read (`ResidentModelLayers::card_free_at_load_mb`, the
 peer list's `resident[].card_free_at_load_mb`). **Open: verify on the real link** once AU runs the release. A
 reload should then read ~10 GB and place ~45. ~5.7 GB means the wait did not cover the lag: read the INFO
-`DIAG: a stopped worker's card memory` lines where a node's log is at hand.
+`DIAG: a stopped worker's card memory` lines where a node's log is at hand. Since `3d03afe9` the wait also ends
+once the release has settled short of three quarters (`Settled`, two readings within 32 MB of the steady run's
+first). **Open, a hypothesis (pre-release review 2026-11-14, confidence ~45)**: a worker charged its card share at
+admission but stopped before it allocated it (the model loads on the first message; a request cancelled in that
+window, or a reclaim of such a worker) frees less than a quarter, so the wait runs its whole 5 s under the spawn lock
+and logs "not back in time". No common path to it was found; the INFO line says if it happens. A fix would read
+whether the worker ever loaded its weights, not `ran_a_request`, which a preload may not set.
 
 `scheduler/parallax.rs` charges a remote hop a flat `ASSUMED_FORWARD_PASSES = 64.0`. The error
 grows with reply length — 1.0 at 8 tokens, 2.4-3.3 at 120-239 — and biases every delegation
@@ -6395,7 +6401,12 @@ grep `^| N |`).
   restarting the count). On the real link (`real_link.sh` `TAG=j9`, CUDA build of `9cf7e618`, 19:04-19:09Z): arm 2's
   first split streamed (tail here, `aa3d1e66,da558cf5`) and the very next request explored the far tail at 8.0
   (`da558cf5,aa3d1e66`) — before, that arm ran streams to its end. That flow took 101 s: the far card had been running
-  4 of its layers on its processor since arm 1's first split read [24..48) from disk there (#3 (j8)).
+  4 of its layers on its processor since arm 1's first split read [24..48) from disk there (#3 (j8)). **And an aim
+  nothing came of passes to the other tail** (pre-release review 2026-11-14): a tail NO route can form (the only
+  peer holding the first layers, so no plan ends far away) was the tail measured least for ever and took every
+  exploration, leaving the tail that can run at the prior; now the next exploration goes to the other untrusted tail
+  until a split of the aimed one is recorded (`Exploring::fruitless`; test
+  `an_exploration_nothing_came_of_passes_to_the_other_tail`, red with either half off).
 - #3 (j7) — **After the first split here, this computer priced its own card's layers at its processor's speed.** Found
   reading the same run: once the explored split left `[24..48)` of the 14B loaded on this card, every later plan read
   this node `has_gpu=false card_layers=None` at 6.4 tok/s (a whole run 61.7 s against the hand-off's 10.7), so no split
