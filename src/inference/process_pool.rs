@@ -2146,7 +2146,11 @@ struct ResponseGuard {
     /// could take the model its user had just used (pre-release review,
     /// 2026-11-13). Ollama resets a runner's keep-alive when a request
     /// FINISHES (`server/sched.go`, `finishedReqCh` → `expireTimer`).
-    used_until_now: Option<Arc<WorkerHandle>>,
+    ///
+    /// WEAK: the stamp must not keep the worker alive. Its last owner's drop
+    /// kills the process and frees its memory (`impl Drop for WorkerHandle`),
+    /// and a reply's slot can outlive an evicted worker.
+    used_until_now: Option<std::sync::Weak<WorkerHandle>>,
 }
 
 /// Claim `request_id` in `map` for a fresh attempt. Returns the new attempt's
@@ -2553,7 +2557,7 @@ impl WorkerHandle {
         self.mark_used_now();
         self.ran_a_request.store(true, Ordering::Relaxed);
         let (mut guard, displaced) = self.register_unseen(request_id, tx, cancel_on_drop);
-        guard.used_until_now = Some(self.clone());
+        guard.used_until_now = Some(Arc::downgrade(self));
         (guard, displaced)
     }
 
@@ -2662,7 +2666,7 @@ impl Drop for ResponseGuard {
         // would fail a request that is still perfectly healthy.
         self.responses
             .remove_if(&self.request_id, |_, (tok, _)| *tok == self.token);
-        if let Some(worker) = self.used_until_now.take() {
+        if let Some(worker) = self.used_until_now.take().and_then(|w| w.upgrade()) {
             worker.mark_used_now();
         }
 
@@ -13800,7 +13804,13 @@ mod tests {
                 .expect("a clock old enough"),
         )
         .await;
+        let owners = Arc::strong_count(&h);
         let (guard, _) = h.register_response(Uuid::new_v4(), dummy_tx(), false);
+        assert_eq!(
+            Arc::strong_count(&h),
+            owners,
+            "the stamp keeps no worker alive: its last owner's drop kills the process"
+        );
         // Ten minutes into the reply, as a long one would be.
         h.last_used.store(LONG_AGO, Ordering::Relaxed);
         assert!(h.idle_secs() >= 600, "fixture: reads idle mid-reply");
