@@ -257,6 +257,33 @@ pub fn serialize_peer_to_json(
         // Its own settings, for display only; `null` from an older build.
         "auto_manage": peer.capability.as_ref().and_then(|c| c.auto_manage),
         "updates_itself": peer.capability.as_ref().and_then(|c| c.updates_itself),
+        // What it says it has LOADED, model by model — the ranges a planner
+        // credits it for, the layers its card runs and its own step time
+        // (`ResidentModelLayers`, gossiped). Its word, as of its last
+        // capability: what a split was planned against, not what it did
+        // (that is each answer's `how_served`, on the request's line).
+        "resident": peer.capability.as_ref().map(|c| {
+            c.resident_layers
+                .iter()
+                .map(|r| {
+                    serde_json::json!({
+                        "model_id": r.model_id,
+                        "layers": r.layers,
+                        "ranges": r.ranges.iter().map(|g| [g.start, g.end]).collect::<Vec<_>>(),
+                        "card_layers": r.card_layers,
+                        "decode_us_per_layer": r.decode_us_per_layer,
+                    })
+                })
+                .collect::<Vec<_>>()
+        }),
+        // Serves a run inside a range it has loaded without loading it again
+        // (#449), and reports how it served each forward (`HowServed`).
+        "serves_slices": peer.capability.as_ref().map(|c| {
+            crate::types::features::supports(c.features, crate::types::features::SERVES_SLICES)
+        }),
+        "reports_how_served": peer.capability.as_ref().map(|c| {
+            crate::types::features::supports(c.features, crate::types::features::HOW_SERVED)
+        }),
     });
     if include_addresses {
         if let Some(o) = obj.as_object_mut() {
@@ -463,6 +490,22 @@ fn time_ago(t: chrono::DateTime<chrono::Utc>, now: chrono::DateTime<chrono::Utc>
         format!("{s}s ago")
     } else {
         format!("{} min ago", s / 60)
+    }
+}
+
+/// Most rows a list in the diagnostics report prints (`-- models --`,
+/// `-- peer serving performance --`, `-- copy repair --`): the report is
+/// pasted, and a node that hears the whole swarm knows dozens of each.
+const REPORT_LIST_ROWS: usize = 50;
+/// Requests and activity events the report shows of the rings that keep them.
+const REPORT_REQUESTS_SHOWN: usize = 15;
+const REPORT_ACTIVITY_SHOWN: usize = 30;
+
+/// Say how many rows a capped list left out, where it left any.
+fn more_rows(out: &mut String, listed: usize) {
+    use std::fmt::Write as _;
+    if listed > REPORT_LIST_ROWS {
+        let _ = writeln!(out, "  (+{} more)", listed - REPORT_LIST_ROWS);
     }
 }
 
@@ -828,10 +871,12 @@ pub async fn diagnostics(
     // to re-run with -v and reproduce.
     {
         let failures = ss.recent_failures_snapshot();
+        // A ring: say so, or 20 reads as "20 failures in all" (sweep 11-13).
         let _ = writeln!(
             out,
-            "\n-- recent inference failures ({}) --",
-            failures.len()
+            "\n-- recent inference failures ({}; the newest {} are kept) --",
+            failures.len(),
+            crate::daemon::state::MAX_RECENT_FAILURES
         );
         if failures.is_empty() {
             let _ = writeln!(out, "  (none since start)");
@@ -885,12 +930,18 @@ pub async fn diagnostics(
     // what has repeatedly cost hours.
     {
         let traces = ss.recent_traces_snapshot();
-        let _ = writeln!(out, "\n-- recent requests ({}) --", traces.len());
+        let _ = writeln!(
+            out,
+            "\n-- recent requests ({}; the newest {} shown, {} kept) --",
+            traces.len(),
+            traces.len().min(REPORT_REQUESTS_SHOWN),
+            crate::daemon::state::MAX_RECENT_TRACES
+        );
         if traces.is_empty() {
             let _ = writeln!(out, "  (none since start)");
         }
         // Newest first — the request someone is asking about just now.
-        for t in traces.iter().rev().take(15) {
+        for t in traces.iter().rev().take(REPORT_REQUESTS_SHOWN) {
             let ttft = t
                 .ttft_ms
                 .map(|v| format!("{v}ms"))
@@ -919,7 +970,7 @@ pub async fn diagnostics(
             if t.remote_segments() > 0 {
                 for s in &t.segments {
                     let ms = s
-                        .elapsed_ms
+                        .typical_ms()
                         .map(|v| format!("{v}ms"))
                         .unwrap_or_else(|| "-".into());
                     let _ = writeln!(
@@ -1001,7 +1052,7 @@ pub async fn diagnostics(
                 "peer", "rtt", "ms/layer", "ewma", "samples"
             );
         }
-        for r in rows {
+        for r in rows.iter().take(REPORT_LIST_ROWS) {
             let _ = writeln!(
                 out,
                 "  {:<18} {:>6} {:>9} {:>9} {:>7}  {}",
@@ -1019,6 +1070,7 @@ pub async fn diagnostics(
                 r.region.as_deref().unwrap_or("-"),
             );
         }
+        more_rows(&mut out, rows.len());
     }
 
     // NAT traversal. "Is this node stuck behind the relay?" is the first
@@ -1116,10 +1168,26 @@ pub async fn diagnostics(
         }
     }
 
-    let _ = writeln!(out, "\n-- models --");
+    // Bounded: a node that hears the whole swarm's registry knows dozens of
+    // models. The ones with parts here first, most parts first.
     let local = ss.identity.node_id().clone();
-    for m in ss.model_registry.models() {
-        let held: Vec<u32> = ss.model_registry.local_shard_indices_in(&m, &local);
+    let mut models: Vec<_> = ss
+        .model_registry
+        .models()
+        .into_iter()
+        .map(|m| {
+            let held: Vec<u32> = ss.model_registry.local_shard_indices_in(&m, &local);
+            (m, held)
+        })
+        .collect();
+    models.sort_by(|a, b| {
+        b.1.len()
+            .cmp(&a.1.len())
+            .then_with(|| a.0.id.0.cmp(&b.0.id.0))
+    });
+    let _ = writeln!(out, "\n-- models ({}) --", models.len());
+    let listed = models.len();
+    for (m, held) in models.into_iter().take(REPORT_LIST_ROWS) {
         let tag = if crate::model::reference::is_reference_model(&m.id.0) {
             " [reference]"
         } else {
@@ -1136,6 +1204,7 @@ pub async fn diagnostics(
             m.num_layers
         );
     }
+    more_rows(&mut out, listed);
 
     // What the copy repair last decided about each model, and whether it is
     // still running at all (FUTURE_WORK #217). A node kept parts its checked
@@ -1154,9 +1223,11 @@ pub async fn diagnostics(
             .map(|e| (e.key().0.clone(), e.value().0, e.value().1.clone()))
             .collect();
         verdicts.sort();
-        for (model, at, verdict) in verdicts {
+        let listed = verdicts.len();
+        for (model, at, verdict) in verdicts.into_iter().take(REPORT_LIST_ROWS) {
             let _ = writeln!(out, "  {model}: {verdict} ({})", time_ago(at, now));
         }
+        more_rows(&mut out, listed);
     }
 
     // **Printed even when it is zero**, and that is the point. This node keeps
@@ -1237,10 +1308,18 @@ pub async fn diagnostics(
     // Recent events carry the failure that prompted the report. English
     // messages are intentional: a maintainer reading a pasted report should not
     // have to reverse a translation.
-    let _ = writeln!(out, "\n-- recent activity --");
     {
         let history = ss.events.activity_history.lock();
-        for ev in history.iter().rev().take(30) {
+        // A ring a busier peer's events can push a quieter one's out of: an
+        // event absent here may have happened (`diagnosis.md` rule 2).
+        let _ = writeln!(
+            out,
+            "\n-- recent activity (the newest {} of {} kept; older ones drop out past {}) --",
+            history.len().min(REPORT_ACTIVITY_SHOWN),
+            history.len(),
+            crate::daemon::state::ACTIVITY_HISTORY_KEPT
+        );
+        for ev in history.iter().rev().take(REPORT_ACTIVITY_SHOWN) {
             let _ = writeln!(out, "  [{}/{}] {}", ev.category, ev.kind, ev.message);
         }
     }

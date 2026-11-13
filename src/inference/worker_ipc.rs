@@ -680,6 +680,11 @@ pub struct IpcLayerResult {
     /// header, where bytes are written as decimal text (gotcha #24).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub block_rows: Option<IpcBlockRows>,
+    /// Where this forward's layers came from and what loading them took
+    /// (`LayerResult::how_served`), carried on by the daemon with its own
+    /// time around the model process added.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub how_served: Option<crate::types::HowServed>,
 }
 
 /// Where a segment's block-drafter rows sit in a result's payload

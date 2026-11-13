@@ -115,12 +115,18 @@ pub struct SegmentTrace {
     pub layer_end: u32,
     pub shard_indices: Vec<u32>,
     pub transport: Transport,
-    /// Wall time attributed to this segment, once known.
+    /// The LATEST forward's wall time through this segment, once known — what
+    /// the live view shows while a reply runs. The request's own figures for
+    /// the segment are in `forwards`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub elapsed_ms: Option<u32>,
     /// Bytes of activation handed to the next hop.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub activation_bytes: Option<u32>,
+    /// Every forward this segment was timed for, the prompt pass apart from
+    /// the steps after it.
+    #[serde(flatten)]
+    pub forwards: SegmentForwards,
 }
 
 impl SegmentTrace {
@@ -128,6 +134,110 @@ impl SegmentTrace {
     pub fn short_node(&self) -> &str {
         &self.node_id[..self.node_id.len().min(8)]
     }
+
+    /// The one figure for this segment where only one is shown (the
+    /// `Server-Timing` header, the report's request list): a step's median,
+    /// else the prompt pass, else the latest forward.
+    pub fn typical_ms(&self) -> Option<u32> {
+        self.forwards
+            .step_ms()
+            .or(self.forwards.prompt_ms)
+            .or(self.elapsed_ms)
+    }
+}
+
+/// One timed forward through a segment ([`RequestTrace::record_segment_timing`]).
+#[derive(Debug, Clone, Copy)]
+pub struct SegmentForward {
+    /// Send to answer, as this node timed it.
+    pub elapsed_ms: u32,
+    /// Bytes of activation the answer carried.
+    pub activation_bytes: u32,
+    /// The request's prompt pass (sequence 0), not a step after it.
+    pub prompt: bool,
+    /// How long the peer said it held the forward (`LayerResult::served_us`).
+    pub served_us: Option<u32>,
+    /// How the peer said it served it (`LayerResult::how_served`).
+    pub how_served: Option<crate::types::HowServed>,
+}
+
+/// Most step samples a segment keeps for its medians; a reply longer than
+/// this is described by its first ones.
+const MOST_STEP_SAMPLES: usize = 4096;
+
+/// A segment's forwards over the request (`SegmentTrace::forwards`): the
+/// prompt pass, the steps' times and the peer's own word on each. Until
+/// 2026-11-13 a segment kept only the LAST forward's time, so `segN_ms` on
+/// the request line was one decode step, or the prompt pass of a one-token
+/// reply, with nothing saying which.
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct SegmentForwards {
+    /// The prompt pass's time, where it crossed as one forward (a prompt read
+    /// in pieces is timed by its pieces, `prompt_chunks`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prompt_ms: Option<u32>,
+    /// What the peer said it held the prompt pass for.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prompt_served_ms: Option<u32>,
+    /// Forwards after the prompt pass.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub steps: u32,
+    /// Where the peer's layers came from on its first report, and the time
+    /// it said loading them took over every forward (a reload mid-reply adds).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub layers_from: Option<crate::types::LayersFrom>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub load_ms: Option<u32>,
+    #[serde(skip)]
+    step_samples: Vec<u32>,
+    #[serde(skip)]
+    step_served_samples: Vec<u32>,
+}
+
+fn is_zero(n: &u32) -> bool {
+    *n == 0
+}
+
+impl SegmentForwards {
+    fn note(&mut self, f: SegmentForward) {
+        let served_ms = f.served_us.map(|us| us / 1000);
+        if f.prompt {
+            self.prompt_ms = Some(f.elapsed_ms);
+            self.prompt_served_ms = served_ms;
+        } else {
+            self.steps = self.steps.saturating_add(1);
+            if self.step_samples.len() < MOST_STEP_SAMPLES {
+                self.step_samples.push(f.elapsed_ms);
+                if let Some(ms) = served_ms {
+                    self.step_served_samples.push(ms);
+                }
+            }
+        }
+        if let Some(how) = f.how_served {
+            self.layers_from.get_or_insert(how.layers);
+            let load = how.load_us / 1000;
+            self.load_ms = Some(self.load_ms.unwrap_or(0).saturating_add(load));
+        }
+    }
+
+    /// The median step, as this node timed it.
+    pub fn step_ms(&self) -> Option<u32> {
+        median(&self.step_samples)
+    }
+
+    /// The median of what the peer said it held each step for.
+    pub fn step_served_ms(&self) -> Option<u32> {
+        median(&self.step_served_samples)
+    }
+}
+
+fn median(samples: &[u32]) -> Option<u32> {
+    if samples.is_empty() {
+        return None;
+    }
+    let mut v = samples.to_vec();
+    v.sort_unstable();
+    Some(v[v.len() / 2])
 }
 
 #[derive(Default)]
@@ -613,12 +723,14 @@ impl RequestTrace {
         }
     }
 
-    /// Attach timing to a segment already recorded by `mark_assembled`.
-    pub fn record_segment_timing(&self, index: u16, elapsed_ms: u32, activation_bytes: u32) {
+    /// Attach one forward's timing to a segment already recorded by
+    /// `mark_assembled`.
+    pub fn record_segment_timing(&self, index: u16, forward: SegmentForward) {
         let mut g = self.lock();
         if let Some(seg) = g.segments.iter_mut().find(|s| s.index == index) {
-            seg.elapsed_ms = Some(elapsed_ms);
-            seg.activation_bytes = Some(activation_bytes);
+            seg.elapsed_ms = Some(forward.elapsed_ms);
+            seg.activation_bytes = Some(forward.activation_bytes);
+            seg.forwards.note(forward);
         }
     }
 
@@ -946,8 +1058,25 @@ impl TraceSnapshot {
             let _ = write!(s, " tpot_ms={t:.1}");
         }
         for seg in &self.segments {
-            if let Some(ms) = seg.elapsed_ms {
-                let _ = write!(s, " seg{}_ms={}", seg.index, ms);
+            let i = seg.index;
+            let f = &seg.forwards;
+            if let Some(ms) = f.prompt_ms {
+                let _ = write!(s, " seg{i}_prompt_ms={ms}");
+            }
+            if let Some(ms) = f.prompt_served_ms {
+                let _ = write!(s, " seg{i}_prompt_served_ms={ms}");
+            }
+            if let Some(ms) = f.step_ms() {
+                let _ = write!(s, " seg{i}_step_ms={ms} seg{i}_steps={}", f.steps);
+            }
+            if let Some(ms) = f.step_served_ms() {
+                let _ = write!(s, " seg{i}_step_served_ms={ms}");
+            }
+            if let Some(from) = f.layers_from {
+                let _ = write!(s, " seg{i}_from={}", from.as_str());
+            }
+            if let Some(ms) = f.load_ms {
+                let _ = write!(s, " seg{i}_load_ms={ms}");
             }
         }
         let bytes: u32 = self
@@ -989,7 +1118,7 @@ impl TraceSnapshot {
             }
             parts.push(format!("total;dur={}", self.total_ms));
             for seg in &self.segments {
-                if let Some(ms) = seg.elapsed_ms {
+                if let Some(ms) = seg.typical_ms() {
                     parts.push(format!(
                         "seg{};dur={};desc=\"{} L{}-{}\"",
                         seg.index,
@@ -1045,6 +1174,7 @@ where
                 },
                 elapsed_ms: None,
                 activation_bytes: None,
+                forwards: SegmentForwards::default(),
             }
         })
         .collect()
@@ -1241,6 +1371,7 @@ pub fn local_segment(node_id: &NodeId, layer_range: (u32, u32)) -> Vec<SegmentTr
         transport: Transport::Local,
         elapsed_ms: None,
         activation_bytes: None,
+        forwards: SegmentForwards::default(),
     }]
 }
 
@@ -1324,6 +1455,7 @@ mod tests {
                     transport: Transport::Local,
                     elapsed_ms: None,
                     activation_bytes: None,
+                    forwards: SegmentForwards::default(),
                 },
                 SegmentTrace {
                     index: 1,
@@ -1336,6 +1468,7 @@ mod tests {
                     transport: Transport::Direct,
                     elapsed_ms: None,
                     activation_bytes: None,
+                    forwards: SegmentForwards::default(),
                 },
             ],
             4,
@@ -1447,6 +1580,7 @@ mod tests {
             transport,
             elapsed_ms: None,
             activation_bytes: None,
+            forwards: SegmentForwards::default(),
         }
     }
 
@@ -1728,7 +1862,7 @@ mod tests {
             vec![seg(0, "9684263580c6660f", false, Transport::Direct)],
             0,
         );
-        t.record_segment_timing(0, 900, 1234);
+        t.record_segment_timing(0, fwd(900, 1234, true));
         t.mark_finished(Outcome::Ok, 4, 9);
         for (name, value) in response_headers(&t.snapshot(), false) {
             assert!(
@@ -1801,15 +1935,81 @@ mod tests {
             ],
             0,
         );
-        t.record_segment_timing(1, 900, 39188);
+        t.record_segment_timing(1, fwd(900, 39188, true));
         t.mark_finished(Outcome::Ok, 22, 3);
         let line = t.snapshot().log_line();
         assert!(line.contains("route=distributed"), "{line}");
         assert!(line.contains("segments=2"), "{line}");
         assert!(line.contains("nodes=0718d8b9,96842635"), "{line}");
-        assert!(line.contains("seg1_ms=900"), "{line}");
+        assert!(line.contains("seg1_prompt_ms=900"), "{line}");
         assert!(line.contains("activation_bytes=39188"), "{line}");
         assert!(line.contains("outcome=ok"), "{line}");
+    }
+
+    fn fwd(elapsed_ms: u32, activation_bytes: u32, prompt: bool) -> SegmentForward {
+        SegmentForward {
+            elapsed_ms,
+            activation_bytes,
+            prompt,
+            served_us: None,
+            how_served: None,
+        }
+    }
+
+    /// A segment's figures on the request line describe the whole request:
+    /// the prompt pass apart, the steps' MEDIAN (never the last one), what the
+    /// peer said it held each for, and where its layers came from. Until
+    /// 2026-11-13 the line carried only the last forward's time.
+    #[test]
+    fn a_segments_prompt_and_steps_are_reported_apart() {
+        let t = RequestTrace::new(uuid::Uuid::nil(), "m", "chat");
+        t.mark_assembled(
+            Route::Distributed,
+            vec![seg(0, "9684263580c6660f", false, Transport::Direct)],
+            0,
+        );
+        let how = |layers, load_us| crate::types::HowServed {
+            layers,
+            load_us,
+            worker_us: 0,
+        };
+        t.record_segment_timing(
+            0,
+            SegmentForward {
+                served_us: Some(1_800_000),
+                how_served: Some(how(crate::types::LayersFrom::Copy, 3_000)),
+                ..fwd(2_000, 10, true)
+            },
+        );
+        for (ms, served) in [(40, 30), (44, 31), (400, 32)] {
+            t.record_segment_timing(
+                0,
+                SegmentForward {
+                    served_us: Some(served * 1000),
+                    how_served: Some(how(crate::types::LayersFrom::Loaded, 0)),
+                    ..fwd(ms, 10, false)
+                },
+            );
+        }
+        t.mark_finished(Outcome::Ok, 4, 4);
+        let snap = t.snapshot();
+        let line = snap.log_line();
+        for want in [
+            "seg0_prompt_ms=2000",
+            "seg0_prompt_served_ms=1800",
+            "seg0_step_ms=44 seg0_steps=3",
+            "seg0_step_served_ms=31",
+            "seg0_from=copy",
+            "seg0_load_ms=3",
+        ] {
+            assert!(line.contains(want), "{want} missing: {line}");
+        }
+        assert_eq!(
+            snap.segments[0].elapsed_ms,
+            Some(400),
+            "the live view keeps the latest"
+        );
+        assert_eq!(snap.segments[0].typical_ms(), Some(44));
     }
 
     #[test]

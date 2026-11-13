@@ -3157,6 +3157,7 @@ mod tests {
             prompt_blocks_stored: None,
             block_rows: None,
             served_us: None,
+            how_served: None,
         };
         assert!(answered_whole(&Ok(ok.clone())));
         let refused = LayerResult {

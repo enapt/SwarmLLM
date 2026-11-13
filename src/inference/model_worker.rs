@@ -1204,6 +1204,62 @@ fn take_load_timings() -> Vec<(u64, u32)> {
         .unwrap_or_default()
 }
 
+/// [`ensure_model_loaded`] for a forward, and the report of what it did
+/// ([`crate::types::HowServed`], the `0x0C` trailer): whether the run was
+/// already loaded as itself, served from a longer run's copy (#449), or read
+/// from disk now, and how long that took. `worker_us` is the daemon's to fill.
+#[allow(clippy::too_many_arguments)]
+fn load_for_a_forward(
+    models: &mut HashMap<(usize, usize, usize, usize), SplitModel>,
+    kv_store: &KvCacheStore,
+    data_dir: &std::path::Path,
+    model_id: &crate::types::ModelId,
+    layer_start: usize,
+    layer_end: usize,
+    tp_rank: usize,
+    tp_size: usize,
+    shard_window: &Option<Vec<u32>>,
+    served_from: Option<(usize, usize)>,
+) -> Result<crate::types::HowServed, SwarmError> {
+    let key = (layer_start, layer_end, tp_rank, tp_size);
+    let held = models.contains_key(&key);
+    let started = std::time::Instant::now();
+    ensure_model_loaded(
+        models,
+        kv_store,
+        data_dir,
+        model_id,
+        layer_start,
+        layer_end,
+        tp_rank,
+        tp_size,
+        shard_window,
+        served_from,
+    )?;
+    let load_us = u32::try_from(started.elapsed().as_micros()).unwrap_or(u32::MAX);
+    Ok(crate::types::HowServed {
+        layers: layers_from(
+            models.get(&key).is_some_and(|m| m.viewed_from().is_some()),
+            held,
+        ),
+        load_us,
+        worker_us: 0,
+    })
+}
+
+/// Where a forward's layers came from: a view of a loaded copy whenever the
+/// run is served as one (built now or before), else loaded already, else read
+/// from disk now.
+fn layers_from(served_as_a_view: bool, held_before: bool) -> crate::types::LayersFrom {
+    if served_as_a_view {
+        crate::types::LayersFrom::Copy
+    } else if held_before {
+        crate::types::LayersFrom::Loaded
+    } else {
+        crate::types::LayersFrom::Disk
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 /// Ensure a SplitModel is loaded for the given model_id, layer range, and TP config.
 /// Non-TP uses (0, 1). TP uses the actual (rank, size).
@@ -1589,7 +1645,7 @@ async fn run_fused_batch_forward(
     let (layer_start, layer_end) = (first.layer_range.0 as usize, first.layer_range.1 as usize);
     let model_id = first.model_id.clone();
 
-    ensure_model_loaded(
+    let how_served = load_for_a_forward(
         models,
         kv_store,
         data_dir,
@@ -1733,6 +1789,7 @@ async fn run_fused_batch_forward(
                 spec_logits_dims: None,
                 prompt_blocks_stored: None,
                 block_rows: None,
+                how_served: Some(how_served),
             });
             result_lens.push(0);
         } else {
@@ -1760,6 +1817,7 @@ async fn run_fused_batch_forward(
                 spec_logits_dims: None,
                 prompt_blocks_stored: None,
                 block_rows: None,
+                how_served: Some(how_served),
             });
             result_lens.push(len);
         }
@@ -2168,7 +2226,7 @@ async fn handle_forward(
         .unwrap_or((0, 1));
 
     // Ensure the TP-specific model variant is loaded and split
-    ensure_model_loaded(
+    let how_served = load_for_a_forward(
         models,
         kv_store,
         data_dir,
@@ -2776,6 +2834,7 @@ async fn handle_forward(
                     prompt_blocks_stored: None,
                     block_rows: None,
                     served_us: None,
+                    how_served: None,
                 });
             }
             // Row i predicts the token at `index_pos + 1 + i` (the verify's
@@ -2821,6 +2880,7 @@ async fn handle_forward(
                         prompt_blocks_stored: None,
                         block_rows: None,
                         served_us: None,
+                        how_served: None,
                     });
                 }
             }
@@ -2890,6 +2950,7 @@ async fn handle_forward(
                 prompt_blocks_stored: None,
                 block_rows: None,
                 served_us: None,
+                how_served: None,
             });
         }
 
@@ -3017,6 +3078,7 @@ async fn handle_forward(
                 prompt_blocks_stored: None,
                 block_rows: None,
                 served_us: None,
+                how_served: None,
             })
         } else {
             if far_side == Some(true) {
@@ -3042,6 +3104,7 @@ async fn handle_forward(
                 prompt_blocks_stored: None,
                 block_rows: None,
                 served_us: None,
+                how_served: None,
             })
         }
     };
@@ -3176,6 +3239,7 @@ async fn handle_forward(
         spec_logits_dims,
         prompt_blocks_stored: result.prompt_blocks_stored,
         block_rows,
+        how_served: Some(how_served),
     };
 
     send_worker(writer, &WorkerMsg::LayerResult(ipc_result), &payload)
@@ -7492,6 +7556,32 @@ mod subsumption_tests {
         models.retain(|&(ls, le, _, _), _| !(ls == 0 && le == 4));
         drop_views_of(&mut models, (0, 4));
         assert!(models.is_empty(), "{:?}", models.keys().collect::<Vec<_>>());
+    }
+
+    /// The coordinator is told where a forward's layers came from (the `0x0C`
+    /// report): a run served from a loaded copy says so whether its view is
+    /// built now or was before, and the loaded range itself says loaded —
+    /// what tells a #449 slice from a read off disk on another computer.
+    #[test]
+    fn a_forward_reports_whether_its_layers_came_from_a_loaded_copy() {
+        use crate::types::LayersFrom;
+        let empty = tempfile::tempdir().unwrap();
+        let id = crate::types::ModelId("m".into());
+        let mut models = HashMap::new();
+        models.insert(
+            (0, 4, 0, 1),
+            crate::inference::split::tests::plain_test_model(4, 64),
+        );
+        let kv = store();
+        let mut load = |a, b| {
+            super::load_for_a_forward(&mut models, &kv, empty.path(), &id, a, b, 0, 1, &None, None)
+                .unwrap()
+                .layers
+        };
+        assert_eq!(load(1, 3), LayersFrom::Copy, "a view built now");
+        assert_eq!(load(1, 3), LayersFrom::Copy, "the same view, already built");
+        assert_eq!(load(0, 4), LayersFrom::Loaded);
+        assert_eq!(super::layers_from(false, false), LayersFrom::Disk);
     }
 
     /// #449's bound: a peer naming run after run inside a loaded range does not

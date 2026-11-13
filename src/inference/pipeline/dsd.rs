@@ -81,6 +81,54 @@ enum Drafter {
     Engine(EngineDrafter),
 }
 
+/// A split about to run without guessing, said at INFO once per (model,
+/// reason) and again only after [`SAY_AGAIN_AFTER`] with the count since —
+/// at debug every time. A split that runs without a drafter is ~11 against
+/// ~18-20 tok/s on a far link, and at info nothing said so (sweep 2026-11-13).
+pub(super) fn say_running_without_guesses(
+    request_id: uuid::Uuid,
+    model: &crate::types::ModelId,
+    why: &'static str,
+) {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+    use std::time::{Duration, Instant};
+    const SAY_AGAIN_AFTER: Duration = Duration::from_secs(600);
+    const MOST_REMEMBERED: usize = 256;
+    /// (model, reason) → when it was last said, and the replies since.
+    type Said = HashMap<(String, &'static str), (Instant, u32)>;
+    static SAID: OnceLock<Mutex<Said>> = OnceLock::new();
+    tracing::debug!(%request_id, model_id = %model, why, "a split runs without guessing");
+    let Ok(mut said) = SAID.get_or_init(Default::default).lock() else {
+        return;
+    };
+    let now = Instant::now();
+    if said.len() >= MOST_REMEMBERED {
+        said.retain(|_, (at, _)| now.duration_since(*at) < SAY_AGAIN_AFTER);
+    }
+    let say = |not_said: u32| {
+        tracing::info!(
+            %request_id,
+            model_id = %model,
+            why,
+            not_said_since = not_said,
+            "DIAG: a split runs without guessing — its replies go a token a round"
+        );
+    };
+    match said.get_mut(&(model.0.clone(), why)) {
+        None => {
+            say(0);
+            said.insert((model.0.clone(), why), (now, 0));
+        }
+        Some((at, quiet)) if now.duration_since(*at) >= SAY_AGAIN_AFTER => {
+            say(*quiet);
+            *at = now;
+            *quiet = 0;
+        }
+        Some((_, quiet)) => *quiet = quiet.saturating_add(1),
+    }
+}
+
 /// Fast-path preconditions for the DSD coordinator loop, short of which
 /// drafter will guess — that is decided in the loop, where the llama.cpp
 /// executor can be asked whether it holds a model and this node's held models
@@ -196,6 +244,11 @@ impl PipelineExecutor {
             let target = self.request.model_id.clone();
             let Some(tokenizer) = self.shared_state.standalone_tokenizer(&target) else {
                 tracing::debug!(%request_id, "DSD: no tokenizer for the target — falling back");
+                say_running_without_guesses(
+                    request_id,
+                    &target,
+                    "no tokenizer for the target here",
+                );
                 return Ok(None);
             };
             let ids: Vec<u32> = tokenizer
@@ -231,6 +284,11 @@ impl PipelineExecutor {
                     false,
                 );
                 tracing::debug!(%request_id, "DSD: no drafter available — falling back");
+                say_running_without_guesses(
+                    request_id,
+                    &target,
+                    "no drafter this computer could load",
+                );
                 return Ok(None);
             };
             // One here: splits keep it, and a larger one may come beside it

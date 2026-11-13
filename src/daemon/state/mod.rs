@@ -77,6 +77,10 @@ pub use tp_allreduce::TpAllReduceCollector;
 /// a pattern (one flaky peer, one bad model) without turning into a log.
 pub const MAX_RECENT_FAILURES: usize = 20;
 
+/// Activity events kept for replay and the report (`events.activity_history`);
+/// the oldest drop out past it.
+pub const ACTIVITY_HISTORY_KEPT: usize = 100;
+
 /// DB tree of the models kept on this computer (#251) — model id → `true`.
 pub(crate) const KEPT_ON_THIS_COMPUTER_TREE: &str = "kept_on_this_computer";
 
@@ -2729,7 +2733,10 @@ impl SharedState {
                 ms_per_layer,
                 layer_work,
             } => {
-                tracing::debug!(
+                // Info: once per hop per reply, and the only place a chain's
+                // middle is seen from here (its answers reach only the hop
+                // after it).
+                tracing::info!(
                     request_id = %report.request_id,
                     peer = %from,
                     model_id = %model,
@@ -2747,9 +2754,12 @@ impl SharedState {
                     .note_held_steps(ms_per_layer, now);
             }
             hop_reports::HopReport::Unasked => {}
-            hop_reports::HopReport::Implausible(why) => tracing::debug!(
+            hop_reports::HopReport::Implausible(why) => tracing::info!(
                 request_id = %report.request_id,
                 peer = %from,
+                layers = report.layers,
+                steps = report.steps,
+                median_held_us = report.median_held_us,
                 why,
                 "a chain hop's report of its held time was not believed"
             ),
@@ -5134,7 +5144,7 @@ impl SharedState {
         {
             let mut history = self.events.activity_history.lock();
             history.push_back(event.clone());
-            if history.len() > 100 {
+            if history.len() > ACTIVITY_HISTORY_KEPT {
                 history.pop_front();
             }
         }

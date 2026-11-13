@@ -1279,6 +1279,7 @@ impl PipelineExecutor {
                         prompt_blocks_stored: None,
                         block_rows: None,
                         served_us: None,
+                        how_served: None,
                     });
                 } else {
                     // Intermediate segment: strip the 0x00 tag and continue
@@ -1339,8 +1340,13 @@ impl PipelineExecutor {
                 self.shared_state.record_segment_timing(
                     request_id,
                     idx as u16,
-                    segment_ms as u32,
-                    result.activations.len() as u32,
+                    crate::inference::trace::SegmentForward {
+                        elapsed_ms: segment_ms as u32,
+                        activation_bytes: result.activations.len() as u32,
+                        prompt: sequence_num == 0,
+                        served_us: None,
+                        how_served: None,
+                    },
                 );
                 // Measure ourselves too. Without this the scheduler had no idea
                 // what our own hardware costs, so the local node was free by
@@ -2073,8 +2079,13 @@ impl PipelineExecutor {
                             self.shared_state.record_segment_timing(
                                 request_id,
                                 idx as u16,
-                                seg_elapsed_ms as u32,
-                                result.activations.len() as u32,
+                                crate::inference::trace::SegmentForward {
+                                    elapsed_ms: seg_elapsed_ms as u32,
+                                    activation_bytes: result.activations.len() as u32,
+                                    prompt: sequence_num == 0,
+                                    served_us: result.served_us,
+                                    how_served: result.how_served,
+                                },
                             );
                             if run_is_last {
                                 tracing::info!(

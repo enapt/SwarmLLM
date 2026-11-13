@@ -11624,6 +11624,7 @@ impl ModelProcessPool {
                                 prompt_blocks_stored: r.prompt_blocks_stored,
                                 block_rows,
                                 served_us: None,
+                                how_served: r.how_served,
                             });
                         }
                         WorkerMsg::Error {
@@ -12153,6 +12154,7 @@ impl ModelProcessPool {
                             prompt_blocks_stored: None,
                             block_rows: None,
                             served_us: None,
+                            how_served: r.how_served,
                         });
                         break;
                     }

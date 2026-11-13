@@ -1115,6 +1115,76 @@ pub struct LayerResult {
     /// and travel no more sealed than this.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub block_rows: Option<BlockRows>,
+    /// Where the answering segment's layers came from for this forward and
+    /// what reading them cost there — the report a coordinator reads to tell
+    /// a run served from a copy already loaded (#449) from one read off disk
+    /// again. Travels as the `0x0C` trailer, set only for the peer that sent
+    /// the forward and only where it advertises `features::HOW_SERVED`. A
+    /// number another computer chose: logged, never priced.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub how_served: Option<HowServed>,
+}
+
+/// How a segment served one forward ([`LayerResult::how_served`]).
+///
+/// The W3C `Server-Timing` header's idea for a split: the far computer names
+/// its own parts of a forward's time, so the coordinator can tell what it did
+/// from what the link did — measured where it happened, never inferred.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HowServed {
+    /// Where the layers came from.
+    pub layers: LayersFrom,
+    /// Microseconds the model process spent making the layers ready — a read
+    /// from disk, or building the view of a loaded copy (near zero).
+    pub load_us: u32,
+    /// Microseconds from the serving node taking the forward up to its model
+    /// process's answer: its turn in a stream of checks, the model process's
+    /// queue, the load and the layers' own work. `served_us` less this is the
+    /// node's network side; this less `load_us` its work and queue.
+    pub worker_us: u32,
+}
+
+/// Where a forward's layers came from ([`HowServed::layers`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LayersFrom {
+    /// Already loaded for exactly this run of layers.
+    Loaded,
+    /// Served from a longer run already loaded, sharing its weights (#449).
+    Copy,
+    /// Read from disk for this forward.
+    Disk,
+}
+
+impl LayersFrom {
+    /// The byte the `0x0C` trailer carries.
+    pub fn code(self) -> u8 {
+        match self {
+            Self::Loaded => 1,
+            Self::Copy => 2,
+            Self::Disk => 3,
+        }
+    }
+
+    /// The trailer's byte read back; `None` for a code this build does not
+    /// know (a later build's), which is read as no report.
+    pub fn from_code(code: u8) -> Option<Self> {
+        match code {
+            1 => Some(Self::Loaded),
+            2 => Some(Self::Copy),
+            3 => Some(Self::Disk),
+            _ => None,
+        }
+    }
+
+    /// The word the coordinator's log writes.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Loaded => "loaded",
+            Self::Copy => "copy",
+            Self::Disk => "disk",
+        }
+    }
 }
 
 /// What a split's prompt pass tells each segment about keeping the prompt
@@ -1279,6 +1349,7 @@ impl LayerResult {
             prompt_blocks_stored: None,
             block_rows: None,
             served_us: None,
+            how_served: None,
         }
     }
 

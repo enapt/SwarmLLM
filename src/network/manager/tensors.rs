@@ -579,6 +579,28 @@ impl NetworkManager {
             self.served_since
                 .answered(&peer_id, result.request_id, step, std::time::Instant::now())
         });
+        // How the segment served it goes by the same rule: only to the peer
+        // that sent the forward — a chained tail answering a coordinator it
+        // was not sent by would have its report read as the run's head's —
+        // and only to one that reads it (`features::HOW_SERVED`).
+        let answers_its_sender = held.is_some();
+        // To the millisecond, as the served time is.
+        let to_the_ms = |us: u32| {
+            super::served_time::micros_to_the_millisecond(std::time::Duration::from_micros(
+                u64::from(us),
+            ))
+        };
+        result.how_served = result
+            .how_served
+            .filter(|_| {
+                answers_its_sender
+                    && self.coordinator_advertises(&peer_id, crate::types::features::HOW_SERVED)
+            })
+            .map(|how| crate::types::HowServed {
+                load_us: to_the_ms(how.load_us),
+                worker_us: to_the_ms(how.worker_us),
+                ..how
+            });
         result.served_us = held
             .filter(|_| self.coordinator_advertises(&peer_id, crate::types::features::SERVED_TIME));
         self.send_tensor_result_as_request(&peer_id, &result, is_connected);
@@ -677,7 +699,10 @@ impl NetworkManager {
                         resend,
                     },
                 );
-                tracing::info!(
+                // Debug: one per answer, one a token under a split; the answer's
+                // info line is `DIAG: LayerForward processed via worker
+                // subprocess` (sweep 2026-11-13).
+                tracing::debug!(
                     %peer_id,
                     request_id = %result.request_id,
                     payload_len,

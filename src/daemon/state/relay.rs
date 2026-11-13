@@ -577,11 +577,10 @@ impl super::SharedState {
         &self,
         request_id: uuid::Uuid,
         segment_index: u16,
-        elapsed_ms: u32,
-        activation_bytes: u32,
+        forward: crate::inference::trace::SegmentForward,
     ) {
         if let Some(t) = self.active_traces.get(&request_id) {
-            t.record_segment_timing(segment_index, elapsed_ms, activation_bytes);
+            t.record_segment_timing(segment_index, forward);
         }
     }
 

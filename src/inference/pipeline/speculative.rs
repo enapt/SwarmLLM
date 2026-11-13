@@ -114,6 +114,11 @@ impl PipelineExecutor {
         let mut draft = self.shared_state.draft_executor.lock().await;
         if !draft.is_loaded() {
             tracing::debug!(%request_id, "speculative: draft model not loaded — falling back");
+            super::dsd::say_running_without_guesses(
+                request_id,
+                &self.request.model_id,
+                "the configured draft model is not loaded",
+            );
             return Ok(None);
         }
 

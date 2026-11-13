@@ -186,6 +186,17 @@ pub fn encode_layer_result(result: &LayerResult) -> Result<Vec<u8>, SwarmError> 
         buf.extend_from_slice(&rows.data);
     }
 
+    // Optional: how the segment served the forward (marker 0x0C + layers u8
+    // + load_us u32 LE + worker_us u32 LE), see `LayerResult::how_served`.
+    // After 0x0B, where an older decoder has already stopped; set only for a
+    // coordinator advertising `features::HOW_SERVED`.
+    if let Some(how) = result.how_served {
+        buf.push(0x0C);
+        buf.push(how.layers.code());
+        buf.extend_from_slice(&how.load_us.to_le_bytes());
+        buf.extend_from_slice(&how.worker_us.to_le_bytes());
+    }
+
     Ok(buf)
 }
 
@@ -549,6 +560,23 @@ pub fn decode_layer_result(data: &[u8]) -> Result<LayerResult, SwarmError> {
     }
     // Optional: a block drafter's layer rows (marker 0x0B), after 0x0A.
     let block_rows = read_block_rows_trailer(data, &mut pos)?;
+    // Optional: how the segment served the forward (marker 0x0C), after 0x0B.
+    // The peer's own word, for the log only; a layers code this build does
+    // not know is read as no report.
+    let mut how_served = None;
+    if pos < data.len() && data[pos] == 0x0C {
+        pos += 1;
+        let Some(b) = data.get(pos..pos + 9) else {
+            return Err(SwarmError::Network("how-served trailer truncated".into()));
+        };
+        how_served =
+            crate::types::LayersFrom::from_code(b[0]).map(|layers| crate::types::HowServed {
+                layers,
+                load_us: u32::from_le_bytes([b[1], b[2], b[3], b[4]]),
+                worker_us: u32::from_le_bytes([b[5], b[6], b[7], b[8]]),
+            });
+        pos += 9;
+    }
     // Suppress unused-assignment warning on the last pos += that has no
     // subsequent reader.
     let _ = pos;
@@ -572,6 +600,7 @@ pub fn decode_layer_result(data: &[u8]) -> Result<LayerResult, SwarmError> {
         prompt_blocks_stored,
         served_us,
         block_rows,
+        how_served,
     })
 }
 

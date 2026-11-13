@@ -397,7 +397,7 @@ pub(super) async fn handle_layer_forward(
     // this answer is on its way.
     drop(turn);
 
-    let result = match result {
+    let mut result = match result {
         Ok(r) => r,
         Err(e) => {
             send_error_result(
@@ -413,6 +413,11 @@ pub(super) async fn handle_layer_forward(
     };
 
     let forward_elapsed = forward_start.elapsed();
+    // The model process said where the layers came from; the time around it
+    // is this daemon's to add (`HowServed::worker_us`).
+    if let Some(how) = result.how_served.as_mut() {
+        how.worker_us = u32::try_from(forward_elapsed.as_micros()).unwrap_or(u32::MAX);
+    }
     // Use structured fields instead of `format!("[{a}..{b})")` — Rust eval
     // is eager and would heap-alloc one String per token even when info-
     // level is filtered out. Per-decode-step hot path on the serving node.
@@ -518,7 +523,6 @@ pub(super) async fn handle_layer_forward(
     // chained reply the one kind the coordinator cannot read. Enabling the seal
     // is its own change: every result path on the coordinator has to unseal
     // first (`docs/FUTURE_WORK.md`).
-    let mut result = result;
     if is_last {
         seal_layer_result(&mut result, None);
     }

@@ -33,7 +33,8 @@ DIAG: request complete request_id=1ddd2912-… route=distributed segments=2
   prompt_tokens=22 tokens=48 tok_per_sec=33.8 tpot_ms=30.2
   predicted_ms=1890 assumed_forward_passes=64
   predicted_terms=net:640/compute:1180/prompt:70/queue:0/transfer:0/cold:0
-  seg0_ms=520 seg1_ms=900 activation_bytes=39188 outcome=ok
+  seg1_prompt_ms=520 seg1_prompt_served_ms=470 seg1_step_ms=31 seg1_steps=47
+  seg1_step_served_ms=22 seg1_from=copy seg1_load_ms=0 activation_bytes=39188 outcome=ok
 ```
 
 `predicted_ms` is what the scheduler's cost model expected this route to cost,
@@ -78,20 +79,23 @@ This answers most questions on its own:
 | Symptom in the line | Where to look next |
 |---|---|
 | `queue_ms` large | node is saturated — the router runs half of `max_concurrent_requests` at once (every request has the same tier while credits are dormant) |
-| `sched_ms` large | scheduler struggling to find holders — check `-- peer serving performance --` |
+| `sched_ms` large | scheduler struggling to find holders — check `-- peer serving performance (N) --` |
 | `predicted_ms` far from `total_ms` | the routing cost model is wrong about this shape — see below |
 | `assemblies=2` present | the request FAILED once and retried. Whatever else the line says, start here: the first attempt's cause is in the log just above |
 | `assemblies=2` with a `LocalMemoryUnavailable` first attempt on a split | did this node refuse BEFORE the peers read the prompt? `grep "KV admission up front"` for the request — present, the re-plan was held to `layers_that_fit`; absent and a forward was refused, the peers' prefill was spent first (#263) |
 | `ttft_ms` large, `decode_ms` small | prefill or a cold model load, not the network |
 | a LATER turn of a conversation slow, on a node without a card | was the repeated prompt priced warm? `grep "already holds the start of this prompt"` (the planner's credit, `cached_locally=`) then `prefix-cache HIT` (what the worker matched). No credit line: the worker holds nothing for it — look for `prefix-cache inserted snapshot` / `keeping its opening` on the previous turn. A credit but a chain anyway: a faster route out-priced it, which is allowed |
 | a LATER turn of a conversation slow through a SPLIT | on the coordinator, `grep "a split prompt pass keeping its prompt"`: each turn's `resumed_from` should be the turn before's `blocks` × the block size (64) — short of it, that turn re-reads part of the conversation; `Prompt cache miss` there is a miss. On each segment's node, `prefix-cache stored a split's prompt` (`stored_positions`, `mb`, `copy_ms`, copied after the answer) and, next turn, `HIT on a split's stored prompt` + `restored a stored prompt beside the live cache` (`copy_ms`, before the forward). A store cut short says why: `snapshot cut to the room beside the live cache` / `cut to the host memory the machine can spare` (FUTURE_WORK #433) |
-| `decode_ms` large, `tpot_ms` high | per-token cost — find the slow hop via `segN_ms` |
-| one `segN_ms` dominates | that peer is the bottleneck; cross-check its row in the peer table |
-| a planned segment has no `segN_ms` | consecutive remote segments ran as one CHAINED run (peer to peer, answering from its tail): their time is the run's first segment's `segN_ms` (`pipeline/distributed.rs`, `run_is_last`). A failed chain re-runs unchained, and then every segment is timed |
+| `decode_ms` large, `tpot_ms` high | per-token cost — find the slow hop via `segN_step_ms` (the MEDIAN step through that segment, over `segN_steps`) |
+| one `segN_step_ms` dominates | that peer is the bottleneck; cross-check its row in the peer table |
+| `segN_step_ms` well above `segN_step_served_ms` | the time is the LINK's, not the peer's: `served` is what the peer says it held each step (`LayerResult::served_us`), and the rest is the network both ways plus this node's side. Close together: the peer is slow on its own |
+| `segN_prompt_ms` large | the prompt pass through that segment; `segN_prompt_served_ms` says how much was the peer's own read. A prompt read in pieces is timed by its pieces (`prompt_chunks`), not here |
+| `segN_from=disk` | that peer READ its layers from disk for this request — `segN_load_ms` is what it said the read took (summed over the reply, so a reload mid-reply adds). `copy` = served from a longer run it had loaded (#449, nothing read); `loaded` = it held exactly this run already. Absent: a peer that predates the report (`features::HOW_SERVED`), a chained segment, or this node |
+| a planned segment has no `segN_*` | consecutive remote segments ran as one CHAINED run (peer to peer, answering from its tail): their time is the run's first segment's (`pipeline/distributed.rs`, `run_is_last`), with no `served` or `from` — a chain's hops report once a reply instead (`a chain hop said how long it held`). A failed chain re-runs unchained, and then every segment is timed. A flow or a stream of checks times its own forwards (`DSD: a tree that flowed is complete`, `… stream … complete`) |
 | `route=relayed` | no direct path to a holder; ~1 extra RTT each way, see NAT section |
 | `outcome=error error_type=…` | the variant name points at the subsystem |
-| `outcome=cancelled` | the reader left (Stop, a closed tab) — nothing failed; `tokens=` is what they were shown, and the request is not in `-- recent inference failures --` (`DIAG: request stopped by the client`) |
-| a failure listed as `served peer <id> (not that peer's doing)` in `-- recent inference failures --` | this node caused it (its own memory refusal, configuration or an internal error — `failure_is_penalty_worthy` says no); the peer only carried the plan. The `NOTE: … suspect that peer` line under the list counts only the failures a peer could have caused (v0.3.241+, #288) |
+| `outcome=cancelled` | the reader left (Stop, a closed tab) — nothing failed; `tokens=` is what they were shown, and the request is not in `-- recent inference failures (N; …) --` (`DIAG: request stopped by the client`) |
+| a failure listed as `peer <id> (not that peer's doing)` in `-- recent inference failures (N; …) --` | this node caused it (its own memory refusal, configuration or an internal error — `failure_is_penalty_worthy` says no); the peer only carried the plan. The `NOTE: … suspect that peer` line under the list counts only the failures a peer could have caused (v0.3.241+, #288) |
 
 `sched_ms` is time spent *assembling*, summed across attempts — not
 time-since-dequeue, which would charge a failed attempt's whole execution to
@@ -610,8 +614,10 @@ metered connection: yes  setting: auto  holding back downloads and work for peer
   just before a download nobody asked for would start and on every
   capability tick (30 s). While it is `true` the node also tells peers it
   takes no inference work (#277): planners skip it, a peer that asks anyway
-  is refused (`LayerForward refused — this connection is metered`,
-  `RemoteGenerateRequest refused — …`, info), and a part or prompt-cache
+  is refused (`LayerForward refused — this connection is metered`, and for
+  other kinds `request refused — this connection is metered, so no new work
+  is taken for other machines` with `kind=RemoteGenerateRequest` etc., info),
+  and a part or prompt-cache
   request is answered as a miss (`Not serving a part — this connection is
   metered`, debug). In the log: `grep "this connection is metered"
   node.log`. A download the owner asked for, a repair, the owner's own
@@ -831,7 +837,7 @@ grep "DSD: request complete" node.log
 far it guessed by the end. **γ settling at 1 on a loopback rig is correct** —
 there a check costs less than a guess; across a real link it settled at 3-7.
 `check_ms_per_position` above 0 means the far computer checks on its processor.
-No line at all: grep `DSD: no drafter available` at debug — no held model shares
+No line at all: grep `DIAG: a split runs without guessing` (INFO since 2026-11-13, once per model and reason, then every 10 min with `not_said_since` = the replies since; `why` = no drafter this computer could load / no tokenizer for the target here / the configured draft model is not loaded) or `DSD: no drafter available` at debug (every request) — no held model shares
 the target's vocabulary within reach of its size — half for a drafter reading at most 2 GiB a
 guess on a node with a card in play, a quarter otherwise, since 0.3.249 (a mixture-of-experts target
 counts ALL its experts since 2026-10-14 — before, Qwen3-30B-A3B sized below a dense
@@ -1053,8 +1059,8 @@ cargo dev-run -- run -vv 2>&1 | grep "request_id=<UUID>"
 4. **Forward start** → `DIAG: starting forward_through_segments` with `seq_num`, `index_pos`, `activation_bytes` (pipeline/distributed.rs)
 5. **Tensor forward send** → DEBUG `DIAG: sent tensor forward via send_request (verbose)` with `peer_established_count`, `is_rr_pending`, `total_connections`, `pending_tensor_count`, `outbound_id` (manager/tensors.rs)
 6. **Codec write** → `DIAG: codec write_request start/done` with `frame_len` (network/protocol/mod.rs, trace)
-7. **Encryption (if enabled, R139)** → encrypt offloaded from event loop via `tokio::spawn`. Failure: `DIAG: tensor encrypt+encode failed — dropping forward` (manager/tensors.rs). On success the spawn task posts `NetworkCommand::SendEncodedTensor` back through `internal_cmd_tx`; the critical task then performs only the `send_request` step. Decode/decrypt offloaded symmetrically in the inbound path; failures log `DIAG: decrypt FAILED — possible AAD mismatch, key mismatch, or corruption`
-9. **Inbound dispatch** → `DIAG: inbound TensorPayload request` → `DIAG: acknowledged tensor forward on receipt` (manager/requests.rs) — the request is ACKed immediately; the result travels back as its own request (`features::FORWARD_ACK`, 2026-08-21). A coordinator that sees no ACK within the RTT-scaled deadline logs `DIAG: tensor forward not acknowledged within the ACK deadline` (manager/mod.rs, the stale sweep) and the pipeline fails over; an un-ACKed forward no longer waits out the segment deadline. When the result comes, `DIAG: a forward's round trip, split at its receipt` (debug, `dispatch_layer_result` + `manager/receipts.rs`) cuts that forward's time at the ACK: `ack_ms` = send → ACK (the network both ways plus the far side taking it in), `answer_ms` = send → result, `after_receipt_ms` = what the far side did with it (dispatch, worker, compute, sending the answer — the replies' return legs cancel, RFC 9002 § 5.3's cut). In a chained run the ACK is the FIRST hop's. Compare `ack_ms` with the peer's `measured_min_rtt_ms` (`/api/admin/peers`): the excess is the send and receive paths (`docs/plans/large_model_splits.md` build order item 1). Checked against a known answer (2026-10-21, `RIG_NETNS=1 RIG_RTT_MS=200 RIG_TRANSPORT=quic split_rig.sh split`, debug): `ack_ms` median 203 (netem 200), `after_receipt_ms` median 30 against the far node's own `SplitModel forward pass complete forward_ms` median 25, over 63 forwards.
+7. **Encryption (if enabled, R139)** → encrypt offloaded from event loop via `tokio::spawn`. Failure: `DIAG: tensor encrypt+encode failed — failing the forward` (manager/tensors.rs) — never sent in plaintext; the coordinator's wait is failed at once. On success the spawn task posts `NetworkCommand::SendEncodedTensor` back through `internal_cmd_tx`; the critical task then performs only the `send_request` step. Decode/decrypt offloaded symmetrically in the inbound path; failures log `DIAG: decrypt FAILED — possible AAD mismatch, key mismatch, or corruption`
+9. **Inbound dispatch** → DEBUG `DIAG: inbound TensorPayload request` (debug since 2026-11-13: one per forward, one a token a hop) → `DIAG: acknowledged tensor forward on receipt` (manager/requests.rs) — the request is ACKed immediately; the result travels back as its own request (`features::FORWARD_ACK`, 2026-08-21). A coordinator that sees no ACK within the RTT-scaled deadline logs `DIAG: tensor forward not acknowledged within the ACK deadline` (manager/mod.rs, the stale sweep) and the pipeline fails over; an un-ACKed forward no longer waits out the segment deadline. When the result comes, `DIAG: a forward's round trip, split at its receipt` (debug, `dispatch_layer_result` + `manager/receipts.rs`) cuts that forward's time at the ACK: `ack_ms` = send → ACK (the network both ways plus the far side taking it in), `answer_ms` = send → result, `after_receipt_ms` = what the far side did with it (dispatch, worker, compute, sending the answer — the replies' return legs cancel, RFC 9002 § 5.3's cut). In a chained run the ACK is the FIRST hop's. Compare `ack_ms` with the peer's `measured_min_rtt_ms` (`/api/admin/peers`): the excess is the send and receive paths (`docs/plans/large_model_splits.md` build order item 1). Checked against a known answer (2026-10-21, `RIG_NETNS=1 RIG_RTT_MS=200 RIG_TRANSPORT=quic split_rig.sh split`, debug): `ack_ms` median 203 (netem 200), `after_receipt_ms` median 30 against the far node's own `SplitModel forward pass complete forward_ms` median 25, over 63 forwards.
 10. **Dispatcher** → `DIAG: dispatcher received LayerForward, spawning handler` with `seq`, `layer_range`, `activation_bytes` (daemon/dispatch/mod.rs)
 11. **Local execution** → INFO `DIAG: processing LayerForward locally`, logged BEFORE the work, with `request_id`, `seq`, `activation_bytes`, `estimated_tokens`, `model_id`, `layer_range` (daemon/dispatch/layer_forward.rs)
 12. **Split model forward** → `DIAG: SplitModel forward pass complete` with `forward_ms`, `seq_len`, `num_layers` (split/executor.rs)
@@ -1068,7 +1074,7 @@ cargo dev-run -- run -vv 2>&1 | grep "request_id=<UUID>"
 20. **Forward complete** → `DIAG: forward_through_segments returned OK` with `fwd_ms`, `tokens`, `activations_bytes` (pipeline/distributed.rs)
 21. **Local segment** → `DIAG: local segment complete` with `segment_ms`, `activation_bytes` (pipeline/distributed.rs)
 22. **Remote segment** → `DIAG: remote segment complete` with `segment_ms`, `activation_bytes` (pipeline/distributed.rs)
-23. **Segment result** → `DIAG: segment result received` with `elapsed_ms` (pipeline/local.rs)
+23. **Segment result** → `DIAG: segment result received` with `elapsed_ms` and, from a peer that says, `served_ms` (how long it held the forward), `link_ms` (`elapsed_ms` less it: the network both ways), `layers_from` (`loaded` / `copy` / `disk`), `load_ms` and `worker_ms` (its model process's part, its queue there included), `is_prefill` (pipeline/local.rs). The peer's own word, logged and never priced; sent only to the computer that sent the forward and only where it advertises `HOW_SERVED` (bit 43) — from 2026-11-13 builds
 24. **Pipeline complete** → `DIAG: forward_through_segments completed` with `pipeline_ms` (pipeline/distributed.rs)
 25. **Execute complete** → `DIAG: execute_request completed successfully` with `schedule_ms`, `execute_ms`, `total_ms` (router/distributed_exec.rs)
 26. **Completion** → `DIAG: request complete` — the single summary line described at the top of this guide, carrying route, nodes, regions, per-phase timings, per-segment timings, tok/s, the cost model's own prediction and outcome (`daemon/state/relay.rs::publish_request_trace`, called from router/mod.rs)
@@ -1083,8 +1089,8 @@ histograms. Adding a field means adding it there once, not at each surface.
 |-------|------|-------|
 | DEBUG | `DIAG: processing swarm event` — event type name for every swarm event | manager/events.rs |
 | DEBUG | `DIAG: handling outbound command` — command type for every outbound command | manager/commands.rs |
-| WARN  | `DIAG: OutboundFailure` — `is_connected`, `pending_tensor_out`, `pending_channels` | manager/events.rs |
-| WARN  | `DIAG: InboundFailure` — `pending_channels` | manager/events.rs |
+| WARN  | `DIAG: OutboundFailure` — `peer`, `request_id`, `error`, `is_connected`, `pending_tensor_out`, `suppressed_since_last` | manager/events.rs |
+| WARN  | `DIAG: InboundFailure — response send may have failed, stale cleanup will reclaim` — `peer`, `request_id`, `error` | manager/events.rs |
 | DEBUG | `DIAG: remote-generate stream complete` — `streamed_count`, the number the done token carries so the coordinator can tell a finished stream from one whose end overtook its middle | daemon/dispatch/remote_generate.rs |
 | INFO  | `remote-generate fast path: request sent` — `target`, `hand_off`, `first_token_budget_s` (how long the first token is waited for), `cold_loads`, `measured_read` (`AtLeast(…)`: the peer's measured floor for reading this prompt whole, which sizes the wait past the 600 s cap at twice it, up to an hour; `Unknown`: the prompt-scaled 600 s cap, #430) | inference/pipeline/remote_generate.rs |
 | DEBUG | `DIAG: ResponseSent event` — confirms response written to wire. Per-message, so `-v`: at info these were three quarters of an idle node's log, and one line per streamed token under load | manager/events.rs |
@@ -1105,7 +1111,7 @@ histograms. Adding a field means adding it there once, not at each surface.
 - **No standby** → `DIAG: NO standby available for failed segment` (pipeline/distributed.rs) — carries `tried` (every node the segment was attempted on) and `last_failure` since 2026-09-02
 - **Departed peer** → `DIAG: peer departed with forwards outstanding — failed them so the pipeline can fail over` (network/manager/connections.rs) — fires when a peer's connection closed AND its re-dial failed while forwards were still pinned to it; the pipeline then fails over immediately instead of waiting the segment deadline
 - **Chained hop** → `DIAG: chained hop — passing the next hop's failure to the coordinator` (WARN, `request_id`, `coordinator`, `onward`, `reason`; network/manager/mod.rs) — a computer in the middle of a chain whose forward to the next one failed tells the computer that leads the request, so it re-plans now instead of waiting out a deadline. `DIAG: chained hop — the forward it handed on failed, and the coordinator cannot be reached to be told` (WARN, `request_id`, `coordinator`, `reason`) is the same failure with no way to report it: the leader learns of it only when its own deadline passes
-- **Chain hop timings** (#427) → on a HOP: `DIAG: told the coordinator how long this hop held its chain's steps` (DEBUG, `request_id`, `coordinator`, `layers`, `steps`, `median_held_us`; network/manager/hop_timings.rs), once a reply, in answer to the coordinator's cancel — absent where the coordinator does not advertise `HOP_TIMINGS`, the hop ran no one-position step, or it never chained (an unchained segment's answer carries `served_us` instead). On the COORDINATOR: `DIAG: a chain hop said how long it held this node's steps` (DEBUG, `peer`, `model_id`, `layers`, `steps`, `median_held_us`, `ms_per_layer`; daemon/state/mod.rs); `a chain hop's report of its held time was not believed` (`why`: too few steps, longer than a round took) is the refusal. The next plan's `DIAG: pipeline candidate` then reads `observed_timed_on=Some(HeldSteps { reports })` for that peer where nothing timed its decode here; `SWARMLLM_HOP_TIMINGS=0` on the coordinator asks nobody.
+- **Chain hop timings** (#427) → on a HOP: `DIAG: told the coordinator how long this hop held its chain's steps` (DEBUG, `request_id`, `coordinator`, `layers`, `steps`, `median_held_us`; network/manager/hop_timings.rs), once a reply, in answer to the coordinator's cancel — absent where the coordinator does not advertise `HOP_TIMINGS`, the hop ran no one-position step, or it never chained (an unchained segment's answer carries `served_us` instead). On the COORDINATOR: `DIAG: a chain hop said how long it held this node's steps` (INFO since 2026-11-13 — once per hop per reply, and the only view of a chain's middle from here; `peer`, `model_id`, `layers`, `steps`, `median_held_us`, `ms_per_layer`; daemon/state/mod.rs); `a chain hop's report of its held time was not believed` (INFO, the same figures and `why`: too few steps, longer than a round took) is the refusal. The next plan's `DIAG: pipeline candidate` then reads `observed_timed_on=Some(HeldSteps { reports })` for that peer where nothing timed its decode here; `SWARMLLM_HOP_TIMINGS=0` on the coordinator asks nobody.
 - **A hand-off's prompt progress** (#430) → on the SERVING peer: `DIAG: told a hand-off's requester how far its prompt has been read` (DEBUG, `request_id`, `processed` of `total` = 1000: thousandths of the pass's own read, never what the cache held; daemon/background.rs), at most every 2 s while the prompt is read — absent where the request did not ask (`wants_prompt_progress`), the requester does not advertise `PROMPT_PROGRESS`, or the pass ran under ~1 s. On the REQUESTER: `DIAG: a peer reported its read of our prompt` (DEBUG, `peer`, `processed`, `total`, `moved`; daemon/dispatch/mod.rs), and once a report carries the wait past its budget INFO `remote-generate: the peer is still reading the prompt — waiting on past the first-token budget while its read keeps moving` (`processed`, `total`, `longest_gap_s` — the longest gap between two reports, a layer of the peer's read, which sizes the silence allowed past the last; `budget_s`). An owner's own sequential prompt pass now stamps its trace's progress too (`DIAG: request progress`). `SWARMLLM_PROMPT_PROGRESS=0` on the requester asks nobody.
 - **Client disconnect** → `DIAG: result_tx receiver dropped` … (router/types.rs: WARN when the client disconnected and an answer was lost, INFO when it disconnected and the request ended without one, DEBUG when dropped without a cancellation)
 - **Channel drop** → `DIAG: LayerResult delivered but pipeline receiver DROPPED` (daemon/dispatch/mod.rs)
@@ -1348,7 +1354,8 @@ bug until shown otherwise. Trace it end to end at `-vv` (request-response logs o
   `DIAG: hand-off reply token queued for the requester`;
 - requester, the same `token_id` (with `routed=false` when the sink belongs to
   another attempt or peer): `DIAG: streaming token arrived`;
-- in between, from the vendored request-response, the connection each request was
+- in between, from the vendored request-response (`vendor/libp2p-request-response`
+  — a grep of `src/` alone does not find these two), the connection each request was
   put on with every candidate's (id, pending, has-answered):
   `rr: request assigned to a connection`. A candidate the swarm never reported in
   `DIAG: connection established` is a ghost, and
@@ -1474,7 +1481,7 @@ costing more than it saves; `SWARMLLM_STREAM_SPARE_LATENESS=0` prices at the poi
 cost, not its gain** — the far half's checks and this node's next chunk share the device, so the
 stream reads ~15% SLOWER there than rounds (25-27 vs 28-33 tok/s at an emulated 24 ms, 2026-09-30),
 while with the far half on other hardware it is ~15-20% faster. Put B on the processor
-(`NODE_B_TOML='gpu_layers = 0\n[resources]\nmax_cpu_threads = 8'` in `split_speed.sh`) or on
+(`GPU_B=0` in `examples/split_rig.sh`, the 2026-09-30 harness `split_speed.sh` is gone) or on
 another machine to see the stream work.
 `DIAG:` **speculation stopped (or swung to many guesses) after one slow request** — the coordinator's INFO
 `DSD: request complete` carries the check-cost fit (`check_fixed_ms`, `check_ms_per_position`), `final_gamma` and
@@ -1538,7 +1545,7 @@ forward past ~5, FUTURE_WORK #412); a delay that jumps regardless of the count i
 | INFO/DEBUG | `DIAG: decode graph could not be updated in place — rebuilt (first of this kind)` (info, ONCE per kind — a count of these lines is not a count of rebuilds) and `DIAG: decode graph: a group's update was refused — its nodes before and now` (debug, every time) — `group`, `before` / `now` = the graph's node census by type (`KERNEL 49, MEM_ALLOC 44, MEM_FREE 44`). A TOPOLOGY refusal names no node; the census difference is what changed (#233: 49 ↔ 50 kernels in group 0 = an id cast inside the capture) | cuda_graph.rs |
 | INFO/DEBUG | `DIAG: decode graph: forwards of this shape keep being rebuilt — they run the ordinary way for a while` / `still rebuilt every launch — resting again` — `positions` (the step's shape: `3`, or `8 (a tree's rows)` for a drafter's tree level since 2026-10-22), `rest_steps`, `figures` (the weighing: graph ms a step at its rebuild share against the ordinary way, or which figure is not timed yet) | cuda_graph.rs |
 | INFO | `DIAG: decode graph: rebuilt often, and still faster as a graph — no rest` / `faster as a graph even with its rebuilds — capturing again` — `rebuilt_share`, `graph_ms`, `ordinary_ms`: the card's own timeline says a rest would cost more than the rebuilds (#233). The 60-second `decode graph` line counts them as `rests_declined`. `SWARMLLM_CUDA_GRAPH_REST=count` restores the count-only rule for an A/B | cuda_graph.rs |
-| WARN | `decode graph: this model's forwards of this many positions kept being refused` — three refusals of the capture's own making for one `positions` count; forwards of that many positions run the ordinary way from then on, others keep capturing | cuda_graph.rs |
+| WARN | `decode graph: this model's forwards of this shape kept being refused — they run the ordinary way from now on` — three refusals of the capture's own making for one `positions` count; forwards of that many positions run the ordinary way from then on, others keep capturing | cuda_graph.rs |
 
 **Verify the mechanism fired** by `launched` > 0 on a `--features cuda` build, and compare replies against a
 run without the switches — the same kernels in the same order, so byte-identical.
@@ -1590,7 +1597,7 @@ The `elapsed_ms` field appears at multiple points:
 1. `DIAG: SplitModel forward pass complete` — time for a single forward pass (compute only)
 2. `DIAG: local segment complete` — time for a local pipeline segment
 3. `DIAG: remote segment complete` — time for a remote pipeline segment (network + compute)
-4. `DIAG: segment result received` — time for a single segment (network + compute)
+4. `DIAG: segment result received` — time for a single segment (network + compute), with the peer's own `served_ms` / `link_ms` / `layers_from` / `load_ms` where it reports them
 5. `DIAG: forward_through_segments completed` — total pipeline forwarding time
 6. `DIAG: execute_request completed successfully` — `schedule_ms` (pipeline assembly) + `execute_ms` (pipeline execution)
 7. `DIAG: split stream decode loop complete (subprocess)` — decode time with `tok_per_sec`
@@ -1603,7 +1610,7 @@ If `schedule_ms` is high, the bottleneck is pipeline assembly. If `execute_ms` i
 Common causes:
 - **Timeout-then-failover**: A segment times out at 30s (the floor of `SEGMENT_TIMEOUT_MIN_SECS`; the deadline grows with layers and prompt, to 600 s), then failover succeeds quickly → ~30s total. Check for `DIAG: segment TIMED OUT` followed by `DIAG: failing over to standby`.
 - **Connection not established**: Tensor sent to a peer that's not connected. Check for WARN `Peer not connected and no relay path — failing tensor forward`.
-- **Encryption failure**: a forward whose sealing fails is DROPPED, never sent in plaintext — check for `DIAG: tensor encrypt+encode failed — dropping forward` and `DIAG: seal() encryption failed`. (A peer with no NodeId mapping yet is a different case: its forward goes out unsealed — `docs/FUTURE_WORK.md` #285.)
+- **Encryption failure**: a forward whose sealing fails is FAILED, never sent in plaintext — the coordinator's wait ends at once with `Encryption failed: …` — check for `DIAG: tensor encrypt+encode failed — failing the forward` and `DIAG: seal() encryption failed`. (A peer with no NodeId mapping yet is a different case: its forward goes out unsealed — `docs/FUTURE_WORK.md` #285.)
 - **Channel backpressure**: Result arrives but the dispatcher channel is full. Check for `Outbound channel full, dropping tensor result`. **Read `nothing_accepted_for_secs` on that line before anything else** — a few hundred milliseconds is a burst under load, while tens of seconds means the dispatcher has stopped consuming and every inbound swarm message is being dropped, not just this one (`docs/FUTURE_WORK.md` #90, gotcha #648). The line is rate-limited to one per 30 s per channel, so `dropped_since_last` is the real volume.
 - **SSE fallback path**: If `DIAG: SSE stream no finish event from pipeline` appears, the streaming token channel broke and the system fell back to waiting for the full result — check pipeline errors above.
 
@@ -2818,10 +2825,11 @@ For "a split is slower than it should be" with the network ruled out. Run both n
 each worker's `DIAG: worker forward received` → the executor's `forward pass complete`
 (`forward_ms` = launch time of the layers) → `DIAG: worker forward answered`
 (`received_to_computed_ms`, `computed_to_sent_ms`) → `sent tensor forward` / `processing
-LayerForward locally` (the network) → `segment result received`. `~/swarmllm-split-0929/`
-holds the harness (`split_speed.sh`: `local` / `split` / `split2` arms, streamed timing in
-`stream_time.py`) and the merge-by-timestamp breakdown used on 2026-09-29, which found 6.6 ms
-per node per token in the batch scheduler (#148).
+LayerForward locally` (the network) → `segment result received` (its `served_ms` / `link_ms`
+split the far computer's time from the link's without the far computer's log, from 2026-11-13
+builds). The 2026-09-29 harness (`split_speed.sh`, `~/swarmllm-split-0929/`) is gone; its
+arms are `examples/split_rig.sh`'s, and its merge-by-timestamp breakdown found 6.6 ms per
+node per token in the batch scheduler (#148).
 ⚠ **Split the tokens by their total before taking medians** — the first fix left a bimodal
 distribution (21-23 ms and 33-36 ms) whose median described neither; the slow half was the
 previous request still counting as active.

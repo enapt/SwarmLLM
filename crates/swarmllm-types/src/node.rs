@@ -461,6 +461,13 @@ pub mod features {
     /// them (`SWARMLLM_ELASTIC_SPANS`, on by default).
     pub const SERVES_SLICES: u64 = 1 << 42;
 
+    /// Takes a segment's report of how it served each forward
+    /// (`LayerResult::how_served`, the `0x0C` trailer after `0x0B`): where its
+    /// layers came from — loaded, a copy's view (#449), or disk — and the load
+    /// and model-process time. A serving node answers with one only to the
+    /// peer that sent the forward, and only where that peer advertises this.
+    pub const HOW_SERVED: u64 = 1 << 43;
+
     /// The full feature set THIS build implements. Advertised by every node,
     /// with [`KV_HALF_ON_CARD`], [`KV_WINDOW_SLIDES`], [`REQUESTER_GUESSES`]
     /// and [`SERVES_SLICES`] beside it where they apply.
@@ -502,7 +509,8 @@ pub mod features {
         | JUDGES_THE_COORDINATOR
         | SENDS_BLOCK_ROWS
         | HOP_TIMINGS
-        | PROMPT_PROGRESS;
+        | PROMPT_PROGRESS
+        | HOW_SERVED;
 
     /// Does `advertised` include every bit in `needed`?
     pub fn supports(advertised: u64, needed: u64) -> bool {

@@ -729,11 +729,23 @@ impl PipelineExecutor {
         match timed {
             Ok(Ok(result)) => {
                 let elapsed = send_time.elapsed();
+                // The peer's own word on its part of the wait, where it gave
+                // one (`served_us`, `how_served` — W3C Server-Timing's split of
+                // server time from the network's): `link_ms` is what the
+                // forward spent on the way there and back. Logged, never priced.
+                let served_ms = result.served_us.map(|us| us / 1000);
+                let how = result.how_served;
                 tracing::info!(
                     request_id = %request_id,
                     segment = segment_idx,
                     node = %node_id,
                     elapsed_ms = elapsed.as_millis() as u64,
+                    served_ms,
+                    link_ms = served_ms.map(|s| (elapsed.as_millis() as u64).saturating_sub(u64::from(s))),
+                    layers_from = how.map(|h| h.layers.as_str()),
+                    load_ms = how.map(|h| h.load_us / 1000),
+                    worker_ms = how.map(|h| h.worker_us / 1000),
+                    is_prefill = budget.is_prefill(),
                     tokens = result.token_ids.len(),
                     activations_bytes = result.activations.len(),
                     finish = ?result.finish_reason,

@@ -145,7 +145,7 @@ impl ServedSince {
 
 /// A duration on the wire: microseconds, rounded to the nearest millisecond;
 /// an hour and more saturates.
-fn micros_to_the_millisecond(held: Duration) -> u32 {
+pub(super) fn micros_to_the_millisecond(held: Duration) -> u32 {
     let ms = (held.as_micros() + 500) / 1000;
     u32::try_from(ms * 1000).unwrap_or(u32::MAX)
 }

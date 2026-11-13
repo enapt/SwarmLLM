@@ -1616,6 +1616,7 @@ mod tests {
             prompt_blocks_stored: None,
             block_rows: None,
             served_us: None,
+            how_served: None,
         };
 
         let encoded = encode_layer_result(&result).unwrap();
@@ -1646,6 +1647,7 @@ mod tests {
             prompt_blocks_stored: None,
             block_rows: None,
             served_us: None,
+            how_served: None,
         };
 
         let encoded = encode_layer_result(&result).unwrap();
@@ -1670,6 +1672,7 @@ mod tests {
             prompt_blocks_stored: None,
             block_rows: None,
             served_us: None,
+            how_served: None,
         };
 
         let encoded = encode_layer_result(&result).unwrap();
@@ -1977,6 +1980,7 @@ mod tests {
             prompt_blocks_stored: None,
             block_rows: None,
             served_us: None,
+            how_served: None,
         };
         let encoded = encode_layer_result(&result).unwrap();
         let decoded = decode_layer_result(&encoded).unwrap();
@@ -2003,6 +2007,7 @@ mod tests {
             prompt_blocks_stored: None,
             block_rows: None,
             served_us: None,
+            how_served: None,
         };
         let encoded = encode_layer_result(&result).unwrap();
         let decoded = decode_layer_result(&encoded).unwrap();
@@ -2038,6 +2043,7 @@ mod tests {
             prompt_blocks_stored: None,
             block_rows: None,
             served_us: None,
+            how_served: None,
         };
         let encoded = encode_layer_result(&result).unwrap();
         let decoded = decode_layer_result(&encoded).unwrap();
@@ -2288,6 +2294,59 @@ mod tests {
         assert_eq!(decode_layer_result(&c).unwrap().block_rows, Some(rows));
     }
 
+    /// The report of how a segment served a forward rides LAST, after the
+    /// block rows — a decoder that predates it reads everything before and
+    /// stops at `0x0C`; one cut short is refused, and a layers code this build
+    /// does not know is read as no report, never as one of ours.
+    #[test]
+    fn how_a_segment_served_rides_after_every_older_trailer() {
+        let rid = uuid::Uuid::new_v4();
+        let mut without = LayerResult::error(rid, "x");
+        without.served_us = Some(41_000);
+        without.block_rows = Some(crate::types::BlockRows {
+            layers: vec![8],
+            from: 0,
+            data: vec![1, 2],
+        });
+        let how = crate::types::HowServed {
+            layers: crate::types::LayersFrom::Copy,
+            load_us: 0x0102_0304,
+            worker_us: 0x0506_0708,
+        };
+        let mut with = without.clone();
+        with.how_served = Some(how);
+        let a = encode_layer_result(&without).unwrap();
+        let b = encode_layer_result(&with).unwrap();
+        assert_eq!(&b[..a.len()], &a[..]);
+        assert_eq!(&b[a.len()..], &[0x0C, 2, 4, 3, 2, 1, 8, 7, 6, 5]);
+        let back = decode_layer_result(&b).unwrap();
+        assert_eq!(back.how_served, Some(how));
+        assert_eq!(back.served_us, Some(41_000));
+        assert!(back.block_rows.is_some());
+        assert_eq!(decode_layer_result(&a).unwrap().how_served, None);
+        assert!(decode_layer_result(&b[..b.len() - 1]).is_err());
+        let mut unknown = b.clone();
+        unknown[a.len() + 1] = 9;
+        assert_eq!(decode_layer_result(&unknown).unwrap().how_served, None);
+        // Alone, too, for each kind.
+        for layers in [
+            crate::types::LayersFrom::Loaded,
+            crate::types::LayersFrom::Copy,
+            crate::types::LayersFrom::Disk,
+        ] {
+            let mut bare = LayerResult::error(rid, "x");
+            bare.how_served = Some(crate::types::HowServed { layers, ..how });
+            let c = encode_layer_result(&bare).unwrap();
+            assert_eq!(
+                decode_layer_result(&c)
+                    .unwrap()
+                    .how_served
+                    .map(|h| h.layers),
+                Some(layers)
+            );
+        }
+    }
+
     /// A reason a newer peer knows and this build does not is read as no
     /// reason — the behaviour before the trailer existed — not as a broken
     /// result that loses the error it carries.
@@ -2329,6 +2388,7 @@ mod tests {
             prompt_blocks_stored: None,
             block_rows: None,
             served_us: None,
+            how_served: None,
         };
         let encoded = encode_layer_result(&result).unwrap();
         let decoded = decode_layer_result(&encoded).unwrap();

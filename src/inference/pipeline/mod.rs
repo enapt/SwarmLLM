@@ -5571,6 +5571,7 @@ mod peer_error_recovery_tests {
             prompt_blocks_stored: None,
             block_rows: None,
             served_us: None,
+            how_served: None,
         }
     }
 

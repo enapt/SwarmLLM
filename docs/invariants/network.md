@@ -4917,6 +4917,30 @@ guard reads whole delays — a gap, not a hazard); a result's integrity is the t
 other trailer's (a result is not sealed end to end); and a result carrying an error (`finish_reason`)
 skips its trailers, served time included.
 
+**How the far computer served the forward rides beside it (2026-11-13, `HOW_SERVED`, `0x0C`).**
+Real-link tests run on other people's computers, whose logs nobody here can read, and #449 (a run
+served from a copy already loaded) was invisible from the coordinator: a slice read as a fast
+first forward, a reload as a slow one, with nothing to tell them apart (the 11-13 diagnosability
+sweep). The prior art is W3C `Server-Timing`: the server names its own parts of the response
+time, so the client splits server from network without the server's log. The answer now carries
+`LayerResult::how_served` — `LayersFrom` (`loaded`: this run was resident as itself; `copy`: a
+view of a longer loaded run; `disk`: read now), the model process's `load_us`
+(`model_worker::load_for_a_forward`, timing `ensure_model_loaded`) and the daemon's `worker_us`
+(from taking the forward up to the model process's answer: a stream's turn, the process's queue,
+the load and the work). With `served_us` that splits a forward's wait into link (`elapsed −
+served`), the node's network side (`served − worker`), and its queue and work (`worker − load`).
+What a change must keep:
+1. **Sent by `served_us`'s rule** — only to the peer that sent the forward (a chained tail's report
+   would be read as the run's head's), only where it advertises `HOW_SERVED`, after `0x0B` so an
+   older decoder has stopped, and rounded to the millisecond like the served time.
+2. **The peer's word, for the log only** — `DIAG: segment result received` (`served_ms`,
+   `link_ms`, `layers_from`, `load_ms`, `worker_ms`) and the request line (`segN_from`,
+   `segN_load_ms`, the prompt pass and the steps' medians apart); nothing prices or routes on it.
+3. **An unknown layers code is no report**, read past (a later build may add one), never one of
+   ours. Tests: `how_a_segment_served_rides_after_every_older_trailer`,
+   `a_forward_reports_whether_its_layers_came_from_a_loaded_copy`,
+   `a_segments_prompt_and_steps_are_reported_apart`.
+
 ## A chain hop tells its coordinator its own time, once a reply (2026-11-12, FUTURE_WORK #427)
 
 A coordinator times a chained split only end to end. A middle hop hands its output to the next hop,

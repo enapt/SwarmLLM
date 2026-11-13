@@ -526,7 +526,11 @@ impl NetworkManager {
                     return;
                 }
 
-                tracing::info!(
+                // Debug: one per forward, so one a token a hop under a split
+                // (sweep 2026-11-13; its siblings went to debug on 05-09). The
+                // forward's own info line is `DIAG: processing LayerForward
+                // locally`.
+                tracing::debug!(
                     %peer,
                     payload_len = payload.len(),
                     "DIAG: inbound TensorPayload request"
