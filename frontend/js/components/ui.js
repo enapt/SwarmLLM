@@ -310,26 +310,31 @@
           c.innerHTML = html;
           chipsEl.appendChild(c);
         };
+        // A bold count and its label (a plural key's `count` picks
+        // `_one` / `_other`, the n === 1 rule).
+        var addCountChip = function(n, label) {
+          addChip('<strong>' + n + '</strong> ' + U.escapeHtml(label));
+        };
         if ((stateKey === 'global' || stateKey === 'viewonly' || stateKey === 'behind') && peers > 0) {
           // One chip per non-empty peer type so the header spells out exactly
           // who's connected: internet peers, same-network peers, pool devices.
-          if (remotePeers > 0) addChip('<strong>' + remotePeers + '</strong> ' + U.escapeHtml(I18n.t(remotePeers === 1 ? 'netstatus.chip_remote_one' : 'netstatus.chip_remote_other')));
-          if (lanPeers > 0) addChip('<strong>' + lanPeers + '</strong> ' + U.escapeHtml(I18n.t(lanPeers === 1 ? 'netstatus.chip_lan_peer_one' : 'netstatus.chip_lan_peer_other')));
-          if (poolPeers > 0) addChip('<strong>' + poolPeers + '</strong> ' + U.escapeHtml(I18n.t(poolPeers === 1 ? 'netstatus.chip_pool_one' : 'netstatus.chip_pool_other')));
+          if (remotePeers > 0) addCountChip(remotePeers, I18n.t('netstatus.chip_remote', { count: remotePeers }));
+          if (lanPeers > 0) addCountChip(lanPeers, I18n.t('netstatus.chip_lan_peer', { count: lanPeers }));
+          if (poolPeers > 0) addCountChip(poolPeers, I18n.t('netstatus.chip_pool', { count: poolPeers }));
         } else if (stateKey === 'lan' && lanPeers > 0) {
-          addChip('<strong>' + lanPeers + '</strong> ' + U.escapeHtml(I18n.t(lanPeers === 1 ? 'netstatus.chip_lan_peer_one' : 'netstatus.chip_lan_peer_other')));
+          addCountChip(lanPeers, I18n.t('netstatus.chip_lan_peer', { count: lanPeers }));
         } else if (stateKey === 'private') {
           if (poolPeers > 0) {
-            addChip('<strong>' + poolPeers + '</strong> ' + U.escapeHtml(I18n.t(poolPeers === 1 ? 'netstatus.chip_pool_one' : 'netstatus.chip_pool_other')));
+            addCountChip(poolPeers, I18n.t('netstatus.chip_pool', { count: poolPeers }));
           } else {
             addChip(U.escapeHtml(I18n.t('netstatus.chip_pool_only')));
           }
-          if (allowLan && lanPeers > 0) addChip('<strong>' + lanPeers + '</strong> ' + U.escapeHtml(I18n.t(lanPeers === 1 ? 'netstatus.chip_lan_peer_one' : 'netstatus.chip_lan_peer_other')));
+          if (allowLan && lanPeers > 0) addCountChip(lanPeers, I18n.t('netstatus.chip_lan_peer', { count: lanPeers }));
         } else if (stateKey === 'solo') {
           // Don't echo a "local parts" chip — the supporting models line
           // below already names them. Cloud provider count is the only
           // useful chip here.
-          if (cloudCount > 0) addChip('<strong>' + cloudCount + '</strong> ' + U.escapeHtml(I18n.t(cloudCount === 1 ? 'netstatus.chip_provider_one' : 'netstatus.chip_provider_other')));
+          if (cloudCount > 0) addCountChip(cloudCount, I18n.t('netstatus.chip_provider', { count: cloudCount }));
         }
       }
 

@@ -50,27 +50,6 @@ use crate::types::{
 pub(crate) use prompt::render_prompt_from_header;
 pub use prompt::template_from_header;
 
-/// Recover a peer's failure from a completed [`LayerResult`].
-///
-/// A serving node reports why it refused a forward in
-/// `finish_reason: NetworkFinishReason::Error(msg)`, and
-/// [`LayerResult::error`] leaves `token_ids` empty when it does. A caller that
-/// tests only `token_ids.is_empty()` therefore throws the peer's stated reason
-/// away and substitutes one of its own — which is how the SAME over-long prompt
-/// came back as `400 invalid_request_error` with an actionable message when the
-/// model was local, and `500 server_error: ngram-only: prefill returned no
-/// tokens` when it was reached over the network (measured on the live swarm
-/// 2026-08-30). That is gotcha #304's shape: whose fault a mistake was decided
-/// by which machine happened to hold the model.
-///
-/// It also mis-attributes blame. `failure_is_penalty_worthy` exempts
-/// `Validation`, but never sees one when the class has been flattened into
-/// `Inference`, so the peer is docked a serve-failure penalty for the caller's
-/// mistake.
-///
-/// Returns `None` when the result carries no error, so a caller keeps its own
-/// "the peer returned nothing and said nothing" message for the genuinely
-/// silent case.
 /// Would every other holder refuse this forward in exactly the same way?
 ///
 /// A peer's `Validation` describes the REQUEST — a prompt longer than the
@@ -136,6 +115,27 @@ fn chained_run_failure(
     }
 }
 
+/// Recover a peer's failure from a completed [`LayerResult`].
+///
+/// A serving node reports why it refused a forward in
+/// `finish_reason: NetworkFinishReason::Error(msg)`, and
+/// [`LayerResult::error`] leaves `token_ids` empty when it does. A caller that
+/// tests only `token_ids.is_empty()` therefore throws the peer's stated reason
+/// away and substitutes one of its own — which is how the SAME over-long prompt
+/// came back as `400 invalid_request_error` with an actionable message when the
+/// model was local, and `500 server_error: ngram-only: prefill returned no
+/// tokens` when it was reached over the network (measured on the live swarm
+/// 2026-08-30). That is gotcha #304's shape: whose fault a mistake was decided
+/// by which machine happened to hold the model.
+///
+/// It also mis-attributes blame. `failure_is_penalty_worthy` exempts
+/// `Validation`, but never sees one when the class has been flattened into
+/// `Inference`, so the peer is docked a serve-failure penalty for the caller's
+/// mistake.
+///
+/// Returns `None` when the result carries no error, so a caller keeps its own
+/// "the peer returned nothing and said nothing" message for the genuinely
+/// silent case.
 pub(super) fn peer_error_from_result(result: &LayerResult) -> Option<SwarmError> {
     match &result.finish_reason {
         Some(NetworkFinishReason::Error(msg)) => Some(

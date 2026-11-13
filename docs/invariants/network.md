@@ -6029,7 +6029,7 @@ held only by A, A on `pause`):
   `Not serving a part — this connection is metered` (2 of 2), B held 0 parts.
   Control (A allowing from the start): B received both parts from A at once (109 MB of each within 90 s over loopback). After a refusal B sends that part to the model's origin (`shard_p2p_failed`, the existing path for every empty answer) until it lands, so in the probe's namespace, with no internet, it did not come back to A once A allowed again; on the internet the origin serves it, and offline mode drops the entry back to the peers (`pending_fetch_can_proceed`).
 
-Tests: `a_metered_connection_refuses_new_work_and_lets_running_work_finish`
+Tests: `a_held_back_node_refuses_new_work_and_lets_running_work_finish`
 (red with the hold removed from `admits_a_new_request`),
 `the_hold_is_read_without_asking_and_the_setting_answers_at_once`,
 `this_node_holds_back_on_a_metered_connection_and_the_owner_is_told_once`.

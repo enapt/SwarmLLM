@@ -430,10 +430,10 @@ Microsoft WDDM/TDR docs, Apple developer docs; issue trackers of Ollama, LM Stud
    - the processor's temperature where readable;
    - `graphics_driver_not_answering()`.
 
-   One `HostHeat` state, `Cool → Warm → Hot`, plus `DriverStuck`, with hysteresis.
+   Shipped as one hold with a cause, `HeatCause` (`Card`, `CardProtecting`, `Processor`, `DriverNotAnswering`), with hysteresis.
    - **Card:** Warm while the driver cuts clocks for heat or the card is within 2 °C of its target. Hot once Warm has held 2 min, or on a hardware slowdown.
    - **Processor:** Hot at 93 °C or more for 5 min. Laptop firmware holds ~95 °C under load by design: seconds there are normal, minutes of strangers' work are not.
-   - **Resume:** 5 °C under, after a 60 s hold-off.
+   - **Resume:** the card 7 °C under its target, the processor at 88 °C, after a 60 s hold-off (`COOL_FOR`).
 2. **While Hot, peers' NEW work is refused** at the one choke point, `admits_a_new_request`, beside `metered_hold`. The refusal is the existing NodeFull-shaped one, so there is no wire change and peers re-plan. `can_serve_inference` goes false in the capability broadcast, so peers route elsewhere.
 3. **Peers' RUNNING work stops** if Hot holds past a second interval, and at once on DriverStuck. Their replies continue elsewhere (`continuation_after`, failover).
 4. **The owner's own work is never refused, but is paced while Hot:** a pause between worker steps (decode and prompt chunks) that halves the duty cycle to start with.
@@ -3302,7 +3302,7 @@ PREFILL coefficient × `NOMINAL_DECODE_ACTIVATION_BYTES` (`daemon/state/peer_spe
 round trip over every position — and `vertex_cost_as` drops the network term for it as for a decode observation. The
 log agrees: Denmark's figure was `None` for the two 8-token warm-ups, then 3.00, 2.87, 2.78, 2.76 (each request's
 prompt pass, warmer each time), never toward the ~10 a layer its checks took; `observed_prefill_ms_per_layer_byte`
-read `None` throughout because the DIAG logs the PROMPT-rate figure (`prompt_ms_per_layer_byte`), not the fallback's.
+read `None` throughout because the DIAG logs the PROMPT-rate figure (`prompt_ms_per_layer_byte`; that day's DIAG fields — the prompt rate is per token since, `prompt_ms_per_layer_token`), not the fallback's.
 **The fix, in two halves**: (1) a figure that answered from the prefill fallback keeps the vertex's network term
 (the source carried to `NodeCandidate` beside `observed_latency_ms_per_layer`, and logged); (2) a chained check is
 charged to its head over the layers it ran, as `forward_through_segments_inner` already charges a chained forward —
@@ -6277,7 +6277,7 @@ grep `^| N |`).
   its pool at connect (`syncTransactions`); BEP 3's bitfield goes first on a new connection.
   Test `a_peer_whose_capability_arrives_is_told_the_versions_at_once` (red with the ring or the
   catch-up taken out). On the rig the requester had its peer's model 16 ms after connecting, against
-  29 s before. Evidence: `docs/invariants/network.md` § "A new connection is a new catch-up".
+  29 s before. Evidence: `docs/invariants/network.md` § "Announce, then pull: manifests" ("A new connection is a new catch-up").
 
 **Closed 2026-11-12, on main (not in a release yet)** (#444)
 - #444 — **An update's drain kept taking new work from other computers, so a busy node could

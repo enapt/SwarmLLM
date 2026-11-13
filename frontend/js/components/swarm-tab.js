@@ -2,7 +2,7 @@
 
 // =============================================================================
 // SwarmLLM — "The Swarm" tab (R111)
-// Wishlist + Running-now + Search-HF + Capacity-plan sub-views. The wishlist
+// Wishlist + Running-now + Search-HF + Capacity-plan + Performance sub-views. The wishlist
 // is the user-visible face of auto-manage: instead of the daemon downloading
 // models in mysterious silence, the user sees a ranked queue with status
 // badges, plain-language "why" tags, and CTAs that explain what their
