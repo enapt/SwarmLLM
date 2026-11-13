@@ -1,5 +1,52 @@
 # Changelog
 
+## [0.3.285-alpha] — 2026-11-13
+
+**A computer that already has a model loaded serves part of it to a split without loading it again.** When a
+split asked a computer for only some of the layers of a model it had loaded whole, that computer read those layers
+from disk a second time and held them twice, about 3.4 GB of a 14B in one report. On a real two-continent split
+that second load was most of the wait for the first word: 4.4-4.6 seconds, against 0.4-0.6 for handing the whole
+reply to that computer. So splits between computers that each held the model rarely paid off. Now any run of layers
+inside what a computer has loaded is served from that copy, sharing its memory, and the planner counts it as no load.
+It does so for this computer, and for another only once that one runs this release and says so. A loaded copy serves
+at most eight such runs at once, and a run that has not been used for 30 seconds gives its place to a new one. Its
+conversation's memory is kept for when it comes back. Ranges split for tensor parallelism, and models whose layers
+share memory (Gemma 4 E2B/E4B), load as before.
+
+**A computer running part of a model on its processor now weighs a faster split.** With "Start and finish on this
+computer" on, a computer that held a whole model, part of it on its processor, ran every request itself: a model
+shared between its graphics card and its processor counted as fitting the card, so a split with a faster computer
+was never priced. Now only a model held entirely on the card counts as fitting it. With a 14B shared with an RTX 3060 about 140 ms
+away, all 8 test requests went to the split: code at 25-29 tokens a second, against 13-15 run here alone, and
+prose at 10-17, against 11-13. A computer that has not run a split of a model yet starts from what its small helper
+model is expected to guess, not one word a round, and now and then tries an untried split so it gets measured.
+
+**The Network map puts every computer in its own country.** A new user reported the map looked inaccurate, and it
+was. A country's dot, and the end of every line to it, sat at the middle of the box around its outline, which for
+20 of 166 countries was outside the country (Russia's in Norway, France's in the Atlantic). Nine countries never
+lit up, and the smallest ones had no dot. Every country now has its dot inside it. A computer in India sees India's
+official borders, as Google Maps shows them there. The map is drawn on an equal-area projection, so Russia, Canada and
+Greenland are no longer several times their size, and a dashed ring marks the country this computer is counted in.
+
+**A split can be diagnosed from the computer that leads it.** A split's other computers belong to other people,
+whose logs nobody here can read. The computer coordinating a reply now learns, for each part, where the other
+computer's layers came from: already loaded, part of a loaded copy, or read from disk just now. It also learns how
+long that load took and how long that computer held the work, so a slow part splits into the link and the computer.
+Each computer sends this only to the computer that asked, rounded to the millisecond, and nothing routes on it.
+The request log reports a part's prompt reading and its words apart. A split that runs without its small helper
+model now says why in the log. The peer list shows which layers each computer has loaded, and the diagnostics
+report caps its long lists.
+
+**Smaller changes.** The network libraries are patched for this week's security advisories:
+- the QUIC library, where a peer could open more streams than allowed or make a connecting computer try to
+  allocate over 10 GB;
+- its receive loop, which could spin on macOS;
+- the gossip library, where a peer could fill memory with messages about topics this computer never joined (the
+  fix is backported to the patched copy we carry).
+
+Three more DNS advisories are in code no build of ours includes, and are listed in SECURITY.md. A peer's list of
+loaded layers is now capped like its other lists.
+
 ## [0.3.284-alpha] — 2026-11-13
 
 **A computer that has served several models is no longer offered as nearly full.** When a computer runs a
