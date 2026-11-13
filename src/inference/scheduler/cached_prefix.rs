@@ -108,6 +108,11 @@ pub struct PromptPlan {
     /// #3 (d)). `false` where no request is behind the plan: one round a
     /// token, exactly as before.
     pub(crate) may_guess_ahead: bool,
+    /// What such a split yields a round before this node has measured enough
+    /// of the model's own (`pipeline::split_yield_prior`, #3 (j)): set with
+    /// [`Self::may_guess_ahead`], never apart from it. `None` (no prior)
+    /// where no request is behind the plan.
+    pub(crate) yield_prior: crate::daemon::state::split_rounds::YieldPrior,
 }
 
 impl PromptPlan {
@@ -149,10 +154,17 @@ impl PromptPlan {
     }
 
     /// This plan, for a request a split driven from here may guess ahead for
-    /// (`pipeline::request_may_guess_ahead`). Set where
-    /// [`Self::with_reply_of_at_most`] is.
-    pub(crate) fn with_guessing_ahead(mut self, may: bool) -> Self {
+    /// (`pipeline::request_may_guess_ahead`), whose split is priced from
+    /// `prior` until its model's own splits are trusted
+    /// (`pipeline::split_yield_prior`, #3 (j)) — the two together, so neither
+    /// is set without the other. Set where [`Self::with_reply_of_at_most`] is.
+    pub(crate) fn with_guessing_ahead(
+        mut self,
+        may: bool,
+        prior: crate::daemon::state::split_rounds::YieldPrior,
+    ) -> Self {
         self.may_guess_ahead = may;
+        self.yield_prior = prior;
         self
     }
 }
@@ -270,6 +282,7 @@ pub(crate) fn plan_prompt(state: &SharedState, request: &InferenceRequest) -> Op
         head_may_lead: false,
         head_features: 0,
         may_guess_ahead: false,
+        yield_prior: crate::daemon::state::split_rounds::YieldPrior::None,
         handed_off: if crate::inference::pipeline::remote_generate::request_may_be_handed_off(
             state, request,
         ) {

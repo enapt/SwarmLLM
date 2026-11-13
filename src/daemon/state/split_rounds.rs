@@ -41,6 +41,43 @@
 //!
 //! Kept across restarts (`recent_by_model`): a restart priced every split at
 //! one round a token until four had finished.
+//!
+//! **Before four have finished, a split with a drafter starts from a prior**
+//! (FUTURE_WORK #3 (j), 2026-11-13): one reply's worth of rounds at the γ
+//! controller's own opening figures ([`YieldPrior::Drafter`]), blended with
+//! whatever splits there are, dropped at [`BEFORE_TRUSTED`]. Priced at one
+//! round a token, the 14B's split with a card far away (TH ↔ AU, 34-37 tok/s
+//! on code) lost every plan to a whole hand-off (17-18) — and a split that
+//! never runs is never measured, so it lost for good. Prior art: a prior
+//! counted as pseudo-observations (Bayes-UCBVI's fake data; this crate's
+//! `AcceptanceEstimate`, α 0.7 over ten trials); a bandit's untried arm must
+//! not be priced as if it had been tried and failed.
+//!
+//! **And now and then it is priced OPTIMISTICALLY, so it runs** (2026-11-13):
+//! the prior is the low end of what drafted splits measured, so where a split
+//! would win only at a better yield — a tree flowing to a card far away — it
+//! still lost every plan, and still was never measured: three 160-token
+//! requests on a fresh node over Thailand ↔ Australia, the prior on, all went
+//! to a whole hand-off (15.6-20 tok/s) beside a split measured at 34-37 on code
+//! (`real_link.sh` arms `flowall`). [`SplitRounds::prior_for_request`] prices
+//! the third request priced from the prior, then the sixth after it, the
+//! twelfth, … at most every [`MOST_EXPLORE_AFTER`]th, at
+//! [`EXPLORED_TOKENS_A_ROUND`] ([`YieldPrior::Explore`]) — every candidate,
+//! every gate and the logged prediction reading the one figure, so the plan is
+//! simply the one that would win were the split that good. A split that
+//! finishes starts the count again; four that have finished are trusted, and
+//! the prior — the optimistic one with it — is gone. What an exploration can
+//! cost is bounded twice: it is taken only where the split would then win,
+//! and a split that runs is measured, so the next price is its own. Prior art:
+//! optimism in the face of uncertainty (UCB — an arm not yet pulled is priced
+//! at what it might be, Auer et al. 2002), with forced exploration on a
+//! doubling schedule as ParetoBandit starts a new arm and as this crate's
+//! `model_worker::Probing` and `SpecBackoff` probe a declined guesser; Envoy's
+//! slow start and gRPC's weighted round robin keep an unmeasured endpoint in
+//! rotation for the same reason — one never tried is never measured (#178's
+//! ratchet, at the scale of a whole split).
+//!
+//! [`BEFORE_TRUSTED`]: super::recent_by_model::BEFORE_TRUSTED
 
 use super::recent_by_model::RecentByModel;
 use crate::storage::db::Database;
@@ -86,12 +123,118 @@ pub fn round_trips_waited(decode_ms: f64, least_answer_ms: Option<f64>, forwards
 pub struct SplitRounds {
     /// (tokens, rounds) of each recent split, oldest first.
     recent: RecentByModel<(u32, u32)>,
+    /// Each model's exploration schedule ([`Self::prior_for_request`]);
+    /// memory only — a restart starts it over.
+    exploring: dashmap::DashMap<String, Exploring>,
+}
+
+/// What a split of a model is expected to yield a round before this node has
+/// measured [`BEFORE_TRUSTED`](super::recent_by_model::BEFORE_TRUSTED) of
+/// them — a REQUIRED argument of [`SplitRounds::tokens_per_round`], chosen by
+/// `pipeline::split_yield_prior` and carried by the plan
+/// (`PromptPlan::with_guessing_ahead`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum YieldPrior {
+    /// A drafter held here would guess for it: one reply of
+    /// [`PRIOR_REPLY_TOKENS`] at Leviathan's tokens a round for the γ
+    /// controller's opening acceptance and its largest step
+    /// (`AcceptanceEstimate::new`'s α 0.7, `GAMMA_STEP` 2: 2.19). The low end
+    /// of what drafted splits measured here — 1.64 on two processors
+    /// (2026-10-19), 2.2 on the 70B, 3.2-4.3 prose and 7.7-10.3 code where a
+    /// tree flowed (2026-10-29) — so it lets a split run, never oversells one.
+    Drafter,
+    /// [`Self::Drafter`] for the request [`SplitRounds::prior_for_request`]
+    /// explores with: one reply at [`EXPLORED_TOKENS_A_ROUND`], so a split
+    /// that would win at that yield is planned, run and measured.
+    Explore,
+    /// Nothing guesses but the n-gram loop's copies, or the plan has no
+    /// request behind it: one round a token until measured, as before.
+    #[default]
+    None,
+}
+
+/// The tokens a round an explored split is priced at: the low end of the
+/// code replies measured where a tree flowed to a card far away (7.7-10.3 a
+/// round trip waited, 14B over Thailand ↔ Australia, 2026-10-29) — above
+/// every prose figure (3.2-4.3) and every chain's (1.6-2.2), which is the
+/// point: an arm not yet pulled is priced at what it might be. A split that
+/// cannot win even there is not tried.
+pub const EXPLORED_TOKENS_A_ROUND: f64 = 8.0;
+
+/// Requests priced from the prior before the first is explored: the third.
+/// The first two are priced honestly — a newcomer's first replies are not an
+/// experiment — and give the reply length (`ReplyLengths`) and a whole
+/// hand-off's speed their first samples.
+pub const FIRST_EXPLORE_AFTER: u32 = 3;
+
+/// The longest wait between two explorations, in requests priced from the
+/// prior: each doubles the wait, so a split that keeps losing is tried ever
+/// less often, never never.
+pub const MOST_EXPLORE_AFTER: u32 = 64;
+
+/// When a model's split is next priced at [`YieldPrior::Explore`].
+#[derive(Clone, Copy, Debug)]
+struct Exploring {
+    /// Requests priced from the prior since a split of the model finished
+    /// here or was explored.
+    since: u32,
+    /// How many of them the next exploration waits for.
+    after: u32,
+    /// The last request answered, and its answer: a re-plan of the same
+    /// request (`router::another_replan_is_due`) is answered the same and
+    /// moves nothing.
+    last: Option<(uuid::Uuid, YieldPrior)>,
+}
+
+/// The tokens one reply of the prior counts for: the planner's assumed reply
+/// (`parallax::ASSUMED_FORWARD_PASSES`), so a first split of a typical
+/// length already moves the figure as far as the prior holds it.
+pub const PRIOR_REPLY_TOKENS: f64 = 64.0;
+
+impl YieldPrior {
+    /// The prior as one pseudo-reply, (tokens, rounds); `None` for no prior.
+    fn pseudo_reply(self) -> Option<(f64, f64)> {
+        match self {
+            Self::Drafter => {
+                let alpha = crate::inference::dsd_controller::AcceptanceEstimate::new().alpha();
+                let per_round = crate::inference::dsd_controller::expected_tokens_per_round(
+                    alpha,
+                    crate::inference::dsd_controller::GAMMA_STEP,
+                );
+                Some((PRIOR_REPLY_TOKENS, PRIOR_REPLY_TOKENS / per_round))
+            }
+            Self::Explore => Some((
+                PRIOR_REPLY_TOKENS,
+                PRIOR_REPLY_TOKENS / EXPLORED_TOKENS_A_ROUND,
+            )),
+            Self::None => None,
+        }
+    }
+}
+
+/// Where a split's tokens a round came from, logged as `split_yield_from`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum YieldFrom {
+    /// The prior alone: no split of the model has finished here.
+    Prior,
+    /// The prior beside fewer splits than are trusted alone.
+    PriorAndSplits,
+    /// This node's own recent splits, nothing else.
+    Splits,
+}
+
+/// What a round of a model's split is expected to yield, and from what.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SplitYield {
+    pub tokens_per_round: f32,
+    pub from: YieldFrom,
 }
 
 impl Default for SplitRounds {
     fn default() -> Self {
         Self {
             recent: RecentByModel::new("split_rounds", ROUNDS_COUNTED_AS),
+            exploring: dashmap::DashMap::new(),
         }
     }
 }
@@ -102,22 +245,90 @@ impl SplitRounds {
     pub fn record(&self, model: &str, tokens: u32, rounds: u32) {
         if usable(&(tokens, rounds)) {
             self.recent.push(model, (tokens, rounds));
+            // A split that ran is measured: the count to the next exploration
+            // starts again.
+            if let Some(mut e) = self.exploring.get_mut(model) {
+                e.since = 0;
+            }
         }
     }
 
-    /// The tokens a round of `model`'s recent splits yielded, or `None` until
-    /// [`BEFORE_TRUSTED`](super::recent_by_model::BEFORE_TRUSTED) have finished. Never below one: a round that
+    /// The prior `request` for `model` is priced with: `prior` itself, but
+    /// [`YieldPrior::Explore`] where it is the drafter's, the model's splits
+    /// are not yet trusted, and this is the [`FIRST_EXPLORE_AFTER`]th request
+    /// so priced since a split of it finished here — then twice as many after
+    /// each exploration, up to [`MOST_EXPLORE_AFTER`]. Asked once a planning
+    /// attempt (`pipeline::split_yield_prior`); the same request asked again
+    /// gets the same answer.
+    pub fn prior_for_request(
+        &self,
+        model: &str,
+        request: uuid::Uuid,
+        prior: YieldPrior,
+    ) -> YieldPrior {
+        if prior != YieldPrior::Drafter || self.recent.with_trusted(model, |_| ()).is_some() {
+            return prior;
+        }
+        let mut e = self
+            .exploring
+            .entry(model.to_string())
+            .or_insert(Exploring {
+                since: 0,
+                after: FIRST_EXPLORE_AFTER,
+                last: None,
+            });
+        if let Some((asked, answer)) = e.last {
+            if asked == request {
+                return answer;
+            }
+        }
+        e.since += 1;
+        let answer = if e.since >= e.after {
+            e.since = 0;
+            e.after = e.after.saturating_mul(2).min(MOST_EXPLORE_AFTER);
+            YieldPrior::Explore
+        } else {
+            YieldPrior::Drafter
+        };
+        e.last = Some((request, answer));
+        answer
+    }
+
+    /// The tokens a round of `model`'s recent splits yielded, once
+    /// [`BEFORE_TRUSTED`](super::recent_by_model::BEFORE_TRUSTED) have
+    /// finished — measured, never derived. Before then the `prior`'s
+    /// pseudo-reply joins whatever splits there are in the same ratio of sums,
+    /// or `None` where there is no prior. Never below one: a round that
     /// yielded nothing (a stream's chunk sent on guesses that were then
     /// refused) overlapped another, and must not price a split above the one
     /// round a token it was priced at before.
-    pub fn tokens_per_round(&self, model: &str) -> Option<f32> {
-        self.recent.with_trusted(model, |recent| {
-            let (tokens, rounds) = recent
+    pub fn tokens_per_round(&self, model: &str, prior: YieldPrior) -> Option<SplitYield> {
+        let sums = |recent: &std::collections::VecDeque<(u32, u32)>| {
+            recent
                 .iter()
                 .fold((0u64, 0u64), |(t, r), &(tokens, rounds)| {
                     (t + u64::from(tokens), r + u64::from(rounds))
-                });
-            (tokens as f64 / rounds.max(1) as f64).max(1.0) as f32
+                })
+        };
+        let at_least_one = |tokens: f64, rounds: f64| (tokens / rounds.max(1.0)).max(1.0) as f32;
+        if let Some((tokens, rounds)) = self.recent.with_trusted(model, sums) {
+            return Some(SplitYield {
+                tokens_per_round: at_least_one(tokens as f64, rounds as f64),
+                from: YieldFrom::Splits,
+            });
+        }
+        let (prior_tokens, prior_rounds) = prior.pseudo_reply()?;
+        let (tokens, rounds) = self.recent.with_any(model, sums).unwrap_or((0, 0));
+        Some(SplitYield {
+            tokens_per_round: at_least_one(
+                prior_tokens + tokens as f64,
+                prior_rounds + rounds as f64,
+            ),
+            from: if rounds == 0 {
+                YieldFrom::Prior
+            } else {
+                YieldFrom::PriorAndSplits
+            },
         })
     }
 
@@ -142,6 +353,13 @@ mod tests {
     use super::*;
     use crate::daemon::state::recent_by_model::{BEFORE_TRUSTED, RECENT};
 
+    /// The figure with no prior: measured, or `None`.
+    fn measured(rounds: &SplitRounds, model: &str) -> Option<f32> {
+        rounds
+            .tokens_per_round(model, YieldPrior::None)
+            .map(|y| y.tokens_per_round)
+    }
+
     /// The figure is the recent splits' tokens over their rounds — a long
     /// reply weighs as its tokens do — once enough have finished.
     #[test]
@@ -150,16 +368,16 @@ mod tests {
         for _ in 0..BEFORE_TRUSTED - 1 {
             rounds.record("m", 300, 100);
         }
-        assert_eq!(rounds.tokens_per_round("m"), None, "too few to trust");
+        assert_eq!(measured(&rounds, "m"), None, "too few to trust");
         // A two-token reply in two rounds (the prompt pass and one step).
         rounds.record("m", 2, 2);
-        let each = rounds.tokens_per_round("m").expect("trusted");
+        let each = measured(&rounds, "m").expect("trusted");
         assert!((each - 902.0 / 302.0).abs() < 1e-4, "{each}");
-        assert_eq!(rounds.tokens_per_round("other"), None);
+        assert_eq!(measured(&rounds, "other"), None);
         // Nothing to learn from an empty reply or an uncounted one.
         rounds.record("m", 0, 5);
         rounds.record("m", 5, 0);
-        assert!((rounds.tokens_per_round("m").unwrap() - each).abs() < 1e-6);
+        assert!((measured(&rounds, "m").unwrap() - each).abs() < 1e-6);
     }
 
     /// A plain loop reads exactly one token a round, and a stream whose
@@ -171,8 +389,8 @@ mod tests {
             rounds.record("plain", 40, 40);
             rounds.record("wasted", 10, 14);
         }
-        assert_eq!(rounds.tokens_per_round("plain"), Some(1.0));
-        assert_eq!(rounds.tokens_per_round("wasted"), Some(1.0));
+        assert_eq!(measured(&rounds, "plain"), Some(1.0));
+        assert_eq!(measured(&rounds, "wasted"), Some(1.0));
     }
 
     /// A reply whose forwards overlapped is counted the round trips it waited:
@@ -200,6 +418,135 @@ mod tests {
         assert_eq!(round_trips_waited(10.0, Some(400.0), 3), 1);
     }
 
+    /// **A split with a drafter is priced from a prior until its own splits
+    /// are trusted** (#3 (j)): one reply of 64 tokens at Leviathan's 2.19 a
+    /// round (α 0.7, γ 2) before any has run; that reply beside the splits
+    /// that have, in one ratio of sums; then the splits alone, exactly as
+    /// without a prior. Without a drafter there is no prior.
+    #[test]
+    fn a_split_with_a_drafter_starts_from_the_prior_until_its_own_are_trusted() {
+        let rounds = SplitRounds::default();
+        let cold = rounds
+            .tokens_per_round("m", YieldPrior::Drafter)
+            .expect("a prior");
+        assert!((cold.tokens_per_round - 2.19).abs() < 0.005, "{cold:?}");
+        assert_eq!(cold.from, YieldFrom::Prior);
+        assert_eq!(
+            measured(&rounds, "m"),
+            None,
+            "no drafter: one round a token"
+        );
+
+        // A first split that kept 4 a round pulls it up, one that kept ~1 down.
+        let prior_rounds = PRIOR_REPLY_TOKENS / f64::from(cold.tokens_per_round);
+        rounds.record("good", 160, 40);
+        let good = rounds
+            .tokens_per_round("good", YieldPrior::Drafter)
+            .unwrap();
+        assert_eq!(good.from, YieldFrom::PriorAndSplits);
+        let expect = (PRIOR_REPLY_TOKENS + 160.0) / (prior_rounds + 40.0);
+        assert!(
+            (f64::from(good.tokens_per_round) - expect).abs() < 0.01,
+            "{good:?}"
+        );
+        assert!(good.tokens_per_round > cold.tokens_per_round);
+        rounds.record("poor", 120, 118);
+        let poor = rounds
+            .tokens_per_round("poor", YieldPrior::Drafter)
+            .unwrap();
+        assert!(poor.tokens_per_round < cold.tokens_per_round, "{poor:?}");
+        assert!(poor.tokens_per_round >= 1.0);
+        assert_eq!(
+            measured(&rounds, "good"),
+            None,
+            "still too few to trust alone"
+        );
+
+        // Trusted: the splits alone, the prior gone.
+        for _ in 1..BEFORE_TRUSTED {
+            rounds.record("good", 160, 40);
+        }
+        let trusted = rounds
+            .tokens_per_round("good", YieldPrior::Drafter)
+            .unwrap();
+        assert_eq!(trusted.from, YieldFrom::Splits);
+        assert_eq!(trusted.tokens_per_round, 4.0);
+        assert_eq!(measured(&rounds, "good"), Some(4.0));
+    }
+
+    /// **An untried split is priced optimistically now and then** (#3 (j)):
+    /// the third request priced from the drafter's prior explores, then the
+    /// sixth after it, doubling to the cap; a re-plan of one request keeps its
+    /// answer; a split that finishes starts the count again; four finished
+    /// end it, and no other prior is ever explored.
+    #[test]
+    fn an_untried_split_is_explored_on_a_doubling_schedule() {
+        let rounds = SplitRounds::default();
+        let ask = |model: &str| {
+            rounds.prior_for_request(model, uuid::Uuid::new_v4(), YieldPrior::Drafter)
+        };
+        let answers: Vec<_> = (0..9).map(|_| ask("m")).collect();
+        use YieldPrior::{Drafter as D, Explore as X};
+        assert_eq!(answers, [D, D, X, D, D, D, D, D, X], "3rd, then 6 later");
+
+        // Priced at the optimistic yield, beside nothing measured.
+        let explored = rounds.tokens_per_round("m", X).unwrap();
+        assert!((f64::from(explored.tokens_per_round) - EXPLORED_TOKENS_A_ROUND).abs() < 1e-4);
+
+        // A re-plan of the same request is answered the same, and moves nothing.
+        let fresh = SplitRounds::default();
+        let first = uuid::Uuid::new_v4();
+        let second = uuid::Uuid::new_v4();
+        let third = uuid::Uuid::new_v4();
+        assert_eq!(fresh.prior_for_request("m", first, D), D);
+        assert_eq!(fresh.prior_for_request("m", second, D), D);
+        assert_eq!(fresh.prior_for_request("m", second, D), D, "a re-plan");
+        assert_eq!(fresh.prior_for_request("m", third, D), X);
+        assert_eq!(
+            fresh.prior_for_request("m", third, D),
+            X,
+            "the re-plan explores too"
+        );
+
+        // A split that finished starts the count again.
+        let ran = SplitRounds::default();
+        ran.prior_for_request("m", uuid::Uuid::new_v4(), D);
+        ran.prior_for_request("m", uuid::Uuid::new_v4(), D);
+        ran.record("m", 160, 40);
+        assert_eq!(ran.prior_for_request("m", uuid::Uuid::new_v4(), D), D);
+        assert_eq!(ran.prior_for_request("m", uuid::Uuid::new_v4(), D), D);
+        assert_eq!(ran.prior_for_request("m", uuid::Uuid::new_v4(), D), X);
+
+        // Trusted: no prior, nothing explored.
+        for _ in 1..BEFORE_TRUSTED {
+            ran.record("m", 160, 40);
+        }
+        for _ in 0..2 * MOST_EXPLORE_AFTER {
+            assert_eq!(ran.prior_for_request("m", uuid::Uuid::new_v4(), D), D);
+        }
+        // No drafter, no prior to explore.
+        for _ in 0..2 * MOST_EXPLORE_AFTER {
+            assert_eq!(
+                rounds.prior_for_request("n", uuid::Uuid::new_v4(), YieldPrior::None),
+                YieldPrior::None
+            );
+        }
+
+        // The wait doubles to the cap and stays there.
+        let long = SplitRounds::default();
+        let mut gaps = Vec::new();
+        let mut since = 0;
+        for _ in 0..400 {
+            since += 1;
+            if long.prior_for_request("m", uuid::Uuid::new_v4(), D) == X {
+                gaps.push(since);
+                since = 0;
+            }
+        }
+        assert_eq!(gaps[..6], [3, 6, 12, 24, 48, 64]);
+        assert!(gaps[6..].iter().all(|&g| g == MOST_EXPLORE_AFTER));
+    }
+
     #[test]
     fn only_the_most_recent_splits_count() {
         let rounds = SplitRounds::default();
@@ -209,6 +556,6 @@ mod tests {
         for _ in 0..RECENT {
             rounds.record("m", 60, 60);
         }
-        assert_eq!(rounds.tokens_per_round("m"), Some(1.0));
+        assert_eq!(measured(&rounds, "m"), Some(1.0));
     }
 }

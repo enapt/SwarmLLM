@@ -2028,6 +2028,23 @@ three red with the bound off, the last red with the learned length off.
 `reply_lengths`: `the_expectation_is_the_mean_of_recent_replies_once_there_are_enough`,
 `only_the_most_recent_replies_count`.
 
+**Before four replies have finished, the prior is one reply beside them (2026-11-13).**
+`ReplyLengths::expected` returned `None` until `BEFORE_TRUSTED` (4) replies of the model had
+finished, and the planner priced every one before that at `ASSUMED_FORWARD_PASSES` — all or
+nothing. On a fresh node (the rig's empty data directory, which is also a newcomer's first hour)
+three 160-token hand-offs of Qwen2.5-14B to an RTX 3060 in Australia were each priced 2.9-4.2 s
+and took 11.9-13.4 s (`real_link.sh` arms `flowall`, `predicted_ms=2922 … assumed_forward_passes=64`
+against `total_ms=13143`): 2.5x of the 3-4x from the length alone, the rest the peer's stated
+speed (1.5x) until its first warm reply was timed. Now the prior (`split_rounds::
+PRIOR_REPLY_TOKENS`, the same 64, pinned by `every_prior_reply_is_the_planners_assumed_reply`) is
+counted as ONE more finished reply in the same mean — 112 after one 160-token reply, 128 after
+two, 136 after three, the replies alone from four. One pseudo-observation is how this crate
+already starts what it has not measured (`YieldPrior`, `AcceptanceEstimate`); DB2's LEO (Stillger
+et al., VLDB 2001) corrects a cost model's input from each execution rather than waiting to trust
+it. Mostly a matter of honest predictions: every route's per-token terms scale with the passes, so
+the length moves a choice only where a once-a-request term (a cold load, a prompt) meets a
+per-token one. Test `a_first_reply_moves_the_price_beside_the_prior` (red all-or-nothing).
+
 ## A split is priced for the rounds it takes, not the tokens it writes
 
 **Rule (2026-10-19, FUTURE_WORK #3 (d)).** `NodeCandidate::rounds_entered(range,
@@ -2147,6 +2164,51 @@ priced as before, the prediction records 3.00),
 check count, the request gate, the split gate). `split_rounds`:
 `a_models_splits_yield_their_tokens_over_their_rounds`,
 `a_round_is_never_priced_at_less_than_a_token`, `only_the_most_recent_splits_count`.
+
+**A split no split of the model has run for starts from a prior, and is now and then priced
+optimistically (2026-11-13, FUTURE_WORK #3 (j)).** The figure above is learned only from splits
+that RAN, so before any had, every split was priced at one round a token — and where its gain is
+its guesses it lost every plan, never ran, and was never measured: the cold-start trap, #178's
+ratchet at the scale of a whole split. Measured on the real link (Qwen2.5-14B Q4_K_M whole here AND
+on an RTX 3060 in Australia, ~136 ms, the 0.5B drafter here, a fresh data dir per arm,
+`real_link.sh`): with no prior (arms 1, 6) and with the drafter's prior (arms 2, 5) all twelve
+requests went to a whole hand-off (15.6-20.1 tok/s), against a split measured at 34-37 on code the
+same day. Two halves:
+- **The prior** (`YieldPrior::Drafter`, chosen only by `pipeline::split_yield_prior` — a drafter may
+  guess AND one is held): one 64-token pseudo-reply at Leviathan's tokens a round for the γ
+  controller's opening figures (α 0.7, `GAMMA_STEP` 2: 2.19), in the same ratio of sums as the
+  splits that ran, dropped at `BEFORE_TRUSTED`. The low end of what drafted splits measured here
+  (1.64 on two processors, 2.2 on the 70B, 3.2-4.3 prose and 7.7-10.3 code where a tree flowed), so
+  it lets a split run and never oversells one. It fired (`split_yield_from=Prior`) and the plan
+  still went to the hand-off: priced honestly-low, a split that wins only at a flow's yield loses.
+- **Bounded exploration** (`SplitRounds::prior_for_request`, the one schedule, asked with the
+  request id so a re-plan keeps its answer): the 3rd request priced from the drafter's prior since
+  a split of the model finished here is priced at `EXPLORED_TOKENS_A_ROUND` (8, the low end of code
+  flows — `YieldPrior::Explore`), then the 6th after it, the 12th, … at most every 64th; trusted,
+  never. Every candidate, gate and the logged prediction read the one figure, so the plan is the
+  one that would win were the split that good, and an exploration costs only where the split then
+  wins — and a split that runs is measured, so the next price is its own. An explored request
+  compares the routes as they run once LOADED (no cold load charged, `gather_candidates`): a load
+  is paid once and a route's speed on every request after it, so the question an exploration asks
+  is the steady state. In the `flowall` arms this node held no worker and had never timed a load,
+  so its own whole run was priced 87-121 s for a 160-token reply at `UNMEASURED_LOAD_MS_PER_GIB`
+  and 19-30 s on the explored requests (28.8 s against the hand-off's 26.5 s in one).
+  ⚠ What the exploration could NOT do there: with `parallax_partial_ranges` off and not under
+  "Start and finish on this computer", two computers that both hold the whole model offer only
+  their whole ranges, so no split between them exists to explore — every explored request chose
+  between this node's whole run and the hand-off (FUTURE_WORK #3 (j)).
+  Prior art: UCB's optimism in the face of uncertainty (Auer et al. 2002 — an arm not yet pulled
+  is priced at what it might be); forced exploration on a doubling schedule (ParetoBandit's new
+  arm; this crate's `model_worker::Probing` and `SpecBackoff`); Envoy slow start and gRPC weighted
+  round robin keep an unmeasured endpoint in rotation for the same reason; ski rental is the
+  textbook answer for the load (rent until the rent paid equals the price), not built.
+  A/B `SWARMLLM_SPLIT_EXPLORE=0`, `SWARMLLM_SPLIT_YIELD_PRIOR=none`; logged "priced OPTIMISTICALLY".
+What a change must keep: an unmeasured split is never priced as if it had been tried and failed;
+the exploration is bounded by a schedule that doubles and by the plan's own comparison; trusted
+figures are measured only. Tests: `a_split_with_a_drafter_starts_from_the_prior_until_its_own_are_trusted`,
+`an_untried_split_is_explored_on_a_doubling_schedule` (`split_rounds`), and the `Drafter` /
+`Explore` arms of `a_split_whose_rounds_carry_three_tokens_is_priced_for_a_third_of_the_rounds`
+(compute ÷ the prior; the explored plan at 8 a round with no load charged).
 
 ## An unmeasured peer is charged one round trip a pass (2026-10-29, #3 (h))
 
@@ -3730,6 +3792,27 @@ the interior. Added only for that topology, so every other encrypted route
 is exactly what it was. Test it from `assemble_pipeline_for`, not from the
 router: the first cut passed the router's tests and stayed local end to
 end for exactly this reason.
+
+**A resident card/processor split is not "fits the card" for the fast path either (2026-11-13).**
+The 10-08 fix above made `gather_candidates` PRICE a resident split off the card, but the gate
+before it still asked `serves_on_cpu`, whose `would_fit_on_gpu` answered `Some(true)` for any worker
+holding card memory (`holds_gpu_memory`) — and a card/processor split is charged to the card. So a
+node with the 14B resident as 25 of its 48 layers on this 8 GB card and 23 on the processor took
+the full-coverage fast path (`local_runs_on_processor=false`) and ran it here at 11.4-15.3 tok/s
+under "Start and finish on this computer", the split over the 3060 in Australia never priced
+(`real_link.sh` arms `dsdwall`, 2026-11-13; that split streams 27-31 on code there) — while the same
+node with nothing resident priced both. `whole_model_on_card` now requires every layer held AND
+none of them on the processor (`!short_of_the_card`, the question `runs_whole_on_the_card` asks);
+anything else falls through to the estimate, which counts what the model's own worker holds as
+reusable (`fits_in_budget`). One answer whatever is resident. The ROOM this node is weighed for is
+not this question: `planning_on_card` asks a live worker's `holds_gpu_memory` itself (growth has no
+processor rung, gotcha #806) — read through `would_fit_on_gpu`, a 70B worker filling the card with
+layers 0-13 was weighed on the processor and offered 13 more layers
+(`an_idle_workers_own_memory_is_the_fresh_runs`, red until it did). Prior art: Ollama reuses a loaded
+runner only when it was loaded for what the request needs (`server/sched.go`, `needsReload`);
+llama.cpp's `-ngl` partial offload IS the "does not fit" case. Test: the fourth case of
+`a_worker_holding_a_segment_has_not_paid_for_the_whole_model` (red with the `short_of_the_card`
+half off). What a change must keep: "charged to the card" and "on the card" are different facts.
 
 ## A peer's capacity for a prompt is weights PLUS that prompt's KV cache
 

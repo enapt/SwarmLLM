@@ -100,6 +100,14 @@ impl<T: Copy + Serialize + DeserializeOwned> RecentByModel<T> {
         (recent.len() >= BEFORE_TRUSTED).then(|| f(&recent))
     }
 
+    /// `f` over however many of `model`'s recent figures there are, trusted or
+    /// not — for a caller that weighs them against its own prior
+    /// (`SplitRounds::tokens_per_round`); `None` where there are none.
+    pub fn with_any<R>(&self, model: &str, f: impl FnOnce(&VecDeque<T>) -> R) -> Option<R> {
+        let recent = self.by_model.get(model)?;
+        (!recent.is_empty()).then(|| f(&recent))
+    }
+
     /// Seed from what an earlier run stored: only figures `usable` accepts,
     /// the last [`RECENT`] a model, never over one recorded since start. A
     /// record that cannot be read, or was counted another way, leaves the

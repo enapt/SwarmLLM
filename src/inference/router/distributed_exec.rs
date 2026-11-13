@@ -851,6 +851,8 @@ pub(super) async fn execute_request(
     // tokenized so the local route is priced on what it will actually read
     // (`cached_prefix`, field report 2026-09-26), and the exact length comes
     // with it.
+    let may_guess_ahead =
+        crate::inference::pipeline::request_may_guess_ahead(&shared_state, &request);
     let prompt_plan =
         crate::inference::scheduler::cached_prefix::plan_prompt_off_thread(&shared_state, &request)
             .await
@@ -876,11 +878,21 @@ pub(super) async fn execute_request(
                 crate::inference::pipeline::remote_generate::features_a_head_needs(&request),
             )
             // A split driven from here crosses its hops once a ROUND, and a
-            // round may carry several guessed tokens (FUTURE_WORK #3 (d)).
-            .with_guessing_ahead(crate::inference::pipeline::request_may_guess_ahead(
-                &shared_state,
-                &request,
-            ));
+            // round may carry several guessed tokens (FUTURE_WORK #3 (d)) —
+            // priced from the drafter's prior until this model's own splits
+            // are trusted (#3 (j)).
+            .with_guessing_ahead(
+                may_guess_ahead,
+                if may_guess_ahead {
+                    crate::inference::pipeline::split_yield_prior(
+                        &shared_state,
+                        model_id,
+                        request.id,
+                    )
+                } else {
+                    crate::daemon::state::split_rounds::YieldPrior::None
+                },
+            );
     if prompt_plan.cached_locally > 0 {
         tracing::info!(
             request_id = %request.id,

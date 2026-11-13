@@ -1605,16 +1605,71 @@ pub(crate) fn request_may_guess_ahead(
     state: &SharedState,
     request: &crate::types::InferenceRequest,
 ) -> bool {
+    (drafter_may_guess_for(state, &request.model_id) || state.cfg().inference.ngram_lookup_enabled)
+        && !request_disqualifies_fast_paths(request)
+}
+
+/// May a drafter's guesses be checked on a split of `model_id` driven from
+/// here — speculation across computers on, and a model that can take a
+/// refused guess back (`speculation_can_roll_back`)? Whether one is HELD is
+/// [`split_yield_prior`]'s question. Asked by [`request_may_guess_ahead`] and
+/// [`split_yield_prior`], one answer for both.
+fn drafter_may_guess_for(state: &SharedState, model_id: &ModelId) -> bool {
     let cfg = state.cfg();
-    let drafter = cfg.inference.speculative_decoding
+    cfg.inference.speculative_decoding
         && cfg.inference.decentralized_spec_decoding
         && distributed::speculation_can_roll_back(
             state
-                .gguf_meta_for(&request.model_id)
+                .gguf_meta_for(model_id)
                 .map(|m| m.architecture.clone())
                 .as_deref(),
-        );
-    (drafter || cfg.inference.ngram_lookup_enabled) && !request_disqualifies_fast_paths(request)
+        )
+}
+
+/// What a split of `model_id` driven from here is priced to yield a round
+/// before this node has measured enough of them (`split_rounds::YieldPrior`,
+/// FUTURE_WORK #3 (j)): the drafter's prior where a drafter may guess for it
+/// AND one held here would ([`drafter_to_leave_room_for`], the planner's own
+/// choice of drafter) — no prior otherwise, one round a token, as before.
+/// The router sets it on the plan beside [`request_may_guess_ahead`]
+/// (`PromptPlan::with_guessing_ahead`). A/B `SWARMLLM_SPLIT_YIELD_PRIOR=none`
+/// (read once): no prior anywhere.
+///
+/// Now and then the drafter's prior is the OPTIMISTIC one, so a split that
+/// would win at a better yield runs and is measured
+/// (`SplitRounds::prior_for_request`, the one schedule, per `request_id`).
+/// A/B `SWARMLLM_SPLIT_EXPLORE=0` (read once): never.
+///
+/// Why a prior at all: priced at one round a token, a split loses to a whole
+/// hand-off wherever its gain is its guesses, never runs, and so is never
+/// measured — the 14B with a card far away (TH ↔ AU) ran 34-37 tok/s split
+/// and 17-18 handed over, and the planner handed it over every time
+/// (2026-11-13, `real_link.sh` arm `flowall`).
+pub(crate) fn split_yield_prior(
+    state: &SharedState,
+    model_id: &ModelId,
+    request_id: uuid::Uuid,
+) -> crate::daemon::state::split_rounds::YieldPrior {
+    use crate::daemon::state::split_rounds::YieldPrior;
+    static NONE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    static NO_EXPLORING: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if *NONE.get_or_init(|| std::env::var("SWARMLLM_SPLIT_YIELD_PRIOR").is_ok_and(|v| v == "none"))
+    {
+        return YieldPrior::None;
+    }
+    if !(drafter_may_guess_for(state, model_id)
+        && drafter_to_leave_room_for(state, model_id).is_some())
+    {
+        return YieldPrior::None;
+    }
+    if *NO_EXPLORING.get_or_init(|| std::env::var("SWARMLLM_SPLIT_EXPLORE").is_ok_and(|v| v == "0"))
+    {
+        return YieldPrior::Drafter;
+    }
+    state
+        .metrics
+        .split_rounds
+        .prior_for_request(&model_id.0, request_id, YieldPrior::Drafter)
 }
 
 /// May a check of guesses on this plan be taken back INTO — truncated to its
@@ -4229,7 +4284,13 @@ mod tests {
             };
             executor.note_split_rounds(&out, 0);
         };
-        let per_round = || state.metrics.split_rounds.tokens_per_round("test");
+        let per_round = || {
+            state
+                .metrics
+                .split_rounds
+                .tokens_per_round("test", crate::daemon::state::split_rounds::YieldPrior::None)
+                .map(|y| y.tokens_per_round)
+        };
 
         // Not a split, no round here, an adapter (one round a token, which
         // would lower the figure for the requests it prices): none recorded.

@@ -4731,15 +4731,39 @@ impl PipelineScheduler {
             .reply_lengths
             .expected(&manifest.id.0);
         // And for the yield of a split's round, where this request may guess
-        // ahead (FUTURE_WORK #3 (d)).
-        let split_tokens_per_round = if prompt.may_guess_ahead {
+        // ahead (FUTURE_WORK #3 (d)) — from the drafter's prior until the
+        // model's own splits are trusted (#3 (j)).
+        let split_yield = if prompt.may_guess_ahead {
             self.shared_state
                 .metrics
                 .split_rounds
-                .tokens_per_round(&manifest.id.0)
+                .tokens_per_round(&manifest.id.0, prompt.yield_prior)
         } else {
             None
         };
+        if let Some(y) =
+            split_yield.filter(|y| y.from != crate::daemon::state::split_rounds::YieldFrom::Splits)
+        {
+            if prompt.yield_prior == crate::daemon::state::split_rounds::YieldPrior::Explore {
+                route_info!(purpose,
+                    model = %manifest.id,
+                    split_tokens_per_round = y.tokens_per_round,
+                    split_yield_from = ?y.from,
+                    "DIAG: a split of this model is priced OPTIMISTICALLY for this request, so a \
+                     split that would win at a better yield runs and is measured \
+                     (split_rounds::prior_for_request)"
+                );
+            } else {
+                route_info!(purpose,
+                    model = %manifest.id,
+                    split_tokens_per_round = y.tokens_per_round,
+                    split_yield_from = ?y.from,
+                    "DIAG: a split of this model is priced from the drafter's prior — too few of its \
+                     splits have run here to price it alone"
+                );
+            }
+        }
+        let split_tokens_per_round = split_yield.map(|y| y.tokens_per_round);
 
         // Average bytes a layer occupies, for a load's price below. The
         // manifest is the only size the coordinator has; it is the on-disk
@@ -5728,7 +5752,21 @@ impl PipelineScheduler {
                         handed_off_tokens
                     },
                     split_openings,
-                    cold_load_ms_per_layer: cold_load_per_layer,
+                    // A request that explores (`YieldPrior::Explore`) compares
+                    // the routes as they run once LOADED: a load is paid once
+                    // and kept for the requests after it, and charged whole to
+                    // the one request that would make it, a split needing this
+                    // node's own layers loaded lost to a hand-off already warm
+                    // however fast it ran warm (the `flowall` arms, 2026-11-13:
+                    // a load here priced ~4 s against the 3060's warm 14B). Bounded
+                    // as the exploration is (`SplitRounds::prior_for_request`).
+                    cold_load_ms_per_layer: if prompt.yield_prior
+                        == crate::daemon::state::split_rounds::YieldPrior::Explore
+                    {
+                        0.0
+                    } else {
+                        cold_load_per_layer
+                    },
                     reply_tokens_at_most: prompt.reply_tokens_at_most,
                     reply_tokens_expected,
                     split_tokens_per_round,

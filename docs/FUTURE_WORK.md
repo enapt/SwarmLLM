@@ -1069,26 +1069,29 @@ multiplies, so record it as a round's sample rather than a layer's — the same 
 half (its `WorkKind::Verify` proposal). Weighed 10-29: it changes no 70B route today (nothing
 local can run the 70B, so its price is compared only with other priors).
 (i) ~~a machine's run cut into back-to-back segments was priced with the whole card per piece~~ —
-**fixed 2026-10-29** (§ Closed). (j) OPEN, found reading (i) on the live node (14B held whole, a
-22-token prompt, 15:00Z): a split this node has never run is priced at one round a token
-(`split_tokens_per_round=None` on every candidate: (d)'s figure is learned only from splits that
-ran), so with a 438 ms peer its network term alone (~28 s at 64 passes) is the whole local run's
-price, the split is never chosen, and the figure that would price it right is never learned — the
-cold-start trap, #178's ratchet at the scale of a whole split (a bandit's "optimism under
-uncertainty" is the textbook answer, #178's unbuilt exploration ours; Petals avoids it by having
-each server benchmark itself at startup). Not obviously wrong for chat on this machine
-(prose: local ~13 tok/s against the boomerang flow's 7.4-8.3), wrong for code (13.6-15.4 against
-17-20). A candidate figure this node already measures: the drafter's acceptance on its OWN
-guessed replies (`LocalSpec`), the same drafter and target a split would use.
-**Measured against the WHOLE hand-off too (2026-11-13, v0.3.284, `real_link.sh` arm `flowall`, Qwen2.5-14B Q4_K_M
-held whole here AND on an RTX 3060 in Australia, ~150 ms, 0.5B drafter here, fresh data dir):** every candidate read
-`split_tokens_per_round=None` and the plan handed the whole model to the 3060 ("holds the whole model but would run
-it on its processor", `local_processor_cost_ms` ~98 s against `pipeline_cost_ms` ~14.8 s, segments=1): code
-17.2-18.0, prose 13.6-17.4 tok/s. The same machines as a split it never priced right (`flowhalf`, half here with the
-drafter on this card, `readme284`, same day): code 34.0-37.5, prose 15.5-17.1 — the trap costs ~2× on code. Caveat:
-the rig starts every arm on an empty node (no history, nothing loaded), which is also a new user's first hour; the
-hand-off's own price (the peer's stated 45 tok/s in 7B units) was optimistic as well, so fixing the prior alone may
-not flip the choice — model both before building.
+**fixed 2026-10-29** (§ Closed). (j) PARTIAL, found reading (i) on the live node (14B held whole, a 22-token prompt, 2026-10-28 15:00Z): a split
+this node has never run was priced at one round a token (`split_tokens_per_round=None`: (d)'s figure is learned only
+from splits that ran), so it was never chosen and the figure that would price it right was never learned — the
+cold-start trap, #178's ratchet at the scale of a whole split. Measured on the real link (`real_link.sh`, Qwen2.5-14B
+Q4_K_M held whole here AND on an RTX 3060 in Australia, ~140 ms, the 0.5B drafter here, a fresh data dir per arm;
+the same machines as `flowhalf`, half here, ran code 34.0-37.5 and prose 15.5-17.1 tok/s on 2026-11-13). Three parts
+are on main (§ Closed, 2026-11-13): a resident card/processor split no longer takes the full-coverage fast path, so
+under "Start and finish on this computer" (`dsdwall`) every request went to the split — code 25.3-28.7 tok/s
+against 13.4-15.3 run here; an unmeasured split starts from the drafter's prior (2.19 a round); and every 3rd, 6th,
+12th … request is priced at 8 a round with no cold load charged (bounded exploration). **OPEN — why the default
+shape (`flowall`, not under that setting) still never splits:** (j1) **the split cannot be expressed**: with
+`parallax_partial_ranges` off, a computer that holds the whole model offers only `[0..48)`, so two whole holders
+have no chain between them — every explored request (it fired: "priced OPTIMISTICALLY") chose between this node's
+whole run and the hand-off; the boomerang forces partial ranges on, which is why `dsdwall` could split. (j2) this
+node's own first load is charged `UNMEASURED_LOAD_MS_PER_GIB` (10 s/GiB, ~85 s for the 14B) until a load is timed,
+and a node that always routes away never times one: its whole run was priced 87-121 s per 160-token reply, 19-30 s
+on the explored requests. (j3) a whole run HERE is priced from the static priors at one pass a token (~4.2 tok/s
+for the 14B's 22 card + 26 processor layers) — a whole-model run here is never timed for the planner, and with its
+card a local sample is dropped as possibly another device's — while it runs 11-15 with its drafter. Together they
+cost the user: on 11-13 10:09Z the 3060 slowed to 5.4 tok/s (its owner's work, or heat) and all twelve requests of
+two arms still went to it at 5.27-5.38 tok/s, the hand-off's measured price (26-33 s) beside this node's 28.8-30.0 s
+explored price, which would have run in ~11-15 s. (j4) the runner-up's price is not logged, so a lost split cannot
+be read off the plan.
 
 `scheduler/parallax.rs` charges a remote hop a flat `ASSUMED_FORWARD_PASSES = 64.0`. The error
 grows with reply length — 1.0 at 8 tokens, 2.4-3.3 at 120-239 — and biases every delegation
@@ -6224,6 +6227,28 @@ archive under the named heading. Reopen one only with the evidence its line name
 Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 19-28 were
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
+
+**Closed 2026-11-13, on main (not in a release yet)** (#3 (j), three of its parts)
+- #3 (j) — **A computer holding the whole model, with part of it on its processor, ran it all itself even where a
+  split with a faster computer was priced and measured faster.** With the 14B resident as 25 of its 48 layers on
+  this 8 GB card and 23 on the processor, `would_fit_on_gpu` answered yes for any worker holding card memory, so the
+  full-coverage fast path skipped the priced search (`local_runs_on_processor=false`) and the node ran it here at
+  11.4-15.3 tok/s under "Start and finish on this computer". `whole_model_on_card` now asks every layer held AND
+  none on the processor (`!short_of_the_card`); the room the planner weighs keeps asking `holds_gpu_memory` (growth
+  has no processor rung, gotcha #806). Real link (`real_link.sh dsdwall`, 3060 in Australia, 2026-11-13): 8 of 8
+  requests went to the three-segment split, code 25.3-28.7 tok/s against 13.4-15.3 here, prose 10.5-17.1 against
+  11.4-13.3 (the first prose request of each arm ~10.5, then 16-17); 0 driver events. Beside it: (b)'s reply-length
+  prior counts as one more reply (112 after one 160-token reply, not 64 until four — fresh-node hand-offs were
+  priced 2.9-4.2 s and took 11.9-13.4); an unmeasured split starts from the drafter's prior (`YieldPrior::Drafter`,
+  2.19 a round); every 3rd, 6th, 12th … (at most every 64th) request of a model priced from that prior is priced at
+  8 a round with no cold load charged (`SplitRounds::prior_for_request`) — it fired on the real link and changed no
+  choice there, for the reasons (j1)-(j3) left open. A/B `SWARMLLM_SPLIT_YIELD_PRIOR=none`,
+  `SWARMLLM_SPLIT_EXPLORE=0`. Prior art: Ollama's `needsReload`; UCB optimism (Auer et al. 2002), ParetoBandit's
+  forced exploration, this crate's `SpecBackoff`; DB2's LEO for correcting a cost input per execution. Tests: the
+  fourth case of `a_worker_holding_a_segment_has_not_paid_for_the_whole_model`,
+  `a_first_reply_moves_the_price_beside_the_prior`, `an_untried_split_is_explored_on_a_doubling_schedule`, the
+  `Drafter`/`Explore` arms of `a_split_whose_rounds_carry_three_tokens_is_priced_for_a_third_of_the_rounds` — each
+  red with its change off. Evidence: `docs/invariants/scheduling.md` § "A split is priced for the rounds it takes".
 
 **Closed 2026-11-12, on main (not in a release yet)** (#447)
 - #447 — **A computer that had served several models in turn was offered as full while its idle

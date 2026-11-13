@@ -5889,6 +5889,12 @@ impl ModelProcessPool {
     /// (#125). Ollama's scheduler places a model the same way: it unloads idle
     /// runners to make room before it settles for less (`server/sched.go`,
     /// `findRunnerToUnload`).
+    ///
+    /// **What the model's own worker already holds on the card is not asked
+    /// for again** (2026-11-13): a worker holding a split's segment of it
+    /// grows into the rest, or is replaced by a whole one, and either way the
+    /// memory it holds goes to the whole model. Counted as spent, a node
+    /// holding most of a model would read as having no room for it.
     fn fits_in_budget(
         &self,
         model_id: &ModelId,
@@ -5898,10 +5904,40 @@ impl ModelProcessPool {
         if budget_mb == 0 || estimated_mb == 0 {
             return None;
         }
-        if self.vram_committed_mb().saturating_add(estimated_mb) <= budget_mb {
+        let needed_mb = estimated_mb.saturating_sub(self.vram_committed_by(model_id));
+        if self.vram_committed_mb().saturating_add(needed_mb) <= budget_mb {
             return Some(true);
         }
-        Some(self.reclaimable_vram_mb(model_id, estimated_mb, budget_mb) > 0)
+        Some(self.reclaimable_vram_mb(model_id, needed_mb, budget_mb) > 0)
+    }
+
+    /// Does `model_id`'s worker here hold EVERY layer of it, ON the card? The
+    /// one case where the whole model already fits it, at no new graphics
+    /// memory — [`Self::would_fit_on_gpu`]'s and
+    /// [`Self::gpu_estimate_and_fit`]'s early answer. A worker the card refused
+    /// (`holds_gpu_memory`, gotcha #329), one loaded for a split's segment, and
+    /// one splitting the model between the card and the processor
+    /// (`short_of_the_card`, the question [`Self::runs_whole_on_the_card`]
+    /// asks) are not; ranges grown into each other count together
+    /// (`split_for`).
+    ///
+    /// Charged to the card is not ON it: a card/processor split charges its
+    /// card share to the card, so `holds_gpu_memory` alone answered "fits" for
+    /// a 14B with 23 of its 48 layers on this laptop's processor, and the
+    /// scheduler's full-coverage fast path ran it here at 11-15 tok/s without
+    /// pricing the split over a card in Australia that streams it at 27-31 on
+    /// code (2026-11-13, `real_link.sh` arms `dsdwall`) — while the same node
+    /// with no worker resident priced both. One answer whatever is resident.
+    fn whole_model_on_card(&self, model_id: &ModelId) -> bool {
+        let ranges: Vec<(u32, u32)> = match self.workers.get(model_id) {
+            Some(h) if h.holds_gpu_memory() && !h.short_of_the_card() => h
+                .charged_segments
+                .lock()
+                .map(|v| v.iter().map(|c| c.range).collect())
+                .unwrap_or_default(),
+            _ => return false,
+        };
+        !ranges.is_empty() && self.split_for(model_id, &ranges) == SplitFor::Whole
     }
 
     /// Both halves of "how big is this model, and does it fit" from ONE reading
@@ -5922,9 +5958,8 @@ impl ModelProcessPool {
     /// Single-answer callers keep the single-answer methods; nothing is made
     /// slower to make this faster.
     pub fn gpu_estimate_and_fit(&self, model_id: &ModelId) -> (Option<u64>, Option<bool>) {
-        let resident_on_gpu = self.workers.get(model_id).map(|h| h.holds_gpu_memory());
         let estimated = self.estimate_gpu_footprint_mb(model_id, None, KvCharge::Typical);
-        let fits = if resident_on_gpu == Some(true) {
+        let fits = if self.whole_model_on_card(model_id) {
             Some(true)
         } else {
             self.fits_in_budget(model_id, estimated, self.card_budget_for_planning(model_id))
@@ -5981,8 +6016,22 @@ impl ModelProcessPool {
         // `Some(true)` — "it fits on your GPU" — for every resident model on
         // every Mac. The honest answer there is `None`, unknowable, which is
         // what falling through to a zero budget now gives.
-        let resident_on_gpu = self.workers.get(model_id).map(|h| h.holds_gpu_memory());
-        if resident_on_gpu == Some(true) {
+        //
+        // **And it must hold EVERY layer, on the card** (`whole_model_on_card`,
+        // 2026-11-13).
+        // A worker loaded for a split's segment holds the graphics memory of
+        // that segment alone, so "already charged" is false for the rest of
+        // the model: after a 14B split loaded its last layers on this 8 GB
+        // card, this answered `Some(true)` for the whole 14B, `serves_on_cpu`
+        // said "card", and the scheduler's full-coverage fast path ran the
+        // whole model here past the split it had just priced faster (5.2-5.8
+        // tok/s, the `dsdwall` arms). Such a worker falls through to the
+        // estimate, which counts the memory it already holds as reusable
+        // (`fits_in_budget`). Prior art: Ollama's scheduler reuses a loaded
+        // runner only when it was loaded for what the request needs
+        // (`server/sched.go`, `needsReload`); gotcha #329 is the same
+        // "loaded" vs "would fit" distinction.
+        if self.whole_model_on_card(model_id) {
             return Some(true);
         }
         let budget = self.card_budget_for_planning(model_id);
@@ -6131,6 +6180,21 @@ impl ModelProcessPool {
     fn planning_on_card(&self, model_id: &ModelId) -> bool {
         if !self.card_in_play() {
             return false;
+        }
+        // A live worker grows on the device its spawn charged
+        // (`holds_gpu_memory`; growth has no processor rung, gotcha #806),
+        // whether or not the WHOLE model would fit the card — the question
+        // `would_fit_on_gpu` answers since it stopped reading a segment's or a
+        // card/processor split's worker as "fits" (`whole_model_on_card`,
+        // 2026-11-13). Read through that, a 70B worker filling the card with
+        // layers 0-13 was weighed on the processor and offered 13 more layers
+        // its growth could never load.
+        if self
+            .workers
+            .get(model_id)
+            .is_some_and(|h| h.holds_gpu_memory())
+        {
+            return true;
         }
         if !self.is_cpu_bound_for_lack_of_vram(model_id) {
             return true;
@@ -16463,6 +16527,139 @@ mod tests {
             recent.would_fit_on_gpu(&wanted),
             Some(false),
             "used moments ago: the idle floor protects it"
+        );
+    }
+
+    /// **A worker holding a split's segment has not paid for the whole model**
+    /// (2026-11-13). After a 14B split loaded its last layers on this 8 GB card,
+    /// `would_fit_on_gpu` answered "yes, already charged" for the WHOLE 14B, and
+    /// the scheduler's full-coverage fast path ran it here, past the split it
+    /// had priced faster. Four cases: a segment alone does not fit; ranges
+    /// grown to cover every layer do, whatever the budget now says; what the
+    /// segment holds is counted as room the whole model reuses; and every layer
+    /// held as a card/processor split does not fit, charged to the card or not.
+    #[tokio::test]
+    async fn a_worker_holding_a_segment_has_not_paid_for_the_whole_model() {
+        let m = ModelId("qwen-14b".into());
+        let setup = |name: &str| {
+            let p = ModelProcessPool::new(std::path::PathBuf::from(format!(
+                "/tmp/swarmllm-fit-segment-{name}"
+            )));
+            p.test_card_in_play
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+            p.set_gpu_layers(-1);
+            p.test_footprint_inputs.insert(
+                m.clone(),
+                crate::model::auto_manage::vram::VramFootprintInputs {
+                    quantized_weight_bytes: 4_400 * 1024 * 1024,
+                    host_resident_bytes: 0,
+                    head_bytes: 0,
+                    unquantized_bytes_per_element: None,
+                    vocab_size: 152_064,
+                    embedding_length: 3584,
+                    segment_layers: 28,
+                    kv: crate::inference::split::kv_budget::KvPrice::uniform(
+                        28,
+                        4,
+                        28,
+                        128,
+                        crate::inference::layers::KvAttention::Standard,
+                    ),
+                    rope_dim: 128,
+                    effective_context: 8192,
+                    is_first: true,
+                    embedding_gatherable: true,
+                    splits_across_devices: true,
+                },
+            );
+            let estimate = p.estimated_gpu_mb(&m).expect("fixture: a priced model");
+            (p, estimate)
+        };
+
+        // A card with room for the segment, not for the whole model.
+        let (p, estimate) = setup("part");
+        p.set_vram_budget_mb(estimate - 1000);
+        let h = admit_and_insert_gpu_worker(&p, &m, 1500, std::time::Duration::ZERO).await;
+        h.record_charged_segment((20, 28), 0);
+        assert_eq!(
+            p.would_fit_on_gpu(&m),
+            Some(false),
+            "layers 20-28 on the card are not the whole model on it"
+        );
+        assert_eq!(
+            p.gpu_estimate_and_fit(&m).1,
+            Some(false),
+            "the listing agrees"
+        );
+        assert!(
+            p.serves_on_cpu(&m),
+            "and the speed answer is not the card's"
+        );
+
+        // The same worker grown to cover every layer: already paid for.
+        h.record_charged_segment((0, 20), 0);
+        assert_eq!(
+            p.would_fit_on_gpu(&m),
+            Some(true),
+            "every layer on the card is the whole model, whatever the budget reads"
+        );
+        assert_eq!(
+            p.gpu_estimate_and_fit(&m).1,
+            Some(true),
+            "the listing agrees"
+        );
+
+        // Room for the whole model only once the segment's own memory counts:
+        // 1500 MB held plus the whole estimate is past the budget, the estimate
+        // alone is not.
+        let (q, estimate) = setup("reuse");
+        q.set_vram_budget_mb(estimate + 500);
+        let h = admit_and_insert_gpu_worker(&q, &m, 1500, std::time::Duration::ZERO).await;
+        h.record_charged_segment((20, 28), 0);
+        assert_eq!(
+            q.would_fit_on_gpu(&m),
+            Some(true),
+            "the memory the segment holds goes to the whole model"
+        );
+        assert_eq!(
+            q.gpu_estimate_and_fit(&m).1,
+            Some(true),
+            "the listing agrees"
+        );
+
+        // Every layer held, but 8 of the 28 on the processor: a card/processor
+        // split is charged to the card and still does not fit it (the
+        // `dsdwall` arms' preloaded 14B).
+        let (s, estimate) = setup("split");
+        s.set_vram_budget_mb(estimate - 1000);
+        assert!(s.admit_to_gpu(&m, estimate - 1200));
+        let h = fake_worker_handle_split(
+            false,
+            None,
+            false,
+            std::time::Instant::now(),
+            Some(CardSplit::Layers {
+                on_card: 20,
+                total: 28,
+            }),
+        )
+        .await;
+        h.charged_mb.store(estimate - 1200, Ordering::Release);
+        s.workers.insert(m.clone(), h.clone());
+        h.record_charged_segment((0, 28), 0);
+        assert_eq!(
+            s.would_fit_on_gpu(&m),
+            Some(false),
+            "every layer held, eight on the processor: the model does not fit the card"
+        );
+        assert_eq!(
+            s.gpu_estimate_and_fit(&m).1,
+            Some(false),
+            "the listing agrees"
+        );
+        assert!(
+            s.serves_on_cpu(&m),
+            "and the priced search may compete with running it here"
         );
     }
 

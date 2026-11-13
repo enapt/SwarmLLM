@@ -1,5 +1,6 @@
 use super::*;
 use crate::config::Config;
+use crate::daemon::state::split_rounds::YieldPrior;
 use crate::identity::Identity;
 use crate::inference::executor::ModelExecutor;
 use crate::storage::db::Database;
@@ -5846,6 +5847,7 @@ fn the_next_turn_of_a_split_goes_to_the_peer_holding_its_opening() {
                     head_features: 0,
                     handed_off: Vec::new(),
                     may_guess_ahead: false,
+                    yield_prior: YieldPrior::None,
                 },
                 crate::types::KeepAsked::Unasked,
             )
@@ -7196,6 +7198,18 @@ fn a_genuinely_cheaper_hand_off_still_wins_when_this_node_is_unpriced() {
     );
 }
 
+/// The reply a prior counts as — beside fewer than four finished replies
+/// (`ReplyLengths::expected`) and as a split's pseudo-reply
+/// (`split_rounds::YieldPrior`) — is the reply the planner assumes with
+/// nothing written: one figure, so no price moves when a prior is dropped.
+#[test]
+fn every_prior_reply_is_the_planners_assumed_reply() {
+    assert_eq!(
+        crate::daemon::state::split_rounds::PRIOR_REPLY_TOKENS,
+        f64::from(parallax::ASSUMED_FORWARD_PASSES)
+    );
+}
+
 /// Every route the caller can be handed records what the cost model expected of
 /// it — a whole-model hand-off included, not only a priced chain.
 ///
@@ -7366,7 +7380,9 @@ fn a_reply_allowed_sixteen_tokens_is_priced_for_sixteen_passes() {
 /// path carries several tokens. Once this model's splits have yielded 3 tokens
 /// a round, the per-token terms of a split are priced for a third of the
 /// passes — and the prompt is not, and nothing changes for a request that may
-/// not guess ahead. The recorded prediction says what it assumed.
+/// not guess ahead. The recorded prediction says what it assumed. Before any
+/// split has run, one with a drafter is priced from the drafter's prior
+/// (#3 (j)), one without at a token a round.
 #[test]
 fn a_split_whose_rounds_carry_three_tokens_is_priced_for_a_third_of_the_rounds() {
     let (state, local, _b, _c) = processor_holder_beside_two_gpu_halves_with(600, 9.0, |c| {
@@ -7417,16 +7433,58 @@ fn a_split_whose_rounds_carry_three_tokens_is_priced_for_a_third_of_the_rounds()
     };
     let plan = || cached_prefix::PromptPlan::from(Some(14_000)).with_reply_of_at_most(2_048);
 
-    let unmeasured = priced(plan().with_guessing_ahead(true));
+    let unmeasured = priced(plan().with_guessing_ahead(true, YieldPrior::None));
     assert_eq!(
         unmeasured.assumed_tokens_per_round, None,
-        "control: nothing measured, one round a token"
+        "control: nothing measured, no drafter — one round a token"
+    );
+    // #3 (j), 2026-11-13: where a drafter would guess for it, the split no
+    // split of the model has run for is priced from the drafter's prior — 2.19
+    // a round — and its compute with it, so it can win a plan and be measured.
+    let cold = priced(plan().with_guessing_ahead(true, YieldPrior::Drafter));
+    let prior = cold
+        .assumed_tokens_per_round
+        .expect("a split with a drafter is priced from the prior");
+    assert!((prior - 2.19).abs() < 0.005, "{prior}");
+    let (u, c) = (
+        unmeasured.predicted_terms.unwrap(),
+        cold.predicted_terms.unwrap(),
+    );
+    let ratio = u.compute_ms as f32 / c.compute_ms.max(1) as f32;
+    assert!(
+        (ratio - prior).abs() < 0.02,
+        "compute is paid once a prior round: {} vs {} ({ratio})",
+        u.compute_ms,
+        c.compute_ms
+    );
+    // Now and then it is priced OPTIMISTICALLY (`YieldPrior::Explore`): at
+    // the explored yield, and with the routes compared as they run once
+    // loaded — no load charged to the one request that would make it.
+    assert!(c.cold_load_ms > 0, "control: the split loads layers here");
+    let explored = priced(plan().with_guessing_ahead(true, YieldPrior::Explore));
+    let optimistic = explored
+        .assumed_tokens_per_round
+        .expect("an explored split is priced from the optimistic prior");
+    assert!(
+        (f64::from(optimistic) - crate::daemon::state::split_rounds::EXPLORED_TOKENS_A_ROUND).abs()
+            < 0.01,
+        "{optimistic}"
+    );
+    assert_eq!(
+        explored.predicted_terms.unwrap().cold_load_ms,
+        0,
+        "an explored request is priced as the routes run once loaded"
     );
     for _ in 0..crate::daemon::state::recent_by_model::BEFORE_TRUSTED {
         state.metrics.split_rounds.record("split-14b", 300, 100);
     }
+    assert_eq!(
+        priced(plan().with_guessing_ahead(true, YieldPrior::Drafter)).assumed_tokens_per_round,
+        Some(3.0),
+        "the model's own splits, once trusted, replace the prior"
+    );
     let plain = priced(plan());
-    let guessing = priced(plan().with_guessing_ahead(true));
+    let guessing = priced(plan().with_guessing_ahead(true, YieldPrior::None));
     // Each plan books the route, so the queue term grows; the rest is fixed.
     let per_token = |t: &crate::inference::trace::TraceSnapshot| {
         t.predicted_terms

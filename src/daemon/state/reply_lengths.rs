@@ -26,8 +26,22 @@
 //!
 //! Kept across restarts (`recent_by_model`): a restart priced every reply at
 //! the prior until four had finished.
+//!
+//! **Before four have finished, the prior is ONE reply beside them** (2026-11-13):
+//! the planner's assumed reply ([`PRIOR_REPLY_TOKENS`]) counted as one more
+//! finished reply, in the same mean, and dropped at
+//! [`BEFORE_TRUSTED`](super::recent_by_model::BEFORE_TRUSTED). All or nothing,
+//! a fresh node priced its first four replies at 64 tokens whatever it had
+//! seen: three 160-token hand-offs of a 14B over Thailand ↔ Australia were
+//! each priced 2.9-4.2 s and took 11.9-13.4 (`real_link.sh`, arms `flowall`) —
+//! 2.5x of the 3-4x from the length alone. One pseudo-observation is how this
+//! crate already starts a figure it has not measured (`split_rounds::
+//! YieldPrior`, `AcceptanceEstimate`'s ten trials); LEO (Stillger et al.,
+//! VLDB 2001) corrects a cost model's INPUT from each execution rather than
+//! waiting to trust a total.
 
 use super::recent_by_model::RecentByModel;
+use super::split_rounds::PRIOR_REPLY_TOKENS;
 use crate::storage::db::Database;
 
 /// What a stored length means: 1, a finished reply's completion tokens.
@@ -55,14 +69,25 @@ impl ReplyLengths {
         }
     }
 
-    /// The mean length of `model`'s recent replies, or `None` until it has
-    /// written [`BEFORE_TRUSTED`](super::recent_by_model::BEFORE_TRUSTED) — the caller's prior stands until
-    /// then.
+    /// The mean length of `model`'s recent replies — with the planner's
+    /// assumed reply ([`PRIOR_REPLY_TOKENS`]) counted as one more until it has
+    /// written [`BEFORE_TRUSTED`](super::recent_by_model::BEFORE_TRUSTED) —
+    /// or `None` where it has written none, so the caller's prior stands.
     pub fn expected(&self, model: &str) -> Option<u32> {
-        self.recent.with_trusted(model, |recent| {
-            let sum: u64 = recent.iter().map(|&n| u64::from(n)).sum();
-            (sum as f64 / recent.len() as f64).round().max(1.0) as u32
-        })
+        let sum = |recent: &std::collections::VecDeque<u32>| {
+            (
+                recent.iter().map(|&n| u64::from(n)).sum::<u64>() as f64,
+                recent.len() as f64,
+            )
+        };
+        let (total, replies) = match self.recent.with_trusted(model, sum) {
+            Some(trusted) => trusted,
+            None => {
+                let (total, replies) = self.recent.with_any(model, sum)?;
+                (total + PRIOR_REPLY_TOKENS, replies + 1.0)
+            }
+        };
+        Some((total / replies).round().max(1.0) as u32)
     }
 
     /// The lengths an earlier run stored (`recent_by_model`).
@@ -89,15 +114,36 @@ mod tests {
         }
         assert_eq!(
             lengths.expected("m"),
-            None,
-            "three replies decided the price"
+            Some(31),
+            "three replies beside the prior's one: (60 + 64) / 4"
         );
         lengths.record("m", 340);
-        assert_eq!(lengths.expected("m"), Some(100));
+        assert_eq!(lengths.expected("m"), Some(100), "trusted: the prior gone");
         assert_eq!(lengths.expected("other"), None);
         // An empty reply says nothing about length.
         lengths.record("m", 0);
         assert_eq!(lengths.expected("m"), Some(100));
+    }
+
+    /// **The first replies move the price at once** (2026-11-13): the 14B's
+    /// three 160-token hand-offs on a fresh node were each priced at the
+    /// assumed 64. The prior now counts as one reply beside them.
+    #[test]
+    fn a_first_reply_moves_the_price_beside_the_prior() {
+        let lengths = ReplyLengths::default();
+        assert_eq!(
+            lengths.expected("m"),
+            None,
+            "nothing written: the caller's prior"
+        );
+        lengths.record("m", 160);
+        assert_eq!(lengths.expected("m"), Some(112), "(64 + 160) / 2");
+        lengths.record("m", 160);
+        assert_eq!(lengths.expected("m"), Some(128), "(64 + 320) / 3");
+        lengths.record("m", 160);
+        assert_eq!(lengths.expected("m"), Some(136));
+        lengths.record("m", 160);
+        assert_eq!(lengths.expected("m"), Some(160), "four: the replies alone");
     }
 
     #[test]
