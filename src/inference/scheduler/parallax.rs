@@ -1139,6 +1139,7 @@ pub(super) fn route_shortest_path(
         capacity,
         prompt_tokens,
         false,
+        false,
     );
     // **A range a machine already holds must be reachable by its neighbours,
     // not only by the machine itself.** Held-range endpoints are split points
@@ -1166,6 +1167,7 @@ pub(super) fn route_shortest_path(
             capacity,
             prompt_tokens,
             true,
+            false,
         ) {
             tracing::info!(
                 rung = ?capacity,
@@ -1178,10 +1180,40 @@ pub(super) fn route_shortest_path(
     routed
 }
 
+/// The cheapest route of two or more segments — the split a plan that chose ONE
+/// machine for the whole model passed over (FUTURE_WORK #3 (j4)). Logged beside
+/// that choice with the same pricing (`chain_cost_ms`), so a split that lost can
+/// be read off the plan: on 2026-11-13 the real link's lost splits showed only
+/// the winner's price, and why this node's part was priced at its processor's
+/// speed (#3 (j7)) was found only from the candidate lines. Diagnosis only: it
+/// decides nothing.
+pub(super) fn cheapest_split(
+    num_layers: u32,
+    candidates: &[NodeCandidate],
+    local_node_id: &NodeId,
+    encrypted_pipeline: bool,
+    partial_ranges: bool,
+    capacity: CapacityBound,
+    prompt_tokens: Option<u32>,
+) -> Result<Vec<PipelineSegment>, SwarmError> {
+    route_over(
+        num_layers,
+        candidates,
+        local_node_id,
+        encrypted_pipeline,
+        partial_ranges,
+        capacity,
+        prompt_tokens,
+        false,
+        true,
+    )
+}
+
 /// [`route_shortest_path`]'s search. `meet_held`: also offer each candidate
 /// the parts of its range that end or begin where some machine's held range
 /// does, with partial ranges off. (Its OWN held ranges are offered on every
-/// pass — FUTURE_WORK #3 (e).)
+/// pass — FUTURE_WORK #3 (e).) `split_only`: no whole-model vertex
+/// ([`cheapest_split`]).
 #[allow(clippy::too_many_arguments)]
 fn route_over(
     num_layers: u32,
@@ -1192,6 +1224,7 @@ fn route_over(
     capacity: CapacityBound,
     prompt_tokens: Option<u32>,
     meet_held: bool,
+    split_only: bool,
 ) -> Result<Vec<PipelineSegment>, SwarmError> {
     if num_layers == 0 {
         return Err(SwarmError::PipelineError("num_layers=0".into()));
@@ -1574,6 +1607,11 @@ fn route_over(
         }
     }
 
+    // The runner-up a whole-model plan is logged beside ([`cheapest_split`]):
+    // every vertex but the whole model's.
+    if split_only {
+        vertices.retain(|v| !(v.range.0 == 0 && v.range.1 >= num_layers));
+    }
     if vertices.is_empty() {
         return Err(SwarmError::PipelineError(
             "parallax: no candidate ranges".into(),
@@ -2335,6 +2373,47 @@ mod tests {
             c.ring.request_may_be_led = false;
         }
         assert_eq!(route(&cands), vec![(4, (0, 32))]);
+    }
+
+    /// FUTURE_WORK #3 (j4): the split a whole-model plan passed over is the
+    /// cheapest route of two or more segments, never the whole model's vertex
+    /// — and where every holder holds the whole model and none may be cut,
+    /// there is none to log.
+    #[test]
+    fn the_split_a_whole_model_plan_passed_over_is_the_cheapest_of_two_or_more_segments() {
+        let local = NodeId([1; 32]);
+        let whole = cand(2, vec![(0, 32)], 20, 0.0, true, true, 40.0);
+        let head = cand(3, vec![(0, 16)], 20, 0.0, true, false, 30.0);
+        let tail = cand(4, vec![(16, 32)], 20, 0.0, false, true, 30.0);
+        let slow_whole = cand(5, vec![(0, 32)], 20, 0.0, true, true, 10.0);
+        let search = |split_only: bool, cands: &[NodeCandidate]| {
+            let f = if split_only {
+                cheapest_split
+            } else {
+                route_shortest_path
+            };
+            f(
+                32,
+                cands,
+                &local,
+                false,
+                false,
+                CapacityBound::Everyone,
+                Some(16),
+            )
+            .map(|segs| {
+                segs.iter()
+                    .map(|s| (s.node_id.0[0], s.layer_range))
+                    .collect::<Vec<_>>()
+            })
+        };
+        let split_on_offer = [whole.clone(), head, tail];
+        assert_eq!(search(false, &split_on_offer).unwrap(), vec![(2, (0, 32))]);
+        assert_eq!(
+            search(true, &split_on_offer).unwrap(),
+            vec![(3, (0, 16)), (4, (16, 32))]
+        );
+        assert!(search(true, &[whole, slow_whole]).is_err());
     }
 
     /// FUTURE_WORK #3 (j3): this node's whole run is priced from what its
@@ -5255,6 +5334,7 @@ mod tests {
                 CapacityBound::Everyone,
                 None,
                 meet_held,
+                false,
             )
         };
 
@@ -5313,6 +5393,7 @@ mod tests {
             CapacityBound::Everyone,
             None,
             true,
+            false,
         )
         .expect("routable");
         assert!(recut.len() > 1, "the control must split: {recut:?}");

@@ -1087,7 +1087,7 @@ card (its worker was spawned after the question), so no tree could flow. **OPEN*
 node's own first load is charged `UNMEASURED_LOAD_MS_PER_GIB` (10 s/GiB, ~85 s for the 14B) until a load is timed,
 and a node that always routes away never times one: its whole run was priced 87-121 s per 160-token reply, 19-30 s
 on the explored requests.
-(j4) the runner-up's price is not logged, so a lost split cannot be read off the plan. (j5) **orientation**: a split
+(j4) ~~the runner-up's price is not logged~~ — logged (§ Closed). (j5) **orientation**: a split
 whose far end is a card flows only with its TAIL there (`dsd_tree::FlowDraws::AtTheFarEnd`, the 120 ms line; a tail
 here keeps 300), yet here-first is charged the hidden state's `transfer_ms` and peer-first is not, so the price
 leans to the shape that cannot flow — on the real link every explored split ran peer-first, `[0..24)` on the
@@ -6296,6 +6296,11 @@ grep `^| N |`).
   `this_nodes_whole_run_is_priced_from_what_it_delivered_and_its_prompt_as_before` — each red with its change off.
   Evidence: `docs/invariants/scheduling.md` § "A computer short of its card shares the rest", § "This node's whole run
   is priced from what it delivered".
+- #3 (j4) — **A split the planner passed over could not be read off the plan.** A whole-model choice now logs the
+  cheapest route of two or more segments beside it, priced by the same `chain_cost_ms` (`parallax::cheapest_split`:
+  the search with every whole-model vertex removed; "DIAG: the cheapest split this plan passed over", `chosen_ms`,
+  `split_ms`, `split`). Diagnosis only. Test:
+  `the_split_a_whole_model_plan_passed_over_is_the_cheapest_of_two_or_more_segments`.
 - #3 (j7) — **After the first split here, this computer priced its own card's layers at its processor's speed.** Found
   reading the same run: once the explored split left `[24..48)` of the 14B loaded on this card, every later plan read
   this node `has_gpu=false card_layers=None` at 6.4 tok/s (a whole run 61.7 s against the hand-off's 10.7), so no split
@@ -6304,6 +6309,8 @@ grep `^| N |`).
   reports `(its card layers, the model's)` — what peers are told of it. Test:
   `a_worker_holding_part_of_a_model_too_big_for_the_card_reports_the_cards_layers`. Evidence: `docs/invariants/
   scheduling.md` § "A range that runs partly on a card is priced per device" (its last paragraph).
+  Not yet exercised on the real link: in `real_link.sh` `TAG=j7` (17:29Z) each arm starts the node over and every
+  free plan came before any split there.
 
 **Closed 2026-11-13, released in v0.3.285 (published 2026-11-13 16:21:16Z)** (#3 (j), three of its parts)
 - #3 (j) — **A computer holding the whole model, with part of it on its processor, ran it all itself even where a

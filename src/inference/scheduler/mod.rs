@@ -4285,6 +4285,40 @@ impl PipelineScheduler {
                         segments = segs.len(),
                         "DIAG: parallax routing selected chain"
                     );
+                    // What a whole-model choice passed over, priced alike
+                    // (#3 (j4)): a lost split is then read off the plan.
+                    if segs.len() == 1 {
+                        if let Ok(split) = parallax::cheapest_split(
+                            num_layers,
+                            beside_drafter.as_deref().unwrap_or(candidates.as_slice()),
+                            local_node_id,
+                            encrypted,
+                            partial,
+                            parallax::CapacityBound::Everyone,
+                            prompt_tokens,
+                        ) {
+                            let price = |s: &[PipelineSegment]| {
+                                parallax::chain_cost_ms(
+                                    s,
+                                    &candidates,
+                                    local_node_id,
+                                    num_layers,
+                                    prompt_tokens,
+                                )
+                            };
+                            route_info!(purpose,
+                                model = %model_id,
+                                chosen_ms = price(&segs),
+                                split_ms = price(&split),
+                                split = ?split
+                                    .iter()
+                                    .map(|s| (s.node_id.to_string(), s.layer_range))
+                                    .collect::<Vec<_>>(),
+                                "DIAG: the cheapest split this plan passed over — one \
+                                 computer runs the whole model"
+                            );
+                        }
+                    }
                     // The search ran against a local node that holds every
                     // layer and would run the model on its processor. Its
                     // answer displaces the fast path only on a chain that is

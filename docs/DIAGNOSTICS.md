@@ -295,6 +295,15 @@ plan{request_id=…}: … DIAG: pipeline candidate  node= est_tokens_per_sec= ha
          layers, the same on every line of one plan: ~0.28 for a 30B-A3B
          Q4_K_M, ~2.3 for a dense 32B; 1 = unknown (no header here, or no
          `expert_used_count`) or `SWARMLLM_LAYER_PRICE=reference`, #250)
+plan{request_id=…}: … DIAG: the cheapest split this plan passed over — one computer runs the whole model
+        chosen_ms= split_ms= split=[(node, (start, end)), …]
+        (WHY DID A SPLIT LOSE? #3 (j4), 2026-11-13: once per plan that chose ONE
+         computer for the whole model, the cheapest route of two or more
+         segments, priced by the same `chain_cost_ms`. Absent = no split was
+         expressible (two whole holders and partial ranges off). Compare a
+         segment's price with the candidate line of its node — on 2026-11-13
+         this node's own part read `has_gpu=false card_layers=None` there,
+         priced at its processor's speed (#3 (j7)))
 This node holds the whole model but would run it on its processor; a pipeline across
   peers' cards is priced faster, so the request goes there
         local_processor_cost_ms= pipeline_cost_ms= segments= prompt_tokens=
