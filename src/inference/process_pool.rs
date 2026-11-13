@@ -13217,7 +13217,8 @@ impl ModelProcessPool {
     /// lags (2 GB back 0.07 s after `kill -9` on the WSL2 laptop, 3 of 3).
     ///
     /// **Or once the release has SETTLED short of that**: risen by a quarter
-    /// and steady (within [`CARD_MEMORY_STEADY_MB`]) for two readings after.
+    /// and steady (within [`CARD_MEMORY_STEADY_MB`] of the run's first
+    /// reading) for two readings after.
     /// Ollama's 75% is of a runner whose cache llama.cpp allocates up front;
     /// ours is charged a cache it fills as conversations come, so an idle
     /// worker gives back less than its charge (gemma-2-2b on the laptop:
@@ -13235,7 +13236,10 @@ impl ModelProcessPool {
         let waited_ms = || u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
         let wanted_mb = owed_mb.saturating_mul(3) / 4;
         let begun_mb = owed_mb / 4;
-        let mut last_mb: Option<u64> = None;
+        // The reading a steady run started at — every later reading of the
+        // run is held to IT, not to the one before, so a release still
+        // trickling back a few MB a reading is never taken for settled.
+        let mut steady_from: Option<u64> = None;
         let mut steady_readings = 0u32;
         loop {
             let Some(free_mb) = read_free_mb() else {
@@ -13247,21 +13251,21 @@ impl ModelProcessPool {
                     waited_ms: waited_ms(),
                 };
             }
-            steady_readings = match last_mb {
-                Some(last)
-                    if risen_mb >= begun_mb && free_mb.abs_diff(last) <= CARD_MEMORY_STEADY_MB =>
-                {
-                    steady_readings + 1
+            match steady_from {
+                Some(from) if free_mb.abs_diff(from) <= CARD_MEMORY_STEADY_MB => {
+                    steady_readings += 1;
                 }
-                _ => 0,
-            };
+                _ => {
+                    steady_from = (risen_mb >= begun_mb).then_some(free_mb);
+                    steady_readings = 0;
+                }
+            }
             if steady_readings >= 2 {
                 return CardMemoryBack::Settled {
                     waited_ms: waited_ms(),
                     risen_mb,
                 };
             }
-            last_mb = Some(free_mb);
             if start.elapsed() >= within {
                 return CardMemoryBack::NotBack { free_mb };
             }
@@ -22710,6 +22714,20 @@ mod admission_tests {
         )
         .await;
         assert!(matches!(back, CardMemoryBack::Back { .. }), "{back:?}");
+
+        // A trickle — 30 MB a reading, each within the steady band of the one
+        // before — is still a release under way: steady is held to the run's
+        // FIRST reading, so it never settles (review 2026-11-14).
+        let mut readings = [5_700, 6_800, 6_830, 6_860, 6_890, 6_920, 6_950].into_iter();
+        let back = ModelProcessPool::await_card_memory_back(
+            5_700,
+            4_300,
+            move || readings.next(),
+            within,
+            poll,
+        )
+        .await;
+        assert_eq!(back, CardMemoryBack::Unread, "a trickle is not settled");
     }
 
     /// What a retired worker gives back to the CARD: its charge when it held

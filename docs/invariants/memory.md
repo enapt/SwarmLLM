@@ -900,7 +900,9 @@ retirement, promotion) reads the card after that. A DEAD worker's eviction
 does not wait (pre-release review 2026-11-14: a gap, not built).
 **The wait also ends once the release has SETTLED short of three quarters**:
 free memory risen by a quarter of the charge, then steady (within
-`CARD_MEMORY_STEADY_MB`, 32) for two readings after (`CardMemoryBack::Settled`).
+`CARD_MEMORY_STEADY_MB`, 32, of the steady run's FIRST reading — held to the one
+before, a release trickling back 30 MB a reading passed as settled; review
+2026-11-14) for two readings after (`CardMemoryBack::Settled`).
 Ollama's runner has its cache allocated up front by llama.cpp, so its release is
 the whole charge; ours is charged a cache it fills only as conversations come,
 and an idle worker gives back less. On the laptop's card a gemma-2-2b worker
