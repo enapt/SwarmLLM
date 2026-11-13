@@ -6296,6 +6296,14 @@ grep `^| N |`).
   `this_nodes_whole_run_is_priced_from_what_it_delivered_and_its_prompt_as_before` — each red with its change off.
   Evidence: `docs/invariants/scheduling.md` § "A computer short of its card shares the rest", § "This node's whole run
   is priced from what it delivered".
+- #3 (j7) — **After the first split here, this computer priced its own card's layers at its processor's speed.** Found
+  reading the same run: once the explored split left `[24..48)` of the 14B loaded on this card, every later plan read
+  this node `has_gpu=false card_layers=None` at 6.4 tok/s (a whole run 61.7 s against the hand-off's 10.7), so no split
+  here could win again. `ModelProcessPool::card_share_for_planning` named a share only for a worker with some of its own
+  layers on the processor; a worker holding PART of a model the card cannot hold whole, all of it on the card, now
+  reports `(its card layers, the model's)` — what peers are told of it. Test:
+  `a_worker_holding_part_of_a_model_too_big_for_the_card_reports_the_cards_layers`. Evidence: `docs/invariants/
+  scheduling.md` § "A range that runs partly on a card is priced per device" (its last paragraph).
 
 **Closed 2026-11-13, released in v0.3.285 (published 2026-11-13 16:21:16Z)** (#3 (j), three of its parts)
 - #3 (j) — **A computer holding the whole model, with part of it on its processor, ran it all itself even where a

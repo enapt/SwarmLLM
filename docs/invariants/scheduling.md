@@ -3814,6 +3814,22 @@ llama.cpp's `-ngl` partial offload IS the "does not fit" case. Test: the fourth 
 `a_worker_holding_a_segment_has_not_paid_for_the_whole_model` (red with the `short_of_the_card`
 half off). What a change must keep: "charged to the card" and "on the card" are different facts.
 
+**And the layers it holds on the card are priced on the card** (2026-11-13, the real link,
+`real_link_j1drafter`). With that verdict "processor" for a worker holding only a segment, the
+local candidate is priced off the card (`local_on_processor`), and per device only where
+`ModelProcessPool::card_share_for_planning` names a share — which it did only for a worker with
+some of its OWN layers on the processor. After the first explored split ran `[24..48)` on this
+8 GB card, every later plan read this node as `has_gpu=false card_layers=None`, 6.4 tok/s, the
+layers its card held priced at the processor's speed (its whole run 61.7 s for 160 tokens against
+the hand-off's 10.7) — so no split here could win again, whatever the exploration measured. A
+worker holding PART of a model the card cannot hold whole, all of it on the card, now reports
+`(its card layers, the model's layers)`: the card's layers on the card, the rest of a run here on
+the processor — what a peer is told of such a worker (`ResidentModelLayers::card_layers` ←
+`layers_on_card`), so this node prices itself as its peers price it. Prior art: llama.cpp's partial
+offload costs each layer on the device that holds it. Test:
+`a_worker_holding_part_of_a_model_too_big_for_the_card_reports_the_cards_layers` (red with the case
+off; controls: a model the card holds whole, and a worker holding every layer).
+
 ## A computer short of its card shares the rest
 
 **Rule (2026-11-13, FUTURE_WORK #3 (j1)).** Where this node holds every layer of a model, the

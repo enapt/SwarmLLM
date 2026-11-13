@@ -9155,18 +9155,40 @@ impl ModelProcessPool {
     /// on the card (FUTURE_WORK #129); the planner blends the two speeds by
     /// this share (`scheduler::split_tokens_per_sec`). Read off the spawn's
     /// split alone, a range grown later never counted (#361).
+    ///
+    /// **A worker holding PART of a model the card cannot hold whole, all of
+    /// it on the card, has a share too**: `(its layers on the card, the
+    /// model's layers)` — the card runs those, and the rest of a run here
+    /// would go to the processor. Read as "one device" (`None`), the planner
+    /// took the whole model's fit verdict (`serves_on_cpu`: processor, since
+    /// #3 (j)'s `whole_model_on_card`) for every range, and priced the very
+    /// layers the card held at the processor's speed: after the first split of
+    /// a 14B ran `[24..48)` on this 8 GB card, this node's candidate read
+    /// `card_layers=None`, 6.4 tok/s, and no split here won again (2026-11-13,
+    /// the real link).
     pub fn card_share_for_planning(&self, model_id: &ModelId) -> Option<(usize, usize)> {
         if let Some(worker) = self.live_worker(model_id) {
             if !worker.holds_gpu_memory() {
                 return None;
             }
-            let held: u32 = worker
+            let ranges: Vec<(u32, u32)> = worker
                 .charged_segments
                 .lock()
-                .map(|v| v.iter().map(|c| c.range.1.saturating_sub(c.range.0)).sum())
-                .unwrap_or(0);
+                .map(|v| v.iter().map(|c| c.range).collect())
+                .unwrap_or_default();
+            let held: u32 = ranges.iter().map(|r| r.1.saturating_sub(r.0)).sum();
             let on_card = worker.layers_on_card();
-            return (on_card < held).then_some((on_card as usize, held as usize));
+            if on_card < held {
+                return Some((on_card as usize, held as usize));
+            }
+            let layers = self
+                .footprint_inputs(model_id, None)
+                .and_then(|i| u32::try_from(i.segment_layers).ok())
+                .filter(|&l| l > held)?;
+            let part_of_a_model_too_big = on_card > 0
+                && self.split_for(model_id, &ranges) == SplitFor::Part
+                && self.would_fit_on_gpu(model_id) == Some(false);
+            return part_of_a_model_too_big.then_some((on_card as usize, layers as usize));
         }
         if !self.planning_on_card(model_id) {
             return None;
@@ -17808,6 +17830,73 @@ mod tests {
         q.workers.insert(m.clone(), h);
         assert_eq!(q.card_share_for_planning(&m), None);
         assert_eq!(q.resident_model_layers()[0].card_layers, Some(0));
+    }
+
+    /// **A worker holding part of a model too big for the card, all of it on
+    /// the card, reports the card's layers** (2026-11-13, the real link): read
+    /// as "one device", the planner took the whole model's verdict — the
+    /// processor — and priced the layers the card held at the processor's
+    /// speed, so after a split ran `[24..48)` here no split here won again.
+    /// Its controls: the same worker for a model the card holds whole, and
+    /// one holding every layer.
+    #[tokio::test]
+    async fn a_worker_holding_part_of_a_model_too_big_for_the_card_reports_the_cards_layers() {
+        use crate::inference::model_arch::ModelArch;
+        use crate::inference::split::hybrid::arch_supports_hybrid;
+        let inputs = |weights_mb: u64| crate::model::auto_manage::vram::VramFootprintInputs {
+            quantized_weight_bytes: weights_mb * 1024 * 1024,
+            host_resident_bytes: 0,
+            head_bytes: 0,
+            unquantized_bytes_per_element: None,
+            vocab_size: 152_064,
+            embedding_length: 3584,
+            segment_layers: 28,
+            kv: crate::inference::split::kv_budget::KvPrice::uniform(
+                28,
+                4,
+                28,
+                128,
+                crate::inference::layers::KvAttention::Standard,
+            ),
+            rope_dim: 128,
+            effective_context: 8192,
+            is_first: true,
+            embedding_gatherable: true,
+            splits_across_devices: arch_supports_hybrid(&ModelArch::Qwen2),
+        };
+        let pool = |weights_mb: u64, held: (u32, u32)| async move {
+            let p = ModelProcessPool::new(std::path::PathBuf::from("/tmp/swarmllm-part-on-card"));
+            p.test_card_in_play
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+            p.set_gpu_layers(-1);
+            p.set_vram_budget_mb(3000);
+            p.set_vram_budget_source(Box::new(|| Some(3000)));
+            let m = ModelId("part-on-card".into());
+            p.test_footprint_inputs
+                .insert(m.clone(), inputs(weights_mb));
+            let h = fake_worker_handle_spawned(false, None, false, std::time::Instant::now()).await;
+            h.record_segment_placed_as_spawned(held);
+            assert_eq!(
+                h.layers_on_card(),
+                held.1 - held.0,
+                "fixture: all on the card"
+            );
+            p.workers.insert(m.clone(), h);
+            (p, m)
+        };
+        let (p, m) = pool(4_400, (14, 28)).await;
+        assert_eq!(
+            p.would_fit_on_gpu(&m),
+            Some(false),
+            "fixture: too big whole"
+        );
+        assert_eq!(p.card_share_for_planning(&m), Some((14, 28)));
+        // A model the card holds whole: its layers run on the card wherever.
+        let (p, m) = pool(900, (14, 28)).await;
+        assert_eq!(p.card_share_for_planning(&m), None);
+        // Every layer held, all on the card: one device.
+        let (p, m) = pool(4_400, (0, 28)).await;
+        assert_eq!(p.card_share_for_planning(&m), None);
     }
 
     /// A split asks whether this node's part runs whole on the card before it
