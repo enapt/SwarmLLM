@@ -1045,6 +1045,60 @@ impl EngineDrafter {
         self.valid = self.seq.len();
     }
 
+    /// What a read of every token before the sequence's LAST sends —
+    /// `(keep, append)` — or `None` when the worker holds them already. The
+    /// last stays unread: a guess follows from ITS logits, so the next call
+    /// must read it ([`Self::before_a_call`] refuses one with nothing new).
+    fn unread_before_the_last(&self) -> Option<(u32, Vec<u32>)> {
+        let end = self.seq.len().checked_sub(1)?;
+        (self.valid < end).then(|| (self.valid as u32, self.seq[self.valid..end].to_vec()))
+    }
+
+    /// Read NOW, with no guesses, every token before the last that the
+    /// drafter's worker does not hold — on a cold start the prompt, which no
+    /// [`read_ahead`] read (`dsd` starts one only once the target's own
+    /// segments are loaded, as the drafter is a guest). The worker is then
+    /// live, so where it runs is a FACT the reply's shape is chosen from
+    /// (`ModelProcessPool::runs_whole_on_the_card` → `drafter_on_card`), and
+    /// the first round reads only the last token, as after a read-ahead. The
+    /// first round would have read it at the same cost; on failure it still
+    /// does. Asked before any read, the first split a node explored ran
+    /// `drafter_on_card=false` with its drafter on the card, so no tree flowed
+    /// (#3 (j1), 2026-11-13, the real link).
+    pub(super) async fn read_up_to_the_last(
+        &mut self,
+        state: &SharedState,
+        sampling: &SamplingParams,
+        cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    ) -> Result<(), SwarmError> {
+        let Some((keep, append)) = self.unread_before_the_last() else {
+            return Ok(());
+        };
+        let read_to = keep as usize + append.len();
+        let d = IpcDraft {
+            request_id: self.key,
+            model_id: self.spec.model_id.clone(),
+            layer_range: self.spec.layer_range,
+            keep,
+            append,
+            gamma: 0,
+            sampling: sampling.clone(),
+            history: Vec::new(),
+            coupling_seed: None,
+            for_the_owner: self.requester == Requester::Owner,
+            runner_ups: false,
+            stop_below: None,
+            tree: None,
+            flow: None,
+        };
+        state
+            .model_process_pool
+            .draft(d, &self.spec.guesses_for, cancel)
+            .await?;
+        self.valid = read_to;
+        Ok(())
+    }
+
     /// Ask the drafter's worker for `gamma` guesses following the sequence so
     /// far. `history` is the reply so far (what the penalties read) and
     /// `coupling_seed` the request's shared noise, `None` for argmax guesses.
@@ -2055,6 +2109,27 @@ mod tests {
         d.push(&[9]);
         assert_eq!(d.valid(), 4);
         assert_eq!(&d.seq[d.valid..], &[9]);
+    }
+
+    /// With no read-ahead (a cold start), reading the prompt once the first
+    /// reply token is pushed reads exactly the prompt — the state a read-ahead
+    /// leaves — and never that token, from whose logits round one guesses: a
+    /// read of the whole sequence leaves the first call nothing to read.
+    #[test]
+    fn a_cold_starts_prompt_read_leaves_round_one_only_the_first_reply_token() {
+        let mut d = drafter(&[1, 2, 3, 4]);
+        d.push(&[9]);
+        assert_eq!(d.unread_before_the_last(), Some((0, vec![1, 2, 3, 4])));
+        // What `read_up_to_the_last` records once the worker answered.
+        d.valid = 4;
+        assert_eq!(&d.seq[d.valid..], &[9]);
+        assert_eq!(d.unread_before_the_last(), None, "read twice");
+        // After a read-ahead there is nothing left to read either.
+        let mut ahead = drafter(&[1, 2, 3, 4]);
+        ahead.prompt_read();
+        ahead.push(&[9]);
+        assert_eq!(ahead.unread_before_the_last(), None);
+        assert_eq!(drafter(&[]).unread_before_the_last(), None);
     }
     fn flagged_release(flag: std::sync::Arc<std::sync::atomic::AtomicBool>) -> Release {
         Box::new(move || {

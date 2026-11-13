@@ -674,12 +674,15 @@ pub struct InferenceConfig {
     /// tested, including the nominal boomerang; that is this, not a separate bug.
     /// Pinned by `encrypted_boomerang_is_unroutable_without_partial_ranges`.
     ///
-    /// The cost model in `scheduler/parallax.rs` charges a remote hop's network
-    /// cost ONCE per segment, so it cannot see that penalty and will keep
-    /// choosing the split. Enabling this is only sensible once that per-token
-    /// term exists, or for measuring a topology where the compute saving is
-    /// large enough to pay for the round trips — a very slow sole holder, or a
-    /// prefill-dominated request, where prefill is one large forward pass.
+    /// Off by default because measured splits ran slower than a whole holder
+    /// (12.0 s against 10.2 s median, FUTURE_WORK #180) when the cost model
+    /// charged a hop once per segment. It now charges one round trip a pass,
+    /// or a round where a drafter guesses ahead (`parallax::vertex_cost_as`,
+    /// #3 (d), (h)), and #180's A/B has not been re-run since — so it stays off
+    /// here, and is forced on in exactly two cases: the boomerang above, and a
+    /// node that holds every layer but whose card holds only part of them
+    /// (`scheduler::shares_what_its_card_cannot_hold`, 2026-11-13), where the
+    /// split it makes possible was measured faster than both alternatives.
     #[serde(default)]
     pub parallax_partial_ranges: bool,
 }

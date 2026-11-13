@@ -1643,8 +1643,10 @@ fn drafter_may_guess_for(state: &SharedState, model_id: &ModelId) -> bool {
 /// Why a prior at all: priced at one round a token, a split loses to a whole
 /// hand-off wherever its gain is its guesses, never runs, and so is never
 /// measured — the 14B with a card far away (TH ↔ AU) ran 34-37 tok/s split
-/// and 17-18 handed over, and the planner handed it over every time
-/// (2026-11-13, `real_link.sh` arm `flowall`).
+/// and 17-18 handed over. (In the `flowall` arms, 2026-11-13, the plan went to
+/// the hand-off every time for another reason too: no split of two computers
+/// holding the whole model could be planned at all —
+/// `scheduler::shares_what_its_card_cannot_hold`.)
 pub(crate) fn split_yield_prior(
     state: &SharedState,
     model_id: &ModelId,

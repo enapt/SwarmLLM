@@ -147,6 +147,15 @@ fn eligible(exec: &PipelineExecutor) -> bool {
         && exec.assignment.segments.len() >= 2
 }
 
+/// Whether the drafter reads the prompt before the reply's shape is chosen
+/// on a start with no read-ahead (`EngineDrafter::read_up_to_the_last`).
+/// `SWARMLLM_DRAFTER_READ_FIRST=0` leaves it to the first round, as before,
+/// for an A/B inside one binary. Read once.
+fn drafter_reads_before_the_shape_is_chosen() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("SWARMLLM_DRAFTER_READ_FIRST").as_deref() != Ok("0"))
+}
+
 impl PipelineExecutor {
     /// Try the distributed multi-segment DSD path. Returns `Ok(None)` if any
     /// runtime precondition fails; caller falls back to standard
@@ -308,8 +317,9 @@ impl PipelineExecutor {
         // (`process_pool::Tenancy::Guest`): it takes graphics memory only as it
         // stands free, and on a cold start that is exactly the memory those
         // segments are about to be loaded into. Loaded first, it would push
-        // them onto the processor; waiting, it takes what they leave. The first
-        // round then reads the prompt itself.
+        // them onto the processor; waiting, it takes what they leave. It then
+        // reads the prompt once the target's prompt pass has loaded them,
+        // before the reply asks where it runs (`read_up_to_the_last`, below).
         let target_segments_loaded = {
             let me = self.shared_state.identity.node_id();
             let pool = &self.shared_state.model_process_pool;
@@ -490,7 +500,33 @@ impl PipelineExecutor {
                     .reads_draft_trees()
             })
         };
-        // The drafter's worker is live here: its prompt read above loaded it.
+        // Where the drafter runs is read from its LIVE worker. On a cold start
+        // no read-ahead ran (above), so the worker does not exist yet: read the
+        // prompt now — the first round would have, at the same cost, and the
+        // first token is already out — so the answer is a fact, never "not on
+        // the card" for a drafter about to load there. A read-ahead leaves
+        // nothing to read; one that failed is tried once more. Asked before
+        // any read, each start's first split ran `drafter_on_card=false` and
+        // streamed where its tree would have flowed (2026-10-23 `flowmech`;
+        // 2026-11-13 the real link, #3 (j1)). A/B `SWARMLLM_DRAFTER_READ_FIRST=0`.
+        if let Drafter::Engine(e) = &mut drafter {
+            if finish_reason.is_empty() && drafter_reads_before_the_shape_is_chosen() {
+                if let Err(err) = e
+                    .read_up_to_the_last(
+                        &self.shared_state,
+                        &self.request.sampling_params,
+                        self.request.cancel.clone(),
+                    )
+                    .await
+                {
+                    tracing::debug!(
+                        %request_id,
+                        error = %err,
+                        "DSD: the drafter could not read the prompt — the first round reads it"
+                    );
+                }
+            }
+        }
         let drafter_on_card = matches!(&drafter, Drafter::Engine(e)
             if self.shared_state.model_process_pool.runs_whole_on_the_card(e.model_id()));
         let farthest_round_trip_ms =

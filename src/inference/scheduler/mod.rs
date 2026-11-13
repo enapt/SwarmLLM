@@ -147,8 +147,10 @@ struct NodeCandidate {
     observed_latency_timed_on: Option<crate::daemon::state::TimedOn>,
     /// Observed per-layer latency EMA (ms/layer) for whole models this peer has
     /// run for us end to end — the *delegated* shape, carrying no per-token
-    /// round trip. `None` for the local node and for any peer we have never
-    /// delegated to. Populated from `state.observed_delegated_ms_per_layer`.
+    /// round trip. For the local node, what its own whole runs delivered
+    /// (`SharedState::note_own_whole_run`, #3 (j3)), read only for its
+    /// whole-model vertex. `None` for any peer we have never delegated to.
+    /// Populated from `state.observed_delegated_ms_per_layer`.
     ///
     /// Kept apart from `observed_latency_ms_per_layer` because substituting one
     /// for the other is a measured mis-pricing, not a rounding error; see
@@ -2780,6 +2782,39 @@ struct RoutePrices {
     local_route_is_available: bool,
 }
 
+/// May the search offer parts of ranges because this node's CARD holds only
+/// part of a model it holds every layer of? `search_decides`: the priced
+/// search competes with this node's own run, which it does only where the run
+/// would be short of the card (`pipeline_may_beat_local`). `local`: this
+/// node's candidate, whose `card_layers` says how many of the model's layers
+/// its card runs — some, not all.
+///
+/// The one place a computer short of its card lets a peer's card take the
+/// rest of its layers rather than its own processor — as llama.cpp spreads
+/// layers over every card it can reach (`--split-mode layer`, RPC servers
+/// included) before it offloads any to the processor. Partial ranges stay off
+/// everywhere else (`InferenceConfig::parallax_partial_ranges`, FUTURE_WORK
+/// #180): a node with no card, or one whose card holds the whole model, plans
+/// exactly as before. Measured (2026-11-13, Qwen2.5-14B held whole here and on
+/// an RTX 3060 ~140 ms away): split with half here, code ran 34-37 tok/s
+/// against 17-18 handed over and 13-15 run here, and with partial ranges off
+/// that split could not be planned at all. A/B `SWARMLLM_SPLIT_BESIDE_CARD=0`
+/// (read once): never.
+fn shares_what_its_card_cannot_hold(
+    search_decides: bool,
+    local: Option<&NodeCandidate>,
+    num_layers: u32,
+) -> bool {
+    static NEVER: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if *NEVER.get_or_init(|| std::env::var("SWARMLLM_SPLIT_BESIDE_CARD").is_ok_and(|v| v == "0")) {
+        return false;
+    }
+    search_decides
+        && local
+            .and_then(|c| c.card_layers)
+            .is_some_and(|on_card| on_card > 0 && on_card < num_layers)
+}
+
 /// Can this node hold every layer of the model at once?
 ///
 /// Two ways to answer yes, and the first is the one that stops this check
@@ -2850,6 +2885,18 @@ fn leaving_room_here(
     cut[local].max_hostable_layers = Some(now.map_or(room, |k| k.min(room)));
     cut[local].fresh_run_layers = None;
     Some(cut)
+}
+
+/// Does the planner first try a plan that leaves this node's drafter room
+/// beside its layers (`PipelineScheduler::candidates_leaving_room_for_the_drafter`)?
+/// Wherever the plan may be a split this node takes part in: it cannot run
+/// every layer (#275), or it can only with its processor beside a card short
+/// of the model, where the search offers parts of ranges
+/// (`shares_what_its_card_cannot_hold`, FUTURE_WORK #3 (j1)). Not where it
+/// runs the whole model and offers no part of it — there the only plans are
+/// its own run and a peer's.
+fn plans_room_for_the_drafter(local_runs_whole_model: bool, card_short_split: bool) -> bool {
+    !local_runs_whole_model || card_short_split
 }
 
 /// `SWARMLLM_DRAFTER_ROOM=0` plans without leaving room for the drafter
@@ -4041,20 +4088,38 @@ impl PipelineScheduler {
             .shared_state
             .route_plan_override(request_id)
             .is_some_and(|o| o.lead_here);
+        // Where this node holds every layer but its card holds only part of
+        // them, the search may offer parts of ranges
+        // (`shares_what_its_card_cannot_hold`), so the plan it finds is a
+        // split this node takes part in — or no part here at all.
+        let card_short_split = !whole_only
+            && shares_what_its_card_cannot_hold(pipeline_may_beat_local, local_cand, num_layers);
         // A plan this node takes part in is a split from here on, so each
         // planner first holds this node to room that leaves its drafter room
         // to load (#275); with no route that way it plans as it always has.
-        let beside_drafter = if local_runs_whole_model {
-            None
-        } else {
-            self.candidates_leaving_room_for_the_drafter(
-                model_id,
-                local_node_id,
-                request_id,
-                &candidates,
-                prompt_tokens,
-            )
-        };
+        //
+        // That holds where its card is short of the whole model too: the
+        // search then plans parts of ranges, and a part here is a split from
+        // here. Skipped there because this node CAN run every layer (its card
+        // and processor together), the cut left the drafter no room, it went
+        // to the processor beside the split's layers, and no tree could flow
+        // (FUTURE_WORK #3 (j1): `drafter_on_card=false` on both explored
+        // splits, 2026-11-13, this node's room 30 layers with none left for
+        // it). Prior art: SpecExec (arXiv 2406.02532) and llama.cpp's
+        // speculative server (`-ngld` before `-ngl`) give the drafter the card
+        // first and move the target's layers.
+        let beside_drafter =
+            if !plans_room_for_the_drafter(local_runs_whole_model, card_short_split) {
+                None
+            } else {
+                self.candidates_leaving_room_for_the_drafter(
+                    model_id,
+                    local_node_id,
+                    request_id,
+                    &candidates,
+                    prompt_tokens,
+                )
+            };
         let raw_segments = if self.shared_state.config.inference.parallax_routing {
             // Encryption forces the first and last segments onto this node,
             // so an encrypted distributed pipeline is multi-segment by
@@ -4065,7 +4130,18 @@ impl PipelineScheduler {
             // model) offers only one indivisible range, which can be neither
             // a middle segment nor a remote encrypted end. That produced a
             // hard "No node available" for a perfectly valid boomerang.
-            let partial = (self.shared_state.config.inference.parallax_partial_ranges || encrypted)
+            //
+            // And where this node holds every layer but its card holds only
+            // part of them (`shares_what_its_card_cannot_hold`): the request
+            // would run the rest on its processor, and a peer's card can take
+            // that rest only as part of a range. Without it two computers
+            // holding the whole model offered one indivisible range each, so
+            // the choice was this node's card/processor run or the whole
+            // hand-off — never the split between them that ran 34-37 tok/s on
+            // code where the hand-off ran 17-18 (FUTURE_WORK #3 (j1)).
+            let partial = (self.shared_state.config.inference.parallax_partial_ranges
+                || encrypted
+                || card_short_split)
                 && !whole_only;
             // Route up to three times, relaxing one bound at a time, because
             // the two kinds of memory figure in the graph are not equally
@@ -5167,15 +5243,14 @@ impl PipelineScheduler {
                     None => (ranking.map(|r| r.ms_per_layer), None, timed_on),
                 }
             };
-            // Deliberately `None` for the local node: there is no such thing as
-            // delegating to ourselves, and a local segment pays no network at
-            // all, so the whole distinction this figure exists to draw is moot.
-            let observed_delegated_ms_per_layer = if &node_id == local_node_id {
-                None
-            } else {
-                self.shared_state
-                    .observed_delegated_ms_per_layer(&node_id, &manifest.id)
-            };
+            // For this node, what its own WHOLE runs of the model delivered,
+            // kept in the same slot (`SharedState::note_own_whole_run`,
+            // FUTURE_WORK #3 (j3)) and read only for its whole-model vertex
+            // (`parallax::vertex_cost_as`); a segment here is priced from its
+            // own timings as before.
+            let observed_delegated_ms_per_layer = self
+                .shared_state
+                .observed_delegated_ms_per_layer(&node_id, &manifest.id);
             // No path to ourselves, so nothing can be lost on the way.
             let expected_attempts = if &node_id == local_node_id {
                 1.0

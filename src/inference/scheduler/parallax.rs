@@ -591,7 +591,15 @@ fn vertex_cost_as(
     // A later segment of a led chain is not round-tripped into from here
     // either, so the figure that carries no round trip of ours is the right one
     // there too, and the mid-chain one its upper bound.
-    let observation = if delegated_whole_model || in_led_chain {
+    //
+    // This node's own whole run is priced the same way (FUTURE_WORK #3 (j3)):
+    // from what its whole replies DELIVERED, each token after the first over
+    // the model's layers, its drafter's guesses included
+    // (`SharedState::note_own_whole_run`). One pass a token at the priors read
+    // a 14B's run here at ~4.2 tok/s where it ran 11-15, and twelve of twelve
+    // requests went to a 3060 abroad delivering 5.4 (2026-11-13).
+    let own_whole_run = is_local && covers_whole_model && role == ChainRole::DrivenFromHere;
+    let observation = if delegated_whole_model || in_led_chain || own_whole_run {
         c.observed_delegated_ms_per_layer
             .or(c.observed_latency_ms_per_layer)
     } else {
@@ -685,6 +693,15 @@ fn vertex_cost_as(
     } else {
         DecodePrice::Prior { range, ahead }
     };
+    // ⚠ Never the PROMPT of this node's own whole run: its delivered figure is
+    // a token's time with the drafter's guesses folded in, a third of one
+    // pass or less, and a prompt read from it would be priced a third of what
+    // it takes. That prompt is priced as it was before the figure existed.
+    let prompt_decode_price = match c.observed_latency_ms_per_layer {
+        _ if !(own_whole_run && c.observed_delegated_ms_per_layer.is_some()) => decode_price,
+        Some(ms) => DecodePrice::Measured { ms, range, ahead },
+        None => DecodePrice::Prior { range, ahead },
+    };
 
     // Compute is per forward pass, and a request is many passes. Scaling every
     // candidate by the same factor leaves their relative order untouched, but it
@@ -745,7 +762,7 @@ fn vertex_cost_as(
         None => 0.0,
         Some(0) => 0.0,
         Some(tokens) => {
-            prefill_ms_per_layer(c, tokens, decode_price, range == (0, num_layers)) * layers
+            prefill_ms_per_layer(c, tokens, prompt_decode_price, range == (0, num_layers)) * layers
         }
     };
 
@@ -1403,6 +1420,40 @@ fn route_over(
                 "parallax: capacity split points would exceed the sub-range budget — \
                  keeping the declared boundaries only"
             );
+        }
+    }
+    // **Where a machine's CARD stops, too** (FUTURE_WORK #3 (j1), 2026-11-13).
+    // A candidate that runs part of a range on its processor beside its card
+    // (`card_layers`) is priced the first that many layers of a run at the
+    // card's speed and the rest at the processor's (`layers_by_device`), so
+    // the split that serves it best often gives it exactly its card's layers —
+    // a cut no shard or memory bound has reason to offer. This node's 14B: its
+    // card runs 22 of 48 layers and the only cuts were 17 and 31, so its
+    // cheapest share carried 9 processor layers at ~8.5 ms each against a
+    // peer's card at ~0.9. Prefix and suffix, as the bounds above. Tried last
+    // and only within the budget, so it never costs a cut that keeps a route
+    // possible.
+    if partial_ranges {
+        let mut with_cards = split_points.clone();
+        for c in candidates {
+            let Some(k) = c.card_layers.filter(|&k| k > 0) else {
+                continue;
+            };
+            for &(a, b) in &c.available_ranges {
+                let b = b.min(num_layers);
+                for p in [a.saturating_add(k), b.saturating_sub(k)] {
+                    if p > a && p < b && p > 0 && p < num_layers {
+                        with_cards.push(p);
+                    }
+                }
+            }
+        }
+        with_cards.sort_unstable();
+        with_cards.dedup();
+        if with_cards.len() > split_points.len()
+            && capacity_points_fit_budget(&with_cards, &clamped, MAX_SUBRANGE_VERTICES)
+        {
+            split_points = with_cards;
         }
     }
 
@@ -2284,6 +2335,62 @@ mod tests {
             c.ring.request_may_be_led = false;
         }
         assert_eq!(route(&cands), vec![(4, (0, 32))]);
+    }
+
+    /// FUTURE_WORK #3 (j3): this node's whole run is priced from what its
+    /// whole replies DELIVERED here, its drafter's guesses included — its
+    /// prompt as it was before that figure existed, since the guesses are in
+    /// it — and a segment here from its own timings, as before. Routed, what
+    /// it delivered beats a peer's hand-off its one-pass-a-token prior lost to.
+    #[test]
+    fn this_nodes_whole_run_is_priced_from_what_it_delivered_and_its_prompt_as_before() {
+        let local = NodeId([1; 32]);
+        let cost = |c: &NodeCandidate, range| vertex_cost(c, range, &local, 32, Some(1_000));
+        let mut here = cand(1, vec![(0, 32)], 0, 0.0, true, true, 4.0);
+        for timed in [None, Some(6.0)] {
+            here.observed_latency_ms_per_layer = timed;
+            here.observed_delegated_ms_per_layer = None;
+            let (whole, part) = (cost(&here, (0, 32)), cost(&here, (0, 16)));
+            here.observed_delegated_ms_per_layer = Some(2.0);
+            let delivered = cost(&here, (0, 32));
+            assert_eq!(
+                delivered.compute_ms,
+                2.0 * 32.0 * here.forward_passes(),
+                "{timed:?}"
+            );
+            assert!(delivered.compute_ms < whole.compute_ms, "{timed:?}");
+            assert!(delivered.prefill_ms > 0.0, "{timed:?}");
+            assert_eq!(delivered.prefill_ms, whole.prefill_ms, "{timed:?}");
+            let part_now = cost(&here, (0, 16));
+            assert_eq!(
+                (part_now.compute_ms, part_now.prefill_ms),
+                (part.compute_ms, part.prefill_ms),
+                "{timed:?}"
+            );
+        }
+
+        let mut peer = cand(2, vec![(0, 32)], 140, 0.0, true, true, 0.0);
+        peer.observed_delegated_ms_per_layer = Some(4.0);
+        let route = |here: &NodeCandidate| {
+            route_shortest_path(
+                32,
+                &[here.clone(), peer.clone()],
+                &local,
+                false,
+                false,
+                CapacityBound::Everyone,
+                None,
+            )
+            .unwrap()
+            .into_iter()
+            .map(|s| (s.node_id.0[0], s.layer_range))
+            .collect::<Vec<_>>()
+        };
+        here.observed_latency_ms_per_layer = None;
+        here.observed_delegated_ms_per_layer = None;
+        assert_eq!(route(&here), vec![(2, (0, 32))], "the prior loses");
+        here.observed_delegated_ms_per_layer = Some(2.0);
+        assert_eq!(route(&here), vec![(1, (0, 32))], "what it delivered wins");
     }
 
     /// FUTURE_WORK #3 (f): two peers leading their own chain state a fast card's

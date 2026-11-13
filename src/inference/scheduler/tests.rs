@@ -8577,6 +8577,110 @@ fn a_local_model_the_loader_splits_is_priced_with_the_cards_share() {
     );
 }
 
+/// **A computer whose card holds only part of a model it holds whole lets a
+/// peer's card take the rest** (FUTURE_WORK #3 (j1), 2026-11-13). With partial
+/// ranges off, this node and a peer that both hold every layer offered one
+/// indivisible range each, so the plan was this node's card/processor run or
+/// the whole hand-off — the split between them was never on offer. Real link:
+/// that split ran code at 34-37 tok/s where the hand-off ran 17-18 and this
+/// node alone 13-15. Here the peer's card is slower than ours and our
+/// processor slower still: our card's layers here and the rest there beats
+/// both, and is chosen.
+#[test]
+fn a_card_short_of_the_whole_model_shares_the_rest_with_a_peers_card() {
+    let card = crate::inference::executor::GpuInfo {
+        name: "NVIDIA GeForce RTX 3070".into(),
+        vram_total_mb: 8192,
+        backend: "cuda".into(),
+    };
+    let (state, local, mid) = a_card_holder_of_a_model_it_must_split_on(Some(card));
+    let (on_card, total) = state
+        .model_process_pool
+        .card_share_for_planning(&mid)
+        .expect("fixture: the loader splits this model");
+    assert!(
+        on_card > 0 && on_card < total,
+        "fixture: {on_card} of {total}"
+    );
+    let peer = NodeId([0xA3; 32]);
+    let mut info = gpu_holder_info(&peer, 5, 10.0);
+    // Everyone loads at once: this is about where the layers run.
+    info.capability.as_mut().unwrap().model_load_ms_per_gib = Some(1);
+    state.peer_registry.insert(peer.clone(), info);
+    state.connected_node_ids.insert(peer.clone());
+    state.model_registry.record_shard_holder(
+        ShardId {
+            model_id: mid.clone(),
+            index: 0,
+        },
+        peer.clone(),
+    );
+    state.model_process_pool.observe_load_for_test(1 << 30, 1);
+    assert!(
+        !state.cfg().inference.parallax_partial_ranges && !state.encrypted_pipeline_for(&mid),
+        "fixture: the default shape — partial ranges off, no ends kept here"
+    );
+
+    let scheduler = PipelineScheduler::with_local_processor_speed(state.clone(), 4.0);
+    let assignment = scheduler
+        .assemble_pipeline_for(
+            &mid,
+            &local,
+            uuid::Uuid::new_v4(),
+            super::Purpose::Route,
+            Some(32),
+            crate::types::KeepAsked::Unasked,
+        )
+        .unwrap();
+    let plan: Vec<(NodeId, (u32, u32))> = assignment
+        .segments
+        .iter()
+        .map(|s| (s.node_id.clone(), s.layer_range))
+        .collect();
+    assert_eq!(plan.len(), 2, "a split, not one computer's run: {plan:?}");
+    let here = plan
+        .iter()
+        .find(|(n, _)| *n == local)
+        .expect("this node takes part");
+    let there = plan
+        .iter()
+        .find(|(n, _)| *n == peer)
+        .expect("the peer takes part");
+    // Either end: both are driven from here, a round trip a round either way.
+    assert_eq!(
+        here.1 .1 - here.1 .0,
+        on_card as u32,
+        "this node keeps exactly what its card runs ({on_card} of {total}): {plan:?}"
+    );
+    assert_eq!(
+        there.1 .1 - there.1 .0,
+        (total - on_card) as u32,
+        "the peer's card takes the rest: {plan:?}"
+    );
+}
+
+/// **A card short of the model it holds whole leaves its drafter room on the
+/// split it offers** (FUTURE_WORK #3 (j1)). Where this node runs every layer
+/// with its processor beside a card too small for them, the search offers parts
+/// of ranges, so its plan is a split from here; the drafter's room was left
+/// only where this node could NOT run every layer, so both splits explored on
+/// the real link (2026-11-13) put the drafter on the processor and no tree
+/// flowed. The controls: a node that runs the whole model and offers no part
+/// of it leaves none; one that cannot run every layer always did.
+#[test]
+fn a_split_offered_beside_a_short_card_leaves_the_drafter_room() {
+    assert!(
+        super::plans_room_for_the_drafter(true, true),
+        "runs every layer, but its card is short and it offers parts: room for the drafter"
+    );
+    assert!(
+        !super::plans_room_for_the_drafter(true, false),
+        "runs the whole model and offers no part of it: nothing to leave room beside"
+    );
+    assert!(super::plans_room_for_the_drafter(false, false));
+    assert!(super::plans_room_for_the_drafter(false, true));
+}
+
 /// **A re-plan after this node's loader refused part of a split gives it fewer
 /// new layers than it refused** (2026-10-08). A tester's node holding 28 of a
 /// 30B's 34 parts refused layers 19..27 and 43..48 — "another holder will have

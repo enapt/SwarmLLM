@@ -1078,30 +1078,22 @@ the same machines as `flowhalf`, half here, ran code 34.0-37.5 and prose 15.5-17
 are on main (§ Closed, 2026-11-13): a resident card/processor split no longer takes the full-coverage fast path, so
 under "Start and finish on this computer" (`dsdwall`) every request went to the split — code 25.3-28.7 tok/s
 against 13.4-15.3 run here; an unmeasured split starts from the drafter's prior (2.19 a round); and every 3rd, 6th,
-12th … request is priced at 8 a round with no cold load charged (bounded exploration). **OPEN — why the default
-shape (`flowall`, not under that setting) still never splits:** (j1) **the split cannot be expressed**: with
-`parallax_partial_ranges` off, a computer that holds the whole model offers only `[0..48)`, so two whole holders
-have no chain between them — every explored request (it fired: "priced OPTIMISTICALLY") chose between this node's
-whole run and the hand-off; the boomerang forces partial ranges on, which is why `dsdwall` could split. **Built and
-measured 2026-11-13, not landed** (patch kept outside the repo): partial ranges forced on where this node holds every
-layer and its card runs only part (plus split points where each candidate's card stops). Real link, `real_link.sh
-TAG=beside`, three arms alternating on/off/on, six 160-token replies each: it planned a split only for the two
-explored prose requests — `aa3d1e66 [0..25)` + this node `[25..48)`, "peer-first", streamed checks, 84 round trips
-for 160 tokens, `drafter_on_card=false` — at 10.2 and 8.9 tok/s (first token 4.4-4.6 s); the hand-offs ran prose
-7.8-11.2 / code 8.6-22.6 with it on, prose 9.6-13.7 / code 14.6-20.0 with it off. Three things it lacks: the peer
-must load its 25 layers again beside its whole copy — its worker serves only an exact range (#449, which comes
-first; first token 4.4-4.6 s against 0.4-0.6 handed over); the drafter landed on the processor, so
-no tree could flow (`dsd_tree::trees_wanted` needs it on the card, and #275's room is not left where this node runs
-the whole model); and the orientation tied, so peer-first won by order, not price. (j2) this
+12th … request is priced at 8 a round with no cold load charged (bounded exploration). **Why the default shape (`flowall`, not under that setting) never split — (j1) and (j3) built 2026-11-13, on
+main (not in a release yet), § Closed**: (j1) the split could not be expressed — with `parallax_partial_ranges` off,
+two computers holding the whole model offered one indivisible range each; (j3) this node's own whole run was priced
+from the static priors at one pass a token (~4.2 tok/s for the 14B's 22 card + 26 processor layers) while it ran
+11-15 with its drafter. Beside them each start's first split read `drafter_on_card=false` with the drafter on the
+card (its worker was spawned after the question), so no tree could flow. **OPEN**: (j2) this
 node's own first load is charged `UNMEASURED_LOAD_MS_PER_GIB` (10 s/GiB, ~85 s for the 14B) until a load is timed,
 and a node that always routes away never times one: its whole run was priced 87-121 s per 160-token reply, 19-30 s
-on the explored requests. (j3) a whole run HERE is priced from the static priors at one pass a token (~4.2 tok/s
-for the 14B's 22 card + 26 processor layers) — a whole-model run here is never timed for the planner, and with its
-card a local sample is dropped as possibly another device's — while it runs 11-15 with its drafter. Together they
-cost the user: on 11-13 10:09Z the 3060 slowed to 5.4 tok/s (its owner's work, or heat) and all twelve requests of
-two arms still went to it at 5.27-5.38 tok/s, the hand-off's measured price (26-33 s) beside this node's 28.8-30.0 s
-explored price, which would have run in ~11-15 s. (j4) the runner-up's price is not logged, so a lost split cannot
-be read off the plan.
+on the explored requests.
+(j4) the runner-up's price is not logged, so a lost split cannot be read off the plan. (j5) **orientation**: a split
+whose far end is a card flows only with its TAIL there (`dsd_tree::FlowDraws::AtTheFarEnd`, the 120 ms line; a tail
+here keeps 300), yet here-first is charged the hidden state's `transfer_ms` and peer-first is not, so the price
+leans to the shape that cannot flow — on the real link every explored split ran peer-first, `[0..24)` on the
+3060's whole copy + `[24..48)` here, streamed checks, 41 round trips waited for 160 tokens. Price the flow for a
+chain whose tail is a far card (its yield per shape), never a bias constant. (j6) a fresh node prices the hand-off
+from the peer's stated 45 tok/s (5.3 s for 160 tokens) against the 24 it delivered.
 
 `scheduler/parallax.rs` charges a remote hop a flat `ASSUMED_FORWARD_PASSES = 64.0`. The error
 grows with reply length — 1.0 at 8 tokens, 2.4-3.3 at 120-239 — and biases every delegation
@@ -1207,13 +1199,14 @@ split wins. Also feed observed per-layer latency into `compute_segment_timeout` 
 the fixed 2 s/layer guess. Depends on #3. **With it off, the GREEDY fallback plans every split
 whose holders overlap** (whole ranges A 0-21 / peer 3-28 have no chain: 16 of 16 plans in
 2026-10-10's #10 rigs), so greedy's pricing is the pricing those splits get — it gained the
-cold-load charge that day. **Tried for one case 2026-11-13 and not landed** (#3 (j1)): forced on
-where this node holds every layer and its card runs only part of them, the split it planned on the
-real link ran no faster than the hand-off — the peer loaded its share again beside its whole copy
-(#449). The flip, general or narrow, waits for #449.
+cold-load charge that day. **On for one case since 2026-11-13, on main (not in a release yet)** (#3 (j1)):
+where this node holds every layer and its card runs only part of them
+(`scheduler::shares_what_its_card_cannot_hold`). With #449 the peer serves its share from its whole
+copy; on the real link the explored splits ran code 24.1 and 16.5 tok/s against 11.0-17.0 with it
+off (`real_link_j1drafter`). The general flip still waits for the A/B above.
 
 #### #449 — A computer serves only the exact layer range it loaded, so a part of a loaded model is loaded again
-`P2` · routing / spreading the load · **PARTIAL** — 2026-11-13: built on main (not in a release yet); the peers' half waits for a release
+`P2` · routing / spreading the load · **PARTIAL** — 2026-11-13: built and released in v0.3.285 (published 2026-11-13 16:21:16Z)
 
 A model worker keyed its loaded ranges by `(start, end, tp)` and ran every layer it loaded, so a
 peer with a model loaded whole that was planned `[22..48)` read 26 layers from disk again and held
@@ -1236,9 +1229,9 @@ at most eight views (`view::MOST_VIEWS_A_COPY`), the least recently used one not
 where every one is in use (prior art: vLLM's fixed `cudagraph_capture_sizes`); a tensor-parallel
 share inside a charged range is charged as itself (`process_pool::RunShape`), as before.
 
-**Residual**: (1) a peer serves slices only once it runs a release carrying this — then #180's
-A/B and #3 (j1) on the real link (the j1 patch is kept outside the repo, with drafter room and
-the orientation pricing it also lacks); (2) tensor-parallel ranges still load as themselves;
+**Residual**: (1) ~~a peer serves slices only once it runs a release carrying this~~ — every
+peer ran v0.3.285 by 2026-11-13 16:41Z, and the 3060 served `[0..24)` of its whole copy to #3 (j1)'s
+explored splits with no load (its prompt pass 577 ms); #180's general A/B remains there; (2) tensor-parallel ranges still load as themselves;
 (3) a view's prompt-cache entries are its own, so a conversation a split stored under `[0..25)`
 is not found by a whole-model request on the same copy (as before).
 
@@ -3572,7 +3565,7 @@ floor_ms_per_layer_token=16.02` (the build before the two-sample rule), reported
 Left from its review (P3, both err toward the price as it was): a peer's own prefix cache holding the prompt from
 ANOTHER coordinator, or from before this node restarted, reads the floor fast — the price then falls back to the
 ratio, never below it; a one-token reply leaves its step in the sample (`one_step_ms` 0), a step's worth slow.
-**Built 2026-11-12, on main (not in a release yet) — the first-token wait sized from the floor**
+**Built 2026-11-12, released in v0.3.283 (published 2026-11-12 10:43:31Z) — the first-token wait sized from the floor**
 (`remote_generate::MeasuredRead`, a REQUIRED third argument of `first_token_timeout`): a whole hand-off to a peer
 with a believed floor waits `120 s + 2 × floor × layers × tokens`, past the old 600 s ceiling up to an hour
 (`MEASURED_FIRST_TOKEN_MAX`), never less than the prompt-scaled allowance; a led split and the HTTP pool forward pass
@@ -3624,7 +3617,7 @@ stream that sends no bytes. Shape here:
   price, first-hand, and only for the request's own peer (a peer's word may price it SLOWER, never faster).
 - Security review before landing (a new frame, a new bit, and a peer-controlled wait); rig: `rig_floor2.sh`'s
   one-CPU B with a 1,702-token prompt must now COMPLETE, the frames logged.
-**Built 2026-11-12, on main (not in a release yet) — the progress frames, and the first-token wait an inactivity
+**Built 2026-11-12, released in v0.3.283 (published 2026-11-12 10:43:31Z) — the progress frames, and the first-token wait an inactivity
 wait.** `SwarmMessage::PromptProgress` (bit 41, `features::PROMPT_PROGRESS`), asked by the requester
 (`RemoteGenerateRequest::wants_prompt_progress`) for a whole-model hand-off only. The worker's ONE-forward prompt
 pass tells its read between layers (`KvCacheStore::note_prompt_progress`) and sends it once a second on a second
@@ -3643,8 +3636,8 @@ SHORTER than the wait this node times itself (the wait holds the read plus the q
 binds nowhere; any use that subtracts the time before the first frame is a discount the peer controls (a first frame
 held back until the read is nearly over prices the read at nothing). Its one slower use — a wait that ran out,
 extrapolated from the share read — is gone with the inactivity wait: a wait now runs out only on a stall or at the
-hour. The queue wait inside today's sample stays answered as it is (the two-sample rule, at the lesser). **Built 2026-11-12, on
-main (not in a release yet) — a LED split's frames too**: the head of a split led for another computer
+hour. The queue wait inside today's sample stays answered as it is (the two-sample rule, at the lesser). **Built 2026-11-12,
+released in v0.3.284 (published 2026-11-13 02:11:09Z) — a LED split's frames too**: the head of a split led for another computer
 (`HandOff::DelegatedSplit`) reports the pieces its chain's last segment has read (`prompt_chunks`'
 `tell_the_requester_how_far`, both drivers, only where `output` is the last segment's), as a share under the
 requester's wire id (`ProgressTargets::start_led`, `ReadBy::Chain` — a worker's report never speaks for a led split's
@@ -4491,7 +4484,7 @@ conversations on this node are using" its room — the previous attempt's own ca
 id. 28 min, no reply. #430 had raised the coordinator's wait for a peer's read to an hour while the cache it waits
 to use stayed swept at ten minutes: the tightest ceiling sat in another file (`architecture.md` § Timeouts, rule 4).
 
-**Fixed 2026-11-12 (on main, not in a release yet)**, in the worker and its daemon, no wire change:
+**Fixed 2026-11-12 (released in v0.3.284 (published 2026-11-13 02:11:09Z))**, in the worker and its daemon, no wire change:
 1. **A cache whose prompt pass ran here is held past the TTL until the request's first step**
    (`KvCacheStore::note_forward_ran`, called by `handle_forward` after the pass's clear and by the fused batch path;
    swept in `cleanup_expired`, bookkeeping included), up to `kv_cache::PROMPT_PASS_HOLD` — the coordinator's own
@@ -6277,7 +6270,34 @@ Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
 
-**Closed 2026-11-13, on main (not in a release yet)** (#3 (j), three of its parts)
+**Closed 2026-11-13, on main (not in a release yet)** (#3 (j1), (j3))
+- #3 (j1) — **Two computers each holding a whole model, one with part of it on its processor, could not share it.**
+  With `parallax_partial_ranges` off each offered one indivisible range, so a split with a faster card abroad (a fixed
+  route ran code 34-37 tok/s that morning, against 17-18 handed over) could not be planned. Partial ranges are now on
+  where this node holds every layer and its card runs only part (`scheduler::shares_what_its_card_cannot_hold`), with
+  split points where each candidate's card stops; such a plan leaves the drafter room on the card
+  (`scheduler::plans_room_for_the_drafter`); and the drafter reads the prompt before the reply's shape is chosen
+  (`EngineDrafter::read_up_to_the_last`) — asked before, each start's first split read `drafter_on_card=false` with its
+  drafter on the card and no tree could flow (seen 2026-10-23 too). Real link (`real_link_j1drafter`, the 3060 slower
+  and noisier than that morning — its fixed-route flow 11.0-23.1 code): the explored splits ran code 24.1 and 16.5
+  tok/s; with j1 off nothing split (code 11.0-17.0, prose 9.7-12.8). Orientation and the hand-off's stated price stay
+  open as (j5), (j6). A/B `SWARMLLM_SPLIT_BESIDE_CARD=0`, `SWARMLLM_DRAFTER_READ_FIRST=0`. Prior art: Petals' block
+  selection over the spans servers hold; vLLM and llama.cpp load the drafter beside the target before choosing how to
+  speculate.
+- #3 (j3) — **This node's own whole run was priced at one pass a token** (~4.2 tok/s for the 14B) while it ran 11-15
+  with its drafter, so a slowed hand-off kept every request (11-13 10:09Z: twelve at 5.3 tok/s). Each whole local
+  reply's time a token after the first is recorded under this node's id (`SharedState::note_own_whole_run`,
+  `WorkKind::Delegated`, the first reply dropped as cold) and read only for this node's whole-model vertex; its prompt
+  keeps the price it had. A/B `SWARMLLM_OWN_WHOLE_RUN_PRICE=0`. Prior art: Petals' `get_server_throughput` (measured,
+  then cached). Tests: `a_card_short_of_the_whole_model_shares_the_rest_with_a_peers_card`,
+  `a_split_offered_beside_a_short_card_leaves_the_drafter_room`,
+  `a_cold_starts_prompt_read_leaves_round_one_only_the_first_reply_token`,
+  `a_whole_reply_generated_here_prices_this_nodes_own_whole_run`,
+  `this_nodes_whole_run_is_priced_from_what_it_delivered_and_its_prompt_as_before` — each red with its change off.
+  Evidence: `docs/invariants/scheduling.md` § "A computer short of its card shares the rest", § "This node's whole run
+  is priced from what it delivered".
+
+**Closed 2026-11-13, released in v0.3.285 (published 2026-11-13 16:21:16Z)** (#3 (j), three of its parts)
 - #3 (j) — **A computer holding the whole model, with part of it on its processor, ran it all itself even where a
   split with a faster computer was priced and measured faster.** With the 14B resident as 25 of its 48 layers on
   this 8 GB card and 23 on the processor, `would_fit_on_gpu` answered yes for any worker holding card memory, so the
@@ -6299,7 +6319,7 @@ grep `^| N |`).
   `Drafter`/`Explore` arms of `a_split_whose_rounds_carry_three_tokens_is_priced_for_a_third_of_the_rounds` — each
   red with its change off. Evidence: `docs/invariants/scheduling.md` § "A split is priced for the rounds it takes".
 
-**Closed 2026-11-12, on main (not in a release yet)** (#447)
+**Closed 2026-11-12, released in v0.3.284 (published 2026-11-13 02:11:09Z)** (#447)
 - #447 — **A computer that had served several models in turn was offered as full while its idle
   workers would make room.** After the Australian RTX 3060 had served ten models one after another,
   every coordinator saw its card with room for 3 of Qwen3-14B's 40 layers and the 70B was refused
@@ -6328,7 +6348,7 @@ grep `^| N |`).
   Left as it is: admission lets a peer's work reclaim an idle model the owner used (#125); whether
   it should keep the owner's recently used model is its own question.
 
-**Closed 2026-11-12, on main (not in a release yet)** (#446)
+**Closed 2026-11-12, released in v0.3.283 (published 2026-11-12 10:43:31Z)** (#446)
 - #446 — **A long prompt refused by several computers in turn failed with a fitting plan untried.**
   Gemma 4 31B from the live node, a 4,304-token prompt (tier re-measure, #427): the computer handed
   the whole model refused it, the split after it was refused up front by the same computer (45
@@ -6344,7 +6364,7 @@ grep `^| N |`).
   Test `a_chain_of_fast_refusals_is_planned_through_to_the_cap` (red at 2). Evidence:
   `docs/invariants/scheduling.md` § "A re-plan is warranted by a changed fact".
 
-**Closed 2026-11-12, on main (not in a release yet)** (#445)
+**Closed 2026-11-12, released in v0.3.283 (published 2026-11-12 10:43:31Z)** (#445)
 - #445 — **A computer that had just started answered "model not found" for up to four minutes
   while its peers already held the model.** A new connection was caught up on its peers' model
   versions only at the next manifest round, every `gossip_broadcast_interval` (30 s up to 10 peers,
@@ -6362,7 +6382,7 @@ grep `^| N |`).
   catch-up taken out). On the rig the requester had its peer's model 16 ms after connecting, against
   29 s before. Evidence: `docs/invariants/network.md` § "Announce, then pull: manifests" ("A new connection is a new catch-up").
 
-**Closed 2026-11-12, on main (not in a release yet)** (#444)
+**Closed 2026-11-12, released in v0.3.283 (published 2026-11-12 10:43:31Z)** (#444)
 - #444 — **An update's drain kept taking new work from other computers, so a busy node could
   restart mid-reply.** Field report 2026-11-12 (the AU tester's node): `update_restart::drain`
   waited up to 600 s for in-flight work to reach zero while admission ran as usual, so a node peers
@@ -6386,7 +6406,7 @@ grep `^| N |`).
   (precedence). Evidence: `docs/invariants/state-and-config.md` § "The drain stops new work for
   other computers first".
 
-**Closed 2026-11-11, on main (not in a release yet)** (#429)
+**Closed 2026-11-11, released in v0.3.282 (published 2026-11-12 01:30:21Z)** (#429)
 - #429 — **A far split's connection died on quinn's assembler bug ("too many gaps in stream
   buffer").** 2026-11-08 01:23:35Z: a Gemma 4 26B split's 4,298-token prompt pass (12.9 MB to
   Australia, ~130 ms) closed its connection 260 ms later and the reply was lost in 3.4 s, on
@@ -6408,7 +6428,7 @@ grep `^| N |`).
   window, at most once per 2,049 frames — the same bound as upstream's assembler, reached by a
   different layout.
 
-**Closed 2026-11-11, on main (not in a release yet)** (#442)
+**Closed 2026-11-11, released in v0.3.282 (published 2026-11-12 01:30:21Z)** (#442)
 - #442 — **A guessing model left on the card by a split route kept the same model's later whole
   placement off the card.** Field report v0.3.280, its run on v0.3.278: after one Qwen2.5-14B request
   ran through a peer with this node's 3B drafter (2,137 MB) on a 12 GB card, the next placed the 14B
@@ -6427,7 +6447,7 @@ grep `^| N |`).
   guessed for a second model is never given back to the first one's whole placement however long ago that was —
   the #442 symptom where one drafter serves two targets (keeps the drafter: safe, partial).
 
-**Closed 2026-11-11, on main (not in a release yet)** (#441)
+**Closed 2026-11-11, released in v0.3.282 (published 2026-11-12 01:30:21Z)** (#441)
 - #441 — **The guessing model took the card room the model it guesses for needed for its
   conversations.** Field report v0.3.280: on a 12 GB card shared with a game streaming client,
   Qwen2.5-3B (2,137 MB) was admitted 3 s after Qwen2.5-14B's [12,48), and the 14B's conversation
@@ -6456,7 +6476,7 @@ grep `^| N |`).
   occupancy per range at the daemon (`KvOccupancy::allocated_in`, reported nowhere outward today). It is also 0
   while the target's worker is still spawning (`live_worker` / empty `charged_segments`), a narrower window.
 
-**Closed 2026-11-11, on main (not in a release yet)** (#176)
+**Closed 2026-11-11, released in v0.3.282 (published 2026-11-12 01:30:21Z)** (#176)
 - #176 — **Pools could reach each other only through `config.toml`.** Discovery and opt-in routing between
   pools shipped in R134 with no dashboard control. Using another pool for a model none of your devices
   holds is now a switch in the Private Mode coverage panel (`b7ea7c31`), and the pool owner's listing a

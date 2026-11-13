@@ -371,6 +371,7 @@ impl super::SharedState {
             self.metrics
                 .reply_lengths
                 .record(&snap.model, snap.completion_tokens);
+            self.note_own_whole_run(&snap);
         }
 
         // Prometheus. Fed from the same snapshot as the log line so a metric
@@ -434,6 +435,74 @@ impl super::SharedState {
             }
             buf.push_back(snap);
         }
+    }
+
+    /// What a reply this node generated WHOLE tells the planner of its own run
+    /// (FUTURE_WORK #3 (j3)): its steady time a token over the model's layers,
+    /// after the first token, its own guessing included — the unit a whole
+    /// hand-off's reply is recorded in (`remote_generate::note_a_whole_reply`,
+    /// `WorkKind::Delegated`), kept under this node's own id. Read back only
+    /// for this node's whole-model vertex (`NodeCandidate::
+    /// observed_delegated_ms_per_layer`), where the hand-off's figure prices a
+    /// peer's.
+    ///
+    /// Without it a whole run here was priced from the static priors at one
+    /// pass a token — the 14B's 22 card and 26 processor layers at ~4.2 tok/s —
+    /// while it ran 11-15 with its drafter; no local sample priced it (a card
+    /// node's are dropped where the request runs on its processor). On
+    /// 2026-11-13 the 3060 in Australia slowed to 5.4 tok/s and all twelve
+    /// requests of two arms still went to it, its measured 26-33 s beside this
+    /// node's priced 28.8-30.0 s, where a run here took ~11-15 s. Here because
+    /// every finished request passes here, whatever path served it; a first
+    /// sample is the load's and is dropped as a cold one
+    /// (`ModelSpeed::observe`). A/B `SWARMLLM_OWN_WHOLE_RUN_PRICE=0`: nothing
+    /// recorded, so the run is priced from the priors as before.
+    ///
+    /// Prior art: Petals prices a server's own blocks from a synthetic
+    /// benchmark run at startup and cached on disk per model, device and dtype
+    /// (`server/throughput.py`, `get_server_throughput`, `throughput_v5.json`),
+    /// never from real requests. Taken: a node's own figure feeds its routing.
+    /// Not taken: a synthetic pass a token is the very figure this corrects,
+    /// since the drafter's guesses are what a real reply here runs at; and the
+    /// figure is not yet kept on disk, so it lasts 10 minutes past the last
+    /// whole run (`RANKING_STALE_AFTER`).
+    fn note_own_whole_run(&self, snap: &crate::inference::trace::TraceSnapshot) {
+        static OFF: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        if *OFF
+            .get_or_init(|| std::env::var("SWARMLLM_OWN_WHOLE_RUN_PRICE").is_ok_and(|v| v == "0"))
+        {
+            return;
+        }
+        let [segment] = snap.segments.as_slice() else {
+            return;
+        };
+        let model = crate::types::ModelId(snap.model.clone());
+        let whole_here = snap.route == crate::inference::trace::Route::Local
+            && segment.is_local
+            && segment.layer_start == 0
+            && segment.layer_end > 0
+            && self
+                .model_registry
+                .get_manifest(&model)
+                .is_some_and(|m| m.num_layers == segment.layer_end);
+        let Some(per_token_ms) = snap
+            .tpot_ms
+            .filter(|ms| ms.is_finite() && *ms > 0.0 && snap.completion_tokens > 1)
+        else {
+            return;
+        };
+        if !whole_here {
+            return;
+        }
+        self.record_peer_segment_latency(
+            self.identity.node_id(),
+            &model,
+            super::peer_speed::WorkKind::Delegated,
+            per_token_ms.round().max(1.0) as u64,
+            segment.layer_end,
+            0,
+            None,
+        );
     }
 
     /// Bar a holder from serving THIS request again.
@@ -1800,5 +1869,72 @@ mod tests {
             state.credits.pending_credit_earn.load(relaxed),
             crate::credit::ledger::RATE_INFERENCE_SERVE,
         );
+    }
+
+    /// FUTURE_WORK #3 (j3): a reply this node generated WHOLE prices its own
+    /// whole run, in the slot a hand-off's reply prices a peer's — and nothing
+    /// else does: a part of the model, a peer's part, a one-word answer, a
+    /// failure. The first sample is the load's and is dropped, as a peer's.
+    #[test]
+    fn a_whole_reply_generated_here_prices_this_nodes_own_whole_run() {
+        use crate::inference::trace::{local_segment, Outcome, RequestTrace, Route};
+        let state = test_state(crate::config::Config::default());
+        let model_id = crate::types::ModelId("m".to_string());
+        let me = state.identity.node_id().clone();
+        state
+            .model_registry
+            .register_manifest(crate::types::ModelManifest {
+                id: model_id.clone(),
+                name: "m".into(),
+                architecture: crate::types::ModelArchitecture::Llama,
+                num_layers: 24,
+                num_params_billions: 1.0,
+                quantization: crate::types::Quantization::Q4KM,
+                total_size_bytes: 1,
+                shard_count: 1,
+                shards: vec![crate::types::ShardInfo {
+                    index: 0,
+                    layer_range: (0, 24),
+                    size_bytes: 1,
+                    hash: [0u8; 32],
+                    tensors: vec![],
+                }],
+                tokenizer_hash: [0u8; 32],
+                manifest_hash: [0u8; 32],
+                publisher: me.clone(),
+                publish_date: chrono::Utc::now(),
+                license: String::new(),
+                mmproj: None,
+                context_length: None,
+            });
+        let reply = |route: Route, segments, tokens: u32, outcome: Outcome| {
+            let trace = RequestTrace::new(uuid::Uuid::new_v4(), "m", "chat");
+            trace.mark_assembled(route, segments, 0);
+            trace.mark_first_token();
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            trace.mark_finished(outcome, 10, tokens);
+            state.publish_request_trace(&trace);
+        };
+        let whole = || local_segment(&me, (0, 24));
+        let priced = || state.observed_delegated_ms_per_layer(&me, &model_id);
+
+        reply(Route::Local, whole(), 5, Outcome::Ok);
+        assert_eq!(priced(), None, "the first sample is the load's");
+        reply(Route::Local, local_segment(&me, (0, 12)), 5, Outcome::Ok);
+        reply(Route::Local, whole(), 1, Outcome::Ok);
+        reply(Route::Local, whole(), 5, Outcome::Error("Inference".into()));
+        let mut far = local_segment(&crate::types::NodeId([7u8; 32]), (0, 24));
+        far[0].is_local = false;
+        reply(Route::Distributed, far, 5, Outcome::Ok);
+        assert_eq!(
+            priced(),
+            None,
+            "a part, a one-word answer, a failure, a peer's run"
+        );
+
+        reply(Route::Local, whole(), 5, Outcome::Ok);
+        // At least 20 ms over 4 tokens after the first, over 24 layers.
+        let ms = priced().expect("a whole reply generated here prices the run");
+        assert!(ms >= 5.0 / 24.0, "{ms}");
     }
 }

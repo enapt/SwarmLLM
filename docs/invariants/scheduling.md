@@ -3814,6 +3814,113 @@ llama.cpp's `-ngl` partial offload IS the "does not fit" case. Test: the fourth 
 `a_worker_holding_a_segment_has_not_paid_for_the_whole_model` (red with the `short_of_the_card`
 half off). What a change must keep: "charged to the card" and "on the card" are different facts.
 
+## A computer short of its card shares the rest
+
+**Rule (2026-11-13, FUTURE_WORK #3 (j1)).** Where this node holds every layer of a model, the
+search competes with its own run (`pipeline_may_beat_local`: that run would be short of the card),
+and its card runs some but not all of the model's layers (the local candidate's `card_layers`),
+`assemble_pipeline_for` lets the search cut ranges (`shares_what_its_card_cannot_hold`) — and the
+search cuts where every candidate's card stops (`route_over`: `a + card_layers` and
+`b − card_layers` for each available range, tried after the shard and memory cuts and only within
+`MAX_SUBRANGE_VERTICES`).
+
+**What it replaced.** Partial ranges are off by default outside the boomerang
+(`InferenceConfig::parallax_partial_ranges`, #180's 12.0 s against 10.2 s, measured when a hop was
+charged once per segment). So a node and a peer that BOTH held the 14B whole offered `[0..48)`
+each, and the plan was this node's card/processor run or the whole hand-off. The split that runs
+our card's layers here and the rest on the peer's card — measured at 34.0-37.5 tok/s on code and
+15.5-17.1 on prose (`flowhalf`, RTX 3060 in Australia, ~140 ms, 2026-11-13), against 17-20 handed
+over and 13-15 here — was not a route the search could see. The exploration built beside it
+(`YieldPrior::Explore`) fired on that link ("priced OPTIMISTICALLY") and could change nothing:
+every explored request compared the same two whole routes. And on the afternoon the 3060 slowed
+to 5.4 tok/s, every request of two arms still went to it.
+
+**Why the card's cut.** A card/processor machine is priced per device (`layers_by_device`: the
+first `card_layers` of a run on the card). The cuts on offer were shard ends and memory bounds — 17
+and 31 for that 14B, whose card runs 22 — so its cheapest share carried 9 processor layers at ~8.5
+ms each where the peer's card runs one at ~0.9. In the test fixture (12 of 32 on the card, a
+memory bound at 15) this node was handed 15 without the cut and exactly 12 with it.
+
+**Prior art.** llama.cpp spreads a model's layers over every card it can reach — RPC servers
+included (`--split-mode layer`, ggml-rpc) — before it offloads any to the processor; Petals routes
+a client over sub-spans of servers' blocks priced by round trip and per-block compute
+(`sequence_manager.py`); exo partitions layers across devices by memory.
+
+**What a change must keep.** Partial ranges stay off for a node with no card, a node whose card
+holds the whole model, and every plan this node does not compete in — #180's A/B decides those.
+The card's cuts never displace the cuts that keep a route possible. A peer holding the whole model
+loaded serves its part from that copy where it advertises `features::SERVES_SLICES` (#449, v0.3.285);
+an older one loads it again and is charged its cold load, which an explored request leaves out once.
+
+**Two things it needs beside it, each found on the real link (`real_link_j1drafter`, 2026-11-13).**
+(1) The drafter's room: a plan that may cut this node's range is planned first with the drafter left
+room on the card (`plans_room_for_the_drafter`, § "A split leaves room for the model that guesses
+for it") — the whole-model guard there had kept the room off for a node holding every layer. (2) The
+drafter's placement as a fact: `drafter_on_card` reads the drafter's LIVE worker
+(`runs_whole_on_the_card`), and on a cold start no read-ahead had spawned it (it waits for the
+target's own segments, as a guest), so the first split read `false` with the drafter loading onto
+the card a moment later (`model-worker: Model loaded … device=Cuda`, 0.85 s after the prompt pass)
+and streamed where its tree could have flowed. `dsd` now has the drafter read the prompt once the
+first token is out and before the shape is chosen (`EngineDrafter::read_up_to_the_last`, everything
+but the last token — the state a read-ahead leaves; A/B `SWARMLLM_DRAFTER_READ_FIRST=0`). The first
+round would have paid the same read. The same false negative was logged on 2026-10-23's
+`flowmech` ("each start's first request streamed … its drafter not yet on the card").
+
+**Measured** (real link, three arms alternating on/off/on, 160-token replies, the 3060 slower and
+noisier than that morning — its fixed-route flow read code 11.0-23.1): with it on the explored
+requests split, peer-first (`[0..24)` on the 3060's whole copy, served with no load, + `[24..48)`
+here), code 24.1 and 16.5 tok/s; with it off nothing split (code 11.0-17.0, prose 9.7-12.8). Those
+splits streamed (`drafter_on_card=false`, before (2)), and they were peer-first: a tail here flows
+only past 300 ms, so the shape that flows on that link is here-first — FUTURE_WORK #3 (j5).
+
+Tests: `a_card_short_of_the_whole_model_shares_the_rest_with_a_peers_card` — red with the predicate
+off (the whole hand-off) and red with the card's cuts off (15 layers here, 3 of them on the
+processor); `a_split_offered_beside_a_short_card_leaves_the_drafter_room`;
+`a_cold_starts_prompt_read_leaves_round_one_only_the_first_reply_token` (red reading the whole
+sequence: the first round would have nothing to read).
+
+## This node's whole run is priced from what it delivered
+
+**Rule (2026-11-13, FUTURE_WORK #3 (j3)).** Every finished request passes
+`SharedState::publish_request_trace`; where it ended Ok on route `Local` with one local segment over
+every layer of the model and at least two tokens, `note_own_whole_run` records its time a token
+after the first (the trace's `tpot_ms`) over those layers, under this node's own id, as
+`WorkKind::Delegated` — the unit and slot a whole hand-off's reply prices a peer in
+(`remote_generate::note_a_whole_reply`). The local candidate reads it as its
+`observed_delegated_ms_per_layer`, and `parallax::vertex_cost_as` prices this node's whole-model
+vertex (`own_whole_run`: local, every layer, driven from here) from it as it prices a peer's
+hand-off. A segment here is priced from its own timings, as before.
+
+**What it replaced.** That vertex was priced from the static device priors at one pass a token:
+the 14B's 22 card and 26 processor layers at ~4.2-4.65 tok/s. A whole run here was never timed for
+the planner (a card node's local samples are dropped where the request runs on its processor), and
+it runs 11-15 tok/s with its drafter guessing. On 2026-11-13 10:09Z the RTX 3060 in Australia
+slowed to 5.4 tok/s and all twelve requests of two arms still went to it at 5.27-5.38 — its measured
+26-33 s beside this node's priced 28.8-30.0 s, where a run here would have taken ~11-15 s.
+
+**The prompt is not priced from it.** The delivered figure is a token's time with the drafter's
+guesses folded in; a prompt derived from it (`prefill_ms_per_layer`'s decode fallback) would be
+priced at a fraction of its read — 14.2 s against 55.6 s in the test fixture. So the vertex's
+prompt keeps the decode figure it had before (`prompt_decode_price`: the local segments' timing,
+or the prior).
+
+**Prior art.** Petals prices a server's own blocks from a synthetic benchmark run at startup and
+cached on disk per model, device and dtype (`server/throughput.py`, `get_server_throughput`,
+`throughput_v5.json`), never re-measured from real requests. A synthetic pass a token is the very
+figure this corrects — a real reply here runs with its drafter — so the figure comes from real
+replies.
+
+**Known limits.** No figure exists until this node has run the model whole twice (the first sample
+is the load's, dropped as cold by `ModelSpeed::observe`), and it lapses 10 minutes after the last
+(`RANKING_STALE_AFTER`, shared with every figure of the model's `ModelSpeed`). A node that always
+hands the model over never measures it — the cold start's prior still prices one pass a token.
+
+**What a change must keep.** The figure is first-hand (never gossiped: `ranking_for_gossip` reads
+the ranking figure, which `Delegated` never writes), read only for the whole-model vertex, and the
+prompt priced apart from it. Tests: `a_whole_reply_generated_here_prices_this_nodes_own_whole_run`
+(red with the recording off), `this_nodes_whole_run_is_priced_from_what_it_delivered_and_its_prompt_as_before`
+(red with the vertex reading it off — 16,000 against 4,096 ms — and red with the prompt guard off).
+
 ## A peer's capacity for a prompt is weights PLUS that prompt's KV cache
 
 (2026-09-03 evening, gotcha #447 follow-up). `scheduler::max_hostable_layers`
