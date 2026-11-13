@@ -150,7 +150,7 @@ The loader records the card's KV budget with or without `inference.max_seq_len_o
 
 ## A card full of our own model is not pressure (2026-10-12, field report #035)
 
-Prune's soft-unload narrows a loaded model only when our CHARGED graphics memory (`vram_committed_mb`) exceeds `compute_vram_budget` — other programs took room — and only the largest model NOT in use (`models_with_inflight_requests`), priced by its own charge (`vram_committed_by`). Never a fraction of the card's total (a loaded model fills it) nor the whole file (a split model is charged its card share). Choice: `prune::card_room_to_give_back`. Idle unload asks `prune::stays_loaded_while_idle`; regional demand buys no reprieve.
+Prune's soft-unload narrows a loaded model only when our CHARGED graphics memory (`vram_committed_mb`) exceeds `compute_vram_budget` — other programs took room — and only the largest model NOT in use (`models_with_inflight_requests`), priced by its own charge (`vram_committed_by`). Never a fraction of the card's total (a loaded model fills it) nor the whole file (a split model is charged its card share). Choice: `prune::card_room_to_give_back`. **Nor a model used within `NARROW_ONLY_AFTER_IDLE_SECS`** (2 × `cuda_pool::IDLE_TRIM`, by `effective_idle_secs` — `prune::held_back_from_narrowing`): until its worker's pool trims, the card counts what it freed as another program's (#3 (j8): the far computer's 14B narrowed between a hand-off and the next request, its run read from disk). Idle unload asks `prune::stays_loaded_while_idle`; regional demand buys no reprieve.
 
 → `docs/invariants/memory.md` § "A card full of our own model is not pressure"
 

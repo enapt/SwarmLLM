@@ -1090,21 +1090,14 @@ on the explored requests.
 (j4) ~~the runner-up's price is not logged~~ — logged (§ Closed). (j5) ~~orientation~~ — each tail of a split is
 priced and measured apart (§ Closed). (j6) a fresh node prices the hand-off
 from the peer's stated 45 tok/s (5.3 s for 160 tokens) against the 24 it delivered.
-(j8) **the far end reads a split's run from disk after its whole copy served** — real link, TAG=j7 and TAG=j5
-(2026-11-13): the first split after two whole hand-offs had AU report `layers_from=disk` for [24..48) (868 ms of a
-1,480 ms forward, its worker's own 1,479 — no spawn inside the forward), then its card held 45, then 44 of 48 layers
-and its hand-offs fell from ~24 to ~10 tok/s; later splits were served as views (`copy`). Its daemon charged no
-covering range (else the forward would carry `served_from`) and its worker held none (else a view). Local rigs do
-not reproduce it: `split_rig.sh slices` with `SLICES_FIRST=handoff` (B's whole copy from A's two hand-offs) passed
-on the processor (tinyllama) and on the card (llama-3.2-3b), the latter at 130 ms (`RIG_NETNS=1`) with the far
-tail and the drafter on the card, the tree flowing — B served [3..28) from its resident [0..28). Hypotheses, unranked: the idle copy was unloaded
-between requests (prune's soft-unload under another program's card pressure, the idle unload), or the worker was
-retired and respawned before the forward — a growth's `Respawn`, or `get_or_spawn_once`'s `retire_for_gpu`: a worker
-short of its card, idle past the promotion floor, is unloaded and the fresh spawn places only the REQUESTED segment,
-so a forward for [24..48) of a worker that held (0,48) reads [24..48) from disk (`disk_first`) and the next whole
-hand-off loads the rest again. The report now says which (`disk_first` /
-`disk_again` / `disk_beside_cover` / `disk_beside_others`, `features::HOW_SERVED_WHY`); read it on the next real
-link once AU runs the release that carries it.
+(j8) **the far end reads a split's run from disk after its whole copy served** — ~~cause unknown~~ likely cause
+fixed 2026-11-13 (§ Closed, on main, not in a release yet): prune's phase 0 narrowed the copy that had just served,
+reading our own pool's freed memory as another program's. Real link TAG=j7, j5, j9, j10: the first split after whole
+hand-offs had AU report `layers_from=disk` for [24..48) (868-869 ms of ~1,470), AU then advertised `(24, 48)` alone,
+its card held 45, then 44 of 48 layers and its hand-offs fell from 23-25 to 9.8-12.0 tok/s. **Open: verify on the
+real link** once AU runs the release carrying the fix — AU keeps `(0, 48)` and 48 card layers through the first
+split and its hand-offs stay ~24; if not, read the forward's `disk_*` reason (`features::HOW_SERVED_WHY`) and AU's
+`gpu_vram_available_mb` in the peer list.
 
 `scheduler/parallax.rs` charges a remote hop a flat `ASSUMED_FORWARD_PASSES = 64.0`. The error
 grows with reply length — 1.0 at 8 tokens, 2.4-3.3 at 120-239 — and biases every delegation
@@ -6328,6 +6321,18 @@ grep `^| N |`).
   Evidence: `docs/invariants/scheduling.md` § "A split is priced for the rounds it takes" ("Each tail of a split").
   On the real link (`real_link.sh` `TAG=j5`, 18:13Z): the third request's exploration priced `tail=Far` at 8.0 and
   ran the split here-first (`30a0e2fd:0-24 + aa3d1e66:24-48`, 16.7 tok/s prose); every split after it ran here-first.
+- #3 (j8) — **A copy that had just served was narrowed for card room it did not need.** Prune's phase 0 reads other
+  programs' share of the card as its used memory less our charges, but a worker's pool keeps what it freed until it
+  has been idle `cuda_pool::IDLE_TRIM` (60 s); read inside that minute, our own freed memory counted as another
+  program's, and the model that had just served was narrowed (`restart_with_window` kills its worker; the next forward
+  loads only its own run, from disk). Four real-link runs (11-13) showed the far computer's 14B, whole on a 12 GB card,
+  replaced by a worker holding only [24..48) within seconds of a hand-off, then running hand-offs at 9.8-12.0 tok/s
+  instead of 23-25 with 44-45 of 48 layers on its card. Now a model used within `NARROW_ONLY_AFTER_IDLE_SECS` (2 × the
+  trim, by `effective_idle_secs`) is never narrowed (`prune::held_back_from_narrowing`). INFERRED from the far end's
+  advertised ranges and `restart_with_window`'s shape — the far computer's log is out of reach; verify on the real
+  link (open item (j8) above). Test `a_model_that_served_within_its_pools_trim_is_not_narrowed`. Prior art: Ollama
+  never shrinks a runner inside `keep_alive`. Evidence: `docs/invariants/memory.md` § "A card full of our own model is
+  not pressure".
 - #3 (j10) — **The planner left a card drafter less room than the drafter's own check asks.** Since 11-11 a guest is
   admitted to the card only beside the conversation room of the target's card layers (`guest_fits_the_card` +
   `room_a_guest_leaves_mb`), but the planner's room beside it (`local_layers_leaving`) was still the budget less the

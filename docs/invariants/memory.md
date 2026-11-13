@@ -4202,6 +4202,30 @@ second request took 23.2 s (it reloaded). Main: no narrowing in two passes, seco
 The rig prints both counts and the time; it did not reproduce the report's detour through peers
 (FUTURE_WORK #250 keeps that).
 
+**Nor a model that served within two minutes (2026-11-13, FUTURE_WORK #3 (j8)).** "Other
+programs" is the card's used memory less our CHARGES, and a worker's pool keeps what it freed
+until it has been idle `cuda_pool::IDLE_TRIM` (60 s) — a long reply's scratch, a speculative
+check's buffers. Read inside that minute, the card counted our own freed memory as another
+program's, the budget fell below what our models were charged, and phase 0 narrowed the model
+that had just served: `restart_with_window` kills its worker, and the next forward spawns one that
+loads only the run it names, from disk. On the real Thailand↔Australia link (`real_link.sh`,
+TAG=j7, j5, j9, j10 — four runs, 11-13) the far computer's Qwen2.5-14B, whole on its 12 GB RTX 3060
+after two or three hand-offs (advertised `(0, 48)`, 48 layers on the card), served the next
+request's first split forward from disk (868-869 ms of a ~1,470 ms forward) and then advertised
+`(24, 48)` alone; its next hand-offs grew back as a card/processor split, 45 then 44 of 48 layers
+on the card, and ran 9.8-12.0 tok/s against 23-25 before. A diagnostics report from the same card
+class (v0.3.239, 2026-10-16) shows "VRAM pressure: narrowed Qwen3-30B-A3B to 32 of 34 parts"
+between two requests, and the next ones failing for lack of room. The far computer's own log is
+out of reach, so the narrowing there is INFERRED (the kill-and-respawn-the-named-run shape is
+`restart_with_window`'s, and only it and the idle unload end a worker unasked within seconds);
+the next release's `disk_first` report and the peer list's `gpu_vram_available_mb` read it. Now
+`prune::held_back_from_narrowing` holds back, beside the models in use, every model used within
+`NARROW_ONLY_AFTER_IDLE_SECS` (2 × the trim) by `effective_idle_secs` — the idle unload's own
+answer (`AutoShardManager::idle_secs_of`, one reading for both). Prior art: Ollama never shrinks a
+runner inside its `keep_alive`; the HPA scales down only after its stabilization window; PyTorch's
+caching allocator reports reserved above allocated for the same reason. Test
+`a_model_that_served_within_its_pools_trim_is_not_narrowed`.
+
 ## The owner is told when the card has become slow to hand out memory (2026-10-01)
 
 **Why.** The pool above and `card_pace` defend the node against a host whose fresh card

@@ -166,6 +166,62 @@ fn effective_idle_secs(
     }
 }
 
+/// The pool's two per-model readings [`effective_idle_secs`] takes from it,
+/// read once for a pass over every loaded model.
+struct LoadedIdle {
+    now: chrono::DateTime<chrono::Utc>,
+    worker_idle: std::collections::HashMap<ModelId, u64>,
+    residency: std::collections::HashMap<ModelId, u64>,
+}
+
+impl LoadedIdle {
+    fn read(pool: &crate::inference::process_pool::ModelProcessPool) -> Self {
+        Self {
+            now: chrono::Utc::now(),
+            worker_idle: pool.model_idle_secs().into_iter().collect(),
+            residency: pool.model_residency_secs().into_iter().collect(),
+        }
+    }
+}
+
+/// A loaded model used within this long is never narrowed for card room
+/// (FUTURE_WORK #3 (j8)). Phase 0 reads other programs' share of the card as
+/// its used memory less our CHARGES (`vram::compute_vram_budget`), but a
+/// worker's pool keeps what it freed until it has been idle
+/// `cuda_pool::IDLE_TRIM` (60 s): a long reply's scratch, a speculative
+/// check's buffers. Read inside that minute, the card counts our own freed
+/// memory as another program's, the budget shrinks below what our models are
+/// charged, and the model that just served is narrowed — its worker killed
+/// (`restart_with_window`), the next forward read from disk for only the run
+/// it named. On the real Thailand↔Australia link (four runs, 11-13) the far
+/// computer's 14B, whole on a 12 GB card after two hand-offs, was replaced
+/// within seconds by a worker holding only the split's [24..48) (868 ms from
+/// disk); its next hand-offs loaded as a card/processor split, 45 then 44 of 48
+/// layers on the card, and ran 9.8-12.0 tok/s against 23-25. A field report
+/// on the same card (v0.3.239, 2026-10-16) narrowed a 30B between two requests.
+/// Twice the trim, so a reading follows the trim. Prior art: Ollama never
+/// shrinks a runner inside its `keep_alive` (`server/sched.go`); the HPA acts
+/// on scale-down only after its stabilization window.
+const NARROW_ONLY_AFTER_IDLE_SECS: u64 = 2 * crate::inference::cuda_pool::IDLE_TRIM.as_secs();
+
+/// The loaded models phase 0 may not narrow now: those in use (`in_use`,
+/// [`WorkerHandle::in_use`]) and those used within
+/// [`NARROW_ONLY_AFTER_IDLE_SECS`] by [`effective_idle_secs`] (`idle`), the
+/// one answer to "used recently". A model with no reading at all is not held.
+///
+/// [`WorkerHandle::in_use`]: crate::inference::process_pool::ModelProcessPool::models_with_inflight_requests
+fn held_back_from_narrowing(
+    mut in_use: Vec<ModelId>,
+    idle: &[(ModelId, Option<i64>)],
+) -> Vec<ModelId> {
+    for (model, since) in idle {
+        if stays_loaded_while_idle(*since, NARROW_ONLY_AFTER_IDLE_SECS) && !in_use.contains(model) {
+            in_use.push(model.clone());
+        }
+    }
+    in_use
+}
+
 /// R134.7: penalty applied when a model has a recent swarm request.
 /// Combined with the existing `region_demand` penalty this means a
 /// model that's actively being used by THIS node is much harder to
@@ -1969,11 +2025,7 @@ impl AutoShardManager {
             active_models.insert(model_id);
         }
 
-        let now = chrono::Utc::now();
-        let residency: std::collections::HashMap<ModelId, u64> =
-            pool.model_residency_secs().into_iter().collect();
-        let worker_idle: std::collections::HashMap<ModelId, u64> =
-            pool.model_idle_secs().into_iter().collect();
+        let idle = LoadedIdle::read(pool);
 
         for model_id in loaded {
             if active_models.contains(&model_id) {
@@ -1985,29 +2037,7 @@ impl AutoShardManager {
             // keeps the benchmark set available, and an unload costs one reload.
             // Idle: no local request within the window (never-requested counts
             // as idle — it was loaded but has served nothing).
-            let last_req = self
-                .shared_state
-                .models
-                .model_trust
-                .get(&model_id)
-                .and_then(|t| t.last_request_at);
-            // Most recent activity of ANY kind — a request this node made, or
-            // one it served for a peer. Serving was invisible here until
-            // 2026-07-28, which is why "regional demand" had to stand in for it
-            // (until field report #035): a pure-server node otherwise looked
-            // permanently idle.
-            let since_local = last_req.map(|t| (now - t).num_seconds());
-            let since_served = self
-                .shared_state
-                .serving_models
-                .get(&model_id)
-                .map(|s| s.last_served_at.elapsed().as_secs().min(i64::MAX as u64) as i64);
-            let since_any = effective_idle_secs(
-                since_local,
-                since_served,
-                worker_idle.get(&model_id).copied(),
-                residency.get(&model_id).copied(),
-            );
+            let since_any = self.idle_secs_of(&model_id, &idle);
             // Layers outside this node's segment of a complete near chain go
             // once the conversation using them is over, so the router can plan
             // the chain (Stage 3, `coverage::near_chain`).
@@ -2063,6 +2093,32 @@ impl AutoShardManager {
         }
     }
 
+    /// How long since `model_id` was last used, by every signal
+    /// ([`effective_idle_secs`]): a request this node made, one it served for
+    /// a peer — serving was invisible here until 2026-07-28, so a pure-server
+    /// node looked permanently idle — the worker's own record, and its
+    /// residency as an upper bound. The idle unload and phase 0 both judge by it.
+    fn idle_secs_of(&self, model_id: &ModelId, idle: &LoadedIdle) -> Option<i64> {
+        let since_local = self
+            .shared_state
+            .models
+            .model_trust
+            .get(model_id)
+            .and_then(|t| t.last_request_at)
+            .map(|t| (idle.now - t).num_seconds());
+        let since_served = self
+            .shared_state
+            .serving_models
+            .get(model_id)
+            .map(|s| s.last_served_at.elapsed().as_secs().min(i64::MAX as u64) as i64);
+        effective_idle_secs(
+            since_local,
+            since_served,
+            idle.worker_idle.get(model_id).copied(),
+            idle.residency.get(model_id).copied(),
+        )
+    }
+
     /// Phase 0: when OTHER programs have taken graphics memory our models were
     /// admitted into, narrow one loaded model's shard window — the parts stay
     /// on disk and on offer — to fit what the card leaves us now
@@ -2092,7 +2148,20 @@ impl AutoShardManager {
         if committed_mb <= budget_mb {
             return;
         }
-        let in_use = pool.models_with_inflight_requests();
+        // In use, or used too recently for the card's reading to say what
+        // OTHER programs hold ([`NARROW_ONLY_AFTER_IDLE_SECS`]).
+        let idle = LoadedIdle::read(pool);
+        let in_use = held_back_from_narrowing(
+            pool.models_with_inflight_requests(),
+            &pool
+                .loaded_model_ids()
+                .into_iter()
+                .map(|m| {
+                    let since = self.idle_secs_of(&m, &idle);
+                    (m, since)
+                })
+                .collect::<Vec<_>>(),
+        );
         let narrowable: Vec<(ModelId, u64)> = pool
             .loaded_model_ids()
             .into_iter()
@@ -2337,6 +2406,54 @@ mod tests {
             card_room_to_give_back(&held, &[big, small], 8_000, 6_000),
             None
         );
+    }
+
+    /// FUTURE_WORK #3 (j8): a model that served seconds ago is not narrowed.
+    /// Until its worker's pool trims (`cuda_pool::IDLE_TRIM`), the card counts
+    /// the memory that worker freed as another program's, so the "pressure"
+    /// is our own: on the real link the far computer's 14B, whole on a 12 GB
+    /// card, was narrowed between a hand-off and the next request and served
+    /// that request's run from disk. Past the floor the reading is honest, and
+    /// the largest idle model gives room back as before.
+    #[test]
+    fn a_model_that_served_within_its_pools_trim_is_not_narrowed() {
+        use super::{held_back_from_narrowing, NARROW_ONLY_AFTER_IDLE_SECS};
+        let q14 = ModelId("qwen2.5-14b".into());
+        let small = ModelId("small".into());
+        let held = [(small.clone(), 1_000), (q14.clone(), 9_000)];
+        let floor = i64::try_from(NARROW_ONLY_AFTER_IDLE_SECS).expect("seconds");
+        assert!(
+            floor >= 2 * 60,
+            "past the pool's trim, with a pass to read it"
+        );
+        let after = |q14_idle: i64| {
+            let back = held_back_from_narrowing(
+                Vec::new(),
+                &[
+                    (q14.clone(), Some(q14_idle)),
+                    (small.clone(), Some(floor + 600)),
+                ],
+            );
+            card_room_to_give_back(&held, &back, 10_000, 9_200)
+        };
+        assert_eq!(
+            after(7),
+            Some((small.clone(), 200)),
+            "served 7 s ago: never the one narrowed"
+        );
+        assert_eq!(after(floor - 1), Some((small.clone(), 200)));
+        assert_eq!(
+            after(floor),
+            Some((q14.clone(), 8_200)),
+            "idle past the trim: the largest idle model gives room back"
+        );
+        // In use stays held whatever its idle reading, and no reading at all
+        // holds nothing back.
+        assert_eq!(
+            held_back_from_narrowing(vec![q14.clone()], &[(q14.clone(), Some(floor + 1))]),
+            vec![q14.clone()]
+        );
+        assert!(held_back_from_narrowing(Vec::new(), &[(q14.clone(), None)]).is_empty());
     }
 
     /// The defect this was written for. Prompt privacy is on wherever a node

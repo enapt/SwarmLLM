@@ -225,6 +225,12 @@ pub fn serialize_peer_to_json(
         // The card's memory decides which models it can run there, so it is
         // read beside the card's name.
         "gpu_vram_mb": peer.capability.as_ref().and_then(|c| c.gpu.as_ref().map(|g| g.vram_total_mb)),
+        // What it says is free on its card now — read at its every broadcast,
+        // a change past the memory deadband is news (`capability_news`).
+        // Beside `resident`'s `card_layers`, how a far computer's card filling
+        // with another program's work is read from here (FUTURE_WORK #3 (j8)).
+        // Display only.
+        "gpu_vram_available_mb": peer.capability.as_ref().and_then(|c| c.gpu.as_ref().map(|g| g.vram_available_mb)),
         // Where it says it is — the same figure the network map counts by
         // region, per computer. Its own word: shown, never routed on here.
         "region": country_code(peer.capability.as_ref().and_then(|c| c.region.as_deref())),

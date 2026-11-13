@@ -1854,7 +1854,7 @@ For production testing, use native Linux (dual boot or bare metal). WSL2 is suit
 |-------|------|--------|
 | INFO  | `DIAG: evaluate_and_prune` | `disk_pressure` (decides every file), `pressure_urgent` (disk) |
 | INFO  | `VRAM soft-unload: other programs took graphics memory` | `model`, `total_shards`, `window_shards`, `committed_mb`, `budget_mb` — fires only when our charged card memory exceeds what the card has room for now (#248) |
-| DEBUG | `VRAM soft-unload: other programs took room, but nothing loaded can give it back now` | `committed_mb`, `budget_mb`, `in_use` |
+| DEBUG | `VRAM soft-unload: other programs took room, but nothing loaded can give it back now` | `committed_mb`, `budget_mb`, `in_use` — models in use OR used within the last 120 s (`NARROW_ONLY_AFTER_IDLE_SECS`: until a worker's pool trims, the card counts its freed memory as another program's; #3 (j8)) |
 | DEBUG | `Not fetching a part prune would delete again once it landed` | `model`, `shard`, `holders`, `pressure_after` (gotcha #795) |
 | INFO  | `DIAG: this computer holds all but a few parts of this model — fetching them so it runs here whole` | `model`, `parts` — at most one part in eight missing (none for a model in fewer than eight parts); these parts skip the swarm's replica target, while the budget, disk and metered-connection checks still apply |
 | DEBUG | `DIAG: register_local_shard` | `model`, `shard` |
