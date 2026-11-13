@@ -138,7 +138,7 @@ The loader records the card's KV budget with or without `inference.max_seq_len_o
 
 ## A retired card worker's memory is waited for before the next load reads the card (2026-11-14, #3 (j13))
 
-`unload_model` (every retirement) reads the card before `Shutdown` and, once the process is reaped, waits until three quarters of its card charge reads free again (`await_card_memory_back`: 250 ms polls, 5 s bound — Ollama's `waitForVRAMRecovery`), THEN releases the budget: a reaped process is not memory back, and a reload reading it meanwhile placed 17 of 48 layers where 45 fit. A/B `SWARMLLM_CARD_MEMORY_BACK=0`.
+`unload_model` (every unload of a LIVE worker — a dead one's eviction does not wait) reads the card before `Shutdown` and, once the process is reaped, waits until three quarters of its card charge reads free again (`await_card_memory_back`: 250 ms polls, 5 s bound — Ollama's `waitForVRAMRecovery`) or until its rise has settled short of that (a quarter risen, two steady readings: our cache fills lazily, Ollama's is allocated up front), THEN releases the budget: a reaped process is not memory back, and a reload reading it meanwhile placed 17 of 48 layers where 45 fit. A/B `SWARMLLM_CARD_MEMORY_BACK=0`.
 
 → `docs/invariants/memory.md` § "Graphics memory has ONE owner" (**And a retired card worker's memory is waited for**)
 

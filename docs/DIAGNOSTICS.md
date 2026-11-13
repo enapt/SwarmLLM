@@ -724,8 +724,10 @@ memory as of its last broadcast; it is re-sent only when it moves by more than 2
 Since 2026-11-14 a retirement waits for the card's memory to come back before the next load reads it
 (`await_card_memory_back`). On this node, a wait shows in the log as INFO
 `DIAG: a stopped worker's card memory came back only after its process`, with `waited_ms`, or as
-`DIAG: a stopped worker's card memory was not back in time`, with `before_mb` and `free_mb`.
-At `-v` a wait that was not needed shows as `DIAG: a stopped worker's card memory is back`. A/B
+`DIAG: a stopped worker's card memory was not back in time`, with `before_mb` and `free_mb`, or as
+`DIAG: a stopped worker's card memory settled below its charge`, with `card_owed_mb`, `risen_mb` and
+`waited_ms`: the release stopped short of three quarters of the charge (an idle worker's cache was
+never filled), so the wait ended when two readings in a row held steady. At `-v` a wait that was not needed shows as `DIAG: a stopped worker's card memory is back`. A/B
 `SWARMLLM_CARD_MEMORY_BACK=0`.
 
 ## "A computer shows no location" / "its figures never change" (2026-11-05, #406 #407)

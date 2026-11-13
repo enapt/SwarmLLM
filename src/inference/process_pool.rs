@@ -2024,6 +2024,10 @@ const CARD_MEMORY_BACK_WITHIN: std::time::Duration = std::time::Duration::from_s
 /// 250 ms. One `nvidia-smi` reading took 56 ms on the WSL2 laptop.
 const CARD_MEMORY_POLL: std::time::Duration = std::time::Duration::from_millis(250);
 
+/// Two readings this close are the same reading: the card's free memory
+/// moves by a few MB with other programs (the desktop, a browser).
+const CARD_MEMORY_STEADY_MB: u64 = 32;
+
 /// What became of the card memory a stopped worker held
 /// ([`ModelProcessPool::await_card_memory_back`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2031,6 +2035,10 @@ enum CardMemoryBack {
     /// The card's free memory rose by three quarters of what the worker was
     /// charged, `waited_ms` after its process was gone.
     Back { waited_ms: u64 },
+    /// Risen by less than three quarters, then steady: the release is over,
+    /// smaller than the worker's charge (an idle worker's cache is not all
+    /// filled), `waited_ms` after its process was gone.
+    Settled { waited_ms: u64, risen_mb: u64 },
     /// It had not by [`CARD_MEMORY_BACK_WITHIN`]; `free_mb` was the last reading.
     NotBack { free_mb: u64 },
     /// The card could not be read (no `nvidia-smi`, or one stuck).
@@ -13129,9 +13137,11 @@ impl ModelProcessPool {
             // computer's 14B reloaded with 17-18 of 48 layers on its card just
             // after its [24..48) worker was retired, where its cold load of
             // the same model placed 45 (`TAG=j11`, `TAG=j13`; #3 (j13)).
-            // Waited for here, the one funnel of every retirement, before the
-            // budget is released — so a spawn under the same lock reads the
-            // card after it. Prior art: Ollama `server/sched.go`
+            // Waited for here, where every unload of a LIVE worker goes (idle,
+            // reclaim, growth's retirement, promotion), before the budget is
+            // released — so a spawn under the same lock reads the card after
+            // it. A dead worker's eviction (`retire_dead_worker`) does not
+            // wait: its process went before anyone asked. Prior art: Ollama `server/sched.go`
             // `waitForVRAMRecovery`.
             if let Some(before_mb) = card_before_mb {
                 let back = Self::await_card_memory_back(
@@ -13166,6 +13176,19 @@ impl ModelProcessPool {
                              had gone — the next load waited for it"
                         );
                     }
+                    CardMemoryBack::Settled {
+                        waited_ms,
+                        risen_mb,
+                    } => {
+                        tracing::info!(
+                            model_id = %model_id,
+                            card_owed_mb,
+                            risen_mb,
+                            waited_ms,
+                            "DIAG: a stopped worker's card memory settled below its charge — \
+                             the next load waited for the release to finish"
+                        );
+                    }
                     CardMemoryBack::NotBack { free_mb } => {
                         tracing::info!(
                             model_id = %model_id,
@@ -13192,6 +13215,15 @@ impl ModelProcessPool {
     /// layers loaded". Three quarters, as Ollama's, because what a worker is
     /// charged is an estimate. Returns at the first reading where nothing
     /// lags (2 GB back 0.07 s after `kill -9` on the WSL2 laptop, 3 of 3).
+    ///
+    /// **Or once the release has SETTLED short of that**: risen by a quarter
+    /// and steady (within [`CARD_MEMORY_STEADY_MB`]) for two readings after.
+    /// Ollama's 75% is of a runner whose cache llama.cpp allocates up front;
+    /// ours is charged a cache it fills as conversations come, so an idle
+    /// worker gives back less than its charge (gemma-2-2b on the laptop:
+    /// 1,962 MB freed of 2,367 charged, 83%). Without it a worker charged
+    /// well over what it held would hold every unload — under the spawn lock
+    /// — for the whole bound (pre-release review 2026-11-14).
     async fn await_card_memory_back(
         before_mb: u64,
         owed_mb: u64,
@@ -13200,16 +13232,36 @@ impl ModelProcessPool {
         poll: std::time::Duration,
     ) -> CardMemoryBack {
         let start = std::time::Instant::now();
+        let waited_ms = || u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
         let wanted_mb = owed_mb.saturating_mul(3) / 4;
+        let begun_mb = owed_mb / 4;
+        let mut last_mb: Option<u64> = None;
+        let mut steady_readings = 0u32;
         loop {
             let Some(free_mb) = read_free_mb() else {
                 return CardMemoryBack::Unread;
             };
-            if free_mb.saturating_sub(before_mb) >= wanted_mb {
+            let risen_mb = free_mb.saturating_sub(before_mb);
+            if risen_mb >= wanted_mb {
                 return CardMemoryBack::Back {
-                    waited_ms: u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX),
+                    waited_ms: waited_ms(),
                 };
             }
+            steady_readings = match last_mb {
+                Some(last)
+                    if risen_mb >= begun_mb && free_mb.abs_diff(last) <= CARD_MEMORY_STEADY_MB =>
+                {
+                    steady_readings + 1
+                }
+                _ => 0,
+            };
+            if steady_readings >= 2 {
+                return CardMemoryBack::Settled {
+                    waited_ms: waited_ms(),
+                    risen_mb,
+                };
+            }
+            last_mb = Some(free_mb);
             if start.elapsed() >= within {
                 return CardMemoryBack::NotBack { free_mb };
             }
@@ -22621,6 +22673,43 @@ mod admission_tests {
         let back =
             ModelProcessPool::await_card_memory_back(5_700, 4_300, || None, within, poll).await;
         assert_eq!(back, CardMemoryBack::Unread);
+
+        // A release smaller than the charge (an idle worker's cache was never
+        // filled): risen past a quarter, then steady — over after two steady
+        // readings, never the whole bound (pre-release review 2026-11-14).
+        let mut readings = [5_700, 7_000, 7_010, 7_005, 7_008].into_iter();
+        let started = std::time::Instant::now();
+        let back = ModelProcessPool::await_card_memory_back(
+            5_700,
+            4_300,
+            move || readings.next(),
+            within,
+            poll,
+        )
+        .await;
+        assert!(
+            matches!(
+                back,
+                CardMemoryBack::Settled {
+                    risen_mb: 1_305,
+                    ..
+                }
+            ),
+            "{back:?}"
+        );
+        assert!(started.elapsed() < within / 2, "settled, not the bound");
+
+        // Still rising is not settled: it waits on.
+        let mut readings = [5_700, 6_900, 7_400, 7_900, 8_400, 9_000].into_iter();
+        let back = ModelProcessPool::await_card_memory_back(
+            5_700,
+            4_300,
+            move || readings.next(),
+            within,
+            poll,
+        )
+        .await;
+        assert!(matches!(back, CardMemoryBack::Back { .. }), "{back:?}");
     }
 
     /// What a retired worker gives back to the CARD: its charge when it held

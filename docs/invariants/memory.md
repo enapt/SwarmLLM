@@ -895,11 +895,24 @@ the reap, `await_card_memory_back` waits until free memory has risen by three
 quarters of the worker's card charge (`DepartedWorker::card_mb_it_frees`). It
 reads every 250 ms (`CARD_MEMORY_POLL`) for up to 5 s (`CARD_MEMORY_BACK_WITHIN`),
 and only then releases the budget. A spawn under the same `spawn_lock` (growth's
-retirement, promotion) reads the card after that.
+retirement, promotion) reads the card after that. A DEAD worker's eviction
+(`retire_dead_worker`, a crash or an out-of-memory) does not go through it and
+does not wait (pre-release review 2026-11-14: a gap, not built).
+**The wait also ends once the release has SETTLED short of three quarters**:
+free memory risen by a quarter of the charge, then steady (within
+`CARD_MEMORY_STEADY_MB`, 32) for two readings after (`CardMemoryBack::Settled`).
+Ollama's runner has its cache allocated up front by llama.cpp, so its release is
+the whole charge; ours is charged a cache it fills only as conversations come,
+and an idle worker gives back less. On the laptop's card a gemma-2-2b worker
+charged 2,367 MB freed 1,962 (83%; the wait fired, 68 and 140 ms). A worker
+charged well over what it held would otherwise have held every unload, under
+the spawn lock, for the whole 5 s (pre-release review 2026-11-14). Test
+`a_stopped_card_workers_memory_is_waited_for_until_it_is_back` (red with the
+settle rule off).
 Prior art: Ollama `server/sched.go` `waitForVRAMRecovery`, whose figures and 75%
 are taken as is. Their rationale is our symptom: "subsequent model loads will
 get far less layers loaded". It was not seen on the WSL2 laptop: 2 GB came back
-0.07 s after `kill -9`, 3 of 3, so the wait returns at its first reading here.
+0.07 s after `kill -9`, 3 of 3, and a real card worker's unload waited 68-140 ms.
 Whether it fires on the far computer is read from that computer's
 `card_free_at_load_mb` after the release. Only a worker with a process waits; a
 test's stand-in has none and would wait out the bound. A/B
