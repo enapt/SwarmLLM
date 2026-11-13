@@ -1516,6 +1516,37 @@ fn test_handle_prune_peer_in_mesh() {
     );
 }
 
+/// RUSTSEC-2026-0534 (rust-libp2p PR #6707, backported to this 0.49.5 copy):
+/// a PRUNE naming a topic this node never joined records no backoff — a stream
+/// of them naming new topics, each kept up to an hour, used up memory. A topic
+/// in our mesh still records the peer's backoff.
+#[test]
+fn a_prune_for_a_topic_never_joined_records_no_backoff() {
+    let (mut gs, peers, _, topic_hashes) = inject_nodes1()
+        .peer_no(2)
+        .topics(vec![String::from("topic1")])
+        .to_subscribe(true)
+        .create_network();
+    assert!(gs.mesh.contains_key(&topic_hashes[0]), "joined topic1");
+
+    let never_joined = TopicHash::from_raw("never-joined");
+    gs.handle_prune(&peers[0], vec![(never_joined.clone(), vec![], Some(3600))]);
+    assert!(
+        gs.backoffs
+            .get_backoff_time(&never_joined, &peers[0])
+            .is_none(),
+        "a topic we never joined keeps no backoff"
+    );
+
+    gs.handle_prune(&peers[0], vec![(topic_hashes[0].clone(), vec![], Some(60))]);
+    assert!(
+        gs.backoffs
+            .get_backoff_time(&topic_hashes[0], &peers[0])
+            .is_some(),
+        "a topic in our mesh keeps the peer's backoff"
+    );
+}
+
 fn count_control_msgs(
     receivers: HashMap<PeerId, Receiver>,
     mut filter: impl FnMut(&PeerId, &RpcOut) -> bool,

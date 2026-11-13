@@ -99,9 +99,9 @@ jobs:
           shellcheck --version | head -2
           actionlint -color .github/workflows/*.yml
 
-  # `cargo audit` against the RustSec advisory DB. The thirteen `--ignore`
-  # advisories below are documented in SECURITY.md § "Known accepted
-  # advisories" with the rationale for each. Re-evaluate whenever the
+  # `cargo audit` against the RustSec advisory DB. Every `--ignore` below is
+  # documented in SECURITY.md § "Known accepted advisories" with the rationale
+  # for each (guard `every_ignored_advisory_is_explained_in_security_md`). Re-evaluate whenever the
   # transitive dep tree moves (most are blocked on a libp2p bump that
   # carries fresh hickory / multihash). New advisories on un-ignored
   # crates fail the job.
@@ -156,7 +156,11 @@ jobs:
             --ignore RUSTSEC-2026-0505 \
             --ignore RUSTSEC-2026-0511 \
             --ignore RUSTSEC-2026-0512 \
-            --ignore RUSTSEC-2026-0514
+            --ignore RUSTSEC-2026-0514 \
+            --ignore RUSTSEC-2026-0530 \
+            --ignore RUSTSEC-2026-0531 \
+            --ignore RUSTSEC-2026-0532 \
+            --ignore RUSTSEC-2026-0534
 
   clippy:
     name: Clippy (${{ matrix.os }} / ${{ matrix.features }})

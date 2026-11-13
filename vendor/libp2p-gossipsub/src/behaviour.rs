@@ -1610,6 +1610,20 @@ where
             .peer_score
             .below_threshold(peer_id, |ts| ts.accept_px_threshold);
         for (topic_hash, px, backoff) in prune_data {
+            // SwarmLLM: backported from rust-libp2p PR #6707 (gossipsub 0.50.1,
+            // RUSTSEC-2026-0534). A PRUNE naming a topic this node never joined
+            // recorded a backoff for it all the same, kept up to an hour after
+            // the peer left, so a stream of PRUNEs naming new topics used up
+            // memory and peer scoring did not see it.
+            if !self.mesh.contains_key(&topic_hash) {
+                tracing::debug!(
+                    peer=%peer_id,
+                    topic=%topic_hash,
+                    "PRUNE: Received prune for unknown topic from peer"
+                );
+                continue;
+            }
+
             if self.remove_peer_from_mesh(peer_id, &topic_hash, backoff, true) {
                 #[cfg(feature = "metrics")]
                 if let Some(m) = self.metrics.as_mut() {

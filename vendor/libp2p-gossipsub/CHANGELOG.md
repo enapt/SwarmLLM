@@ -1,4 +1,10 @@
-## 0.49.5 + SwarmLLM patch (not upstream)
+## 0.49.5 + SwarmLLM patches (not upstream in this release)
+
+- A PRUNE naming a topic this node never joined records no backoff (2026-11-13,
+  `handle_prune` in src/behaviour.rs): rust-libp2p PR #6707, released in 0.50.1,
+  backported for RUSTSEC-2026-0534 — each such pair was kept up to an hour after
+  the peer left, so a stream of PRUNEs naming new topics used up memory.
+  Test: `a_prune_for_a_topic_never_joined_records_no_backoff`.
 
 - Our subscriptions are told again to a peer that connects beside an existing
   connection, and again when one of its connections closes while another stays

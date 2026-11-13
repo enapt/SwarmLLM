@@ -106,7 +106,7 @@ swarmllm/
 │   │                          slots, an unanswered read never taken as empty); the router-facing address only, and
 │   │                          another of the listener's when it goes; no "mapping should exist" panic (libp2p #6377);
 │   │                          re-search on a backoff (#329); 20 tests, `--features tokio --lib`, CI `vendored.yml`)
-│   ├── quinn-proto/           (0.11.18 + ONE patch, quinn PR #2976: the stream assembler merges each run of
+│   ├── quinn-proto/           (0.11.19 + ONE patch, quinn PR #2976: the stream assembler merges each run of
 │   │                          contiguous data into one buffer and its gap limit grows with the data buffered
 │   │                          (1,024 → 8,192) — a stream behind lost packets is kept, not closed "too many gaps"
 │   │                          (#429); 319 tests, `--lib`, CI `vendored.yml`; guard
@@ -523,7 +523,8 @@ libp2p Swarm
 │
 ├── GossipSub (pub/sub, mesh_n/mesh_n_low/mesh_n_high/mesh_outbound_min auto-scale with the PEERS the node has met — distinct peers in its cache, not their addresses (#91): 2/1/4/1 at <10 peers up to 8/6/16/4 at 10k+;
 │   vendor/libp2p-gossipsub: our subscriptions are told again to a peer that connects beside an old connection and when
-│   one closes beside a live one — upstream tells only the first, and a restarted computer's gossip reached nobody, 2026-11-05)
+│   one closes beside a live one — upstream tells only the first, and a restarted computer's gossip reached nobody, 2026-11-05;
+│   and upstream's PRUNE fix, PR #6707: a PRUNE for a topic never joined records no backoff, RUSTSEC-2026-0534)
 │   ├── swarm/models                  → ShardAnnounce, capacity, manifests (ONE topic for every model; a custom `gossip_network_id` appends `/<id>`)
 │   ├── swarm/credits                 → CreditGossip
 │   ├── swarm/health                  → trust summaries

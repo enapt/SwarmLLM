@@ -37,9 +37,10 @@ Five carry contracts, not just versions:
   either and every tool schema reaches the model alphabetised.
 - **`libp2p-gossipsub` is a DIRECT dep to enable its `metrics` feature** (the
   facade's does not; drift from libp2p's pin builds two copies and the traffic
-  split reads as absent) **and VENDORED for one patch**: a peer reconnecting
+  split reads as absent) **and VENDORED for two patches**: a peer reconnecting
   beside an old connection is told our subscriptions again — without it a
-  restarted computer's gossip reached nobody (2026-11-05). Both guarded.
+  restarted computer's gossip reached nobody (2026-11-05) — and upstream's PRUNE
+  fix (RUSTSEC-2026-0534, backported; `cargo audit` still names 0.49.5). Guarded.
 - **`rayon-core` is vendored for ONE patch**: idle workers spin 200 µs before they
   sleep (8-thread processor decode 172 → 123-127 ms, #137). A `rayon` needing a newer
   core leaves the `[patch]` unused with only a warning. Guarded.

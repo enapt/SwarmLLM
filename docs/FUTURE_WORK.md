@@ -5888,15 +5888,21 @@ escrow release clamps only at 0. Cheap bound: clamp to the request's `max_tokens
 coordinator's own prompt-token count, and always take the completion count from tokens the
 coordinator received (`stream.emitted()`). Belongs with credits enforcement.
 
-#### #268 — Eleven DNS advisories wait on the libp2p 0.57 upgrade
-`P3` · security · **OPEN** — 2026-10-14 (the v0.3.237 gate's `cargo audit`) · history: `SECURITY.md` rows RUSTSEC-2026-0118/0119; 0487/0489/0490/0491 added 2026-11-11 (CI's audit failed on them); 0504/0505/0511/0512/0514 added 2026-11-12 (the same)
+#### #268 — Fourteen DNS advisories and a backported gossip fix wait on the libp2p 0.57 upgrade
+`P3` · security · **OPEN** — 2026-10-14 (the v0.3.237 gate's `cargo audit`) · history: `SECURITY.md` rows RUSTSEC-2026-0118/0119; 0487/0489/0490/0491 added 2026-11-11 (CI's audit failed on them); 0504/0505/0511/0512/0514 added 2026-11-12 (the same); 0530/0531/0532 and gossipsub's 0534 added 2026-11-13 (the release check's audit, run by hand — guard `every_ignored_advisory_is_explained_in_security_md` since)
 
 `hickory-proto 0.25.2` (an NSEC3 proof loop, an O(n²) name-compression cost, ~18 MB reserved off a
 header's record counts per crafted packet, three panics parsing DNS TEXT the daemon never parses)
 reaches the daemon only through `libp2p-dns` (bootstrap multiaddrs at startup) and `libp2p-mdns`
 (link-local), which is why `SECURITY.md` accepts them. Five more (2026-11-12) are in DNSSEC validation, which
-hickory 0.25 compiles only with a `dnssec-*` feature no build of ours enables — not in the binary at all. All
-eleven are fixed in `hickory ≥ 0.26.2`. libp2p 0.57.0 (2026-09-11) ships `libp2p-dns 0.45` on
+hickory 0.25 compiles only with a `dnssec-*` feature no build of ours enables — not in the binary at all; three
+more of the same kind on 2026-11-13 (a delegation's NSEC/NSEC3 accepted as a denial). All fourteen are fixed
+in `hickory ≥ 0.26.2` / `hickory-net ≥ 0.26.2`. **gossipsub's RUSTSEC-2026-0534** (a PRUNE naming topics
+never joined kept a backoff for each, memory a peer could fill) is fixed in 0.50.1, which needs 0.57: its fix
+(PR #6707) is backported to `vendor/libp2p-gossipsub` and checked by the vendoring guard, so the upgrade
+drops the backport with the copy's other patch carried over. The same day quinn-proto's two (0523: streams
+opened past the limit; 0524: a Retry token sized the client's packets) were fixed by re-vendoring 0.11.19 with
+PR #2976 carried over, and quinn-udp's 0538 (a receive loop that spun on macOS and the BSDs) by 0.5.16. libp2p 0.57.0 (2026-09-11) ships `libp2p-dns 0.45` on
 `hickory-resolver ^0.26`, the fixed line. The upgrade is not a version bump: the vendored
 `libp2p-request-response` patch must be re-applied to 0.57's crate, the direct `libp2p-gossipsub`
 pin must move with the facade (two copies otherwise, see CLAUDE.md), and a 0.56 node must still
@@ -6387,7 +6393,8 @@ grep `^| N |`).
   quinn-proto 0.11.18. quinn-rs/quinn#2955 (open): after one lost packet the assembler kept the
   contiguous data behind it as alternating pieces it never merged, and refused the stream past a
   fixed 1,024. 0.11.19 has the same code; the fix, PR #2976, is in review. QUIC now runs on a
-  VENDORED quinn-proto 0.11.18 with PR #2976 ported onto its heap (`vendor/quinn-proto`,
+  VENDORED quinn-proto 0.11.18 (0.11.19 since 2026-11-13, for RUSTSEC-2026-0523/-0524, the patch
+  carried over unchanged) with PR #2976 ported onto its heap (`vendor/quinn-proto`,
   `[patch.crates-io]`): each contiguous run merged into one buffer, gaps allowed in proportion to the
   data buffered (1,024-8,192). Prior art: the PR itself (its benchmarks level with quinn main);
   rejected a smaller stream window (caps a far link's speed) and a retry after the connection is gone.

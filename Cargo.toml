@@ -446,7 +446,7 @@ path = "examples/swarm_spec_bench.rs"
 
 [patch.crates-io]
 libp2p-request-response = { path = "vendor/libp2p-request-response" }
-# libp2p-gossipsub 0.49.5 with ONE change: our subscriptions are told again to a
+# libp2p-gossipsub 0.49.5 with TWO changes. (1) Our subscriptions are told again to a
 # peer that connects beside an old connection, and again when a connection
 # closes beside a live one (src/behaviour.rs `send_our_subscriptions`). Upstream
 # tells only a peer's first connection, so a computer that restarted before its
@@ -455,6 +455,9 @@ libp2p-request-response = { path = "vendor/libp2p-request-response" }
 # computer's location and figures stayed at its first second everywhere).
 # go-libp2p-pubsub re-sends its hello packet the same way. Guard:
 # `gossip_runs_on_the_vendored_copy_that_tells_a_reconnected_peer_our_subscriptions`.
+# (2) Upstream's PRUNE fix, rust-libp2p PR #6707 (0.50.1 needs libp2p 0.57):
+# a PRUNE naming a topic never joined records no backoff (RUSTSEC-2026-0534,
+# SECURITY.md; the same guard checks it).
 libp2p-gossipsub = { path = "vendor/libp2p-gossipsub" }
 # libp2p-quic 0.13.1 with ONE addition: `Config::congestion` (src/config.rs), so
 # our QUIC connections run quinn's BBR instead of the Cubic upstream hard-codes
@@ -464,7 +467,8 @@ libp2p-gossipsub = { path = "vendor/libp2p-gossipsub" }
 # libp2p-quic would leave this patch unused, and the build then fails:
 # `network::manager` calls `Config::congestion`, which upstream does not have.
 libp2p-quic = { path = "vendor/libp2p-quic" }
-# quinn-proto 0.11.18 with ONE change: the stream assembler
+# quinn-proto 0.11.19 (re-vendored 2026-11-13 for RUSTSEC-2026-0523/-0524) with
+# ONE change: the stream assembler
 # (src/connection/assembler.rs) merges each run of contiguous data into one
 # buffer and lets the gaps it keeps grow with the data buffered (1,024 to
 # 8,192) — quinn-rs/quinn PR #2976 for issue #2955, unreleased on 2026-11-11.

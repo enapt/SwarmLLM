@@ -4399,6 +4399,11 @@ dies with it).
 **What a change must keep:** quinn-proto resolves from `vendor/quinn-proto` — guard
 `quic_runs_on_the_vendored_quinn_proto_that_keeps_a_lossy_stream` (cargo only WARNS when a
 `[patch]` goes unused). When a quinn release carries PR #2976, drop the copy and the guard.
+**Re-vendored on 0.11.19 (2026-11-13)** for RUSTSEC-2026-0523 (a MAX_STREAM_DATA frame opened every
+stream up to an index past the advertised limit) and -0524 (a Retry token of any length sized every
+later Initial packet past the datagram): 0.11.19 leaves `assembler.rs` untouched, so the patch went
+over as it was (`diff -ru` of 0.11.18 against the copy, applied with `patch -p1`, an offset only in
+`tests/mod.rs`), and the copy's own suite ran on the result.
 Tests (vendored, CI `vendored.yml`): `every_other_packet_lost_in_large_window` (a real
 connection losing every other datagram of a 6 MB stream in an 8 MiB window — red on unpatched
 0.11.18 with exactly "too many gaps in stream buffer"), `many_chunks_behind_one_gap_are_not_rejected`

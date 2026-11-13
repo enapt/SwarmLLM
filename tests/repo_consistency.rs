@@ -13054,6 +13054,68 @@ fn gossip_runs_on_the_vendored_copy_that_tells_a_reconnected_peer_our_subscripti
         "the vendored gossipsub no longer tells a reconnected peer our subscriptions on both \
          events (a connection opening beside another, one closing beside another)"
     );
+    // The backported PRUNE fix (rust-libp2p PR #6707): `cargo audit` still names
+    // 0.49.5 for RUSTSEC-2026-0534, which CI ignores because the fix is here.
+    let prune = behaviour
+        .find("fn handle_prune(")
+        .expect("the vendored gossipsub has a handle_prune");
+    let body_end = behaviour[prune + 1..]
+        .find("\n    fn ")
+        .map_or(behaviour.len(), |e| prune + 1 + e);
+    assert!(
+        behaviour[prune..body_end].contains("if !self.mesh.contains_key(&topic_hash) {"),
+        "the vendored gossipsub no longer skips a PRUNE for a topic never joined \
+         (RUSTSEC-2026-0534, rust-libp2p PR #6707) — SECURITY.md and CI's audit treat it as \
+         fixed here; carry the fix over or stop ignoring the advisory"
+    );
+}
+
+/// Every advisory CI's `cargo audit` ignores is explained in SECURITY.md §
+/// "Known accepted advisories", and every one listed there is ignored: an
+/// ignore nobody explained hides a finding, and a row nobody ignores is stale
+/// (2026-11-13, seven new advisories found only by running the audit by hand).
+#[test]
+fn every_ignored_advisory_is_explained_in_security_md() {
+    let read = |path: &str| {
+        std::fs::read_to_string(repo_root().join(path)).unwrap_or_else(|e| panic!("{path}: {e}"))
+    };
+    let ignored: std::collections::BTreeSet<String> = read(".github/workflows/ci.yml")
+        .split("--ignore ")
+        .skip(1)
+        .filter_map(|rest| rest.split_whitespace().next())
+        .map(str::to_string)
+        .collect();
+    let mut explained = std::collections::BTreeSet::new();
+    for row in read("SECURITY.md")
+        .lines()
+        .filter(|l| l.starts_with("| RUSTSEC-"))
+    {
+        let ids = row.split('|').nth(1).expect("a table row's first cell");
+        let mut prefix = String::new();
+        for id in ids.split(',').map(str::trim) {
+            if let Some(number) = id.strip_prefix('-') {
+                explained.insert(format!("{prefix}-{number}"));
+            } else {
+                prefix = id
+                    .rsplit_once('-')
+                    .expect("RUSTSEC-YYYY-NNNN")
+                    .0
+                    .to_string();
+                explained.insert(id.to_string());
+            }
+        }
+    }
+    assert!(
+        !ignored.is_empty(),
+        "no `--ignore` found in ci.yml — the guard reads the wrong file"
+    );
+    let unexplained: Vec<_> = ignored.difference(&explained).collect();
+    let stale: Vec<_> = explained.difference(&ignored).collect();
+    assert!(
+        unexplained.is_empty() && stale.is_empty(),
+        "ci.yml ignores advisories SECURITY.md does not explain: {unexplained:?}; SECURITY.md \
+         lists advisories ci.yml no longer ignores: {stale:?}"
+    );
 }
 
 /// Every rayon pool in this binary — candle's, the decode pool, the prompt
