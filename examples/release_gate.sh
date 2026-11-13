@@ -219,9 +219,14 @@ fi
 # Windows code is any cfg that names windows ANYWHERE in it (`any(windows, …)`) or excludes another
 # platform (`not(target_os = "linux")`, `not(unix)`): both compile on Windows. The .258 gate read
 # `cfg(not(target_os = "linux"))` (#334 (4)'s free-space path) as no Windows change and skipped this.
+# A dependency's Windows code counts too: a lockfile line naming a Windows binding (`windows-sys`,
+# `windows`, `winapi`) added or removed means a crate's Windows build changed — .285's quinn-udp
+# 0.5.16 moved its Windows sockets to socket2 0.6 / windows-sys 0.61, which no file name says.
 if grep -qiE 'windows|update_restart|job_object|launcher' <<< "$CHANGED" \
    || git -C "$REPO" diff "${SINCE:-HEAD}"..HEAD -- src \
-      | grep -qE '^[+-].*cfg\(.*(windows|not\((target_os|target_family|unix))'; then
+      | grep -qE '^[+-].*cfg\(.*(windows|not\((target_os|target_family|unix))' \
+   || git -C "$REPO" diff "${SINCE:-HEAD}"..HEAD -- Cargo.lock \
+      | grep -qE '^[+-]( "|name = ")(windows|winapi)'; then
   verdict windows REVIEW "Windows code changed: wincheck the draft's .exe files now, a real update after publishing"
 else
   verdict windows SKIPPED "no Windows code changed"
