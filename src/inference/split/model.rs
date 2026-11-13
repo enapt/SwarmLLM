@@ -158,10 +158,10 @@ pub struct SplitModel {
     /// layers prices its own cache by the one layout (#449). `None` in test
     /// fixtures.
     pub(super) kv_layout: Option<std::sync::Arc<super::kv_budget::KvLayout>>,
-    /// The range of the instance loaded from disk whose weights this one runs,
-    /// where it is a view of it (`split::view`, #449); `None` for an instance
-    /// that loaded its own.
-    pub(super) viewed_from: Option<(usize, usize)>,
+    /// The instance loaded from disk whose weights this one runs, and when it
+    /// was built, where it is a view of it (`split::view`, #449); `None` for an
+    /// instance that loaded its own.
+    pub(super) viewed_from: Option<super::view::ViewOf>,
     /// Gemma 2 final logit soft-capping value (e.g. 30.0).
     pub(super) final_logit_softcap: Option<f32>,
     /// What the head adds to every row of logits so the tokens the model file

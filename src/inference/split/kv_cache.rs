@@ -2129,6 +2129,18 @@ impl KvCacheStore {
             .is_some_and(|entry| entry.holds_state())
     }
 
+    /// Does any conversation keep a cache under this model segment? A view of
+    /// a loaded copy (`split::view`, #449) that none does may go when the copy
+    /// has [`MOST_VIEWS_A_COPY`](super::view::MOST_VIEWS_A_COPY): its next
+    /// forward builds it again and finds nothing of its own lost.
+    pub(crate) fn holds_a_conversation_of(&self, model_key: &str) -> bool {
+        self.caches.iter().any(|e| {
+            e.key()
+                .strip_prefix(model_key)
+                .is_some_and(|rest| rest.starts_with('\0'))
+        })
+    }
+
     /// How many positions a request's cache holds: the fewest any layer
     /// holds, so a pass that stopped part-way never reads as whole. `0` when
     /// there is no entry.

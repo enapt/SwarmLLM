@@ -2356,21 +2356,41 @@ impl WorkerHandle {
     /// the worker already serves — read as "charged" only when equal, a 14B
     /// held whole was charged and grown for the 25 layers a split gave it
     /// (2026-11-13), and the worker read them from disk again.
-    fn serves_segment(&self, segment: (u32, u32)) -> bool {
-        let slices = crate::inference::split::view::elastic_spans_on();
-        self.charged_segments
-            .lock()
-            .map(|v| {
-                v.iter().any(|c| {
-                    c.range == segment
-                        || (slices
-                            && crate::inference::split::view::serves_inside(
-                                (c.range.0 as usize, c.range.1 as usize),
-                                (segment.0 as usize, segment.1 as usize),
-                            ))
-                })
+    fn serves_segment(&self, segment: (u32, u32), shape: RunShape) -> bool {
+        self.serving_range(segment, shape).is_some()
+    }
+
+    /// The charged range that serves `segment` — itself where charged as it
+    /// is, else (a plain run) the narrowest charged range holding it (#449). A
+    /// forward for a run inside a charged range carries that range to the
+    /// worker (`IpcForward::served_from`), so the worker loads THAT range —
+    /// what the daemon charged — and serves the run from it, never the run on
+    /// its own.
+    fn serving_range(&self, segment: (u32, u32), shape: RunShape) -> Option<(u32, u32)> {
+        let charged = self.charged_segments.lock().ok()?;
+        if charged.iter().any(|c| c.range == segment) {
+            return Some(segment);
+        }
+        if shape == RunShape::TensorParallel || !crate::inference::split::view::elastic_spans_on() {
+            return None;
+        }
+        charged
+            .iter()
+            .map(|c| c.range)
+            .filter(|r| {
+                crate::inference::split::view::serves_inside(
+                    (r.0 as usize, r.1 as usize),
+                    (segment.0 as usize, segment.1 as usize),
+                )
             })
-            .unwrap_or(false)
+            .min_by_key(|r| r.1 - r.0)
+    }
+
+    /// What a forward for `segment` tells the worker it is served from
+    /// (`IpcForward::served_from`): a charged range holding it, where that is
+    /// not `segment` itself — never for a tensor-parallel share.
+    fn served_from_for(&self, segment: (u32, u32), shape: RunShape) -> Option<(u32, u32)> {
+        self.serving_range(segment, shape).filter(|r| *r != segment)
     }
 
     /// Drop the charges for every range this one strictly contains, returning
@@ -2914,6 +2934,29 @@ impl RangeCost {
         Self {
             mb: self.mb.saturating_add(other.mb),
             host_mb: self.host_mb.saturating_add(other.host_mb),
+        }
+    }
+}
+
+/// Whether a forward's run is one rank's share of a tensor-parallel group.
+/// A worker serves a PLAIN run inside a range it loaded from that copy's
+/// weights (#449, `split::view`), so the daemon charges nothing for it; a
+/// rank's share holds different weights — a slice of every matrix — so it is
+/// charged and loaded as itself, as every run was before (review 2026-11-13:
+/// charged nothing, the worker read it from disk all the same). REQUIRED of
+/// every "would this load" question that a tensor-parallel forward reaches.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RunShape {
+    Plain,
+    TensorParallel,
+}
+
+impl RunShape {
+    pub(crate) fn of(tensor_parallel: bool) -> Self {
+        if tensor_parallel {
+            Self::TensorParallel
+        } else {
+            Self::Plain
         }
     }
 }
@@ -7127,7 +7170,7 @@ impl ModelProcessPool {
         beside: &ModelId,
     ) -> GuestFit {
         if let Some(handle) = self.live_worker(model_id) {
-            return if !handle.serves_segment(segment) {
+            return if !handle.serves_segment(segment, RunShape::Plain) {
                 GuestFit::Refused
             } else if self.runs_whole_on_the_card(model_id) {
                 GuestFit::OnCard
@@ -7235,7 +7278,7 @@ impl ModelProcessPool {
     ) -> Option<u32> {
         if self
             .live_worker(guest)
-            .is_some_and(|h| h.serves_segment(guest_range))
+            .is_some_and(|h| h.serves_segment(guest_range, RunShape::Plain))
         {
             return None;
         }
@@ -7510,11 +7553,12 @@ impl ModelProcessPool {
         segment: (u32, u32),
         handle: &Arc<WorkerHandle>,
         requester: Requester,
+        shape: RunShape,
     ) -> Result<(), GrowthRefused> {
         // Serialised against spawns for the same read-decide-charge atomicity
         // the admission gates already rely on.
         let _guard = self.spawn_lock.lock().await;
-        if handle.serves_segment(segment) {
+        if handle.serves_segment(segment, shape) {
             return Ok(());
         }
         // Which budget this worker is charged against was decided ONCE, at
@@ -7978,9 +8022,10 @@ impl ModelProcessPool {
         segment: (u32, u32),
         handle: &Arc<WorkerHandle>,
         requester: Requester,
+        shape: RunShape,
     ) -> Result<bool, GrowthRefused> {
         let _guard = self.spawn_lock.lock().await;
-        if handle.serves_segment(segment) {
+        if handle.serves_segment(segment, shape) {
             return Ok(true);
         }
         let Some((split, room_mb)) = self.growth_split(model_id, segment, handle, 0) else {
@@ -8108,9 +8153,10 @@ impl ModelProcessPool {
         segment: (u32, u32),
         handle: Arc<WorkerHandle>,
         requester: Requester,
+        shape: RunShape,
     ) -> Result<Growth, SwarmError> {
         let mut refused = match self
-            .charge_additional_segment(model_id, segment, &handle, requester)
+            .charge_additional_segment(model_id, segment, &handle, requester, shape)
             .await
         {
             Ok(()) => return Ok(Growth::Grown(handle)),
@@ -8132,7 +8178,7 @@ impl ModelProcessPool {
                      take on the range asked for"
                 );
                 refused = match self
-                    .charge_additional_segment(model_id, segment, &handle, requester)
+                    .charge_additional_segment(model_id, segment, &handle, requester, shape)
                     .await
                 {
                     Ok(()) => return Ok(Growth::Grown(handle)),
@@ -8159,7 +8205,7 @@ impl ModelProcessPool {
                 .await;
             if freed > 0 {
                 refused = match self
-                    .charge_additional_segment(model_id, segment, &handle, requester)
+                    .charge_additional_segment(model_id, segment, &handle, requester, shape)
                     .await
                 {
                     Ok(()) => return Ok(Growth::Grown(handle)),
@@ -8171,7 +8217,7 @@ impl ModelProcessPool {
             // of report #037, a request's second local run — can never be
             // retired.
             match self
-                .charge_segment_as_split(model_id, segment, &handle, requester)
+                .charge_segment_as_split(model_id, segment, &handle, requester, shape)
                 .await
             {
                 Ok(true) => return Ok(Growth::Grown(handle)),
@@ -8263,7 +8309,7 @@ impl ModelProcessPool {
         requester: Requester,
     ) -> bool {
         match worker {
-            Some(h) if h.serves_segment(run) => true,
+            Some(h) if h.serves_segment(run, RunShape::Plain) => true,
             Some(h) => {
                 self.growth_would_be_admitted(model_id, run, h, requester)
                     || (!h.in_use(self.conversation_window())
@@ -8288,7 +8334,7 @@ impl ModelProcessPool {
         h: &WorkerHandle,
         requester: Requester,
     ) -> bool {
-        !h.serves_segment(run)
+        !h.serves_segment(run, RunShape::Plain)
             && !h.in_use(self.conversation_window())
             && !self.growth_would_be_admitted(model_id, run, h, requester)
             && self.a_fresh_spawn_fits_in_place_of_the_worker(model_id, run, requester)
@@ -9327,7 +9373,7 @@ impl ModelProcessPool {
         let holds_the_first = worker
             .as_ref()
             .zip(layer_ranges.first())
-            .is_some_and(|(h, &first)| h.serves_segment(first));
+            .is_some_and(|(h, &first)| h.serves_segment(first, RunShape::Plain));
         let no_worker = worker.is_none();
         // Not held across the wait below: a handle is how a retirement signals.
         drop(worker);
@@ -9404,9 +9450,9 @@ impl ModelProcessPool {
     /// Whether this model's live worker already holds `range` — what a
     /// load ahead skips.
     pub(crate) fn holds_range(&self, model_id: &ModelId, range: (u32, u32)) -> bool {
-        self.workers
-            .get(model_id)
-            .is_some_and(|h| !h.dead.load(Ordering::Acquire) && h.serves_segment(range))
+        self.workers.get(model_id).is_some_and(|h| {
+            !h.dead.load(Ordering::Acquire) && h.serves_segment(range, RunShape::Plain)
+        })
     }
 
     /// The one loader behind both: through `get_or_spawn` as the work it
@@ -9423,7 +9469,7 @@ impl ModelProcessPool {
                 continue;
             }
             let handle = match self
-                .get_or_spawn(model_id, range, Tenancy::Tenant, requester)
+                .get_or_spawn(model_id, range, Tenancy::Tenant, requester, RunShape::Plain)
                 .await
             {
                 Ok(handle) => handle,
@@ -9904,7 +9950,7 @@ impl ModelProcessPool {
     /// compete with that range's load for memory — see [`Tenancy::Guest`].
     pub fn holds_segment(&self, model_id: &ModelId, segment: (u32, u32)) -> bool {
         self.live_worker(model_id)
-            .is_some_and(|h| h.serves_segment(segment))
+            .is_some_and(|h| h.serves_segment(segment, RunShape::Plain))
     }
 
     /// Admit `estimated` MB to the card for a spawn, reclaiming idle models'
@@ -9980,6 +10026,7 @@ impl ModelProcessPool {
         segment: (u32, u32),
         tenancy: Tenancy,
         requester: Requester,
+        shape: RunShape,
     ) -> Result<Arc<WorkerHandle>, SwarmError> {
         // A round ends without a worker only when another task put one in the
         // map, while this one waited for the spawn lock, that does not hold this
@@ -9987,7 +10034,7 @@ impl ModelProcessPool {
         // contention cannot spin; running out is a local lifecycle failure.
         for _ in 0..GET_OR_SPAWN_ROUNDS {
             if let Some(handle) = self
-                .get_or_spawn_once(model_id, segment, tenancy, requester)
+                .get_or_spawn_once(model_id, segment, tenancy, requester, shape)
                 .await?
             {
                 return Ok(handle);
@@ -10007,6 +10054,7 @@ impl ModelProcessPool {
         segment: (u32, u32),
         tenancy: Tenancy,
         requester: Requester,
+        shape: RunShape,
     ) -> Result<Option<Arc<WorkerHandle>>, SwarmError> {
         let guest = tenancy.is_guest();
         // Fast path: worker already exists — and, unless this node demoted it
@@ -10039,7 +10087,7 @@ impl ModelProcessPool {
             } else if guest || !self.worker_should_return_to_gpu(model_id, &handle) {
                 // A guest is never promoted: moving it to the card means
                 // taking memory, which it may not do (`Tenancy::Guest`).
-                if handle.serves_segment(segment) {
+                if handle.serves_segment(segment, shape) {
                     return Ok(Some(handle));
                 }
                 if guest {
@@ -10056,7 +10104,7 @@ impl ModelProcessPool {
                 // rather than refuse (`grow_worker`).
                 let before = handle.card_and_machine_mb();
                 match self
-                    .grow_worker(model_id, segment, handle, requester)
+                    .grow_worker(model_id, segment, handle, requester, shape)
                     .await?
                 {
                     Growth::Grown(handle) => {
@@ -10100,7 +10148,9 @@ impl ModelProcessPool {
                     // never admitted is in use (found in pre-release review
                     // 2026-09-27; `grow_worker`'s retirement sends traffic here).
                     // Otherwise go round again, and the fast path grows it.
-                    return Ok(handle.serves_segment(segment).then(|| handle.clone()));
+                    return Ok(handle
+                        .serves_segment(segment, shape)
+                        .then(|| handle.clone()));
                 }
                 true
             }
@@ -11397,7 +11447,13 @@ impl ModelProcessPool {
         // gone.
         crate::inference::cancel::bail_if_cancelled(cancel.as_ref())?;
         let handle = self
-            .get_or_spawn(&model_id, forward.layer_range, Tenancy::Tenant, requester)
+            .get_or_spawn(
+                &model_id,
+                forward.layer_range,
+                Tenancy::Tenant,
+                requester,
+                RunShape::of(forward.tp_meta.is_some()),
+            )
             .await;
         self.note_load_refusal(forward.request_id, &model_id, forward.layer_range, &handle);
         let handle = handle?;
@@ -11455,6 +11511,7 @@ impl ModelProcessPool {
             None => (Vec::new(), 0u32),
         };
 
+        let served_from = handle.served_from_for(layer_range, RunShape::of(tp_meta.is_some()));
         let ipc_fwd = IpcForward {
             request_id,
             sequence_num,
@@ -11463,6 +11520,7 @@ impl ModelProcessPool {
             model_id: fwd_model_id,
             layer_range,
             tp_meta,
+            served_from,
             vision_embeddings_len: vision_len,
             requester_node_id,
             pre_embedded,
@@ -11637,6 +11695,7 @@ impl ModelProcessPool {
                 } else {
                     Requester::Swarm
                 }),
+                RunShape::Plain,
             )
             .await?;
         crate::inference::cancel::bail_if_cancelled(cancel.as_ref())?;
@@ -11920,6 +11979,9 @@ impl ModelProcessPool {
                 forwards[0].layer_range,
                 Tenancy::Tenant,
                 Requester::Swarm,
+                // A batch never carries a tensor-parallel forward
+                // (`forward_is_schedulable`).
+                RunShape::Plain,
             )
             .await;
         for f in &forwards {
@@ -12004,6 +12066,7 @@ impl ModelProcessPool {
             let forward_sampling = sampling.unwrap_or_default();
             activation_lens.push(activations.len() as u32);
             concat_payload.extend_from_slice(&activations);
+            let served_from = handle.served_from_for(layer_range, RunShape::of(tp_meta.is_some()));
             ipc_requests.push(IpcForward {
                 request_id,
                 sequence_num,
@@ -12012,6 +12075,7 @@ impl ModelProcessPool {
                 model_id,
                 layer_range,
                 tp_meta,
+                served_from,
                 vision_embeddings_len: 0,
                 requester_node_id,
                 pre_embedded,
@@ -12254,7 +12318,13 @@ impl ModelProcessPool {
         emitted: &std::sync::atomic::AtomicBool,
     ) -> Result<crate::inference::router::InferenceOutput, SwarmError> {
         let handle = self
-            .get_or_spawn(model_id, layer_range, Tenancy::Tenant, requester)
+            .get_or_spawn(
+                model_id,
+                layer_range,
+                Tenancy::Tenant,
+                requester,
+                RunShape::Plain,
+            )
             .await;
         self.note_load_refusal(request_id, model_id, layer_range, &handle);
         let handle = handle?;
@@ -14133,7 +14203,7 @@ mod tests {
         // and recorded at ZERO, exactly as `get_or_spawn` records it.
         let h = admit_and_insert_cpu_worker(pool, model, 250, false).await;
         h.record_charged_segment((0, 2), 0);
-        pool.charge_additional_segment(model, (14, 40), &h, Requester::Swarm)
+        pool.charge_additional_segment(model, (14, 40), &h, Requester::Swarm, RunShape::Plain)
             .await
             .expect("26 more layers fit the budget");
         assert_eq!(pool.ram_committed_mb(), 2850, "fixture: 250 + 26 x 100");
@@ -14157,7 +14227,7 @@ mod tests {
         pool.set_ram_budget_mb(4300);
         let h = worker_holding_both_ends(&pool, &model).await;
 
-        pool.charge_additional_segment(&model, (0, 40), &h, Requester::Swarm)
+        pool.charge_additional_segment(&model, (0, 40), &h, Requester::Swarm, RunShape::Plain)
             .await
             .expect("the peak after the drop fits, so the range is admitted");
 
@@ -14189,16 +14259,20 @@ mod tests {
         pool.set_ram_budget_mb(4000);
         let h = worker_holding_both_ends(&pool, &model).await;
         let before = pool.ram_committed_mb();
-        assert!(h.serves_segment((14, 40)), "a charged range");
         assert!(
-            h.serves_segment((20, 30)) && h.serves_segment((1, 2)),
+            h.serves_segment((14, 40), RunShape::Plain),
+            "a charged range"
+        );
+        assert!(
+            h.serves_segment((20, 30), RunShape::Plain)
+                && h.serves_segment((1, 2), RunShape::Plain),
             "a run inside one"
         );
         assert!(
-            !h.serves_segment((10, 20)),
+            !h.serves_segment((10, 20), RunShape::Plain),
             "a run reaching outside every charged range loads"
         );
-        pool.charge_additional_segment(&model, (20, 30), &h, Requester::Swarm)
+        pool.charge_additional_segment(&model, (20, 30), &h, Requester::Swarm, RunShape::Plain)
             .await
             .expect("nothing to add");
         assert_eq!(pool.ram_committed_mb(), before, "charged nothing");
@@ -14206,6 +14280,36 @@ mod tests {
             !h.segment_is_charged((20, 30)),
             "and the record keeps only what was charged"
         );
+
+        // A tensor-parallel share holds a slice of every matrix, not the
+        // copy's weights: the worker loads it as itself, so it is charged as
+        // itself, as every run was before #449 (review 2026-11-13).
+        assert!(
+            h.serves_segment((14, 40), RunShape::TensorParallel),
+            "a charged range, charged as it is"
+        );
+        assert!(
+            !h.serves_segment((20, 30), RunShape::TensorParallel),
+            "a share inside a charged range loads"
+        );
+        assert_eq!(h.serving_range((20, 30), RunShape::TensorParallel), None);
+        assert_eq!(
+            h.served_from_for((20, 30), RunShape::TensorParallel),
+            None,
+            "and is never served from the copy"
+        );
+        assert_eq!(h.served_from_for((20, 30), RunShape::Plain), Some((14, 40)));
+        pool.charge_additional_segment(
+            &model,
+            (20, 30),
+            &h,
+            Requester::Swarm,
+            RunShape::TensorParallel,
+        )
+        .await
+        .expect("fits the budget");
+        assert!(pool.ram_committed_mb() > before, "charged");
+        assert!(h.segment_is_charged((20, 30)));
     }
 
     /// The control: when even the peak does not fit, the refusal leaves every
@@ -14219,7 +14323,7 @@ mod tests {
         let h = worker_holding_both_ends(&pool, &model).await;
 
         let refused = pool
-            .charge_additional_segment(&model, (0, 40), &h, Requester::Swarm)
+            .charge_additional_segment(&model, (0, 40), &h, Requester::Swarm, RunShape::Plain)
             .await
             .expect_err("2850 + 1400 > 4000");
         assert!(!refused.on_gpu, "weighed by the budget its spawn charged");
@@ -14961,13 +15065,19 @@ mod tests {
 
         // The control: growth ALONE refuses — the live node's answer.
         let refused = pool
-            .charge_additional_segment(&wanted, (0, 32), &h, Requester::Swarm)
+            .charge_additional_segment(&wanted, (0, 32), &h, Requester::Swarm, RunShape::Plain)
             .await
             .expect_err("3638 + 5440 > 6000 with the idle model still resident");
         assert!(refused.on_gpu);
 
         match pool
-            .grow_worker(&wanted, (0, 32), h.clone(), Requester::Swarm)
+            .grow_worker(
+                &wanted,
+                (0, 32),
+                h.clone(),
+                Requester::Swarm,
+                RunShape::Plain,
+            )
             .await
             .expect("the idle model's room is enough")
         {
@@ -16160,14 +16270,20 @@ mod tests {
         h.record_charged_segment((0, 1), 0);
 
         let held = pool
-            .get_or_spawn(&m, (0, 1), TYPICAL_GUEST, Requester::Swarm)
+            .get_or_spawn(&m, (0, 1), TYPICAL_GUEST, Requester::Swarm, RunShape::Plain)
             .await;
         assert!(
             held.is_ok_and(|g| Arc::ptr_eq(&g, &h)),
             "the range it holds is handed back"
         );
         let refused = pool
-            .get_or_spawn(&m, (0, 24), TYPICAL_GUEST, Requester::Swarm)
+            .get_or_spawn(
+                &m,
+                (0, 24),
+                TYPICAL_GUEST,
+                Requester::Swarm,
+                RunShape::Plain,
+            )
             .await;
         assert!(matches!(refused, Err(SwarmError::ServiceUnavailable(_))));
         assert!(
@@ -16178,7 +16294,13 @@ mod tests {
         assert!(!pool.holds_segment(&m, (0, 24)));
 
         let grown = pool
-            .get_or_spawn(&m, (0, 24), Tenancy::Tenant, Requester::Swarm)
+            .get_or_spawn(
+                &m,
+                (0, 24),
+                Tenancy::Tenant,
+                Requester::Swarm,
+                RunShape::Plain,
+            )
             .await
             .expect("a tenant grows the worker");
         assert!(Arc::ptr_eq(&grown, &h));
@@ -16196,7 +16318,7 @@ mod tests {
         let (_idle, wanted, h) = card_with_an_idle_model_and_a_one_layer_worker(&pool, 190).await;
 
         let outcome = pool
-            .grow_worker(&wanted, (0, 32), h, Requester::Swarm)
+            .grow_worker(&wanted, (0, 32), h, Requester::Swarm, RunShape::Plain)
             .await
             .expect("an idle worker is replaced rather than refusing the request");
         assert!(matches!(outcome, Growth::Respawn));
@@ -16244,7 +16366,7 @@ mod tests {
         assert!(held_mb + growth_mb > asked_mb, "fixture: growth is refused");
         let h = cpu_worker_holding(&p, &model, held, held_mb).await;
         let outcome = p
-            .grow_worker(&model, asked, h, Requester::Swarm)
+            .grow_worker(&model, asked, h, Requester::Swarm, RunShape::Plain)
             .await
             .expect("an idle worker is replaced rather than refusing a range that would load");
         assert!(matches!(outcome, Growth::Respawn));
@@ -16256,7 +16378,7 @@ mod tests {
         p.set_ram_budget_mb(asked_mb - 1);
         let h = cpu_worker_holding(&p, &model, held, held_mb).await;
         let refused = p
-            .grow_worker(&model, asked, h.clone(), Requester::Swarm)
+            .grow_worker(&model, asked, h.clone(), Requester::Swarm, RunShape::Plain)
             .await;
         assert!(matches!(
             refused,
@@ -16274,7 +16396,7 @@ mod tests {
         let h = cpu_worker_holding(&p, &model, held, held_mb).await;
         h.note_conversation(Uuid::new_v4());
         let refused = p
-            .grow_worker(&model, asked, h.clone(), Requester::Swarm)
+            .grow_worker(&model, asked, h.clone(), Requester::Swarm, RunShape::Plain)
             .await;
         assert!(matches!(
             refused,
@@ -16408,7 +16530,7 @@ mod tests {
         );
 
         let refused = p
-            .grow_worker(&model, asked, h.clone(), Requester::Swarm)
+            .grow_worker(&model, asked, h.clone(), Requester::Swarm, RunShape::Plain)
             .await;
         assert!(
             matches!(refused, Err(SwarmError::LocalMemoryUnavailable(_))),
@@ -16757,7 +16879,7 @@ mod tests {
         let pool = ModelProcessPool::new(std::path::PathBuf::from("/tmp/swarmllm-grow-raced"));
         let (_idle, wanted, h) = card_with_an_idle_model_and_a_one_layer_worker(&pool, 190).await;
         let refused = pool
-            .charge_additional_segment(&wanted, (0, 32), &h, Requester::Swarm)
+            .charge_additional_segment(&wanted, (0, 32), &h, Requester::Swarm, RunShape::Plain)
             .await
             .expect_err("32 x 190 is more than the whole budget");
         assert_eq!(
@@ -16766,7 +16888,7 @@ mod tests {
             "the control: idle and untouched since it refused, it may be replaced"
         );
 
-        pool.charge_additional_segment(&wanted, (1, 2), &h, Requester::Swarm)
+        pool.charge_additional_segment(&wanted, (1, 2), &h, Requester::Swarm, RunShape::Plain)
             .await
             .expect("another request's one layer fits");
         assert_eq!(
@@ -16794,7 +16916,13 @@ mod tests {
         h.note_conversation(Uuid::new_v4());
 
         let err = match pool
-            .grow_worker(&wanted, (0, 32), h.clone(), Requester::Swarm)
+            .grow_worker(
+                &wanted,
+                (0, 32),
+                h.clone(),
+                Requester::Swarm,
+                RunShape::Plain,
+            )
             .await
         {
             Err(e) => e,
@@ -20327,7 +20455,7 @@ mod admission_tests {
         // A range the card takes whole goes there whole — not by the spawn's
         // experts-in-RAM count, which the loader would otherwise apply.
         let grown = p
-            .grow_worker(&m, (26, 28), h.clone(), Requester::Owner)
+            .grow_worker(&m, (26, 28), h.clone(), Requester::Owner, RunShape::Plain)
             .await;
         assert!(matches!(grown, Ok(Growth::Grown(_))), "{:?}", grown.err());
         assert_eq!(
@@ -20340,7 +20468,7 @@ mod admission_tests {
         // Twenty more layers do not fit the card whole: every layer goes there
         // with the fewest layers' experts in the machine's memory.
         let grown = p
-            .grow_worker(&m, (28, 48), h.clone(), Requester::Owner)
+            .grow_worker(&m, (28, 48), h.clone(), Requester::Owner, RunShape::Plain)
             .await;
         assert!(
             matches!(grown, Ok(Growth::Grown(_))),
@@ -20439,7 +20567,7 @@ mod admission_tests {
         };
 
         let grown = p
-            .grow_worker(&m, (26, 48), h.clone(), Requester::Owner)
+            .grow_worker(&m, (26, 48), h.clone(), Requester::Owner, RunShape::Plain)
             .await;
         assert!(matches!(grown, Ok(Growth::Grown(_))), "{:?}", grown.err());
         assert!(

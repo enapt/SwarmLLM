@@ -890,6 +890,81 @@ fn subsumed_segment_keys<'a>(
 /// runs that instance's weights, so one kept after it would keep their memory
 /// alive after the daemon released it. Asked wherever a loaded range leaves
 /// the map — the daemon's `Unload`, and a larger range superseding it.
+/// Serve a run inside a range this worker loaded from that instance's own
+/// weights (#449, `split::view`): no layer read from disk or held a second
+/// time. Always from an instance that LOADED its weights, never another view,
+/// so dropping that instance drops every view of it ([`drop_views_of`]).
+/// `Ok(false)` where no loaded instance holds the run or can be cut there
+/// (`SplitModel::view_of`); an error where the instance already keeps
+/// [`MOST_VIEWS_A_COPY`](crate::inference::split::view::MOST_VIEWS_A_COPY)
+/// views and a conversation is using every one.
+fn serve_from_a_loaded_copy(
+    models: &mut HashMap<(usize, usize, usize, usize), SplitModel>,
+    kv_store: &KvCacheStore,
+    model_id: &crate::types::ModelId,
+    key: (usize, usize, usize, usize),
+) -> Result<bool, SwarmError> {
+    use crate::inference::split::view::{serves_inside, MOST_VIEWS_A_COPY};
+    let (layer_start, layer_end, _, _) = key;
+    let Some((root, view)) = models
+        .iter()
+        .filter(|((ls, le, tr, ts), m)| {
+            *tr == 0
+                && *ts == 1
+                && m.viewed_from().is_none()
+                && serves_inside((*ls, *le), (layer_start, layer_end))
+        })
+        .find_map(|((ls, le, _, _), m)| m.view_of(layer_start, layer_end).map(|v| ((*ls, *le), v)))
+    else {
+        return Ok(false);
+    };
+    // The copy's views, oldest first; one no conversation uses gives way.
+    let mut views: Vec<_> = models
+        .iter()
+        .filter(|(_, m)| m.viewed_from() == Some(root))
+        .map(|(k, m)| {
+            (
+                *k,
+                m.view_built().unwrap_or(0),
+                m.kv_model_key().to_string(),
+            )
+        })
+        .collect();
+    views.sort_by_key(|(_, built, _)| *built);
+    let mut held = views.len();
+    for (k, _, model_key) in &views {
+        if held < MOST_VIEWS_A_COPY {
+            break;
+        }
+        if kv_store.holds_a_conversation_of(model_key) {
+            continue;
+        }
+        models.remove(k);
+        held -= 1;
+        tracing::info!(
+            model = %model_id,
+            gave_way = format!("[{}..{})", k.0, k.1),
+            to = format!("[{layer_start}..{layer_end})"),
+            "model-worker: a run of layers no conversation was using gave its place to another"
+        );
+    }
+    if held >= MOST_VIEWS_A_COPY {
+        return Err(SwarmError::ServiceUnavailable(format!(
+            "this computer is already running {held} different parts of this model at \
+             once and cannot take another until one finishes"
+        )));
+    }
+    tracing::info!(
+        model = %model_id,
+        layers = format!("[{layer_start}..{layer_end})"),
+        from_resident = format!("[{}..{})", root.0, root.1),
+        "model-worker: serving a run of layers from the copy already loaded — \
+         nothing read from disk"
+    );
+    models.insert(key, view);
+    Ok(true)
+}
+
 fn drop_views_of(
     models: &mut HashMap<(usize, usize, usize, usize), SplitModel>,
     held: (usize, usize),
@@ -1135,6 +1210,7 @@ fn take_load_timings() -> Vec<(u64, u32)> {
 /// `shard_window`: if Some, only load shards in this set (VRAM-saving mode).
 fn ensure_model_loaded(
     models: &mut HashMap<(usize, usize, usize, usize), SplitModel>,
+    kv_store: &KvCacheStore,
     data_dir: &std::path::Path,
     model_id: &crate::types::ModelId,
     layer_start: usize,
@@ -1142,41 +1218,51 @@ fn ensure_model_loaded(
     tp_rank: usize,
     tp_size: usize,
     shard_window: &Option<Vec<u32>>,
+    served_from: Option<(usize, usize)>,
 ) -> Result<(), SwarmError> {
     let key = (layer_start, layer_end, tp_rank, tp_size);
     if models.contains_key(&key) {
         return Ok(());
     }
-    // A range inside one this worker loaded is served from that instance's
-    // own weights (#449, `split::view`): no layer is read from disk or held a
-    // second time. Always from an instance that LOADED its weights, never
-    // from another view, so dropping that instance drops every view of it
-    // (`drop_views_of`).
     if tp_size == 1 && crate::inference::split::view::elastic_spans_on() {
-        let view = models
-            .iter()
-            .filter(|((ls, le, tr, ts), m)| {
-                *tr == 0
-                    && *ts == 1
-                    && m.viewed_from().is_none()
-                    && crate::inference::split::view::serves_inside(
-                        (*ls, *le),
-                        (layer_start, layer_end),
-                    )
-            })
-            .find_map(|((ls, le, _, _), m)| {
-                m.view_of(layer_start, layer_end).map(|v| ((*ls, *le), v))
-            });
-        if let Some(((ls, le), view)) = view {
-            tracing::info!(
-                model = %model_id,
-                layers = format!("[{layer_start}..{layer_end})"),
-                from_resident = format!("[{ls}..{le})"),
-                "model-worker: serving a run of layers from the copy already loaded — \
-                 nothing read from disk"
-            );
-            models.insert(key, view);
+        if serve_from_a_loaded_copy(models, kv_store, model_id, key)? {
             return Ok(());
+        }
+        // The daemon counts this run against a range it charged
+        // (`IpcForward::served_from`, `WorkerHandle::serving_range`): that
+        // range is loaded — now, as no forward has loaded it yet — and the run
+        // served from it. Never the run read from disk on its own: nobody
+        // charged that memory, and runs named one after another, each
+        // overlapping the last, would each be loaded beside the others.
+        if let Some(root) = served_from.filter(|r| *r != (layer_start, layer_end)) {
+            if !crate::inference::split::view::serves_inside(root, (layer_start, layer_end)) {
+                return Err(SwarmError::Internal(format!(
+                    "a forward for layers [{layer_start}..{layer_end}) was counted against \
+                     [{}..{}), which does not hold them",
+                    root.0, root.1
+                )));
+            }
+            ensure_model_loaded(
+                models,
+                kv_store,
+                data_dir,
+                model_id,
+                root.0,
+                root.1,
+                0,
+                1,
+                shard_window,
+                None,
+            )?;
+            return if serve_from_a_loaded_copy(models, kv_store, model_id, key)? {
+                Ok(())
+            } else {
+                Err(SwarmError::ServiceUnavailable(format!(
+                    "this computer cannot run layers {layer_start} to {layer_end} of the \
+                     model on their own: its layers read each other's memory, so they \
+                     run only as the whole range it has loaded"
+                )))
+            };
         }
     }
     // From here on this IS a load; the fault delay below stands in for a slow
@@ -1505,6 +1591,7 @@ async fn run_fused_batch_forward(
 
     ensure_model_loaded(
         models,
+        kv_store,
         data_dir,
         &model_id,
         layer_start,
@@ -1512,6 +1599,7 @@ async fn run_fused_batch_forward(
         0,
         1,
         shard_window,
+        first.served_from.map(|(a, b)| (a as usize, b as usize)),
     )?;
 
     // Build per-request input tensors + decode BatchItems.
@@ -2082,6 +2170,7 @@ async fn handle_forward(
     // Ensure the TP-specific model variant is loaded and split
     ensure_model_loaded(
         models,
+        kv_store,
         data_dir,
         &model_id,
         layer_start,
@@ -2089,6 +2178,7 @@ async fn handle_forward(
         tp_rank,
         tp_size,
         shard_window,
+        fwd.served_from.map(|(a, b)| (a as usize, b as usize)),
     )?;
 
     // A chain whose two ends this worker holds (`FarRuns`): a decode forward
@@ -7306,8 +7396,14 @@ const _: () = assert!(DRAFT_MARGIN_POSITIONS > crate::config::MAX_GUESSES_PER_CH
 /// so the two arms can be compared inside ONE binary. Read once.
 #[cfg(test)]
 mod subsumption_tests {
-    use super::{drop_views_of, ensure_model_loaded, subsumed_segment_keys};
+    use super::{drop_views_of, ensure_model_loaded, subsumed_segment_keys, KvCacheStore};
+    use crate::error::SwarmError;
+    use crate::inference::split::view::MOST_VIEWS_A_COPY;
     use std::collections::HashMap;
+
+    fn store() -> KvCacheStore {
+        KvCacheStore::new(std::time::Duration::from_secs(60))
+    }
 
     /// The reported sequence (#010): a worker holding [16..48) and [0..16) is
     /// asked for [0..48). Both are covered, so both are redundant — before
@@ -7371,24 +7467,183 @@ mod subsumption_tests {
             (0, 4, 0, 1),
             crate::inference::split::tests::plain_test_model(4, 64),
         );
-        ensure_model_loaded(&mut models, empty.path(), &id, 1, 3, 0, 1, &None)
+        let kv = store();
+        ensure_model_loaded(&mut models, &kv, empty.path(), &id, 1, 3, 0, 1, &None, None)
             .expect("served from the loaded copy, not read from disk");
         assert!(crate::inference::split::view::shares_weights_with(
             &models[&(1, 3, 0, 1)],
             &models[&(0, 4, 0, 1)]
         ));
         // Inside the view too, and still from the loaded copy.
-        ensure_model_loaded(&mut models, empty.path(), &id, 2, 3, 0, 1, &None).unwrap();
+        ensure_model_loaded(&mut models, &kv, empty.path(), &id, 2, 3, 0, 1, &None, None).unwrap();
         assert_eq!(models[&(2, 3, 0, 1)].viewed_from(), Some((0, 4)));
         // A tensor-parallel shape is never a view: it would load (and here fail).
-        assert!(ensure_model_loaded(&mut models, empty.path(), &id, 1, 3, 0, 2, &None).is_err());
+        assert!(
+            ensure_model_loaded(&mut models, &kv, empty.path(), &id, 1, 3, 0, 2, &None, None)
+                .is_err()
+        );
         // Reaching outside the loaded copy loads (and here fails).
-        assert!(ensure_model_loaded(&mut models, empty.path(), &id, 2, 5, 0, 1, &None).is_err());
+        assert!(
+            ensure_model_loaded(&mut models, &kv, empty.path(), &id, 2, 5, 0, 1, &None, None)
+                .is_err()
+        );
 
         // The copy goes, and its views with it.
         models.retain(|&(ls, le, _, _), _| !(ls == 0 && le == 4));
         drop_views_of(&mut models, (0, 4));
         assert!(models.is_empty(), "{:?}", models.keys().collect::<Vec<_>>());
+    }
+
+    /// #449's bound: a peer naming run after run inside a loaded range does not
+    /// grow the worker without end. A copy keeps `MOST_VIEWS_A_COPY`; past it
+    /// the OLDEST view no conversation is using gives way, and where a
+    /// conversation is using every one the run is refused — never a ninth.
+    #[test]
+    fn a_copy_keeps_a_bounded_number_of_views_and_an_idle_one_gives_way() {
+        assert_eq!(MOST_VIEWS_A_COPY, 8, "the fixture names nine runs");
+        let empty = tempfile::tempdir().unwrap();
+        let id = crate::types::ModelId("m".into());
+        let kv = store();
+        let mut models = HashMap::new();
+        models.insert(
+            (0, 4, 0, 1),
+            crate::inference::split::tests::plain_test_model(4, 64),
+        );
+        // Every run strictly inside [0..4), oldest first.
+        let runs = [
+            (0, 1),
+            (0, 2),
+            (0, 3),
+            (1, 2),
+            (1, 3),
+            (1, 4),
+            (2, 3),
+            (2, 4),
+            (3, 4),
+        ];
+        let views = |models: &HashMap<(usize, usize, usize, usize), _>| {
+            let mut v: Vec<(usize, usize)> = models
+                .iter()
+                .filter(|(_, m): &(_, &crate::inference::split::SplitModel)| {
+                    m.viewed_from().is_some()
+                })
+                .map(|(k, _): (&(usize, usize, usize, usize), _)| (k.0, k.1))
+                .collect();
+            v.sort();
+            v
+        };
+        let serve = |models: &mut HashMap<_, _>, (a, b): (usize, usize)| {
+            ensure_model_loaded(models, &kv, empty.path(), &id, a, b, 0, 1, &None, None)
+        };
+        for run in &runs[..8] {
+            serve(&mut models, *run).unwrap();
+        }
+        assert_eq!(views(&models).len(), 8);
+
+        // A ninth: the oldest, idle, gives way.
+        serve(&mut models, runs[8]).unwrap();
+        let mut expect: Vec<_> = runs[1..].to_vec();
+        expect.sort();
+        assert_eq!(views(&models), expect, "the oldest idle view went");
+
+        // Every view but (1, 2) holds a conversation: (1, 2) goes, though
+        // older ones stand.
+        for (k, m) in &models {
+            if m.viewed_from().is_some() && (k.0, k.1) != (1, 2) {
+                drop(kv.get_or_create(m.kv_model_key(), "chat", 1));
+            }
+        }
+        serve(&mut models, runs[0]).unwrap();
+        assert!(!models.contains_key(&(1, 2, 0, 1)), "the idle one went");
+        assert!(
+            models.contains_key(&(0, 2, 0, 1)),
+            "an older one in use stood"
+        );
+        assert_eq!(views(&models).len(), 8);
+
+        // Every view in use: a ninth is refused, and nothing moved.
+        let m = &models[&(0, 1, 0, 1)];
+        drop(kv.get_or_create(m.kv_model_key(), "chat", 1));
+        let before = views(&models);
+        match serve(&mut models, (1, 2)) {
+            Err(SwarmError::ServiceUnavailable(msg)) => {
+                assert!(msg.contains("cannot take another"), "{msg}")
+            }
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+        assert_eq!(views(&models), before);
+        assert!(models.contains_key(&(0, 4, 0, 1)), "the copy itself stays");
+    }
+
+    /// #449: a forward the daemon counted against a range it charged
+    /// (`IpcForward::served_from`) is served from that range — and where the
+    /// range cannot be cut there (layers reading each other's caches), it is
+    /// REFUSED, never read from disk on its own: nobody charged that memory.
+    #[test]
+    fn a_run_counted_against_a_loaded_range_is_never_loaded_on_its_own() {
+        let empty = tempfile::tempdir().unwrap();
+        let id = crate::types::ModelId("m".into());
+        let kv = store();
+        let mut models = HashMap::new();
+        models.insert(
+            (0, 4, 0, 1),
+            crate::inference::split::tests::plain_test_model(4, 64),
+        );
+        ensure_model_loaded(
+            &mut models,
+            &kv,
+            empty.path(),
+            &id,
+            1,
+            3,
+            0,
+            1,
+            &None,
+            Some((0, 4)),
+        )
+        .expect("served from the range it was counted against");
+        assert_eq!(models[&(1, 3, 0, 1)].viewed_from(), Some((0, 4)));
+
+        // A root whose layers lend their caches cannot be cut.
+        let mut shared = crate::inference::split::tests::plain_test_model(4, 64);
+        crate::inference::split::tests::lend_a_cache(&mut shared, 3, 1);
+        let mut models = HashMap::new();
+        models.insert((0, 4, 0, 1), shared);
+        match ensure_model_loaded(
+            &mut models,
+            &kv,
+            empty.path(),
+            &id,
+            1,
+            3,
+            0,
+            1,
+            &None,
+            Some((0, 4)),
+        ) {
+            Err(SwarmError::ServiceUnavailable(msg)) => {
+                assert!(msg.contains("only as the whole range"), "{msg}")
+            }
+            other => panic!("expected a refusal, not a load: {other:?}"),
+        }
+        assert_eq!(models.len(), 1);
+
+        // Counted against a range that does not hold it: a bug, said so.
+        assert!(matches!(
+            ensure_model_loaded(
+                &mut models,
+                &kv,
+                empty.path(),
+                &id,
+                2,
+                6,
+                0,
+                1,
+                &None,
+                Some((0, 4)),
+            ),
+            Err(SwarmError::Internal(_))
+        ));
     }
 }
 
@@ -8975,6 +9230,7 @@ async fn handle_generate(
     // Generate is always non-TP (full local inference)
     ensure_model_loaded(
         models,
+        kv_store,
         data_dir,
         &model_id,
         layer_start,
@@ -8982,6 +9238,7 @@ async fn handle_generate(
         0,
         1,
         shard_window,
+        None,
     )?;
 
     ensure_whole_model_for_generate(models, (layer_start, layer_end, 0, 1), &model_id)?;
@@ -9600,6 +9857,7 @@ async fn handle_draft(
     let (layer_start, layer_end) = (d.layer_range.0 as usize, d.layer_range.1 as usize);
     ensure_model_loaded(
         models,
+        kv_store,
         data_dir,
         &d.model_id,
         layer_start,
@@ -9607,6 +9865,7 @@ async fn handle_draft(
         0,
         1,
         shard_window,
+        None,
     )?;
     let key = (layer_start, layer_end, 0, 1);
     ensure_whole_model_for_generate(models, key, &d.model_id)?;
@@ -10605,6 +10864,7 @@ async fn try_register_generate_slot(
 
     if let Err(e) = ensure_model_loaded(
         models,
+        kv_store,
         data_dir,
         &model_id,
         layer_start,
@@ -10612,6 +10872,7 @@ async fn try_register_generate_slot(
         0,
         1,
         shard_window,
+        None,
     ) {
         return Err(SlotAdmitError::Fatal(e));
     }
@@ -11712,6 +11973,7 @@ async fn handle_daemon_msg(
             let began = std::time::Instant::now();
             match ensure_model_loaded(
                 models,
+                kv_store,
                 data_dir,
                 &model_id,
                 layer_start,
@@ -11719,6 +11981,7 @@ async fn handle_daemon_msg(
                 0,
                 1,
                 shard_window,
+                None,
             ) {
                 Ok(()) => tracing::info!(
                     model = %model_id,

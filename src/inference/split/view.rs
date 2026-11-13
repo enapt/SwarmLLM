@@ -42,13 +42,46 @@ pub(crate) fn serves_inside(held: (usize, usize), range: (usize, usize)) -> bool
     held.0 <= range.0 && range.1 <= held.1 && range.0 < range.1 && held != range
 }
 
+/// Where a view's weights come from: the range of the instance that loaded
+/// them, and the view's place in the order views were built — the oldest idle
+/// one is the first to go when a copy has [`MOST_VIEWS_A_COPY`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ViewOf {
+    pub(crate) root: (usize, usize),
+    pub(crate) built: u64,
+}
+
+/// How many views one loaded copy keeps at once. A view costs no weights, but
+/// what a forward keeps per model is its own — on a card each decode graph
+/// holds its working memory while the view lives — and the daemon charges a
+/// view nothing (`WorkerHandle::serves_segment`), so a peer naming run after
+/// run inside a loaded range must not grow it without end. A split names a few
+/// runs of a model; eight leaves room for several coordinators' plans at once.
+/// Past it the oldest view no conversation is using goes (rebuilt on its next
+/// forward; its caches stay, keyed by its range), and where every one is in
+/// use the run is refused.
+///
+/// Prior art: vLLM records graphs only for a fixed list of batch sizes
+/// (`cudagraph_capture_sizes`), so their memory is bounded before the first
+/// request; NVIDIA's forum (threads 294148, 244901, read 2026-11-13): a
+/// graph's memory nodes and per-node records stay with it, and destroying one
+/// does not hand the memory back at once. Taken: a fixed bound per copy, idle
+/// views going first.
+pub(crate) const MOST_VIEWS_A_COPY: usize = 8;
+
 impl SplitModel {
     /// The range this instance was built from, where it is a view of another
     /// (`None` for an instance loaded from disk). A view goes with that
     /// instance: it holds the same weights, so keeping it would keep their
     /// memory after the daemon has released it.
     pub(crate) fn viewed_from(&self) -> Option<(usize, usize)> {
-        self.viewed_from
+        self.viewed_from.map(|v| v.root)
+    }
+
+    /// Where this view stands in the order views were built (`None` for an
+    /// instance loaded from disk).
+    pub(crate) fn view_built(&self) -> Option<u64> {
+        self.viewed_from.map(|v| v.built)
     }
 
     /// A model over exactly `[start..end)` that runs this instance's own
@@ -161,10 +194,16 @@ impl SplitModel {
             },
             stand_in_prior: None,
             grammar_vocab: Default::default(),
-            viewed_from: Some(
-                self.viewed_from
+            viewed_from: Some(ViewOf {
+                root: self
+                    .viewed_from()
                     .unwrap_or((self.layer_start, self.layer_end)),
-            ),
+                built: {
+                    static BUILT: std::sync::atomic::AtomicU64 =
+                        std::sync::atomic::AtomicU64::new(0);
+                    BUILT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                },
+            }),
         })
     }
 

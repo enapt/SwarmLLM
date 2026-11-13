@@ -30,3 +30,12 @@ mod views;
 pub(crate) fn plain_test_model(num_layers: usize, hidden_dim: usize) -> super::SplitModel {
     common::make_test_split_model(num_layers, hidden_dim)
 }
+
+/// Make layer `layer` (an index into the model's own layers) attend layer
+/// `from`'s cache, as Gemma 4 E2B/E4B's shared layers do — a model that runs
+/// only whole (`view_of` refuses it).
+pub(crate) fn lend_a_cache(model: &mut super::SplitModel, layer: usize, from: usize) {
+    if let crate::inference::layers::LayerVariant::Dense(w) = &mut model.layers[layer] {
+        w.kv_source = Some(from);
+    }
+}

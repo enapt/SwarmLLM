@@ -2853,10 +2853,57 @@ segment loaded beside the head's part.
 production sites (spawn, growth both ways, `forward_would_load`,
 `forward_replaces_the_worker`, the guest fit, `holds_range` / `holds_segment`,
 `peer_load_refusal`): a contained run is charged nothing and never retires a
-worker. A run asked for while its charged copy has not loaded yet is loaded
-from disk on its own — inside memory the copy's charge already holds — and the
-copy's later load drops it first (`subsumed_segment_keys`), so the process never
-holds more than the charge.
+worker.
+
+**What the daemon did not charge is never loaded** (hardening, same day). As
+first pushed, a run asked for before its charged copy had loaded was read from
+disk on its own, on the reasoning that it sat inside memory the copy's charge
+held and the copy's later load would drop it. That held for ONE run. Runs that
+overlap without one containing another — `[0..20)`, then `[10..30)` inside a
+charged `[0..48)` that no forward had loaded — each loaded beside the other, and
+together could pass the charge. So a forward for a contained run carries the
+charged range it is counted against (`IpcForward::served_from`, the narrowest
+from `WorkerHandle::serving_range`; never for tensor parallelism), and
+`ensure_model_loaded` serves it from a loaded copy if one holds it, else loads
+THAT range (charged) and serves the run from it, else refuses with
+`ServiceUnavailable` — a run whose copy cannot be cut. An older daemon sends no
+`served_from` (serde default), and the worker behaves as before.
+
+**A tensor-parallel share is charged as itself** (review, same day). As
+first pushed, `serves_segment` took no shape, so a tensor-parallel forward for
+`[c..d)` inside a charged `[a..b)` was handed the worker uncharged — while the
+worker, which never makes a view of a rank's share (it holds a slice of every
+matrix, not the copy's weights), read `(c, d, rank, size)` from disk. Before
+#449 that forward was charged as growth. `process_pool::RunShape` (`Plain` /
+`TensorParallel`) is now a REQUIRED argument of `serves_segment` /
+`serving_range`, threaded from `forward_for_request` (`RunShape::of(tp_meta)`)
+through `get_or_spawn`, `get_or_spawn_once`, `grow_worker`,
+`charge_additional_segment` and `charge_segment_as_split`; every other site
+names `Plain` (a guest, a peer's question, the load ahead, a batch — batches
+carry no tensor-parallel forward). A share charged exactly as a plain range
+already was is still charged once, as before #449.
+
+**A copy keeps at most `view::MOST_VIEWS_A_COPY` (8) views.** A view costs no
+weights, but what a forward keeps per model is its own — on a card each decode
+graph holds its working memory while the view lives — and the daemon charges a
+view nothing, so a peer naming run after run inside a loaded range could grow
+the worker without end. Past the bound, `model_worker::serve_from_a_loaded_copy`
+removes the oldest view no conversation is using
+(`KvCacheStore::holds_a_conversation_of`: any cache entry under its key; its
+caches stay, keyed by its range, and it is rebuilt on its next forward), INFO
+"a run of layers no conversation was using gave its place to another"; where a
+conversation is using every one, the run is refused. Prior art: vLLM records
+graphs only for a fixed list of batch sizes (`cudagraph_capture_sizes`), so their
+memory is bounded before the first request; NVIDIA's forum (threads 294148,
+244901) — a graph's memory nodes stay with it, and destroying one does not hand
+the memory back at once. Taken: a fixed bound per copy, idle views first. A
+split names a few runs of a model; eight leaves room for several coordinators'
+plans at once. The cost of the bound: eight runs each holding a live
+conversation refuse a ninth until one ends (the finished-conversation release,
+`FINISHED_CONVERSATION_AFTER`) — memory stays bounded, and the refusal is an
+ordinary `ServiceUnavailable` the coordinator re-plans around. A view dropped
+by a larger load or an `Unload` takes no conversation with it: its caches are
+keyed by its range and the view is rebuilt on its next forward.
 
 The planner's credit is `HeldRange::serves_slices` (`covers_without_a_load`, read
 by `layers_added_by` and `bytes_added_by`): this node's ranges by the switch, a
@@ -2877,9 +2924,18 @@ loads a contained run again, so it is charged as one.
   — in a data directory with no model (a load fails): served, sharing the
   parent's weights, a view inside a view is still the root's, tp and a run
   reaching outside load (and fail), and `drop_views_of` empties the map.
+- `model_worker::…::a_copy_keeps_a_bounded_number_of_views_and_an_idle_one_gives_way`
+  — all nine runs inside a 4-layer copy: the ninth evicts the oldest; with every
+  view but one holding a conversation, that one goes though older ones stand;
+  with all in use the run is refused and nothing moves.
+- `model_worker::…::a_run_counted_against_a_loaded_range_is_never_loaded_on_its_own`
+  — `served_from` is served from the copy; a copy whose layer lends its cache is
+  REFUSED (`ServiceUnavailable`), not read from disk; a `served_from` that does
+  not hold the run is an `Internal` error.
 - `process_pool::…::a_run_inside_a_charged_range_is_served_without_a_charge`
   and `layers_added_by_mirrors_what_the_worker_loads` (its `serves_slices`
-  block) — the daemon charges nothing for a contained run;
+  block) — the daemon charges nothing for a contained run, and charges a
+  tensor-parallel share inside one as itself (never `served_from`);
   `a_loaded_drafter_is_asked_about_its_own_range` — a guest's run inside its
   loaded range fits (no growth), a range it would grow into still does not.
 - `scheduler::tests::a_run_inside_a_peers_loaded_range_costs_no_load_where_it_serves_slices`
@@ -2902,6 +2958,11 @@ same reply.
   worker adds must be one the daemon also makes, or the daemon charges nothing
   for a run the worker then loads.
 - A peer's contained run is credited only on its bit.
+- The worker loads only what the daemon charged: a contained run is served from
+  its charged range or refused, never loaded on its own; a tensor-parallel share
+  is charged as itself.
+- A copy's views are bounded, and a view a conversation is using is never the
+  one that goes.
 
 ### Residual
 

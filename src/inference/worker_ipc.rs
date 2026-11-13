@@ -455,6 +455,14 @@ pub struct IpcForward {
     pub layer_range: (u32, u32),
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tp_meta: Option<TensorParallelMeta>,
+    /// The range the daemon charged that serves `layer_range` from inside it
+    /// (#449, `WorkerHandle::serving_range`), where it is not `layer_range`
+    /// itself: the worker serves the run from that range's copy — loading the
+    /// range first if no forward has — and never reads the run from disk on
+    /// its own, which nobody charged. `None`: `layer_range` is charged as it
+    /// is, or tensor-parallel.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub served_from: Option<(u32, u32)>,
     /// Byte length of the vision-embedding prefix at the head of the IPC
     /// binary payload (zero when absent). Vision embeddings used to live
     /// inside this JSON header as `Option<Vec<u8>>`, but serde_json encodes
@@ -1671,6 +1679,7 @@ mod tests {
             model_id: ModelId("test".into()),
             layer_range: (0, 4),
             tp_meta: None,
+            served_from: None,
             vision_embeddings_len: 0,
             requester_node_id: None,
             pre_embedded: false,
@@ -1717,6 +1726,7 @@ mod tests {
             model_id: ModelId("test".into()),
             layer_range: (0, 4),
             tp_meta: None,
+            served_from: None,
             vision_embeddings_len: 0,
             requester_node_id: None,
             pre_embedded: false,
@@ -1765,6 +1775,7 @@ mod tests {
             model_id: ModelId("test".into()),
             layer_range: (0, 4),
             tp_meta: None,
+            served_from: None,
             vision_embeddings_len: 12345,
             requester_node_id: None,
             pre_embedded: false,
