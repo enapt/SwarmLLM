@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #449**). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #450**). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -1082,7 +1082,17 @@ against 13.4-15.3 run here; an unmeasured split starts from the drafter's prior 
 shape (`flowall`, not under that setting) still never splits:** (j1) **the split cannot be expressed**: with
 `parallax_partial_ranges` off, a computer that holds the whole model offers only `[0..48)`, so two whole holders
 have no chain between them — every explored request (it fired: "priced OPTIMISTICALLY") chose between this node's
-whole run and the hand-off; the boomerang forces partial ranges on, which is why `dsdwall` could split. (j2) this
+whole run and the hand-off; the boomerang forces partial ranges on, which is why `dsdwall` could split. **Built and
+measured 2026-11-13, not landed** (patch kept outside the repo): partial ranges forced on where this node holds every
+layer and its card runs only part (plus split points where each candidate's card stops). Real link, `real_link.sh
+TAG=beside`, three arms alternating on/off/on, six 160-token replies each: it planned a split only for the two
+explored prose requests — `aa3d1e66 [0..25)` + this node `[25..48)`, "peer-first", streamed checks, 84 round trips
+for 160 tokens, `drafter_on_card=false` — at 10.2 and 8.9 tok/s (first token 4.4-4.6 s); the hand-offs ran prose
+7.8-11.2 / code 8.6-22.6 with it on, prose 9.6-13.7 / code 14.6-20.0 with it off. Three things it lacks: the peer
+must load its 25 layers again beside its whole copy — its worker serves only an exact range (#449, which comes
+first; first token 4.4-4.6 s against 0.4-0.6 handed over); the drafter landed on the processor, so
+no tree could flow (`dsd_tree::trees_wanted` needs it on the card, and #275's room is not left where this node runs
+the whole model); and the orientation tied, so peer-first won by order, not price. (j2) this
 node's own first load is charged `UNMEASURED_LOAD_MS_PER_GIB` (10 s/GiB, ~85 s for the 14B) until a load is timed,
 and a node that always routes away never times one: its whole run was priced 87-121 s per 160-token reply, 19-30 s
 on the explored requests. (j3) a whole run HERE is priced from the static priors at one pass a token (~4.2 tok/s
@@ -1197,7 +1207,30 @@ split wins. Also feed observed per-layer latency into `compute_segment_timeout` 
 the fixed 2 s/layer guess. Depends on #3. **With it off, the GREEDY fallback plans every split
 whose holders overlap** (whole ranges A 0-21 / peer 3-28 have no chain: 16 of 16 plans in
 2026-10-10's #10 rigs), so greedy's pricing is the pricing those splits get — it gained the
-cold-load charge that day.
+cold-load charge that day. **Tried for one case 2026-11-13 and not landed** (#3 (j1)): forced on
+where this node holds every layer and its card runs only part of them, the split it planned on the
+real link ran no faster than the hand-off — the peer loaded its share again beside its whole copy
+(#449). The flip, general or narrow, waits for #449.
+
+#### #449 — A computer serves only the exact layer range it loaded, so a part of a loaded model is loaded again
+`P2` · routing / spreading the load · **OPEN** — 2026-11-13
+
+A model worker keys its loaded ranges by `(start, end, tp)` and runs every layer it loaded: the
+layer loop has no offset and the token table and output head are fixed at load time
+(`model_worker.rs`, "A range CONTAINED IN one already resident"). So a peer with a model loaded
+whole that is planned `[22..48)` reads 26 layers from disk again and holds them twice (report
+#021: 19 of 48 layers, ~3.4 GB of a 14B), and the planner rightly charges it as a cold load
+(`process_pool::layers_added_by` credits only an exact or strictly-subsumed range). Every split
+of computers that hold a model whole pays it — which is most of the swarm for the popular
+models, and the load-spreading goal (each computer runs as little as it can, more computers
+make it faster) needs a computer to serve ANY slice of what it holds: Petals servers serve any
+sub-span of their loaded blocks (the client names the block ids it wants; the server's
+`handler.py` runs exactly those of the ones it hosts). Needs: a forward over `[a..b)` of a loaded `[s..e)` (skip the token table
+unless `a == 0`, skip the head unless `b == num_layers`), a KV cache per request sized and keyed
+by the range it runs, the prefix cache keyed the same (`lookup_chain`), admission over that
+range, and `layers_added_by` crediting a contained range — then #180's A/B and #3 (j1). Prior
+art: Petals (above). Measured cost on the real link 2026-11-13: #3 (j1)'s split had its peer load
+`[0..25)` beside its resident `[0..48)` (first token 4.4-4.6 s).
 
 #### #129 — A model a few MB too large for the card is sent on a boomerang across continents
 `P2` · routing · **PARTIAL** — 2026-09-27, narrowed 2026-10-04 and 2026-10-05 (fit verdict fixed in v0.3.227), 2026-10-07 (cold loads waited for and priced, released in v0.3.230) · history: archive row #129
