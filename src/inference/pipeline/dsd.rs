@@ -105,6 +105,11 @@ pub(super) fn say_running_without_guesses(
     let now = Instant::now();
     if said.len() >= MOST_REMEMBERED {
         said.retain(|_, (at, _)| now.duration_since(*at) < SAY_AGAIN_AFTER);
+        // Every one said within the window: start over rather than grow — a
+        // line said again early costs less than a map without a bound.
+        if said.len() >= MOST_REMEMBERED {
+            said.clear();
+        }
     }
     let say = |not_said: u32| {
         tracing::info!(
