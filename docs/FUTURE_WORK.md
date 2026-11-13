@@ -6321,6 +6321,18 @@ grep `^| N |`).
   Evidence: `docs/invariants/scheduling.md` § "A split is priced for the rounds it takes" ("Each tail of a split").
   On the real link (`real_link.sh` `TAG=j5`, 18:13Z): the third request's exploration priced `tail=Far` at 8.0 and
   ran the split here-first (`30a0e2fd:0-24 + aa3d1e66:24-48`, 16.7 tok/s prose); every split after it ran here-first.
+- #3 (j11) — **After a split left a few layers here, this computer priced every further layer at its processor's
+  speed.** The j7 fix read a worker holding part of a model too big for the card, all of it on the card, as `(its card
+  layers, the model's)` — so the first split's shape decided every later one. On the real link (`TAG=j10`, arm 2) the
+  first split put `[44..48)` here; every later plan read this node `card_layers=Some(4)` (then 8) beside
+  `max_hostable_layers=Some(26)`, priced the rest at the processor's 5.4, and gave the far computer 40-44 of the 14B's
+  48 layers (one such split ran prose at 2.4 tok/s). A live worker grows on the card (no processor rung, gotcha #806)
+  and the planner's bound never offers it more than the card's room, so `card_share_for_planning` now counts the held
+  card layers PLUS that room (`local_layers_leaving` on the card; a live worker's fixed terms are paid, so no requester
+  is read). A run wider than that is a fresh card/processor split, whose share is near it. Test (red with the room
+  left out): `a_worker_holding_part_of_a_model_too_big_for_the_card_reports_the_cards_layers`. Prior art: Ollama places
+  a runner by the layers that WOULD fit the card's free memory (`llm/memory.go` `EstimateGPULayers`), never by an
+  earlier placement. To verify on the real link with the release.
 - #3 (j8) — **A copy that had just served was narrowed for card room it did not need.** Prune's phase 0 reads other
   programs' share of the card as its used memory less our charges, but a worker's pool keeps what it freed until it
   has been idle `cuda_pool::IDLE_TRIM` (60 s); read inside that minute, our own freed memory counted as another

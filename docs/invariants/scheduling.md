@@ -3877,6 +3877,24 @@ offload costs each layer on the device that holds it. Test:
 `a_worker_holding_part_of_a_model_too_big_for_the_card_reports_the_cards_layers` (red with the case
 off; controls: a model the card holds whole, and a worker holding every layer).
 
+**And the layers it can still grow by on the card** (2026-11-13, FUTURE_WORK #3 (j11), real link
+`TAG=j10`). "The rest of a run here on the processor" was wrong for a run the worker GROWS into: a
+live worker grows on the device its spawn charged (gotcha #806), and this node's bound
+(`max_hostable_layers_for_planning`, for a running card worker the card's room alone) never offers
+it more. So the first split's shape decided every later one: arm 2's first split put `[44..48)`
+here, and every later plan read `card_layers=Some(4)` (then 8, holding `[0..4)` too) beside
+`max_hostable_layers=Some(26)` (then 22), priced everything past those layers at the processor's
+5.4, and gave the far computer 40-44 of 48 layers — one of those splits ran prose at 2.4 tok/s.
+`card_share_for_planning` now reports `(held card layers + the card's room, the model's layers)`,
+capped at the model's: every layer a plan may give it within its bound is priced on the card. A
+run wider than the bound is a fresh card/processor split replacing an idle worker
+(`fresh_run_layers`), whose card share is near that figure — a few layers optimistic for the whole
+run at most, against up to 26 pessimistic before. The room is `local_layers_leaving` on the card
+with no guest: a live worker's fixed terms are paid, so the requester is never read there. Prior
+art: Ollama places a runner by the layers that WOULD fit the card's free memory (`llm/memory.go`
+`EstimateGPULayers`), never by an earlier placement. Test: the same one, asserting the share is the
+held layers plus the bound (red with the room left out).
+
 ## A computer short of its card shares the rest
 
 **Rule (2026-11-13, FUTURE_WORK #3 (j1)).** Where this node holds every layer of a model, the

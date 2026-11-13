@@ -9202,9 +9202,10 @@ impl ModelProcessPool {
     /// split alone, a range grown later never counted (#361).
     ///
     /// **A worker holding PART of a model the card cannot hold whole, all of
-    /// it on the card, has a share too**: `(its layers on the card, the
-    /// model's layers)` — the card runs those, and the rest of a run here
-    /// would go to the processor. Read as "one device" (`None`), the planner
+    /// it on the card, has a share too**: `(its layers on the card plus the
+    /// layers the card has room to grow it by, the model's layers)` — the
+    /// card runs those, and only a run wider than that goes partly to the
+    /// processor (#3 (j11), below). Read as "one device" (`None`), the planner
     /// took the whole model's fit verdict (`serves_on_cpu`: processor, since
     /// #3 (j)'s `whole_model_on_card`) for every range, and priced the very
     /// layers the card held at the processor's speed: after the first split of
@@ -9233,7 +9234,30 @@ impl ModelProcessPool {
             let part_of_a_model_too_big = on_card > 0
                 && self.split_for(model_id, &ranges) == SplitFor::Part
                 && self.would_fit_on_gpu(model_id) == Some(false);
-            return part_of_a_model_too_big.then_some((on_card as usize, layers as usize));
+            // **And the layers it can still grow by on the card** (#3 (j11)):
+            // a live worker grows on the device its spawn charged — the card,
+            // no processor rung (gotcha #806) — and the planner's bound on
+            // this node (`max_hostable_layers_for_planning`, the card's room
+            // for a running worker) never offers it more, so every layer a
+            // plan gives it within that bound runs on the card. Read as the
+            // layers loaded alone, the first split's shape decided every
+            // later one: after it left `[44..48)` here, the next plans read
+            // `card_layers=Some(4)` beside room for 26 more, priced the rest
+            // at the processor's speed, and gave the far computer 40-44 of
+            // the 14B's 48 layers (real link `TAG=j10`, 2026-11-13). Ollama
+            // places a runner by the layers that WOULD fit the card's free
+            // memory (`llm/memory.go` `EstimateGPULayers`), never by what
+            // an earlier placement loaded. A live worker's growth reads no
+            // requester on the card (its fixed terms are paid), so none is
+            // asked for here.
+            let growth = if part_of_a_model_too_big {
+                self.local_layers_leaving(model_id, true, Requester::Swarm, None)
+                    .unwrap_or(0)
+            } else {
+                0
+            };
+            let card = on_card.saturating_add(growth).min(layers);
+            return part_of_a_model_too_big.then_some((card as usize, layers as usize));
         }
         if !self.planning_on_card(model_id) {
             return None;
@@ -17975,6 +17999,13 @@ mod tests {
     /// speed, so after a split ran `[24..48)` here no split here won again.
     /// Its controls: the same worker for a model the card holds whole, and
     /// one holding every layer.
+    ///
+    /// **And the layers it can still grow by on the card count as the card's**
+    /// (#3 (j11), the real link `TAG=j10`): growth lands on the card, and the
+    /// planner's bound on this node never offers it more than that room, so
+    /// the share is the held card layers plus that bound. Read as the held
+    /// layers alone, a worker left holding `[44..48)` priced every further
+    /// layer at the processor's speed beside room for 26 more on the card.
     #[tokio::test]
     async fn a_worker_holding_part_of_a_model_too_big_for_the_card_reports_the_cards_layers() {
         use crate::inference::model_arch::ModelArch;
@@ -18017,6 +18048,11 @@ mod tests {
                 held.1 - held.0,
                 "fixture: all on the card"
             );
+            // Charged what its layers take, as its spawn was.
+            let mb = p.estimate_gpu_footprint_mb(&m, Some(held), KvCharge::Typical);
+            if p.admit_to_gpu(&m, mb) {
+                h.charged_mb.store(mb, Ordering::Release);
+            }
             p.workers.insert(m.clone(), h);
             (p, m)
         };
@@ -18026,7 +18062,18 @@ mod tests {
             Some(false),
             "fixture: too big whole"
         );
-        assert_eq!(p.card_share_for_planning(&m), Some((14, 28)));
+        let growth = p
+            .max_hostable_layers_for_planning(&m, Requester::Swarm)
+            .expect("a bound on the card");
+        assert!(
+            growth > 0 && growth < 14,
+            "fixture: room for some layers more, not the whole model: {growth}"
+        );
+        assert_eq!(
+            p.card_share_for_planning(&m),
+            Some((14 + growth as usize, 28)),
+            "every layer a plan may give it within its bound runs on the card"
+        );
         // A model the card holds whole: its layers run on the card wherever.
         let (p, m) = pool(900, (14, 28)).await;
         assert_eq!(p.card_share_for_planning(&m), None);

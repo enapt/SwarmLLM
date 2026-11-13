@@ -218,7 +218,7 @@ way (`ResidentModelLayers::gives_way`, summed by `NodeCapability::given_way_for`
 `processor_tokens_per_sec_7b`, read only through **`NodeCapability::processor_beside_card`**, added to
 the card's bound by `scheduler::layers_beside_card` and recorded as `NodeCandidate::card_layers` — for
 a warm peer, the layers its card RUNS (`ResidentModelLayers::card_layers` ← **`WorkerHandle::layers_on_card`**,
-range by range as each was placed, the one figure this node's `card_share_for_planning` reads too — a worker holding PART of a model too big for the card, all of it on the card, reads `(its card layers, the model's)`, never "one device": read so, the layers its card held were priced at the processor's speed after the first split here, 2026-11-13), never
+range by range as each was placed, the one figure this node's `card_share_for_planning` reads too — a worker holding PART of a model too big for the card, all of it on the card, reads `(its card layers + the card's room for more, the model's)`, never "one device": read so, the layers its card held were priced at the processor's speed after the first split here, 2026-11-13 — and never its held layers alone: growth lands on the card, and read so the first split's 4 layers here priced every later one off the card, #3 (j11)), never
 every layer it holds, and never more than its whole card holds (an older peer's word; #361). A
 range is then priced PER DEVICE — **`NodeCandidate::layers_by_device`**: its first `card_layers` at the
 card's speed (the loader's order), the rest at `processor_tokens_per_sec`
