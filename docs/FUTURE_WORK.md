@@ -1096,7 +1096,8 @@ from the peer's stated 45 tok/s (5.3 s for 160 tokens) against the 24 it deliver
 and its hand-offs fell from ~24 to ~10 tok/s; later splits were served as views (`copy`). Its daemon charged no
 covering range (else the forward would carry `served_from`) and its worker held none (else a view). Local rigs do
 not reproduce it: `split_rig.sh slices` with `SLICES_FIRST=handoff` (B's whole copy from A's two hand-offs) passed
-on the processor (tinyllama) and on the card (llama-3.2-3b). Hypotheses, unranked: the idle copy was unloaded
+on the processor (tinyllama) and on the card (llama-3.2-3b), the latter at 130 ms (`RIG_NETNS=1`) with the far
+tail and the drafter on the card, the tree flowing — B served [3..28) from its resident [0..28). Hypotheses, unranked: the idle copy was unloaded
 between requests (prune's soft-unload under another program's card pressure, the idle unload), or the worker was
 retired and respawned before the forward — a growth's `Respawn`, or `get_or_spawn_once`'s `retire_for_gpu`: a worker
 short of its card, idle past the promotion floor, is unloaded and the fresh spawn places only the REQUESTED segment,
@@ -6333,7 +6334,10 @@ grep `^| N |`).
   tok/s and the flow (16.7 prose in the arm before) was never priced off the prior. Now only a split of the tail
   the next exploration would try restarts its count (`SplitRounds::tail_to_explore`). Prior art: UCB keeps its count
   per arm (Auer et al. 2002). Test: `an_untried_split_is_explored_on_a_doubling_schedule` (red with any split
-  restarting the count).
+  restarting the count). On the real link (`real_link.sh` `TAG=j9`, CUDA build of `9cf7e618`, 19:04-19:09Z): arm 2's
+  first split streamed (tail here, `aa3d1e66,da558cf5`) and the very next request explored the far tail at 8.0
+  (`da558cf5,aa3d1e66`) — before, that arm ran streams to its end. That flow took 101 s: the far card had been running
+  4 of its layers on its processor since arm 1's first split read [24..48) from disk there (#3 (j8)).
 - #3 (j7) — **After the first split here, this computer priced its own card's layers at its processor's speed.** Found
   reading the same run: once the explored split left `[24..48)` of the 14B loaded on this card, every later plan read
   this node `has_gpu=false card_layers=None` at 6.4 tok/s (a whole run 61.7 s against the hand-off's 10.7), so no split
