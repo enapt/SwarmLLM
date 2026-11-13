@@ -1,5 +1,45 @@
 # Changelog
 
+## [0.3.284-alpha] — 2026-11-13
+
+**A computer that has served several models is no longer offered as nearly full.** When a computer runs a
+model for someone and then sits idle, that model stays loaded in case it is asked again, and gives its memory
+back the moment another model needs it. But the room a computer told the swarm it had counted those idle models
+as memory in use, so a computer that had served a few models in turn looked almost full: on the swarm's 70B
+model, one computer was offered 5 of its 80 layers, though it could take far more once its idle models stepped
+aside. Each computer now also says how much memory its idle models of OTHER models would give back, counted
+exactly as its own loading would free it (a model idle at least 30 seconds, not one a reply is using, not a
+small model guessing for another), and planners count it as room. The figure says nothing about who used a
+model or when. On a two-computer test, after one had served another model for the other, the room it was
+priced at for the next model rose from 8 to 14 layers, and from 4 to 11 with less memory.
+
+**A long prompt sent to a split that another computer leads is waited for while it is read.** A split model
+whose parts run on several computers is often led by the computer holding its first part. The computer that
+handed it the request waited a fixed time for the first word, however long the prompt, and a long prompt on
+slow machines failed while the split was still reading it. The leading computer now reports how far its chain
+has read the prompt, as a share of the whole, as a computer running a whole model already did, and the wait
+goes on while those reports keep moving, up to an hour. A pass that continues a conversation from what the
+split already holds is not reported, so the reports cannot tell anyone how much of an earlier conversation
+those computers keep.
+
+**A long prompt read by a split's farther computers no longer loses the nearer computers' part of it.** Each
+computer of a split keeps its part of a conversation while the others work, and threw away a part untouched for
+ten minutes in case nobody would come back for it. A long prompt read by slow computers further along the split can
+take longer than that, and the computers that had already read their part threw it away while they waited, so the
+reply failed at its first word: a 4,306-token prompt for Gemma 4 31B split over three computers was read for 13
+minutes, lost, read again and lost again. A part whose prompt has been read now waits for its first word up to an
+hour, the longest the computer leading the split waits for the others. A computer holding a middle part
+of a split no longer unloads it as unused while the computers after it read the prompt, and when a request is
+tried again, a computer no longer turns it away because of the part it still holds from the attempt before, which
+the new attempt replaces. If the computer that asked disappears in the middle of a long prompt (its laptop sleeps, it
+crashes or loses its network), the computers holding its parts let them go once they have had no connection to it
+for five minutes, instead of keeping them, and a graphics card's memory with them, for the whole hour.
+
+**Smaller changes.** A split of a Qwen 3.5, 3.6 or 3.8 model no longer logs a warning that looked like a fault
+each time its block guesser is set aside for the rest of a reply; the reply was never affected. Five new
+advisories against the DNS library the network layer uses are in code no build of ours includes (DNSSEC
+validation), and are listed with the reasons in SECURITY.md. The code builds and passes its checks on Rust 1.100, released this week; nothing changes for a computer running it.
+
 ## [0.3.283-alpha] — 2026-11-12
 
 **A long prompt sent to a slow computer is waited for while that computer reads it.** When a model runs whole on

@@ -149,23 +149,23 @@ idea, applied to running AI instead of sharing files.)
 
 ## How fast is it?
 
-<!-- speeds:begin, reviewed for 0.3.283-alpha. Refreshed at every release: .claude/rules/completeness.md § "README speeds" -->
+<!-- speeds:begin, reviewed for 0.3.284-alpha. Refreshed at every release: .claude/rules/completeness.md § "README speeds" -->
 Speed is in **tokens a second**: a token is a word or part of one, and most
 people read about 5 a second. The figures are from the project's test laptop,
 with an 8 GB NVIDIA RTX 3070 graphics card and an 8-core AMD Ryzen 7 5800H
 processor, on its own or teamed up with volunteers' computers.
 
 <!-- release-check:begin -->
-<!-- from the v0.3.282 release check, timed on the downloaded release -->
+<!-- from the v0.3.283 release check, timed on the downloaded release -->
 **On one computer.** Each model reads a 1,800-token document and writes 128
 tokens about it.
 
 | Model | Runs on | Writing (tokens a second) | Reading (tokens a second) |
 |---|---|---|---|
-| Qwen2.5 Coder 7B | the graphics card | 58 | 1,830–1,840 |
-| Qwen2.5 14B | card and processor (too big for the card) | 16.3–19.9 | 640–660 |
-| Qwen3 30B-A3B (2-bit) | card and processor (a mixture of experts, too big for the card) | 20.6–23.1 | 240 |
-| Llama 3.2 3B | the processor only | 15.5–15.7 | 80 |
+| Qwen2.5 Coder 7B | the graphics card | 54–55 | 1,670–1,760 |
+| Qwen2.5 14B | card and processor (too big for the card) | 15.9–18.4 | 590–620 |
+| Qwen3 30B-A3B (2-bit) | card and processor (a mixture of experts, too big for the card) | 21.9–23.8 | 230 |
+| Llama 3.2 3B | the processor only | 15.2–15.4 | 80 |
 <!-- release-check:end -->
 
 **Across computers.** The same laptop, in Thailand, asking volunteers'
@@ -402,7 +402,7 @@ SwarmLLM is built by a human developer working with Claude Code, an AI
 programming assistant: the human sets the direction, tests and reviews, and
 Claude writes the code. We say so openly so you can judge the project on its
 merits. Every change is checked by thousands of automated tests
-(4553 lib tests + 80 integration tests) before it ships, and regular
+(4566 lib tests + 80 integration tests) before it ships, and regular
 automated audits are logged in the repository. Scrutiny and contributions are
 welcome.
 
