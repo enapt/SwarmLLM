@@ -166,6 +166,7 @@ pub(super) fn capability(ceiling_mb: Option<u64>, disk_mb: u64) -> NodeCapabilit
         auto_manage: None,
         updates_itself: None,
         storage: None,
+        models_served: None,
         resident_layers: Vec::new(),
         context_ceiling_tokens: None,
         model_load_ms_per_gib: None,

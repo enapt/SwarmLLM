@@ -17,9 +17,10 @@ pub(super) struct PeerTarget {
 /// (`SharedState::no_route_error`): a 404 naming the models this node knows,
 /// `NoModelLoaded` only for a node that knows none. It was `NoModelLoaded` for
 /// every node, which told one holding models to go and download one (#324).
-/// Not a "busy" class: only a model with no manifest here reaches the wait (a
-/// known one goes to the router), and a retry after its manifest lands skips
-/// the wait altogether.
+/// Not a "busy" class: a model reaches the wait only with no manifest here or
+/// no computer in reach holding the parts it needs — a known one held by
+/// nobody reachable is told so (`ModelIncompleteInSwarm`, #452) and counted as
+/// asked for — and a retry once a holder or its manifest lands skips the wait.
 pub(super) fn cold_start_slot<'a>(
     state: &crate::daemon::SharedState,
     model: &ModelId,
@@ -755,6 +756,7 @@ mod tests {
                     auto_manage: None,
                     updates_itself: None,
                     storage: None,
+                    models_served: None,
                     resident_layers: Vec::new(),
                     context_ceiling_tokens: None,
                     model_load_ms_per_gib: None,
@@ -912,5 +914,47 @@ mod tests {
             ),
             "after the wait, a node holding models is told the name is unavailable"
         );
+    }
+
+    /// #452: a model every holder gave back is still known here, and nobody in
+    /// reach holds a part of it. The last answer says that — all its layers,
+    /// "download its missing parts" — not "no model is loaded", and the request
+    /// counts as asked for here and wakes the download pass, which is how a
+    /// model pruned for want of use comes back once somebody wants it.
+    #[tokio::test]
+    async fn a_known_model_nobody_in_reach_holds_is_told_so_and_counted_as_asked_for() {
+        let state = pool_member_hosting(crate::config::Config::default(), "theirs").await;
+        add_model(&state, "ours-q4", Held::WholeHere);
+        // Every part on a computer that is not connected.
+        let gone = add_model(&state, "gone-q4", Held::OnPeer);
+        let asked = |state: &crate::daemon::SharedState| {
+            state
+                .models
+                .model_request_counts
+                .get(&gone)
+                .map_or(0, |c| c.load(std::sync::atomic::Ordering::Relaxed))
+        };
+        match state.no_route_error(&gone) {
+            crate::error::SwarmError::ModelIncompleteInSwarm { model_id, span, .. } => {
+                assert_eq!(model_id, "gone-q4");
+                assert_eq!(span, "layers 0-3", "every layer of it");
+            }
+            other => panic!("expected ModelIncompleteInSwarm, got {other:?}"),
+        }
+        assert_eq!(asked(&state), 1, "the request is counted as asked for");
+
+        // Control: its holder connects — a holder in reach is not "nobody",
+        // and the request is not counted here (the router counts what it takes).
+        state
+            .connected_node_ids
+            .insert(crate::types::NodeId([9u8; 32]));
+        assert!(
+            !matches!(
+                state.no_route_error(&gone),
+                crate::error::SwarmError::ModelIncompleteInSwarm { .. }
+            ),
+            "a holder in reach is not nobody"
+        );
+        assert_eq!(asked(&state), 1);
     }
 }

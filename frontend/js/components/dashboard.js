@@ -1029,8 +1029,16 @@
         return;
       }
 
-      // Filter out ghost models
+      // Filter out ghost models — but not one every computer gave back because
+      // nobody ran it (#452, `held_before`): no part of it is anywhere, yet the
+      // node can still run it, so it is listed in its own folded group below
+      // the rest while that give-back is remembered, never dropped.
+      var heldBefore = [];
       models = models.filter(function(m) {
+        if (m.held_before && !(m.local || m.hosted_shards > 0) && m.acquisition !== 'downloading') {
+          heldBefore.push(m);
+          return false;
+        }
         if (m.local || m.hosted_shards > 0) return true;
         if (m.peers_hosting > 0) return true;
         // A model everyone else has in a DIFFERENT version still exists, and
@@ -1046,7 +1054,7 @@
         return anyHolder;
       });
 
-      if (models.length === 0 && !hasCloud && !hasSubscription) {
+      if (models.length === 0 && heldBefore.length === 0 && !hasCloud && !hasSubscription) {
         _disconnectMatrixObservers(list);
         list.innerHTML = '';
         empty.style.display = '';
@@ -1156,7 +1164,7 @@
 
       // Swarm models section
       var swarmBody;
-      if (models.length > 0) {
+      if (models.length > 0 || heldBefore.length > 0) {
         var swarmSection = document.createElement('details');
         swarmSection.className = 'models-section';
         swarmSection.open = true;
@@ -1817,6 +1825,51 @@
           });
         }
       });
+
+      // Models no computer holds now (#452): every holder gave it back because
+      // nobody ran it. Folded away below the rest, most recently run first —
+      // this node can still run each one, so it stays listed while the
+      // give-back is remembered (four weeks), with the one thing a reader can
+      // do about it: get it again. Opened or not survives the 30 s re-render.
+      if (heldBefore.length && swarmBody) {
+        heldBefore.sort(function(a, b) {
+          return ((b.held_before.last_ran || 0) - (a.held_before.last_ran || 0)) ||
+            ((b.held_before.given_back || 0) - (a.held_before.given_back || 0));
+        });
+        var whenText = function(key, secs) {
+          var days = Math.max(0, Math.floor((Date.now() / 1000 - secs) / 86400));
+          return days === 0 ? I18n.t(key + '_today') : I18n.t(key, { count: days });
+        };
+        var heldRows = heldBefore.map(function(m) {
+          var before = m.held_before;
+          var facts = [];
+          if (m.total_size_bytes) facts.push(U.formatBytes(m.total_size_bytes));
+          facts.push(before.last_ran
+            ? whenText('dashboard.held_before_ran', before.last_ran)
+            : I18n.t('dashboard.held_before_never_ran'));
+          facts.push(whenText('dashboard.held_before_given_back', before.given_back));
+          return '<div class="held-before-row">' +
+            '<div class="held-before-text">' +
+              '<span class="held-before-name">' + U.escapeHtml(U.formatModelDisplayName(m.id)) + '</span>' +
+              '<span class="held-before-facts">' + U.escapeHtml(facts.join(' · ')) + '</span>' +
+            '</div>' +
+            '<button type="button" class="btn-action btn-download" data-request-model="' + U.escapeHtml(m.id) + '">' +
+              U.escapeHtml(I18n.t('dashboard.held_before_get_again')) + '</button>' +
+          '</div>';
+        }).join('');
+        var heldGroup = document.createElement('details');
+        heldGroup.className = 'models-held-before';
+        heldGroup.open = !!S._heldBeforeOpen;
+        heldGroup.innerHTML =
+          '<summary class="models-group-head">' +
+            '<span class="models-group-title">' + U.escapeHtml(I18n.t('dashboard.group_held_before')) + '</span>' +
+            '<span class="models-group-count">' + heldBefore.length + '</span>' +
+          '</summary>' +
+          '<p class="held-before-note">' + U.escapeHtml(I18n.t('dashboard.held_before_note')) + '</p>' +
+          heldRows;
+        heldGroup.addEventListener('toggle', function() { S._heldBeforeOpen = heldGroup.open; });
+        swarmBody.appendChild(heldGroup);
+      }
 
       // --- Shared helpers for cloud + subscription card rendering ---
       function getCtxLen(cm) {

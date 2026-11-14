@@ -1714,6 +1714,7 @@ impl SharedState {
                 metered: Default::default(),
                 model_request_counts: DashMap::new(),
                 requests_served_for_peers: DashMap::new(),
+                served_for_peers_at: DashMap::new(),
                 resource_schedule: RwLock::new(config.resources.schedule.clone()),
                 prune_history: RwLock::new(VecDeque::new()),
                 shard_p2p_failed: dashmap::DashSet::new(),
@@ -4113,6 +4114,14 @@ impl SharedState {
             .entry(model_id.clone())
             .or_insert_with(|| std::sync::atomic::AtomicU64::new(0))
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        // And WHEN (#452): the swarm's use of the model, the one input the
+        // prune pass folds into `model_use` (`watch_model_use`) and this node
+        // advertises by the day (`NodeCapability::models_served`), so every
+        // holder judges "nobody runs it" by what the swarm runs — never by the
+        // owner's use, which stops above.
+        self.models
+            .served_for_peers_at
+            .insert(model_id.clone(), chrono::Utc::now().timestamp());
     }
 
     /// `node_id` saw a request for `model_id` through to the end — resets its
@@ -4271,10 +4280,60 @@ impl SharedState {
     /// the dashboard…" is wrong advice to a node holding models — both surfaces
     /// gave it once a waited-for catch-up had not landed (pre-release review,
     /// 2026-10-20). Only a node that knows no model gets `NoModelLoaded` (503).
+    ///
+    /// **A model this node knows that no reachable computer holds a part of**
+    /// (#452: every holder gave it back, nobody having run it) is
+    /// `ModelIncompleteInSwarm` over all its layers — "download its missing
+    /// parts from the model's card" — never `NoModelLoaded`, whose "go and get a
+    /// model" was wrong for it. And the request is RECORDED: counted as asked
+    /// for here (`model_request_counts`, as the router counts a request it
+    /// takes — none reaches the router for a model nobody holds) and the
+    /// download pass woken, so a model pruned for want of use is fetched again
+    /// once somebody asks for it (`AutoShardManager::nobody_runs` yields to
+    /// `asked_for`). Counted only here: the owner's requests are never gossiped
+    /// (#389 (a)). Called once per request that found no route.
     pub fn no_route_error(&self, model_id: &crate::types::ModelId) -> crate::error::SwarmError {
+        if let Some(manifest) = self.model_registry.get_manifest(model_id) {
+            if !manifest.shards.is_empty() && !self.a_reachable_computer_holds_a_part_of(&manifest)
+            {
+                self.models
+                    .model_request_counts
+                    .entry(model_id.clone())
+                    .or_insert_with(|| std::sync::atomic::AtomicU64::new(0))
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                self.models.auto_manage_notify.notify_one();
+                return crate::error::SwarmError::ModelIncompleteInSwarm {
+                    model_id: model_id.0.clone(),
+                    layer: 0,
+                    span: crate::error::describe_missing_layers(0, manifest.num_layers.max(1)),
+                };
+            }
+        }
         self.model_registry
             .reject_if_unknown_model(model_id, false)
             .unwrap_or(crate::error::SwarmError::NoModelLoaded)
+    }
+
+    /// Does this node, or a computer connected to it, hold any part of
+    /// `manifest`'s model, of any build, on its own word
+    /// (`ModelRegistry::part_has_a_holder_where` + [`Self::holder_standing`] —
+    /// the reading #333 forgets a peer's model by)? A DHT record or a computer
+    /// that left is no holder. The one answer for the last answer to a request
+    /// ([`Self::no_route_error`]) and the dashboard's list of models no computer
+    /// holds now (`api::admin_models::listing`).
+    pub(crate) fn a_reachable_computer_holds_a_part_of(
+        &self,
+        manifest: &crate::types::ModelManifest,
+    ) -> bool {
+        manifest.shards.iter().any(|shard| {
+            self.model_registry.part_has_a_holder_where(
+                &crate::types::ShardId {
+                    model_id: manifest.id.clone(),
+                    index: shard.index,
+                },
+                |holder| self.holder_standing(holder).is_some(),
+            )
+        })
     }
 
     /// Does `node_id` advertise every bit of `feature`? Unknown counts as no —

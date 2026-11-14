@@ -3583,6 +3583,7 @@ mod tests {
                 auto_manage: None,
                 updates_itself: None,
                 storage: None,
+                models_served: None,
                 resident_layers: Vec::new(),
                 context_ceiling_tokens: None,
                 model_load_ms_per_gib: None,

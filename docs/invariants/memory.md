@@ -1300,9 +1300,9 @@ only with a higher estimated frequency): a model is held only on evidence it is 
 `would_shed_once_fetched`, never fetches it — and per model in the prune pass, which gives back
 every part in one pass however few hold it (`PruneCandidate::nobody_runs`, the machinery the
 2026-10-15 rule built: the replica count, busy holders and re-acquirable are skipped, a model IN
-USE is still waited for), its projector too. It answers yes only when a fresh reading of what
-people run does not name the model (`SharedState::popular_outside_the_swarm`, #389 (b)) AND the
-model is none of:
+USE is still waited for), its projector too. As built on 2026-11-01 it answered yes only when a
+fresh reading of what people run did not name the model (`SharedState::popular_outside_the_swarm`,
+#389 (b)) — **superseded 2026-11-14 by the swarm's use, below** — AND the model is none of:
 
 - **run here within `USE_WINDOW_SECS` (14 days) after being watched for it** — the record
   (`ModelUse`, `models.model_use`, saved in `model_use`) begins at this node's first part of the
@@ -1321,11 +1321,95 @@ model is none of:
 - **the drafter of a split this computer runs** (`drafts_for_a_split`: its work is counted
   toward the model it drafts for, and a drafter given back could never be fetched to be used).
 
-**No fresh reading, nothing given back for want of use** (`popular::MOST_SNAPSHOT_AGE_SECS`, 3
-days): a node offline, or one HuggingFace has not answered, cannot tell a model nobody runs from
-one it has not heard about. Swarm use only ever SPARES, never evicts: with a handful of testers it
-says little about what people run (the owner, 2026-11-01), so the outside reading decides what is
-added and what is kept beyond use.
+~~**No fresh reading, nothing given back for want of use**~~ (superseded 2026-11-14, #452: an
+offline node now gives back nothing because no computer ADVERTISES the swarm's use, below). On
+2026-11-01 swarm use only ever spared: with a handful of testers it said little about what people
+run, so the outside reading decided what was added and what was kept beyond use.
+
+#### The swarm's use decides what is KEPT; the outside reading only what is TRIED (2026-11-14, #452)
+
+**What it replaced, measured**: on the Proxmox box (44,000 MB limit, journal 11-07 → 11-14) 4,222
+prune passes gave back **0** models for nobody running them: HuggingFace's list named nearly every
+model held (the Qwen 3.5/3.6 family, Gemma, the 70B's base), and while no reading was fresh nothing
+at all could go. Its full computers kept 57 parts "not more copies than the target" and 21 "the last
+close holder in this region", so with 3-4 cards online the models people used found no room and
+requests were forced over the Australia-Thailand link. The owner (2026-11-14): "nobody_runs should
+be true for the swarm rather than huggingface, should have separate statistic pools" — and "we need
+to be leaning much harder towards usable/popular/recent models".
+
+**Three pools, each deciding one thing** (`unused::unused_everywhere`):
+
+- **The swarm's use — KEEP.** `SharedState::note_request_served_for_a_peer` (the one writer, past
+  the pool-member and unknown-model checks) stamps `models.served_for_peers_at`;
+  `watch_model_use` folds it into `ModelUse::served_for_others` (saved, moved by the hour) — on
+  every auto-manage tick, OUTSIDE the enabled gate, or a node with auto-manage or prune off (the
+  live node, an anchor) never moved its stamps and every other holder read its models as unused.
+  `unused::models_served` advertises it by the DAY in `NodeCapability::models_served` (additive,
+  `Option`: `None` = an older build), beside the day the node began holding each model, sorted by
+  id, ≤ `ModelServed::MOST_ENTRIES` (512; `dispatch::capability_fits` refuses more, or an id over
+  256 bytes). A copy held here is given back once quiet here for the window (its trial, as before)
+  AND no connected holder advertises a serve within it (`SwarmUse::Quiet`). **One connected
+  holder that cannot say** — `models_served` absent and a part held by its capability's
+  `hosted_shards`, or no capability yet and the registry names it a holder — **or no computer
+  advertising at all** (offline) is `SwarmUse::Unknown`, and nothing is given back.
+- **This computer's use — keeps THIS copy.** `ModelUse::last_used` (the owner's and peers' use
+  here) keeps the copy here and is never advertised (#389 (a)): a model the owner runs keeps the
+  owner's copy, and other computers' unused copies go.
+- **What people run outside the swarm — TRY.** For a model this node holds none of: fetched when
+  the reading names it AND the swarm's online cards could hold it between them
+  (`AutoShardManager::worth_trying` → `unused::the_cards_could_run`: its estimate against
+  `swarm_card_mb`, the download pass's once-a-cycle `global_pool_vram_mb`, 0 = unknown, anything
+  goes — the 122B and 397B parts that took the 70B's room had been tried on cards that could not
+  hold them; the same answer is `is_scarce`'s `run_outside`), not when the reading says nobody runs it (as before), and **never where
+  the swarm tried it and nobody ran it** — a holder advertising a hold of the whole window with no
+  serve in it, or a give-back for want of use within `GAVE_BACK_FOR_SECS` (two windows: prune
+  writes `ModelUse::gave_back_unused` with the model's last part, `note_gave_back_unused`, and the
+  record is advertised with `held_since` 0). Without this the reading would bring a model nobody
+  runs back every window — the #246 loop at the scale of a whole model. **A peer's stamp is only
+  its word** (security review 2026-11-14): a connected computer could list 512 new releases as
+  given back and no node would try any. So "held it the window unserved" is weighed only from a
+  computer holding a part (its capability's parts or the registry's — what it announced, the lever
+  announcing already gives), a peer's give-back only with a second (`unused::GAVE_BACK_WITNESSES`,
+  gotcha #788's rule — a model nobody runs is given back by every holder within days, so two is met
+  wherever more than one held it), no stamp dated past tomorrow, and a list full at `MOST_ENTRIES`
+  that stops short of a model it holds cannot say (`Word::Silent`). Guards:
+  `one_computers_word_alone_never_makes_a_model_tried` and the scoring test above.
+
+**Prior art** (FUTURE_WORK #452): Scarlett (EuroSys '11) pays a base and budgets every replica above
+it by demand over a long window; the kubelet's image GC and IPFS keep only what is in use or pinned
+— none keeps a copy floor for content nobody asks for. TinyLFU's admission stays the frame: the
+reading is what ADMITS a newcomer for a trial; only use keeps it.
+
+**Peers' word** (P3): a peer can claim a serve to keep a model (what holding already does) or a
+give-back to keep the reading from trying one (a request still fetches it); the list is bounded at
+the door. Only connected computers are read.
+
+**A model nobody holds stays usable and visible** (2026-11-14). Given back everywhere, its manifest
+stays known (`cleanup_orphaned_model_files` keeps `manifest.json`) and the code that runs it stays,
+but before this the request path went router → peer → cold-start wait → `NoModelLoaded` ("go and
+select a model" — wrong advice), counted nothing (the router counts only a request it takes), and the
+dashboard's ghost filter dropped the row. Now **`SharedState::no_route_error`** — the one last answer,
+every surface — for a known model whose parts no computer in reach holds
+(`a_reachable_computer_holds_a_part_of`: `part_has_a_holder_where` + `holder_standing`, #333's
+reading) answers `ModelIncompleteInSwarm` over all its layers (the hint: get its parts from its
+card), counts the request in `model_request_counts` and wakes the download pass — `asked_for` beats
+`nobody_runs` and the give-back record. Counted here only (the owner's use is never gossiped), so the
+ring's share of parts comes back on its own; the owner's whole copy comes from the dashboard. The
+listing marks such a model `held_before` (`unused::held_before`: this node's give-back record and
+every connected computer's advertised one, while remembered — `GAVE_BACK_FOR_SECS`; the latest
+serve any of them saw) and the dashboard shows it in a folded group, "No computer holds these now",
+with "Get it again" (`POST /api/admin/models/:id/add`). Tests:
+`resolver::tests::a_known_model_nobody_in_reach_holds_is_told_so_and_counted_as_asked_for`, the
+`held_before` half of `prune_gives_back_a_model_nobody_runs_however_few_hold_it`.
+
+What a change must keep: a held copy is never judged by the outside reading; the swarm is judged
+only where every connected holder can say; the owner's use is never advertised; the give-back is
+remembered past its last part. Tests: `unused::tests::*`,
+`scoring::fetch_what_prune_keeps::{a_model_nobody_runs_is_given_back_and_each_kind_of_use_keeps_it,
+a_model_the_swarm_tried_and_nobody_ran_is_not_fetched_on_popularity_alone,
+prune_gives_back_a_model_nobody_runs_however_few_hold_it,
+a_held_model_is_watched_from_its_first_part_and_forgotten_with_its_last}`,
+`dispatch::capability_fits_tests::a_capability_listing_more_served_models_than_a_node_could_is_refused`.
 
 **One quantisation per model** (#389 (e)) follows: the reading names one file per base
 (`popular::pick_file` — Q4_K_M, Q8_0 at 2B and under), so a second quantisation of a base people
@@ -1490,7 +1574,17 @@ loaded here, not held here whole or all but a few parts of (`completes_model_her
 any pressure). Never past what keeps a copy for what it does — carrying a model, a near chain, a
 drafter, privacy's ends, pins, the `--shards` range. Prune gives such copies back
 (`PruneCandidate::to_make_room`) until the bytes it frees this pass reach the room noted, and
-re-checks each against the floor rather than the target. Both passes ask through `would_shed_copy`,
+re-checks each against the floor rather than the target. **All or nothing (2026-11-14, #452)**:
+before any copy goes for the room, `prune::room_this_pass_could_make` adds what the pass gives back
+anyway (copies over their target, a model nobody runs) to the copies that may go only for the room
+(above its floor, within the per-model limit, in the pass's order); short of the room, none goes
+for it (AdaptSize, NSDI '17 § 3.1 — admission decided before eviction). Without it the Proxmox box
+(11-08) gave back a 70B copy a pass toward a 1,539 MB room its one-a-pass candidates made 518 MB
+of; the part asking never fit, and the download pass spent the 518 MB on the copy just given back
+— shard 72 three times in 8 days, its holders falling to 0 (#246's mechanism). Logged
+"DIAG: no copy given back for room". Tests `room_all_or_nothing_tests::*` in `prune.rs` (the
+arithmetic) and `room_wanted::a_room_the_pass_cannot_complete_takes_no_copy` in `manager.rs` (the
+pass: red with `!room_completes` taken out, a part given back for a room three parts large). Both passes ask through `would_shed_copy`,
 so while the room is noted the download pass does not fetch a spare copy back (gotcha #795), and
 `select_within_budget` skips the copies tier when a hole did not fit and none was chosen — else
 the room would fill with copies before the hole could use it. Petals moves a server only when no

@@ -410,10 +410,11 @@ impl AutoShardManager {
             // (`coverage::only_a_split_runs`). Its parts short of their target
             // may ask a full node for room (`is_scarce`, #371).
             let only_a_split_runs = asked_for && self.only_a_split_runs(&manifest);
-            // People run it outside the swarm: its part held by one computer
+            // People run it outside the swarm, and the swarm's cards could run
+            // it (`unused::worth_trying`, #452): its part held by one computer
             // may ask a full node for room as if asked for (`is_scarce`).
             let run_outside =
-                self.shared_state.popular_outside_the_swarm(&manifest.id) == Some(true);
+                self.worth_trying(&manifest.id, || Some(manifest.total_size_bytes)) == Some(true);
 
             // VRAM fitness: does the global pool have enough VRAM to actually run this model?
             // Don't block downloads, but deprioritize models the pool can't run yet.
@@ -1972,9 +1973,44 @@ mod fetch_what_prune_keeps {
         }));
     }
 
+    /// Every connected peer advertises its models' use (#452), each listing
+    /// only the entries given for it here (by its id byte).
+    fn swarm_says(state: &Arc<SharedState>, entries: &[(u8, crate::types::ModelServed)]) {
+        let peers: Vec<NodeId> = state
+            .connected_node_ids
+            .iter()
+            .map(|n| n.key().clone())
+            .collect();
+        for peer in peers {
+            let mut list: Vec<crate::types::ModelServed> = entries
+                .iter()
+                .filter(|(byte, _)| NodeId([*byte; 32]) == peer)
+                .map(|(_, m)| m.clone())
+                .collect();
+            list.sort_by(|a, b| a.model_id.cmp(&b.model_id));
+            let mut cap = super::super::test_support::capability(None, 1_000_000);
+            cap.models_served = Some(list);
+            if let Some(mut info) = state.peer_registry.get_mut(&peer) {
+                info.capability = Some(cap);
+            }
+        }
+    }
+
+    /// A peer's entry for `mid` (#452): held since `held_since`, last served
+    /// for another computer at `served` (Unix seconds, 0 = never).
+    fn holder_entry(mid: &ModelId, held_since: i64, served: i64) -> crate::types::ModelServed {
+        crate::types::ModelServed {
+            model_id: mid.0.clone(),
+            held_since: crate::types::ModelServed::day_of(held_since),
+            served: crate::types::ModelServed::day_of(served),
+            gave_back_unused: 0,
+        }
+    }
+
     /// `busy_model` that nothing asks for, watched here for `watched_days`
-    /// without a request, beside a fresh reading of what people run that names
-    /// another model.
+    /// without a request, in a swarm whose every connected computer advertises
+    /// its use and served it for nobody, beside a fresh reading of what people
+    /// run that names another model.
     fn model_nobody_runs(
         state: &Arc<SharedState>,
         manager: &AutoShardManager,
@@ -1988,16 +2024,18 @@ mod fetch_what_prune_keeps {
             mid.clone(),
             crate::model::auto_manage::unused::ModelUse {
                 watched_since: now - watched_days * 86_400,
-                last_used: 0,
+                ..Default::default()
             },
         );
+        swarm_says(state, &[]);
         reading_names(state, &["someone-else-q4"], now);
         mid
     }
 
     /// A model nobody runs is given back, and its parts are not fetched again
     /// (#389 (d)) — however few hold it: its only copy here. Each piece of
-    /// evidence that someone runs it keeps it, alone.
+    /// evidence that someone runs it keeps it, alone — and what people run
+    /// outside the swarm is not such evidence for a copy held here (#452).
     #[test]
     fn a_model_nobody_runs_is_given_back_and_each_kind_of_use_keeps_it() {
         use crate::model::auto_manage::unused::ModelUse;
@@ -2022,19 +2060,54 @@ mod fetch_what_prune_keeps {
 
         let now = chrono::Utc::now().timestamp();
         reading_names(&state, &["old-coder-q4"], now);
-        assert!(!shed(), "people run it");
+        assert!(
+            shed(),
+            "people run it outside the swarm, nobody in it: given back all the same (#452)"
+        );
         reading_names(&state, &["someone-else-q4"], now - 4 * 86_400);
         assert!(
-            !shed(),
-            "no fresh reading of what people run: nobody can say"
+            shed(),
+            "no fresh reading of what people run: the swarm's word decides a copy held here"
         );
         reading_names(&state, &["someone-else-q4"], now);
+        swarm_says(
+            &state,
+            &[(7, holder_entry(&mid, now - 40 * 86_400, now - 86_400))],
+        );
+        assert!(!shed(), "a holder served it for another computer yesterday");
+        swarm_says(
+            &state,
+            &[(7, holder_entry(&mid, now - 40 * 86_400, now - 20 * 86_400))],
+        );
+        assert!(shed(), "last served before the window");
+        if let Some(mut info) = state.peer_registry.get_mut(&NodeId([9; 32])) {
+            info.capability = None;
+        }
+        assert!(
+            !shed(),
+            "a holder that cannot say — an older build, or not heard yet — may be running it"
+        );
+        swarm_says(&state, &[]);
+        for byte in [7u8, 8, 9] {
+            if let Some(mut info) = state.peer_registry.get_mut(&NodeId([byte; 32])) {
+                if let Some(cap) = info.capability.as_mut() {
+                    cap.models_served = None;
+                }
+            }
+        }
+        assert!(
+            !shed(),
+            "no computer advertises its use: nobody can say what the swarm runs"
+        );
+        swarm_says(&state, &[]);
+        assert!(shed(), "control: nobody again");
         let watched = |since_days: i64, used_days: Option<i64>| {
             state.models.model_use.insert(
                 mid.clone(),
                 ModelUse {
                     watched_since: now - since_days * 86_400,
                     last_used: used_days.map_or(0, |d| now - d * 86_400),
+                    ..Default::default()
                 },
             );
         };
@@ -2080,6 +2153,8 @@ mod fetch_what_prune_keeps {
         let (state, manager) = manager_with(Config::default());
         let unused = model_nobody_runs(&state, &manager, "old-coder-q4", 15);
         let asked = busy_model(&state, &manager, "coder-7b-q4");
+        // `busy_model` put its peers back with nothing advertised.
+        swarm_says(&state, &[]);
         manager.evaluate_and_prune().await;
         let held = |mid: &ModelId| {
             crate::model::shard::model_dir(&state.config.node.data_dir, &mid.0)
@@ -2091,6 +2166,177 @@ mod fetch_what_prune_keeps {
             held(&asked),
             "control: a model asked for keeps its only copy here"
         );
+        // Its last part here went: remembered, and told to the swarm (#452).
+        let record = state
+            .models
+            .model_use
+            .get(&unused)
+            .map(|r| *r)
+            .expect("the give-back is remembered");
+        assert!(record.gave_back_unused > 0, "{record:?}");
+        manager.watch_model_use();
+        assert!(
+            state.models.model_use.get(&unused).is_some(),
+            "a pass does not forget it with the last part"
+        );
+        let told = crate::model::auto_manage::unused::models_served(&state);
+        let entry = told
+            .iter()
+            .find(|m| m.model_id == unused.0)
+            .expect("advertised");
+        assert_eq!(entry.held_since, 0, "held no more");
+        assert_eq!(
+            entry.gave_back_unused,
+            crate::types::ModelServed::day_of(record.gave_back_unused)
+        );
+
+        // The dashboard keeps listing it, folded away, while the give-back is
+        // remembered — this node's, or a connected computer's by the day.
+        use crate::model::auto_manage::unused::{held_before, GAVE_BACK_FOR_SECS};
+        let now = chrono::Utc::now().timestamp();
+        let before = held_before(&state, &unused, now).expect("listed as held before");
+        assert_eq!(before.given_back, record.gave_back_unused);
+        assert!(
+            held_before(&state, &asked, now).is_none(),
+            "control: a model never given back is not"
+        );
+        let theirs = ModelId("their-old-q4".into());
+        let day = crate::types::ModelServed::day_of;
+        swarm_says(
+            &state,
+            &[(
+                7,
+                crate::types::ModelServed {
+                    model_id: theirs.0.clone(),
+                    held_since: 0,
+                    served: day(now - 20 * 86_400),
+                    gave_back_unused: day(now - 3 * 86_400),
+                },
+            )],
+        );
+        let theirs_before = held_before(&state, &theirs, now).expect("a peer's give-back");
+        assert_eq!(theirs_before.last_ran, Some(day(now - 20 * 86_400)));
+        assert_eq!(theirs_before.given_back, day(now - 3 * 86_400));
+        assert!(
+            held_before(&state, &theirs, now + GAVE_BACK_FOR_SECS).is_none(),
+            "listed no longer than the give-back is remembered"
+        );
+    }
+
+    /// The swarm's word decides what a computer holding NONE of a model
+    /// fetches (#452): what people run outside the swarm is tried, but not one
+    /// the swarm already tried and nobody ran — a holder kept it a window
+    /// unserved, or this node or another gave it back for that.
+    #[test]
+    fn a_model_the_swarm_tried_and_nobody_ran_is_not_fetched_on_popularity_alone() {
+        let (state, manager) = manager_with(Config::default());
+        let mid = busy_model(&state, &manager, "new-release-q4");
+        let local = state.identity.node_id().clone();
+        state.model_registry.remove_shard_holder(
+            &ShardId {
+                model_id: mid.clone(),
+                index: 0,
+            },
+            &local,
+        );
+        state.models.model_request_counts.remove(&mid);
+        state.models.model_use.remove(&mid);
+        let now = chrono::Utc::now().timestamp();
+        reading_names(&state, &["new-release-q4"], now);
+        swarm_says(&state, &[]);
+        let part1 = ShardId {
+            model_id: mid.clone(),
+            index: 1,
+        };
+        let fetch_sheds = || {
+            manager.would_shed_copy(
+                &part1,
+                &[local.clone(), NodeId([7; 32]), NodeId([8; 32])],
+                0.0,
+                &[],
+            )
+        };
+        assert!(!fetch_sheds(), "people run it outside the swarm: tried");
+        swarm_says(&state, &[(7, holder_entry(&mid, now - 20 * 86_400, 0))]);
+        assert!(
+            fetch_sheds(),
+            "a holder kept it a window and served it for nobody"
+        );
+        swarm_says(
+            &state,
+            &[(7, holder_entry(&mid, now - 20 * 86_400, now - 86_400))],
+        );
+        assert!(!fetch_sheds(), "served yesterday: the swarm runs it");
+        swarm_says(&state, &[]);
+        assert!(!fetch_sheds(), "control: tried again");
+
+        // One computer's word alone never makes it tried (security review
+        // 2026-11-14): a stamp from one holding none of it, one give-back, and a
+        // list too full to say are each not weighed.
+        state.model_registry.remove_shard_holder(
+            &ShardId {
+                model_id: mid.clone(),
+                index: 2,
+            },
+            &NodeId([9; 32]),
+        );
+        swarm_says(&state, &[(9, holder_entry(&mid, now - 20 * 86_400, 0))]);
+        assert!(
+            !fetch_sheds(),
+            "a computer holding none of it cannot say it held it unused"
+        );
+        let gave_back = |byte: u8| {
+            (
+                byte,
+                crate::types::ModelServed {
+                    model_id: mid.0.clone(),
+                    held_since: 0,
+                    served: 0,
+                    gave_back_unused: crate::types::ModelServed::day_of(now - 86_400),
+                },
+            )
+        };
+        swarm_says(&state, &[gave_back(9)]);
+        assert!(!fetch_sheds(), "one computer's give-back alone");
+        swarm_says(&state, &[gave_back(9), gave_back(8)]);
+        assert!(fetch_sheds(), "two gave it back: tried");
+        let full_list_and_a_quiet_holder = |listed: usize| {
+            let mut entries: Vec<(u8, crate::types::ModelServed)> = (0..listed)
+                .map(|i| {
+                    let other = ModelId(format!("aaa-other-{i:04}"));
+                    (7, holder_entry(&other, now - 3 * 86_400, 0))
+                })
+                .collect();
+            entries.push((8, holder_entry(&mid, now - 20 * 86_400, 0)));
+            entries
+        };
+        swarm_says(
+            &state,
+            &full_list_and_a_quiet_holder(crate::types::ModelServed::MOST_ENTRIES),
+        );
+        assert!(
+            !fetch_sheds(),
+            "a holder whose list is full cannot say it served nobody"
+        );
+        swarm_says(
+            &state,
+            &full_list_and_a_quiet_holder(crate::types::ModelServed::MOST_ENTRIES - 1),
+        );
+        assert!(
+            fetch_sheds(),
+            "control: a list with room that lacks it says it served nobody"
+        );
+        swarm_says(&state, &[]);
+        manager.note_gave_back_unused(&mid);
+        assert!(
+            fetch_sheds(),
+            "this node gave it back for nobody running it: not fetched back on popularity"
+        );
+        state
+            .models
+            .model_request_counts
+            .insert(mid.clone(), AtomicU64::new(1));
+        assert!(!fetch_sheds(), "asked for now: fetched");
     }
 
     /// ...but not while it is writing a reply: the checks such a copy skips
@@ -2150,6 +2396,32 @@ mod fetch_what_prune_keeps {
             state.db.get_json::<ModelUse>(USE_TREE, &mid.0).unwrap(),
             Some(record),
             "saved"
+        );
+        let advertised = |state: &Arc<SharedState>| {
+            crate::model::auto_manage::unused::models_served(state)
+                .into_iter()
+                .find(|m| m.model_id == mid.0)
+                .expect("held: advertised")
+        };
+        assert_eq!(record.served_for_others, 0, "{record:?}");
+        assert_eq!(
+            advertised(&state).served,
+            0,
+            "the router's request may be the owner's: never told (#389 (a))"
+        );
+        assert_eq!(
+            advertised(&state).held_since,
+            crate::types::ModelServed::day_of(record.watched_since)
+        );
+
+        // A request served for another computer is the swarm's use (#452).
+        state.note_request_served_for_a_peer(uuid::Uuid::new_v4(), &mid, None, None);
+        manager.watch_model_use();
+        let record = state.models.model_use.get(&mid).map(|r| *r).unwrap();
+        assert!(record.served_for_others >= now, "{record:?}");
+        assert_eq!(
+            advertised(&state).served,
+            crate::types::ModelServed::day_of(record.served_for_others)
         );
 
         state.model_registry.remove_shard_holder(

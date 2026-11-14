@@ -204,6 +204,12 @@ pub struct AutoShardManager {
     /// by prune, which may give back spare copies for up to that many bytes
     /// (`prune::spare_for_room`).
     pub(super) room_wanted: std::sync::Mutex<Option<RoomWanted>>,
+    /// The graphics memory of every card the swarm has online, MB, as the
+    /// download pass last summed it (`vram::global_pool_vram_mb`, once a cycle
+    /// — on a node without a card each reading runs `nvidia-smi`); 0 until
+    /// then. What a model is tried on is held to it (`unused::the_cards_could_run`,
+    /// #452).
+    pub(super) swarm_card_mb: std::sync::atomic::AtomicU64,
 }
 
 /// Why a part may ask a node with no storage left to give back a spare copy
@@ -377,6 +383,7 @@ impl AutoShardManager {
             drafter_book: Default::default(),
             targets_seen,
             room_wanted: std::sync::Mutex::new(None),
+            swarm_card_mb: std::sync::atomic::AtomicU64::new(0),
         }
     }
 
@@ -605,6 +612,15 @@ impl AutoShardManager {
                     // with no log signal. Sweep runs every loop tick so
                     // worst-case stall window is ~one interval.
                     sweep_stalled_p2p_permits(&self.shared_state);
+
+                    // What this node saw of its models' use, OUTSIDE the
+                    // enabled gate (#452): it is what the capability tells the
+                    // swarm (`unused::models_served`), and a node with
+                    // auto-manage or prune off still serves its models for
+                    // peers — gated, its stamps never moved, and every other
+                    // holder read its models as run by nobody. Cheap: a record
+                    // is written only when a use moves by an hour.
+                    self.watch_model_use();
 
                     // Finish origin fetches for shards a peer could not prove
                     // intact. Deliberately OUTSIDE the enabled gate below —
@@ -1132,6 +1148,8 @@ impl AutoShardManager {
 
         // Log global pool capacity for visibility
         let pool_vram = global_pool_vram_mb(&self.shared_state);
+        self.swarm_card_mb
+            .store(pool_vram, std::sync::atomic::Ordering::Relaxed);
         tracing::debug!(
             pool_vram_mb = pool_vram,
             peers = self.shared_state.peer_registry.len(),
@@ -2535,6 +2553,39 @@ mod room_wanted {
             assert!(
                 next.len() == 1 && next[0].0 == shape.large,
                 "at {limit_mb} MB: the room goes to the part people asked for ({next:?})"
+            );
+        }
+    }
+
+    /// #452 (2026-11-14): a room is made whole or not at all (AdaptSize's
+    /// admission before eviction, `prune::room_this_pass_could_make`). The
+    /// computer above, but its room three parts large where a pass may give
+    /// back one part of a model (two at urgent pressure): the part would still
+    /// not fit, so no copy goes — a room half made lost a 70B three copies on
+    /// the Proxmox box and fetched nothing. The test above, its room one part,
+    /// is the control: one part goes.
+    #[tokio::test]
+    async fn a_room_the_pass_cannot_complete_takes_no_copy() {
+        for limit_mb in [2_800, 2_500] {
+            let shape = full_node_holding_a_model_whole(limit_mb);
+            asked(&shape.state, &shape.large, 3);
+            shape.manager.evaluate_and_download().await;
+            {
+                let mut noted = shape.manager.room_wanted.lock().unwrap();
+                let room = noted
+                    .as_mut()
+                    .expect("the part no computer holds asks for room");
+                assert!(
+                    room.bytes < 3 * PART,
+                    "fixture: the room set below is larger than the one noted"
+                );
+                room.bytes = 3 * PART;
+            }
+            shape.manager.evaluate_and_prune().await;
+            assert_eq!(
+                parts_here(&shape.state, &shape.copies),
+                vec![0, 1, 2, 3],
+                "at {limit_mb} MB: no copy goes for a room the pass cannot complete"
             );
         }
     }

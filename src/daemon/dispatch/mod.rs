@@ -3705,6 +3705,10 @@ pub(crate) async fn dispatch_network_messages(
 /// peer list (`serialize_peer_to_json`, the WebSocket's `peer_list` on each
 /// connect and change), so a 100k-range list was megabytes a frame per viewer.
 /// A node lists one entry per loaded model and a few ranges each.
+///
+/// `models_served` too (#452): every entry is looked up by every prune and
+/// download pass (`auto_manage::unused`), so it is held to
+/// `ModelServed::MOST_ENTRIES` and each id to `MAX_MODEL_ID_BYTES`.
 pub(crate) fn capability_fits(cap: &crate::types::NodeCapability) -> bool {
     const MAX_OBSERVED_LATENCIES: usize = 256;
     const MAX_HOSTED_SHARDS_IN_CAP: usize = 1024;
@@ -3722,6 +3726,12 @@ pub(crate) fn capability_fits(cap: &crate::types::NodeCapability) -> bool {
                     .filter(|total| *total <= MAX_RESIDENT_RANGES_IN_CAP)
             })
             .is_some()
+        && cap.models_served.as_ref().is_none_or(|served| {
+            served.len() <= crate::types::ModelServed::MOST_ENTRIES
+                && served.iter().all(|m| {
+                    m.model_id.len() <= crate::daemon::state::manifest_sync::MAX_MODEL_ID_BYTES
+                })
+        })
 }
 
 pub(crate) mod layer_forward;
@@ -3778,6 +3788,42 @@ mod capability_fits_tests {
         assert!(!capability_fits(&cap), "too many ranges across entries");
         cap.resident_layers = vec![resident(0); 257];
         assert!(!capability_fits(&cap), "too many entries");
+    }
+
+    /// The models a peer says it holds and serves (#452) are looked up by
+    /// every prune pass: held to what a node could list, each id bounded.
+    #[test]
+    fn a_capability_listing_more_served_models_than_a_node_could_is_refused() {
+        let mut cap: crate::types::NodeCapability = serde_json::from_value(serde_json::json!({
+            "node_id": vec![0u8; 32],
+            "gpu": null,
+            "ram_total_mb": 8192u64,
+            "ram_available_mb": 4096u64,
+            "disk_available_mb": 100000u64,
+            "bandwidth_mbps": 100.0f32,
+            "hosted_shards": [],
+            "max_contribution": "Moderate",
+            "uptime_seconds": 100u64,
+            "version": "0.3.288-alpha"
+        }))
+        .expect("a bare capability");
+        assert!(cap.models_served.is_none(), "an older build's capability");
+        assert!(capability_fits(&cap));
+        let served = |id: String| swarmllm_types::ModelServed {
+            model_id: id,
+            held_since: 86_400,
+            served: 0,
+            gave_back_unused: 0,
+        };
+        cap.models_served = Some(vec![served("m".into()); 40]);
+        assert!(capability_fits(&cap), "an ordinary node's list");
+        cap.models_served = Some(vec![
+            served("m".into());
+            swarmllm_types::ModelServed::MOST_ENTRIES + 1
+        ]);
+        assert!(!capability_fits(&cap), "too many entries");
+        cap.models_served = Some(vec![served("m".repeat(257))]);
+        assert!(!capability_fits(&cap), "an id longer than any model's");
     }
 }
 

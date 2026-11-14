@@ -334,6 +334,10 @@ above: persisting `uncorroborated_origin_parts` beside `origin_verified`.
 #### #246 — A node near its storage limit fetched back a part prune had just deleted, once in six runs
 `P3` · heal · **OPEN** — 2026-10-09 · history: the v0.3.232 gate, step 12t
 
+> **2026-11-14: seen in the field — #452 defect 3.** The Proxmox box gave back 70B shard 72 three
+> times in 8 days for room a 122B part never used, fetching it back between (holders 2 → 1 → 0).
+> The room path's fix (all or nothing, and room freed kept for the part that asked) is #452's.
+
 `gate232_resume.sh` 12t (`prune_loop_inner.sh`: A at 87% of its storage budget, B and C holding
 every part, a request a minute): the .232 artifact deleted the middle part, fetched it back
 (14:55:15 and 14:56:12 UTC, 57 s apart) and deleted it again — 3 deletions, 2 fetches in 600 s —
@@ -856,6 +860,86 @@ frame, then add a receipt ACK or a per-frame read deadline mirroring request-res
 § 4 item 7); with V1Lazy (#136) request-response is as fast, so there is no speed reason to.
 
 ### Routing and placement
+
+#### #452 — Full computers keep parts of models the swarm never runs, so the models people use find no room
+`P1` · placement · **BUILT, field check open** — 2026-11-14 · history: #389 (d), #400, #401, #246
+
+> **Done on main (2026-11-14), all three defects and both follow-ups.** (1) The swarm-use pool:
+> `unused::nobody_runs` reads the swarm's advertised use (`NodeCapability::models_served`), never
+> HuggingFace's list, for a copy held here; the list only decides what is tried, and a model the swarm
+> tried and nobody ran is not fetched back on it for two windows — on a holder's word, this node's
+> give-back or two others' (`unused::GAVE_BACK_WITNESSES`; one peer's stamp alone never decides,
+> security review 2026-11-14). (2, 3) Room is all or nothing
+> (`prune::room_this_pass_could_make`): no copy goes for a room the pass cannot complete, so none is
+> fetched back into it. The usable gate: a model is tried on the outside reading only where the
+> swarm's online cards could run it (`AutoShardManager::worth_trying`). A request for a known model
+> no computer in reach holds is told so (`ModelIncompleteInSwarm` over its layers, from
+> `SharedState::no_route_error`), counted as asked for and wakes the download pass. The dashboard
+> lists such a model, folded away under "No computer holds these now", while a give-back is
+> remembered (`unused::held_before`, four weeks), with "Get it again". Evidence and tests:
+> `docs/invariants/memory.md` § "The swarm's use decides what is KEPT".
+> **Open**: (a) the field check — on the live swarm once released, give-backs for want of use appear
+> (`nobody runs it` in prune's log) only after a copy's 14-day trial, and no copy goes for a room it
+> cannot complete (`DIAG: no copy given back for room`); (b) a model pruned to no holder for ROOM,
+> not for want of use, leaves no give-back record, so the dashboard does not list it (rare: room keeps
+> two other holders); (c) an owner's request for a model nobody holds counts only here (their use is
+> never gossiped, #389 (a)), so it fetches only the parts the ring gives this node — "Get it again" is
+> how its owner gets the whole model back.
+
+**What the user sees** (2026-11-14): 3-4 cards online, every one full, and requests forced over the
+Australia-Thailand link because the computers that could take a model's parts are holding parts of
+models nobody here runs. "We support those models, however we need to be leaning much harder towards
+usable/popular/recent models, and have the pruning work as needed."
+
+**Read on the Proxmox box (`96842635`, 44,000 MB limit, journal 11-07 → 11-14):** 4,222 prune passes;
+**0** give-backs for "a model nobody runs" (#389 (d)); today's pass finds `candidates=0` — 57 parts kept
+"not more copies than the target", 21 "the last close holder in this region". Three defects:
+
+1. **`nobody_runs` reads HuggingFace, not the swarm** (`unused.rs`): any model the day's HuggingFace
+   list names, or ANY model while no reading is fresh, is never given back, whatever the swarm does with
+   it. The user (11-14): "nobody_runs should be true for the swarm rather than huggingface, should have
+   separate statistic pools". (Separately, the 14-day trial from v0.3.267, 11-01, has not yet elapsed on
+   any copy — so nothing here could have been given back yet in any case.)
+2. **A give-back for room that cannot complete** (`prune.rs` room path): 04:31-04:37Z on .286 the box,
+   1,341 MB over its limit (2,905 MB of `mmproj.gguf` / `tied_output_weight.bin` beside 42,436 MB of
+   parts), gave back three 70B copies (3 → 2 holders) toward rooms of 1,762 and 1,966 MB, ran out of
+   candidates at 920 and 460 MB, and fetched nothing: copies lost, nothing gained.
+3. **Room freed for one part is spent on another — usually the copy just given back** (this is #246's
+   mechanism): 11-08 13:44Z 70B shard 72 given back (518 MB) for Ornith 122B shard 3 (1,539 MB); 13:56Z
+   the download pass, the 122B part not fitting 518 MB and being `Scarce` (not a hole), went on to the
+   lower tiers and fetched shard 72 back (holders 2 < target 3) from AU; 14:02Z given back again. Shard
+   72 was given back 3×, 63 and 70 2× each; 8 of the 40 parts the box touched in 8 days were both given
+   back and fetched, and that evening the swarm's holders of shard 72 fell to 1, then 0.
+
+**Prior art** (research 2026-11-14 — Scarlett EuroSys '11 § "Computing File Replication Factor"; Cohen &
+Shenker SIGCOMM '02 §5-6; Petals `block_selection.py` / `server.py:84`; kubelet `image_gc_manager.go`
+`freeSpace` + `types.go`; kubo `docs/config.md`; AdaptSize NSDI '17 §3.1; Caffeine `evictFromMain`; LHD
+NSDI '18): **no system keeps a copy floor for content nobody asks for** — Scarlett pays a base of 3 and
+budgets everything above it by demand; the kubelet and IPFS protect only what is in use or pinned;
+unrequested content goes in all of them. Targets come from demand over a long window with a cushion
+(Scarlett: `max(cf + δ, 3)`, 24 h window, 12 h period). Anti-oscillation is a band plus a minimum age
+(kubelet 85/80 %, 2 min) and an act-only-for-a-clear-gain margin (Petals 0.75). **Admission is decided
+before eviction** (AdaptSize §3.1) — a rejected newcomer evicts nothing; Caffeine's pairwise loop and the
+kubelet's `freeSpace` both evict partially, acceptable for a cache, not for scarce replicas.
+
+**Design — three statistic pools, each deciding one thing:**
+- **Outside popularity** (HuggingFace's list, unchanged): decides what the swarm TRIES — and only a model
+  the swarm's online cards can run (the "usable" step below).
+- **Swarm use**: each holder stamps the DAY it last served a model for another computer
+  (`SharedState::note_request_served_for_a_peer`, the one writer — it already skips the owner's pool) and
+  advertises, per model it holds, that day and the day it began holding it (`NodeCapability`, additive,
+  `None` from an older build). It never carries the owner's own use (#389 (a)). Decides what the SWARM
+  keeps: `nobody_runs` = no holder served it for another computer within the window, and the copy has
+  been watched for the window (the trial), and the owner's own use (`model_use`, local, private) does
+  not keep THIS computer's copy, and it is not chosen, asked for, a reference model or a drafter. Every
+  live holder must advertise the pool — one older build among them and nothing is judged.
+- **Tried and unused**: a computer that gave a model back for nobody running it advertises so for twice
+  the window; the download pass then does not fetch it for a trial on popularity alone (a request still
+  does) — or HuggingFace's list would bring it back every window.
+
+**Room is all or nothing**: prune plans every copy it would give back for a room, and gives back only
+when they free the whole room; else nothing (AdaptSize). **Usable**: the trial does not start for a
+model the swarm's online cards cannot run usably (the 122B/397B parts that took the 70B's room).
 
 #### #250 — A model held whole here, which the card holds only part of, can be routed through peers at a fraction of local speed
 `P3` · routing · **NARROWED** — 2026-11-06 (was P1 PARTIAL since 2026-10-12; every contributor named below is fixed or the setting working as designed, the prompt price since 10-25) · history: report #035 (a tester, RTX 3060 12 GB, v0.3.232-.234)

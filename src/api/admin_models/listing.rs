@@ -799,6 +799,28 @@ pub async fn list_models(State(state): State<AppState>) -> Json<Vec<serde_json::
                 })),
             );
             obj.insert("num_layers".to_string(), serde_json::json!(m.num_layers));
+            // A model every computer gave back because nobody ran it (#452):
+            // no part of it is anywhere in reach, and the dashboard lists it,
+            // folded away, while that is remembered — never a model that is
+            // only being fetched, or held by a computer that left.
+            if hosted_count == 0
+                && acq_state != Some("downloading")
+                && !state.shared_state.a_reachable_computer_holds_a_part_of(m)
+            {
+                if let Some(before) = crate::model::auto_manage::unused::held_before(
+                    &state.shared_state,
+                    &m.id,
+                    chrono::Utc::now().timestamp(),
+                ) {
+                    obj.insert(
+                        "held_before".to_string(),
+                        serde_json::json!({
+                            "last_ran": before.last_ran,
+                            "given_back": before.given_back,
+                        }),
+                    );
+                }
+            }
             obj.insert("acquisition".to_string(), serde_json::json!(acq_state));
             obj.insert(
                 "acquisition_progress".to_string(),

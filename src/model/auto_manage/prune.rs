@@ -1038,6 +1038,20 @@ impl AutoShardManager {
         let room_bytes = room_wanted.as_ref().map_or(0, |room| room.bytes);
         let mut room_made = 0u64;
         let floor_for_room = room_wanted.as_ref().map_or(usize::MAX, |room| room.floor);
+        // All or nothing (#452): no copy goes for a room this pass cannot
+        // complete (`room_this_pass_could_make`).
+        let room_could_make =
+            room_this_pass_could_make(&prune_candidates, max_per_model, floor_for_room);
+        let room_completes = room_could_make >= room_bytes;
+        if !room_completes && prune_candidates.iter().any(|c| c.to_make_room) {
+            tracing::info!(
+                room_mb = room_bytes / (1024 * 1024),
+                could_make_mb = room_could_make / (1024 * 1024),
+                for_model = %room_wanted.as_ref().map_or("", |room| room.model.0.as_str()),
+                "DIAG: no copy given back for room — the copies that may go for it would not make \
+                 all of it, and a room half made fetches nothing (#452)"
+            );
+        }
 
         for candidate in &prune_candidates {
             let count = pruned_per_model
@@ -1048,7 +1062,7 @@ impl AutoShardManager {
             if count >= max_per_model && !candidate.nobody_runs {
                 continue;
             }
-            if candidate.to_make_room && room_made >= room_bytes {
+            if candidate.to_make_room && (!room_completes || room_made >= room_bytes) {
                 continue;
             }
 
@@ -1207,7 +1221,7 @@ impl AutoShardManager {
                     )
                 } else if candidate.nobody_runs {
                     format!(
-                        "Not run here for {} days, nor among the models people run",
+                        "Nobody on the network ran it in {} days",
                         super::unused::USE_WINDOW_SECS / 86_400
                     )
                 } else {
@@ -1248,8 +1262,15 @@ impl AutoShardManager {
                     shard = candidate.shard_index,
                     holders = candidate.holder_count,
                     freed_mb = candidate.shard_size_bytes / (1024 * 1024),
-                    "Giving back a part of a model nobody runs (#389)"
+                    remaining_here = remaining_local,
+                    "Giving back a part of a model nobody runs (#389, #452)"
                 );
+                // Its last part here: the swarm tried it and nobody ran it —
+                // remembered, so neither this node nor another fetches it back
+                // on popularity alone (`unused::GAVE_BACK_FOR_SECS`).
+                if remaining_local == 0 {
+                    self.note_gave_back_unused(&candidate.model_id);
+                }
             } else {
                 tracing::info!(
                     model = %candidate.model_id,
@@ -1902,9 +1923,12 @@ impl AutoShardManager {
             return Some("a pool pin");
         }
         // A model nobody runs is given back, every part, however few hold it
-        // (#389 (d), `unused::nobody_runs`): not among the models people run,
-        // not run here for the window it was watched, not the owner's, not
-        // asked for, not a reference model, not a split's drafter. Here, so
+        // (#389 (d), #452, `unused::nobody_runs`): not run here for the window
+        // it was watched, served for another computer by no holder in the
+        // swarm in it, not the owner's, not asked for, not a reference model,
+        // not a split's drafter — and one held nowhere here is fetched only to
+        // be tried on what people run outside the swarm, never where the swarm
+        // tried it and nobody ran it. Here, so
         // the download pass — which asks this — never fetches what prune
         // sheds. Before the exemptions below: prompt privacy's automatic ends
         // would otherwise keep two parts of a model nobody runs, and an
@@ -2491,6 +2515,46 @@ pub(crate) fn mmproj_prune_floor(min_replicas: u32, pool_size: usize) -> u32 {
 /// under urgent disk pressure, and only above [`mmproj_prune_floor`].
 pub(crate) fn mmproj_sheds_at(pressure: f64, holder_count: usize, floor: u32) -> bool {
     pressure > PRESSURE_URGENT && holder_count > floor as usize
+}
+
+/// How much room this pass could make (#452): everything it gives back anyway —
+/// copies over their target, every part of a model nobody runs — plus each copy
+/// it may give back ONLY for the room, above the room's floor of holders, in
+/// the order and within the per-model limit the pass gives them back. A
+/// projector kept unless the pressure stays urgent is not counted: it may not go.
+///
+/// Room is all or nothing (AdaptSize, NSDI '17 § 3.1: admission is decided
+/// before eviction — a newcomer refused evicts nothing): where this falls short
+/// of the room asked, no copy goes for it. Given back toward a room it could
+/// not complete, the Proxmox box lost three of a 70B's copies (3 → 2 holders)
+/// for rooms of 1,762 and 1,966 MB its candidates could free 920 and 460 MB of,
+/// and fetched nothing; the part asking never fit, and the download pass spent
+/// the room on the copy just given back (2026-11-08, shard 72 three times).
+pub(super) fn room_this_pass_could_make(
+    candidates: &[PruneCandidate],
+    max_per_model: u32,
+    floor_for_room: usize,
+) -> u64 {
+    let mut per_model: std::collections::HashMap<&ModelId, u32> = std::collections::HashMap::new();
+    let mut room = 0u64;
+    for candidate in candidates {
+        let count = per_model.entry(&candidate.model_id).or_insert(0);
+        if *count >= max_per_model && !candidate.nobody_runs {
+            continue;
+        }
+        let goes = if candidate.nobody_runs {
+            true
+        } else if candidate.to_make_room {
+            candidate.holder_count > floor_for_room
+        } else {
+            candidate.shard_index != crate::types::MMPROJ_SHARD_INDEX
+        };
+        if goes {
+            *count += 1;
+            room = room.saturating_add(candidate.shard_size_bytes);
+        }
+    }
+    room
 }
 
 #[cfg(test)]
@@ -3127,6 +3191,88 @@ mod tests {
             score_with_stale -= RECENT_REQUEST_PENALTY;
         }
         assert!(score_with_fresh < score_with_stale - 1.0);
+    }
+}
+
+#[cfg(test)]
+mod room_all_or_nothing_tests {
+    use super::room_this_pass_could_make;
+    use crate::model::auto_manage::manager::PruneCandidate;
+    use crate::types::ModelId;
+
+    const MB: u64 = 1024 * 1024;
+
+    fn copy(model: &str, index: u32, mb: u64, holders: usize) -> PruneCandidate {
+        PruneCandidate {
+            model_id: ModelId(model.into()),
+            model_name: model.into(),
+            shard_index: index,
+            shard_size_bytes: mb * MB,
+            holder_count: holders,
+            target_replicas: 3,
+            score: 1.0,
+            nobody_runs: false,
+            to_make_room: true,
+        }
+    }
+
+    /// The Proxmox box, 2026-11-08 (#452): a 122B part asked for 1,539 MB; the
+    /// copies that could go for it were a 70B's, one a pass, 518 MB each. One
+    /// pass makes 518 MB — so none goes, where before one went every pass and
+    /// came back.
+    #[test]
+    fn a_room_the_pass_cannot_complete_takes_no_copy() {
+        let seventy_b = [
+            copy("llama-70b", 72, 518, 3),
+            copy("llama-70b", 63, 518, 3),
+            copy("llama-70b", 70, 518, 3),
+        ];
+        let made = room_this_pass_could_make(&seventy_b, 1, 2);
+        assert_eq!(made, 518 * MB, "one part of a model a pass");
+        assert!(made < 1_539 * MB);
+        assert_eq!(
+            room_this_pass_could_make(&seventy_b, 2, 2),
+            1_036 * MB,
+            "two under urgent pressure"
+        );
+        let mut spread = seventy_b.to_vec();
+        spread.push(copy("qwen-14b", 3, 600, 4));
+        assert_eq!(
+            room_this_pass_could_make(&spread, 1, 2),
+            1_118 * MB,
+            "one from each model"
+        );
+        assert_eq!(
+            room_this_pass_could_make(&[copy("llama-70b", 72, 518, 2)], 1, 2),
+            0,
+            "at the room's floor of holders: it may not go"
+        );
+    }
+
+    /// What the pass gives back anyway counts toward the room: every part of a
+    /// model nobody runs, past the per-model limit, and a copy over its target.
+    /// A projector held only while the pressure stays urgent does not.
+    #[test]
+    fn what_goes_anyway_counts_toward_the_room() {
+        let mut unused: Vec<PruneCandidate> = (0..3)
+            .map(|i| PruneCandidate {
+                nobody_runs: true,
+                to_make_room: false,
+                holder_count: 1,
+                ..copy("old-coder", i, 400, 1)
+            })
+            .collect();
+        assert_eq!(room_this_pass_could_make(&unused, 1, 2), 1_200 * MB);
+        unused.push(PruneCandidate {
+            to_make_room: false,
+            ..copy("over-target", 0, 300, 5)
+        });
+        unused.push(PruneCandidate {
+            to_make_room: false,
+            shard_index: crate::types::MMPROJ_SHARD_INDEX,
+            ..copy("vision", 0, 600, 5)
+        });
+        assert_eq!(room_this_pass_could_make(&unused, 1, 2), 1_500 * MB);
     }
 }
 

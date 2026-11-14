@@ -1583,6 +1583,13 @@ impl HealthMonitor {
             storage: storage_reading.as_ref().map(|reading| {
                 crate::model::auto_manage::storage_room(&self.shared_state, reading)
             }),
+            // Each model it holds — since when, and the day it last served it
+            // for another computer — and each it gave back because nobody ran
+            // it (#452): what every holder judges "nobody runs it" by. Never
+            // the owner's own use (#389 (a)).
+            models_served: Some(crate::model::auto_manage::unused::models_served(
+                &self.shared_state,
+            )),
             // What is LOADED, as distinct from what is on disk above. A peer
             // pricing our spare capacity needs to know how much of a model we
             // have already paid for; without it the only signal is "did this
@@ -3214,6 +3221,7 @@ pub(crate) mod tests {
             auto_manage: None,
             updates_itself: None,
             storage: None,
+            models_served: None,
             resident_layers: Vec::new(),
             context_ceiling_tokens: Some(8192),
             model_load_ms_per_gib: Some(900),

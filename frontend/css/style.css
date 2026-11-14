@@ -3244,6 +3244,47 @@ select.swarm-model-sort:focus { border-color: var(--accent); }
   border-radius: var(--radius-pill, 9999px);
   padding: 0 7px;
 }
+/* Models no computer holds now (#452): folded away below the rest. */
+.models-held-before { margin-top: 6px; }
+.models-held-before > summary { list-style: none; cursor: pointer; user-select: none; }
+.models-held-before > summary::-webkit-details-marker { display: none; }
+.models-held-before > summary::before {
+  content: '\25BE'; /* ▾ */
+  transition: transform 0.18s;
+}
+.models-held-before:not([open]) > summary::before { transform: rotate(-90deg); }
+.held-before-note {
+  margin: 0; padding: 0 14px 6px;
+  font-size: var(--fs-xs); color: var(--text-muted);
+}
+.held-before-row {
+  display: flex; align-items: center; gap: 10px;
+  padding: 6px 14px;
+  border-top: 1px solid var(--border);
+}
+.held-before-text { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.held-before-name {
+  font-size: var(--fs-sm); color: var(--text-secondary);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.held-before-facts { font-size: var(--fs-xs); color: var(--text-muted); }
+/* The model card's download button, in a compact row. */
+.held-before-row .btn-action {
+  flex: 0 0 auto;
+  height: 28px; padding: 0 10px;
+  font-size: var(--fs-xs); font-weight: 600; line-height: 1;
+  border-radius: var(--radius-md);
+  border: 1px solid rgba(59,130,246,0.35);
+  background: var(--accent-glow);
+  color: var(--accent);
+  cursor: pointer; white-space: nowrap;
+  transition: background 0.15s, border-color 0.15s;
+}
+.held-before-row .btn-action:hover { background: rgba(59,130,246,0.2); border-color: var(--accent); }
+.held-before-row .btn-action:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px var(--bg-primary), 0 0 0 4px var(--ring);
+}
 
 /* Cloud provider cards */
 .model-card.cloud-model {

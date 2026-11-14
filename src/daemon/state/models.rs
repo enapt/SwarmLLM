@@ -251,6 +251,12 @@ pub struct ModelMgmt {
     /// protect the owner's copies. Written only by
     /// `SharedState::note_request_served_for_a_peer`.
     pub requests_served_for_peers: DashMap<crate::types::ModelId, AtomicU64>,
+    /// When this node last served each model FOR A PEER (#452), Unix seconds:
+    /// the swarm-use pool's input, memory only. Written only by
+    /// `SharedState::note_request_served_for_a_peer` (beside the count above,
+    /// past the same pool-member and unknown-model checks); read only by
+    /// `AutoShardManager::watch_model_use`, which saves it into `model_use`.
+    pub served_for_peers_at: DashMap<crate::types::ModelId, i64>,
     pub resource_schedule: RwLock<crate::config::ResourceSchedule>,
     pub prune_history: RwLock<VecDeque<crate::types::PruneEvent>>,
     /// Parallax Phase C.2 stability counter per shard. Positive values mean
@@ -343,9 +349,12 @@ pub struct ModelMgmt {
     /// stale one for none.
     pub hf_popular: arc_swap::ArcSwap<crate::model::huggingface::popular::PopularSnapshot>,
     /// What this node has seen of each held model's use (#389 (d)): watched
-    /// from its first part here, its last request here. Written only by
-    /// `AutoShardManager::watch_model_use`, saved (`unused::USE_TREE`); read by
-    /// `AutoShardManager::nobody_runs`.
+    /// from its first part here, its last request here, its last served for
+    /// another computer (#452) — and, for a model it gave back because nobody
+    /// ran it, when, kept for `unused::GAVE_BACK_FOR_SECS`. Written only by
+    /// `AutoShardManager::watch_model_use` and `note_gave_back_unused`, saved
+    /// (`unused::USE_TREE`); read by `AutoShardManager::nobody_runs` and the
+    /// capability's `models_served` (`unused::models_served`).
     pub model_use: DashMap<crate::types::ModelId, crate::model::auto_manage::unused::ModelUse>,
     /// Why the last prune pass kept the parts it kept (FUTURE_WORK #432): its
     /// `KeptBy` summary — each rule with the parts it kept — and when. Written
@@ -1270,6 +1279,7 @@ mod tests {
             peer_models: Default::default(),
             model_request_counts: DashMap::new(),
             requests_served_for_peers: DashMap::new(),
+            served_for_peers_at: DashMap::new(),
             resource_schedule: RwLock::new(Default::default()),
             prune_history: RwLock::new(VecDeque::new()),
             parallax_stability: DashMap::new(),

@@ -735,6 +735,15 @@ pub struct NodeCapability {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub storage: Option<StorageRoom>,
 
+    /// The swarm's use of each model this computer holds a part of, as it saw
+    /// it, and the models it gave back because nobody ran them ([`ModelServed`],
+    /// FUTURE_WORK #452) — what decides whether the swarm KEEPS a model
+    /// (`auto_manage::unused::nobody_runs`). `None` = an older build, which
+    /// says nothing: a model it holds is not judged unused while it is
+    /// connected (`#[serde(default)]`, the additive rule).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub models_served: Option<Vec<ModelServed>>,
+
     /// Layers of each model this node currently has LOADED, by model id.
     ///
     /// `hosted_shards` says what is on disk; this says what is in memory right
@@ -918,6 +927,48 @@ pub enum StorageLimitKind {
     #[default]
     #[serde(other)]
     Unknown,
+}
+
+/// What a computer saw of the SWARM's use of one model it holds, or that it
+/// gave the model back because nobody ran it ([`NodeCapability::models_served`],
+/// FUTURE_WORK #452). The swarm's own statistic, kept apart from what people
+/// outside it run (HuggingFace's list — what the swarm TRIES) and from the
+/// owner's own use, which is never sent (#389 (a)): only work served FOR
+/// ANOTHER computer counts, as in the demand a node gossips. Every time is
+/// Unix seconds by the sender's clock cut to the start of its day
+/// ([`ModelServed::day_of`] — a week's window needs no finer, and a day says
+/// less of who asked when); `0` = none. A claim, like every field: saying a
+/// model was served keeps it a window longer, saying one was given back keeps
+/// others from TRYING it on popularity alone — a request still brings it.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ModelServed {
+    pub model_id: String,
+    /// The day it began holding a part of the model under a build that
+    /// records use; `0` = it holds none (a give-back record).
+    #[serde(default)]
+    pub held_since: i64,
+    /// The last day it served the model for another computer.
+    #[serde(default)]
+    pub served: i64,
+    /// The day it gave every part back because nobody ran it.
+    #[serde(default)]
+    pub gave_back_unused: i64,
+}
+
+impl ModelServed {
+    /// The most entries a receiver reads from one capability: a computer
+    /// holds a part of at most this many models it reports, and the rest of
+    /// a longer list is not read (`dispatch::capability_fits`).
+    pub const MOST_ENTRIES: usize = 512;
+
+    /// `unix_secs` cut to the start of its day (UTC); `0` stays `0`.
+    pub fn day_of(unix_secs: i64) -> i64 {
+        if unix_secs <= 0 {
+            0
+        } else {
+            unix_secs - unix_secs.rem_euclid(86_400)
+        }
+    }
 }
 
 /// The serde default for [`NodeCapability::can_serve_inference`].
