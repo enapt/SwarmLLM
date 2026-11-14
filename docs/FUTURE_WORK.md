@@ -2709,6 +2709,11 @@ the processor-held layers (vLLM's rule, as on the card); charged there; the bloc
 (`context_rows` already moved them to its device) and its output (guesses × hidden) goes up to the
 card's head per draft. Reported `attached_in_system_memory`. Prior art: llama.cpp places a draft model
 on devices of its own (`--spec-draft-device none`, `--spec-draft-ngl auto`, `common/arg.cpp`).
+**The first probe found it never fired** (11-14, Qwen3.5-9B at 25 of 32 card layers, 1,715 MB of card budget):
+the check before the load weighed the weights alone (1,309 MB fitted), the one after added the
+384 MB cache and refused — so the drafter was loaded on the card, dropped, and system memory never
+offered. Fixed: ONE charge, `block_drafter::charged`, weighed before the load and kept by it
+(`docs/invariants/inference.md` § "Weighed whole").
 **Open — measure, then default ON or drop**: Qwen3.5-9B (`~/swarmllm-ref/dflash/`, drafter 1.38 GB)
 forced to a card/processor split on the RTX 3070 (`test-split --gpu-layers N` with the card budget
 held so the drafter is refused there) — `SWARMLLM_BLOCK_DRAFTER_IN_RAM=1` against unset in ONE CUDA
@@ -6797,7 +6802,7 @@ grep `^| N |`).
   is not used. Tests `a_guest_on_the_card_leaves_its_target_the_room_for_its_conversations` (red
   with the leave term zeroed) and `the_room_a_guest_leaves_is_the_targets_card_share`. The same
   report's Qwen3.6-27B block drafter (1.85 GB) ran a 12 GB card holding 27 of 64 layers out of
-  memory on every load: it is now weighed off its header before it loads (`weights_in`), with the
+  memory on every load: it is now weighed off its header before it loads (`charged_in`: weights and cache, #451), with the
   rule that ran only after the load (`fits_beside_one_conversation`). Prior art: vLLM loads the
   drafter before it sizes the target's cache; llama.cpp's server sizes both at start and
   `common/fit.cpp` sizes a load before allocating; Ollama's `updateFreeSpace` takes the same

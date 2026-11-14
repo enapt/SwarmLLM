@@ -8600,12 +8600,25 @@ ran only AFTER `BlockDrafter::load` had put every tensor on the device. On a
 12 GB card holding 27 of Qwen3.6-27B's 64 layers, the 1.85 GB drafter never got
 that far: the card refused its memory (`CUDA_ERROR_OUT_OF_MEMORY`) on every
 load. `attach_block_drafter` now reads the drafter's weights off its header
-(`weights_in`, the sum `tensor_byte_size` gives the load) and asks the same
-`fits_beside_one_conversation` BEFORE loading. That can only refuse earlier,
-never more: a pinned file holds only the tensors the load reads (both reference
-conversions, 69 of 69), and the load's own figure adds its 8,192-position
-cache and hot rows on top. Prior art: llama.cpp's `common/fit.cpp` sizes what
-a load takes before it allocates anything.
+and asks the same `fits_beside_one_conversation` BEFORE loading. Prior art:
+llama.cpp's `common/fit.cpp` sizes what a load takes before it allocates
+anything.
+
+**Weighed whole — its cache too — before it is placed (2026-11-14, #451's
+probe).** The check before the load summed the weights alone and the check
+after it added the 8,192-position cache, so the two disagreed exactly where
+#451 matters: Qwen3.5-9B forced to 25 of 32 layers on the RTX 3070 had 1,715 MB
+of card budget and a 192 MB conversation; 1,309 MB of weights fitted, so the
+card was chosen and the drafter LOADED there; 1,309 + 384 MB of cache did not,
+so it was refused — `in_system_memory=false attached=false` with
+`SWARMLLM_BLOCK_DRAFTER_IN_RAM=1` set — and system memory was never offered.
+Now ONE figure, **`block_drafter::charged`** (every tensor in the file + its
+cache at its longest, through the one reading of its widths,
+`DrafterShape::read`), is what `charged_in` weighs off the header before the
+load and what `BlockDrafter::load` keeps as `bytes`; only hot rows (a head on
+the processor, never beside a card) can add to it after. Test
+`a_drafter_is_charged_its_cache_before_it_is_placed` (red with the cache left
+out of `charged`).
 
 **Measured (stage 1, 2026-11-08)** — Qwen3.5-9B Q4_K_M on this laptop's
 processor with `z-lab/Qwen3.5-9B-DFlash` as llama.cpp converts it (1.69 GB),

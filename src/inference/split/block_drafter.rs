@@ -303,12 +303,14 @@ impl BlockDrafter {
             return Err(fail(format!("architecture {arch:?}, not \"dflash\"")));
         }
         let num = |key: &str| md(&format!("dflash.{key}")).and_then(meta_u32);
-        let need = |key: &str| num(key).ok_or_else(|| fail(format!("no dflash.{key}")));
-        let hidden = need("embedding_length")? as usize;
-        let n_layers = need("block_count")? as usize;
-        let n_head = need("attention.head_count")? as usize;
-        let n_kv_head = need("attention.head_count_kv")? as usize;
-        let head_dim = num("attention.key_length").map_or(hidden / n_head.max(1), |d| d as usize);
+        let shape = DrafterShape::read(&ct).map_err(fail)?;
+        let DrafterShape {
+            hidden,
+            n_layers,
+            n_head,
+            n_kv_head,
+            head_dim,
+        } = shape;
         let block_size = num("block_size").unwrap_or(16) as usize;
         let eps = md("dflash.attention.layer_norm_rms_epsilon")
             .and_then(|v| v.to_f32().ok())
@@ -397,13 +399,12 @@ impl BlockDrafter {
         // The model's device, or system memory beside a card that has no
         // room for it ([`drafter_home`]).
         let device = device.clone();
-        let mut bytes = 0u64;
+        // What it is charged: the one figure the rule before the load weighed.
+        let bytes = charged(&ct, &shape);
         let mut tensor = |name: String| {
-            let info = ct
-                .tensor_infos
-                .get(&name)
-                .ok_or_else(|| fail(format!("no {name}")))?;
-            bytes += super::tensor_byte_size(info);
+            if !ct.tensor_infos.contains_key(&name) {
+                return Err(fail(format!("no {name}")));
+            }
             ct.tensor(&mut file, &name, &device)
                 .map_err(|e| fail(format!("{name}: {e}")))
         };
@@ -449,8 +450,6 @@ impl BlockDrafter {
                 },
             });
         }
-        // Its cache at its longest: keys and values, f32, every layer.
-        bytes += (n_layers * 2 * n_kv_head * head_dim * 4 * BLOCK_MOST_POSITIONS) as u64;
         let (cos, sin) = super::rope::precompute_freqs_cis(
             head_dim,
             theta,
@@ -810,21 +809,73 @@ impl BlockDrafter {
     }
 }
 
-/// The bytes of every tensor in the drafter file at `path`, read off its
-/// header alone — what [`BlockDrafter::load`] counts as its weights. A pinned
-/// file holds only the tensors the load reads (both reference conversions:
-/// 69 of 69), and the load's own figure adds its cache too, so this is never
-/// more than what the rule after the load weighs. `None` where the header
-/// cannot be read (the load then says why).
-fn weights_in(path: &Path) -> Option<u64> {
+/// A drafter's widths, read off its header: the ONE reading, by
+/// [`BlockDrafter::load`] and by what it is charged ([`charged`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct DrafterShape {
+    hidden: usize,
+    n_layers: usize,
+    n_head: usize,
+    n_kv_head: usize,
+    head_dim: usize,
+}
+
+impl DrafterShape {
+    /// The widths, or the key a drafter must carry and this header does not.
+    fn read(ct: &gguf_file::Content) -> Result<Self, String> {
+        let num = |key: &str| ct.metadata.get(&format!("dflash.{key}")).and_then(meta_u32);
+        let need = |key: &str| {
+            num(key)
+                .map(|v| v as usize)
+                .ok_or_else(|| format!("no dflash.{key}"))
+        };
+        let hidden = need("embedding_length")?;
+        let n_head = need("attention.head_count")?;
+        Ok(Self {
+            hidden,
+            n_layers: need("block_count")?,
+            n_head,
+            n_kv_head: need("attention.head_count_kv")?,
+            head_dim: num("attention.key_length").map_or(hidden / n_head.max(1), |d| d as usize),
+        })
+    }
+
+    /// Its cache at its longest ([`BLOCK_MOST_POSITIONS`]): keys and values,
+    /// f32, every layer.
+    fn cache_at_longest(&self) -> u64 {
+        (self.n_layers as u64)
+            .saturating_mul(2 * 4 * BLOCK_MOST_POSITIONS as u64)
+            .saturating_mul(self.n_kv_head as u64)
+            .saturating_mul(self.head_dim as u64)
+    }
+}
+
+/// What a drafter is charged when attached: every tensor in its file and its
+/// cache at its longest. The ONE figure — weighed off the header before any
+/// weight is loaded ([`charged_in`]) and kept as [`BlockDrafter::bytes`] after
+/// — so the device chosen before the load is the one the rule after it keeps.
+/// Weighed apart (the weights alone before, the cache added after), a drafter
+/// whose weights fitted its card and whose cache did not was loaded there,
+/// refused, and never offered system memory: Qwen3.5-9B's 1,309 MB of weights
+/// and 384 MB of cache beside 1,715 MB a card had left (#451, 2026-11-14).
+/// llama.cpp's `common/fit.cpp` likewise sizes a load's weights AND its
+/// context before it places anything.
+fn charged(ct: &gguf_file::Content, shape: &DrafterShape) -> u64 {
+    ct.tensor_infos
+        .values()
+        .map(super::tensor_byte_size)
+        .fold(0u64, u64::saturating_add)
+        .saturating_add(shape.cache_at_longest())
+}
+
+/// [`charged`] for the drafter file at `path`, read off its header alone.
+/// `None` where the header cannot be read or lacks a width (the load then
+/// says why).
+fn charged_in(path: &Path) -> Option<u64> {
     let file = std::fs::File::open(path).ok()?;
     let ct = gguf_file::Content::read(&mut std::io::BufReader::new(file)).ok()?;
-    Some(
-        ct.tensor_infos
-            .values()
-            .map(super::tensor_byte_size)
-            .fold(0u64, u64::saturating_add),
-    )
+    let shape = DrafterShape::read(&ct).ok()?;
+    Some(charged(&ct, &shape))
 }
 
 /// May a drafter taking `takes` bytes come off a conversation `budget`?
@@ -939,34 +990,37 @@ impl SplitModel {
             self.drop_drafter_head();
             return BlockDrafterState::HeadWritesFaster;
         }
-        // Its weights are known off its header before any is loaded, and the
-        // rule below can only refuse more (its cache and hot rows join them):
-        // a device they do not fit beside one conversation is never handed
-        // them. Loaded first, Qwen3.6-27B's 1.85 GB drafter beside the 27 of
-        // 64 layers a 12 GB card held ran the card out of memory on every
-        // load (field report v0.3.280, 2026-11-11). Prior art: llama.cpp's
+        // What it is charged is known off its header before any weight is
+        // loaded ([`charged`]: its weights AND its cache, the figure the rule
+        // below weighs, which only hot rows can raise — and only on the
+        // processor, never beside a card): a device it does not fit beside one
+        // conversation is never handed it, and a card that cannot hold it
+        // hands it to system memory BEFORE the load, where that is offered.
+        // Loaded first, Qwen3.6-27B's 1.85 GB drafter beside the 27 of 64
+        // layers a 12 GB card held ran the card out of memory on every load
+        // (field report v0.3.280, 2026-11-11). Prior art: llama.cpp's
         // `common/fit.cpp` sizes what a load takes before it allocates.
         let mut home = DrafterHome::OwnDevice;
-        if let Some(weights) = weights_in(&path) {
-            let at_least = weights.saturating_add(if head_charged {
+        if let Some(drafter_charged) = charged_in(&path) {
+            let takes = drafter_charged.saturating_add(if head_charged {
                 0
             } else {
                 self.drafter_head_bytes
             });
             let one_conversation = self.kv_growth.bytes_for(self.max_seq_len);
             home = drafter_home(
-                at_least,
+                takes,
                 (self.kv_budget_bytes, one_conversation),
                 self.drafter_may_sit_in_system_memory(),
             );
             if home == DrafterHome::NoRoom {
                 tracing::info!(
-                    weights_mb = at_least >> 20,
+                    mb = takes >> 20,
                     budget_mb = ?self.kv_budget_bytes.map(|b| b >> 20),
                     one_conversation_mb = one_conversation >> 20,
                     system_memory = ?self.drafter_may_sit_in_system_memory()
                         .map(|(b, one)| (b.map(|b| b >> 20), one >> 20)),
-                    "block drafter not attached: its weights do not fit beside one conversation \
+                    "block drafter not attached: it does not fit beside one conversation \
                      of this model on its device"
                 );
                 self.drop_drafter_head();
@@ -1189,6 +1243,65 @@ mod tests {
         assert_eq!(
             drafter_home(takes, card_full, Some((Some(4_000 * MB), 3_000 * MB))),
             DrafterHome::NoRoom
+        );
+    }
+
+    /// What a drafter is charged before its load is what it is charged after:
+    /// its tensors AND its cache at its longest, read off the header. Weighed
+    /// as its weights alone, Qwen3.5-9B's drafter (1,309 MB, 6 layers of 8 KV
+    /// heads × 128) fitted a card with 1,715 MB left beside a 192 MB
+    /// conversation, was loaded there, refused once its 384 MB cache joined,
+    /// and never offered system memory (#451's probe, 2026-11-14).
+    #[test]
+    fn a_drafter_is_charged_its_cache_before_it_is_placed() {
+        use candle_core::quantized::{GgmlDType, QTensor};
+        use gguf_file::Value;
+        const MB: u64 = 1 << 20;
+        let md: Vec<(&str, Value)> = vec![
+            ("general.architecture", Value::String("dflash".into())),
+            ("dflash.embedding_length", Value::U32(4096)),
+            ("dflash.block_count", Value::U32(6)),
+            ("dflash.attention.head_count", Value::U32(32)),
+            ("dflash.attention.head_count_kv", Value::U32(8)),
+            ("dflash.attention.key_length", Value::U32(128)),
+        ];
+        let refs: Vec<(&str, &Value)> = md.iter().map(|(k, v)| (*k, v)).collect();
+        let weight = QTensor::quantize(
+            &Tensor::zeros((4, 64), candle_core::DType::F32, &Device::Cpu).unwrap(),
+            GgmlDType::F32,
+        )
+        .unwrap();
+        let mut buf = std::io::Cursor::new(Vec::new());
+        gguf_file::write(&mut buf, &refs, &[("fc.weight", &weight)]).unwrap();
+        buf.set_position(0);
+        let ct = gguf_file::Content::read(&mut buf).unwrap();
+        let shape = DrafterShape::read(&ct).unwrap();
+        assert_eq!(shape.cache_at_longest(), 384 * MB);
+        assert_eq!(charged(&ct, &shape), 4 * 64 * 4 + 384 * MB);
+
+        // The probe's figures: the card is refused it, system memory takes it.
+        let weights = 1_309 * MB;
+        let card = (Some(1_715 * MB), 192 * MB);
+        let machine = Some((Some(9_000 * MB), 1_000 * MB));
+        let takes = weights + shape.cache_at_longest();
+        assert_eq!(
+            drafter_home(takes, card, machine),
+            DrafterHome::SystemMemory
+        );
+        // Its weights alone chose the card the check after the load refused.
+        assert_eq!(drafter_home(weights, card, machine), DrafterHome::OwnDevice);
+        assert!(!fits_beside_one_conversation(card.0, takes, card.1));
+
+        // A header without a width charges nothing it cannot read.
+        let bare = [("general.architecture", Value::String("dflash".into()))];
+        let refs: Vec<(&str, &Value)> = bare.iter().map(|(k, v)| (*k, v)).collect();
+        let mut buf = std::io::Cursor::new(Vec::new());
+        gguf_file::write(&mut buf, &refs, &[]).unwrap();
+        buf.set_position(0);
+        let ct = gguf_file::Content::read(&mut buf).unwrap();
+        assert_eq!(
+            DrafterShape::read(&ct),
+            Err("no dflash.embedding_length".to_string())
         );
     }
 
