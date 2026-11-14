@@ -1441,7 +1441,8 @@ its pass judges by — prune's, or the download pass's with its fetches landed, 
 keeping a spare copy), **7 days** (`USE_WINDOW_SECS`, trust's idle week) below it. The same window
 decides this copy's trial, its quiet here, the swarm's serves (`swarm_use_of`'s `window_from`) and
 whether a holder's record covers it (`served_since`) — so an update's blind spot lasts one window
-(2 days on a full computer). `GAVE_BACK_FOR_SECS` stays fixed (14 days): a computer whose disk
+(2 days on a full computer). `GAVE_BACK_FOR_SECS` stays fixed whatever the pressure (14 days, two
+of the 7-day windows — 28 before 2026-11-14, when the window was 14): a computer whose disk
 eased must not fetch back what it gave back while pressed. A NaN pressure reads as room. The pass
 reports which pool decided each model held here (`unused::Verdict`, `UsesReport`: `DIAG: models
 held here, by what the use rule says of each`, every 10 min, and the diagnostics report's storage

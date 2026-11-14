@@ -962,6 +962,16 @@ kubelet's `freeSpace` both evict partially, acceptable for a cache, not for scar
 **Room is all or nothing**: prune plans every copy it would give back for a room, and gives back only
 when they free the whole room; else nothing (AdaptSize). **Usable**: the trial does not start for a
 model the swarm's online cards cannot run usably (the 122B/397B parts that took the 70B's room).
+**Watch — a pressed pass has no low-water mark** (the pre-release review of 0.3.289, 2026-11-14): at
+pressure ≥ 0.8 every model nobody on the network ran in 2 days goes in ONE pass, however far below 0.8
+that leaves the computer; the kubelet this cites deletes least recently used first and stops at its low
+threshold (`imageGCLowThresholdPercent`, 80%). Kept as built: the user asked for full computers to make
+room faster (2026-11-14), "nobody runs" needs the WHOLE network quiet, and computers under 0.8 keep the
+7-day window, so a copy survives there. **Build the stop if the field shows either**: a full computer
+falling below ~0.5 in one pass (the 10-min `DIAG: models held here` lines and `storage` in
+`/api/admin/peers`), or a model given back under pressure requested within its 14 days with no holder
+left. The stop: a model `Unused` only under the pressed window (quiet 2-7 days) goes least recently used
+first and only while the pass's running pressure stays ≥ 0.8; one quiet past 7 days goes as now.
 
 #### #250 — A model held whole here, which the card holds only part of, can be routed through peers at a fraction of local speed
 `P3` · routing · **NARROWED** — 2026-11-06 (was P1 PARTIAL since 2026-10-12; every contributor named below is fixed or the setting working as designed, the prompt price since 10-25) · history: report #035 (a tester, RTX 3060 12 GB, v0.3.232-.234)
