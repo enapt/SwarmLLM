@@ -915,8 +915,9 @@ Prior art: Ollama `server/sched.go` `waitForVRAMRecovery`, whose figures and 75%
 are taken as is. Their rationale is our symptom: "subsequent model loads will
 get far less layers loaded". It was not seen on the WSL2 laptop: 2 GB came back
 0.07 s after `kill -9`, 3 of 3, and a real card worker's unload waited 68-140 ms.
-Whether it fires on the far computer is read from that computer's
-`card_free_at_load_mb` after the release. Only a worker with a process waits; a
+On the far computer with v0.3.286 (`TAG=r286`, 2026-11-14) no
+reload happened in 12 requests — j8's and j12's narrowing is gone — and its one load read
+10,814 MB and placed 47 of 48 layers; the wait there awaits a real retirement. Only a worker with a process waits; a
 test's stand-in has none and would wait out the bound. A/B
 `SWARMLLM_CARD_MEMORY_BACK=0`.
 

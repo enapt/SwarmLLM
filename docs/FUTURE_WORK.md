@@ -1095,9 +1095,11 @@ causes fixed 2026-11-13 (§ Closed, released in v0.3.286): prune's phase 0 narro
 served, reading our own pool's freed memory as another program's (j8); and the promotion to the card replaced a copy
 short of the card with the split's slice alone (j12, `TAG=j11` peer snapshots). Real link TAG=j7, j5, j9, j10: the first split after whole
 hand-offs had AU report `layers_from=disk` for [24..48) (868-869 ms of ~1,470), AU then advertised `(24, 48)` alone,
-its card held 45, then 44 of 48 layers and its hand-offs fell from 23-25 to 9.8-12.0 tok/s. **Open: verify on the
-real link** once AU runs the release carrying the fix — AU keeps `(0, 48)` and 48 card layers through the first
-split and its hand-offs stay ~24; if not, read the forward's `disk_*` reason (`features::HOW_SERVED_WHY`) and AU's
+its card held 45, then 44 of 48 layers and its hand-offs fell from 23-25 to 9.8-12.0 tok/s. **VERIFIED on the real
+link 2026-11-14** (`real_link.sh` `TAG=r286`, v0.3.286 both ends, 01:55-01:59Z, `real_link_r286/peers_seen.jsonl`):
+AU loaded `(0, 48)` with 47 card layers and held it through all 12 requests of both arms; each arm's one split was
+served from that copy (`seg1_from=copy`), and its hand-offs ran 28.8-29.2 tok/s from first to last (v0.3.285: ~24,
+then 9.8-12.0). Should it recur, read the forward's `disk_*` reason (`features::HOW_SERVED_WHY`) and AU's
 `gpu_vram_available_mb` in the peer list.
 (j13) **a far computer's reload placed 17 of 48 layers on its card where ~40 fit.** `TAG=j11` snapshots: after j12's
 promotion left AU with `[23..48)` (25 card layers, free 5,748 MB), its next whole request reloaded `[0..48)` with 17.
@@ -1114,9 +1116,11 @@ after the `[24..48)` worker's retirement placed 18. It is the same model, comput
 sizing is not the cause. **Built 2026-11-14, released in v0.3.286 (published 2026-11-14 01:36:28Z)**: `unload_model` waits for the
 memory as Ollama does (`await_card_memory_back`, A/B `SWARMLLM_CARD_MEMORY_BACK=0`; invariants/memory.md). Each
 residency also carries the card's free memory its load read (`ResidentModelLayers::card_free_at_load_mb`, the
-peer list's `resident[].card_free_at_load_mb`). **Open: verify on the real link** once AU runs the release. A
-reload should then read ~10 GB and place ~45. ~5.7 GB means the wait did not cover the lag: read the INFO
-`DIAG: a stopped worker's card memory` lines where a node's log is at hand. Since `3d03afe9` the wait also ends
+peer list's `resident[].card_free_at_load_mb`). On the real link with v0.3.286 (`TAG=r286`, 2026-11-14) AU's load
+read 10,814 MB and placed 47 of 48 layers, and NO reload happened in 12 requests: the narrowing that led to it (j8,
+j12) is gone, so the wait itself was not exercised there. **Open:** a reload after a real retirement on a far
+computer — `card_free_at_load_mb` near the free memory before it means the wait covered the lag; ~5.7 GB-like means
+not: read the INFO `DIAG: a stopped worker's card memory` lines where a node's log is at hand. Since `3d03afe9` the wait also ends
 once the release has settled short of three quarters (`Settled`, two readings within 32 MB of the steady run's
 first). **Open, a hypothesis (pre-release review 2026-11-14, confidence ~45)**: a worker charged its card share at
 admission but stopped before it allocated it (the model loads on the first message; a request cancelled in that
@@ -6357,7 +6361,8 @@ grep `^| N |`).
   `a_promotion_for_a_slice_never_narrows_the_worker`. Prior art: Ollama re-places a runner only when it cannot serve
   the request (`needsReload`). Also from the pre-release review: a worker's idle time now starts at its last reply's
   END (`ResponseGuard::used_until_now`; test `a_replys_end_starts_its_workers_idle_time_over_and_a_question_does_not`).
-  Open: why AU's reload placed 17 layers with 5.7 GB free; verify both on the real link once AU runs the release.
+  Verified on the real link with v0.3.286 (`TAG=r286`, 2026-11-14): AU held `(0, 48)` with 47 card layers through
+  12 requests and served each split's slice from that copy (`seg1_from=copy`). The 17-layer reload is (j13).
 - #3 (j11) — **After a split left a few layers here, this computer priced every further layer at its processor's
   speed.** The j7 fix read a worker holding part of a model too big for the card, all of it on the card, as `(its card
   layers, the model's)` — so the first split's shape decided every later one. On the real link (`TAG=j10`, arm 2) the
@@ -6369,7 +6374,8 @@ grep `^| N |`).
   is read). A run wider than that is a fresh card/processor split, whose share is near it. Test (red with the room
   left out): `a_worker_holding_part_of_a_model_too_big_for_the_card_reports_the_cards_layers`. Prior art: Ollama places
   a runner by the layers that WOULD fit the card's free memory (`llm/memory.go` `EstimateGPULayers`), never by an
-  earlier placement. To verify on the real link with the release.
+  earlier placement. Verified on the real link (`TAG=j11`, 2026-11-13): after the first split left `[43..48)` here,
+  the next plan read `card_layers=Some(30)` (was 4-8) and gave this node `[0..30)`.
 - #3 (j8) — **A copy that had just served was narrowed for card room it did not need.** Prune's phase 0 reads other
   programs' share of the card as its used memory less our charges, but a worker's pool keeps what it freed until it
   has been idle `cuda_pool::IDLE_TRIM` (60 s); read inside that minute, our own freed memory counted as another
