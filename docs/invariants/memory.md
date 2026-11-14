@@ -1304,14 +1304,15 @@ USE is still waited for), its projector too. As built on 2026-11-01 it answered 
 fresh reading of what people run did not name the model (`SharedState::popular_outside_the_swarm`,
 #389 (b)) — **superseded 2026-11-14 by the swarm's use, below** — AND the model is none of:
 
-- **run here within `USE_WINDOW_SECS` (14 days) after being watched for it** — the record
+- **run here within the use window after being watched for it** (`unused::use_window_secs`:
+  7 days, 2 where storage is pressed — § "The window follows the disk" below; 14 until
+  2026-11-14) — the record
   (`ModelUse`, `models.model_use`, saved in `model_use`) begins at this node's first part of the
   model and ends with its last; `watch_model_use`, at the start of every prune pass, folds in a
   request a worker ran (`ModelProcessPool::model_used_secs_ago`: `register_response`, which every
   execution path passes, the owner's and peers' alike — a peer's QUESTION does not count) and one
   the router took (`ModelTrustInfo::last_request_at`). A new copy has the window as its trial,
-  and an upgrade gives nothing back for 14 days. Twice trust's 7 idle days, so a model run at
-  weekends survives one missed;
+  and an upgrade gives nothing back for a window;
 - **chosen by this computer's owner** (`SharedState::owner_chose`: pinned — a dashboard download
   pins — kept on this computer, the default model, prompt privacy set by hand);
 - **asked for on the swarm now** (`coverage::asked_for`: the demand this node routed, or peers'
@@ -1337,7 +1338,7 @@ requests were forced over the Australia-Thailand link. The owner (2026-11-14): "
 be true for the swarm rather than huggingface, should have separate statistic pools" — and "we need
 to be leaning much harder towards usable/popular/recent models".
 
-**Three pools, each deciding one thing** (`unused::unused_everywhere`):
+**Three pools, each deciding one thing** (`unused::judge`, its `Verdict` naming the pool that decided):
 
 - **The swarm's use — KEEP.** `SharedState::note_request_served_for_a_peer` (the one writer, past
   the pool-member and unknown-model checks) stamps `models.served_for_peers_at`;
@@ -1383,7 +1384,8 @@ to be leaning much harder towards usable/popular/recent models".
   began after the holding did; a holder whose record does not cover the window cannot say
   (`Word::Silent`) — Kubernetes HPA counts a pod missing metrics as fully used when scaling down.
   So a model one computer holds is judged at once (its own `last_used` is whole), one several hold
-  once their records cover the window (~15 days after the update). Tests
+  once their records cover the window (a window after the update — 2 days on a full computer
+  since 2026-11-14, below). Tests
   `a_record_from_before_the_update_records_serving_for_others_from_the_update`,
   `a_holder_whose_record_is_younger_than_the_window_cannot_say`.
 
@@ -1422,6 +1424,39 @@ a_model_the_swarm_tried_and_nobody_ran_is_not_fetched_on_popularity_alone,
 prune_gives_back_a_model_nobody_runs_however_few_hold_it,
 a_held_model_is_watched_from_its_first_part_and_forgotten_with_its_last}`,
 `dispatch::capability_fits_tests::a_capability_listing_more_served_models_than_a_node_could_is_refused`.
+
+#### The window follows the disk (2026-11-14)
+
+**What it replaced, measured**: one `USE_WINDOW_SECS` of 14 days whatever the disk. With every
+holder updated to .288 that day, `served_since` (above) left every model several computers hold
+"cannot say" until ~11-29, and a full computer kept two weeks of what nobody ran: the Proxmox box
+(disk pressure 1.00) wanted 1,458 MB for a Qwen3.6-35B-A3B part and could free 384 (`DIAG: no copy
+given back for room`), holding parts of `ornith-1.5-122b` no card in the swarm can run; Jeff's
+16 GB 5080 sat at its 392 GB limit with parts of the 122B and the 397B. The owner: "we need to be
+pruning more aggressively at this scale, so nodes make room for usable models faster".
+
+**The rule** (`unused::use_window_secs(disk_pressure)`, asked by `nobody_runs` with the pressure
+its pass judges by — prune's, or the download pass's with its fetches landed, so the two agree):
+**2 days** (`PRESSED_USE_WINDOW_SECS`) from `prune::PRESSURE_NORMAL` (0.8 — where prune stops
+keeping a spare copy), **7 days** (`USE_WINDOW_SECS`, trust's idle week) below it. The same window
+decides this copy's trial, its quiet here, the swarm's serves (`swarm_use_of`'s `window_from`) and
+whether a holder's record covers it (`served_since`) — so an update's blind spot lasts one window
+(2 days on a full computer). `GAVE_BACK_FOR_SECS` stays fixed (14 days): a computer whose disk
+eased must not fetch back what it gave back while pressed. A NaN pressure reads as room. The pass
+reports which pool decided each model held here (`unused::Verdict`, `UsesReport`: `DIAG: models
+held here, by what the use rule says of each`, every 10 min, and the diagnostics report's storage
+section), and `/api/admin/peers` shows each peer's `models_served` — the input every verdict reads.
+
+**Prior art**: the kubelet's image garbage collection (KEP-4210) — an image unused for
+`imageMaximumGCAge` goes whatever the disk; above `imageGCHighThresholdPercent` (85%) unused images
+go least recently used first, with no age asked past `imageMinimumGCAge` (2 min). Ours keeps a
+short age even when pressed: a model run every day (the AU tester's nightly script, the swarm's
+steadiest use) survives one missed night, and the swarm's word is a day stamp.
+
+What a change must keep: one window per decision, from the pressure that decision is judged at; the
+give-back memory independent of it. Tests: `unused::tests::a_pressed_computer_judges_by_the_short_window`,
+`the_verdict_names_the_pool_that_decided`, the pressed half of
+`a_model_nobody_runs_is_given_back_and_each_kind_of_use_keeps_it`.
 
 **One quantisation per model** (#389 (e)) follows: the reading names one file per base
 (`popular::pick_file` — Q4_K_M, Q8_0 at 2B and under), so a second quantisation of a base people

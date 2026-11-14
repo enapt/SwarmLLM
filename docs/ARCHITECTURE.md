@@ -2926,7 +2926,11 @@ Routes Claude model requests through a locally-authenticated `claude` CLI subpro
   display only, the WebSocket `peer_list` carries the same, 2026-11-04),
   `storage` (its storage limit, what it holds and what its prune would give back for a
   part asked for more — `StorageRoom`, `null` from an older build) and `storage_full`
-  (no room for a part under its limit, #400, 2026-11-14),
+  (no room for a part under its limit, #400, 2026-11-14), `models_served` (its
+  advertised word on what it served for other computers, model by model — `{count,
+  entries}` of `ModelServed` day stamps, `null` from an older build; only on this
+  listing, never the WebSocket's `peer_list`: the input every "nobody runs it"
+  verdict reads, #452, 2026-11-14),
   `predicted_rtt_ms` (what the peer's published network coordinate predicts
   against ours as it stands) and `predicted_rtt_published_ms` (against the one
   we PUBLISH, held still between moves — what any other node and the scheduler

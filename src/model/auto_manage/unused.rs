@@ -48,15 +48,47 @@
 use super::manager::AutoShardManager;
 use crate::types::{ModelId, ModelServed, NodeId};
 
-/// How long a held model goes without a request before it may be given back —
-/// and so the trial a new copy has. Twice trust's seven idle days: a model
-/// someone runs at weekends survives a missed one.
-pub(crate) const USE_WINDOW_SECS: i64 = 14 * 86_400;
+/// How long a held model goes without a request before it may be given back
+/// where this computer's storage has room — and so the trial a new copy has.
+/// Trust's seven idle days: a model someone runs every week keeps its copies.
+/// It was 14 until 2026-11-14 (user: "we need to be pruning more aggressively
+/// at this scale, so nodes make room for usable models faster").
+pub(crate) const USE_WINDOW_SECS: i64 = 7 * 86_400;
+
+/// The window where this computer's storage is pressed
+/// ([`use_window_secs`]): a model nobody ran in two days goes from a computer
+/// that needs the room. A model run every day — the AU tester's nightly script
+/// is the swarm's steadiest use — keeps its copies through one missed night.
+///
+/// Prior art: the kubelet's image garbage collection — an image unused for
+/// `imageMaximumGCAge` goes whatever the disk, and above
+/// `imageGCHighThresholdPercent` (85%) unused images go least recently used
+/// first, with no age asked past `imageMinimumGCAge` (2 min; KEP-4210). A full
+/// node keeping 14 days of what nobody ran is the one that has no room for the
+/// models people do run: 2026-11-14 the full Proxmox box wanted 1,458 MB for
+/// Qwen3.6-35B-A3B and could free 384, holding parts of a 122B no card in the
+/// swarm can run.
+pub(crate) const PRESSED_USE_WINDOW_SECS: i64 = 2 * 86_400;
 
 /// How long a model given back because nobody ran it stays TRIED (#452): it is
 /// not fetched again on popularity alone, here or by a computer that hears of
-/// it, for two windows after its last part here went.
+/// it, for two windows after its last part here went. Fixed, whatever the
+/// window a computer judged it by: a computer whose storage eased must not
+/// fetch back what it gave back while pressed.
 pub(crate) const GAVE_BACK_FOR_SECS: i64 = 2 * USE_WINDOW_SECS;
+
+/// The use window at this disk pressure (held over the storage budget, the
+/// figure every decision to delete or fetch a part reads): the short one from
+/// the pressure at which prune stops keeping a spare copy
+/// (`prune::PRESSURE_NORMAL`, the kubelet's high threshold), the long one
+/// below it. A NaN reading is read as room.
+pub(crate) fn use_window_secs(disk_pressure: f64) -> i64 {
+    if disk_pressure >= super::prune::PRESSURE_NORMAL {
+        PRESSED_USE_WINDOW_SECS
+    } else {
+        USE_WINDOW_SECS
+    }
+}
 
 /// How many connected computers must say they gave a model back because nobody
 /// ran it before this node, holding none, takes it as TRIED on their word
@@ -73,7 +105,7 @@ pub(crate) const GAVE_BACK_WITNESSES: usize = 2;
 pub(crate) const USE_TREE: &str = "model_use";
 
 /// A record moves in memory and on disk only when a use moves this far:
-/// against a 14-day window, an hour late is nothing, and a request does not
+/// against a two-day window, an hour late is nothing, and a request does not
 /// cost a database write.
 const MOVES_BY_SECS: i64 = 3_600;
 
@@ -132,10 +164,11 @@ impl ModelUse {
     }
 }
 
-/// Has a copy with this record gone the whole window without a request here?
-/// A use from before the record began does not end its trial.
-pub(crate) fn quiet_for_the_window(record: &ModelUse, now: i64) -> bool {
-    now.saturating_sub(record.watched_since.max(record.last_used)) >= USE_WINDOW_SECS
+/// Has a copy with this record gone the whole `window` ([`use_window_secs`])
+/// without a request here? A use from before the record began does not end its
+/// trial.
+pub(crate) fn quiet_for_the_window(record: &ModelUse, now: i64, window: i64) -> bool {
+    now.saturating_sub(record.watched_since.max(record.last_used)) >= window
 }
 
 /// What one pass saw of a model ([`next_record`]).
@@ -244,11 +277,17 @@ pub(crate) enum Word {
     },
 }
 
-/// The swarm's verdict on a model from each connected computer's word. A
-/// stamp later than tomorrow (a clock a little ahead may write tomorrow) is not
-/// weighed: no computer served or gave back anything in the future.
-pub(crate) fn swarm_use_of(words: impl IntoIterator<Item = Word>, now: i64) -> SwarmUse {
-    let window_from = ModelServed::day_of(now.saturating_sub(USE_WINDOW_SECS));
+/// The swarm's verdict on a model from each connected computer's word, over
+/// this computer's `window` ([`use_window_secs`]) — each computer judges by its
+/// own, from the same day stamps. A stamp later than tomorrow (a clock a little
+/// ahead may write tomorrow) is not weighed: no computer served or gave back
+/// anything in the future.
+pub(crate) fn swarm_use_of(
+    words: impl IntoIterator<Item = Word>,
+    now: i64,
+    window: i64,
+) -> SwarmUse {
+    let window_from = ModelServed::day_of(now.saturating_sub(window));
     let gave_back_from = ModelServed::day_of(now.saturating_sub(GAVE_BACK_FOR_SECS));
     let latest = ModelServed::day_of(now).saturating_add(86_400);
     let within = |stamp: i64, from: i64| stamp > 0 && stamp >= from && stamp <= latest;
@@ -300,34 +339,96 @@ pub(crate) fn the_cards_could_run(total_size_bytes: u64, swarm_card_mb: u64) -> 
     swarm_card_mb == 0 || super::vram::estimate_model_vram_mb(total_size_bytes) <= swarm_card_mb
 }
 
+/// Why a model is — or is not — one nobody runs (#452), as [`judge`] and
+/// [`AutoShardManager::unused_verdict`] read it: the one answer, so the prune
+/// pass's report names the pool that held each model. Only
+/// [`Verdict::Unused`] gives a copy back (or leaves a model unfetched).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Verdict {
+    /// Kept whatever the pools say: the owner's choice, a reference model,
+    /// asked for now, a split's drafter.
+    Exempt(&'static str),
+    /// A copy here still on its trial: watched for less than the window.
+    OnTrial,
+    /// A copy here run here within the window (the owner's use included).
+    RunHere,
+    /// A computer served it for another within the window.
+    Served,
+    /// A holder cannot say what it served (an older build, not heard yet, a
+    /// record younger than the window), or no computer advertises its use.
+    CannotSay,
+    /// Held none here and worth trying on what people run outside the swarm
+    /// (or no fresh reading of it).
+    WorthTrying,
+    /// Nobody runs it: given back, or not fetched.
+    Unused,
+}
+
+impl Verdict {
+    /// What the prune pass's report calls it.
+    pub(crate) fn describe(self) -> &'static str {
+        match self {
+            Verdict::Exempt(why) => why,
+            Verdict::OnTrial => "on its trial",
+            Verdict::RunHere => "run here within the window",
+            Verdict::Served => "served for another computer within the window",
+            Verdict::CannotSay => "a holder cannot say what it served",
+            Verdict::WorthTrying => "worth trying",
+            Verdict::Unused => "nobody runs it",
+        }
+    }
+}
+
 /// The pools' verdict on a model (#452), past the keeps every model has (the
 /// owner's choice, a request now, a reference model, a split's drafter):
 /// `record` is this node's, `popular` whether it is worth trying on what people
 /// run outside the swarm ([`AutoShardManager::worth_trying`]; `None`: no fresh
-/// reading), `swarm` what the connected computers say — each asked only where
-/// the rest leaves it the deciding word.
-pub(crate) fn unused_everywhere(
+/// reading), `swarm` what the connected computers say over the same `window`
+/// ([`use_window_secs`]) — each asked only where the rest leaves it the
+/// deciding word.
+pub(crate) fn judge(
     record: Option<ModelUse>,
     popular: impl FnOnce() -> Option<bool>,
     swarm: impl FnOnce() -> SwarmUse,
     now: i64,
-) -> bool {
+    window: i64,
+) -> Verdict {
+    let of_the_swarm = |swarm: SwarmUse| match swarm {
+        SwarmUse::Served => Verdict::Served,
+        SwarmUse::Unknown => Verdict::CannotSay,
+        SwarmUse::Quiet { .. } => Verdict::Unused,
+    };
     match record {
         // A copy here: on trial for the window, kept by any use of it here —
         // the owner's included, which never leaves this computer — and then
         // by the swarm's.
         Some(r) if !r.gave_back() => {
-            quiet_for_the_window(&r, now) && matches!(swarm(), SwarmUse::Quiet { .. })
+            if quiet_for_the_window(&r, now, window) {
+                of_the_swarm(swarm())
+            } else if r.last_used > 0 && now.saturating_sub(r.last_used) < window {
+                Verdict::RunHere
+            } else {
+                Verdict::OnTrial
+            }
         }
         // Given back here because nobody ran it: not fetched again unless a
         // computer has served it since.
-        Some(r) if r.gave_back_recently(now) => swarm() != SwarmUse::Served,
+        Some(r) if r.gave_back_recently(now) => match swarm() {
+            SwarmUse::Served => Verdict::Served,
+            SwarmUse::Unknown | SwarmUse::Quiet { .. } => Verdict::Unused,
+        },
         // Held none: tried on what people run outside the swarm — never where
         // the swarm tried it and nobody ran it.
         _ => match swarm() {
-            SwarmUse::Served => false,
-            SwarmUse::Quiet { tried: true } => true,
-            SwarmUse::Quiet { tried: false } | SwarmUse::Unknown => popular() == Some(false),
+            SwarmUse::Served => Verdict::Served,
+            SwarmUse::Quiet { tried: true } => Verdict::Unused,
+            SwarmUse::Quiet { tried: false } | SwarmUse::Unknown => {
+                if popular() == Some(false) {
+                    Verdict::Unused
+                } else {
+                    Verdict::WorthTrying
+                }
+            }
         },
     }
 }
@@ -531,7 +632,7 @@ impl AutoShardManager {
 
     /// Every part of `model_id` this node held went back because nobody ran it
     /// (#452): remembered for [`GAVE_BACK_FOR_SECS`], so this node's download
-    /// pass does not fetch it back on popularity alone ([`unused_everywhere`])
+    /// pass does not fetch it back on popularity alone ([`judge`])
     /// and the swarm hears so ([`models_served`]). Called by prune once the
     /// model's last part here is gone.
     pub(super) fn note_gave_back_unused(&self, model_id: &ModelId) {
@@ -557,7 +658,7 @@ impl AutoShardManager {
     /// only if it holds a part: by its capability's parts, or the registry's
     /// where no capability has been heard. A computer saying it held the model
     /// unserved is weighed only while it holds a part ([`Word::Says`]).
-    fn swarm_use(&self, model_id: &ModelId, now: i64) -> SwarmUse {
+    fn swarm_use(&self, model_id: &ModelId, now: i64, window: i64) -> SwarmUse {
         /// What one connected computer's capability says, read under its
         /// registry guard: its entry, or that its list is full without one, or
         /// that it advertises none — each with whether its parts name the model.
@@ -625,7 +726,7 @@ impl AutoShardManager {
                 },
             });
         }
-        swarm_use_of(words, now)
+        swarm_use_of(words, now, window)
     }
 
     /// Every computer the registry names as holding a part of `model_id`.
@@ -649,23 +750,38 @@ impl AutoShardManager {
     }
 
     /// May this node give back every part of `model_id` — or leave it unfetched
-    /// (#389 (d), #452)? Never a model chosen by this computer's owner
+    /// (#389 (d), #452)? [`Self::unused_verdict`] says [`Verdict::Unused`].
+    pub(super) fn nobody_runs(&self, model_id: &ModelId, disk_pressure: f64) -> bool {
+        self.unused_verdict(model_id, disk_pressure) == Verdict::Unused
+    }
+
+    /// Why `model_id` is or is not one nobody runs (#389 (d), #452). Never a
+    /// model chosen by this computer's owner
     /// ([`crate::daemon::SharedState::owner_chose`]), a reference model testers
     /// compare results on (`model::reference`), one asked for on the swarm now
     /// (`asked_for`), or the drafter of a split this computer runs
     /// (`drafts_for_a_split` — its use counts toward the model it drafts for).
-    /// Past those, the three pools decide ([`unused_everywhere`]).
-    pub(super) fn nobody_runs(&self, model_id: &ModelId) -> bool {
+    /// Past those, the three pools decide ([`judge`]) over the window
+    /// `disk_pressure` gives ([`use_window_secs`]): the pressure a prune pass
+    /// judges by, or the download pass's with its fetches landed — so the two
+    /// passes agree on a copy.
+    pub(super) fn unused_verdict(&self, model_id: &ModelId, disk_pressure: f64) -> Verdict {
         let state = &self.shared_state;
-        if state.owner_chose(model_id)
-            || crate::model::reference::is_reference_model(&model_id.0)
-            || self.asked_for(model_id)
-            || self.drafts_for_a_split(model_id)
-        {
-            return false;
+        if state.owner_chose(model_id) {
+            return Verdict::Exempt("its owner chose it");
+        }
+        if crate::model::reference::is_reference_model(&model_id.0) {
+            return Verdict::Exempt("a reference model");
+        }
+        if self.asked_for(model_id) {
+            return Verdict::Exempt("asked for now");
+        }
+        if self.drafts_for_a_split(model_id) {
+            return Verdict::Exempt("it guesses for a split");
         }
         let now = chrono::Utc::now().timestamp();
-        unused_everywhere(
+        let window = use_window_secs(disk_pressure);
+        judge(
             state.models.model_use.get(model_id).map(|r| *r),
             || {
                 self.worth_trying(model_id, || {
@@ -675,15 +791,72 @@ impl AutoShardManager {
                         .map(|m| m.total_size_bytes)
                 })
             },
-            || self.swarm_use(model_id, now),
+            || self.swarm_use(model_id, now, window),
             now,
+            window,
         )
+    }
+}
+
+/// The prune pass's account of the models it holds a part of, by
+/// [`Verdict`] (#452): `verdict (n): model, model …` — the verdict with the
+/// most models first, at most [`UsesReport::NAMED`] named each. A full
+/// computer that gives nothing back says which pool kept each model, and one
+/// that gave a model back says it was judged unused.
+#[derive(Debug, Default)]
+pub(crate) struct UsesReport(std::collections::BTreeMap<&'static str, Vec<String>>);
+
+impl UsesReport {
+    /// Models named per verdict; the rest are counted.
+    const NAMED: usize = 6;
+
+    pub(crate) fn note(&mut self, verdict: Verdict, model_id: &ModelId) {
+        self.0
+            .entry(verdict.describe())
+            .or_default()
+            .push(model_id.0.clone());
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    pub(crate) fn summary(&self) -> String {
+        let mut rows: Vec<(&&'static str, &Vec<String>)> = self.0.iter().collect();
+        rows.sort_by(|a, b| b.1.len().cmp(&a.1.len()).then(a.0.cmp(b.0)));
+        rows.into_iter()
+            .map(|(verdict, models)| {
+                let mut named: Vec<&str> = models.iter().map(String::as_str).collect();
+                named.sort_unstable();
+                let more = named.len().saturating_sub(Self::NAMED);
+                named.truncate(Self::NAMED);
+                let tail = if more > 0 {
+                    format!(" and {more} more")
+                } else {
+                    String::new()
+                };
+                format!("{verdict} ({}): {}{tail}", models.len(), named.join(", "))
+            })
+            .collect::<Vec<_>>()
+            .join("; ")
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Is it a model nobody runs ([`judge`] says [`Verdict::Unused`])? The
+    /// tests' shorthand for the verdict prune and the download pass act on.
+    fn unused_everywhere(
+        record: Option<ModelUse>,
+        popular: impl FnOnce() -> Option<bool>,
+        swarm: impl FnOnce() -> SwarmUse,
+        now: i64,
+        window: i64,
+    ) -> bool {
+        judge(record, popular, swarm, now, window) == Verdict::Unused
+    }
 
     const DAY: i64 = 86_400;
 
@@ -710,22 +883,132 @@ mod tests {
     #[test]
     fn a_copy_is_quiet_only_once_watched_for_the_whole_window() {
         let now = 100 * DAY;
+        let w = USE_WINDOW_SECS;
         assert!(
-            !quiet_for_the_window(&watched(now - 13 * DAY, 0), now),
-            "watched 13 days, never used: still on trial"
+            !quiet_for_the_window(&watched(now - 6 * DAY, 0), now, w),
+            "watched 6 days, never used: still on trial"
         );
-        assert!(quiet_for_the_window(&watched(now - 14 * DAY, 0), now));
+        assert!(quiet_for_the_window(&watched(now - 7 * DAY, 0), now, w));
         assert!(
-            !quiet_for_the_window(&watched(now - 60 * DAY, now - 2 * DAY), now),
+            !quiet_for_the_window(&watched(now - 60 * DAY, now - 2 * DAY), now, w),
             "used two days ago"
         );
         assert!(quiet_for_the_window(
-            &watched(now - 60 * DAY, now - 15 * DAY),
-            now
+            &watched(now - 60 * DAY, now - 8 * DAY),
+            now,
+            w
         ));
         assert!(
-            !quiet_for_the_window(&watched(now - 2 * DAY, now - 40 * DAY), now),
+            !quiet_for_the_window(&watched(now - 2 * DAY, now - 40 * DAY), now, w),
             "a use from before the record began does not end the trial"
+        );
+    }
+
+    /// The user (2026-11-14): "we need to be pruning more aggressively at this
+    /// scale, so nodes make room for usable models faster". Where storage is
+    /// pressed — from the pressure at which prune stops keeping a spare copy,
+    /// the kubelet's high threshold — a copy nobody ran in two days goes; where
+    /// it has room, a week. A model run yesterday stays either way.
+    #[test]
+    fn a_pressed_computer_judges_by_the_short_window() {
+        let now = 100 * DAY;
+        assert_eq!(use_window_secs(0.0), USE_WINDOW_SECS);
+        assert_eq!(use_window_secs(0.79), USE_WINDOW_SECS);
+        assert_eq!(use_window_secs(0.8), PRESSED_USE_WINDOW_SECS);
+        assert_eq!(use_window_secs(1.3), PRESSED_USE_WINDOW_SECS);
+        assert_eq!(
+            use_window_secs(f64::NAN),
+            USE_WINDOW_SECS,
+            "NaN reads as room"
+        );
+        let quiet = || SwarmUse::Quiet { tried: false };
+        let three_days_quiet = watched(now - 30 * DAY, now - 3 * DAY);
+        assert!(
+            unused_everywhere(
+                Some(three_days_quiet),
+                || None,
+                quiet,
+                now,
+                use_window_secs(0.9)
+            ),
+            "pressed: nobody ran it in three days, it goes"
+        );
+        assert!(
+            !unused_everywhere(
+                Some(three_days_quiet),
+                || None,
+                quiet,
+                now,
+                use_window_secs(0.5)
+            ),
+            "control: with room it keeps its week"
+        );
+        assert!(
+            !unused_everywhere(
+                Some(watched(now - 30 * DAY, now - DAY)),
+                || None,
+                quiet,
+                now,
+                use_window_secs(0.9)
+            ),
+            "run here yesterday: kept however full"
+        );
+        assert!(
+            !unused_everywhere(
+                Some(watched(now - DAY, 0)),
+                || None,
+                quiet,
+                now,
+                use_window_secs(0.9)
+            ),
+            "a copy a day old is still on its two-day trial"
+        );
+        let served_yesterday = Word::Says {
+            entry: Some(entry(now - 40 * DAY, now - DAY, 0)),
+            holds: true,
+        };
+        assert_eq!(
+            swarm_use_of([served_yesterday], now, PRESSED_USE_WINDOW_SECS),
+            SwarmUse::Served,
+            "a holder served it yesterday: kept however full"
+        );
+        let served_three_days_ago = Word::Says {
+            entry: Some(entry(now - 40 * DAY, now - 3 * DAY, 0)),
+            holds: true,
+        };
+        assert_eq!(
+            swarm_use_of(
+                [served_three_days_ago.clone()],
+                now,
+                PRESSED_USE_WINDOW_SECS
+            ),
+            SwarmUse::Quiet { tried: true }
+        );
+        assert_eq!(
+            swarm_use_of([served_three_days_ago], now, USE_WINDOW_SECS),
+            SwarmUse::Served,
+            "control: within the week"
+        );
+        let updated_three_days_ago = Word::Says {
+            entry: Some(ModelServed {
+                served_since: ModelServed::day_of(now - 3 * DAY),
+                ..entry(now - 40 * DAY, 0, 0)
+            }),
+            holds: true,
+        };
+        assert_eq!(
+            swarm_use_of(
+                [updated_three_days_ago.clone()],
+                now,
+                PRESSED_USE_WINDOW_SECS
+            ),
+            SwarmUse::Quiet { tried: true },
+            "an update three days ago covers a pressed computer's window"
+        );
+        assert_eq!(
+            swarm_use_of([updated_three_days_ago], now, USE_WINDOW_SECS),
+            SwarmUse::Unknown,
+            "control: not a week's"
         );
     }
 
@@ -798,7 +1081,7 @@ mod tests {
         assert_eq!(next_record(Some(r), gone, now), Next::Forget);
         assert_eq!(next_record(None, gone, now), Next::Unchanged);
         let given_back = ModelUse {
-            gave_back_unused: now - 27 * DAY,
+            gave_back_unused: now - 13 * DAY,
             served_for_others: now - 40 * DAY,
             ..r
         };
@@ -808,7 +1091,7 @@ mod tests {
             "within two windows: remembered"
         );
         let long_ago = ModelUse {
-            gave_back_unused: now - 28 * DAY,
+            gave_back_unused: now - 14 * DAY,
             ..given_back
         };
         assert_eq!(next_record(Some(long_ago), gone, now), Next::Forget);
@@ -890,22 +1173,30 @@ mod tests {
             holds: true,
         };
         assert_eq!(
-            swarm_use_of([holder(now - 40 * DAY, now - 3 * DAY)], now),
+            swarm_use_of(
+                [holder(now - 40 * DAY, now - 3 * DAY)],
+                now,
+                USE_WINDOW_SECS
+            ),
             SwarmUse::Unknown,
             "held 40 days, serving recorded for 3: it cannot say"
         );
         assert_eq!(
-            swarm_use_of([holder(now - 40 * DAY, now - 14 * DAY)], now),
+            swarm_use_of(
+                [holder(now - 40 * DAY, now - 14 * DAY)],
+                now,
+                USE_WINDOW_SECS
+            ),
             SwarmUse::Quiet { tried: true },
             "recorded the whole window"
         );
         assert_eq!(
-            swarm_use_of([holder(now - 2 * DAY, now - 3 * DAY)], now),
+            swarm_use_of([holder(now - 2 * DAY, now - 3 * DAY)], now, USE_WINDOW_SECS),
             SwarmUse::Quiet { tried: false },
             "began holding after it began recording: it covers what it held"
         );
         assert_eq!(
-            swarm_use_of([holder(now - 40 * DAY, 0)], now),
+            swarm_use_of([holder(now - 40 * DAY, 0)], now, USE_WINDOW_SECS),
             SwarmUse::Quiet { tried: true },
             "0: recorded since it began holding"
         );
@@ -924,7 +1215,8 @@ mod tests {
                         holds: true
                     },
                 ],
-                now
+                now,
+                USE_WINDOW_SECS
             ),
             SwarmUse::Quiet { tried: false },
             "a computer holding none of it is no holder that cannot say"
@@ -935,50 +1227,74 @@ mod tests {
     fn the_swarm_is_judged_only_when_every_holder_can_say() {
         let now = 100 * DAY;
         let says = |entry: Option<ModelServed>| Word::Says { entry, holds: true };
-        assert_eq!(swarm_use_of([], now), SwarmUse::Unknown, "offline");
         assert_eq!(
-            swarm_use_of([Word::Silent { holds: false }], now),
+            swarm_use_of([], now, USE_WINDOW_SECS),
+            SwarmUse::Unknown,
+            "offline"
+        );
+        assert_eq!(
+            swarm_use_of([Word::Silent { holds: false }], now, USE_WINDOW_SECS),
             SwarmUse::Unknown,
             "nobody advertises"
         );
         assert_eq!(
-            swarm_use_of([says(None)], now),
+            swarm_use_of([says(None)], now, USE_WINDOW_SECS),
             SwarmUse::Quiet { tried: false }
         );
         assert_eq!(
-            swarm_use_of([says(None), Word::Silent { holds: false }], now),
+            swarm_use_of(
+                [says(None), Word::Silent { holds: false }],
+                now,
+                USE_WINDOW_SECS
+            ),
             SwarmUse::Quiet { tried: false },
             "an older build that holds none says nothing of it"
         );
         assert_eq!(
-            swarm_use_of([says(None), Word::Silent { holds: true }], now),
+            swarm_use_of(
+                [says(None), Word::Silent { holds: true }],
+                now,
+                USE_WINDOW_SECS
+            ),
             SwarmUse::Unknown,
             "an older build holding a part may be running it"
         );
         let served_yesterday = says(Some(entry(now - 40 * DAY, now - DAY, 0)));
         assert_eq!(
-            swarm_use_of([Word::Silent { holds: true }, served_yesterday], now),
+            swarm_use_of(
+                [Word::Silent { holds: true }, served_yesterday],
+                now,
+                USE_WINDOW_SECS
+            ),
             SwarmUse::Served,
             "served: whatever the rest say"
         );
         assert_eq!(
-            swarm_use_of([says(Some(entry(now - 40 * DAY, now - 15 * DAY, 0)))], now),
+            swarm_use_of(
+                [says(Some(entry(now - 40 * DAY, now - 15 * DAY, 0)))],
+                now,
+                USE_WINDOW_SECS
+            ),
             SwarmUse::Quiet { tried: true },
             "held for the window, last served before it"
         );
         assert_eq!(
-            swarm_use_of([says(Some(entry(now - 3 * DAY, 0, 0)))], now),
+            swarm_use_of(
+                [says(Some(entry(now - 3 * DAY, 0, 0)))],
+                now,
+                USE_WINDOW_SECS
+            ),
             SwarmUse::Quiet { tried: false },
             "a holder still on its trial"
         );
         let gave_back = |days: i64| says(Some(entry(0, 0, now - days * DAY)));
         assert_eq!(
-            swarm_use_of([gave_back(20), gave_back(3)], now),
+            swarm_use_of([gave_back(10), gave_back(3)], now, USE_WINDOW_SECS),
             SwarmUse::Quiet { tried: true },
             "two gave it back for want of use within two windows"
         );
         assert_eq!(
-            swarm_use_of([gave_back(30), gave_back(3)], now),
+            swarm_use_of([gave_back(15), gave_back(3)], now, USE_WINDOW_SECS),
             SwarmUse::Quiet { tried: false },
             "one of them past two windows"
         );
@@ -998,7 +1314,8 @@ mod tests {
                     entry: held_unserved.clone(),
                     holds: false
                 }],
-                now
+                now,
+                USE_WINDOW_SECS
             ),
             SwarmUse::Quiet { tried: false },
             "it holds no part of it: its stamp is not weighed"
@@ -1009,7 +1326,8 @@ mod tests {
                     entry: held_unserved,
                     holds: true
                 }],
-                now
+                now,
+                USE_WINDOW_SECS
             ),
             SwarmUse::Quiet { tried: true },
             "control: a holder"
@@ -1019,14 +1337,15 @@ mod tests {
             holds: false,
         };
         assert_eq!(
-            swarm_use_of([says(entry(0, 0, now - DAY))], now),
+            swarm_use_of([says(entry(0, 0, now - DAY))], now, USE_WINDOW_SECS),
             SwarmUse::Quiet { tried: false },
             "one give-back alone"
         );
         assert_eq!(
             swarm_use_of(
                 [says(entry(0, 0, now - DAY)), says(entry(0, 0, i64::MAX))],
-                now
+                now,
+                USE_WINDOW_SECS
             ),
             SwarmUse::Quiet { tried: false },
             "a give-back dated in the future is no second witness"
@@ -1034,13 +1353,14 @@ mod tests {
         assert_eq!(
             swarm_use_of(
                 [says(entry(0, 0, now - DAY)), says(entry(0, 0, now + DAY))],
-                now
+                now,
+                USE_WINDOW_SECS
             ),
             SwarmUse::Quiet { tried: true },
             "a clock a day ahead still counts"
         );
         assert_eq!(
-            swarm_use_of([says(entry(1, i64::MAX, 0))], now),
+            swarm_use_of([says(entry(1, i64::MAX, 0))], now, USE_WINDOW_SECS),
             SwarmUse::Quiet { tried: false },
             "served in the future: not served"
         );
@@ -1059,22 +1379,41 @@ mod tests {
         for reading in [Some(true), Some(false), None] {
             let popular = || reading;
             assert!(
-                unused_everywhere(Some(done), popular, quiet, now),
+                unused_everywhere(Some(done), popular, quiet, now, USE_WINDOW_SECS),
                 "popular {reading:?}: held the window, nobody ran it"
             );
-            assert!(!unused_everywhere(Some(on_trial), popular, quiet, now));
+            assert!(!unused_everywhere(
+                Some(on_trial),
+                popular,
+                quiet,
+                now,
+                USE_WINDOW_SECS
+            ));
             assert!(!unused_everywhere(
                 Some(done),
                 popular,
                 || SwarmUse::Served,
-                now
+                now,
+                USE_WINDOW_SECS
             ));
             assert!(
-                !unused_everywhere(Some(done), popular, || SwarmUse::Unknown, now),
+                !unused_everywhere(
+                    Some(done),
+                    popular,
+                    || SwarmUse::Unknown,
+                    now,
+                    USE_WINDOW_SECS
+                ),
                 "an older build or no peer: nothing is given back"
             );
             assert!(
-                unused_everywhere(None, popular, || SwarmUse::Quiet { tried: true }, now),
+                unused_everywhere(
+                    None,
+                    popular,
+                    || SwarmUse::Quiet { tried: true },
+                    now,
+                    USE_WINDOW_SECS
+                ),
                 "the swarm tried it and nobody ran it: not fetched"
             );
         }
@@ -1083,20 +1422,21 @@ mod tests {
                 Some(watched(now - 20 * DAY, now - DAY)),
                 || Some(false),
                 quiet,
-                now
+                now,
+                USE_WINDOW_SECS
             ),
             "run here yesterday — the owner's use keeps this computer's copy"
         );
         assert!(
-            !unused_everywhere(None, || Some(true), quiet, now),
+            !unused_everywhere(None, || Some(true), quiet, now, USE_WINDOW_SECS),
             "held nowhere, run outside: tried"
         );
         assert!(
-            !unused_everywhere(None, || None, quiet, now),
+            !unused_everywhere(None, || None, quiet, now, USE_WINDOW_SECS),
             "no reading: fetched as before"
         );
         assert!(
-            unused_everywhere(None, || Some(false), quiet, now),
+            unused_everywhere(None, || Some(false), quiet, now, USE_WINDOW_SECS),
             "nobody here or outside runs it"
         );
         let given_back = ModelUse {
@@ -1104,26 +1444,104 @@ mod tests {
             ..done
         };
         assert!(
-            unused_everywhere(Some(given_back), || Some(true), quiet, now),
+            unused_everywhere(Some(given_back), || Some(true), quiet, now, USE_WINDOW_SECS),
             "given back here: not fetched again on popularity"
         );
         assert!(unused_everywhere(
             Some(given_back),
             || Some(true),
             || SwarmUse::Unknown,
-            now
+            now,
+            USE_WINDOW_SECS
         ));
         assert!(
-            !unused_everywhere(Some(given_back), || Some(true), || SwarmUse::Served, now),
+            !unused_everywhere(
+                Some(given_back),
+                || Some(true),
+                || SwarmUse::Served,
+                now,
+                USE_WINDOW_SECS
+            ),
             "served since: fetched"
         );
         let stale = ModelUse {
-            gave_back_unused: now - 29 * DAY,
+            gave_back_unused: now - 15 * DAY,
             ..done
         };
         assert!(
-            !unused_everywhere(Some(stale), || Some(true), quiet, now),
+            !unused_everywhere(Some(stale), || Some(true), quiet, now, USE_WINDOW_SECS),
             "two windows on, it may be tried again"
+        );
+    }
+
+    /// The prune pass's report names the pool that decided each model, so a
+    /// full computer that gives nothing back says why (#452).
+    #[test]
+    fn the_verdict_names_the_pool_that_decided() {
+        let now = 100 * DAY;
+        let w = USE_WINDOW_SECS;
+        let quiet = || SwarmUse::Quiet { tried: false };
+        assert_eq!(
+            judge(Some(watched(now - 3 * DAY, 0)), || None, quiet, now, w),
+            Verdict::OnTrial
+        );
+        assert_eq!(
+            judge(
+                Some(watched(now - 3 * DAY, now - DAY)),
+                || None,
+                quiet,
+                now,
+                w
+            ),
+            Verdict::RunHere,
+            "run here inside the trial: the use is what keeps it"
+        );
+        assert_eq!(
+            judge(
+                Some(watched(now - 30 * DAY, 0)),
+                || None,
+                || SwarmUse::Unknown,
+                now,
+                w
+            ),
+            Verdict::CannotSay
+        );
+        assert_eq!(
+            judge(
+                Some(watched(now - 30 * DAY, 0)),
+                || None,
+                || SwarmUse::Served,
+                now,
+                w
+            ),
+            Verdict::Served
+        );
+        assert_eq!(
+            judge(Some(watched(now - 30 * DAY, 0)), || None, quiet, now, w),
+            Verdict::Unused
+        );
+        assert_eq!(
+            judge(None, || Some(true), quiet, now, w),
+            Verdict::WorthTrying
+        );
+        let mut report = UsesReport::default();
+        for m in ["c", "a", "b"] {
+            report.note(Verdict::CannotSay, &ModelId(m.into()));
+        }
+        report.note(Verdict::Unused, &ModelId("z".into()));
+        assert_eq!(
+            report.summary(),
+            "a holder cannot say what it served (3): a, b, c; nobody runs it (1): z"
+        );
+        for i in 0..8 {
+            report.note(Verdict::OnTrial, &ModelId(format!("t{i}")));
+        }
+        assert!(
+            report
+                .summary()
+                .starts_with("on its trial (8): t0, t1, t2, t3, t4, t5 and 2 more; "),
+            "{}",
+            report.summary()
         );
     }
 

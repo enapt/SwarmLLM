@@ -42,7 +42,7 @@ fn recently_acquired_from(modified: std::io::Result<std::time::SystemTime>) -> b
 /// Resource pressure thresholds for pruning decisions.
 /// Relaxed: add a spare replica. Normal: no change. Eager: shed 1. Urgent: shed 2.
 const PRESSURE_RELAXED: f64 = 0.5;
-const PRESSURE_NORMAL: f64 = 0.8;
+pub(super) const PRESSURE_NORMAL: f64 = 0.8;
 const PRESSURE_URGENT: f64 = 0.95;
 
 /// Saturation factor for `contribution_auto`. When `holder_count >=
@@ -512,6 +512,8 @@ impl AutoShardManager {
 
         // Why each part held here was kept, for the reports after the pass.
         let mut kept = KeptBy::default();
+        // What each model held here is to the use rule (#452), likewise.
+        let mut uses = super::unused::UsesReport::default();
         // The room a part asks for, read once for the pass: every copy is
         // weighed against the same room.
         let room_noted = self.room_wanted_now();
@@ -603,8 +605,13 @@ impl AutoShardManager {
             // of the last day — never the one this instant reads (`target_hold`).
             let target = self.shed_target_replicas(&manifest.id, config.min_replicas, pool_size);
             let contribution_auto = live.node.contribution_auto;
-            // Once per model: every part of one nobody runs goes (#389 (d)).
-            let nobody_runs = self.nobody_runs(&manifest.id);
+            // Once per model: every part of one nobody runs goes (#389 (d)) —
+            // judged over the window this pass's disk pressure gives.
+            let verdict = self.unused_verdict(&manifest.id, disk_pressure);
+            let nobody_runs = verdict == super::unused::Verdict::Unused;
+            if parts_held_here(&manifest) > 0 {
+                uses.note(verdict, &manifest.id);
+            }
             let ends = crate::inference::split::parts_at_the_ends(&manifest);
 
             for shard in &manifest.shards {
@@ -1222,7 +1229,7 @@ impl AutoShardManager {
                 } else if candidate.nobody_runs {
                     format!(
                         "Nobody on the network ran it in {} days",
-                        super::unused::USE_WINDOW_SECS / 86_400
+                        super::unused::use_window_secs(disk_pressure) / 86_400
                     )
                 } else {
                     format!(
@@ -1368,12 +1375,26 @@ impl AutoShardManager {
                 );
             }
         }
+        // Which pool kept each model held here — every few minutes, so a full
+        // computer that gives nothing back says whether nobody can say yet
+        // (a holder's record younger than the window), it is on trial, or it
+        // is served (#452; 2026-11-14: a 14-day window and an update the same
+        // day kept everything with nothing in the log saying so).
+        if !uses.is_empty() && due_every(&self.last_uses_report, KEPT_REPORT_EVERY) {
+            tracing::info!(
+                disk_pressure = %format_args!("{disk_pressure:.2}"),
+                window_days = super::unused::use_window_secs(disk_pressure) / 86_400,
+                models = %uses.summary(),
+                "DIAG: models held here, by what the use rule says of each (#452)"
+            );
+        }
         self.shared_state
             .models
             .parts_kept_by
             .store(Some(std::sync::Arc::new(
                 crate::daemon::state::PartsKeptReport {
                     summary: kept.summary(),
+                    uses: uses.summary(),
                     spare_bytes: self.spare_for_any_room(disk_pressure, &shard_pins_cached),
                     at: std::time::Instant::now(),
                 },
@@ -1936,7 +1957,7 @@ impl AutoShardManager {
         // advertises: "nobody runs it" reads this owner's use (`model_use`),
         // which no other computer may learn (#389 (a)) — there the copy is
         // judged by the rules below, as a model somebody runs.
-        if !room.is_some_and(|r| r.advertised) && self.nobody_runs(&shard_id.model_id) {
+        if !room.is_some_and(|r| r.advertised) && self.nobody_runs(&shard_id.model_id, pressure) {
             return None;
         }
         // Prompt privacy needs BOTH ends of the model on this node, so

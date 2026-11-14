@@ -699,6 +699,10 @@ pub async fn diagnostics(
                     "  would give back for a part asked for more: {} MB",
                     report.spare_bytes_now() / MB
                 );
+                // Which pool kept each model held here — or judged it one
+                // nobody runs (#452): the window in force follows the disk
+                // pressure (`unused::use_window_secs`).
+                let _ = writeln!(out, "  models by the use rule: {}", report.uses);
             }
             None => {
                 let _ = writeln!(out, "  kept by: no prune pass yet");
@@ -2204,10 +2208,36 @@ pub async fn list_peers(State(state): State<AppState>) -> Json<Vec<serde_json::V
         .shared_state
         .peer_registry
         .iter()
-        .map(|entry| serialize_peer_to_json(entry.value(), &state.shared_state, true))
+        .map(|entry| {
+            let mut row = serialize_peer_to_json(entry.value(), &state.shared_state, true);
+            if let Some(o) = row.as_object_mut() {
+                o.insert("models_served".into(), models_served_json(entry.value()));
+            }
+            row
+        })
         .collect();
 
     Json(peers)
+}
+
+/// A peer's word on what it served for other computers, model by model
+/// (`NodeCapability::models_served`, #452) — the input every keep or give-back
+/// decision of a model nobody runs reads (`auto_manage::unused::SwarmUse`):
+/// `null` from a build that does not advertise it, else its count and its
+/// entries (day stamps, Unix seconds; `served_since` > 0 = its record of
+/// serving began after it began holding — it cannot yet say what it served
+/// before). Only on this listing, never the WebSocket's peer list: up to
+/// `ModelServed::MOST_ENTRIES` entries a peer. Its own word, gossiped to every
+/// computer already; shown, never acted on here.
+fn models_served_json(peer: &crate::types::PeerInfo) -> serde_json::Value {
+    match peer
+        .capability
+        .as_ref()
+        .and_then(|c| c.models_served.as_ref())
+    {
+        Some(list) => serde_json::json!({ "count": list.len(), "entries": list }),
+        None => serde_json::Value::Null,
+    }
 }
 
 /// GET /api/admin/credits — Credit details.

@@ -20,6 +20,9 @@ use super::hf::{HfProbeInfo, HfSource};
 pub struct PartsKeptReport {
     /// `rule (parts); rule (parts)`, the rule that kept the most first.
     pub summary: String,
+    /// What the use rule says of each model held here (#452,
+    /// `unused::UsesReport`): `verdict (n): model, …`, the most models first.
+    pub uses: String,
     /// Bytes of what is held here that this computer would give back for a
     /// part of a model people ask for more (`prune::spare_for_any_room`) —
     /// the `spare_mb` its capability tells other computers (#400).

@@ -887,7 +887,19 @@ frame, then add a receipt ACK or a per-frame read deadline mirroring request-res
 > not for want of use, leaves no give-back record, so the dashboard does not list it (rare: room keeps
 > two other holders); (c) an owner's request for a model nobody holds counts only here (their use is
 > never gossiped, #389 (a)), so it fetches only the parts the ring gives this node — "Get it again" is
-> how its owner gets the whole model back. (d) SCALE: only CONNECTED holders are asked (pre-release
+> how its owner gets the whole model back.
+> **2026-11-14 evening — the window follows the disk** (user: "we need to be pruning more aggressively
+> at this scale, so nodes make room for usable models faster"): 14 days whatever the disk left every
+> model several computers hold "cannot say" until ~11-29 (all updated to .288 that day) and full
+> computers kept two weeks of what nobody ran — Proxmox (pressure 1.00) wanted 1,458 MB for a
+> Qwen3.6-35B-A3B part and could free 384, holding 122B parts no card here can run. Now
+> `unused::use_window_secs`: 2 days from disk pressure 0.8, 7 below (prior art: the kubelet's
+> `imageGCHighThresholdPercent` / `imageMaximumGCAge`, KEP-4210); the give-back memory stays 14 days.
+> Diagnosable: the prune pass names the pool that decided each model held (`DIAG: models held here,
+> by what the use rule says of each`, every 10 min, and the diagnostics report), and
+> `/api/admin/peers` shows each peer's `models_served`. Field check (a) now reads give-backs from
+> ~11-16 on full computers (2 days after .288's `served_since`), ~11-21 elsewhere.
+> (d) SCALE: only CONNECTED holders are asked (pre-release
 > review 2026-11-14). A holder serving the model that is not connected here is heard only through its
 > demand gossip, which keeps the model for a few hours after each request (`asked_for`, the EMA's
 > decay) — so a copy idle here 14 days can go while a far holder serves it once a day. Today every

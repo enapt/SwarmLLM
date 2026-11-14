@@ -19,7 +19,10 @@ and the peers its answers listed — `closer_peers`, and `provider_peers` for th
 holders it named.
 
 ### GET /api/admin/peers
-Connected peers with latency, trust scores, and hosted models.
+Connected peers with latency, trust scores, and hosted models. Each peer's
+`models_served` is its own word on what it ran for other computers, model by
+model, by the day — what decides whether a model nobody runs is given back
+(`null` from an older build).
 
 ### GET /api/admin/credits
 The internal ledger figures (balance, lifetime earned and spent, escrow) and the tier name. Credits are dormant: the balance is self-minted, gates nothing, and the tier is the same for everyone.

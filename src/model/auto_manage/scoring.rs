@@ -2125,10 +2125,24 @@ mod fetch_what_prune_keeps {
                 },
             );
         };
-        watched(13, None);
-        assert!(!shed(), "watched 13 days: still on trial");
+        watched(6, None);
+        assert!(!shed(), "watched 6 days: still on trial");
         watched(40, Some(2));
         assert!(!shed(), "run here two days ago");
+        // Where storage is pressed the window is two days (2026-11-14: "we
+        // need to be pruning more aggressively at this scale"), and the
+        // download pass, asking at the pressure its fetch would leave, agrees.
+        let shed_pressed =
+            || manager.would_shed_copy(&part(0), std::slice::from_ref(&local), 0.9, &[]);
+        assert!(
+            shed_pressed(),
+            "pressed: run here two days ago is not enough"
+        );
+        watched(40, Some(1));
+        assert!(!shed_pressed(), "run here yesterday: kept however full");
+        watched(3, None);
+        assert!(shed_pressed(), "pressed: three days is past the trial");
+        assert!(!shed(), "control: with room, still on its week's trial");
         watched(40, None);
         assert!(shed(), "control: nobody again");
         state
@@ -2151,9 +2165,9 @@ mod fetch_what_prune_keeps {
         let (state, manager) = manager_with(Config::default());
         let reference = model_nobody_runs(&state, &manager, "tinyllama-1.1b-chat-v1.0.q4-k-m", 30);
         let other = model_nobody_runs(&state, &manager, "tinyllama-1.1b-chat-v0.9.q4-k-m", 30);
-        assert!(!manager.nobody_runs(&reference));
+        assert!(!manager.nobody_runs(&reference, 0.0));
         assert!(
-            manager.nobody_runs(&other),
+            manager.nobody_runs(&other, 0.0),
             "control: one that is not a reference model"
         );
     }

@@ -176,6 +176,9 @@ pub struct AutoShardManager {
     /// When prune last said why it gave nothing back while a part asked for
     /// room (`prune::KeptBy`).
     pub(super) last_kept_report: std::sync::Mutex<Option<std::time::Instant>>,
+    /// When the prune pass last reported what the use rule says of each model
+    /// held here (`unused::UsesReport`, #452).
+    pub(super) last_uses_report: std::sync::Mutex<Option<std::time::Instant>>,
     /// Which part the download pass last said wants room here, and when
     /// ([`Self::room_report_due`]).
     last_room_report: std::sync::Mutex<Option<((ModelId, u32), std::time::Instant)>>,
@@ -375,6 +378,7 @@ impl AutoShardManager {
             last_over_budget_warning: std::sync::Mutex::new(None),
             last_storage_full_notice: std::sync::Mutex::new(None),
             last_kept_report: std::sync::Mutex::new(None),
+            last_uses_report: std::sync::Mutex::new(None),
             last_room_report: std::sync::Mutex::new(None),
             carry_curves: dashmap::DashMap::new(),
             carrier_leases: dashmap::DashMap::new(),
