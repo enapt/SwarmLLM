@@ -8062,8 +8062,17 @@ computer was busy, perhaps for its owner (#389 (a)) — it is told as `Plain`, a
 log probabilities and a low payoff are. And `Speculated` only where a check RAN
 (a guess kept or refused, `LocalSpec::how_guessed`): the speculating loop is
 admitted only on an idle worker, so "speculating, checked nothing" would leak
-the same fact from the other side (security review 2026-11-14, low; a reply
-whose guesses were checked shows it in its pace anyway). SWIFT (off by default)
+the same fact from the other side (security review 2026-11-14, low). **What
+remains, accepted:** `Speculated` itself tells the requester that no other
+request was decoding on that worker when this one arrived, since the speculating
+loop is admitted only then, and for a request the requester knows could be
+guessed, `Plain` beside an attached drafter usually means the opposite (the
+pre-release review of v0.3.287, 2026-11-14). The reply's pace carries the same
+bit (a checked guess brings back several words a round, a batched step one),
+and dropping the path or the counts would not remove it either: the record's
+absence would say it. So the rule is narrower than "reveal nothing about
+concurrent use": the record names no REASON a reply was not guessed, and no
+field may narrow `Plain` further. SWIFT (off by default)
 reads `Plain`. A record in a shape this build cannot read is `None`
 (`how_guessed_or_none`, serde's `untagged` + `IgnoredAny`): the last frame ENDS
 the reply, so it must decode. Counts and fixed words only — no text a peer wrote; an unknown word

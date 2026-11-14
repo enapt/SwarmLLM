@@ -470,16 +470,25 @@
       var baseline = App.settings._loadedConfig;
       if (baseline && Object.keys(App.settings._changedFields(App.settings._readForm(), baseline)).length > 0) return true;
       if (App.settings._extraDirty) return true;
-      return Array.prototype.some.call(
-        document.querySelectorAll('#provider-cards input[type="password"]'),
-        function(el) { return !!el.value; });
+      return Array.prototype.some.call(App.settings._providerKeyInputs(), function(el) { return !!el.value; });
+    },
+
+    // The provider key boxes, found by their ids: "Show" turns a box's type to
+    // `text`, so a `type="password"` selector loses a key the user is looking at.
+    _providerKeyInputs: function() {
+      return document.querySelectorAll('#provider-cards input[id^="provider-key-"]');
     },
 
     // The user chose to discard: put back what is NOT repopulated by the next
     // `load`, so reopening Settings does not show edits that were thrown away
     // as though they were still pending. Config fields come back from `load`.
     discardEdits: function() {
-      document.querySelectorAll('#provider-cards input[type="password"]').forEach(function(el) { el.value = ''; });
+      App.settings._providerKeyInputs().forEach(function(el) {
+        el.value = '';
+        el.type = 'password';
+        var toggle = el.parentNode && el.parentNode.querySelector('.password-toggle');
+        if (toggle) toggle.textContent = I18n.t('settings.show_password');
+      });
       var nickEl = document.getElementById('settings-nickname');
       if (nickEl) {
         nickEl.value = '';

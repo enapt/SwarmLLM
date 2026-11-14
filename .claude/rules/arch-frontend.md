@@ -119,7 +119,8 @@ asks (native `confirm`, as the rest of the dashboard) only when
 health-interval edit, or a provider key typed and not saved. A backdrop click
 closes only when the press STARTED on the backdrop too: selecting text in an
 input and releasing outside fires `click` on the backdrop. Hiding
-`#settings-modal` anywhere else skips the guard.
+`#settings-modal` anywhere else skips the guard. Key boxes are found by id
+(`_providerKeyInputs`), never `type="password"`: "Show" makes one `text`.
 
 → `docs/invariants/frontend.md`
 
