@@ -1,5 +1,31 @@
 # Changelog
 
+## [0.3.289-alpha] — 2026-11-15
+
+**A full computer gives back models nobody runs within two days, not two weeks.** Most computers on the network are at
+their storage limit, and a model nobody ran stayed on them for 14 days before it made room for one people use (#452).
+Now a computer whose model storage is 80% full or more judges "nobody runs it" over 2 days; below that, over 7 (it
+was 14). A model given back is remembered for 14 days (it was 28), so it is not fetched straight back on popularity
+alone; a request for it still brings it back. As before, a model is judged by what
+every connected computer holding it served for others, and a computer that updated recently cannot vouch for the time
+before its update: right after this update, a model several computers hold is judged about two days after they update.
+
+**You can see why a model is kept or given back.** Every 10 minutes the log says, for each model held, which rule
+decided — run here, served for another computer, a holder cannot say yet, or nobody runs it — and the diagnostics
+report carries the same line. The peer list (`/api/admin/peers`) shows what each computer says it served for others.
+
+**A mixture-of-experts model no longer settles on a slower thread count.** With its experts in system memory, the
+owner's replies may use more processor threads when a quick side-by-side check says that is faster. On a hot laptop
+that check sometimes chose 6 or 8 threads that then decoded 10-25% slower over the whole reply (#453). A wider choice
+is now tried in blocks over 32 tokens and kept only if it stays faster; otherwise the default stays.
+
+**A model split between the graphics card and the processor keeps its guessing helper even when the card is full.**
+A model's block drafter — a small helper that guesses several words at once for the model to check — was left out
+when the card had no room for it, which is exactly where a model too big for the card (a 27B on a 12 GB card) needs
+it most. It now sits in the computer's own memory instead, when that has room (#451). Measured on a 9B with 25 of
+its 32 layers on a laptop card: code 30 tokens a second against 21 without it; prose and stories no slower. Replies
+are the model's own; they may part from the old ones only where two words were all but tied.
+
 ## [0.3.288-alpha] — 2026-11-14
 
 **Computers now give back models nobody on the network runs, so there is room for the ones people do.** Computers
