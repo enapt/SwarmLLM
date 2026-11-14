@@ -134,6 +134,51 @@ impl std::fmt::Display for StorageLimit {
     }
 }
 
+impl StorageLimit {
+    /// What set the limit, as other computers are told it
+    /// (`NodeCapability::storage`): the rule, never its figures.
+    pub fn kind(&self) -> swarmllm_types::StorageLimitKind {
+        use swarmllm_types::StorageLimitKind as Kind;
+        match self {
+            Self::Explicit { .. } => Kind::Setting,
+            Self::ContributionShare { .. } => Kind::ShareOfDisk,
+            Self::MaxDisk { .. } => Kind::DiskLimit,
+            Self::FreeDisk { .. } => Kind::FreeDisk,
+            Self::NothingConfigured => Kind::NoneSet,
+        }
+    }
+}
+
+/// **What this computer tells other computers about its storage** — its limit,
+/// what it holds, and what of that it would give back for a part of a model
+/// people ask for more (`NodeCapability::storage`, #400). The one builder, for
+/// the capability: from `reading` (the limit and what is held, read as the
+/// storage budget reads them) and prune's last pass (`PartsKeptReport::
+/// spare_bytes_now`; nothing while prune is off, which gives nothing back).
+pub fn storage_room(
+    state: &crate::daemon::SharedState,
+    reading: &StorageReading,
+) -> swarmllm_types::StorageRoom {
+    const MB: u64 = 1024 * 1024;
+    let budget = reading.budget();
+    let spare_bytes = if state.cfg().auto_manage.prune_enabled {
+        state
+            .models
+            .parts_kept_by
+            .load()
+            .as_ref()
+            .map_or(0, |report| report.spare_bytes_now())
+    } else {
+        0
+    };
+    swarmllm_types::StorageRoom {
+        limit_mb: budget.bytes / MB,
+        held_mb: reading.held_bytes.div_ceil(MB),
+        spare_mb: spare_bytes / MB,
+        limited_by: budget.limited_by.kind(),
+    }
+}
+
 fn contribution_name(contribution: &swarmllm_types::ContributionMode) -> &'static str {
     match contribution {
         swarmllm_types::ContributionMode::Minimal => "minimal",

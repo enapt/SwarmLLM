@@ -2441,6 +2441,12 @@
         if (p.updates_itself === false) {
           _flag('badge-amber', 'dashboard.peer_updates_off', 'dashboard.peer_updates_off_tip');
         }
+        // At its storage limit with nothing it would give back for a new part
+        // (`StorageRoom::full`, #400): the network hands it no part to fetch.
+        // Not beside "Auto-download off", which already says it fetches none.
+        if (!p.is_anchor && p.auto_manage !== false && p.storage_full === true) {
+          _flag('badge-amber', 'dashboard.peer_storage_full', 'dashboard.peer_storage_full_tip');
+        }
         // A computer this one has run many requests for, that has run none of
         // this one's. Not on your own devices or an anchor (which runs nothing
         // by design). Its tip says it may be serving others: only what passed

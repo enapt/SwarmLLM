@@ -228,12 +228,14 @@ fn held_back_from_narrowing(
 /// prune than one that's used elsewhere in the region.
 const RECENT_REQUEST_PENALTY: f64 = 1.5;
 
-/// The replica-count and region rules' names in
-/// [`AutoShardManager::copy_kept_because`] — the two that a part asking for
-/// room may override ([`AutoShardManager::spare_for_room`]), so [`KeptBy`]
-/// asks those copies why they were not given back for it.
+/// The replica-count, region and whole-model rules' names in
+/// [`AutoShardManager::copy_kept_because`] — the three that a part asking for
+/// room may override ([`AutoShardManager::spare_for_room`]; the whole model
+/// only for a model asked for more, #400), so [`KeptBy`] asks those copies why
+/// they were not given back for it.
 const KEPT_FOR_ITS_COUNT: &str = "not more copies than the target";
 const KEPT_FOR_ITS_REGION: &str = "the last close holder in this region";
+const KEPT_WHOLE_HERE: &str = "this computer holds the whole model, or completes it";
 
 /// How often prune says why it gave nothing back while a part asks for room,
 /// and the download pass repeats which part asks (`due_when_changed_or_every`).
@@ -277,7 +279,10 @@ impl KeptBy {
 
 /// True once every `every`, recording now when it is: the one rate limit for
 /// prune's repeating reports. A poisoned lock stays quiet rather than spam.
-fn due_every(last: &std::sync::Mutex<Option<std::time::Instant>>, every: Duration) -> bool {
+pub(super) fn due_every(
+    last: &std::sync::Mutex<Option<std::time::Instant>>,
+    every: Duration,
+) -> bool {
     match last.lock() {
         Ok(mut last) => {
             let now = std::time::Instant::now();
@@ -312,6 +317,39 @@ pub(super) fn due_when_changed_or_every<K: PartialEq>(
             due
         }
         Err(_) => false,
+    }
+}
+
+/// What a copy held here is weighed against when a part asks for its room
+/// (`AutoShardManager::spare_for_room`): the room the download pass noted
+/// (`manager::RoomWanted::ask`), or the room this computer tells other
+/// computers it could make ([`RoomAsk::advertised`]).
+#[derive(Clone, Copy, Debug)]
+pub(super) struct RoomAsk<'a> {
+    /// The model the part asking belongs to: its own copies are never given
+    /// back for it. `None` for the advertised room — any model's part.
+    pub model: Option<&'a ModelId>,
+    /// A copy goes only with MORE live holders than this, this node counted.
+    pub floor: usize,
+    /// How much the model asking is asked for (`coverage::demand_for`): a
+    /// copy of a model held here whole goes only for one asked for more.
+    pub demand: f64,
+    /// The room advertised to other computers: judged on what they can see,
+    /// never on this owner's own use (#389 (a)) — `nobody_runs`, which reads
+    /// it, is not asked.
+    pub advertised: bool,
+}
+
+impl RoomAsk<'static> {
+    /// The room this computer could make for a part of a model asked for more
+    /// than any it holds — what it advertises (`NodeCapability::storage`).
+    pub(super) fn advertised(floor: usize) -> Self {
+        Self {
+            model: None,
+            floor,
+            demand: f64::INFINITY,
+            advertised: true,
+        }
     }
 }
 
@@ -474,7 +512,10 @@ impl AutoShardManager {
 
         // Why each part held here was kept, for the reports after the pass.
         let mut kept = KeptBy::default();
-        let room_asked = self.room_wanted_now().is_some();
+        // The room a part asks for, read once for the pass: every copy is
+        // weighed against the same room.
+        let room_noted = self.room_wanted_now();
+        let room_ask = room_noted.as_ref().map(|r| r.ask());
         let parts_held_here = |manifest: &crate::types::ModelManifest| {
             manifest
                 .shards
@@ -612,14 +653,19 @@ impl AutoShardManager {
                     &holders,
                     disk_pressure,
                     &shard_pins_cached,
-                    true,
+                    room_ask.as_ref(),
                 ) {
-                    // A copy only the count or the region kept was asked for
-                    // the room too: say which of that rule's conditions held it.
-                    let refused = (room_asked
-                        && (rule == KEPT_FOR_ITS_COUNT || rule == KEPT_FOR_ITS_REGION))
-                        .then(|| self.not_spare_for_room(&shard_id, &holders))
-                        .flatten();
+                    // A copy only the count, the region or a whole model here
+                    // kept was asked for the room too: say which of that rule's
+                    // conditions held it.
+                    let refused = room_ask
+                        .as_ref()
+                        .filter(|_| {
+                            rule == KEPT_FOR_ITS_COUNT
+                                || rule == KEPT_FOR_ITS_REGION
+                                || rule == KEPT_WHOLE_HERE
+                        })
+                        .and_then(|room| self.not_spare_for_room(&shard_id, &holders, room));
                     match refused {
                         Some(why) => kept.note(format!("{rule}, not given back for room: {why}")),
                         None => kept.note(rule),
@@ -1307,6 +1353,7 @@ impl AutoShardManager {
             .store(Some(std::sync::Arc::new(
                 crate::daemon::state::PartsKeptReport {
                     summary: kept.summary(),
+                    spare_bytes: self.spare_for_any_room(disk_pressure, &shard_pins_cached),
                     at: std::time::Instant::now(),
                 },
             )));
@@ -1577,16 +1624,23 @@ impl AutoShardManager {
         pressure: f64,
         shard_pins: &[crate::types::ShardPin],
     ) -> bool {
-        self.copy_kept_because(shard_id, holders, pressure, shard_pins, true)
-            .is_none()
+        let room = self.room_wanted_now();
+        self.copy_kept_because(
+            shard_id,
+            holders,
+            pressure,
+            shard_pins,
+            room.as_ref().map(|r| r.ask()).as_ref(),
+        )
+        .is_none()
     }
 
     /// Would prune shed this copy ONLY to make room for a part the swarm is
-    /// short of — kept by the replica count or the region rule, given back
-    /// because the download pass noted such a part it could not fit
-    /// ([`Self::spare_for_room`])? Prune gives such copies back within the
-    /// room noted, never more, and re-checks them against that room's floor
-    /// ([`Self::floor_for_room`]), not the replica target.
+    /// short of — kept by the replica count, the region rule or a whole model
+    /// here, given back because the download pass noted such a part it could
+    /// not fit ([`Self::spare_for_room`])? Prune gives such copies back within
+    /// the room noted, never more, and re-checks them against that room's
+    /// floor ([`Self::floor_for_room`]), not the replica target.
     pub(super) fn sheds_only_to_make_room(
         &self,
         shard_id: &ShardId,
@@ -1594,9 +1648,51 @@ impl AutoShardManager {
         pressure: f64,
         shard_pins: &[crate::types::ShardPin],
     ) -> bool {
-        self.copy_kept_because(shard_id, holders, pressure, shard_pins, false)
+        self.copy_kept_because(shard_id, holders, pressure, shard_pins, None)
             .is_some()
             && self.would_shed_copy(shard_id, holders, pressure, shard_pins)
+    }
+
+    /// What of the copies held here this computer would give back for a part
+    /// of a model people ask for — the room it tells other computers it could
+    /// make (`NodeCapability::storage`'s `spare_mb`, #400), in bytes. Each
+    /// held part asked [`Self::copy_kept_because`] against
+    /// [`RoomAsk::advertised`]: the plain floor, no model's own copies
+    /// excepted, a demand above any — so it is judged on what other computers
+    /// can see and never on this owner's own use (#389 (a)). Parts a download
+    /// is still writing are not counted.
+    pub(super) fn spare_for_any_room(
+        &self,
+        pressure: f64,
+        shard_pins: &[crate::types::ShardPin],
+    ) -> u64 {
+        let local = self.shared_state.identity.node_id().clone();
+        let allowed_set = crate::pool::scope::allowed_node_set(&self.shared_state);
+        let ask = RoomAsk::advertised(self.floor_for_room(super::manager::RoomFor::Placed, 0));
+        let registry = &self.shared_state.model_registry;
+        registry
+            .shards_for_node(&local)
+            .into_iter()
+            .filter(|shard_id| {
+                !self
+                    .shared_state
+                    .models
+                    .is_shard_in_progress(&shard_id.model_id, shard_id.index)
+            })
+            .filter_map(|shard_id| {
+                let holders = self.live_holders_with_us(&shard_id, &allowed_set);
+                self.copy_kept_because(&shard_id, &holders, pressure, shard_pins, Some(&ask))
+                    .is_none()
+                    .then(|| registry.get_manifest(&shard_id.model_id))
+                    .flatten()
+                    .and_then(|m| {
+                        m.shards
+                            .iter()
+                            .find(|s| s.index == shard_id.index)
+                            .map(|s| s.size_bytes)
+                    })
+            })
+            .sum()
     }
 
     /// The live holders, this node among them, a part must have MORE than for
@@ -1644,10 +1740,14 @@ impl AutoShardManager {
     /// live holders counting this node and this node is not among the first
     /// that many in the order every computer ranks them
     /// (`coverage::kept_by_rank`), and never a copy of the wanted part's own
-    /// model, of a model being assembled itself (`coverage::model_has_holes`),
-    /// loaded here, or held here whole or all but a few parts of
-    /// (`completes_model_here_counting` — at any pressure: the owner's one-hop
-    /// answer is not traded for a hole).
+    /// model, of a model being assembled itself (`coverage::model_has_holes`)
+    /// or loaded here — nor of one held here whole or all but a few parts of
+    /// (`completes_model_here_counting`) unless the part asking belongs to a
+    /// model asked for MORE (`coverage::demand_for`, TinyLFU's admission) and
+    /// the owner did not choose it (`SharedState::owner_chose`): the owner's
+    /// one-hop answer is traded only for something people want more (#400,
+    /// 2026-11-14 — before, never, and a full computer of small whole models
+    /// took no part of a 70B people were asking for).
     ///
     /// #371 (2026-10-29) widened what may ask from a hole to this node's part
     /// of a planned chain or of carrying, and a part too few computers hold
@@ -1676,8 +1776,13 @@ impl AutoShardManager {
     /// privacy, pins). Both passes ask it through [`Self::would_shed_copy`], so
     /// a copy given back is not fetched straight back while the room is noted
     /// (gotcha #795).
-    pub(super) fn spare_for_room(&self, shard_id: &ShardId, holders: &[NodeId]) -> bool {
-        self.not_spare_for_room(shard_id, holders).is_none()
+    pub(super) fn spare_for_room(
+        &self,
+        shard_id: &ShardId,
+        holders: &[NodeId],
+        room: &RoomAsk<'_>,
+    ) -> bool {
+        self.not_spare_for_room(shard_id, holders, room).is_none()
     }
 
     /// Why [`Self::spare_for_room`] refuses this copy — the first condition it
@@ -1686,19 +1791,19 @@ impl AutoShardManager {
     /// nothing says which condition held every copy (2026-11-02: the Proxmox
     /// box noted room for a part one computer held, ran prune every minute
     /// beside seven copies with four to six holders, and gave none back with
-    /// nothing in its log saying why).
+    /// nothing in its log saying why). `room` is the room the download pass
+    /// noted (`RoomWanted::ask`) or the one this computer tells other
+    /// computers it could make ([`RoomAsk::advertised`]).
     pub(super) fn not_spare_for_room(
         &self,
         shard_id: &ShardId,
         holders: &[NodeId],
+        room: &RoomAsk<'_>,
     ) -> Option<&'static str> {
-        let Some(room) = self.room_wanted_now() else {
-            return Some("no part asks for room");
-        };
         if holders.len() <= room.floor {
             return Some("too few other holders to give one back");
         }
-        if shard_id.model_id == room.model {
+        if room.model == Some(&shard_id.model_id) {
             return Some("a copy of the model asking for room");
         }
         // The first `floor` holders every computer ranks alike keep theirs,
@@ -1711,7 +1816,14 @@ impl AutoShardManager {
         ) {
             return Some("this computer is among the holders that keep theirs");
         }
-        if self.model_has_holes(&shard_id.model_id) {
+        // Whoever asked, for the room advertised (#389 (a)): "asked for" counts
+        // this owner's requests.
+        let assembled = if room.advertised {
+            self.has_holes_whoever_asks(&shard_id.model_id)
+        } else {
+            self.model_has_holes(&shard_id.model_id)
+        };
+        if assembled {
             return Some("its model is still being assembled");
         }
         if self
@@ -1721,8 +1833,24 @@ impl AutoShardManager {
         {
             return Some("its model is loaded");
         }
+        // A model held here whole, or all but a few parts of, is the owner's
+        // answer with no hop (#286, #320) — given up only for a part of a
+        // model asked for MORE (TinyLFU's admission: a newcomer replaces a
+        // victim only when it is worth more), and never one the owner chose.
+        // 2026-11-14: a computer with auto-manage on, at its 25 GB limit with
+        // thirteen small models held whole, was planned 24 layers of a 70B
+        // people were asking for, and gave nothing back: this said no to
+        // every copy, however few people ran those models (#400).
         if self.completes_model_here_counting(shard_id) {
-            return Some("this computer holds that model whole");
+            if self.shared_state.owner_chose(&shard_id.model_id) {
+                return Some("this computer holds that model whole, and its owner chose it");
+            }
+            if self.demand_for(&shard_id.model_id) >= room.demand {
+                return Some(
+                    "this computer holds that model whole, and it is asked for as much as the \
+                     model asking for room",
+                );
+            }
         }
         None
     }
@@ -1738,9 +1866,10 @@ impl AutoShardManager {
         holders: &[NodeId],
         pressure: f64,
         shard_pins: &[crate::types::ShardPin],
-        // Whether a part the swarm is short of may take a copy the replica count
-        // keeps (`spare_for_room`); `false` asks the replica count alone.
-        make_room: bool,
+        // The room a part the swarm is short of asks for — it may take a copy
+        // the replica count, the region or a whole model here keeps
+        // (`spare_for_room`); `None` asks those rules alone.
+        room: Option<&RoomAsk<'_>>,
     ) -> Option<&'static str> {
         let live = self.shared_state.cfg();
         if !live.auto_manage.prune_enabled {
@@ -1779,8 +1908,11 @@ impl AutoShardManager {
         // the download pass — which asks this — never fetches what prune
         // sheds. Before the exemptions below: prompt privacy's automatic ends
         // would otherwise keep two parts of a model nobody runs, and an
-        // explicit privacy choice is the owner's.
-        if self.nobody_runs(&shard_id.model_id) {
+        // explicit privacy choice is the owner's. Not for the room this computer
+        // advertises: "nobody runs it" reads this owner's use (`model_use`),
+        // which no other computer may learn (#389 (a)) — there the copy is
+        // judged by the rules below, as a model somebody runs.
+        if !room.is_some_and(|r| r.advertised) && self.nobody_runs(&shard_id.model_id) {
             return None;
         }
         // Prompt privacy needs BOTH ends of the model on this node, so
@@ -1820,6 +1952,26 @@ impl AutoShardManager {
             if shard_id.index >= start && shard_id.index <= end {
                 return Some("the configured --shards range");
             }
+        }
+        // The room this computer ADVERTISES (`RoomAsk::advertised`) reads
+        // nothing that follows this owner's own requests (#389 (a); security
+        // review 2026-11-14): "asked for", the carrier lease, a planned chain,
+        // a split's drafter and the demand-raised replica target all do, and a
+        // `spare_mb` that dropped by one model's parts as its owner asked for
+        // it told every peer which model that was. So a copy the model would
+        // fall short without is kept whoever asked (a far chain's part is
+        // one), and every other copy is weighed by `spare_for_room` alone —
+        // its floor, its rank, a model still being assembled (whoever asked),
+        // loaded, held whole and chosen. A near chain's part and a drafter's,
+        // kept below urgent pressure for speed, count as room: reading them
+        // would say what this owner runs.
+        if room.is_some_and(|r| r.advertised) {
+            if self.copy_carries_model_whoever_asks(shard_id, local_node_id) {
+                return Some("this copy carries the model");
+            }
+            return room
+                .is_some_and(|room| !self.spare_for_room(shard_id, holders, room))
+                .then_some(KEPT_FOR_ITS_COUNT);
         }
         // A copy that carries a model somebody asked for — its holders could
         // not run it without this one, or this node is fetching it to (#231).
@@ -1881,8 +2033,14 @@ impl AutoShardManager {
             // locally). Copies of partial holders go first; only an urgent disk
             // takes one. After the count, so the files are read only for a part
             // the count would shed (`parts_missing_here` stats each part).
+            //
+            // A part of a model asked for MORE may still take its room
+            // (`not_spare_for_room` weighs the two models' demand, #400).
             if pressure < PRESSURE_URGENT && self.completes_model_here_counting(shard_id) {
-                return Some("this computer holds the whole model, or completes it");
+                if room.is_some_and(|room| self.spare_for_room(shard_id, holders, room)) {
+                    return None;
+                }
+                return Some(KEPT_WHOLE_HERE);
             }
             // Region-aware: never the last holder in our region.
             self.would_eliminate_region(shard_id, local_node_id, holders)
@@ -1890,7 +2048,9 @@ impl AutoShardManager {
         };
         // Kept only for how many copies there are, or where they are: a part
         // the swarm is short of that lacks room here may take it.
-        if kept_for_its_copies.is_some() && make_room && self.spare_for_room(shard_id, holders) {
+        if kept_for_its_copies.is_some()
+            && room.is_some_and(|room| self.spare_for_room(shard_id, holders, room))
+        {
             return None;
         }
         kept_for_its_copies
@@ -1925,7 +2085,14 @@ impl AutoShardManager {
                     ),
                 );
         }
-        match self.copy_kept_because(&shard_id, &holders, pressure_after, shard_pins, true) {
+        let room = self.room_wanted_now();
+        match self.copy_kept_because(
+            &shard_id,
+            &holders,
+            pressure_after,
+            shard_pins,
+            room.as_ref().map(|r| r.ask()).as_ref(),
+        ) {
             None => true,
             Some(rule) => {
                 tracing::debug!(

@@ -720,6 +720,21 @@ pub struct NodeCapability {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub updates_itself: Option<bool>,
 
+    /// This computer's storage for parts: its limit, what it holds, and what of
+    /// that it would give back for a part of a model people ask for more
+    /// (#400, 2026-11-14). A peer hands it a part to FETCH by this
+    /// (`auto_manage::coverage::room_to_fetch_bytes`), never by its free disk:
+    /// a computer at its 25 GB limit with 779 GB free was planned 24 layers of
+    /// a 70B it would never fetch, held them 20 minutes, was passed over two
+    /// hours and planned again. Kubernetes' kubelet publishes its
+    /// `DiskPressure` the same way, in the node's status, for the scheduler to
+    /// read. A claim, like every field here: saying less only takes it out of
+    /// its share, saying more only gets it planned what it will not fetch, as
+    /// before. `None` = an older build, whose free disk (`disk_available_mb`)
+    /// is read as its room, as before (`#[serde(default)]`, the additive rule).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub storage: Option<StorageRoom>,
+
     /// Layers of each model this node currently has LOADED, by model id.
     ///
     /// `hosted_shards` says what is on disk; this says what is in memory right
@@ -839,6 +854,70 @@ pub struct NodeCapability {
     /// `0` from a node predating the field: unordered, taken as before.
     #[serde(default)]
     pub issued_at_ms: u64,
+}
+
+/// What a computer's storage limit leaves it room to fetch
+/// ([`NodeCapability::storage`], #400). Whole megabytes; every figure is the
+/// computer's own word.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct StorageRoom {
+    /// The most it holds of model parts, MB (`auto_manage::storage_budget`).
+    pub limit_mb: u64,
+    /// What it holds now, MB — everything under its models directory.
+    pub held_mb: u64,
+    /// What of that it would give back for a part of a model people ask for
+    /// more, MB: copies other computers keep enough of, not loaded, not its
+    /// owner's choice (`prune::spare_for_any_room`) — judged on what other
+    /// computers can see, never on its owner's own use of a model.
+    #[serde(default)]
+    pub spare_mb: u64,
+    /// What set the limit, for display.
+    #[serde(default)]
+    pub limited_by: StorageLimitKind,
+}
+
+impl StorageRoom {
+    /// MB it fetches into without giving anything back.
+    pub fn free_mb(&self) -> u64 {
+        self.limit_mb.saturating_sub(self.held_mb)
+    }
+
+    /// MB it may be handed to fetch for a part of a model people ask for more:
+    /// what is free, and what it would give back.
+    pub fn room_mb(&self) -> u64 {
+        self.free_mb().saturating_add(self.spare_mb)
+    }
+
+    /// No room for one more part, given back or free
+    /// ([`StorageRoom::ROOM_FOR_A_PART_MB`]): what a peer list shows as
+    /// "Storage full".
+    pub fn full(&self) -> bool {
+        self.room_mb() < Self::ROOM_FOR_A_PART_MB
+    }
+
+    /// About one part of a mid-sized model, MB: less room than this takes no
+    /// part at all.
+    pub const ROOM_FOR_A_PART_MB: u64 = 1024;
+}
+
+/// What set a computer's storage limit ([`StorageRoom::limited_by`]).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StorageLimitKind {
+    /// Its owner set the limit (`auto_manage.max_storage_mb`).
+    Setting,
+    /// A share of its disk limit, by how much it contributes.
+    ShareOfDisk,
+    /// Its disk limit (`resources.max_disk_mb`).
+    DiskLimit,
+    /// Its disk itself is nearly full.
+    FreeDisk,
+    /// No limit is set, so it holds nothing it fetches by itself.
+    NoneSet,
+    /// A kind a newer build names, or none said.
+    #[default]
+    #[serde(other)]
+    Unknown,
 }
 
 /// The serde default for [`NodeCapability::can_serve_inference`].
@@ -1500,6 +1579,45 @@ mod version_compat_tests {
             cap.memory_for_model_layers_mb("m"),
             2048,
             "the models load in RAM, so the RAM budget is what bounds them"
+        );
+    }
+
+    /// #400 (2026-11-14): a capability from before `storage` decodes with none
+    /// (a peer then reads its free disk as its room, as before); ours carries
+    /// it and reads back the same; a limit kind a newer build names reads as
+    /// `Unknown`, never a failed decode — a capability that fails to decode
+    /// loses the peer's whole announcement.
+    #[test]
+    fn storage_decodes_on_either_release_and_an_unknown_limit_kind_is_unknown() {
+        let old: NodeCapability = serde_json::from_value(base_fields()).unwrap();
+        assert_eq!(old.storage, None);
+        let mut v = base_fields();
+        v.as_object_mut().unwrap().insert(
+            "storage".into(),
+            serde_json::json!({
+                "limit_mb": 25_000u64,
+                "held_mb": 40_000u64,
+                "spare_mb": 3_000u64,
+                "limited_by": "share_of_disk",
+            }),
+        );
+        let cap: NodeCapability = serde_json::from_value(v.clone()).unwrap();
+        let storage = cap.storage.expect("said");
+        assert_eq!(
+            (storage.free_mb(), storage.room_mb(), storage.limited_by),
+            (0, 3_000, StorageLimitKind::ShareOfDisk),
+            "over its limit: nothing free, what it would give back is its room"
+        );
+        assert!(!storage.full());
+        assert_eq!(serde_json::to_value(&cap).unwrap()["storage"], v["storage"]);
+        v["storage"]["limited_by"] = serde_json::json!("a_kind_from_a_newer_build");
+        let newer: NodeCapability = serde_json::from_value(v.clone()).unwrap();
+        assert_eq!(newer.storage.unwrap().limited_by, StorageLimitKind::Unknown);
+        v["storage"] = serde_json::json!({ "limit_mb": 1_000u64, "held_mb": 400u64 });
+        let bare: NodeCapability = serde_json::from_value(v).unwrap();
+        assert!(
+            bare.storage.unwrap().full(),
+            "600 MB free and nothing to give back holds no part"
         );
     }
 

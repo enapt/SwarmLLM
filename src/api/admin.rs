@@ -263,6 +263,15 @@ pub fn serialize_peer_to_json(
         // Its own settings, for display only; `null` from an older build.
         "auto_manage": peer.capability.as_ref().and_then(|c| c.auto_manage),
         "updates_itself": peer.capability.as_ref().and_then(|c| c.updates_itself),
+        // Its storage limit, what it holds and what it would give back for a
+        // part of a model asked for more (#400) — `null` from an older build —
+        // and whether that leaves it room for no new part at all.
+        "storage": peer.capability.as_ref().and_then(|c| c.storage),
+        "storage_full": peer
+            .capability
+            .as_ref()
+            .and_then(|c| c.storage)
+            .map(|storage| storage.full()),
         // What it says it has LOADED, model by model — the ranges a planner
         // credits it for, the layers its card runs and its own step time
         // (`ResidentModelLayers`, gossiped). Its word, as of its last
@@ -682,6 +691,13 @@ pub async fn diagnostics(
                     "  kept by (last prune pass, {} s ago): {}",
                     report.at.elapsed().as_secs(),
                     report.summary
+                );
+                // What it would give back for a part of a model asked for
+                // more — the room other computers are told (#400).
+                let _ = writeln!(
+                    out,
+                    "  would give back for a part asked for more: {} MB",
+                    report.spare_bytes_now() / MB
                 );
             }
             None => {

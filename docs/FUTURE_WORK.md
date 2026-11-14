@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #450**). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #451**). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -1515,22 +1515,6 @@ same build check `shard_holders` applies (`expected_build_tag`), withdrawn when 
 disconnects — or have the newcomer's catch-up carry the holdings point to point, as manifests
 are. Either way a capability is a peer's claim, so it may add a holder for planning and never
 remove one. Measure the newcomer's first-plan delay before and after.
-
-#### #400 — A full computer still takes its places on the download ring, so a part assigned to it is fetched by nobody
-`P3` · placement · **PARTIAL** — 2026-11-02, narrowed 2026-11-04 · history: this entry; gotcha #1027; `docs/invariants/memory.md` § "A computer that does not fetch is handed no part to fetch"
-
-`gather_candidates` gives each part short of its target to `replicas_needed` machines on a hash
-ring (`scoring::download_ring`, `VIRTUAL_SLOTS` 10 each), and every other machine skips those parts.
-**Done 2026-11-04**: a computer whose capability says it does not fetch (`auto_manage: false` —
-downloads off, an anchor) takes no place on the ring and is planned no fetch as a carrier or a
-chain segment (`coverage::fetches_parts`, `room_to_fetch_bytes`); an older build is counted as
-before. **Left**: a FULL machine prune can free nothing on still takes its places, and a one- or
-two-part model the ring hands it stays at one holder (a many-part model escapes through
-`already_hosting_model`). It cannot say so yet — `disk_available_mb` is the filesystem's, not the
-storage budget's. **Direction**: the capability carries the room its budget would take (a new
-`#[serde(default)]` field), `fetches_parts` / `room_to_fetch_bytes` read it, and a full machine
-leaves the ring until it has room. **Not established**: how often it bites — count, from one
-node's view, the parts under target whose ring owner holds nothing new over a day.
 
 ### Network and transport
 
@@ -4120,7 +4104,8 @@ runs it whole beside its processor"). But the 3080 Ti states `ceiling=46, card=2
 this node logged (11-05 → 11-08), so its own near pass already went far. Left on its side, none
 visible from here: its plan differs (coordinates, above), its download pass holds back (a model it
 holds no part of waits to be TRUSTED through its own HuggingFace check — `origin_trust_notify`;
-the canonical-upload gate; a metered hold; its storage budget), or its fetch starts and fails
+the canonical-upload gate; a metered hold; its storage budget — now said on the wire, #400 Closed
+2026-11-14: `storage` in `/api/admin/peers`), or its fetch starts and fails
 before any progress is announced. ⚠ Publishing "the chain it plans" is not free: a chain is
 planned only for a model `asked_for`, which reads `region_demand` — the owner's own requests
 included, which #389 (a) keeps off the wire — so a published plan would tell every peer which
@@ -5772,6 +5757,25 @@ Credits are DORMANT — they gate nothing, and `credits_stay_dormant` fails the 
 starts. Read `docs/CREDITS_DESIGN.md` before touching them; the credit items below are
 preconditions for ever switching enforcement on, not work for now.
 
+#### #450 — A peer's gossiped demand is taken at its word, and now weighs whole copies too
+`P3` · security · **OPEN** — 2026-11-14 · history: #400 (the trade this widens), the security review of #400
+
+`ModelDemandGossip` is accepted from any authenticated publisher with any finite `decayed_rate`,
+under a region string the publisher chooses (`dispatch/mod.rs`, the `region.len() > 8` check is the
+only bound), and `coverage::demand_for` sums every region's entry. Since #400 that figure is
+`RoomWanted::demand`, and a part of a model asked for MORE takes the room of a copy of a model held
+whole here. So a peer that announces one part of model X and gossips a very large rate for X makes
+X's part `Scarce` on a full computer, and that computer gives back whole copies (up to the room
+noted) to fetch it. Still kept: more than the floor of live holders (two others remain), not loaded,
+never the owner's choice (`owner_chose`), re-checked before the delete. Before #400 the same lever
+already shed copies kept by the count or region rule; the whole-model reach is new. Review: low.
+A cap at the replica target's saturation (20) does not help (it still beats almost every model);
+requiring first-hand demand breaks the motivating case (a 70B asked for by OTHER computers).
+Likely shape: demand kept per PUBLISHER (the shared slot is per (model, region) today — gotcha #73's
+shape), a model's demand the median or a trimmed sum across publishers, each bounded by what one
+computer can serve. Prior art: libp2p-gossipsub's peer scoring (P4 invalid messages) bounds a
+publisher's weight; Bitcoin's addrman buckets a source's claims by its network.
+
 #### #443 — "Another pool" costs whoever makes it three keys
 `P3` · privacy · **OPEN** (residual: which pools — the review's two fixes and the wording done 2026-11-12) — 2026-11-12 · history: #176 (the switches), the security review of `b7ea7c31` + `fba9b343`
 
@@ -6325,7 +6329,19 @@ Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
 
-**Closed 2026-11-14 (on main, not in a release yet)** (#3 (j14))
+**Closed 2026-11-14 (on main, not in a release yet)** (#3 (j14), #400)
+- #400 — **A full computer took its places on the download ring and was planned chain segments it never
+  fetched, and a computer full of small whole models gave a model people asked for no room.** The US RTX 3080 Ti
+  (auto-manage on, ~40 GB of thirteen whole models against an automatic 25-37.5 GB limit, 779 GB free disk) was
+  named for Llama 3.3 70B's layers 36-59 by every far plan, fetched none, lapsed and was planned again. Now a
+  capability says its storage (`NodeCapability::storage`: limit, held, what prune would give back for a part asked
+  for more, what set the limit; `#[serde(default)]`), planners read that room (`room_to_fetch_bytes`), the ring
+  takes a computer only with room under its limit (`takes_ring_places`), and a whole model here gives its room to a
+  part of a model asked for STRICTLY more, never the owner's choice (`coverage::demand_for`, `RoomWanted::demand`).
+  The owner is told on the dashboard; a peer list shows "Storage full". Prior art: TinyLFU's admission (arXiv
+  1512.00727), the kubelet's `DiskPressure` condition. Field check once released: `a661155f` in
+  `/api/admin/peers` (`storage`), and whether it fetches its segment. Evidence: `docs/invariants/memory.md` §
+  "Nor is one at its storage limit".
 - #3 (j14) — **This computer's own run, cut in two, was priced as a split and undercut the route abroad.** Under
   "Start and finish on this computer" (real link `TAG=readme286c`, request `cac17054`, 14B) the search returned
   [0..24) + [24..48), both here, at 17.5 s against 22.4 s for the same run whole: each piece was a split's segment,

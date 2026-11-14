@@ -20,7 +20,28 @@ use super::hf::{HfProbeInfo, HfSource};
 pub struct PartsKeptReport {
     /// `rule (parts); rule (parts)`, the rule that kept the most first.
     pub summary: String,
+    /// Bytes of what is held here that this computer would give back for a
+    /// part of a model people ask for more (`prune::spare_for_any_room`) —
+    /// the `spare_mb` its capability tells other computers (#400).
+    pub spare_bytes: u64,
     pub at: std::time::Instant,
+}
+
+impl PartsKeptReport {
+    /// How long a pass's word on what it would give back holds: the passes
+    /// run about a minute apart while auto-manage runs, so a report this old
+    /// means prune has stopped, and stopped prune gives nothing back.
+    pub const SPARE_HOLDS_FOR: std::time::Duration = std::time::Duration::from_secs(600);
+
+    /// What this computer would give back now, bytes: the last pass's figure
+    /// while it is fresh, else nothing.
+    pub fn spare_bytes_now(&self) -> u64 {
+        if self.at.elapsed() <= Self::SPARE_HOLDS_FOR {
+            self.spare_bytes
+        } else {
+            0
+        }
+    }
 }
 
 /// Model management: shard acquisition, auto-manage, trust gating, pruning.

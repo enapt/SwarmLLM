@@ -357,6 +357,7 @@ mod tests {
                     can_serve_inference: true,
                     auto_manage: None,
                     updates_itself: None,
+                    storage: None,
                     resident_layers: Vec::new(),
                     context_ceiling_tokens: None,
                     model_load_ms_per_gib: None,

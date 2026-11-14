@@ -96,7 +96,8 @@ impl AutoShardManager {
 
     /// The consistent hash ring that splits further copies between machines:
     /// [`VIRTUAL_SLOTS`] positions for this node and each connected machine
-    /// that fetches parts for the swarm ([`AutoShardManager::fetches_parts`]),
+    /// that fetches parts for the swarm and has room under its storage limit
+    /// for one ([`AutoShardManager::takes_ring_places`], #400),
     /// sorted for binary search. A machine with automatic downloads off — an
     /// anchor, a computer whose owner turned them off — took its share of the
     /// ring and every other machine skipped those parts, so a one- or
@@ -121,7 +122,7 @@ impl AutoShardManager {
             ));
         }
         for peer in self.shared_state.connected_node_ids.iter() {
-            if peer.key() == local_node_id || !self.fetches_parts(peer.key()) {
+            if peer.key() == local_node_id || !self.takes_ring_places(peer.key()) {
                 continue;
             }
             for vn in 0..VIRTUAL_SLOTS {

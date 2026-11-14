@@ -169,6 +169,10 @@ pub struct AutoShardManager {
     /// the first run, which is the same log-flooding shape fixed for rr
     /// failures in v0.3.73.
     pub(super) last_over_budget_warning: std::sync::Mutex<Option<std::time::Instant>>,
+    /// When the owner was last told this computer is at its storage limit while
+    /// a part the network is short of wants a place here
+    /// ([`Self::tell_owner_storage_is_full`], #400).
+    pub(super) last_storage_full_notice: std::sync::Mutex<Option<std::time::Instant>>,
     /// When prune last said why it gave nothing back while a part asked for
     /// room (`prune::KeptBy`).
     pub(super) last_kept_report: std::sync::Mutex<Option<std::time::Instant>>,
@@ -250,8 +254,53 @@ pub(super) struct RoomWanted {
     pub floor: usize,
     /// The part's model: its own copies are never given back for it.
     pub model: ModelId,
+    /// How much that model is asked for when the room was noted
+    /// (`coverage::demand_for`): a model this computer holds whole gives its
+    /// room only to a part of a model asked for MORE (`prune::RoomAsk`).
+    pub demand: f64,
     pub why: RoomFor,
     pub noted: std::time::Instant,
+}
+
+impl RoomWanted {
+    /// What a copy is weighed against for this room (`prune::RoomAsk`).
+    pub(super) fn ask(&self) -> super::prune::RoomAsk<'_> {
+        super::prune::RoomAsk {
+            model: Some(&self.model),
+            floor: self.floor,
+            demand: self.demand,
+            advertised: false,
+        }
+    }
+}
+
+/// How often the owner is told this computer is at its storage limit while a
+/// part the network is short of wants a place here
+/// ([`AutoShardManager::tell_owner_storage_is_full`]).
+const STORAGE_FULL_NOTICE_EVERY: std::time::Duration = std::time::Duration::from_secs(6 * 3600);
+
+/// What the owner is told when storage is at its limit and a part the network
+/// is short of wants a place here: the activity kind (its translation key is
+/// `activity.<kind>`) and the toast's English, chosen by what set the limit —
+/// a setting can raise one, never a full disk (the over-budget notice's
+/// lesson, `prune::over_budget_notice`).
+fn storage_full_notice(limited_by: &super::StorageLimit) -> (&'static str, &'static str) {
+    if let super::StorageLimit::FreeDisk { .. } = limited_by {
+        return (
+            "disk_full_part_wanted",
+            "This computer's disk is nearly full, and the network wants it to hold part of a \
+             model people are asking for. Where it can, SwarmLLM makes room by removing copies \
+             of models fewer people use that other computers also hold. Models you downloaded \
+             yourself are kept. Freeing space on the disk lets it hold more.",
+        );
+    }
+    (
+        "storage_full_part_wanted",
+        "Storage is at its limit, and the network wants this computer to hold part of a model \
+         people are asking for. Where it can, SwarmLLM makes room by removing copies of models \
+         fewer people use that other computers also hold. Models you downloaded yourself are \
+         kept. Raising the storage limits in Settings lets it hold more.",
+    )
 }
 
 /// How long the download pass's word on the room a part lacks holds: two of
@@ -318,6 +367,7 @@ impl AutoShardManager {
             notify,
             download_semaphore,
             last_over_budget_warning: std::sync::Mutex::new(None),
+            last_storage_full_notice: std::sync::Mutex::new(None),
             last_kept_report: std::sync::Mutex::new(None),
             last_room_report: std::sync::Mutex::new(None),
             carry_curves: dashmap::DashMap::new(),
@@ -339,6 +389,7 @@ impl AutoShardManager {
                 bytes,
                 floor: self.floor_for_room(why, part.holder_count),
                 model: part.model_id.clone(),
+                demand: self.demand_for(&part.model_id),
                 why,
                 noted: std::time::Instant::now(),
             })
@@ -358,6 +409,24 @@ impl AutoShardManager {
             (part.model_id.clone(), part.shard_index),
             super::prune::KEPT_REPORT_EVERY,
         )
+    }
+
+    /// Tell the OWNER — on the dashboard, not only in the log — that this
+    /// computer is at its storage limit while a part of a model people ask for
+    /// wants a place here, what it does about it and what they can do: at most
+    /// every [`STORAGE_FULL_NOTICE_EVERY`], whatever part asks, so it reads as
+    /// a state, not a stream (#400, 2026-11-14: a computer with auto-manage
+    /// on sat at its 25 GB limit beside 779 GB free while the network planned
+    /// it 24 layers of a 70B, and nothing told its owner).
+    fn tell_owner_storage_is_full(&self, report: &super::scoring::BudgetReport) {
+        if !super::prune::due_every(&self.last_storage_full_notice, STORAGE_FULL_NOTICE_EVERY) {
+            return;
+        }
+        let (kind, toast) = storage_full_notice(&report.budget.limited_by);
+        self.shared_state.emit_activity(
+            crate::daemon::state::ActivityEvent::new("model", kind, toast.to_string())
+                .with_toast("info", 12000),
+        );
     }
 
     /// The room a part the swarm is short of lacks here, while the download
@@ -1113,6 +1182,7 @@ impl AutoShardManager {
             );
             self.note_room_wanted(wanting.zip(lacks));
             if let (Some(part), Some(bytes)) = (wanting, lacks) {
+                self.tell_owner_storage_is_full(&report);
                 if self.room_report_due(part) {
                     tracing::info!(
                         model = %part.model_id,
@@ -1151,6 +1221,7 @@ impl AutoShardManager {
         let lacks = super::scoring::room_lacked_after(wanting.as_ref(), &selected, budget);
         self.note_room_wanted(wanting.as_ref().zip(lacks));
         if let (Some(part), Some(bytes)) = (&wanting, lacks) {
+            self.tell_owner_storage_is_full(&report);
             if self.room_report_due(part) {
                 tracing::info!(
                     model = %part.model_id,
@@ -2355,5 +2426,185 @@ mod room_wanted {
         shape.manager.evaluate_and_prune().await;
         assert_eq!(parts_here(state, &shape.large), vec![0]);
         assert_eq!(parts_here(state, &shape.copies), vec![0, 1]);
+    }
+
+    /// [`full_node_beside_a_hole`] with `copies` held WHOLE here — all four
+    /// parts — under a limit of `limit_mb`: 2,500 MB held. Two far computers
+    /// hold every part of `copies` too, ranked above this node on parts 0
+    /// and 1; the large model's parts 1-3 are on no computer.
+    fn full_node_holding_a_model_whole(limit_mb: u64) -> Shape {
+        let mut config = Config::default();
+        config.auto_manage.min_replicas = 2;
+        config.auto_manage.max_storage_mb = limit_mb;
+        config.node.contribution = ContributionMode::Minimal;
+        let (state, manager) = make_test_manager_with_config(config);
+        state.models.auto_manage_default_model_cap.store(0, Relaxed);
+        let local = state.identity.node_id().clone();
+        let ranges = [(0, 8), (8, 16), (16, 24), (24, 32)];
+        let copies = register_manifest_with_sized_shards(&state, "copies", 32, &ranges, PART);
+        let large = register_manifest_with_sized_shards(&state, "large", 32, &ranges, PART);
+        holds(&state, &copies, &local, &[0, 1, 2, 3]);
+        write_sparse_shards(&state, &copies, [0, 1, 2, 3], PART);
+        holds(&state, &large, &local, &[0]);
+        write_sparse_shards(&state, &large, [0], PART);
+        let far = far_computers(&local, &copies, &Far::AboveHereOnPartsZeroAndOne);
+        for id in &far {
+            let id = peer(&state, id.clone(), 300);
+            holds(&state, &copies, &id, &[0, 1, 2, 3]);
+        }
+        let other = peer(&state, NodeId([20; 32]), 300);
+        holds(&state, &large, &other, &[0]);
+        Shape {
+            state,
+            manager,
+            copies,
+            large,
+            far,
+        }
+    }
+
+    fn asked(state: &Arc<SharedState>, mid: &ModelId, requests: u64) {
+        state
+            .models
+            .model_request_counts
+            .insert(mid.clone(), AtomicU64::new(requests));
+    }
+
+    /// #400 (2026-11-14): a computer full of small models it held WHOLE gave
+    /// nothing back for the part of a large model people asked for — "this
+    /// computer holds that model whole" refused every copy, at any pressure.
+    /// Now a part of a model asked for MORE takes the room of a copy of one
+    /// held whole (TinyLFU's admission), below urgent pressure (2,800 MB: the
+    /// whole-model keep) and at it (2,500 MB: the room's own refusal). Asked
+    /// for as much — the control — the whole model stays, as it does when its
+    /// owner chose it.
+    #[tokio::test]
+    async fn a_whole_model_gives_its_room_only_to_a_model_asked_for_more() {
+        for limit_mb in [2_800, 2_500] {
+            // Asked for as much as the large model: kept.
+            let even = full_node_holding_a_model_whole(limit_mb);
+            asked(&even.state, &even.large, 3);
+            asked(&even.state, &even.copies, 3);
+            even.manager.evaluate_and_download().await;
+            let room = even
+                .manager
+                .room_wanted_now()
+                .expect("the part no computer holds asks for room");
+            assert_eq!(room.model, even.large, "at {limit_mb} MB");
+            even.manager.evaluate_and_prune().await;
+            assert_eq!(
+                parts_here(&even.state, &even.copies),
+                vec![0, 1, 2, 3],
+                "control at {limit_mb} MB: a model asked for as much keeps its whole copy"
+            );
+
+            // The owner chose it: kept, however little it is asked for.
+            let chosen_here = full_node_holding_a_model_whole(limit_mb);
+            asked(&chosen_here.state, &chosen_here.large, 3);
+            chosen_here
+                .state
+                .keep_on_this_computer(&chosen_here.copies, true)
+                .unwrap();
+            chosen_here.manager.evaluate_and_download().await;
+            assert!(chosen_here.manager.room_wanted_now().is_some());
+            chosen_here.manager.evaluate_and_prune().await;
+            assert_eq!(
+                parts_here(&chosen_here.state, &chosen_here.copies),
+                vec![0, 1, 2, 3],
+                "control at {limit_mb} MB: the owner's own choice is never traded"
+            );
+
+            // Asked for less than the large model: one part goes for its room.
+            let shape = full_node_holding_a_model_whole(limit_mb);
+            asked(&shape.state, &shape.large, 3);
+            shape.manager.evaluate_and_download().await;
+            let room = shape
+                .manager
+                .room_wanted_now()
+                .expect("the part no computer holds asks for room");
+            assert!(room.demand > 0.0, "the room carries its model's demand");
+            shape.manager.evaluate_and_prune().await;
+            let kept = parts_here(&shape.state, &shape.copies);
+            assert_eq!(
+                kept.len(),
+                3,
+                "at {limit_mb} MB: one part of the model asked for less is given back, for the \
+                 room the part lacks and no more ({kept:?})"
+            );
+            let next = chosen(&shape);
+            assert!(
+                next.len() == 1 && next[0].0 == shape.large,
+                "at {limit_mb} MB: the room goes to the part people asked for ({next:?})"
+            );
+        }
+    }
+
+    /// What this computer tells other computers it could give back
+    /// (`prune::spare_for_any_room`, `NodeCapability::storage`): a part of a
+    /// model held whole where enough other holders keep theirs — whatever
+    /// this owner asks of it, which no other computer may learn (#389 (a)) —
+    /// but never the owner's choice, nor a part only two computers hold.
+    #[tokio::test]
+    async fn the_room_advertised_counts_copies_others_keep_and_never_the_owners_use() {
+        let shape = full_node_holding_a_model_whole(2_500);
+        let spare = |shape: &Shape| shape.manager.spare_for_any_room(1.0, &[]) / PART;
+        // Parts 0 and 1: this node ranked below both far holders, so it is
+        // not among the two that keep theirs. Parts 2 and 3 fall wherever the
+        // random id puts it; the large model's part 0 has two holders (floor).
+        let counted = spare(&shape);
+        assert!(
+            (2..=4).contains(&counted),
+            "parts 0 and 1 of the whole model at least ({counted})"
+        );
+        asked(&shape.state, &shape.copies, 50);
+        assert_eq!(
+            spare(&shape),
+            counted,
+            "the owner's own requests never move what other computers are told"
+        );
+        shape
+            .state
+            .keep_on_this_computer(&shape.copies, true)
+            .unwrap();
+        assert_eq!(spare(&shape), 0, "the owner's choice is never offered");
+    }
+
+    /// Nor what is asked of a model still being assembled (security review
+    /// 2026-11-14, #389 (a)): "asked for" counts this owner's own requests,
+    /// and gated on it, a model with parts on no computer had its copies here
+    /// counted as room until its owner asked for it — a drop of exactly that
+    /// model's parts, telling every peer which model it was. Whoever asked,
+    /// such a model keeps its copies here (the reading that gives back less);
+    /// so does carrying, read the same way.
+    #[tokio::test]
+    async fn the_room_advertised_keeps_a_model_being_assembled_whoever_asked() {
+        let shape = full_node_holding_a_model_whole(2_500);
+        let state = &shape.state;
+        let local = state.identity.node_id().clone();
+        let spare = || shape.manager.spare_for_any_room(1.0, &[]);
+        let without_it = spare();
+        // Parts 0 and 1 here and on two far computers ranked above this node
+        // — counted as room were the model not being assembled — and parts 2
+        // and 3 on no computer.
+        let ranges = [(0, 8), (8, 16), (16, 24), (24, 32)];
+        let assembling =
+            register_manifest_with_sized_shards(state, "assembling", 32, &ranges, PART);
+        holds(state, &assembling, &local, &[0, 1]);
+        write_sparse_shards(state, &assembling, [0, 1], PART);
+        for id in far_computers(&local, &assembling, &Far::AboveHereOnPartsZeroAndOne) {
+            let id = peer(state, id, 300);
+            holds(state, &assembling, &id, &[0, 1]);
+        }
+        assert_eq!(
+            spare(),
+            without_it,
+            "a model being assembled is never offered as room, asked for or not"
+        );
+        asked(state, &assembling, 50);
+        assert_eq!(
+            spare(),
+            without_it,
+            "the owner's own requests never move what other computers are told"
+        );
     }
 }

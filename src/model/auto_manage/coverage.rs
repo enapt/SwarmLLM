@@ -75,6 +75,12 @@ const CARRIER_PATIENCE: std::time::Duration = std::time::Duration::from_secs(20 
 /// has since grown is asked again.
 const PASSED_OVER_FOR: std::time::Duration = std::time::Duration::from_secs(2 * 60 * 60);
 
+/// The room under its storage limit, MB, a computer needs to take places on
+/// the download ring ([`AutoShardManager::takes_ring_places`]): about one
+/// part of a mid-sized model. Less, and a part the ring hands it is fetched by
+/// nobody (#400).
+pub(super) const RING_ROOM_MB: u64 = crate::types::StorageRoom::ROOM_FOR_A_PART_MB;
+
 /// A model's chosen carrier, when its lease lapses unless renewed, and the
 /// layers it held at the last renewal.
 #[derive(Debug, Clone)]
@@ -146,16 +152,46 @@ impl AutoShardManager {
     }
 
     /// The bytes of parts `node` may be handed to FETCH — a carrier's plan, a
-    /// chain's segment: the free disk it advertises, nothing where it does not
-    /// fetch parts ([`Self::fetches_parts`]; planned a fetch, such a machine
-    /// held a carrier's lease for [`CARRIER_PATIENCE`] or a chain's segment
-    /// open, fetching nothing) and nothing where no capability was heard.
+    /// chain's segment: what its storage limit leaves it and what it would
+    /// give back for a part of a model asked for more
+    /// (`NodeCapability::storage`, `StorageRoom::room_mb` — prune makes that
+    /// room for a placed part, `prune::spare_for_room`), its free disk where an
+    /// older build says nothing of its limit; nothing where it does not fetch
+    /// parts ([`Self::fetches_parts`]; planned a fetch, such a machine held a
+    /// carrier's lease for [`CARRIER_PATIENCE`] or a chain's segment open,
+    /// fetching nothing) and nothing where no capability was heard.
+    ///
+    /// #400 (2026-11-14): the free disk alone planned a computer at its 25 GB
+    /// limit, with 779 GB free and thirteen small models it held whole, 24
+    /// layers of a 70B — it fetched none, its segment lapsed after the lease,
+    /// it was passed over for two hours and planned again.
     fn room_to_fetch_bytes(&self, node: &NodeId) -> u64 {
         if !self.fetches_parts(node) {
             return 0;
         }
-        self.advertised(node, |c| c.disk_available_mb.saturating_mul(1024 * 1024))
-            .unwrap_or(0)
+        self.advertised(node, |c| {
+            c.storage
+                .map_or(c.disk_available_mb, |storage| storage.room_mb())
+                .saturating_mul(1024 * 1024)
+        })
+        .unwrap_or(0)
+    }
+
+    /// Does `node` take places on the download ring (`scoring::download_ring`)
+    /// — fetches parts ([`Self::fetches_parts`]) and has room under its limit
+    /// for one without giving anything back ([`RING_ROOM_MB`])? A further copy
+    /// the ring hands out asks no room of prune, so a FULL computer handed one
+    /// fetched it never, and a part of a model of one or two parts the ring
+    /// gave it stayed at one holder (#400). An older build, saying nothing of
+    /// its limit, takes its places as before.
+    pub(super) fn takes_ring_places(&self, node: &NodeId) -> bool {
+        self.fetches_parts(node)
+            && self
+                .advertised(node, |c| {
+                    c.storage
+                        .is_none_or(|storage| storage.free_mb() >= RING_ROOM_MB)
+                })
+                .unwrap_or(true)
     }
 
     /// How many of `manifest`'s layers `node` could ever hold. `None`: cannot
@@ -265,9 +301,16 @@ impl AutoShardManager {
     /// one to make room for another's (`prune::spare_for_room`). Only live
     /// holders count: a part listed for a computer that is gone is missing.
     pub(super) fn model_has_holes(&self, model_id: &ModelId) -> bool {
-        if !self.asked_for(model_id) {
-            return false;
-        }
+        self.asked_for(model_id) && self.has_holes_whoever_asks(model_id)
+    }
+
+    /// [`Self::model_has_holes`] with nobody's asking read: a part of the
+    /// model on a live computer and another on none. What the room this
+    /// computer ADVERTISES reads (`prune::RoomAsk::advertised`): "asked for"
+    /// counts this owner's own requests, which no other computer may learn
+    /// from what is gossiped (#389 (a)) — so there every such model is kept
+    /// as if asked for, the reading that gives back less.
+    pub(super) fn has_holes_whoever_asks(&self, model_id: &ModelId) -> bool {
         let registry = &self.shared_state.model_registry;
         let Some(manifest) = registry.get_manifest(model_id) else {
             return false;
@@ -303,6 +346,34 @@ impl AutoShardManager {
                 .model_request_counts
                 .get(model_id)
                 .is_some_and(|c| c.load(std::sync::atomic::Ordering::Relaxed) > 0)
+    }
+
+    /// HOW MUCH this model is asked for — every region's demand this node has
+    /// heard, summed (the decayed rate per tick that [`Self::asked_for`] reads
+    /// as a yes), plus the requests routed here since the last decay. Both
+    /// sides of a comparison are read the same way, so the units cancel.
+    /// The one figure a copy held here is weighed by against the model a part
+    /// asking for room belongs to (`prune::RoomAsk::demand`): TinyLFU's
+    /// admission — a newcomer takes a victim's place only when it is asked
+    /// for more (Einziger et al., arXiv 1512.00727). 0 for a model nobody
+    /// asked for; never negative, never NaN (a NaN entry counts as nothing,
+    /// as `decay_request_counts` heals it).
+    pub(super) fn demand_for(&self, model_id: &ModelId) -> f64 {
+        let heard: f64 = self
+            .shared_state
+            .region_demand
+            .iter()
+            .filter(|e| &e.key().0 == model_id)
+            .map(|e| *e.value())
+            .filter(|v| v.is_finite() && *v > 0.0)
+            .sum();
+        let fresh = self
+            .shared_state
+            .models
+            .model_request_counts
+            .get(model_id)
+            .map_or(0, |c| c.load(std::sync::atomic::Ordering::Relaxed));
+        heard + fresh as f64
     }
 
     /// This node and the connected machines in scope — in private mode, the
@@ -532,9 +603,36 @@ impl AutoShardManager {
         if self.needs_carrier(&manifest) && self.carrier_for(&manifest).as_ref() == Some(node) {
             return true;
         }
+        self.falls_short_without(&manifest, node)
+    }
+
+    /// [`Self::copy_carries_model`] with nobody's asking read, and no chain
+    /// gate: `node` adds to what carries the model and without it the model
+    /// would fall short. What the room this computer ADVERTISES reads
+    /// (`prune::RoomAsk::advertised`): "asked for", the carrier lease and a
+    /// planned chain all follow this owner's own requests, which no other
+    /// computer may learn from what is gossiped (#389 (a)) — so there such a
+    /// copy is kept whoever asked, the reading that gives back less. A far
+    /// chain's part — a model only a split can run — is such a copy too.
+    pub(super) fn copy_carries_model_whoever_asks(
+        &self,
+        shard_id: &ShardId,
+        node: &NodeId,
+    ) -> bool {
+        shard_id.index != MMPROJ_SHARD_INDEX
+            && self
+                .shared_state
+                .model_registry
+                .get_manifest(&shard_id.model_id)
+                .is_some_and(|manifest| self.falls_short_without(&manifest, node))
+    }
+
+    /// Would `manifest` fall short of a computer that runs it without
+    /// `node`'s copies, while `node` adds to what carries it?
+    fn falls_short_without(&self, manifest: &ModelManifest, node: &NodeId) -> bool {
         let (Some(with), Some(without)) = (
-            self.carried_layers(&manifest, None),
-            self.carried_layers(&manifest, Some(node)),
+            self.carried_layers(manifest, None),
+            self.carried_layers(manifest, Some(node)),
         ) else {
             return false;
         };
@@ -812,6 +910,57 @@ mod tests {
         );
     }
 
+    /// The room this computer ADVERTISES keeps a copy the model would fall
+    /// short without, whoever asked for the model (#389 (a), security review
+    /// 2026-11-14): carrying, its lease and a far chain all follow "asked
+    /// for", which counts this owner's own requests. Read that way, these two
+    /// parts were room until the owner asked for the model and then were not
+    /// — a drop that named the model to every peer.
+    #[test]
+    fn the_room_advertised_keeps_a_carrying_copy_whoever_asked() {
+        let (state, manager, mid, _small) = the_reported_shape(16);
+        state.region_demand.remove(&(mid.clone(), "BE".to_string()));
+        let local = state.identity.node_id().clone();
+        holds(&state, &mid, &local, &[0, 1]);
+        write_sparse_shards(&state, &mid, [0, 1], PART);
+        // Two more holders of parts 0 and 1 with no room to carry them, both
+        // ranked above this node: neither the floor nor the rank keeps its
+        // copies, only what they carry.
+        let part = |index| ShardId {
+            model_id: mid.clone(),
+            index,
+        };
+        let above: Vec<u8> = (3u8..=255)
+            .filter(|b| {
+                (0..2).all(|i| {
+                    super::part_rank_weight(&part(i), &NodeId([*b; 32]))
+                        > super::part_rank_weight(&part(i), &local)
+                })
+            })
+            .take(2)
+            .collect();
+        assert_eq!(above.len(), 2, "two holders ranked above this node");
+        for byte in above {
+            let roomless = peer(&state, byte, Some(ceiling_for(0)));
+            holds(&state, &mid, &roomless, &[0, 1]);
+        }
+        let spare = || manager.spare_for_any_room(0.5, &[]);
+        assert_eq!(
+            spare(),
+            0,
+            "this node's 16 layers carry the model, asked for or not"
+        );
+        state
+            .models
+            .model_request_counts
+            .insert(mid.clone(), std::sync::atomic::AtomicU64::new(50));
+        assert_eq!(
+            spare(),
+            0,
+            "the owner's own requests never move what other computers are told"
+        );
+    }
+
     /// Unknown is never "short": a holder advertising no ceiling (older than
     /// v0.3.230) leaves everything as it was.
     #[test]
@@ -932,5 +1081,83 @@ mod tests {
         assert_eq!(manager.room_to_fetch_bytes(&big), 0);
         assert!(manager.needs_carrier(&manifest));
         assert_eq!(manager.carrier_for(&manifest), None);
+    }
+
+    fn says_its_storage(
+        state: &Arc<SharedState>,
+        node: &NodeId,
+        storage: crate::types::StorageRoom,
+    ) {
+        let mut peer = state.peer_registry.get_mut(node).expect("a peer");
+        peer.capability.as_mut().expect("a capability").storage = Some(storage);
+    }
+
+    /// #400 (2026-11-14): a computer at its storage limit is handed room to
+    /// fetch by what its limit leaves it and what it would give back — never
+    /// by its free disk: one at its 25 GB limit with 779 GB free was planned
+    /// 24 layers of a 70B it never fetched. Full with nothing to give back, it
+    /// is chosen to carry nothing; with copies it would give back, it is
+    /// handed that room. An older build, saying nothing, keeps its free disk.
+    #[test]
+    fn a_computer_at_its_storage_limit_is_handed_only_the_room_it_has() {
+        use crate::types::{StorageLimitKind, StorageRoom};
+        let (state, manager, mid, _small) = the_reported_shape(0);
+        let manifest = state.model_registry.get_manifest(&mid).unwrap();
+        let big = peer(&state, 3, Some(ceiling_for(32)));
+        assert_eq!(
+            manager.room_to_fetch_bytes(&big),
+            100_000 * MIB,
+            "control: an older build's free disk"
+        );
+        assert_eq!(
+            manager.carrier_for(&manifest),
+            Some(big.clone()),
+            "control: it carries the model"
+        );
+        let full = StorageRoom {
+            limit_mb: 25_000,
+            held_mb: 25_000,
+            spare_mb: 0,
+            limited_by: StorageLimitKind::ShareOfDisk,
+        };
+        says_its_storage(&state, &big, full);
+        assert_eq!(manager.room_to_fetch_bytes(&big), 0);
+        assert!(!manager.takes_ring_places(&big), "no place on the ring");
+        manager.carrier_leases.clear();
+        assert_eq!(
+            manager.carrier_for(&manifest),
+            None,
+            "nor the carrier's lease"
+        );
+        says_its_storage(
+            &state,
+            &big,
+            StorageRoom {
+                spare_mb: 30_000,
+                ..full
+            },
+        );
+        assert_eq!(
+            manager.room_to_fetch_bytes(&big),
+            30_000 * MIB,
+            "what it would give back for a part asked for more"
+        );
+        assert!(
+            !manager.takes_ring_places(&big),
+            "a further copy asks no room of prune: still no place on the ring"
+        );
+        says_its_storage(
+            &state,
+            &big,
+            StorageRoom {
+                limit_mb: 50_000,
+                ..full
+            },
+        );
+        assert_eq!(manager.room_to_fetch_bytes(&big), 25_000 * MIB);
+        assert!(
+            manager.takes_ring_places(&big),
+            "room under its limit: its places"
+        );
     }
 }

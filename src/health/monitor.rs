@@ -444,6 +444,14 @@ fn capability_news(
     if let (Some(n), Some(s)) = (now.ram_model_budget_mb.as_mut(), sent.ram_model_budget_mb) {
         hold(n, s, CAPABILITY_MEMORY_DEADBAND_MB);
     }
+    // The storage figures move with every part fetched or given back (#400),
+    // and its limit with other programs' files where the disk sets it: the
+    // free disk's deadband, each. What set the limit is news at once.
+    if let (Some(n), Some(s)) = (now.storage.as_mut(), sent.storage.as_ref()) {
+        hold(&mut n.limit_mb, s.limit_mb, CAPABILITY_DISK_DEADBAND_MB);
+        hold(&mut n.held_mb, s.held_mb, CAPABILITY_DISK_DEADBAND_MB);
+        hold(&mut n.spare_mb, s.spare_mb, CAPABILITY_DISK_DEADBAND_MB);
+    }
     // The machine's room beside a card moves with every other program's
     // memory, as the RAM budget does.
     if let (Some(n), Some(s)) = (
@@ -1368,7 +1376,10 @@ impl HealthMonitor {
         // a Tokio worker thread for the duration of the syscalls, which
         // forces the runtime to spin up a replacement on every 30s tick.
         let data_dir = self.shared_state.config.node.data_dir.clone();
-        let (ram_total_mb, ram_available_mb, disk_available_mb) =
+        // What this node's storage limit leaves it (#400): read beside the free
+        // disk, off the runtime — what is held is a walk of the models directory.
+        let storage_state = self.shared_state.clone();
+        let (ram_total_mb, ram_available_mb, disk_available_mb, storage_reading) =
             tokio::task::spawn_blocking(move || {
                 let (ram_total, ram_avail) =
                     crate::daemon::machine_memory::machine_memory_mb();
@@ -1381,7 +1392,8 @@ impl HealthMonitor {
                 // written to.
                 let disk_avail: u64 = crate::model::auto_manage::models_disk(&data_dir)
                     .map_or(0, |d| d.free_bytes / (1024 * 1024));
-                (ram_total, ram_avail, disk_avail)
+                let storage = crate::model::auto_manage::StorageReading::now(&storage_state);
+                (ram_total, ram_avail, disk_avail, Some(storage))
             })
             .await
             .unwrap_or_else(|e| {
@@ -1389,7 +1401,7 @@ impl HealthMonitor {
                 // container environments. Log so a recurring zero-broadcast
                 // doesn't look like genuine resource exhaustion to peers.
                 tracing::warn!(error = %e, "Hardware-detection task failed; broadcasting zeros for this tick");
-                (0, 0, 0)
+                (0, 0, 0, None)
             });
 
         // **Keyed on where models will actually run, not on whether a card
@@ -1565,6 +1577,12 @@ impl HealthMonitor {
                 self.shared_state.cfg().updates.effective_mode()
                     == crate::config::UpdateMode::Install,
             ),
+            // Its storage limit, what it holds and what it would give back
+            // (#400): what a peer hands it a part to fetch by. Not said when
+            // the reading failed — a peer then reads the free disk, as before.
+            storage: storage_reading.as_ref().map(|reading| {
+                crate::model::auto_manage::storage_room(&self.shared_state, reading)
+            }),
             // What is LOADED, as distinct from what is on disk above. A peer
             // pricing our spare capacity needs to know how much of a model we
             // have already paid for; without it the only signal is "did this
@@ -3195,6 +3213,7 @@ pub(crate) mod tests {
             can_serve_inference: true,
             auto_manage: None,
             updates_itself: None,
+            storage: None,
             resident_layers: Vec::new(),
             context_ceiling_tokens: Some(8192),
             model_load_ms_per_gib: Some(900),
@@ -3239,6 +3258,53 @@ pub(crate) mod tests {
             .is_none(),
             "one round after the last publish, an unchanged capability stays quiet"
         );
+    }
+
+    /// #400: the storage figures move with every part fetched or given back,
+    /// so only a move past the free disk's deadband is news — and what set the
+    /// limit, or the figures appearing at all, is news at once.
+    #[test]
+    fn storage_is_news_only_past_its_deadband() {
+        use crate::types::{StorageLimitKind, StorageRoom};
+        let with = |storage: Option<StorageRoom>| {
+            let mut c = capability_for_test();
+            c.storage = storage;
+            c
+        };
+        let full = StorageRoom {
+            limit_mb: 25_000,
+            held_mb: 25_000,
+            spare_mb: 2_000,
+            limited_by: StorageLimitKind::ShareOfDisk,
+        };
+        let sent = with(Some(full));
+        let moved = |storage: StorageRoom| capability_news(&sent, &with(Some(storage)));
+        assert!(
+            moved(StorageRoom {
+                held_mb: 25_600,
+                spare_mb: 1_500,
+                limit_mb: 24_700,
+                ..full
+            })
+            .is_empty(),
+            "a part landed and another went: inside the deadband"
+        );
+        assert!(!moved(StorageRoom {
+            held_mb: 27_000,
+            ..full
+        })
+        .is_empty());
+        assert!(!moved(StorageRoom {
+            spare_mb: 0,
+            ..full
+        })
+        .is_empty());
+        assert!(!moved(StorageRoom {
+            limited_by: StorageLimitKind::FreeDisk,
+            ..full
+        })
+        .is_empty());
+        assert!(!capability_news(&with(None), &sent).is_empty());
     }
 
     /// A worker's own decode speed (FUTURE_WORK #3 (f)) is timed afresh on

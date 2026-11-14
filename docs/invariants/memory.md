@@ -1614,6 +1614,63 @@ filesystem's, not the budget's). Tests:
 `coverage::tests::a_computer_that_does_not_fetch_is_never_handed_a_part_to_fetch` (control: the same
 machine saying nothing is the carrier, `a_model_its_holders_cannot_carry_gets_a_carrier_that_can`).
 
+**Nor is one at its storage limit — and a whole small model gives its room to a model asked for
+more (2026-11-14, #400).** The US computer with the RTX 3080 Ti (`a661155f`, auto-manage ON) held
+thirteen models whole — about 40 GB by their published sizes, above every automatic limit (the
+default is 50% of `max_disk_mb` = 50,000, i.e. 25 GB; 37.5 GB at Maximum) — and advertised 779 GB
+free. Every planner read that free disk (`room_to_fetch_bytes`), so the far chain for Llama 3.3 70B
+named it for layers 36-59 every time; it fetched none (its own download pass is bound by its BUDGET),
+its place lapsed after `CARRIER_PATIENCE`, it was passed over for `PASSED_OVER_FOR` and planned again.
+Had it noted the room, prune would still have given nothing back: `not_spare_for_room` refused any
+copy of a model held whole here, at any pressure, and below urgent pressure the whole-model keep
+returned before the room was even asked — a computer full of small whole models gave a 70B nothing,
+however few people ran them. Two halves now. (1) **The capability says the room**
+(`NodeCapability::storage`, `StorageRoom`: limit, held, `spare_mb`, what set the limit — built only
+by `auto_manage::storage_room`); `room_to_fetch_bytes` reads `room_mb()` = free under the limit +
+what prune would give back for a part asked for more (`prune::spare_for_any_room`, the prune pass's
+`PartsKeptReport::spare_bytes`), and the ring takes a machine only with `RING_ROOM_MB` free under its
+limit (`coverage::takes_ring_places` — a further copy asks no room of prune, so a full machine
+handed one fetched it never, the residual this entry left on 11-04). Kubernetes' kubelet publishes
+`DiskPressure` the same way, in the node's status, for the scheduler to read. (2) **TinyLFU's
+admission for a whole model** (Einziger et al., arXiv 1512.00727, Caffeine): the room carries its
+model's demand (`RoomWanted::demand`, `coverage::demand_for` — every region's heard demand summed,
+plus the requests here since the last decay), and a copy of a model held whole is spare for it only
+when the wanted model is asked for STRICTLY more and the owner did not choose the held one
+(`SharedState::owner_chose`; a dashboard download pins, which an earlier rule keeps anyway). The
+floor, the rendezvous rank, a model with holes and a loaded one still refuse, as for every copy;
+the 2026-10-16 30B report (#286, a part of a model the owner ran pruned beside two other holders,
+120 s against 2.3 s) is still answered: a model its owner runs is asked for, and is kept unless what
+asks is asked for more. **What is advertised is judged on what other computers can see**:
+`RoomAsk::advertised` asks a demand above any (so this owner's own requests, which only
+`model_request_counts` holds, never move it — #389 (a)) and skips `nobody_runs` (which reads this
+owner's use). The security review (2026-11-14) found four more rules that read "asked for" — and
+"asked for" counts this owner's requests: carrying (and its lease), a planned chain, a model with
+holes, a split's drafter, and the demand-raised replica target. A node holding parts of a model
+nobody asked for counted them as room until its owner asked for it, then dropped by exactly those
+parts — the model's name, to every peer, with nothing fetched. So the advertised pass reads every
+such rule WHOEVER ASKED (`copy_kept_because` with `room.advertised`): a copy the model would fall
+short without is kept (`coverage::copy_carries_model_whoever_asks` — a far chain's part is one), a
+model with parts on no computer keeps its copies (`has_holes_whoever_asks`), and every other copy
+is weighed by `spare_for_room` alone; a near chain's part and a drafter's, kept below urgent
+pressure for speed, count as room (an over-reading bounded by them, where reading them would say
+what this owner runs). Chain planning itself is not asked: it updates the lease book as it runs.
+What remains for the owner to move is a loaded model, which `resident_layers` already shows, and
+the owner's explicit choices (`owner_chose`). Accepted residual (review, low): `held_mb` is the
+directory walk the budget counts, so it includes bytes the capability does not announce (a
+withheld other upload, a part being fetched) — their size, never which requests. A peer's demand
+gossip weighing whole copies is #450. The owner is told on the dashboard, at most every 6 h, when the
+limit stops a part people ask for (`tell_owner_storage_is_full`, `activity.storage_full_part_wanted` /
+`disk_full_part_wanted`); a peer list shows "Storage full" (`StorageRoom::full`: under
+`ROOM_FOR_A_PART_MB` of room). Tests: `room_wanted::a_whole_model_gives_its_room_only_to_a_model_asked_for_more`
+(below urgent and at it; controls: asked for as much, the owner's choice — red without either half),
+`room_wanted::the_room_advertised_counts_copies_others_keep_and_never_the_owners_use` (red with a
+finite advertised demand),
+`room_wanted::the_room_advertised_keeps_a_model_being_assembled_whoever_asked` (red with the asked-for
+holes check) `coverage::tests::the_room_advertised_keeps_a_carrying_copy_whoever_asked`
+(red with the asked-for carrying check), `coverage::tests::a_computer_at_its_storage_limit_is_handed_only_the_room_it_has`,
+`health::monitor::tests::storage_is_news_only_past_its_deadband`, and the types crate's
+`storage_decodes_on_either_release_and_an_unknown_limit_kind_is_unknown`.
+
 **Prune says which rule kept each copy (2026-11-02).** After v0.3.270 the Proxmox box (43.9 of
 44 GB) noted room every minute for Ornith 1.5 35B's part 9 (one holder, `Scarce`, floor 3), held
 seven copies with four to six live holders (Llama 3.2 1B parts 0 and 2, xLAM 3B parts 0 and 3,
