@@ -8896,14 +8896,14 @@ a path. Ollama checks every blob by its digest (`verifyBlob`); #422 fetches a vi
 SHA-256. A wrong pairing is still refused at load (arch, width, target layers), and a weak one is set aside by
 what it writes (`dsd_controller::Delivered`).
 
-### In system memory beside a card with no room for it (2026-11-14, #451 — OPT-IN, unmeasured)
+### In system memory beside a card with no room for it (2026-11-14, #451 — ON since measured)
 
 A whole model split between a card and the processor attached no drafter where the card's budget could
 not hold it beside one conversation — a 27B on a 12 GB card and its 1.85 GB drafter (field report
 v0.3.280), so the models between ran with no block guesses exactly where a drafter would pay most (a
 processor-heavy step). **`block_drafter::drafter_home`** asks the card first, then — offered only for a
 whole model on a card with processor-held layers (`SplitModel::drafter_may_sit_in_system_memory`: its
-own head, none borrowed) and `SWARMLLM_BLOCK_DRAFTER_IN_RAM=1` — system memory, against the split's
+own head, none borrowed; A/B `SWARMLLM_BLOCK_DRAFTER_IN_RAM=0`) — system memory, against the split's
 processor-side budget (`host_kv_budget_bytes`) and one conversation of its processor-held layers
 (`host_kv_growth`), which must be KNOWN: an unknown budget admits everything on a card, but a new
 placement in the machine's memory is never unchecked. Charged there. `BlockDrafter::load` takes the
@@ -8913,5 +8913,25 @@ draft (`draft`), so the card picks the guesses as before. Prior art: llama.cpp p
 devices of its own (`--spec-draft-device none` keeps it on the processor, `--spec-draft-ngl auto` fits
 its layers, `common/arg.cpp`). What it must keep: the per-round rule sets the block aside by what it
 writes, so a slow processor draft costs at most its probes. Test
-`a_drafter_the_card_cannot_hold_goes_to_system_memory_only_where_it_fits`. Measure before defaulting
-it on (FUTURE_WORK #451).
+`a_drafter_the_card_cannot_hold_goes_to_system_memory_only_where_it_fits`.
+
+**Measured, then defaulted ON (2026-11-14 evening)** — Qwen3.5-9B Q4_K_M (unsloth) forced to 25 of 32
+layers on the RTX 3070 laptop card (1,715 MB of card budget left: the 1,693 MB drafter + a 192 MB
+conversation do not fit, so the card refuses it), `z-lab/Qwen3.5-9B-DFlash` as llama.cpp converts it,
+ONE CUDA build of `506a0a7f`, idle machine, arms old/new/new/old/old/new/new/old, 3 prompts × 3 reps,
+256 tokens greedy (`~/swarmllm-gate/deep/cg/ab451.sh`, `ab451/speed.jsonl`), decode tok/s over 12 runs:
+
+| prompt | in system memory: median (range) | no drafter: median (range) |
+|---|---|---|
+| code | **30.4** (26.0-39.5) | 20.9 (19.8-21.3) |
+| prose | 21.2 (19.2-28.8) | 20.8 (19.8-21.1) |
+| story | 21.6 (18.4-28.2) | 20.8 (18.4-21.2) |
+
+Every new arm logged `in_system_memory=true attached=true`; card memory the same both ways
+(5,571-5,861 MiB); 0 driver events. Code's slowest run beat the plain arm's fastest. **Replies** part
+from the plain arm's — and differ run to run, as the block's measured width does — at near ties: the
+prose's second word, `" wind"` (plain) against `" salt"` (new), is 17.847 / 17.721 in llama.cpp
+master's processor prompt pass and 17.942 / 17.527 in its card build, and llama.cpp's own one-at-a-time
+decode picks `" salt"` (`ref_generate`), so llama.cpp parts from itself there (gotcha #955's bar: a
+card's check width moves a row; a near tie is not a fault). The first run of this measurement found the
+drafter never reached system memory (§ "Weighed whole — its cache too").

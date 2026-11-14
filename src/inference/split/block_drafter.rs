@@ -108,12 +108,14 @@ pub(crate) fn block_drafter_on() -> bool {
     *ON.get_or_init(|| std::env::var("SWARMLLM_BLOCK_DRAFTER").as_deref() != Ok("0"))
 }
 
-/// `SWARMLLM_BLOCK_DRAFTER_IN_RAM=1`: a drafter its card/processor split's
-/// card has no room for goes to system memory ([`drafter_home`], 2026-11-14).
-/// OPT-IN until measured on an idle machine (`docs/FUTURE_WORK.md` #451).
+/// A drafter its card/processor split's card has no room for goes to system
+/// memory ([`drafter_home`], #451) — ON since measured (2026-11-14, Qwen3.5-9B
+/// at 25 of 32 layers on an RTX 3070, 12 runs a prompt: code 30.4 against 20.9
+/// tok/s at the median, prose and a story no slower). `SWARMLLM_BLOCK_DRAFTER_IN_RAM=0`
+/// leaves it off, for A/B inside one binary.
 fn block_drafter_in_system_memory_on() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var("SWARMLLM_BLOCK_DRAFTER_IN_RAM").as_deref() == Ok("1"))
+    *ON.get_or_init(|| std::env::var("SWARMLLM_BLOCK_DRAFTER_IN_RAM").as_deref() != Ok("0"))
 }
 
 /// `SWARMLLM_BLOCK_DRAFTER=processor`: attach the drafter beside a whole

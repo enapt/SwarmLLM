@@ -2695,15 +2695,15 @@ reply when the model loads ON the request — idle comes only after it (the dash
 gives the time); (b) a split's segments and a tree's row counts are not recorded; (c) gaps of 1.6-8.5 s OUTSIDE any
 forward, in both arms of those runs alike — the 10-26 ones' other half (ending at a card memory reading).
 
-#### #451 — A block drafter in system memory beside a card that has no room for it: built, opt-in, unmeasured
-`P2` · perf-local · **BUILT (opt-in)** — 2026-11-14 · models between (27B/35B on a 12 GB card)
+#### #451 — A block drafter in system memory beside a card that has no room for it: ON — the field check is left
+`P2` · perf-local · **ON (measured)** — 2026-11-14 · models between (27B/35B on a 12 GB card)
 
 A whole model split between a card and the processor attached no block drafter where the card had no
 room beside one conversation (`BlockDrafterState::NoRoom`): a 27B on a 12 GB card holds ~27 of 64
 layers and its 1.85 GB drafter (field report v0.3.280). The 27B handed to the Australian computer ran
 at ~6.4 tok/s (11-14) — whether its drafter was there is what the hand-off's guess record
 (`GenerateUsage::how_guessed`, `55bb2d8c`) will say once it ships. **Built**
-(`SWARMLLM_BLOCK_DRAFTER_IN_RAM=1`): `block_drafter::drafter_home` puts it in system memory where the
+(A/B `SWARMLLM_BLOCK_DRAFTER_IN_RAM=0`): `block_drafter::drafter_home` puts it in system memory where the
 card refuses and the split's processor-side budget is KNOWN and holds it beside one conversation of
 the processor-held layers (vLLM's rule, as on the card); charged there; the block's rows go to it
 (`context_rows` already moved them to its device) and its output (guesses × hidden) goes up to the
@@ -2714,14 +2714,15 @@ the check before the load weighed the weights alone (1,309 MB fitted), the one a
 384 MB cache and refused — so the drafter was loaded on the card, dropped, and system memory never
 offered. Fixed: ONE charge, `block_drafter::charged`, weighed before the load and kept by it
 (`docs/invariants/inference.md` § "Weighed whole").
-**Open — measure, then default ON or drop**: Qwen3.5-9B (`~/swarmllm-ref/dflash/`, drafter 1.38 GB)
-forced to a card/processor split on the RTX 3070 (`test-split --gpu-layers N` with the card budget
-held so the drafter is refused there) — `SWARMLLM_BLOCK_DRAFTER_IN_RAM=1` against unset in ONE CUDA
-binary, IDLE machine, code + prose + story, min-of-N, replies judged against llama.cpp; then the AU
-27B on the real link. The per-round rule (`best_gamma_beside_a_step_per_round`, the block set aside
-by what it writes) is what keeps a slow processor draft from costing a reply — verify it fired.
-Estimate (unmeasured): a 1.85 GB draft is bandwidth-bound at ~50-90 ms on a desktop processor
-against a ~140 ms step.
+**Measured and ON** (11-14 evening, ONE CUDA build, idle machine, Qwen3.5-9B at 25 of 32 card layers,
+12 runs a prompt): code 30.4 against 20.9 tok/s at the median, prose 21.2 against 20.8, a story 21.6
+against 20.8; replies part at near ties only (llama.cpp parts from itself at the first one) —
+`docs/invariants/inference.md` § "Measured, then defaulted ON".
+**Left — the field check**: once the release ships, the Australian computer's Qwen3.6-27B (a 12 GB card,
+27 of 64 layers) should report `attached (in system memory …)` in its guess record
+(`GenerateUsage::how_guessed`) and its pace against the ~6.4 tok/s it ran without one (11-14). The
+per-round rule (`best_gamma_beside_a_step_per_round`) sets the block aside where a processor draft
+costs more than it writes — read its share there.
 
 #### #147 — Prompt reading on the card: the smaller items left after f16 accumulation
 `P3` · perf-local · **PARTIAL** — 2026-10-09 · history: archive row #147 and § "Prompt reading on the card (#147, 2026-09-29)"
