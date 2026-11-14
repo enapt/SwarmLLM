@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #452**). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #454**). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -2125,6 +2125,26 @@ warning covers all three meanwhile.
 Local GPU decode runs at ~97% of llama.cpp (`docs/plans/local_decode_submissions.md`); what
 is left is prompt reading, the processor half of a hybrid, and MoE placement —
 `docs/plans/faster_than_local.md` § 3 and § 4 carry the order.
+
+#### #453 — The decode-width re-check can pick a wider width that decodes slower over a whole reply
+`P2` · perf-local · **OPEN** — 2026-11-14 · evidence: release checks of v0.3.284 and v0.3.288 (`~/swarmllm-gate/v0.3.28{4,8}-alpha/out/speed.moe_*.node.log`)
+
+#396/#399's side-by-side re-check (5 samples each) settles Qwen3-30B-A3B Q2_K (experts of 26 card-held layers in RAM,
+the owner's request) on 4 threads in most workers, decoding 20.6-22.2 tok/s. In three release-check workers it took a
+wider width, and every one decoded slower for the whole reply: v0.3.288 `moe/cand/2` re-checked "4:68ms against
+6:37ms", took 6, decoded 19.1; `moe/cand/3` "4:63ms against 8:46ms", took 8, decoded 15.8 (63 ms a token — the width it
+re-checked at 46); v0.3.284 `moe/cand/2` "4:51ms against 6:38ms", took 6, decoded 16.6. The processor zone read 90-92 °C
+mean in those runs, as in the runs that kept 4, so the run-level heat does not separate them; a wider width heating
+the cores over a reply, which a sub-second re-check cannot see, is the first hypothesis, not established. #399 already
+records the open half ("why a paired re-check reads equal widths that decode ~7% apart is not established"). Not this
+release's code: v0.3.288 changed no inference path. One dip kept 4 (v0.3.286 `moe/cand/2`, 17.9), so not every slow
+run is the width. The swapped re-run that day (`~/swarmllm-gate/v0.3.288-alpha-abswap-split|moe-1343/`, 4 replies an
+arm) agrees: the two workers that kept 4 decoded 24.8 and 21.9 median, the two that took 6 ("4:57ms against 6:43ms")
+and 8 ("4:45ms against 8:41ms") 21.7 and 20.8 — each binary drew one of each. Options to measure first: (a) re-time the chosen width over the first reply's steady steps and fall
+back to the default when it decodes slower than the default's re-check; (b) widen only on a margin that holds over a
+longer re-check. Prior art to look up before building: how llama.cpp's `-t` default and any autotuner (FFTW's
+measured planner, ATLAS) guard against a timing that sustained load does not reproduce. Rig: the release check's
+`moe` step, `SWARMLLM_OWNER_DECODE=contribution` as the control arm.
 
 #### #366 — A model split between the card and the processor decodes at the processor's pace; the card can guess for it
 `P2` · perf-local · **PARTIAL** — 2026-10-28 · evidence: `docs/invariants/inference.md` § "A whole model's processor-held layers sit early in the middle, so the card can guess"
