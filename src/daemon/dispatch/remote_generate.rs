@@ -410,6 +410,10 @@ async fn stream_reply_to_requester(
     let stream_seq = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
     let forward_seq = stream_seq.clone();
     let retain_state = shared_state.clone();
+    // How the reply's writer guessed ahead, told when its worker finishes and
+    // carried by the last frame (`GenerateUsage::how_guessed`). Taken before
+    // the receiver moves into the task below.
+    let how_guessed = token_rx.how_guessed();
     // A requester that guesses for a split led here is sent the reply's token
     // ids beside its text (#318): its drafter reads ids, and the loop leading
     // the reply records them in the slot before it emits each token.
@@ -508,6 +512,7 @@ async fn stream_reply_to_requester(
             usage: Some(GenerateUsage {
                 prompt_tokens: out.prompt_tokens,
                 completion_tokens: out.completion_tokens,
+                how_guessed: how_guessed.get(),
             }),
             matched_stop_sequence: out.matched_stop_sequence,
             logprob: None,

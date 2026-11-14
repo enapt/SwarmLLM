@@ -34,6 +34,24 @@ pub struct StreamingTokenTx {
     /// whatever renders it and read by the receiver's buffer (#392) — see
     /// [`StreamingTokenTx::note_prompt_opened`].
     opened: crate::inference::PromptOpenedSlot,
+    /// How the reply was guessed ahead — see
+    /// [`StreamingTokenTx::note_how_guessed`].
+    guessed: HowGuessedSlot,
+}
+
+/// How a reply was guessed ahead (`HowGuessed`), told by the pool when its
+/// worker finishes and read by whoever answers a requester with the reply's
+/// last frame (`dispatch::remote_generate`). Through the channel, like the
+/// trace and the prompt's verdict: the reply's output type has two dozen
+/// builders and only this one reader.
+#[derive(Clone, Default)]
+pub(crate) struct HowGuessedSlot(std::sync::Arc<std::sync::OnceLock<crate::types::HowGuessed>>);
+
+impl HowGuessedSlot {
+    /// What the pool was told, `None` if nothing was (an older path, a split).
+    pub(crate) fn get(&self) -> Option<crate::types::HowGuessed> {
+        self.0.get().cloned()
+    }
 }
 
 /// The trace a channel's sender was given, readable by its receiver.
@@ -53,6 +71,7 @@ pub struct StreamingTokenRx {
     inner: mpsc::Receiver<StreamingTokenEvent>,
     shared: TraceSlot,
     opened: crate::inference::PromptOpenedSlot,
+    guessed: HowGuessedSlot,
 }
 
 impl StreamingTokenRx {
@@ -81,6 +100,12 @@ impl StreamingTokenRx {
     pub(crate) fn prompt_opened(&self) -> crate::inference::PromptOpenedSlot {
         self.opened.clone()
     }
+
+    /// Where this reply's writer says how it guessed ahead, read once the
+    /// reply is done — taken before the receiver moves into a reading task.
+    pub(crate) fn how_guessed(&self) -> HowGuessedSlot {
+        self.guessed.clone()
+    }
 }
 
 impl StreamingTokenTx {
@@ -90,19 +115,29 @@ impl StreamingTokenTx {
         let (inner, rx) = mpsc::channel(capacity);
         let shared = TraceSlot::default();
         let opened = crate::inference::PromptOpenedSlot::default();
+        let guessed = HowGuessedSlot::default();
         (
             Self {
                 inner,
                 trace: None,
                 shared: shared.clone(),
                 opened: opened.clone(),
+                guessed: guessed.clone(),
             },
             StreamingTokenRx {
                 inner: rx,
                 shared,
                 opened,
+                guessed,
             },
         )
+    }
+
+    /// Tell the reader how the reply was guessed ahead (`HowGuessed`).
+    /// Called by `ModelProcessPool::generate` when its worker finishes; the
+    /// first word stands.
+    pub(crate) fn note_how_guessed(&self, how: crate::types::HowGuessed) {
+        let _ = self.guessed.0.set(how);
     }
 
     /// Tell the reader whether the prompt left the reply inside a reasoning

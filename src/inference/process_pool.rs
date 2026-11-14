@@ -12700,11 +12700,17 @@ impl ModelProcessPool {
                     completion_tokens: ct,
                     finish_reason: fr,
                     matched_stop_sequence: ms,
+                    how_guessed,
                 } if rid == request_id => {
                     prompt_tokens = pt as u32;
                     completion_tokens = ct as u32;
                     finish_reason = fr;
                     matched_stop_sequence = ms;
+                    // For a hand-off's last frame: the reader of this
+                    // stream answers the requester with it.
+                    if let (Some(how), Some(tx)) = (how_guessed, token_tx.as_ref()) {
+                        tx.note_how_guessed(how);
+                    }
                     // GenerateDone is terminal — the worker is finished.
                     guard.disarm();
                     break;

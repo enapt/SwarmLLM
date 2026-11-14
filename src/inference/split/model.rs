@@ -54,6 +54,9 @@ pub struct SplitModel {
     /// A block drafter beside the whole model (#428), attached after the
     /// load from the model's directory (`SplitModel::attach_block_drafter`).
     pub(super) block_drafter: Option<super::block_drafter::BlockDrafter>,
+    /// What [`Self::attach_block_drafter`] made of the drafter: attached, or
+    /// why not (`Unknown` until it is asked).
+    pub(super) block_drafter_state: swarmllm_types::BlockDrafterState,
     /// The model's output head, read for a block drafter beside a FIRST
     /// segment that does not end the model (#428): the drafter's block is
     /// read through it, never a forward of this segment — `output` stays

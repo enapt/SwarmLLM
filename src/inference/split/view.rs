@@ -189,6 +189,7 @@ impl SplitModel {
             },
             mtp: None,
             block_drafter: None,
+            block_drafter_state: swarmllm_types::BlockDrafterState::Unknown,
             drafter_head: None,
             drafter_head_bytes: 0,
             drafter_hot: None,

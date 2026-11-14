@@ -8030,3 +8030,55 @@ rise) — the wait never falls below the fixed budget meanwhile.
 `a_moving_prompt_read_holds_the_first_token_wait_open_to_a_ceiling`
 (`remote_generate`); `only_a_request_asking_for_prompt_progress_carries_the_field`
 (types crate).
+
+## A hand-off's last frame says how its writer guessed (2026-11-14)
+
+**Why.** A whole model handed to a peer is decoded THERE, and its speed is mostly
+how many tokens each check keeps — whether the peer's block drafter was attached
+(and if not, why: no file, no room beside one conversation, its guess head writes
+faster), which guessers ran and what they kept. All of it was in the peer's own
+log (`DIAG: local n-gram speculation complete`), which the requester never sees:
+the 27B handed whole to the Australian computer (partly on its card) at ~6.4
+tok/s (2026-11-14) could not be told apart
+from "no drafter there", "drafter refused for room" or "guesses rejected" without
+the peer's log. The user's rule (2026-11-13): a release ships what its real-network
+tests need to be DIAGNOSED — peers' facts reach us only over the wire.
+
+**What.** `GenerateUsage::how_guessed` (`HowGuessed`: the decode loop —
+`GuessPath::{Speculated, Plain}` — the rounds, tokens written and guesses
+kept, each guesser's `Guesser` counts, and `BlockDrafterState`, recorded where the
+drafter is attached, `SplitModel::attach_block_drafter`). The worker sends it in
+`WorkerMsg::GenerateDone` (the sequential loop from `LocalSpec::how_guessed`, the
+batched loop as `Plain`), the pool hands it to the reply's token channel
+(`StreamingTokenTx::note_how_guessed` — the slot pattern of the trace and the
+prompt's verdict: `InferenceOutput` has two dozen builders and one reader wanted
+this), and `dispatch::remote_generate::stream_reply_to_requester` puts it on the
+last frame. The requester logs it once a reply
+(`remote_generate::log_how_the_writer_guessed`, info).
+
+**Rules.** Never WHY a reply was not guessed: the batched loop is taken while
+another request decodes on the worker, so `Batched` would tell a peer when the
+computer was busy, perhaps for its owner (#389 (a)) — it is told as `Plain`, as
+log probabilities and a low payoff are. And `Speculated` only where a check RAN
+(a guess kept or refused, `LocalSpec::how_guessed`): the speculating loop is
+admitted only on an idle worker, so "speculating, checked nothing" would leak
+the same fact from the other side (security review 2026-11-14, low; a reply
+whose guesses were checked shows it in its pace anyway). SWIFT (off by default)
+reads `Plain`. A record in a shape this build cannot read is `None`
+(`how_guessed_or_none`, serde's `untagged` + `IgnoredAny`): the last frame ENDS
+the reply, so it must decode. Counts and fixed words only — no text a peer wrote; an unknown word
+decodes as `Unknown` (`#[serde(other)]`), never a failed frame. It is the peer's
+word: logged, NEVER priced or used to choose. An optional JSON field an older
+requester ignores (no `deny_unknown_fields` anywhere on the frame), so no feature
+bit. A split led by a peer carries none (its tokens never pass the pool's
+`generate`).
+
+**Prior art.** llama.cpp's server returns `draft_n` / `draft_n_accepted` in a
+reply's final timings (`tools/server/server-common.cpp`, `server_slot_stats::to_json`);
+vLLM counts drafts and accepted tokens per engine (`vllm/v1/spec_decode/metrics.py`).
+We take llama.cpp's per-reply shape on the final frame and add why a drafter is
+absent, which neither reports.
+
+**Tests.** `how_a_reply_was_guessed_is_additive_on_the_wire` (types crate: absent
+when unknown, an older reader parses it, an unknown word is `Unknown`);
+`a_reply_guessed_far_away_is_described_in_the_requesters_log` (`remote_generate`).

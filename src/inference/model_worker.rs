@@ -6637,6 +6637,49 @@ impl LocalSpec {
             .map_or(0, |b| b.most(model).min(self.widest.saturating_sub(1)))
     }
 
+    /// What the guessing did, in the words a hand-off's last frame carries
+    /// (`HowGuessed`) — the counts [`Self::summary`] logs here.
+    fn how_guessed(
+        &self,
+        block_drafter: crate::types::BlockDrafterState,
+    ) -> crate::types::HowGuessed {
+        // A reply whose rounds checked no guess is told as a plain one: only
+        // an idle worker runs this loop, and "speculating, checked nothing"
+        // would say so (`GuessPath::Plain`, security review 2026-11-14).
+        if self.accepted == 0 && self.rejected == 0 {
+            return crate::types::HowGuessed {
+                path: crate::types::GuessPath::Plain,
+                block_drafter,
+                ..Default::default()
+            };
+        }
+        let n = |v: u64| u32::try_from(v).unwrap_or(u32::MAX);
+        let guesser = |rounds: u64, proposed: u64, accepted: u64| crate::types::Guesser {
+            rounds: n(rounds),
+            proposed: n(proposed),
+            accepted: n(accepted),
+        };
+        crate::types::HowGuessed {
+            path: crate::types::GuessPath::Speculated,
+            rounds: n(self.rounds),
+            produced: n(self.produced),
+            accepted: n(self.accepted),
+            block: self
+                .block
+                .as_ref()
+                .map(|b| guesser(b.rounds, b.proposed, b.accepted)),
+            head: self
+                .mtp
+                .as_ref()
+                .map(|m| guesser(m.rounds, m.proposed, m.accepted)),
+            card: self
+                .card
+                .as_ref()
+                .map(|c| guesser(c.rounds, c.proposed, c.accepted)),
+            block_drafter,
+        }
+    }
+
     /// What the guessing learned, for the request's closing line.
     fn summary(&self) -> String {
         let fit = self.check.fit().map_or("-".to_string(), |(f, s)| {
@@ -9680,6 +9723,7 @@ async fn handle_generate(
                     completion_tokens: 0,
                     finish_reason: "cancelled".to_string(),
                     matched_stop_sequence: None,
+                    how_guessed: None,
                 },
                 &[],
             )
@@ -9726,6 +9770,8 @@ async fn handle_generate(
     // What the reply's stand-in learned, for the model's prior once the reply
     // is out (`absorb_the_reply`).
     let mut finished_stand_in: Option<crate::inference::split::RunStandIn> = None;
+    // How the reply was guessed ahead, for its last frame (`HowGuessed`).
+    let mut how_guessed: Option<crate::types::HowGuessed> = None;
     let replied: Result<(), SwarmError> = async {
         let use_logprobs = gen.sampling.logprobs;
         let (mut next_token, mut token_logprob) =
@@ -9786,6 +9832,13 @@ async fn handle_generate(
                 selected = ?calibrator.selected_candidate(),
                 "DIAG: SWIFT session complete"
             );
+            // SWIFT (off by default) keeps its own counts; the last frame
+            // says only that no counted guesser ran.
+            how_guessed = Some(crate::types::HowGuessed {
+                path: crate::types::GuessPath::Plain,
+                block_drafter: model.block_drafter_state(),
+                ..Default::default()
+            });
         } else {
             // Draft-free speculation on the local path (`speculating`, above).
             //
@@ -9912,6 +9965,14 @@ async fn handle_generate(
                     "DIAG: local n-gram speculation complete"
                 );
             }
+            how_guessed = Some(match spec.as_ref() {
+                Some(spec) => spec.how_guessed(model.block_drafter_state()),
+                None => crate::types::HowGuessed {
+                    path: crate::types::GuessPath::Plain,
+                    block_drafter: model.block_drafter_state(),
+                    ..Default::default()
+                },
+            });
             finished_stand_in = spec.and_then(|s| s.card).and_then(|c| c.stand_in);
 
             // The loop samples one token ahead: when it exits on `length`,
@@ -9972,6 +10033,7 @@ async fn handle_generate(
                 completion_tokens: generated.len(),
                 finish_reason,
                 matched_stop_sequence,
+                how_guessed: how_guessed.take(),
             },
             &[],
         )
@@ -11847,6 +11909,14 @@ async fn finalize_slot(
             completion_tokens: generated_count,
             finish_reason: finish_label,
             matched_stop_sequence: slot.matched_stop_sequence.clone(),
+            // The batched loop guesses nothing. Told as plain, never as
+            // batched: that would say another request shared the worker
+            // (`GuessPath::Plain`, #389 (a)).
+            how_guessed: Some(crate::types::HowGuessed {
+                path: crate::types::GuessPath::Plain,
+                block_drafter: model.map(|m| m.block_drafter_state()).unwrap_or_default(),
+                ..Default::default()
+            }),
         },
         &[],
     )

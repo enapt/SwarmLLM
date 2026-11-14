@@ -843,21 +843,42 @@ impl SplitModel {
     }
 
     pub(crate) fn attach_block_drafter(&mut self, dir: &Path) {
+        self.block_drafter_state = self.try_attach_block_drafter(dir);
+    }
+
+    /// Whether a block drafter sits beside these layers, and if not, why —
+    /// the word a hand-off's last frame carries (`HowGuessed::block_drafter`).
+    pub(crate) fn block_drafter_state(&self) -> swarmllm_types::BlockDrafterState {
+        self.block_drafter_state
+    }
+
+    /// [`Self::attach_block_drafter`]'s work, answering what came of it.
+    fn try_attach_block_drafter(&mut self, dir: &Path) -> swarmllm_types::BlockDrafterState {
+        use swarmllm_types::BlockDrafterState;
         // A guess head beside a split's first segment keeps the output head
         // it reads, charged before any drafter, which then shares it.
         let head_charged = self.keep_the_split_guess_head();
         let path = dir.join(BLOCK_DRAFTER_FILE);
         let head_here = self.output.is_some() || self.drafter_head.is_some();
-        if !block_drafter_on() || !path.is_file() || self.layer_start != 0 || !head_here {
+        let refused = if !block_drafter_on() {
+            Some(BlockDrafterState::Off)
+        } else if self.layer_start != 0 || !head_here {
+            Some(BlockDrafterState::NotThisSegment)
+        } else if !path.is_file() {
+            Some(BlockDrafterState::NotHeld)
+        } else {
+            None
+        };
+        if let Some(refused) = refused {
             self.drop_drafter_head();
-            return;
+            return refused;
         }
         if self.head_guesses_better_here() && !block_drafter_on_the_processor_anyway() {
             tracing::info!(
                 "block drafter not attached: on the processor this model's own guess head writes faster"
             );
             self.drop_drafter_head();
-            return;
+            return BlockDrafterState::HeadWritesFaster;
         }
         // Its weights are known off its header before any is loaded, and the
         // rule below can only refuse more (its cache and hot rows join them):
@@ -882,7 +903,7 @@ impl SplitModel {
                      of this model on its device"
                 );
                 self.drop_drafter_head();
-                return;
+                return BlockDrafterState::NoRoom;
             }
         }
         let drafter = match BlockDrafter::load(&path, self) {
@@ -890,7 +911,7 @@ impl SplitModel {
             Err(e) => {
                 tracing::warn!(error = %e, "block drafter not attached");
                 self.drop_drafter_head();
-                return;
+                return BlockDrafterState::FailedToLoad;
             }
         };
         // The head's first rows, where the drafter reads it on the processor
@@ -949,8 +970,10 @@ impl SplitModel {
         if fits {
             self.block_drafter = Some(drafter);
             self.drafter_hot = hot.map(|(rows, _)| rows);
+            BlockDrafterState::Attached
         } else {
             self.drop_drafter_head();
+            BlockDrafterState::NoRoom
         }
     }
 

@@ -1334,6 +1334,8 @@ impl PipelineExecutor {
         let mut prompt_tokens = 0u32;
         let mut completion_tokens = 0u32;
         let mut matched_stop_seq: Option<String> = None;
+        // How the peer says it guessed ahead (`GenerateUsage::how_guessed`).
+        let mut how_guessed: Option<swarmllm_types::HowGuessed> = None;
         let mut token_logprobs: Vec<swarmllm_types::TokenLogProbEntry> = Vec::new();
         let mut first = true;
         // Timing for the delegated-speed observation recorded at the end.
@@ -1728,6 +1730,7 @@ impl PipelineExecutor {
                 if let Some(usage) = tok.usage {
                     prompt_tokens = usage.prompt_tokens;
                     completion_tokens = usage.completion_tokens;
+                    how_guessed = usage.how_guessed.or(how_guessed);
                 }
                 if let Some(ms) = tok.matched_stop_sequence.clone() {
                     matched_stop_seq = Some(ms);
@@ -1977,6 +1980,18 @@ impl PipelineExecutor {
             )));
         }
 
+        // How the far computer guessed ahead — its word, logged only.
+        if whole_model {
+            log_how_the_writer_guessed(
+                request_id,
+                &segment.node_id,
+                &self.request.model_id,
+                completion_tokens,
+                first_token_at.map(|at| at.elapsed()),
+                how_guessed.as_ref(),
+            );
+        }
+
         // A delegated split's pace is its PLAN's — the delegate and every peer
         // it chose — and recorded as the delegate's it would misprice it.
         if let Some(ttft) = first_token_at.filter(|_| whole_model) {
@@ -2051,6 +2066,115 @@ impl PipelineExecutor {
             matched_stop_sequence: matched_stop_seq,
             trace: None,
         }))
+    }
+}
+
+/// Log how the computer that wrote a whole reply says it guessed ahead
+/// (`HowGuessed`, 2026-11-14): whether its block drafter was attached, and if
+/// not why, and what each guesser's checks kept. A hand-off's speed is mostly
+/// that, and it was known only in the far computer's own log. Its word, so
+/// logged and never priced; one line a reply.
+fn log_how_the_writer_guessed(
+    request_id: uuid::Uuid,
+    peer: &crate::types::NodeId,
+    model_id: &crate::types::ModelId,
+    tokens: u32,
+    since_first_token: Option<std::time::Duration>,
+    how: Option<&swarmllm_types::HowGuessed>,
+) {
+    let decode_tok_s = since_first_token
+        .map(|d| d.as_secs_f64())
+        .filter(|s| *s > 0.0 && tokens > 1)
+        .map(|s| format!("{:.1}", f64::from(tokens - 1) / s));
+    tracing::info!(
+        %request_id,
+        %peer,
+        model = %model_id,
+        tokens,
+        decode_tok_s = decode_tok_s.as_deref().unwrap_or("-"),
+        guessed = %how_guessed_words(how),
+        "DIAG: how the computer that wrote this reply guessed ahead"
+    );
+}
+
+/// [`log_how_the_writer_guessed`]'s words for one record.
+fn how_guessed_words(how: Option<&swarmllm_types::HowGuessed>) -> String {
+    use swarmllm_types::{BlockDrafterState as B, GuessPath as P};
+    let Some(how) = how else {
+        return "not told (an older computer)".to_string();
+    };
+    let path = match how.path {
+        P::Speculated => "guesses checked",
+        P::Plain => "no guesses checked on this reply",
+        P::Unknown => "a loop this build does not know",
+    };
+    let drafter = match how.block_drafter {
+        B::Attached => "attached",
+        B::NotHeld => "none (no drafter file there)",
+        B::Off => "switched off there",
+        B::NotThisSegment => "none (these layers cannot carry one)",
+        B::HeadWritesFaster => "none (its own guess head writes faster there)",
+        B::NoRoom => "none (no room beside one conversation)",
+        B::FailedToLoad => "failed to load",
+        B::Unknown => "unknown",
+    };
+    let mut words = format!("{path}; block drafter {drafter}");
+    if how.rounds > 0 {
+        words.push_str(&format!(
+            "; {} rounds wrote {} ({:.2} a round, {} guesses kept)",
+            how.rounds,
+            how.produced,
+            f64::from(how.produced) / f64::from(how.rounds),
+            how.accepted
+        ));
+    }
+    for (name, guesser) in [("block", how.block), ("head", how.head), ("card", how.card)] {
+        if let Some(g) = guesser.filter(|g| g.rounds > 0) {
+            words.push_str(&format!(
+                "; {name} {} rounds kept {} of {}",
+                g.rounds, g.accepted, g.proposed
+            ));
+        }
+    }
+    words
+}
+
+#[cfg(test)]
+mod how_guessed_words_tests {
+    use super::how_guessed_words;
+    use swarmllm_types::{BlockDrafterState, GuessPath, Guesser, HowGuessed};
+
+    #[test]
+    fn a_reply_guessed_far_away_is_described_in_the_requesters_log() {
+        assert_eq!(how_guessed_words(None), "not told (an older computer)");
+        let how = HowGuessed {
+            path: GuessPath::Speculated,
+            rounds: 10,
+            produced: 31,
+            accepted: 21,
+            block: Some(Guesser {
+                rounds: 6,
+                proposed: 90,
+                accepted: 18,
+            }),
+            head: Some(Guesser::default()),
+            card: None,
+            block_drafter: BlockDrafterState::Attached,
+        };
+        assert_eq!(
+            how_guessed_words(Some(&how)),
+            "guesses checked; block drafter attached; 10 rounds wrote 31 \
+             (3.10 a round, 21 guesses kept); block 6 rounds kept 18 of 90"
+        );
+        let refused = HowGuessed {
+            path: GuessPath::Plain,
+            block_drafter: BlockDrafterState::NoRoom,
+            ..Default::default()
+        };
+        assert_eq!(
+            how_guessed_words(Some(&refused)),
+            "no guesses checked on this reply; block drafter none (no room beside one conversation)"
+        );
     }
 }
 

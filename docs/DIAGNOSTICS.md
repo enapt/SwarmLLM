@@ -830,6 +830,32 @@ loaded, and with `SWARMLLM_FLOW_COPY_STORE=0`.
 `SWARMLLM_LOCAL_GUESS_GAMMA=fixed` checks every guess, the rule before. A request
 that is not alone on the worker joins the batch instead and logs nothing.
 
+### How did the far computer guess? (a whole model handed over, 2026-11-14)
+
+A reply handed whole to a peer is guessed THERE, and that line lands in the peer's log, not
+yours. The reply's last frame now carries the peer's account (`GenerateUsage::how_guessed`), and
+the requester logs it once a reply, at info:
+
+```bash
+grep "how the computer that wrote this reply guessed ahead" node.log
+# tokens=160 decode_tok_s=… guessed=guesses checked; block drafter attached;
+#   10 rounds wrote 31 (3.10 a round, 21 guesses kept); block 6 rounds kept 18 of 90
+```
+
+The words, in order: whether the peer checked guesses (`guesses checked`, or `no guesses checked
+on this reply` — never why: log probabilities, a payoff the worker judged too low, nothing found to
+guess, or another request on the worker, which would tell you when that computer was busy, perhaps
+for its owner, #389 (a); SWIFT, off by default, keeps its own counts and reads as the latter),
+then whether its block drafter was attached and, if not, why. `no drafter file there`: the peer
+fetched none (it holds the model's two ends, `block_drafter::fetch_for_models_held_end_to_end`,
+from the pinned table only). `no room beside one conversation`: its drafter's weights and cache
+would not fit beside one full-context conversation on its device (a 27B on a 12 GB card). `its own
+guess head writes faster there`: a whole model on a processor with a guess head. Then the rounds
+that checked guesses, the tokens they wrote (`a round` near 1.0 is plain decoding) and each
+guesser's share — `block`, `head` (the file's own guess head), `card` (a card/processor split
+guessing on its card). `not told (an older computer)`: the peer runs a release before this field.
+The numbers are the peer's word: logged, never priced.
+
 ### A split's card guessing on its own (2026-10-28)
 
 A whole model split between the card and the processor keeps its processor layers early in the

@@ -255,6 +255,10 @@ pub enum WorkerMsg {
         /// older worker builds.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         matched_stop_sequence: Option<String>,
+        /// How the reply was guessed ahead, for a hand-off's last frame
+        /// (`GenerateUsage::how_guessed`). `None` where nothing was written.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        how_guessed: Option<crate::types::HowGuessed>,
     },
     /// How long the worker's fresh card allocations took when it first picked
     /// the card (`cuda_pool::probe_once`), sent once, after the message that

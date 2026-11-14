@@ -1457,6 +1457,120 @@ pub struct StreamingToken {
 pub struct GenerateUsage {
     pub prompt_tokens: u32,
     pub completion_tokens: u32,
+    /// How the computer that wrote a whole reply guessed ahead — its own
+    /// word, told with the reply's last frame and only LOGGED by the requester
+    /// (never priced: a peer chose these numbers). `None` from an older
+    /// computer and from a split led there; a record this build cannot read
+    /// is `None` too, never a failed frame ([`how_guessed_or_none`]).
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "how_guessed_or_none"
+    )]
+    pub how_guessed: Option<HowGuessed>,
+}
+
+/// `GenerateUsage::how_guessed` as read off the wire: a record in a shape this
+/// build does not know (a count dropped, a tag that is not a word) is `None`,
+/// so the reply's last frame — which ends the reply — still decodes
+/// (security review 2026-11-14). serde's `untagged` + `IgnoredAny` fallback.
+fn how_guessed_or_none<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> Result<Option<HowGuessed>, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Read {
+        Known(HowGuessed),
+        Other(serde::de::IgnoredAny),
+    }
+    Ok(match Option::<Read>::deserialize(d)? {
+        Some(Read::Known(how)) => Some(how),
+        Some(Read::Other(_)) | None => None,
+    })
+}
+
+/// How a whole reply's writer guessed ahead (#3, diagnosis, 2026-11-14).
+///
+/// A hand-off's speed is mostly how many tokens a check kept, and that was
+/// known only in the far computer's own log. Prior art: llama.cpp's server
+/// returns `draft_n` / `draft_n_accepted` in a reply's final timings
+/// (`server_slot_stats::to_json`); this adds WHY no block drafter guessed,
+/// which neither llama.cpp nor vLLM reports. Counts and fixed words only —
+/// nothing a peer writes here is text.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HowGuessed {
+    /// Whether guesses were checked on this reply.
+    #[serde(default)]
+    pub path: GuessPath,
+    /// The speculating loop's rounds (plain steps included), the tokens they
+    /// wrote, and the guesses its checks kept.
+    #[serde(default)]
+    pub rounds: u32,
+    #[serde(default)]
+    pub produced: u32,
+    #[serde(default)]
+    pub accepted: u32,
+    /// The block drafter's share of those rounds (#428).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub block: Option<Guesser>,
+    /// The file's own guess head's share (#425).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub head: Option<Guesser>,
+    /// A card/processor split's card guesses' share.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub card: Option<Guesser>,
+    /// The block drafter beside the model, or why there is none.
+    #[serde(default)]
+    pub block_drafter: BlockDrafterState,
+}
+
+/// One guesser's rounds, the guesses it proposed and those a check kept.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Guesser {
+    pub rounds: u32,
+    pub proposed: u32,
+    pub accepted: u32,
+}
+
+/// The decode loop a reply was written by.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GuessPath {
+    /// Guesses were checked on this reply.
+    Speculated,
+    /// No guesses checked on this reply — and never WHY: the batched loop is
+    /// taken while another request decodes on the worker, so saying so (or
+    /// saying "speculating, found nothing", which only an idle worker runs)
+    /// would tell a peer when the computer was busy, perhaps for its owner
+    /// (#389 (a), security review 2026-11-14).
+    Plain,
+    /// A word a newer computer sent.
+    #[default]
+    #[serde(other)]
+    Unknown,
+}
+
+/// Whether a block drafter sits beside the model, and if not, why.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BlockDrafterState {
+    Attached,
+    /// No drafter file beside the model.
+    NotHeld,
+    /// Switched off on that computer.
+    Off,
+    /// The layers loaded do not start the model, or hold no output head.
+    NotThisSegment,
+    /// On the processor the model's own guess head writes faster.
+    HeadWritesFaster,
+    /// Its weights do not fit beside one conversation of the model.
+    NoRoom,
+    /// Its file did not load.
+    FailedToLoad,
+    /// Not asked, or a word a newer computer sent.
+    #[default]
+    #[serde(other)]
+    Unknown,
 }
 
 /// Request a remote peer to run the full generation loop for a single-segment
@@ -2068,5 +2182,79 @@ mod delegated_split_wire_tests {
                 ids: vec![9, 8]
             })
         );
+    }
+
+    /// How a reply's writer guessed rides the last frame's usage: absent when
+    /// unknown, read by an older requester as nothing (it ignores the key), and
+    /// a word a newer writer sends reads as `Unknown`, never a failed frame.
+    #[test]
+    fn how_a_reply_was_guessed_is_additive_on_the_wire() {
+        let plain = GenerateUsage {
+            prompt_tokens: 5,
+            completion_tokens: 7,
+            how_guessed: None,
+        };
+        let json = serde_json::to_value(&plain).unwrap();
+        assert!(json.get("how_guessed").is_none(), "{json}");
+        let told = GenerateUsage {
+            how_guessed: Some(HowGuessed {
+                path: GuessPath::Speculated,
+                rounds: 10,
+                produced: 31,
+                accepted: 21,
+                block: Some(Guesser {
+                    rounds: 6,
+                    proposed: 90,
+                    accepted: 18,
+                }),
+                head: None,
+                card: None,
+                block_drafter: BlockDrafterState::Attached,
+            }),
+            ..plain
+        };
+        let json = serde_json::to_value(&told).unwrap();
+        // An older requester's `GenerateUsage` has only the two counts.
+        #[derive(serde::Deserialize)]
+        struct OlderUsage {
+            prompt_tokens: u32,
+            completion_tokens: u32,
+        }
+        let older: OlderUsage = serde_json::from_value(json.clone()).unwrap();
+        assert_eq!((older.prompt_tokens, older.completion_tokens), (5, 7));
+        let back: GenerateUsage = serde_json::from_value(json).unwrap();
+        assert_eq!(back.how_guessed, told.how_guessed);
+        let newer = serde_json::json!({
+            "prompt_tokens": 1,
+            "completion_tokens": 2,
+            "how_guessed": {
+                "path": "a_loop_not_yet_written",
+                "rounds": 0, "produced": 0, "accepted": 0,
+                "block_drafter": "a_reason_not_yet_written"
+            }
+        });
+        let back: GenerateUsage = serde_json::from_value(newer).unwrap();
+        let how = back.how_guessed.unwrap();
+        assert_eq!(how.path, GuessPath::Unknown);
+        assert_eq!(how.block_drafter, BlockDrafterState::Unknown);
+        // A dropped count reads as none of it; a shape this build cannot read
+        // at all is no record — never a frame that fails to decode.
+        let dropped = serde_json::json!({
+            "prompt_tokens": 1, "completion_tokens": 2,
+            "how_guessed": {"path": "speculated"}
+        });
+        let back: GenerateUsage = serde_json::from_value(dropped).unwrap();
+        assert_eq!(back.how_guessed.unwrap().rounds, 0);
+        let odd = serde_json::json!({
+            "prompt_tokens": 1, "completion_tokens": 2,
+            "how_guessed": {"path": 7, "rounds": "many"}
+        });
+        let back: GenerateUsage = serde_json::from_value(odd).unwrap();
+        assert_eq!((back.completion_tokens, back.how_guessed), (2, None));
+        let null = serde_json::json!({
+            "prompt_tokens": 1, "completion_tokens": 2, "how_guessed": null
+        });
+        let back: GenerateUsage = serde_json::from_value(null).unwrap();
+        assert!(back.how_guessed.is_none());
     }
 }
