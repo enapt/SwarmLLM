@@ -183,7 +183,16 @@ pub(super) fn peer_with_disk(
     ceiling_mb: Option<u64>,
     disk_mb: u64,
 ) -> NodeId {
-    let id = NodeId([byte; 32]);
+    peer_with_id(state, NodeId([byte; 32]), ceiling_mb, disk_mb)
+}
+
+/// [`peer_with_disk`] for an id drawn by [`ids_ranked_above`].
+pub(super) fn peer_with_id(
+    state: &Arc<SharedState>,
+    id: NodeId,
+    ceiling_mb: Option<u64>,
+    disk_mb: u64,
+) -> NodeId {
     state.peer_registry.insert(
         id.clone(),
         crate::types::PeerInfo {
@@ -205,6 +214,25 @@ pub(super) fn peer_with_disk(
     );
     state.connected_node_ids.insert(id.clone());
     id
+}
+
+/// `n` machine ids ranked above `local` on every one of `parts` in rendezvous
+/// order ([`super::coverage::part_rank_weight`]), drawn from a fixed sequence.
+/// This node's own id is random (`Identity::generate`): the 253 one-byte ids a
+/// test searched found two only ~96% of the time — a node ranked near the top
+/// of both parts has few above it — and a full test run failed on it
+/// (2026-11-15). A million candidates miss about once in 36,000 runs.
+pub(super) fn ids_ranked_above(local: &NodeId, parts: &[ShardId], n: usize) -> Vec<NodeId> {
+    use super::coverage::part_rank_weight;
+    (0u32..1_000_000)
+        .map(|i| NodeId(*blake3::hash(&i.to_le_bytes()).as_bytes()))
+        .filter(|id| {
+            parts
+                .iter()
+                .all(|p| part_rank_weight(p, id) > part_rank_weight(p, local))
+        })
+        .take(n)
+        .collect()
 }
 
 /// Record `node` as a holder of `parts` of `mid`.

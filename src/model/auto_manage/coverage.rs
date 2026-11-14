@@ -753,8 +753,8 @@ mod tests {
     use std::sync::Arc;
 
     use super::super::test_support::{
-        capability, fetched, holds, make_test_manager_with_config, offered, peer_with_disk,
-        register_manifest_with_sized_shards, write_sparse_shards,
+        capability, fetched, holds, ids_ranked_above, make_test_manager_with_config, offered,
+        peer_with_disk, peer_with_id, register_manifest_with_sized_shards, write_sparse_shards,
     };
     use super::super::AutoShardManager;
     use crate::config::Config;
@@ -930,18 +930,10 @@ mod tests {
             model_id: mid.clone(),
             index,
         };
-        let above: Vec<u8> = (3u8..=255)
-            .filter(|b| {
-                (0..2).all(|i| {
-                    super::part_rank_weight(&part(i), &NodeId([*b; 32]))
-                        > super::part_rank_weight(&part(i), &local)
-                })
-            })
-            .take(2)
-            .collect();
+        let above = ids_ranked_above(&local, &[part(0), part(1)], 2);
         assert_eq!(above.len(), 2, "two holders ranked above this node");
-        for byte in above {
-            let roomless = peer(&state, byte, Some(ceiling_for(0)));
+        for id in above {
+            let roomless = peer_with_id(&state, id, Some(ceiling_for(0)), 100_000);
             holds(&state, &mid, &roomless, &[0, 1]);
         }
         let spare = || manager.spare_for_any_room(0.5, &[]);
