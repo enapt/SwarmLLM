@@ -1,5 +1,47 @@
 # Changelog
 
+## [0.3.287-alpha] — 2026-11-14
+
+**A computer at its storage limit now says so, and makes room for the models people ask for.** Other computers
+planned what a computer should fetch from its free disk, not from its storage limit. A computer with auto-manage on,
+at its limit but with hundreds of GB of disk free, was handed part of a large model every few hours and never fetched
+it (#400). Each computer now tells the others its storage limit, how much it holds and how much it could give back,
+and planners hand it only that room; the peer list marks a computer with no room left "Storage full". To make room,
+a computer can give back its copy of a small model it holds whole, for part of a model people ask for more, but only
+while at least two other computers keep their copies, never a model loaded right now and never one its owner
+downloaded or chose. When the limit stops a part people ask for, the owner sees a dashboard notice, at most every 6
+hours, saying how to raise it. What a computer tells others never depends on what its own owner asks for. Older
+releases ignore the new field and are read as before.
+
+**Every computer now plans a big model's chain of cards the same way.** Each computer works out on its own which
+machines should hold which layers of a model too big for any one card, and fetches only its own piece, so all of
+them must reach the same plan. A computer whose memory could run the model whole with its processor's help stopped
+at "I can run it alone" and never priced the chain of cards the others planned; for Llama 3.3 70B the computer in
+Australia did exactly that. It now weighs running alone against every chain of cards.
+
+**"Start and finish on this computer" weighs the faster route honestly.** The planner could pick a route made of
+two pieces of this computer's own run, both here, and priced each piece as part of a split across computers, which
+is credited for the words its guesses bring back. The pieces read 17.5 s against 22.4 s for the same work, the reply
+ran here at 5.3 tokens a second, and the route that hands the middle layers to a faster card abroad, which is what the
+setting is for, was never weighed fairly. One computer's whole run is now always priced as one run.
+
+**Settings asks before throwing away unsaved changes.** Closing the Settings popup (the close button, Escape or "Run
+setup again") used to discard unsaved edits without a word, and clicking outside it did nothing. Now it asks first
+when something is unsaved, including a provider key shown with "Show", and a click outside closes it the same way.
+Translated into all 21 languages.
+
+**A reply written by another computer says how that computer guessed ahead.** When a whole model is handed to a
+peer, its speed depends mostly on how many guessed words each check keeps, and until now only the far computer's
+own log showed that. The reply's last message now carries the writer's account, and the computer that asked logs it
+once per reply (`grep "guessed ahead"` in its log; `docs/DIAGNOSTICS.md`). It names no reason a reply was not
+guessed, so it says no more about whether the far computer was busy than the reply's pace already does. Older
+releases ignore it.
+
+**Smaller changes.** A model process stopped before it loaded anything no longer holds the next load for up to 5
+seconds while it waits for card memory that process never took. An opt-in switch,
+`SWARMLLM_BLOCK_DRAFTER_IN_RAM=1`, puts the small guessing model in system memory when a model split between a card
+and the processor leaves no room for it on the card (a 27B on a 12 GB card); it stays off until it is measured.
+
 ## [0.3.286-alpha] — 2026-11-14
 
 **A split between two computers far apart now runs the way round that is faster.** A split can start on this

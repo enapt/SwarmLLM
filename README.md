@@ -149,44 +149,45 @@ idea, applied to running AI instead of sharing files.)
 
 ## How fast is it?
 
-<!-- speeds:begin, reviewed for 0.3.286-alpha. Refreshed at every release: .claude/rules/completeness.md § "README speeds" -->
+<!-- speeds:begin, reviewed for 0.3.287-alpha. Refreshed at every release: .claude/rules/completeness.md § "README speeds" -->
 Speed is in **tokens a second**: a token is a word or part of one, and most
 people read about 5 a second. The figures are from the project's test laptop,
 with an 8 GB NVIDIA RTX 3070 graphics card and an 8-core AMD Ryzen 7 5800H
 processor, on its own or teamed up with volunteers' computers.
 
 <!-- release-check:begin -->
-<!-- from the v0.3.285 release check, timed on the downloaded release -->
+<!-- from the v0.3.286 release check, timed on the downloaded release -->
 **On one computer.** Each model reads a 1,800-token document and writes 128
 tokens about it.
 
 | Model | Runs on | Writing (tokens a second) | Reading (tokens a second) |
 |---|---|---|---|
-| Qwen2.5 Coder 7B | the graphics card | 53–56 | 1,620–1,760 |
-| Qwen2.5 14B | card and processor (too big for the card) | 12.1–12.3 | 530–540 |
-| Qwen3 30B-A3B (2-bit) | card and processor (a mixture of experts, too big for the card) | 19.1–19.6 | 210–220 |
-| Llama 3.2 3B | the processor only | 14.6–14.7 | 60–70 |
+| Qwen2.5 Coder 7B | the graphics card | 54 | 1,550–1,640 |
+| Qwen2.5 14B | card and processor (too big for the card) | 12.4–15.0 | 530–550 |
+| Qwen3 30B-A3B (2-bit) | card and processor (a mixture of experts, too big for the card) | 17.8–20.0 | 210 |
+| Llama 3.2 3B | the processor only | 13.5–14.2 | 70 |
 <!-- release-check:end -->
 
-**Across computers.** The same laptop, in Thailand, asking volunteers'
-computers: one with a 12 GB RTX 3060 card in Australia, about 130 ms there and
-back, and one with a 32 GB RTX 5090 in Denmark, about 210 ms. When a model is
-split, a small helper guesses the next few words and the big model checks them
-all at once, so each trip across the long link brings back several words.
+**Across computers.** The same laptop, in Thailand, asking a volunteer's
+computer in Australia with a 12 GB RTX 3060 card, about 130 ms there and back.
+When a model is split, a small helper guesses the next few words and the big
+model checks them all at once, so each trip across the long link brings back
+several words.
 
 | Model, and how it is shared | Writing code | Writing prose |
 |---|---|---|
-| Qwen3.8 27B, run whole by the computer in Denmark | 138–145 | 120–124 |
-| Qwen2.5 14B, half on this laptop and half in Australia | 34–38 | 15.5–17.1 |
+| Qwen2.5 14B, half on this laptop and half in Australia | 33–34 | 15.0–19.0 |
 | The same, set to "Start and finish on this computer" | 25–28 | 15.0–15.1 |
-| Qwen3.6 35B-A3B, its first and last layers on this laptop, the middle 38 in Australia | 8.2–18.4 | 7.6–9.5 |
-| Llama 3.3 70B, 76 of its 80 layers in Australia, the first two on this laptop and the last two on a small home server beside it | 4.0 | 1.7–1.8 |
-<!-- measured on: the two 14B rows and the laptop-alone 14B figures below v0.3.284 (real_link.sh readme284 and drafterfit, 11-13, RTT 139-152 ms; "start and finish" with the 0.5B helper on the card; helper on the processor 15.0-21.6 / 6.9-10.5 over readme284, readme284b, ab283 and drafterfit's processor arms); the 35B-A3B, 27B and 70B rows v0.3.279 (27B/70B: the live node's own route, ask_tier.py, 160 tokens, code and prose twice each after a warm-up, 11-09) -->
+| Qwen3.8 27B, run whole by the computer in Australia, 30 of its 64 layers on that computer's card | 7.2–7.6 | 6.8–7.4 |
+| Qwen3.6 35B-A3B, run whole by the computer in Australia | 40–41 | 40–41 |
+| Llama 3.3 70B, its first 7 layers on this laptop, the other 73 in Australia | 3.3 | 2.7–2.8 |
+<!-- measured on: the 14B half-and-half row and the laptop-alone 14B figures below v0.3.286 (real_link.sh readme286, 11-14 to 02:09Z, three sittings, flowhalf and locald arms); the "start and finish" row and its processor-helper figures v0.3.284 (readme284 and drafterfit, 11-13, RTT 139-152 ms, the 0.5B helper on the card; on the processor 15.0-21.6 / 6.9-10.5 over readme284, readme284b, ab283 and drafterfit's processor arms); the 27B, 35B-A3B and 70B rows v0.3.286 (readme287x, the live node's own route, ask_tier.py, 160 tokens, code and prose twice each after a warm-up, 11-14 02:46-03:11Z; the 70B [0,7) here + [7,80) Australia) -->
 
-On its own this laptop writes the 14B's code at 13.9–16.9 tokens a second and
-its prose at 10.5–13.6, so the two continents together are over twice as fast
-on code and about a third faster on prose. Code is easier to guess, and the
-guesses keep the long link busy ([how](docs/plans/faster_than_local.md)).
+On its own this laptop writes the 14B's code at 14.0–14.6 tokens a second and
+its prose at 10.7–11.6, so the two continents together are over twice as fast
+on code and a quarter to three quarters faster on prose. Code is easier to
+guess, and the guesses keep the long link busy
+([how](docs/plans/faster_than_local.md)).
 "Start and finish on this computer" is that fast only while its small helper
 model fits on this laptop's card beside the 14B: with other programs holding a
 gigabyte of the card, the helper runs on the processor and the split writes
@@ -406,7 +407,7 @@ SwarmLLM is built by a human developer working with Claude Code, an AI
 programming assistant: the human sets the direction, tests and reviews, and
 Claude writes the code. We say so openly so you can judge the project on its
 merits. Every change is checked by thousands of automated tests
-(4601 lib tests + 80 integration tests) before it ships, and regular
+(4613 lib tests + 80 integration tests) before it ships, and regular
 automated audits are logged in the repository. Scrutiny and contributions are
 welcome.
 
