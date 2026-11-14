@@ -887,7 +887,14 @@ frame, then add a receipt ACK or a per-frame read deadline mirroring request-res
 > not for want of use, leaves no give-back record, so the dashboard does not list it (rare: room keeps
 > two other holders); (c) an owner's request for a model nobody holds counts only here (their use is
 > never gossiped, #389 (a)), so it fetches only the parts the ring gives this node — "Get it again" is
-> how its owner gets the whole model back.
+> how its owner gets the whole model back. (d) SCALE: only CONNECTED holders are asked (pre-release
+> review 2026-11-14). A holder serving the model that is not connected here is heard only through its
+> demand gossip, which keeps the model for a few hours after each request (`asked_for`, the EMA's
+> decay) — so a copy idle here 14 days can go while a far holder serves it once a day. Today every
+> card is connected to every other; at a few hundred nodes it is not. Counting an alive but
+> unconnected holder as "cannot say" was weighed and NOT built: at that size some holder is always
+> unconnected, and nothing would ever be given back. The fix is a gossiped served-day per model (the
+> demand gossip's shape, by the day), not a wider "cannot say".
 
 **What the user sees** (2026-11-14): 3-4 cards online, every one full, and requests forced over the
 Australia-Thailand link because the computers that could take a model's parts are holding parts of

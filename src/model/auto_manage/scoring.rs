@@ -2238,6 +2238,41 @@ mod fetch_what_prune_keeps {
         );
     }
 
+    /// A model id longer than a receiver reads is left out of what this
+    /// computer advertises: one such entry made every receiver drop its whole
+    /// capability — its parts, memory and speed with it (pre-release review
+    /// 2026-11-14). A model imported from a file keeps its name's length.
+    #[test]
+    fn a_model_id_too_long_for_a_receiver_is_never_advertised() {
+        use crate::daemon::state::manifest_sync::MAX_MODEL_ID_BYTES;
+        use crate::model::auto_manage::unused::{models_served, ModelUse};
+        let (state, _manager) = manager_with(Config::default());
+        let long = ModelId("m".repeat(MAX_MODEL_ID_BYTES + 1));
+        let longest = ModelId("n".repeat(MAX_MODEL_ID_BYTES));
+        for id in [&long, &longest] {
+            state.models.model_use.insert(
+                id.clone(),
+                ModelUse {
+                    watched_since: 86_400,
+                    served_recorded_since: 86_400,
+                    ..Default::default()
+                },
+            );
+        }
+        let told = models_served(&state);
+        assert_eq!(
+            told.iter().map(|m| m.model_id.clone()).collect::<Vec<_>>(),
+            vec![longest.0.clone()],
+            "only what a receiver reads"
+        );
+        let mut cap = super::super::test_support::capability(None, 1_000_000);
+        cap.models_served = Some(told);
+        assert!(
+            crate::daemon::dispatch::capability_fits(&cap),
+            "every receiver takes the capability"
+        );
+    }
+
     /// The swarm's word decides what a computer holding NONE of a model
     /// fetches (#452): what people run outside the swarm is tried, but not one
     /// the swarm already tried and nobody ran — a holder kept it a window

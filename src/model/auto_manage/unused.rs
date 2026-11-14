@@ -339,12 +339,20 @@ pub(crate) fn unused_everywhere(
 /// remembered. By the day; sorted by id, so a reader looks one up by halves; at
 /// most `ModelServed::MOST_ENTRIES`, the models held first. Never the owner's
 /// own use (#389 (a)): `served_for_others` is written only for a peer's request.
+/// Never an id longer than a receiver reads (`MAX_MODEL_ID_BYTES`): one such
+/// entry makes every receiver drop this computer's whole capability
+/// (`dispatch::capability_fits`) — its parts, memory and speed with it — and a
+/// model imported from a file keeps its name's length (pre-release review
+/// 2026-11-14).
 pub(crate) fn models_served(state: &crate::daemon::SharedState) -> Vec<ModelServed> {
     let now = chrono::Utc::now().timestamp();
     let (mut held, mut gave_back): (Vec<ModelServed>, Vec<ModelServed>) = (Vec::new(), Vec::new());
     for entry in state.models.model_use.iter() {
         let r = *entry.value();
         if r.gave_back() && !r.gave_back_recently(now) {
+            continue;
+        }
+        if entry.key().0.len() > crate::daemon::state::manifest_sync::MAX_MODEL_ID_BYTES {
             continue;
         }
         let served = ModelServed {
