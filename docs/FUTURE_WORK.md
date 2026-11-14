@@ -1091,7 +1091,7 @@ on the explored requests.
 priced and measured apart (§ Closed). (j6) a fresh node prices the hand-off
 from the peer's stated 45 tok/s (5.3 s for 160 tokens) against the 24 it delivered.
 (j8) **the far end reads a split's run from disk after its whole copy served** — ~~cause unknown~~ two likely
-causes fixed 2026-11-13 (§ Closed, on main, not in a release yet): prune's phase 0 narrowed the copy that had just
+causes fixed 2026-11-13 (§ Closed, released in v0.3.286): prune's phase 0 narrowed the copy that had just
 served, reading our own pool's freed memory as another program's (j8); and the promotion to the card replaced a copy
 short of the card with the split's slice alone (j12, `TAG=j11` peer snapshots). Real link TAG=j7, j5, j9, j10: the first split after whole
 hand-offs had AU report `layers_from=disk` for [24..48) (868-869 ms of ~1,470), AU then advertised `(24, 48)` alone,
@@ -1111,7 +1111,7 @@ runner's memory is back, up to 5 s ("subsequent model loads will get far less la
 on WSL2 with an 8 GB card, 2 GB held by a process was back within 0.07 s of `kill -9`, 3 of 3. **`TAG=j13` (21:40Z)
 repeated it with a control**: in one arm, AU's cold load of the 14B placed 45 card layers, and its reload right
 after the `[24..48)` worker's retirement placed 18. It is the same model, computer and kind of request, so the
-sizing is not the cause. **Built 2026-11-14 (on main, not in a release yet)**: `unload_model` waits for the
+sizing is not the cause. **Built 2026-11-14, released in v0.3.286 (published 2026-11-14 01:36:28Z)**: `unload_model` waits for the
 memory as Ollama does (`await_card_memory_back`, A/B `SWARMLLM_CARD_MEMORY_BACK=0`; invariants/memory.md). Each
 residency also carries the card's free memory its load read (`ResidentModelLayers::card_free_at_load_mb`, the
 peer list's `resident[].card_free_at_load_mb`). **Open: verify on the real link** once AU runs the release. A
@@ -6299,7 +6299,7 @@ Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
 
-**Closed 2026-11-13, on main (not in a release yet)** (#3 (j1), (j3))
+**Closed 2026-11-13, released in v0.3.286 (published 2026-11-14 01:36:28Z)** (#3 (j1), (j3))
 - #3 (j1) — **Two computers each holding a whole model, one with part of it on its processor, could not share it.**
   With `parallax_partial_ranges` off each offered one indivisible range, so a split with a faster card abroad (a fixed
   route ran code 34-37 tok/s that morning, against 17-18 handed over) could not be planned. Partial ranges are now on
