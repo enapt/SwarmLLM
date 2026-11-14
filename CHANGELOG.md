@@ -1,5 +1,34 @@
 # Changelog
 
+## [0.3.288-alpha] — 2026-11-14
+
+**Computers now give back models nobody on the network runs, so there is room for the ones people do.** Computers
+were full of parts of models nobody on the network ran, while a large model people asked for had nowhere to go and
+requests were sent the long way round to the few computers that held it (#452). Pruning asked HuggingFace's list of
+popular models whether a model was in use; that list named nearly everything held, and in a week of passes on one test
+computer not one model was given back. Now each computer tells the others which models it served for other computers
+recently, by the day and never what its own owner ran. A copy is given back once it has been held two weeks with
+nobody running it, on this computer or on any connected computer that holds it. If a computer holding the model runs
+an older release, or this computer is offline, nothing is given back. Right after this update a computer's record of
+what it served for others starts empty, so a model several computers hold is judged about two weeks after they
+update; one only this computer holds is judged straight away.
+
+**What people run elsewhere now decides only which new models are tried.** A model popular on HuggingFace is fetched
+to try only where the network's online graphics cards could run it, and a model the network already tried and nobody
+ran is not fetched back on popularity for four weeks. What another computer says is only its word: "held it unused"
+counts only from a computer that holds a part of the model, "gave it back" only once two computers report one.
+
+**Room for a model people ask for is made whole or not at all.** A full computer gave back copies to make room for a
+part that still did not fit, then fetched the same copies back into the space; one part of a 70B went that way three
+times in eight days on one test computer. Now no copy goes unless the room can be made in full.
+
+**A model no computer holds any more stays usable and listed.** Asking for it now says no computer holds it right now,
+instead of "no model loaded", and counts as a request, so this computer starts fetching its share again. The dashboard
+keeps it for four weeks after it was given back, folded away under "No computer holds these now" below the ready
+models, with when it last ran and a "Get it again" button.
+
+Older releases ignore the new list in each computer's announcement and are read as not saying.
+
 ## [0.3.287-alpha] — 2026-11-14
 
 **A computer at its storage limit now says so, and makes room for the models people ask for.** Other computers
