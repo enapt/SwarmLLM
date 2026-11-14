@@ -1122,11 +1122,13 @@ j12) is gone, so the wait itself was not exercised there. **Open:** a reload aft
 computer — `card_free_at_load_mb` near the free memory before it means the wait covered the lag; ~5.7 GB-like means
 not: read the INFO `DIAG: a stopped worker's card memory` lines where a node's log is at hand. Since `3d03afe9` the wait also ends
 once the release has settled short of three quarters (`Settled`, two readings within 32 MB of the steady run's
-first). **Open, a hypothesis (pre-release review 2026-11-14, confidence ~45)**: a worker charged its card share at
-admission but stopped before it allocated it (the model loads on the first message; a request cancelled in that
-window, or a reclaim of such a worker) frees less than a quarter, so the wait runs its whole 5 s under the spawn lock
-and logs "not back in time". No common path to it was found; the INFO line says if it happens. A fix would read
-whether the worker ever loaded its weights, not `ran_a_request`, which a preload may not set.
+first). **Closed 2026-11-14 (on main, not in a release yet), the pre-release review's hypothesis (confidence ~45)**:
+a worker charged its card share at admission and stopped before its first message (it loads on that message)
+frees less than a quarter of the charge, so the wait would run its whole 5 s under the spawn lock. Now only a worker
+asked to load is owed its charge: `WorkerHandle::asked_to_load` is set before a request or a load ahead is sent, and
+by the reader on `ModelLoadTimed`. One never asked is released at once, as v0.3.285 released every worker. It was
+never seen: the live node's unloads since .286 all came back within one poll. Prior art: Ollama's runner joins
+`s.loaded` only after its load, so its `waitForVRAMRecovery` never waits on one that allocated nothing.
 
 `scheduler/parallax.rs` charges a remote hop a flat `ASSUMED_FORWARD_PASSES = 64.0`. The error
 grows with reply length — 1.0 at 8 tokens, 2.4-3.3 at 120-239 — and biases every delegation

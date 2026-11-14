@@ -920,6 +920,25 @@ reload happened in 12 requests — j8's and j12's narrowing is gone — and its 
 10,814 MB and placed 47 of 48 layers; the wait there awaits a real retirement. Only a worker with a process waits; a
 test's stand-in has none and would wait out the bound. A/B
 `SWARMLLM_CARD_MEMORY_BACK=0`.
+**Only a worker ASKED TO LOAD is waited for** (2026-11-14, the pre-release
+review's open case, confidence ~45). A worker is charged its card share at the
+spawn and loads on its first message. Retired before one, it holds only the
+device context its spawn opened to read the card. Its release could never rise
+by a quarter of the charge, so the wait would never settle and would hold the
+spawn lock for the whole 5 s. `WorkerHandle::asked_to_load` is set BEFORE
+anything that may load is sent: a request (`register_response`) or a load ahead
+(`load_ranges_ahead`). The reader also sets it when a worker reports a load
+(`WorkerMsg::ModelLoadTimed`, from `ensure_model_loaded`, the one load path).
+Until then `card_mb_it_frees` is 0, and the charge is released without a wait.
+A worker whose release lags still gets .285's behaviour, no wait, so nothing is
+waited for that the old code would not have. Set before the send, the flag
+never misses a load already under way. The card probe (`CardAllocationProbe`)
+cannot stand in: a worker that never loaded sends it after its first message of
+any kind (a cancel or release broadcast). Ollama never meets this case, because
+a runner enters `s.loaded` only once its load has finished. The live node's
+unloads since v0.3.286 have all come back within one poll (INFO shows none of
+the slow outcomes). Tests `a_card_worker_never_asked_to_load_is_owed_nothing_back`
+and `a_reported_load_marks_the_worker_as_asked_to_load`.
 
 ## `model::auto_manage::storage_budget` is the ONE answer to "how much shard storage may this node hold?", and `held_shard_bytes` the one answer to "how much does it hold?"
 

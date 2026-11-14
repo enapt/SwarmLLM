@@ -1214,6 +1214,15 @@ struct WorkerHandle {
     /// 0 both before the first and for one registered in its first second.
     /// Read by [`ModelProcessPool::model_used_secs_ago`].
     ran_a_request: AtomicBool,
+    /// Has this worker been given anything that loads weights — a request
+    /// ([`Self::register_response`]), a load ahead (`DaemonMsg::LoadRange`) —
+    /// or reported a load (`WorkerMsg::ModelLoadTimed`, by the reader)? Until
+    /// then it holds only the device context its spawn opened to read the card,
+    /// not the share it was charged, so its retirement waits for no card
+    /// memory to come back ([`DepartedWorker::card_mb_it_frees`], #3 (j13)).
+    /// Set BEFORE the work is sent, so a load under way is always waited for.
+    /// An `Arc`: the reader actor writes it too.
+    asked_to_load: Arc<AtomicBool>,
     /// Requests whose conversation cache this worker holds BETWEEN forwards,
     /// and when each last sent one.
     ///
@@ -1657,6 +1666,8 @@ struct SideBand {
     load_rate: Arc<LoadRate>,
     /// This worker's `WorkerHandle::context_fits`.
     context_fits: Arc<std::sync::atomic::AtomicU32>,
+    /// This worker's `WorkerHandle::asked_to_load`, set on a reported load.
+    asked_to_load: Arc<AtomicBool>,
     /// The daemon's stop signal ([`ModelProcessPool::watch_daemon_stop`]):
     /// whether a worker's death is news or the node stopping.
     daemon_stopping: Option<tokio::sync::watch::Receiver<bool>>,
@@ -1706,6 +1717,7 @@ async fn reader_actor(
         slow_card,
         load_rate,
         context_fits,
+        asked_to_load,
         daemon_stopping,
     } = side;
     let mut skipped: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -1776,8 +1788,10 @@ async fn reader_actor(
                     slow_card.record(std::time::Duration::from_millis(u64::from(took_ms)));
                     continue;
                 }
-                // One model load, timed inside the worker (#129).
+                // One model load, timed inside the worker (#129) — and the
+                // fact that it holds weights, whatever path asked for them.
                 if let WorkerMsg::ModelLoadTimed { bytes, ms } = msg {
+                    asked_to_load.store(true, Ordering::Release);
                     load_rate.observe(bytes, ms);
                     tracing::debug!(
                         model = %model_id,
@@ -2592,6 +2606,8 @@ impl WorkerHandle {
     ) -> (ResponseGuard, Option<u64>) {
         self.mark_used_now();
         self.ran_a_request.store(true, Ordering::Relaxed);
+        // Before the request is sent: its first message may load weights.
+        self.asked_to_load.store(true, Ordering::Release);
         let (mut guard, displaced) = self.register_unseen(request_id, tx, cancel_on_drop);
         guard.used_until_now = Some(Arc::downgrade(self));
         (guard, displaced)
@@ -3222,6 +3238,8 @@ struct DepartedWorker {
     charged_mb: u64,
     charged_against_ram: bool,
     host_share_mb: u64,
+    /// `WorkerHandle::asked_to_load`: whether it may hold the share it was charged.
+    asked_to_load: bool,
 }
 
 impl From<&WorkerHandle> for DepartedWorker {
@@ -3241,15 +3259,28 @@ impl From<&WorkerHandle> for DepartedWorker {
             charged_mb: h.charged_mb.load(Ordering::Acquire),
             charged_against_ram: h.charged_against_ram,
             host_share_mb: h.host_share_mb.load(Ordering::Acquire),
+            asked_to_load: h.asked_to_load.load(Ordering::Acquire),
         }
     }
 }
 
 impl DepartedWorker {
-    /// The card memory this worker was charged and gives back on exit — 0 for
-    /// a worker in system memory (its processor share is `host_share_mb`).
+    /// The card memory this worker was charged and gives back on exit — what
+    /// its retirement waits to read free again (`unload_model`, #3 (j13)). 0
+    /// for a worker in system memory (its processor share is `host_share_mb`),
+    /// and for one never asked to load anything: charged at its spawn, it
+    /// loads on its first message, so until then it holds its device context
+    /// alone. Waited for at its charge, its release never rose a quarter, never
+    /// settled, and held the spawn lock the whole 5 s (pre-release review
+    /// 2026-11-14). The charge itself is released either way
+    /// (`after_worker_gone_charge`).
+    ///
+    /// Prior art: Ollama's `waitForVRAMRecovery` (`server/sched.go`) waits for
+    /// every runner on a discrete card — but a runner enters its scheduler's
+    /// loaded set only once its load has finished, so it never waits on one
+    /// that allocated nothing. Ours is charged before it loads.
     fn card_mb_it_frees(&self) -> u64 {
-        if self.freed_gpu_memory && !self.charged_against_ram {
+        if self.freed_gpu_memory && !self.charged_against_ram && self.asked_to_load {
             self.charged_mb
         } else {
             0
@@ -9715,6 +9746,9 @@ impl ModelProcessPool {
                 layer_start: range.0 as usize,
                 layer_end: range.1 as usize,
             };
+            // Before the send: from here its retirement waits for the card
+            // memory the load takes (`DepartedWorker::card_mb_it_frees`).
+            handle.asked_to_load.store(true, Ordering::Release);
             let mut writer = handle.writer.lock().await;
             match send_daemon(&mut *writer, &msg, &[]).await {
                 Ok(()) if requester == Requester::Owner => tracing::info!(
@@ -11441,6 +11475,7 @@ impl ModelProcessPool {
         let responses: ResponseMap = Arc::new(DashMap::new());
         let dead = Arc::new(AtomicBool::new(false));
         let context_fits = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let asked_to_load = Arc::new(AtomicBool::new(false));
         let reader_handle = tokio::spawn(reader_actor(
             read_half,
             responses.clone(),
@@ -11453,6 +11488,7 @@ impl ModelProcessPool {
                 slow_card: self.slow_card.clone(),
                 load_rate: self.load_rate.clone(),
                 context_fits: context_fits.clone(),
+                asked_to_load: asked_to_load.clone(),
                 daemon_stopping: self.daemon_stopping.get().cloned(),
             },
         ));
@@ -11468,6 +11504,7 @@ impl ModelProcessPool {
             spawned_at: std::time::Instant::now(),
             last_used: AtomicU64::new(0),
             ran_a_request: AtomicBool::new(false),
+            asked_to_load,
             kv_holders: std::sync::Mutex::new(std::collections::HashMap::new()),
             awaiting_first_step: std::sync::Mutex::new(std::collections::HashMap::new()),
             placed_on_cpu_because,
@@ -13093,7 +13130,8 @@ impl ModelProcessPool {
             // so the wait after its exit knows when that share is back (#3
             // (j13)). Only a worker with a process of its own holds any — a
             // test's stand-in has none, and would wait out the bound on a
-            // card that has nothing to give back.
+            // card that has nothing to give back — and only one asked to
+            // load something (`card_mb_it_frees`).
             let card_owed_mb = if handle.child.is_some() {
                 departed.card_mb_it_frees()
             } else {
@@ -13299,6 +13337,8 @@ impl ModelProcessPool {
             charged_mb,
             charged_against_ram,
             host_share_mb,
+            // Whether to WAIT for the card; the charge is released either way.
+            asked_to_load: _,
         } = departed;
         // Exactly what THIS worker was charged, not the model's whole entry: a
         // replacement can already have been admitted under the same key while
@@ -18153,15 +18193,79 @@ mod tests {
         ));
     }
 
-    /// [`fake_worker_handle_split`], handing back the WORKER's end of the
-    /// socket, so a test can read what the daemon told the worker.
-    pub(super) async fn fake_worker_handle_split_with_its_end(
-        dead_now: bool,
-        placed_on_cpu_because: Option<CpuReason>,
-        charged_against_ram: bool,
-        spawned_at: std::time::Instant,
-        card_split: Option<CardSplit>,
-    ) -> (Arc<WorkerHandle>, interprocess::local_socket::tokio::Stream) {
+    /// **A card worker never asked to load anything is owed nothing back** (#3
+    /// (j13)'s open case, pre-release review 2026-11-14): charged at its spawn,
+    /// it loads on its first message, so retired before one it holds its device
+    /// context alone — waited for at its charge, its release never rose a
+    /// quarter and held the spawn lock the whole 5 s. A request asks it to
+    /// load (so does a load ahead, `load_ranges_ahead`, beside its send).
+    #[tokio::test]
+    async fn a_card_worker_never_asked_to_load_is_owed_nothing_back() {
+        let h = fake_worker_handle_split(false, None, false, std::time::Instant::now(), None).await;
+        h.charged_mb.store(4_300, Ordering::Release);
+        assert_eq!(
+            DepartedWorker::from(&*h).card_mb_it_frees(),
+            0,
+            "spawned and charged, never asked to load"
+        );
+        let (tx, _rx) = mpsc::channel(1);
+        let _guard = h.register_response(Uuid::new_v4(), tx, false);
+        assert_eq!(
+            DepartedWorker::from(&*h).card_mb_it_frees(),
+            4_300,
+            "a request's first message may load its weights"
+        );
+    }
+
+    /// The reader marks a worker that REPORTS a load, whatever asked for it —
+    /// the one fact behind the flag the daemon's own sends set ahead of it.
+    #[tokio::test]
+    async fn a_reported_load_marks_the_worker_as_asked_to_load() {
+        let (name, daemon_end, mut worker_end) = test_socket_pair().await;
+        let (read_half, _write_half) = split_ipc(daemon_end);
+        let p = ModelProcessPool::new(std::path::PathBuf::from("/tmp/swarmllm-asked-to-load"));
+        let asked_to_load = Arc::new(AtomicBool::new(false));
+        let reader = tokio::spawn(reader_actor(
+            read_half,
+            Arc::new(DashMap::new()),
+            Arc::new(AtomicBool::new(false)),
+            ModelId("loaded".into()),
+            SideBand {
+                prefix_manifest_tx: None,
+                prefix_probe_tx: None,
+                progress_tx: None,
+                slow_card: p.slow_card.clone(),
+                load_rate: p.load_rate.clone(),
+                context_fits: Arc::new(std::sync::atomic::AtomicU32::new(0)),
+                asked_to_load: asked_to_load.clone(),
+                daemon_stopping: None,
+            },
+        ));
+        send_worker(
+            &mut worker_end,
+            &WorkerMsg::ModelLoadTimed {
+                bytes: 1 << 30,
+                ms: 900,
+            },
+            &[],
+        )
+        .await
+        .expect("send");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while !asked_to_load.load(Ordering::Acquire) && std::time::Instant::now() < deadline {
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        assert!(asked_to_load.load(Ordering::Acquire));
+        reader.abort();
+        let _ = std::fs::remove_file(&name);
+    }
+
+    /// A connected local socket: its path, the daemon's end and the worker's.
+    async fn test_socket_pair() -> (
+        String,
+        interprocess::local_socket::tokio::Stream,
+        interprocess::local_socket::tokio::Stream,
+    ) {
         use interprocess::local_socket::{tokio::prelude::*, ListenerOptions};
         let name = format!(
             "/tmp/swarmllm-retire-test-{}.sock",
@@ -18181,6 +18285,19 @@ mod tests {
         });
         let server = listener.accept().await.expect("accept");
         let client = connect.await.expect("join").expect("connect");
+        (name, server, client)
+    }
+
+    /// [`fake_worker_handle_split`], handing back the WORKER's end of the
+    /// socket, so a test can read what the daemon told the worker.
+    pub(super) async fn fake_worker_handle_split_with_its_end(
+        dead_now: bool,
+        placed_on_cpu_because: Option<CpuReason>,
+        charged_against_ram: bool,
+        spawned_at: std::time::Instant,
+        card_split: Option<CardSplit>,
+    ) -> (Arc<WorkerHandle>, interprocess::local_socket::tokio::Stream) {
+        let (name, server, client) = test_socket_pair().await;
         let (read_half, write_half) = split_ipc(server);
         let responses: ResponseMap = Arc::new(DashMap::new());
         let dead = Arc::new(AtomicBool::new(dead_now));
@@ -18200,6 +18317,7 @@ mod tests {
             spawned_at,
             last_used: AtomicU64::new(0),
             ran_a_request: AtomicBool::new(false),
+            asked_to_load: Arc::new(AtomicBool::new(false)),
             kv_holders: std::sync::Mutex::new(std::collections::HashMap::new()),
             awaiting_first_step: std::sync::Mutex::new(std::collections::HashMap::new()),
             charged_mb: AtomicU64::new(0),
@@ -22031,6 +22149,7 @@ mod admission_tests {
                 charged_mb: 2_000,
                 charged_against_ram: false,
                 host_share_mb: 3_000,
+                asked_to_load: true,
             },
             "test",
         );
@@ -22739,6 +22858,7 @@ mod admission_tests {
             charged_mb: 4_300,
             charged_against_ram: false,
             host_share_mb: 1_200,
+            asked_to_load: true,
         };
         assert_eq!(card.card_mb_it_frees(), 4_300);
         let machine = DepartedWorker {
@@ -22746,6 +22866,7 @@ mod admission_tests {
             charged_mb: 9_000,
             charged_against_ram: true,
             host_share_mb: 0,
+            asked_to_load: true,
         };
         assert_eq!(machine.card_mb_it_frees(), 0);
     }
