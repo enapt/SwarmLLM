@@ -64,8 +64,10 @@
 //! neighbourhoods that only overlap, which see different near sets — is phase 2
 //! (published near lists), in the plan.
 //!
-//! **Where the near machines cannot carry the model, the same chain is planned
-//! over every machine in scope** ([`Reach::Far`], #346, 2026-10-25). A Llama
+//! **Where the near machines cannot carry the model — or where one of them
+//! runs it whole, which the far pass weighs against the far chains of cards
+//! (#318, 2026-11-14) — the same chain is planned over every machine in
+//! scope** ([`Reach::Far`], #346, 2026-10-25). A Llama
 //! 3.3 70B no machine could run whole had four holders 300-410 ms apart, none
 //! near another but this one's LAN box: no near chain, and carrying — which
 //! summed the holders' figures, counting a layer once per holder — read 80 of
@@ -282,8 +284,12 @@ pub(in crate::model::auto_manage) enum ChainPart {
 /// What planning over one [`Reach`] came to.
 enum Planned {
     Chain(NearChain),
-    /// A card among them holds the model whole, or one machine running it
-    /// whole costs no more than any chain: carrying's to fill.
+    /// A card among them holds the model whole: today's rules' to fill, at
+    /// any reach — no chain of cards beats one card.
+    ACardHoldsItWhole,
+    /// One machine running it whole — beside its processor, or by speeds
+    /// nobody states — costs no more than any chain over them: carrying's to
+    /// fill, unless a chain over more machines costs less (the far pass).
     OneRunsItWhole,
     /// Their ceilings could not carry it between them, or no chain over them
     /// fits their disks.
@@ -1148,11 +1154,19 @@ impl AutoShardManager {
         self.asked_for(model_id)
     }
 
-    /// `manifest`'s chain, computed now: over the near machines, else — where
-    /// they cannot carry it — over every machine in scope (#346). `None`:
-    /// nobody asked for it, no header here, a machine planned over could run
-    /// it whole, they could not carry it between them, or a ceiling is
-    /// unknown.
+    /// `manifest`'s chain, computed now: over the near machines, else over
+    /// every machine in scope (#346) — where the near ones cannot carry it,
+    /// AND where one of them runs it whole beside its processor (#318,
+    /// 2026-11-14): that run competes there with the far chains of cards
+    /// (#356), as it does on every machine whose own near pass could not carry
+    /// the model. Stopped at the near pass, a machine whose own memory covers
+    /// a model (Australia's for the 70B) planned nothing while every machine
+    /// short of it planned the far chain — one plan computed alike is the
+    /// design. Petals' block selection has no local-only answer either: a
+    /// server weighs every server's span. A near CARD holding it whole ends
+    /// it. `None`: nobody asked for it, no header here, a card or a machine
+    /// planned over runs it whole for no more than any chain, they could not
+    /// carry it between them, or a ceiling is unknown.
     fn compute_near_chain(&self, manifest: &ModelManifest) -> Option<NearChain> {
         let layers = manifest.num_layers;
         if layers == 0 || near_chains_switched_off() || !self.may_plan_a_near_chain(&manifest.id) {
@@ -1162,11 +1176,15 @@ impl AutoShardManager {
         let parts = parts_in_order(manifest)?;
         match self.plan_over(manifest, &parts, curve, Reach::Near)? {
             Planned::Chain(chain) => Some(chain),
-            Planned::OneRunsItWhole => None,
-            Planned::CannotCarry => match self.plan_over(manifest, &parts, curve, Reach::Far)? {
-                Planned::Chain(chain) => Some(chain),
-                Planned::OneRunsItWhole | Planned::CannotCarry => None,
-            },
+            Planned::ACardHoldsItWhole => None,
+            Planned::OneRunsItWhole | Planned::CannotCarry => {
+                match self.plan_over(manifest, &parts, curve, Reach::Far)? {
+                    Planned::Chain(chain) => Some(chain),
+                    Planned::ACardHoldsItWhole | Planned::OneRunsItWhole | Planned::CannotCarry => {
+                        None
+                    }
+                }
+            }
         }
     }
 
@@ -1205,7 +1223,7 @@ impl AutoShardManager {
                 .iter()
                 .any(|m| m.card.is_some_and(|card| card >= layers))
             {
-                return Some(Planned::OneRunsItWhole);
+                return Some(Planned::ACardHoldsItWhole);
             }
             if total < u64::from(layers) {
                 return Some(Planned::CannotCarry);
@@ -2848,6 +2866,72 @@ mod tests {
             "control: a slower chain is not taken: {chain:?}"
         );
         assert_eq!(chain.price.processor_layers, 8, "{chain:?}");
+        assert!(s.offered().is_empty());
+    }
+
+    /// #318 (2026-11-14): a machine whose own memory runs a model whole only
+    /// beside its processor (Australia's, for the 70B) stopped at its near
+    /// pass ("one runs it whole") and never priced the chain of cards every
+    /// machine short of it planned — one plan computed alike is the design. Here
+    /// nothing is near; this node, like the far holder, could run all 32
+    /// layers — 12 on its card, 20 on its processor (0.25 tokens/s at 7B: 125
+    /// ms a layer, 2.5 s a token) — and three 12-layer cards cost ~0.9 s a
+    /// token with their hops. It plans that chain and fetches its card's
+    /// segment. Control: processors at 20 tokens/s run it whole in ~38 ms, no
+    /// chain is cheaper, and nothing is planned or fetched.
+    #[test]
+    fn a_machine_that_runs_a_model_whole_only_beside_its_processor_still_joins_a_chain_of_cards() {
+        let planned = |processor: f32| {
+            // Nothing near: the second machine is 250 ms away.
+            let s = swarm(250.0);
+            let with_card = |c: &mut crate::types::NodeCapability, ceiling: u64| {
+                c.model_memory_ceiling_mb = Some(ceiling);
+                c.gpu = Some(crate::types::GpuInfo {
+                    name: "card".to_string(),
+                    vram_total_mb: ceiling_for(12),
+                    vram_available_mb: ceiling_for(12),
+                    compute_capability: None,
+                    memory_bandwidth_gbps: 0.0,
+                });
+                c.est_tokens_per_sec_7b = 56.0;
+                c.processor_tokens_per_sec_7b = Some(processor);
+            };
+            let mut own = (*s.state.local_capability.load_full().unwrap()).clone();
+            with_card(&mut own, ceiling_for(32));
+            s.state.local_capability.store(Some(Arc::new(own)));
+            for (peer, ceiling) in [(&s.near, ceiling_for(20)), (&s.far, ceiling_for(32))] {
+                with_card(
+                    s.state
+                        .peer_registry
+                        .get_mut(peer)
+                        .unwrap()
+                        .capability
+                        .as_mut()
+                        .unwrap(),
+                    ceiling,
+                );
+            }
+            s.manager.carry_curves.clear();
+            s
+        };
+
+        let s = planned(0.25);
+        let chain = s.chain().expect("a far chain of cards");
+        assert_eq!(chain.reach, Reach::Far, "{chain:?}");
+        assert!(!chain.complete, "{chain:?}");
+        assert_eq!(chain.price.processor_layers, 0, "{chain:?}");
+        let (start, end) = chain
+            .segment_of(&s.local())
+            .expect("this node is named a segment");
+        assert!(end - start <= 12, "its card's share: {chain:?}");
+        let mine: Vec<u32> = (start / 4..end.div_ceil(4)).collect();
+        assert_eq!(s.offered(), mine, "{chain:?}");
+
+        let s = planned(20.0);
+        assert!(
+            s.chain().is_none(),
+            "control: running it whole is cheaper than any chain"
+        );
         assert!(s.offered().is_empty());
     }
 }

@@ -3951,6 +3951,27 @@ reach's bound (30 ms near, 300 ms far), and the router prices the chain it is gi
 where machines see different peers (a partial mesh): each plan's fetch is bounded by one
 machine's ceiling, and both settle on what is then held.
 
+**And where one machine runs it whole beside its processor (2026-11-14, #318).** The far pass ran
+only where the near pass `CannotCarry`. A machine whose own memory covers the model with its
+processor's help (Australia's 3060 for the 70B: ceiling 80, card 22) ended at its near pass —
+`whole_us <= chain_us` over itself alone, `OneRunsItWhole` — and planned nothing, while every
+machine short of the model reached the far pass and planned the chain of cards (this node:
+since 02:53Z: here 0-13, Australia 13-36, the US 3080 Ti 36-59, the US 5080 59-80, 510 ms a
+token by stated speeds).
+One plan computed alike is the design, and on two machines it was two answers. Now the near
+pass's `OneRunsItWhole` goes on to the far pass, which weighs that run against every far chain
+(`plan_over`'s `whole_us` over every machine in scope); only a near CARD holding the model whole
+ends it there (`Planned::ACardHoldsItWhole` — no chain of cards beats one card, and the far pass
+would answer the same). Petals' `block_selection.py` has no local-only answer either: a server
+chooses its span over every server's announced span. Test
+`a_machine_that_runs_a_model_whole_only_beside_its_processor_still_joins_a_chain_of_cards`
+(nothing near; this node and the far holder each run 32 layers, 12 on a card and 20 at 125 ms
+a layer: the three-card far chain, ~0.9 s against 2.5 s, is planned and this node fetches its
+card's segment; control at 20 tokens/s: running it whole wins, nothing planned). **What it is
+not**: the cause of the US 3080 Ti never fetching its segment — it states `ceiling=46` (every
+line this node logged, 11-05 → 11-08), short of 80, so its own near pass already went far; that
+stays open in FUTURE_WORK #318.
+
 ### Cards first: a chain is priced by the speeds its machines state (2026-10-26, #356)
 
 **Why.** A machine's ceiling (`NodeCapability::model_memory_ceiling_mb`) is its card PLUS the

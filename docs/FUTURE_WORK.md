@@ -4108,6 +4108,26 @@ own side (it would read this node's coordinate as unusable for the hour after ea
 restarts), or does its fetch start and fail? Its download pass's view is needed: ask its owner for
 a `-v` log, or add the chain it plans to its published capability.
 
+**2026-11-14 — one way a machine plans apart is closed; the US card's is not that one.** Every
+plan since 02:53Z names it again (here 0-13, Australia 13-36, `a661155f` 36-59, the US 5080
+`5bfbd36e` 59-80, 510 ms a token, `complete=false`); it holds none of the 79 parts and no peer
+sees a download of it start (`peer_downloads` empty on every part). Found in `compute_near_chain`:
+the far pass ran only where the near pass `CannotCarry`, so a machine whose OWN memory runs the
+model whole beside its processor (Australia: ceiling 80) ended at "one runs it whole" and planned
+nothing — fixed (on main, not in a release yet): such a run now competes in the far pass, a near
+card holding the model whole still ends it (`docs/invariants/memory.md` § "And where one machine
+runs it whole beside its processor"). But the 3080 Ti states `ceiling=46, card=22` on every line
+this node logged (11-05 → 11-08), so its own near pass already went far. Left on its side, none
+visible from here: its plan differs (coordinates, above), its download pass holds back (a model it
+holds no part of waits to be TRUSTED through its own HuggingFace check — `origin_trust_notify`;
+the canonical-upload gate; a metered hold; its storage budget), or its fetch starts and fails
+before any progress is announced. ⚠ Publishing "the chain it plans" is not free: a chain is
+planned only for a model `asked_for`, which reads `region_demand` — the owner's own requests
+included, which #389 (a) keeps off the wire — so a published plan would tell every peer which
+large models a computer's owner asks for. A diagnosis field must say WHY a named segment is not
+being fetched (a reason code per model a peer's plan named it for, answered only to that
+asker), never which models this computer's owner wants.
+
 #### #10 — Conversation prefixes across computers: a cache this node did not fill is invisible
 `P2` · perf-split · **PARTIAL** — 2026-09-07 · absorbs #139 and archive § "Speeding up inference BETWEEN nodes" idea 1 (prefix-keyed remote KV); history: archive row #10 and § "A conversation's later turns do not seek out the peer holding its prefix"
 
