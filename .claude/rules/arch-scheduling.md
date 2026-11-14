@@ -229,9 +229,12 @@ ratio (`parallax::prompt_speedup_over`), never the card's 40 alone (#430 (a): a 
 **A machine's back-to-back segments are ONE run there** (`merge_contiguous`): each is priced with the
 run before it ahead on the card, **`parallax::layers_ahead_in_run`** → `vertex_cost_as`'s REQUIRED
 `ahead`, in the search's DP and `chain_cost_terms` alike — priced per piece, a 14B cut in three read 45 of
-its 48 layers on a 23-layer card and undercut every split (2026-10-29).
+its 48 layers on a 23-layer card and undercut every split (2026-10-29). **A chain that is ONE machine
+from layer 0 to the last is its whole-model vertex, never pieces** (`route_over`, every pass, where that
+vertex is offered): each piece was charged a split's rounds, the vertex every pass, and this node's 14B
+in two pieces undercut "Start and finish"'s route abroad at 0.78 of its own whole price (2026-11-14).
 
-→ `docs/invariants/scheduling.md` § "A range that runs partly on a card is priced per device"
+→ `docs/invariants/scheduling.md` § "A range that runs partly on a card is priced per device", § "A node holding every layer that would run the model on its processor lets the priced search compete with its fast path" (the back-to-back pieces)
 
 ## A hand-off is priced as the shape it will be given, not as the whole model
 

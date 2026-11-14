@@ -1753,6 +1753,15 @@ fn route_over(
             "parallax: no candidate ranges".into(),
         ));
     }
+    // Which machines this pass offers the whole model as one vertex — their
+    // whole run is priced there, never as pieces (the forward DP, below).
+    let mut runs_whole_as_one_vertex = vec![false; candidates.len()];
+    for v in vertices
+        .iter()
+        .filter(|v| v.range.0 == 0 && v.range.1 >= num_layers)
+    {
+        runs_whole_as_one_vertex[v.cand_idx] = true;
+    }
 
     // The source segment starts at layer 0, so it is the one handed the prompt
     // itself. Under `encrypted_pipeline` that is this node by construction and
@@ -2090,7 +2099,28 @@ fn route_over(
                 // — and reported as a split it read `[(0,24), (24,48)]` on one
                 // computer (#3 (j4), real link 2026-11-13). Coming back to a
                 // machine after another is a split.
-                if split_only && vertices[w_idx].cand_idx == vertices[v_idx].cand_idx {
+                //
+                // On every pass, a chain that is ONE machine from layer 0 to
+                // the last — its run so far starts the model (`run_width`) and
+                // this step ends it — is that machine's whole run, and its
+                // whole-model vertex prices it (a hand-off, or this node's own
+                // run). Taken as pieces, each piece was a split's segment,
+                // charged a split's rounds (`NodeCandidate::rounds_entered`,
+                // the yield a round dividing its passes) where the vertex is
+                // charged every pass: this node's 14B as [0..24) + [24..48)
+                // priced 17.5 s against 22.4 s for the same run whole, won,
+                // ran here whole at 5.3 tok/s, and the "Start and finish"
+                // route through Australia was never weighed against an honest
+                // price (real link `TAG=readme286c`, 2026-11-14). Petals'
+                // route search keeps a server's back-to-back blocks ONE span
+                // (`sequence_manager.py`). Only where that vertex is on offer:
+                // a machine with no whole-model vertex keeps the pieces as its
+                // only way to run the model.
+                let same_machine = vertices[w_idx].cand_idx == vertices[v_idx].cand_idx;
+                let whole_run_in_pieces = run_width[v_idx] == v_end
+                    && vertices[w_idx].range.1 >= num_layers
+                    && runs_whole_as_one_vertex[vertices[v_idx].cand_idx];
+                if same_machine && (split_only || whole_run_in_pieces) {
                     continue;
                 }
                 let w_bit = bit_of(w_idx);
@@ -2571,6 +2601,78 @@ mod tests {
             search(true, &[two_ranges, slower_tail]).unwrap(),
             vec![(6, (0, 16)), (7, (16, 32))]
         );
+    }
+
+    /// A chain that is this node from layer 0 to the last is its whole run,
+    /// priced by its whole-model vertex — never as pieces, each of which is
+    /// charged a split's rounds (the yield a round dividing its passes). The
+    /// real link's "Start and finish" request (2026-11-14) planned the 14B as
+    /// [0..24) + [24..48) here at 0.78 of the same run's whole price, ran it
+    /// here whole, and never weighed the route through the peer honestly.
+    /// Here the pieces undercut the route through the peer, which undercuts
+    /// the run whole; the route through the peer is the plan.
+    #[test]
+    fn one_machines_whole_run_is_never_priced_as_pieces_of_a_split() {
+        let local = NodeId([1; 32]);
+        let mut me = cand(1, vec![(0, 32)], 0, 0.0, true, true, 10.0);
+        let mut peer = cand(2, vec![(0, 32)], 100, 0.0, true, true, 40.0);
+        for c in [&mut me, &mut peer] {
+            c.split_tokens_per_round = Some(2.0);
+            c.split_tokens_per_round_far_tail = Some(2.0);
+        }
+        let cands = [me, peer];
+        let ids = |segs: &[PipelineSegment]| {
+            segs.iter()
+                .map(|s| (s.node_id.0[0], s.layer_range))
+                .collect::<Vec<_>>()
+        };
+        let seg = |byte: u8, range: (u32, u32)| PipelineSegment {
+            node_id: NodeId([byte; 32]),
+            shard_id: ShardId {
+                model_id: ModelId("m".into()),
+                index: 0,
+            },
+            layer_range: range,
+        };
+        let price = |plan: &[PipelineSegment]| chain_cost_ms(plan, &cands, &local, 32, None);
+        let whole = [seg(1, (0, 32))];
+        let pieces = [seg(1, (0, 1)), seg(1, (1, 32))];
+        let through_the_peer = [seg(1, (0, 1)), seg(2, (1, 31)), seg(1, (31, 32))];
+        // The trap the search fell into, priced as it was.
+        assert!(price(&pieces) < price(&through_the_peer));
+        assert!(price(&through_the_peer) < price(&whole));
+
+        // "Start and finish on this computer": the ends here, the middle
+        // wherever it is cheapest.
+        let plan = route_shortest_path(
+            32,
+            &cands,
+            &local,
+            true,
+            true,
+            CapacityBound::Everyone,
+            None,
+        )
+        .expect("routable");
+        assert_eq!(ids(&plan), ids(&through_the_peer));
+
+        // With the peer far slower, the plan is this node's run as ONE
+        // segment — its whole-model vertex — never its pieces.
+        let mut slow = cands.clone();
+        slow[1].est_tokens_per_sec = 1.0;
+        for encrypted in [false, true] {
+            let plan = route_shortest_path(
+                32,
+                &slow,
+                &local,
+                encrypted,
+                true,
+                CapacityBound::Everyone,
+                None,
+            )
+            .expect("routable");
+            assert_eq!(ids(&plan), vec![(1, (0, 32))], "encrypted={encrypted}");
+        }
     }
 
     /// FUTURE_WORK #3 (j5): a split is searched once per TAIL where the two

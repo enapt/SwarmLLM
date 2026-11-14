@@ -3834,6 +3834,26 @@ Research: llama.cpp's `--tensor-split` and Petals' block choice place a contiguo
 device or server and never price a span twice; nothing to borrow beyond "price what is loaded".
 Test `back_to_back_segments_on_one_machine_share_its_card`: the cut run equals the whole run, and a
 split across a 50 ms peer's card priced between the two is taken.
+**And a machine's whole run in pieces is its whole-model vertex, never a split (2026-11-14).** The
+card was priced alike, but the ROUNDS were not: each piece is a segment of a split, charged
+`forward_passes ÷ split_tokens_per_round` (`NodeCandidate::rounds_entered`, #3 (d)), while the
+whole-model vertex is charged every pass. Real link `TAG=readme286c`, "Start and finish on this
+computer", request `cac17054` (14B, this node's card 25 of 48, the near yield 1.30 from the
+drafter's prior): the search returned two segments, both here, `pipeline_cost_ms=17533` against
+`local_processor_cost_ms=22438` for the same run whole (17533 ≈ 22438 × 1/1.30 plus the unscaled
+prompt); `merge_contiguous` made it one segment, it ran here at 5.3 tok/s, and the route through
+Australia — the reason the setting exists — was never weighed against an honest price. The
+all-local chain also hid itself: two segments skip the "cheapest split it passed over" line, which
+is logged only beside a one-segment choice. Now the forward DP refuses, on every pass, the step
+that would make a chain ONE machine from layer 0 to the last (`run_width` of the path = its end,
+and the step ends the model) wherever that machine has a whole-model vertex in the pass
+(`runs_whole_as_one_vertex`) — the j4 guard of `cheapest_split` generalised. Without such a vertex
+(a machine offering the model only as ranges back to back) the pieces stay its one way to run it.
+Prior art: Petals' `_build_inference_graph` models staying on a server as within-server edges with
+no hand-off cost and merges the path, so a route never holds two adjacent spans of one peer.
+Test `one_machines_whole_run_is_never_priced_as_pieces_of_a_split`: the pieces undercut the route
+through the peer, which undercuts the run whole, and the route through the peer is planned; with
+the peer slow the plan is this node's one segment, under prompt privacy and without.
 **Why this is not `cbbed678` again**: that pass priced local layers at a
 constant 10,000 — a penalty, not a price — so the search could not see the
 LAN split that was best and sent a request abroad. Here the local figure is

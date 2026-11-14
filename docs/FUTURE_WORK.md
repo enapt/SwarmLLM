@@ -6305,6 +6305,18 @@ Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
 
+**Closed 2026-11-14 (on main, not in a release yet)** (#3 (j14))
+- #3 (j14) — **This computer's own run, cut in two, was priced as a split and undercut the route abroad.** Under
+  "Start and finish on this computer" (real link `TAG=readme286c`, request `cac17054`, 14B) the search returned
+  [0..24) + [24..48), both here, at 17.5 s against 22.4 s for the same run whole: each piece was a split's segment,
+  charged the split's rounds (passes ÷ the near yield 1.30), the whole-model vertex every pass. It ran here at 5.3
+  tok/s and the route through Australia was never weighed honestly; two segments also skipped the "cheapest split"
+  line. The search now refuses, on every pass, the step that makes a chain one machine from layer 0 to the last
+  where that machine has a whole-model vertex (j4's guard generalised). Prior art: Petals' `_build_inference_graph`
+  (a server's back-to-back blocks are one span). Test: `one_machines_whole_run_is_never_priced_as_pieces_of_a_split`.
+  Evidence: `docs/invariants/scheduling.md` § "A node holding every layer that would run the model on its processor
+  lets the priced search compete with its fast path" (**And a machine's whole run in pieces**).
+
 **Closed 2026-11-13, released in v0.3.286 (published 2026-11-14 01:36:28Z)** (#3 (j1), (j3))
 - #3 (j1) — **Two computers each holding a whole model, one with part of it on its processor, could not share it.**
   With `parallax_partial_ranges` off each offered one indivisible range, so a split with a faster card abroad (a fixed
