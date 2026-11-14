@@ -849,8 +849,9 @@ for its owner, #389 (a); SWIFT, off by default, keeps its own counts and reads a
 then whether its block drafter was attached and, if not, why. `no drafter file there`: the peer
 fetched none (it holds the model's two ends, `block_drafter::fetch_for_models_held_end_to_end`,
 from the pinned table only). `no room beside one conversation`: its drafter's weights and cache
-would not fit beside one full-context conversation on its device (a 27B on a 12 GB card). `its own
-guess head writes faster there`: a whole model on a processor with a guess head. Then the rounds
+would not fit beside one full-context conversation on its device (a 27B on a 12 GB card; with
+`SWARMLLM_BLOCK_DRAFTER_IN_RAM=1` there, #451, it reads `attached (in system memory: no room on its
+card)` where the machine's budget holds it). `its own guess head writes faster there`: a whole model on a processor with a guess head. Then the rounds
 that checked guesses, the tokens they wrote (`a round` near 1.0 is plain decoding) and each
 guesser's share — `block`, `head` (the file's own guess head), `card` (a card/processor split
 guessing on its card). `not told (an older computer)`: the peer runs a release before this field.

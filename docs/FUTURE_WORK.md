@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #451**). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #452**). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -2558,6 +2558,29 @@ again after 75 s idle (past the card's 60 s hand-back of graph memory) stalled n
 reply when the model loads ON the request — idle comes only after it (the dashboard's load at the first keystroke, #424,
 gives the time); (b) a split's segments and a tree's row counts are not recorded; (c) gaps of 1.6-8.5 s OUTSIDE any
 forward, in both arms of those runs alike — the 10-26 ones' other half (ending at a card memory reading).
+
+#### #451 — A block drafter in system memory beside a card that has no room for it: built, opt-in, unmeasured
+`P2` · perf-local · **BUILT (opt-in)** — 2026-11-14 · models between (27B/35B on a 12 GB card)
+
+A whole model split between a card and the processor attached no block drafter where the card had no
+room beside one conversation (`BlockDrafterState::NoRoom`): a 27B on a 12 GB card holds ~27 of 64
+layers and its 1.85 GB drafter (field report v0.3.280). The 27B handed to the Australian computer ran
+at ~6.4 tok/s (11-14) — whether its drafter was there is what the hand-off's guess record
+(`GenerateUsage::how_guessed`, `55bb2d8c`) will say once it ships. **Built**
+(`SWARMLLM_BLOCK_DRAFTER_IN_RAM=1`): `block_drafter::drafter_home` puts it in system memory where the
+card refuses and the split's processor-side budget is KNOWN and holds it beside one conversation of
+the processor-held layers (vLLM's rule, as on the card); charged there; the block's rows go to it
+(`context_rows` already moved them to its device) and its output (guesses × hidden) goes up to the
+card's head per draft. Reported `attached_in_system_memory`. Prior art: llama.cpp places a draft model
+on devices of its own (`--spec-draft-device none`, `--spec-draft-ngl auto`, `common/arg.cpp`).
+**Open — measure, then default ON or drop**: Qwen3.5-9B (`~/swarmllm-ref/dflash/`, drafter 1.38 GB)
+forced to a card/processor split on the RTX 3070 (`test-split --gpu-layers N` with the card budget
+held so the drafter is refused there) — `SWARMLLM_BLOCK_DRAFTER_IN_RAM=1` against unset in ONE CUDA
+binary, IDLE machine, code + prose + story, min-of-N, replies judged against llama.cpp; then the AU
+27B on the real link. The per-round rule (`best_gamma_beside_a_step_per_round`, the block set aside
+by what it writes) is what keeps a slow processor draft from costing a reply — verify it fired.
+Estimate (unmeasured): a 1.85 GB draft is bandwidth-bound at ~50-90 ms on a desktop processor
+against a ~140 ms step.
 
 #### #147 — Prompt reading on the card: the smaller items left after f16 accumulation
 `P3` · perf-local · **PARTIAL** — 2026-10-09 · history: archive row #147 and § "Prompt reading on the card (#147, 2026-09-29)"

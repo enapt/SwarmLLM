@@ -2110,6 +2110,7 @@ fn how_guessed_words(how: Option<&swarmllm_types::HowGuessed>) -> String {
     };
     let drafter = match how.block_drafter {
         B::Attached => "attached",
+        B::AttachedInSystemMemory => "attached (in system memory: no room on its card)",
         B::NotHeld => "none (no drafter file there)",
         B::Off => "switched off there",
         B::NotThisSegment => "none (these layers cannot carry one)",

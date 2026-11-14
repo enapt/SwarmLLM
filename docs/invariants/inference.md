@@ -8882,3 +8882,23 @@ would have deleted a good drafter and fetched it again later. A file in use (`mo
 a path. Ollama checks every blob by its digest (`verifyBlob`); #422 fetches a vision encoder by its origin's listed
 SHA-256. A wrong pairing is still refused at load (arch, width, target layers), and a weak one is set aside by
 what it writes (`dsd_controller::Delivered`).
+
+### In system memory beside a card with no room for it (2026-11-14, #451 — OPT-IN, unmeasured)
+
+A whole model split between a card and the processor attached no drafter where the card's budget could
+not hold it beside one conversation — a 27B on a 12 GB card and its 1.85 GB drafter (field report
+v0.3.280), so the models between ran with no block guesses exactly where a drafter would pay most (a
+processor-heavy step). **`block_drafter::drafter_home`** asks the card first, then — offered only for a
+whole model on a card with processor-held layers (`SplitModel::drafter_may_sit_in_system_memory`: its
+own head, none borrowed) and `SWARMLLM_BLOCK_DRAFTER_IN_RAM=1` — system memory, against the split's
+processor-side budget (`host_kv_budget_bytes`) and one conversation of its processor-held layers
+(`host_kv_growth`), which must be KNOWN: an unknown budget admits everything on a card, but a new
+placement in the machine's memory is never unchecked. Charged there. `BlockDrafter::load` takes the
+device; the block's context rows already moved to the drafter's device (`context_rows`) and its embedded
+block too; its output (`[1, guesses, hidden]`, a few hundred KB) is copied to the target's head per
+draft (`draft`), so the card picks the guesses as before. Prior art: llama.cpp places a draft model on
+devices of its own (`--spec-draft-device none` keeps it on the processor, `--spec-draft-ngl auto` fits
+its layers, `common/arg.cpp`). What it must keep: the per-round rule sets the block aside by what it
+writes, so a slow processor draft costs at most its probes. Test
+`a_drafter_the_card_cannot_hold_goes_to_system_memory_only_where_it_fits`. Measure before defaulting
+it on (FUTURE_WORK #451).

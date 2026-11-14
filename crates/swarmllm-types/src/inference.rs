@@ -1555,6 +1555,8 @@ pub enum GuessPath {
 #[serde(rename_all = "snake_case")]
 pub enum BlockDrafterState {
     Attached,
+    /// Attached in system memory beside a card that had no room for it.
+    AttachedInSystemMemory,
     /// No drafter file beside the model.
     NotHeld,
     /// Switched off on that computer.

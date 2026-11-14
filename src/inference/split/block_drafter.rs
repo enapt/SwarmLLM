@@ -108,6 +108,14 @@ pub(crate) fn block_drafter_on() -> bool {
     *ON.get_or_init(|| std::env::var("SWARMLLM_BLOCK_DRAFTER").as_deref() != Ok("0"))
 }
 
+/// `SWARMLLM_BLOCK_DRAFTER_IN_RAM=1`: a drafter its card/processor split's
+/// card has no room for goes to system memory ([`drafter_home`], 2026-11-14).
+/// OPT-IN until measured on an idle machine (`docs/FUTURE_WORK.md` #451).
+fn block_drafter_in_system_memory_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("SWARMLLM_BLOCK_DRAFTER_IN_RAM").as_deref() == Ok("1"))
+}
+
 /// `SWARMLLM_BLOCK_DRAFTER=processor`: attach the drafter beside a whole
 /// model on the processor even where its own guess head guesses
 /// ([`SplitModel::head_guesses_better_here`]), for A/B inside one binary.
@@ -263,7 +271,11 @@ impl BlockDrafter {
     /// the target (its width, its layers, its token table). It runs on the
     /// target's own device — the card where the model's first layers are, as
     /// llama.cpp loads a DFlash drafter on the target's devices.
-    pub(crate) fn load(path: &Path, target: &SplitModel) -> Result<Self, SwarmError> {
+    pub(crate) fn load(
+        path: &Path,
+        target: &SplitModel,
+        device: &Device,
+    ) -> Result<Self, SwarmError> {
         let fail = |what: String| {
             SwarmError::Internal(format!("block drafter {}: {what}", path.display()))
         };
@@ -382,7 +394,9 @@ impl BlockDrafter {
             .unwrap_or_default();
         let rule = attention_rule(md("dflash.attention.causal").and_then(|v| v.to_bool().ok()));
 
-        let device = target.device.clone();
+        // The model's device, or system memory beside a card that has no
+        // room for it ([`drafter_home`]).
+        let device = device.clone();
         let mut bytes = 0u64;
         let mut tensor = |name: String| {
             let info = ct
@@ -758,6 +772,15 @@ impl BlockDrafter {
         if matches!(over, super::GuessOver::HotAnd(_)) && target.mtp_hot_rows().is_some() {
             return target.mtp_guesses(&out, over);
         }
+        // A drafter in system memory beside a card's head hands it the
+        // block's rows (guesses x hidden, a few hundred KB) — llama.cpp's
+        // copy between backends.
+        let out = if out.device().same_device(target.device()) {
+            out
+        } else {
+            out.to_device(target.device())
+                .map_err(err("block to the output head"))?
+        };
         let logits = match (&target.output, &target.drafter_head) {
             (None, Some(head)) => head.forward(&out).map_err(err("output head"))?,
             _ => target.logits_from(&out)?,
@@ -810,6 +833,42 @@ fn weights_in(path: &Path) -> Option<u64> {
 /// nothing ([`SplitModel::attach_block_drafter`]).
 fn fits_beside_one_conversation(budget: Option<u64>, takes: u64, one_conversation: u64) -> bool {
     budget.is_none_or(|b| takes.saturating_add(one_conversation) <= b)
+}
+
+/// Where a block drafter's weights go.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DrafterHome {
+    /// The model's own device.
+    OwnDevice,
+    /// System memory, beside a card/processor split whose card has no room.
+    SystemMemory,
+    /// Neither.
+    NoRoom,
+}
+
+/// Where a drafter that `takes` bytes goes (2026-11-14): the model's device
+/// while one conversation (`device.1`) still fits beside it in that budget
+/// (`device.0`) — else, where `system` is offered (a whole model split
+/// between a card and the processor, [`block_drafter_in_system_memory_on`]),
+/// system memory, under the same rule against the processor-held layers'
+/// budget and conversation, which must be KNOWN: a new placement in the
+/// machine's memory is never unchecked. llama.cpp places a draft model on
+/// devices of its own (`--spec-draft-device`, `--spec-draft-ngl auto`); a 27B
+/// on a 12 GB card had no room for its 1.85 GB drafter, and its machine had.
+fn drafter_home(
+    takes: u64,
+    device: (Option<u64>, u64),
+    system: Option<(Option<u64>, u64)>,
+) -> DrafterHome {
+    if fits_beside_one_conversation(device.0, takes, device.1) {
+        return DrafterHome::OwnDevice;
+    }
+    match system {
+        Some((Some(budget), one)) if takes.saturating_add(one) <= budget => {
+            DrafterHome::SystemMemory
+        }
+        _ => DrafterHome::NoRoom,
+    }
 }
 
 impl SplitModel {
@@ -887,6 +946,7 @@ impl SplitModel {
         // 64 layers a 12 GB card held ran the card out of memory on every
         // load (field report v0.3.280, 2026-11-11). Prior art: llama.cpp's
         // `common/fit.cpp` sizes what a load takes before it allocates.
+        let mut home = DrafterHome::OwnDevice;
         if let Some(weights) = weights_in(&path) {
             let at_least = weights.saturating_add(if head_charged {
                 0
@@ -894,11 +954,18 @@ impl SplitModel {
                 self.drafter_head_bytes
             });
             let one_conversation = self.kv_growth.bytes_for(self.max_seq_len);
-            if !fits_beside_one_conversation(self.kv_budget_bytes, at_least, one_conversation) {
+            home = drafter_home(
+                at_least,
+                (self.kv_budget_bytes, one_conversation),
+                self.drafter_may_sit_in_system_memory(),
+            );
+            if home == DrafterHome::NoRoom {
                 tracing::info!(
                     weights_mb = at_least >> 20,
                     budget_mb = ?self.kv_budget_bytes.map(|b| b >> 20),
                     one_conversation_mb = one_conversation >> 20,
+                    system_memory = ?self.drafter_may_sit_in_system_memory()
+                        .map(|(b, one)| (b.map(|b| b >> 20), one >> 20)),
                     "block drafter not attached: its weights do not fit beside one conversation \
                      of this model on its device"
                 );
@@ -906,7 +973,11 @@ impl SplitModel {
                 return BlockDrafterState::NoRoom;
             }
         }
-        let drafter = match BlockDrafter::load(&path, self) {
+        let device = match home {
+            DrafterHome::SystemMemory => Device::Cpu,
+            _ => self.device.clone(),
+        };
+        let drafter = match BlockDrafter::load(&path, self, &device) {
             Ok(d) => d,
             Err(e) => {
                 tracing::warn!(error = %e, "block drafter not attached");
@@ -944,11 +1015,18 @@ impl SplitModel {
             .saturating_add(head_bytes)
             .saturating_add(hot_bytes);
         // The drafter and the head it borrows sit on the model's own device
-        // (`BlockDrafter::load`): its budget pays, never a card/processor
-        // split's processor-side one (`host_kv_budget_bytes`).
-        let (budget, growth) = (&mut self.kv_budget_bytes, &self.kv_growth);
+        // (`BlockDrafter::load`): its budget pays — or, for a drafter in
+        // system memory beside a card/processor split, the split's
+        // processor-side one (`host_kv_budget_bytes`), which must be known.
+        let in_system_memory = home == DrafterHome::SystemMemory;
+        let (budget, growth) = if in_system_memory {
+            (&mut self.host_kv_budget_bytes, &self.host_kv_growth)
+        } else {
+            (&mut self.kv_budget_bytes, &self.kv_growth)
+        };
         let one_conversation = growth.bytes_for(self.max_seq_len);
-        let fits = fits_beside_one_conversation(*budget, takes, one_conversation);
+        let fits = (!in_system_memory || budget.is_some())
+            && fits_beside_one_conversation(*budget, takes, one_conversation);
         if fits {
             if let Some(b) = budget.as_mut() {
                 *b -= takes;
@@ -964,17 +1042,40 @@ impl SplitModel {
             block = drafter.block_size,
             target_layers = ?drafter.target_layers,
             rule = ?drafter.rule,
+            in_system_memory,
             attached = fits,
             "block drafter (#428)"
         );
         if fits {
             self.block_drafter = Some(drafter);
             self.drafter_hot = hot.map(|(rows, _)| rows);
-            BlockDrafterState::Attached
+            if in_system_memory {
+                BlockDrafterState::AttachedInSystemMemory
+            } else {
+                BlockDrafterState::Attached
+            }
         } else {
             self.drop_drafter_head();
             BlockDrafterState::NoRoom
         }
+    }
+
+    /// Whether a drafter the card has no room for may sit in system memory,
+    /// and if so the processor-held layers' budget and one conversation's
+    /// cache there ([`drafter_home`]): a WHOLE model (its own head here, none
+    /// borrowed) split between a card and the processor, with the switch on.
+    fn drafter_may_sit_in_system_memory(&self) -> Option<(Option<u64>, u64)> {
+        (block_drafter_in_system_memory_on()
+            && self.device.is_cuda()
+            && self.output.is_some()
+            && self.drafter_head.is_none()
+            && self.host_kv_growth.per_position() > 0)
+            .then(|| {
+                (
+                    self.host_kv_budget_bytes,
+                    self.host_kv_growth.bytes_for(self.max_seq_len),
+                )
+            })
     }
 
     /// The output head a split's first segment read for its drafter, given
@@ -1057,6 +1158,39 @@ impl SplitModel {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A drafter its card has no room for goes to system memory only where
+    /// that is offered and its budget is KNOWN and holds it beside one
+    /// conversation of the processor-held layers; the card is asked first.
+    /// The shape: a 27B on a 12 GB card, the 1.85 GB drafter.
+    #[test]
+    fn a_drafter_the_card_cannot_hold_goes_to_system_memory_only_where_it_fits() {
+        const MB: u64 = 1 << 20;
+        let takes = 1_900 * MB;
+        let card_full = (Some(1_000 * MB), 600 * MB);
+        let card_room = (Some(4_000 * MB), 600 * MB);
+        let machine = Some((Some(9_000 * MB), 3_000 * MB));
+        assert_eq!(
+            drafter_home(takes, card_room, machine),
+            DrafterHome::OwnDevice
+        );
+        assert_eq!(
+            drafter_home(takes, card_full, machine),
+            DrafterHome::SystemMemory
+        );
+        // Not offered (a model on one device, the switch off): as before.
+        assert_eq!(drafter_home(takes, card_full, None), DrafterHome::NoRoom);
+        // Offered, but the machine's budget is unknown: never unchecked.
+        assert_eq!(
+            drafter_home(takes, card_full, Some((None, 3_000 * MB))),
+            DrafterHome::NoRoom
+        );
+        // Offered, and one conversation would not fit beside it there.
+        assert_eq!(
+            drafter_home(takes, card_full, Some((Some(4_000 * MB), 3_000 * MB))),
+            DrafterHome::NoRoom
+        );
+    }
 
     /// The drafter comes off the conversation budget while one conversation
     /// of the model's context still fits beside it — the case that refused
