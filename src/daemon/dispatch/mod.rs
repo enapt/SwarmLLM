@@ -3814,6 +3814,7 @@ mod capability_fits_tests {
             held_since: 86_400,
             served: 0,
             gave_back_unused: 0,
+            served_since: 0,
         };
         cap.models_served = Some(vec![served("m".into()); 40]);
         assert!(capability_fits(&cap), "an ordinary node's list");

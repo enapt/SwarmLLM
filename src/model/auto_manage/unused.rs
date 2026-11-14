@@ -95,11 +95,35 @@ pub struct ModelUse {
     /// [`GAVE_BACK_FOR_SECS`].
     #[serde(default)]
     pub gave_back_unused: i64,
+    /// When this node began recording the requests for it served for other
+    /// computers (Unix seconds): `watched_since` for a record this build began;
+    /// for one a build before #452's wrote (read as 0), the first pass after
+    /// the update — what was served before it is not known, and the swarm is
+    /// told so ([`models_served`], `ModelServed::served_since`).
+    #[serde(default)]
+    pub served_recorded_since: i64,
 }
 
 impl ModelUse {
     fn gave_back(&self) -> bool {
         self.gave_back_unused > 0
+    }
+
+    /// `ModelServed::served_since` for this record at `now`: the first whole
+    /// day its record of serving for others covers, where that began after the
+    /// record did; 0 where it covers the whole record. A record not yet passed
+    /// over since the update counts from `now`.
+    fn served_since(&self, now: i64) -> i64 {
+        let recorded = if self.served_recorded_since > 0 {
+            self.served_recorded_since
+        } else {
+            now
+        };
+        if recorded > self.watched_since {
+            ModelServed::day_of(recorded).saturating_add(86_400)
+        } else {
+            0
+        }
     }
 
     /// A give-back still remembered at `now`.
@@ -158,12 +182,20 @@ pub(crate) fn next_record(before: Option<ModelUse>, seen: Seen, now: i64) -> Nex
                 moved(used_at, r.last_used),
                 moved(served_at, r.served_for_others),
             );
-            if last_used.is_none() && served.is_none() {
+            // A record from before serving for others was recorded: it is
+            // recorded from this pass on.
+            let recorded_from_now = r.served_recorded_since == 0;
+            if last_used.is_none() && served.is_none() && !recorded_from_now {
                 return Next::Unchanged;
             }
             Next::Write(ModelUse {
                 last_used: last_used.unwrap_or(r.last_used),
                 served_for_others: served.unwrap_or(r.served_for_others),
+                served_recorded_since: if recorded_from_now {
+                    now
+                } else {
+                    r.served_recorded_since
+                },
                 ..r
             })
         }
@@ -174,6 +206,7 @@ pub(crate) fn next_record(before: Option<ModelUse>, seen: Seen, now: i64) -> Nex
                 .unwrap_or(0)
                 .max(before.map_or(0, |r| r.served_for_others)),
             gave_back_unused: 0,
+            served_recorded_since: now,
         }),
     }
 }
@@ -229,6 +262,18 @@ pub(crate) fn swarm_use_of(words: impl IntoIterator<Item = Word>, now: i64) -> S
                 let Some(m) = entry else { continue };
                 if within(m.served, window_from) {
                     return SwarmUse::Served;
+                }
+                // Its record of serving for others began after it began
+                // holding, too late to cover the window (it updated from a
+                // build that did not keep one): what it served before is not
+                // known, so it cannot say nobody ran it — missing data is never
+                // a reason to give back (Kubernetes HPA: a pod missing metrics
+                // counts as fully used when scaling down).
+                let covers_window =
+                    m.served_since == 0 || m.served_since <= m.held_since.max(window_from);
+                if holds && !covers_window {
+                    a_holder_silent = true;
+                    continue;
                 }
                 held_unserved |= holds && m.held_since > 0 && m.held_since <= window_from;
                 gave_back_by += usize::from(within(m.gave_back_unused, gave_back_from));
@@ -311,6 +356,7 @@ pub(crate) fn models_served(state: &crate::daemon::SharedState) -> Vec<ModelServ
             },
             served: ModelServed::day_of(r.served_for_others),
             gave_back_unused: ModelServed::day_of(r.gave_back_unused),
+            served_since: r.served_since(now),
         };
         if r.gave_back() {
             gave_back.push(served);
@@ -633,10 +679,12 @@ mod tests {
 
     const DAY: i64 = 86_400;
 
+    /// A record this build began: serving for others recorded from its start.
     fn watched(since: i64, last: i64) -> ModelUse {
         ModelUse {
             watched_since: since,
             last_used: last,
+            served_recorded_since: since,
             ..Default::default()
         }
     }
@@ -647,6 +695,7 @@ mod tests {
             held_since,
             served,
             gave_back_unused,
+            served_since: 0,
         }
     }
 
@@ -766,8 +815,111 @@ mod tests {
                 last_used: r.last_used,
                 served_for_others: now - 40 * DAY,
                 gave_back_unused: 0,
+                served_recorded_since: now,
             }),
             "held again: a new trial, its history kept"
+        );
+    }
+
+    /// A record from the build before #452's kept no serving for others, so the
+    /// first pass after the update records it from then on and the swarm is
+    /// told the first whole day it covers. A record this build began covers
+    /// itself (`served_since` 0).
+    #[test]
+    fn a_record_from_before_the_update_records_serving_for_others_from_the_update() {
+        let now = 200 * DAY + 3_600;
+        let from_the_old_build = ModelUse {
+            watched_since: now - 30 * DAY,
+            last_used: now - 20 * DAY,
+            ..Default::default()
+        };
+        assert_eq!(
+            from_the_old_build.served_since(now),
+            200 * DAY + DAY,
+            "not passed over yet: from now, the next whole day"
+        );
+        let held = Seen {
+            held: true,
+            ..Seen::default()
+        };
+        let Next::Write(updated) = next_record(Some(from_the_old_build), held, now) else {
+            panic!("the first pass after the update writes the record");
+        };
+        assert_eq!(
+            updated,
+            ModelUse {
+                served_recorded_since: now,
+                ..from_the_old_build
+            }
+        );
+        assert_eq!(updated.served_since(now + 10 * DAY), 201 * DAY);
+        assert_eq!(
+            next_record(Some(updated), held, now + 60),
+            Next::Unchanged,
+            "recorded once"
+        );
+        let begun_here = watched(now - 3 * DAY, 0);
+        assert_eq!(begun_here.served_since(now), 0, "covers itself");
+        let Next::Write(new) = next_record(None, held, now) else {
+            panic!("a model held now starts a record");
+        };
+        assert_eq!(new.served_since(now + DAY), 0);
+    }
+
+    /// Right after an update every computer's record of serving for others is
+    /// empty, so "served nothing" would be every model's verdict: a holder
+    /// whose record does not cover the window cannot say (Kubernetes HPA counts
+    /// a pod missing metrics as fully used when scaling down). One that began
+    /// holding after it began recording covers what it held.
+    #[test]
+    fn a_holder_whose_record_is_younger_than_the_window_cannot_say() {
+        let now = 100 * DAY;
+        let holder = |held_since: i64, served_since: i64| Word::Says {
+            entry: Some(ModelServed {
+                served_since,
+                ..entry(held_since, 0, 0)
+            }),
+            holds: true,
+        };
+        assert_eq!(
+            swarm_use_of([holder(now - 40 * DAY, now - 3 * DAY)], now),
+            SwarmUse::Unknown,
+            "held 40 days, serving recorded for 3: it cannot say"
+        );
+        assert_eq!(
+            swarm_use_of([holder(now - 40 * DAY, now - 14 * DAY)], now),
+            SwarmUse::Quiet { tried: true },
+            "recorded the whole window"
+        );
+        assert_eq!(
+            swarm_use_of([holder(now - 2 * DAY, now - 3 * DAY)], now),
+            SwarmUse::Quiet { tried: false },
+            "began holding after it began recording: it covers what it held"
+        );
+        assert_eq!(
+            swarm_use_of([holder(now - 40 * DAY, 0)], now),
+            SwarmUse::Quiet { tried: true },
+            "0: recorded since it began holding"
+        );
+        assert_eq!(
+            swarm_use_of(
+                [
+                    Word::Says {
+                        entry: Some(ModelServed {
+                            served_since: now,
+                            ..entry(0, 0, now - DAY)
+                        }),
+                        holds: false,
+                    },
+                    Word::Says {
+                        entry: None,
+                        holds: true
+                    },
+                ],
+                now
+            ),
+            SwarmUse::Quiet { tried: false },
+            "a computer holding none of it is no holder that cannot say"
         );
     }
 

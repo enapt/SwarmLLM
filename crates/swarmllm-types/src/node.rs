@@ -953,6 +953,13 @@ pub struct ModelServed {
     /// The day it gave every part back because nobody ran it.
     #[serde(default)]
     pub gave_back_unused: i64,
+    /// The first whole day its record of `served` covers, where that began
+    /// AFTER it began holding — it updated from a build that did not record
+    /// serving for others, so what it served before is not known; `0` = the
+    /// record covers every day since `held_since`. Until it covers the window
+    /// a reader takes it as unable to say the model went unserved.
+    #[serde(default)]
+    pub served_since: i64,
 }
 
 impl ModelServed {

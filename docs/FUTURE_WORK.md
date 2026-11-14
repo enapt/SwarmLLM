@@ -869,7 +869,10 @@ frame, then add a receipt ACK or a per-frame read deadline mirroring request-res
 > HuggingFace's list, for a copy held here; the list only decides what is tried, and a model the swarm
 > tried and nobody ran is not fetched back on it for two windows — on a holder's word, this node's
 > give-back or two others' (`unused::GAVE_BACK_WITNESSES`; one peer's stamp alone never decides,
-> security review 2026-11-14). (2, 3) Room is all or nothing
+> security review 2026-11-14). A holder whose record of serving for others does not yet cover the
+> window cannot say (`ModelServed::served_since`): the update starts that record empty, so a model
+> several computers hold is judged ~15 days after it, one only this computer holds at once.
+> (2, 3) Room is all or nothing
 > (`prune::room_this_pass_could_make`): no copy goes for a room the pass cannot complete, so none is
 > fetched back into it. The usable gate: a model is tried on the outside reading only where the
 > swarm's online cards could run it (`AutoShardManager::worth_trying`). A request for a known model

@@ -2004,6 +2004,7 @@ mod fetch_what_prune_keeps {
             held_since: crate::types::ModelServed::day_of(held_since),
             served: crate::types::ModelServed::day_of(served),
             gave_back_unused: 0,
+            served_since: 0,
         }
     }
 
@@ -2024,6 +2025,7 @@ mod fetch_what_prune_keeps {
             mid.clone(),
             crate::model::auto_manage::unused::ModelUse {
                 watched_since: now - watched_days * 86_400,
+                served_recorded_since: now - watched_days * 86_400,
                 ..Default::default()
             },
         );
@@ -2080,6 +2082,17 @@ mod fetch_what_prune_keeps {
             &[(7, holder_entry(&mid, now - 40 * 86_400, now - 20 * 86_400))],
         );
         assert!(shed(), "last served before the window");
+        let updated_lately = crate::types::ModelServed {
+            served_since: crate::types::ModelServed::day_of(now - 3 * 86_400),
+            ..holder_entry(&mid, now - 40 * 86_400, 0)
+        };
+        swarm_says(&state, &[(7, updated_lately)]);
+        assert!(
+            !shed(),
+            "a holder that updated three days ago cannot say what it served before"
+        );
+        swarm_says(&state, &[(7, holder_entry(&mid, now - 40 * 86_400, 0))]);
+        assert!(shed(), "control: its record covers the window");
         if let Some(mut info) = state.peer_registry.get_mut(&NodeId([9; 32])) {
             info.capability = None;
         }
@@ -2107,6 +2120,7 @@ mod fetch_what_prune_keeps {
                 ModelUse {
                     watched_since: now - since_days * 86_400,
                     last_used: used_days.map_or(0, |d| now - d * 86_400),
+                    served_recorded_since: now - since_days * 86_400,
                     ..Default::default()
                 },
             );
@@ -2211,6 +2225,7 @@ mod fetch_what_prune_keeps {
                     held_since: 0,
                     served: day(now - 20 * 86_400),
                     gave_back_unused: day(now - 3 * 86_400),
+                    served_since: 0,
                 },
             )],
         );
@@ -2293,6 +2308,7 @@ mod fetch_what_prune_keeps {
                     held_since: 0,
                     served: 0,
                     gave_back_unused: crate::types::ModelServed::day_of(now - 86_400),
+                    served_since: 0,
                 },
             )
         };

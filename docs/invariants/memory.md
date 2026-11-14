@@ -1373,7 +1373,19 @@ to be leaning much harder towards usable/popular/recent models".
   gotcha #788's rule — a model nobody runs is given back by every holder within days, so two is met
   wherever more than one held it), no stamp dated past tomorrow, and a list full at `MOST_ENTRIES`
   that stops short of a model it holds cannot say (`Word::Silent`). Guards:
-  `one_computers_word_alone_never_makes_a_model_tried` and the scoring test above.
+  `one_computers_word_alone_never_makes_a_model_tried` and the scoring test above. **An update
+  starts the record of serving for others EMPTY** (found before the release, 2026-11-14): v0.3.287
+  kept only `last_used` (the owner's and peers' alike), so on the update every holder would have
+  said "served nothing" and every copy idle here 14 days would have gone within minutes — idle
+  replicas of models another holder serves daily included, fetched back later over the slow links.
+  `ModelUse::served_recorded_since` (the first pass after the update, for a record the old build
+  wrote) goes out as `ModelServed::served_since`, the first whole day the record covers where it
+  began after the holding did; a holder whose record does not cover the window cannot say
+  (`Word::Silent`) — Kubernetes HPA counts a pod missing metrics as fully used when scaling down.
+  So a model one computer holds is judged at once (its own `last_used` is whole), one several hold
+  once their records cover the window (~15 days after the update). Tests
+  `a_record_from_before_the_update_records_serving_for_others_from_the_update`,
+  `a_holder_whose_record_is_younger_than_the_window_cannot_say`.
 
 **Prior art** (FUTURE_WORK #452): Scarlett (EuroSys '11) pays a base and budgets every replica above
 it by demand over a long window; the kubelet's image GC and IPFS keep only what is in use or pinned
