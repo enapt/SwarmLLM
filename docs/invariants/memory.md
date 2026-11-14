@@ -2779,6 +2779,38 @@ so it is red without `base`), `a_wider_width_that_wins_side_by_side_is_taken` (r
 margin), `a_narrower_width_than_the_contributions_still_needs_the_full_margin`,
 `a_narrower_pick_is_taken_only_when_it_wins_side_by_side` (#396, red with the re-check off).
 
+**A wider pick is proved in blocks before it is kept** (2026-11-14, `cpu_pools::PROVE_BLOCK_STEPS`,
+FUTURE_WORK #453). The step-by-step re-check did not hold over a reply on the release checks' MoE
+arm: v0.3.288 re-checked "4:63ms against 8:46ms", took 8, and decoded the whole reply at 63 ms a
+token where workers keeping 4 decoded at 45-48; three of five wider picks across v0.3.284/.288
+decoded slower than the default they left. All five came in the gate's MIDDLE slots, where this
+laptop's processor runs ~95 °C (gotcha #1086); the cause is not established — the proof does not
+need it. Once the re-check takes a WIDER width, decode runs PROVE_BLOCKS (4) blocks of 8 plain steps
+— pick, default, default, pick — the first 2 of each block not counted (a pool woken from sleep), and
+keeps the pick only where its median over its 12 steady steps is below the default's; a tie or
+worse goes back to the default. No margin there: the re-check already asked `WIDEN_MARGIN_PCT`, and
+asking it again sent gpt-oss-20b back to 4 on a block reading of "4:44ms against 8:41ms". Until it
+ends the width is not settled (`decode_width_settled`), so a speculating loop steps plainly for those
+≤ 32 steps, once per worker and depth. Prior art: FFTW's measured planner and TVM's tuner time each
+candidate in one short burst and guard only timer noise; llama.cpp does not tune (physical cores);
+Emurian et al. ("Pitfalls of Accurately Benchmarking Thermally Adaptive Chips") put 8%+ between a
+short run and steady state. No tuner found re-validates a pick under sustained load.
+
+Measured 2026-11-14, one CUDA build, live node stopped, 0 driver events, ABBA, 4 replies of 256
+tokens an arm, off arm `SWARMLLM_DECODE_PROVE=0` (`~/swarmllm-gate/deep/cg/ab453{,g}.sh`):
+Qwen3-30B-A3B Q2_K (experts of 26 card-held layers in RAM), 12 arms — the re-check took a wider
+width in NONE of them (each rig arm starts after a cool-down), so the proof never ran; every arm
+decoded at 4 threads, 19.7-27.9 tok/s a reply, the noise this placement has at one width.
+gpt-oss-20b MXFP4, 8 arms: the proof RAN in all 4 on-arms — kept 8 on "4:55ms against 8:44ms" and
+"4:58ms against 8:41ms", went back to 4 on "4:46ms against 8:47ms" (a tie) and on 44/41 (under the
+5% margin since dropped); the off arms kept the re-check's 8, 8, 8 and 4. Replies: 17.2 tok/s median
+on, 17.7 off (16 each; 8-thread arms 17.4-19.1, 4-thread arms 16.5-16.8 by median). The case the
+proof is for — a wider pick that reverses under heat — awaits a gate whose MoE arm widens; the
+`proved=` field of the "Decode thread width calibrated" line says what it read. Tests:
+`a_wider_pick_that_is_slower_in_blocks_goes_back_to_the_default` (v0.3.288's timings; the off arm
+keeps 8), `a_wider_pick_that_holds_in_blocks_is_kept` (red with the margin asked again),
+`a_proofs_blocks_alternate_pick_default_default_pick`.
+
 **The swarm's checks at the contribution width** (2026-10-30, `cpu_pools::swarm_check_threads`,
 FUTURE_WORK #379). The change above widened only the OWNER's checks; a machine checking another's
 guesses — every processor peer of a split, and the owner's own where the owner's pool is no wider

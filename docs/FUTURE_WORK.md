@@ -2139,7 +2139,17 @@ is left is prompt reading, the processor half of a hybrid, and MoE placement —
 `docs/plans/faster_than_local.md` § 3 and § 4 carry the order.
 
 #### #453 — The decode-width re-check can pick a wider width that decodes slower over a whole reply
-`P2` · perf-local · **OPEN** — 2026-11-14 · evidence: release checks of v0.3.284 and v0.3.288 (`~/swarmllm-gate/v0.3.28{4,8}-alpha/out/speed.moe_*.node.log`)
+`P2` · perf-local · **BUILT — awaiting a widening gate arm** — 2026-11-14 · evidence: release checks of v0.3.284 and v0.3.288 (`~/swarmllm-gate/v0.3.28{4,8}-alpha/out/speed.moe_*.node.log`); `docs/invariants/memory.md` § "A wider pick is proved in blocks before it is kept"
+
+**Built 2026-11-14 (option (a), in blocks)**: once the re-check takes a WIDER width, decode proves it over 4 blocks of 8
+plain steps — pick, default, default, pick, the first 2 of each block not counted — and keeps it only where its steady
+median is below the default's (`cpu_pools::PROVE_BLOCK_STEPS`, A/B `SWARMLLM_DECODE_PROVE=0`). Prior art: FFTW/TVM
+time candidates in one burst and guard only timer noise; llama.cpp does not tune; Emurian et al. measured 8%+ between
+a short run and steady state on thermally adaptive chips — none re-validates a pick under sustained load. Verified
+firing on gpt-oss-20b (4 of 4 arms: kept 8 twice, went back to 4 on a tie and on a sub-5% win under the margin since
+dropped; replies 17.2 on vs 17.7 off, noise). The Qwen3-30B rig never widened in 12 cooled arms, so the reversal case
+itself is unmeasured: **open** — read the next gate's MoE arms' `proved=` field (gotcha #1086's middle slots are where
+.284/.288 widened). The original report follows.
 
 #396/#399's side-by-side re-check (5 samples each) settles Qwen3-30B-A3B Q2_K (experts of 26 card-held layers in RAM,
 the owner's request) on 4 threads in most workers, decoding 20.6-22.2 tok/s. In three release-check workers it took a

@@ -238,6 +238,40 @@ const CONFIRM_SAMPLES: usize = 5;
 /// keeps 4, at 21.4 — level with the build before (21.2).
 const WIDEN_MARGIN_PCT: u64 = 5;
 
+/// Plain steps in each block of the run that PROVES a wider pick before decode
+/// keeps it (#453): pick, default, default, pick — each width timed over two
+/// blocks of steady steps, the first [`PROVE_SETTLE_STEPS`] of a block not
+/// counted.
+///
+/// The paired re-check alternates the two widths every step, and on the
+/// release checks' mixture-of-experts arm (Qwen3-30B-A3B Q2_K, experts of 26
+/// card-held layers in RAM, the owner's request) that reading did not hold
+/// over a reply: v0.3.288 re-checked "4:63ms against 8:46ms", took 8 and
+/// decoded the whole reply at 63 ms a token, where workers that kept 4 decoded
+/// at 45-48; three of five wider picks across v0.3.284/.288 decoded slower
+/// than the default they left (FUTURE_WORK #453). Timed in blocks, each width
+/// runs as it would for the rest of the reply.
+///
+/// Prior art: FFTW's measured planner and TVM's tuner time each candidate in
+/// one short burst (repeats, min-of-N) and guard only against timer noise;
+/// llama.cpp does not tune at all (physical cores, `common_cpu_get_num_math`)
+/// and its issue #1437 shows decode flat in threads once memory-bound. The
+/// thermal-benchmarking literature (Emurian et al., "Pitfalls of Accurately
+/// Benchmarking Thermally Adaptive Chips": 8%+ between a short run and steady
+/// state) is why the proof is timed on the reply's own steady steps and
+/// compared like with like — both widths in blocks, alternated so neither
+/// owns the hotter or longer-cache end. No tuner found re-validates a pick
+/// under sustained load; this is ours.
+const PROVE_BLOCK_STEPS: usize = 8;
+
+/// The first steps of a proving block after the width changes, not counted: a
+/// pool whose threads slept since its last step pays their wake-up and a cold
+/// cache, which the rest of the block does not.
+const PROVE_SETTLE_STEPS: usize = 2;
+
+/// Blocks in the proof: pick, default, default, pick.
+const PROVE_BLOCKS: usize = 4;
+
 /// How many threads decode should use, given what the owner offered and what
 /// the machine has.
 ///
@@ -295,6 +329,10 @@ struct Calibration {
     /// Whether a narrower pick is re-checked against the widest before it is
     /// taken ([`CONFIRM_SAMPLES`]; `SWARMLLM_DECODE_CONFIRM=0` is the off arm).
     confirm: bool,
+    /// Whether a WIDER pick the re-check took is proved in blocks of steady
+    /// steps before it is kept ([`PROVE_BLOCK_STEPS`]; `SWARMLLM_DECODE_PROVE=0`
+    /// is the off arm). Only a re-check runs one, so `confirm` off means none.
+    prove: bool,
     /// The owner's decode of experts kept in RAM ([`owner_decode_threads`]),
     /// for the log line only.
     for_the_owner: bool,
@@ -318,6 +356,33 @@ struct Confirming {
     step: usize,
 }
 
+/// A wider pick's proof in blocks of steady steps ([`PROVE_BLOCK_STEPS`]).
+struct Proving {
+    /// The default's candidate index (`Calibration::base`).
+    base: usize,
+    /// The wider candidate index the re-check took.
+    pick: usize,
+    /// What the re-check read, the default's and the pick's, for the log.
+    rechecked: (u64, u64),
+    /// Counted timings: `[0]` the default's, `[1]` the pick's.
+    ns: [Vec<u64>; 2],
+    /// Steps handed out so far, for the blocks.
+    step: usize,
+    /// Timings recorded so far, for the settle steps a block does not count.
+    recorded: usize,
+}
+
+impl Proving {
+    /// Which width the proof's `n`th step runs: pick, default, default, pick.
+    fn index_of_step(&self, n: usize) -> usize {
+        if matches!((n / PROVE_BLOCK_STEPS) % PROVE_BLOCKS, 0 | 3) {
+            self.pick
+        } else {
+            self.base
+        }
+    }
+}
+
 struct CalibrationState {
     /// Every timing seen per candidate. Compared by MEDIAN, deliberately not by
     /// minimum.
@@ -338,6 +403,9 @@ struct CalibrationState {
     /// Set once the search has chosen a narrower width and the paired re-check
     /// is running; the search's own samples are no longer added to.
     confirming: Option<Confirming>,
+    /// Set once the re-check has taken a WIDER width and its proof in blocks
+    /// is running (#453).
+    proving: Option<Proving>,
 }
 
 /// Median of a set of timings, or `None` when there are none.
@@ -371,8 +439,10 @@ impl Calibration {
                 counts: vec![0; n],
                 eliminated: vec![false; n],
                 confirming: None,
+                proving: None,
             }),
             confirm,
+            prove: confirm,
             for_the_owner: false,
             base: 0,
         }
@@ -391,19 +461,22 @@ impl Calibration {
             return;
         }
         self.chosen.store(self.candidates[idx], Ordering::Relaxed);
-        self.announce(st, idx, medians, None);
+        self.announce(st, idx, medians, None, None);
     }
 
     /// Report the decision once, the same way from either exit.
     ///
     /// `paired` is the re-check's outcome where one ran: the default's and the
-    /// pick's indices and the medians they read, in that order.
+    /// pick's indices and the medians they read, in that order. `proved` is
+    /// the proof in blocks where one ran (#453): the default's and the pick's
+    /// medians over their steady steps.
     fn announce(
         &self,
         st: &CalibrationState,
         final_idx: usize,
         medians: &[Option<u64>],
         paired: Option<(usize, usize, u64, u64)>,
+        proved: Option<(u64, u64)>,
     ) {
         let _ = st;
         let table: Vec<String> = self
@@ -423,6 +496,16 @@ impl Calibration {
                 )
             })
             .unwrap_or_default();
+        let in_blocks = match (paired, proved) {
+            (Some((base, pick, _, _)), Some((b, p))) => format!(
+                "{}:{}ms against {}:{}ms in blocks of {PROVE_BLOCK_STEPS} steps",
+                self.candidates[base],
+                b / 1_000_000,
+                self.candidates[pick],
+                p / 1_000_000
+            ),
+            _ => String::new(),
+        };
         tracing::info!(
             decode_threads = self.candidates[final_idx],
             offered = self.candidates[0],
@@ -430,13 +513,14 @@ impl Calibration {
             for_the_owner = self.for_the_owner,
             measured = %table.join(" "),
             rechecked = %rechecked,
+            proved = %in_blocks,
             "Decode thread width calibrated on this machine from real tokens"
         );
         // The benches run without a tracing subscriber, and a calibration you
         // cannot see is a calibration you cannot check.
         if std::env::var("SWARMLLM_DECODE_CALIBRATE_VERBOSE").is_ok() {
             eprintln!(
-                "CALIB chose {} of {} — {} {rechecked}",
+                "CALIB chose {} of {} — {} {rechecked} {in_blocks}",
                 self.candidates[final_idx],
                 self.candidates[0],
                 table.join(" ")
@@ -460,6 +544,11 @@ impl Calibration {
         let Ok(mut st) = self.state.lock() else {
             return raw(step);
         };
+        if let Some(p) = st.proving.as_mut() {
+            let n = p.step;
+            p.step += 1;
+            return p.index_of_step(n);
+        }
         if let Some(c) = st.confirming.as_mut() {
             // Default, pick, pick, default: neither width owns the earlier slots.
             let i = c.step;
@@ -492,6 +581,10 @@ impl Calibration {
             // calibration is not worth propagating that: keep the widest.
             Err(_) => return,
         };
+        if st.proving.is_some() {
+            self.record_proving(&mut st, idx, ns);
+            return;
+        }
         if st.confirming.is_some() {
             self.record_confirming(&mut st, idx, ns);
             return;
@@ -620,11 +713,77 @@ impl Calibration {
             CALIBRATION_MARGIN_PCT
         };
         let take = p.saturating_mul(100) <= b.saturating_mul(100 - margin);
+        if take && self.prove && self.candidates[pick] > self.candidates[base] {
+            // A wider width is kept only once it holds in blocks (#453). The
+            // re-check's record stays for inspection; `proving` now leads.
+            st.proving = Some(Proving {
+                base,
+                pick,
+                rechecked: (b, p),
+                ns: [Vec::new(), Vec::new()],
+                step: 0,
+                recorded: 0,
+            });
+            return;
+        }
         let final_idx = if take { pick } else { base };
         self.chosen
             .store(self.candidates[final_idx], Ordering::Relaxed);
         let medians: Vec<Option<u64>> = st.samples_ns.iter().map(|v| median_ns(v)).collect();
-        self.announce(st, final_idx, &medians, Some((base, pick, b, p)));
+        self.announce(st, final_idx, &medians, Some((base, pick, b, p)), None);
+    }
+
+    /// One timing of a wider pick's proof in blocks; once every block has run,
+    /// keep the pick only where its median over its steady steps is still
+    /// faster than the default's over theirs — a tie, or worse, goes back to
+    /// the default (#453).
+    ///
+    /// No margin: the re-check already asked [`WIDEN_MARGIN_PCT`], and the
+    /// proof is there to catch a REVERSAL (v0.3.288: re-checked 46 against 63,
+    /// decoded at 63 against the default's 45-48). Asking the margin a second
+    /// time sent gpt-oss-20b back to 4 threads on "4:44ms against 8:41ms" in
+    /// blocks, a win of under 5% (2026-11-14, `cg/ab453g.sh`).
+    ///
+    /// A block's first [`PROVE_SETTLE_STEPS`] timings are not counted. The
+    /// position is the timing's own count, so a step handed out and recorded
+    /// out of order by a second request on the same depth lands at most one
+    /// slot off — never in the other width's samples, which go by `idx`.
+    fn record_proving(&self, st: &mut CalibrationState, idx: usize, ns: u64) {
+        let Some(p) = st.proving.as_mut() else {
+            return;
+        };
+        let n = p.recorded;
+        p.recorded += 1;
+        let slot = if idx == p.base {
+            0
+        } else if idx == p.pick {
+            1
+        } else {
+            // A step handed out before the proof began.
+            return;
+        };
+        if n % PROVE_BLOCK_STEPS >= PROVE_SETTLE_STEPS {
+            p.ns[slot].push(ns);
+        }
+        if p.recorded < PROVE_BLOCKS * PROVE_BLOCK_STEPS || p.ns.iter().any(|v| v.is_empty()) {
+            return;
+        }
+        let (base, pick, rechecked) = (p.base, p.pick, p.rechecked);
+        let (b, q) = (
+            median_ns(&p.ns[0]).unwrap_or(0),
+            median_ns(&p.ns[1]).unwrap_or(u64::MAX),
+        );
+        let final_idx = if q < b { pick } else { base };
+        self.chosen
+            .store(self.candidates[final_idx], Ordering::Relaxed);
+        let medians: Vec<Option<u64>> = st.samples_ns.iter().map(|v| median_ns(v)).collect();
+        self.announce(
+            st,
+            final_idx,
+            &medians,
+            Some((base, pick, rechecked.0, rechecked.1)),
+            Some((b, q)),
+        );
     }
 }
 
@@ -719,6 +878,8 @@ fn pool_for(threads: usize) -> Option<Arc<rayon::ThreadPool>> {
 struct Calibrations {
     candidates: Vec<usize>,
     confirm: bool,
+    /// `Calibration::prove` for each depth.
+    prove: bool,
     for_the_owner: bool,
     /// Each depth's `Calibration::base`.
     base: usize,
@@ -726,10 +887,11 @@ struct Calibrations {
 }
 
 impl Calibrations {
-    fn new(candidates: Vec<usize>, for_the_owner: bool, confirm: bool) -> Self {
+    fn new(candidates: Vec<usize>, for_the_owner: bool, confirm: bool, prove: bool) -> Self {
         Self {
             candidates,
             confirm,
+            prove: confirm && prove,
             for_the_owner,
             base: 0,
             by_depth: Mutex::new(HashMap::new()),
@@ -747,6 +909,7 @@ impl Calibrations {
             map.entry(cpu_layers)
                 .or_insert_with(|| {
                     let mut c = Calibration::new(self.candidates.clone(), self.confirm);
+                    c.prove = self.prove;
                     c.for_the_owner = self.for_the_owner;
                     c.base = self.base;
                     Arc::new(c)
@@ -781,7 +944,12 @@ fn calibration_for(cpu_layers: usize, owner_wide: bool) -> Option<Arc<Calibratio
         if candidates.len() < 2 {
             return None;
         }
-        let mut c = Calibrations::new(candidates, for_the_owner, env_confirm_enabled());
+        let mut c = Calibrations::new(
+            candidates,
+            for_the_owner,
+            env_confirm_enabled(),
+            env_prove_enabled(),
+        );
         if for_the_owner {
             c.base = owner_default_index(&c.candidates, decode_threads(offered, physical));
         }
@@ -818,7 +986,9 @@ fn calibration_for(cpu_layers: usize, owner_wide: bool) -> Option<Arc<Calibratio
 /// never speculate again.
 ///
 /// `owner_wide` as for [`calibration_for`]: the owner's decode of experts kept
-/// in RAM settles on a calibration of its own.
+/// in RAM settles on a calibration of its own. A wider pick's proof in blocks
+/// ([`PROVE_BLOCK_STEPS`], #453) is not settled either: it needs plain steps,
+/// at most [`PROVE_BLOCKS`] blocks of them, once per worker and depth.
 pub(crate) fn decode_width_settled(cpu_layers: usize, owner_wide: bool) -> bool {
     calibration_for(cpu_layers, owner_wide).is_none_or(|c| c.settled())
 }
@@ -855,6 +1025,19 @@ fn env_confirm_enabled() -> bool {
     *ON.get_or_init(|| {
         !matches!(
             std::env::var("SWARMLLM_DECODE_CONFIRM").ok().as_deref(),
+            Some("0")
+        )
+    })
+}
+
+/// `SWARMLLM_DECODE_PROVE=0` keeps a wider width as soon as the paired
+/// re-check takes it, without the proof in blocks ([`PROVE_BLOCK_STEPS`]) —
+/// the behaviour before #453, for A/B inside one binary.
+fn env_prove_enabled() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| {
+        !matches!(
+            std::env::var("SWARMLLM_DECODE_PROVE").ok().as_deref(),
             Some("0")
         )
     })
@@ -1579,7 +1762,7 @@ mod tests {
     /// all, and one processor depth must never settle another's verdict.
     #[test]
     fn a_card_only_forward_is_not_timed_and_cannot_decide_a_deeper_ones_width() {
-        let set = Calibrations::new(vec![4, 3, 2, 1], false, false);
+        let set = Calibrations::new(vec![4, 3, 2, 1], false, false, false);
         assert!(
             set.for_depth(0).is_none(),
             "a forward with no processor layers has nothing to calibrate"
@@ -1879,6 +2062,7 @@ mod tests {
         assert_eq!(c.pick, 2);
         assert_eq!(c.ns[0].len(), CONFIRM_SAMPLES);
         assert_eq!(c.ns[1].len(), CONFIRM_SAMPLES);
+        assert!(st.proving.is_none(), "a narrower pick is never proved");
     }
 
     /// **The owner's decode of experts in RAM may use every physical core**
@@ -1985,5 +2169,121 @@ mod tests {
             _ => 50_000_000,
         };
         assert_eq!(run_until_settled(&owner_calibration(), flat), 4);
+    }
+
+    /// Drive a calibration as [`run_until_settled`] does, timing a step by
+    /// `burst` while the search and the re-check run and by `in_blocks` once a
+    /// proof in blocks has begun — the two readings of a machine where they
+    /// differ (#453). `in_blocks` is told whether the width just changed.
+    fn run_with_a_proof(
+        c: &Calibration,
+        burst: impl Fn(usize, usize) -> u64,
+        in_blocks: impl Fn(usize, bool) -> u64,
+    ) -> usize {
+        let mut last = 0;
+        for step in 0..200 {
+            let proving = c.state.lock().unwrap().proving.is_some();
+            let idx = c.next_index();
+            let threads = c.candidates[idx];
+            let ns = if proving {
+                in_blocks(threads, threads != last)
+            } else {
+                burst(threads, step)
+            };
+            last = threads;
+            c.record(idx, ns);
+            let chosen = c.chosen.load(Ordering::Relaxed);
+            if chosen != 0 {
+                return chosen;
+            }
+        }
+        panic!("never settled");
+    }
+
+    /// **A wider pick that does not hold in blocks goes back to the default**
+    /// (#453). v0.3.288's `moe/cand/3`: the re-check read "4:63ms against
+    /// 8:46ms" and took 8, which then decoded the whole reply at 63 ms a token
+    /// where workers keeping 4 decoded at 45-48. Timed in blocks, the proof
+    /// sees that and keeps 4; without it (`SWARMLLM_DECODE_PROVE=0`) the
+    /// re-check's 8 stands.
+    #[test]
+    fn a_wider_pick_that_is_slower_in_blocks_goes_back_to_the_default() {
+        let burst = |threads: usize, _step: usize| match threads {
+            8 => 46_000_000,
+            6 => 70_000_000,
+            4 => 63_000_000,
+            _ => 90_000_000,
+        };
+        let in_blocks = |threads: usize, _switched: bool| match threads {
+            8 => 63_000_000,
+            _ => 46_000_000,
+        };
+        let mut off = owner_calibration();
+        off.prove = false;
+        assert_eq!(
+            run_with_a_proof(&off, burst, in_blocks),
+            8,
+            "the re-check alone takes 8"
+        );
+        let on = owner_calibration();
+        assert_eq!(run_with_a_proof(&on, burst, in_blocks), 4);
+        let st = on.state.lock().unwrap();
+        let p = st.proving.as_ref().expect("the proof ran");
+        assert_eq!((p.base, p.pick), (2, 0), "8 proved against 4");
+        let counted = 2 * (PROVE_BLOCK_STEPS - PROVE_SETTLE_STEPS);
+        assert_eq!((p.ns[0].len(), p.ns[1].len()), (counted, counted));
+    }
+
+    /// The other half: gpt-oss-20b's 8 threads hold ~11% over 4 in blocks
+    /// too, so 8 is kept — the first step after each change of width reading
+    /// slow does not move it.
+    #[test]
+    fn a_wider_pick_that_holds_in_blocks_is_kept() {
+        let burst = |threads: usize, step: usize| match (threads, step) {
+            (8, 0..=3) => 73_000_000,
+            (8, _) => 49_000_000,
+            (6, _) => 52_000_000,
+            (4, _) => 55_000_000,
+            _ => 85_000_000,
+        };
+        let in_blocks = |threads: usize, switched: bool| match (threads, switched) {
+            (_, true) => 300_000_000,
+            (8, false) => 49_000_000,
+            _ => 55_000_000,
+        };
+        let c = owner_calibration();
+        assert_eq!(run_with_a_proof(&c, burst, in_blocks), 8);
+        assert!(c.state.lock().unwrap().proving.is_some(), "the proof ran");
+        // 2026-11-14's gpt-oss arm: "4:44ms against 8:41ms" in blocks, under
+        // 5% apart (the margin asked again sent it back to 4) — still a win.
+        let near = |threads: usize, _switched: bool| match threads {
+            8 => 41_900_000,
+            _ => 44_000_000,
+        };
+        assert_eq!(run_with_a_proof(&owner_calibration(), burst, near), 8);
+        // A tie in blocks goes back to the contribution's width.
+        let tie = |_threads: usize, _switched: bool| 46_000_000;
+        assert_eq!(run_with_a_proof(&owner_calibration(), burst, tie), 4);
+    }
+
+    /// The proof's blocks: pick, default, default, pick — neither width owns
+    /// the reply's earlier or later steps.
+    #[test]
+    fn a_proofs_blocks_alternate_pick_default_default_pick() {
+        let p = Proving {
+            base: 2,
+            pick: 0,
+            rechecked: (0, 0),
+            ns: [Vec::new(), Vec::new()],
+            step: 0,
+            recorded: 0,
+        };
+        let order: Vec<usize> = (0..PROVE_BLOCKS * PROVE_BLOCK_STEPS)
+            .step_by(PROVE_BLOCK_STEPS)
+            .map(|n| p.index_of_step(n))
+            .collect();
+        assert_eq!(order, vec![0, 2, 2, 0]);
+        assert_eq!(p.index_of_step(PROVE_BLOCK_STEPS - 1), 0);
+        assert_eq!(p.index_of_step(PROVE_BLOCK_STEPS), 2);
     }
 }
