@@ -1138,6 +1138,7 @@
   "settings.contribution_restart_note": "Takes effect right away. Two things only change when SwarmLLM next starts: how many computers you connect to, and the processor cores a running model has already reserved.",
   "settings.copy_token_title": "Copy access token",
   "settings.detecting": "Checking...",
+  "settings.discard_confirm": "You have unsaved changes. Discard them and close Settings?",
   "settings.enter_key_first": "Enter an API key first",
   "settings.exceeds_vram": "Exceeds network VRAM ({size})",
   "settings.filter_providers": "Filter providers...",

@@ -1138,6 +1138,7 @@
   "settings.contribution_restart_note": "Có hiệu lực ngay. Chỉ hai điều thay đổi khi SwarmLLM khởi động lần sau: số lượng máy ngang hàng bạn kết nối và số nhân xử lý mà một mô hình đang chạy đã giữ.",
   "settings.copy_token_title": "Sao chép mã truy cập",
   "settings.detecting": "Đang kiểm tra...",
+  "settings.discard_confirm": "Bạn có thay đổi chưa lưu. Bỏ các thay đổi và đóng Cài đặt?",
   "settings.enter_key_first": "Nhập khóa API trước",
   "settings.exceeds_vram": "Vượt quá VRAM mạng ({size})",
   "settings.filter_providers": "Lọc nhà cung cấp...",

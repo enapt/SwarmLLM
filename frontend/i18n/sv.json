@@ -1138,6 +1138,7 @@
   "settings.contribution_restart_note": "Träder i kraft direkt. Bara två saker ändras när SwarmLLM startar nästa gång: hur många datorer du ansluter till och de processorkärnor som en modell som redan körs har reserverat.",
   "settings.copy_token_title": "Kopiera åtkomsttoken",
   "settings.detecting": "Kontrollerar...",
+  "settings.discard_confirm": "Du har osparade ändringar. Vill du kassera dem och stänga Inställningar?",
   "settings.enter_key_first": "Ange en API-nyckel först",
   "settings.exceeds_vram": "Överskrider nätverkets VRAM ({size})",
   "settings.filter_providers": "Filtrera leverantörer...",

@@ -108,6 +108,21 @@ discarded every settings change not saved within thirty seconds.
 
 → `docs/invariants/frontend.md`
 
+## Settings closes through ONE function, and that function asks before discarding
+
+**`App.ui.closeSettings()`** is the only way the Settings popup closes: the close
+button, Escape, a click on the backdrop, "Run setup again" and a finished Save
+all call it, and it returns `false` when the user chose to keep editing. It
+asks (native `confirm`, as the rest of the dashboard) only when
+`App.settings.hasUnsavedChanges()` — the form differs from what `load` read
+(`_changedFields`, the same diff `save` sends), a nickname / visibility /
+health-interval edit, or a provider key typed and not saved. A backdrop click
+closes only when the press STARTED on the backdrop too: selecting text in an
+input and releasing outside fires `click` on the backdrop. Hiding
+`#settings-modal` anywhere else skips the guard.
+
+→ `docs/invariants/frontend.md`
+
 ## A write whose response is never read reports failure as success
 
 **`U.apiAction(url, opts, onSuccess, { fallback })`** is how the dashboard

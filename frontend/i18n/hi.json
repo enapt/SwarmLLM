@@ -1138,6 +1138,7 @@
   "settings.contribution_restart_note": "यह तुरंत लागू होता है। केवल दो चीज़ें SwarmLLM के अगली बार शुरू होने पर बदलती हैं: आप कितने कंप्यूटर से जुड़ते हैं, और चल रहे मॉडल द्वारा पहले से आरक्षित प्रोसेसर कोर।",
   "settings.copy_token_title": "एक्सेस टोकन कॉपी करें",
   "settings.detecting": "जाँच हो रही है...",
+  "settings.discard_confirm": "आपके बदलाव सहेजे नहीं गए हैं। क्या उन्हें छोड़कर सेटिंग बंद करें?",
   "settings.enter_key_first": "पहले API कुंजी दर्ज करें",
   "settings.exceeds_vram": "नेटवर्क VRAM से अधिक ({size})",
   "settings.filter_providers": "प्रदाता फ़िल्टर करें...",

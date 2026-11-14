@@ -291,6 +291,32 @@ doing, and leaves no trace.
 
 → gotcha #596
 
+## Settings closes through ONE function, and that function asks before discarding
+
+Report (2026-11): the Settings popup closed without warning when it had unsaved
+changes, and a click outside it did nothing. The close button and Escape both
+hid the popup directly, so there was no single place a guard could live.
+`App.ui.closeSettings()` is now the choke point (button, Escape, backdrop,
+"Run setup again", and Save's own close) and returns whether the panel closed,
+so "Run setup again" does not open the wizard when the user kept editing.
+
+"Unsaved" is what Save would write: `_changedFields` is shared with `save`, so
+the two cannot disagree; the nickname, its visibility and the health interval
+load asynchronously with no baseline and are recorded by a trusted `input` /
+`change` event instead; a typed provider key counts until saved. Language and
+appearance apply on change and are not "unsaved". Discarding clears the
+provider keys and puts the nickname and health interval back, because the next
+`load` repopulates only the node's config.
+
+The backdrop closes only if `mousedown` AND `click` both hit it: a drag that
+selects text in an input and ends outside fires `click` on the backdrop (the
+common ancestor). `welcome.js` checks the click target only; it has no form to
+lose, so it was left.
+
+Prior art: the dirty-form modal convention (every close request through one
+handler, then "Discard unsaved changes?"), and the mousedown-plus-click
+backdrop rule (Dialpad dialtone PR 1322).
+
 ## A write whose response is never read reports failure as success
 
 `U.apiAction(url, opts, onSuccess, { fallback })` is how the dashboard performs

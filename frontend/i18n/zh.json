@@ -1138,6 +1138,7 @@
   "settings.contribution_restart_note": "立即生效。只有两项会在 SwarmLLM 下次启动时才改变：您连接的电脑数量，以及正在运行的模型已占用的处理器核心。",
   "settings.copy_token_title": "复制访问令牌",
   "settings.detecting": "检查中...",
+  "settings.discard_confirm": "您有未保存的更改。要放弃这些更改并关闭设置吗？",
   "settings.enter_key_first": "请先输入API密钥",
   "settings.exceeds_vram": "超出网络 VRAM（{size}）",
   "settings.filter_providers": "筛选提供商...",

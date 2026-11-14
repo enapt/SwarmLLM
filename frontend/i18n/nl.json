@@ -1138,6 +1138,7 @@
   "settings.contribution_restart_note": "Werkt meteen. Twee dingen veranderen pas wanneer SwarmLLM opnieuw start: met hoeveel computers je verbinding maakt en de processorkernen die een draaiend model al heeft gereserveerd.",
   "settings.copy_token_title": "Toegangstoken kopiëren",
   "settings.detecting": "Controleren...",
+  "settings.discard_confirm": "Je hebt niet-opgeslagen wijzigingen. Wil je ze negeren en Instellingen sluiten?",
   "settings.enter_key_first": "Voer eerst een API-sleutel in",
   "settings.exceeds_vram": "Overschrijdt netwerk-VRAM ({size})",
   "settings.filter_providers": "Providers filteren...",

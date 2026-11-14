@@ -176,6 +176,17 @@
         try { var saved = localStorage.getItem(App.HEALTH_INTERVAL_KEY); if (saved) healthIntervalEl.value = saved; } catch(e) {}
       }
 
+      // Edits to the fields Save writes outside the node's config (see
+      // `_extraDirty`). `isTrusted` keeps a script's synthetic event from
+      // counting as the user's edit.
+      ['settings-nickname', 'settings-visibility', 'settings-health-interval'].forEach(function(id) {
+        var el = document.getElementById(id);
+        if (!el) return;
+        ['input', 'change'].forEach(function(type) {
+          el.addEventListener(type, function(e) { if (e.isTrusted) App.settings._extraDirty = true; });
+        });
+      });
+
       var nickInput = document.getElementById('settings-nickname');
       var nickError = document.getElementById('nickname-error');
       if (nickInput && nickError) {
@@ -424,6 +435,67 @@
         relay_forwarding_auto: !!(document.getElementById('settings-relay-auto') || {}).checked,
         update_mode: val('settings-update-mode') || undefined,
       };
+    },
+
+    // The fields of `current` that differ from `baseline` — what `save` sends,
+    // and what `hasUnsavedChanges` asks about, so the two cannot disagree about
+    // what "changed" means. An undefined field, or a NaN from an empty or
+    // non-numeric slider, is not a value.
+    _changedFields: function(current, baseline) {
+      var changed = {};
+      Object.keys(current).forEach(function(k) {
+        if (current[k] === undefined) return;
+        if (typeof current[k] === 'number' && isNaN(current[k])) return;
+        if (current[k] !== baseline[k]) changed[k] = current[k];
+      });
+      return changed;
+    },
+
+    // Set by a person editing a field that is not part of the node's config but
+    // that Save also writes: nickname, who may see it, the health-check
+    // interval. Those load asynchronously from other places with no baseline
+    // snapshot, so the edit itself is what is recorded; the listeners below
+    // fire for typing, never for the code that fills the fields in.
+    _extraDirty: false,
+
+    markClean: function() { App.settings._extraDirty = false; },
+
+    // True when closing Settings now would throw away something the user
+    // changed and has not saved: a node setting that differs from what `load`
+    // read, a nickname / visibility / health-interval edit, or a provider key
+    // typed and not yet saved. Appearance and language apply as you change
+    // them and are not "unsaved". A form that was never read from the node
+    // (`_loadedConfig` null) has no config edits to lose.
+    hasUnsavedChanges: function() {
+      var baseline = App.settings._loadedConfig;
+      if (baseline && Object.keys(App.settings._changedFields(App.settings._readForm(), baseline)).length > 0) return true;
+      if (App.settings._extraDirty) return true;
+      return Array.prototype.some.call(
+        document.querySelectorAll('#provider-cards input[type="password"]'),
+        function(el) { return !!el.value; });
+    },
+
+    // The user chose to discard: put back what is NOT repopulated by the next
+    // `load`, so reopening Settings does not show edits that were thrown away
+    // as though they were still pending. Config fields come back from `load`.
+    discardEdits: function() {
+      document.querySelectorAll('#provider-cards input[type="password"]').forEach(function(el) { el.value = ''; });
+      var nickEl = document.getElementById('settings-nickname');
+      if (nickEl) {
+        nickEl.value = '';
+        nickEl.style.borderColor = '';
+        var nickError = document.getElementById('nickname-error');
+        if (nickError) nickError.classList.add('hidden');
+      }
+      if (App.identity) App.identity.loadNickname();
+      var healthEl = document.getElementById('settings-health-interval');
+      if (healthEl) {
+        var saved = null;
+        try { saved = localStorage.getItem(App.HEALTH_INTERVAL_KEY); } catch (e) {}
+        healthEl.value = saved || '30';
+        if (healthEl._sliderUpdate) healthEl._sliderUpdate();
+      }
+      App.settings.markClean();
     },
 
     load: async function() {
@@ -982,13 +1054,7 @@
       // is derived from Max Disk + contribution mode, so that field is not sent
       // at all. The dead `settings-auto-manage-storage` read here was throwing a
       // TypeError whenever auto-manage was on, silently killing the entire save.
-      var config = {};
-      Object.keys(current).forEach(function(k) {
-        if (current[k] === undefined) return;
-        // NaN from an empty or non-numeric slider is not a value to send.
-        if (typeof current[k] === 'number' && isNaN(current[k])) return;
-        if (current[k] !== baseline[k]) config[k] = current[k];
-      });
+      var config = App.settings._changedFields(current, baseline);
 
       // An empty body is a legitimate save: the node's own settings are
       // unchanged, but the nickname, providers and health interval below are
@@ -1013,6 +1079,7 @@
           }
           await App.identity.saveNickname();
           await App.settings.saveProviders();
+          App.settings.markClean();
 
           App.ui.showBanner('success', I18n.t('settings.saved'));
           App.ui.closeSettings();

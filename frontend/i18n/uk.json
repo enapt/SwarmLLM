@@ -1138,6 +1138,7 @@
   "settings.contribution_restart_note": "Застосовується одразу. Лише дві речі змінюються під час наступного запуску SwarmLLM: до скількох комп'ютерів ви під'єднуєтеся та ядра процесора, вже зайняті запущеною моделлю.",
   "settings.copy_token_title": "Копіювати токен доступу",
   "settings.detecting": "Перевірка...",
+  "settings.discard_confirm": "У вас є незбережені зміни. Скасувати їх і закрити налаштування?",
   "settings.enter_key_first": "Спочатку введіть API-ключ",
   "settings.exceeds_vram": "Перевищує VRAM мережі ({size})",
   "settings.filter_providers": "Фільтрувати провайдерів...",

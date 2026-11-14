@@ -1138,6 +1138,7 @@
   "settings.contribution_restart_note": "Prend effet immédiatement. Deux choses ne changent qu'au prochain démarrage de SwarmLLM : le nombre d'ordinateurs auxquels vous vous connectez et les cœurs du processeur déjà réservés par un modèle en cours d'exécution.",
   "settings.copy_token_title": "Copier le jeton d'accès",
   "settings.detecting": "Vérification...",
+  "settings.discard_confirm": "Vous avez des modifications non enregistrées. Les abandonner et fermer les Paramètres ?",
   "settings.enter_key_first": "Entrez d'abord une clé API",
   "settings.exceeds_vram": "Dépasse la VRAM du réseau ({size})",
   "settings.filter_providers": "Filtrer les fournisseurs...",

@@ -1138,6 +1138,7 @@
   "settings.contribution_restart_note": "Działa od razu. Tylko dwie rzeczy zmienią się przy następnym uruchomieniu SwarmLLM: z iloma komputerami się łączysz oraz rdzenie procesora zarezerwowane już przez działający model.",
   "settings.copy_token_title": "Kopiuj token dostępu",
   "settings.detecting": "Sprawdzanie...",
+  "settings.discard_confirm": "Masz niezapisane zmiany. Odrzucić je i zamknąć Ustawienia?",
   "settings.enter_key_first": "Najpierw wprowadź klucz API",
   "settings.exceeds_vram": "Przekracza VRAM sieci ({size})",
   "settings.filter_providers": "Filtruj dostawców...",

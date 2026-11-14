@@ -1138,6 +1138,7 @@
   "settings.contribution_restart_note": "すぐに反映されます。次回 SwarmLLM を起動したときに変わるのは 2 つだけです。接続するコンピューターの数と、実行中のモデルがすでに確保しているプロセッサーコアです。",
   "settings.copy_token_title": "アクセストークンをコピー",
   "settings.detecting": "確認中...",
+  "settings.discard_confirm": "保存されていない変更があります。変更を破棄して設定を閉じますか？",
   "settings.enter_key_first": "APIキーを先に入力してください",
   "settings.exceeds_vram": "ネットワークVRAMを超過（{size}）",
   "settings.filter_providers": "プロバイダーをフィルター...",

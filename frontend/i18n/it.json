@@ -1138,6 +1138,7 @@
   "settings.contribution_restart_note": "Ha effetto subito. Solo due cose cambiano al prossimo avvio di SwarmLLM: a quanti computer ti colleghi e i core del processore già riservati da un modello in esecuzione.",
   "settings.copy_token_title": "Copia token di accesso",
   "settings.detecting": "Verifica...",
+  "settings.discard_confirm": "Hai modifiche non salvate. Scartarle e chiudere le Impostazioni?",
   "settings.enter_key_first": "Inserisci prima una chiave API",
   "settings.exceeds_vram": "Supera VRAM di rete ({size})",
   "settings.filter_providers": "Filtra provider...",

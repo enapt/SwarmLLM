@@ -139,8 +139,15 @@
     },
 
     openSettings: function(scrollToProviders) {
-      document.getElementById('settings-modal').classList.remove('hidden');
-      App.settings.load();
+      var modal = document.getElementById('settings-modal');
+      // Already open: do not re-run `load`, which would repopulate the form
+      // from the node and throw away what the user has typed.
+      var wasOpen = !modal.classList.contains('hidden');
+      modal.classList.remove('hidden');
+      if (!wasOpen) {
+        App.settings.markClean();
+        App.settings.load();
+      }
       if (scrollToProviders) {
         var section = document.getElementById('settings-providers-section');
         if (section) {
@@ -150,8 +157,26 @@
       }
     },
 
+    // THE one way Settings closes: the close button, Escape, a click on the
+    // backdrop, "Run setup again" and a finished Save all call this, so the
+    // unsaved-changes guard cannot be skipped by one of them. Returns true when
+    // the panel is now closed, false when the user chose to keep editing, so a
+    // caller that does something AFTER closing (re-running setup) can stop.
+    //
+    // Prior art: every close request goes through one handler that checks the
+    // form's dirty state and asks "discard unsaved changes?" before closing
+    // (the usual dirty-form modal pattern; MUI/Hyperscript examples). The
+    // dashboard confirms with the native `confirm()` everywhere else, so this
+    // does too.
     closeSettings: function() {
-      document.getElementById('settings-modal').classList.add('hidden');
+      var modal = document.getElementById('settings-modal');
+      if (modal.classList.contains('hidden')) return true;
+      if (App.settings.hasUnsavedChanges()) {
+        if (!confirm(I18n.t('settings.discard_confirm'))) return false;
+        App.settings.discardEdits();
+      }
+      modal.classList.add('hidden');
+      return true;
     },
 
     // Jumps to the Models tab's Search subtab. The legacy modal has been

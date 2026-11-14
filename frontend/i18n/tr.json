@@ -1138,6 +1138,7 @@
   "settings.contribution_restart_note": "Hemen etkili olur. Yalnızca iki şey SwarmLLM bir sonraki başlatıldığında değişir: kaç bilgisayarla bağlantı kurduğunuz ve çalışan bir modelin hâlihazırda ayırdığı işlemci çekirdekleri.",
   "settings.copy_token_title": "Erişim anahtarını kopyala",
   "settings.detecting": "Kontrol ediliyor...",
+  "settings.discard_confirm": "Kaydedilmemiş değişiklikleriniz var. Bunları silip Ayarlar'ı kapatmak istiyor musunuz?",
   "settings.enter_key_first": "Önce bir API anahtarı girin",
   "settings.exceeds_vram": "Ağ VRAM'ini aşıyor ({size})",
   "settings.filter_providers": "Sağlayıcı filtrele...",

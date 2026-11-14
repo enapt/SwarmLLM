@@ -1138,6 +1138,7 @@
   "settings.contribution_restart_note": "Projeví se ihned. Až při příštím spuštění SwarmLLM se změní jen dvě věci: ke kolika počítačům se připojujete a jádra procesoru, která si už vyhradil běžící model.",
   "settings.copy_token_title": "Kopírovat přístupový token",
   "settings.detecting": "Kontroluji...",
+  "settings.discard_confirm": "Máte neuložené změny. Zahodit je a zavřít Nastavení?",
   "settings.enter_key_first": "Nejprve zadejte API klíč",
   "settings.exceeds_vram": "Překračuje VRAM sítě ({size})",
   "settings.filter_providers": "Filtrovat poskytovatele...",

@@ -95,6 +95,21 @@
 
     // Settings modal
     on('btn-close-settings', 'click', function() { App.ui.closeSettings(); });
+    // A click on the backdrop closes Settings, through the same guard as every
+    // other close. The press must START on the backdrop as well as the click
+    // landing there: selecting text in an input and releasing outside the panel
+    // fires `click` on the backdrop (the common ancestor), and must not close it.
+    (function() {
+      var overlay = document.getElementById('settings-modal');
+      if (!overlay) return;
+      var pressOnBackdrop = false;
+      overlay.addEventListener('mousedown', function(e) { pressOnBackdrop = (e.target === overlay); });
+      overlay.addEventListener('click', function(e) {
+        var closes = pressOnBackdrop && e.target === overlay;
+        pressOnBackdrop = false;
+        if (closes) App.ui.closeSettings();
+      });
+    })();
     on('btn-copy-api-key', 'click', function() { App.settings.copyApiKey(); });
     on('btn-save-settings', 'click', function() { App.settings.save(); });
     on('btn-open-settings', 'click', function() { App.ui.openSettings(); });
@@ -180,7 +195,7 @@
     })();
 
     on('btn-rerun-setup', 'click', function() {
-      App.ui.closeSettings();
+      if (!App.ui.closeSettings()) return;
       App.setup.reopen();
     });
 

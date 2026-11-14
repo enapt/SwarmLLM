@@ -1138,6 +1138,7 @@
   "settings.contribution_restart_note": "Langsung berlaku. Hanya dua hal yang berubah saat SwarmLLM dijalankan berikutnya: berapa banyak peer yang Anda hubungi dan inti prosesor yang sudah dipakai model yang sedang berjalan.",
   "settings.copy_token_title": "Salin token akses",
   "settings.detecting": "Memeriksa...",
+  "settings.discard_confirm": "Anda memiliki perubahan yang belum disimpan. Buang perubahan dan tutup Pengaturan?",
   "settings.enter_key_first": "Masukkan kunci API terlebih dahulu",
   "settings.exceeds_vram": "Melebihi VRAM jaringan ({size})",
   "settings.filter_providers": "Filter penyedia...",

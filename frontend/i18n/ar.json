@@ -1138,6 +1138,7 @@
   "settings.contribution_restart_note": "يسري المفعول فورًا. شيئان فقط يتغيران عند تشغيل SwarmLLM في المرة القادمة: عدد الحواسيب الذين تتصل بهم، وأنوية المعالج التي حجزها بالفعل نموذج قيد التشغيل.",
   "settings.copy_token_title": "نسخ رمز الوصول",
   "settings.detecting": "جارٍ التحقق...",
+  "settings.discard_confirm": "لديك تغييرات غير محفوظة. هل تريد تجاهلها وإغلاق الإعدادات؟",
   "settings.enter_key_first": "أدخل مفتاح API أولاً",
   "settings.exceeds_vram": "يتجاوز VRAM الشبكة ({size})",
   "settings.filter_providers": "تصفية المزودين...",
