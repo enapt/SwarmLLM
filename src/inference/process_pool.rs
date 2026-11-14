@@ -18304,6 +18304,9 @@ mod tests {
         card_split: Option<CardSplit>,
     ) -> (Arc<WorkerHandle>, interprocess::local_socket::tokio::Stream) {
         let (name, server, client) = test_socket_pair().await;
+        // The socket's path is a field on Unix only (`socket_name`).
+        #[cfg(not(unix))]
+        let _ = name;
         let (read_half, write_half) = split_ipc(server);
         let responses: ResponseMap = Arc::new(DashMap::new());
         let dead = Arc::new(AtomicBool::new(dead_now));
