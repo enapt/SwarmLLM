@@ -1650,6 +1650,14 @@ ID", "Local peer ID") — a node that cannot reach the private address (every in
 last one and may hand it to a LAN node in a lookup answer, which is then dialled once per such lookup. If that
 residual is large, the next step is a per-(peer, address) dial backoff (go-libp2p's `DialBackoff`) — never per
 peer, which lets anyone who answers at an address they control block our dials to a peer they name.
+**Field check, 2026-11-14 (this node and the LAN box on 0.3.288, both updated ~14:03Z)**: the STEADY churn is
+gone — 4 inbound closes from the box in the ~4 h after (14:07, 14:08, 14:13, 16:31Z) against 1,540 in 4 h on
+11-01. The START-UP burst remains, the 10-24 shape: 231 inbound QUIC + ~90 TCP connections from the box
+(192.168.1.200) in 14:04:18-14:05:52Z, connection ids 8478 → 8821, each `ApplicationClosed 0` / yamux
+`Closed`, `closed_addr=None` (inbound) — i.e. while the box restarted into the update, ~4 dials a second that it
+closed at once. Bounded (~90 s, once per update) and harmless to replies; the box logs at INFO, so its dial
+source is unnamed. Next step only if it grows: restart the box at debug WHILE this node restarts too (a box-only
+restart at debug did not reproduce it, 10-24) and read which behaviour dials.
 
 **Narrowed 2026-10-07.** Settled in the pinned source (libp2p-autonat 0.15.0, `v2`): the server
 dials back with `PeerCondition::Always` (`server/behaviour.rs`), our per-peer cap then denies the
