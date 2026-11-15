@@ -5379,6 +5379,17 @@ expect the two-process overlap to buy little, and the second stream to be the re
 0.89 of the work one at a time, both passes: two contexts time-slice and lose ~11% to the switch. So overlapping
 the two IPC calls is ruled out; the overlap needs the drafter and the near segment in ONE process on two streams,
 which is a change to the one-stream rule (read `docs/invariants/inference.md` on why it holds first).
+**Design candidate (2026-11-15, unbuilt)**: the rule is ONE STREAM PER candle DEVICE with buffers never crossing
+devices (`docs/invariants/inference.md` § "The 2,625 event ops per token") — and candle already builds several
+devices in one process, each with its own stream, refusing to mix their tensors. So the drafter loaded on a SECOND
+`CudaDevice` of the same card, inside the first segment's worker, gets a stream of its own without breaking the rule:
+nothing but token ids passes between the two, through the host (the rank read-back already lands there). The
+precedent is in place — a file's MTP head and the DFlash drafter already load BESIDE the first segment (#425, #428).
+What it must solve: one card's free memory read across two pools (`cuda_pool::reusable_bytes` per device, the KV
+budget's one reading), the guest's charge (`Tenancy::Guest`) moved onto the segment's worker, the drafter's graphs
+captured on its own stream, and the flow's drafting call (today IPC to the guest worker) answered by the segment's
+worker while its forward runs. First check: two candle devices on this card, a 3B forward on one and the 0.5B's
+8-row level on the other from two threads — do they overlap, unlike two processes?
 
 Prior art: PEARL (arXiv 2408.11850, ICLR 2025) names it "mutual waiting" — the target idle while the draft drafts and the
 reverse — and its post-verify keeps drafting while the target verifies (up to 1.5× over plain speculation); PipeInfer
