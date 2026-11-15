@@ -5472,7 +5472,7 @@ spawn range's base afterwards (`unaccounted` = released − subsumed = 0). Austr
 room, the net admission AND the release (move that share out of `charged_mb` so a departure does not release it
 twice); fixed parts (context, buffers, the token table both ranges load) stay. Better still, as #365 did for
 spawns: let the worker drop the covered ranges, read the card (`ReadCardFree`) and size the split on that
-reading. Reproduce on a two-node rig with a card first node (`[0..20)` then `[0..24)` by `swarm_route`), never by
+reading. **Smallest candidate**: the planner already priced this run as the idle worker's RETIREMENT (`a_fresh_spawn_fits_in_place_of_the_worker`, #350 — "an idle worker gives its own card memory to that run"); the growth ladder's split rung ran first and pre-empted it. So `charge_segment_as_split` answers `Ok(false)` where the incoming range strictly subsumes the SPAWN's range and the worker is not `in_use` — the ladder then retires it and the fresh spawn reads the card (#3 (j13) waits for the memory back) — and keeps today's split where it is in use (a refusal there would re-plan worse). Reproduce on a two-node rig with a card first node (`[0..20)` then `[0..24)` by `swarm_route`), never by
 widening the far computer's range on the real link. Not landed before v0.3.292: memory accounting on three paths
 (room, admission, departure), verified by a rig the night did not have time for.
 
