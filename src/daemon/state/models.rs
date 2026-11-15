@@ -58,6 +58,14 @@ pub struct ModelMgmt {
     /// about trust now, not at its next hourly poll — until then no peer on
     /// auto-manage fetches a part of a model it holds none of.
     pub origin_trust_notify: Arc<tokio::sync::Notify>,
+    /// Whether the startup pass has registered the models this node holds
+    /// (`split_models`, #460). `true` unless a daemon's pass is still to run —
+    /// tests and tools never wait. Marked pending ONLY by
+    /// [`ModelMgmt::note_local_models_pending`] (the daemon, before its API
+    /// serves), done ONLY by [`LocalModelsRegistered`]'s drop (the startup
+    /// pass, however it ends); waited on ONLY through
+    /// [`ModelMgmt::local_models_registered_within`].
+    pub local_models_registered: tokio::sync::watch::Sender<bool>,
     pub auto_manage_enabled: std::sync::atomic::AtomicBool,
     pub auto_manage_default_model_cap: AtomicU32,
     /// The model `auto` last resolved to. Read and written ONLY by
@@ -561,7 +569,55 @@ impl std::fmt::Debug for ShardDownloadClaim {
 /// per made-up manifest a gossiper sent).
 pub const MAX_MANIFESTS_HEARD: usize = 16_384;
 
+/// Held by the startup pass while it registers the models this node holds;
+/// dropped — however the pass ends, a panic or a shutdown included — it marks
+/// them registered, so no request waits on a pass that is gone.
+#[must_use = "dropping it marks the local models registered at once"]
+pub struct LocalModelsRegistered(tokio::sync::watch::Sender<bool>);
+
+impl Drop for LocalModelsRegistered {
+    fn drop(&mut self) {
+        self.0.send_replace(true);
+    }
+}
+
 impl ModelMgmt {
+    /// The startup pass has not yet registered the models held here: until
+    /// [`LocalModelsRegistered`] drops, a request waits for it (bounded).
+    ///
+    /// A split asked in those first seconds found no drafter in `split_models`
+    /// and ran its whole reply unguessed — 160 tokens at 5.8 tok/s against
+    /// 34-45 with the drafter on the 14B split to Australia (#460) — the first
+    /// request after any restart, an auto-update's included, that lands there.
+    pub fn note_local_models_pending(&self) -> LocalModelsRegistered {
+        self.local_models_registered.send_replace(false);
+        LocalModelsRegistered(self.local_models_registered.clone())
+    }
+
+    /// Wait at most `bound` for the startup pass to register the models held
+    /// here; whether it has. Immediate once it has — and on a node whose pass
+    /// was never pending.
+    ///
+    /// Prior art: llama.cpp's server answers 503 "Loading model" until its
+    /// model is loaded, and a Kubernetes readiness gate keeps traffic off a
+    /// pod until its startup work is done. A request here is HELD instead —
+    /// the pass is seconds, a refusal would cost the caller a retry — and the
+    /// hold is bounded, so a pass that never ends delays a request, never
+    /// strands it.
+    pub async fn local_models_registered_within(&self, bound: std::time::Duration) -> bool {
+        let mut seen = self.local_models_registered.subscribe();
+        if *seen.borrow_and_update() {
+            return true;
+        }
+        // Bound to a local: as the tail expression, the `Ref` the wait hands
+        // back would outlive `seen`, which it borrows.
+        let registered = matches!(
+            tokio::time::timeout(bound, seen.wait_for(|registered| *registered)).await,
+            Ok(Ok(_))
+        );
+        registered
+    }
+
     /// Take the exclusive right to write this shard's `.tmp`, or `None` if a
     /// download of it is already running.
     ///
@@ -1252,6 +1308,7 @@ mod tests {
             hf_sources: DashMap::new(),
             auto_manage_notify: Arc::new(tokio::sync::Notify::new()),
             origin_trust_notify: Arc::new(tokio::sync::Notify::new()),
+            local_models_registered: tokio::sync::watch::channel(true).0,
             auto_manage_enabled: AtomicBool::new(false),
             auto_manage_default_model_cap: AtomicU32::new(0),
             auto_model: parking_lot::Mutex::new(None),
@@ -2163,5 +2220,73 @@ mod shard_download_claim_tests {
             !m.model_has_live_shard_download(&mid),
             "no writer holds a claim, so nothing is actually downloading"
         );
+    }
+}
+
+#[cfg(test)]
+mod local_models_registered_tests {
+    use std::time::{Duration, Instant};
+
+    fn mgmt() -> super::ModelMgmt {
+        super::tests::make_mgmt()
+    }
+
+    /// A node whose startup pass was never pending — every test, every tool —
+    /// never waits.
+    #[tokio::test]
+    async fn a_node_with_no_pass_pending_never_waits() {
+        let m = mgmt();
+        let asked = Instant::now();
+        assert!(
+            m.local_models_registered_within(Duration::from_secs(5))
+                .await
+        );
+        assert!(asked.elapsed() < Duration::from_millis(100));
+    }
+
+    /// While the pass runs, a request waits — and goes on once its bound is
+    /// up, so a pass that never ends delays a request, never strands it.
+    #[tokio::test]
+    async fn a_request_waits_for_a_pass_still_running_but_only_to_its_bound() {
+        let m = mgmt();
+        let pass = m.note_local_models_pending();
+        let asked = Instant::now();
+        assert!(
+            !m.local_models_registered_within(Duration::from_millis(60))
+                .await
+        );
+        assert!(asked.elapsed() >= Duration::from_millis(60));
+        drop(pass);
+        assert!(
+            m.local_models_registered_within(Duration::from_millis(1))
+                .await
+        );
+    }
+
+    /// The pass ending — however it ends: its guard dropped — wakes a request
+    /// waiting for it at once, not at the bound (#460).
+    #[tokio::test]
+    async fn the_pass_ending_wakes_a_waiting_request_at_once() {
+        let m = std::sync::Arc::new(mgmt());
+        let pass = m.note_local_models_pending();
+        let ends = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            drop(pass);
+        });
+        let asked = Instant::now();
+        assert!(
+            m.local_models_registered_within(Duration::from_secs(10))
+                .await
+        );
+        let waited = asked.elapsed();
+        assert!(
+            waited >= Duration::from_millis(40),
+            "waited {waited:?}: it did not wait for the pass"
+        );
+        assert!(
+            waited < Duration::from_secs(5),
+            "waited {waited:?}: it waited for the bound instead"
+        );
+        ends.await.unwrap();
     }
 }

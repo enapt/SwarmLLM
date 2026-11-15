@@ -1346,12 +1346,17 @@ pub(super) fn spawn_prefix_probe_handler(
 /// Auto-load models that have local shards available. Popular models
 /// (by historical request count) are loaded first so they get VRAM priority
 /// on restart.
+///
+/// `registered` marks them registered when the pass ends, however it ends —
+/// requests asked meanwhile wait for it (#460).
 pub(super) fn spawn_model_autoload(
     tasks: &mut BackgroundTasks,
     shared_state: Arc<SharedState>,
     mut shutdown_rx: watch::Receiver<bool>,
+    registered: crate::daemon::state::LocalModelsRegistered,
 ) {
     tasks.spawn(async move {
+        let _registered = registered;
         // Brief delay to let shard announcements propagate, abort on shutdown
         tokio::select! {
             _ = tokio::time::sleep(std::time::Duration::from_secs(2)) => {}
@@ -1373,15 +1378,36 @@ pub(super) fn spawn_model_autoload(
                 .unwrap_or(0);
             count_b.cmp(&count_a)
         });
+        let pass_began = std::time::Instant::now();
+        let mut checked_here = 0usize;
         for m in &manifests {
             if shared_state.has_split_model(&m.id) {
+                continue;
+            }
+            // A model with no part here only has its geometry learned — all
+            // `check_and_load_model` does for it before returning — without
+            // asking the card: the budget is an `nvidia-smi` run (30-60 ms on
+            // WSL), and the registry holds every model the network has named
+            // (40 on the rig's node: 1.75 s of the pass), while the first
+            // requests after a start wait for this pass (#460). A part landing
+            // later is loaded by its own landing path with a fresh budget.
+            if shared_state.parts_servable_here(m).is_empty() {
+                let _ = shared_state.gguf_meta_for(&m.id);
                 continue;
             }
             // Recompute VRAM budget each iteration since loading a model consumes VRAM
             let vram_budget = crate::model::auto_manage::compute_vram_budget(&shared_state);
             crate::model::auto_manage::check_and_load_model(&shared_state, &m.id, vram_budget)
                 .await;
+            checked_here += 1;
         }
+        // The end of what the first requests after a start wait for (#460).
+        tracing::info!(
+            models_with_parts_here = checked_here,
+            models_named = manifests.len(),
+            pass_ms = pass_began.elapsed().as_millis() as u64,
+            "DIAG: the startup pass has registered the models held here"
+        );
         "model_autoload"
     });
 }

@@ -20,6 +20,11 @@ use super::types::{deliver_result, InferenceOutput, QueuedRequest, StreamingToke
 
 const MODEL_LOAD_WAIT_SECS: u64 = 60;
 
+/// How long a request waits for the startup pass to register the models this
+/// node holds (#460): the pass starts 2 s after the daemon and parses headers
+/// only, so seconds; past this the request is planned without them, as before.
+const LOCAL_MODELS_REGISTERED_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
+
 /// Finalize a completed request: update stats and apply credit charges.
 /// When `escrow_id` is `Some`, the escrow already deducted credits — skip the
 /// direct charge to avoid double-billing the local API consumer.
@@ -626,6 +631,32 @@ pub(super) async fn execute_request(
     trace: Arc<crate::inference::trace::RequestTrace>,
 ) -> Result<InferenceOutput, SwarmError> {
     let model_id = &request.model_id;
+
+    // A request asked in the seconds after a start, before the startup pass has
+    // registered the models held here, was planned without them: a split found
+    // no drafter (`engine_drafter::chosen` reads `split_models`) and wrote its
+    // whole reply unguessed (#460). Every plan and drafter choice of a request
+    // is made below, so it waits here, once; immediate once registered.
+    let waited = std::time::Instant::now();
+    if !shared_state
+        .models
+        .local_models_registered_within(LOCAL_MODELS_REGISTERED_WAIT)
+        .await
+    {
+        tracing::warn!(
+            request_id = %request.id,
+            model = %model_id,
+            waited_secs = LOCAL_MODELS_REGISTERED_WAIT.as_secs(),
+            "This computer's models are still being registered after a start; planning without them"
+        );
+    } else if waited.elapsed() >= std::time::Duration::from_millis(1) {
+        tracing::info!(
+            request_id = %request.id,
+            model = %model_id,
+            waited_ms = waited.elapsed().as_millis() as u64,
+            "DIAG: request waited for the startup pass to register this computer's models"
+        );
+    }
 
     // Update model trust on inference request — promotes to DemandVerified
     // after threshold, enabling auto-manage to propagate this model.

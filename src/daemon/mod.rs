@@ -236,6 +236,11 @@ impl Daemon {
         // credit ledger, and pool manager, so it fully participates in P2P
         // discovery without exposing any inference surface. See `--anchor`.
         let anchor = self.config.node.anchor_mode;
+        // Before the API serves: a request asked while the startup pass has
+        // not registered the models held here waits for it (#460). The pass
+        // holds the guard; an anchor runs no pass, so nothing is pending.
+        let local_models_pending =
+            (!anchor).then(|| shared_state.models.note_local_models_pending());
 
         // Say how many cloud providers this node actually ends up with, and
         // say it loudly when the answer is none.
@@ -710,11 +715,12 @@ impl Daemon {
         );
         // Anchor nodes never load models — skip autoload entirely (the main
         // memory win: no candle model weights in RAM).
-        if !anchor {
+        if let Some(registered) = local_models_pending {
             background::spawn_model_autoload(
                 &mut background_tasks,
                 shared_state.clone(),
                 shutdown_rx.clone(),
+                registered,
             );
         }
         background::spawn_sighup_handler(

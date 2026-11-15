@@ -60,8 +60,8 @@ pub use events::EventBus;
 pub use hf::{HfProbeInfo, HfSource};
 pub use metrics::{ChannelCounters, ChannelMetricsSet, MetricsProviders};
 pub use models::{
-    ModelMgmt, P2pDownloadSlot, PartsKeptReport, ShardDownloadClaim, FOREIGN_WISHLIST_MAX_AGE_MS,
-    MAX_FOREIGN_WISHLIST_ENTRIES,
+    LocalModelsRegistered, ModelMgmt, P2pDownloadSlot, PartsKeptReport, ShardDownloadClaim,
+    FOREIGN_WISHLIST_MAX_AGE_MS, MAX_FOREIGN_WISHLIST_ENTRIES,
 };
 pub use peer_outliers::PeerOutliers;
 pub use peer_speed::{PeerSpeed, PromptRead, Ranking, TimedOn, WorkKind};
@@ -1687,6 +1687,7 @@ impl SharedState {
                 hf_sources,
                 auto_manage_notify: Arc::new(tokio::sync::Notify::new()),
                 origin_trust_notify: Arc::new(tokio::sync::Notify::new()),
+                local_models_registered: tokio::sync::watch::channel(true).0,
                 auto_manage_enabled: std::sync::atomic::AtomicBool::new(auto_manage_enabled),
                 auto_manage_default_model_cap: AtomicU32::new(default_model_shard_cap),
                 auto_model: parking_lot::Mutex::new(None),

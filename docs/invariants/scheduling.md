@@ -7492,6 +7492,47 @@ What it may and may never do:
 `a_report_reaches_the_price_and_nothing_else`), `peer_speed`'s `HeldSteps` test, and the parallax
 floor test.
 
+## A request after a start waits for the models held here (2026-11-15, FUTURE_WORK #460)
+
+A split's drafter is chosen only from models in `split_models` (`engine_drafter::chosen`, `is_complete`),
+and the startup pass (`background::spawn_model_autoload`) fills that map 2 s after the daemon starts, one
+`check_and_load_model` a model. A request asked before then was planned as if this computer held nothing:
+the 14B split to Australia found no drafter and wrote its whole reply a token a round. Every arm of `line292`
+met it on its warm-up (5.8 tok/s against 34-45 with the drafter). Reproduced on purpose with the rig asking as
+soon as the far peer is measured (`real_link.sh`, `SKIP_SCAN_WAIT=1`, `TAG=f460old`, 20:44Z): the first request
+at 20:44:09.216 logged "no drafter this computer could load", the pass listed the drafter 0.31 s later, and
+that reply ran at 6.1 tok/s.
+
+**Now**: the daemon marks the models pending before its API serves (`ModelMgmt::note_local_models_pending`);
+the pass holds the guard (`LocalModelsRegistered`) and drops it however it ends; `execute_request` waits on it
+before any plan or drafter choice, at most `LOCAL_MODELS_REGISTERED_WAIT` (10 s), then plans without them as
+before, with a warning. An anchor runs no pass and marks nothing; tests and tools start registered. Same rig,
+fixed binary (`f460new`, 20:45Z): "DIAG: request waited for the startup pass to register this computer's
+models" `waited_ms=2283`, no "no drafter" line, the warm-up guessed with the drafter.
+
+**The pass asks the card only for a model it loads.** It ran `compute_vram_budget` — an `nvidia-smi` run,
+30-60 ms on WSL — for every model the registry names, and the registry holds every model the network has
+announced: 40 on the rig's node, none held there, 1.75 of the 2.28 s waited. A model with no part here now
+has only its geometry learned (`gguf_meta_for`, all `check_and_load_model` did for it before returning); a
+part landing later is loaded by its own landing path with a fresh budget. Rebuilt with a line at the pass's
+end and re-run (`f460end`, 21:09Z): the pass took 166 ms over the 38 models named (2 held here), and the first
+request, waiting 662 ms, was let go 0.24 ms after the pass ended. (In `f460skip` the request came 9 s after the
+pass and never waited; the held models were registered 0.12 s into the pass against 0.70 s before.)
+
+That run's first plan went `[0..24)` here, `[24..25)` on a third computer 263 ms away, `[25..26)` here again,
+Australia — the drafter's room left 25 layers here (`room_for=Some(25)`) — and the wider `[0..26)` the next
+request planned was placed beside the held `[0..24)` with 3 layers on the card (7.4 tok/s). Neither is #460's:
+the room-leaving rung and this node's exemption from the once-a-chain bound predate it, and 30-odd first
+requests after the pass on the old binary (`line292`, `wide292`, `lev292`, `rows292`) planned two segments.
+FUTURE_WORK #463.
+
+Prior art: llama.cpp's server answers 503 "Loading model" until its model is loaded; a Kubernetes readiness
+gate holds traffic until a pod reports ready. Here the request waits rather than being refused: the wait is
+seconds and bounded, and a refused request would be planned again without the half this computer holds.
+
+**Tests**: `local_models_registered_tests` (3) — a node with no pass pending never waits, a request waits for
+a pass still running only to its bound, and the pass ending wakes a waiting request at once.
+
 ## Inference Router Queue
 
 `drain_queue` only fires on `RouterCommand::Submit` / `StreamSubmit` or

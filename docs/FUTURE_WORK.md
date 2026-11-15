@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #463**). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #464**). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -2223,20 +2223,6 @@ warning covers all three meanwhile.
 Local GPU decode runs at ~97% of llama.cpp (`docs/plans/local_decode_submissions.md`); what
 is left is prompt reading, the processor half of a hybrid, and MoE placement —
 `docs/plans/faster_than_local.md` § 3 and § 4 carry the order.
-
-#### #460 — A split asked in the first 2-3 s after a start guesses with nothing for that whole reply
-`P3` · perf-split · **OPEN** — 2026-11-15 · evidence: `docs/invariants/scheduling.md` § "The one-card rig again, below the line" (`line292`); `~/swarmllm-gate/deep/fr/real_link_line292/H_2_flowhalf.log` 17:21:57-17:22:32Z
-
-A drafter is chosen only from models in `split_models` (`engine_drafter::chosen`, `is_complete`), and the
-startup scan fills that map 2 s after start (`daemon::background` `model_autoload`, then
-`check_and_load_model`). A split request in between finds no drafter ("no drafter this computer could load",
-with `drafter_to_leave_room_for` also `None`) and runs the n-gram loop for the whole reply: on the 14B split
-to Australia 160 tokens at 5.8 tok/s against 34-45 with the drafter, the next request then loading it. All 8
-arms of `real_link_line292` met it (the rig asked as soon as `/health` answered; fixed in the rig by waiting
-for the scan); a user meets it on the first request after a restart — an auto-update's included — that lands
-inside those seconds. Candidates: choose from models whose manifest says every part is held here (what the scan
-reads) when the map has not been filled yet, or have `/health/ready` wait for the scan (#646 already says
-ready answers early). Prior art: none searched yet.
 
 #### #459 — A processor with VNNI multiplies a check's rows with the two-instruction AVX2 sequence
 `P3` · perf-local · **OPEN** — 2026-11-15 · evidence: `docs/invariants/inference.md` § "A 2-3 row tail shares one pass too" (compute-bound from three rows)
@@ -5417,6 +5403,27 @@ reverse — and its post-verify keeps drafting while the target verifies (up to 
 (2407.11798) and AMUSD (2410.17375) run draft and verify concurrently on separate devices. None of them shares one card
 between the two; here they would.
 
+#### #463 — Leaving the drafter room, a plan can send ONE layer to a slow third computer and come back here
+`P2` · perf-split / planner · **OPEN** — 2026-11-15 · evidence: `docs/invariants/scheduling.md` § "A request after a start waits for the models held here" (`f460end`); `~/swarmllm-gate/deep/fr/real_link_f460end/H_1_flowhalf.log` 21:09:03-21:09:38Z · related: #275, #461
+
+**Seen** (14B, this laptop `[0..26)` + Australia `[26..48)` under the rig's `swarm_route` override, a third
+computer `99aafc41` holding `[0..32)` at 263 ms): the first request after a start was planned `[0..24)` here,
+`[24..25)` there, `[25..26)` here again, then Australia — four segments, two extra 263 ms crossings a round for
+one layer. The drafter's room left this node 25 layers (`room_for=Some(25)`, `room_without_it=Some(32)`), and
+`candidates_leaving_room_for_the_drafter` takes the first route that rung finds; it is never priced against
+the plan without the room. Even granting the cut, `[0..25)` here + `[25..26)` there is three segments. The
+reply ran 2.1 tok/s; the NEXT request planned the plain `[0..26)` + Australia, and that wider range was placed
+beside the held `[0..24)` worker with 3 of 26 layers on the card (card read 585 MB free; 255 ms a forward, 7.4
+tok/s against 42.7) — #461's missing worse-placement guard, on THIS node. 1 of ~35 first plans tonight; the
+rest planned two segments.
+
+**Two contributors**: (1) this node is exempt from the once-a-chain bound (`parallax.rs`, the capped-bit
+mask, for prompt privacy's both-ends route, gotcha #481), so a route may leave it and come back on an
+ordinary plan; (2) the room-leaving rung is taken whenever it routes at all. Candidates: allow this node twice
+only where the route must start and finish here; price the room-leaving plan against the plain one and keep
+the cheaper (the drafter's gain is in the split's rounds prior, so both are comparable). Prior art: none
+searched yet.
+
 #### #461 — A peer's split that asks a computer for a WIDER range replaces its all-card copy with a mostly-processor one, which then serves every narrower request too
 `P2` · memory / admission · **OPEN** — 2026-11-15 · found on the real link (`real_link.sh` TAG=bal292, a forced split point) · related: #3 (j12), #3 (j13), #449, #458
 
@@ -5448,6 +5455,16 @@ memory but this node's budget allows 34440 MB and 0 MB is already in use. Raise 
 23..48 of the model, 13 would load here" — `peer_load_refusal` words every refusal as system memory
 (`ram_refusal_words` with `fresh_spawn_machine_mb`, 0 for a card placement), where this one was the card (or a
 worker still in use). The user reads it as "the last one said: …".
+
+**Design candidate (2026-11-15, not built)**: the forward's retirement takes the rule promotion already has
+(`promotion_keeps_what_it_holds`, #3 (j12)): a replacement is admitted only if every layer the retired worker
+ran on the card stays on the card; otherwise the wider ask is refused with words naming the card ("would move N
+of the layers it serves to the processor"), and the asker plans the range already loaded. Prior art: searched
+vLLM's sleep/wake reload (re-wakes the SAME placement, no comparison) and exo's re-partitioning (no guard found);
+the nearest rule is a Kubernetes rolling update's `maxUnavailable: 0` — never take away serving capacity before
+its replacement is at least as able. Contributor 2 still needs the far computer's own log, so a release that
+carries the guard also carries the spawn's card reading and chosen card layers in its capability, readable from
+here (feedback: a release ships what its real-network tests need to be diagnosed).
 
 **What a fix must keep**: a wider range is sometimes the right plan (a requester with less room), so a plain
 refusal is not the answer. Candidates: (a) a replacement weighed by the card layers it keeps against the worker
@@ -6837,6 +6854,19 @@ archive under the named heading. Reopen one only with the evidence its line name
 Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 19-28 were
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
+
+**Closed 2026-11-15 (v0.3.292)** (#460)
+- #460 — **A split asked in the first seconds after a start found no drafter and wrote its whole reply a token a
+  round.** A drafter is chosen only from `split_models`, which the startup pass fills 2 s after start; the 14B split
+  to Australia ran its first reply at 5.8-6.1 tok/s against 34-45 with the drafter (every arm of `line292`; on
+  purpose in `f460old`: the request 0.31 s before the pass listed the drafter). Now the daemon marks the models held
+  here pending before its API serves, the pass's guard marks them registered however it ends, and
+  `execute_request` waits for that before any plan, at most 10 s (`LOCAL_MODELS_REGISTERED_WAIT`). The pass also
+  asks the card (`nvidia-smi`) only for a model with a part here: it asked for all 40 the network had named, 1.75
+  of the 2.28 s the first request waited. Fixed binary: the pass took 166 ms over the 38 models named (2 held
+  here) and released the waiting request 0.24 ms after it ended (`f460end`). Prior art: llama.cpp's server answers 503 "Loading model" until loaded; a Kubernetes readiness gate
+  — here a bounded wait instead of a refusal. `docs/invariants/scheduling.md` § "A request after a start waits
+  for the models held here".
 
 **Closed 2026-11-15 (v0.3.291)** (#456, #457)
 - #456 + #457 — **A lone request's long prompt was read in ONE forward, and on a card/processor split it spilled
