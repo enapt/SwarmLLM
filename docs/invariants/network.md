@@ -7253,8 +7253,12 @@ publishes, ~7.4 MB and ~74 publishes above its steady rate, holding 27 manifests
   tree (`<hash hex>:<model id>` → Unix ms) by `SharedState::persist_manifests_heard`, at the end of
   each round and only when `manifest_heard_changes` moved, and read back at boot by
   `load_manifests_heard`, each record placed at its age on this boot's clock. A record older than
-  the longest window (a day), dated in the future by a clock that went back, or unreadable is left
-  out: a lost record costs one repeat and never holds a repeat back past its window. A record
+  the longest window (a day), dated more than `HEARD_AFTER_THE_CLOCK_MS` (5 s) in the future, or
+  unreadable is left out: a lost record costs one repeat and never holds a repeat back more than
+  that step past its window. One dated up to 5 s ahead is read as heard just now (age zero, RFC
+  9111 § 4.2.3's `max(0, …)`): this machine wrote it, so the clock was set back since — WSL2's time
+  sync steps it every ~31 s, and one step between a round's write and a restart's read lost the
+  record and failed `a_restart_does_not_gossip_what_the_swarm_already_heard` once (2026-11-15). A record
   older than the machine's uptime is kept on Linux (a Rust `Instant` may go below boot time), so a
   reboot loses nothing there; where the clock cannot hold it, it costs a repeat.
 - **Precedent**: Bitcoin Core's unbroadcast set (PR #18038) splits it the same way: an item is

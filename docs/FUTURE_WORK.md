@@ -8863,8 +8863,10 @@ alone, sustained", v0.3.262)
   manifest round with no peer connected gossips nothing (nobody hears it, and its window cannot
   know whether peers take digests), and `manifest_heard` is stored in the `manifests_heard` tree
   (`SharedState::persist_manifests_heard`, by the round, only when it changed) and read back at
-  boot on the wall clock (`load_manifests_heard`; a record older than a day, dated in the future
-  or unreadable is left out, so a lost one costs a repeat and never holds one back). The digest
+  boot on the wall clock (`load_manifests_heard`; a record older than a day, dated more than 5 s in
+  the future or unreadable is left out, so a lost one costs a repeat and never holds one back — one
+  up to 5 s ahead is heard just now, since 2026-11-15: WSL2's time sync sets the clock back ~1.8 s
+  every ~31 s, which once failed `a_restart_does_not_gossip_what_the_swarm_already_heard`). The digest
   catch-up tells every reconnecting peer — since 2026-10-20 (gotcha #918); before, one back within
   a round was not told. Bitcoin Core's unbroadcast set (PR #18038) is the
   same split: an item is re-announced until a peer has asked for it, then only a daily repeat. Rig

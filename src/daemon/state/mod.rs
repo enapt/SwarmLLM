@@ -102,13 +102,27 @@ fn load_kept_on_this_computer(
 /// `<manifest hash, hex>:<model id>` → when, in Unix milliseconds.
 pub(crate) const MANIFESTS_HEARD_TREE: &str = "manifests_heard";
 
+/// How far after this boot's wall clock a stored record may be dated and still
+/// be read back as heard just now. This machine wrote it, so a date after
+/// `now_ms` means a time sync set the clock back between the write and the read
+/// — WSL2's does every ~31 s (journald: "Time jumped backwards"; steps of
+/// -1.81, -1.77 and -1.76 s in 90 s on the dev laptop, 2026-11-15), and one such
+/// step between a round's write and a restart's read lost the record and failed
+/// `a_restart_does_not_gossip_what_the_swarm_already_heard` in a full test run
+/// (2026-11-15). Prior art: RFC 9111 § 4.2.3 floors a negative age at zero
+/// (`apparent_age = max(0, response_time - date_value)`) rather than discarding
+/// the response. Further ahead is a clock that was wrong, not set back a step,
+/// and the record is left out as before.
+const HEARD_AFTER_THE_CLOCK_MS: u64 = 5_000;
+
 /// The manifest versions the swarm was gossiped, as stored, each put back on
 /// this boot's clock (`now`, `now_ms`: the same moment on both clocks). A record
-/// older than `kept_for` (the longest quiet window, which nothing older can
-/// suppress), dated after `now_ms` by a clock that went back, or not
-/// representable on this boot's clock, is left out: a lost record costs one
-/// repeat and never holds a repeat back past its window. Unreadable is empty,
-/// for the same price.
+/// dated after `now_ms` by at most [`HEARD_AFTER_THE_CLOCK_MS`] is read as
+/// heard just now. One older than `kept_for` (the longest quiet window, which
+/// nothing older can suppress), dated further ahead, or not representable on
+/// this boot's clock, is left out: a lost record costs one repeat, and none
+/// holds a repeat back more than that step past its window. Unreadable is
+/// empty, for the same price.
 fn load_manifests_heard(
     db: &crate::storage::db::Database,
     now: std::time::Instant,
@@ -136,8 +150,13 @@ fn load_manifests_heard(
         else {
             continue;
         };
-        let Some(at) = now_ms
-            .checked_sub(heard_ms)
+        let age_ms = match now_ms.checked_sub(heard_ms) {
+            Some(age_ms) => Some(age_ms),
+            // The clock was set back a step since the write: heard just now.
+            None if heard_ms - now_ms <= HEARD_AFTER_THE_CLOCK_MS => Some(0),
+            None => None,
+        };
+        let Some(at) = age_ms
             .map(std::time::Duration::from_millis)
             .filter(|age| *age < kept_for)
             .and_then(|age| now.checked_sub(age))
@@ -193,8 +212,10 @@ mod manifests_heard_tests {
     use super::*;
 
     /// A record read back is placed at its age on this boot's clock; one older
-    /// than the longest window, dated in the future, or that cannot be parsed
-    /// is left out, so it costs a repeat and never holds one back (#91 (2c)).
+    /// than the longest window, dated in the future past a clock step, or that
+    /// cannot be parsed is left out, so it costs a repeat and never holds one
+    /// back (#91 (2c)). One dated a step ahead — the clock set back since the
+    /// write — is heard just now.
     #[test]
     fn a_stored_record_is_kept_only_where_this_boots_clock_can_hold_it() {
         let db = crate::storage::db::Database::open_temp().unwrap();
@@ -205,6 +226,10 @@ mod manifests_heard_tests {
         let mut records = manifests_heard_records(&heard, now, now_ms);
         let future = serde_json::to_vec(&(now_ms + 60_000)).unwrap();
         records.push((format!("{}:future", hex::encode([2u8; 32])), future));
+        // Written 1.5 s after the moment the second boot reads as now: the
+        // clock was set back that far between the write and the read.
+        let set_back = serde_json::to_vec(&(now_ms + 5_000 + 1_500)).unwrap();
+        records.push((format!("{}:set-back", hex::encode([6u8; 32])), set_back));
         let ancient = serde_json::to_vec(&0u64).unwrap();
         records.push((format!("{}:ancient", hex::encode([3u8; 32])), ancient));
         let past_window = serde_json::to_vec(&(now_ms - 2 * 86_400_000)).unwrap();
@@ -221,7 +246,11 @@ mod manifests_heard_tests {
             now_ms + 5_000,
             std::time::Duration::from_secs(86_400),
         );
-        assert_eq!(back.len(), 1, "only the record this clock can hold");
+        assert_eq!(back.len(), 2, "only the records this clock can hold");
+        let set_back_at = *back
+            .get(&(crate::types::ModelId("set-back".into()), [6; 32]))
+            .expect("a record dated a clock step ahead is kept");
+        assert_eq!(set_back_at, later, "and heard just now, not in the future");
         let at = *back
             .get(&(model, [1; 32]))
             .expect("its key survives the colons");
