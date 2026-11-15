@@ -5390,6 +5390,13 @@ budget's one reading), the guest's charge (`Tenancy::Guest`) moved onto the segm
 captured on its own stream, and the flow's drafting call (today IPC to the guest worker) answered by the segment's
 worker while its forward runs. First check: two candle devices on this card, a 3B forward on one and the 0.5B's
 8-row level on the other from two threads — do they overlap, unlike two processes?
+**Probed the same night** (`~/swarmllm-gate/deep/streams_probe/probe.cu`, raw CUDA, two streams in one process, each
+side a captured graph, 40 repeats × 3 runs, this card): 300 tiny kernels ran **100% hidden** under a chain of 26
+weight reads of 160 MB (11.6 ms alone, 11.6 together) — one process's streams do run side by side here, unlike two
+processes; but a drafter side that READS its 640 MB three times (5.9 ms alone at ~334 GB/s) was only **8% hidden**
+under that chain, both saturating the card's ~380 GB/s. The real steps saturate nothing: the near layers read ~4.3 GB
+in ~26 ms (~165 GB/s) and the drafter ~1.9 GB in ~14.5 ms (~130 GB/s), ~6.2 GB in 26 ms together (~240 GB/s) — under
+the card's line, so a large share could hide; how large is the candle-devices check above.
 
 Prior art: PEARL (arXiv 2408.11850, ICLR 2025) names it "mutual waiting" — the target idle while the draft drafts and the
 reverse — and its post-verify keeps drafting while the target verifies (up to 1.5× over plain speculation); PipeInfer
