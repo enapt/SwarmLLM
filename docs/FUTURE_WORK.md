@@ -6598,7 +6598,7 @@ Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
 
-**Closed 2026-11-15 (on main, not in a release yet)** (#456, #457)
+**Closed 2026-11-15 (v0.3.291)** (#456, #457)
 - #456 + #457 — **A lone request's long prompt was read in ONE forward, and on a card/processor split it spilled
   the card into system memory.** Seen after #454's reload (Llama-3.1-8B, 29 of 32 layers on the 8 GB RTX 3070, a
   15k-token prompt): first word 100-140 s, decode 2.4-3.7 tok/s, a "gap" after the pass (#456) and a slow pass past
