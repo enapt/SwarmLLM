@@ -5530,6 +5530,18 @@ memory), `the_processors_snapshot_stays_charged_beside_its_live_cache` (a proces
 machine's, never a card's). A CPU test cannot hold a card tensor, so the split's card share is
 verified on a CUDA build by the ladder above.
 
+**Card check (2026-11-15 04:25Z, a CUDA build of `1ec0f8df`, the same ladder → `ladder_fix/`).** The admission
+read the card's share only (`cached_mb=351` and `409`, where v0.3.289 read 587-991), evicted for 2 of the 7 prompts
+instead of 5 (at 4,317 and 5,754 tokens; from 1,850 before), and the 4.3k prompt fit after its eviction and was
+answered (first word 6.6 s against 15.5 s; one run each). The 5.7k prompt still evicted and was refused 13 ms
+later. Its claim was about 671 MB; the admission read 913 counting 409 MB of saved prompt, and the eviction did give
+the pool 410 MB back (`pool_used` 6,221 → 5,811). The pool then handed 384 MB to the driver to keep its margin
+(`hold_driver_margin`), but WSL2's driver showed only 132 MB of it free (`driver_free_after_mb=132`), still 388
+MB 230 ms later. So the reading after the eviction was 646, and the re-plan's up-front ask refused 33 MB short with
+nothing evicted. What happened to the other ~250 MB is not established. The rig forces saved prompts onto the
+card, which under WSL2 they never are by default (#257), and no native driver was checked. The rest of that
+refusal is the split sized for a typical conversation (FUTURE_WORK #454).
+
 ## A split's processor share is charged to the machine (2026-10-13, FUTURE_WORK #264)
 
 Found closing #262. A card/processor split (`get_or_spawn_once`'s `hybrid_layers`) was charged

@@ -5246,7 +5246,11 @@ processor (`device=Cpu`) and ran the prompt there. **Part fixed 2026-11-15** (go
 split's saved prompt whole as card memory — on that split ~379 of the 395 MB were the card's, so the prompt was still
 ~3 MB short, and here (14B 28/20, `ladder.sh` with saved prompts on the card) a 5.7k prompt was evicted for and then
 refused 8 ms later. Now the admission evicts only for room the card really gets back, and refuses up front
-otherwise.
+otherwise. On a CUDA build of the fix (04:25Z) the ladder evicted for 2 of 7 prompts instead of 5 and the 4.3k
+prompt was served after its eviction (first word 6.6 s against 15.5 s). The 5.7k one still evicted and was then
+refused: the pool gave the driver 384 MB back and WSL2's driver showed 132 MB of it free (`docs/invariants/memory.md`
+§ "…and so is a saved prompt", card check). The cause of that gap is not established, and it was seen only with
+saved prompts forced onto the card under WSL2.
 **Left:** the split's card share is fitted at spawn to a TYPICAL conversation (`KvCharge::Typical`, 4,096
 positions — `process_pool::refit_split_to_the_load`, `vram.rs`), so a prompt past it on a card held to the last
 layer is refused however long it waits; after the refusal the re-plan withdraws a fresh split
