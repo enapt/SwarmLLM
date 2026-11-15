@@ -1,5 +1,29 @@
 # Changelog
 
+## [0.3.291-alpha] — 2026-11-15
+
+**A long prompt no longer takes minutes to its first word on an 8 GB graphics card.** Since 0.3.290, a request
+running alone on its computer read its whole prompt in one step, the only place that did not cut a prompt into
+pieces. On an 8 GB card, that one step needed more memory than the card has, and Windows lent it the computer's own
+memory, which is far slower. A 15,000-token prompt to Llama 3.1 8B took 100-133 seconds to its first word, and the
+reply then came at 2.8-3.7 tokens a second. The prompt is cut into pieces again: on the same computer, its first word
+now comes in 15-17 seconds and the reply at 13-15 tokens a second. On the processor alone nothing changes (#456,
+#457).
+
+**A long prompt to a model on a graphics card is answered instead of refused.** A model loaded whole on a card keeps
+room beside it for a typical conversation of about 4,000 tokens. A longer prompt, like the ones coding assistants
+send, was refused there however long it waited: a 12 GB card running a 14B refused a 9,500-token prompt. Now the
+computer loads the model again with a few of its layers moved to the processor and room for that prompt, then answers
+it, before any word has been sent. On an 8 GB card, two 15,000-token prompts to Llama 3.1 8B were each answered after
+one reload (29 of its 32 layers on the card instead of all 32); before, both were refused. This happens only while
+nothing else is using the model, and the room is remembered for 30 minutes, so the conversation's next turns load that
+way from the start. `SWARMLLM_LONG_PROMPT_RELOAD=0` turns it off (#454).
+
+**A restart no longer announces model descriptions the network has already heard.** A computer remembers what it has
+told the network, so a restart does not repeat it. Where the clock is set back now and then (on WSL2, about 1.8
+seconds every half minute), a note written just before such a step was read as coming from the future and dropped,
+and its description was sent again. A note up to 5 seconds ahead of the clock now counts as written just now.
+
 ## [0.3.290-alpha] — 2026-11-15
 
 **A full computer makes room within a day, and no longer deletes a quiet model from every computer at once.** On a
