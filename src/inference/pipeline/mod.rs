@@ -1660,8 +1660,9 @@ pub(crate) fn split_yield_prior(
     {
         return YieldPriors::both(YieldPrior::None);
     }
-    if !(drafter_may_guess_for(state, model_id)
+    if !((drafter_may_guess_for(state, model_id)
         && drafter_to_leave_room_for(state, model_id).is_some())
+        || split_guess_head_here(state, model_id))
     {
         return YieldPriors::both(YieldPrior::None);
     }
@@ -1673,6 +1674,55 @@ pub(crate) fn split_yield_prior(
         .metrics
         .split_rounds
         .prior_for_request(&model_id.0, request_id, YieldPrior::Drafter)
+}
+
+/// Would a split of `model_id` driven from here guess with the model file's
+/// own guess head beside its first segment (#425 (a))? The file carries one in
+/// the shape the head runs (`block_draft::head_planned`, the worker's own
+/// test) AND every part past the last layer — the head's block, cut as its own
+/// part (gotcha #1025) — is on disk here, which the load needs
+/// (`split::loader`'s `guess_head_parts_held`), beside the part holding layer
+/// 0 (the head loads only beside a first segment from there).
+///
+/// The second guesser [`split_yield_prior`] prices a split by: Qwen 3.5's
+/// families take no separate drafter (`speculation_can_roll_back` is false
+/// for their recurrent state), so a split of a 27B was priced at one round a
+/// token, lost every plan to a whole hand-off — a card/processor run on one
+/// computer — and was never tried. The head kept 2.2-2.6 tokens a round on the
+/// real link (Qwen3.6-35B-A3B TH ↔ AU, `faster_than_local.md` § 14), the
+/// drafter prior's own range, so it starts from that prior and is measured.
+/// Prior art: Sequoia (arXiv 2402.12374) sizes speculation by the verifying
+/// HARDWARE's measured cost — a card checks many guesses at the price of one,
+/// a processor does not — and llama.cpp spreads layers over every card it can
+/// reach (`--split-mode layer`, RPC servers too) before the processor.
+pub(crate) fn split_guess_head_here(state: &SharedState, model_id: &ModelId) -> bool {
+    let planned = state
+        .gguf_meta_for(model_id)
+        .map(|meta| (block_draft::head_planned(&meta), meta.block_count as u32));
+    let Some((true, layers)) = planned else {
+        return false;
+    };
+    let Some(manifest) = state.model_registry.get_manifest(model_id) else {
+        return false;
+    };
+    let head_parts: Vec<u32> = manifest
+        .shards
+        .iter()
+        .filter(|s| s.layer_range.0 >= layers)
+        .map(|s| s.index)
+        .collect();
+    let here = state
+        .model_registry
+        .local_shard_indices_in(&manifest, state.identity.node_id());
+    // The head guesses only where this node runs the split's first segment
+    // from layer 0 (`SplitBlockDrafter::for_plan`), so the part holding it
+    // must be here too — else every split this node could drive is one the
+    // head never runs in.
+    let opening_here = manifest
+        .shards
+        .iter()
+        .any(|s| s.layer_range.0 == 0 && here.contains(&s.index));
+    opening_here && !head_parts.is_empty() && head_parts.iter().all(|i| here.contains(i))
 }
 
 /// May a check of guesses on this plan be taken back INTO — truncated to its
@@ -4778,6 +4828,116 @@ mod tests {
         );
         assert!(!disqualified(true, true, false), "every first layer here");
         assert!(!disqualified(false, false, false), "privacy off: as before");
+    }
+
+    /// **A split this node drives guesses with the file's own head where it
+    /// holds the head's part and layer 0's** (2026-11-15): Qwen 3.5's families
+    /// take no separate drafter, so without the head counted a split of a 27B
+    /// was priced at a round a token and never chosen. Red with the head's
+    /// predicate dropped from `split_yield_prior`'s gate (it then answers
+    /// `None` for this model whatever is held).
+    #[test]
+    fn a_split_guessed_by_the_files_own_head_is_priced_from_the_drafters_prior() {
+        use crate::daemon::state::split_rounds::YieldPrior;
+        let state = make_test_state();
+        let mid = ModelId("qwen3.8-27b-q4-k-m".into());
+        let layers = 64usize;
+        let mut tensors = std::collections::HashMap::new();
+        for name in [
+            "nextn.eh_proj.weight",
+            "nextn.enorm.weight",
+            "nextn.hnorm.weight",
+            "attn_norm.weight",
+            "post_attention_norm.weight",
+            "attn_q.weight",
+            "attn_k.weight",
+            "attn_v.weight",
+            "attn_output.weight",
+            "attn_q_norm.weight",
+            "attn_k_norm.weight",
+        ] {
+            tensors.insert(
+                format!("blk.{layers}.{name}"),
+                crate::inference::split::TensorLocation { offset: 0, size: 1 },
+            );
+        }
+        state.gguf_meta.insert(
+            mid.clone(),
+            crate::inference::split::GgufTensorMeta {
+                tensors,
+                tensor_data_offset: 0,
+                model_name: None,
+                head_count: 24,
+                head_count_kv: 4,
+                block_count: layers,
+                embedding_length: 5120,
+                head_dim: 256,
+                rope_dim: 64,
+                rope_freq_base: 10_000_000.0,
+                rms_norm_eps: 1e-6,
+                expert_count: 0,
+                expert_used_count: 0,
+                architecture: "qwen35".into(),
+                context_length: 262_144,
+                pooling_type: 0,
+                kv_layout: None,
+                unbuilt_part: None,
+                shared_kv_layers: 0,
+            },
+        );
+        let part = |index: u32, layer_range: (u32, u32)| ShardInfo {
+            index,
+            layer_range,
+            size_bytes: 1,
+            hash: [0u8; 32],
+            tensors: vec![],
+        };
+        state.model_registry.register_manifest(ModelManifest {
+            id: mid.clone(),
+            name: "Qwen3.8 27B".into(),
+            architecture: ModelArchitecture::Qwen2,
+            num_layers: layers as u32,
+            num_params_billions: 27.0,
+            quantization: Quantization::Q4KM,
+            total_size_bytes: 4,
+            shard_count: 4,
+            shards: vec![
+                part(0, (0, 1)),
+                part(1, (1, 63)),
+                part(2, (63, 64)),
+                part(3, (64, 65)),
+            ],
+            tokenizer_hash: [0u8; 32],
+            manifest_hash: [0u8; 32],
+            publisher: NodeId([0u8; 32]),
+            publish_date: chrono::Utc::now(),
+            license: "apache-2.0".into(),
+            mmproj: None,
+            context_length: None,
+        });
+        let hold = |index: u32| {
+            state.model_registry.record_shard_holder(
+                ShardId {
+                    model_id: mid.clone(),
+                    index,
+                },
+                state.identity.node_id().clone(),
+            )
+        };
+        let prior = || split_yield_prior(&state, &mid, uuid::Uuid::new_v4()).here;
+        assert!(!split_guess_head_here(&state, &mid), "nothing held");
+        hold(3);
+        assert!(
+            !split_guess_head_here(&state, &mid),
+            "the head's part without layer 0's: the head never runs in a split from here"
+        );
+        hold(0);
+        assert!(split_guess_head_here(&state, &mid));
+        assert_ne!(
+            prior(),
+            YieldPrior::None,
+            "a split the head guesses for starts from a prior, not a round a token"
+        );
     }
 }
 

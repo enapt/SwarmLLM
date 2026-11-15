@@ -2181,6 +2181,17 @@ same day. Two halves:
   (1.64 on two processors, 2.2 on the 70B, 3.2-4.3 prose and 7.7-10.3 code where a tree flowed), so
   it lets a split run and never oversells one. It fired (`split_yield_from=Prior`) and the plan
   still went to the hand-off: priced honestly-low, a split that wins only at a flow's yield loses.
+  **The file's own guess head counts as the drafter (2026-11-15)**: Qwen 3.5's families take no
+  separate drafter (`speculation_can_roll_back` is false for their recurrent state), so their
+  splits had no prior and were priced at a round a token. Where the head would guess —
+  `pipeline::split_guess_head_here`: the file carries one in the shape the head runs
+  (`block_draft::head_planned`), and this node holds the head's part AND layer 0's, since the head
+  loads only beside a first segment from layer 0 here (`SplitBlockDrafter::for_plan`) — the split
+  starts from the same prior. The head's measured yield sits in it: 2.2-2.6 tokens a round on
+  Qwen3.6-35B-A3B (TH ↔ AU, `faster_than_local.md` § 14, where it took that split from 5.0-5.8 to
+  11-15 tok/s on code) and 2.25-3.3 on Qwen3.8-27B (`TAG=c2h1115b`, 48-71 rounds a 160-token reply).
+  Test `a_split_guessed_by_the_files_own_head_is_priced_from_the_drafters_prior` (red with the
+  head dropped from the gate, and with layer 0's part not held).
 - **Bounded exploration** (`SplitRounds::prior_for_request`, the one schedule, asked with the
   request id so a re-plan keeps its answer): the 3rd request priced from the drafter's prior since
   a split of the model finished here is priced at `EXPLORED_TOKENS_A_ROUND` (8, the low end of code
@@ -3806,7 +3817,8 @@ its processor layers is in system memory too — and every peer's card by its wh
 layer's weights, which is all an older peer's announcement allows (24 for that card). What a peer
 may be GIVEN is unchanged; only the speed its layers are priced at. Still a count, not a
 placement: a range starting mid-way through what it holds is priced as if its first
-`card_layers` were on the card. Petals prices a span from each server's measured throughput,
+`card_layers` were on the card — until 2026-11-15, for a run a held copy serves without a load
+(§ "A slice of a loaded copy runs where the copy's layers are"). Petals prices a span from each server's measured throughput,
 not a device split (research changed nothing here; our analogue is the peer's own timing floor,
 `decode_us_per_layer`, which already outranks this prior). Tests:
 `a_warm_peers_card_layers_are_the_ones_its_card_runs` (scheduler),
@@ -3990,6 +4002,44 @@ off (the whole hand-off) and red with the card's cuts off (15 layers here, 3 of 
 processor); `a_split_offered_beside_a_short_card_leaves_the_drafter_room`;
 `a_cold_starts_prompt_read_leaves_round_one_only_the_first_reply_token` (red reading the whole
 sequence: the first round would have nothing to read).
+
+## A slice of a loaded copy runs where the copy's layers are
+
+**Rule (2026-11-15, FUTURE_WORK #3 (j14)).** `NodeCandidate::layers_by_device` prices a run that a
+held copy serves without a load (`HeldRange::covers_without_a_load`: the copy itself, or a run
+inside one whose holder serves slices, #449) at that COPY's placement: the loader filled the card
+from the copy's first layer, a slice is a view of those weights on the devices they were loaded
+to (`split::view::view_of` takes the copy's `layer_devices[from..to]`), so only the part of the run
+inside the copy's first `card_layers` is on the card. A fresh load keeps the loader's order from
+the run's start, `ahead` as before. A/B `SWARMLLM_SLICE_PLACEMENT=start`.
+
+**What it replaced.** The count above, applied from the RANGE's start whatever was loaded. The
+direction of 2026-11-15 (user: the cards across computers before one computer's card and
+processor) asked whether this card could take the processor share of a 27B the Australian RTX
+3060 runs whole. `real_link27d.sh TAG=c2h1115b` (v0.3.291 both ends, Qwen3.8-27B Q4_K_M, arms
+alternating hand/c2h/c2h/hand, 160 tokens, the live node stopped): handed whole to AU, code 5.58
+and 5.67, prose 5.20 and 5.29 tok/s; `[0..15)` + `[63..64)` + the file's guess head on this card
+and `[15..63)` on AU, code 3.10 and 3.06, prose 2.37 and 2.68 — the head keeping 2.25-3.3 tokens a
+round. AU served `[15..63)` from its resident `[0..64)`, whose card holds the first ~26-30 layers:
+~11-15 of the slice ran on its card and ~33-37 on its processor, about the hand-off's processor
+work, plus the link and a processor check of ~3 rows each round. Priced from the slice's start, it
+read 26 card layers.
+
+**What it decided.** A rule letting the search cut ranges because a PEER holding the whole model
+runs part of it on its processor (#3 (j1)'s local rule, for every holder) was written, measured
+against by the run above and not built: with the peer's copy loaded, a cut only moves a slice of
+it and the processor share stays. Loaded card-first it still lost: with nothing resident on AU
+(`TAG=c2hfresh1115`), AU loaded `[15..63)` fresh (~26 card, ~22 processor layers) and the split ran
+code 3.88/3.89, prose 3.17/3.41 tok/s against the hand-off's 6.16/5.69 in the same run. A
+card/processor peer's whole run stays the 27B's best route until the cards in reach hold the
+model.
+
+**Prior art.** llama.cpp fixes each layer's device at load (`llama_model::impl::dev_layer[il]`,
+`load_tensors`) and every later use of a layer reads that entry; Helix (arXiv 2406.01566) prices a
+node's span by where each layer sits.
+
+Test: `a_slice_of_a_loaded_copy_is_priced_where_the_copys_layers_are` (red counted from the
+slice's start: `[15..63)` read `(26, 22)`).
 
 ## This node's whole run is priced from what it delivered
 

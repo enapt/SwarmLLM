@@ -983,8 +983,10 @@ impl SplitBlockDrafter {
 /// (#425 (a)): the switches on, Qwen 3.5's families, and one next-token block
 /// in the shape the head runs (`split::mtp::head_in_shape`, the check the
 /// load runs). Whether this node holds its parts is the worker's answer — a
-/// head not loaded is refused on its first ask, and held off a while.
-fn head_planned(meta: &crate::inference::split::GgufTensorMeta) -> bool {
+/// head not loaded is refused on its first ask, and held off a while. The
+/// planner asks it too, for the yield it prices a split at
+/// (`pipeline::split_guess_head_here`).
+pub(super) fn head_planned(meta: &crate::inference::split::GgufTensorMeta) -> bool {
     use crate::inference::split::{head_in_shape, mtp_on, split_guess_head_on};
     let has = |name: &str| meta.tensors.contains_key(name);
     mtp_on()

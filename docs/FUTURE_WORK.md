@@ -1283,6 +1283,33 @@ asked to load is owed its charge: `WorkerHandle::asked_to_load` is set before a 
 by the reader on `ModelLoadTimed`. One never asked is released at once, as v0.3.285 released every worker. It was
 never seen: the live node's unloads since .286 all came back within one poll. Prior art: Ollama's runner joins
 `s.loaded` only after its load, so its `waitForVRAMRecovery` never waits on one that allocated nothing.
+(j14) **A slice of a copy already loaded was priced as if the card started at the slice** (2026-11-15, on main,
+not in a release yet). The direction (user, 11-15: the cards across computers before one computer's card and
+processor) asked whether this card could take the processor share of a 27B the Australian RTX 3060 runs whole
+(#451's field check: that hybrid ran 5.5-6.5 tok/s, its drafter's 3-3.6 tokens a round bought nothing).
+`real_link27d.sh TAG=c2h1115b` (v0.3.291 both ends, 14:55-15:10Z, Qwen3.8-27B Q4_K_M, arms hand/c2h/c2h/hand, 160
+tokens, live node stopped): handed to AU whole, code 5.58/5.67 and prose 5.20/5.29 tok/s; `[0..15)` + `[63..64)` +
+the file's guess head on this card and `[15..63)` on AU, code 3.10/3.06 and prose 2.37/2.68 — the head keeping
+2.25-3.3 tokens a round (`split guess head complete … rounds=48-71`). AU served `[15..63)` as a VIEW of its
+resident `[0..64)` (#449), whose card holds that copy's first ~26-30 layers: ~11-15 of the slice on the card and
+~33-37 on its processor — the hand-off's processor work, plus the link and a processor check of ~3 rows a round.
+`layers_by_device` counted the slice's card layers from the slice's own start: 26. **Fixed**: a run a held copy
+covers without a load (`HeldRange::covers_without_a_load`) is priced at that copy's placement; a fresh load keeps
+the loader's order (test `a_slice_of_a_loaded_copy_is_priced_where_the_copys_layers_are`; Prior art: llama.cpp's
+`dev_layer[il]`, fixed at load). **Measured against, not built**: letting the search cut ranges because a PEER
+holding the whole model runs part of it on its processor (#3 (j1)'s rule for every holder) — in this fleet the cut
+only moves a slice of the copy and the processor share stays. **Loaded card-first it still lost**: with nothing
+resident on AU (`TAG=c2hfresh1115`, 15:20-15:31Z, arms c2h/c2h/hand), AU loaded `[15..63)` fresh (~26 card, ~22
+processor layers) and the split ran code 3.88/3.89, prose 3.17/3.41 tok/s against the hand-off's 6.16/5.69 in the
+same run — a round took ~0.7-1 s where the link, AU's check and this node's layers add to ~0.45 s. So in this fleet
+the hybrid hand-off is the right route, and the planner (which now prices both shapes by where the layers run)
+keeps choosing it. An all-card 27B needs ~64 card layers across computers
+(this card ~20 beside the head, AU's ~30; the RTX 5080 had 4 GB free, the RTX 3080 Ti holds none — its storage is
+full). **Also on main**: a Qwen 3.5-family split this node drives with the file's guess head is priced from the
+drafter's prior (`pipeline::split_guess_head_here` — the head's part and layer 0's held here; those families take
+no separate drafter, so their splits were priced at a round a token). Open: where a split round's other ~0.3-0.5 s goes
+(this node's tail segment ran on its processor with the output head; per-round timings in
+`~/swarmllm-gate/deep/fr/real_link_c2hfresh1115/`).
 
 `scheduler/parallax.rs` charges a remote hop a flat `ASSUMED_FORWARD_PASSES = 64.0`. The error
 grows with reply length — 1.0 at 8 tokens, 2.4-3.3 at 120-239 — and biases every delegation
@@ -1392,7 +1419,10 @@ cold-load charge that day. **On for one case since 2026-11-13, on main (not in a
 where this node holds every layer and its card runs only part of them
 (`scheduler::shares_what_its_card_cannot_hold`). With #449 the peer serves its share from its whole
 copy; on the real link the explored splits ran code 24.1 and 16.5 tok/s against 11.0-17.0 with it
-off (`real_link_j1drafter`). The general flip still waits for the A/B above.
+off (`real_link_j1drafter`). The general flip still waits for the A/B above. The same rule for a PEER holding the whole
+model with part of it on its processor was measured against on 2026-11-15 and not built (#3 (j14)): its slice is a
+view of the copy it runs, so the processor share stays (2.5-3.1 tok/s split against 5.2-5.7 handed over;
+loaded card-first, 3.2-3.9 against 5.7-6.2).
 
 #### #449 — A computer serves only the exact layer range it loaded, so a part of a loaded model is loaded again
 `P2` · routing / spreading the load · **PARTIAL** — 2026-11-13: built and released in v0.3.285 (published 2026-11-13 16:21:16Z)
@@ -2751,8 +2781,8 @@ reply when the model loads ON the request — idle comes only after it (the dash
 gives the time); (b) a split's segments and a tree's row counts are not recorded; (c) gaps of 1.6-8.5 s OUTSIDE any
 forward, in both arms of those runs alike — the 10-26 ones' other half (ending at a card memory reading).
 
-#### #451 — A block drafter in system memory beside a card that has no room for it: ON — the field check is left
-`P2` · perf-local · **ON (measured)** — 2026-11-14 · models between (27B/35B on a 12 GB card)
+#### #451 — A block drafter in system memory beside a card that has no room for it: ON — field-checked, no gain on a hybrid
+`P2` · perf-local · **ON (measured)** — 2026-11-15 · models between (27B/35B on a 12 GB card)
 
 A whole model split between a card and the processor attached no block drafter where the card had no
 room beside one conversation (`BlockDrafterState::NoRoom`): a 27B on a 12 GB card holds ~27 of 64
@@ -2774,9 +2804,15 @@ offered. Fixed: ONE charge, `block_drafter::charged`, weighed before the load an
 12 runs a prompt): code 30.4 against 20.9 tok/s at the median, prose 21.2 against 20.8, a story 21.6
 against 20.8; replies part at near ties only (llama.cpp parts from itself at the first one) —
 `docs/invariants/inference.md` § "Measured, then defaulted ON".
-**Left — the field check**: once the release ships, the Australian computer's Qwen3.6-27B (a 12 GB card,
-27 of 64 layers) should report `attached (in system memory …)` in its guess record
-(`GenerateUsage::how_guessed`) and its pace against the ~6.4 tok/s it ran without one (11-14). The
+**The field check (2026-11-15 ~14:20Z, v0.3.291, this node's live `swarm_route` to the Australian RTX 3060
+only, Qwen3.6-27B, 160-token replies)**: ATTACHED in system memory; 2.96-3.62 tokens a round, the block's
+guesses ~45% kept — and 5.5-6.5 tok/s, no gain on the ~6.4 it ran without (11-14). A round there cost
+~3.5× a plain step (0.52-0.56 s against ~0.16): the processor-held layers check rows about linearly, and
+the drafter drafts on the processor too. So on a card/processor HYBRID the drafter writes more tokens a
+round and no more a second; what pays is the processor's layers on another computer's CARD
+(`scheduler::a_peer_shares_what_its_card_cannot_hold`, § #3; user, 11-15: "lean towards utilizing the gpu
+across nodes rather than gpu and cpu"). Kept ON — it costs nothing measurable there and pays where the
+card holds most of the model (the 9B's 30.4 against 20.9). The
 per-round rule (`best_gamma_beside_a_step_per_round`) sets the block aside where a processor draft
 costs more than it writes — read its share there.
 

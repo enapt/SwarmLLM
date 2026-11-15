@@ -605,15 +605,40 @@ impl NodeCandidate {
     /// Priced each as if it began the run, three local segments of a 14B
     /// whose card holds 23 of its 48 layers read as all 48 on the card:
     /// 17.5 s against the 29.5 s of the same run priced whole (2026-10-29).
+    ///
+    /// A run served from a copy already loaded (`HeldRange`, a slice of it
+    /// where its holder serves slices, #449) keeps that COPY's placement —
+    /// a slice is a view of its weights on the devices they were loaded to
+    /// (`split::view`), and the loader filled the card from the copy's first
+    /// layer — so only the part of `range` inside the copy's first
+    /// `card_layers` is on the card. Counted from `range`'s own start, the
+    /// slice `[15..63)` of a 27B loaded `[0..64)` with 26 on the card read as
+    /// 26 card layers where 11 are, and that split ran 2.5-3.1 tok/s against
+    /// the same computer's 5.2-5.7 handed the whole model (2026-11-15). A
+    /// fresh load keeps the loader's order from the run's start. Prior art:
+    /// llama.cpp fixes each layer's device at load (`dev_layer[il]`) and
+    /// every later use reads it. A/B `SWARMLLM_SLICE_PLACEMENT=start` (read
+    /// once): every run counted from its own start, as before.
     fn layers_by_device(&self, range: (u32, u32), ahead: u32) -> (u32, u32) {
+        static FROM_THE_START: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
         let width = range.1.saturating_sub(range.0);
-        match self.card_layers {
-            Some(card) => {
-                let on_card = width.min(card.saturating_sub(ahead));
-                (on_card, width - on_card)
-            }
-            None => (width, 0),
+        let Some(card) = self.card_layers else {
+            return (width, 0);
+        };
+        let run = (range.0.saturating_sub(ahead), range.1);
+        let from_the_start = *FROM_THE_START
+            .get_or_init(|| std::env::var("SWARMLLM_SLICE_PLACEMENT").is_ok_and(|v| v == "start"));
+        if let Some(copy) = self
+            .held_ranges
+            .iter()
+            .find(|held| !from_the_start && held.covers_without_a_load(run))
+        {
+            let card_ends = copy.range.0.saturating_add(card).min(copy.range.1);
+            let on_card = card_ends.saturating_sub(range.0).min(width);
+            return (on_card, width - on_card);
         }
+        let on_card = width.min(card.saturating_sub(ahead));
+        (on_card, width - on_card)
     }
 
     /// The static prior for one of `range`'s layers, averaged over the devices

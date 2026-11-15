@@ -8681,6 +8681,61 @@ fn a_card_short_of_the_whole_model_shares_the_rest_with_a_peers_card() {
     );
 }
 
+/// **A slice of a copy already loaded runs where that copy's layers are**
+/// (2026-11-15): a computer that loaded a 27B `[0..64)` with 26 layers on its
+/// card and serves slices (#449) runs `[15..63)` as a view of that copy — 11
+/// layers on the card, 37 on its processor — and that split ran 2.5-3.1 tok/s
+/// against 5.2-5.7 handed the whole model. Counted from the slice's own start
+/// it read as 26 on the card. A fresh load (no copy, or one whose holder does
+/// not serve slices) still fills the card from the run's first layer.
+#[test]
+fn a_slice_of_a_loaded_copy_is_priced_where_the_copys_layers_are() {
+    let held = |serves_slices: bool| {
+        let mut c = simple_candidate(0xA3, vec![(0, 64)]);
+        c.card_layers = Some(26);
+        c.held_ranges = vec![crate::inference::process_pool::HeldRange {
+            range: (0, 64),
+            releasable_layers: 0,
+            serves_slices,
+        }];
+        c
+    };
+    let copy = held(true);
+    assert_eq!(
+        copy.layers_by_device((15, 63), 0),
+        (11, 37),
+        "the copy's card holds [0..26): 11 of the slice"
+    );
+    assert_eq!(
+        copy.layers_by_device((0, 64), 0),
+        (26, 38),
+        "the copy itself"
+    );
+    assert_eq!(copy.layers_by_device((30, 64), 0), (0, 34), "past its card");
+    assert_eq!(
+        copy.layers_by_device((10, 20), 5),
+        (10, 0),
+        "a run's second piece: still where the copy put it"
+    );
+    assert_eq!(
+        held(false).layers_by_device((15, 63), 0),
+        (26, 22),
+        "a holder that loads the run again fills its card from the run's start"
+    );
+    let mut fresh = simple_candidate(0xA4, vec![(0, 64)]);
+    fresh.card_layers = Some(26);
+    assert_eq!(
+        fresh.layers_by_device((15, 63), 0),
+        (26, 22),
+        "nothing loaded"
+    );
+    assert_eq!(
+        fresh.layers_by_device((15, 63), 20),
+        (6, 42),
+        "a fresh run's second piece takes the card's rest, as before"
+    );
+}
+
 /// **A card short of the model it holds whole leaves its drafter room on the
 /// split it offers** (FUTURE_WORK #3 (j1)). Where this node runs every layer
 /// with its processor beside a card too small for them, the search offers parts

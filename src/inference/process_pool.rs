@@ -3683,8 +3683,10 @@ pub struct HeldRange {
 
 impl HeldRange {
     /// Is `range` run by this held range with nothing loaded: the range
-    /// itself, or a run inside it its holder serves from these weights?
-    fn covers_without_a_load(&self, range: (u32, u32)) -> bool {
+    /// itself, or a run inside it its holder serves from these weights? The
+    /// planner prices such a run on the devices this range was loaded to
+    /// (`NodeCandidate::layers_by_device`).
+    pub(crate) fn covers_without_a_load(&self, range: (u32, u32)) -> bool {
         self.range == range
             || (self.serves_slices
                 && self.range.0 <= range.0
