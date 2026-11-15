@@ -5371,7 +5371,9 @@ drafter's small launches run beside the near layers' large ones. **So measure fi
 drafter call (CUDA events around each level, or `nsys` on the rig) against its 14.5 ms wall. Mostly idle → overlap the
 calls (daemon-side in `dsd_flow`, a stale call dropped at a rebase like an answer from before it); mostly busy →
 the gain needs the drafter in the near segment's process on a second stream, a larger change to weigh against the rule's
-reasons (graph capture, one sync point).
+reasons (graph capture, one sync point). llama.cpp's 0.5B takes 3.1 ms for ONE row with its CUDA graphs (pp1 323 tok/s
+on this card), so most of a ~4.5 ms level is likely the card's own latency over ~300 small kernels, not host gaps —
+expect the two-process overlap to buy little, and the second stream to be the real question.
 
 Prior art: PEARL (arXiv 2408.11850, ICLR 2025) names it "mutual waiting" — the target idle while the draft drafts and the
 reverse — and its post-verify keeps drafting while the target verifies (up to 1.5× over plain speculation); PipeInfer

@@ -1254,6 +1254,29 @@ story: 13.5 → 15.4, 11.8 → 13.0, 7.8 → 8.5). Half of guess-ahead's gain is
 guess head". Open: the DFlash block drafter beside the same segment does not guess ahead, and the two guessers have
 not yet been measured together on this link (FUTURE_WORK #425 (f), #428).
 
+## 15. The flow is bound by this computer now, and its two steps run in series (2026-11-15)
+
+Since #357 (b) and the tiled tree kernels, the 14B half and half to Australia (123-145 ms) never waits for the far
+computer: this one is the slower side, ~40 ms a forward against the far end's ~30, and a reply's rate is its tokens a
+forward over that (0.80 / 41 ms ≈ 19.5 prose, 1.76 / 40 ms ≈ 44 code — measured 19.4 and 43.8). Every shape knob was
+measured against the default on the real link and lost (4 or 16 rows a level, 2 or 4 levels; `docs/invariants/
+scheduling.md` § "Rows and levels, a third time"), and both of this computer's steps already run at llama.cpp's speed
+on this card (its 26 layers ~1.0 ms a layer against ~0.93 scaled; a drafter level ~4.5 ms against ~4.1). So what is
+left is not a kernel and not a shape:
+
+1. **The order** (#462): `flowed_ms` = drafting + layers to 0.2% — this computer drafts (~14.5 ms), then runs its
+   layers (~26), never both. The next call's levels grow from leaves already drafted, so they could run during this
+   forward's layers: one forward ≈ 28 ms, the far end's 30 then the limit — up to ~1.3x. The catch: drafter and
+   segment are two processes, two time-sliced contexts on one card. llama.cpp's 0.5B takes 3.1 ms for ONE row with
+   its graphs, so a level is mostly the card's own latency over ~300 small kernels, not host gaps — two processes
+   would overlap little of it; kernels side by side need a second stream in one process, against the one-stream rule.
+2. **The balance** (#411 "Also"): the planner fills this computer's card without counting that it also drafts. At
+   ~21-22 layers here instead of 26 each side would take ~36 ms (~+12%) — unmeasured: forcing that split point grew
+   the far computer's copy onto its processor (#461), so it is measured only where the far copy CONTAINS the range.
+3. **Fewer serial drafter forwards for the same depth** — code needs the depth (a level fewer cost 27% of its tokens
+   a forward), and every level is one more ~4.5 ms launch-bound forward of the 0.5B: a one-layer head (EAGLE, a
+   file's MTP head as in § 14) or a block drafter (#428) gives depth without the 24-layer stack per level.
+
 ## Sources
 
 Petals 2312.08361 · Pope et al. 2211.05102 · StagFormer 2501.15665 · Layer
