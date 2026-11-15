@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #462**). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #463**). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -5350,6 +5350,33 @@ against llama.cpp 0.3.16, then flip `is_supported` and re-read `arch_supports_hy
 StarCoder2, inert while refused).
 
 ### Memory and admission
+
+#### #462 — A flowing split drafts, then runs this node's layers, one after the other: overlap them
+`P2` · perf-split · **OPEN** (conceptual — measure the card's idle time first) — 2026-11-15 · evidence: `docs/invariants/scheduling.md` § "Rows and levels, a third time"
+
+**Seen** (the 14B half and half to Australia, 8 × 3 flow, server-timed, 2026-11-15): the flow never waits for the far
+computer, and this node's time is exactly its two steps in series — `flowed_ms` = `drafting_ms` + `near_ms` to within
+0.2% (8,965 = 3,227 + 5,723): ~14.5 ms of drafting then ~26 ms of its 26 layers a forward, against the far end's ~30.
+Neither step is slow for its work (both within ~10-15% of llama.cpp on this card), every rows/levels knob loses to the
+default, and a level fewer saves its ~4.5 ms but loses a code reply's depth. What is left is the ORDER: the drafter's
+next levels grow from leaves it already drafted, not from the near forward's output, so drafting call k+1 can run while
+forward k's layers do. Bound: one forward ≈ max(26, 14.5) + overheads ≈ 28 ms here, so the far end's ~30 ms becomes the
+limit — up to ~1.3× on prose and code alike, before the layer balance (#411 "Also").
+
+**The catch is the one card.** The drafter is a guest worker (its own process, so its own CUDA context) and the near
+segment another: two contexts are time-sliced, never run kernels side by side, so overlapping the two IPC calls buys
+only what the card sits idle inside a drafter call (host walks between levels, the rank read-back, the IPC hop) — and
+inside one process the ONE-stream-per-device rule (`arch-inference.md`) forbids the second stream that would let the
+drafter's small launches run beside the near layers' large ones. **So measure first**: the card's busy time inside a
+drafter call (CUDA events around each level, or `nsys` on the rig) against its 14.5 ms wall. Mostly idle → overlap the
+calls (daemon-side in `dsd_flow`, a stale call dropped at a rebase like an answer from before it); mostly busy →
+the gain needs the drafter in the near segment's process on a second stream, a larger change to weigh against the rule's
+reasons (graph capture, one sync point).
+
+Prior art: PEARL (arXiv 2408.11850, ICLR 2025) names it "mutual waiting" — the target idle while the draft drafts and the
+reverse — and its post-verify keeps drafting while the target verifies (up to 1.5× over plain speculation); PipeInfer
+(2407.11798) and AMUSD (2410.17375) run draft and verify concurrently on separate devices. None of them shares one card
+between the two; here they would.
 
 #### #461 — A peer's split that asks a computer for a WIDER range replaces its all-card copy with a mostly-processor one, which then serves every narrower request too
 `P2` · memory / admission · **OPEN** — 2026-11-15 · found on the real link (`real_link.sh` TAG=bal292, a forced split point) · related: #3 (j12), #3 (j13), #449, #458
