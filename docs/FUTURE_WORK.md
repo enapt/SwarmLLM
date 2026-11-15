@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #456**). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #458**). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -5240,7 +5240,7 @@ StarCoder2, inert while refused).
 ### Memory and admission
 
 #### #454 — A long prompt on a split sized for a typical conversation is refused by megabytes, not reloaded with fewer card layers
-`P1` · memory / scheduling · **BUILT, card check open** — 2026-11-15 · from a field report (AU, 12 GB card, Qwen2.5-14B at 47/48 on the card)
+`P3` · memory / scheduling · **FIXED for a whole model (card-checked 2026-11-15); residual (2)-(3)** — 2026-11-15 · from a field report (AU, 12 GB card, Qwen2.5-14B at 47/48 on the card)
 
 **Seen:** first word 4.4 s at 2,066 tokens, 188 s at 4,072, 338 s at 7,064, refused at 9.5k. At 4k the card worker
 evicted its saved prompts (`needed_mb=382 freed_mb=395`) and ~250 ms later a worker loaded the model on the
@@ -5261,11 +5261,42 @@ Tests: `a_whole_placement_fitted_to_a_long_prompt_keeps_room_for_it`,
 whose `num_ctx` is shorter than asked (`server/sched.go` `needsReload`), its GPU layers fitted to that context
 (`llm/memory.go` `EstimateGPULayers`); llama.cpp `common/fit.cpp` (`--fit`) brings the context down to 4,096 before
 layers leave the card — our first load does that, and a longer prompt asks for the room back.
-**Left:** (1) the CARD check — a model admitted whole that its load fits to 4,096 (this 8 GB card: an 8B near its
-line), a prompt past that room served after one reload, mechanism in the log ("loading the model again with room
-for it"); (2) a split's peer segment refused mid-prefill still records no `layers_fitting` (#263 records it only for
+**Card check, run 1 (08:01Z):** Llama-3.1-8B, context 16,384, a 15,283-token prompt. The reload FIRED: the prompt
+was refused at 32 card layers and loaded again with 31. The reloaded load then ran 100 MB short during the prompt's
+first forward. Its placement had been filled to the load's line by the weights and that prompt's cache, and nothing
+was left for the forward's buffers. Fixed: a load fitted to one long prompt keeps `FORWARD_BUFFER_RESERVE_BYTES` off
+the line too (`hybrid::SplitCard::for_one_long_prompt`, `docs/invariants/memory.md`).
+**Card check, run 2 (08:19Z, the same rig with that fix, `~/swarmllm-gate/ab-1115/longprompt_swap.sh`):** PASS.
+Both long prompts (15,285 and 15,248 tokens) were ANSWERED after one reload: refused at 32 card layers, loaded again
+with 29 (layers 3..6 on the processor), asked again. With the reload off (`SWARMLLM_LONG_PROMPT_RELOAD=0`) both were
+refused, as before. The short prompts were answered in both arms. Slow, though: first word 135 s and 101 s, the
+prompt pass alone 81 s and 63 s — #456 and #457.
+**Left:** (2) a split's peer segment refused mid-prefill still records no `layers_fitting` (#263 records it only for
 the up-front admission) — the reload covers the whole-model generate only; (3) what loaded the processor-only copy the
 report saw is NOT found in code (traced 2026-11-15: `cpu_reason` never reads a refusal).
+
+#### #456 — After a long prompt on a card-guessing split, the first word waits 35-52 s with nothing logged
+`P1` · inference / speed · **OPEN** — 2026-11-15 · from #454's card check run 2
+
+**Seen** (Llama-3.1-8B, 29/32 on this node's RTX 3070 Laptop, layers 3..6 on the processor, a lone request, so it
+guesses — gotcha #1104): the prompt pass ended (`forward_ms=80709`, 15,285 tokens) at 08:21:09, and the next lines
+are `card guesses: the prior fitted on the reply's first step` at 08:22:01 and the first decode step. The second
+prompt: 08:23:09 → 08:23:44 (35 s). The prior's own fit took 2.5 s and 1.2 s of those gaps (`fit_ms_total`). The
+client's first word came at the gap's end. `CardGuesses::take_the_prompt` says the first token is out before the
+fit; the client saw otherwise. **Hypotheses, unmeasured:** `RunStandIn::rows_of` / `learn_rows` over the whole
+prompt's rows, or the prompt pass's capture. **Next:** the rig with `SWARMLLM_CARD_GUESSES=0` and
+`SWARMLLM_CARD_GUESS_PRIOR=0` (rule 1: does the gap go with it?), then time inside `learn_the_prompt`.
+
+#### #457 — A card/processor split reads a long prompt at ~125 tokens a second past ~10,000 tokens
+`P2` · inference / speed · **OPEN** — 2026-11-15 · from #454's card check run 2
+
+**Seen** (the same run, 477-token chunks): 0 → 9,553 tokens in 18 s (~530 tok/s, a 6.7 s stall at ~2k), then
+10,030 → 14,807 in 49 s — each 477-token chunk 3.5-6.9 s, growing with depth. The three processor-held layers read
+each chunk on the card with their cache kept on the processor (`arch-inference.md` § "A card/processor split
+multiplies a prompt on the card", 1c: history goes up each chunk); the card's room after the long prompt's
+reservation held the chunk to 477. **Hypotheses, unmeasured:** the history upload growing per chunk, a pool growth
+stall per chunk under WSL2 (gotcha #883's shape), or a layer that left the card silently. **Next:**
+`SWARMLLM_PROFILE` on one chunk at 12k against one at 2k.
 
 #### #455 — A split's saved prompt is planned against the card alone; its processor share is bounded only afterwards
 `P3` · memory · **OPEN** — 2026-11-15 · from the pre-release review of #454's partial fix (gotcha #1105)

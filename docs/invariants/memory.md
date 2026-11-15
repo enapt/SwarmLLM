@@ -5583,7 +5583,26 @@ for 4,096 splits it for 8,192.
 - not for a placement its load did not fit;
 - kept while another request is in flight, with its next load fitted.
 
-The card check is open (FUTURE_WORK #454 Left (1)).
+**The load fitted to the prompt keeps the forward's buffers beneath the load's line too**
+(`hybrid::split_room_bytes` with `SplitCard::for_one_long_prompt`; `whole_placement_short_by_bytes` adds
+`FORWARD_BUFFER_RESERVE_BYTES`). Elsewhere the line's 15% covers them, because a cache sized to the context is
+rarely filled. A reload is sized to the very prompt it was refused, so it has nothing left over. The first card
+check found this (2026-11-15 08:01Z, this node's RTX 3070 Laptop, Llama-3.1-8B, context 16,384, a 15,283-token
+prompt):
+- The reload fired. The prompt was refused at 32 card layers, 177 MB short, and the model was loaded again with 31.
+- The new load's cache budget was 2,017 MB.
+- During the prompt's first forward the card had room for 1,760 MB of cache, against the 1,860 MB needed, so
+  the prompt was refused again.
+- The forward held 239 MB more in the pool, and first use took ~130 MB outside it.
+
+llama.cpp's fitting counts the compute buffers it measures and keeps 1 GiB free on top (`common/fit.cpp`,
+`fit_params_target`). Tests: `a_split_sized_to_one_long_prompt_keeps_its_forward_beneath_the_line`. In the
+long-prompt test above, the fitted placement keeps fewer card layers than a split filled to the line. Both fail
+with the reserve off.
+
+**Card check, run 2 (08:19Z, with the reserve): PASS.** Both long prompts (15,285 and 15,248 tokens) were refused
+at 32 card layers, loaded again with 29 and answered; with `SWARMLLM_LONG_PROMPT_RELOAD=0` both were refused. The
+answers were slow (first word 135 s and 101 s): FUTURE_WORK #456 and #457.
 
 ## A split's processor share is charged to the machine (2026-10-13, FUTURE_WORK #264)
 

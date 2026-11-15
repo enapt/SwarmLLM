@@ -3973,6 +3973,7 @@ fn whole_placement_short_by_bytes(
     layer_weights: &[u64],
     positions: u64,
     load_reads_free_bytes: u64,
+    one_long_prompt: bool,
 ) -> u64 {
     use crate::inference::split::kv_budget::{weights_and_caches_room, VRAM_HEADROOM_PCT};
     let at_positions = crate::model::auto_manage::vram::VramFootprintInputs {
@@ -3982,10 +3983,18 @@ fn whole_placement_short_by_bytes(
     let laid = layer_weights
         .iter()
         .fold(0u64, |sum, &bytes| sum.saturating_add(bytes));
+    // A load fitted to the one prompt it was refused keeps that prompt's
+    // forward buffers too, as its split would (`hybrid::split_room_bytes`).
+    let forward = if one_long_prompt {
+        crate::inference::split::hybrid::FORWARD_BUFFER_RESERVE_BYTES
+    } else {
+        0
+    };
     let needs = inputs
         .card_weight_bytes()
         .max(laid.saturating_add(inputs.head_bytes))
-        .saturating_add(card_kv_bytes_of_split(&at_positions));
+        .saturating_add(card_kv_bytes_of_split(&at_positions))
+        .saturating_add(forward);
     if needs <= weights_and_caches_room(load_reads_free_bytes) {
         return 0;
     }
@@ -4155,12 +4164,15 @@ fn whole_placement_reads_the_card(
 /// [`card_split`] in `room_mb` of the card and, for a spawn, the free memory
 /// its load reads (`SplitCard::read_by_the_load`; a plan has only the room) —
 /// the sizing every split admitted short of the card shares with a whole
-/// placement the load would leave too little (#322).
+/// placement the load would leave too little (#322). `one_long_prompt`: the
+/// placement is fitted to one prompt a worker refused, and keeps its forward's
+/// buffers off the load's line (`SplitCard::for_one_long_prompt`, #454).
 fn split_in_room(
     inputs: &crate::model::auto_manage::vram::VramFootprintInputs,
     mut layers: LayerBytes,
     room_mb: u64,
     load_reads_free_bytes: Option<u64>,
+    one_long_prompt: bool,
 ) -> Option<CardSplit> {
     use crate::inference::split::hybrid::SplitCard;
     // A/B inside one binary: `0` places a mixture-of-experts model by whole
@@ -4172,6 +4184,11 @@ fn split_in_room(
     let card = match load_reads_free_bytes {
         Some(free) => SplitCard::read_by_the_load(room, free),
         None => SplitCard::room(room),
+    };
+    let card = if one_long_prompt {
+        card.for_one_long_prompt()
+    } else {
+        card
     };
     card_split(inputs, &layers, card)
 }
@@ -5529,7 +5546,7 @@ impl ModelProcessPool {
             return None;
         }
         let (inputs, layers) = self.segment_geometry(model_id, segment)?;
-        split_in_room(&inputs, layers, available_mb, load_reads_free_bytes)
+        split_in_room(&inputs, layers, available_mb, load_reads_free_bytes, false)
     }
 
     /// The `--gpu-layers` value a worker for `model_id` should be spawned with.
@@ -8118,11 +8135,13 @@ impl ModelProcessPool {
             requester,
         } = refit;
         let positions = kv.positions(&inputs);
+        let one_long_prompt = matches!(kv, KvCharge::LongPrompt(_));
         let short_by = whole_placement_short_by_bytes(
             &inputs,
             &layers.weights,
             positions,
             load_reads_free_bytes,
+            one_long_prompt,
         );
         if short_by == 0 {
             return charged;
@@ -8155,7 +8174,13 @@ impl ModelProcessPool {
         // Sized to keep the spawn's cache, not the full context (llama.cpp's
         // order: the context comes down before layers leave the card).
         inputs.effective_context = inputs.effective_context.min(positions);
-        let sized = split_in_room(&inputs, layers, room_mb, Some(load_reads_free_bytes));
+        let sized = split_in_room(
+            &inputs,
+            layers,
+            room_mb,
+            Some(load_reads_free_bytes),
+            one_long_prompt,
+        );
         let Some(sized) = sized.filter(|split| split.is_short_of_the_card()) else {
             add_reserved(&self.vram_reserved_mb, model_id, charged_vram_mb);
             match sized {
@@ -21963,7 +21988,8 @@ mod admission_tests {
             fourteen_b_spawned_whole("fourteen-b-whole", 100_000).await;
         let segment = (0, 48);
         let (inputs, layers) = p.segment_geometry(&m, Some(segment)).unwrap();
-        let short = whole_placement_short_by_bytes(&inputs, &layers.weights, 4_096, 10_400 * MIB);
+        let short =
+            whole_placement_short_by_bytes(&inputs, &layers.weights, 4_096, 10_400 * MIB, false);
         assert!(
             short > 0,
             "fixture: the load's line cannot hold 4,096 tokens beside it"
@@ -22009,7 +22035,7 @@ mod admission_tests {
         let Some(CardSplit::Layers {
             on_card: at_full_context,
             ..
-        }) = split_in_room(&inputs, layers, 10_500, Some(10_400 * MIB))
+        }) = split_in_room(&inputs, layers, 10_500, Some(10_400 * MIB), false)
         else {
             panic!("a split at the full context");
         };
@@ -22072,11 +22098,13 @@ mod admission_tests {
         let read_mb = (10_000..16_000)
             .step_by(50)
             .find(|&mb| {
-                whole_placement_short_by_bytes(&inputs, &layers.weights, 4_096, mb * MIB) == 0
+                whole_placement_short_by_bytes(&inputs, &layers.weights, 4_096, mb * MIB, false)
+                    == 0
             })
             .expect("fixture: some reading keeps room for a typical conversation");
         assert!(
-            whole_placement_short_by_bytes(&inputs, &layers.weights, 8_192, read_mb * MIB) > 0,
+            whole_placement_short_by_bytes(&inputs, &layers.weights, 8_192, read_mb * MIB, false)
+                > 0,
             "fixture: ...and not for 8,192 positions"
         );
         // Typical: whole, as before.
@@ -22121,6 +22149,23 @@ mod admission_tests {
             );
         };
         assert!(on_card < 48, "{on_card}");
+        // ...and keeps that prompt's forward buffers off the load's line.
+        // Filled to the line by the weights and the prompt's cache alone, the
+        // reload on this node's 8 GB card was refused again by the prompt's
+        // first forward (#454's card check, `hybrid::split_room_bytes`).
+        let (mut at_prompt, layers_again) = p.segment_geometry(&m, Some(segment)).unwrap();
+        at_prompt.effective_context = at_prompt.effective_context.min(8_192);
+        let Some(CardSplit::Layers {
+            on_card: to_the_line,
+            ..
+        }) = split_in_room(&at_prompt, layers_again, 10_500, Some(read_mb * MIB), false)
+        else {
+            panic!("a split filled to the line");
+        };
+        assert!(
+            on_card < to_the_line,
+            "{on_card} layers keeping the forward's buffers vs {to_the_line} to the line"
+        );
         assert!(
             placement_told(&mut worker_end).await.is_some(),
             "told before its load"

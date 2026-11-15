@@ -73,6 +73,10 @@ pub(crate) struct SplitCard {
     /// The card's free memory as the worker's load will read it, in bytes;
     /// `None` where no worker was asked (a plan, a growth).
     pub(crate) load_reads_free_bytes: Option<u64>,
+    /// The placement is sized to ONE long prompt a worker refused
+    /// (`KvCharge::LongPrompt`, #454): its forward's buffers come off the
+    /// load's line too ([`split_room_bytes`]).
+    pub(crate) sized_to_one_prompt: bool,
 }
 
 impl SplitCard {
@@ -82,6 +86,7 @@ impl SplitCard {
         Self {
             room_bytes,
             load_reads_free_bytes: None,
+            sized_to_one_prompt: false,
         }
     }
 
@@ -90,6 +95,15 @@ impl SplitCard {
         Self {
             room_bytes,
             load_reads_free_bytes: Some(free_bytes),
+            sized_to_one_prompt: false,
+        }
+    }
+
+    /// The same card, for a placement sized to one long prompt (#454).
+    pub(crate) fn for_one_long_prompt(self) -> Self {
+        Self {
+            sized_to_one_prompt: true,
+            ..self
         }
     }
 }
@@ -124,11 +138,29 @@ impl SplitCard {
 /// as Ollama's server asks its runner to fit a layout before it allocates
 /// (`llm.LoadOperationFit`, v0.11.5) and llama.cpp's own fitting reads the
 /// device it is about to fill (`common/fit.cpp`, `--fit-target`).
+///
+/// **A placement sized to one long prompt keeps the forward's buffers off the
+/// load's line as well** ([`SplitCard::for_one_long_prompt`], #454). Elsewhere
+/// the line's 15% stands in for them: the cache is sized to the context, and a
+/// prompt rarely fills it. A reload fitted to the prompt it was refused leaves
+/// nothing over. Measured 2026-11-15 on this node's 8 GB card, Llama-3.1-8B,
+/// context 16,384: the load read 7,730 MB free, and one layer moved to the
+/// processor gave a 2,017 MB cache budget for a 15,283-token prompt. Once the
+/// prompt's first forward ran, the card had room for 1,760 MB of cache, and it
+/// needed 1,860. The prompt was refused again after the reload. llama.cpp's
+/// fitting counts the compute buffers it measures and keeps 1 GiB free on top
+/// (`common/fit.cpp`, `fit_params_target`).
 pub(crate) fn split_room_bytes(card: SplitCard) -> u64 {
     let load_reads = card.load_reads_free_bytes.unwrap_or(card.room_bytes);
+    let line = super::kv_budget::weights_and_caches_room(load_reads);
+    let line = if card.sized_to_one_prompt {
+        line.saturating_sub(FORWARD_BUFFER_RESERVE_BYTES)
+    } else {
+        line
+    };
     card.room_bytes
         .saturating_sub(FORWARD_BUFFER_RESERVE_BYTES)
-        .min(super::kv_budget::weights_and_caches_room(load_reads))
+        .min(line)
 }
 
 /// Where the share of a whole model's layers that starts its processor-held
@@ -745,6 +777,34 @@ mod tests {
         assert!(
             split_room_bytes(SplitCard::read_by_the_load(room, 5_000 * MB)) < unasked,
             "a card taken since the room was read shrinks the share"
+        );
+    }
+
+    /// **A placement sized to one long prompt keeps its forward's buffers
+    /// beneath the load's line** (#454). Measured on this node's 8 GB card
+    /// (2026-11-15): the load read 7,730 MB free, and a split filled to the
+    /// line kept 2,017 MB for a 15,283-token prompt's cache. Its first
+    /// forward left room for 1,760 MB of the 1,860 it needed. Every other
+    /// split keeps the line as it was, and the room still binds where it is
+    /// the smaller.
+    #[test]
+    fn a_split_sized_to_one_long_prompt_keeps_its_forward_beneath_the_line() {
+        let room = 7_060 * MB;
+        let read = SplitCard::read_by_the_load(room, 7_730 * MB);
+        let line = super::super::kv_budget::weights_and_caches_room(7_730 * MB);
+        assert_eq!(split_room_bytes(read), line, "every other split: the line");
+        assert_eq!(
+            split_room_bytes(read.for_one_long_prompt()),
+            line - FORWARD_BUFFER_RESERVE_BYTES,
+            "one long prompt: the line less the forward's buffers"
+        );
+        let unasked = SplitCard::room(2 * GB);
+        assert_eq!(
+            split_room_bytes(unasked.for_one_long_prompt()),
+            split_room_bytes(unasked).min(
+                super::super::kv_budget::weights_and_caches_room(2 * GB)
+                    - FORWARD_BUFFER_RESERVE_BYTES
+            ),
         );
     }
 
