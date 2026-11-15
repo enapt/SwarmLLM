@@ -764,6 +764,27 @@ pub(super) const COOLED_COPIES: usize = 2;
 /// (a holder above it gone, unannounced) is the case the second copy and the
 /// execution's re-check of the live holders cover.
 pub(super) fn keeps_a_cooled_copy(model: &ModelId, holders: &[NodeId], node: &NodeId) -> bool {
+    holders_ranked_above(model, holders, node) < COOLED_COPIES
+}
+
+/// Does `node` keep the FIRST of a cooled part's copies — no holder it sees
+/// ranks above it for the model? That copy stays for the quiet week whatever
+/// room another model asks (`prune::cooled_copy_kept_because`; pre-release
+/// review 2026-11-15): with both keepers full and a room asked on each, the
+/// two gave the last copies back in the same pass. Each holder judges by the
+/// holders it sees, so the one ranked first among them all always keeps its
+/// copy; a stale view only keeps more (HDFS deletes a block's excess replicas
+/// down to its minimum, never the last).
+pub(super) fn keeps_the_first_cooled_copy(
+    model: &ModelId,
+    holders: &[NodeId],
+    node: &NodeId,
+) -> bool {
+    holders_ranked_above(model, holders, node) == 0
+}
+
+/// How many distinct `holders` rank above `node` for `model` ([`rendezvous`]).
+fn holders_ranked_above(model: &ModelId, holders: &[NodeId], node: &NodeId) -> usize {
     let weight = rendezvous(model, node);
     let mut above: Vec<&NodeId> = holders
         .iter()
@@ -771,7 +792,7 @@ pub(super) fn keeps_a_cooled_copy(model: &ModelId, holders: &[NodeId], node: &No
         .collect();
     above.sort_by_key(|n| n.0);
     above.dedup();
-    above.len() < COOLED_COPIES
+    above.len()
 }
 
 /// The layer ranges of `parts` of `manifest`.

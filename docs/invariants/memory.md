@@ -1479,10 +1479,14 @@ parts. it needs to be smart".
    a model three computers hold whole keeps two whole copies on two of them, never its parts
    scattered over three; a holder gives back only once two holders it ranks above itself hold the
    part, so the first two, which see fewer above them, never do). The download pass asks the same
-   (`cooled_copy_kept_because`: a part not held here is never fetched). Those two copies go only
-   for the room a part somebody wants asks for (`RoomAsk`, not of its own model), and only where
-   an origin could give them back (`SharedState::can_fetch_shard_from_origin`, else
-   `KEPT_NO_ORIGIN`) — `prune::room_order` gives such copies back after what goes anyway and
+   (`cooled_copy_kept_because`: a part not held here is never fetched). The FIRST of the two stays
+   for the week whatever room is asked (`coverage::keeps_the_first_cooled_copy`,
+   `KEPT_AS_THE_FIRST_COOLED_COPY`, re-checked at execution against the live holders — pre-release
+   review 2026-11-15: with both keepers full and a room asked on each, the two gave a model's last
+   copies back in the same pass; HDFS deletes excess replicas down to its minimum, never the last).
+   The SECOND goes only for the room a part somebody wants asks for (`RoomAsk`, not of its own
+   model), and only where an origin could give it back (`SharedState::can_fetch_shard_from_origin`,
+   else `KEPT_NO_ORIGIN`) — `prune::room_order` gives such copies back after what goes anyway and
    before the copies the replica count keeps, the model quiet the LONGEST first
    (`CooledCopy::Kept { quiet_since }`) and one model's parts together, so a room leaves at most
    one model partly held; the room is still all or nothing (`room_this_pass_could_make`, which

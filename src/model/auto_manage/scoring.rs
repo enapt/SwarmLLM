@@ -2313,6 +2313,67 @@ mod fetch_what_prune_keeps {
         assert!(record(&only_here).is_some_and(|r| r.gave_back_unused == 0));
     }
 
+    /// The first of a cooled part's two copies stays for the week whatever
+    /// room another model asks; the second goes for it where an origin could
+    /// give it back (pre-release review 2026-11-15: with both keepers full and
+    /// a room asked on each, the model's last copies went in the same pass).
+    #[test]
+    fn a_room_ask_takes_the_second_cooled_copy_never_the_first() {
+        use crate::model::auto_manage::manager::{RoomFor, RoomWanted};
+        use crate::model::auto_manage::unused::Verdict;
+        let (state, manager) = manager_with(Config::default());
+        let local = state.identity.node_id().clone();
+        let pair = [local.clone(), NodeId([10; 32])];
+        let first_here = |name: &str| {
+            crate::model::auto_manage::coverage::keeps_the_first_cooled_copy(
+                &ModelId(name.into()),
+                &pair,
+                &local,
+            )
+        };
+        let first_name = (0..256)
+            .map(|i| format!("first-{i}-q4"))
+            .find(|name| first_here(name))
+            .expect("a model this computer ranks first for");
+        let second_name = (0..256)
+            .map(|i| format!("second-{i}-q4"))
+            .find(|name| !first_here(name))
+            .expect("a model the other computer ranks first for");
+        let first = model_nobody_runs(&state, &manager, &first_name, 3);
+        let second = model_nobody_runs(&state, &manager, &second_name, 3);
+        close_peer_holding(&state, 10, &first, 0);
+        close_peer_holding(&state, 10, &second, 0);
+        swarm_says(&state, &[]);
+        for mid in [&first, &second] {
+            assert_eq!(manager.unused_verdict(mid, 0.0), Verdict::Cooled, "{mid:?}");
+        }
+        let shed = |mid: &ModelId| {
+            manager.would_shed_copy(
+                &ShardId {
+                    model_id: mid.clone(),
+                    index: 0,
+                },
+                &pair,
+                0.0,
+                &[],
+            )
+        };
+        assert!(
+            !shed(&first) && !shed(&second),
+            "control: with no room asked, both copies a part keeps stay"
+        );
+        *manager.room_wanted.lock().unwrap() = Some(RoomWanted {
+            bytes: 1,
+            floor: 2,
+            model: ModelId("wanted-q4".into()),
+            demand: 1.0,
+            why: RoomFor::Hole,
+            noted: std::time::Instant::now(),
+        });
+        assert!(shed(&second), "the second copy goes for the room");
+        assert!(!shed(&first), "the first stays for the week");
+    }
+
     /// A part in the range the operator configured (`--shards`) is their
     /// explicit choice: kept past the use rule, cooled or unused, as a model
     /// its owner chose is (review 2026-11-15 — the cooled step would have

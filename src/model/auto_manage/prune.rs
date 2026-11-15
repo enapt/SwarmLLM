@@ -247,6 +247,11 @@ const KEPT_AS_A_COOLED_COPY: &str =
 /// never lets go of the last copies of something it could not fetch again.
 const KEPT_NO_ORIGIN: &str =
     "nobody runs its model, but no origin could give it back, and this is one of its last copies";
+/// The first of those two copies (`coverage::keeps_the_first_cooled_copy`):
+/// no room another model asks takes it within the week, so a cooled model
+/// keeps a copy of each part until nobody has run it for the week.
+const KEPT_AS_THE_FIRST_COOLED_COPY: &str =
+    "nobody ran its model lately, and this is the copy of the part the swarm keeps for the week";
 
 /// How often prune says why it gave nothing back while a part asks for room,
 /// and the download pass repeats which part asks (`due_when_changed_or_every`).
@@ -1179,7 +1184,16 @@ impl AutoShardManager {
                     &current_holder_ids,
                     &local_node_id,
                 ),
-                Some(CooledCopy::Kept { .. }) => candidate.to_make_room,
+                // ...and never once this holder has become the first of them
+                // (the one above it gone since the scan).
+                Some(CooledCopy::Kept { .. }) => {
+                    candidate.to_make_room
+                        && !super::coverage::keeps_the_first_cooled_copy(
+                            &candidate.model_id,
+                            &current_holder_ids,
+                            &local_node_id,
+                        )
+                }
                 None if candidate.to_make_room => current_holders > floor_for_room,
                 None => current_holders > effective_target as usize,
             };
@@ -2233,6 +2247,15 @@ impl AutoShardManager {
             return None;
         }
         if room.is_some_and(|r| r.model != Some(&shard_id.model_id)) {
+            // The first of the two stays for the week whatever the room: both
+            // keepers full at once gave the model's last copies back together.
+            if super::coverage::keeps_the_first_cooled_copy(
+                &shard_id.model_id,
+                holders,
+                self.shared_state.identity.node_id(),
+            ) {
+                return Some(KEPT_AS_THE_FIRST_COOLED_COPY);
+            }
             return (!self
                 .shared_state
                 .can_fetch_shard_from_origin(&shard_id.model_id))

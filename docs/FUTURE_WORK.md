@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #455**). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #456**). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -905,8 +905,10 @@ frame, then add a receipt ACK or a per-frame read deadline mirroring request-res
 > quiet for `unused::quiet_window_secs` — **1 day** from disk pressure 0.8, **2 days** below — every
 > copy of each part goes but TWO, kept by the part's live holders ranked first for the MODEL
 > (`coverage::keeps_a_cooled_copy`, rendezvous by model, so a model held whole keeps two whole copies);
-> none is fetched; those go only for a room another model's part asks (`prune::room_order`: the
-> model quiet the longest first, its parts together) and only where an origin could give them back.
+> none is fetched; the first of the two stays for the week (`coverage::keeps_the_first_cooled_copy`,
+> pre-release review 2026-11-15: both keepers full at once gave the last copies back together), the
+> second goes only for a room another model's part asks (`prune::room_order`: the model quiet the
+> longest first, its parts together) and only where an origin could give it back.
 > Quiet for **7 days** at any pressure every copy goes, as before — but the last two of a model no
 > origin could give back (`KEPT_NO_ORIGIN`). First pushed as 6 h and ONE copy; the research run the
 > same morning made it a day and two: day stamps and a daily cycle made 6 h give back and re-fetch a
@@ -5264,6 +5266,18 @@ processor path. **Prior art:** Ollama reloads a runner whose `num_ctx` differs, 
 context (`server/sched.go` `needsReload`, `llm/memory.go` `EstimateGPULayers`); llama.cpp's `common/fit.cpp`
 (`--fit`) fits `n_gpu_layers` to the context at load. Both size layers BY the context; neither runs a long prompt
 on the processor while the card holds the model.
+
+#### #455 — A split's saved prompt is planned against the card alone; its processor share is bounded only afterwards
+`P3` · memory · **OPEN** — 2026-11-15 · from the pre-release review of #454's partial fix (gotcha #1105)
+
+`model_worker::room_beside_live` plans a snapshot's positions in the model's own memory (`model.kv_home()`, the
+card for a card/processor split) with that memory's growth per position. The snapshot copies every layer, so its
+processor layers' copies (f32, ~0.16 MB a position on a 14B 28/20) land in machine memory unplanned. Before
+gotcha #1105's fix the whole snapshot was charged to the card, which bounded them by accident. Now they are bounded
+by the cache's own 2 GB total (`inference.prefix_cache_max_mb`) and by the next machine-side claim, which charges
+`external_in(Host)` and asks the evictor for that memory. Not seen to fail. **Build:** plan the room in each memory
+the model charges (`SplitModel::kv_homes`) and keep the fewest positions, the eviction in the memory that binds.
+**Prior art:** vLLM's CPU offload sizes its own block pool apart from the GPU's (`--swap-space`).
 
 #### #376 — A near-full card loses a split's drafter to the processor: the planner's room for it is about a layer too generous
 `P2` · memory / scheduling · **PARTIAL** — 2026-10-30 · history: #275, #342's residual
