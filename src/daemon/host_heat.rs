@@ -31,9 +31,12 @@
 //! the dispatcher reads before it starts a peer's request (`dispatch::
 //! admits_a_new_request`), and the capability reads for `can_serve_inference`
 //! — so planners leave this node out, and a peer that asks anyway is refused
-//! out loud, with no penalty to anyone. The owner's own requests and serving
-//! the model pieces it holds go on (pacing the owner's is the next step of
-//! #440). The owner is told once per change, in their words.
+//! out loud, with no penalty to anyone. The owner's own requests go on, paced
+//! to half speed while the hold lasts ([`SharedState::host_heat_hold_now`] →
+//! `ModelProcessPool::pace_steps` → `inference::pace`, #440 step 4), and
+//! serving the model pieces it holds goes on. The owner is told once per
+//! change, in their words. ⚠ Under WSL2 no processor sensor is visible
+//! (`inference::thermal`), so there only the card can start a hold.
 //!
 //! **Work already running for other computers stops too** once the hold has
 //! lasted [`RUNNING_WORK_STOPS_AFTER`], and at once when the driver stops
