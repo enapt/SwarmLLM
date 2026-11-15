@@ -1,5 +1,36 @@
 # Changelog
 
+## [0.3.290-alpha] — 2026-11-15
+
+**A full computer makes room within a day, and no longer deletes a quiet model from every computer at once.** On a
+computer whose model storage is 80% full or more, a model nobody has run for a day (two days below that; it was two
+and seven) now gives back every copy of its parts but two (#452). The two computers every holder agrees on for that
+model keep theirs, so the model still runs when someone asks. The first of those copies stays until nobody has run
+the model for a week. The second may go sooner, when another model someone uses needs the room and the parts can be
+fetched again from where they came from. A model nobody runs is not downloaded again until someone does. Before,
+every computer holding a quiet model gave it back in the same pass.
+
+**A model you downloaded yourself no longer stays forever on a full computer.** Once storage is 80% full or more and
+nobody has run it on this computer for 30 days, it is treated like any other model: it stays listed, and its parts
+come back when it is used. "Keep on this computer", your default model and a model you turned privacy on for
+yourself never lapse. The earliest of these falls on 2026-12-01.
+
+**Long prompts on a model split between the graphics card and the processor no longer throw away saved prompts for
+room the card never gets.** A computer keeps recent prompts so that a conversation's next turn is not read again
+from the start. On a model split between the card and the processor, every memory check counted a saved prompt's
+processor half as card memory. So a long prompt let go of every saved prompt and was refused a few milliseconds later
+anyway: a 14B on an 8 GB card gave up 991 MB of saved prompts, and only 408 MB of that was card memory. Each memory is
+now charged only what it holds. On the same 14B, saved prompts were let go for 2 of 7 long prompts instead of 5, and a
+4,300-token prompt's first word came in 6.6 seconds instead of 15.5 (one run each). A prompt much longer than the
+typical conversation the split was sized for is still refused, rather than reloaded with fewer layers on the card
+(#454).
+
+**A request alone on its computer always uses speculative guessing.** Speculative guessing drafts a few words ahead
+and has the model check them at once. Before, a run of replies whose guesses paid poorly (prose, typically) could keep
+the next 25 or so requests of a script, code included, at plain speed. When nothing else runs beside a request, a
+wrong guess costs nothing: a 9B wrote 52.4 tokens a second guessing against about 52 without. Where requests
+overlap, the measured payoff still decides, since a guessing reply holds the computer until it ends.
+
 ## [0.3.289-alpha] — 2026-11-15
 
 **A full computer gives back models nobody runs within two days, not two weeks.** Most computers on the network are at
