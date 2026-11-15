@@ -1121,11 +1121,12 @@ pub struct KvCacheStore {
     /// TTL for abandoned cache entries.
     ttl: std::time::Duration,
     /// Device bytes held by something OTHER than live request caches that the
-    /// KV budget must still see — the prefix cache's snapshots. Set by the
-    /// worker whenever that cache changes (gotcha #440); read into
-    /// `KvOccupancy::external_bytes` so the per-chunk head-room guard charges
-    /// it too.
-    external_reserved: std::sync::atomic::AtomicU64,
+    /// KV budget must still see — the prefix cache's snapshots — by the
+    /// memory they are in ([`KvHome::index`]: a card/processor split's
+    /// snapshot is in both, #262). Set by the worker whenever that cache
+    /// changes (gotcha #440); read into `KvOccupancy::external_in` so the
+    /// per-chunk head-room guard charges each budget its own.
+    external_reserved: [std::sync::atomic::AtomicU64; 2],
     /// How to give some of that external memory back: evicts at least the
     /// asked-for bytes of cached prompts if it can, updates
     /// `external_reserved`, and returns what it freed. Installed by the
@@ -1267,9 +1268,10 @@ pub(crate) fn forward_was_cancelled(e: &crate::error::SwarmError) -> bool {
     matches!(e, crate::error::SwarmError::Inference(m) if m == CANCELLED_MID_FORWARD)
 }
 
-/// Frees at least the asked-for bytes of externally held device memory if it
-/// can, keeps `external_reserved` current, and returns what it freed.
-pub type ExternalEvictor = Box<dyn Fn(u64) -> u64 + Send + Sync>;
+/// Frees at least the asked-for bytes of externally held memory IN the given
+/// memory if it can, keeps `external_reserved` current, and returns what it
+/// freed there — never what it freed elsewhere (#262).
+pub type ExternalEvictor = Box<dyn Fn(u64, KvHome) -> u64 + Send + Sync>;
 
 /// Why a growth claim was refused: what the device held when it was asked,
 /// DECOMPOSED.
@@ -1319,7 +1321,7 @@ pub(crate) struct KvCacheEntry {
 /// vLLM keeps one block pool per device for the same reason, and Ollama weighs
 /// a split's processor share against the machine's memory, not the card's.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum KvHome {
+pub enum KvHome {
     Card,
     Host,
 }
@@ -1366,9 +1368,13 @@ pub struct KvOccupancy {
     pub used_bytes: u64,
     /// Sequence positions written across every entry and layer.
     pub tokens: usize,
-    /// Bytes held on the same device by the prefix cache's snapshots — not
-    /// live requests, but not free either. Charged by the head-room guard.
+    /// Bytes held by the prefix cache's snapshots beside the live caches, on
+    /// EVERY device — not live requests, but not free either. Like
+    /// `allocated_bytes`, a figure to report; a budget reads
+    /// [`Self::external_in`].
     pub external_bytes: u64,
+    /// Of `external_bytes`, the bytes in the machine's memory.
+    pub external_host_bytes: u64,
 }
 
 impl KvOccupancy {
@@ -1377,6 +1383,15 @@ impl KvOccupancy {
         match home {
             KvHome::Card => self.allocated_bytes.saturating_sub(self.host_bytes),
             KvHome::Host => self.host_bytes,
+        }
+    }
+
+    /// The saved prompts' bytes in `home` — what a budget for that memory
+    /// charges for them (#262).
+    pub(crate) fn external_in(&self, home: KvHome) -> u64 {
+        match home {
+            KvHome::Card => self.external_bytes.saturating_sub(self.external_host_bytes),
+            KvHome::Host => self.external_host_bytes,
         }
     }
 
@@ -1471,6 +1486,7 @@ impl KvCacheEntry {
             used_bytes: used,
             tokens,
             external_bytes: 0,
+            external_host_bytes: 0,
         }
     }
 
@@ -1650,7 +1666,10 @@ impl KvCacheStore {
         Self {
             caches: dashmap::DashMap::new(),
             ttl,
-            external_reserved: std::sync::atomic::AtomicU64::new(0),
+            external_reserved: [
+                std::sync::atomic::AtomicU64::new(0),
+                std::sync::atomic::AtomicU64::new(0),
+            ],
             external_evictor: std::sync::Mutex::new(None),
             cancel_oracle: std::sync::Mutex::new(None),
             prompt_progress: std::sync::Mutex::new(None),
@@ -2003,8 +2022,9 @@ impl KvCacheStore {
     ) -> Result<(), ClaimRefused> {
         use super::kv_budget::claim_exceeds_headroom;
         // The prefix cache's snapshots are charged where they are kept beside
-        // the live cache — a processor worker's, so `Host` — and nowhere else.
-        let in_use = |occ: &KvOccupancy| occ.allocated_in(home).saturating_add(occ.external_bytes);
+        // the live cache, each layer's copy to its own memory (#262).
+        let in_use =
+            |occ: &KvOccupancy| occ.allocated_in(home).saturating_add(occ.external_in(home));
         let occ = self.occupancy();
         if !claim_exceeds_headroom(budget_bytes, in_use(&occ), claim) {
             return Ok(());
@@ -2017,9 +2037,9 @@ impl KvCacheStore {
         }
         let occ = self.occupancy();
         let excess = in_use(&occ).saturating_add(claim) - budget_bytes;
-        if occ.external_bytes > 0 {
+        if occ.external_in(home) > 0 {
             let freed = match self.external_evictor.lock() {
-                Ok(slot) => slot.as_ref().map(|f| f(excess)).unwrap_or(0),
+                Ok(slot) => slot.as_ref().map(|f| f(excess, home)).unwrap_or(0),
                 Err(_) => 0,
             };
             if freed > 0 {
@@ -2030,7 +2050,7 @@ impl KvCacheStore {
                 return Err(ClaimRefused {
                     in_use_bytes: in_use(&occ),
                     live_bytes: occ.allocated_in(home),
-                    external_bytes: occ.external_bytes,
+                    external_bytes: occ.external_in(home),
                     entries: occ.entries,
                 });
             }
@@ -2038,7 +2058,7 @@ impl KvCacheStore {
         Err(ClaimRefused {
             in_use_bytes: in_use(&occ),
             live_bytes: occ.allocated_in(home),
-            external_bytes: occ.external_bytes,
+            external_bytes: occ.external_in(home),
             entries: occ.entries,
         })
     }
@@ -2048,25 +2068,22 @@ impl KvCacheStore {
     /// is kept here or no evictor is installed. For a forward the card ran out
     /// of memory for, before it is run once more
     /// (`SplitModel::forward_inner_impl`, FUTURE_WORK #367 (d) (3b)).
-    pub(crate) fn let_saved_prompts_go(&self) -> u64 {
-        if self
-            .external_reserved
-            .load(std::sync::atomic::Ordering::Relaxed)
-            == 0
-        {
+    pub(crate) fn let_saved_prompts_go(&self, home: KvHome) -> u64 {
+        if self.external_reserved[home.index()].load(std::sync::atomic::Ordering::Relaxed) == 0 {
             return 0;
         }
         match self.external_evictor.lock() {
-            Ok(slot) => slot.as_ref().map_or(0, |f| f(u64::MAX)),
+            Ok(slot) => slot.as_ref().map_or(0, |f| f(u64::MAX, home)),
             Err(_) => 0,
         }
     }
 
-    /// Record how many device bytes the prefix cache currently holds, so the
-    /// head-room guard charges them. Call after every insert or release.
-    pub fn set_external_reserved(&self, bytes: u64) {
-        self.external_reserved
-            .store(bytes, std::sync::atomic::Ordering::Relaxed);
+    /// Record how many bytes of `home` the prefix cache currently holds
+    /// beside the live caches (`PrefixCache::bytes_on`), so the head-room
+    /// guard charges them to that memory's budget. Call after every insert or
+    /// release, for each memory.
+    pub fn set_external_reserved(&self, home: KvHome, bytes: u64) {
+        self.external_reserved[home.index()].store(bytes, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// Build a composite lookup key from model key and request ID for the KV-cache DashMap.
@@ -2417,9 +2434,11 @@ impl KvCacheStore {
             out.used_bytes += one.used_bytes;
             out.tokens += one.tokens;
         }
-        out.external_bytes = self
-            .external_reserved
-            .load(std::sync::atomic::Ordering::Relaxed);
+        let reserved = |home: KvHome| {
+            self.external_reserved[home.index()].load(std::sync::atomic::Ordering::Relaxed)
+        };
+        out.external_host_bytes = reserved(KvHome::Host);
+        out.external_bytes = reserved(KvHome::Card).saturating_add(out.external_host_bytes);
         out
     }
 }
@@ -2474,7 +2493,7 @@ mod tests {
             kv.append(&k, &k.clone()).unwrap();
             entry.layers[0] = Some(kv);
         }
-        store.set_external_reserved(1_000_000);
+        store.set_external_reserved(KvHome::Host, 1_000_000);
 
         // A budget of zero refuses anything, which is all this needs.
         let refused = store
@@ -2927,15 +2946,54 @@ mod tests {
         let store = KvCacheStore::new(std::time::Duration::from_secs(60));
         append(&store, 4, 4096);
         let live = store.occupancy().allocated_bytes;
-        store.set_external_reserved(12_345);
+        store.set_external_reserved(KvHome::Host, 12_345);
         let occ = store.occupancy();
         assert_eq!(
             occ.allocated_bytes, live,
             "live bytes must not absorb the external figure"
         );
         assert_eq!(occ.external_bytes, 12_345);
-        store.set_external_reserved(0);
+        store.set_external_reserved(KvHome::Host, 0);
         assert_eq!(store.occupancy().external_bytes, 0);
+    }
+
+    /// #262 for saved prompts (2026-11-15): a card/processor split's snapshot
+    /// holds its card layers on the card and the rest in the machine's
+    /// memory, and each budget is charged ITS bytes only — counted whole on
+    /// the card, the guard refused a claim the card had room for, and the
+    /// evictor was asked to free card memory a processor layer's copy never
+    /// held.
+    #[test]
+    fn each_memory_is_charged_only_the_saved_prompts_it_holds() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        use std::sync::Arc;
+        let store = KvCacheStore::new(std::time::Duration::from_secs(60));
+        store.set_external_reserved(KvHome::Card, 400);
+        store.set_external_reserved(KvHome::Host, 600);
+        let occ = store.occupancy();
+        assert_eq!(occ.external_bytes, 1000, "reported whole");
+        assert_eq!(occ.external_in(KvHome::Card), 400);
+        assert_eq!(occ.external_in(KvHome::Host), 600);
+        let asked = Arc::new(AtomicU64::new(0));
+        {
+            let asked = asked.clone();
+            store.set_external_evictor(Box::new(move |_, home| {
+                asked.store(if home == KvHome::Card { 1 } else { 2 }, Ordering::Relaxed);
+                0
+            }));
+        }
+        // The card's 400 plus a claim of 100 fit a budget of 500 — the
+        // machine memory's 600 is not the card's.
+        assert!(store.claim_room(KvHome::Card, 500, 100, "r").is_ok());
+        assert_eq!(asked.load(Ordering::Relaxed), 0, "nothing to evict");
+        // Over the card's budget the evictor is asked for the CARD's room.
+        let refused = store
+            .claim_room(KvHome::Card, 450, 100, "r")
+            .expect_err("over the card's budget");
+        assert_eq!(asked.load(Ordering::Relaxed), 1, "asked of the card");
+        assert_eq!(refused.external_bytes, 400, "names the card's snapshots");
+        assert_eq!(store.let_saved_prompts_go(KvHome::Host), 0);
+        assert_eq!(asked.load(Ordering::Relaxed), 2, "asked of the machine");
     }
 
     /// The per-chunk guard shrinks cached prompts before it refuses, and
@@ -2949,21 +3007,22 @@ mod tests {
         let live = store.occupancy().allocated_bytes;
         // 1000 bytes of cached prompts, of which an evictor can give back at
         // most 600.
-        store.set_external_reserved(1000);
+        store.set_external_reserved(KvHome::Host, 1000);
         let held = Arc::new(AtomicU64::new(1000));
         let evictor_calls = Arc::new(AtomicU64::new(0));
         {
             let ks = Arc::downgrade(&store);
             let held = held.clone();
             let calls = evictor_calls.clone();
-            store.set_external_evictor(Box::new(move |needed| {
+            store.set_external_evictor(Box::new(move |needed, home| {
+                assert_eq!(home, KvHome::Host);
                 calls.fetch_add(1, Ordering::Relaxed);
                 let can = held.load(Ordering::Relaxed).saturating_sub(400);
                 let freed = needed.min(can);
                 let now = held.load(Ordering::Relaxed) - freed;
                 held.store(now, Ordering::Relaxed);
                 if let Some(ks) = ks.upgrade() {
-                    ks.set_external_reserved(now);
+                    ks.set_external_reserved(KvHome::Host, now);
                 }
                 freed
             }));
@@ -2987,7 +3046,7 @@ mod tests {
         assert_eq!(refused.in_use_bytes, live + 400);
         // With no evictor installed a store refuses as it always did.
         let bare = KvCacheStore::new(std::time::Duration::from_secs(60));
-        bare.set_external_reserved(1000);
+        bare.set_external_reserved(KvHome::Host, 1000);
         assert!(bare.claim_room(KvHome::Host, 500, 10, "r").is_err());
     }
 
@@ -3000,23 +3059,33 @@ mod tests {
         use std::sync::atomic::{AtomicU64, Ordering};
         use std::sync::Arc;
         let store = KvCacheStore::new(std::time::Duration::from_secs(60));
-        assert_eq!(store.let_saved_prompts_go(), 0, "no evictor, nothing kept");
+        assert_eq!(
+            store.let_saved_prompts_go(KvHome::Card),
+            0,
+            "no evictor, nothing kept"
+        );
         let asked = Arc::new(AtomicU64::new(0));
         {
             let asked = asked.clone();
-            store.set_external_evictor(Box::new(move |needed| {
+            store.set_external_evictor(Box::new(move |needed, _| {
                 asked.store(needed, Ordering::Relaxed);
                 700
             }));
         }
         assert_eq!(
-            store.let_saved_prompts_go(),
+            store.let_saved_prompts_go(KvHome::Card),
             0,
             "nothing kept beside the live caches"
         );
         assert_eq!(asked.load(Ordering::Relaxed), 0, "the evictor is not asked");
-        store.set_external_reserved(700);
-        assert_eq!(store.let_saved_prompts_go(), 700);
+        store.set_external_reserved(KvHome::Host, 700);
+        assert_eq!(
+            store.let_saved_prompts_go(KvHome::Card),
+            0,
+            "none on the card"
+        );
+        store.set_external_reserved(KvHome::Card, 700);
+        assert_eq!(store.let_saved_prompts_go(KvHome::Card), 700);
         assert_eq!(
             asked.load(Ordering::Relaxed),
             u64::MAX,

@@ -270,12 +270,12 @@ pub async fn run_worker(
     {
         let pc = Arc::downgrade(&prefix_cache);
         let ks = Arc::downgrade(&kv_store);
-        kv_store.set_external_evictor(Box::new(move |needed: u64| {
+        kv_store.set_external_evictor(Box::new(move |needed: u64, memory: KvHome| {
             let (Some(pc), Some(ks)) = (pc.upgrade(), ks.upgrade()) else {
                 return 0;
             };
-            let freed = pc.release(needed as usize, SnapshotHome::BesideLive) as u64;
-            ks.set_external_reserved(pc.bytes_in(SnapshotHome::BesideLive) as u64);
+            let freed = pc.release(needed as usize, memory) as u64;
+            reserve_beside_live(&ks, &pc);
             freed
         }));
     }
@@ -3324,11 +3324,14 @@ fn split_prompt_saved_after_the_answer() -> bool {
     })
 }
 
-/// Stored prompts kept beside the live cache are device memory the
-/// head-room guard must see.
+/// Stored prompts kept beside the live cache are memory the head-room guard
+/// must see — each memory charged the bytes it holds (#262): a card/processor
+/// split's snapshot is on both. The one place the store is told.
 fn reserve_beside_live(kv_store: &KvCacheStore, prefix_cache: &PrefixCache) {
     if prefix_cache_charged() {
-        kv_store.set_external_reserved(prefix_cache.bytes_in(SnapshotHome::BesideLive) as u64);
+        for memory in [KvHome::Card, KvHome::Host] {
+            kv_store.set_external_reserved(memory, prefix_cache.bytes_on(memory) as u64);
+        }
     }
 }
 
@@ -7932,7 +7935,7 @@ fn snapshot_room(
         prefix_cache,
         prompt_tokens,
         reply,
-        let_go.beside_live,
+        let_go.beside_live_on(model.kv_home()),
     );
     let room = room_off_the_card_if_more(
         beside,
@@ -8000,9 +8003,7 @@ fn save_prompt_opening(
     );
     // A snapshot kept beside the live cache is device memory the head-room
     // guard must see.
-    if prefix_cache_charged() {
-        kv_store.set_external_reserved(prefix_cache.bytes_in(SnapshotHome::BesideLive) as u64);
-    }
+    reserve_beside_live(kv_store, prefix_cache);
     manifest
 }
 
@@ -8060,6 +8061,7 @@ fn host_ram_room(
     };
     let unbounded = SnapshotRoom {
         home: SnapshotHome::HostRam,
+        memory: KvHome::Host,
         max_positions: usize::MAX,
         evict_bytes: 0,
     };
@@ -8093,6 +8095,7 @@ fn host_ram_room(
     }
     SnapshotRoom {
         home: SnapshotHome::HostRam,
+        memory: KvHome::Host,
         max_positions: plan.positions,
         evict_bytes: plan.evict_bytes,
     }
@@ -8110,17 +8113,18 @@ fn room_beside_live(
     reply: ReplyAhead,
     letting_go: u64,
 ) -> SnapshotRoom {
+    let home = model.kv_home();
     let unbounded = SnapshotRoom {
         home: SnapshotHome::BesideLive,
+        memory: home,
         max_positions: usize::MAX,
         evict_bytes: 0,
     };
     if !prefix_cache_charged() {
         return unbounded;
     }
-    let home = model.kv_home();
     let allocated = kv_store.occupancy().allocated_in(home);
-    let cached = prefix_cache.bytes_in(SnapshotHome::BesideLive) as u64;
+    let cached = prefix_cache.bytes_on(home) as u64;
     // Against the card as it stands, not the budget predicted at load: a
     // snapshot is a device allocation the size of the prompt, taken on a card
     // that may hold tenants the load-time figure never saw.
@@ -8159,6 +8163,7 @@ fn room_beside_live(
     }
     SnapshotRoom {
         home: SnapshotHome::BesideLive,
+        memory: home,
         max_positions: plan.positions,
         evict_bytes: plan.evict_bytes,
     }
@@ -8504,7 +8509,11 @@ fn admit_prompt_in(
         0
     };
     let mut live = in_home.saturating_add(promised).saturating_sub(replaced);
-    let cached = prefix_cache.bytes_in(SnapshotHome::BesideLive) as u64;
+    // The saved prompts' bytes in THIS memory only (#262): a card/processor
+    // split's snapshot is on both, and counted whole on the card it was
+    // evicted for room the card never got — every saved prompt let go, and
+    // the prompt refused by the growth guard 8 ms later (2026-11-15).
+    let cached = prefix_cache.bytes_on(home) as u64;
     // Anything live past what this pass replaces belongs to another request
     // — one still decoding, or one whose cache outlived its reply. The
     // store's figure was seen to wander by ~1 GB across identical sequential
@@ -8593,9 +8602,9 @@ fn admit_prompt_in(
             return Ok(Room::AfterEvicting);
         }
         PromptAdmission::EvictBytes(needed) => {
-            let freed = prefix_cache.release(needed as usize, SnapshotHome::BesideLive) as u64;
-            // Charging is on here (checked above), so keep the guard's figure current.
-            kv_store.set_external_reserved(prefix_cache.bytes_in(SnapshotHome::BesideLive) as u64);
+            let freed = prefix_cache.release(needed as usize, home) as u64;
+            // Keep the guard's figures current.
+            reserve_beside_live(kv_store, prefix_cache);
             tracing::info!(
                 request_id,
                 prompt_tokens,
@@ -8834,13 +8843,12 @@ fn whole_model_context_fits(
         })
         .map(|(_, m)| m)?;
     let occupancy = kv_store.occupancy();
-    let cached = prefix_cache.bytes_in(SnapshotHome::BesideLive) as u64;
     context_fits_in(
         model.kv_homes().map(|home| {
             let live = occupancy
                 .allocated_in(home)
                 .saturating_add(kv_store.outstanding_admission_bytes(home));
-            model.kv_budget_now(home, live, cached)
+            model.kv_budget_now(home, live, prefix_cache.bytes_on(home) as u64)
         }),
         draft_margin,
     )
@@ -14558,6 +14566,7 @@ mod up_front_admission_tests {
         drop(entry);
         let room = SnapshotRoom {
             home: SnapshotHome::BesideLive,
+            memory: KvHome::Host,
             max_positions: usize::MAX,
             evict_bytes: 0,
         };
@@ -14736,6 +14745,7 @@ mod up_front_admission_tests {
         // memory gives anything up.
         let card = |max_positions: usize| SnapshotRoom {
             home: SnapshotHome::BesideLive,
+            memory: KvHome::Card,
             max_positions,
             evict_bytes: 11,
         };
@@ -14745,6 +14755,7 @@ mod up_front_admission_tests {
                 asked.set(true);
                 SnapshotRoom {
                     home: SnapshotHome::HostRam,
+                    memory: KvHome::Host,
                     max_positions,
                     evict_bytes: 22,
                 }

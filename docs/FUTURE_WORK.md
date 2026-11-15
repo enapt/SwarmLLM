@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #454**). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #455**). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -5236,6 +5236,30 @@ against llama.cpp 0.3.16, then flip `is_supported` and re-read `arch_supports_hy
 StarCoder2, inert while refused).
 
 ### Memory and admission
+
+#### #454 — A long prompt on a split sized for a typical conversation is refused by megabytes, not reloaded with fewer card layers
+`P1` · memory / scheduling · **OPEN** — 2026-11-15 · from a field report (AU, 12 GB card, Qwen2.5-14B at 47/48 on the card)
+
+**Seen:** first word 4.4 s at 2,066 tokens, 188 s at 4,072, 338 s at 7,064, refused at 9.5k. At 4k the card worker
+evicted its saved prompts (`needed_mb=382 freed_mb=395`) and ~250 ms later a worker loaded the model on the
+processor (`device=Cpu`) and ran the prompt there. **Part fixed 2026-11-15** (gotcha #1105): the eviction counted a
+split's saved prompt whole as card memory — on that split ~379 of the 395 MB were the card's, so the prompt was still
+~3 MB short, and here (14B 28/20, `ladder.sh` with saved prompts on the card) a 5.7k prompt was evicted for and then
+refused 8 ms later. Now the admission evicts only for room the card really gets back, and refuses up front
+otherwise.
+**Left:** the split's card share is fitted at spawn to a TYPICAL conversation (`KvCharge::Typical`, 4,096
+positions — `process_pool::refit_split_to_the_load`, `vram.rs`), so a prompt past it on a card held to the last
+layer is refused however long it waits; after the refusal the re-plan withdraws a fresh split
+(`fresh_run_layers` → `None`, `scheduler/mod.rs` ~5450) and an executor's mid-prefill refusal records no
+`layers_fitting` (#263 records it only for the daemon's up-front admission). What loaded the processor-only copy the
+report saw is NOT found in code (traced 2026-11-15: `cpu_reason` never reads a refusal; the re-plan reuses the card
+worker, which refuses again — as it did here, ending in the refusal message). **Build:** a refusal of a prompt past
+the spawn's typical charge on a card/processor split respawns the split sized for that prompt (fewer card layers,
+the cache's room left beside them), once per model and length class, where the reload costs less than the
+processor path. **Prior art:** Ollama reloads a runner whose `num_ctx` differs, its GPU layers re-estimated for that
+context (`server/sched.go` `needsReload`, `llm/memory.go` `EstimateGPULayers`); llama.cpp's `common/fit.cpp`
+(`--fit`) fits `n_gpu_layers` to the context at load. Both size layers BY the context; neither runs a long prompt
+on the processor while the card holds the model.
 
 #### #376 — A near-full card loses a split's drafter to the processor: the planner's room for it is about a layer too generous
 `P2` · memory / scheduling · **PARTIAL** — 2026-10-30 · history: #275, #342's residual

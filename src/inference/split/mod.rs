@@ -70,7 +70,7 @@ pub(crate) use self::gguf_meta::{
     host_resident, kv_layers, kv_sources, layer_is_recurrent, query_scale, routed_expert_bytes,
     segment_tensor, SegmentTensor, SlidingWindow, PER_LAYER_TOKEN_TABLE,
 };
-pub use self::kv_cache::{KvCacheStore, KvOccupancy};
+pub use self::kv_cache::{KvCacheStore, KvHome, KvOccupancy};
 pub(crate) use self::loader::card_free_for_a_load;
 pub use self::model::SplitModel;
 pub(crate) use self::mtp::{head_in_shape, mtp_on, split_guess_head_on};

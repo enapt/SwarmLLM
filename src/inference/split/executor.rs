@@ -14,7 +14,7 @@ use crate::error::SwarmError;
 use crate::model::lora::LoraAdapter;
 
 use super::entry::BatchItem;
-use super::kv_cache::KvCacheStore;
+use super::kv_cache::{KvCacheStore, KvHome};
 use super::model::SplitModel;
 use super::{FfnVariant, LayerVariant, SsmState};
 use crate::inference::layers::{LayerOnTheCard, LayerWeights};
@@ -1076,7 +1076,7 @@ impl SplitModel {
             }
             other => return other,
         };
-        let freed = kv_cache_store.let_saved_prompts_go();
+        let freed = kv_cache_store.let_saved_prompts_go(KvHome::of(&self.device));
         if freed == 0 {
             return Err(e);
         }
@@ -1831,7 +1831,7 @@ impl SplitModel {
                 // boundary, so the device query stays off the per-token path.
                 let occ = kv_cache_store.occupancy();
                 let budget = self
-                    .kv_budget_now(home, occ.allocated_in(home), occ.external_bytes)
+                    .kv_budget_now(home, occ.allocated_in(home), occ.external_in(home))
                     .0
                     .unwrap_or(load_time_budget);
                 // Live caches PLUS the prefix cache's snapshots: the same
@@ -2666,7 +2666,7 @@ impl SplitModel {
             Err(e) if worth_it(&e, positions_held(kv_cache_store)) => e,
             other => return other,
         };
-        let freed = kv_cache_store.let_saved_prompts_go();
+        let freed = kv_cache_store.let_saved_prompts_go(KvHome::of(&self.device));
         let e = if freed > 0 {
             let again = self.forward_batch_once(items, kv_cache_store);
             tracing::info!(

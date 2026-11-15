@@ -5496,6 +5496,40 @@ The split's processor-held weights were charged to no RAM budget either — #264
 day (§ "A split's processor share is charged to the machine"): since then the daemon hands the
 split `--kv-budget-bytes` and the machine's figure is only the fallback.
 
+### …and so is a saved prompt, layer by layer (2026-11-15, gotcha #1105)
+
+**What was wrong.** #262 split the LIVE caches by memory and left the prefix cache's snapshots whole:
+`PrefixCache::bytes_in(SnapshotHome::BesideLive)` summed every layer of every snapshot kept beside the
+live cache, and every budget read that one figure — prompt admission (`admit_prompt_in`), the
+head-room guard (`KvOccupancy::external_bytes` in `claim_room` and the executor's `kv_budget_now`),
+the evictor, `room_beside_live` and `whole_model_context_fits` — for the card AND the machine. A
+split's snapshot keeps its processor layers' copies in machine memory (f32, twice a card layer's
+f16 bytes), so the card was charged them and an eviction counted them as card room. Measured on the
+released v0.3.289 (`~/swarmllm-gate/ab-1115/ladder.sh`, Qwen2.5-14B 28/20 on the 8 GB card,
+`SWARMLLM_PREFIX_CACHE_HOME=card` — the default off WSL2): a 5,756-token prompt's admission read
+`cached_mb=991 budget_mb=912 needed_mb=750`, evicted every saved prompt (`freed_mb=991`), and the
+growth guard refused the prompt 8 ms later against 647 MB — the pool's use fell 6,219 → 5,811 MB,
+408 MB; the other 583 were the processor layers'. Reconciled against the card, the budget is
+invariant under an eviction only when the bytes counted as cached are the card's (§
+`budget_reconciled_with_device`). A field report (12 GB card, 14B at 47/48) showed the same shape
+at a 4% processor share: `needed_mb=382 freed_mb=395`, about 379 back on the card.
+
+**The rule.** A snapshot's bytes are charged per memory at the source: **`KvSnapshot::bytes_on(KvHome)`**
+counts each layer pair where its tensor is (`KvHome::of(tensor.device())`), nothing for a snapshot
+moved to host RAM (#257, its own bound). `PrefixCache::bytes_on` is the only figure a KV budget reads;
+`release(needed, KvHome)` evicts snapshots holding bytes in that memory until THAT memory's bytes
+reach `needed` and returns those; `KvCacheStore::set_external_reserved(home, bytes)` keeps one figure
+per memory (`KvOccupancy::external_in`, `external_bytes` the every-device report), set only through
+`model_worker::reserve_beside_live`; the evictor (`ExternalEvictor`) and `let_saved_prompts_go` are
+asked per memory; a snapshot's room is planned in the model's own memory (`SnapshotRoom::memory`)
+and counts what a save lets go there (`LetGo::beside_card` / `beside_host`). Prior art: as for the
+live caches — vLLM's per-device block pools (a freed CPU block is never a free GPU block).
+
+**Tests.** `each_memory_is_charged_only_the_saved_prompts_it_holds` (the guard and the evictor per
+memory), `the_processors_snapshot_stays_charged_beside_its_live_cache` (a processor's snapshot is the
+machine's, never a card's). A CPU test cannot hold a card tensor, so the split's card share is
+verified on a CUDA build by the ladder above.
+
 ## A split's processor share is charged to the machine (2026-10-13, FUTURE_WORK #264)
 
 Found closing #262. A card/processor split (`get_or_spawn_once`'s `hybrid_layers`) was charged

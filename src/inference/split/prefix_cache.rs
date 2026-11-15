@@ -44,7 +44,7 @@ use candle_core::{Device, Tensor};
 use crate::error::SwarmError;
 use crate::types::{KeepAsked, PrefixBlockEntry};
 
-use super::kv_cache::{CacheLayout, KvCacheEntry, KvCacheStore};
+use super::kv_cache::{CacheLayout, KvCacheEntry, KvCacheStore, KvHome};
 
 /// Compute the chained BLAKE3 hash chain over a token sequence, in blocks of
 /// `block_size` tokens. Returns one entry per block boundary that lies inside
@@ -257,10 +257,32 @@ impl KvSnapshot {
             .iter()
             .chain(self.ssm.iter())
             .flatten()
-            .map(|(k, v)| {
-                k.elem_count() * k.dtype().size_in_bytes()
-                    + v.elem_count() * v.dtype().size_in_bytes()
-            })
+            .map(|(k, v)| pair_bytes(k, v))
+            .sum()
+    }
+
+    /// Bytes this snapshot costs the KV budget of `memory` (#262): its layers
+    /// kept beside the live cache whose copy is THERE — a card/processor
+    /// split's card layers on the card, its processor layers in the machine's
+    /// memory, each charged to its own budget as the live caches are
+    /// (`KvOccupancy::allocated_in`). Nothing for a snapshot moved to host
+    /// RAM (#257), which that store's own bound covers.
+    ///
+    /// Counted whole on the card, a 14B split's saved prompt (991 MB, 583 of
+    /// them in machine memory) was evicted as if it freed 991 MB of the card,
+    /// which got back 408, and the prompt it was evicted for was refused a
+    /// moment later (2026-11-15) — vLLM keeps one block pool per device for
+    /// the same reason: a freed CPU block is never a free GPU block.
+    pub fn bytes_on(&self, memory: KvHome) -> usize {
+        if self.home() != SnapshotHome::BesideLive {
+            return 0;
+        }
+        self.layers
+            .iter()
+            .chain(self.ssm.iter())
+            .flatten()
+            .filter(|(k, _)| KvHome::of(k.device()) == memory)
+            .map(|(k, v)| pair_bytes(k, v))
             .sum()
     }
 
@@ -283,6 +305,12 @@ impl KvSnapshot {
             0
         }
     }
+}
+
+/// Bytes of one layer's pair of tensors (K and V, or a recurrent layer's two
+/// states).
+fn pair_bytes(a: &Tensor, b: &Tensor) -> usize {
+    a.elem_count() * a.dtype().size_in_bytes() + b.elem_count() * b.dtype().size_in_bytes()
 }
 
 /// Where a prefix-cache snapshot's copy is kept (#257).
@@ -369,6 +397,11 @@ fn home_override() -> Option<SnapshotHome> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SnapshotRoom {
     pub home: SnapshotHome,
+    /// The KV budget's memory a room beside the live cache was planned
+    /// against — the model's own (`SplitModel::kv_home`) — and so the memory
+    /// its evictions are counted in ([`KvSnapshot::bytes_on`], #262). Host
+    /// for a room in host RAM, which is where that is.
+    pub memory: KvHome,
     /// Positions that fit in `home`; 0 stores nothing, `usize::MAX` means no
     /// bound is known.
     pub max_positions: usize,
@@ -381,6 +414,25 @@ pub struct SnapshotRoom {
     pub evict_bytes: u64,
 }
 
+impl SnapshotRoom {
+    /// What `snapshot` holds in the memory this room was planned in — the
+    /// one measure its eviction and its plan are both made in.
+    fn counted(&self, snapshot: &KvSnapshot) -> usize {
+        match self.home {
+            SnapshotHome::BesideLive => snapshot.bytes_on(self.memory),
+            SnapshotHome::HostRam => snapshot.bytes_in(SnapshotHome::HostRam),
+        }
+    }
+
+    /// What a save lets go of in the memory this room was planned in.
+    fn let_go_counted(&self, let_go: LetGo) -> u64 {
+        match self.home {
+            SnapshotHome::BesideLive => let_go.beside_live_on(self.memory),
+            SnapshotHome::HostRam => let_go.host_ram,
+        }
+    }
+}
+
 /// Bytes of the snapshots a save will let go of because the new one covers
 /// them — a growing conversation's previous turn — by where each is kept.
 /// Room the plan counts as its own: still held while it is planned, so
@@ -389,23 +441,28 @@ pub struct SnapshotRoom {
 /// to make room this one's previous turn was about to give back).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct LetGo {
-    pub beside_live: u64,
+    /// Kept beside the live cache on a card ([`KvSnapshot::bytes_on`]).
+    pub beside_card: u64,
+    /// Kept beside the live cache in the machine's memory: a processor's
+    /// layers, a card/processor split's among them (#262).
+    pub beside_host: u64,
     pub host_ram: u64,
 }
 
 impl LetGo {
     fn of<'a>(entries: impl Iterator<Item = &'a Entry>) -> Self {
         entries.fold(Self::default(), |sum, e| Self {
-            beside_live: sum.beside_live + e.snapshot.bytes_in(SnapshotHome::BesideLive) as u64,
+            beside_card: sum.beside_card + e.snapshot.bytes_on(KvHome::Card) as u64,
+            beside_host: sum.beside_host + e.snapshot.bytes_on(KvHome::Host) as u64,
             host_ram: sum.host_ram + e.snapshot.bytes_in(SnapshotHome::HostRam) as u64,
         })
     }
 
-    /// The bytes let go of in `home`.
-    pub fn in_home(self, home: SnapshotHome) -> u64 {
-        match home {
-            SnapshotHome::BesideLive => self.beside_live,
-            SnapshotHome::HostRam => self.host_ram,
+    /// The bytes let go of beside the live cache in `memory`.
+    pub fn beside_live_on(self, memory: KvHome) -> u64 {
+        match memory {
+            KvHome::Card => self.beside_card,
+            KvHome::Host => self.beside_host,
         }
     }
 }
@@ -928,7 +985,7 @@ impl PrefixCache {
             let let_go = self.let_go(model_key, |e| {
                 e.replaced_by_tokens(snap_tokens, serves_once_saved)
             });
-            if let_go.in_home(room.home) < planned_let_go.in_home(room.home) {
+            if room.let_go_counted(let_go) < room.let_go_counted(planned_let_go) {
                 tracing::info!(
                     model_key,
                     available,
@@ -1158,13 +1215,13 @@ impl PrefixCache {
             // the same memory; the replaced entries were its own room.
             let freed_in_home: u64 = gone[replaced..]
                 .iter()
-                .map(|e| e.snapshot.bytes_in(room.home) as u64)
+                .map(|e| room.counted(&e.snapshot) as u64)
                 .sum();
             if room.evict_bytes > freed_in_home {
                 gone.extend(take_least_recently_hit(
                     &mut inner,
                     room.evict_bytes - freed_in_home,
-                    room.home,
+                    |snapshot| room.counted(snapshot),
                 ));
             }
             let room_made = RoomMade {
@@ -1350,7 +1407,7 @@ impl PrefixCache {
             let let_go = self.let_go(model_key, |e| {
                 e.replaced_by_chain(chain, block_tokens, serves)
             });
-            if let_go.in_home(room.home) < planned_let_go.in_home(room.home) {
+            if room.let_go_counted(let_go) < room.let_go_counted(planned_let_go) {
                 tracing::info!(
                     model_key,
                     positions,
@@ -1733,10 +1790,10 @@ impl PrefixCache {
             .unwrap_or(0)
     }
 
-    /// Bytes of KV held in `home` across every model. `BesideLive` is what
-    /// this cache costs the device right now, charged against the KV budget
-    /// by `admit_prompt`; `HostRam` is what it holds off the card (#257),
-    /// which that budget never sees.
+    /// Bytes of KV held in `home` across every model, whole: `HostRam` is
+    /// what it holds off the card (#257), bounded by that store's budget.
+    /// ⚠ Never a KV budget's charge — a split's snapshot beside the live
+    /// cache spans two memories; that is [`Self::bytes_on`].
     pub fn bytes_in(&self, home: SnapshotHome) -> usize {
         self.inner
             .read()
@@ -1751,9 +1808,29 @@ impl PrefixCache {
             .unwrap_or(0)
     }
 
-    /// Evict least-recently-hit entries kept in `home`, across every model,
-    /// until at least `needed` bytes of that memory are freed or none is left.
-    /// Returns the bytes freed.
+    /// Bytes this cache costs the KV budget of `memory` right now, across
+    /// every model: what its snapshots kept beside the live cache hold there
+    /// ([`KvSnapshot::bytes_on`]). The figure `admit_prompt` and the head-room
+    /// guard charge, and the only one (#262).
+    pub fn bytes_on(&self, memory: KvHome) -> usize {
+        self.inner
+            .read()
+            .ok()
+            .map(|i| {
+                i.per_model
+                    .values()
+                    .flatten()
+                    .map(|e| e.snapshot.bytes_on(memory))
+                    .sum()
+            })
+            .unwrap_or(0)
+    }
+
+    /// Evict least-recently-hit entries kept beside the live cache that hold
+    /// bytes in `memory`, across every model, until at least `needed` bytes
+    /// of THAT memory are freed or none is left. Returns the bytes of
+    /// `memory` freed — a card/processor split's snapshot frees the machine
+    /// memory too, which never counts as room on the card (#262).
     ///
     /// Called when a request's own KV would not fit beside the cache (gotcha
     /// #440). A cached prompt is reconstructible; the request in hand is not,
@@ -1763,22 +1840,29 @@ impl PrefixCache {
     /// entries in `home` go**: dropping a snapshot kept in host RAM frees
     /// nothing on the card, and counting it as freed would let a refusal the
     /// card still owes through (#257).
-    pub fn release(&self, needed: usize, home: SnapshotHome) -> usize {
+    pub fn release(&self, needed: usize, memory: KvHome) -> usize {
         let Ok(mut inner) = self.inner.write() else {
             return 0;
         };
-        let gone = take_least_recently_hit(&mut inner, needed as u64, home);
-        let freed: usize = gone.iter().map(|e| e.snapshot.bytes()).sum();
+        let gone = take_least_recently_hit(&mut inner, needed as u64, |snapshot| {
+            snapshot.bytes_on(memory)
+        });
+        let freed: usize = gone.iter().map(|e| e.snapshot.bytes_on(memory)).sum();
         if freed > 0 {
             tracing::info!(
                 freed_mb = freed / (1024 * 1024),
                 needed_mb = needed / (1024 * 1024),
-                home = ?home,
+                memory = ?memory,
+                freed_elsewhere_mb = gone
+                    .iter()
+                    .map(|e| e.snapshot.bytes() - e.snapshot.bytes_on(memory))
+                    .sum::<usize>()
+                    / (1024 * 1024),
                 remaining_mb = inner
                     .per_model
                     .values()
                     .flatten()
-                    .map(|e| e.snapshot.bytes_in(home))
+                    .map(|e| e.snapshot.bytes_on(memory))
                     .sum::<usize>()
                     / (1024 * 1024),
                 "DIAG: prefix-cache released cached prompts to make room"
@@ -1873,7 +1957,14 @@ impl HeldCache {
 /// none is left — the ONE eviction order of [`PrefixCache::release`] and of a
 /// save's planned room ([`PrefixCache::make_room`]). The caller drops them
 /// once its lock is released.
-fn take_least_recently_hit(inner: &mut Inner, needed: u64, home: SnapshotHome) -> Vec<Entry> {
+/// Entries, least recently hit first, until `counted` of those taken reaches
+/// `needed` — only entries holding something by that measure, so an entry in
+/// another memory is never let go for this one.
+fn take_least_recently_hit(
+    inner: &mut Inner,
+    needed: u64,
+    counted: impl Fn(&KvSnapshot) -> usize,
+) -> Vec<Entry> {
     let mut gone = Vec::new();
     let mut freed = 0u64;
     while freed < needed {
@@ -1884,7 +1975,7 @@ fn take_least_recently_hit(inner: &mut Inner, needed: u64, home: SnapshotHome) -
                 bucket
                     .iter()
                     .enumerate()
-                    .filter(|(_, e)| e.snapshot.home() == home)
+                    .filter(|(_, e)| counted(&e.snapshot) > 0)
                     .map(move |(i, e)| (e.last_hit.load(Ordering::Relaxed), key.clone(), i))
             })
             .min_by_key(|(hit, _, _)| *hit);
@@ -1899,7 +1990,7 @@ fn take_least_recently_hit(inner: &mut Inner, needed: u64, home: SnapshotHome) -
         if bucket.is_empty() {
             inner.per_model.remove(&key);
         }
-        freed = freed.saturating_add(removed.snapshot.bytes() as u64);
+        freed = freed.saturating_add(counted(&removed.snapshot) as u64);
         gone.push(removed);
     }
     gone
@@ -2442,6 +2533,7 @@ mod tests {
     /// runs on the processor, where that is the only home.
     const ANYWHERE: SnapshotRoom = SnapshotRoom {
         home: SnapshotHome::BesideLive,
+        memory: KvHome::Host,
         max_positions: usize::MAX,
         evict_bytes: 0,
     };
@@ -2449,6 +2541,7 @@ mod tests {
     fn beside(max_positions: usize) -> SnapshotRoom {
         SnapshotRoom {
             home: SnapshotHome::BesideLive,
+            memory: KvHome::Host,
             max_positions,
             evict_bytes: 0,
         }
@@ -2495,7 +2588,7 @@ mod tests {
         assert!(per_entry > 0);
 
         // Ask for a little more than one entry: two must go, a then c.
-        let freed = pc.release(per_entry + 1, SnapshotHome::BesideLive);
+        let freed = pc.release(per_entry + 1, KvHome::Host);
         assert_eq!(freed, 2 * per_entry);
         assert_eq!(pc.bytes_in(SnapshotHome::BesideLive), per_entry);
         let a: Vec<u32> = (100..110).collect();
@@ -2505,9 +2598,9 @@ mod tests {
         assert!(pc.lookup("m", &b).is_some(), "b was hit last and survives");
 
         // Asking for more than everything frees everything and stops.
-        assert_eq!(pc.release(usize::MAX, SnapshotHome::BesideLive), per_entry);
+        assert_eq!(pc.release(usize::MAX, KvHome::Host), per_entry);
         assert_eq!(pc.bytes_in(SnapshotHome::BesideLive), 0);
-        assert_eq!(pc.release(1, SnapshotHome::BesideLive), 0);
+        assert_eq!(pc.release(1, KvHome::Host), 0);
     }
 
     /// Mark the stored entry opening with `first_token` as `snapshot_at`
@@ -2555,8 +2648,8 @@ mod tests {
 
         // The card asks for room: only the entry on the card goes, though the
         // one in host RAM is older.
-        assert_eq!(pc.release(1, SnapshotHome::BesideLive), per_entry);
-        assert_eq!(pc.release(1, SnapshotHome::BesideLive), 0);
+        assert_eq!(pc.release(1, KvHome::Host), per_entry);
+        assert_eq!(pc.release(1, KvHome::Host), 0);
         let a: Vec<u32> = (100..110).collect();
         let b: Vec<u32> = (200..210).collect();
         assert!(pc.lookup("m", &b).is_none());
@@ -2565,9 +2658,11 @@ mod tests {
             "host RAM gave the card nothing"
         );
 
-        // Host RAM's own plan evicts it.
-        assert_eq!(pc.release(1, SnapshotHome::HostRam), per_entry);
-        assert_eq!(pc.bytes_in(SnapshotHome::HostRam), 0);
+        // Nor is it the machine memory's KV budget's to give: that store has
+        // its own bound, and its own plan evicts it (`make_room`).
+        assert_eq!(pc.bytes_on(KvHome::Host), 0);
+        assert_eq!(pc.release(usize::MAX, KvHome::Host), 0);
+        assert_eq!(pc.bytes_in(SnapshotHome::HostRam), per_entry);
     }
 
     /// #257: a hit on a snapshot kept in host RAM — narrowed, as every hit
@@ -2716,6 +2811,10 @@ mod tests {
         assert!(snap.restore_to.iter().all(Option::is_none));
         assert_eq!(snap.home(), SnapshotHome::BesideLive);
         assert_eq!(snap.bytes_in(SnapshotHome::BesideLive), snap.bytes());
+        // Charged to the memory its copies are in — the machine's — and to
+        // no card (#262).
+        assert_eq!(snap.bytes_on(KvHome::Host), snap.bytes());
+        assert_eq!(snap.bytes_on(KvHome::Card), 0);
     }
 
     #[test]
@@ -3155,7 +3254,8 @@ mod tests {
         assert_eq!(
             handed.get(),
             Some(LetGo {
-                beside_live: turn_1_bytes,
+                beside_card: 0,
+                beside_host: turn_1_bytes,
                 host_ram: 0,
             }),
             "the plan is told the previous turn goes, and nothing else"
@@ -3235,6 +3335,7 @@ mod tests {
         let new: Vec<u32> = (400..408).collect();
         let room = SnapshotRoom {
             home: SnapshotHome::BesideLive,
+            memory: KvHome::Host,
             max_positions: usize::MAX,
             evict_bytes: per_entry,
         };
