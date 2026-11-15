@@ -363,11 +363,11 @@ pub(super) struct PruneCandidate {
 /// 2026-11-15) that prune gives back.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum CooledCopy {
-    /// One past the copy the part keeps (`coverage::keeps_the_cooled_copy`):
-    /// every such part goes in one pass, once a holder ranked above this one
-    /// still holds it.
+    /// One past the copies the part keeps (`coverage::keeps_a_cooled_copy`):
+    /// every such part goes in one pass, once the holders ranked above this
+    /// one still hold it.
     Extra,
-    /// The copy the part keeps, given back only for the room a part somebody
+    /// A copy the part keeps, given back only for the room a part somebody
     /// wants needs (`to_make_room`), with no floor of holders: the model quiet
     /// the longest goes first (`quiet_since`, Unix seconds — the kubelet's
     /// least-recently-used order), one model's parts before the next's.

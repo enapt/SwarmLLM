@@ -902,16 +902,31 @@ frame, then add a receipt ACK or a per-frame read deadline mirroring request-res
 > **2026-11-15 — a quiet model COOLS before it goes** (user: "2 days is still too long", "we need to
 > ensure the pruning doesnt just, remove all parts. it needs to be smart"): `use_window_secs` gave EVERY
 > copy back in one pass on every holder at once. Now two steps (`unused::Verdict::Cooled`, `unused::cools`):
-> quiet for `unused::quiet_window_secs` — **6 hours** from disk pressure 0.8, **2 days** below — every
-> copy of each part goes but ONE, kept by the part's live holder ranked first for the MODEL
-> (`coverage::keeps_the_cooled_copy`, rendezvous by model, so a model held whole keeps one whole copy);
-> none is fetched; that one goes only for a room another model's part asks (`prune::room_order`: the
-> model quiet the longest first, its parts together). Quiet for **7 days** at any pressure every copy
-> goes, as before. Prior art: ERMS (Cheng et al., IEEE Cluster 2012) removes a cooled file's EXTRA
-> replicas and keeps the file; the kubelet's LRU above its high threshold and `imageMaximumGCAge` (KEP-4210);
-> rendezvous hashing for a keeper every holder agrees on. Evidence: `docs/invariants/memory.md` § "A
-> quiet model cools before it goes". Field check (a) now also reads `one_copy_stays=true` give-backs from
-> ~6 h after a model's last use on a full computer, and every model still held SOMEWHERE until its week.
+> quiet for `unused::quiet_window_secs` — **1 day** from disk pressure 0.8, **2 days** below — every
+> copy of each part goes but TWO, kept by the part's live holders ranked first for the MODEL
+> (`coverage::keeps_a_cooled_copy`, rendezvous by model, so a model held whole keeps two whole copies);
+> none is fetched; those go only for a room another model's part asks (`prune::room_order`: the
+> model quiet the longest first, its parts together) and only where an origin could give them back.
+> Quiet for **7 days** at any pressure every copy goes, as before — but the last two of a model no
+> origin could give back (`KEPT_NO_ORIGIN`). First pushed as 6 h and ONE copy; the research run the
+> same morning made it a day and two: day stamps and a daily cycle made 6 h give back and re-fetch a
+> nightly model every day, and one keeper on a home computer is away for hours to days (Ceph `size 2`,
+> Carbonite NSDI'06, Tahoe-LAFS). Prior art: ERMS (Cheng et al., IEEE Cluster 2012) removes a cooled
+> file's EXTRA replicas and keeps the file; the kubelet's LRU above its high threshold, minimum age
+> and `imageMaximumGCAge` (KEP-4210); S3 minimum storage durations; IPFS pinning and HDFS trash for
+> what has no origin; rendezvous hashing for keepers every holder agrees on. Evidence:
+> `docs/invariants/memory.md` § "A quiet model cools before it goes". Field check (a) now also reads
+> `copies_stay=true` give-backs from ~a day after a model's last use on a full computer, and every
+> model still held SOMEWHERE until its week.
+> **2026-11-15 — an owner's download lapses after a month unused on a full disk**: a probe of this
+> project's own node (its data hard-linked, run as the node) found all 31 models exempt — every one
+> had been downloaded, and a download pinned it for good. Now `SharedState::owner_fetched` lapses in
+> the use rule alone (`unused::owner_fetch_lapsed`: pressure ≥ 0.8, nobody ran it here for 30 days
+> since it was first watched); "Keep on this computer", the default model and privacy by hand
+> (`owner_keeps`) never do. Prior art: Storage Sense's 30 days unopened → online-only, exempting
+> "Always keep on this device"; Android's auto-archive under low storage. Evidence:
+> `docs/invariants/memory.md` § "An owner's fetch lapses after a month unused". First lapses
+> 2026-12-01 (records began 11-01).
 > (d) SCALE: only CONNECTED holders are asked (pre-release
 > review 2026-11-14). A holder serving the model that is not connected here is heard only through its
 > demand gossip, which keeps the model for a few hours after each request (`asked_for`, the EMA's

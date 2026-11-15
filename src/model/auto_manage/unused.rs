@@ -13,10 +13,11 @@
 //!   day ([`models_served`] → `NodeCapability::models_served`). A copy watched
 //!   here for the quiet window and run here by nobody in it, the model served
 //!   in it by no connected holder either ([`SwarmUse`]), COOLS
-//!   ([`Verdict::Cooled`]): one copy of each part stays on the swarm, the rest
-//!   go, and that one goes for the room a part somebody wants needs, least
+//!   ([`Verdict::Cooled`]): two copies of each part stay on the swarm, the
+//!   rest go, and those two go for the room a part somebody wants needs, least
 //!   recently used first; past [`USE_WINDOW_SECS`] every copy goes
-//!   ([`Verdict::Unused`]) — whatever HuggingFace's list says. Read from that
+//!   ([`Verdict::Unused`]) — whatever HuggingFace's list says — but the last
+//!   copies of a model no origin could give back. Read from that
 //!   list instead, 0 of 4,222 prune passes on the Proxmox box gave a model
 //!   back (2026-11-07 → 11-14): the list named nearly everything held.
 //! - **This computer's use — the owner's included — keeps THIS computer's
@@ -63,9 +64,10 @@ pub(crate) const USE_WINDOW_SECS: i64 = 7 * 86_400;
 
 /// How long a held model goes without a request before it COOLS where this
 /// computer's storage has room ([`quiet_window_secs`], [`Verdict::Cooled`]):
-/// every copy past ONE of each part goes, and that one goes only when a part
-/// somebody wants needs its room, the least recently used model first — or at
-/// [`USE_WINDOW_SECS`]. So the trial a new copy has.
+/// every copy past TWO of each part goes (`coverage::COOLED_COPIES`), and
+/// those go only when a part somebody wants needs their room, the least
+/// recently used model first — or at [`USE_WINDOW_SECS`]. So the trial a new
+/// copy has.
 ///
 /// Until 2026-11-15 a model nobody ran went whole, from every computer at once
 /// — two days on a full computer, seven with room (user: "2 days is still too
@@ -79,19 +81,59 @@ pub(crate) const USE_WINDOW_SECS: i64 = 7 * 86_400;
 /// `imageGCLowThresholdPercent` (85/80%), with no age asked past
 /// `imageMinimumGCAge` (2 min), and every unused image only past
 /// `imageMaximumGCAge` (KEP-4210). Here: the extra copies are the room, the
-/// one copy is the model still runnable on the swarm, and the long window is
-/// the maximum age.
+/// two copies are the model still runnable on the swarm, and the long window
+/// is the maximum age.
 pub(crate) const QUIET_WINDOW_SECS: i64 = 2 * 86_400;
 
 /// The quiet window where this computer's storage is pressed
-/// ([`quiet_window_secs`]): a model nobody ran for six hours keeps one copy of
-/// each part on the swarm and gives back the rest. A model run every day —
-/// the AU tester's nightly script is the swarm's steadiest use — still runs
-/// the next night, from that one copy, and copies come back with its demand.
-/// It was a whole give-back at two days until 2026-11-15; the 2026-11-14 full
-/// Proxmox box wanted 1,458 MB for Qwen3.6-35B-A3B and could free 384, holding
-/// parts of a 122B no card in the swarm can run.
-pub(crate) const PRESSED_QUIET_WINDOW_SECS: i64 = 6 * 3_600;
+/// ([`quiet_window_secs`]): a model nobody ran for a day keeps two copies of
+/// each part on the swarm and gives back the rest. It was a whole give-back
+/// at two days until 2026-11-15; the 2026-11-14 full Proxmox box wanted
+/// 1,458 MB for Qwen3.6-35B-A3B and could free 384, holding parts of a 122B
+/// no card in the swarm can run.
+///
+/// A day, not less (research run 2026-11-15): people use models on a daily
+/// cycle — the AU tester's nightly script is the swarm's steadiest use — and
+/// the swarm's word is a day stamp, so a shorter window let go of copies in
+/// the hours before each day's use and fetched them back after it (tens of GB
+/// a day for a 70B). Caches and replica managers hold what was used or
+/// fetched within about a day (the kubelet's minimum age, S3's minimum
+/// storage durations; Carbonite's timeout masks transient absence), and
+/// nearly every computer here is past 0.8 — the download pass fills the
+/// budget — so this is the window the swarm actually runs on.
+pub(crate) const PRESSED_QUIET_WINDOW_SECS: i64 = 86_400;
+
+/// How long a model this computer's owner FETCHED (`SharedState::owner_fetched`
+/// — a dashboard download pins) stays theirs with nobody running it here,
+/// where storage is pressed ([`owner_fetch_lapsed`]). Past it the use rule
+/// judges the model like any other: two copies of each part stay while the
+/// swarm runs it, the last copies of one no origin could give back stay
+/// always, and the model stays listed and is fetched again when asked for.
+///
+/// 2026-11-15: a test of the use rule on this project's own node found every
+/// one of its 31 models exempt — each had been downloaded, so each was pinned
+/// for good, and no rule could ever give back a model nobody had run in
+/// months. Prior art: Windows Storage Sense makes a OneDrive file not opened
+/// for 30 days online-only (the Windows 11 22H2 default), exempting "Always
+/// keep on this device" — here "Keep on this computer" (`owner_keeps`), which
+/// never lapses; Android's auto-archive removes an app nobody used when
+/// storage is low and keeps its icon, re-downloading it on a tap while the
+/// store still lists it.
+pub(crate) const OWNER_FETCH_LAPSES_SECS: i64 = 30 * 86_400;
+
+/// Has the owner's fetch of a model lapsed ([`OWNER_FETCH_LAPSES_SECS`])?
+/// Only where storage is pressed (`prune::PRESSURE_NORMAL` — with room there
+/// is nothing to win), and only once nobody has run it here — a request here
+/// or one served for a peer, `ModelUse::last_used` — since a month after this
+/// node began watching it (`watched_since`: a model fetched yesterday has its
+/// month). No record (a model not yet watched) never lapses.
+pub(crate) fn owner_fetch_lapsed(record: Option<ModelUse>, disk_pressure: f64, now: i64) -> bool {
+    disk_pressure >= super::prune::PRESSURE_NORMAL
+        && record.is_some_and(|r| {
+            r.watched_since > 0
+                && now.saturating_sub(r.watched_since.max(r.last_used)) >= OWNER_FETCH_LAPSES_SECS
+        })
+}
 
 /// How long a model given back because nobody ran it stays TRIED (#452): it is
 /// not fetched again on popularity alone, here or by a computer that hears of
@@ -113,7 +155,7 @@ pub(crate) fn quiet_window_secs(disk_pressure: f64) -> i64 {
     }
 }
 
-/// A window as the log and the dashboard say it: "6 hours", "2 days".
+/// A window as the log and the dashboard say it: "12 hours", "2 days".
 pub(crate) fn describe_window(secs: i64) -> String {
     if secs % 86_400 == 0 {
         let days = secs / 86_400;
@@ -139,9 +181,9 @@ pub(crate) const GAVE_BACK_WITNESSES: usize = 2;
 pub(crate) const USE_TREE: &str = "model_use";
 
 /// A record moves in memory and on disk only when a use moves this far:
-/// against a six-hour window ([`PRESSED_QUIET_WINDOW_SECS`]), ten minutes late
-/// is nothing, and a request does not cost a database write.
-const MOVES_BY_SECS: i64 = 600;
+/// against a window of a day or more, an hour late is nothing, and a request
+/// does not cost a database write.
+const MOVES_BY_SECS: i64 = 3_600;
 
 /// What this node has seen of one model's use (#389 (d), #452).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -377,7 +419,7 @@ pub(crate) fn the_cards_could_run(total_size_bytes: u64, swarm_card_mb: u64) -> 
 /// [`AutoShardManager::unused_verdict`] read it: the one answer, so the prune
 /// pass's report names the pool that held each model. Only
 /// [`Verdict::Unused`] gives every copy back; [`Verdict::Cooled`] gives back
-/// all but one copy of each part; both leave a part not held here unfetched.
+/// all but two copies of each part; both leave a part not held here unfetched.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Verdict {
     /// Kept whatever the pools say: the owner's choice, a reference model,
@@ -396,11 +438,12 @@ pub(crate) enum Verdict {
     /// (or no fresh reading of it).
     WorthTrying,
     /// Nobody ran it in the quiet window ([`quiet_window_secs`]), but within
-    /// [`USE_WINDOW_SECS`]: ONE copy of each part stays on the swarm — the
-    /// holder every computer ranks first for the model keeps its copies
-    /// (`coverage::keeps_the_cooled_copy`) — and gives them back only for the
-    /// room a part somebody wants needs, least recently used first. Every
-    /// other copy goes, and none is fetched.
+    /// [`USE_WINDOW_SECS`]: TWO copies of each part stay on the swarm — the
+    /// holders every computer ranks first for the model keep their copies
+    /// (`coverage::keeps_a_cooled_copy`) — and give them back only for the
+    /// room a part somebody wants needs, least recently used first, where an
+    /// origin could give them back. Every other copy goes, and none is
+    /// fetched.
     Cooled,
     /// Nobody runs it: given back, or not fetched.
     Unused,
@@ -416,7 +459,7 @@ impl Verdict {
             Verdict::Served => "served for another computer within the window",
             Verdict::CannotSay => "a holder cannot say what it served",
             Verdict::WorthTrying => "worth trying",
-            Verdict::Cooled => "nobody ran it lately: one copy of each part stays",
+            Verdict::Cooled => "nobody ran it lately: two copies of each part stay",
             Verdict::Unused => "nobody runs it",
         }
     }
@@ -824,7 +867,14 @@ impl AutoShardManager {
     /// until it is quiet for [`USE_WINDOW_SECS`] too ([`cools`]).
     pub(super) fn unused_verdict(&self, model_id: &ModelId, disk_pressure: f64) -> Verdict {
         let state = &self.shared_state;
-        if state.owner_chose(model_id) {
+        let now = chrono::Utc::now().timestamp();
+        let record = state.models.model_use.get(model_id).map(|r| *r);
+        // The owner's fetch lapses where nobody has run the model here for a
+        // month and storage is pressed (`owner_fetch_lapsed`); "Keep on this
+        // computer", the default model and prompt privacy never do.
+        if state.owner_keeps(model_id)
+            || (state.owner_fetched(model_id) && !owner_fetch_lapsed(record, disk_pressure, now))
+        {
             return Verdict::Exempt("its owner chose it");
         }
         if crate::model::reference::is_reference_model(&model_id.0) {
@@ -836,9 +886,7 @@ impl AutoShardManager {
         if self.drafts_for_a_split(model_id) {
             return Verdict::Exempt("it guesses for a split");
         }
-        let now = chrono::Utc::now().timestamp();
         let window = quiet_window_secs(disk_pressure);
-        let record = state.models.model_use.get(model_id).map(|r| *r);
         let verdict = judge(
             record,
             || {
@@ -1013,11 +1061,12 @@ mod tests {
     /// The user (2026-11-14, then 11-15): "we need to be pruning more
     /// aggressively at this scale", "2 days is still too long", "we need to
     /// ensure the pruning doesnt just, remove all parts. it needs to be smart".
-    /// A copy nobody ran in the quiet window — six hours where storage is
-    /// pressed (from the pressure at which prune stops keeping a spare copy,
-    /// the kubelet's high threshold), two days with room — COOLS: one copy of
-    /// each part stays on the swarm. Only past the use window, seven days at
-    /// any pressure, does every copy go. A model run within the window stays.
+    /// A copy nobody ran in the quiet window — a day where storage is pressed
+    /// (from the pressure at which prune stops keeping a spare copy, the
+    /// kubelet's high threshold), two days with room — COOLS: two copies of
+    /// each part stay on the swarm. Only past the use window, seven days at
+    /// any pressure, does every copy go. A model run within the window stays,
+    /// and one served every day never cools.
     #[test]
     fn a_quiet_copy_cools_before_it_goes() {
         const HOUR: i64 = 3_600;
@@ -1031,39 +1080,43 @@ mod tests {
             QUIET_WINDOW_SECS,
             "NaN reads as room"
         );
-        assert_eq!(describe_window(PRESSED_QUIET_WINDOW_SECS), "6 hours");
+        assert_eq!(describe_window(PRESSED_QUIET_WINDOW_SECS), "1 day");
         assert_eq!(describe_window(QUIET_WINDOW_SECS), "2 days");
         assert_eq!(describe_window(USE_WINDOW_SECS), "7 days");
         assert_eq!(describe_window(HOUR), "1 hour");
-        assert_eq!(describe_window(DAY), "1 day");
+        assert_eq!(describe_window(12 * HOUR), "12 hours");
 
         // What `unused_verdict` decides past its exemptions, with `swarm`
         // judging each window.
-        let verdict = |record: ModelUse, pressure: f64, swarm: &dyn Fn(i64) -> SwarmUse| {
-            let window = quiet_window_secs(pressure);
-            cools(
-                judge(Some(record), || None, || swarm(window), now, window),
-                Some(record),
-                || {
-                    judge(
-                        Some(record),
-                        || None,
-                        || swarm(USE_WINDOW_SECS),
-                        now,
-                        USE_WINDOW_SECS,
-                    )
-                },
-            )
+        let verdict_at =
+            |now: i64, record: ModelUse, pressure: f64, swarm: &dyn Fn(i64) -> SwarmUse| {
+                let window = quiet_window_secs(pressure);
+                cools(
+                    judge(Some(record), || None, || swarm(window), now, window),
+                    Some(record),
+                    || {
+                        judge(
+                            Some(record),
+                            || None,
+                            || swarm(USE_WINDOW_SECS),
+                            now,
+                            USE_WINDOW_SECS,
+                        )
+                    },
+                )
+            };
+        let verdict = |record, pressure, swarm: &dyn Fn(i64) -> SwarmUse| {
+            verdict_at(now, record, pressure, swarm)
         };
         let quiet = |_| SwarmUse::Quiet { tried: false };
-        let seven_hours_quiet = watched(now - 30 * DAY, now - 7 * HOUR);
+        let a_day_quiet = watched(now - 30 * DAY, now - 25 * HOUR);
         assert_eq!(
-            verdict(seven_hours_quiet, 0.9, &quiet),
+            verdict(a_day_quiet, 0.9, &quiet),
             Verdict::Cooled,
-            "pressed: nobody ran it in six hours, one copy of each part stays"
+            "pressed: nobody ran it in a day, two copies of each part stay"
         );
         assert_eq!(
-            verdict(seven_hours_quiet, 0.5, &quiet),
+            verdict(a_day_quiet, 0.5, &quiet),
             Verdict::RunHere,
             "control: with room it keeps its two days"
         );
@@ -1079,27 +1132,27 @@ mod tests {
             );
         }
         assert_eq!(
-            verdict(watched(now - 30 * DAY, now - 5 * HOUR), 0.9, &quiet),
+            verdict(watched(now - 30 * DAY, now - 23 * HOUR), 0.9, &quiet),
             Verdict::RunHere,
-            "run here five hours ago: kept however full"
+            "run here 23 hours ago: kept however full"
         );
         assert_eq!(
-            verdict(watched(now - 5 * HOUR, 0), 0.9, &quiet),
+            verdict(watched(now - 23 * HOUR, 0), 0.9, &quiet),
             Verdict::OnTrial,
-            "a copy five hours old is on its trial"
+            "a copy fetched 23 hours ago is on its trial"
         );
         assert_eq!(
-            verdict(watched(now - 7 * HOUR, 0), 0.9, &quiet),
+            verdict(watched(now - 25 * HOUR, 0), 0.9, &quiet),
             Verdict::Cooled,
             "a new copy's trial is the quiet window; it cools, never goes, before the week"
         );
 
         // The swarm's word, from the same day stamps.
-        let served = |served_at: i64| {
+        let served_at = |now: i64, served: i64| {
             move |window| {
                 swarm_use_of(
                     [Word::Says {
-                        entry: Some(entry(now - 40 * DAY, served_at, 0)),
+                        entry: Some(entry(now - 40 * DAY, served, 0)),
                         holds: true,
                     }],
                     now,
@@ -1109,18 +1162,35 @@ mod tests {
         };
         let a_week_quiet = watched(now - 30 * DAY, now - 8 * DAY);
         assert_eq!(
-            verdict(a_week_quiet, 0.9, &served(now - DAY)),
+            verdict(a_week_quiet, 0.9, &served_at(now, now - DAY)),
             Verdict::Served,
-            "a holder served it yesterday (the day stamps cover the six hours): kept however full"
+            "a holder served it yesterday: kept however full"
         );
         assert_eq!(
-            verdict(a_week_quiet, 0.9, &served(now - 3 * DAY)),
+            verdict(a_week_quiet, 0.9, &served_at(now, now - 3 * DAY)),
             Verdict::Cooled,
-            "served three days ago: quiet for the six hours, not for the week"
+            "served three days ago: quiet for the day, not for the week"
         );
         assert_eq!(
-            verdict(a_week_quiet, 0.5, &served(now - 8 * DAY)),
+            verdict(a_week_quiet, 0.5, &served_at(now, now - 8 * DAY)),
             Verdict::Unused
+        );
+        // A model another computer serves once a day, judged late in the day
+        // before today's use: yesterday's stamp covers the whole day, so its
+        // copies stay. A six-hour window read it quiet in those hours, gave
+        // its copies back and fetched them again after the day's use (the
+        // research run, 2026-11-15).
+        let evening = now + 20 * HOUR;
+        let served_yesterday_morning = served_at(evening, now - 23 * HOUR);
+        assert_eq!(
+            verdict_at(evening, a_week_quiet, 0.9, &served_yesterday_morning),
+            Verdict::Served,
+            "served every day: never cools"
+        );
+        assert_eq!(
+            served_yesterday_morning(6 * HOUR),
+            SwarmUse::Quiet { tried: true },
+            "control: over six hours the day stamp has lapsed"
         );
         let updated_three_days_ago = |window| {
             swarm_use_of(
@@ -1144,6 +1214,45 @@ mod tests {
             verdict(a_week_quiet, 0.9, &updated_three_days_ago),
             Verdict::Cooled,
             "it cannot say for the week, so the copy cools and never goes"
+        );
+    }
+
+    /// The owner's fetch lapses only where storage is pressed and nobody has
+    /// run the model here for a month since it was first watched — Storage
+    /// Sense's 30 days unopened (2026-11-15).
+    #[test]
+    fn an_owners_fetch_lapses_after_a_month_unused_where_storage_is_pressed() {
+        let now = 100 * DAY;
+        let unused_40_days = watched(now - 40 * DAY, 0);
+        assert!(owner_fetch_lapsed(Some(unused_40_days), 0.8, now));
+        assert!(
+            !owner_fetch_lapsed(Some(unused_40_days), 0.79, now),
+            "with room there is nothing to win: the fetch stands"
+        );
+        assert!(
+            !owner_fetch_lapsed(Some(unused_40_days), f64::NAN, now),
+            "NaN reads as room"
+        );
+        assert!(
+            !owner_fetch_lapsed(Some(watched(now - 29 * DAY, 0)), 0.9, now),
+            "watched 29 days: still the owner's month, however unused"
+        );
+        assert!(
+            !owner_fetch_lapsed(Some(watched(now - 40 * DAY, now - 29 * DAY)), 0.9, now),
+            "run here 29 days ago"
+        );
+        assert!(owner_fetch_lapsed(
+            Some(watched(now - 40 * DAY, now - 31 * DAY)),
+            0.9,
+            now
+        ));
+        assert!(
+            !owner_fetch_lapsed(None, 1.0, now),
+            "a model not yet watched never lapses"
+        );
+        assert!(
+            !owner_fetch_lapsed(Some(watched(0, 0)), 1.0, now),
+            "nor one whose watch never began"
         );
     }
 
@@ -1184,7 +1293,7 @@ mod tests {
     }
 
     #[test]
-    fn a_record_begins_when_held_and_moves_only_by_ten_minutes() {
+    fn a_record_begins_when_held_and_moves_only_by_the_hour() {
         let now = 50 * DAY;
         let held = |used_at, served_at| Seen {
             held: true,
@@ -1206,17 +1315,9 @@ mod tests {
             "nothing seen"
         );
         assert_eq!(
-            next_record(Some(r), held(Some(now - 7_200 + 599), None), now),
+            next_record(Some(r), held(Some(now - 7_100), None), now),
             Next::Unchanged,
-            "under ten minutes later: not worth a write"
-        );
-        assert_eq!(
-            next_record(Some(r), held(Some(now - 7_200 + 600), None), now),
-            Next::Write(ModelUse {
-                last_used: now - 7_200 + 600,
-                ..r
-            }),
-            "ten minutes later moves it: against a six-hour window an hour was too coarse"
+            "under an hour later: not worth a write"
         );
         assert_eq!(
             next_record(Some(r), held(Some(now), None), now),

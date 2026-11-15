@@ -737,25 +737,41 @@ pub(super) fn kept_by_rank(part: &ShardId, holders: &[NodeId], node: &NodeId, ke
     ranked.into_iter().take(keep).any(|n| n == node)
 }
 
+/// How many copies of each part a model that has cooled keeps
+/// (`unused::Verdict::Cooled`) — on the holders ranked first for the MODEL
+/// ([`keeps_a_cooled_copy`]). Two, not one (research run 2026-11-15): no
+/// storage system keeps a single plain copy of cold data on computers that
+/// come and go — Ceph warns that a pool of size 2 already risks loss,
+/// Carbonite (NSDI '06) puts the floor at three, Tahoe-LAFS plans for laptops
+/// gone for days — and one copy on a laptop left the model unrunnable while
+/// it slept. Ours can be fetched again from its origin, so two holds it
+/// runnable without a third; and a copy one holder's stale view lets go is
+/// still the other's.
+pub(super) const COOLED_COPIES: usize = 2;
+
 /// Does `node` keep its copy of a part of a model that has cooled
 /// (`unused::Verdict::Cooled`, 2026-11-15) — is it, of the part's live
-/// `holders`, the one ranked first for the MODEL ([`rendezvous`])? Ranked by
-/// the model, not the part ([`part_rank_weight`]): a model held whole by three
-/// computers keeps one whole copy on one of them, never its parts scattered
-/// over all three — a split where a single computer answered. A part whose
-/// holders differ keeps the first of its own holders, so every part keeps a
-/// copy wherever the model was runnable.
+/// `holders`, among the [`COOLED_COPIES`] ranked first for the MODEL
+/// ([`rendezvous`])? Ranked by the model, not the part ([`part_rank_weight`]):
+/// a model held whole by several computers keeps whole copies on the same
+/// two, never its parts scattered over all of them — a split where one
+/// computer answered. A part whose holders differ keeps the first of its own
+/// holders, so every part keeps copies wherever the model was runnable.
 ///
-/// One copy stays whatever each computer's view: a holder gives its copy back
-/// only for a holder it ranks above itself, so the part's highest-ranked
-/// holder — which sees itself — never does. A view stale by a gossip round
-/// (a holder above it gone, unannounced) is the case the execution's re-check
-/// of the live holders narrows.
-pub(super) fn keeps_the_cooled_copy(model: &ModelId, holders: &[NodeId], node: &NodeId) -> bool {
+/// Copies stay whatever each computer's view: a holder gives its copy back
+/// only for holders it ranks above itself, so the part's highest-ranked
+/// holders — which see themselves — never do. A view stale by a gossip round
+/// (a holder above it gone, unannounced) is the case the second copy and the
+/// execution's re-check of the live holders cover.
+pub(super) fn keeps_a_cooled_copy(model: &ModelId, holders: &[NodeId], node: &NodeId) -> bool {
     let weight = rendezvous(model, node);
-    !holders
+    let mut above: Vec<&NodeId> = holders
         .iter()
-        .any(|h| h != node && rendezvous(model, h) > weight)
+        .filter(|h| *h != node && rendezvous(model, h) > weight)
+        .collect();
+    above.sort_by_key(|n| n.0);
+    above.dedup();
+    above.len() < COOLED_COPIES
 }
 
 /// The layer ranges of `parts` of `manifest`.
@@ -796,60 +812,67 @@ mod tests {
         peer_with_disk(state, byte, ceiling_mb, 100_000)
     }
 
-    /// A model that has cooled keeps ONE copy of each part (2026-11-15: "we
-    /// need to ensure the pruning doesnt just, remove all parts"): exactly one
-    /// of a part's holders keeps, whatever order they are listed in, and a
-    /// model held whole by several keeps every part on the SAME one — ranked by
-    /// the model, so one computer still answers alone.
+    /// A model that has cooled keeps TWO copies of each part (2026-11-15:
+    /// "we need to ensure the pruning doesnt just, remove all parts"):
+    /// exactly two of a part's holders keep, whatever order they are listed
+    /// in, and a model held whole by several keeps every part on the SAME two
+    /// — ranked by the model, so a computer still answers alone.
     #[test]
-    fn a_cooled_model_keeps_one_whole_copy_on_one_holder() {
+    fn a_cooled_model_keeps_two_whole_copies_on_the_same_holders() {
         let model = ModelId("cooled-14b-q4".into());
         let holders: Vec<NodeId> = (0u8..12).map(|b| NodeId([b; 32])).collect();
-        let keepers: Vec<&NodeId> = holders
+        let keepers: Vec<NodeId> = holders
             .iter()
-            .filter(|n| super::keeps_the_cooled_copy(&model, &holders, n))
+            .filter(|n| super::keeps_a_cooled_copy(&model, &holders, n))
+            .cloned()
             .collect();
-        assert_eq!(keepers.len(), 1, "exactly one holder keeps its copy");
-        let keeper = keepers[0].clone();
+        assert_eq!(keepers.len(), super::COOLED_COPIES, "exactly two keep");
         let mut reversed = holders.clone();
         reversed.reverse();
-        assert!(super::keeps_the_cooled_copy(&model, &reversed, &keeper));
-        // The per-part rank scatters a model held whole: some part's first
-        // holder is another computer. The model's rank never does.
+        for keeper in &keepers {
+            assert!(super::keeps_a_cooled_copy(&model, &reversed, keeper));
+        }
+        // The per-part rank scatters a model held whole: its 24 parts' first
+        // two holders are more than two computers. The model's rank never is.
         let part_keepers: std::collections::HashSet<NodeId> = (0..24)
-            .map(|index| {
+            .flat_map(|index| {
                 let part = ShardId {
                     model_id: model.clone(),
                     index,
                 };
                 holders
                     .iter()
-                    .find(|n| super::kept_by_rank(&part, &holders, n, 1))
-                    .expect("a part keeps one")
-                    .clone()
+                    .filter(|n| super::kept_by_rank(&part, &holders, n, 2))
+                    .cloned()
+                    .collect::<Vec<_>>()
             })
             .collect();
         assert!(
-            part_keepers.len() > 1,
+            part_keepers.len() > 2,
             "control: ranked by the part, the 24 parts keep on {} computers",
             part_keepers.len()
         );
-        // A part fewer hold keeps the first of its own holders.
-        let others: Vec<NodeId> = holders.iter().filter(|n| **n != keeper).cloned().collect();
+        // Without the keepers, two of the rest keep.
+        let others: Vec<NodeId> = holders
+            .iter()
+            .filter(|n| !keepers.contains(n))
+            .cloned()
+            .collect();
         assert_eq!(
             others
                 .iter()
-                .filter(|n| super::keeps_the_cooled_copy(&model, &others, n))
+                .filter(|n| super::keeps_a_cooled_copy(&model, &others, n))
                 .count(),
-            1,
-            "without the keeper, one of the rest keeps"
+            2
+        );
+        let pair = [holders[3].clone(), holders[5].clone()];
+        assert!(
+            pair.iter()
+                .all(|n| super::keeps_a_cooled_copy(&model, &pair, n)),
+            "two holders both keep"
         );
         assert!(
-            super::keeps_the_cooled_copy(&model, std::slice::from_ref(&holders[3]), &holders[3]),
-            "a lone holder keeps"
-        );
-        assert!(
-            super::keeps_the_cooled_copy(&model, &[], &holders[3]),
+            super::keeps_a_cooled_copy(&model, &[], &holders[3]),
             "a holder that sees no other keeps"
         );
     }

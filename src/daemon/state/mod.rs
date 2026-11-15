@@ -3557,11 +3557,28 @@ impl SharedState {
     /// back what it names (#389 (d)), and only what it names may be picked for
     /// someone who did not pick it when the model is uncensored.
     pub fn owner_chose(&self, model_id: &crate::types::ModelId) -> bool {
+        self.owner_fetched(model_id) || self.owner_keeps(model_id)
+    }
+
+    /// Did this computer's owner fetch or pin `model_id` (`pinned_by_user` —
+    /// a download from the dashboard pins)? The weakest of the owner's
+    /// choices: the use rule lets it lapse once nobody has run the model here
+    /// for `unused::OWNER_FETCH_LAPSES_SECS` where storage is pressed
+    /// (`AutoShardManager::unused_verdict`), as Storage Sense makes a cloud
+    /// file not opened for 30 days online-only. Everything else reads
+    /// [`Self::owner_chose`].
+    pub fn owner_fetched(&self, model_id: &crate::types::ModelId) -> bool {
         self.models
             .model_trust
             .get(model_id)
             .is_some_and(|t| t.pinned_by_user)
-            || self.kept_on_this_computer(model_id)
+    }
+
+    /// The owner's choices that never lapse: "Keep on this computer" (Storage
+    /// Sense's "Always keep on this device"), the default model, and prompt
+    /// privacy given by hand.
+    pub fn owner_keeps(&self, model_id: &crate::types::ModelId) -> bool {
+        self.kept_on_this_computer(model_id)
             || self.cfg().inference.default_model == model_id.0
             || self.privacy_explicitly_enabled_for(model_id)
     }

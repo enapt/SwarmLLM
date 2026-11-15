@@ -2031,6 +2031,15 @@ mod fetch_what_prune_keeps {
         );
         swarm_says(state, &[]);
         reading_names(state, &["someone-else-q4"], now);
+        // An origin, so its last copies may go too (`prune::KEPT_NO_ORIGIN`);
+        // provisional, so nothing here starts a real download.
+        state.models.hf_sources.insert(
+            mid.clone(),
+            crate::daemon::state::HfSource {
+                repo_id: "test/origin".into(),
+                filename: format!("{}.gguf", mid.0),
+            },
+        );
         mid
     }
 
@@ -2127,29 +2136,33 @@ mod fetch_what_prune_keeps {
                 },
             );
         };
-        // Quiet for the quiet window — two days with room, six hours where
-        // storage is pressed (2026-11-15: "2 days is still too long") — a
-        // model COOLS: one copy of each part stays, on the holder every
-        // computer ranks first for the model, and only past the week does
-        // every copy go ("the pruning doesnt just, remove all parts").
-        let above = (0u32..100_000)
+        // Quiet for the quiet window — two days with room, one where storage
+        // is pressed (2026-11-15: "2 days is still too long") — a model
+        // COOLS: two copies of each part stay, on the holders every computer
+        // ranks first for the model, and only past the week does every copy
+        // go ("the pruning doesnt just, remove all parts").
+        let ids: Vec<NodeId> = (0u32..10_000)
             .map(|i| NodeId(*blake3::hash(&i.to_le_bytes()).as_bytes()))
-            .find(|id| {
-                crate::model::auto_manage::coverage::keeps_the_cooled_copy(
+            .collect();
+        let (a, b) = ids
+            .windows(2)
+            .map(|w| (w[0].clone(), w[1].clone()))
+            .find(|(a, b)| {
+                !crate::model::auto_manage::coverage::keeps_a_cooled_copy(
                     &mid,
-                    &[local.clone(), id.clone()],
-                    id,
+                    &[local.clone(), a.clone(), b.clone()],
+                    &local,
                 )
             })
-            .expect("a node ranked above this one for the model");
-        let beside_the_keeper = [local.clone(), above.clone()];
+            .expect("two nodes ranked above this one for the model");
+        let beside_the_keepers = [local.clone(), a.clone(), b.clone()];
         let shed_at = |holders: &[NodeId], pressure| {
             manager.would_shed_copy(&part(0), holders, pressure, &[])
         };
         watched(DAY, None);
         assert!(!shed(), "watched a day: still on trial");
         assert!(
-            !shed_at(&beside_the_keeper, 0.0),
+            !shed_at(&beside_the_keepers, 0.0),
             "on trial: every copy stays"
         );
         watched(6 * DAY, None);
@@ -2158,32 +2171,36 @@ mod fetch_what_prune_keeps {
             "quiet for the two days, not the week: it cools, and its one holder keeps its copy"
         );
         assert!(
-            shed_at(&beside_the_keeper, 0.0),
-            "a copy beside the holder ranked first goes"
+            shed_at(&beside_the_keepers, 0.0),
+            "a copy beside the two holders ranked first goes"
         );
         assert!(
-            shed_at(&[above.clone(), local.clone()], 0.0),
+            shed_at(&[b.clone(), local.clone(), a.clone()], 0.0),
             "whatever order the holders are listed in"
         );
-        watched(40 * DAY, Some(DAY));
         assert!(
-            !shed_at(&beside_the_keeper, 0.0),
-            "run here yesterday: with room, every copy stays"
+            !shed_at(&[local.clone(), a.clone()], 0.0),
+            "with one other holder this copy is one of the two kept"
         );
-        // Where storage is pressed the window is six hours, and the download
+        watched(40 * DAY, Some(25 * HOUR));
+        assert!(
+            !shed_at(&beside_the_keepers, 0.0),
+            "run here a day ago: with room, every copy stays"
+        );
+        // Where storage is pressed the window is a day, and the download
         // pass, asking at the pressure its fetch would leave, agrees.
         assert!(
-            shed_at(&beside_the_keeper, 0.9),
-            "pressed: run yesterday is quiet for six hours, so the extra copy goes"
+            shed_at(&beside_the_keepers, 0.9),
+            "pressed: run 25 hours ago is quiet for the day, so the extra copy goes"
         );
         assert!(
             !shed_at(std::slice::from_ref(&local), 0.9),
-            "and the one copy stays however full"
+            "and the copies kept stay however full"
         );
-        watched(40 * DAY, Some(5 * HOUR));
+        watched(40 * DAY, Some(23 * HOUR));
         assert!(
-            !shed_at(&beside_the_keeper, 0.9),
-            "run here five hours ago: every copy stays however full"
+            !shed_at(&beside_the_keepers, 0.9),
+            "run here 23 hours ago: every copy stays however full"
         );
         watched(3 * DAY, None);
         assert!(
@@ -2194,6 +2211,20 @@ mod fetch_what_prune_keeps {
         assert!(
             shed_at(std::slice::from_ref(&local), 0.9) && shed(),
             "a week quiet: every copy goes, at any pressure"
+        );
+        // ...but the last copies of a model no origin could give back.
+        state.models.hf_sources.remove(&mid);
+        assert!(!shed(), "no origin: its last copies stay whatever the use");
+        assert!(
+            shed_at(&beside_the_keepers, 0.0),
+            "no origin: a copy past the two kept still goes"
+        );
+        state.models.hf_sources.insert(
+            mid.clone(),
+            crate::daemon::state::HfSource {
+                repo_id: "test/origin".into(),
+                filename: format!("{}.gguf", mid.0),
+            },
         );
         watched(40 * DAY, None);
         assert!(shed(), "control: nobody again");
@@ -2209,33 +2240,59 @@ mod fetch_what_prune_keeps {
             .model_trust
             .insert(mid.clone(), crate::types::ModelTrustInfo::new_pinned());
         assert!(!shed(), "its owner pinned it");
+        // The owner's FETCH lapses where storage is pressed and nobody has run
+        // it here for a month (2026-11-15: every model on a node its owner had
+        // downloaded was exempt for good, months unused). "Keep on this
+        // computer" never lapses.
+        let here = std::slice::from_ref(&local);
+        assert!(
+            shed_at(here, 0.9),
+            "fetched, watched 40 days, nobody ran it, storage pressed: the fetch lapsed"
+        );
+        watched(20 * DAY, None);
+        assert!(
+            !shed_at(here, 0.9),
+            "fetched, watched 20 days: still the owner's month"
+        );
+        watched(40 * DAY, Some(29 * DAY));
+        assert!(!shed_at(here, 0.9), "run here 29 days ago: still theirs");
+        watched(40 * DAY, Some(31 * DAY));
+        assert!(shed_at(here, 0.9), "run here 31 days ago: lapsed");
+        state.keep_on_this_computer(&mid, true).unwrap();
+        assert!(
+            !shed_at(here, 0.9),
+            "kept on this computer: never lapses, however long unused"
+        );
+        state.keep_on_this_computer(&mid, false).unwrap();
+        assert!(shed_at(here, 0.9), "control: the keep removed");
     }
 
-    /// Prune gives back a cooled model's copies past the one each part keeps,
-    /// and keeps that one (2026-11-15: "we need to ensure the pruning doesnt
+    /// Prune gives back a cooled model's copies past the two each part keeps,
+    /// and keeps those (2026-11-15: "we need to ensure the pruning doesnt
     /// just, remove all parts"). Two models nobody ran in the two days but
-    /// within the week, each held here: the one a computer ranked above this
-    /// one for it also holds goes from here, the one only this computer holds
-    /// stays. With no part asking for room, nothing else moves it.
+    /// within the week, each held here: the one two computers ranked above
+    /// this one for it also hold goes from here, the one only this computer
+    /// holds stays. With no part asking for room, nothing else moves it.
     #[tokio::test]
-    async fn prune_gives_back_a_cooled_models_extra_copies_and_keeps_its_one() {
+    async fn prune_gives_back_a_cooled_models_extra_copies_and_keeps_two() {
         use crate::model::auto_manage::unused::Verdict;
         let (state, manager) = manager_with(Config::default());
         let local = state.identity.node_id().clone();
-        let above = NodeId([10; 32]);
-        let extra_name = (0..64)
+        let above = [NodeId([10; 32]), NodeId([11; 32])];
+        let extra_name = (0..256)
             .map(|i| format!("extra-{i}-q4"))
             .find(|name| {
-                crate::model::auto_manage::coverage::keeps_the_cooled_copy(
+                !crate::model::auto_manage::coverage::keeps_a_cooled_copy(
                     &ModelId(name.clone()),
-                    &[local.clone(), above.clone()],
-                    &above,
+                    &[local.clone(), above[0].clone(), above[1].clone()],
+                    &local,
                 )
             })
-            .expect("a model the other computer is ranked above this one for");
+            .expect("a model both other computers are ranked above this one for");
         let only_here = model_nobody_runs(&state, &manager, "only-here-q4", 3);
         let extra = model_nobody_runs(&state, &manager, &extra_name, 3);
         close_peer_holding(&state, 10, &extra, 0);
+        close_peer_holding(&state, 11, &extra, 0);
         swarm_says(&state, &[]);
         for mid in [&only_here, &extra] {
             assert_eq!(manager.unused_verdict(mid, 0.0), Verdict::Cooled, "{mid:?}");
@@ -2246,8 +2303,8 @@ mod fetch_what_prune_keeps {
                 .join(crate::model::shard::shard_filename(0))
                 .exists()
         };
-        assert!(!held(&extra), "a copy past the one its part keeps goes");
-        assert!(held(&only_here), "the one copy of a part stays");
+        assert!(!held(&extra), "a copy past the two its part keeps goes");
+        assert!(held(&only_here), "a copy of the two kept stays");
         let record = |mid: &ModelId| state.models.model_use.get(mid).map(|r| *r);
         assert!(
             record(&extra).is_some_and(|r| r.gave_back_unused > 0),
