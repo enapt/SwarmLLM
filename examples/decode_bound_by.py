@@ -151,9 +151,9 @@ for rep in range(REPS):
     stop, samples = threading.Event(), []
     t = threading.Thread(target=gpu_util, args=(stop, samples), daemon=True)
     t.start()
-    c0, t0 = cputime(w), time.time()
+    c0, t0 = cputime(w), time.monotonic()
     body, _ = gen(MAX_TOKENS)
-    wall, c1 = time.time() - t0, cputime(w)
+    wall, c1 = time.monotonic() - t0, cputime(w)
     stop.set()
     t.join(timeout=2)
     toks = body["usage"]["completion_tokens"]

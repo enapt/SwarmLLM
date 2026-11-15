@@ -88,9 +88,9 @@ def snap():
     return s
 
 
-end = time.time() + secs
+end = time.monotonic() + secs
 prev = snap()
-while time.time() < end:
+while time.monotonic() < end:
     time.sleep(0.05)
     cur = snap()
     out = []

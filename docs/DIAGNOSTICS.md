@@ -2754,6 +2754,15 @@ shape: **a large change with a TIGHT spread is a different configuration, not
 noise** — the opposite of the contention signature, where the mean moves and the
 spread widens with it. See gotcha #422.
 
+**Under WSL, never time an interval with the wall clock.** WSL steps its wall
+clock to the Windows host's every ~31 s, by 1.3-1.8 s at a time (measured
+2026-11-15), so `time.time()` around a 5 s reply can be a quarter wrong: a
+real-link client read a streamed reply as 26.3 tok/s that the node's own
+`decode_ms` put at 34.2 (gotcha #1112). Time with `time.monotonic()` — and even
+that ran at 0.961 of the host's clock under load that day, so a difference under
+~5% between two sittings is not a measurement. Prefer the node's own figures
+(the `decode_ms=` field of `DIAG: request complete`) and compare arms inside one sitting.
+
 | harness | what it measures | notes |
 |---|---|---|
 | `examples/prefill_bench.rs` | prompt processing + decode, driving `SplitModel::forward` directly | no daemon, no scheduler, no API in the way. `SWARM_BENCH_MODEL` (a model dir holding every shard), `SWARM_BENCH_PROMPT` (896), `SWARM_BENCH_DECODE` (32), `SWARM_BENCH_REPS` (3), `SWARM_BENCH_DEVICE=cuda`. Pair with `SWARMLLM_PROFILE=1` for the per-stage breakdown. A split's segment: `SWARM_BENCH_LAYERS=0-14`. A check of K rows: `SWARM_BENCH_SPEC_WIDTHS=2,4,…` (interleaved 1-vs-K, min of pairs), `SWARM_BENCH_SPEC_TREE=1` adds the same rows as a tree, `SWARM_BENCH_SPEC_ALL_ROWS=1` makes logits at every row (a drafter's step). A drafter's tree growth: `SWARM_BENCH_GROW=64,8` (rows, per step; from nothing and on a seed, ranked on the host vs where the logits are). Compare a width with llama.cpp's `llama-bench -p K -n 0 -d 300` on the same GGUF (`~/swarmllm-318/rowcost.sh`) |
