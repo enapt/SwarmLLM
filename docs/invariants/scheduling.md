@@ -6327,10 +6327,10 @@ queue (11.6-13.5), the other ran no flow (round trip unmeasured, gotcha #942). T
 wider rows grow more rows a token and wait longer.
 
 *Rows and levels, a third time: the flow no longer waits, and 8 × 3 still wins* (2026-11-15
-17:53-18:21Z, `~/swarmllm-gate/deep/fr/real_link.sh` TAG=rows292 then wide292, main at a887074b7 built
+17:53-19:14Z, `~/swarmllm-gate/deep/fr/real_link.sh` TAG=rows292, wide292, then lev292, main at a887074b7 built
 as v0.3.292 ships, the 14B split [0, 26) here on the 8 GB card + [26, 48) on the Australian 12 GB card
-at 123-145 ms, flow forced, 160-token replies, server-timed — gotcha #1112; rows292 ABBA × 2, wide292
-ABCCBA × 2). Since #357 (b) and the card's tree kernels the default flow does not wait for the far end
+at 123-145 ms, flow forced, 160-token replies, server-timed — gotcha #1112; rows292 and lev292 ABBA × 2, wide292
+ABCCBA × 2; the far computer's `[26, 48)` all on its card throughout, by its own `resident` after each reply). Since #357 (b) and the card's tree kernels the default flow does not wait for the far end
 (`waiting_ms` 0-7 in every reply): this node is the slower side, ~40 ms a forward (drafting ~14, its 26
 layers ~26) against the far end's ~30 (`after_receipt_ms`, median). So the question was whether a
 cheaper forward (fewer rows) or a fuller one (more rows, more levels) now wins. Neither does:
@@ -6338,16 +6338,18 @@ cheaper forward (fewer rows) or a fuller one (more rows, more levels) now wins. 
 | arm | prose tok/s | code tok/s | rows a forward | here a forward: drafting + layers (ms) | tokens a forward (prose / code) | far end a forward (median) |
 |---|---|---|---|---|---|---|
 | 4 rows a level (`SWARMLLM_FLOW_ROWS=4`) | 15.06-15.33 | 40.48-42.43 | 12.6-13.1 | 12-13 + 23-24 | 0.56-0.57 / 1.51-1.52 | 24 ms |
-| **8 × 3 (default)**, both sittings | **17.61-19.56** | **42.87-45.43** | 23-25 | 14-16 + 25-28 | 0.72-0.81 / 1.68-1.82 | 30-31 ms |
+| **8 × 3 (default)**, all three sittings | **17.61-19.93** | **40.94-45.43** | 23-25 | 13-16 + 25-28 | 0.72-0.82 / 1.65-1.82 | 30-31 ms |
 | 16 rows a level (`SWARMLLM_FLOW_ROWS=16`) | 15.72-17.89 | 33.57-34.72 | 41-45 | 22-26 + 33-35 | 1.02-1.13 / 1.95-2.00 | 46-47 ms |
 | 4 levels (`SWARMLLM_FLOW_LEVELS=4`) | 16.85-19.38 | 40.23-41.53 | 29-34 | 18-20 + 29-30 | 0.88-1.00 / 1.98-2.03 | 36-37 ms |
+| 2 levels (`SWARMLLM_FLOW_LEVELS=2`) | 18.45-19.43 | 37.45-38.93 | 15.6-17.3 | 9-11 + 23-25 | 0.65-0.68 / 1.25-1.29 | 25-26 ms |
 
 Doubling 4 → 8 rows costs a forward ~10% here (its 26 layers' weights are read once a forward whatever
 its rows) and brings 41% more prose a forward, 12% more code. Doubling again to 16 brings another 37%
 of prose and 12% of code, but the drafter's level leaves the one-kernel, one-graph path built for ≤ 8 rows
 (§ "A tree level on a card") — drafting 14 → 25 ms — and the far end's share passes this node's, so the
 flow starts to wait (0.5-0.8 s a prose reply). A fourth level costs the drafter ~5 ms a forward and the
-far end ~6, for 10-25% more tokens a forward. The default stands. What the numbers say would win: a level
+far end ~6, for 10-25% more tokens a forward; a level fewer saves ~4.5 ms of drafting (a forward 15% cheaper)
+and costs 17% of prose a forward and 27% of code — a code reply's long runs need the depth. The default stands. What the numbers say would win: a level
 wider than 8 rows at the 8-row level's price on PROSE only (code gains 12% a doubling and loses it in
 cost) — a width that follows the guess's confidence (`docs/plans/faster_than_local.md` § 13.2) — and a
 split that gives this node fewer layers while it also drafts (FUTURE_WORK #411, "Also"). The law below
@@ -6359,7 +6361,10 @@ through Qwen2.5-Coder-7B Q4_K_M at 1,023 tok/s (pp24: 23.5 ms, ~0.79 ms a layer 
 575 (pp12: ~0.70 ms a layer); scaled by the weights a layer (~167 MB for the 14B against ~141 MB) that is ~0.93 and
 ~0.83 ms, against the flow's 1.0 and 0.91 here — tree attention and the token table included, within ~10%. So the
 lever is not the kernels: it is the drafting (~35% of this node's forward) and how many layers this node takes
-beside it.
+beside it. The drafting is not slow for its work either: a level of 8 rows costs ~4.5 ms here, and llama.cpp reads
+8 rows through the same 0.5B Q8_0 in ~4.1 ms (pp8 1,948 ± 338 tok/s) — a forward of a small model on a card is
+bound by its launches, not its weights, so what would cut it is fewer serial drafter forwards for the same depth
+(EAGLE-style one-layer heads, a block drafter), not a faster kernel.
 
 **The law this reads as: a flow advances about E (the tokens the drafter's live rows get right)
 per round trip.** 14-15 tok/s × 0.45 s ≈ 6.5 tokens. The tree rounds on the same link get 6.3-6.8 a round
