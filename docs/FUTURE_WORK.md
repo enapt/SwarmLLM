@@ -2754,6 +2754,10 @@ for the wider range replaced its all-card copy with a mostly-processor one (#461
 Measure it on a far computer whose loaded copy CONTAINS the ranges asked (a view, #449), never by growing one.
 Since #461's growth half (v0.3.292) an IDLE far computer on that release asked for the wider range retires its
 worker and loads the range afresh on its card, so the forced split point can be measured once the far end runs it.
+The other direction is no test on this 8 GB card: `[0..29)` here with `[29..48)` a SLICE of the far's loaded copy
+(`real_link_bal29/`, 2026-11-15 22:08Z, ABBA, one binary) left the 0.5B drafter no room on the card
+(`drafter_on_card=false` in both arms, `true` in both `[0..26)` arms): prose 8.4-8.8 and code 15.7-16.4 tok/s against
+17.4-17.7 and 42.5-42.8 — that arm measured a drafter on the processor, not the balance.
 **Why the planner cannot find the balance itself** (read 2026-11-15): a chain is priced as the SUM of its segments
 (`parallax::chain_cost_terms` folds each `vertex_cost_as` into one `VertexCost`, whose `total` adds its terms),
 and no term is the drafter's (`split_rounds.rs`'s module comment lists "the drafter's own time per guess, small
