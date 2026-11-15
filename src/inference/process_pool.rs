@@ -1298,6 +1298,14 @@ struct WorkerHandle {
     /// #322) — what promotion must see the card gain before it moves the
     /// model whole again ([`should_return_to_gpu`]).
     split_by_the_load: Option<SplitByTheLoad>,
+    /// The conversation a WHOLE card placement was fitted to keep room for by
+    /// its load's own reading ([`ModelProcessPool::fit_whole_placement_to_the_load`]);
+    /// `None` for every other placement — a split admitted short of the room
+    /// is sized for the model's whole context already, and the processor's
+    /// cache has a grant of its own. A prompt this placement refuses for want
+    /// of room is worth a reload only where one sized for it keeps more
+    /// ([`ModelProcessPool::make_room_for_a_longer_prompt`], #454).
+    room_sized_for: Option<KvCharge>,
     /// The card's free memory, in MB, as this worker's load READ it before
     /// placing its layers (`WorkerMsg::CardFree`, #365); `None` where the
     /// spawn did not ask. Diagnostic only: gossiped as
@@ -1532,6 +1540,9 @@ fn worker_msg_request_id(msg: &WorkerMsg) -> Option<Uuid> {
         | WorkerMsg::Drafted { request_id, .. }
         | WorkerMsg::PromptAdmitted { request_id }
         | WorkerMsg::PromptRefused { request_id, .. }
+        // Sent just before that request's `Error`, which its reader (the
+        // generate) needs it beside (#454).
+        | WorkerMsg::PromptRoomWanted { request_id, .. }
         | WorkerMsg::Error { request_id, .. } => Some(*request_id),
         // `PrefixSnapshotResponse` is correlated by `request_id` via the
         // normal response-routing channel — `fetch_local_snapshot`
@@ -2624,6 +2635,23 @@ impl WorkerHandle {
             .count()
             .try_into()
             .unwrap_or(u32::MAX)
+    }
+
+    /// [`Self::in_use`] asked by one request about every OTHER: a reply of
+    /// another in flight, or another's conversation held between forwards.
+    /// What a request that would retire this worker for itself asks
+    /// ([`ModelProcessPool::make_room_for_a_longer_prompt`]) — its own
+    /// registration is not use by anyone else.
+    fn in_use_beside(&self, request_id: Uuid, window: std::time::Duration) -> bool {
+        if self.others_in_flight(request_id) > 0 {
+            return true;
+        }
+        let mut holders = self
+            .kv_holders
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        holders.retain(|_, last| last.elapsed() <= window);
+        holders.keys().any(|holder| *holder != request_id)
     }
 
     /// This worker did work for a request just now: its idle time starts
@@ -4342,6 +4370,54 @@ impl Tenancy {
     }
 }
 
+/// How long a prompt refused for want of room keeps a model's later loads
+/// sized for one as long (#454): a conversation that sent one is likely to
+/// send the next, longer still — an agent's grows with every tool result.
+const LONG_PROMPT_REMEMBERED_FOR: std::time::Duration = std::time::Duration::from_secs(30 * 60);
+
+/// The positions a load keeps room for after a prompt of `positions` was
+/// refused: the next multiple of a typical conversation
+/// ([`crate::model::auto_manage::vram::ADMISSION_KV_CONTEXT`]), so the turns
+/// after it, a little longer each, fit the same placement instead of each
+/// asking for a reload.
+fn long_prompt_room(positions: u64) -> u64 {
+    let step = crate::model::auto_manage::vram::ADMISSION_KV_CONTEXT;
+    positions.div_ceil(step).saturating_mul(step)
+}
+
+/// `SWARMLLM_LONG_PROMPT_RELOAD=0` keeps every load fitted to a typical
+/// conversation and refuses a longer prompt as before #454 — for an A/B inside
+/// one binary. Read once.
+fn long_prompt_reload_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("SWARMLLM_LONG_PROMPT_RELOAD").as_deref() != Ok("0"))
+}
+
+/// The prompts each model was refused lately for want of room on a whole
+/// card placement fitted to a shorter conversation (#454), in positions
+/// ([`long_prompt_room`]), each kept [`LONG_PROMPT_REMEMBERED_FOR`] from the
+/// last. Written ONLY by [`ModelProcessPool::make_room_for_a_longer_prompt`],
+/// read ONLY by the spawn's fitting of a whole placement
+/// ([`ModelProcessPool::whole_placement_kv`]).
+#[derive(Default)]
+struct LongPrompts(DashMap<ModelId, (u64, std::time::Instant)>);
+
+impl LongPrompts {
+    /// The room `model`'s loads keep now, if a refusal asked for more than a
+    /// typical conversation within the window.
+    fn room_for(&self, model: &ModelId, now: std::time::Instant) -> Option<u64> {
+        let (room, at) = *self.0.get(model)?;
+        (now.saturating_duration_since(at) < LONG_PROMPT_REMEMBERED_FOR).then_some(room)
+    }
+
+    /// A prompt asked for `room`: the longest asked within the window is kept,
+    /// its clock started again.
+    fn note(&self, model: &ModelId, room: u64, now: std::time::Instant) {
+        let kept = self.room_for(model, now).unwrap_or(0).max(room);
+        self.0.insert(model.clone(), (kept, now));
+    }
+}
+
 /// Whose memory cap a drafter's load is weighed against
 /// ([`ModelProcessPool::draft`], [`ModelProcessPool::guest_fit`],
 /// the planner's room beside it): that of the request it guesses for. A
@@ -4435,6 +4511,10 @@ pub struct ModelProcessPool {
     /// prompt's length, when the up-front admission refused it — kept like
     /// `layers_refused` until the router takes them (`take_layers_fitting`).
     layers_fitting: DashMap<Uuid, (u32, std::time::Instant)>,
+    /// Prompts each model was refused lately for want of room on a whole card
+    /// placement fitted to a shorter conversation, so its next loads keep room
+    /// for one as long (#454).
+    long_prompts: LongPrompts,
     data_dir: PathBuf,
     /// Each model's header, parsed once while its file is unchanged — read
     /// ONLY by `segment_geometry`, which every footprint estimate goes through
@@ -4822,6 +4902,7 @@ impl ModelProcessPool {
             spawn_failures: DashMap::new(),
             layers_refused: DashMap::new(),
             layers_fitting: DashMap::new(),
+            long_prompts: LongPrompts::default(),
             data_dir,
             header_cache: crate::inference::split::HeaderCache::default(),
             active_shard_windows: DashMap::new(),
@@ -8135,6 +8216,102 @@ impl ModelProcessPool {
         (card_mb, machine_mb)
     }
 
+    /// The conversation a whole card placement's load keeps room for
+    /// ([`Self::fit_whole_placement_to_the_load`]): a typical one, or — for a
+    /// tenant of a model refused a longer prompt lately — one as long
+    /// ([`LongPrompts`], #454). Admission is not asked with it: a model that
+    /// was admitted whole still is, and only the load's own reading moves
+    /// layers to the processor to keep the room — none where the machine
+    /// cannot take them, so a model never stops loading for it.
+    fn whole_placement_kv(&self, model_id: &ModelId, tenancy: Tenancy) -> KvCharge {
+        match tenancy {
+            Tenancy::Tenant if long_prompt_reload_on() => self
+                .long_prompts
+                .room_for(model_id, std::time::Instant::now())
+                .map_or(KvCharge::Typical, KvCharge::LongPrompt),
+            _ => tenancy.kv_charge(),
+        }
+    }
+
+    /// A reply's prompt was refused by `handle` for want of room
+    /// (`WorkerMsg::PromptRoomWanted`: `positions` is the prompt plus its
+    /// reply's reserve). Remember it, and retire the worker where a load
+    /// fitted to keep room for it would keep more than this one was fitted to
+    /// and no other request is using it. Returns whether it retired the
+    /// worker: the caller then asks once more, and the spawn fits the
+    /// placement to the prompt ([`Self::whole_placement_kv`]) — fewer layers on
+    /// the card, the prompt served where it was refused (#454; field report
+    /// 2026-11-03: a 12 GB card's 14B kept ~1,300 tokens beside it).
+    ///
+    /// Prior art: Ollama reloads a runner whose context is shorter than a
+    /// request asks for (`server/sched.go`, `needsReload`) and fits its card
+    /// layers to that context (`llm/memory.go`, `EstimateGPULayers`);
+    /// llama.cpp's `--fit` brings the context down to 4,096 before layers leave
+    /// the card (`common/fit.cpp`). This node's first load does the latter; a
+    /// longer prompt asks for the room back, as Ollama's request does.
+    ///
+    /// Never a loop: the replacement is fitted to [`long_prompt_room`] of the
+    /// prompt, so the same prompt refused again wants no more than that. The
+    /// handle is MOVED in — it must not outlive the retirement
+    /// ([`Self::unload_model`] waits for the process to exit).
+    async fn make_room_for_a_longer_prompt(
+        &self,
+        model_id: &ModelId,
+        handle: Arc<WorkerHandle>,
+        request_id: Uuid,
+        segment: (u32, u32),
+        positions: u64,
+    ) -> bool {
+        if !long_prompt_reload_on() {
+            return false;
+        }
+        let Some(sized_for) = handle.room_sized_for else {
+            return false;
+        };
+        let Some((inputs, _)) = self.segment_geometry(model_id, Some(segment)) else {
+            return false;
+        };
+        let room = long_prompt_room(positions);
+        let had = sized_for.positions(&inputs);
+        let wants = KvCharge::LongPrompt(room).positions(&inputs);
+        if wants <= had {
+            return false;
+        }
+        self.long_prompts
+            .note(model_id, room, std::time::Instant::now());
+        // Under the spawn lock, as every retirement: a request that took this
+        // worker between the refusal and here has registered or charged.
+        let guard = self.spawn_lock.lock().await;
+        let current = self
+            .workers
+            .get(model_id)
+            .is_some_and(|w| Arc::ptr_eq(w.value(), &handle));
+        if !current || handle.in_use_beside(request_id, self.conversation_window()) {
+            tracing::info!(
+                model = %model_id,
+                prompt_positions = positions,
+                room_now = had,
+                room_wanted = wants,
+                "A prompt longer than this model's placement keeps room for was refused; \
+                 another request is using the model, so it stays as it is — its next load \
+                 keeps room for one as long"
+            );
+            return false;
+        }
+        tracing::info!(
+            model = %model_id,
+            prompt_positions = positions,
+            room_now = had,
+            room_wanted = wants,
+            "A prompt longer than this model's placement keeps room for — loading the model \
+             again with room for it (fewer of its layers on the graphics card)"
+        );
+        drop(handle);
+        self.unload_model(model_id).await;
+        drop(guard);
+        true
+    }
+
     /// How [`Self::charge_segment_as_split`] would place `segment` on
     /// `handle`'s card with `extra_mb` more card memory than stands free —
     /// `extra_mb` 0 is its own question, more is the reclaim's
@@ -10847,6 +11024,8 @@ impl ModelProcessPool {
                             .await;
                     }
                     (Some(free), None) if whole_reads_card => {
+                        let kv = self.whole_placement_kv(model_id, tenancy);
+                        handle.room_sized_for = Some(kv);
                         (charged_vram_mb, charged_ram_mb) = self
                             .fit_whole_placement_to_the_load(
                                 model_id,
@@ -10854,7 +11033,7 @@ impl ModelProcessPool {
                                 &mut handle,
                                 WholeRefit {
                                     load_reads_free_bytes: free,
-                                    kv: tenancy.kv_charge(),
+                                    kv,
                                     requester,
                                 },
                                 (charged_vram_mb, charged_ram_mb),
@@ -11343,6 +11522,8 @@ impl ModelProcessPool {
         command.env(crate::inference::worker_ipc::DAEMON_READS_LOAD_TIMING, "1");
         // ...and the context its whole model holds (#252 (1)).
         command.env(crate::inference::worker_ipc::DAEMON_READS_CONTEXT_FITS, "1");
+        // ...and the room a refused prompt wanted (#454).
+        command.env(crate::inference::worker_ipc::DAEMON_READS_PROMPT_ROOM, "1");
         // The pace it starts at (#440 step 4): a worker spawned while the
         // computer is hot is paced from its first step.
         let pace_at_spawn = self.pace_permille.load(Ordering::Acquire);
@@ -11530,6 +11711,7 @@ impl ModelProcessPool {
             // says so through `placed_on_cpu_because: None` alone.
             card_split: card_split.filter(|_| placed_on_cpu_because.is_none()),
             split_by_the_load: None,
+            room_sized_for: None,
             card_free_at_load_mb: None,
             context_fits,
             own_decode: std::sync::Mutex::new(OwnDecodeSpeed::default()),
@@ -12518,6 +12700,9 @@ impl ModelProcessPool {
         // Track whether any token has been streamed to the caller, so a retry
         // can never duplicate output the client already saw.
         let emitted = std::sync::atomic::AtomicBool::new(false);
+        // Set where the worker refused the prompt for want of room and was
+        // retired to load again with room for it (#454).
+        let room_made = std::sync::atomic::AtomicBool::new(false);
         let was_pinned = self.is_cpu_pinned(model_id);
         let first = self
             .generate_attempt(
@@ -12533,10 +12718,40 @@ impl ModelProcessPool {
                 token_tx.clone(),
                 opened,
                 &emitted,
+                &room_made,
             )
             .await;
         match first {
             Ok(out) => Ok(out),
+            // Refused at admission, before its first token: nothing streamed,
+            // so asking again duplicates nothing. Once — the new load is
+            // fitted to this prompt, and a refusal of it is the answer.
+            Err(_)
+                if room_made.load(std::sync::atomic::Ordering::Relaxed)
+                    && !emitted.load(std::sync::atomic::Ordering::Relaxed) =>
+            {
+                tracing::info!(
+                    model = %model_id,
+                    %request_id,
+                    "Asking again for the prompt the model's earlier placement had no room for"
+                );
+                self.generate_attempt(
+                    model_id,
+                    layer_range,
+                    prompt,
+                    sampling,
+                    request_id,
+                    requester,
+                    requested_by,
+                    keep,
+                    session_id,
+                    token_tx,
+                    opened,
+                    &std::sync::atomic::AtomicBool::new(false),
+                    &std::sync::atomic::AtomicBool::new(false),
+                )
+                .await
+            }
             Err(e) => {
                 // A GPU OOM on the first (cold) request kills the worker and pins
                 // the model to CPU. The request that TRIGGERED the OOM used to eat
@@ -12568,6 +12783,7 @@ impl ModelProcessPool {
                         token_tx,
                         opened,
                         &emitted_retry,
+                        &std::sync::atomic::AtomicBool::new(false),
                     )
                     .await
                 } else {
@@ -12592,6 +12808,7 @@ impl ModelProcessPool {
         token_tx: Option<crate::inference::router::StreamingTokenTx>,
         opened: crate::inference::PromptOpened,
         emitted: &std::sync::atomic::AtomicBool,
+        room_made: &std::sync::atomic::AtomicBool,
     ) -> Result<crate::inference::router::InferenceOutput, SwarmError> {
         let handle = self
             .get_or_spawn(
@@ -12662,6 +12879,8 @@ impl ModelProcessPool {
         let mut token_logprobs: Vec<crate::inference::router::TokenLogProbEntry> = Vec::new();
         #[allow(unused_assignments)]
         let mut matched_stop_sequence: Option<String> = None;
+        // The room the worker said the prompt wanted, just before refusing it.
+        let mut room_wanted: Option<u64> = None;
 
         loop {
             let (msg, _) = match resp_rx.recv().await {
@@ -12732,6 +12951,12 @@ impl ModelProcessPool {
                     guard.disarm();
                     break;
                 }
+                WorkerMsg::PromptRoomWanted {
+                    request_id: rid,
+                    positions,
+                } if rid == request_id => {
+                    room_wanted = Some(positions);
+                }
                 WorkerMsg::Error {
                     request_id: rid,
                     message,
@@ -12739,6 +12964,23 @@ impl ModelProcessPool {
                     local_memory_refusal,
                 } if rid == request_id => {
                     guard.disarm();
+                    if let (Some(positions), true, false) =
+                        (room_wanted, local_memory_refusal, fatal)
+                    {
+                        // This request's registration goes first: the
+                        // retirement waits for the worker's replies to drain.
+                        drop(guard);
+                        let made = self
+                            .make_room_for_a_longer_prompt(
+                                model_id,
+                                handle,
+                                request_id,
+                                layer_range,
+                                positions,
+                            )
+                            .await;
+                        room_made.store(made, std::sync::atomic::Ordering::Relaxed);
+                    }
                     return Err(self.classify_worker_error(
                         model_id,
                         message,
@@ -18354,6 +18596,7 @@ mod tests {
             gpu_estimate_mb: 0,
             card_split,
             split_by_the_load: None,
+            room_sized_for: None,
             card_free_at_load_mb: None,
             context_fits: Arc::new(std::sync::atomic::AtomicU32::new(0)),
             own_decode: std::sync::Mutex::new(OwnDecodeSpeed::default()),
@@ -21810,6 +22053,231 @@ mod admission_tests {
             );
             p.after_worker_gone_charge(&m, DepartedWorker::from(&h), "test");
         }
+    }
+
+    /// **A load fitted to a long prompt keeps room for it** (#454). A reading
+    /// that leaves the 14B room for a typical 4,096-token conversation keeps
+    /// it whole on the card, and a prompt of 8,000 tokens is then refused
+    /// there; fitted to that prompt ([`ModelProcessPool::whole_placement_kv`]
+    /// once [`ModelProcessPool::make_room_for_a_longer_prompt`] noted it), the
+    /// same reading moves layers to the processor so the card keeps room for
+    /// 8,192, and the charges follow what moved.
+    #[tokio::test]
+    async fn a_whole_placement_fitted_to_a_long_prompt_keeps_room_for_it() {
+        let (p, m, mut h, mut worker_end, charged) =
+            fourteen_b_spawned_whole("fourteen-b-long-prompt", 100_000).await;
+        let segment = (0, 48);
+        let (inputs, layers) = p.segment_geometry(&m, Some(segment)).unwrap();
+        // The least reading that keeps room for a typical conversation.
+        let read_mb = (10_000..16_000)
+            .step_by(50)
+            .find(|&mb| {
+                whole_placement_short_by_bytes(&inputs, &layers.weights, 4_096, mb * MIB) == 0
+            })
+            .expect("fixture: some reading keeps room for a typical conversation");
+        assert!(
+            whole_placement_short_by_bytes(&inputs, &layers.weights, 8_192, read_mb * MIB) > 0,
+            "fixture: ...and not for 8,192 positions"
+        );
+        // Typical: whole, as before.
+        let mut typical = fourteen_b_spawned_whole("fourteen-b-typical", 100_000).await;
+        let after = typical
+            .0
+            .fit_whole_placement_to_the_load(
+                &typical.1,
+                segment,
+                &mut typical.2,
+                whole_refit(read_mb),
+                typical.4,
+            )
+            .await;
+        assert_eq!(
+            after, typical.4,
+            "a typical conversation fits beside it whole"
+        );
+        assert_eq!(typical.2.card_split, None);
+
+        p.long_prompts
+            .note(&m, long_prompt_room(8_000), std::time::Instant::now());
+        let kv = p.whole_placement_kv(&m, Tenancy::Tenant);
+        assert_eq!(kv, KvCharge::LongPrompt(8_192));
+        let (card_mb, machine_mb) = p
+            .fit_whole_placement_to_the_load(
+                &m,
+                segment,
+                &mut h,
+                WholeRefit {
+                    load_reads_free_bytes: read_mb * MIB,
+                    kv,
+                    requester: Requester::Owner,
+                },
+                charged,
+            )
+            .await;
+        let Some(CardSplit::Layers { on_card, total: 48 }) = h.card_split else {
+            panic!(
+                "fitted to the long prompt, split by whole layers: {:?}",
+                h.card_split
+            );
+        };
+        assert!(on_card < 48, "{on_card}");
+        assert!(
+            placement_told(&mut worker_end).await.is_some(),
+            "told before its load"
+        );
+        assert!(
+            card_mb < charged.0 && machine_mb > 0,
+            "{card_mb} / {machine_mb}"
+        );
+        // A guest is never fitted to another model's prompt.
+        assert_eq!(
+            p.whole_placement_kv(
+                &m,
+                Tenancy::Guest {
+                    conversation: 512,
+                    leaves_mb: 0
+                }
+            ),
+            KvCharge::Conversation(512)
+        );
+        p.after_worker_gone_charge(&m, DepartedWorker::from(&h), "test");
+        typical
+            .0
+            .after_worker_gone_charge(&typical.1, DepartedWorker::from(&typical.2), "test");
+    }
+
+    /// The room a long prompt asks for is a whole number of typical
+    /// conversations, never less than one, and never past the context.
+    #[test]
+    fn the_room_a_long_prompt_asks_for() {
+        assert_eq!(long_prompt_room(1), 4_096);
+        assert_eq!(long_prompt_room(4_096), 4_096);
+        assert_eq!(long_prompt_room(4_097), 8_192);
+        assert_eq!(long_prompt_room(9_000), 12_288);
+        let inputs = fourteen_b();
+        assert_eq!(KvCharge::LongPrompt(2_000).positions(&inputs), 4_096);
+        assert_eq!(KvCharge::LongPrompt(8_192).positions(&inputs), 8_192);
+        assert_eq!(
+            KvCharge::LongPrompt(12_288).positions(&inputs),
+            8_192,
+            "the context it holds"
+        );
+    }
+
+    /// The longest prompt asked within the window is kept, and the window
+    /// starts again with each.
+    #[test]
+    fn a_long_prompt_is_remembered_for_its_window() {
+        let prompts = LongPrompts::default();
+        let m = ModelId("m".into());
+        let t0 = std::time::Instant::now();
+        assert_eq!(prompts.room_for(&m, t0), None);
+        prompts.note(&m, 12_288, t0);
+        let t1 = t0 + std::time::Duration::from_secs(600);
+        prompts.note(&m, 8_192, t1);
+        assert_eq!(prompts.room_for(&m, t1), Some(12_288), "the longest");
+        let almost = LONG_PROMPT_REMEMBERED_FOR.saturating_sub(std::time::Duration::from_secs(1));
+        assert_eq!(
+            prompts.room_for(&m, t1 + almost),
+            Some(12_288),
+            "from the last"
+        );
+        assert_eq!(prompts.room_for(&m, t1 + LONG_PROMPT_REMEMBERED_FOR), None);
+    }
+
+    /// **A worker refusing a prompt for want of room is retired only where a
+    /// load fitted to it keeps more, and nothing else uses it** (#454) — and
+    /// never twice for the same prompt.
+    #[tokio::test]
+    async fn a_refused_long_prompt_retires_the_worker_only_where_a_reload_gives_room() {
+        let p = pool();
+        let m = ModelId("fourteen-b-retire".into());
+        p.test_footprint_inputs.insert(m.clone(), fourteen_b());
+        let segment = (0, 48);
+        let rid = Uuid::new_v4();
+        let worker_sized_for = |sized: Option<KvCharge>| async move {
+            let (h, end) = super::tests::fake_worker_handle_split_with_its_end(
+                false,
+                None,
+                false,
+                std::time::Instant::now(),
+                None,
+            )
+            .await;
+            let Ok(mut handle) = Arc::try_unwrap(h) else {
+                panic!("a fresh handle has one owner");
+            };
+            handle.room_sized_for = sized;
+            (Arc::new(handle), end)
+        };
+
+        // Fitted to a typical conversation: an 8,000-position prompt is
+        // worth a reload — the worker goes and the room is remembered.
+        let (h, _end) = worker_sized_for(Some(KvCharge::Typical)).await;
+        p.workers.insert(m.clone(), h.clone());
+        assert!(
+            p.make_room_for_a_longer_prompt(&m, h, rid, segment, 8_000)
+                .await
+        );
+        assert!(p.workers.get(&m).is_none(), "retired");
+        assert_eq!(
+            p.long_prompts.room_for(&m, std::time::Instant::now()),
+            Some(8_192)
+        );
+
+        // Its replacement, fitted to that room, refusing the same prompt
+        // again: no second reload.
+        let (h, _end) = worker_sized_for(Some(KvCharge::LongPrompt(8_192))).await;
+        p.workers.insert(m.clone(), h.clone());
+        assert!(
+            !p.make_room_for_a_longer_prompt(&m, h, rid, segment, 8_000)
+                .await
+        );
+        assert!(p.workers.get(&m).is_some(), "kept");
+        p.workers.remove(&m);
+
+        // A placement not fitted by its load (a split admitted short, the
+        // processor): nothing to reload for.
+        let (h, _end) = worker_sized_for(None).await;
+        p.workers.insert(m.clone(), h.clone());
+        assert!(
+            !p.make_room_for_a_longer_prompt(&m, h, rid, segment, 8_000)
+                .await
+        );
+        assert!(p.workers.get(&m).is_some(), "kept");
+        p.workers.remove(&m);
+
+        // Another request's reply in flight: kept, its next load fitted.
+        let other = ModelId("fourteen-b-busy".into());
+        p.test_footprint_inputs.insert(other.clone(), fourteen_b());
+        let (h, _end) = worker_sized_for(Some(KvCharge::Typical)).await;
+        p.workers.insert(other.clone(), h.clone());
+        let (tx, _rx) = mpsc::channel(1);
+        let (_busy, _) = h.register_response(Uuid::new_v4(), tx, false);
+        assert!(
+            !p.make_room_for_a_longer_prompt(&other, h, rid, segment, 8_000)
+                .await
+        );
+        assert!(p.workers.get(&other).is_some(), "kept while in use");
+        assert_eq!(
+            p.long_prompts.room_for(&other, std::time::Instant::now()),
+            Some(8_192),
+            "the next load is fitted to it"
+        );
+    }
+
+    /// The worker's note of the room a prompt wanted reaches that request's
+    /// generate — it is read beside the refusal that follows it.
+    #[test]
+    fn the_room_a_prompt_wanted_is_routed_to_its_request() {
+        let rid = Uuid::new_v4();
+        assert_eq!(
+            worker_msg_request_id(&WorkerMsg::PromptRoomWanted {
+                request_id: rid,
+                positions: 8_000
+            }),
+            Some(rid)
+        );
     }
 
     /// Only a whole CARD placement is read again — never a guest (it takes

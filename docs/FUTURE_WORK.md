@@ -5240,32 +5240,32 @@ StarCoder2, inert while refused).
 ### Memory and admission
 
 #### #454 — A long prompt on a split sized for a typical conversation is refused by megabytes, not reloaded with fewer card layers
-`P1` · memory / scheduling · **OPEN** — 2026-11-15 · from a field report (AU, 12 GB card, Qwen2.5-14B at 47/48 on the card)
+`P1` · memory / scheduling · **BUILT, card check open** — 2026-11-15 · from a field report (AU, 12 GB card, Qwen2.5-14B at 47/48 on the card)
 
 **Seen:** first word 4.4 s at 2,066 tokens, 188 s at 4,072, 338 s at 7,064, refused at 9.5k. At 4k the card worker
 evicted its saved prompts (`needed_mb=382 freed_mb=395`) and ~250 ms later a worker loaded the model on the
 processor (`device=Cpu`) and ran the prompt there. **Part fixed 2026-11-15** (gotcha #1105): the eviction counted a
-split's saved prompt whole as card memory — on that split ~379 of the 395 MB were the card's, so the prompt was still
-~3 MB short, and here (14B 28/20, `ladder.sh` with saved prompts on the card) a 5.7k prompt was evicted for and then
-refused 8 ms later. Now the admission evicts only for room the card really gets back, and refuses up front
-otherwise. On a CUDA build of the fix (04:25Z) the ladder evicted for 2 of 7 prompts instead of 5 and the 4.3k
-prompt was served after its eviction (first word 6.6 s against 15.5 s). The 5.7k one still evicted and was then
-refused: the pool gave the driver 384 MB back and WSL2's driver showed 132 MB of it free (`docs/invariants/memory.md`
-§ "…and so is a saved prompt", card check). The cause of that gap is not established, and it was seen only with
-saved prompts forced onto the card under WSL2.
-**Left:** the split's card share is fitted at spawn to a TYPICAL conversation (`KvCharge::Typical`, 4,096
-positions — `process_pool::refit_split_to_the_load`, `vram.rs`), so a prompt past it on a card held to the last
-layer is refused however long it waits; after the refusal the re-plan withdraws a fresh split
-(`fresh_run_layers` → `None`, `scheduler/mod.rs` ~5450) and an executor's mid-prefill refusal records no
-`layers_fitting` (#263 records it only for the daemon's up-front admission). What loaded the processor-only copy the
-report saw is NOT found in code (traced 2026-11-15: `cpu_reason` never reads a refusal; the re-plan reuses the card
-worker, which refuses again — as it did here, ending in the refusal message). **Build:** a refusal of a prompt past
-the spawn's typical charge on a card/processor split respawns the split sized for that prompt (fewer card layers,
-the cache's room left beside them), once per model and length class, where the reload costs less than the
-processor path. **Prior art:** Ollama reloads a runner whose `num_ctx` differs, its GPU layers re-estimated for that
-context (`server/sched.go` `needsReload`, `llm/memory.go` `EstimateGPULayers`); llama.cpp's `common/fit.cpp`
-(`--fit`) fits `n_gpu_layers` to the context at load. Both size layers BY the context; neither runs a long prompt
-on the processor while the card holds the model.
+split's saved prompt whole as card memory; now the admission evicts only for room the card really gets back.
+**Built 2026-11-15 (the reload):** 47/48 is a WHOLE admission that its load's own reading split to keep a TYPICAL
+conversation (`fit_whole_placement_to_the_load`, #322 — `KvCharge::Typical`, 4,096 positions); a split admitted
+short of the room is sized for the full context already (`card_kv_bytes_of_split`). Now a generate refused as too
+long for such a placement (`Shortfall::TooLong` only — never one other conversations or programs cause) tells the
+daemon the room it wanted (`WorkerMsg::PromptRoomWanted`, gated at the sender, gotcha #765); the pool remembers it
+30 min (`LongPrompts`, rounded up to a multiple of 4,096), retires the worker where a load fitted to it keeps more
+and no other request uses it (`make_room_for_a_longer_prompt`), and `generate` asks again once before the first
+token. The new load is admitted as before and fitted to the prompt by its own reading (`whole_placement_kv` →
+`KvCharge::LongPrompt`): fewer card layers, or whole where the machine cannot take them — never a model that stops
+loading. Never a loop (the same prompt wants no more than the new load keeps). A/B `SWARMLLM_LONG_PROMPT_RELOAD=0`.
+Tests: `a_whole_placement_fitted_to_a_long_prompt_keeps_room_for_it`,
+`a_refused_long_prompt_retires_the_worker_only_where_a_reload_gives_room`. **Prior art:** Ollama reloads a runner
+whose `num_ctx` is shorter than asked (`server/sched.go` `needsReload`), its GPU layers fitted to that context
+(`llm/memory.go` `EstimateGPULayers`); llama.cpp `common/fit.cpp` (`--fit`) brings the context down to 4,096 before
+layers leave the card — our first load does that, and a longer prompt asks for the room back.
+**Left:** (1) the CARD check — a model admitted whole that its load fits to 4,096 (this 8 GB card: an 8B near its
+line), a prompt past that room served after one reload, mechanism in the log ("loading the model again with room
+for it"); (2) a split's peer segment refused mid-prefill still records no `layers_fitting` (#263 records it only for
+the up-front admission) — the reload covers the whole-model generate only; (3) what loaded the processor-only copy the
+report saw is NOT found in code (traced 2026-11-15: `cpu_reason` never reads a refusal).
 
 #### #455 — A split's saved prompt is planned against the card alone; its processor share is bounded only afterwards
 `P3` · memory · **OPEN** — 2026-11-15 · from the pre-release review of #454's partial fix (gotcha #1105)

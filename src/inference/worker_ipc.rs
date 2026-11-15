@@ -186,6 +186,20 @@ pub(crate) const DAEMON_READS_LOAD_TIMING: &str = "SWARMLLM_DAEMON_READS_LOAD_TI
 /// `WorkerMsg::ContextFits`. Gated and read like [`DAEMON_READS_LOAD_TIMING`].
 pub(crate) const DAEMON_READS_CONTEXT_FITS: &str = "SWARMLLM_DAEMON_READS_CONTEXT_FITS";
 
+/// Set by the daemon in every worker's environment: this daemon decodes
+/// `WorkerMsg::PromptRoomWanted` (#454). Gated like
+/// [`DAEMON_READS_LOAD_TIMING`] (gotcha #765).
+pub(crate) const DAEMON_READS_PROMPT_ROOM: &str = "SWARMLLM_DAEMON_READS_PROMPT_ROOM";
+
+/// Whether the daemon that spawned this worker reads
+/// `WorkerMsg::PromptRoomWanted`. Read once, where a refusal is sent.
+pub(crate) fn daemon_reads_prompt_room() -> bool {
+    static READS: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *READS.get_or_init(|| {
+        daemon_reads_card_probe(std::env::var_os(DAEMON_READS_PROMPT_ROOM).as_deref())
+    })
+}
+
 /// Message from worker → daemon.
 #[derive(Serialize, Deserialize, Debug)]
 #[serde(tag = "t")]
@@ -304,6 +318,17 @@ pub enum WorkerMsg {
     /// load here reads it, in bytes; `None` without a card or a reading.
     /// Sent only in answer to that message, so only to a daemon that reads it.
     CardFree { free_bytes: Option<u64> },
+    /// A reply's prompt was refused because the conversation memory this
+    /// worker's placement leaves could not hold `positions` — the prompt plus
+    /// the reply's reserve, what its admission asked for. Sent just before
+    /// that request's `Error`, so the daemon may load the model again with
+    /// room for it (`ModelProcessPool::make_room_for_a_longer_prompt`, #454).
+    /// Only the two generate admissions send it, and only for their own
+    /// refusal of the prompt; every other reader ignores it.
+    ///
+    /// ⚠ Sent only when the daemon said it reads it
+    /// ([`DAEMON_READS_PROMPT_ROOM`]) — see `CardAllocationProbe`.
+    PromptRoomWanted { request_id: Uuid, positions: u64 },
     /// Error for a specific request.
     ///
     /// `fatal` marks a failure that corrupted or exhausted the worker's device
@@ -1142,6 +1167,7 @@ enum WorkerMsgTag {
     ModelLoadTimed,
     ContextFits,
     CardFree,
+    PromptRoomWanted,
     Error,
     PrefixManifestUpdate,
     PrefixFetchProbe,
@@ -1457,6 +1483,7 @@ mod tests {
                 WorkerMsg::ModelLoadTimed { .. } => WorkerMsgTag::ModelLoadTimed,
                 WorkerMsg::ContextFits { .. } => WorkerMsgTag::ContextFits,
                 WorkerMsg::CardFree { .. } => WorkerMsgTag::CardFree,
+                WorkerMsg::PromptRoomWanted { .. } => WorkerMsgTag::PromptRoomWanted,
                 WorkerMsg::Error { .. } => WorkerMsgTag::Error,
                 WorkerMsg::PrefixManifestUpdate { .. } => WorkerMsgTag::PrefixManifestUpdate,
                 WorkerMsg::PrefixFetchProbe { .. } => WorkerMsgTag::PrefixFetchProbe,
@@ -1495,6 +1522,10 @@ mod tests {
                 request_id: Uuid::nil(),
                 message: String::new(),
                 layers_that_fit: 3,
+            },
+            WorkerMsg::PromptRoomWanted {
+                request_id: Uuid::nil(),
+                positions: 8_000,
             },
         ] {
             let written = serde_json::to_value(&m).unwrap()["t"].clone();

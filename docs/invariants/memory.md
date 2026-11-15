@@ -5543,8 +5543,47 @@ the pool 410 MB back (`pool_used` 6,221 → 5,811). The pool then handed 384 MB 
 (`hold_driver_margin`), but WSL2's driver showed only 132 MB of it free (`driver_free_after_mb=132`), still 388
 MB 230 ms later. So the reading after the eviction was 646, and the re-plan's up-front ask refused 33 MB short with
 nothing evicted. What happened to the other ~250 MB is not established. The rig forces saved prompts onto the
-card, which under WSL2 they never are by default (#257), and no native driver was checked. The rest of that
-refusal is the split sized for a typical conversation (FUTURE_WORK #454).
+card, which under WSL2 they never are by default (#257), and no native driver was checked. (Corrected 2026-11-15:
+this note blamed the rest on a split sized for a typical conversation. That split was admitted short of the room,
+and such a split is sized for the model's FULL context (`card_kv_bytes_of_split`). Only a whole admission that its
+load fits to 4,096 positions keeps less, and that is what #454's reload answers — see "A long prompt asks for the
+room back" below.)
+
+### A long prompt asks for the room back (2026-11-15, FUTURE_WORK #454)
+
+**Found by** a field report: a 12 GB card held Qwen2.5-14B at 47/48 layers. Admission had taken it whole, and its
+load's own reading split it to keep a 4,096-position conversation (#322). Prompts past that room were refused
+however long they waited (7,064 tokens took 338 s, and 9.5k was refused). llama.cpp's `--fit` makes the same first
+choice: the context comes down to 4,096 before layers leave the card (`common/fit.cpp`). Ollama's answer to a
+longer request is to reload the runner with the context it asks for, its card layers fitted to it
+(`server/sched.go` `needsReload`, `llm/memory.go` `EstimateGPULayers`).
+
+**The rule.** Only the two generate admissions send `WorkerMsg::PromptRoomWanted` (the prompt plus its reply's
+reserve). Each sends it just before the request's `Error`, and only for `Shortfall::TooLong`, never for room that
+other conversations or another program hold. It is sent only where the daemon set `SWARMLLM_DAEMON_READS_PROMPT_ROOM`
+(gotcha #765). The pool routes it to that request's generate. `ModelProcessPool::make_room_for_a_longer_prompt`
+retires the worker only where three things hold:
+- its placement was fitted by its load (`WorkerHandle::room_sized_for`, set only where `fit_whole_placement_to_the_load` runs);
+- a load fitted to `long_prompt_room(positions)` keeps MORE positions than that one was fitted to (no loop);
+- no other request uses it (`WorkerHandle::in_use_beside`).
+
+It does this under the spawn lock. It always remembers the room (`LongPrompts`, 30 min from the last, the longest
+kept). `generate` then asks once more before any token, and the new load is fitted to the prompt
+(`whole_placement_kv` → `KvCharge::LongPrompt`, never below a typical conversation, never past the context).
+
+Admission is NOT asked with the longer charge. A model admitted whole is still admitted, and where the machine
+cannot take the moved layers it loads whole as before. So remembering a long prompt can never stop a model loading.
+A/B `SWARMLLM_LONG_PROMPT_RELOAD=0`.
+
+**Tests.** `a_whole_placement_fitted_to_a_long_prompt_keeps_room_for_it`: the reading that keeps the 14B whole
+for 4,096 splits it for 8,192.
+`a_refused_long_prompt_retires_the_worker_only_where_a_reload_gives_room` covers four cases:
+- retired, with the room noted;
+- not again for the same prompt;
+- not for a placement its load did not fit;
+- kept while another request is in flight, with its next load fitted.
+
+The card check is open (FUTURE_WORK #454 Left (1)).
 
 ## A split's processor share is charged to the machine (2026-10-13, FUTURE_WORK #264)
 

@@ -8312,6 +8312,30 @@ fn ensure_room_for_prompt(
     reply_positions: usize,
     forward_width: usize,
 ) -> Result<(), SwarmError> {
+    admit_this_prompt(
+        model,
+        kv_store,
+        prefix_cache,
+        request_id,
+        prompt_tokens,
+        reply_positions,
+        forward_width,
+    )
+    .map_err(|refused| refused.error)
+}
+
+/// [`ensure_room_for_prompt`], keeping why a refusal was made — for the two
+/// generate admissions, which tell the daemon the room a prompt too long for
+/// this placement wanted ([`tell_the_room_a_prompt_wanted`], #454).
+fn admit_this_prompt(
+    model: &SplitModel,
+    kv_store: &KvCacheStore,
+    prefix_cache: &PrefixCache,
+    request_id: &str,
+    prompt_tokens: usize,
+    reply_positions: usize,
+    forward_width: usize,
+) -> Result<(), PromptRefusal> {
     let width = model.layer_end.saturating_sub(model.layer_start) as u32;
     admit_prompt_over(
         &[(model, width)],
@@ -8325,7 +8349,35 @@ fn ensure_room_for_prompt(
         Admitting::Record,
     )
     .map(|_| ())
-    .map_err(|refused| refused.error)
+}
+
+/// Tell the daemon how much room a reply's prompt wanted when this worker
+/// refused it as too long for the room its placement leaves conversations
+/// (`WorkerMsg::PromptRoomWanted`, #454): `positions` is what the admission
+/// asked for, the prompt plus the reply's reserve. The daemon may then load
+/// the model again with fewer layers on the card and room for it — Ollama
+/// reloads a runner whose context is smaller than a request needs
+/// (`server/sched.go` `needsReload`), llama.cpp's `--fit` sizes the layers
+/// for the context first (`common/fit.cpp`). Nothing for a refusal another
+/// conversation or program causes (a reload would not help), and nothing to
+/// a daemon that does not read it (gotcha #765). Sent before the request's
+/// `Error`, so the daemon has it when that arrives.
+async fn tell_the_room_a_prompt_wanted(
+    writer: &mut IpcWriter,
+    request_id: Uuid,
+    refused: &PromptRefusal,
+    positions: usize,
+) {
+    if refused.shortfall != Shortfall::TooLong || !daemon_reads_prompt_room() {
+        return;
+    }
+    let msg = WorkerMsg::PromptRoomWanted {
+        request_id,
+        positions: u64::try_from(positions).unwrap_or(u64::MAX),
+    };
+    if let Err(e) = send_worker(writer, &msg, &[]).await {
+        tracing::debug!(%request_id, error = %e, "could not tell the daemon the room a prompt wanted");
+    }
 }
 
 /// What an admission may change. A REQUIRED argument of [`admit_prompt_over`]:
@@ -8391,6 +8443,9 @@ struct PromptRefusal {
     error: SwarmError,
     needed: u64,
     short_by: u64,
+    /// Why — only [`Shortfall::TooLong`] is helped by a placement with more
+    /// room for conversations (#454, [`tell_the_room_a_prompt_wanted`]).
+    shortfall: Shortfall,
 }
 
 /// How many of `layers` a prompt's cache fits in, when the room holds
@@ -8707,12 +8762,13 @@ fn admit_prompt_in(
     // class travels on `WorkerMsg::Error::local_memory_refusal` rather than in
     // the text.
     let needed = promise;
+    let why = shortfall(live, budget, load_time_budget, needed);
     let error = SwarmError::LocalMemoryUnavailable(prompt_refusal_message(
         prompt_tokens,
         mb(live),
         mb(budget),
         mb(short_by),
-        shortfall(live, budget, load_time_budget, needed),
+        why,
         longest_prompt_that_fits(budget, growth, reply_positions),
         mb(load_time_budget),
     ));
@@ -8720,6 +8776,7 @@ fn admit_prompt_in(
         error,
         needed,
         short_by,
+        shortfall: why,
     })
 }
 
@@ -9570,18 +9627,23 @@ async fn handle_generate(
     // forward the suffix. Try local first (free); on miss, probe cross-node
     // (Item 8 Phase 2b).
     let matched = prefix_cache.lookup(&model_key_string, &prompt_ids);
-    ensure_room_for_prompt(
+    let reply_positions = reply_reserve_positions(
+        gen.sampling.max_tokens,
+        draft_margin_positions(ngram_cfg, swift_cfg),
+    );
+    if let Err(refused) = admit_this_prompt(
         model,
         kv_store,
         prefix_cache,
         &req_id_str,
         prompt_ids.len(),
-        reply_reserve_positions(
-            gen.sampling.max_tokens,
-            draft_margin_positions(ngram_cfg, swift_cfg),
-        ),
+        reply_positions,
         0,
-    )?;
+    ) {
+        let positions = prompt_ids.len().saturating_add(reply_positions);
+        tell_the_room_a_prompt_wanted(writer, request_id, &refused, positions).await;
+        return Err(refused.error);
+    }
     let mut prefix_len = match matched.as_ref() {
         Some(snap) => prefix_cache
             .hydrate_request_from_snapshot(
@@ -11262,13 +11324,14 @@ async fn try_register_generate_slot(
     let running = slot_table.len();
     let on_card = model.runs_entirely_on_card();
     let admission_started = std::time::Instant::now();
-    let room = ensure_room_for_prompt(
+    let reply_positions = reply_reserve_positions(gen.sampling.max_tokens, draft_margin);
+    let room = admit_this_prompt(
         model,
         kv_store,
         prefix_cache,
         &req_id_str,
         prompt_ids.len(),
-        reply_reserve_positions(gen.sampling.max_tokens, draft_margin),
+        reply_positions,
         0,
     );
     // A refusal is timed too: the stall can be in the synchronize before it.
@@ -11282,9 +11345,11 @@ async fn try_register_generate_slot(
             stalled.log("admission");
         }
     };
-    if let Err(e) = room {
+    if let Err(refused) = room {
         admission_done(card_pace);
-        return Err(SlotAdmitError::Fatal(e));
+        let positions = prompt_ids.len().saturating_add(reply_positions);
+        tell_the_room_a_prompt_wanted(writer, request_id, &refused, positions).await;
+        return Err(SlotAdmitError::Fatal(refused.error));
     }
     let mut prefix_len = match matched.as_ref() {
         Some(snap) => prefix_cache

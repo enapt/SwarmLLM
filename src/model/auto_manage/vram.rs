@@ -222,19 +222,24 @@ pub enum KvCharge {
     Typical,
     /// The one conversation the load is for, in positions.
     Conversation(u64),
+    /// Conversations not yet seen, of which the model was recently asked one
+    /// this long, in positions — a prompt its last placement refused for want
+    /// of room (`process_pool::LongPrompts`, #454): never charged less than a
+    /// typical one.
+    LongPrompt(u64),
 }
 
 impl KvCharge {
     /// The positions charged for a worker of `i`'s shape — never past the
     /// context its cache is sized to.
     pub fn positions(self, i: &VramFootprintInputs) -> u64 {
+        let typical = i.effective_context.min(ADMISSION_KV_CONTEXT);
         match self {
             KvCharge::Conversation(positions) if !conversation_charged_as_typical() => {
                 positions.min(i.effective_context)
             }
-            KvCharge::Typical | KvCharge::Conversation(_) => {
-                i.effective_context.min(ADMISSION_KV_CONTEXT)
-            }
+            KvCharge::LongPrompt(positions) => positions.min(i.effective_context).max(typical),
+            KvCharge::Typical | KvCharge::Conversation(_) => typical,
         }
     }
 }
