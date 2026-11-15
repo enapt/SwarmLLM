@@ -2613,6 +2613,19 @@ impl WorkerHandle {
         (guard, displaced)
     }
 
+    /// Requests other than `request_id` with a reply registered on this
+    /// worker now — generates, forwards and peers' questions alike: what a
+    /// request diverted out of the batch would keep waiting
+    /// (`IpcGenerate::others_in_flight`).
+    fn others_in_flight(&self, request_id: Uuid) -> u32 {
+        self.responses
+            .iter()
+            .filter(|entry| *entry.key() != request_id)
+            .count()
+            .try_into()
+            .unwrap_or(u32::MAX)
+    }
+
     /// This worker did work for a request just now: its idle time starts
     /// over ([`Self::idle_secs`]). A plain store, as the stamp always was: the
     /// clock only moves forward, and two stamps racing differ by a second.
@@ -12600,7 +12613,7 @@ impl ModelProcessPool {
         // after one".
         let requested_max_tokens = sampling.max_tokens;
 
-        let gen = IpcGenerate::new(
+        let mut gen = IpcGenerate::new(
             request_id,
             model_id.clone(),
             layer_range,
@@ -12620,6 +12633,10 @@ impl ModelProcessPool {
         let (resp_tx, mut resp_rx) = mpsc::channel(RESPONSE_CHANNEL_CAPACITY);
         let (mut guard, _) = handle.register_response(request_id, resp_tx, true);
         let attempt_token = guard.token;
+        // Counted once this request is registered, so two sent at once each
+        // see the other: the worker diverts a request to guess only when it
+        // has the worker to itself, or speculation has been paying.
+        gen.others_in_flight = handle.others_in_flight(request_id);
 
         {
             let mut writer = handle.writer.lock().await;

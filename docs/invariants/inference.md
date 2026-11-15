@@ -164,6 +164,27 @@ Three things a change here must keep:
   identical arms). Each refused solo request moves the payoff 0.02 back toward
   the bar, never past it (`drift_toward_retrying`), so one request measures
   again every 7th to 23rd solo request; a burst still diverts at most one.
+  **The payoff is asked only where requests overlap** (2026-11-15, gotcha
+  #1104): what it guards is the time of requests arriving behind a diverted
+  one, which wait out its whole reply. Where nothing else is in flight on the
+  worker and nothing has overlapped there for `OVERLAP_REMEMBERED` (120 s, a
+  judgement: longer than the gaps inside an agent's burst, shorter than a
+  script's alone-time), nobody waits — and a reply whose guesses fail decodes
+  no slower (a 9B's reply at 1.17 tokens a round: 52.4 tok/s diverted against
+  ~52 batched, every arm of .284/.288/.289). So the worker is told how many
+  other requests the daemon has in flight on it (`IpcGenerate::others_in_flight`,
+  read off the worker's pending responses — the worker handles one message at
+  a time and cannot see its queue), notes each overlap (`overlap_noted`: a
+  request in flight beside it, or a slot table not empty), and
+  `diverts_to_guess` diverts a lone request always, asking the payoff (and so
+  drifting it) only otherwise. vLLM turns speculation off by the same
+  quantity, the batch size (`speculative_disable_by_batch_size`) — per step,
+  which our diverted loop cannot do mid-reply; hence the memory. Reported from
+  the field: Qwen3.5-9B's nightly code replies at 55 tok/s against 141 on
+  .283/.284, its block drafter attached — consistent with a prose reply's payoff
+  keeping the solo code requests after it in the batch, which the rigs here did
+  not reproduce (7/7 requests speculated on every version; the cause on that
+  machine is not confirmed).
 - **It is not bit-identical** (gotcha #370). Do not describe it as such.
 - **A miss is not free** (gotcha #371): the forward the draft provokes costs
   even when nothing is accepted, which is what `SpecBackoff` exists for. Measure

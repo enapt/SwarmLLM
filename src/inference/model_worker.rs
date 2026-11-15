@@ -3720,6 +3720,56 @@ fn drift_toward_retrying(seen_x100: u32) -> u32 {
         .min(SPEC_PAYOFF_WORTH_DIVERTING_X100)
 }
 
+/// Is a solo speculatable request diverted out of the batch to guess? Always
+/// with nobody else in flight on the worker (`IpcGenerate::others_in_flight`)
+/// and none seen overlapping for [`OVERLAP_REMEMBERED`] (`since_overlap`);
+/// otherwise as the payoff says — asked only then, since asking moves it
+/// ([`drift_toward_retrying`]). See `slot_admission_eligible`.
+fn diverts_to_guess(
+    others_in_flight: u32,
+    since_overlap: Option<std::time::Duration>,
+    payoff_justifies: impl FnOnce() -> bool,
+) -> bool {
+    let alone_lately =
+        others_in_flight == 0 && since_overlap.is_none_or(|ago| ago >= OVERLAP_REMEMBERED);
+    alone_lately || payoff_justifies()
+}
+
+/// How long requests seen overlapping on this worker keep its next lone
+/// request under the payoff's rule. The diverted loop holds the worker for
+/// the whole reply, so the first of a burst diverted makes the rest wait it
+/// out (gotcha #373); a worker whose requests have overlapped lately is read
+/// as one bursts arrive at. Two minutes is a judgement, not a measurement:
+/// longer than the gaps inside an agent's burst of tool calls, far shorter
+/// than a nightly script's alone-time between runs.
+const OVERLAP_REMEMBERED: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// When a request last arrived here while another was in flight — ms past
+/// [`worker_clock`] plus one, 0 for never.
+static LAST_OVERLAP_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// This worker's own clock for [`LAST_OVERLAP_MS`].
+fn worker_clock() -> std::time::Duration {
+    static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    START.get_or_init(std::time::Instant::now).elapsed()
+}
+
+/// Note whether the request being admitted overlaps another, and answer how
+/// long ago requests last overlapped here (`None`: never).
+fn overlap_noted(overlaps: bool) -> Option<std::time::Duration> {
+    use std::sync::atomic::Ordering;
+    let now = worker_clock();
+    if overlaps {
+        let ms = u64::try_from(now.as_millis()).unwrap_or(u64::MAX - 1);
+        LAST_OVERLAP_MS.store(ms.saturating_add(1), Ordering::Relaxed);
+        return Some(std::time::Duration::ZERO);
+    }
+    match LAST_OVERLAP_MS.load(Ordering::Relaxed) {
+        0 => None,
+        at => Some(now.saturating_sub(std::time::Duration::from_millis(at - 1))),
+    }
+}
+
 /// The decision itself. Pure, for the same reason `blend_spec_payoff` is.
 fn payoff_justifies_diverting(seen_x100: u32) -> bool {
     seen_x100 == 0 || seen_x100 >= SPEC_PAYOFF_WORTH_DIVERTING_X100
@@ -11076,15 +11126,39 @@ fn slot_admission_eligible(
     // measurement artefact (gotcha #348). A verify round wins far more than
     // that, and against an empty table batching has nothing to amortise
     // anyway — there is no second request to share the weight read with.
-    if slot_table.is_empty()
-        && ngram_spec_eligible(&gen.sampling, ngram_cfg, swift_cfg)
-        && spec_payoff_justifies_diverting()
-    {
-        tracing::debug!(
-            request_id = %gen.request_id,
-            "slot admission refused: solo and speculatable — taking the n-gram path"
-        );
-        return false;
+    //
+    // **And past the payoff only where requests overlap** (2026-11-15): the
+    // payoff guards what a diverted request costs the requests that arrive
+    // behind it, which wait out its whole reply — a burst of 8 open-ended
+    // requests took 29 s diverted against 12.5 s batched (gotcha #373). Where
+    // nothing else is in flight on this worker AND nothing has overlapped
+    // lately (`diverts_to_guess`), there is nobody to make wait, and a reply
+    // whose guesses fail decodes no slower (2026-11-15: a 9B's reply at 1.17
+    // tokens a round, 52.4 tok/s against ~52 batched) — so it always guesses.
+    // vLLM turns speculation off by the same quantity, how many requests are
+    // running (`speculative_disable_by_batch_size`); its loop can turn it off
+    // mid-reply, ours cannot, hence the memory of overlaps. Read from the
+    // payoff alone, a run of prose replies below the bar kept a sequential
+    // script's later code requests in the batch, plain, for ~25 requests
+    // (field report 2026-11-15: Qwen3.5-9B code 141 → 55 tok/s, its drafter
+    // attached; not reproduced here, gotcha #1104).
+    if !slot_table.is_empty() {
+        overlap_noted(true);
+    } else if ngram_spec_eligible(&gen.sampling, ngram_cfg, swift_cfg) {
+        let since_overlap = overlap_noted(gen.others_in_flight > 0);
+        if diverts_to_guess(
+            gen.others_in_flight,
+            since_overlap,
+            spec_payoff_justifies_diverting,
+        ) {
+            tracing::debug!(
+                request_id = %gen.request_id,
+                others_in_flight = gen.others_in_flight,
+                since_overlap_s = since_overlap.map(|ago| ago.as_secs()),
+                "slot admission refused: solo and speculatable — taking the n-gram path"
+            );
+            return false;
+        }
     }
     tracing::debug!(
         request_id = %gen.request_id,
@@ -14223,6 +14297,54 @@ mod spec_payoff_tests {
     fn the_threshold_separates_the_two_measured_workloads() {
         assert!(payoff_justifies_diverting(settle(8.83, 8)), "copy-heavy");
         assert!(!payoff_justifies_diverting(settle(1.04, 8)), "open-ended");
+    }
+
+    /// A request with nobody else in flight on its worker, and none seen
+    /// overlapping lately, always guesses — and the payoff is not even asked,
+    /// since asking moves it; with others in flight, or overlapping within
+    /// `OVERLAP_REMEMBERED`, the payoff decides as before (2026-11-15: prose
+    /// replies below the bar left a nightly script's later solo code requests
+    /// plain, 141 → 55 tok/s; gotcha #373 is why bursts keep the payoff).
+    #[test]
+    fn a_request_alone_on_its_worker_always_guesses() {
+        let asked = std::cell::Cell::new(0u32);
+        let payoff = |says: bool| {
+            let asked = &asked;
+            move || {
+                asked.set(asked.get() + 1);
+                says
+            }
+        };
+        let long_ago = Some(OVERLAP_REMEMBERED);
+        let lately = OVERLAP_REMEMBERED.checked_sub(std::time::Duration::from_secs(1));
+        assert!(
+            diverts_to_guess(0, None, payoff(false)),
+            "alone, whatever the payoff"
+        );
+        assert!(
+            diverts_to_guess(0, long_ago, payoff(false)),
+            "alone for a while"
+        );
+        assert_eq!(
+            asked.get(),
+            0,
+            "and the payoff is neither asked nor drifted"
+        );
+        assert!(
+            !diverts_to_guess(1, None, payoff(false)),
+            "others in flight: the payoff says no"
+        );
+        assert!(
+            diverts_to_guess(3, None, payoff(true)),
+            "others in flight: the payoff says yes"
+        );
+        // Alone now, but requests overlapped lately: a burst may be arriving,
+        // and the diverted loop would make it wait out the whole reply.
+        assert!(
+            !diverts_to_guess(0, lately, payoff(false)),
+            "overlapped lately"
+        );
+        assert_eq!(asked.get(), 3);
     }
 
     /// The first generation after start has nothing to go on and must be allowed

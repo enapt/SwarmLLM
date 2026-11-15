@@ -817,6 +817,15 @@ pub struct IpcGenerate {
     /// [`IpcGenerate::rejoin_grammar`], so neither end can drop it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub grammar: Option<crate::types::ReplyGrammar>,
+    /// Other requests the daemon had in flight on this worker when it sent
+    /// this one (its registered replies less this one's,
+    /// `WorkerHandle::others_in_flight`). The worker's diversion gate reads
+    /// it (`model_worker::slot_admission_eligible`): a request with nobody
+    /// beside it always guesses, as vLLM turns speculation off only by how
+    /// many requests are queued (`speculative_disable_by_batch_size`); the
+    /// payoff figure decides only when others wait behind it (2026-11-15).
+    #[serde(default)]
+    pub others_in_flight: u32,
 }
 
 impl IpcGenerate {
@@ -846,6 +855,7 @@ impl IpcGenerate {
             keep_here,
             reads_owner_replies,
             grammar,
+            others_in_flight: 0,
         }
     }
 

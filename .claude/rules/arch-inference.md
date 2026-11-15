@@ -157,6 +157,11 @@ slot-admission gate and the decode loop. Two copies would eventually disagree,
 and the failure is silent: the gate diverts a request off the batched path and
 the loop then declines to speculate it, so it loses batching and gains nothing.
 
+**Whether a solo request is diverted to guess is `diverts_to_guess`** (2026-11-15, gotcha #1104): always where
+nothing else is in flight on the worker (`IpcGenerate::others_in_flight`, the daemon's count — the worker cannot
+see its queue) and nothing overlapped there for `OVERLAP_REMEMBERED`; otherwise the measured payoff decides
+(`spec_payoff_justifies_diverting`, gotcha #373: the diverted loop holds the worker for the whole reply).
+
 → `docs/invariants/inference.md`
 
 ## A prompt's length in tokens is a POSITION, not a statistic
