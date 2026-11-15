@@ -5437,8 +5437,14 @@ rest planned two segments.
 mask, for prompt privacy's both-ends route, gotcha #481), so a route may leave it and come back on an
 ordinary plan; (2) the room-leaving rung is taken whenever it routes at all. Candidates: allow this node twice
 only where the route must start and finish here; price the room-leaving plan against the plain one and keep
-the cheaper (the drafter's gain is in the split's rounds prior, so both are comparable). Prior art: none
-searched yet.
+the cheaper (the drafter's gain is in the split's rounds prior, so both are comparable). Prior art (searched
+2026-11-15, search snippets, not code): none found PRICES a drafter's reservation against the plan without it —
+llama.cpp reserves (its `--fit` counts the draft model as a second model, a fixed 1 GiB margin a device, draft
+layers and device by flag: `-ngld`, `--device-draft`); vLLM, SGLang, TensorRT-LLM and Modular MAX hold a static
+memory fraction tuned by hand (Nightjar, arXiv 2512.22420: draft weights compete with the KV cache under that
+split); FlowSpec and PipeDec put the drafter on the first stage, as here. So the comparison would be ours; the
+one transferable detail is llama.cpp's `--device-draft` — a drafter apart from stage 0's device, to stop the two
+contending for one card.
 
 #### #461 — A peer's split that asks a computer for a WIDER range replaces its all-card copy with a mostly-processor one, which then serves every narrower request too
 `P3` · memory / admission · **NARROWED** — 2026-11-15 (the growth half shipped in v0.3.292) · found on the real link (`real_link.sh` TAG=bal292, a forced split point) · related: #3 (j12), #3 (j13), #449, #458
