@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #460**). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #461**). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -2224,6 +2224,20 @@ Local GPU decode runs at ~97% of llama.cpp (`docs/plans/local_decode_submissions
 is left is prompt reading, the processor half of a hybrid, and MoE placement —
 `docs/plans/faster_than_local.md` § 3 and § 4 carry the order.
 
+#### #460 — A split asked in the first 2-3 s after a start guesses with nothing for that whole reply
+`P3` · perf-split · **OPEN** — 2026-11-15 · evidence: `docs/invariants/scheduling.md` § "The one-card rig again, below the line" (`line292`); `~/swarmllm-gate/deep/fr/real_link_line292/H_2_flowhalf.log` 17:21:57-17:22:32Z
+
+A drafter is chosen only from models in `split_models` (`engine_drafter::chosen`, `is_complete`), and the
+startup scan fills that map 2 s after start (`daemon::background` `model_autoload`, then
+`check_and_load_model`). A split request in between finds no drafter ("no drafter this computer could load",
+with `drafter_to_leave_room_for` also `None`) and runs the n-gram loop for the whole reply: on the 14B split
+to Australia 160 tokens at 5.8 tok/s against 34-45 with the drafter, the next request then loading it. All 8
+arms of `real_link_line292` met it (the rig asked as soon as `/health` answered; fixed in the rig by waiting
+for the scan); a user meets it on the first request after a restart — an auto-update's included — that lands
+inside those seconds. Candidates: choose from models whose manifest says every part is held here (what the scan
+reads) when the map has not been filled yet, or have `/health/ready` wait for the scan (#646 already says
+ready answers early). Prior art: none searched yet.
+
 #### #459 — A processor with VNNI multiplies a check's rows with the two-instruction AVX2 sequence
 `P3` · perf-local · **OPEN** — 2026-11-15 · evidence: `docs/invariants/inference.md` § "A 2-3 row tail shares one pass too" (compute-bound from three rows)
 
@@ -2656,8 +2670,8 @@ the last one — an agent's next turn — waits for it: those arms' first token 
 the card's device-to-host read) at both speeds; whether freed snapshots' host buffers are reused or
 the copy faults fresh pages (an allocation of 569 MB under WSL2 is 146K first touches).
 
-#### #411 — Where the flow's line ends under 120 ms, and code's 2-3% at the line
-`P3` · perf-split · **OPEN** (narrowed 2026-11-06) · evidence: `docs/invariants/scheduling.md` § "A tree that flows" (the flow's distance line); history: #388 (closed 2026-11-06)
+#### #411 — Where the flow's line ends under 110 ms
+`P3` · perf-split · **OPEN** (narrowed 2026-11-06 and 2026-11-15; (b) closed) · evidence: `docs/invariants/scheduling.md` § "A tree that flows" (the flow's distance line); history: #388 (closed 2026-11-06)
 
 **Narrowed 2026-11-06: the flow's line moved from 150 to 120 ms** (`dsd_tree::FLOW_LEAST_ROUND_TRIP_MS`,
 pinned at 126 ms by `a_tree_that_flows_is_the_default_over_a_shorter_link_than_tree_rounds`). Two
@@ -2704,11 +2718,25 @@ with the fixed build (`real_link_readme275b/`, 127-130 ms, three default arms): 
 a tree drawn here starts to pay between 133 and 300 ms** is unmeasured (it flowed from 150 ms in
 v0.3.259-.274, never compared with the stream there).
 
-**What is left**: (a) **under 120 ms** — the one-card rig put the flow at 0.94x at 100 ms (a rig
-that leans against it); no real link with a card far at 100-120 ms has been measured. (b) **code
-at the line gives back 2-3%** — a per-reply or per-step switch by the drafter's confidence
-(EAGLE-2's signal, `faster_than_local.md` § 13.2) could keep it; the flow's tree is fixed-width
-today (`dsd_flow::rows_a_level` 8 × `levels_a_call` 3), so that is new code for 2-3%: passive.
+**Narrowed again 2026-11-15: the line moved from 120 to 110 ms.** By v0.3.291 the flow led on code too, and
+both modes ran FLAT across the link's whole band, so neither is bound by the round trip there. Same 14B split,
+here `[0,26)` with the 0.5B Q8_0 drafter on this card, `aa3d1e66` `[26,48)` on its card, 160-token greedy replies,
+every figure the node's own `decode_ms` (the rig client's wall clock misread one, gotcha #1112):
+
+| sitting | round trip | flow code / prose | stream code / prose | flow ÷ stream |
+|---|---|---|---|---|
+| `real_link_readme291` (v0.3.291, the line picking) | 119-121 ms | 43.8-43.9 / 19.35 | 34.2 / 14.8 | 1.28 code |
+| `real_link_line292` (main, forced, ABBA × 2) | 126-133 ms | 43.8-45.3 / 17.8-18.9 | 33.3-34.3 / 14.3-14.4 | 1.31 code, 1.27 prose |
+
+(`line292`'s prose replies each carried the drafter's load: the rig asked before the startup scan had listed
+it, so its warm-up ran n-gram only — both arms alike; arm 8 left out, the far computer stalled at 1,279 ms.)
+That link's least round trip reads 115-133 ms over a day, so at 120 the same two computers flowed or streamed
+by the reading of the moment. (b) **closed**: code no longer gives anything back (1.31×).
+
+**What is left**: (a) **under 110 ms** — no real link with a card far at 60-110 ms has been measured. The
+one-card rig (both halves and the drafter on one card, which leans against the flow) has the stream AHEAD
+there: flow ÷ stream ~0.77 at 100 ms, ~0.72 at 80, ~0.75 at 60 (2026-11-15, `docs/invariants/scheduling.md`
+§ "The one-card rig again, below the line"); a card-each-end link at 60-110 ms decides it.
 
 **Prior art** (searched 2026-11-06, abstracts and
 summaries, not full texts): no system found picks chain or tree by round trip, or by code against

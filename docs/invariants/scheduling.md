@@ -6628,6 +6628,49 @@ a forward (`far_least_ms=894`, against 23-54 ms on its card that morning) with t
 135-163 ms: the far was slow at its end, and the guard's trial said so ("fewer forwards out did not
 shorten the far computer's time").
 
+**The one-card rig again, below the line** (2026-11-15, v0.3.291, `~/swarmllm-318/flowline.sh` — flow318
+over several round trips; outputs `line_{100,80,60}/`, `flowline.out`; Windows up 2.3 h). The same split
+and drafter as the 10-23 table, 160-token replies to the rig's one prose prompt, four asks an arm (the
+first carries the load and is left out), the flow forced (`SWARMLLM_DRAFT_TREES=1`) against `=0`, ABBA,
+and `SWARMLLM_FLOW_COPY_STORE=0` in both arms — without it the same question asked again lets the flow
+copy its own earlier reply (48-80 tok/s, `flowline_copy.out`), which measures the copy, not the link:
+
+| round trip | flow tok/s (warm asks) | chain stream tok/s | flow ÷ stream |
+|---|---|---|---|
+| 100 ms | 19.30-19.86 | 23.77-27.92 | ~0.77 |
+| 80 ms | 19.89-21.86 | 26.48-31.59 | ~0.72 |
+| 60 ms | 21.82-24.23 | 28.17-32.48 | ~0.75 |
+
+At 100 ms the flow's ratio fell from 0.94 (10-23) to ~0.77: the stream has gained since (the chunk
+width, #374/#375), the flow on this one shared card has not. So on THIS rig nothing under the line
+supports moving it down. The field question stays the real link's: there, at a least round trip of
+119-121 ms, v0.3.291's flow wrote code at 43.8-43.9 tok/s (two arms) against the stream's 34.2 (one
+arm, the link read 119 and the reply streamed: `real_link.sh readme291`; every figure here is the node's
+own `decode_ms` — the rig client's wall clock had read that stream as 26.3, gotcha #1112), so on the
+real link the flow led by ~1.28× where the one-card rig has the stream ahead; while the link's own windowed
+least reads 115-133 ms over a day — the line sits inside that band, so the same two computers flow or
+stream by the reading of the moment.
+
+**So the line moved to 110 ms** (2026-11-15, `FLOW_LEAST_ROUND_TRIP_MS`). The field A/B on main, forced
+both ways, ABBA × 2 (`real_link.sh`, `TAG=line292`, `WARM_TOKENS=160`, 17:20-17:36Z, Windows up 3.3-3.5 h,
+the link 126-133 ms; the node's own `decode_ms`):
+
+| arm | flow code / prose | stream code / prose |
+|---|---|---|
+| 1-4 (A B B A) | 44.00 / 18.86, 45.32 / 18.47 | 34.29 / 14.38, 34.21 / 14.25 |
+| 5-7 (A B B; 8 left out) | 43.79 / 17.75 | 33.28 / 14.33, 34.11 / 14.37 |
+
+Flow ÷ stream 1.31 on code, 1.27 on prose, ahead in every block. With `readme291`'s 119-121 ms (flow
+43.8-43.9, stream 34.2 on code) both modes ran FLAT across 119-133 ms: neither is bound by the round trip
+there, so a 1.3× lead does not end 9 ms lower, and 110 puts the link's whole band (115-133) above the line.
+The rig's ratio fell 0.005 a millisecond from 120 to 100 (10-23); 1.3 minus that over 10 ms is still ~1.25.
+Arm 8 is left out: the far computer stalled (its latency read 1,279 ms; 3.5 / 1.5 tok/s). Every prose reply
+in this sitting carried the drafter's load — the rig asked 0.3 s before the startup scan listed the drafter
+(`check_and_load_model` 2.5 s after start), so the warm-up ran n-gram only at 5.8 tok/s and the drafter
+loaded inside the measured prose reply, both arms alike; the code replies are clean. Mechanism: each arm's
+first segment `[0..26)` recorded its 16 shapes (8 chains, 8 tree row counts) 0.1-0.8 s after it loaded,
+before any reply (#357 (b)).
+
 **Only where the far end draws** (2026-11-06, before release). Every figure above is the default
 shape's; a tree drawn by this node's own last layers ("Start and finish on this computer", #369)
 flowed under the new line too, and lost: one binary, ABBA × 3 at 127-133 ms

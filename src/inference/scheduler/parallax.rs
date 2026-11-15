@@ -1252,7 +1252,7 @@ pub(super) fn cheapest_split(
 ///
 /// A split's yield a round depends on its tail: a tail on a card far away lets
 /// the drafter's tree FLOW there (`dsd_tree::FlowDraws::AtTheFarEnd`, the
-/// 120 ms line), a tail here keeps the stream (300 ms). The yield divides
+/// 110 ms line), a tail here keeps the stream (300 ms). The yield divides
 /// every segment's per-token costs, so no vertex can be priced for it alone —
 /// the head of a split does not know its tail. Each pass restricts a split's
 /// tail to one side and prices every vertex for that side

@@ -145,7 +145,7 @@ mmproj). Never edit a count without the run behind it (`completeness.md`).
   header (#715).
 - **A far split is fast when a drafter's tree FLOWS from the far end**: 14B Thailand↔Australia (126-133 ms), a card
   each end → prose 17.8-20.5, code 40-43 tok/s against 11.0-11.3 / 14.1-14.5 on this laptop alone (v0.3.275; the flow's
-  line is 120 ms since #411). A chain that starts and finishes here keeps the 300 ms line and streams below it (27-31
+  line is 110 ms since 2026-11-15, #411). A chain that starts and finishes here keeps the 300 ms line and streams below it (27-31
   code, 12.0-12.8 prose on that link; `dsd_tree::FlowDraws`); a lopsided split saturates the far side. Coordinates only
   PRICE a chain its head leads (#3 (a)) → `docs/plans/faster_than_local.md` § 9, `split_speculation.md`, `regional_pipelines.md`.
 - **Local GPU decode is bound by SUBMISSION COUNT**; ONE CUDA stream per device,

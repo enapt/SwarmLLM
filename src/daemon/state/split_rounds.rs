@@ -82,7 +82,7 @@
 //! computer** ([`SplitTail`], FUTURE_WORK #3 (j5), 2026-11-14). Which machine
 //! runs a split's LAST layers decides how its guesses travel: a tail on a card
 //! far away draws the flowing tree there (`dsd_tree::FlowDraws::AtTheFarEnd`,
-//! the 120 ms line), a tail here keeps the stream (300 ms). On the real
+//! the 110 ms line), a tail here keeps the stream (300 ms). On the real
 //! Thailand ↔ Australia link the 14B's here-first split (flow) ran 15.8 / 39.0
 //! tok/s on prose / code where the same two halves turned round (stream) ran
 //! 11.5 / 27.4 — and 7.6 / 17.5 against 6.8 / 13.2 with the far card slowed,

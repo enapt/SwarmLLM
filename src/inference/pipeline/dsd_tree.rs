@@ -91,8 +91,20 @@ pub(super) fn trees_wanted(
 /// a card at the far end, the far's own time read apart since #388) the flow
 /// beat the stream in every alternating block of three prose prompts, medians
 /// 14.62 / 16.65 / 16.67 tok/s against 11.91 / 14.43 / 13.27, and gave back
-/// 2-3% on code (32.31 against 33.45). So the line is 120 ms: the old rig's
-/// tie, under the shortest real link the flow was measured winning on.
+/// 2-3% on code (32.31 against 33.45). The line went to 120 ms there, and to
+/// 110 on 2026-11-15: by v0.3.291 the flow led on code too, and both modes ran
+/// FLAT across the link's whole band — flow code 43.8-43.9 at 120-121 ms and
+/// 43.8-45.3 at 126-133, the stream 34.2 at 119 and 33.3-34.3 at 126-133
+/// (prose 17.8-18.9 against 14.3-14.4; `real_link.sh` `readme291` and
+/// `line292`, ABBA × 2, read from the node's own `decode_ms`) — so neither is
+/// bound by the round trip there, and a 1.3× lead does not end 9 ms lower.
+/// That link's least round trip reads 115-133 ms over a day: at 120 its
+/// replies flowed or streamed by the reading of the moment. Under 110 no real
+/// link with a card at the far end has been measured (FUTURE_WORK #411 (a)).
+/// Prior art: FlowSpec (arXiv 2507.02620) and Speculation at a Distance
+/// (arXiv 2606.25091) give no tree-against-chain crossover by round trip; a
+/// dead band (hysteresis) would damp a line inside a link's band, and none is
+/// needed with the band above it.
 ///
 /// Only for a tree the FAR END draws ([`FlowDraws::AtTheFarEnd`]): every figure
 /// above is that shape's. A tree drawn by this node's own last layers ("Start
@@ -103,7 +115,7 @@ pub(super) fn trees_wanted(
 /// every answer beside the drafter on one card, and the far computer's queue
 /// cut the flow back 8-16 times a reply. It keeps the tree rounds' line, where
 /// the flow takes the rounds' place and beat them 1.2x (420 ms, 2026-10-29).
-pub(super) const FLOW_LEAST_ROUND_TRIP_MS: u32 = 120;
+pub(super) const FLOW_LEAST_ROUND_TRIP_MS: u32 = 110;
 
 /// Who draws a flowing tree's rows — what decides the link it pays over.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -765,14 +777,19 @@ mod tests {
     /// A tree that FLOWS from the far end pays over a shorter link than tree
     /// rounds: on the rig it beat the chain stream at 150, 220 and 300 ms, where
     /// the rounds' line had handed every one of those links to the stream
-    /// (2026-10-23), and on the real TH↔AU link at 126-132 ms (#411,
-    /// 2026-11-06). A reply whose tree cannot flow keeps the rounds' line.
+    /// (2026-10-23), and on the real TH↔AU link at 119-133 ms (#411,
+    /// 2026-11-06 and 2026-11-15). A reply whose tree cannot flow keeps the
+    /// rounds' line.
     #[test]
     fn a_tree_that_flows_is_the_default_over_a_shorter_link_than_tree_rounds() {
         let far_draws = Some(FlowDraws::AtTheFarEnd);
         assert!(
-            trees_wanted_given(None, true, true, Some(126), far_draws),
+            trees_wanted_given(None, true, true, Some(119), far_draws),
             "the shortest real link the flow was measured winning on flows"
+        );
+        assert!(
+            trees_wanted_given(None, true, true, Some(115), far_draws),
+            "that link's lowest reading over a day flows too — at 120 it streamed by the reading"
         );
         let between = Some(FLOW_LEAST_ROUND_TRIP_MS + 70);
         assert!(trees_wanted_given(None, true, true, between, far_draws));
