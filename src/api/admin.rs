@@ -701,7 +701,7 @@ pub async fn diagnostics(
                 );
                 // Which pool kept each model held here — or judged it one
                 // nobody runs (#452): the window in force follows the disk
-                // pressure (`unused::use_window_secs`).
+                // pressure (`unused::quiet_window_secs`).
                 let _ = writeln!(out, "  models by the use rule: {}", report.uses);
             }
             None => {

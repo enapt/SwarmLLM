@@ -356,7 +356,7 @@ pub struct ModelMgmt {
     /// another computer (#452) — and, for a model it gave back because nobody
     /// ran it, when, kept for `unused::GAVE_BACK_FOR_SECS`. Written only by
     /// `AutoShardManager::watch_model_use` and `note_gave_back_unused`, saved
-    /// (`unused::USE_TREE`); read by `AutoShardManager::nobody_runs` and the
+    /// (`unused::USE_TREE`); read by `AutoShardManager::unused_verdict` and the
     /// capability's `models_served` (`unused::models_served`).
     pub model_use: DashMap<crate::types::ModelId, crate::model::auto_manage::unused::ModelUse>,
     /// Why the last prune pass kept the parts it kept (FUTURE_WORK #432): its

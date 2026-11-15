@@ -1148,7 +1148,7 @@ impl AutoShardManager {
 
     /// May this node plan `model_id`'s near chain — is it asked for? Any model
     /// may be (#389 (c): nothing automatic judges content); a model nobody runs
-    /// is not asked for (`unused::nobody_runs`). The chain and the header ask
+    /// is not asked for (`AutoShardManager::unused_verdict`). The chain and the header ask
     /// this.
     fn may_plan_a_near_chain(&self, model_id: &ModelId) -> bool {
         self.asked_for(model_id)

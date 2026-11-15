@@ -4289,7 +4289,7 @@ impl SharedState {
     /// for here (`model_request_counts`, as the router counts a request it
     /// takes — none reaches the router for a model nobody holds) and the
     /// download pass woken, so a model pruned for want of use is fetched again
-    /// once somebody asks for it (`AutoShardManager::nobody_runs` yields to
+    /// once somebody asks for it (`AutoShardManager::unused_verdict` yields to
     /// `asked_for`). Counted only here: the owner's requests are never gossiped
     /// (#389 (a)). Called once per request that found no route.
     pub fn no_route_error(&self, model_id: &crate::types::ModelId) -> crate::error::SwarmError {

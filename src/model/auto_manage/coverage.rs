@@ -737,6 +737,27 @@ pub(super) fn kept_by_rank(part: &ShardId, holders: &[NodeId], node: &NodeId, ke
     ranked.into_iter().take(keep).any(|n| n == node)
 }
 
+/// Does `node` keep its copy of a part of a model that has cooled
+/// (`unused::Verdict::Cooled`, 2026-11-15) — is it, of the part's live
+/// `holders`, the one ranked first for the MODEL ([`rendezvous`])? Ranked by
+/// the model, not the part ([`part_rank_weight`]): a model held whole by three
+/// computers keeps one whole copy on one of them, never its parts scattered
+/// over all three — a split where a single computer answered. A part whose
+/// holders differ keeps the first of its own holders, so every part keeps a
+/// copy wherever the model was runnable.
+///
+/// One copy stays whatever each computer's view: a holder gives its copy back
+/// only for a holder it ranks above itself, so the part's highest-ranked
+/// holder — which sees itself — never does. A view stale by a gossip round
+/// (a holder above it gone, unannounced) is the case the execution's re-check
+/// of the live holders narrows.
+pub(super) fn keeps_the_cooled_copy(model: &ModelId, holders: &[NodeId], node: &NodeId) -> bool {
+    let weight = rendezvous(model, node);
+    !holders
+        .iter()
+        .any(|h| h != node && rendezvous(model, h) > weight)
+}
+
 /// The layer ranges of `parts` of `manifest`.
 fn ranges_of(manifest: &ModelManifest, parts: &HashSet<u32>) -> Vec<(u32, u32)> {
     manifest
@@ -773,6 +794,64 @@ mod tests {
 
     fn peer(state: &Arc<SharedState>, byte: u8, ceiling_mb: Option<u64>) -> NodeId {
         peer_with_disk(state, byte, ceiling_mb, 100_000)
+    }
+
+    /// A model that has cooled keeps ONE copy of each part (2026-11-15: "we
+    /// need to ensure the pruning doesnt just, remove all parts"): exactly one
+    /// of a part's holders keeps, whatever order they are listed in, and a
+    /// model held whole by several keeps every part on the SAME one — ranked by
+    /// the model, so one computer still answers alone.
+    #[test]
+    fn a_cooled_model_keeps_one_whole_copy_on_one_holder() {
+        let model = ModelId("cooled-14b-q4".into());
+        let holders: Vec<NodeId> = (0u8..12).map(|b| NodeId([b; 32])).collect();
+        let keepers: Vec<&NodeId> = holders
+            .iter()
+            .filter(|n| super::keeps_the_cooled_copy(&model, &holders, n))
+            .collect();
+        assert_eq!(keepers.len(), 1, "exactly one holder keeps its copy");
+        let keeper = keepers[0].clone();
+        let mut reversed = holders.clone();
+        reversed.reverse();
+        assert!(super::keeps_the_cooled_copy(&model, &reversed, &keeper));
+        // The per-part rank scatters a model held whole: some part's first
+        // holder is another computer. The model's rank never does.
+        let part_keepers: std::collections::HashSet<NodeId> = (0..24)
+            .map(|index| {
+                let part = ShardId {
+                    model_id: model.clone(),
+                    index,
+                };
+                holders
+                    .iter()
+                    .find(|n| super::kept_by_rank(&part, &holders, n, 1))
+                    .expect("a part keeps one")
+                    .clone()
+            })
+            .collect();
+        assert!(
+            part_keepers.len() > 1,
+            "control: ranked by the part, the 24 parts keep on {} computers",
+            part_keepers.len()
+        );
+        // A part fewer hold keeps the first of its own holders.
+        let others: Vec<NodeId> = holders.iter().filter(|n| **n != keeper).cloned().collect();
+        assert_eq!(
+            others
+                .iter()
+                .filter(|n| super::keeps_the_cooled_copy(&model, &others, n))
+                .count(),
+            1,
+            "without the keeper, one of the rest keeps"
+        );
+        assert!(
+            super::keeps_the_cooled_copy(&model, std::slice::from_ref(&holders[3]), &holders[3]),
+            "a lone holder keeps"
+        );
+        assert!(
+            super::keeps_the_cooled_copy(&model, &[], &holders[3]),
+            "a holder that sees no other keeps"
+        );
     }
 
     /// The report's shape: a 32-layer model in four 8-layer parts, held whole by

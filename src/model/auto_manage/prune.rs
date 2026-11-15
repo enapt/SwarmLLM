@@ -4,7 +4,7 @@ use chrono::Timelike;
 
 use crate::types::{ModelId, NodeId, ShardId};
 
-use super::manager::{AutoShardManager, PruneCandidate};
+use super::manager::{AutoShardManager, CooledCopy, PruneCandidate};
 
 /// Protection window — a shard acquired within the last `SHARD_RECENTLY_ACQUIRED_SECS`
 /// is not pruned below eager disk pressure, and is scored down above it, so it
@@ -236,6 +236,10 @@ const RECENT_REQUEST_PENALTY: f64 = 1.5;
 const KEPT_FOR_ITS_COUNT: &str = "not more copies than the target";
 const KEPT_FOR_ITS_REGION: &str = "the last close holder in this region";
 const KEPT_WHOLE_HERE: &str = "this computer holds the whole model, or completes it";
+/// The copy a part of a model nobody ran lately keeps on the swarm
+/// (`unused::Verdict::Cooled`) — given back only for room a part asks for.
+const KEPT_AS_THE_COOLED_COPY: &str =
+    "nobody ran its model lately, and this is the one copy of the part the swarm keeps";
 
 /// How often prune says why it gave nothing back while a part asks for room,
 /// and the download pass repeats which part asks (`due_when_changed_or_every`).
@@ -335,8 +339,8 @@ pub(super) struct RoomAsk<'a> {
     /// copy of a model held here whole goes only for one asked for more.
     pub demand: f64,
     /// The room advertised to other computers: judged on what they can see,
-    /// never on this owner's own use (#389 (a)) — `nobody_runs`, which reads
-    /// it, is not asked.
+    /// never on this owner's own use (#389 (a)) — `unused_verdict`, which reads
+    /// it, is not asked; `cools_whoever_asked` is.
     pub advertised: bool,
 }
 
@@ -605,10 +609,20 @@ impl AutoShardManager {
             // of the last day — never the one this instant reads (`target_hold`).
             let target = self.shed_target_replicas(&manifest.id, config.min_replicas, pool_size);
             let contribution_auto = live.node.contribution_auto;
-            // Once per model: every part of one nobody runs goes (#389 (d)) —
-            // judged over the window this pass's disk pressure gives.
+            // Once per model: every part of one nobody runs goes (#389 (d)),
+            // and of one that has cooled every copy but the one each part
+            // keeps — judged over the window this pass's disk pressure gives.
             let verdict = self.unused_verdict(&manifest.id, disk_pressure);
             let nobody_runs = verdict == super::unused::Verdict::Unused;
+            let cooled = verdict == super::unused::Verdict::Cooled;
+            // How long it has been quiet, for the order the copies the parts
+            // keep go in for room (least recently used first).
+            let quiet_since = self
+                .shared_state
+                .models
+                .model_use
+                .get(&manifest.id)
+                .map_or(0, |r| r.watched_since.max(r.last_used));
             if parts_held_here(&manifest) > 0 {
                 uses.note(verdict, &manifest.id);
             }
@@ -690,10 +704,28 @@ impl AutoShardManager {
                 // checks were what kept its files while a reply was being
                 // written (`SharedState::model_is_in_use`, the answer to "may I
                 // delete this model's files?").
-                if nobody_runs && self.shared_state.model_is_in_use(&manifest.id) {
+                if (nobody_runs || cooled) && self.shared_state.model_is_in_use(&manifest.id) {
                     kept.note("its model is answering");
                     continue;
                 }
+                // A copy of a model that has cooled: past the one its part
+                // keeps, or that one, given back for room
+                // (`cooled_copy_kept_because`). The guards below that keep a
+                // copy for the swarm's sake — busy holders, a way to fetch it
+                // back, a part just arrived — are asked of it as of a model
+                // nobody runs: the one copy is what the swarm keeps.
+                let cooled_copy = cooled.then(|| {
+                    if super::coverage::keeps_the_cooled_copy(
+                        &manifest.id,
+                        &holders,
+                        &local_node_id,
+                    ) {
+                        CooledCopy::Kept { quiet_since }
+                    } else {
+                        CooledCopy::Extra
+                    }
+                });
+                let given_back_unrun = nobody_runs || cooled;
 
                 let holder_count = holders.len();
                 // The effective target behind that answer, for the score and the
@@ -709,7 +741,7 @@ impl AutoShardManager {
                 );
 
                 // Load-aware: block if remaining holders are busy
-                if !nobody_runs
+                if !given_back_unrun
                     && self.remaining_holders_busy(
                         &holders,
                         &local_node_id,
@@ -727,7 +759,7 @@ impl AutoShardManager {
                 }
 
                 // Re-acquisition check: can we get it back?
-                if !nobody_runs
+                if !given_back_unrun
                     && !self.can_reacquire(&manifest.id, &shard_id, &holders, &local_node_id)
                 {
                     kept.note("no way to fetch it back");
@@ -830,7 +862,7 @@ impl AutoShardManager {
                 // candidates, and a node whose ONLY candidate was a part that
                 // landed 28 s earlier deleted it (field report 2026-10-16). A
                 // copy of a model nobody runs is still given back at once.
-                if recently_acquired && !nobody_runs && disk_pressure < PRESSURE_NORMAL {
+                if recently_acquired && !given_back_unrun && disk_pressure < PRESSURE_NORMAL {
                     kept.note("it arrived in the last half hour");
                     continue;
                 }
@@ -924,6 +956,7 @@ impl AutoShardManager {
                         disk_pressure,
                         &shard_pins_cached,
                     ),
+                    cooled: cooled_copy,
                 });
             }
 
@@ -981,6 +1014,7 @@ impl AutoShardManager {
                                 score: 0.1, // Very low score -- only prune under extreme pressure
                                 nobody_runs: given_back,
                                 to_make_room: false,
+                                cooled: None,
                             });
                         }
                     }
@@ -1035,6 +1069,10 @@ impl AutoShardManager {
                 .partial_cmp(&a.score)
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
+        // Then the order room is made in (`room_order`): what goes anyway
+        // first — it counts toward the room — then the copies cooled models
+        // keep, then those the count keeps.
+        prune_candidates.sort_by(room_order);
 
         // Execute pruning with per-model limits
         let max_per_model = if pressure_urgent { 2u32 } else { 1u32 };
@@ -1065,8 +1103,9 @@ impl AutoShardManager {
                 .get(&candidate.model_id)
                 .copied()
                 .unwrap_or(0);
-            // Every part of a copy that is not ours to host goes in one pass.
-            if count >= max_per_model && !candidate.nobody_runs {
+            // Every part of a copy that is not ours to host goes in one pass,
+            // and every copy a cooled model gives back (`CooledCopy`).
+            if count >= max_per_model && !candidate.nobody_runs && candidate.cooled.is_none() {
                 continue;
             }
             if candidate.to_make_room && (!room_completes || room_made >= room_bytes) {
@@ -1079,7 +1118,7 @@ impl AutoShardManager {
                 model_id: candidate.model_id.clone(),
                 index: candidate.shard_index,
             };
-            let current_holders = {
+            let current_holder_ids: Vec<NodeId> = {
                 let h = registry.shard_holders(&shard_id_check);
                 let h = crate::pool::scope::filter_allowed_holders(h, &allowed_set);
                 // SEC: same liveness filter as candidate-collection loop.
@@ -1091,8 +1130,9 @@ impl AutoShardManager {
                         *peer == local_node_id
                             || self.shared_state.connected_node_ids.contains(peer)
                     })
-                    .count()
+                    .collect()
             };
+            let current_holders = current_holder_ids.len();
             // Re-compute pressure-adjusted target with current pressure as well.
             // As we prune candidates earlier in this cycle, local disk usage
             // drops and pressure-adjusted_target may have grown (i.e., we no
@@ -1122,11 +1162,21 @@ impl AutoShardManager {
                 continue;
             }
             // A copy given back to make room is held to that room's floor,
-            // not the target that kept it.
-            let still_spare = if candidate.to_make_room {
-                current_holders > floor_for_room
-            } else {
-                current_holders > effective_target as usize
+            // not the target that kept it. A cooled model's copy past the one
+            // its part keeps goes once a holder ranked above this one still
+            // holds the part — the one copy is never given back by a holder
+            // that has since become the first; the copy the part keeps goes
+            // for the room with no floor, and only for it: a room note that
+            // lapsed between the scan and here leaves it where it is.
+            let still_spare = match candidate.cooled {
+                Some(CooledCopy::Extra) => !super::coverage::keeps_the_cooled_copy(
+                    &candidate.model_id,
+                    &current_holder_ids,
+                    &local_node_id,
+                ),
+                Some(CooledCopy::Kept { .. }) => candidate.to_make_room,
+                None if candidate.to_make_room => current_holders > floor_for_room,
+                None => current_holders > effective_target as usize,
             };
             if !still_spare && !candidate.nobody_runs {
                 tracing::debug!(
@@ -1220,16 +1270,32 @@ impl AutoShardManager {
                 model_id: candidate.model_id.clone(),
                 model_name: candidate.model_name.clone(),
                 shard_index: candidate.shard_index,
-                reason: if candidate.to_make_room {
+                reason: if let Some(CooledCopy::Kept { .. }) = candidate.cooled {
+                    format!(
+                        "Room for a part the network is short of — nobody on the network ran \
+                         this model in {}, and this was the one copy of the part it kept",
+                        super::unused::describe_window(super::unused::quiet_window_secs(
+                            disk_pressure
+                        ))
+                    )
+                } else if candidate.to_make_room {
                     format!(
                         "Room for a part the network is short of ({} holders, {} kept)",
                         current_holders,
                         current_holders.saturating_sub(1)
                     )
+                } else if candidate.cooled.is_some() {
+                    format!(
+                        "Nobody on the network ran it in {} — one copy of each part stays on \
+                         another computer",
+                        super::unused::describe_window(super::unused::quiet_window_secs(
+                            disk_pressure
+                        ))
+                    )
                 } else if candidate.nobody_runs {
                     format!(
-                        "Nobody on the network ran it in {} days",
-                        super::unused::use_window_secs(disk_pressure) / 86_400
+                        "Nobody on the network ran it in {}",
+                        super::unused::describe_window(super::unused::USE_WINDOW_SECS)
                     )
                 } else {
                     format!(
@@ -1261,23 +1327,19 @@ impl AutoShardManager {
                     why = room_wanted
                         .as_ref()
                         .map_or("a part", |room| room.why.describe()),
+                    the_cooled_copy = candidate.cooled.is_some(),
                     "DIAG: gave back a spare copy to make room for a part the swarm is short of"
                 );
-            } else if candidate.nobody_runs {
+            } else if candidate.nobody_runs || candidate.cooled.is_some() {
                 tracing::info!(
                     model = %candidate.model_id,
                     shard = candidate.shard_index,
-                    holders = candidate.holder_count,
+                    holders = current_holders,
                     freed_mb = candidate.shard_size_bytes / (1024 * 1024),
                     remaining_here = remaining_local,
+                    one_copy_stays = candidate.cooled.is_some(),
                     "Giving back a part of a model nobody runs (#389, #452)"
                 );
-                // Its last part here: the swarm tried it and nobody ran it —
-                // remembered, so neither this node nor another fetches it back
-                // on popularity alone (`unused::GAVE_BACK_FOR_SECS`).
-                if remaining_local == 0 {
-                    self.note_gave_back_unused(&candidate.model_id);
-                }
             } else {
                 tracing::info!(
                     model = %candidate.model_id,
@@ -1287,6 +1349,15 @@ impl AutoShardManager {
                     freed_mb = candidate.shard_size_bytes / (1024 * 1024),
                     "Pruning over-replicated shard"
                 );
+            }
+
+            // Its last part here of a model nobody runs, or nobody ran lately
+            // (a cooled model's copies, the one its parts keep given for room
+            // included): the swarm tried it and nobody ran it — remembered, so
+            // neither this node nor another fetches it back on popularity
+            // alone (`unused::GAVE_BACK_FOR_SECS`).
+            if remaining_local == 0 && (candidate.nobody_runs || candidate.cooled.is_some()) {
+                self.note_gave_back_unused(&candidate.model_id);
             }
 
             // If no local shards remain, kill the worker subprocess to free VRAM
@@ -1383,7 +1454,9 @@ impl AutoShardManager {
         if !uses.is_empty() && due_every(&self.last_uses_report, KEPT_REPORT_EVERY) {
             tracing::info!(
                 disk_pressure = %format_args!("{disk_pressure:.2}"),
-                window_days = super::unused::use_window_secs(disk_pressure) / 86_400,
+                quiet_window = %super::unused::describe_window(
+                    super::unused::quiet_window_secs(disk_pressure)
+                ),
                 models = %uses.summary(),
                 "DIAG: models held here, by what the use rule says of each (#452)"
             );
@@ -1943,22 +2016,38 @@ impl AutoShardManager {
         {
             return Some("a pool pin");
         }
-        // A model nobody runs is given back, every part, however few hold it
-        // (#389 (d), #452, `unused::nobody_runs`): not run here for the window
-        // it was watched, served for another computer by no holder in the
-        // swarm in it, not the owner's, not asked for, not a reference model,
-        // not a split's drafter — and one held nowhere here is fetched only to
-        // be tried on what people run outside the swarm, never where the swarm
-        // tried it and nobody ran it. Here, so
-        // the download pass — which asks this — never fetches what prune
-        // sheds. Before the exemptions below: prompt privacy's automatic ends
-        // would otherwise keep two parts of a model nobody runs, and an
-        // explicit privacy choice is the owner's. Not for the room this computer
-        // advertises: "nobody runs it" reads this owner's use (`model_use`),
-        // which no other computer may learn (#389 (a)) — there the copy is
-        // judged by the rules below, as a model somebody runs.
-        if !room.is_some_and(|r| r.advertised) && self.nobody_runs(&shard_id.model_id, pressure) {
-            return None;
+        // The configured `--shards` range: the operator's explicit choice, so
+        // before the use rule below, as `owner_chose` is for a whole model.
+        if let Some((start, end)) = self.shared_state.config.inference.shard_range {
+            if shard_id.index >= start && shard_id.index <= end {
+                return Some("the configured --shards range");
+            }
+        }
+        // A model nobody runs is given back (#389 (d), #452,
+        // `unused::unused_verdict`): not run here for the window it was
+        // watched, served for another computer by no holder in the swarm in
+        // it, not the owner's, not asked for, not a reference model, not a
+        // split's drafter — and one held nowhere here is fetched only to be
+        // tried on what people run outside the swarm, never where the swarm
+        // tried it and nobody ran it. In two steps (2026-11-15): quiet for the
+        // quiet window it COOLS — one copy of each part stays on the swarm,
+        // the rest go and none is fetched (`cooled_copy_kept_because`) — and
+        // quiet for `unused::USE_WINDOW_SECS` every part goes, however few
+        // hold it. Here, so the download pass — which asks this — never
+        // fetches what prune sheds. Before the exemptions below: prompt
+        // privacy's automatic ends would otherwise keep two parts of a model
+        // nobody runs, and an explicit privacy choice is the owner's. Not for
+        // the room this computer advertises: the verdict reads this owner's
+        // use (`model_use`), which no other computer may learn (#389 (a)) —
+        // that room asks `cools_whoever_asked` below.
+        if !room.is_some_and(|r| r.advertised) {
+            match self.unused_verdict(&shard_id.model_id, pressure) {
+                super::unused::Verdict::Unused => return None,
+                super::unused::Verdict::Cooled => {
+                    return self.cooled_copy_kept_because(shard_id, holders, room);
+                }
+                _ => {}
+            }
         }
         // Prompt privacy needs BOTH ends of the model on this node, so
         // pruning an end strands the setting: it stays on, nothing can
@@ -1992,12 +2081,6 @@ impl AutoShardManager {
         {
             return Some("the user pinned the model");
         }
-        // The configured `--shards` range.
-        if let Some((start, end)) = self.shared_state.config.inference.shard_range {
-            if shard_id.index >= start && shard_id.index <= end {
-                return Some("the configured --shards range");
-            }
-        }
         // The room this computer ADVERTISES (`RoomAsk::advertised`) reads
         // nothing that follows this owner's own requests (#389 (a); security
         // review 2026-11-14): "asked for", the carrier lease, a planned chain,
@@ -2013,6 +2096,12 @@ impl AutoShardManager {
         if room.is_some_and(|r| r.advertised) {
             if self.copy_carries_model_whoever_asks(shard_id, local_node_id) {
                 return Some("this copy carries the model");
+            }
+            // A model that has cooled, judged on what other computers can
+            // see: its copies go — the one each part keeps for exactly such
+            // a room.
+            if self.cools_whoever_asked(&shard_id.model_id, pressure) {
+                return None;
             }
             return room
                 .is_some_and(|room| !self.spare_for_room(shard_id, holders, room))
@@ -2099,6 +2188,39 @@ impl AutoShardManager {
             return None;
         }
         kept_for_its_copies
+    }
+
+    /// [`Self::copy_kept_because`] for a copy of a model that has cooled
+    /// (`unused::Verdict::Cooled`, 2026-11-15): `None` gives it back. A copy
+    /// past the one its part keeps goes (`coverage::keeps_the_cooled_copy`);
+    /// one not held here — the download pass asking — is never fetched; the
+    /// one the part keeps stays, and goes only for the room a part somebody
+    /// wants needs (`room`, not one of the model's own parts), with no floor
+    /// of holders: the model then leaves the swarm part by part, the one quiet
+    /// the longest first (`CooledCopy::Kept`), as the kubelet frees images
+    /// least recently used first above its high threshold.
+    fn cooled_copy_kept_because(
+        &self,
+        shard_id: &ShardId,
+        holders: &[NodeId],
+        room: Option<&RoomAsk<'_>>,
+    ) -> Option<&'static str> {
+        let local = self.shared_state.identity.node_id();
+        if !self
+            .shared_state
+            .model_registry
+            .shard_holders(shard_id)
+            .contains(local)
+        {
+            return None;
+        }
+        if !super::coverage::keeps_the_cooled_copy(&shard_id.model_id, holders, local) {
+            return None;
+        }
+        if room.is_some_and(|r| r.model != Some(&shard_id.model_id)) {
+            return None;
+        }
+        Some(KEPT_AS_THE_COOLED_COPY)
     }
 
     /// Would prune shed `candidate` again once it had landed — counted among
@@ -2560,15 +2682,17 @@ pub(super) fn room_this_pass_could_make(
     let mut room = 0u64;
     for candidate in candidates {
         let count = per_model.entry(&candidate.model_id).or_insert(0);
-        if *count >= max_per_model && !candidate.nobody_runs {
+        if *count >= max_per_model && !candidate.nobody_runs && candidate.cooled.is_none() {
             continue;
         }
-        let goes = if candidate.nobody_runs {
-            true
-        } else if candidate.to_make_room {
-            candidate.holder_count > floor_for_room
-        } else {
-            candidate.shard_index != crate::types::MMPROJ_SHARD_INDEX
+        // A cooled model's copies go with no floor: those past the one each
+        // part keeps anyway, that one for the room only (`CooledCopy`).
+        let goes = match candidate.cooled {
+            Some(CooledCopy::Extra) => true,
+            Some(CooledCopy::Kept { .. }) => candidate.to_make_room,
+            None if candidate.nobody_runs => true,
+            None if candidate.to_make_room => candidate.holder_count > floor_for_room,
+            None => candidate.shard_index != crate::types::MMPROJ_SHARD_INDEX,
         };
         if goes {
             *count += 1;
@@ -2576,6 +2700,32 @@ pub(super) fn room_this_pass_could_make(
         }
     }
     room
+}
+
+/// The order prune gives copies back in, once sorted by score (a stable sort
+/// keeps that order within each group): every copy that goes anyway first —
+/// each counts toward the room asked — then the copies cooled models keep
+/// (`CooledCopy::Kept`), the model quiet the longest first and one model's
+/// parts together, so a room leaves at most one model partly held (the
+/// kubelet frees images least recently used first); then the copies the
+/// replica count keeps, which go for room only past the room's floor.
+pub(super) fn room_order(a: &PruneCandidate, b: &PruneCandidate) -> std::cmp::Ordering {
+    let group = |c: &PruneCandidate| match (c.to_make_room, c.cooled) {
+        (false, _) => (0u8, 0i64),
+        (true, Some(CooledCopy::Kept { quiet_since })) => (1, quiet_since),
+        (true, _) => (2, 0),
+    };
+    let (ga, gb) = (group(a), group(b));
+    ga.cmp(&gb).then_with(|| {
+        if ga.0 == 1 {
+            a.model_id
+                .0
+                .cmp(&b.model_id.0)
+                .then(a.shard_index.cmp(&b.shard_index))
+        } else {
+            std::cmp::Ordering::Equal
+        }
+    })
 }
 
 #[cfg(test)]
@@ -3234,6 +3384,7 @@ mod room_all_or_nothing_tests {
             score: 1.0,
             nobody_runs: false,
             to_make_room: true,
+            cooled: None,
         }
     }
 
@@ -3294,6 +3445,68 @@ mod room_all_or_nothing_tests {
             ..copy("vision", 0, 600, 5)
         });
         assert_eq!(room_this_pass_could_make(&unused, 1, 2), 1_500 * MB);
+    }
+
+    /// A cooled model's copies count toward the room with no floor and no
+    /// per-model limit (2026-11-15), and prune gives them back in the order
+    /// `room_order` gives: what goes anyway first, then the one copy cooled
+    /// models keep — the model quiet the LONGEST first, its parts together, so
+    /// a room leaves at most one model partly held — and the copies the
+    /// replica count keeps last.
+    #[test]
+    fn a_cooled_model_gives_its_room_least_recently_used_first() {
+        use crate::model::auto_manage::manager::CooledCopy;
+        let kept = |model: &str, index, quiet_since| PruneCandidate {
+            cooled: Some(CooledCopy::Kept { quiet_since }),
+            holder_count: 1,
+            ..copy(model, index, 400, 1)
+        };
+        let candidates = vec![
+            copy("spare", 0, 500, 4),
+            kept("lately", 0, 900),
+            kept("long-ago", 1, 100),
+            PruneCandidate {
+                cooled: Some(CooledCopy::Extra),
+                to_make_room: false,
+                ..copy("cool-extra", 0, 200, 2)
+            },
+            kept("long-ago", 0, 100),
+            kept("lately", 1, 900),
+        ];
+        assert_eq!(
+            room_this_pass_could_make(&candidates, 1, 2),
+            (500 + 4 * 400 + 200) * MB,
+            "every cooled copy, past the per-model limit and the room's floor"
+        );
+        assert_eq!(
+            room_this_pass_could_make(
+                &[PruneCandidate {
+                    to_make_room: false,
+                    ..kept("lately", 0, 900)
+                }],
+                1,
+                2
+            ),
+            0,
+            "the one copy a part keeps goes for a room ask only"
+        );
+        let mut sorted = candidates.clone();
+        sorted.sort_by(super::room_order);
+        let order: Vec<(&str, u32)> = sorted
+            .iter()
+            .map(|c| (c.model_id.0.as_str(), c.shard_index))
+            .collect();
+        assert_eq!(
+            order,
+            [
+                ("cool-extra", 0),
+                ("long-ago", 0),
+                ("long-ago", 1),
+                ("lately", 0),
+                ("lately", 1),
+                ("spare", 0),
+            ]
+        );
     }
 }
 

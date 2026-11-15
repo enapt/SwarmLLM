@@ -1295,7 +1295,7 @@ computers hold to `NetworkPopular` on every tick, so a copied model kept itself 
 
 **The rule** is TinyLFU's admission (Einziger et al., ACM TOS 2017: a newcomer displaces a holding
 only with a higher estimated frequency): a model is held only on evidence it is used.
-`AutoShardManager::nobody_runs` (`auto_manage/unused.rs`) is the one answer, asked in
+`AutoShardManager::unused_verdict` (`auto_manage/unused.rs`) is the one answer, asked in
 `copy_kept_because` — so prune sheds such a copy and the download pass, asking the same through
 `would_shed_once_fetched`, never fetches it — and per model in the prune pass, which gives back
 every part in one pass however few hold it (`PruneCandidate::nobody_runs`, the machinery the
@@ -1304,9 +1304,10 @@ USE is still waited for), its projector too. As built on 2026-11-01 it answered 
 fresh reading of what people run did not name the model (`SharedState::popular_outside_the_swarm`,
 #389 (b)) — **superseded 2026-11-14 by the swarm's use, below** — AND the model is none of:
 
-- **run here within the use window after being watched for it** (`unused::use_window_secs`:
-  7 days, 2 where storage is pressed — § "The window follows the disk" below; 14 until
-  2026-11-14) — the record
+- **run here within the window after being watched for it** (`unused::quiet_window_secs`:
+  6 hours where storage is pressed, 2 days below, before the copies past one of each part go;
+  `USE_WINDOW_SECS`, 7 days, before every copy goes — § "A quiet model cools before it goes"
+  below; 14 days until 2026-11-14) — the record
   (`ModelUse`, `models.model_use`, saved in `model_use`) begins at this node's first part of the
   model and ends with its last; `watch_model_use`, at the start of every prune pass, folds in a
   request a worker ran (`ModelProcessPool::model_used_secs_ago`: `register_response`, which every
@@ -1342,7 +1343,7 @@ to be leaning much harder towards usable/popular/recent models".
 
 - **The swarm's use — KEEP.** `SharedState::note_request_served_for_a_peer` (the one writer, past
   the pool-member and unknown-model checks) stamps `models.served_for_peers_at`;
-  `watch_model_use` folds it into `ModelUse::served_for_others` (saved, moved by the hour) — on
+  `watch_model_use` folds it into `ModelUse::served_for_others` (saved, moved by ten minutes) — on
   every auto-manage tick, OUTSIDE the enabled gate, or a node with auto-manage or prune off (the
   live node, an anchor) never moved its stamps and every other holder read its models as unused.
   `unused::models_served` advertises it by the DAY in `NodeCapability::models_served` (additive,
@@ -1407,7 +1408,7 @@ every surface — for a known model whose parts no computer in reach holds
 (`a_reachable_computer_holds_a_part_of`: `part_has_a_holder_where` + `holder_standing`, #333's
 reading) answers `ModelIncompleteInSwarm` over all its layers (the hint: get its parts from its
 card), counts the request in `model_request_counts` and wakes the download pass — `asked_for` beats
-`nobody_runs` and the give-back record. Counted here only (the owner's use is never gossiped), so the
+`unused_verdict` and the give-back record. Counted here only (the owner's use is never gossiped), so the
 ring's share of parts comes back on its own; the owner's whole copy comes from the dashboard. The
 listing marks such a model `held_before` (`unused::held_before`: this node's give-back record and
 every connected computer's advertised one, while remembered — `GAVE_BACK_FOR_SECS`; the latest
@@ -1435,10 +1436,10 @@ given back for room`), holding parts of `ornith-1.5-122b` no card in the swarm c
 16 GB 5080 sat at its 392 GB limit with parts of the 122B and the 397B. The owner: "we need to be
 pruning more aggressively at this scale, so nodes make room for usable models faster".
 
-**The rule** (`unused::use_window_secs(disk_pressure)`, asked by `nobody_runs` with the pressure
-its pass judges by — prune's, or the download pass's with its fetches landed, so the two agree):
-**2 days** (`PRESSED_USE_WINDOW_SECS`) from `prune::PRESSURE_NORMAL` (0.8 — where prune stops
-keeping a spare copy), **7 days** (`USE_WINDOW_SECS`, trust's idle week) below it. The same window
+**The rule as built that day** (superseded 2026-11-15 by § "A quiet model cools before it goes"
+below, which keeps everything else here): `unused::use_window_secs(disk_pressure)` — every copy
+went after **2 days** from `prune::PRESSURE_NORMAL` (0.8 — where prune stops keeping a spare copy),
+**7 days** (`USE_WINDOW_SECS`, trust's idle week) below it. The same window
 decides this copy's trial, its quiet here, the swarm's serves (`swarm_use_of`'s `window_from`) and
 whether a holder's record covers it (`served_since`) — so an update's blind spot lasts one window
 (2 days on a full computer). `GAVE_BACK_FOR_SECS` stays fixed whatever the pressure (14 days, two
@@ -1455,9 +1456,60 @@ short age even when pressed: a model run every day (the AU tester's nightly scri
 steadiest use) survives one missed night, and the swarm's word is a day stamp.
 
 What a change must keep: one window per decision, from the pressure that decision is judged at; the
-give-back memory independent of it. Tests: `unused::tests::a_pressed_computer_judges_by_the_short_window`,
+give-back memory independent of it. Tests: `unused::tests::a_quiet_copy_cools_before_it_goes`,
 `the_verdict_names_the_pool_that_decided`, the pressed half of
 `a_model_nobody_runs_is_given_back_and_each_kind_of_use_keeps_it`.
+
+#### A quiet model cools before it goes (2026-11-15)
+
+**What it replaced**: the window above gave EVERY copy back at once — every holder judged the same
+swarm-wide word over the same window, so a model nobody ran for two days left the swarm whole, from
+every computer in the same pass; a request for it then waited on HuggingFace for every part. The
+owner: "2 days is still too long", and "we need to ensure the pruning doesnt just, remove all
+parts. it needs to be smart".
+
+**The rule** — two steps (`unused::Verdict::Cooled`, then `Unused`):
+
+1. **Cooled** — run by nobody here and served by no connected holder for the QUIET window
+   (`unused::quiet_window_secs`: **6 hours** from disk pressure 0.8, `PRESSED_QUIET_WINDOW_SECS`;
+   **2 days** below, `QUIET_WINDOW_SECS`), but not for the week (`unused::cools`, which asks the
+   week only of a quiet copy held here). Every copy of each part goes but ONE: the part's live
+   holder ranked first for the MODEL (`coverage::keeps_the_cooled_copy`, rendezvous by the model,
+   not the part's `part_rank_weight` — a model three computers hold whole keeps one whole copy on
+   one of them, never its parts scattered over three; a holder gives back only for a holder it
+   ranks above itself, so the first-ranked one, which sees itself, never does). The download pass
+   asks the same (`cooled_copy_kept_because`: a part not held here is never fetched). That one copy
+   goes only for the room a part somebody wants asks for (`RoomAsk`, not of its own model) —
+   `prune::room_order` gives such copies back after what goes anyway and before the copies the
+   replica count keeps, the model quiet the LONGEST first (`CooledCopy::Kept { quiet_since }`) and
+   one model's parts together, so a room leaves at most one model partly held; the room is still
+   all or nothing (`room_this_pass_could_make`, which counts every cooled copy with no floor).
+2. **Unused** — quiet for `USE_WINDOW_SECS` (7 days) at any pressure: every copy goes, as before,
+   and it is remembered as given back (`note_gave_back_unused`, with the last part — a cooled copy
+   that was this node's last part notes it too).
+
+The room advertised to other computers (`RoomAsk::advertised`) asks `cools_whoever_asked`: the
+quiet window over what other computers can see alone — this node's serves for others, never the
+owner's use (#389 (a)). `MOVES_BY_SECS` fell from an hour to ten minutes: against a six-hour window
+an hour late was a sixth of it.
+
+**Prior art**: ERMS (Cheng et al., IEEE Cluster 2012) adds replicas while data is hot and removes
+the EXTRA ones once it cools, keeping the data — the shape here; the kubelet (KEP-4210) above gives
+the least recently used first under pressure and every unused image past a maximum age, which the
+week is. Rendezvous hashing (Thaler & Ravishankar 1998) is why every holder agrees on the keeper
+with no coordinator.
+
+What a change must keep: one copy of each part of a cooled model on the swarm until the week or a
+room ask — the keeper's copy goes only while its candidate makes room (`still_spare`, and
+`room_this_pass_could_make` counts it only then: a room note that lapses mid-pass leaves it); the
+keeper ranked by the model; a cooled part not held here never fetched; the advertised room never
+reading the owner's use; the operator's configured `--shards` range asked BEFORE the use rule (review
+2026-11-15: after it, the cooled step took the range in six hours). Tests: `unused::tests::{a_quiet_copy_cools_before_it_goes,
+only_a_quiet_copy_held_here_cools}`, `coverage::tests::a_cooled_model_keeps_one_whole_copy_on_one_holder`,
+`prune::room_all_or_nothing_tests::a_cooled_model_gives_its_room_least_recently_used_first`,
+`scoring::fetch_what_prune_keeps::{prune_gives_back_a_cooled_models_extra_copies_and_keeps_its_one,
+a_configured_shard_range_is_kept_past_the_use_rule}`. With the keeper rule off, the first and
+`a_model_nobody_runs_is_given_back_and_each_kind_of_use_keeps_it` fail (checked 2026-11-15).
 
 **One quantisation per model** (#389 (e)) follows: the reading names one file per base
 (`popular::pick_file` — Q4_K_M, Q8_0 at 2B and under), so a second quantisation of a base people

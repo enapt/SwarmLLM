@@ -345,7 +345,8 @@ pub(super) struct PruneCandidate {
     pub target_replicas: u32,
     /// Score: higher = more prunable.
     pub score: f64,
-    /// A model nobody runs (`AutoShardManager::nobody_runs`, #389 (d)): shed
+    /// A model nobody runs (`AutoShardManager::unused_verdict` says
+    /// `Verdict::Unused`, #389 (d)): shed
     /// however few hold it, every part in one pass.
     pub nobody_runs: bool,
     /// Kept by the replica count, shed only to make room for a part the swarm
@@ -353,6 +354,24 @@ pub(super) struct PruneCandidate {
     /// room the download pass noted, and re-checked against that room's floor
     /// (`RoomWanted::floor`) rather than the target.
     pub to_make_room: bool,
+    /// A copy of a model that has cooled (`unused::Verdict::Cooled`): which
+    /// of its copies this is.
+    pub cooled: Option<CooledCopy>,
+}
+
+/// A copy of a model nobody ran in the quiet window (`unused::Verdict::Cooled`,
+/// 2026-11-15) that prune gives back.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum CooledCopy {
+    /// One past the copy the part keeps (`coverage::keeps_the_cooled_copy`):
+    /// every such part goes in one pass, once a holder ranked above this one
+    /// still holds it.
+    Extra,
+    /// The copy the part keeps, given back only for the room a part somebody
+    /// wants needs (`to_make_room`), with no floor of holders: the model quiet
+    /// the longest goes first (`quiet_since`, Unix seconds — the kubelet's
+    /// least-recently-used order), one model's parts before the next's.
+    Kept { quiet_since: i64 },
 }
 
 impl AutoShardManager {
@@ -1858,6 +1877,7 @@ mod tests {
             score: 3.0 + 1.0, // high redundancy + cold bonus
             nobody_runs: false,
             to_make_room: false,
+            cooled: None,
         };
         let warm_less_redundant = PruneCandidate {
             model_id: crate::types::ModelId("m2".into()),
@@ -1869,6 +1889,7 @@ mod tests {
             score: 1.5, // low redundancy, first shard penalty
             nobody_runs: false,
             to_make_room: false,
+            cooled: None,
         };
         assert!(cold_redundant.score > warm_less_redundant.score);
     }

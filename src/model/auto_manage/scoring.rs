@@ -2114,36 +2114,88 @@ mod fetch_what_prune_keeps {
         );
         swarm_says(&state, &[]);
         assert!(shed(), "control: nobody again");
-        let watched = |since_days: i64, used_days: Option<i64>| {
+        const HOUR: i64 = 3_600;
+        const DAY: i64 = 24 * HOUR;
+        let watched = |since: i64, used: Option<i64>| {
             state.models.model_use.insert(
                 mid.clone(),
                 ModelUse {
-                    watched_since: now - since_days * 86_400,
-                    last_used: used_days.map_or(0, |d| now - d * 86_400),
-                    served_recorded_since: now - since_days * 86_400,
+                    watched_since: now - since,
+                    last_used: used.map_or(0, |ago| now - ago),
+                    served_recorded_since: now - since,
                     ..Default::default()
                 },
             );
         };
-        watched(6, None);
-        assert!(!shed(), "watched 6 days: still on trial");
-        watched(40, Some(2));
-        assert!(!shed(), "run here two days ago");
-        // Where storage is pressed the window is two days (2026-11-14: "we
-        // need to be pruning more aggressively at this scale"), and the
-        // download pass, asking at the pressure its fetch would leave, agrees.
-        let shed_pressed =
-            || manager.would_shed_copy(&part(0), std::slice::from_ref(&local), 0.9, &[]);
+        // Quiet for the quiet window — two days with room, six hours where
+        // storage is pressed (2026-11-15: "2 days is still too long") — a
+        // model COOLS: one copy of each part stays, on the holder every
+        // computer ranks first for the model, and only past the week does
+        // every copy go ("the pruning doesnt just, remove all parts").
+        let above = (0u32..100_000)
+            .map(|i| NodeId(*blake3::hash(&i.to_le_bytes()).as_bytes()))
+            .find(|id| {
+                crate::model::auto_manage::coverage::keeps_the_cooled_copy(
+                    &mid,
+                    &[local.clone(), id.clone()],
+                    id,
+                )
+            })
+            .expect("a node ranked above this one for the model");
+        let beside_the_keeper = [local.clone(), above.clone()];
+        let shed_at = |holders: &[NodeId], pressure| {
+            manager.would_shed_copy(&part(0), holders, pressure, &[])
+        };
+        watched(DAY, None);
+        assert!(!shed(), "watched a day: still on trial");
         assert!(
-            shed_pressed(),
-            "pressed: run here two days ago is not enough"
+            !shed_at(&beside_the_keeper, 0.0),
+            "on trial: every copy stays"
         );
-        watched(40, Some(1));
-        assert!(!shed_pressed(), "run here yesterday: kept however full");
-        watched(3, None);
-        assert!(shed_pressed(), "pressed: three days is past the trial");
-        assert!(!shed(), "control: with room, still on its week's trial");
-        watched(40, None);
+        watched(6 * DAY, None);
+        assert!(
+            !shed(),
+            "quiet for the two days, not the week: it cools, and its one holder keeps its copy"
+        );
+        assert!(
+            shed_at(&beside_the_keeper, 0.0),
+            "a copy beside the holder ranked first goes"
+        );
+        assert!(
+            shed_at(&[above.clone(), local.clone()], 0.0),
+            "whatever order the holders are listed in"
+        );
+        watched(40 * DAY, Some(DAY));
+        assert!(
+            !shed_at(&beside_the_keeper, 0.0),
+            "run here yesterday: with room, every copy stays"
+        );
+        // Where storage is pressed the window is six hours, and the download
+        // pass, asking at the pressure its fetch would leave, agrees.
+        assert!(
+            shed_at(&beside_the_keeper, 0.9),
+            "pressed: run yesterday is quiet for six hours, so the extra copy goes"
+        );
+        assert!(
+            !shed_at(std::slice::from_ref(&local), 0.9),
+            "and the one copy stays however full"
+        );
+        watched(40 * DAY, Some(5 * HOUR));
+        assert!(
+            !shed_at(&beside_the_keeper, 0.9),
+            "run here five hours ago: every copy stays however full"
+        );
+        watched(3 * DAY, None);
+        assert!(
+            !shed_at(std::slice::from_ref(&local), 0.9),
+            "pressed, held three days: it cools, never all goes before the week"
+        );
+        watched(8 * DAY, None);
+        assert!(
+            shed_at(std::slice::from_ref(&local), 0.9) && shed(),
+            "a week quiet: every copy goes, at any pressure"
+        );
+        watched(40 * DAY, None);
         assert!(shed(), "control: nobody again");
         state
             .models
@@ -2159,15 +2211,91 @@ mod fetch_what_prune_keeps {
         assert!(!shed(), "its owner pinned it");
     }
 
+    /// Prune gives back a cooled model's copies past the one each part keeps,
+    /// and keeps that one (2026-11-15: "we need to ensure the pruning doesnt
+    /// just, remove all parts"). Two models nobody ran in the two days but
+    /// within the week, each held here: the one a computer ranked above this
+    /// one for it also holds goes from here, the one only this computer holds
+    /// stays. With no part asking for room, nothing else moves it.
+    #[tokio::test]
+    async fn prune_gives_back_a_cooled_models_extra_copies_and_keeps_its_one() {
+        use crate::model::auto_manage::unused::Verdict;
+        let (state, manager) = manager_with(Config::default());
+        let local = state.identity.node_id().clone();
+        let above = NodeId([10; 32]);
+        let extra_name = (0..64)
+            .map(|i| format!("extra-{i}-q4"))
+            .find(|name| {
+                crate::model::auto_manage::coverage::keeps_the_cooled_copy(
+                    &ModelId(name.clone()),
+                    &[local.clone(), above.clone()],
+                    &above,
+                )
+            })
+            .expect("a model the other computer is ranked above this one for");
+        let only_here = model_nobody_runs(&state, &manager, "only-here-q4", 3);
+        let extra = model_nobody_runs(&state, &manager, &extra_name, 3);
+        close_peer_holding(&state, 10, &extra, 0);
+        swarm_says(&state, &[]);
+        for mid in [&only_here, &extra] {
+            assert_eq!(manager.unused_verdict(mid, 0.0), Verdict::Cooled, "{mid:?}");
+        }
+        manager.evaluate_and_prune().await;
+        let held = |mid: &ModelId| {
+            crate::model::shard::model_dir(&state.config.node.data_dir, &mid.0)
+                .join(crate::model::shard::shard_filename(0))
+                .exists()
+        };
+        assert!(!held(&extra), "a copy past the one its part keeps goes");
+        assert!(held(&only_here), "the one copy of a part stays");
+        let record = |mid: &ModelId| state.models.model_use.get(mid).map(|r| *r);
+        assert!(
+            record(&extra).is_some_and(|r| r.gave_back_unused > 0),
+            "its last part here went: remembered as given back"
+        );
+        assert!(record(&only_here).is_some_and(|r| r.gave_back_unused == 0));
+    }
+
+    /// A part in the range the operator configured (`--shards`) is their
+    /// explicit choice: kept past the use rule, cooled or unused, as a model
+    /// its owner chose is (review 2026-11-15 — the cooled step would have
+    /// taken it after six hours).
+    #[test]
+    fn a_configured_shard_range_is_kept_past_the_use_rule() {
+        let mut config = Config::default();
+        config.inference.shard_range = Some((0, 0));
+        let (state, manager) = manager_with(config);
+        let local = state.identity.node_id().clone();
+        let mid = model_nobody_runs(&state, &manager, "old-coder-q4", 15);
+        let shed = |index| {
+            manager.would_shed_copy(
+                &ShardId {
+                    model_id: mid.clone(),
+                    index,
+                },
+                std::slice::from_ref(&local),
+                0.0,
+                &[],
+            )
+        };
+        assert!(!shed(0), "in the configured range");
+        assert!(shed(1), "control: outside it, a model nobody runs goes");
+    }
+
     /// The models testers compare results on stay (`model::reference`).
     #[test]
     fn a_reference_model_is_never_given_back_for_want_of_use() {
         let (state, manager) = manager_with(Config::default());
         let reference = model_nobody_runs(&state, &manager, "tinyllama-1.1b-chat-v1.0.q4-k-m", 30);
         let other = model_nobody_runs(&state, &manager, "tinyllama-1.1b-chat-v0.9.q4-k-m", 30);
-        assert!(!manager.nobody_runs(&reference, 0.0));
-        assert!(
-            manager.nobody_runs(&other, 0.0),
+        use crate::model::auto_manage::unused::Verdict;
+        assert_eq!(
+            manager.unused_verdict(&reference, 0.0),
+            Verdict::Exempt("a reference model")
+        );
+        assert_eq!(
+            manager.unused_verdict(&other, 0.0),
+            Verdict::Unused,
             "control: one that is not a reference model"
         );
     }

@@ -865,7 +865,7 @@ frame, then add a receipt ACK or a per-frame read deadline mirroring request-res
 `P1` · placement · **BUILT, field check open** — 2026-11-14 · history: #389 (d), #400, #401, #246
 
 > **Done on main (2026-11-14), all three defects and both follow-ups.** (1) The swarm-use pool:
-> `unused::nobody_runs` reads the swarm's advertised use (`NodeCapability::models_served`), never
+> `AutoShardManager::unused_verdict` reads the swarm's advertised use (`NodeCapability::models_served`), never
 > HuggingFace's list, for a copy held here; the list only decides what is tried, and a model the swarm
 > tried and nobody ran is not fetched back on it for two windows — on a holder's word, this node's
 > give-back or two others' (`unused::GAVE_BACK_WITNESSES`; one peer's stamp alone never decides,
@@ -899,6 +899,19 @@ frame, then add a receipt ACK or a per-frame read deadline mirroring request-res
 > by what the use rule says of each`, every 10 min, and the diagnostics report), and
 > `/api/admin/peers` shows each peer's `models_served`. Field check (a) now reads give-backs from
 > ~11-16 on full computers (2 days after .288's `served_since`), ~11-21 elsewhere.
+> **2026-11-15 — a quiet model COOLS before it goes** (user: "2 days is still too long", "we need to
+> ensure the pruning doesnt just, remove all parts. it needs to be smart"): `use_window_secs` gave EVERY
+> copy back in one pass on every holder at once. Now two steps (`unused::Verdict::Cooled`, `unused::cools`):
+> quiet for `unused::quiet_window_secs` — **6 hours** from disk pressure 0.8, **2 days** below — every
+> copy of each part goes but ONE, kept by the part's live holder ranked first for the MODEL
+> (`coverage::keeps_the_cooled_copy`, rendezvous by model, so a model held whole keeps one whole copy);
+> none is fetched; that one goes only for a room another model's part asks (`prune::room_order`: the
+> model quiet the longest first, its parts together). Quiet for **7 days** at any pressure every copy
+> goes, as before. Prior art: ERMS (Cheng et al., IEEE Cluster 2012) removes a cooled file's EXTRA
+> replicas and keeps the file; the kubelet's LRU above its high threshold and `imageMaximumGCAge` (KEP-4210);
+> rendezvous hashing for a keeper every holder agrees on. Evidence: `docs/invariants/memory.md` § "A
+> quiet model cools before it goes". Field check (a) now also reads `one_copy_stays=true` give-backs from
+> ~6 h after a model's last use on a full computer, and every model still held SOMEWHERE until its week.
 > (d) SCALE: only CONNECTED holders are asked (pre-release
 > review 2026-11-14). A holder serving the model that is not connected here is heard only through its
 > demand gossip, which keeps the model for a few hours after each request (`asked_for`, the EMA's

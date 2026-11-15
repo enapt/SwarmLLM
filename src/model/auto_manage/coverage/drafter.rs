@@ -195,7 +195,7 @@ impl AutoShardManager {
 
     /// Is `model` the drafter of a split this computer runs, or the one it is
     /// fetching to? A drafter's use counts toward the model it drafts for, so
-    /// the model-level answer is asked too (`unused::nobody_runs`, #389 (d)).
+    /// the model-level answer is asked too (`AutoShardManager::unused_verdict`, #389 (d)).
     pub(in crate::model::auto_manage) fn drafts_for_a_split(&self, model: &ModelId) -> bool {
         if self.shared_state.models.drafters_wanted.is_empty() {
             return false;
