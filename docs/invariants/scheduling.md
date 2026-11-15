@@ -6353,7 +6353,13 @@ cost) — a width that follows the guess's confidence (`docs/plans/faster_than_l
 split that gives this node fewer layers while it also drafts (FUTURE_WORK #411, "Also"). The law below
 (E per round trip) describes 10-23's flow, which waited on the far end; this one is bound by the
 slower side's forward instead: tok/s ≈ tokens a forward ÷ that side's ms a forward (0.80 / 41 ms ≈ 19.5
-prose, 1.76 / 40 ms ≈ 44 code — arm 7 measured 19.41 and 43.79).
+prose, 1.76 / 40 ms ≈ 44 code — arm 7 measured 19.41 and 43.79). This node's 26 layers are not slow for their work:
+llama.cpp (`llama-bench` 4b1a27f, `-fa 1`, the same card, the live node idle beside it, 7 repeats) reads 24 rows
+through Qwen2.5-Coder-7B Q4_K_M at 1,023 tok/s (pp24: 23.5 ms, ~0.79 ms a layer net of the head) and 12 rows at
+575 (pp12: ~0.70 ms a layer); scaled by the weights a layer (~167 MB for the 14B against ~141 MB) that is ~0.93 and
+~0.83 ms, against the flow's 1.0 and 0.91 here — tree attention and the token table included, within ~10%. So the
+lever is not the kernels: it is the drafting (~35% of this node's forward) and how many layers this node takes
+beside it.
 
 **The law this reads as: a flow advances about E (the tokens the drafter's live rows get right)
 per round trip.** 14-15 tok/s × 0.45 s ≈ 6.5 tokens. The tree rounds on the same link get 6.3-6.8 a round
