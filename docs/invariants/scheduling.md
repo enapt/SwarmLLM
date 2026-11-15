@@ -4005,7 +4005,7 @@ sequence: the first round would have nothing to read).
 
 ## A slice of a loaded copy runs where the copy's layers are
 
-**Rule (2026-11-15, FUTURE_WORK #3 (j14)).** `NodeCandidate::layers_by_device` prices a run that a
+**Rule (2026-11-15, FUTURE_WORK #3 (j15)).** `NodeCandidate::layers_by_device` prices a run that a
 held copy serves without a load (`HeldRange::covers_without_a_load`: the copy itself, or a run
 inside one whose holder serves slices, #449) at that COPY's placement: the loader filled the card
 from the copy's first layer, a slice is a view of those weights on the devices they were loaded

@@ -1283,7 +1283,7 @@ asked to load is owed its charge: `WorkerHandle::asked_to_load` is set before a 
 by the reader on `ModelLoadTimed`. One never asked is released at once, as v0.3.285 released every worker. It was
 never seen: the live node's unloads since .286 all came back within one poll. Prior art: Ollama's runner joins
 `s.loaded` only after its load, so its `waitForVRAMRecovery` never waits on one that allocated nothing.
-(j14) **A slice of a copy already loaded was priced as if the card started at the slice** (2026-11-15, on main,
+(j15) **A slice of a copy already loaded was priced as if the card started at the slice** (2026-11-15, on main,
 not in a release yet). The direction (user, 11-15: the cards across computers before one computer's card and
 processor) asked whether this card could take the processor share of a 27B the Australian RTX 3060 runs whole
 (#451's field check: that hybrid ran 5.5-6.5 tok/s, its drafter's 3-3.6 tokens a round bought nothing).
@@ -1307,9 +1307,9 @@ keeps choosing it. An all-card 27B needs ~64 card layers across computers
 (this card ~20 beside the head, AU's ~30; the RTX 5080 had 4 GB free, the RTX 3080 Ti holds none — its storage is
 full). **Also on main**: a Qwen 3.5-family split this node drives with the file's guess head is priced from the
 drafter's prior (`pipeline::split_guess_head_here` — the head's part and layer 0's held here; those families take
-no separate drafter, so their splits were priced at a round a token). Open: where a split round's other ~0.3-0.5 s goes
-(this node's tail segment ran on its processor with the output head; per-round timings in
-`~/swarmllm-gate/deep/fr/real_link_c2hfresh1115/`).
+no separate drafter, so their splits were priced at a round a token). Where the fresh run's other ~0.3-0.5 s a round
+went: this node's last range was refused by the loader after the daemon admitted it, the refusal pinned the whole model
+to the processor and the retry ran `[0..15)` there at ~148 ms a round (#458).
 
 `scheduler/parallax.rs` charges a remote hop a flat `ASSUMED_FORWARD_PASSES = 64.0`. The error
 grows with reply length — 1.0 at 8 tokens, 2.4-3.3 at 120-239 — and biases every delegation
@@ -1420,7 +1420,7 @@ where this node holds every layer and its card runs only part of them
 (`scheduler::shares_what_its_card_cannot_hold`). With #449 the peer serves its share from its whole
 copy; on the real link the explored splits ran code 24.1 and 16.5 tok/s against 11.0-17.0 with it
 off (`real_link_j1drafter`). The general flip still waits for the A/B above. The same rule for a PEER holding the whole
-model with part of it on its processor was measured against on 2026-11-15 and not built (#3 (j14)): its slice is a
+model with part of it on its processor was measured against on 2026-11-15 and not built (#3 (j15)): its slice is a
 view of the copy it runs, so the processor share stays (2.5-3.1 tok/s split against 5.2-5.7 handed over;
 loaded card-first, 3.2-3.9 against 5.7-6.2).
 
@@ -5306,7 +5306,7 @@ line and its ends' tables, so the split rung runs first; (b) the guess head (and
 segment leaves room for the plan's other local ranges, or gives its card memory back for them (it is worth ~2 tokens a
 round; a range on the processor costs ~130 ms a round here); (c) the last segment's output head shared with the guess
 head's copy rather than counted again. Not decisive for tonight's 27B: with `[0..15)` on the card the split prices
-~4.2 tok/s against the hand-off's 5.7-6.2 (FUTURE_WORK #3 (j14)). Evidence: `real_link_c2hfresh1115/H_1_c2h.log`
+~4.2 tok/s against the hand-off's 5.7-6.2 (FUTURE_WORK #3 (j15)). Evidence: `real_link_c2hfresh1115/H_1_c2h.log`
 15:20:47-15:21:03Z.
 
 #### #454 — A long prompt on a split sized for a typical conversation is refused by megabytes, not reloaded with fewer card layers
