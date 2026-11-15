@@ -5373,7 +5373,12 @@ calls (daemon-side in `dsd_flow`, a stale call dropped at a rebase like an answe
 the gain needs the drafter in the near segment's process on a second stream, a larger change to weigh against the rule's
 reasons (graph capture, one sync point). llama.cpp's 0.5B takes 3.1 ms for ONE row with its CUDA graphs (pp1 323 tok/s
 on this card), so most of a ~4.5 ms level is likely the card's own latency over ~300 small kernels, not host gaps —
-expect the two-process overlap to buy little, and the second stream to be the real question.
+expect the two-process overlap to buy little, and the second stream to be the real question. **Measured
+2026-11-15, settled**: llama.cpp's 3B (24 rows) and 0.5B (8 rows) as two processes on this card at once
+(`scratchpad/llref_overlap.sh`, two passes, `-r 400` / `-r 1500`) kept 0.40 and 0.49 of their rates alone —
+0.89 of the work one at a time, both passes: two contexts time-slice and lose ~11% to the switch. So overlapping
+the two IPC calls is ruled out; the overlap needs the drafter and the near segment in ONE process on two streams,
+which is a change to the one-stream rule (read `docs/invariants/inference.md` on why it holds first).
 
 Prior art: PEARL (arXiv 2408.11850, ICLR 2025) names it "mutual waiting" — the target idle while the draft drafts and the
 reverse — and its post-verify keeps drafting while the target verifies (up to 1.5× over plain speculation); PipeInfer

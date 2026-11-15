@@ -1267,9 +1267,9 @@ left is not a kernel and not a shape:
 1. **The order** (#462): `flowed_ms` = drafting + layers to 0.2% — this computer drafts (~14.5 ms), then runs its
    layers (~26), never both. The next call's levels grow from leaves already drafted, so they could run during this
    forward's layers: one forward ≈ 28 ms, the far end's 30 then the limit — up to ~1.3x. The catch: drafter and
-   segment are two processes, two time-sliced contexts on one card. llama.cpp's 0.5B takes 3.1 ms for ONE row with
-   its graphs, so a level is mostly the card's own latency over ~300 small kernels, not host gaps — two processes
-   would overlap little of it; kernels side by side need a second stream in one process, against the one-stream rule.
+   segment are two processes, and two processes on this card time-slice: llama.cpp's 3B and 0.5B run at once did
+   0.89 of the work they did one at a time (measured, #462). Kernels side by side need the drafter in the segment's
+   process on a second stream — against the one-stream rule, whose reasons come first.
 2. **The balance** (#411 "Also"): the planner fills this computer's card without counting that it also drafts. At
    ~21-22 layers here instead of 26 each side would take ~36 ms (~+12%) — unmeasured: forcing that split point grew
    the far computer's copy onto its processor (#461), so it is measured only where the far copy CONTAINS the range.
