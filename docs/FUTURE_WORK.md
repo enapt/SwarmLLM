@@ -5414,7 +5414,8 @@ one layer. The drafter's room left this node 25 layers (`room_for=Some(25)`, `ro
 the plan without the room. Even granting the cut, `[0..25)` here + `[25..26)` there is three segments. The
 reply ran 2.1 tok/s; the NEXT request planned the plain `[0..26)` + Australia, and that wider range was placed
 beside the held `[0..24)` worker with 3 of 26 layers on the card (card read 585 MB free; 255 ms a forward, 7.4
-tok/s against 42.7) — #461's missing worse-placement guard, on THIS node. 1 of ~35 first plans tonight; the
+tok/s against 42.7) — #461's growth path, fixed in v0.3.292 (the idle worker is now retired and the range
+placed afresh). 1 of ~35 first plans tonight; the
 rest planned two segments.
 
 **Two contributors**: (1) this node is exempt from the once-a-chain bound (`parallax.rs`, the capped-bit
@@ -5425,7 +5426,14 @@ the cheaper (the drafter's gain is in the split's rounds prior, so both are comp
 searched yet.
 
 #### #461 — A peer's split that asks a computer for a WIDER range replaces its all-card copy with a mostly-processor one, which then serves every narrower request too
-`P2` · memory / admission · **OPEN** — 2026-11-15 · found on the real link (`real_link.sh` TAG=bal292, a forced split point) · related: #3 (j12), #3 (j13), #449, #458
+`P3` · memory / admission · **NARROWED** — 2026-11-15 (the growth half shipped in v0.3.292) · found on the real link (`real_link.sh` TAG=bal292, a forced split point) · related: #3 (j12), #3 (j13), #449, #458
+
+**Narrowed 2026-11-15 (v0.3.292)**: contributor 2 was the GROWTH ladder (below, "Contributor 2 found"), and
+`charge_segment_as_split` now steps aside for an idle worker whose spawn range the new range takes in, so the
+retirement the planner priced places it afresh (`docs/invariants/memory.md` § "A worker that cannot grow", real
+link 7.56 → 35.25 tok/s). **Left**: (1) the retirement's own guard against a worse placement (contributor 1); (3)
+no promotion under steady use; the refusal's words; and the accounting itself — a worker IN USE still takes the
+wider range as a split sized beside the dropped range, and the daemon keeps charging that range's base.
 
 **Seen** (the Australian 12 GB card, v0.3.291, the 14B; `real_link_bal292/peers_seen.jsonl`, its own advertised
 `resident` after each reply): it held `[26..48)` with all 22 layers on the card (3,390 MB of the card free beside
@@ -6875,7 +6883,12 @@ Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
 
-**Closed 2026-11-15 (v0.3.292)** (#460)
+**Closed 2026-11-15 (v0.3.292)** (#460, #461's growth half)
+- #461 (growth half) — **A range taking in the one a model's worker was started with was placed beside it, mostly on
+  the processor.** The spawn's range is charged in the worker's base, so the split rung sized the wider range on the
+  room beside it, though the worker drops it before loading: a 14B's `[0..26)` over a spawned `[0..23)` went 4 of 26
+  layers on the card. An idle worker now goes to the retirement the planner priced (#350). Real link, one binary
+  each way: 7.56 → 35.25 tok/s, 266 → 32.6 ms a forward here. The rest of #461 stays open above.
 - #460 — **A split asked in the first seconds after a start found no drafter and wrote its whole reply a token a
   round.** A drafter is chosen only from `split_models`, which the startup pass fills 2 s after start; the 14B split
   to Australia ran its first reply at 5.8-6.1 tok/s against 34-45 with the drafter (every arm of `line292`; on

@@ -2565,6 +2565,21 @@ impl WorkerHandle {
             .unwrap_or_default()
     }
 
+    /// Does `incoming` take in a range whose memory is charged in the worker's
+    /// BASE — its spawn's own range, or one grown with nothing judged, both
+    /// recorded at no cost of their own? [`Self::subsumed_charge`] then counts
+    /// nothing for the memory that range gives back when the worker drops it
+    /// for `incoming` (#461).
+    fn takes_in_a_range_charged_in_its_base(&self, incoming: (u32, u32)) -> bool {
+        self.charged_segments
+            .lock()
+            .map(|v| {
+                v.iter()
+                    .any(|c| strictly_subsumes(incoming, c.range) && c.cost == RangeCost::default())
+            })
+            .unwrap_or(false)
+    }
+
     /// Record that this worker has been charged for `segment`, wholly on the
     /// device it is charged to, and add `mb` to what it owes. Idempotent on the
     /// range.
@@ -8421,6 +8436,34 @@ impl ModelProcessPool {
         let _guard = self.spawn_lock.lock().await;
         if handle.serves_segment(segment, shape) {
             return Ok(true);
+        }
+        // A range taking in one charged in the worker's base would be sized
+        // below on the room BESIDE that range, though the worker drops it
+        // before loading this one: `subsumed_charge` counts it as nothing. On
+        // this laptop a worker holding its spawn's [0..24) whole on the card
+        // was asked [0..26) and placed 3 of its 26 layers on the card (585 MB,
+        // ~4.9 GB freed a moment later unused): 7.4 tok/s against 42.7; a far
+        // computer's [26..48) widened to [20..48) the same way kept 10 of 28
+        // (#461). The planner priced that run as the idle worker's retirement
+        // (`a_fresh_spawn_fits_in_place_of_the_worker`, #350), so an idle
+        // worker goes on down the ladder to it, and the fresh spawn reads the
+        // card once the old memory is back (#3 (j13)). A worker in use keeps
+        // the split: refused, a running conversation would be planned again.
+        // Prior art: Kubernetes' in-place pod resize, where a resize the node
+        // cannot fit in place falls back to recreating the pod (VPA's
+        // eviction), never to running it starved.
+        // A/B `SWARMLLM_GROWTH_OVER_BASE_RANGE=split` keeps the old split.
+        if handle.takes_in_a_range_charged_in_its_base(segment)
+            && !handle.in_use(self.conversation_window())
+            && std::env::var("SWARMLLM_GROWTH_OVER_BASE_RANGE").as_deref() != Ok("split")
+        {
+            tracing::info!(
+                model = %model_id,
+                layers = format!("[{}..{})", segment.0, segment.1),
+                "This range takes in the one this model's worker was started with — placing it \
+                 afresh rather than beside it, so the memory that range frees counts"
+            );
+            return Ok(false);
         }
         let Some((split, room_mb)) = self.growth_split(model_id, segment, handle, 0) else {
             return Ok(false);
@@ -21962,6 +22005,86 @@ mod admission_tests {
         };
         handle.charged_mb.store(estimated, Ordering::Release);
         (p, m, handle, worker_end, (estimated, 0))
+    }
+
+    /// The 14B's `[0..24)` spawned whole on this laptop's card budget, its
+    /// charge in the worker's base as a spawn's is.
+    async fn fourteen_b_spawned_as_0_24(
+        name: &str,
+    ) -> (
+        ModelProcessPool,
+        ModelId,
+        Arc<WorkerHandle>,
+        interprocess::local_socket::tokio::Stream,
+    ) {
+        let p = pool();
+        p.test_card_in_play.store(true, Ordering::Relaxed);
+        p.set_gpu_layers(-1);
+        p.set_vram_budget_mb(6_700);
+        p.set_ram_budget_mb(100_000);
+        let m = ModelId(name.into());
+        p.test_footprint_inputs.insert(m.clone(), fourteen_b());
+        let spawned = p.estimate_gpu_footprint_mb(&m, Some((0, 24)), KvCharge::Typical);
+        assert!(
+            p.admit_to_gpu(&m, spawned),
+            "fixture: [0..24) whole on the card ({spawned} MB)"
+        );
+        let (h, worker_end) = super::tests::fake_worker_handle_split_with_its_end(
+            false,
+            None,
+            false,
+            std::time::Instant::now(),
+            None,
+        )
+        .await;
+        h.charged_mb.store(spawned, Ordering::Release);
+        h.record_segment_placed_as_spawned((0, 24));
+        p.workers.insert(m.clone(), h.clone());
+        (p, m, h, worker_end)
+    }
+
+    /// **A range taking in the worker's spawn range is placed afresh, not split
+    /// beside it** (#461). The spawn's range is recorded at no cost — its
+    /// charge is the worker's base — so the split rung sized `[0..26)` on the
+    /// room BESIDE `[0..24)`, which the worker then dropped before loading it:
+    /// 3 of 26 layers on this laptop's card, 7.4 tok/s against 42.7. An idle
+    /// worker now goes on to the retirement the planner priced (#350).
+    #[tokio::test]
+    async fn a_range_taking_in_the_spawn_range_is_placed_afresh_not_beside_it() {
+        let (p, m, h, _worker_end) = fourteen_b_spawned_as_0_24("fourteen-b-461-idle").await;
+        let Some((CardSplit::Layers { on_card, total: 26 }, _)) =
+            p.growth_split(&m, (0, 26), &h, 0)
+        else {
+            panic!("fixture: beside [0..24) the card takes [0..26) by whole layers");
+        };
+        assert!(
+            on_card < 24,
+            "fixture: the room beside [0..24) is the defect's ({on_card} of 26 on the card)"
+        );
+
+        let grown = p
+            .grow_worker(&m, (0, 26), h, Requester::Owner, RunShape::Plain)
+            .await
+            .expect("an idle worker is placed afresh, never refused");
+        assert!(matches!(grown, Growth::Respawn));
+        assert!(
+            p.workers.get(&m).is_none(),
+            "retired, so `get_or_spawn` places [0..26) on a card read afresh"
+        );
+    }
+
+    /// ...and a worker in use keeps today's split: refused, the conversation it
+    /// holds would be planned again (#461).
+    #[tokio::test]
+    async fn a_worker_in_use_still_takes_a_wider_range_as_a_split() {
+        let (p, m, h, _worker_end) = fourteen_b_spawned_as_0_24("fourteen-b-461-in-use").await;
+        h.note_conversation(Uuid::new_v4());
+        let grown = p
+            .grow_worker(&m, (0, 26), h.clone(), Requester::Owner, RunShape::Plain)
+            .await
+            .expect("a worker in use still takes the range");
+        assert!(matches!(grown, Growth::Grown(_)));
+        assert!(h.serves_segment((0, 26), RunShape::Plain));
     }
 
     fn whole_refit(read_mb: u64) -> WholeRefit {

@@ -3186,6 +3186,41 @@ refuse on the first rung, and a partial worker then wedged its model — every
 chat request refused in ~50 ms — until it aged out. A worker in use keeps the
 refusal; never retire one mid-conversation (#93).
 
+**A range taking in the one the worker was started with skips the split rung
+while the worker is idle** (2026-11-15, FUTURE_WORK #461). The spawn's own range
+— and one grown with nothing judged — is recorded at no cost of its own
+(`record_segment_placed_as_spawned`): its memory is the worker's base charge. So
+`subsumed_charge` counted nothing for it, and `charge_segment_as_split` sized a
+wider range on the room BESIDE it, though the worker drops the covered range
+before loading the new one. On this laptop a worker spawned on `[0..24)` whole
+on the card was asked `[0..26)` (the drafter's room had moved the plan by two
+layers) and placed 3 of 26 layers on the card, ~4.9 GB freed a moment later
+unused; the 14B split with Australia ran 7.4 tok/s against 42.7. The far
+computer's `[26..48)` widened to `[20..48)` the same night kept 10 of 28 (bal292,
+gotcha #1113). The planner had priced that run as the idle worker's RETIREMENT
+(`a_fresh_spawn_fits_in_place_of_the_worker`, #350); the ladder's split rung ran
+first and pre-empted it. Now `charge_segment_as_split` answers `Ok(false)` where
+the range takes in one charged in the worker's base
+(`WorkerHandle::takes_in_a_range_charged_in_its_base`) and the worker is not in
+use, so the ladder retires it and the fresh spawn reads the card once the old
+memory is back (#3 (j13)). A worker in use keeps the split: refused, a running
+conversation would be planned again. Prior art: Kubernetes' in-place pod resize
+falls back to recreating the pod when the node cannot fit the resize in place
+(VPA's eviction), never to running it starved.
+
+Real link, one binary each way (`real_link.sh` with `WARM_LOCAL=0-6
+WARM_PEERS=aa3d1e66:7-15`: the warm-up spawns `[0..23)` here, the measured code
+reply plans `[0..26)`; 21:37-21:40Z, the far computer holding nothing of the
+model before): old — "Hybrid placement: 4 layers on the graphics card", 266 ms a
+forward here, 7.56 tok/s; fixed — "This range takes in the one this model's
+worker was started with", retired, `[0..26)` loaded whole 0.7 s later, 32.6 ms
+a forward, 35.25 tok/s (the far card shared with another program that sitting).
+Tests: `a_range_taking_in_the_spawn_range_is_placed_afresh_not_beside_it` (red
+with the rung on), `a_worker_in_use_still_takes_a_wider_range_as_a_split`. A/B
+`SWARMLLM_GROWTH_OVER_BASE_RANGE=split`. Left open: the accounting itself (the
+daemon still charges a dropped spawn range's base while a split stands beside a
+worker in use) and the retirement's own worse-placement guard (#461).
+
 ## A worker serves any run inside a range it loaded (2026-11-13, FUTURE_WORK #449)
 
 ### What it replaced
