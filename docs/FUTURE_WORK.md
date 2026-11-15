@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #461**). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #462**). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -2752,6 +2752,20 @@ Not checked: vLLM, SGLang, TensorRT-LLM, SpecInfer, PipeInfer's ablations, Petal
 **Also** (moved from #369 (b) via #388, passive): a balance term for a cards-only chain whose reply
 flows, once a placement that saturates one side is seen on a real chain — today `plan_chain` fills
 each machine to its ceiling in turn, and a flow is priced by `split_rounds::round_trips_waited` (#3 (d)).
+**Seen on the real link 2026-11-15** (`docs/invariants/scheduling.md` § "Rows and levels, a third time"):
+the 14B split [0, 26) here + [26, 48) in Australia, flowing, never waits for the far end — this node is
+the slower side at ~40 ms a forward (drafting ~14 + its 26 layers ~26, ~1.0 ms a layer at 24 rows)
+against the far end's ~30 (22 layers, ~1.36 ms a layer). The drafter's share is the head's alone and
+the planner does not count it. Even at ~21-22 layers here (14.5 + 1.0 n = 1.36 (48 − n)) a forward
+would cost ~36 ms on each side, ~+12% to both prose and code — an estimate from one link's
+per-layer times, to be measured by a `swarm_route` override of the split point before any pricing.
+Prior art (searched 2026-11-15): SpecPipe (arXiv 2504.04104) gives the drafter a GPU of its own and fixes the
+tree's width so every stage's work balances; PipeDec folds the drafter into the pipeline's stages. None found
+partitions the layers around a drafter that shares the first stage — but a heterogeneous partitioner balances
+stage TIME, and the drafter's time is the head's.
+Tried 2026-11-15 by forcing the split point (`[0..23)` and `[0..20)` here): void — asking the far computer
+for the wider range replaced its all-card copy with a mostly-processor one (#461), so only the first arm measured.
+Measure it on a far computer whose loaded copy CONTAINS the ranges asked (a view, #449), never by growing one.
 
 #### #412 — A busy far card is busy with our own forwards: run its backlog as one
 `P2` · perf-split · **OPEN** (conceptual, tests first) — 2026-11-06 · evidence: `docs/plans/faster_than_local.md` § 13; history: #388
@@ -5336,6 +5350,50 @@ against llama.cpp 0.3.16, then flip `is_supported` and re-read `arch_supports_hy
 StarCoder2, inert while refused).
 
 ### Memory and admission
+
+#### #461 — A peer's split that asks a computer for a WIDER range replaces its all-card copy with a mostly-processor one, which then serves every narrower request too
+`P2` · memory / admission · **OPEN** — 2026-11-15 · found on the real link (`real_link.sh` TAG=bal292, a forced split point) · related: #3 (j12), #3 (j13), #449, #458
+
+**Seen** (the Australian 12 GB card, v0.3.291, the 14B; `real_link_bal292/peers_seen.jsonl`, its own advertised
+`resident` after each reply): it held `[26..48)` with all 22 layers on the card (3,390 MB of the card free beside
+it) and answered a forward of 24 rows in ~30 ms. This node then asked it — by a `swarm_route` override testing a
+balanced split point — for `[23..48)` (refused up front, below) and two minutes later for `[20..48)`. The second was
+admitted: the worker, idle past the conversation gap, was retired and `[20..48)` spawned with **10 of its 28 layers
+on the card**, the card still showing 3,542 MB free. Every forward after that took ~1,000 ms (median, 528 forwards)
+— and so did the original `[26..48)`, now a VIEW of the new copy (#449): the plain half-and-half split fell from
+19.6 / 44.9 to 3.2-3.7 / 8.3 tokens a second (prose / code) for the 30 minutes the rig kept asking. Nothing moved
+it back: promotion waits for the worker to sit idle (`promotion_is_worth_weighing`), and a request every two
+minutes never let it.
+
+**Three contributors** (diagnosis.md § 6), only the first certain:
+1. **No guard against a worse placement.** `forward_would_load` → `a_fresh_spawn_fits_in_place_of_the_worker` asks
+   only whether the replacement loads at all, card/processor split included — never whether it keeps the layers
+   the retired worker ran on the card. `promotion_keeps_what_it_holds` (#3 (j12)) guards the promotion path for
+   this shape; the forward's retirement has no such rule.
+2. **Only 10 card layers with ~3.5 GB still free.** UNDETERMINED from this side: the spawn may have read the card
+   before the retired worker's ~4 GB came back (`await_card_memory_back` settles "short" on two steady readings,
+   #3 (j13)), or the swarm's card share on that computer is capped by its contribution level (#266). Its own
+   log decides.
+3. **No promotion under steady use** — the copy is promoted only once idle, so the computer serves every user
+   from the slow copy until traffic stops (`idle_unload_secs`, 5 min, then a fresh load).
+
+**And the refusal said the wrong thing**: `[23..48)` was answered "qwen2.5-14b-instruct-q4-k-m needs about 0 MB of
+memory but this node's budget allows 34440 MB and 0 MB is already in use. Raise `resources.max_ram_mb` … Of layers
+23..48 of the model, 13 would load here" — `peer_load_refusal` words every refusal as system memory
+(`ram_refusal_words` with `fresh_spawn_machine_mb`, 0 for a card placement), where this one was the card (or a
+worker still in use). The user reads it as "the last one said: …".
+
+**What a fix must keep**: a wider range is sometimes the right plan (a requester with less room), so a plain
+refusal is not the answer. Candidates: (a) a replacement weighed by the card layers it keeps against the worker
+it retires, refusing up front with `layers_that_fit` = the widest run that keeps them (the re-plan already
+honours it, `note_peer_prompt_refusal`); (b) a slice served from a copy placed short of the card does not count as
+"held" for the planner where the computer could hold it whole on the card; (c) promotion weighed between
+requests for a worker placed short of the card by a growth, not only when idle. Prior art: Kubernetes' scheduler
+preemption never evicts a pod for one of equal or lower priority — the replacement must be better, not merely
+admissible; our own `worth_moving` (#318) moves a chain only for a quarter off its slowest machine.
+
+The balanced-split question that led here (#411 "Also": fewer layers on the head that also drafts) stays
+UNMEASURED: arm 1 (`[0..26)` here) read 19.6 / 44.9, and every later arm measured the slow copy.
 
 #### #458 — A range grown onto a card worker that its loader then refuses pins the WHOLE model to the processor
 `P2` · memory / admission · **OPEN** — 2026-11-15 · found on the real link (`real_link27d.sh`, `TAG=c2h1115b` and `c2hfresh1115`)

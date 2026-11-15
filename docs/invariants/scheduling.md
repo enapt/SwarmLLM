@@ -6326,6 +6326,35 @@ cheaper a row) 15.05-16.23 tok/s, waiting 7.6-9.4 s; **8 (default)** 15.57-18.21
 queue (11.6-13.5), the other ran no flow (round trip unmeasured, gotcha #942). The default stands;
 wider rows grow more rows a token and wait longer.
 
+*Rows and levels, a third time: the flow no longer waits, and 8 × 3 still wins* (2026-11-15
+17:53-18:21Z, `~/swarmllm-gate/deep/fr/real_link.sh` TAG=rows292 then wide292, main at a887074b7 built
+as v0.3.292 ships, the 14B split [0, 26) here on the 8 GB card + [26, 48) on the Australian 12 GB card
+at 123-145 ms, flow forced, 160-token replies, server-timed — gotcha #1112; rows292 ABBA × 2, wide292
+ABCCBA × 2). Since #357 (b) and the card's tree kernels the default flow does not wait for the far end
+(`waiting_ms` 0-7 in every reply): this node is the slower side, ~40 ms a forward (drafting ~14, its 26
+layers ~26) against the far end's ~30 (`after_receipt_ms`, median). So the question was whether a
+cheaper forward (fewer rows) or a fuller one (more rows, more levels) now wins. Neither does:
+
+| arm | prose tok/s | code tok/s | rows a forward | here a forward: drafting + layers (ms) | tokens a forward (prose / code) | far end a forward (median) |
+|---|---|---|---|---|---|---|
+| 4 rows a level (`SWARMLLM_FLOW_ROWS=4`) | 15.06-15.33 | 40.48-42.43 | 12.6-13.1 | 12-13 + 23-24 | 0.56-0.57 / 1.51-1.52 | 24 ms |
+| **8 × 3 (default)**, both sittings | **17.61-19.56** | **42.87-45.43** | 23-25 | 14-16 + 25-28 | 0.72-0.81 / 1.68-1.82 | 30-31 ms |
+| 16 rows a level (`SWARMLLM_FLOW_ROWS=16`) | 15.72-17.89 | 33.57-34.72 | 41-45 | 22-26 + 33-35 | 1.02-1.13 / 1.95-2.00 | 46-47 ms |
+| 4 levels (`SWARMLLM_FLOW_LEVELS=4`) | 16.85-19.38 | 40.23-41.53 | 29-34 | 18-20 + 29-30 | 0.88-1.00 / 1.98-2.03 | 36-37 ms |
+
+Doubling 4 → 8 rows costs a forward ~10% here (its 26 layers' weights are read once a forward whatever
+its rows) and brings 41% more prose a forward, 12% more code. Doubling again to 16 brings another 37%
+of prose and 12% of code, but the drafter's level leaves the one-kernel, one-graph path built for ≤ 8 rows
+(§ "A tree level on a card") — drafting 14 → 25 ms — and the far end's share passes this node's, so the
+flow starts to wait (0.5-0.8 s a prose reply). A fourth level costs the drafter ~5 ms a forward and the
+far end ~6, for 10-25% more tokens a forward. The default stands. What the numbers say would win: a level
+wider than 8 rows at the 8-row level's price on PROSE only (code gains 12% a doubling and loses it in
+cost) — a width that follows the guess's confidence (`docs/plans/faster_than_local.md` § 13.2) — and a
+split that gives this node fewer layers while it also drafts (FUTURE_WORK #411, "Also"). The law below
+(E per round trip) describes 10-23's flow, which waited on the far end; this one is bound by the
+slower side's forward instead: tok/s ≈ tokens a forward ÷ that side's ms a forward (0.80 / 41 ms ≈ 19.5
+prose, 1.76 / 40 ms ≈ 44 code — arm 7 measured 19.41 and 43.79).
+
 **The law this reads as: a flow advances about E (the tokens the drafter's live rows get right)
 per round trip.** 14-15 tok/s × 0.45 s ≈ 6.5 tokens. The tree rounds on the same link get 6.3-6.8 a round
 (59-63 rounds for 400 tokens, ~0.58 s each, with up to 416 rows grown beside the check). The flow's win is
