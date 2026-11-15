@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #458**). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #459**). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -5282,6 +5282,32 @@ against llama.cpp 0.3.16, then flip `is_supported` and re-read `arch_supports_hy
 StarCoder2, inert while refused).
 
 ### Memory and admission
+
+#### #458 — A range grown onto a card worker that its loader then refuses pins the WHOLE model to the processor
+`P2` · memory / admission · **OPEN** — 2026-11-15 · found on the real link (`real_link27d.sh`, `TAG=c2h1115b` and `c2hfresh1115`)
+
+**Seen** (both runs, this node's 8 GB card with ~2.8 GB held by other programs, Qwen3.8-27B, a split that starts and
+finishes here): the daemon admitted `[0..15)` to the card (4,997 MB, headroom 1,533); the worker loaded it and kept the
+file's guess head beside it (`keep_the_split_guess_head`: 994 MB of output head + the 227 MB next-token block, charged
+only to the worker's own cache budget, `budget_left_mb=280`). The daemon then grew the same worker by `[63..64)`
+(`charge_additional_segment`: 261 MB against its budget, headroom 144 MB, `on_gpu=true`); the loader, drawing its own
+line (85% of free memory, the range's weights counted WITH the output head an end loads), found no room for even a
+32 MB cache and refused with `NO_KV_CACHE_ROOM_MARKER` — classified a permanent card failure: the worker that had run
+the prompt pass on the card was killed and the model pinned to the processor for 120 s (doubling). The retry ran
+`[0..15)` on the processor: 148 ms a round against ~15 on the card, every round of both runs.
+**Why the ladder did not catch it**: a card growth is admitted by the daemon's budget (`admit_to_gpu`: free memory
+less its reserve), never by the loader's line — #364 drew that line for splits (`split_room_bytes`) but not here —
+and the growth counts layers only, never the output head a range ENDING the model loads (#342 charges a spawn's ends,
+not a growth's). And no rung places a range that ends the model on the processor beside a card worker: the head goes
+on the card (`split_for_card`), so `growth_split` answers "no layer fits".
+**What a fix must keep**: under "Start and finish on this computer" the last segment must be here, so turning the pin
+into a plain refusal turns a slow answer into a failed request. Candidates: (a) a card growth weighed by the loader's
+line and its ends' tables, so the split rung runs first; (b) the guess head (and a block drafter) beside a first
+segment leaves room for the plan's other local ranges, or gives its card memory back for them (it is worth ~2 tokens a
+round; a range on the processor costs ~130 ms a round here); (c) the last segment's output head shared with the guess
+head's copy rather than counted again. Not decisive for tonight's 27B: with `[0..15)` on the card the split prices
+~4.2 tok/s against the hand-off's 5.7-6.2 (FUTURE_WORK #3 (j14)). Evidence: `real_link_c2hfresh1115/H_1_c2h.log`
+15:20:47-15:21:03Z.
 
 #### #454 — A long prompt on a split sized for a typical conversation is refused by megabytes, not reloaded with fewer card layers
 `P3` · memory / scheduling · **FIXED for a whole model (card-checked 2026-11-15); residual (2)-(3)** — 2026-11-15 · from a field report (AU, 12 GB card, Qwen2.5-14B at 47/48 on the card)
