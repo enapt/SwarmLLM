@@ -81,8 +81,9 @@ the top track (`docs/plans/large_model_splits.md`).
 2a. **#440** — FIRST by the user's direction (2026-11-11): a node's work can drive the computer it runs
    on into a thermal lock-up. "swarmllm cant be locking up peoples systems like that. it discourages
    use." PARTIAL: a hot computer takes no new work for others and, if the heat lasts, stops what it was
-   running for them; the owner's own chats run at half speed until it cools. Next: the Windows
-   processor's temperature (stage B), then macOS (C).
+   running for them; the owner's own chats run at half speed until it cools. The Windows processor is
+   read since stage B. Next: macOS (C, needs a Mac), and the processor under WSL2 / Docker Desktop,
+   where no sensor is visible (D, 2026-11-15).
 3. **#1** — every Mac runs on the processor; no GPU backend is compiled for Apple Silicon (needs a
    Mac to verify on).
 4. **#220** — WATCH: a worker's card faulted once (illegal memory access, 2026-10-04) and the driver
@@ -397,7 +398,7 @@ plants another build's manifest on a peer-only node.
 ### Reliability and failover
 
 #### #440 — A node's work can drive the computer it runs on into a thermal lock-up, and nothing watches the card
-`P1` · reliability · **PARTIAL** (stages A and B done, C open) — 2026-11-11 · history: gotcha #1081 (the lock-up); archive § "Thermal throttling had no measurable effect" (2026-08-10)
+`P1` · reliability · **PARTIAL** (stages A and B done, C and D open) — 2026-11-11 · history: gotcha #1081 (the lock-up); archive § "Thermal throttling had no measurable effect" (2026-08-10)
 
 The user, 2026-11-11, after this laptop hard-froze under sustained card load: "swarmllm cant be locking up
 peoples systems like that. it discourages use. i understand we run tests unhindered though". That freeze came
@@ -448,6 +449,13 @@ Microsoft WDDM/TDR docs, Apple developer docs; issue trackers of Ollama, LM Stud
 - **(A)** card, driver and steps 2-6, on every OS with an NVIDIA card;
 - **(B)** the Windows processor through the PDH counter `\Thermal Zone Information(*)\Temperature`, which needs no admin. It is a firmware zone, not the package, so it is coarse and lags; smooth it.
 - **(C)** macOS `thermalState`.
+- **(D, open, found 2026-11-15)** the processor under **WSL2** — and so under Docker Desktop on Windows, which runs
+  there. The Linux build reads hwmon, where WSL2 shows only `AC1`/`BAT1`, and the ACPI read is `cfg(windows)`: no
+  processor reading at all, so only the card can start a hold. On this laptop a processor-only A/B held the zone at
+  93-95.9 °C for most of an hour with no heat line in any node log (gotcha #1109). The reading exists on the Windows
+  side (the safety kit reads that PDH counter through `powershell.exe`); a WSL2 build would have to ask Windows for it.
+  ⚠ Calibrate before acting on it: here the zone sat ≥ 93 °C (`PROCESSOR_HOT_C`) for 60 of 90 samples of an 18-minute
+  processor A/B that ended cleanly, so the line as it stands would hold on nearly every long processor job.
 
 **Done (2026-11-11, steps 1, 2, 5, 6 of stage A — `daemon::host_heat`):**
 - The reading and the stop/start rule as designed (card at its target 120 s, hardware protection or a stuck
@@ -1268,7 +1276,7 @@ j12) is gone, so the wait itself was not exercised there. **Open:** a reload aft
 computer — `card_free_at_load_mb` near the free memory before it means the wait covered the lag; ~5.7 GB-like means
 not: read the INFO `DIAG: a stopped worker's card memory` lines where a node's log is at hand. Since `3d03afe9` the wait also ends
 once the release has settled short of three quarters (`Settled`, two readings within 32 MB of the steady run's
-first). **Closed 2026-11-14 (on main, not in a release yet), the pre-release review's hypothesis (confidence ~45)**:
+first). **Closed 2026-11-14 (v0.3.287), the pre-release review's hypothesis (confidence ~45)**:
 a worker charged its card share at admission and stopped before its first message (it loads on that message)
 frees less than a quarter of the charge, so the wait would run its whole 5 s under the spawn lock. Now only a worker
 asked to load is owed its charge: `WorkerHandle::asked_to_load` is set before a request or a load ahead is sent, and
@@ -4311,7 +4319,7 @@ plan since 02:53Z names it again (here 0-13, Australia 13-36, `a661155f` 36-59, 
 sees a download of it start (`peer_downloads` empty on every part). Found in `compute_near_chain`:
 the far pass ran only where the near pass `CannotCarry`, so a machine whose OWN memory runs the
 model whole beside its processor (Australia: ceiling 80) ended at "one runs it whole" and planned
-nothing — fixed (on main, not in a release yet): such a run now competes in the far pass, a near
+nothing — fixed (v0.3.287): such a run now competes in the far pass, a near
 card holding the model whole still ends it (`docs/invariants/memory.md` § "And where one machine
 runs it whole beside its processor"). But the 3080 Ti states `ceiling=46, card=22` on every line
 this node logged (11-05 → 11-08), so its own near pass already went far. Left on its side, none
@@ -6604,7 +6612,7 @@ grep `^| N |`).
   against 100.5-133.0, decode 13.2-15.1 against 2.8-3.7 tok/s, peak in use 6.8-6.9 against 8.95 GB, host memory lent
   98-125 against 2,973 MB (`docs/invariants/inference.md` § "Every prompt pass is cut at the chunk ceiling").
 
-**Closed 2026-11-14 (on main, not in a release yet)** (#3 (j14), #400)
+**Closed 2026-11-14 (v0.3.287)** (#3 (j14), #400)
 - #400 — **A full computer took its places on the download ring and was planned chain segments it never
   fetched, and a computer full of small whole models gave a model people asked for no room.** The US RTX 3080 Ti
   (auto-manage on, ~40 GB of thirteen whole models against an automatic 25-37.5 GB limit, 779 GB free disk) was
