@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #459**). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #460**). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -2223,6 +2223,30 @@ warning covers all three meanwhile.
 Local GPU decode runs at ~97% of llama.cpp (`docs/plans/local_decode_submissions.md`); what
 is left is prompt reading, the processor half of a hybrid, and MoE placement —
 `docs/plans/faster_than_local.md` § 3 and § 4 carry the order.
+
+#### #459 — A processor with VNNI multiplies a check's rows with the two-instruction AVX2 sequence
+`P3` · perf-local · **OPEN** — 2026-11-15 · evidence: `docs/invariants/inference.md` § "A 2-3 row tail shares one pass too" (compute-bound from three rows)
+
+From three rows a processor's quantized product is compute-bound (the 7B's FFN up + gate ~26 ms a row
+from three on, Ryzen 7 5800H): every 32-value block is `maddubs` (u8 × i8 → paired i16) then `madd`
+(paired i16 → i32). AVX-VNNI (Intel from Alder Lake, AMD from Zen 5) and AVX-512 VNNI (Ice Lake server,
+Zen 4) do the pair in ONE instruction, `vpdpbusd` (four u8 × i8 products added straight into i32). So a
+check, a prompt chunk and a tree level on such a processor would read faster; one-row decode is
+memory-bound and would not move. **Prior art**: llama.cpp's `mul_sum_us8_pairs_float`
+(`ggml/src/ggml-cpu/arch/x86/quants.c`) is `_mm256_dpbusd_epi32` under `__AVX512VNNI__ && __AVX512VL__`,
+`_mm256_dpbusd_avx_epi32` under `__AVXVNNI__`, else `maddubs` + `madd`; its `GGML_CPU_ALL_VARIANTS`
+builds one CPU backend per level (`cascadelake … AVX512_VNNI`, an `alderlake` variant with AVX_VNNI) and
+picks one at load. Here one binary is `x86-64-v3`, so it would be runtime dispatch:
+`is_x86_feature_detected!("avxvnni")` / `("avx512vnni")` once, kernels under
+`#[target_feature(enable = "avxvnni")]` — both intrinsics compile on stable (checked on 1.100, 11-15;
+check against the MSRV). **Bits**: the same i32 sums — every type's unsigned side is ≤ 128 (a
+nibble, a 6-bit value, or |q| of a Q8 block) and its signed side ≤ 127, so a `maddubs` pair is
+≤ 32,512 and never saturates; the bit-identity tests
+(`multi_row_kernels_are_bit_identical_to_the_per_row_ordering`) must pass unchanged. **Why not now**: this laptop (Zen 3) has neither, and of the
+swarm's computers on 11-15 only Australia's i7-12700 has AVX-VNNI (its card does that node's work).
+Next: build the Q4_K and Q8_0 row kernels behind the dispatch and an A/B switch, run the bit-identity
+tests under Intel SDE (`sde64 -adl`), and time it on a VNNI processor in the swarm through a
+`swarm_route` override with that node's model on its processor.
 
 #### #453 — The decode-width re-check can pick a wider width that decodes slower over a whole reply
 `P2` · perf-local · **BUILT — awaiting a widening gate arm** — 2026-11-14 · evidence: release checks of v0.3.284 and v0.3.288 (`~/swarmllm-gate/v0.3.28{4,8}-alpha/out/speed.moe_*.node.log`); `docs/invariants/memory.md` § "A wider pick is proved in blocks before it is kept"
