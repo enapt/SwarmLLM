@@ -5443,10 +5443,10 @@ minutes never let it.
    only whether the replacement loads at all, card/processor split included — never whether it keeps the layers
    the retired worker ran on the card. `promotion_keeps_what_it_holds` (#3 (j12)) guards the promotion path for
    this shape; the forward's retirement has no such rule.
-2. **Only 10 card layers with ~3.5 GB still free.** UNDETERMINED from this side: the spawn may have read the card
+2. **Only 10 card layers with ~3.5 GB still free.** FOUND 2026-11-15 on this node (§ "Contributor 2 found" below; the first guesses were: the spawn may have read the card
    before the retired worker's ~4 GB came back (`await_card_memory_back` settles "short" on two steady readings,
    #3 (j13)), or the swarm's card share on that computer is capped by its contribution level (#266). Its own
-   log decides.
+   log decides.)
 3. **No promotion under steady use** — the copy is promoted only once idle, so the computer serves every user
    from the slow copy until traffic stops (`idle_unload_secs`, 5 min, then a fresh load).
 
@@ -5455,6 +5455,26 @@ memory but this node's budget allows 34440 MB and 0 MB is already in use. Raise 
 23..48 of the model, 13 would load here" — `peer_load_refusal` words every refusal as system memory
 (`ram_refusal_words` with `fresh_spawn_machine_mb`, 0 for a card placement), where this one was the card (or a
 worker still in use). The user reads it as "the last one said: …".
+
+**Contributor 2 found (2026-11-15 21:30Z, on THIS node's own log, `real_link_f460end/H_1_flowhalf.log`
+21:09:14-18Z)**: the worker held `[0..24)` (its SPAWN's range, all on the card) and `[25..26)` (grown, 195 MB); the
+next plan asked `[0..26)`. `charge_segment_as_split` sized the split by `growth_split`'s room — budget less
+committed plus `subsumed_charge(segment)` — and `subsumed_charge` counted 195 MB: the spawn's own range is recorded
+at NO cost (`record_segment_placed_as_spawned` → `RangeCost::default()`), its charge living in the worker's base
+`charged_mb`. So the ~4.9 GB `[0..24)` frees was not room: card share 585 MB → 3 of 26 layers on the card
+(18.652Z); the worker then dropped `[25..26)` and `[0..24)` as covered (18.657, 18.676) and loaded `[0..26)` with
+the stale 3-layer placement (18.816) — 255 ms a forward, 7.4 tok/s. And the daemon keeps charging the dropped
+spawn range's base afterwards (`unaccounted` = released − subsumed = 0). Australia's `[20..48)` beside its spawned
+`[26..48)` fits the same path (a hypothesis — its log is not ours): room ≈ its 3.4 GB free → 10 layers, and
+`card_free_at_load_mb` stayed 8,214, the spawn's reading, as a growth leaves it.
+**Fix design**: price a strictly subsumed SPAWN range at the card memory its drop frees — its card layers
+(`card_split`, all where `None`) × `segment_cost_curve(model, true)`'s per-layer figure — in `subsumed_charge`'s
+room, the net admission AND the release (move that share out of `charged_mb` so a departure does not release it
+twice); fixed parts (context, buffers, the token table both ranges load) stay. Better still, as #365 did for
+spawns: let the worker drop the covered ranges, read the card (`ReadCardFree`) and size the split on that
+reading. Reproduce on a two-node rig with a card first node (`[0..20)` then `[0..24)` by `swarm_route`), never by
+widening the far computer's range on the real link. Not landed before v0.3.292: memory accounting on three paths
+(room, admission, departure), verified by a rig the night did not have time for.
 
 **Design candidate (2026-11-15, not built)**: the forward's retirement takes the rule promotion already has
 (`promotion_keeps_what_it_holds`, #3 (j12)): a replacement is admitted only if every layer the retired worker
