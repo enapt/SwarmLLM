@@ -2752,6 +2752,17 @@ stage TIME, and the drafter's time is the head's.
 Tried 2026-11-15 by forcing the split point (`[0..23)` and `[0..20)` here): void — asking the far computer
 for the wider range replaced its all-card copy with a mostly-processor one (#461), so only the first arm measured.
 Measure it on a far computer whose loaded copy CONTAINS the ranges asked (a view, #449), never by growing one.
+Since #461's growth half (v0.3.292) an IDLE far computer on that release asked for the wider range retires its
+worker and loads the range afresh on its card, so the forced split point can be measured once the far end runs it.
+**Why the planner cannot find the balance itself** (read 2026-11-15): a chain is priced as the SUM of its segments
+(`parallax::chain_cost_terms` folds each `vertex_cost_as` into one `VertexCost`, whose `total` adds its terms),
+and no term is the drafter's (`split_rounds.rs`'s module comment lists "the drafter's own time per guess, small
+beside a hop" among what the figure does not see). A sum is the right price where stages wait on each other; a
+flow's stages run AT ONCE on different forwards, so its pace is its SLOWEST stage — and a sum cannot tell a 26/22
+cut from a 21/27 one between two equally fast cards. A flowing plan's price would be the slowest stage's time,
+the head's drafter forwards counted in the head's. Prior art: pipeline-parallel partitioners (PipeDream's
+planner, Narayanan et al. 2019) minimise the slowest stage's time, never the total. Not built: one link's
+estimate (~+12%) is the whole evidence, and the forced split point is the measurement that comes first.
 
 #### #412 — A busy far card is busy with our own forwards: run its backlog as one
 `P2` · perf-split · **OPEN** (conceptual, tests first) — 2026-11-06 · evidence: `docs/plans/faster_than_local.md` § 13; history: #388
