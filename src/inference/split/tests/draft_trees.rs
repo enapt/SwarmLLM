@@ -6,6 +6,8 @@
 use super::super::token_embedding::TokenEmbedding;
 use super::super::*;
 use super::common::*;
+#[cfg(feature = "candle-cuda")]
+use crate::inference::cuda_graph::StepShape;
 use crate::inference::draft_tree::DraftTree;
 use candle_core::{Device, Tensor};
 
@@ -248,41 +250,56 @@ fn a_captured_tree_level_reads_as_the_ordinary_one() {
     }
 }
 
-/// A reply's checks find their graphs already made once an idle worker has
-/// recorded the widths (`model_worker::record_check_widths`): no check of any
-/// width a reply asks for is then a one-off forward. Without the recording each
-/// width's first check runs the ordinary way and the next makes its graph —
-/// 0.3-8 s each under WSL2, inside the reply (#428, card runs 8-9). The
-/// recording's own request leaves no cache behind.
-///
-/// ⚠ Gated: run it on a card with `--nocapture` and look for the SKIPPED line
-/// before believing a pass, with `--test-threads=1` beside other card tests.
+/// A split's first segment on the card: the same three layers as
+/// [`whole_model_on`], of a six-layer model, so no norm or head — its forwards
+/// carry token ids and send rows on.
 #[cfg(feature = "candle-cuda")]
-#[test]
-fn a_reply_after_the_idle_recording_makes_no_graph() {
-    let card = match Device::new_cuda(0) {
-        Ok(d) => d,
-        Err(e) => {
-            eprintln!("SKIPPED idle recording: no CUDA device ({e})");
-            return;
-        }
-    };
-    let mut model = whole_model_on(&card);
+fn first_segment_on(device: &Device) -> SplitModel {
+    let mut m = whole_model_on(device);
+    m.norm = None;
+    m.output = None;
+    m.total_layers = 6;
+    m.kv_model_key = "0-3-6".into();
+    m
+}
+
+/// One forward of `input` at `at` as a reply makes it: a model that ends the
+/// reply as the worker's generate and the drafter do, a first segment as the
+/// worker answers a peer's forward.
+#[cfg(feature = "candle-cuda")]
+fn reply_forward(model: &mut SplitModel, kv: &KvCacheStore, input: &Tensor, at: usize, rows: bool) {
+    if !model.is_last() {
+        model
+            .forward_prompt_in_chunks_keeping(input, at, kv, "reply", None, false, 0, None)
+            .unwrap();
+    } else if rows {
+        model
+            .forward_verify_all_positions(input, at, kv, "reply")
+            .unwrap();
+    } else {
+        model.forward(input, at, kv, "reply").unwrap();
+    }
+}
+
+/// Record what the idle worker records (`model_worker::record_check_widths`),
+/// then run a reply through every shape it named and count the forwards that
+/// made a graph. Each chain width runs as a reply's check does, cut back to its
+/// first position; each tree row count as a drafter's later level does — read
+/// after a level already in the cache, then cut back.
+#[cfg(feature = "candle-cuda")]
+fn one_offs_in_a_reply_after_the_recording(
+    model: &mut SplitModel,
+    widest: usize,
+) -> (Vec<StepShape>, u64) {
     let kv = KvCacheStore::new(std::time::Duration::from_secs(60));
     let widths = model.widths_to_record();
-    assert_eq!(
-        widths.first(),
-        Some(&crate::inference::cuda_graph::MAX_POSITIONS),
-        "a whole model on the card names every width, widest first: {widths:?}"
-    );
     let finished =
-        crate::inference::model_worker::record_check_widths(&mut model, &kv, &widths, &|| true)
-            .unwrap();
+        crate::inference::model_worker::record_check_widths(model, &kv, &widths, &|| true).unwrap();
     assert!(finished, "nothing asked the recording to stop");
     for &w in &widths {
         assert!(
             model.has_step_graph(w),
-            "width {w} has no graph after the recording"
+            "{w} has no graph after the recording"
         );
     }
     assert_eq!(
@@ -291,32 +308,126 @@ fn a_reply_after_the_idle_recording_makes_no_graph() {
         "the recording left its cache behind"
     );
     // A reply: its prompt, its first step (a one-off in every reply: nothing
-    // of its own ran before it), then each width as a reply runs it — a step,
-    // or a check cut back to its first position as a rejected one is.
+    // of its own ran before it), then each shape as a reply runs it.
     let prompt = model.tensor_from_ids(&PROMPT).unwrap();
     model.forward(&prompt, 0, &kv, "reply").unwrap();
     let step = model.tensor_from_ids(&[42]).unwrap();
-    model.forward(&step, PROMPT.len(), &kv, "reply").unwrap();
+    reply_forward(model, &kv, &step, PROMPT.len(), false);
     let before = model.one_off_forwards();
     let mut at = PROMPT.len() + 1;
-    for &w in widths.iter().rev() {
-        let ids: Vec<u32> = (0..w as u32).map(|i| 7 + i).collect();
+    // Every shape a reply may ask for — never only the ones recorded, or a
+    // shape the recording left out would never be run here and its one-off
+    // never counted.
+    let reply_shapes = crate::inference::cuda_graph::shapes_to_record(widest, true, |_| false);
+    for &w in reply_shapes.iter().rev() {
+        let ids: Vec<u32> = (0..w.positions as u32).map(|i| 7 + i).collect();
         let input = model.tensor_from_ids(&ids).unwrap();
-        if w == 1 {
-            model.forward(&input, at, &kv, "reply").unwrap();
-        } else {
+        if w.tree {
+            // A level of two rows already read, then this one's rows: row 0
+            // follows the context, row 1 row 0, the new rows rows 0 and 1 in turn.
+            let lead = model.tensor_from_ids(&[5, 9]).unwrap();
+            let head = DraftTree::new(at, vec![None, Some(0)]).unwrap();
             model
-                .forward_verify_all_positions(&input, at, &kv, "reply")
+                .with_draft_tree(head, |m| reply_forward(m, &kv, &lead, at, true))
                 .unwrap();
-            kv.truncate_request_to(model.kv_model_key(), "reply", at + 1)
+            let mut parents = vec![None, Some(0)];
+            parents.extend((0..w.positions).map(|i| Some((i % 2) as u16)));
+            let tree = DraftTree::new(at, parents).unwrap();
+            model
+                .with_draft_tree(tree, |m| reply_forward(m, &kv, &input, at + 2, true))
                 .unwrap();
+            kv.truncate_request_to(model.kv_model_key(), "reply", at)
+                .unwrap();
+        } else {
+            reply_forward(model, &kv, &input, at, w.positions > 1);
+            if w.positions > 1 {
+                kv.truncate_request_to(model.kv_model_key(), "reply", at + 1)
+                    .unwrap();
+            }
+            at += 1;
         }
-        at += 1;
     }
+    (widths, model.one_off_forwards() - before)
+}
+
+/// A reply's checks and tree levels find their graphs already made once an
+/// idle worker has recorded them (`model_worker::record_check_widths`): no
+/// forward of any shape a reply asks for is then a one-off. Without the
+/// recording each shape's first forward runs the ordinary way and the next
+/// makes its graph — 0.3-8 s each under WSL2, inside the reply (#428, card runs
+/// 8-9) — and a tree's row counts were not recorded at all (#357 (b): 289-958
+/// ms each inside the 14B split's replies, 2026-11-14). The recording's own
+/// request leaves no cache behind.
+///
+/// ⚠ Gated: run it on a card with `--nocapture` and look for the SKIPPED line
+/// before believing a pass, with `--test-threads=1` beside other card tests.
+#[cfg(feature = "candle-cuda")]
+#[test]
+fn a_reply_after_the_idle_recording_makes_no_graph() {
+    use crate::inference::cuda_graph::MAX_POSITIONS;
+    let card = match Device::new_cuda(0) {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("SKIPPED idle recording: no CUDA device ({e})");
+            return;
+        }
+    };
+    let mut model = whole_model_on(&card);
+    // Several positions are captured only where flash attention reads no mask.
+    let widest = if cfg!(feature = "flash-attn") {
+        MAX_POSITIONS
+    } else {
+        1
+    };
+    let (widths, one_offs) = one_offs_in_a_reply_after_the_recording(&mut model, widest);
     assert_eq!(
-        model.one_off_forwards(),
-        before,
-        "a check after the recording made its graph inside the reply"
+        one_offs, 0,
+        "a forward after the recording made its graph inside the reply: {widths:?}"
+    );
+    assert_eq!(
+        widths.first(),
+        Some(&StepShape::chain(widest)),
+        "a whole model on the card names every width, widest first: {widths:?}"
+    );
+    assert!(
+        (1..=MAX_POSITIONS).all(|r| widths.contains(&StepShape::tree(r))),
+        "a whole model whose trees are captured names every tree row count: {widths:?}"
+    );
+}
+
+/// The same for a split's FIRST segment (#357 (b)): its forwards carry token
+/// ids, so the idle worker records its checks and tree levels too — before it,
+/// a first segment named nothing and every flowing tree's row count made its
+/// graph inside a reply.
+///
+/// ⚠ Gated as above.
+#[cfg(feature = "candle-cuda")]
+#[test]
+fn a_first_segment_records_its_shapes_before_a_reply_needs_them() {
+    use crate::inference::cuda_graph::MAX_POSITIONS;
+    let card = match Device::new_cuda(0) {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("SKIPPED first segment recording: no CUDA device ({e})");
+            return;
+        }
+    };
+    let mut model = first_segment_on(&card);
+    assert!(model.is_first() && !model.is_last());
+    let widest = if cfg!(feature = "flash-attn") {
+        MAX_POSITIONS
+    } else {
+        1
+    };
+    let (widths, one_offs) = one_offs_in_a_reply_after_the_recording(&mut model, widest);
+    assert_eq!(
+        one_offs, 0,
+        "a first segment's forward after the recording made its graph inside the reply: {widths:?}"
+    );
+    assert!(
+        widths.contains(&StepShape::chain(1))
+            && (1..=MAX_POSITIONS).all(|r| widths.contains(&StepShape::tree(r))),
+        "a first segment names its step and every tree row count: {widths:?}"
     );
 }
 

@@ -785,13 +785,12 @@ impl SplitModel {
         }
     }
 
-    /// Whether a check of `positions` (a chain) has its recorded graph on the
-    /// card (`cuda_graph::DecodeGraph::has_graph`); false where none is kept.
-    pub(crate) fn has_step_graph(&self, positions: usize) -> bool {
+    /// Whether forwards of `shape` (a chain's width, or a tree's row count)
+    /// have their recorded graph on the card
+    /// (`cuda_graph::DecodeGraph::has_graph`); false where none is kept.
+    pub(crate) fn has_step_graph(&self, shape: crate::inference::cuda_graph::StepShape) -> bool {
         match &self.decode_graph {
-            crate::inference::cuda_graph::DecodeGraphSlot::On(graph) => {
-                graph.has_graph(crate::inference::cuda_graph::StepShape::chain(positions))
-            }
+            crate::inference::cuda_graph::DecodeGraphSlot::On(graph) => graph.has_graph(shape),
             _ => false,
         }
     }

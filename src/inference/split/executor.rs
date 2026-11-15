@@ -1389,19 +1389,23 @@ impl SplitModel {
         }
     }
 
-    /// The check widths, widest first, a reply on this card may ask for and
+    /// The step shapes, widest first, a reply on this card may ask for and
     /// whose graph is not recorded yet — what `model_worker::warm_check_widths`
-    /// records while the worker has nothing to do. Empty where nothing is
-    /// captured (off a card, a card/processor split), for a segment of a split
-    /// (its forwards carry another computer's rows, not token ids), and once
+    /// records while the worker has nothing to do
+    /// ([`crate::inference::cuda_graph::shapes_to_record`]): every check width,
+    /// then every tree row count where a tree's rows are captured
+    /// ([`Self::tree_steps_may_be_captured`]) and read
+    /// ([`Self::draft_tree_refusal`]). A whole model, or a split's FIRST
+    /// segment — its forwards carry token ids, as the recording's do (#357
+    /// (b)); a later segment's carry another computer's rows. Empty where
+    /// nothing is captured (off a card, a card/processor split) and once
     /// recorded. A check of several positions is captured only where no mask
     /// is read ([`Self::mask_is_read`]); there only the step is named.
-    pub(crate) fn widths_to_record(&mut self) -> Vec<usize> {
-        use crate::inference::cuda_graph::{DecodeGraphSlot, StepShape, MAX_POSITIONS};
+    pub(crate) fn widths_to_record(&mut self) -> Vec<crate::inference::cuda_graph::StepShape> {
+        use crate::inference::cuda_graph::{DecodeGraphSlot, MAX_POSITIONS};
         if !crate::inference::cuda_graph::record_widths_ahead()
             || !self.device.is_cuda()
             || !self.is_first()
-            || !self.is_last()
             || self.draft_tree.is_some()
         {
             return Vec::new();
@@ -1412,11 +1416,13 @@ impl SplitModel {
         } else {
             MAX_POSITIONS
         };
+        let trees = self.tree_steps_may_be_captured() && self.draft_tree_refusal().is_none();
         match &self.decode_graph {
-            DecodeGraphSlot::On(graph) if !graph.widths_recorded() => (1..=widest)
-                .rev()
-                .filter(|&w| !graph.has_graph(StepShape::chain(w)))
-                .collect(),
+            DecodeGraphSlot::On(graph) if !graph.widths_recorded() => {
+                crate::inference::cuda_graph::shapes_to_record(widest, trees, |shape| {
+                    graph.has_graph(shape)
+                })
+            }
             _ => Vec::new(),
         }
     }

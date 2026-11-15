@@ -132,6 +132,31 @@ impl std::fmt::Display for StepShape {
     }
 }
 
+/// The step shapes an idle worker records before a reply needs them
+/// (`model_worker::warm_check_widths`), widest first: a chain of every width
+/// up to `widest_chain` (1 where the model reads a mask), then — where a
+/// tree's rows are captured (`trees`) — a tree of every row count up to
+/// [`MAX_POSITIONS`], leaving out each one `recorded` already. A tree's level
+/// and a flowing tree's new rows come in any count from 1 to 8, each first
+/// met inside a reply: on the 14B split between Thailand and Australia
+/// (v0.3.286, the card 2.8 GB fuller) each such first graph took 289-958 ms
+/// against 10-14 ms at v0.3.284, ~0.8 s of a 5 s reply (FUTURE_WORK #357 (b)).
+/// Prior art: vLLM records a graph for every capture size at start-up;
+/// SGLang records its draft model's tree steps there too.
+pub(crate) fn shapes_to_record(
+    widest_chain: usize,
+    trees: bool,
+    recorded: impl Fn(StepShape) -> bool,
+) -> Vec<StepShape> {
+    let tree_rows = if trees { MAX_POSITIONS } else { 0 };
+    (1..=widest_chain)
+        .rev()
+        .map(StepShape::chain)
+        .chain((1..=tree_rows).rev().map(StepShape::tree))
+        .filter(|&shape| !recorded(shape))
+        .collect()
+}
+
 /// How many conversations' last decode step a model remembers. A worker
 /// serves a handful at once; past this the map is simply cleared, which costs
 /// each live conversation one uncaptured step.
@@ -1464,6 +1489,37 @@ mod cuda {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The idle recording names every chain width, widest first, then — where
+    /// a tree's rows are captured — every tree row count up to
+    /// `MAX_POSITIONS`, and nothing already recorded. Before #357 (b) it named
+    /// chains only, so each tree level's first graph was made inside a reply.
+    #[test]
+    fn the_idle_recording_names_every_tree_row_count_after_the_chains() {
+        let none = |_: StepShape| false;
+        let shapes = shapes_to_record(3, true, none);
+        let mut want = vec![
+            StepShape::chain(3),
+            StepShape::chain(2),
+            StepShape::chain(1),
+        ];
+        want.extend((1..=MAX_POSITIONS).rev().map(StepShape::tree));
+        assert_eq!(shapes, want);
+        assert_eq!(
+            shapes_to_record(MAX_POSITIONS, false, none),
+            (1..=MAX_POSITIONS)
+                .rev()
+                .map(StepShape::chain)
+                .collect::<Vec<_>>(),
+            "a model whose trees are not captured records chains only"
+        );
+        // A model that reads a mask records its step and its trees.
+        let recorded = |s: StepShape| s == StepShape::tree(5) || s == StepShape::chain(1);
+        let left = shapes_to_record(1, true, recorded);
+        assert!(!left.contains(&StepShape::tree(5)) && !left.contains(&StepShape::chain(1)));
+        assert_eq!(left.len(), MAX_POSITIONS - 1, "{left:?}");
+        assert_eq!(left.first(), Some(&StepShape::tree(MAX_POSITIONS)));
+    }
 
     /// A capture needs a decode step of the SAME conversation to have run the
     /// ordinary way first: that step did whatever a first decode step

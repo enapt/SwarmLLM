@@ -6240,9 +6240,13 @@ fn refit_stale_priors(
 /// recorded graph is updated in place for every later request: the live node
 /// rebuilt no chain width over days of replies. Each width runs as a reply's
 /// rejected check does — then cut back to its first position — widest first.
-/// Prior art: vLLM records its graphs at start-up for every capture size,
-/// largest first; SGLang records target and draft graphs once at start-up, and
-/// an adaptive-length verifier records one per length up front (arXiv
+/// Then each row count of a tree, where the model's trees are captured, and on
+/// a split's first segment too (#357 (b): a drafter's tree levels and the
+/// first segment's flowing rows made their first graphs inside replies, 289-958
+/// ms each on a full 8 GB card, 2026-11-14). Prior art: vLLM records its graphs
+/// at start-up for every capture size, largest first; SGLang records target and
+/// draft graphs once at start-up, its draft model's tree steps included, and an
+/// adaptive-length verifier records one per length up front (arXiv
 /// 2605.00342) — FUTURE_WORK #425 (b). True where anything ran, so the card's
 /// pool may hold what it freed.
 fn warm_check_widths(
@@ -6269,7 +6273,10 @@ fn warm_check_widths(
                 let recorded = widths.iter().filter(|&&w| model.has_step_graph(w)).count();
                 tracing::info!(
                     widths = widths.len(),
+                    trees = widths.iter().filter(|w| w.tree).count(),
                     recorded,
+                    layers = %format_args!("{}..{}", model.layer_start, model.layer_end),
+                    ends_the_model = model.is_last(),
                     took_ms = started.elapsed().as_millis() as u64,
                     "DIAG: the card's check widths recorded before any reply needs them"
                 );
@@ -6289,12 +6296,20 @@ fn warm_check_widths(
     any
 }
 
-/// [`warm_check_widths`]'s forwards for one model: `Ok(true)` once every width
+/// [`warm_check_widths`]'s forwards for one model: `Ok(true)` once every shape
 /// was tried, `Ok(false)` where a message came first. Its cache goes either way.
+///
+/// Each forward is the call a reply makes, so the graph a reply then updates is
+/// the one recorded here: a model that ends the reply checks as the worker's
+/// generate and the drafter's tree levels do (`forward` for one position,
+/// `forward_verify_all_positions` otherwise); a split's first segment, which
+/// sends its rows on, as the worker answers a peer's forward
+/// (`forward_prompt_in_chunks_keeping`, no logits). A tree's rows are siblings
+/// read at the throwaway request's end, then cut back off.
 pub(crate) fn record_check_widths(
     model: &mut SplitModel,
     kv_store: &KvCacheStore,
-    widths: &[usize],
+    widths: &[crate::inference::cuda_graph::StepShape],
     keep_going: &dyn Fn() -> bool,
 ) -> Result<bool, SwarmError> {
     // Longer than any captured forward, so the prompt pass is no width of its own.
@@ -6303,26 +6318,54 @@ pub(crate) fn record_check_widths(
     const TRIES: usize = 3;
     let request = format!("check-widths-{}", Uuid::new_v4());
     let key = model.kv_model_key().to_string();
+    let ends_the_model = model.is_last();
+    let step = |model: &mut SplitModel,
+                input: &candle_core::Tensor,
+                at: usize,
+                every_row: bool|
+     -> Result<(), SwarmError> {
+        if !ends_the_model {
+            model
+                .forward_prompt_in_chunks_keeping(
+                    input, at, kv_store, &request, None, false, 0, None,
+                )
+                .map(|_| ())
+        } else if every_row {
+            model
+                .forward_verify_all_positions(input, at, kv_store, &request)
+                .map(|_| ())
+        } else {
+            model.forward(input, at, kv_store, &request).map(|_| ())
+        }
+    };
     let mut run = || -> Result<bool, SwarmError> {
         let prompt = model.tensor_from_ids(&[0; PROMPT])?;
         model.forward(&prompt, 0, kv_store, &request)?;
         let mut at = PROMPT;
-        for &width in widths {
+        for &shape in widths {
             for _ in 0..TRIES {
                 if !keep_going() {
                     return Ok(false);
                 }
-                if model.has_step_graph(width) {
+                if model.has_step_graph(shape) {
                     break;
                 }
-                let input = model.tensor_from_ids(&vec![0; width])?;
-                if width == 1 {
-                    model.forward(&input, at, kv_store, &request)?;
+                let input = model.tensor_from_ids(&vec![0; shape.positions])?;
+                if shape.tree {
+                    let tree = crate::inference::draft_tree::DraftTree::new(
+                        at,
+                        vec![None; shape.positions],
+                    )
+                    .map_err(SwarmError::Internal)?;
+                    model.with_draft_tree(tree, |m| step(m, &input, at, true))??;
+                    kv_store.truncate_request_to(&key, &request, at)?;
                 } else {
-                    model.forward_verify_all_positions(&input, at, kv_store, &request)?;
-                    kv_store.truncate_request_to(&key, &request, at + 1)?;
+                    step(model, &input, at, shape.positions > 1)?;
+                    if shape.positions > 1 {
+                        kv_store.truncate_request_to(&key, &request, at + 1)?;
+                    }
+                    at += 1;
                 }
-                at += 1;
             }
         }
         Ok(true)

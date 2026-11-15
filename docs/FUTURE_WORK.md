@@ -2765,7 +2765,7 @@ microbatch "before we figure out how to deal with speculative decoding". Still u
 and exo source, DeepSpeed/Megatron micro-batching.
 
 #### #357 — A card's first graph of a new shape, late in a worker's life, can stall one forward 10-59 s
-`P3` · perf-local · **PARTIAL** (a whole model on a card records its check widths while idle, 2026-11-08) — 2026-10-26 · evidence: `faster_than_local.md` § 8.6; gotcha #883
+`P3` · perf-local · **PARTIAL** (a whole model on a card records its check widths while idle, 2026-11-08; a split's first segment and every tree row count too, 2026-11-15) — 2026-10-26 · evidence: `faster_than_local.md` § 8.6; gotcha #883; `docs/invariants/inference.md` § "A card records its check widths while the worker is idle"
 
 Four of 16 split replies on 2026-10-26 (this PC, Windows up 84 h) each lost 10-59 s to ONE
 forward on the card: the worker's first CUDA graph of a 2-row chunk (`decode graph … instantiated`
@@ -2802,8 +2802,10 @@ width ahead (`model_worker::warm_check_widths`, the second candidate above). Wit
 300 ms on any arm; `SWARMLLM_CUDA_GRAPH_WARM=0` in the same binary brought the 3.7-4.0 s ones back. A question asked
 again after 75 s idle (past the card's 60 s hand-back of graph memory) stalled nowhere. **Left**: (a) a worker's FIRST
 reply when the model loads ON the request — idle comes only after it (the dashboard's load at the first keystroke, #424,
-gives the time); (b) a split's segments and a tree's row counts are not recorded; (c) gaps of 1.6-8.5 s OUTSIDE any
-forward, in both arms of those runs alike — the 10-26 ones' other half (ending at a card memory reading).
+gives the time); (b) a LATER segment of a split records nothing (its rows come from another computer) — a split's
+first segment and every tree row count are recorded since 2026-11-15 (on the 14B Thailand↔Australia split each first
+graph of a tree level or chunk took 289-958 ms inside a reply on a card 2.8 GB fuller, v0.3.286); (c) gaps of 1.6-8.5 s
+OUTSIDE any forward, in both arms of those runs alike — the 10-26 ones' other half (ending at a card memory reading).
 
 #### #451 — A block drafter in system memory beside a card that has no room for it: ON — field-checked, no gain on a hybrid
 `P2` · perf-local · **ON (measured)** — 2026-11-15 · models between (27B/35B on a 12 GB card)

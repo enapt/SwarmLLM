@@ -8886,9 +8886,37 @@ over days of replies (2 rebuilds, both a tree's rows), so a graph recorded at
 drafter reads are copied out of EVERY captured step (`graph_keeps_rows`), so
 the recording's plain forwards record the graph a reply's keeping ones replay.
 
+**A split's first segment and a tree's row counts too** (2026-11-15, #357 (b)).
+*What it replaced*: a segment of a split recorded nothing (its forwards were
+said to carry another computer's rows — true of a later segment, not of the
+first, whose forwards carry token ids as the recording's do), and a whole
+model recorded chains only. So a flowing tree's levels (any row count 1-8) and
+the first segment's chunks met each shape for the first time inside a reply.
+On the 14B split between Thailand and Australia (`real_link.sh readme286`,
+v0.3.286, Windows up 38.8 h, other programs holding 2.8 GB of this card) each
+such first graph took 289-958 ms, ~0.8 s of a 4-5 s code reply (33-34 tok/s
+against 40-43 before); at v0.3.284 on a quieter card the same instantiations
+took 10-14 ms, and at v0.3.291 with the card idle 150-170 ms (`readme291`
+arm 5's warm-up). *Now*: `cuda_graph::shapes_to_record` names every chain
+width widest first, then — where `tree_steps_may_be_captured` and the layers
+read a tree (`draft_tree_refusal`) — every tree row count from
+`MAX_POSITIONS` down, for a whole model AND a split's first segment
+(`widths_to_record` no longer asks `is_last`); `record_check_widths` runs a
+tree's rows through `with_draft_tree` (a `DraftTree` of that many roots at the
+cache's end), a first segment's every shape through the prompt pass its reply's
+forwards take (`forward_prompt_in_chunks_keeping`, one graph key: rows not
+kept), and cuts the cache back after each. Tests:
+`the_idle_recording_names_every_tree_row_count_after_the_chains` (processor),
+`a_reply_after_the_idle_recording_makes_no_graph` (every tree row count, a
+whole model), `a_first_segment_records_its_shapes_before_a_reply_needs_them`
+(a first segment; both on a card). Their reply runs EVERY shape a reply may
+ask for, never only the recorded ones: with the trees left out and `is_last`
+back, the first made 9 forwards of their own inside the reply and the second
+17 (2026-11-15, RTX 3070 Laptop, release build).
+
 **Left**: a worker's first reply when the model loads on the request (idle
-comes after it; the dashboard loads at the first keystroke, #424); a split's
-segments and a tree's row counts. Prior art: vLLM records its graphs at
+comes after it; the dashboard loads at the first keystroke, #424); a later
+segment of a split (its rows come from another computer). Prior art: vLLM records its graphs at
 start-up for every capture size, largest first; SGLang records target and
 draft graphs once at start-up; an adaptive-length verifier records one verify
 graph per length up front (arXiv 2605.00342) — FUTURE_WORK #425 (b).
