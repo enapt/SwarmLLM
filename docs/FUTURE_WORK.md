@@ -5270,33 +5270,10 @@ the line too (`hybrid::SplitCard::for_one_long_prompt`, `docs/invariants/memory.
 Both long prompts (15,285 and 15,248 tokens) were ANSWERED after one reload: refused at 32 card layers, loaded again
 with 29 (layers 3..6 on the processor), asked again. With the reload off (`SWARMLLM_LONG_PROMPT_RELOAD=0`) both were
 refused, as before. The short prompts were answered in both arms. Slow, though: first word 135 s and 101 s, the
-prompt pass alone 81 s and 63 s — #456 and #457.
+prompt pass alone 81 s and 63 s — #456 and #457, one cause (the pass read in one forward), closed 2026-11-15.
 **Left:** (2) a split's peer segment refused mid-prefill still records no `layers_fitting` (#263 records it only for
 the up-front admission) — the reload covers the whole-model generate only; (3) what loaded the processor-only copy the
 report saw is NOT found in code (traced 2026-11-15: `cpu_reason` never reads a refusal).
-
-#### #456 — After a long prompt on a card-guessing split, the first word waits 35-52 s with nothing logged
-`P1` · inference / speed · **OPEN** — 2026-11-15 · from #454's card check run 2
-
-**Seen** (Llama-3.1-8B, 29/32 on this node's RTX 3070 Laptop, layers 3..6 on the processor, a lone request, so it
-guesses — gotcha #1104): the prompt pass ended (`forward_ms=80709`, 15,285 tokens) at 08:21:09, and the next lines
-are `card guesses: the prior fitted on the reply's first step` at 08:22:01 and the first decode step. The second
-prompt: 08:23:09 → 08:23:44 (35 s). The prior's own fit took 2.5 s and 1.2 s of those gaps (`fit_ms_total`). The
-client's first word came at the gap's end. `CardGuesses::take_the_prompt` says the first token is out before the
-fit; the client saw otherwise. **Hypotheses, unmeasured:** `RunStandIn::rows_of` / `learn_rows` over the whole
-prompt's rows, or the prompt pass's capture. **Next:** the rig with `SWARMLLM_CARD_GUESSES=0` and
-`SWARMLLM_CARD_GUESS_PRIOR=0` (rule 1: does the gap go with it?), then time inside `learn_the_prompt`.
-
-#### #457 — A card/processor split reads a long prompt at ~125 tokens a second past ~10,000 tokens
-`P2` · inference / speed · **OPEN** — 2026-11-15 · from #454's card check run 2
-
-**Seen** (the same run, 477-token chunks): 0 → 9,553 tokens in 18 s (~530 tok/s, a 6.7 s stall at ~2k), then
-10,030 → 14,807 in 49 s — each 477-token chunk 3.5-6.9 s, growing with depth. The three processor-held layers read
-each chunk on the card with their cache kept on the processor (`arch-inference.md` § "A card/processor split
-multiplies a prompt on the card", 1c: history goes up each chunk); the card's room after the long prompt's
-reservation held the chunk to 477. **Hypotheses, unmeasured:** the history upload growing per chunk, a pool growth
-stall per chunk under WSL2 (gotcha #883's shape), or a layer that left the card silently. **Next:**
-`SWARMLLM_PROFILE` on one chunk at 12k against one at 2k.
 
 #### #455 — A split's saved prompt is planned against the card alone; its processor share is bounded only afterwards
 `P3` · memory · **OPEN** — 2026-11-15 · from the pre-release review of #454's partial fix (gotcha #1105)
@@ -6612,6 +6589,20 @@ archive under the named heading. Reopen one only with the evidence its line name
 Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 19-28 were
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
+
+**Closed 2026-11-15 (on main, not in a release yet)** (#456, #457)
+- #456 + #457 — **A lone request's long prompt was read in ONE forward, and on a card/processor split it spilled
+  the card into system memory.** Seen after #454's reload (Llama-3.1-8B, 29 of 32 layers on the 8 GB RTX 3070, a
+  15k-token prompt): first word 100-140 s, decode 2.4-3.7 tok/s, a "gap" after the pass (#456) and a slow pass past
+  ~10k tokens (#457). ONE cause: `handle_generate` — every lone request's path since gotcha #1104 — read the prompt
+  in one `forward`, so each layer held its 15,288-row gate and up products whole (1,672 MiB), the pool reached
+  8.95 GB in use, and the driver lent 3-4.4 GB of system memory instead of refusing (gotcha #1044). The "gap" was
+  the card still working through the queued pass (a forward's time is its enqueue); the "477-token chunks" were
+  progress per LAYER of the one forward (15,288 / 32) — both first hypotheses wrong. Fixed:
+  `SplitModel::forward_prompt_keeping` cuts the pass at `split::PROMPT_CHUNK_TOKENS`, the width the KV budget
+  already assumed (`widest_prompt_forward`). One binary, `SWARMLLM_PROMPT_PASS=whole` the A/B: first word 14.8-17.1 s
+  against 100.5-133.0, decode 13.2-15.1 against 2.8-3.7 tok/s, peak in use 6.8-6.9 against 8.95 GB, host memory lent
+  98-125 against 2,973 MB (`docs/invariants/inference.md` § "Every prompt pass is cut at the chunk ceiling").
 
 **Closed 2026-11-14 (on main, not in a release yet)** (#3 (j14), #400)
 - #400 — **A full computer took its places on the download ring and was planned chain segments it never

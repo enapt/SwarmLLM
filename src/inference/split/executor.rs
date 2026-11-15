@@ -129,6 +129,19 @@ pub(super) struct SkipLayers<'a> {
 /// A forward's output and the hidden states it kept ([`Capture`]).
 type ForwardOut = (Tensor, HashMap<usize, Tensor>);
 
+#[cfg(test)]
+thread_local! {
+    /// The most positions one forward on this thread read since the last
+    /// [`take_widest_forward`] — what a test asks of a prompt pass.
+    static WIDEST_FORWARD: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// The most positions one forward on this thread read since the last call.
+#[cfg(test)]
+pub(crate) fn take_widest_forward() -> usize {
+    WIDEST_FORWARD.with(|w| w.replace(0))
+}
+
 /// The hidden states a forward keeps ([`SplitModel::forward_keeping`]): after
 /// each layer in `layers`, its last `last` positions — copied where that is
 /// fewer than the forward read, so a prompt pass does not hold a
@@ -858,6 +871,51 @@ impl SplitModel {
         Ok((out, caught))
     }
 
+    /// A prompt pass as this worker reads prompts: cut at its configured chunk
+    /// (`split::PROMPT_CHUNK_TOKENS`, `inference.prefill_chunk_tokens`), raised
+    /// as `prefill_pacer::prompt_chunk_ceiling` raises it — the width
+    /// [`SplitModel::widest_prompt_forward`] tells the KV budget a prompt
+    /// forward takes. The way in for a prompt pass that is handed no chunk of
+    /// its own (`model_worker::handle_generate`, every lone request's since a
+    /// lone request always guesses, gotcha #1104).
+    ///
+    /// **Why.** Read in ONE forward, a 15,288-token prompt on Llama-3.1-8B (29
+    /// of 32 layers on an 8 GB card) held each layer's gate and up products
+    /// whole — 836 MiB each — and the pool, already holding the weights and
+    /// the prompt's cache, reached 8.95 GB at its peak: Windows lent the rest
+    /// from system memory, and the prompt took 128-140 s to its first word,
+    /// decode 2.6-3.4 tokens a second (FUTURE_WORK #456). llama.cpp cuts every
+    /// batch into `n_ubatch` inside `llama_decode`, and sizes its buffers for
+    /// that, never for the prompt. `SWARMLLM_PROMPT_PASS=whole` reads it in
+    /// one forward, as before — the A/B.
+    pub fn forward_prompt_keeping(
+        &mut self,
+        input: &Tensor,
+        index_pos: usize,
+        kv_cache_store: &KvCacheStore,
+        request_id: &str,
+        capture: Option<Capture<'_>>,
+    ) -> Result<ForwardOut, SwarmError> {
+        static WHOLE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        let whole =
+            *WHOLE.get_or_init(|| std::env::var("SWARMLLM_PROMPT_PASS").as_deref() == Ok("whole"));
+        let chunk = if whole {
+            0
+        } else {
+            super::PROMPT_CHUNK_TOKENS.load(std::sync::atomic::Ordering::Relaxed)
+        };
+        self.forward_prompt_in_chunks_keeping(
+            input,
+            index_pos,
+            kv_cache_store,
+            request_id,
+            None,
+            false,
+            chunk,
+            capture,
+        )
+    }
+
     /// Forward pass with optional LoRA adapter applied per-layer.
     ///
     /// When `lora_adapter` is `Some`, the adapter's low-rank deltas are applied
@@ -1013,6 +1071,10 @@ impl SplitModel {
         all_positions: bool,
         skip_mask: Option<SkipLayers<'_>>,
     ) -> Result<(Tensor, HashMap<usize, Tensor>), SwarmError> {
+        #[cfg(test)]
+        if let Ok(read) = input.dim(1) {
+            WIDEST_FORWARD.with(|w| w.set(w.get().max(read)));
+        }
         let step = crate::inference::pace::Step::begin();
         let out = self.forward_inner_unpaced(
             input,
@@ -2057,7 +2119,7 @@ impl SplitModel {
                     ));
                 }
                 // And how far it has got, for a worker reading a long prompt
-                // in this ONE forward to say so while it reads (#430). A prompt
+                // to say so while it reads, chunk after chunk (#430). A prompt
                 // pass only; nothing is told where nobody listens.
                 if layer_idx > 0 {
                     kv_cache_store.note_prompt_progress(

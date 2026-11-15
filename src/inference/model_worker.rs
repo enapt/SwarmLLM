@@ -9350,10 +9350,11 @@ const PROMPT_PROGRESS_EVERY: std::time::Duration = std::time::Duration::from_sec
 
 /// A sequential prompt pass says how far it has read while it reads (#430).
 ///
-/// `handle_generate` reads a prompt in ONE forward inside `block_in_place`,
-/// holding the worker's only writer, so nothing could go out until the pass
-/// was over: a peer's requester could not tell a 10-minute read from a dead
-/// computer, and gave up at its fixed budget. The forward tells the KV store
+/// `handle_generate` reads a prompt inside `block_in_place` (chunk after
+/// chunk, `SplitModel::forward_prompt_keeping`), holding the worker's only
+/// writer, so nothing could go out until the pass was over: a peer's
+/// requester could not tell a 10-minute read from a dead computer, and gave
+/// up at its fixed budget. The forward tells the KV store
 /// between its layers (`KvCacheStore::note_prompt_progress`, beside the
 /// cancel probe); while [`Self::open`]'s window is open, this sends the read
 /// as `WorkerMsg::Progress` — the batched path's message — on a second handle
@@ -9762,23 +9763,15 @@ async fn handle_generate(
     let prefill = tokio::task::block_in_place(|| {
         let _g = crate::inference::attn_kernel::ForceStandardAttnGuard::new(force_attn);
         let mut from = index_pos_start;
+        // Both passes are cut where every other prompt pass is
+        // (`SplitModel::forward_prompt_keeping`): in one forward a long prompt's
+        // activations spilled an 8 GB card into system memory (#456).
         if let Some(at) = stop_to_save {
             let head = model.tensor_from_ids(&prompt_ids[from..at])?;
-            match mtp_capture {
-                Some(capture) => {
-                    let (_, caught) = model.forward_keeping(
-                        &head,
-                        from,
-                        kv_store,
-                        &req_id_str,
-                        capture,
-                        false,
-                    )?;
-                    mtp_rows.push(caught);
-                }
-                None => {
-                    model.forward(&head, from, kv_store, &req_id_str)?;
-                }
+            let (_, caught) =
+                model.forward_prompt_keeping(&head, from, kv_store, &req_id_str, mtp_capture)?;
+            if mtp_capture.is_some() {
+                mtp_rows.push(caught);
             }
             manifest = save_prompt_opening(
                 model,
@@ -9800,14 +9793,10 @@ async fn handle_generate(
             }),
             (None, head) => head,
         };
-        match capture {
-            Some(capture) => model
-                .forward_keeping(&rest, from, kv_store, &req_id_str, capture, false)
-                .map(|(logits, caught)| (logits, Some(caught))),
-            None => model
-                .forward(&rest, from, kv_store, &req_id_str)
-                .map(|logits| (logits, None)),
-        }
+        let keeps = capture.is_some();
+        model
+            .forward_prompt_keeping(&rest, from, kv_store, &req_id_str, capture)
+            .map(|(logits, caught)| (logits, keeps.then_some(caught)))
     });
     drop(reading);
     // What the pass kept for the stand-in, learned once the first token is out

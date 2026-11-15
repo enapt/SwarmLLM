@@ -1139,7 +1139,7 @@ pub struct KvCacheStore {
     /// over its cancelled-request set; `None` means never cancelled here.
     cancel_oracle: std::sync::Mutex<Option<CancelOracle>>,
     /// Told between layers how far a prompt pass has got (#430), so a worker
-    /// reading a long prompt in ONE forward can say so while it reads.
+    /// reading a long prompt can say so while it reads, between its layers.
     /// Installed by the worker (`model_worker::PromptProgressOut`); `None`
     /// tells nobody.
     prompt_progress: std::sync::Mutex<Option<PromptProgressSink>>,

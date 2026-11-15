@@ -1766,6 +1766,42 @@ fn a_prompt_pass_in_chunks_matches_the_whole_pass() {
     }
 }
 
+/// A prompt pass handed no chunk of its own (`model_worker::handle_generate`,
+/// every lone request's) is cut where the KV budget says a prompt forward ends
+/// (`SplitModel::widest_prompt_forward`), and answers what the one-shot pass
+/// answers. Read in one forward, a 15,288-token prompt's activations spilled
+/// an 8 GB card into system memory (FUTURE_WORK #456).
+#[test]
+fn a_lone_requests_prompt_pass_is_cut_where_the_budget_says_a_forward_ends() {
+    let hidden_dim = 128;
+    let mut model = make_test_split_model_with_window(2, hidden_dim, 1024);
+    let kv_store = KvCacheStore::new(std::time::Duration::from_secs(600));
+    let widest = model.widest_prompt_forward();
+    let seq = 2 * widest + 37;
+    assert!(seq <= 1024, "the prompt must fit the model's context");
+    let input = Tensor::randn(0f32, 1.0, (1, seq, hidden_dim), &Device::Cpu).unwrap();
+
+    let whole = model.forward(&input, 0, &kv_store, "whole").unwrap();
+    super::super::executor::take_widest_forward();
+    let (cut, kept) = model
+        .forward_prompt_keeping(&input, 0, &kv_store, "cut", None)
+        .unwrap();
+    let read = super::super::executor::take_widest_forward();
+
+    assert!(
+        read <= widest,
+        "a {seq}-position prompt pass read {read} positions in one forward, past the \
+         {widest} the KV budget plans for"
+    );
+    assert!(kept.is_empty(), "nothing asked to be kept");
+    assert_tensors_close(
+        &cut,
+        &whole,
+        1e-3,
+        "the cut prompt pass must answer what the one-shot pass answers",
+    );
+}
+
 /// A split's block drafter reads the prompt pass's last rows of each layer it
 /// asks for (#428 stage 3), however the worker cut the pass: in 4-position
 /// chunks (4, 4, 3) the six rows kept span two chunks, and equal the one-shot

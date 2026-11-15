@@ -1335,6 +1335,63 @@ all. Parity with the one-shot pass is pinned on the output and on the
 cache left behind; a decode step is one position and takes the one-shot
 path unchanged.
 
+## Every prompt pass is cut at the chunk ceiling — a lone request's too (2026-11-15, FUTURE_WORK #456)
+
+**What it replaced.** Three prompt passes were cut (`forward_prompt_in_chunks_keeping`: a pipeline segment's, the
+batched table's, the drafter's); `handle_generate`'s was not — it read the whole prompt in ONE `forward` /
+`forward_keeping`. That was the sequential path a request took only when guessing paid, until gotcha #1104 (v0.3.290)
+sent every LONE request there. One forward over 15,288 tokens of Llama-3.1-8B holds each layer's gate and up
+products whole: 15,288 × 14,336 × 4 bytes = 836 MiB each, 1,672 MiB together. Reloaded for that prompt with 29 of 32
+layers on this laptop's RTX 3070 (8 GB, #454), the pool held the weights (4.3 GB) and the prompt's cache (1.74 GB)
+and reached 8.95 GB in use at the forward's peak. The driver never refuses under WDDM — it lends system memory
+(gotcha #1044), so the pool reserved 9.5-10.9 GB and Windows' `\GPU Adapter Memory(*)\Shared Usage` read up to 4.4 GB.
+Every layer then ran 4-10 s, and decode after it 2.4-3.7 tokens a second.
+
+**How it was found.** The pool's peak minus what stayed in use was 1,671-1,672 MiB in every arm — with the split's
+weight copies off (`SWARMLLM_PROMPT_CARD_PROJECTIONS=0`, `SWARMLLM_PROMPT_CARD_LAYERS=0`), with the f16 cuBLAS path
+off (`SWARMLLM_QMATMUL_CUBLAS=0`), with neither — and `DIAG: KV cache growth during a prompt chunk` logged
+`chunk_positions=15288`, one forward. ⚠ The request's progress lines advanced 477 positions at a time, read at first
+as 477-token chunks (FUTURE_WORK #457's first hypotheses): `PassProgress::processed` counts a forward's layers as a
+share of its positions, 15,288 / 32 = 477.75 — progress per LAYER of one forward. Nsight Systems under WSL2 recorded
+no `cuMemAllocAsync` and no kernel, and was no help.
+
+**Prior art.** llama.cpp's `llama_decode` cuts every batch into `n_ubatch` (512) micro-batches inside the one call
+and sizes its compute buffers for `n_ubatch`, never for the prompt; vLLM's chunked prefill caps a step at
+`max_num_batched_tokens`. PyTorch users on Windows meet the same spill as a slowdown, never an error (NVIDIA's
+"CUDA – Sysmem Fallback Policy", driver 536.40+).
+
+**The rule.** `SplitModel::forward_prompt_keeping` is the way in for a prompt pass handed no chunk of its own: it
+reads `split::PROMPT_CHUNK_TOKENS` (the worker's `inference.prefill_chunk_tokens`, set once in `run_worker`) and
+cuts through `forward_prompt_in_chunks_keeping` — `prompt_chunk_ceiling` raises it to 512 on a card and to the room
+on a split copying its weights — the same figure `SplitModel::widest_prompt_forward` gives the KV budget, so the pass
+and the budget cannot disagree. `handle_generate` calls it for both of its passes (the head before a recurrent
+model's save point, and the rest), keeping what its `Capture` asks across chunks as before. A/B
+`SWARMLLM_PROMPT_PASS=whole`.
+
+**Measured** (2026-11-15 09:45-09:59Z, CUDA release build of this change, ONE binary, the live node stopped, Windows
+up ~19 h, `~/swarmllm-gate/ab-1115/ab456.sh`; Llama-3.1-8B Q4_K_M, context 16,384, the 15k prompt reloading it at
+29 of 32 card layers; arms cut / whole / cut):
+
+| | cut (twice) | whole (`SWARMLLM_PROMPT_PASS=whole`) |
+|---|---|---|
+| first word, 15,248-15,288-token prompt | 14.8-17.1 s | 100.5-133.0 s |
+| decode after it | 13.2-15.1 tok/s | 2.8-3.7 tok/s |
+| pool's peak in use | 6,784-6,937 MB | 8,949 MB |
+| host memory lent to the card, most | 98-125 MB | 2,973 MB |
+| prompt forwards logged (`DIAG: KV cache growth during a prompt chunk`) | 103 / 89 | 29 |
+
+**On the processor it costs nothing** (2026-11-15 10:40-10:58Z, the same binary, `gpu_layers = 0`, the live node
+stopped, `~/swarmllm-gate/ab-1115/cpu456r.sh`; Llama-3.1-8B Q4_K_M, three unique ~1,570-token prompts an arm, arms
+whole / cut / whole / cut, each started at ≤ 75 °C). Cut, 36 forwards of 128 positions an arm: first word 49.4-52.9 s,
+29.6-31.8 prompt tokens a second. Whole, one forward of 1,539-1,573 positions a prompt: 47.7-52.7 s, 29.9-32.9 — the
+medians within 1%. So the cut does not slow a processor at this length, and it does not explain .290's processor
+prompt figure (0.95× of .289's): that one-forward hypothesis is rejected.
+
+**What a change must keep.** A prompt pass is cut — a new path calls `forward_prompt_keeping` or
+`forward_prompt_in_chunks_keeping`, never `forward` over a prompt. Test
+`a_lone_requests_prompt_pass_is_cut_where_the_budget_says_a_forward_ends` (the widest forward a 293-position pass
+reads, against `widest_prompt_forward`'s 128; red with the pass read whole).
+
 ## `inference::split::token_embedding::rows_on_demand_eligible`
 
 (2026-08-18) — the
