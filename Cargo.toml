@@ -428,6 +428,12 @@ name = "qmatvec_graph_bench"
 path = "examples/qmatvec_graph_bench.rs"
 required-features = ["candle-cuda"]
 
+# Two candle devices on one card from two threads: do they overlap (#462)?
+[[example]]
+name = "two_device_overlap_bench"
+path = "examples/two_device_overlap_bench.rs"
+required-features = ["candle-cuda"]
+
 [[test]]
 name = "integration"
 path = "tests/integration/api_test.rs"

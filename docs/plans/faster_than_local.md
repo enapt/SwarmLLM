@@ -1269,7 +1269,13 @@ left is not a kernel and not a shape:
    forward's layers: one forward ≈ 28 ms, the far end's 30 then the limit — up to ~1.3x. The catch: drafter and
    segment are two processes, and two processes on this card time-slice: llama.cpp's 3B and 0.5B run at once did
    0.89 of the work they did one at a time (measured, #462). Kernels side by side need the drafter in the segment's
-   process on a second stream — against the one-stream rule, whose reasons come first.
+   process on a second stream — against the one-stream rule, whose reasons come first. **Measured in one process the
+   same night** (`examples/two_device_overlap_bench.rs`, two candle devices of this card, three runs × two passes):
+   the two steps' weight products — the 14B's 26 layers at 24 rows, 23.5 ms; the 0.5B's three 8-row levels as graphs,
+   9.5 ms — took ~31.5-32.5 ms together against ~33.5 in series: 12-20% of the drafter's products hidden, 26-32% with
+   its stream at the card's top priority, 0-3% on one device. Both keep the card's processors busy, so the order is
+   worth ~2-3 ms of the products plus whatever of the drafter's ~5 ms of non-product time is host gaps — ~40 → 35-37
+   ms a forward at best, not ~1.3x, for moving the drafter into the segment's worker. **So the balance comes first.**
 2. **The balance** (#411 "Also"): the planner fills this computer's card without counting that it also drafts. At
    ~21-22 layers here instead of 26 each side would take ~36 ms (~+12%) — unmeasured: forcing that split point grew
    the far computer's copy onto its processor (#461), so it is measured only where the far copy CONTAINS the range.

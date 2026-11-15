@@ -5352,7 +5352,7 @@ StarCoder2, inert while refused).
 ### Memory and admission
 
 #### #462 — A flowing split drafts, then runs this node's layers, one after the other: overlap them
-`P2` · perf-split · **OPEN** (conceptual — measure the card's idle time first) — 2026-11-15 · evidence: `docs/invariants/scheduling.md` § "Rows and levels, a third time"
+`P3` · perf-split · **OPEN** (measured: worth ~2-3 ms a forward on one card, behind #411's balance) — 2026-11-15 · evidence: `docs/invariants/scheduling.md` § "Rows and levels, a third time", `examples/two_device_overlap_bench.rs`
 
 **Seen** (the 14B half and half to Australia, 8 × 3 flow, server-timed, 2026-11-15): the flow never waits for the far
 computer, and this node's time is exactly its two steps in series — `flowed_ms` = `drafting_ms` + `near_ms` to within
@@ -5397,6 +5397,20 @@ processes; but a drafter side that READS its 640 MB three times (5.9 ms alone at
 under that chain, both saturating the card's ~380 GB/s. The real steps saturate nothing: the near layers read ~4.3 GB
 in ~26 ms (~165 GB/s) and the drafter ~1.9 GB in ~14.5 ms (~130 GB/s), ~6.2 GB in 26 ms together (~240 GB/s) — under
 the card's line, so a large share could hide; how large is the candle-devices check above.
+**The candle-devices check, measured the same night** (`examples/two_device_overlap_bench.rs`: two `Device::new_cuda(0)`
+in one process, the 14B's 26 near layers' weight products at 24 rows on one — 23.5 ms, uncaptured as the product runs
+them — and the 0.5B's three 8-row levels on the other — 9.5 ms as graphs, 13.9 eager; 6 rounds × 8 repeats, three runs,
+two passes, the live node stopped): together ~31.5-32.5 ms against ~33.5 in series — **12-20% of the drafter's products
+hidden** under the near layers, **26-32% with the drafter's stream at the card's top priority** (−5, a graph launched
+into it), 0-3% with both on ONE device (the control; eager-on-eager hides 6-11% there, the processor's launching). The
+best repeat of each pair reached ~27.5 ms, so the overlap exists but only some repeats get it. Unlike the raw probe's
+light kernels, the real ones keep the card's processors busy — MMQ's blocks at 24 rows hold the SMs — so the order is
+worth ~2-3 ms of the products, plus whatever share of the drafter's other ~5 ms (attention, norms, the rank read-back,
+the host walk between levels) is host gaps: ~40 → 35-37 ms a forward at best, against ~+12% for #411's balance, which
+needs no new process layout. **Ranked behind the balance**; redo this check before building it, with the real steps
+(attention included) if the balance lands first. Prior art for the priority arm: CUDA stream priorities schedule a
+waiting block of the higher stream first as SMs free, never pre-empting a running one (CUDA programming guide § Stream
+Priorities) — what the 26-32% shows.
 
 Prior art: PEARL (arXiv 2408.11850, ICLR 2025) names it "mutual waiting" — the target idle while the draft drafts and the
 reverse — and its post-verify keeps drafting while the target verifies (up to 1.5× over plain speculation); PipeInfer
