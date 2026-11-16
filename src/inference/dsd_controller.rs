@@ -127,6 +127,34 @@ pub const FIRST_PROBE_AFTER: u32 = 8;
 /// The longest run of declined rounds before a probe.
 pub const MOST_PROBE_AFTER: u32 = 64;
 
+/// The guesses a block drafter's first checked round makes, before any check
+/// has been timed ([`first_block_guesses`]).
+pub const FIRST_BLOCK_GUESSES: u32 = 3;
+
+/// How many of `room` guesses a block drafter's round checks before any check
+/// has been timed — the one rule for a whole model (`model_worker::LocalSpec`)
+/// and a split (`pipeline::block_draft::Guesser`); from then on the measured
+/// line prices every round, up to the whole block where checks are cheap (a
+/// card). It was the whole block: on a processor a 16-wide check costs ~10
+/// plain steps (Gemma 4 12B, debug build: 78 + 201 ms a position against a
+/// 319 ms step), and a story that kept none of it ran slower than with no
+/// drafter (3.0 against 3.5 tok/s at 96 tokens, #428 (b)). The block stays
+/// CHECKED — a first block judged unchecked was tried and dropped
+/// (`docs/invariants/scheduling.md`); only its width changes, to a guess
+/// head's first count. Prior art: DFlash (arXiv 2602.06036 § 5.5.4: a drafter
+/// trained on blocks of 16 keeps its quality on smaller ones, and wide blocks
+/// cost where the check is compute-bound); llama.cpp's DFlash path cuts a
+/// block at its first unsure guess (`p_min`); HF's assistant schedule starts
+/// narrow and widens on a fully kept round. A/B `SWARMLLM_BLOCK_FIRST=whole`.
+pub fn first_block_guesses(room: u32) -> u32 {
+    static WHOLE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if *WHOLE.get_or_init(|| std::env::var("SWARMLLM_BLOCK_FIRST").as_deref() == Ok("whole")) {
+        room
+    } else {
+        FIRST_BLOCK_GUESSES.min(room)
+    }
+}
+
 impl CheckCost {
     const DECAY: f64 = 0.8;
     /// How many times its expected cost a check must take to be held back.

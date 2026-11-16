@@ -324,11 +324,12 @@ impl Guesser {
     ) -> (u32, Option<f64>) {
         let most = self.most.min(remaining);
         self.probing = false;
+        let first = match self.by {
+            By::Block => crate::inference::dsd_controller::first_block_guesses(most),
+            By::Head => HEAD_FIRST_GUESSES.min(most),
+        };
         if self.draft_ms.median().is_none() {
-            return match self.by {
-                By::Block => (most, None),
-                By::Head => (HEAD_FIRST_GUESSES.min(most), None),
-            };
+            return (first, None);
         }
         let Some(step) = step else {
             // One plain step first. A round another source fills (the far
@@ -338,6 +339,9 @@ impl Guesser {
         };
         let (gamma, rate) = match self.priced(most, step, check) {
             Some((g, rate)) => (g, Some(rate)),
+            // No check timed yet: the block's first is narrow, the head's
+            // as many as it may.
+            None if self.by == By::Block => (first, None),
             None => (most, None),
         };
         if gamma > 0 {
@@ -1048,7 +1052,7 @@ fn choose(block: Choice, head: Choice) -> By {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::inference::dsd_controller::{CheckReach, FIRST_PROBE_AFTER};
+    use crate::inference::dsd_controller::{CheckReach, FIRST_BLOCK_GUESSES, FIRST_PROBE_AFTER};
 
     /// A segment's rows are kept only as asked of it: layers it runs and the
     /// reply asked for, each once, and no more rows than its forward asked.
@@ -1108,7 +1112,11 @@ mod tests {
     #[test]
     fn a_split_block_drafter_steps_aside_on_a_reply_it_does_not_guess() {
         let mut b = block_only(Some(130));
-        assert_eq!(count(&mut b, 200), 15, "untimed: as many as it may");
+        assert_eq!(
+            count(&mut b, 200),
+            FIRST_BLOCK_GUESSES,
+            "untimed: a narrow first check (#428 (b))"
+        );
         block(&mut b).record_draft(15, 247.0);
         b.record_check(16, 1_262.0);
         b.record_round(By::Block, 1, 15, 2, 1_262.0);
@@ -1173,7 +1181,11 @@ mod tests {
             },
             false,
         );
-        assert_eq!(b.gamma(200), (By::Block, 15), "the block drafts first");
+        assert_eq!(
+            b.gamma(200),
+            (By::Block, FIRST_BLOCK_GUESSES),
+            "the block drafts first, narrow"
+        );
         b.block.as_mut().unwrap().record_draft(15, 60.0);
         b.record_check(16, 260.0);
         for _ in 0..4 {
@@ -1222,7 +1234,11 @@ mod tests {
             },
             true,
         );
-        assert_eq!(b.gamma(200), (By::Block, 15), "the block drafts first");
+        assert_eq!(
+            b.gamma(200),
+            (By::Block, FIRST_BLOCK_GUESSES),
+            "the block drafts first, narrow"
+        );
         b.block.as_mut().unwrap().record_draft(15, 20.0);
         b.record_check(16, 600.0);
         b.record_round(By::Block, 1, 15, 2, 600.0);

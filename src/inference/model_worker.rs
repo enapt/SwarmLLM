@@ -6750,8 +6750,8 @@ impl LocalSpec {
     }
 
     /// How many guesses the block drafter makes this round ([`BlockGuesses`]):
-    /// none before a plain step has been timed, the whole `room` before a
-    /// check has (the block it was trained on), then the count that pays with
+    /// none before a plain step has been timed, a few before a check has
+    /// (`dsd_controller::first_block_guesses`), then the count that pays with
     /// its draft's time charged once a round — zero included. Every round
     /// drafts the whole `room` where the count is fixed.
     fn block_guess_count(&self, room: usize) -> usize {
@@ -6764,14 +6764,16 @@ impl LocalSpec {
         let Some(step) = self.step_ms.median() else {
             return 0;
         };
+        let room = u32::try_from(room).unwrap_or(u32::MAX);
         crate::inference::dsd_controller::best_gamma_beside_a_step_per_round(
             block.acceptance.alpha(),
             Some(crate::inference::dsd_controller::Step::Here(step)),
             &self.check,
-            u32::try_from(room).unwrap_or(u32::MAX),
+            room,
             block.draft_ms.median().unwrap_or(0.0),
         )
-        .map_or(room, |g| g as usize)
+        .unwrap_or_else(|| crate::inference::dsd_controller::first_block_guesses(room))
+            as usize
     }
 
     /// The most guesses a block round may check: the drafter's block less

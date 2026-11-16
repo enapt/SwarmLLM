@@ -4313,10 +4313,22 @@ the hot rows' guess cost (126 against 280 ms); the chat story 0.85 → 0.92 (eve
 the hot rows more than one in six, so it reads every word after 48 tokens either way. Replies exact. **Prior art**:
 FR-Spec (ACL 2025) drafts over a frequency-ranked vocabulary subset; Gemma's file states no frequencies (scores all
 -1000, merges start with runs of newlines), and the alphabet is the part every text needs. Ranks from this node's own
-replies were the other candidate, not needed for code. (b) On the processor the priced loop checks one full block a
-reply before it sets the block aside (~5 s at 96 tokens in a debug build, a 16-wide check costing ~8.5 steps). Probe
-with a narrower block, and measure on a release build before deciding. A Gemma model on a processor-only computer
-fetches the drafter (no guess head to prefer), so this is that computer's whole cost. On the split rig (A [0,13) +
+replies were the other candidate, not needed for code. **(b) Narrowed 2026-11-16 (branch `gemma4-drafter-428`)**: the
+priced loop's FIRST check of a reply was the whole block (a 16-wide check ~10 steps on the processor) — a story that
+kept none ran under no drafter, and on code one wide check that kept little sank the acceptance and the block was
+declined 77 rounds. It is now `dsd_controller::first_block_guesses` (3, the guess head's first count) on one computer
+and a split, then the line prices every round. One binary, `SWARMLLM_BLOCK_FIRST=whole` the old arm, 12B processor
+debug, 96 tokens, one run a side, replies identical: code **3.8 against 3.2 tok/s** (plain 3.4 / 3.5 in the same runs:
+1.12× against 0.91×), story 3.2 against 2.8 (0.91× against 0.85×). **Left**: a story still runs ~9% under plain on
+the processor — three unchecked shadow probes and the rows kept for the drafter each step; measure on a release build
+(a debug build's step is ~3x a release one's, so the balance differs) and on a card before deciding more. **Prior art**:
+DFlash § 5.5.4 (a drafter trained on blocks of 16 keeps its quality on smaller ones; wide blocks cost where the check
+is compute-bound); llama.cpp's DFlash path cuts a block at its first unsure guess (`p_min`); HF's assistant schedule
+starts narrow. A Gemma model on a processor-only computer fetches the drafter (no guess head to prefer), so this is
+that computer's whole cost. **On the split rig with both fixes** (same rig and prompts, three arms in one dev build,
+one run each, identical replies; seconds for 96 tokens): palindrome 56.0 / 70.6 / 64.6 (branch / whole first block /
+no drafter: 1.15× against 0.91×), search tree 51.2 / 49.2 / 58.1 (1.13× / 1.18×), story 59.4 / 62.6 / 55.5 (0.93× /
+0.89×) — the story is still the residual above. Before them, on the split rig (A [0,13) +
 drafter ↔ B [13,48), processors, 130 ms, dev build, one run each) the lend fired (`head_mb=0`) and the replies were
 the same text: palindrome 1.11×, search tree 1.09×, story 0.90× (one block checked, none kept, then set aside),
 which is (b)'s cost on a split. (c) The 26B-A4B (MoE, dense branch beside) and 31B, on a card.

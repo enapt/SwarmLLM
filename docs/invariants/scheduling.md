@@ -7270,6 +7270,20 @@ worth reading:
   head and Draft & Verify's threshold predict; SGLang's average and BanditSpec
   learn only from what was checked). The drafter's reward is seen whether it ran
   or not: full information, as Hedge has, where a bandit sees only its own arm's.
+- **The first block is checked NARROW** (`dsd_controller::first_block_guesses`,
+  #428 (b), 2026-11-16): before any check is timed it was the whole block, so on
+  the processor a reply's first round cost a 16-wide check (Gemma 4 12B, debug:
+  78 + 201 ms a position against a 319 ms step, ~10 steps), and one wide check
+  that kept little set the acceptance so low the block was then declined (code:
+  77 of 84 rounds). Three guesses — a guess head's first count — keep the check
+  and teach the line (one check and a step already price every width,
+  `predict_through_a_step`). One binary, `SWARMLLM_BLOCK_FIRST=whole` the old
+  arm, 96 greedy tokens, one run a side, replies identical: code 3.8 against
+  3.2 tok/s (plain 3.4 / 3.5 in the same runs), the story 3.2 against 2.8 (plain
+  3.5 / 3.3) — the story still ~9% under plain (`docs/FUTURE_WORK.md` #428 (b)).
+  On a card the line widens at once (a 16-wide check ~1.5 steps); unmeasured
+  there. Prior art: DFlash § 5.5.4, llama.cpp's DFlash `p_min` cut, HF's
+  assistant schedule (narrow first). `~/swarmllm-gate/deep/gemma4_dflash/first_runs.sh`.
 - **A block round is charged its whole time** (`BlockGuesses::rest_ms`: the
   rows taken in, a refused guess's take-back, the bookkeeping), weighed against
   a plain round's whole time (`LocalSpec::plain_round_per_ms`). Measured small on
