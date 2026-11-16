@@ -3675,7 +3675,19 @@ around the split (the user, 11-08: a slow split is the bug). **The fix order**: 
 block drafter at the far end (#428), the drafter's first-choice rate (§ 7-8); (2) price a request by what its OWN
 conversation's guesses kept (a later turn knows its earlier turns' acceptance; SmartSpec-style per-request acceptance
 priors) rather than the model's blended figure — measure first how far a conversation's first-turn acceptance predicts
-its next. Prior art to read before (2): SmartSpec (goodput-chosen γ per request), Leviathan's α per task.
+its next. **Prior art (looked up 2026-11-16, web):** SmartSpec/TurboSpec (arXiv 2406.14066) picks the
+draft length by goodput from ONE global acceptance average per draft/target pair — our design, with our weakness;
+BanditSpec (2505.15141) keeps per-request empirical means per configuration, cold-started by one pull of each, and
+assumes acceptance stationary; Nightjar (2512.22420) is a bandit over (batch size, length) whose arms include "off",
+with a penalty for switching; SpecDec++ / AdaEDL read the DRAFT's own confidence (a trained head; entropy as a bound)
+— a per-token signal that costs nothing; vLLM switches speculation off by batch size, never by acceptance; acceptance
+differs by task type (2604.14682, one small pair: chat high, math low). **No published system chooses its execution
+plan per request from predicted acceptance**, and none measured how well one turn's acceptance predicts the next.
+What transfers: (a) priors per KIND of reply (code / prose / structured), not per model — the kind scored from the
+prompt, or from the drafter's own confidence over it, a figure the split's drafter computes anyway; (b) once a split
+reply runs, its own rounds (BanditSpec's per-request means) can say it is below the line where local wins —
+continuing locally costs a prompt read here, the switching cost Nightjar prices; (c) the line itself is known from
+the US measurement (prose 0.87x, code 1.6x at 308 ms).
 
 #### #427 — The models between (~14B, ~27-35B) and 70B: what a user gets from each is unmeasured
 `P1` · perf-split · **OPEN** (measure first) — 2026-11-08 · history: user direction 2026-11-08; #318 (the 70B)
