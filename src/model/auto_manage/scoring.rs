@@ -2141,20 +2141,29 @@ mod fetch_what_prune_keeps {
         // COOLS: two copies of each part stay, on the holders every computer
         // ranks first for the model, and only past the week does every copy
         // go ("the pruning doesnt just, remove all parts").
-        let ids: Vec<NodeId> = (0u32..10_000)
+        // Two computers ranked above this one for the model. This node's id is
+        // a fresh identity every run, so search until two turn up: a fixed
+        // window of 10,000 consecutive pairs found none whenever this node
+        // ranked near the top — about one run in a hundred (CI 2026-11-16).
+        let mut above = (0u32..)
             .map(|i| NodeId(*blake3::hash(&i.to_le_bytes()).as_bytes()))
-            .collect();
-        let (a, b) = ids
-            .windows(2)
-            .map(|w| (w[0].clone(), w[1].clone()))
-            .find(|(a, b)| {
-                !crate::model::auto_manage::coverage::keeps_a_cooled_copy(
+            .filter(|id| {
+                !crate::model::auto_manage::coverage::keeps_the_first_cooled_copy(
                     &mid,
-                    &[local.clone(), a.clone(), b.clone()],
+                    &[local.clone(), id.clone()],
                     &local,
                 )
-            })
-            .expect("two nodes ranked above this one for the model");
+            });
+        let a = above.next().expect("a node ranked above this one");
+        let b = above.next().expect("a second node ranked above this one");
+        assert!(
+            !crate::model::auto_manage::coverage::keeps_a_cooled_copy(
+                &mid,
+                &[local.clone(), a.clone(), b.clone()],
+                &local,
+            ),
+            "two holders ranked above this one: it is not among the two kept"
+        );
         let beside_the_keepers = [local.clone(), a.clone(), b.clone()];
         let shed_at = |holders: &[NodeId], pressure| {
             manager.would_shed_copy(&part(0), holders, pressure, &[])
