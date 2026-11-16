@@ -89,6 +89,38 @@ fn draft_hot_rows() -> Option<usize> {
     })
 }
 
+/// The vocabulary's alphabet past its first `hot` ids: its one-character
+/// entries that are printable ASCII or general punctuation (U+2010-U+2027,
+/// U+2030-U+205E: quotes, dashes, the ellipsis). A guess on the processor
+/// reads them beside the hot rows from a reply's start (`DraftWords` in
+/// `model_worker`, #428 stage 4). The hot rows are the FIRST ids because a
+/// byte-level vocabulary keeps its alphabet there and makes its merges most
+/// frequent first; a SentencePiece vocabulary may keep it at the END —
+/// Gemma 4's 262,144 hold every printable ASCII character at
+/// 236,744-236,995, and those were 15 of the 19 words past the hot rows in
+/// a code reply and 15 of the 32 in a story (`,` alone eight times). FR-Spec
+/// (ACL 2025) ranks a draft vocabulary by corpus frequency; this file states
+/// none (Gemma's scores are all -1000), and the alphabet is the part of it
+/// every text needs. Empty where the alphabet sits inside the hot rows
+/// (Qwen, Llama 3: the first 256 ids).
+pub(crate) fn alphabet_past(vocabulary: &[String], hot: usize) -> Vec<u32> {
+    let wanted = |c: char| {
+        c.is_ascii_graphic()
+            || ('\u{2010}'..='\u{2027}').contains(&c)
+            || ('\u{2030}'..='\u{205E}').contains(&c)
+    };
+    vocabulary
+        .iter()
+        .enumerate()
+        .skip(hot)
+        .filter(|(_, piece)| {
+            let mut chars = piece.chars();
+            matches!((chars.next(), chars.next()), (Some(c), None) if wanted(c))
+        })
+        .filter_map(|(id, _)| u32::try_from(id).ok())
+        .collect()
+}
+
 /// The head, loaded only where the segment ends the model.
 pub(crate) struct MtpHead {
     pub(super) eh_proj: QMatMul,
@@ -437,6 +469,14 @@ impl SplitModel {
         self.hot_head()?.out_features().ok()
     }
 
+    /// [`alphabet_past`] the first `hot` ids of this model's vocabulary —
+    /// none where it has no vocabulary.
+    pub(crate) fn alphabet_past(&self, hot: usize) -> Vec<u32> {
+        self.vocabulary
+            .as_deref()
+            .map_or_else(Vec::new, |v| alphabet_past(v, hot))
+    }
+
     /// The output head's rows for `ids` — a conversation's own words past
     /// the hot rows — for a guess to read beside them.
     pub(crate) fn mtp_rows_of(&self, ids: &[u32]) -> Result<QMatMul, SwarmError> {
@@ -664,5 +704,21 @@ mod tests {
             "more rows than the head"
         );
         Ok(())
+    }
+
+    /// The alphabet past the hot rows is the vocabulary's one-character
+    /// printable ASCII and punctuation entries there, and nothing inside them
+    /// (#428 stage 4: Gemma 4 keeps `,` at 236,764).
+    #[test]
+    fn the_alphabet_past_the_hot_rows_is_its_one_character_text() {
+        let vocab: Vec<String> = [
+            "a", ".", "▁the", ",", "’", "ab", "\u{200b}", "漢", "▁", "\n", "…", "",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        assert_eq!(alphabet_past(&vocab, 2), vec![3, 4, 10]);
+        assert_eq!(alphabet_past(&vocab, 0), vec![0, 1, 3, 4, 10]);
+        assert!(alphabet_past(&vocab, vocab.len()).is_empty());
     }
 }

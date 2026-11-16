@@ -4372,13 +4372,17 @@ struct MtpGuesses {
 /// The words a reply's guesses read where the head guesses on the processor
 /// (#425 (b), `split::mtp::DRAFT_HOT_ROWS`): the output head's first rows,
 /// and the conversation's own words past them — a copied name is the head's
-/// surest guess. A conversation in words mostly past them, or a reply whose
-/// new words leave them often, reads every word.
+/// surest guess — and the vocabulary's alphabet past them from the start
+/// (`split::mtp::alphabet_past`, #428 stage 4: Gemma 4 keeps it at the
+/// vocabulary's end). A conversation in words mostly past them, or a reply
+/// whose new words leave them often, reads every word.
 struct DraftWords {
     hot: usize,
-    /// The conversation's words past the hot rows, in the order `rows`
-    /// holds them.
+    /// The alphabet past the hot rows, then the conversation's words past
+    /// them, in the order `rows` holds them.
     ids: Vec<u32>,
+    /// How many of `ids` are the alphabet — never a conversation's own word.
+    alphabet: usize,
     known: std::collections::HashSet<u32>,
     /// The output head's rows for `ids[..built]`.
     rows: Option<crate::inference::split::QMatMul>,
@@ -4396,16 +4400,26 @@ impl DraftWords {
     /// Words a reply commits before it is judged.
     const JUDGE_AFTER: u64 = 48;
 
-    /// `None` where more than a third of the prompt is past the hot rows, or
-    /// its own words past them number more than `DRAFT_MOST_OWN_WORDS`.
-    fn for_prompt(hot: usize, prompt: &[u32]) -> Option<Self> {
-        let past = prompt.iter().filter(|&&t| t as usize >= hot).count();
-        if past * 3 > prompt.len() {
-            return None;
-        }
+    /// The words `model`'s guesses read past its first `hot` rows for a
+    /// reply to `prompt` — the one way every guess path builds them, so none
+    /// can leave the alphabet out ([`Self::reading`]).
+    fn for_prompt(
+        model: &crate::inference::split::SplitModel,
+        hot: usize,
+        prompt: &[u32],
+    ) -> Option<Self> {
+        Self::reading(hot, &model.alphabet_past(hot), prompt)
+    }
+
+    /// `None` where more than a third of the prompt is past the hot rows and
+    /// `alphabet`, or its own words past them number more than
+    /// `DRAFT_MOST_OWN_WORDS`. The alphabet is read from the start and is
+    /// never a new word.
+    fn reading(hot: usize, alphabet: &[u32], prompt: &[u32]) -> Option<Self> {
         let mut words = Self {
             hot,
             ids: Vec::new(),
+            alphabet: 0,
             known: Default::default(),
             rows: None,
             built: 0,
@@ -4413,10 +4427,26 @@ impl DraftWords {
             outside: 0,
             whole: false,
         };
+        for &t in alphabet {
+            words.learn(t);
+        }
+        words.alphabet = words.ids.len();
+        let past = prompt
+            .iter()
+            .filter(|&&t| t as usize >= hot && !words.known.contains(&t))
+            .count();
+        if past * 3 > prompt.len() {
+            return None;
+        }
         for &t in prompt {
             words.learn(t);
         }
-        (words.ids.len() <= crate::inference::split::DRAFT_MOST_OWN_WORDS).then_some(words)
+        (words.own() <= crate::inference::split::DRAFT_MOST_OWN_WORDS).then_some(words)
+    }
+
+    /// The conversation's own words past the hot rows.
+    fn own(&self) -> usize {
+        self.ids.len() - self.alphabet
     }
 
     /// `true` for a word past the hot rows not seen before.
@@ -4439,7 +4469,7 @@ impl DraftWords {
                 self.outside += 1;
             }
         }
-        if self.ids.len() > crate::inference::split::DRAFT_MOST_OWN_WORDS
+        if self.own() > crate::inference::split::DRAFT_MOST_OWN_WORDS
             || (self.committed >= Self::JUDGE_AFTER && self.outside * 6 > self.committed)
         {
             self.whole = true;
@@ -5702,7 +5732,7 @@ async fn handle_block_draft(
             // else the drafter's own (`SplitModel::mtp_hot_rows`).
             let words = model
                 .mtp_hot_rows()
-                .and_then(|hot| DraftWords::for_prompt(hot, &d.words));
+                .and_then(|hot| DraftWords::for_prompt(model, hot, &d.words));
             drafts.0.insert(
                 d.request_id,
                 SplitGuessers {
@@ -6541,7 +6571,7 @@ impl LocalSpec {
         };
         mtp.words = model
             .mtp_hot_rows()
-            .and_then(|hot| DraftWords::for_prompt(hot, prompt_ids));
+            .and_then(|hot| DraftWords::for_prompt(model, hot, prompt_ids));
         match mtp.take_the_prompt(model, prompt_ids, &kept, first) {
             Ok(()) => self.mtp = Some(mtp),
             Err(e) => tracing::warn!(error = %e, "next-token head: not used for this reply"),
@@ -6584,7 +6614,7 @@ impl LocalSpec {
         if let Some(mut block) = BlockGuesses::for_model(model, kv_store, req_id_str) {
             block.words = model
                 .block_hot_rows()
-                .and_then(|hot| DraftWords::for_prompt(hot, prompt_ids));
+                .and_then(|hot| DraftWords::for_prompt(model, hot, prompt_ids));
             match block.take_the_prompt(model, prompt_ids.len(), &kept, first) {
                 Ok(()) => self.block = Some(block),
                 Err(e) => tracing::warn!(error = %e, "block drafter: not used for this reply"),
@@ -13433,11 +13463,11 @@ mod local_speculation_tests {
     #[test]
     fn a_replys_guesses_read_its_own_words_until_they_leave_the_hot_rows() {
         assert!(
-            DraftWords::for_prompt(100, &[150, 160, 170, 5]).is_none(),
+            DraftWords::reading(100, &[], &[150, 160, 170, 5]).is_none(),
             "a prompt mostly past the hot rows reads every word"
         );
         let mut words =
-            DraftWords::for_prompt(100, &[1, 2, 3, 150, 150, 4, 5]).expect("mostly hot");
+            DraftWords::reading(100, &[], &[1, 2, 3, 150, 150, 4, 5]).expect("mostly hot");
         assert_eq!(words.ids, vec![150], "each own word once");
         // A word already known is no miss, however often it comes.
         words.note(&[150; 60]);
@@ -13450,6 +13480,27 @@ mod local_speculation_tests {
         words.note(&(300..305).collect::<Vec<u32>>());
         assert!(words.whole, "{} new of {}", words.outside, words.committed);
         assert_eq!(words.ids.len(), 16);
+    }
+
+    /// The vocabulary's alphabet past the hot rows is read from a reply's
+    /// start and is never a new word (#428 stage 4: Gemma 4 keeps `,` and `.`
+    /// at 236,764 and 236,761). Red without it: a prompt whose punctuation
+    /// sits past the hot rows read every word, and a reply's commas counted
+    /// as new words until the hot rows were given up.
+    #[test]
+    fn the_alphabet_past_the_hot_rows_is_read_from_the_start() {
+        let alphabet = [200, 201];
+        let prompt = [200, 1, 201, 150];
+        assert!(
+            DraftWords::reading(100, &[], &prompt).is_none(),
+            "without it, three in four past the hot rows"
+        );
+        let mut words = DraftWords::reading(100, &alphabet, &prompt).expect("the alphabet read");
+        assert_eq!(words.ids, vec![200, 201, 150], "the alphabet first");
+        assert_eq!(words.own(), 1);
+        words.note(&[200, 201, 2, 3].repeat(15));
+        assert_eq!((words.committed, words.outside), (60, 0));
+        assert!(!words.whole);
     }
 
     /// An open reply: little in it repeats the prompt, so the n-gram finds

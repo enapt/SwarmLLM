@@ -9089,6 +9089,24 @@ id 32,768 (`,` 236764, `.` 236761; `▁the` 506), so the processor's hot rows (`
 every punctuation mark and digit the conversation has not used yet. Every word read kept 0.96 against 0.85
 on the chat story, one run each.
 
+**So a reply's guesses read the vocabulary's alphabet past the hot rows from its start** (`mtp::alphabet_past`,
+built only by `DraftWords::for_prompt(model, …)`, 2026-11-16). Tokenizing the two replies with the file's merges
+(an approximate BPE that gave the story's 96 tokens exactly, `~/swarmllm-gate/deep/gemma4_dflash/bpe_past_hot.py`):
+33% of the story's tokens and 20% of the code's sat past the hot rows, and one-character tokens were 15 of 32 and
+15 of 19 of them (`,` eight times in the story; `(` `)` `:` `{` `_` `$` `n` `I` in the code). The alphabet is the
+one-character printable ASCII and general punctuation (U+2010-U+2027, U+2030-U+205E): 158 rows on Gemma 4, none
+past the hot rows on a byte-level vocabulary (Qwen, Llama 3 keep it in the first 256). It counts as known, so it
+is never a "new word" toward the one-in-six rule, and not toward `DRAFT_MOST_OWN_WORDS`. Same rig, same build:
+
+| Reply (12B Q4_K_M, processor, 96 tokens, every round) | hot rows only | + the alphabet | every word read |
+|---|---|---|---|
+| chat code: kept a block / rounds / guess cost | 2.16 / 31 / 132 ms | **3.71** / 21 / 126 ms | 3.71 / 21 / 280 ms |
+| chat story: kept a block / rounds / guess cost | 0.85 / 52 / 294 ms | 0.92 / 50 / 272 ms | 0.96 / 49 / 295 ms |
+
+The story's own words (`▁bracing`, `▁brine`, `▁jagged` …) still leave the hot rows more than one in six, so it reads
+every word from its 48th token either way (hence the cost); the code keeps every word's acceptance at the hot rows'
+price. Every reply equalled the one read one token at a time. `~/swarmllm-gate/deep/gemma4_dflash/alpha_runs.sh`.
+
 **On a split** (`examples/split_rig.sh split`, the same 12B: A holds parts 0-3 = layers [0,13) and the drafter,
 B the other 35 layers, both on the processor, 130 ms over netns, 96 greedy tokens, ON then OFF in one dev
 build, one run each, `~/swarmllm-gate/deep/gemma4_dflash/rig_{1_on,2_off}`). A logged `The model's head is its

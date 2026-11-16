@@ -4304,11 +4304,16 @@ whole on the processor (12B Q4_K_M, greedy, 96 tokens): kept a block 0.79 / 0.85
 code) against llama.cpp `draft-dflash`'s 0.79 / 0.78 / 2.64 on the same text, every reply exact. **Prior art**:
 llama.cpp PR #29802 (`2b36825`) measured the Gemma scale (26B-A4B: 3.77 → 4.38 kept a block) and its converter writes
 it; z-lab's `_raw_input_embeddings` defaults to 1.0 and is not followed; llama.cpp's Gemma loader duplicates
-`token_embd` as `output`, which is the lend. **Left in stage 4**: (a) Gemma's vocabulary puts its one-character tokens
-at the END (`,` 236764, `.` 236761), past the processor's 32,768 hot rows, which assume a merge-ordered vocabulary;
-every word read kept 0.96 against 0.85 on the chat story (one run each). Its merge list is no frequency order either
-(the first merges join runs of 30 newlines), so the candidates are the one-character tokens beside the first rows, or
-ranks taken from this node's own replies — measured against every word read before either is chosen. (b) On the processor the priced loop checks one full block a
+`token_embd` as `output`, which is the lend. **(a) Built 2026-11-16 (~21:45Z, branch `gemma4-drafter-428`)**: Gemma's
+vocabulary keeps its whole alphabet at the END (all 94 printable ASCII characters at 236,744-236,995), past the
+processor's 32,768 hot rows, which assume a byte-level vocabulary's order. A reply's guesses now read the alphabet past
+the hot rows from its start (`mtp::alphabet_past`: one-character ASCII and punctuation, 158 rows on Gemma 4, none on
+Qwen or Llama 3), and it is never a new word. Chat code kept 2.16 → **3.71** a block, the same as every word read (3.71) at
+the hot rows' guess cost (126 against 280 ms); the chat story 0.85 → 0.92 (every word 0.96): its own rare words leave
+the hot rows more than one in six, so it reads every word after 48 tokens either way. Replies exact. **Prior art**:
+FR-Spec (ACL 2025) drafts over a frequency-ranked vocabulary subset; Gemma's file states no frequencies (scores all
+-1000, merges start with runs of newlines), and the alphabet is the part every text needs. Ranks from this node's own
+replies were the other candidate, not needed for code. (b) On the processor the priced loop checks one full block a
 reply before it sets the block aside (~5 s at 96 tokens in a debug build, a 16-wide check costing ~8.5 steps). Probe
 with a narrower block, and measure on a release build before deciding. A Gemma model on a processor-only computer
 fetches the drafter (no guess head to prefer), so this is that computer's whole cost. On the split rig (A [0,13) +
