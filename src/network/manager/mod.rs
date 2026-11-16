@@ -529,6 +529,9 @@ pub struct NetworkManager {
     /// latch even when it closes with no address — a reservation that never
     /// landed (#464).
     relay_listener: Option<libp2p::core::transport::ListenerId>,
+    /// Address candidates already logged — what peers report seeing us at,
+    /// which is what DCUtR offers a hole-punch partner (#466). Bounded.
+    seen_candidates: std::collections::HashSet<Multiaddr>,
     /// Whether we have already explained that relaying is off by configuration.
     /// `try_activate_relay` is called repeatedly, and the consequence is worth
     /// stating once rather than every time.
@@ -1083,6 +1086,7 @@ impl NetworkManager {
             buffered_gossip: Vec::new(),
             relay_activated: false,
             relay_listener: None,
+            seen_candidates: std::collections::HashSet::new(),
             relay_disabled_explained: false,
             last_relay_attempt: None,
             pending_tensor_outbound: HashMap::new(),
@@ -1989,6 +1993,9 @@ impl NetworkManager {
                         );
                     }
                     self.last_reached.prune(std::time::Instant::now());
+                    // Our confirmed direct addresses stay among the candidates
+                    // DCUtR sends first (#466, `relay::offer_for_hole_punch`).
+                    self.offer_our_addresses_for_hole_punch();
                     // The relay is re-armed here: after a lost circuit (relay
                     // restart, lapsed reservation — `note_relay_circuit_lost`
                     // clears the latch), and as the fallback for a node AutoNAT

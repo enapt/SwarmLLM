@@ -232,6 +232,15 @@ A computer that cannot be dialled comes back only by dialling the addresses it h
 
 → `docs/invariants/network.md` § "Every node keeps a home relay, reachable or not"
 
+## A hole punch offers our confirmed addresses, handed straight to DCUtR (2026-11-16, #466)
+
+DCUtR's `CONNECT` carries only address CANDIDATES, and libp2p-swarm drops a candidate that is already confirmed — so a
+UPnP-mapped or declared address never reached a hole-punch partner, and a peer that met a reachable node by relay
+stayed there. `offer_our_addresses_for_hole_punch` hands each confirmed direct internet address
+(`relay::offer_for_hole_punch`) to DCUtR's own `on_swarm_event`, on confirmation and every liveness tick. **Never raise
+it as a swarm candidate** — dropped silently (gotcha #1122). → `docs/invariants/network.md` § "A hole punch offers our
+confirmed addresses, handed straight to DCUtR"
+
 ## "Is this connection direct?" — `network::relay::addr_is_direct_transport`
 
 **`network::relay::addr_is_direct_transport`** is the single answer, for both layers that choose a connection: a real `/ip4`, `/ip6` or `/dns*` hop AND no circuit. `is_relay_circuit_addr` alone misses the listener's view; the vendored request-response inbound handler records the send-back address. `peer_direct_conns` is gated on it; any new "prefer direct" logic uses it (gotchas #356, #179). Keep the loop-stall tripwire in `NetworkManager::run`.

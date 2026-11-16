@@ -184,6 +184,22 @@ pub(crate) fn is_relay_circuit_addr(addr: &Multiaddr) -> bool {
         .any(|p| matches!(p, libp2p::multiaddr::Protocol::P2pCircuit))
 }
 
+/// Whether a confirmed external address of ours goes to a hole-punch partner
+/// (#466): direct — no relay circuit — and reachable from the internet (a
+/// public IP or a DNS name; never a LAN, CGNAT or Tailscale address).
+///
+/// DCUtR's `CONNECT` carries address CANDIDATES only — what peers reported
+/// seeing us at (libp2p-dcutr 0.12 changelog: "exchange address candidates
+/// instead of external addresses"; 0.14.1 `behaviour.rs` `observed_addresses`)
+/// — so a port UPnP forwarded, or one the config declares, reached the far
+/// side only if a peer happened to observe us on exactly that port. A computer
+/// that cannot be dialled then dialled ports that drop it, and stayed on the
+/// relay. Prior art: go-libp2p's hole punch offers the host's own public
+/// addresses, the NAT-mapped ones included.
+pub(crate) fn offer_for_hole_punch(addr: &Multiaddr) -> bool {
+    !is_relay_circuit_addr(addr) && crate::pool::invite::multiaddr_is_internet_reachable(addr)
+}
+
 /// Does this address describe a real, direct transport path to the peer?
 ///
 /// True only when it carries a concrete network hop (`/ip4`, `/ip6`, `/dns*`)
@@ -394,6 +410,68 @@ mod tests {
         assert!(
             events.contains("let ours = self.relay_listener == Some(listener_id);"),
             "a relay listener that closes with no address no longer clears the latch"
+        );
+    }
+
+    #[test]
+    fn a_hole_punch_partner_is_offered_our_direct_internet_addresses_only() {
+        let offered = |a: &str| offer_for_hole_punch(&a.parse::<Multiaddr>().unwrap());
+        assert!(
+            offered("/ip4/171.97.115.249/udp/8800/quic-v1"),
+            "a UPnP-mapped public address"
+        );
+        assert!(offered("/ip4/171.97.115.249/tcp/8810"));
+        assert!(
+            offered("/dns4/node.example/tcp/8810"),
+            "a declared DNS name"
+        );
+        let relay = PeerId::random();
+        assert!(
+            !offered(&format!(
+                "/dns4/relay.example/tcp/8810/p2p/{relay}/p2p-circuit"
+            )),
+            "a relay circuit is not a direct address, though its relay has a DNS name"
+        );
+        assert!(
+            !offered("/ip4/192.168.0.146/udp/8800/quic-v1"),
+            "a LAN address"
+        );
+        assert!(
+            !offered("/ip4/100.70.76.52/udp/8800/quic-v1"),
+            "a Tailscale address"
+        );
+        assert!(
+            !offered("/ip4/172.17.0.1/udp/8800/quic-v1"),
+            "a Docker bridge"
+        );
+    }
+
+    #[test]
+    fn our_confirmed_addresses_reach_the_hole_punch_and_stay_fresh() {
+        // Offered when confirmed AND on every liveness tick — DCUtR keeps the
+        // 20 most recently reported candidates and sends them in that order,
+        // so an address offered once falls behind peers' steady reports.
+        let events = include_str!("manager/events.rs");
+        assert!(
+            events.contains("self.offer_our_addresses_for_hole_punch();"),
+            "a newly confirmed address no longer reaches DCUtR's candidates"
+        );
+        let mod_rs = include_str!("manager/mod.rs");
+        assert!(
+            mod_rs.contains("self.offer_our_addresses_for_hole_punch();"),
+            "the liveness tick no longer refreshes our hole-punch candidates"
+        );
+        // Straight to DCUtR: raised through the swarm, a confirmed address is
+        // dropped before any behaviour sees it (libp2p-swarm 0.47.1) — the first
+        // build of this fix did exactly that, and its unit test passed.
+        assert!(
+            events.contains(".dcutr.on_swarm_event(")
+                && events.contains("libp2p::swarm::FromSwarm::NewExternalAddrCandidate("),
+            "our addresses no longer go straight to DCUtR"
+        );
+        assert!(
+            !events.contains("ToSwarm::NewExternalAddrCandidate"),
+            "a confirmed address raised as a swarm candidate is dropped by the swarm"
         );
     }
 

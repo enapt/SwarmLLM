@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #466**). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #467**). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -6932,7 +6932,21 @@ Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
 
-**Closed 2026-11-16 (on main, for the next release)** (#464)
+**Closed 2026-11-16 (on main, for the next release)** (#464, #466)
+- #466 — **A computer that met a directly reachable node through a relay stayed on the relay: the hole punch
+  offered it only a LAN address.** DCUtR's `CONNECT` carries address CANDIDATES (what peers report seeing us at,
+  libp2p-dcutr 0.12 changelog), and libp2p-swarm 0.47.1 drops a candidate that is already a CONFIRMED address. UPnP
+  confirmed this node's public address at startup, before any peer reported it, so every report of it was dropped
+  and DCUtR held one candidate, a LAN peer's view (`/ip4/192.168.1.53/udp/8800/quic-v1`). The Australian peer, on our
+  relay 50 minutes (13:50 → 14:35Z, 505 ms against ~130 direct), had a failed punch and nothing it could dial. Now
+  every confirmed direct internet address (`relay::offer_for_hole_punch`) goes STRAIGHT to DCUtR (`on_swarm_event`,
+  the swarm's filter skipped) when confirmed and on every liveness tick, which keeps it among the 20 newest candidates
+  DCUtR sends first; a DIAG line names each one offered. Older peers benefit at once: only the reachable side's
+  `CONNECT` changes. The first build raised them as swarm candidates, which the swarm dropped; its unit test passed
+  (gotcha #1122). Prior art: go-libp2p's hole punch offers the host's own public addresses, NAT-mapped included.
+  Residual: a peer reached only by relay whose reachable side runs an older release still waits on DCUtR; dialling a
+  relayed peer's advertised public address directly (go-libp2p's limited-connection redial, Syncthing's upgrade loop)
+  would close that — not built.
 - #464 — **A computer that could not be dialled lost its way back to a node that became directly reachable.** The
   Australian peer, dialable by no one since its address began changing (11-16 ~01:38Z), reached this node only
   through its relay circuit. After a restart in which UPnP worked, this node reserved no relay (only AutoNAT's

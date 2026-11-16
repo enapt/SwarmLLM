@@ -1121,6 +1121,17 @@ impl NetworkManager {
                     .kademlia
                     .set_mode(Some(libp2p::kad::Mode::Server));
                 self.refresh_listen_multiaddrs();
+                self.offer_our_addresses_for_hole_punch();
+            }
+
+            // What peers report seeing us at: with our own confirmed addresses,
+            // the whole list DCUtR offers a hole-punch partner (#466). Each one
+            // once, bounded — it decides whether a punch can work at all, and
+            // nothing else shows it.
+            SwarmEvent::NewExternalAddrCandidate { address } => {
+                if self.seen_candidates.len() < 64 && self.seen_candidates.insert(address.clone()) {
+                    tracing::info!(%address, "DIAG: new hole-punch candidate for this node");
+                }
             }
 
             // The other half: an address that stops being external must lower
@@ -1267,6 +1278,43 @@ impl NetworkManager {
             tracing::warn!(
                 "No relay peers accepted yet — will retry; node may be unreachable meanwhile"
             );
+        }
+    }
+
+    /// Hand every confirmed direct internet address of ours to DCUtR as a
+    /// hole-punch candidate (#466, `relay::offer_for_hole_punch`): a computer
+    /// that met us through a relay then dials a port that lets it in, not only
+    /// the ports peers happened to see. Called when an address is confirmed
+    /// and on every liveness tick — DCUtR sends its 20 most recently reported
+    /// candidates, newest first, and peers report theirs all the time.
+    ///
+    /// ⚠ Straight to DCUtR, never raised as a candidate through the swarm:
+    /// libp2p-swarm 0.47.1 DROPS a candidate that is already confirmed
+    /// (`lib.rs`, `if !self.confirmed_external_addr.contains(&addr)`) — ours by
+    /// definition, and every peer's report of it too. Seen 2026-11-16: UPnP
+    /// confirmed our public address at startup, so DCUtR held only a LAN
+    /// address, and the Australian peer, on our relay for 50 minutes, was
+    /// handed nothing it could dial. Only DCUtR reads a candidate for this.
+    pub(super) fn offer_our_addresses_for_hole_punch(&mut self) {
+        use libp2p::swarm::NetworkBehaviour as _;
+        if !self.swarm.behaviour().dcutr.is_enabled() {
+            return;
+        }
+        let ours: Vec<Multiaddr> = self
+            .swarm
+            .external_addresses()
+            .filter(|a| crate::network::relay::offer_for_hole_punch(a))
+            .cloned()
+            .collect();
+        for addr in &ours {
+            self.swarm.behaviour_mut().dcutr.on_swarm_event(
+                libp2p::swarm::FromSwarm::NewExternalAddrCandidate(
+                    libp2p::swarm::NewExternalAddrCandidate { addr },
+                ),
+            );
+            if self.seen_candidates.len() < 64 && self.seen_candidates.insert(addr.clone()) {
+                tracing::info!(address = %addr, "DIAG: hole punches now offer this confirmed address");
+            }
         }
     }
 

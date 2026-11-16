@@ -5771,6 +5771,42 @@ tick's re-arm or the listener-id reset brings a failure back
 `a_bootstrap_entry_names_its_relay_and_never_this_node` the one reading of a
 bootstrap entry as a relay.
 
+## A hole punch offers our confirmed addresses, handed straight to DCUtR (2026-11-16, FUTURE_WORK #466)
+
+**Seen.** The Australian peer reached this node through its home relay (#464) at 13:50:39Z and stayed there 50
+minutes at 505 ms (direct it runs ~130 ms); the hole punch failed at 13:50:56 ("Giving up after 3 dial attempts").
+This node was directly reachable the whole time — UPnP had mapped `171.97.115.249` TCP 8810 and UDP 8800, and the
+India peer dialled that address directly at 13:05. The upgrade off a relay is DCUtR's job, and DCUtR had nothing
+to hand Australia that it could dial.
+
+**Why.** DCUtR's `CONNECT` carries address CANDIDATES only — what peers report seeing us at — never confirmed
+external addresses (libp2p-dcutr 0.12 changelog: "exchange address candidates instead of external addresses";
+0.14.1 `behaviour.rs`, `observed_addresses` = the `Candidates` LRU of 20, fed by `FromSwarm::NewExternalAddrCandidate`).
+And libp2p-swarm 0.47.1 forwards a candidate to the behaviours only if it is NOT already confirmed (`lib.rs`,
+`ToSwarm::NewExternalAddrCandidate` → `if !self.confirmed_external_addr.contains(&addr)`). UPnP confirmed the public
+address at startup, before any peer reported it, so every later report of it was dropped: the one candidate logged
+after the restart at 14:35Z was a LAN peer's view, `/ip4/192.168.1.53/udp/8800/quic-v1`. The better a node's
+reachability, the worse its hole-punch offer. A peer whose NAT will not punch (Australia's: 2 of ~12 punches
+succeeded on 11-16, before and after UPnP) had no way off the relay but a reconnect.
+
+**The rule.** `offer_our_addresses_for_hole_punch` hands every confirmed direct internet address
+(`relay::offer_for_hole_punch`: no circuit, a public IP or a DNS name) to DCUtR by calling its `on_swarm_event` with a
+`FromSwarm::NewExternalAddrCandidate` — past the swarm's filter — when an address is confirmed and on every liveness
+tick (30 s), so it stays among the 20 newest candidates, which DCUtR sends first. Only the reachable side's `CONNECT`
+changes, so a peer on an older release dials it at once. A DIAG line names each address offered; another names each
+candidate peers report, the rest of the list.
+
+**Prior art.** go-libp2p's hole punch offers the host's own public addresses, NAT-mapped ones included; rust-libp2p's
+switch to candidates (0.12) was for nodes with no confirmed address, where an observed one is the best guess.
+
+**The first build was a no-op its unit test passed.** It raised the addresses through a small behaviour
+(`ToSwarm::NewExternalAddrCandidate`); the swarm dropped every one, and the test checked only that the behaviour
+emitted them. The live run showed it: no offered address in the candidate log. Gotcha #1122.
+
+**What a change must keep.** Handing the addresses to DCUtR directly, on confirmation and on the tick
+(`our_confirmed_addresses_reach_the_hole_punch_and_stay_fresh`, which also refuses the swarm route), and the
+predicate (`a_hole_punch_partner_is_offered_our_direct_internet_addresses_only`).
+
 ## ACK-Timeout Fast-Fail for rr Sends
 
 `SendDirectMessage` carries `delivery_request_id: Option<uuid::Uuid>`.
