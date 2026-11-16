@@ -1,5 +1,51 @@
 # Changelog
 
+## [0.3.292-alpha] — 2026-11-16
+
+**A split model shared with a computer that has it loaded is planned where its layers actually run.** A computer that
+already has a model loaded across its graphics card and its processor serves a slice of it from that copy, and each of
+those layers runs where the copy put it. The planner counted the slice's card layers from the slice's own start, so a
+slice past the card read as running on it. Between this laptop and a 12 GB card abroad, Qwen3.8 27B split that way ran
+at 2.5-3.1 tokens a second, against 5.2-5.7 handed over whole. A slice of a loaded copy is now priced at that copy's
+placement, so the planner hands the model over there. `SWARMLLM_SLICE_PLACEMENT=start` brings the old pricing back.
+
+**Splits of Qwen 3.5-family models are priced for the words their own guess head writes.** Qwen3.6 and Qwen3.8 (27B,
+35B-A3B) take no separate drafter, so a split of one was priced at one word a round even where the file's own guess
+head drafts beside the first part (2.2-3.3 words a round measured). Such a split now starts from the same prior as
+other models' splits, where this computer holds the guess head's part and the model's first layers.
+
+**A split's first part, and every size of a tree of guesses, is made ready on the graphics card before a reply
+needs it.** While a model sits idle on a card, the computer prepares each step shape a reply may use, so no reply
+waits for one. It did that for a model run whole, but not for the first part of a model split across computers, and
+for no size of the trees of guesses a split checks. Each of those was prepared inside a reply the first time it was
+met: 0.3 to 1 second each on a card other programs held 2.8 GB of, about 0.8 seconds of a 4-5 second reply on the
+14B shared with Australia. Now an idle first part prepares every one of them too. The part of a split on another
+computer still prepares its shapes during its first reply (#357).
+
+**A model split with a computer about 110-120 ms away keeps its fastest way of guessing.** When a model is split
+and the far computer has a graphics card, a small helper's guesses flow there continuously, which on the
+Thailand-Australia link writes code at 41-45 tokens a second and prose at 17.6-19.9, against 33-34 and 14-15 for the
+older way of sending guesses in batches. The faster way was used only from 120 ms of round trip, and that link
+measures anywhere from 115 to 133 ms over a day, so some replies went the slower way by chance. Neither way
+slows down across that range, and the flowing one stays about 30% ahead throughout, so the line is now 110 ms
+(#411).
+
+**A split asked in the first seconds after a start uses its helper model.** A computer lists the models it holds a
+couple of seconds after it starts, and a split asked before that found no small helper model to guess with, so its
+whole reply was written one word at a time: 5.8 tokens a second against 34-45 on the 14B shared with Australia. That
+was the first request after any restart, an automatic update's included, that landed in those seconds. A request
+now waits for the list, at most 10 seconds and only after a start, and the list itself takes a fraction of a
+second: it asked the graphics card about every model the network had named, not only the ones this computer
+holds (1.75 seconds for 40 of them; now 0.17 seconds) (#460).
+
+**A computer asked for a few more layers of a model it is already running keeps them on its graphics card.** The
+part of a split model a computer runs can widen between two requests, for instance when room is left for the small
+helper model that guesses ahead. A computer asked for such a wider range sized it against the card's room beside
+the range it was already running, though that range is let go a moment later, so most of the wider one landed on
+the processor: on the 14B shared with Australia 4 of 26 layers stayed on the card here and the reply ran at 7.6
+tokens a second. When nothing else is using the model at that moment, the computer now loads the wider range
+afresh on a card read after the old range is gone: 35 tokens a second in the same check (#461).
+
 ## [0.3.291-alpha] — 2026-11-15
 
 **A long prompt no longer takes minutes to its first word on an 8 GB graphics card.** Since 0.3.290, a request
