@@ -36,8 +36,10 @@ pub struct NetworkConfig {
     pub peer_exchange: bool,
     #[serde(default = "default_true")]
     pub enable_relay: bool,
-    /// Whether this node may route its OWN traffic through someone else's relay
-    /// when it is not directly reachable.
+    /// Whether this node may route its OWN traffic through someone else's relay:
+    /// its only way in when it is not directly reachable, and its home relay
+    /// when it is — a computer that knows it only by its relay address still
+    /// reaches it, and the connection then goes direct (#464).
     ///
     /// Distinct from [`NetworkConfig::enable_relay`], which is the opposite
     /// role: whether this node relays for OTHERS. Turning this off keeps the
@@ -63,7 +65,10 @@ pub struct NetworkConfig {
     /// Maximum number of relay circuits this node will serve simultaneously.
     #[serde(default = "default_relay_max_circuits")]
     pub relay_max_circuits: usize,
-    /// Automatically activate relay listener when NAT is detected as Private.
+    /// Hold a relay listener automatically: from startup as this node's home
+    /// relay, reachable or not, so a computer that knows it only by its relay
+    /// address can still reach it (#464); at once when AutoNAT finds it
+    /// unreachable.
     #[serde(default = "default_true")]
     pub auto_relay: bool,
     /// NETWORKING_PLAN Phase 1 — forward *inference* messages between two peers

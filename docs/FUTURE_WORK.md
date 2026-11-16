@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #464**). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #466**). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -1701,6 +1701,25 @@ are. Either way a capability is a peer's claim, so it may add a holder for plann
 remove one. Measure the newcomer's first-plan delay before and after.
 
 ### Network and transport
+
+#### #465 — A computer that lost a peer never looks up the peer's new address; peer exchange is the only way one arrives
+`P3` · network · **OPEN** — 2026-11-16 · evidence: `docs/invariants/network.md` § "Every node keeps a home relay, reachable or not"
+
+**Seen** (2026-11-16, the home relay's incident, #464): a node that lost us redials only the addresses it already
+holds (2-5 s, +5, +15, +45, +120, +300 s, then "treating it as departed", `connections.rs`), and its five-minute
+discovery tick dials the same ones from its peer cache. Kademlia never looks a lost peer up (only a chained run's
+next hop does, `commands.rs` `DialError::NoAddresses`), identify does not push a new address
+(`push_listen_addr_updates` off), and peer exchange — the one way a new address arrives — answers with at most 20
+addresses across ALL the answerer's peers (`requests.rs`, `.take(20)`), so through the anchor, which knows everyone, a
+given node is listed by luck. India came back after 14 minutes. The home relay (#464) closes the case where the peer
+knew our relay address; this one stays where it did not (a peer that knew only a direct address that has since
+changed — a new public IP or UPnP port — and cannot itself be dialled).
+
+**Prior art**: go-libp2p's routed host looks a peer up in the DHT (`FindPeer`) when it has no address to dial; the
+lookup here would ask Kademlia `get_closest_peers(peer)` once its known addresses fail, rationed like the next-hop
+lookup (`MAX_NEXT_HOP_LOOKUPS`, `next_hop_misses`), dialling only the public addresses returned. A reachable node is
+in its server-mode neighbours' tables with its current address, so the answer is fresh. Also worth weighing: a PEX
+answer that rotates which peers it lists, so every peer is eventually named.
 
 #### #155 — AutoNAT redials a peer this node is already connected to, and the per-peer cap denies it, every ~5 s
 `P3` · network · **PARTIAL** — 2026-10-02, narrowed 2026-10-07, recurred 2026-10-30/31, **cause found and fixed 2026-11-02** (field check left) · history: archive row #155, gotcha #774, #1020
@@ -6912,6 +6931,17 @@ archive under the named heading. Reopen one only with the evidence its line name
 Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 19-28 were
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
+
+**Closed 2026-11-16 (on main, for the next release)** (#464)
+- #464 — **A computer that could not be dialled lost its way back to a node that became directly reachable.** The
+  Australian peer, dialable by no one since its address began changing (11-16 ~01:38Z), reached this node only
+  through its relay circuit. After a restart in which UPnP worked, this node reserved no relay (only AutoNAT's
+  "unreachable" or the "no reachable address" fallback did), so every redial and cache dial the peer made hit a relay
+  holding nothing: India came back after 14 minutes (by luck of a peer-exchange answer), Australia not in 20. Now
+  every node keeps a home relay from startup, reachable or not (`relay::reason_to_reserve`, `relay::HOME_RELAY`;
+  the liveness tick re-arms it after a lost circuit; never through this node itself), and the connection goes
+  direct from there. Prior art: Tailscale's DERP-first connections, Syncthing's relay listener beside its direct
+  ones. Residual: #465 (a lost peer's new address is never looked up).
 
 **Closed 2026-11-16 (v0.3.293-alpha)** (#463; #458's double head — the entry keeps its residual)
 - #458 (its seen cause) — **A computer running both ends of a split kept two copies of the model's output layer, and

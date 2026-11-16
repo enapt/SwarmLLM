@@ -1172,16 +1172,19 @@ impl NetworkManager {
         );
     }
 
-    /// Reserve a relay circuit on a bootstrap peer so a node that isn't directly
-    /// reachable (NAT/CGNAT) can still receive inbound connections.
+    /// Reserve a relay circuit on a bootstrap peer: the only way in for a node
+    /// that isn't directly reachable (NAT/CGNAT), and every other node's HOME
+    /// relay (#464, `relay::reason_to_reserve`) — a peer that knows it only by
+    /// its relay address still reaches it, then goes direct.
     ///
-    /// Called from two places: the AutoNAT v2 client's "address not reachable"
-    /// result (primary), and a startup fallback timer in the run loop (in case
-    /// AutoNAT never gets a conclusive answer — e.g. no AutoNAT servers reachable).
+    /// Called from three places: the startup (the home relay), the AutoNAT v2
+    /// client's "address not reachable" result, and the liveness tick (re-arms
+    /// after a lost circuit; the fallback when AutoNAT never answers).
     /// Idempotent: latches `relay_activated` once a relay listen succeeds, and
     /// rate-limits attempts to at most once per `RELAY_RETRY_MIN_SECS` until then,
     /// so repeated triggers don't spam `listen_on`. No-op when `auto_relay` is off
-    /// or there are no bootstrap peers to relay through.
+    /// or there are no bootstrap peers to relay through; never relays through
+    /// this node itself (an anchor lists its own address).
     pub(super) fn try_activate_relay(&mut self, reason: &str) {
         if self.relay_activated || !self.shared_state.config.network.auto_relay {
             return;
@@ -1216,10 +1219,7 @@ impl NetworkManager {
             return; // nothing publicly-reachable to relay through
         }
         self.last_relay_attempt = Some(now);
-        tracing::info!(
-            reason,
-            "Activating relay listener (node not directly reachable)"
-        );
+        tracing::info!(reason, "Activating relay listener");
         let mut relayed = false;
         for addr_str in &bootstrap_addrs {
             let Ok(maddr) = addr_str.parse::<Multiaddr>() else {
@@ -1231,6 +1231,9 @@ impl NetworkManager {
             }) else {
                 continue;
             };
+            if relay_pid == *self.swarm.local_peer_id() {
+                continue; // an anchor's bootstrap list names itself
+            }
             // Relay-listen address without the trailing /p2p component.
             let base: Multiaddr = maddr
                 .iter()

@@ -5692,6 +5692,65 @@ server with a public address of its own needs no UPnP, and would otherwise be to
 does not have before AutoNAT confirmed it. A mapping is never advice — the next reachability check
 settles it. Test `the_verdict_names_what_stands_in_the_way`.
 
+## Every node keeps a home relay, reachable or not (2026-11-16, FUTURE_WORK #464)
+
+**Seen.** On 11-15 01:31Z the home router restarted and its UPnP service stopped
+answering, so this node lived on the anchor's relay for a day. Separately,
+from ~11-16 01:38Z the Australian peer `aa3d1e66` stopped being dialable: its
+public address kept changing (60.242.52.163 → 194.223.44.41 → 115.166.3.89) and it
+advertised no public address and held no relay reservation. Until then this node
+had dialled it direct at `60.242.52.163:8800` within 1-4 s of every start (17 starts
+on 11-15 18:54-22:13Z, UPnP broken or not); from then it came only by dialling
+OUR relay circuit, 51-252 s after a start. When the router was fixed (12:08Z
+11-16) and this node restarted (12:11Z), UPnP mapped at once, AutoNAT never
+reported an address unreachable, and so nothing reserved a relay — the only
+trigger was AutoNAT's "unreachable" or the 45 s fallback's "no internet-reachable
+address". India `bdd389de`, also relay-only that morning, came back after 846 s
+(direct-in: it dialled the new public address), and Australia had not come back
+20 min later. The US peer dialled the new public address within 3 min, so the
+address itself was reachable.
+
+**Why they could not come back.** A computer that cannot be dialled reconnects
+only by dialling us, at addresses it already holds (code map, 2026-11-16):
+
+- its redial queue dials the addresses it had — ours were the relay circuit's —
+  at 2-5 s, then +5, +15, +45, +120, +300 s, and gives up ("treating it as
+  departed", `connections.rs`);
+- its discovery tick (300 s) dials its peer cache: the same addresses;
+- Kademlia never looks a lost peer up (only a chained run's next hop does);
+- identify does not push a new address (`push_listen_addr_updates` is off), and
+  reaches only connected peers anyway;
+- peer exchange is the one way a new address arrives — through a third node
+  connected to both, within that node's 20-address answer across ALL its peers
+  (`requests.rs`, `.take(20)`). An anchor knows everybody, so a given node is in
+  its answer by luck. India's 14 minutes were that luck.
+
+**The rule.** Every node reserves a relay at startup (`relay::HOME_RELAY`) and
+re-arms it on the liveness tick after a lost circuit, whether or not it is
+directly reachable (`relay::reason_to_reserve`; an anchor that is reachable
+keeps none). A peer that knows us only by the relay then gets in at its next
+redial, and the connection goes direct: this node is the relayed listener, so
+it starts DCUtR, and the far side can always dial a public node. The dashboard's
+"direct" stays true: `publicly_reachable` counts no circuit address
+(`multiaddr_is_public_relay_candidate`).
+
+**Prior art.** Tailscale starts every connection on DERP and upgrades it to
+direct; Syncthing announces its relay listener beside its direct listeners and
+replaces a relayed connection when a direct one lands ("connects first over
+relay and half a second later … replaced connection"). go-libp2p's AutoRelay
+reserves only while private, because its peers re-find a public node through
+the DHT (the routed host's `FindPeer` when it has no address) — ours find a
+lost peer only by the addresses they hold, which is FUTURE_WORK #465.
+
+**Cost.** One reservation per node on the anchor (128 allowed,
+`RelayServerConfig`); a circuit carries data only until the direct connection
+lands, and request-response prefers a direct connection over a circuit
+(`addr_is_direct_transport`, gotcha #164).
+
+**What a change must keep.** Removing the startup reservation or the tick's
+re-arm brings the failure back (`the_home_relay_is_reserved_at_startup_and_re_armed_on_the_tick`);
+`a_directly_reachable_node_still_keeps_a_home_relay` pins the decision.
+
 ## ACK-Timeout Fast-Fail for rr Sends
 
 `SendDirectMessage` carries `delivery_request_id: Option<uuid::Uuid>`.

@@ -89,10 +89,58 @@ pub fn build_relay_server_config(config: &RelayServerConfig) -> libp2p::relay::C
     }
 }
 
+/// The reason a directly reachable node gives for reserving a relay anyway.
+pub(crate) const HOME_RELAY: &str =
+    "keep a home relay, so a computer that knows this node only by its relay address can still reach it";
+
+/// The reason a node with no internet-reachable address gives.
+pub(crate) const NOT_REACHABLE: &str = "no internet-reachable address after startup";
+
+/// Whether this node should reserve a relay now, and why — `None` when not.
+///
+/// **Every node keeps a HOME relay, directly reachable or not (2026-11-16, #464).**
+/// A computer that cannot be dialled (no public address, no relay of its own —
+/// the Australian peer since its address began changing) reconnects only by
+/// dialling US, at the addresses it already holds. It met this node through
+/// the relay, so those were the relay's. After a restart in which UPnP worked,
+/// this node reserved nothing — only AutoNAT's "unreachable" did — and that
+/// computer's redials (5 s → 300 s, then given up) and its five-minute cache
+/// dial all hit a relay holding no reservation: India came back after 14
+/// minutes, by luck of a third node's 20-address peer list, and Australia not
+/// at all. With a home relay the address it holds keeps working, and the
+/// connection goes direct from there (DCUtR: this node, the relayed listener,
+/// starts the upgrade, and the far side can always dial a public node).
+///
+/// Prior art: Tailscale starts every connection on DERP and upgrades it to
+/// direct; Syncthing announces its relay listener beside its direct ones and
+/// replaces a relayed connection when a direct one lands. go-libp2p's AutoRelay
+/// reserves only while private, because its peers re-find a public node
+/// through the DHT — ours find a lost peer only by the addresses they already
+/// hold (#465).
+///
+/// An anchor is a relay and everyone's bootstrap address, so a reachable one
+/// keeps none; an unreachable one reserves as before.
+pub(crate) fn reason_to_reserve(
+    already_reserved: bool,
+    anchor_mode: bool,
+    reachable: bool,
+) -> Option<&'static str> {
+    if already_reserved {
+        None
+    } else if !reachable {
+        Some(NOT_REACHABLE)
+    } else if anchor_mode {
+        None
+    } else {
+        Some(HOME_RELAY)
+    }
+}
+
 /// Generate the relay listener address for connecting through a relay peer.
 ///
-/// NAT'd nodes call this to establish a relayed listen address, allowing
-/// other peers to reach them through the relay.
+/// A node calls this to establish a relayed listen address — its only way in
+/// when it is not directly reachable, its home relay when it is
+/// ([`reason_to_reserve`]).
 pub fn relay_listen_addr(relay_peer_id: &PeerId, relay_addr: &Multiaddr) -> Multiaddr {
     relay_addr
         .clone()
@@ -285,36 +333,40 @@ mod tests {
     }
 
     #[test]
-    fn auto_relay_once_per_session_flag() {
-        // Simulate the relay_activated flag behavior
-        let mut relay_activated = false;
-        let auto_relay = true;
-        let nat_private = true;
-
-        // First activation should trigger
-        if nat_private && !relay_activated && auto_relay {
-            relay_activated = true;
-        }
-        assert!(relay_activated);
-
-        // Second check should NOT trigger (already activated)
-        let mut triggered_again = false;
-        if nat_private && !relay_activated && auto_relay {
-            triggered_again = true;
-        }
-        assert!(!triggered_again);
+    fn a_directly_reachable_node_still_keeps_a_home_relay() {
+        // The 2026-11-16 failure: UPnP worked, so nothing reserved, and a peer
+        // that knew this node only by its relay address never got back in.
+        assert_eq!(
+            reason_to_reserve(false, false, true),
+            Some(HOME_RELAY),
+            "a reachable node reserves too"
+        );
+        assert_eq!(reason_to_reserve(false, false, false), Some(NOT_REACHABLE));
     }
 
     #[test]
-    fn auto_relay_disabled_prevents_activation() {
-        let mut relay_activated = false;
-        let auto_relay = false;
-        let nat_private = true;
+    fn a_reservation_is_made_once_and_a_reachable_anchor_needs_none() {
+        assert_eq!(reason_to_reserve(true, false, true), None);
+        assert_eq!(reason_to_reserve(true, false, false), None);
+        // An anchor IS the relay, and every node's bootstrap address.
+        assert_eq!(reason_to_reserve(false, true, true), None);
+        // An anchor nobody can reach still needs a way in.
+        assert_eq!(reason_to_reserve(false, true, false), Some(NOT_REACHABLE));
+    }
 
-        if nat_private && !relay_activated && auto_relay {
-            relay_activated = true;
-        }
-        assert!(!relay_activated);
+    #[test]
+    fn the_home_relay_is_reserved_at_startup_and_re_armed_on_the_tick() {
+        // The startup reservation and the tick's re-arm are what make the home
+        // relay last; either one missing brings the 2026-11-16 failure back.
+        let mod_rs = include_str!("manager/mod.rs");
+        assert!(
+            mod_rs.contains("self.try_activate_relay(crate::network::relay::HOME_RELAY)"),
+            "the startup no longer reserves a home relay"
+        );
+        assert!(
+            mod_rs.contains("crate::network::relay::reason_to_reserve("),
+            "the liveness tick no longer asks reason_to_reserve"
+        );
     }
 
     #[test]
@@ -362,13 +414,13 @@ mod tests {
             "latch must clear when the circuit is lost"
         );
 
-        // Next liveness tick: latch clear + no reachable address → re-reserve.
-        let (auto_relay, reachable) = (true, false);
-        let mut re_reserved = false;
-        if !relay_activated && auto_relay && !reachable {
-            re_reserved = true;
+        // Next liveness tick: latch clear → re-reserve, reachable or not.
+        for reachable in [false, true] {
+            assert!(
+                reason_to_reserve(relay_activated, false, reachable).is_some(),
+                "recovery must re-arm after the latch clears (reachable: {reachable})"
+            );
         }
-        assert!(re_reserved, "recovery must re-arm after the latch clears");
     }
 
     #[test]

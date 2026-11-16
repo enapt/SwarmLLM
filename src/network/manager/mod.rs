@@ -521,15 +521,17 @@ pub struct NetworkManager {
     peer_to_node: DashMap<libp2p::PeerId, crate::types::NodeId>,
     /// Buffered GossipSub messages that failed to publish at startup (no peers yet).
     buffered_gossip: Vec<(String, Vec<u8>)>,
-    /// Whether relay listen has been activated for this session (at most once).
+    /// Whether this node holds a relay listener now — its home relay, kept
+    /// whether or not it is directly reachable (#464). Cleared when the circuit
+    /// is lost, so the liveness tick reserves again.
     relay_activated: bool,
     /// Whether we have already explained that relaying is off by configuration.
     /// `try_activate_relay` is called repeatedly, and the consequence is worth
     /// stating once rather than every time.
     relay_disabled_explained: bool,
     /// Last time we attempted relay activation, to rate-limit retries until one
-    /// succeeds (AutoNAT-unreachable results + the startup fallback both trigger
-    /// `try_activate_relay`).
+    /// succeeds (the startup, AutoNAT-unreachable results and the liveness tick
+    /// all trigger `try_activate_relay`).
     last_relay_attempt: Option<std::time::Instant>,
     /// The tensor forwards this node has sent and not yet seen acknowledged,
     /// by request-response id: what an `OutboundFailure`, the ACK sweep and
@@ -1716,6 +1718,14 @@ impl NetworkManager {
                 discovery::trigger_bootstrap(&mut self.swarm)?;
             }
 
+            // A home relay from the first second, before anything says whether
+            // this node is reachable (#464, `relay::reason_to_reserve`): a peer
+            // that cannot be dialled comes back only through the address it
+            // holds for us, and its first redials land seconds after we start.
+            if !config.node.anchor_mode {
+                self.try_activate_relay(crate::network::relay::HOME_RELAY);
+            }
+
             // Loopback probe: find same-host peers, which mDNS cannot on WSL2.
             // Cheap — only fires a handful of TCP dials on 127.0.0.1.
             // ⚠ UNCONDITIONAL: it runs whatever the peer cache, bootstrap list
@@ -1982,21 +1992,22 @@ impl NetworkManager {
                         );
                     }
                     self.last_reached.prune(std::time::Instant::now());
-                    // Belt-and-suspenders relay fallback: if, well after startup,
-                    // this node still has NO internet-reachable address (no public
-                    // listener, no UPnP/AutoNAT-confirmed external addr, no relay
-                    // circuit yet), reserve a relay proactively — don't wait for
-                    // AutoNAT to produce a conclusive "unreachable", which can fail
-                    // to fire if no AutoNAT servers are reachable. `try_activate_relay`
-                    // is idempotent + rate-limited and no-ops once we're reachable.
-                    if !self.relay_activated
-                        && startup_instant.elapsed().as_secs() >= RELAY_FALLBACK_DELAY_SECS
-                    {
+                    // The relay is re-armed here: after a lost circuit (relay
+                    // restart, lapsed reservation — `note_relay_circuit_lost`
+                    // clears the latch), and as the fallback for a node AutoNAT
+                    // never answers about. Reachable or not, a node keeps its
+                    // home relay (#464, `relay::reason_to_reserve`);
+                    // `try_activate_relay` is idempotent and rate-limited.
+                    if startup_instant.elapsed().as_secs() >= RELAY_FALLBACK_DELAY_SECS {
                         let reachable = crate::pool::invite::any_internet_reachable(
                             self.shared_state.listen_multiaddrs.load().as_ref(),
                         );
-                        if !reachable {
-                            self.try_activate_relay("no internet-reachable address after startup");
+                        if let Some(reason) = crate::network::relay::reason_to_reserve(
+                            self.relay_activated,
+                            self.shared_state.config.node.anchor_mode,
+                            reachable,
+                        ) {
+                            self.try_activate_relay(reason);
                         }
                     }
                 }

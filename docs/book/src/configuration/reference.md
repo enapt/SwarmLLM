@@ -67,9 +67,9 @@ value it booted with.
 | `gossip_network_id` | string | none | Put a group of nodes on their own announcement topics and their own gossip key, so they discover each other's models separately from the public swarm. **Not an isolation boundary on its own** — which nodes hold which shards is also learned through the shared DHT, so a node can still route work outside the group. To keep work in, use a pool with `private_mode` and `private_mode_allow_lan = false`. Leave unset to join the public network |
 | `peer_exchange` | boolean | `true` | Share peer lists with connected nodes |
 | `enable_relay` | boolean | `true` | Act as relay for peers behind firewalls |
-| `enable_relay_client` | boolean | `true` | Let THIS node route its own traffic through someone else's relay when it is not directly reachable. Turning it off leaves the node able to reach others but generally unreachable from the internet. The opposite role — relaying for others — is `enable_relay` |
+| `enable_relay_client` | boolean | `true` | Let THIS node hold a place on someone else's relay: its only way in when it is not directly reachable, and a fallback address when it is, so a computer that knows it only by that address can still reach it (the connection then goes direct). Turning it off leaves the node able to reach others but generally unreachable from the internet. The opposite role — relaying for others — is `enable_relay` |
 | `max_peers` | integer | *(from `contribution`)* | Max simultaneous peer connections. Unset it follows `[node] contribution` — minimal `150`, moderate `300`, maximum `500`. An explicit value wins in either direction. |
-| `auto_relay` | boolean | `true` | Auto-use relay when NAT detected |
+| `auto_relay` | boolean | `true` | Hold that place automatically, from startup |
 | `relay_max_circuit_duration_secs` | integer | `3600` | Max relay circuit duration |
 | `relay_max_circuits` | integer | `128` | Max relay circuits to serve |
 | `enable_encryption` | boolean | `true` | Encrypt tensor forwards and control messages between computers. Protects against anyone watching the network; the receiving computer decrypts in order to do the work, so this is not end-to-end |

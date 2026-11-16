@@ -226,6 +226,12 @@ UPnP is the DIRECT `libp2p-upnp` ≥ 0.6 dependency (it backs off a refused mapp
 
 → `docs/invariants/network.md` § "UPnP that the router refuses is said out loud"
 
+## Every node keeps a home relay, reachable or not (2026-11-16, #464)
+
+A computer that cannot be dialled comes back only by dialling the addresses it holds for us — the relay's, if it met us there — and nothing tells it a new one (no lookup of a lost peer, no identify push; peer exchange caps an answer at 20 addresses). So every node reserves at startup (`relay::HOME_RELAY`) and the liveness tick re-arms after a lost circuit, whatever its reachability — **`relay::reason_to_reserve`** is the one decision (a reachable anchor keeps none); `try_activate_relay` never relays through this node itself. Never make a reservation depend on AutoNAT's "unreachable" again. "Direct" stays `publicly_reachable`, which counts no circuit.
+
+→ `docs/invariants/network.md` § "Every node keeps a home relay, reachable or not"
+
 ## "Is this connection direct?" — `network::relay::addr_is_direct_transport`
 
 **`network::relay::addr_is_direct_transport`** is the single answer, for both layers that choose a connection: a real `/ip4`, `/ip6` or `/dns*` hop AND no circuit. `is_relay_circuit_addr` alone misses the listener's view; the vendored request-response inbound handler records the send-back address. `peer_direct_conns` is gated on it; any new "prefer direct" logic uses it (gotchas #356, #179). Keep the loop-stall tripwire in `NetworkManager::run`.
