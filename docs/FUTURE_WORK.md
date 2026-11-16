@@ -2767,6 +2767,19 @@ cut from a 21/27 one between two equally fast cards. A flowing plan's price woul
 the head's drafter forwards counted in the head's. Prior art: pipeline-parallel partitioners (PipeDream's
 planner, Narayanan et al. 2019) minimise the slowest stage's time, never the total. Not built: one link's
 estimate (~+12%) is the whole evidence, and the forced split point is the measurement that comes first.
+**Measured 2026-11-16 — no gain, so not built** (`~/swarmllm-gate/deep/fr/real_link_bal292/`, the published
+v0.3.292 binary, AU `aa3d1e66` on .292, arms flowhalf · flow23 · flow23 · flowhalf · flowhalf · flow20 · flow20 ·
+flowhalf, prompts prose/prose2/prose3/code, 0.5B drafter): the far computer placed every layer of the wider range on
+its card (`card_layers` 25 for `[23..48)`, 28 for `[20..48)` — #461's fix firing on the peer) and `drafter_on_card=true`
+in every clean arm. Clean = arms 1, 2, 7, 8 and arm 3's first reply, least round trip 130-149 ms; arms 4-6 ran with the
+link to Australia at 539-617 ms (03:37-03:53Z, direct route — the link, not the build) and arm 3's last two lost the
+peer, so they are left out. Prose: `[0..26)` here 12.6-16.9 tok/s (6 replies, mean 14.8); `[0..23)` 13.4-14.4 (4, mean
+13.9, 0.94x); `[0..20)` 11.3-14.0 (3, mean 12.6, 0.85x) — not one fewer-here reply reached the half split's mean.
+Code (one reply an arm, the noisiest): 29.7 / 39.1 against 24.8 and 26.4. The estimate assumed a flow runs at its
+slowest stage's forward; on a ~130 ms link it runs at E a ROUND TRIP (`docs/invariants/scheduling.md` § "A tree that
+flows": a cheaper requester ran more forwards, not more reply), and the far's longer forward lengthens every round
+trip. A slowest-stage price is not supported by this link; revisit only on a link short enough that a stage's forward,
+not the round trip, sets the pace.
 
 #### #412 — A busy far card is busy with our own forwards: run its backlog as one
 `P2` · perf-split · **OPEN** (conceptual, tests first) — 2026-11-06 · evidence: `docs/plans/faster_than_local.md` § 13; history: #388
