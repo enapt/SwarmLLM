@@ -189,6 +189,19 @@ pub(crate) const RELAY_RETRY_MIN_SECS: u64 = 20;
 /// The longest, after refusals in a row — a relay full or not serving.
 pub(crate) const RELAY_RETRY_MAX_SECS: u64 = 600;
 
+/// Did the relay REFUSE us, judged from our relay listener's close? Only a
+/// refusal counts toward [`relay_retry_gap`]. libp2p-relay 0.21.1 closes the
+/// listener with `Err(Error::Reservation(..))` when the relay answered the
+/// reservation with an error (`priv_client/transport.rs`, `ToListenerMsg::
+/// Reservation(Err)`), and with `Ok(())` when the request's channel was dropped:
+/// a dial to the relay that failed (`priv_client.rs`, `DialFailure`) or its
+/// connection closing — a relay restarting, as every anchor does at a deploy.
+/// Counted as refusals, those backed a node off for minutes and it stayed
+/// unreachable that long after the anchor was back (review, 2026-11-16).
+pub(crate) fn relay_refused_us<E>(reason: &Result<(), E>) -> bool {
+    reason.is_err()
+}
+
 /// The wait before the next reservation after `refusals` in a row (#467): 20 s,
 /// doubling, at most 10 min; a granted reservation sets it back to 20 s.
 ///
@@ -204,7 +217,7 @@ pub(crate) fn relay_retry_gap(refusals: u32) -> Duration {
 
 /// The order this node tries its bootstrap relays in — the smallest first: one
 /// it is connected to (the reservation rides that connection), the one that
-/// just refused or lost it last, and among the rest a rank keyed by this
+/// just refused it last, and among the rest a rank keyed by this
 /// node's own id (#467). Taken in the listed order, every node reserved on the
 /// FIRST relay, and with reachable nodes reserving too (#464) they could fill
 /// it and leave a computer behind a home router, which needs the place, none.
@@ -455,6 +468,21 @@ mod tests {
             events.contains("crate::network::relay::relay_retry_gap(self.relay_refusals)"),
             "the retry gate no longer backs off after refusals"
         );
+        assert!(
+            events.contains("if crate::network::relay::relay_refused_us(&reason) {"),
+            "a relay that was only gone (restarting, or our dial lost) counts as a refusal again"
+        );
+    }
+
+    #[test]
+    fn only_a_relays_answer_counts_as_a_refusal() {
+        // A relay that answered the reservation with an error refused us …
+        assert!(relay_refused_us::<std::io::Error>(&Err(
+            std::io::Error::other("reservation refused")
+        )));
+        // … a listener whose channel was dropped (the relay gone, or our dial to
+        // it failing) closes Ok — no refusal, no back-off.
+        assert!(!relay_refused_us::<std::io::Error>(&Ok(())));
     }
 
     #[test]

@@ -1105,11 +1105,26 @@ impl NetworkManager {
                 // `DialFailure` arm drops the request and its listener's sender.
                 let ours = self.relay_listener.is_some_and(|(id, _)| id == listener_id);
                 if let Some((_, relay)) = self.relay_listener.filter(|_| ours) {
-                    // Refused or lost alike: wait longer, and ask another relay
-                    // first next time (#467, `relay::relay_retry_gap`).
                     self.relay_listener = None;
-                    self.relay_refusals = self.relay_refusals.saturating_add(1);
-                    self.relay_refused = Some(relay);
+                    // Refused: wait longer, and ask another relay first next time
+                    // (#467, `relay::relay_retry_gap`). A relay that was only gone
+                    // — restarting, or our dial to it lost — is asked again at the
+                    // next tick, as before (`relay::relay_refused_us`).
+                    if crate::network::relay::relay_refused_us(&reason) {
+                        self.relay_refusals = self.relay_refusals.saturating_add(1);
+                        self.relay_refused = Some(relay);
+                        tracing::info!(
+                            relay_peer = %relay,
+                            refusals = self.relay_refusals,
+                            ?reason,
+                            "Relay refused our reservation — backing off (#467)"
+                        );
+                    } else {
+                        tracing::info!(
+                            relay_peer = %relay,
+                            "Relay reservation ended with the relay connection — asking again"
+                        );
+                    }
                 }
                 // A circuit address closing counts only while no listener of
                 // ours is tracked: an OLDER listener's close, delivered after the

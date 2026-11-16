@@ -5778,13 +5778,19 @@ said anything — a refusal (128 reservations taken, a relay not serving) arrive
 later as `ListenerClosed` — so the loop's `break` after the first `Ok` always
 took the FIRST relay in config order, the same one for every node and the same
 one after every refusal; and a refusing relay was asked again every 30 s
-liveness tick, forever, by every node. Now a refusal or a lost reservation
-doubles the wait (`relay::relay_retry_gap`: 20 s → 10 min) and marks that relay
+liveness tick, forever, by every node. Now a refusal doubles the wait (`relay::relay_retry_gap`: 20 s → 10 min) and marks that relay
 to be tried last (`relay_refused`); a granted reservation
 (`relay::client::Event::ReservationReqAccepted`, read by nothing before) resets
 both. Among relays equally connected the order is a hash of this node's id and
 the relay's (`relay::relay_preference`), so nodes spread over the anchors
-instead of filling the first. A circuit address closing clears the latch only
+instead of filling the first. **Only the relay's ANSWER is a refusal**
+(`relay::relay_refused_us`, read off `ListenerClosed`'s reason): libp2p-relay 0.21.1
+closes the listener `Err(Error::Reservation(..))` when the relay answered with an
+error, and `Ok(())` when the request's channel was dropped — our dial to the relay
+failing (`DialFailure`) or its connection closing. The first build counted both,
+and a relay restarting at a deploy backed every node off for up to ~5 min after it
+was back (review, 2026-11-16); a relay that was only gone is asked again at the
+next tick, as before #467. A circuit address closing clears the latch only
 while no listener of ours is tracked: an older listener's close delivered after
 the tick opened a new one cleared the latch for the live one, and the next tick
 opened a third beside it. Prior art: go-libp2p's AutoRelay backs a candidate off
@@ -5858,8 +5864,10 @@ REACHED, and the walk dials the target at the addresses its neighbours return �
 connected by the walk itself; the answer's public addresses are dialled too, read by the one reader both
 lookups share (`addresses_the_dht_found`: the target's own entries, public only, `dialable_from_here`). A
 connection established forgets the peer. Never offline, never a peer cut off for its release. (2) A
-peer-exchange answer is built by **`helpers::pex_answer`**: at most `PEX_ADDRESSES_PER_PEER` (2) a peer, its
-best first as the registry ranks them, connected peers before the rest, a fresh random order every answer, at
+peer-exchange answer is built by **`helpers::pex_answer`**: at most `PEX_ADDRESSES_PER_PEER` (2) a peer — its
+best as the registry ranks them, then its best over the OTHER transport where it has one (`a_peers_best_for_pex`:
+QUIC ranks first, so a dual-stack peer was named by two QUIC addresses and no TCP one, nothing for a receiver whose
+UDP is blocked — review, 2026-11-16), connected peers before the rest, a fresh random order every answer, at
 most `PEX_ANSWER_ADDRESSES` (20) — ten peers an answer, every peer named within a few.
 
 **Prior art.** go-libp2p's routed host looks a peer up in the DHT (`FindPeer`) when it has no address to dial;

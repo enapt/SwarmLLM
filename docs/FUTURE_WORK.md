@@ -6931,10 +6931,12 @@ grep `^| N |`).
   relay was asked again every 30 s, forever.** Found by the pre-release review of #464/#466. `listen_on` answers
   before the relay does (a refusal is a later `ListenerClosed`), so the first relay in config order always "won", and
   the retry gate was a flat 20 s behind a 30 s tick. Past 128 reservations an anchor would have refused computers
-  behind a home router, which need the place. Now a refused or lost reservation doubles the wait (20 s → 10 min,
+  behind a home router, which need the place. Now a refused reservation doubles the wait (20 s → 10 min,
   `relay::relay_retry_gap`), that relay is tried last next time, a granted reservation resets both (the client's
   `ReservationReqAccepted`, read by nothing before), and relays equally connected are ordered by a hash of the
-  node's own id (`relay::relay_preference`), spreading nodes over the anchors. A stale circuit close no longer clears
+  node's own id (`relay::relay_preference`), spreading nodes over the anchors. Only the relay's answer counts
+  (`relay::relay_refused_us`): a relay that was gone — restarting at a deploy, or our dial to it lost — is asked again
+  at the next tick (the pre-release review caught the first build counting it). A stale circuit close no longer clears
   the latch while a newer listener is tracked. Prior art: go-libp2p AutoRelay's per-candidate `WithBackoff` /
   `WithMaxAttempts`. Residual: a reachable node still takes a place an unreachable one could need when the anchors
   are nearly full — no relay tells a client how full it is; not built.

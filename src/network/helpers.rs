@@ -154,9 +154,31 @@ pub(crate) fn pex_answer<R: rand::Rng + ?Sized>(
     peers.sort_by_key(|(connected, _)| !connected);
     peers
         .into_iter()
-        .flat_map(|(_, addrs)| addrs.into_iter().take(PEX_ADDRESSES_PER_PEER))
+        .flat_map(|(_, addrs)| a_peers_best_for_pex(addrs))
         .take(PEX_ANSWER_ADDRESSES)
         .collect()
+}
+
+/// A peer's `PEX_ADDRESSES_PER_PEER` (2) for a peer-exchange answer: its best,
+/// then its best over the OTHER transport where it has one — QUIC ranks first
+/// (`addresses_worth_passing_on`), so a peer listening on IPv4 and IPv6 had its
+/// two QUIC addresses named and no TCP one, and a receiver whose UDP is blocked
+/// had nothing to dial (review, 2026-11-16).
+fn a_peers_best_for_pex(addrs: Vec<String>) -> Vec<String> {
+    let is_quic = |a: &str| a.contains("/quic");
+    let Some(first) = addrs.first().cloned() else {
+        return Vec::new();
+    };
+    let other = addrs
+        .iter()
+        .skip(1)
+        .position(|a| is_quic(a) != is_quic(&first))
+        .map(|i| i + 1)
+        .unwrap_or(1);
+    let mut picked = vec![first];
+    picked.extend(addrs.into_iter().nth(other));
+    picked.truncate(PEX_ADDRESSES_PER_PEER);
+    picked
 }
 
 /// The `arm=` a slow swarm event is reported under (`DIAG: network event loop
@@ -646,8 +668,9 @@ mod netgroup_tests {
 #[cfg(test)]
 mod pex_address_tests {
     use super::{
-        addresses_worth_passing_on, label_address_with_peer, pex_answer, target_peer_from_address,
-        PEER_ADDRESSES_KEPT, PEX_ADDRESSES_PER_PEER, PEX_ANSWER_ADDRESSES,
+        a_peers_best_for_pex, addresses_worth_passing_on, label_address_with_peer, pex_answer,
+        target_peer_from_address, PEER_ADDRESSES_KEPT, PEX_ADDRESSES_PER_PEER,
+        PEX_ANSWER_ADDRESSES,
     };
     use libp2p::Multiaddr;
 
@@ -682,6 +705,25 @@ mod pex_address_tests {
         assert!(answer
             .iter()
             .all(|a| a.ends_with(".0/tcp/8810") || a.ends_with(".1/tcp/8810")));
+    }
+
+    #[test]
+    fn a_dual_stack_peer_is_named_by_both_transports() {
+        let quic4 = "/ip4/1.2.3.4/udp/8800/quic-v1".to_string();
+        let quic6 = "/ip6/2001:db8::1/udp/8800/quic-v1".to_string();
+        let tcp4 = "/ip4/1.2.3.4/tcp/8810".to_string();
+        let tcp6 = "/ip6/2001:db8::1/tcp/8810".to_string();
+        assert_eq!(
+            a_peers_best_for_pex(vec![quic4.clone(), quic6.clone(), tcp4.clone(), tcp6]),
+            vec![quic4.clone(), tcp4.clone()]
+        );
+        // One transport only: its best two, as before.
+        assert_eq!(
+            a_peers_best_for_pex(vec![quic4.clone(), quic6.clone()]),
+            vec![quic4.clone(), quic6]
+        );
+        assert_eq!(a_peers_best_for_pex(vec![tcp4.clone()]), vec![tcp4]);
+        assert!(a_peers_best_for_pex(Vec::new()).is_empty());
     }
 
     #[test]
