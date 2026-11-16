@@ -5803,6 +5803,10 @@ switch to candidates (0.12) was for nodes with no confirmed address, where an ob
 (`ToSwarm::NewExternalAddrCandidate`); the swarm dropped every one, and the test checked only that the behaviour
 emitted them. The live run showed it: no offered address in the candidate log. Gotcha #1122.
 
+**Verified live** (main's build, 14:59:37Z): "hole punches now offer this confirmed address" for
+`171.97.115.249` TCP 8810 and UDP 8800, the relay circuit left out. No peer came by relay in that run, so a punch
+over the new list is still to be seen in a log.
+
 **What a change must keep.** Handing the addresses to DCUtR directly, on confirmation and on the tick
 (`our_confirmed_addresses_reach_the_hole_punch_and_stay_fresh`, which also refuses the swarm route), and the
 predicate (`a_hole_punch_partner_is_offered_our_direct_internet_addresses_only`).

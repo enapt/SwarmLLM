@@ -6946,7 +6946,8 @@ grep `^| N |`).
   (gotcha #1122). Prior art: go-libp2p's hole punch offers the host's own public addresses, NAT-mapped included.
   Residual: a peer reached only by relay whose reachable side runs an older release still waits on DCUtR; dialling a
   relayed peer's advertised public address directly (go-libp2p's limited-connection redial, Syncthing's upgrade loop)
-  would close that — not built.
+  would close that — not built. **Verified live** 14:59:37Z: both UPnP addresses offered (DIAG line), the circuit not;
+  a punch over the new list is not yet seen — no peer came by relay in that run.
 - #464 — **A computer that could not be dialled lost its way back to a node that became directly reachable.** The
   Australian peer, dialable by no one since its address began changing (11-16 ~01:38Z), reached this node only
   through its relay circuit. After a restart in which UPnP worked, this node reserved no relay (only AutoNAT's
@@ -6958,7 +6959,11 @@ grep `^| N |`).
   relay lost to our bootstrap dial (`DialPeerConditionFalse`), the request was dropped and its listener closed with
   no address, which the latch did not count as a loss — so no node whose reservation failed before an address ever
   asked again (older than the home relay). The latch now follows the relay listener, and the home relay is asked
-  once a bootstrap relay is connected. Prior art: Tailscale's DERP-first connections, Syncthing's relay listener beside its direct
+  once a bootstrap relay is connected.
+  **Verified live 2026-11-16** (main's build as this node, processor only): the reservation landed 0.2 s after the relay
+  connection (13:48:27Z), circuit addresses followed; the Australian peer, not back for 98 min on .293, connected
+  through the relay 2 min 12 s after the restart (13:50:39) and held it 45 min; after the next restart it dialled this
+  node's public TCP port DIRECTLY (14:40:38, and again 15:05:38) — the relayed connection had given it the address. Prior art: Tailscale's DERP-first connections, Syncthing's relay listener beside its direct
   ones. Residual: #465 (a lost peer's new address is never looked up).
 
 **Closed 2026-11-16 (v0.3.293-alpha)** (#463; #458's double head — the entry keeps its residual)
