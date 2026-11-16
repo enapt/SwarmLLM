@@ -5740,7 +5740,7 @@ replaces a relayed connection when a direct one lands ("connects first over
 relay and half a second later … replaced connection"). go-libp2p's AutoRelay
 reserves only while private, because its peers re-find a public node through
 the DHT (the routed host's `FindPeer` when it has no address) — ours find a
-lost peer only by the addresses they hold, which is FUTURE_WORK #465.
+lost peer only by the addresses they hold — FUTURE_WORK #465, since closed: a lost peer is now looked up.
 
 **Cost.** One reservation per node on the anchor (128 allowed,
 `RelayServerConfig`); a circuit carries data only until the direct connection
@@ -5833,6 +5833,47 @@ over the new list is still to be seen in a log.
 **What a change must keep.** Handing the addresses to DCUtR directly, on confirmation and on the tick
 (`our_confirmed_addresses_reach_the_hole_punch_and_stay_fresh`, which also refuses the swarm route), and the
 predicate (`a_hole_punch_partner_is_offered_our_direct_internet_addresses_only`).
+
+## A lost peer is looked up, and peer exchange names every peer in turn (2026-11-16, FUTURE_WORK #465)
+
+**Seen.** A node that lost a peer redialled only the addresses it held (2-5 s, then +5, +15, +45, +120, +300 s,
+then "treating it as departed") and its five-minute discovery tick dialled the same ones from the peer cache.
+Kademlia never looked a lost peer up (only a chained run's next hop did), identify does not push a new address
+(`push_listen_addr_updates` is off), and a peer-exchange answer — the one way a new address arrived — took the
+first 20 public addresses in the registry's iteration order: every address of the first few peers, the same
+peers in every answer, so a node late in that order was never named however often the anchor was asked. India
+came back after 14 minutes by luck; the Australian peer, which cannot be dialled and returns only by dialling
+us, did not come back once a rig on our public ports answered its dial under another identity and #155's rule
+made it forget our address (gotcha #1123).
+
+**The rule.** (1) A peer whose last connection closed and that had a direct internet address
+(`lost_peers::worth_looking_up`: a direct transport, internet-reachable — never only private or a circuit) at
+ANY Identify this run (`LostPeers::note_dialable`, kept apart from the registry entry: a stopping computer
+reconnects for a moment on its way out and names only a private address, and judged from that last Identify
+the loss was never looked up — the first build, caught by its probe) is noted lost on every last close,
+whatever branch the close takes, and looked up in the DHT: `kademlia.get_closest_peers(peer)` a minute after the loss (the redial goes first), then
+at a gap that doubles to an hour, for a day, at most four lookups a liveness tick, one in flight a peer, 256
+peers remembered (`lost_peers::LostPeers`). libp2p-kad 0.48 lists in the answer only the peers its walk
+REACHED, and the walk dials the target at the addresses its neighbours return — so an online peer is usually
+connected by the walk itself; the answer's public addresses are dialled too, read by the one reader both
+lookups share (`addresses_the_dht_found`: the target's own entries, public only, `dialable_from_here`). A
+connection established forgets the peer. Never offline, never a peer cut off for its release. (2) A
+peer-exchange answer is built by **`helpers::pex_answer`**: at most `PEX_ADDRESSES_PER_PEER` (2) a peer, its
+best first as the registry ranks them, connected peers before the rest, a fresh random order every answer, at
+most `PEX_ANSWER_ADDRESSES` (20) — ten peers an answer, every peer named within a few.
+
+**Prior art.** go-libp2p's routed host looks a peer up in the DHT (`FindPeer`) when it has no address to dial;
+Bitcoin Core answers `getaddr` with a random subset of its address manager, never a fixed prefix. BitTorrent's
+PEX (BEP 11) sends what changed, a different design for a different swarm size.
+
+**Cost.** A lookup is a walk of a few Kademlia requests; a lost peer costs ~30 over the day it is looked for,
+a node at most four lookups a 30 s tick. Peer exchange's answer stays 20 addresses.
+
+**What a change must keep.** **Probed 2026-11-16** (two test nodes on this machine, main's build, the first with UPnP so it had a public address): stopped for 150 s, it was looked up 61 s after the loss — the answer found nothing, it was down — and forgotten when it came back. The first build's probe caught a flap: the stopping computer reconnected for a moment, its last Identify named only a private address, and the loss judged from it was never looked up; "dialable" is now remembered from any Identify of the run. On one machine every node can dial every other, so the restarted node's own DHT walk reconnected the pair first every time; the case this is for — a computer nobody can dial, looking for one that moved — shows on the swarm once its computers run this release. Tests `a_lost_peer_is_looked_up_after_a_minute_then_less_and_less_often`,
+`a_found_or_long_lost_peer_is_not_looked_up`, `a_tick_starts_a_few_lookups_and_the_list_is_bounded`,
+`only_a_peer_with_a_direct_internet_address_is_looked_up`, `a_peer_that_flapped_on_its_way_out_is_still_looked_up`,
+`a_peer_exchange_answer_names_many_peers_a_few_addresses_each`,
+`every_peer_is_named_by_some_answer_and_connected_peers_come_first` (red with the old order and no per-peer cap).
 
 ## ACK-Timeout Fast-Fail for rr Sends
 

@@ -134,6 +134,7 @@ impl NetworkManager {
         self.last_reached
             .reached(peer_id, std::time::Instant::now());
         self.proven_wrong.reached(&peer_id);
+        self.lost_peers.note_found(&peer_id);
         let remote_addr = endpoint.get_remote_address();
         let is_loopback = remote_addr.iter().any(|proto| {
             matches!(proto, libp2p::multiaddr::Protocol::Ip4(ip) if ip.is_loopback())
@@ -429,6 +430,13 @@ impl NetworkManager {
             self.update_peer_count();
         } else {
             self.update_peer_count();
+            // The peer's last connection is gone: one that named a direct
+            // internet address this run is looked up in the DHT until it is
+            // back, should its address have changed (#465). Whatever branch the
+            // close takes below — a peer stopping reconnects for a moment and
+            // closes before its Identify registers it again.
+            self.lost_peers
+                .note_lost(peer_id, std::time::Instant::now());
 
             // NET-I1: Drain pending shard requests for this peer and kick each
             // into the failover path. Without this, libp2p's subsequent

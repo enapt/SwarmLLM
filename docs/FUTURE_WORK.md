@@ -1702,25 +1702,6 @@ remove one. Measure the newcomer's first-plan delay before and after.
 
 ### Network and transport
 
-#### #465 — A computer that lost a peer never looks up the peer's new address; peer exchange is the only way one arrives
-`P3` · network · **OPEN** — 2026-11-16 · evidence: `docs/invariants/network.md` § "Every node keeps a home relay, reachable or not"
-
-**Seen** (2026-11-16, the home relay's incident, #464): a node that lost us redials only the addresses it already
-holds (2-5 s, +5, +15, +45, +120, +300 s, then "treating it as departed", `connections.rs`), and its five-minute
-discovery tick dials the same ones from its peer cache. Kademlia never looks a lost peer up (only a chained run's
-next hop does, `commands.rs` `DialError::NoAddresses`), identify does not push a new address
-(`push_listen_addr_updates` off), and peer exchange — the one way a new address arrives — answers with at most 20
-addresses across ALL the answerer's peers (`requests.rs`, `.take(20)`), so through the anchor, which knows everyone, a
-given node is listed by luck. India came back after 14 minutes. The home relay (#464) closes the case where the peer
-knew our relay address; this one stays where it did not (a peer that knew only a direct address that has since
-changed — a new public IP or UPnP port — and cannot itself be dialled).
-
-**Prior art**: go-libp2p's routed host looks a peer up in the DHT (`FindPeer`) when it has no address to dial; the
-lookup here would ask Kademlia `get_closest_peers(peer)` once its known addresses fail, rationed like the next-hop
-lookup (`MAX_NEXT_HOP_LOOKUPS`, `next_hop_misses`), dialling only the public addresses returned. A reachable node is
-in its server-mode neighbours' tables with its current address, so the answer is fresh. Also worth weighing: a PEX
-answer that rotates which peers it lists, so every peer is eventually named.
-
 #### #155 — AutoNAT redials a peer this node is already connected to, and the per-peer cap denies it, every ~5 s
 `P3` · network · **PARTIAL** — 2026-10-02, narrowed 2026-10-07, recurred 2026-10-30/31, **cause found and fixed 2026-11-02** (field check left) · history: archive row #155, gotcha #774, #1020
 
@@ -6932,7 +6913,20 @@ Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
 
-**Closed 2026-11-16 (on main, for the next release)** (#464, #466, #467)
+**Closed 2026-11-16 (on main, for the next release)** (#464, #465, #466, #467)
+- #465 — **A computer that lost a peer never looked up the peer's new address, and peer exchange named the same few
+  peers in every answer.** A node that lost a peer redialled the addresses it held and its discovery tick dialled the
+  same ones; Kademlia never looked a lost peer up, identify pushes no new address, and a peer-exchange answer took
+  the first 20 public addresses in the registry's own order — every address of the first few peers, the same peers
+  each time, so a node late in that order was never named (India back after 14 min by luck, the Australian peer not
+  at all, 2026-11-16). Now (1) a lost peer that named a direct internet address at any Identify this run is looked
+  up in the DHT
+  (`get_closest_peers`, whose walk dials it where its neighbours say it is) a minute after the loss, then at a gap
+  doubling to an hour, for a day, four lookups a tick at most (`network::manager::lost_peers`); a peer nobody can
+  dial is never looked up (no answer could reach it); (2) a peer-exchange answer names at most two addresses a peer,
+  connected peers first, in a new random order each answer (`helpers::pex_answer`), so every peer is named within a
+  few answers. Prior art: go-libp2p's routed host (`FindPeer` when no address is known); Bitcoin Core answers
+  `getaddr` with a random subset of its address manager. **Probed 2026-11-16** (two test nodes on this machine, main's build, the first with UPnP so it had a public address): stopped for 150 s, it was looked up 61 s after the loss — the answer found nothing, it was down — and forgotten when it came back. The first build's probe caught a flap: the stopping computer reconnected for a moment, its last Identify named only a private address, and the loss judged from it was never looked up; "dialable" is now remembered from any Identify of the run. On one machine every node can dial every other, so the restarted node's own DHT walk reconnected the pair first every time; the case this is for — a computer nobody can dial, looking for one that moved — shows on the swarm once its computers run this release.
 - #467 — **With every node keeping a home relay, every node reserved on the FIRST anchor, and a full or refusing
   relay was asked again every 30 s, forever.** Found by the pre-release review of #464/#466. `listen_on` answers
   before the relay does (a refusal is a later `ListenerClosed`), so the first relay in config order always "won", and

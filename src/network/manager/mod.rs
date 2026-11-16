@@ -33,6 +33,7 @@ mod hop_timings;
 pub(crate) use events::addr_is_remotely_reachable;
 mod identify;
 mod loop_stall;
+mod lost_peers;
 mod receipts;
 mod relay;
 mod requests;
@@ -712,6 +713,11 @@ pub struct NetworkManager {
     /// for (`NetworkCommand::DialPeer`): QueryId → the peer, dialled with the
     /// addresses the lookup finds. At most `MAX_NEXT_HOP_LOOKUPS`, one per peer.
     next_hop_lookups: HashMap<libp2p::kad::QueryId, libp2p::PeerId>,
+    /// Peers this node lost that had a direct internet address, looked up in
+    /// the DHT on the liveness tick until they are back (#465,
+    /// `lost_peers::LostPeers`), and the lookups in flight: QueryId → the peer.
+    lost_peers: lost_peers::LostPeers,
+    lost_peer_lookups: HashMap<libp2p::kad::QueryId, libp2p::PeerId>,
     /// Next hops a lookup found no address for, and when: not looked up again
     /// for `NEXT_HOP_MISS_MEMORY` (`commands::NextHopMisses`).
     next_hop_misses: commands::NextHopMisses,
@@ -1128,6 +1134,8 @@ impl NetworkManager {
             dht_query_rx,
             pending_provider_queries: HashMap::new(),
             next_hop_lookups: HashMap::new(),
+            lost_peers: lost_peers::LostPeers::default(),
+            lost_peer_lookups: HashMap::new(),
             next_hop_misses: commands::NextHopMisses::default(),
             relay_provider_registered: false,
             upnp_watch: upnp_watch::UpnpWatch::new(enable_upnp, wsl, std::time::Instant::now()),
@@ -2003,6 +2011,7 @@ impl NetworkManager {
                     // Our confirmed direct addresses stay among the candidates
                     // DCUtR sends first (#466, `relay::offer_for_hole_punch`).
                     self.offer_our_addresses_for_hole_punch();
+                    self.look_up_lost_peers();
                     // The relay is re-armed here: after a lost circuit (relay
                     // restart, lapsed reservation — `note_relay_circuit_lost`
                     // clears the latch), and as the fallback for a node AutoNAT

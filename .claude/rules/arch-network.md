@@ -241,6 +241,16 @@ stayed there. `offer_our_addresses_for_hole_punch` hands each confirmed direct i
 it as a swarm candidate** — dropped silently (gotcha #1122). → `docs/invariants/network.md` § "A hole punch offers our
 confirmed addresses, handed straight to DCUtR"
 
+## A lost peer is looked up; peer exchange names every peer in turn (2026-11-16, #465)
+
+A peer that named a direct internet address at any Identify this run (`lost_peers::worth_looking_up`, remembered by
+`note_dialable` apart from the registry) is noted lost on its last close, whatever the branch, and looked up in the DHT — `get_closest_peers`, whose walk dials it — a minute after the loss, then at a gap doubling
+to an hour, for a day (`network::manager::lost_peers::LostPeers`, four a liveness tick); both DHT lookups read
+their answer through `addresses_the_dht_found` (public only). A peer-exchange answer is built ONLY by
+**`helpers::pex_answer`**: two addresses a peer, connected peers first, a new random order each answer — never the
+registry's own order, which named the same few peers in every answer. → `docs/invariants/network.md` § "A lost
+peer is looked up, and peer exchange names every peer in turn"
+
 ## "Is this connection direct?" — `network::relay::addr_is_direct_transport`
 
 **`network::relay::addr_is_direct_transport`** is the single answer, for both layers that choose a connection: a real `/ip4`, `/ip6` or `/dns*` hop AND no circuit. `is_relay_circuit_addr` alone misses the listener's view; the vendored request-response inbound handler records the send-back address. `peer_direct_conns` is gated on it; any new "prefer direct" logic uses it (gotchas #356, #179). Keep the loop-stall tripwire in `NetworkManager::run`.

@@ -858,26 +858,7 @@ impl NetworkManager {
                         if self.next_hop_lookups.contains_key(&id) =>
                     {
                         let target = self.next_hop_lookups.remove(&id).expect("checked above");
-                        let peers = match closest {
-                            Ok(ok) => &ok.peers,
-                            Err(libp2p::kad::GetClosestPeersError::Timeout { peers, .. }) => peers,
-                        };
-                        // Public addresses only: a DHT answer is any peer's
-                        // word, and a private one would point this node at its
-                        // own network for a stranger (security review, 10-20).
-                        // Two machines on one network meet by mDNS, or by the
-                        // hop's own addresses the dial was handed first.
-                        let found: Vec<String> = peers
-                            .iter()
-                            .filter(|p| p.peer_id == target)
-                            .flat_map(|p| {
-                                p.addrs
-                                    .iter()
-                                    .filter(|a| !crate::network::peer_cache::addr_is_private(a))
-                                    .map(|a| a.to_string())
-                            })
-                            .collect();
-                        let addrs = self.dialable_from_here(&found);
+                        let addrs = self.addresses_the_dht_found(target, closest);
                         if addrs.is_empty() {
                             self.next_hop_misses.note(target, std::time::Instant::now());
                             tracing::debug!(peer_id = %target, "Next-hop lookup found no address");
@@ -897,6 +878,34 @@ impl NetworkManager {
                                 Err(e) => {
                                     tracing::debug!(peer_id = %target, error = %e, "Next-hop dial skipped")
                                 }
+                            }
+                        }
+                    }
+                    // A lost peer this node looked up (#465,
+                    // `look_up_lost_peers`). The walk itself dials the peer at
+                    // the address its neighbours hold, so it may be connected
+                    // already; else what the answer names is dialled.
+                    QueryResult::GetClosestPeers(ref closest)
+                        if self.lost_peer_lookups.contains_key(&id) =>
+                    {
+                        let target = self.lost_peer_lookups.remove(&id).expect("checked above");
+                        let addrs = self.addresses_the_dht_found(target, closest);
+                        let connected = self.swarm.is_connected(&target);
+                        tracing::info!(
+                            peer_id = %target,
+                            found = addrs.len(),
+                            connected,
+                            "DIAG: a lost peer's DHT lookup answered (#465)"
+                        );
+                        if !connected && !addrs.is_empty() {
+                            let opts = libp2p::swarm::dial_opts::DialOpts::peer_id(target)
+                                .addresses(addrs)
+                                .condition(
+                                    libp2p::swarm::dial_opts::PeerCondition::DisconnectedAndNotDialing,
+                                )
+                                .build();
+                            if let Err(e) = self.dial_checked(opts, "lost_peer_lookup") {
+                                tracing::debug!(peer_id = %target, error = %e, "Lost-peer dial skipped");
                             }
                         }
                     }
@@ -1331,6 +1340,35 @@ impl NetworkManager {
     /// confirmed our public address at startup, so DCUtR held only a LAN
     /// address, and the Australian peer, on our relay for 50 minutes, was
     /// handed nothing it could dial. Only DCUtR reads a candidate for this.
+    /// The addresses a DHT walk for `target` found that are worth dialling from
+    /// here: the target's own entries in the answer, public ones only — a DHT
+    /// answer is any peer's word, and a private one would point this node at its
+    /// own network for a stranger (security review, 10-20) — through
+    /// `dialable_from_here`. Two machines on one network meet by mDNS, or by
+    /// the addresses the dial was handed first. Both lookups read their answer
+    /// here: a chained run's next hop and a lost peer (#465).
+    fn addresses_the_dht_found(
+        &self,
+        target: libp2p::PeerId,
+        closest: &Result<libp2p::kad::GetClosestPeersOk, libp2p::kad::GetClosestPeersError>,
+    ) -> Vec<Multiaddr> {
+        let peers = match closest {
+            Ok(ok) => &ok.peers,
+            Err(libp2p::kad::GetClosestPeersError::Timeout { peers, .. }) => peers,
+        };
+        let found: Vec<String> = peers
+            .iter()
+            .filter(|p| p.peer_id == target)
+            .flat_map(|p| {
+                p.addrs
+                    .iter()
+                    .filter(|a| !crate::network::peer_cache::addr_is_private(a))
+                    .map(|a| a.to_string())
+            })
+            .collect();
+        self.dialable_from_here(&found)
+    }
+
     pub(super) fn offer_our_addresses_for_hole_punch(&mut self) {
         use libp2p::swarm::NetworkBehaviour as _;
         if !self.swarm.behaviour().dcutr.is_enabled() {

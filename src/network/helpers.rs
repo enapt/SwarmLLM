@@ -125,6 +125,40 @@ pub(crate) fn addresses_worth_passing_on(listen_addrs: &[Multiaddr], cap: usize)
         .collect()
 }
 
+/// How many addresses a peer-exchange answer names in all, and at most how many
+/// of one peer's (#465).
+pub(crate) const PEX_ANSWER_ADDRESSES: usize = 20;
+pub(crate) const PEX_ADDRESSES_PER_PEER: usize = 2;
+
+/// The addresses a peer-exchange answer names (#465): each peer's best
+/// `PEX_ADDRESSES_PER_PEER` (in the order the registry keeps them, ranked by
+/// `addresses_worth_passing_on`), connected peers before the rest, and within
+/// each the peers in a fresh random order every answer — at most
+/// `PEX_ANSWER_ADDRESSES`. `peers` is (connected, the peer's addresses that may
+/// be passed on).
+///
+/// Taken in the registry's own order, every address of the first few peers
+/// filled the answer, the same peers each time: a node late in that order was
+/// never named however often the anchor was asked, and a computer that cannot be
+/// dialled — whose one way back to a peer whose address changed is an answer
+/// naming it — waited on luck (India 14 min, the Australian peer longer,
+/// 2026-11-16). Prior art: Bitcoin Core answers `getaddr` with a random subset
+/// of its address manager, never a fixed prefix.
+pub(crate) fn pex_answer<R: rand::Rng + ?Sized>(
+    mut peers: Vec<(bool, Vec<String>)>,
+    rng: &mut R,
+) -> Vec<String> {
+    use rand::seq::SliceRandom;
+    peers.shuffle(rng);
+    // Stable: the shuffle survives within the connected and the rest.
+    peers.sort_by_key(|(connected, _)| !connected);
+    peers
+        .into_iter()
+        .flat_map(|(_, addrs)| addrs.into_iter().take(PEX_ADDRESSES_PER_PEER))
+        .take(PEX_ANSWER_ADDRESSES)
+        .collect()
+}
+
 /// The `arm=` a slow swarm event is reported under (`DIAG: network event loop
 /// stalled`): its kind, and for a request-response event which way it went
 /// and the message it carried — `swarm_event:RequestResponse:in:ShardTransfer`.
@@ -612,10 +646,60 @@ mod netgroup_tests {
 #[cfg(test)]
 mod pex_address_tests {
     use super::{
-        addresses_worth_passing_on, label_address_with_peer, target_peer_from_address,
-        PEER_ADDRESSES_KEPT,
+        addresses_worth_passing_on, label_address_with_peer, pex_answer, target_peer_from_address,
+        PEER_ADDRESSES_KEPT, PEX_ADDRESSES_PER_PEER, PEX_ANSWER_ADDRESSES,
     };
     use libp2p::Multiaddr;
+
+    /// 40 peers of 4 addresses each, as an anchor's registry holds them.
+    fn registry(connected: usize) -> Vec<(bool, Vec<String>)> {
+        (0..40)
+            .map(|i| {
+                let addrs = (0..4)
+                    .map(|j| format!("/ip4/8.8.{i}.{j}/tcp/8810"))
+                    .collect();
+                (i < connected, addrs)
+            })
+            .collect()
+    }
+
+    fn named(answer: &[String]) -> std::collections::HashSet<String> {
+        answer
+            .iter()
+            .map(|a| a.split('.').nth(2).unwrap().to_string())
+            .collect()
+    }
+
+    #[test]
+    fn a_peer_exchange_answer_names_many_peers_a_few_addresses_each() {
+        let answer = pex_answer(registry(40), &mut rand::thread_rng());
+        assert_eq!(answer.len(), PEX_ANSWER_ADDRESSES);
+        assert_eq!(
+            named(&answer).len(),
+            PEX_ANSWER_ADDRESSES / PEX_ADDRESSES_PER_PEER
+        );
+        // Each peer's FIRST addresses: the registry keeps them best first.
+        assert!(answer
+            .iter()
+            .all(|a| a.ends_with(".0/tcp/8810") || a.ends_with(".1/tcp/8810")));
+    }
+
+    #[test]
+    fn every_peer_is_named_by_some_answer_and_connected_peers_come_first() {
+        // Taken in the registry's order, the first five peers filled every
+        // answer and the other 35 were never named (2026-11-16).
+        let mut ever = std::collections::HashSet::new();
+        let mut rng = rand::thread_rng();
+        for _ in 0..200 {
+            ever.extend(named(&pex_answer(registry(40), &mut rng)));
+        }
+        assert_eq!(ever.len(), 40, "some peer was never named in 200 answers");
+        // Four connected peers out of 40: every answer names all four.
+        for _ in 0..20 {
+            let n = named(&pex_answer(registry(4), &mut rng));
+            assert!((0..4).all(|i| n.contains(&i.to_string())), "{n:?}");
+        }
+    }
 
     fn addr(s: &str) -> Multiaddr {
         s.parse().expect("test multiaddr")

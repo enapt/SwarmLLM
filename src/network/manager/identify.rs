@@ -548,6 +548,13 @@ impl NetworkManager {
             goodput_bytes_per_sec: None,
             goodput_samples: 0,
         };
+        // A peer that names a direct internet address is one this node may look
+        // up in the DHT once lost (#465) — remembered apart from this entry,
+        // which a later Identify can replace with a poorer list.
+        if super::lost_peers::worth_looking_up(&peer_info.addresses) {
+            self.lost_peers
+                .note_dialable(peer_id, std::time::Instant::now());
+        }
         // Insert peer_registry BEFORE peer_to_node to prevent TOCTOU race
         // where dispatch can resolve NodeId from peer_to_node but peer_registry
         // check fails because insert hasn't happened yet.

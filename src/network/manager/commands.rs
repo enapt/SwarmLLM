@@ -64,6 +64,44 @@ impl NetworkManager {
             .filter_map(|a| a.parse().ok())
             .collect()
     }
+
+    /// Look up, in the DHT, the lost peers whose turn it is (#465,
+    /// `lost_peers::LostPeers::due`): the walk dials a peer that is up at the
+    /// address its neighbours hold now, and the answer's public addresses are
+    /// dialled too (`events.rs`). Run on the liveness tick; never in offline
+    /// mode, never for a peer cut off for its release, at most one lookup a
+    /// peer in flight.
+    pub(super) fn look_up_lost_peers(&mut self) {
+        if self
+            .shared_state
+            .credits
+            .offline_mode
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            return;
+        }
+        let now = std::time::Instant::now();
+        let swarm = &self.swarm;
+        let due = self.lost_peers.due(now, |p| swarm.is_connected(p));
+        for peer_id in due {
+            if self.cut_off.contains_key(&peer_id)
+                || self.lost_peer_lookups.values().any(|p| p == &peer_id)
+            {
+                continue;
+            }
+            let query = self
+                .swarm
+                .behaviour_mut()
+                .kademlia
+                .get_closest_peers(peer_id);
+            self.lost_peer_lookups.insert(query, peer_id);
+            tracing::info!(
+                %peer_id,
+                still_lost = self.lost_peers.len(),
+                "DIAG: looking a lost peer up in the DHT (#465)"
+            );
+        }
+    }
 }
 
 /// `SWARMLLM_TEST_TENSOR_DELAY_MS=N` holds every outbound tensor message — a

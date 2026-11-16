@@ -49,7 +49,9 @@ impl NetworkManager {
                         }
                         self.pex_inbound_timestamps.push(now_pex);
                         tracing::debug!(%peer, "Handling PEX request");
-                        // Respond with up to 20 known peer addresses (filter out self).
+                        // Respond with known peers' addresses (never our own):
+                        // `helpers::pex_answer` chooses which, a few per peer,
+                        // connected peers first, in a new order each answer (#465).
                         //
                         // Every address is terminated with `/p2p/<peer_id>`.
                         // The receiver's only way to tell whose address it has
@@ -63,25 +65,30 @@ impl NetworkManager {
                         // `max_connections_per_peer`, until the request_response
                         // layer started picking a dead one (gotcha #405).
                         let local_node_id = self.shared_state.identity.node_id();
-                        let peers: Vec<String> = self
+                        let known: Vec<(bool, Vec<String>)> = self
                             .shared_state
                             .peer_registry
                             .iter()
                             .filter(|entry| entry.key() != local_node_id)
-                            .flat_map(|entry| {
+                            .map(|entry| {
                                 let peer_id = entry
                                     .peer_id_bytes
                                     .as_deref()
                                     .and_then(|b| libp2p::PeerId::from_bytes(b).ok());
-                                entry
+                                let connected =
+                                    peer_id.is_some_and(|p| self.swarm.is_connected(&p));
+                                let addrs = entry
                                     .addresses
                                     .iter()
                                     .map(|addr| label_address_with_peer(addr, peer_id))
-                                    .collect::<Vec<_>>()
+                                    .filter(|addr| !is_non_public_addr(addr))
+                                    .collect::<Vec<_>>();
+                                (connected, addrs)
                             })
-                            .filter(|addr| !is_non_public_addr(addr))
-                            .take(20)
+                            .filter(|(_, addrs)| !addrs.is_empty())
                             .collect();
+                        let peers =
+                            crate::network::helpers::pex_answer(known, &mut rand::thread_rng());
                         // Our coordinate as it stands now: the asker times this
                         // answer and needs our position for that very sample (#91).
                         let pex_resp = SwarmMessage::PeerExchangeResponse(
