@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.3.293-alpha] — 2026-11-16
+
+**A computer that starts and finishes a split keeps the large model on its graphics card.** With "Start and finish
+on this computer", a Qwen 3.5-family model's first part keeps the model's output layer for its own guesses, and
+the part that ends the model loaded the same layer a second time — 994 MB more on Qwen3.8 27B. On a nearly full
+8 GB card that second copy did not fit, the card's worker was stopped and the whole model moved to the processor,
+about four times slower. A computer now holds one copy and both parts use it. Split with a 12 GB card in Australia
+over a link that measured 540-580 ms there and back that day, this laptop's card running the two ends: with the old
+behaviour both runs fell back to the processor (prose
+1.4-2.8 tokens a second, code 1.6-3.5); now neither does, and the replies run at 4.9-5.7 and 5.1-6.2, level with
+handing the whole model to the Australian computer (4.9 and 5.5). `SWARMLLM_SHARE_OUTPUT_HEAD=0` brings the old
+behaviour back (#458).
+
+**A split leaves room for this computer's guessing helper only where that is the faster plan.** Where a split could
+leave the small helper model room beside this computer's layers, the planner took that plan whenever one existed.
+About one first request in 35 it sent a single layer to a computer 263 ms away and back for it, and ran at 2.1 tokens
+a second where the plan without the room ran at 42.7. The plan with the room is now priced against the plan without
+it, and the faster one runs. `SWARMLLM_DRAFTER_ROOM_PRICED=0` brings the old choice back (#463).
+
 ## [0.3.292-alpha] — 2026-11-16
 
 **A split model shared with a computer that has it loaded is planned where its layers actually run.** A computer that
