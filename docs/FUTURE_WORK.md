@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #469**). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #470**). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -3660,6 +3660,22 @@ Designs: `docs/plans/large_model_splits.md` (the target, the bound and the build
 `docs/plans/split_speculation.md` (guess-and-check across a split),
 `docs/plans/wan_parallel.md` (parallelise the reply, not the token), `docs/plans/regional_pipelines.md`
 (placement by distance, #192), `docs/plans/faster_than_local.md` (the ranked list).
+
+#### #469 — A split's yield is one figure for every kind of reply, so a prose reply can be planned onto a split slower than local
+`P2` · perf-split · **OPEN** — 2026-11-16 · evidence: `faster_than_local.md` § 9 ("A second far card") · history: #3 (j), #428
+
+**Seen** (2026-11-16, Qwen2.5-14B, this laptop ↔ a US RTX 3080 Ti at a 308 ms least round trip, the flow, released
+v0.3.293 both ends): code 26.9-27.2 tok/s against this laptop alone 16.0-17.2; prose 11.7-11.8 against 13.5-13.6.
+**Why the planner may take it for prose**: the yield it prices a split with is one ratio of sums over the model's
+(and tail's) last 32 splits (`SplitRounds::record` / `tokens_per_round`, `daemon/state/split_rounds.rs`; `RECENT` in
+`recent_by_model.rs`), token-weighted and blind to the reply's kind; this node's own whole run is likewise one EMA
+across kinds (`note_own_whole_run`, `peer_speed.rs` `ALPHA`). After code-heavy use the split is priced near its code
+speed and a prose request is planned onto it (code-reading only, not yet seen on a live plan). **Not the fix**: routing
+around the split (the user, 11-08: a slow split is the bug). **The fix order**: (1) prose faster over a long link — the
+block drafter at the far end (#428), the drafter's first-choice rate (§ 7-8); (2) price a request by what its OWN
+conversation's guesses kept (a later turn knows its earlier turns' acceptance; SmartSpec-style per-request acceptance
+priors) rather than the model's blended figure — measure first how far a conversation's first-turn acceptance predicts
+its next. Prior art to read before (2): SmartSpec (goodput-chosen γ per request), Leviathan's α per task.
 
 #### #427 — The models between (~14B, ~27-35B) and 70B: what a user gets from each is unmeasured
 `P1` · perf-split · **OPEN** (measure first) — 2026-11-08 · history: user direction 2026-11-08; #318 (the 70B)
