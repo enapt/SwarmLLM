@@ -525,10 +525,15 @@ pub struct NetworkManager {
     /// whether or not it is directly reachable (#464). Cleared when the circuit
     /// is lost, so the liveness tick reserves again.
     relay_activated: bool,
-    /// The relay listener `try_activate_relay` opened, so its close clears the
-    /// latch even when it closes with no address — a reservation that never
-    /// landed (#464).
-    relay_listener: Option<libp2p::core::transport::ListenerId>,
+    /// The relay listener `try_activate_relay` opened and the relay it asked, so
+    /// its close clears the latch even when it closes with no address — a
+    /// reservation that never landed (#464) — and the next try avoids that relay.
+    relay_listener: Option<(libp2p::core::transport::ListenerId, libp2p::PeerId)>,
+    /// Reservations refused or lost in a row, and the relay of the last one:
+    /// the back-off (`relay::relay_retry_gap`) and the next relay to try
+    /// (`relay::relay_preference`, #467). Cleared when a relay grants one.
+    relay_refusals: u32,
+    relay_refused: Option<libp2p::PeerId>,
     /// Address candidates already logged — what peers report seeing us at,
     /// which is what DCUtR offers a hole-punch partner (#466). Bounded.
     seen_candidates: std::collections::HashSet<Multiaddr>,
@@ -1086,6 +1091,8 @@ impl NetworkManager {
             buffered_gossip: Vec::new(),
             relay_activated: false,
             relay_listener: None,
+            relay_refusals: 0,
+            relay_refused: None,
             seen_candidates: std::collections::HashSet::new(),
             relay_disabled_explained: false,
             last_relay_attempt: None,

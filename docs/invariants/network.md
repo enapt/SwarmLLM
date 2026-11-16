@@ -5771,6 +5771,29 @@ tick's re-arm or the listener-id reset brings a failure back
 `a_bootstrap_entry_names_its_relay_and_never_this_node` the one reading of a
 bootstrap entry as a relay.
 
+**A refused reservation backs off, and the next try asks another relay (#467,
+pre-release review the same evening).** With every node now reserving, two
+gaps the home relay made worse: `listen_on` answers `Ok` before the relay has
+said anything — a refusal (128 reservations taken, a relay not serving) arrives
+later as `ListenerClosed` — so the loop's `break` after the first `Ok` always
+took the FIRST relay in config order, the same one for every node and the same
+one after every refusal; and a refusing relay was asked again every 30 s
+liveness tick, forever, by every node. Now a refusal or a lost reservation
+doubles the wait (`relay::relay_retry_gap`: 20 s → 10 min) and marks that relay
+to be tried last (`relay_refused`); a granted reservation
+(`relay::client::Event::ReservationReqAccepted`, read by nothing before) resets
+both. Among relays equally connected the order is a hash of this node's id and
+the relay's (`relay::relay_preference`), so nodes spread over the anchors
+instead of filling the first. A circuit address closing clears the latch only
+while no listener of ours is tracked: an older listener's close delivered after
+the tick opened a new one cleared the latch for the live one, and the next tick
+opened a third beside it. Prior art: go-libp2p's AutoRelay backs a candidate off
+per peer after a failed reservation (`WithBackoff`) and drops it after
+`WithMaxAttempts`. Tests `a_refused_reservation_backs_off_and_a_granted_one_starts_over`,
+`nodes_spread_their_home_relays_and_avoid_the_one_that_refused`; the guard
+`the_home_relay_is_reserved_on_reaching_a_relay_and_re_armed_on_the_tick` also
+pins the back-off gate and the reset.
+
 ## A hole punch offers our confirmed addresses, handed straight to DCUtR (2026-11-16, FUTURE_WORK #466)
 
 **Seen.** The Australian peer reached this node through its home relay (#464) at 13:50:39Z and stayed there 50

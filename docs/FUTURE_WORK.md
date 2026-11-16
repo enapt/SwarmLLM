@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #467**). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #468**). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -6932,7 +6932,18 @@ Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
 
-**Closed 2026-11-16 (on main, for the next release)** (#464, #466)
+**Closed 2026-11-16 (on main, for the next release)** (#464, #466, #467)
+- #467 — **With every node keeping a home relay, every node reserved on the FIRST anchor, and a full or refusing
+  relay was asked again every 30 s, forever.** Found by the pre-release review of #464/#466. `listen_on` answers
+  before the relay does (a refusal is a later `ListenerClosed`), so the first relay in config order always "won", and
+  the retry gate was a flat 20 s behind a 30 s tick. Past 128 reservations an anchor would have refused computers
+  behind a home router, which need the place. Now a refused or lost reservation doubles the wait (20 s → 10 min,
+  `relay::relay_retry_gap`), that relay is tried last next time, a granted reservation resets both (the client's
+  `ReservationReqAccepted`, read by nothing before), and relays equally connected are ordered by a hash of the
+  node's own id (`relay::relay_preference`), spreading nodes over the anchors. A stale circuit close no longer clears
+  the latch while a newer listener is tracked. Prior art: go-libp2p AutoRelay's per-candidate `WithBackoff` /
+  `WithMaxAttempts`. Residual: a reachable node still takes a place an unreachable one could need when the anchors
+  are nearly full — no relay tells a client how full it is; not built.
 - #466 — **A computer that met a directly reachable node through a relay stayed on the relay: the hole punch
   offered it only a LAN address.** DCUtR's `CONNECT` carries address CANDIDATES (what peers report seeing us at,
   libp2p-dcutr 0.12 changelog), and libp2p-swarm 0.47.1 drops a candidate that is already a CONFIRMED address. UPnP

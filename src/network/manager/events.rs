@@ -25,11 +25,6 @@ use crate::types::SwarmMessage;
 
 use super::NetworkManager;
 
-/// Minimum spacing between relay-activation attempts until one succeeds. Bounds
-/// how often repeated AutoNAT-unreachable results (or the startup fallback tick)
-/// can issue `listen_on` for a relay circuit.
-const RELAY_RETRY_MIN_SECS: u64 = 20;
-
 /// Ceiling on the acknowledgement latency handed to routing, in ms. The
 /// estimator doubles on every miss up to the ACK-deadline maximum, which is
 /// the right deadline for a silent peer and the wrong latency for a route: a
@@ -1099,18 +1094,48 @@ impl NetworkManager {
                 // `DisconnectedAndNotDialing`, so beside our own bootstrap dial
                 // it fails `DialPeerConditionFalse`, and `on_swarm_event`'s
                 // `DialFailure` arm drops the request and its listener's sender.
-                let ours = self.relay_listener == Some(listener_id);
-                if ours {
+                let ours = self.relay_listener.is_some_and(|(id, _)| id == listener_id);
+                if let Some((_, relay)) = self.relay_listener.filter(|_| ours) {
+                    // Refused or lost alike: wait longer, and ask another relay
+                    // first next time (#467, `relay::relay_retry_gap`).
                     self.relay_listener = None;
+                    self.relay_refusals = self.relay_refusals.saturating_add(1);
+                    self.relay_refused = Some(relay);
                 }
+                // A circuit address closing counts only while no listener of
+                // ours is tracked: an OLDER listener's close, delivered after the
+                // tick opened a new one, must not clear the latch for the live
+                // one (#467).
                 if ours
-                    || addresses
-                        .iter()
-                        .any(crate::network::relay::is_relay_circuit_addr)
+                    || (self.relay_listener.is_none()
+                        && addresses
+                            .iter()
+                            .any(crate::network::relay::is_relay_circuit_addr))
                 {
                     self.note_relay_circuit_lost("listener closed");
                 }
                 self.refresh_listen_multiaddrs();
+            }
+
+            // A relay granted the reservation: the back-off starts over (#467).
+            // Until now nothing read this event — `relay_activated` is set when a
+            // listener opens, before any relay has answered.
+            SwarmEvent::Behaviour(SwarmBehaviourEvent::RelayClient(
+                libp2p::relay::client::Event::ReservationReqAccepted {
+                    relay_peer_id,
+                    renewal,
+                    ..
+                },
+            )) => {
+                if !renewal {
+                    tracing::info!(
+                        relay_peer = %relay_peer_id,
+                        after_refusals = self.relay_refusals,
+                        "Relay reservation granted"
+                    );
+                }
+                self.relay_refusals = 0;
+                self.relay_refused = None;
             }
 
             // NET-I7: Switch Kademlia to Server mode when external address is confirmed
@@ -1189,7 +1214,7 @@ impl NetworkManager {
     /// NAT'd node never regains internet reachability until a manual restart
     /// (found live 2026-07-23: an anchor restart mid-test stranded the test node).
     /// `last_relay_attempt` is deliberately left intact so a flapping relay is
-    /// still rate-limited by `RELAY_RETRY_MIN_SECS`.
+    /// still rate-limited by `relay::relay_retry_gap`.
     pub(super) fn note_relay_circuit_lost(&mut self, reason: &str) {
         if !self.relay_activated {
             return; // we had no relay reservation to lose
@@ -1210,7 +1235,8 @@ impl NetworkManager {
     /// client's "address not reachable" result, and the liveness tick (re-arms
     /// after a lost circuit; the fallback when AutoNAT never answers).
     /// Idempotent: latches `relay_activated` once a relay listen succeeds, and
-    /// rate-limits attempts to at most once per `RELAY_RETRY_MIN_SECS` until then,
+    /// rate-limits attempts by `relay::relay_retry_gap` (20 s, doubling per
+    /// refusal in a row to 10 min, #467) until then,
     /// so repeated triggers don't spam `listen_on`. No-op when `auto_relay` is off
     /// or there are no bootstrap peers to relay through; never relays through
     /// this node itself (an anchor lists its own address).
@@ -1239,7 +1265,9 @@ impl NetworkManager {
         }
         let now = std::time::Instant::now();
         if let Some(last) = self.last_relay_attempt {
-            if now.duration_since(last).as_secs() < RELAY_RETRY_MIN_SECS {
+            if now.duration_since(last)
+                < crate::network::relay::relay_retry_gap(self.relay_refusals)
+            {
                 return;
             }
         }
@@ -1255,15 +1283,23 @@ impl NetworkManager {
             .iter()
             .filter_map(|addr_str| crate::network::relay::bootstrap_relay(addr_str, &local))
             .collect();
-        // A relay we are connected to first: the reservation then rides that
-        // connection instead of a dial of its own (see the `ListenerClosed` arm).
-        relays.sort_by_key(|(pid, _)| !self.swarm.is_connected(pid));
+        // A relay we are connected to first (the reservation then rides that
+        // connection — see the `ListenerClosed` arm), the one that just refused
+        // us last, the rest in an order of this node's own (#467).
+        relays.sort_by_key(|(pid, _)| {
+            crate::network::relay::relay_preference(
+                &local,
+                pid,
+                self.swarm.is_connected(pid),
+                self.relay_refused == Some(*pid),
+            )
+        });
         for (relay_pid, base) in relays {
             let relay_addr = crate::network::relay::relay_listen_addr(&relay_pid, &base);
             match self.swarm.listen_on(relay_addr.clone()) {
                 Ok(listener_id) => {
                     tracing::info!(relay_peer = %relay_pid, %relay_addr, "Relay listen activated");
-                    self.relay_listener = Some(listener_id);
+                    self.relay_listener = Some((listener_id, relay_pid));
                     relayed = true;
                     break; // one relay is sufficient
                 }

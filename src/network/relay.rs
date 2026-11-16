@@ -184,6 +184,41 @@ pub(crate) fn is_relay_circuit_addr(addr: &Multiaddr) -> bool {
         .any(|p| matches!(p, libp2p::multiaddr::Protocol::P2pCircuit))
 }
 
+/// The shortest wait between two home-relay reservations.
+pub(crate) const RELAY_RETRY_MIN_SECS: u64 = 20;
+/// The longest, after refusals in a row — a relay full or not serving.
+pub(crate) const RELAY_RETRY_MAX_SECS: u64 = 600;
+
+/// The wait before the next reservation after `refusals` in a row (#467): 20 s,
+/// doubling, at most 10 min; a granted reservation sets it back to 20 s.
+///
+/// Since #464 every node keeps a home relay, so a relay that is full (128
+/// reservations) or not serving was asked by every node every liveness tick,
+/// forever. Prior art: go-libp2p's AutoRelay backs a candidate off after a
+/// failed reservation, per peer (`WithBackoff`), and drops it after
+/// `WithMaxAttempts`.
+pub(crate) fn relay_retry_gap(refusals: u32) -> Duration {
+    let secs = RELAY_RETRY_MIN_SECS.saturating_mul(1u64 << refusals.min(6));
+    Duration::from_secs(secs.min(RELAY_RETRY_MAX_SECS))
+}
+
+/// The order this node tries its bootstrap relays in — the smallest first: one
+/// it is connected to (the reservation rides that connection), the one that
+/// just refused or lost it last, and among the rest a rank keyed by this
+/// node's own id (#467). Taken in the listed order, every node reserved on the
+/// FIRST relay, and with reachable nodes reserving too (#464) they could fill
+/// it and leave a computer behind a home router, which needs the place, none.
+pub(crate) fn relay_preference(
+    local: &PeerId,
+    relay: &PeerId,
+    connected: bool,
+    refused_last: bool,
+) -> (bool, bool, [u8; 32]) {
+    let mut key = local.to_bytes();
+    key.extend_from_slice(&relay.to_bytes());
+    (!connected, refused_last, *blake3::hash(&key).as_bytes())
+}
+
 /// Whether a confirmed external address of ours goes to a hole-punch partner
 /// (#466): direct — no relay circuit — and reachable from the internet (a
 /// public IP or a DNS name; never a LAN, CGNAT or Tailscale address).
@@ -408,8 +443,67 @@ mod tests {
         );
         let events = include_str!("manager/events.rs");
         assert!(
-            events.contains("let ours = self.relay_listener == Some(listener_id);"),
+            events.contains(".is_some_and(|(id, _)| id == listener_id);"),
             "a relay listener that closes with no address no longer clears the latch"
+        );
+        assert!(
+            events.contains("libp2p::relay::client::Event::ReservationReqAccepted {")
+                && events.contains("self.relay_refusals = 0;"),
+            "a granted reservation no longer resets the back-off"
+        );
+        assert!(
+            events.contains("crate::network::relay::relay_retry_gap(self.relay_refusals)"),
+            "the retry gate no longer backs off after refusals"
+        );
+    }
+
+    #[test]
+    fn a_refused_reservation_backs_off_and_a_granted_one_starts_over() {
+        assert_eq!(relay_retry_gap(0), Duration::from_secs(20));
+        assert_eq!(relay_retry_gap(1), Duration::from_secs(40));
+        assert_eq!(relay_retry_gap(3), Duration::from_secs(160));
+        assert_eq!(
+            relay_retry_gap(5),
+            Duration::from_secs(600),
+            "capped at 10 min"
+        );
+        assert_eq!(
+            relay_retry_gap(u32::MAX),
+            Duration::from_secs(600),
+            "no overflow"
+        );
+    }
+
+    #[test]
+    fn nodes_spread_their_home_relays_and_avoid_the_one_that_refused() {
+        let relays: Vec<PeerId> = (0..3).map(|_| PeerId::random()).collect();
+        let first = |local: &PeerId, refused: Option<PeerId>, connected: &[PeerId]| {
+            relays
+                .iter()
+                .min_by_key(|r| {
+                    relay_preference(local, r, connected.contains(r), refused == Some(**r))
+                })
+                .copied()
+                .unwrap()
+        };
+        // Every relay connected: 60 nodes do not all pick the same one.
+        let picks: std::collections::HashSet<PeerId> = (0..60)
+            .map(|_| first(&PeerId::random(), None, &relays))
+            .collect();
+        assert!(picks.len() >= 2, "nodes all chose one relay: {picks:?}");
+        // One node: the relay it chose refused it, so the next try is another.
+        let me = PeerId::random();
+        let chosen = first(&me, None, &relays);
+        assert_ne!(first(&me, Some(chosen), &relays), chosen);
+        // A connected relay still comes before one that would need a dial.
+        assert_eq!(first(&me, None, &relays[2..]), relays[2]);
+        // And a node with one relay keeps asking it — after the back-off.
+        assert_eq!(
+            relays[..1]
+                .iter()
+                .min_by_key(|r| relay_preference(&me, r, true, true))
+                .copied(),
+            Some(relays[0])
         );
     }
 
