@@ -5431,34 +5431,6 @@ reverse — and its post-verify keeps drafting while the target verifies (up to 
 (2407.11798) and AMUSD (2410.17375) run draft and verify concurrently on separate devices. None of them shares one card
 between the two; here they would.
 
-#### #463 — Leaving the drafter room, a plan can send ONE layer to a slow third computer and come back here
-`P2` · perf-split / planner · **OPEN** — 2026-11-15 · evidence: `docs/invariants/scheduling.md` § "A request after a start waits for the models held here" (`f460end`); `~/swarmllm-gate/deep/fr/real_link_f460end/H_1_flowhalf.log` 21:09:03-21:09:38Z · related: #275, #461
-
-**Seen** (14B, this laptop `[0..26)` + Australia `[26..48)` under the rig's `swarm_route` override, a third
-computer `99aafc41` holding `[0..32)` at 263 ms): the first request after a start was planned `[0..24)` here,
-`[24..25)` there, `[25..26)` here again, then Australia — four segments, two extra 263 ms crossings a round for
-one layer. The drafter's room left this node 25 layers (`room_for=Some(25)`, `room_without_it=Some(32)`), and
-`candidates_leaving_room_for_the_drafter` takes the first route that rung finds; it is never priced against
-the plan without the room. Even granting the cut, `[0..25)` here + `[25..26)` there is three segments. The
-reply ran 2.1 tok/s; the NEXT request planned the plain `[0..26)` + Australia, and that wider range was placed
-beside the held `[0..24)` worker with 3 of 26 layers on the card (card read 585 MB free; 255 ms a forward, 7.4
-tok/s against 42.7) — #461's growth path, fixed in v0.3.292 (the idle worker is now retired and the range
-placed afresh). 1 of ~35 first plans tonight; the
-rest planned two segments.
-
-**Two contributors**: (1) this node is exempt from the once-a-chain bound (`parallax.rs`, the capped-bit
-mask, for prompt privacy's both-ends route, gotcha #481), so a route may leave it and come back on an
-ordinary plan; (2) the room-leaving rung is taken whenever it routes at all. Candidates: allow this node twice
-only where the route must start and finish here; price the room-leaving plan against the plain one and keep
-the cheaper (the drafter's gain is in the split's rounds prior, so both are comparable). Prior art (searched
-2026-11-15, search snippets, not code): none found PRICES a drafter's reservation against the plan without it —
-llama.cpp reserves (its `--fit` counts the draft model as a second model, a fixed 1 GiB margin a device, draft
-layers and device by flag: `-ngld`, `--device-draft`); vLLM, SGLang, TensorRT-LLM and Modular MAX hold a static
-memory fraction tuned by hand (Nightjar, arXiv 2512.22420: draft weights compete with the KV cache under that
-split); FlowSpec and PipeDec put the drafter on the first stage, as here. So the comparison would be ours; the
-one transferable detail is llama.cpp's `--device-draft` — a drafter apart from stage 0's device, to stop the two
-contending for one card.
-
 #### #461 — A peer's split that asks a computer for a WIDER range replaces its all-card copy with a mostly-processor one, which then serves every narrower request too
 `P3` · memory / admission · **NARROWED** — 2026-11-15 (the growth half shipped in v0.3.292) · found on the real link (`real_link.sh` TAG=bal292, a forced split point) · related: #3 (j12), #3 (j13), #449, #458
 
@@ -6916,6 +6888,23 @@ archive under the named heading. Reopen one only with the evidence its line name
 Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 19-28 were
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
+
+**Closed 2026-11-16 (on main, not in a release yet)** (#463)
+- #463 — **Leaving the drafter room, a plan could send ONE layer to a slow third computer and come back.** The plan
+  that leaves this node's drafter room (#275) ran whenever it routed: a first request after a start, room for 25 of
+  the 26 layers held here, was planned `[0..24)` here, `[24..25)` on a computer 263 ms away, `[25..26)` here again,
+  then Australia, and ran 2.1 tok/s where the plain `[0..26)` + Australia ran 42.7 (`real_link_f460end`, 2026-11-15).
+  Now `scheduler::the_plan_beside_the_drafter` prices it against the plan without the cut on the same rung
+  (parallax's `Everyone`, greedy's strict pass) and keeps the cheaper, a tie keeping the room. The trap: every
+  candidate carries the drafter's yield whatever the room (`split_yield_prior` asks only that a drafter is held), so
+  a plain plan charging this node past the room is priced at a token a round. A/B `SWARMLLM_DRAFTER_ROOM_PRICED=0`.
+  Contributor (1), this node twice in a chain that is not the both-ends route, is left: the price now catches the
+  costly case, and the exemption is what prompt privacy's route needs (gotcha #481). Verified by
+  `a_plan_leaving_the_drafter_room_runs_only_where_it_is_the_cheaper` (its control red with the plain plan priced at
+  the drafter's yield); not yet seen on the live swarm, where it was 1 of ~35 first plans — grep a node's log for
+  "costs more than the plan without that room". Prior art: llama.cpp's `--fit` fits the draft model and its context
+  with the target, room first (`common_fit_extra_model`, read 2026-11-16); none found weighs the reservation against
+  the plan without it. `docs/invariants/scheduling.md` § "The room's plan is priced against the plan without it".
 
 **Closed 2026-11-15 (v0.3.292)** (#460, #461's growth half)
 - #461 (growth half) — **A range taking in the one a model's worker was started with was placed beside it, mostly on

@@ -8993,6 +8993,105 @@ fn a_fresh_card_split_gives_way_to_the_drafters_room() {
     assert_eq!(cut_to(&with_room(Some(20), Some(30)), 0), None);
 }
 
+/// **A plan leaving the drafter room runs only where it is the cheaper**
+/// (#463, 2026-11-16). The cut's plan used to run whenever it routed: a first
+/// request after a start, room for 25 of the 26 layers held here, was planned
+/// `[0..24)` here, ONE layer on a computer 263 ms away, `[25..26)` here again,
+/// then the far end — and ran 2.1 tok/s where the plain plan ran 42.7. It is
+/// now priced against the plan without the cut, and a plain plan that fills
+/// the room is priced at a token a round: it leaves the drafter no room, and
+/// the candidates' yield is the drafter's.
+#[test]
+fn a_plan_leaving_the_drafter_room_runs_only_where_it_is_the_cheaper() {
+    use super::BesideTheDrafter;
+    let local = NodeId([1; 32]);
+    let guessing = |mut c: NodeCandidate| {
+        c.est_tokens_per_sec = 40.0;
+        c.split_tokens_per_round = Some(2.19);
+        c.split_tokens_per_round_far_tail = Some(2.19);
+        c
+    };
+    let mut here = guessing(simple_candidate(1, vec![(0, 26)]));
+    here.latency_ms = 0;
+    here.max_hostable_layers = Some(32);
+    let fleet = |third_ms: u32, far_from: u32| {
+        let mut third = guessing(simple_candidate(3, vec![(0, 32)]));
+        third.latency_ms = third_ms;
+        let mut far = guessing(simple_candidate(4, vec![(far_from, 48)]));
+        far.latency_ms = 130;
+        vec![here.clone(), third, far]
+    };
+    let shape = |plan: &[PipelineSegment]| -> Vec<(u8, (u32, u32))> {
+        plan.iter()
+            .map(|s| (s.node_id.0[0], s.layer_range))
+            .collect()
+    };
+    let room_plan = vec![
+        segment(1, (0, 24)),
+        segment(3, (24, 25)),
+        segment(1, (25, 26)),
+        segment(4, (26, 48)),
+    ];
+    let plain_plan = vec![segment(1, (0, 26)), segment(4, (26, 48))];
+    let choose = |third_ms: u32, far_from: u32, plain: &[PipelineSegment]| {
+        let uncut = fleet(third_ms, far_from);
+        let cut = super::leaving_room_here(&uncut, 0, 25).expect("a cut");
+        super::the_plan_beside_the_drafter(
+            room_plan.clone(),
+            Some(plain.to_vec()),
+            &cut,
+            &uncut,
+            &local,
+            48,
+            Some(64),
+        )
+    };
+
+    // 263 ms away, the detour's round trip costs more than the guesses the
+    // room keeps — even with the plain plan priced at a token a round.
+    match choose(263, 26, &plain_plan) {
+        BesideTheDrafter::Plain {
+            segments,
+            room_ms,
+            plain_ms,
+            leaves_room,
+        } => {
+            assert_eq!(shape(&segments), shape(&plain_plan));
+            assert!(!leaves_room, "26 layers here fill a room of 25");
+            assert!(plain_ms < room_ms, "{plain_ms} against {room_ms}");
+        }
+        other => panic!("the one-layer detour ran: {other:?}"),
+    }
+
+    // A plain plan inside the room keeps the drafter's yield: with the far
+    // end holding from layer 25 it needs no detour, where the room's plan
+    // makes one. (A chain driven from here pays a round trip a peer visited,
+    // so `[0..25)` + the third computer's `[25..26)` + the far end would cost
+    // the room's plan exactly — and a tie keeps the room.)
+    let inside = vec![segment(1, (0, 25)), segment(4, (25, 48))];
+    match choose(263, 25, &inside) {
+        BesideTheDrafter::Plain {
+            segments,
+            leaves_room,
+            ..
+        } => {
+            assert_eq!(shape(&segments), shape(&inside));
+            assert!(leaves_room);
+        }
+        other => panic!("the cheaper plan inside the room lost: {other:?}"),
+    }
+
+    // THE CONTROL: the third computer on the same network (1 ms), the
+    // crossings cost nothing beside the guesses, and the plain plan — no
+    // drafter beside its 26 layers — loses. Priced at the drafter's yield it
+    // would win, so this half fails without the token-a-round price.
+    assert!(
+        matches!(choose(1, 26, &plain_plan), BesideTheDrafter::Room(_)),
+        "{:?}",
+        choose(1, 26, &plain_plan)
+    );
+}
+
 /// Two card peers holding every part of a 32-layer model (4 GB, so 125 MB a
 /// layer), neither holding a part here. `b` is FASTER than `c`.
 fn two_whole_model_card_peers() -> (Arc<SharedState>, NodeId, NodeId, NodeId, ModelId) {

@@ -2941,6 +2941,123 @@ fn drafter_room_planned() -> bool {
     *ON.get_or_init(|| std::env::var("SWARMLLM_DRAFTER_ROOM").map_or(true, |v| v.trim() != "0"))
 }
 
+/// `SWARMLLM_DRAFTER_ROOM_PRICED=0` keeps the plan leaving the drafter room
+/// whenever one routes, never priced against the plan without the cut
+/// ([`the_plan_beside_the_drafter`]) — the plan before #463, for an A/B inside
+/// one binary. Read once.
+fn drafter_room_priced() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        std::env::var("SWARMLLM_DRAFTER_ROOM_PRICED").map_or(true, |v| v.trim() != "0")
+    })
+}
+
+/// What [`the_plan_beside_the_drafter`] chose, and the prices it chose by.
+#[derive(Debug)]
+enum BesideTheDrafter {
+    /// The plan leaving this node's drafter room: the cheaper, or there was
+    /// no plan without the cut to weigh it against.
+    Room(Vec<PipelineSegment>),
+    /// The plan without the cut, priced below the one leaving the room.
+    Plain {
+        segments: Vec<PipelineSegment>,
+        room_ms: f32,
+        plain_ms: f32,
+        /// Whether the plan without the cut leaves the drafter room anyway —
+        /// else it was priced with no guesses.
+        leaves_room: bool,
+    },
+}
+
+/// Which plan runs where the planner found one leaving this node's drafter
+/// room ([`leaving_room_here`]'s cut, `room_plan`) and one without that cut
+/// (`plain_plan`), on the same rung: the cheaper by [`parallax::chain_cost_ms`],
+/// each priced as it would run (#463). Equal prices keep the room.
+///
+/// The candidates carry the drafter's yield for every split
+/// (`pipeline::split_yield_prior` asks only that a drafter is HELD, never that
+/// it fits), and the drafter loads only beside the layers a plan loads here
+/// (`guest_fit_beside`). So a plain plan charging this node more than the
+/// cut's room leaves its drafter none, and is priced at a token a round — its
+/// candidates' split yields dropped — never at a yield it cannot get. One
+/// inside the room is priced as it is.
+///
+/// Before this the cut's plan ran whenever it routed: a first request after a
+/// start, the cut at 25 layers of the 26 held here, was planned `[0..24)` here,
+/// ONE layer on a computer 263 ms away, `[25..26)` here again, then Australia
+/// — two more 263 ms crossings a round — and ran 2.1 tok/s where the plain
+/// `[0..26)` + Australia ran 42.7 with the drafter beside it after all
+/// (`real_link_f460end`, 2026-11-15).
+///
+/// Prior art: none found that PRICES a drafter's memory reservation against
+/// the plan without it — llama.cpp's `--fit` fits the draft model and its
+/// context together with the target, room first (`common_fit_extra_model`,
+/// read 2026-11-16), its layers and device otherwise set by flag (`-ngld`,
+/// `--device-draft`); vLLM, SGLang, TensorRT-LLM and MAX hold a static memory
+/// fraction tuned by hand (FUTURE_WORK #463).
+fn the_plan_beside_the_drafter(
+    room_plan: Vec<PipelineSegment>,
+    plain_plan: Option<Vec<PipelineSegment>>,
+    cut: &[NodeCandidate],
+    candidates: &[NodeCandidate],
+    local_node_id: &NodeId,
+    num_layers: u32,
+    prompt_tokens: Option<u32>,
+) -> BesideTheDrafter {
+    let Some(plain) = plain_plan.filter(|_| drafter_room_priced()) else {
+        return BesideTheDrafter::Room(room_plan);
+    };
+    let room = cut
+        .iter()
+        .find(|c| &c.node_id == local_node_id)
+        .and_then(|c| c.max_hostable_layers);
+    let here = candidates.iter().find(|c| &c.node_id == local_node_id);
+    let charged_here: u32 = plain
+        .iter()
+        .filter(|s| &s.node_id == local_node_id)
+        .map(|s| {
+            here.map_or(s.layer_range.1.saturating_sub(s.layer_range.0), |c| {
+                c.layers_charged(s.layer_range)
+            })
+        })
+        .sum();
+    let leaves_room = room.is_none_or(|k| charged_here <= k);
+    let unguessed: Vec<NodeCandidate>;
+    let plain_priced_on = if leaves_room {
+        candidates
+    } else {
+        unguessed = candidates
+            .iter()
+            .cloned()
+            .map(|mut c| {
+                c.split_tokens_per_round = None;
+                c.split_tokens_per_round_far_tail = None;
+                c
+            })
+            .collect();
+        &unguessed
+    };
+    let room_ms =
+        parallax::chain_cost_ms(&room_plan, cut, local_node_id, num_layers, prompt_tokens);
+    let plain_ms = parallax::chain_cost_ms(
+        &plain,
+        plain_priced_on,
+        local_node_id,
+        num_layers,
+        prompt_tokens,
+    );
+    if plain_ms < room_ms {
+        BesideTheDrafter::Plain {
+            segments: plain,
+            room_ms,
+            plain_ms,
+            leaves_room,
+        }
+    } else {
+        BesideTheDrafter::Room(room_plan)
+    }
+}
+
 /// How many layers a delegated peer actually RUNS, given the shape the caller
 /// will build.
 ///
@@ -4223,18 +4340,50 @@ impl PipelineScheduler {
                         prompt_tokens,
                     )
                 };
-                if let Some(Ok(segs)) = beside_drafter
+                if let Some((cut, Ok(room_plan))) = beside_drafter
                     .as_deref()
                     .filter(|_| matches!(capacity, parallax::CapacityBound::Everyone))
-                    .map(route)
+                    .map(|cut| (cut, route(cut)))
                 {
-                    route_info!(purpose,
-                        model = %model_id,
-                        rung = ?capacity,
-                        "Planned with room left beside this node's layers for the model \
-                         that guesses ahead for them"
-                    );
-                    return Ok(segs);
+                    // Priced against the plan without the cut on the same
+                    // rung, never taken because it routed (#463).
+                    match the_plan_beside_the_drafter(
+                        room_plan,
+                        route(&candidates).ok(),
+                        cut,
+                        &candidates,
+                        local_node_id,
+                        num_layers,
+                        prompt_tokens,
+                    ) {
+                        BesideTheDrafter::Room(segs) => {
+                            route_info!(purpose,
+                                model = %model_id,
+                                rung = ?capacity,
+                                "Planned with room left beside this node's layers for the model \
+                                 that guesses ahead for them"
+                            );
+                            return Ok(segs);
+                        }
+                        BesideTheDrafter::Plain {
+                            segments,
+                            room_ms,
+                            plain_ms,
+                            leaves_room,
+                        } => {
+                            route_info!(purpose,
+                                model = %model_id,
+                                rung = ?capacity,
+                                room_plan_ms = room_ms,
+                                plain_plan_ms = plain_ms,
+                                plain_leaves_room = leaves_room,
+                                "DIAG: the plan leaving room beside this node's layers for the \
+                                 model that guesses ahead for them costs more than the plan \
+                                 without that room — running the plan without it (#463)"
+                            );
+                            return Ok(segments);
+                        }
+                    }
                 }
                 route(&candidates)
             };
@@ -6488,23 +6637,57 @@ impl PipelineScheduler {
         lead_here: bool,
         purpose: Purpose,
     ) -> Result<Vec<PipelineSegment>, SwarmError> {
-        if let Some(Ok(segments)) = beside_drafter.map(|cut| {
+        let strict = |c: &[NodeCandidate]| {
             self.greedy_assign_inner(
                 num_layers,
-                cut,
+                c,
                 prompt_tokens,
                 encrypted_pipeline,
                 lead_here,
                 true,
             )
-        }) {
-            route_info!(
-                purpose,
+        };
+        if let Some((cut, Ok(room_plan))) = beside_drafter.map(|cut| (cut, strict(cut))) {
+            // Priced against the strict pass without the cut, as the search
+            // prices its own (#463) — never against the relaxed pass.
+            let local_node_id = self.shared_state.identity.node_id();
+            match the_plan_beside_the_drafter(
+                room_plan,
+                strict(candidates).ok(),
+                cut,
+                candidates,
+                local_node_id,
                 num_layers,
-                "Planned with room left beside this node's layers for the model that \
-                 guesses ahead for them (greedy)"
-            );
-            return Ok(segments);
+                prompt_tokens,
+            ) {
+                BesideTheDrafter::Room(segments) => {
+                    route_info!(
+                        purpose,
+                        num_layers,
+                        "Planned with room left beside this node's layers for the model that \
+                         guesses ahead for them (greedy)"
+                    );
+                    return Ok(segments);
+                }
+                BesideTheDrafter::Plain {
+                    segments,
+                    room_ms,
+                    plain_ms,
+                    leaves_room,
+                } => {
+                    route_info!(
+                        purpose,
+                        num_layers,
+                        room_plan_ms = room_ms,
+                        plain_plan_ms = plain_ms,
+                        plain_leaves_room = leaves_room,
+                        "DIAG: the plan leaving room beside this node's layers for the model \
+                         that guesses ahead for them costs more than the plan without that \
+                         room — running the plan without it (greedy, #463)"
+                    );
+                    return Ok(segments);
+                }
+            }
         }
         self.greedy_assign(
             num_layers,

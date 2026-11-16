@@ -496,6 +496,46 @@ loaded layers and refuse alike: 2.65-2.93 tok/s in every arm.
   after that load agrees; warm: held layers add nothing) — red with the plan
   ignored: "a plan loading 22 layers here", true where the spawn says false.
 
+### The room's plan is priced against the plan without it (2026-11-16, #463)
+
+The cut's plan used to run whenever it routed — "a drafter is worth layers, not a
+request", and the planner never priced the trade. On the real link (`real_link_f460end`,
+2026-11-15, 21:09Z) one first request after a start, the cut at 25 of the 26 layers held
+here, was planned `[0..24)` here, `[24..25)` on a computer 263 ms away, `[25..26)` here
+again, then Australia: two extra 263 ms crossings a round for one layer, 2.1 tok/s. The
+next request planned the plain `[0..26)` + Australia and ran with the drafter beside it
+after all (42.7 tok/s once placed on the card) — the room is the planner's estimate, and
+an estimate errs. 1 of ~35 first plans that night.
+
+**`scheduler::the_plan_beside_the_drafter`** now chooses, on the rung where the cut is
+tried (parallax at `CapacityBound::Everyone`, greedy's strict pass — never against a
+relaxed one): the cheaper by `parallax::chain_cost_ms`, equal prices keeping the room.
+The trap it avoids: every candidate carries the drafter's yield for a split
+(`pipeline::split_yield_prior` asks that a drafter is HELD, never that it fits), so priced
+as it stands the plain plan always looks cheaper — more layers here, fewer crossings, the
+same guesses. A plain plan charging this node more than the cut's room
+(`NodeCandidate::layers_charged`, the search's own charge) leaves the drafter none
+(`guest_fit_beside` asks the layers the plan loads here), so it is priced at a token a
+round (its candidates' `split_tokens_per_round` and far-tail figure dropped — `None` is
+`rounds_entered`'s every-pass answer); one inside the room keeps the yield. Logged
+"costs more than the plan without that room" with `room_plan_ms`, `plain_plan_ms`,
+`plain_leaves_room`. A/B `SWARMLLM_DRAFTER_ROOM_PRICED=0`.
+
+Contributor (1) of the entry — this node may appear twice in a chain that is not the
+both-ends route (the capped-bit mask's exemption, gotcha #481) — is left: a node holding
+two disjoint ranges with a peer between needs it, and the price now catches the costly
+case. Prior art: llama.cpp's `--fit` fits the draft model and its context with the target,
+room first (`common_fit_extra_model`, read 2026-11-16); no system found weighs the
+reservation against the plan without it.
+
+- `a_plan_leaving_the_drafter_room_runs_only_where_it_is_the_cheaper` — the #463 shape:
+  the detour through 263 ms loses to the plain plan even priced at a token a round; a
+  plain plan inside the room keeps the yield and wins without the detour (a far end from
+  layer 25); the control (the third computer at 1 ms) keeps the room's plan — red with the
+  plain plan priced at the drafter's yield (2026-11-16). A chain driven from here pays one
+  round trip a peer visited, so `[0..25)` + the third computer's `[25..26)` + the far end
+  costs exactly what the detour does, and the tie keeps the room.
+
 ## Room for more layers is not room for the layers already held (2026-09-24, #95)
 
 **`NodeCandidate::held_ranges` + `layers_it_would_add` — the local node is
@@ -7528,7 +7568,8 @@ Australia — the drafter's room left 25 layers here (`room_for=Some(25)`) — a
 request planned was placed beside the held `[0..24)` with 3 layers on the card (7.4 tok/s). Neither is #460's:
 the room-leaving rung and this node's exemption from the once-a-chain bound predate it, and 30-odd first
 requests after the pass on the old binary (`line292`, `wide292`, `lev292`, `rows292`) planned two segments.
-FUTURE_WORK #463.
+FUTURE_WORK #463, closed 2026-11-16: the room's plan is now priced against the plain one (§ "The room's plan is
+priced against the plan without it").
 
 Prior art: llama.cpp's server answers 503 "Loading model" until its model is loaded; a Kubernetes readiness
 gate holds traffic until a pod reports ready. Here the request waits rather than being refused: the wait is
