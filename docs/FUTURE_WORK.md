@@ -6388,6 +6388,21 @@ Wrap the TCP and QUIC transports INSIDE the DNS layer (so the gate sees resolved
 pin the builder's shape and must move with it. Decide what "LAN" admits (CGNAT `100.64/10` for Tailscale, IPv6
 ULA). Test with this probe: B must dial nothing public and still reach a LAN peer.
 
+**Design (2026-11-16, read from the pinned sources — check each line when building):** a behaviour cannot be the gate —
+`handle_pending_outbound_connection` sees only the `DialOpts` addresses (libp2p-swarm 0.47.1 `lib.rs:458-469`; Kademlia
+and Identify answer with their own tables, so a peer-only dial shows it an empty slice), and
+`handle_established_outbound_connection` runs after TCP, noise and yamux (bytes already left). So `OfflineGate<T>` in
+`network/transport.rs`, OUTSIDE the DNS layer (inside it, the name lookup has already left the machine; outside, a `/dns*`
+dial is refused while offline — mDNS peers carry IP literals) and INSIDE the relay client (a circuit dial becomes a
+`ToSwarm::Dial` of the relay hop, which reaches the gate). The builder cannot place it there through `with_tcp`/`with_dns`,
+so one `swarm_transport(key, …, offline)` builds TCP exactly as `with_tcp` does (`phase/tcp.rs:84-90`: nodelay, `V1Lazy`,
+noise, `metered_muxer` yamux, no per-upgrade timeout) `or` the existing QUIC, then DNS, then the gate, handed to
+`with_other_transport`; `probe_swarm` in `protocol_traffic.rs` uses the same builder so its known-answer test covers it.
+Refuse with `TransportError::Other` naming the refusal, never `MultiaddrNotSupported` (`OrTransport` falls through on
+it); skip `leave_the_table_if_out_of_reach` and the redial retry for that refusal. "LAN": RFC 1918, loopback, link-local,
+CGNAT 100.64/10, `::1`, `fe80::/10`, `fc00::/7`, IPv4-mapped v6 judged as v4 — reuse `pool/invite.rs`'s `is_public_ipv4/6`
+(promoted), not a fourth copy. Connections open before the switch stay; inbound is a cheap follow-up (`send_back_addr`).
+
 #### #450 — A peer's gossiped demand is taken at its word, and now weighs whole copies too
 `P3` · security · **OPEN** — 2026-11-14 · history: #400 (the trade this widens), the security review of #400
 
