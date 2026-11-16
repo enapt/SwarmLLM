@@ -5725,9 +5725,9 @@ only by dialling us, at addresses it already holds (code map, 2026-11-16):
   (`requests.rs`, `.take(20)`). An anchor knows everybody, so a given node is in
   its answer by luck. India's 14 minutes were that luck.
 
-**The rule.** Every node reserves a relay at startup (`relay::HOME_RELAY`) and
-re-arms it on the liveness tick after a lost circuit, whether or not it is
-directly reachable (`relay::reason_to_reserve`; an anchor that is reachable
+**The rule.** Every node reserves a relay as soon as it reaches one of its
+bootstrap relays (`relay::HOME_RELAY`, `connections.rs`) and re-arms it on the
+liveness tick after a lost circuit, whether or not it is directly reachable (`relay::reason_to_reserve`; an anchor that is reachable
 keeps none). A peer that knows us only by the relay then gets in at its next
 redial, and the connection goes direct: this node is the relayed listener, so
 it starts DCUtR, and the far side can always dial a public node. The dashboard's
@@ -5747,9 +5747,29 @@ lost peer only by the addresses they hold, which is FUTURE_WORK #465.
 lands, and request-response prefers a direct connection over a circuit
 (`addr_is_direct_transport`, gotcha #164).
 
-**What a change must keep.** Removing the startup reservation or the tick's
-re-arm brings the failure back (`the_home_relay_is_reserved_at_startup_and_re_armed_on_the_tick`);
-`a_directly_reachable_node_still_keeps_a_home_relay` pins the decision.
+**The first build's reservation never landed (12:54Z, the same day).** It asked
+at startup, before the relay was connected. libp2p-relay 0.21.1's client then
+dials the relay itself (`priv_client.rs`, `ListenReq` with no connection), with
+the default `DisconnectedAndNotDialing` — our own bootstrap dial to the same relay
+was in flight, so the dial failed `DialPeerConditionFalse`, the client's
+`DialFailure` arm dropped the request and its listener's sender, and the listener
+closed with NO address. The `ListenerClosed` arm cleared the latch only for a
+closing CIRCUIT address, so `relay_activated` stayed true over a reservation that
+did not exist and nothing ever asked again: the log said "Relay listen
+activated" and no circuit address followed. Seen live: Australia did not return
+in 15 min. That latch hole predates the home relay — any reservation refused
+before an address (a relay holding back, a dial that failed) left a NAT'd node
+unreachable until a restart. Now the latch follows the LISTENER
+(`relay_listener`, its id from `listen_on`), the reservation is asked once a
+bootstrap relay is CONNECTED (it rides that connection), and a connected relay
+is tried before one that would need a dial.
+
+**What a change must keep.** Removing the reservation on reaching a relay, the
+tick's re-arm or the listener-id reset brings a failure back
+(`the_home_relay_is_reserved_on_reaching_a_relay_and_re_armed_on_the_tick`);
+`a_directly_reachable_node_still_keeps_a_home_relay` pins the decision,
+`a_bootstrap_entry_names_its_relay_and_never_this_node` the one reading of a
+bootstrap entry as a relay.
 
 ## ACK-Timeout Fast-Fail for rr Sends
 

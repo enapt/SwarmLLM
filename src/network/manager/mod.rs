@@ -525,6 +525,10 @@ pub struct NetworkManager {
     /// whether or not it is directly reachable (#464). Cleared when the circuit
     /// is lost, so the liveness tick reserves again.
     relay_activated: bool,
+    /// The relay listener `try_activate_relay` opened, so its close clears the
+    /// latch even when it closes with no address — a reservation that never
+    /// landed (#464).
+    relay_listener: Option<libp2p::core::transport::ListenerId>,
     /// Whether we have already explained that relaying is off by configuration.
     /// `try_activate_relay` is called repeatedly, and the consequence is worth
     /// stating once rather than every time.
@@ -1078,6 +1082,7 @@ impl NetworkManager {
             peer_to_node: DashMap::new(),
             buffered_gossip: Vec::new(),
             relay_activated: false,
+            relay_listener: None,
             relay_disabled_explained: false,
             last_relay_attempt: None,
             pending_tensor_outbound: HashMap::new(),
@@ -1716,14 +1721,6 @@ impl NetworkManager {
             let bootstrap_count = self.dial_bootstrap_peers(&config.network.bootstrap_peers);
             if bootstrap_count > 0 || !cached_peers.is_empty() {
                 discovery::trigger_bootstrap(&mut self.swarm)?;
-            }
-
-            // A home relay from the first second, before anything says whether
-            // this node is reachable (#464, `relay::reason_to_reserve`): a peer
-            // that cannot be dialled comes back only through the address it
-            // holds for us, and its first redials land seconds after we start.
-            if !config.node.anchor_mode {
-                self.try_activate_relay(crate::network::relay::HOME_RELAY);
             }
 
             // Loopback probe: find same-host peers, which mDNS cannot on WSL2.

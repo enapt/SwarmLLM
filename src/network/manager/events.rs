@@ -1084,11 +1084,29 @@ impl NetworkManager {
                 self.refresh_listen_multiaddrs();
             }
 
-            SwarmEvent::ListenerClosed { addresses, .. } => {
-                tracing::debug!(?addresses, "Listener closed");
-                if addresses
-                    .iter()
-                    .any(crate::network::relay::is_relay_circuit_addr)
+            SwarmEvent::ListenerClosed {
+                listener_id,
+                addresses,
+                reason,
+            } => {
+                tracing::debug!(?addresses, ?reason, "Listener closed");
+                // Our relay listener by its id, not only by a circuit address:
+                // a reservation that failed before the relay granted one closes
+                // with NO address, and the latch then held a reservation that
+                // did not exist — no retry, ever (#464, 2026-11-16). Prior art:
+                // libp2p-relay 0.21.1 `priv_client.rs` — a listen request made
+                // while not yet connected to the relay dials it with the default
+                // `DisconnectedAndNotDialing`, so beside our own bootstrap dial
+                // it fails `DialPeerConditionFalse`, and `on_swarm_event`'s
+                // `DialFailure` arm drops the request and its listener's sender.
+                let ours = self.relay_listener == Some(listener_id);
+                if ours {
+                    self.relay_listener = None;
+                }
+                if ours
+                    || addresses
+                        .iter()
+                        .any(crate::network::relay::is_relay_circuit_addr)
                 {
                     self.note_relay_circuit_lost("listener closed");
                 }
@@ -1221,28 +1239,20 @@ impl NetworkManager {
         self.last_relay_attempt = Some(now);
         tracing::info!(reason, "Activating relay listener");
         let mut relayed = false;
-        for addr_str in &bootstrap_addrs {
-            let Ok(maddr) = addr_str.parse::<Multiaddr>() else {
-                continue;
-            };
-            let Some(relay_pid) = maddr.iter().find_map(|p| match p {
-                libp2p::multiaddr::Protocol::P2p(pid) => Some(pid),
-                _ => None,
-            }) else {
-                continue;
-            };
-            if relay_pid == *self.swarm.local_peer_id() {
-                continue; // an anchor's bootstrap list names itself
-            }
-            // Relay-listen address without the trailing /p2p component.
-            let base: Multiaddr = maddr
-                .iter()
-                .take_while(|p| !matches!(p, libp2p::multiaddr::Protocol::P2p(_)))
-                .collect();
+        let local = *self.swarm.local_peer_id();
+        let mut relays: Vec<(libp2p::PeerId, Multiaddr)> = bootstrap_addrs
+            .iter()
+            .filter_map(|addr_str| crate::network::relay::bootstrap_relay(addr_str, &local))
+            .collect();
+        // A relay we are connected to first: the reservation then rides that
+        // connection instead of a dial of its own (see the `ListenerClosed` arm).
+        relays.sort_by_key(|(pid, _)| !self.swarm.is_connected(pid));
+        for (relay_pid, base) in relays {
             let relay_addr = crate::network::relay::relay_listen_addr(&relay_pid, &base);
             match self.swarm.listen_on(relay_addr.clone()) {
-                Ok(_) => {
+                Ok(listener_id) => {
                     tracing::info!(relay_peer = %relay_pid, %relay_addr, "Relay listen activated");
+                    self.relay_listener = Some(listener_id);
                     relayed = true;
                     break; // one relay is sufficient
                 }

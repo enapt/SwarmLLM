@@ -6940,7 +6940,11 @@ grep `^| N |`).
   holding nothing: India came back after 14 minutes (by luck of a peer-exchange answer), Australia not in 20. Now
   every node keeps a home relay from startup, reachable or not (`relay::reason_to_reserve`, `relay::HOME_RELAY`;
   the liveness tick re-arms it after a lost circuit; never through this node itself), and the connection goes
-  direct from there. Prior art: Tailscale's DERP-first connections, Syncthing's relay listener beside its direct
+  direct from there. The first build's reservation, asked at startup, never landed: libp2p-relay's own dial to the
+  relay lost to our bootstrap dial (`DialPeerConditionFalse`), the request was dropped and its listener closed with
+  no address, which the latch did not count as a loss — so no node whose reservation failed before an address ever
+  asked again (older than the home relay). The latch now follows the relay listener, and the home relay is asked
+  once a bootstrap relay is connected. Prior art: Tailscale's DERP-first connections, Syncthing's relay listener beside its direct
   ones. Residual: #465 (a lost peer's new address is never looked up).
 
 **Closed 2026-11-16 (v0.3.293-alpha)** (#463; #458's double head — the entry keeps its residual)

@@ -149,6 +149,28 @@ impl NetworkManager {
             pending_tensor_forwards = self.pending_tensor_outbound.len(),
             "DIAG: connection established"
         );
+        // The home relay is reserved once a relay is reached (#464,
+        // `relay::reason_to_reserve`): asked earlier, the relay client dials the
+        // relay beside our own bootstrap dial and the request is lost (the
+        // `ListenerClosed` arm in `events.rs`). A peer that cannot be dialled
+        // comes back only through the address it holds for us, so this is as
+        // early as the reservation can land.
+        if !self.relay_activated
+            && !endpoint.is_relayed()
+            && !self.shared_state.config.node.anchor_mode
+            && self
+                .shared_state
+                .config
+                .network
+                .bootstrap_peers
+                .iter()
+                .any(|a| {
+                    crate::network::relay::bootstrap_relay(a, self.swarm.local_peer_id())
+                        .is_some_and(|(relay, _)| relay == peer_id)
+                })
+        {
+            self.try_activate_relay(crate::network::relay::HOME_RELAY);
+        }
         // Reaching the peer is what the retry schedule was counting down to, so
         // the budget resets here rather than expiring — a peer that flaps gets a
         // fresh set of attempts each time it comes back.

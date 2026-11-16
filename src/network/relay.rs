@@ -136,6 +136,27 @@ pub(crate) fn reason_to_reserve(
     }
 }
 
+/// The relay a bootstrap address names — its peer id and its address without
+/// the `/p2p` part — or `None` when it names no peer, or names this node (an
+/// anchor's bootstrap list lists itself). The one reading of a bootstrap entry
+/// as a relay: `try_activate_relay` reserves on these, and a connection to one
+/// is what starts the home relay.
+pub(crate) fn bootstrap_relay(addr: &str, local: &PeerId) -> Option<(PeerId, Multiaddr)> {
+    let maddr = addr.parse::<Multiaddr>().ok()?;
+    let pid = maddr.iter().find_map(|p| match p {
+        libp2p::multiaddr::Protocol::P2p(pid) => Some(pid),
+        _ => None,
+    })?;
+    if pid == *local {
+        return None;
+    }
+    let base = maddr
+        .iter()
+        .take_while(|p| !matches!(p, libp2p::multiaddr::Protocol::P2p(_)))
+        .collect();
+    Some((pid, base))
+}
+
 /// Generate the relay listener address for connecting through a relay peer.
 ///
 /// A node calls this to establish a relayed listen address — its only way in
@@ -355,18 +376,42 @@ mod tests {
     }
 
     #[test]
-    fn the_home_relay_is_reserved_at_startup_and_re_armed_on_the_tick() {
-        // The startup reservation and the tick's re-arm are what make the home
-        // relay last; either one missing brings the 2026-11-16 failure back.
-        let mod_rs = include_str!("manager/mod.rs");
+    fn the_home_relay_is_reserved_on_reaching_a_relay_and_re_armed_on_the_tick() {
+        // The reservation on reaching a relay, the tick's re-arm and the latch
+        // reset on our listener's close are what make the home relay last; any
+        // one missing brings a 2026-11-16 failure back.
+        let connections = include_str!("manager/connections.rs");
         assert!(
-            mod_rs.contains("self.try_activate_relay(crate::network::relay::HOME_RELAY)"),
-            "the startup no longer reserves a home relay"
+            connections.contains("self.try_activate_relay(crate::network::relay::HOME_RELAY)"),
+            "reaching a relay no longer reserves a home relay"
         );
+        let mod_rs = include_str!("manager/mod.rs");
         assert!(
             mod_rs.contains("crate::network::relay::reason_to_reserve("),
             "the liveness tick no longer asks reason_to_reserve"
         );
+        let events = include_str!("manager/events.rs");
+        assert!(
+            events.contains("let ours = self.relay_listener == Some(listener_id);"),
+            "a relay listener that closes with no address no longer clears the latch"
+        );
+    }
+
+    #[test]
+    fn a_bootstrap_entry_names_its_relay_and_never_this_node() {
+        let relay = PeerId::random();
+        let local = PeerId::random();
+        let (pid, base) =
+            bootstrap_relay(&format!("/dns4/relay.example/tcp/8810/p2p/{relay}"), &local)
+                .expect("a bootstrap entry with a peer id names a relay");
+        assert_eq!(pid, relay);
+        assert_eq!(
+            base,
+            "/dns4/relay.example/tcp/8810".parse::<Multiaddr>().unwrap()
+        );
+        assert!(bootstrap_relay(&format!("/ip4/1.2.3.4/tcp/8810/p2p/{local}"), &local).is_none());
+        assert!(bootstrap_relay("/ip4/1.2.3.4/tcp/8810", &local).is_none());
+        assert!(bootstrap_relay("not an address", &local).is_none());
     }
 
     #[test]
