@@ -46,6 +46,11 @@ pub(crate) const MOST_DRAFTER_BYTES: u64 = 2 << 30;
 /// 2026-11-08: each header checked — width, target layers inside the model,
 /// the mask token, no tensor this loader lacks). Qwen3.8-27B's drafter is
 /// DFlash 2 (dynamic convolutions, a selector), which this loader refuses.
+/// Gemma 4's (#428 stage 4, read 2026-11-16, the same checks): the 12B's
+/// states Gemma's embedding scale and cap, which the loader takes only as the
+/// target's own; the 26B-A4B's and 31B's state neither (converted before
+/// llama.cpp's PR #29802) and are embedded as their target embeds, √hidden —
+/// the scale that PR measured kept more.
 pub(crate) const PINNED: &[PinnedDrafter] = &[
     PinnedDrafter {
         target_name: "Qwen3.6 35B A3B",
@@ -109,6 +114,33 @@ pub(crate) const PINNED: &[PinnedDrafter] = &[
         file: "Qwen3.5-397B-A17B-DFlash-Q8_0.gguf",
         size_bytes: 1_383_768_384,
         sha256: "8e62fe5f759646fa0d3d693b9c99793090791f2b66b4328af047ed013e3cd270",
+    },
+    PinnedDrafter {
+        target_name: "Gemma 4 12B It",
+        target_architecture: "gemma4",
+        target_width: 3840,
+        repo: "Anbeeld/gemma4-12B-it-DFlash-GGUF",
+        file: "gemma4-12B-it-DFlash-Q8_0.gguf",
+        size_bytes: 788_890_592,
+        sha256: "746effb9a2325922762c389412d20d19b8f3a3d5d7e7541cd2ab90c4dcdad0c0",
+    },
+    PinnedDrafter {
+        target_name: "Gemma 4 26B A4B It",
+        target_architecture: "gemma4",
+        target_width: 2816,
+        repo: "Anbeeld/gemma-4-26B-A4B-it-DFlash-GGUF",
+        file: "gemma4-26b-a4b-it-dflash-Q8_0.gguf",
+        size_bytes: 472_433_632,
+        sha256: "ef04c31d43002711bd651d722d0017276f1bcab7e46e6eefbbb3137277781a6c",
+    },
+    PinnedDrafter {
+        target_name: "Gemma 4 31B It",
+        target_architecture: "gemma4",
+        target_width: 5376,
+        repo: "Anbeeld/gemma-4-31B-it-DFlash-GGUF",
+        file: "gemma4-31b-it-dflash-Q8_0.gguf",
+        size_bytes: 1_647_944_672,
+        sha256: "703529e40dc132fca3992a151c5e78d7644c377da48f433c5360560764d9b957",
     },
 ];
 
@@ -217,7 +249,9 @@ fn attaches_here(to_a_card: bool, block_count: usize, has: impl Fn(&str) -> bool
 
 /// Where this node stands on the parts a drafter attaches beside: part 0 (the
 /// token table) and the head's part (the output head it reads its guesses
-/// with, `loader::shards::drafter_head_info`).
+/// with, `loader::shards::drafter_head_info`) — which, for a weight-tied model
+/// (every Gemma 4), IS part 0: its head is the token table a first segment
+/// holds (#428 stage 4).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Ends {
     /// Both whole and checked here, neither being fetched again.
@@ -228,11 +262,21 @@ enum Ends {
     Unsure,
 }
 
-fn ends_here(state: &SharedState, model_id: &ModelId) -> Ends {
+/// The part holding the head a drafter reads its guesses through: the
+/// model's head part, or part 0 where the head is the token table.
+fn head_part_for_the_drafter(shard_count: u32, head_is_the_table: bool) -> u32 {
+    if head_is_the_table {
+        0
+    } else {
+        crate::inference::shard_layout::head_part(shard_count)
+    }
+}
+
+fn ends_here(state: &SharedState, model_id: &ModelId, head_is_the_table: bool) -> Ends {
     let Some(manifest) = state.model_registry.get_manifest(model_id) else {
         return Ends::Unsure;
     };
-    let head = crate::inference::shard_layout::head_part(manifest.shard_count);
+    let head = head_part_for_the_drafter(manifest.shard_count, head_is_the_table);
     let servable = state.parts_servable_here(&manifest);
     if servable.contains(&0) && servable.contains(&head) {
         return Ends::Held;
@@ -259,16 +303,20 @@ pub(crate) async fn fetch_for_models_held_end_to_end(state: &std::sync::Arc<Shar
     for model_id in crate::model::auto_manage::canonical::models_kept_on_disk(state) {
         let dir = state.model_dir(&model_id.0);
         let path = dir.join(crate::inference::split::BLOCK_DRAFTER_FILE);
-        let (pinned, attaches) = state.gguf_meta_for(&model_id).map_or((None, true), |m| {
-            (
-                pinned_for(m.model_name.as_deref(), &m.architecture, m.embedding_length),
-                attaches_here(
-                    crate::model::auto_manage::vram::models_go_to_the_card(state),
-                    m.block_count,
-                    |name| m.tensors.contains_key(name),
-                ),
-            )
-        });
+        let (pinned, attaches, tied) =
+            state
+                .gguf_meta_for(&model_id)
+                .map_or((None, true, false), |m| {
+                    (
+                        pinned_for(m.model_name.as_deref(), &m.architecture, m.embedding_length),
+                        attaches_here(
+                            crate::model::auto_manage::vram::models_go_to_the_card(state),
+                            m.block_count,
+                            |name| m.tensors.contains_key(name),
+                        ),
+                        !m.tensors.is_empty() && !m.tensors.contains_key("output.weight"),
+                    )
+                });
         let failed_lately = FAILED_LATELY
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -276,7 +324,7 @@ pub(crate) async fn fetch_for_models_held_end_to_end(state: &std::sync::Arc<Shar
             .is_some_and(|at| at.elapsed() < TRY_AGAIN_AFTER);
         match step_for(
             pinned,
-            ends_here(state, &model_id),
+            ends_here(state, &model_id, tied),
             path.is_file(),
             failed_lately,
             attaches,
@@ -392,6 +440,13 @@ mod tests {
         assert_eq!(pinned_for(Some("Qwen3.5 9B"), "qwen35", 2560), None);
         assert_eq!(pinned_for(None, "qwen35", 4096), None);
         assert_eq!(pinned_for(Some("Qwen3.8 27B"), "qwen35", 5120), None);
+        // Gemma 4, as bartowski's and Google's uploads name it.
+        let g = pinned_for(Some("Gemma 4 12B It"), "gemma4", 3840).expect("the 12B");
+        assert_eq!(g.repo, "Anbeeld/gemma4-12B-it-DFlash-GGUF");
+        assert!(pinned_for(Some("gemma-4-26B-A4B-it"), "gemma4", 2816).is_some());
+        assert!(pinned_for(Some("Gemma 4 31B It"), "gemma4", 5376).is_some());
+        assert_eq!(pinned_for(Some("Gemma 4 E4B It"), "gemma4", 2560), None);
+        assert_eq!(pinned_for(Some("Gemma 4 31B It"), "gemma4", 3840), None);
     }
 
     #[test]
@@ -434,6 +489,19 @@ mod tests {
             step_for(None, Ends::Held, false, false, true),
             Step::Nothing
         );
+    }
+
+    /// A tied model's head is its token table, in part 0: a node holding part
+    /// 0 holds both ends a drafter attaches beside. An untied one's is in its
+    /// head part.
+    #[test]
+    fn a_tied_models_drafter_needs_only_its_first_part() {
+        assert_eq!(head_part_for_the_drafter(15, true), 0);
+        assert_eq!(
+            head_part_for_the_drafter(15, false),
+            crate::inference::shard_layout::head_part(15)
+        );
+        assert_ne!(head_part_for_the_drafter(15, false), 0);
     }
 
     /// Where no load here attaches it, a drafter is never fetched, and one on

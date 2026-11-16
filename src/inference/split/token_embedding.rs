@@ -111,6 +111,17 @@ impl TokenEmbedding {
         dims.first().copied().unwrap_or(0)
     }
 
+    /// The quantized table itself, where it is kept so — the tensor a
+    /// weight-tied model's output head IS, shared rather than read again
+    /// (a block drafter beside a tied model's first segment reads its guesses
+    /// through it, #428 stage 4). `None` for a table dequantized at load.
+    pub(crate) fn quantized_table(&self) -> Option<Arc<QTensor>> {
+        match self {
+            Self::Dense(_) => None,
+            Self::Quantized(q) => Some(Arc::clone(&q.table)),
+        }
+    }
+
     /// Bytes this table holds resident, for the log line that reports placement.
     pub(crate) fn resident_bytes(&self) -> usize {
         match self {

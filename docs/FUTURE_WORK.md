@@ -4087,7 +4087,7 @@ if the excess holds there, it is a per-piece cost the price should carry for pie
 (`docs/invariants/scheduling.md` § "A prompt read in pieces is priced piece by piece").
 
 #### #428 — Every popular model guesses 4-5 tokens a round trip: a DFlash drafter at the split's far end
-`P1` · perf-split · **OPEN** (stage 1 built and measured: the reply is exact, acceptance matches llama.cpp's; stage 3 built and measured on the rig — a split over 130 ms, processors: code 1.6-1.8×, a story 1.10-1.15×, the same replies; on a card, whole: code 1.4-1.6×, a story 0.89-0.92× — (c2) done, the block's first rounds on prose, (c3); stage 6 built: the drafter fetched by a pin; next: the field model, Qwen3.6-35B-A3B) — 2026-11-08 · history: #427 (the measurement), #425 (the guess head), #411 (the flow)
+`P1` · perf-split · **OPEN** (stage 1 built and measured: the reply is exact, acceptance matches llama.cpp's; stage 3 built and measured on the rig — a split over 130 ms, processors: code 1.6-1.8×, a story 1.10-1.15×, the same replies; on a card, whole: code 1.4-1.6×, a story 0.89-0.92× — (c2) done, the block's first rounds on prose, (c3); stage 6 built: the drafter fetched by a pin; stage 4 built for Gemma 4 (12B, 26B-A4B, 31B): its scales taken as the target's own, a tied head lent from the token table, acceptance level with llama.cpp's; next: the field model, Qwen3.6-35B-A3B) — 2026-11-16 · history: #427 (the measurement), #425 (the guess head), #411 (the flow)
 
 **What a user gets today** (#427's table, 2026-11-08 01:00-01:30Z, live node, one ask at a time): every split of
 the popular models decodes ONE token a round trip — Gemma 4 31B here↔Australia 1.7-1.9 tok/s, Gemma 4 26B-A4B
@@ -4292,6 +4292,29 @@ drafter on its own — llama.cpp takes `-md`, LM Studio a manual pick, SGLang/vL
 digest (`verifyBlob`); #422 fetches a vision encoder by its origin's listed SHA-256 — the pin follows those, and the
 loader's own checks (`dflash` arch, width, target layers) plus the set-aside (`Delivered`) are what stand behind a
 wrong or weak pairing.
+
+**Stage 4 — built 2026-11-16 for Gemma 4** (`split::block_drafter::DrafterFigures`, `loader::shards`
+`drafter_reads_the_table`; `docs/invariants/inference.md` § "Gemma 4: its scales are the target's own"). z-lab's
+three Gemma 4 drafters are the Qwen shape, so no new tensor was needed. Three things stood in the way. The loader
+refused the 12B's `dflash.embedding_scale` (√3840), which is the scale the target's own lookup applies; it now takes
+a scale or soft cap only as the target's own. Every Gemma 4 file is weight-tied, so a split's first segment had no
+head to lend; the token table it holds is now lent at no charge. And a tied model's drafter waited for the last part,
+where only part 0 is needed. Pinned: Anbeeld's Q8_0 conversions for the 12B, 26B-A4B and 31B (0.47-1.65 GB). Measured
+whole on the processor (12B Q4_K_M, greedy, 96 tokens): kept a block 0.79 / 0.85 / 2.16 (raw story, chat story, chat
+code) against llama.cpp `draft-dflash`'s 0.79 / 0.78 / 2.64 on the same text, every reply exact. **Prior art**:
+llama.cpp PR #29802 (`2b36825`) measured the Gemma scale (26B-A4B: 3.77 → 4.38 kept a block) and its converter writes
+it; z-lab's `_raw_input_embeddings` defaults to 1.0 and is not followed; llama.cpp's Gemma loader duplicates
+`token_embd` as `output`, which is the lend. **Left in stage 4**: (a) Gemma's vocabulary puts its one-character tokens
+at the END (`,` 236764, `.` 236761), past the processor's 32,768 hot rows, which assume a merge-ordered vocabulary;
+every word read kept 0.96 against 0.85 on the chat story (one run each). Its merge list is no frequency order either
+(the first merges join runs of 30 newlines), so the candidates are the one-character tokens beside the first rows, or
+ranks taken from this node's own replies — measured against every word read before either is chosen. (b) On the processor the priced loop checks one full block a
+reply before it sets the block aside (~5 s at 96 tokens in a debug build, a 16-wide check costing ~8.5 steps). Probe
+with a narrower block, and measure on a release build before deciding. A Gemma model on a processor-only computer
+fetches the drafter (no guess head to prefer), so this is that computer's whole cost. On the split rig (A [0,13) +
+drafter ↔ B [13,48), processors, 130 ms, dev build, one run each) the lend fired (`head_mb=0`) and the replies were
+the same text: palindrome 1.11×, search tree 1.09×, story 0.90× (one block checked, none kept, then set aside),
+which is (b)'s cost on a split. (c) The 26B-A4B (MoE, dense branch beside) and 31B, on a card.
 
 #### #435 — A split's far end sends the block drafter one row a position, not one per layer it reads
 `P2` · perf-split · **OPEN** (designed 2026-11-08, not built) · history: #428 stage 3 (the rows come back)

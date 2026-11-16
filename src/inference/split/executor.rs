@@ -2577,14 +2577,25 @@ impl SplitModel {
                 .to_dtype(candle_core::DType::F32)
                 .map_err(|e| SwarmError::Internal(format!("Embedding cast failed: {e}")))?;
         }
-        // Gemma models scale embeddings by sqrt(hidden_dim).
-        if self.arch.use_gemma_norm() {
-            let scale = (self.hidden_dim as f64).sqrt();
+        let scale = self.embedding_scale();
+        if scale != 1.0 {
             emb = emb
                 .affine(scale, 0.0)
                 .map_err(|e| SwarmError::Internal(format!("Embedding scale failed: {e}")))?;
         }
         Ok(emb)
+    }
+
+    /// What [`Self::embed_tokens`] multiplies a table row by: Gemma models
+    /// scale embeddings by sqrt(hidden_dim), every other family by 1. A block
+    /// drafter's file names the scale its block is embedded at
+    /// (`dflash.embedding_scale`), and is loaded only where it is this one.
+    pub(crate) fn embedding_scale(&self) -> f64 {
+        if self.arch.use_gemma_norm() {
+            (self.hidden_dim as f64).sqrt()
+        } else {
+            1.0
+        }
     }
 
     /// The first layer's input for `ids` — `[1, n, hidden]`, f32, scaled as

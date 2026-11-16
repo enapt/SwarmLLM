@@ -299,6 +299,13 @@ impl SplitModel {
         let drafter_head = (is_first && !is_last)
             .then(|| drafter_head_info(model_dir, &ct, &reader, guess_head_beside_first))
             .flatten();
+        // A weight-tied model's head IS its token table (every Gemma 4), which
+        // a first segment holds already: the drafter reads its guesses through
+        // that table (#428 stage 4).
+        let drafter_reads_the_table = is_first
+            && !is_last
+            && drafter_beside(model_dir)
+            && !ct.tensor_infos.contains_key("output.weight");
         // This range's own placement where the daemon sent one
         // (`split::placement_of`, #265), else the spawn's.
         let placement = crate::inference::split::placement_of(layer_start, layer_end);
@@ -370,9 +377,46 @@ impl SplitModel {
                     tracing::warn!(error = %e, "block drafter: the output head could not be read")
                 }
             }
+        } else if drafter_reads_the_table {
+            // The same tensor the segment looks its tokens up in — nothing
+            // read or charged again — as the loader's own tied head shares it
+            // with a range ending the model. A table dequantized at load (an
+            // unquantized file, Metal) lends nothing, and the drafter is not
+            // attached there.
+            match model
+                .tok_embeddings
+                .as_ref()
+                .and_then(|table| table.quantized_table())
+                .map(super::super::QMatMul::from_arc)
+            {
+                Some(Ok(head)) => {
+                    tracing::info!(
+                        layers = format!("[{layer_start}..{layer_end})"),
+                        "The model's head is its token table, which this first segment holds: \
+                         the guesser reads through it (#428)"
+                    );
+                    model.drafter_head = Some(head);
+                    model.drafter_head_bytes = 0;
+                }
+                Some(Err(e)) => {
+                    tracing::warn!(error = %e, "block drafter: the token table could not serve as its head")
+                }
+                None => tracing::debug!(
+                    "block drafter: the token table is not kept quantized, so it lends no head"
+                ),
+            }
         }
         Ok(model)
     }
+}
+
+/// Is a block drafter wanted beside this model: its switch on and its file
+/// in `model_dir` (#428)?
+fn drafter_beside(model_dir: &Path) -> bool {
+    super::super::block_drafter::block_drafter_on()
+        && model_dir
+            .join(super::super::block_drafter::BLOCK_DRAFTER_FILE)
+            .is_file()
 }
 
 /// The output head's entry where a block drafter beside a first segment can
@@ -385,10 +429,7 @@ fn drafter_head_info(
     reader: &ShardReader,
     for_guess_head: bool,
 ) -> Option<gguf_file::TensorInfo> {
-    let for_drafter = super::super::block_drafter::block_drafter_on()
-        && model_dir
-            .join(super::super::block_drafter::BLOCK_DRAFTER_FILE)
-            .is_file();
+    let for_drafter = drafter_beside(model_dir);
     if !for_drafter && !for_guess_head {
         return None;
     }

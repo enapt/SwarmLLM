@@ -219,6 +219,53 @@ fn meta_u32(v: &gguf_file::Value) -> Option<u32> {
         .or_else(|| v.to_u64().ok().and_then(|x| u32::try_from(x).ok()))
 }
 
+/// Do two figures name the same value — one stored as an f32 in a file, the
+/// other the f64 it was written from (Gemma 4 12B's √3840 is 61.9677353… in
+/// f64, 61.967735 in the drafter's header)?
+fn same_figure(a: f64, b: f64) -> bool {
+    (a - b).abs() <= 1e-5 * a.abs().max(b.abs()).max(1.0)
+}
+
+/// A drafter file's scales, as its header states them (`None`: not stated).
+#[derive(Clone, Copy, Debug, Default)]
+struct DrafterFigures {
+    /// `dflash.embedding_scale`: what the block's table rows are multiplied by.
+    embedding_scale: Option<f32>,
+    /// `dflash.final_logit_softcapping`: the cap on the head's scores.
+    final_softcap: Option<f32>,
+    /// `dflash.logit_scale`.
+    logit_scale: Option<f32>,
+}
+
+impl DrafterFigures {
+    /// Why these figures cannot run beside a target whose lookup multiplies a
+    /// row by `target_scale` ([`SplitModel::embedding_scale`]) and whose head
+    /// caps at `target_cap` — `None` where they are the target's own, since
+    /// the block goes through that lookup and that head. A scale not stated
+    /// is the target's; a logit scale other than 1 is not built.
+    fn refusal_beside(self, target_scale: f64, target_cap: Option<f32>) -> Option<String> {
+        if let Some(v) = self.embedding_scale {
+            if !same_figure(f64::from(v), target_scale) {
+                return Some(format!(
+                    "dflash.embedding_scale = {v}, the model's lookup scales by {target_scale}"
+                ));
+            }
+        }
+        if let Some(v) = self.final_softcap.filter(|&v| v != 0.0) {
+            let own = target_cap.unwrap_or(0.0);
+            if !same_figure(f64::from(v), f64::from(own)) {
+                return Some(format!(
+                    "dflash.final_logit_softcapping = {v}, the model's head caps at {own}"
+                ));
+            }
+        }
+        if let Some(v) = self.logit_scale.filter(|&v| v != 1.0) {
+            return Some(format!("dflash.logit_scale = {v} is not built"));
+        }
+        None
+    }
+}
+
 /// The model's layers a drafter reads, off its file: `dflash.target_layers`
 /// stores each as its id + 1 (llama.cpp reads that layer's INPUT, the output
 /// of the id). `None` where the key is missing or names no layer.
@@ -268,9 +315,10 @@ pub(crate) fn plan_in(dir: &Path) -> Option<BlockPlan> {
 impl BlockDrafter {
     /// Load `path` for `target`, refusing a file it cannot run as written:
     /// not a `dflash` file, a part this loader does not build (DFlash 2's
-    /// convolutions and selector, a draft vocabulary, scaled embeddings or
-    /// logits, M-RoPE sections that are not plain), or one that does not fit
-    /// the target (its width, its layers, its token table). It runs on the
+    /// convolutions and selector, a draft vocabulary, scaled logits, M-RoPE
+    /// sections that are not plain), or one that does not fit the target (its
+    /// width, its layers, its token table, an embedding scale or soft cap that
+    /// is not the target's own — [`DrafterFigures`]). It runs on the
     /// target's own device — the card where the model's first layers are, as
     /// llama.cpp loads a DFlash drafter on the target's devices.
     pub(crate) fn load(
@@ -326,16 +374,24 @@ impl BlockDrafter {
         let target_layers = target_layers_in(&ct)
             .ok_or_else(|| fail("no dflash.target_layers, or one that is not a layer".into()))?;
         // What this loader does not build is refused by name, never skipped.
-        for (key, plain) in [
-            ("dflash.embedding_scale", 1.0f32),
-            ("dflash.logit_scale", 1.0),
-            ("dflash.final_logit_softcapping", 0.0),
-        ] {
-            if let Some(v) = md(key).and_then(|v| v.to_f32().ok()) {
-                if v != plain {
-                    return Err(fail(format!("{key} = {v} is not built")));
-                }
-            }
+        // The block is embedded by the TARGET's lookup and read by its head
+        // (`SplitModel::embed_ids`, `logits_from`), so a file's embedding
+        // scale and final soft cap are built exactly where they are the
+        // target's own: Gemma's √hidden (llama.cpp's converter writes it for
+        // a Gemma target since PR #29802 — without it the drafter ran on
+        // embeddings ~62× too small, 3.77 → 4.38 kept a block on Gemma 4
+        // 26B-A4B) and its cap of 30. A file naming no scale is embedded as
+        // its target embeds. Any other figure is refused.
+        let figure = |key: &str| md(key).and_then(|v| v.to_f32().ok());
+        let figures = DrafterFigures {
+            embedding_scale: figure("dflash.embedding_scale"),
+            final_softcap: figure("dflash.final_logit_softcapping"),
+            logit_scale: figure("dflash.logit_scale"),
+        };
+        if let Some(why) =
+            figures.refusal_beside(target.embedding_scale(), target.final_logit_softcap)
+        {
+            return Err(fail(why));
         }
         if let Some(sections) = md("dflash.rope.dimension_sections").and_then(|v| v.to_vec().ok()) {
             let s: Vec<u32> = sections.iter().filter_map(meta_u32).collect();
@@ -1214,6 +1270,58 @@ impl SplitModel {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A Gemma 4 drafter states the √hidden its block is embedded at and
+    /// its target's cap (Anbeeld's `gemma4-12B-it-DFlash-Q8_0.gguf`,
+    /// llama.cpp's converter since PR #29802: 61.967735 and 30): beside the
+    /// Gemma target whose lookup and head apply exactly those, it runs; beside
+    /// a target that scales by 1 or caps elsewhere, the block would be read at
+    /// the wrong size, so it is refused by name. A Qwen drafter (no figures)
+    /// runs beside its target as before.
+    #[test]
+    fn a_drafter_runs_where_its_scales_are_its_targets_own() {
+        let gemma4_12b = DrafterFigures {
+            embedding_scale: Some(61.967_735),
+            final_softcap: Some(30.0),
+            logit_scale: None,
+        };
+        let gemma_lookup = 3840f64.sqrt();
+        assert_eq!(gemma4_12b.refusal_beside(gemma_lookup, Some(30.0)), None);
+        let refused = |why: Option<String>, key: &str| {
+            assert!(
+                why.as_deref().is_some_and(|w| w.contains(key)),
+                "{key}: {why:?}"
+            )
+        };
+        refused(
+            gemma4_12b.refusal_beside(1.0, Some(30.0)),
+            "embedding_scale",
+        );
+        refused(
+            gemma4_12b.refusal_beside(4096f64.sqrt(), Some(30.0)),
+            "embedding_scale",
+        );
+        refused(gemma4_12b.refusal_beside(gemma_lookup, None), "softcapping");
+        refused(
+            gemma4_12b.refusal_beside(gemma_lookup, Some(50.0)),
+            "softcapping",
+        );
+        // A file naming no scale is embedded as its target embeds; a cap of
+        // 0 is no cap.
+        let unstated = DrafterFigures::default();
+        assert_eq!(unstated.refusal_beside(1.0, None), None);
+        assert_eq!(unstated.refusal_beside(gemma_lookup, Some(30.0)), None);
+        let no_cap = DrafterFigures {
+            final_softcap: Some(0.0),
+            ..DrafterFigures::default()
+        };
+        assert_eq!(no_cap.refusal_beside(1.0, None), None);
+        let scaled_logits = DrafterFigures {
+            logit_scale: Some(0.5),
+            ..DrafterFigures::default()
+        };
+        refused(scaled_logits.refusal_beside(1.0, None), "logit_scale");
+    }
 
     /// A drafter its card has no room for goes to system memory only where
     /// that is offered and its budget is KNOWN and holds it beside one

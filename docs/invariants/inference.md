@@ -9041,3 +9041,60 @@ master's processor prompt pass and 17.942 / 17.527 in its card build, and llama.
 decode picks `" salt"` (`ref_generate`), so llama.cpp parts from itself there (gotcha #955's bar: a
 card's check width moves a row; a near tie is not a fault). The first run of this measurement found the
 drafter never reached system memory (§ "Weighed whole — its cache too").
+
+### Gemma 4: its scales are the target's own, its head is the table (stage 4, 2026-11-16)
+
+z-lab's Gemma 4 drafters (`gemma4-12B-it`, `gemma-4-26B-A4B-it`, `gemma-4-31B-it` DFlash) are the Qwen
+shape — five layers (four sliding at 2048, one full), SiLU, q/k norms, `v_proj`, `fc` + `hidden_norm`, no
+token table or head — so the loader needed no new tensor. Two figures and one tensor were in the way:
+
+- **The embedding scale.** The block is embedded by the target's lookup, which multiplies a Gemma row by
+  √hidden. The 12B's conversion states `dflash.embedding_scale` = 61.9677 (√3840) and the loader refused
+  any scale ≠ 1. llama.cpp PR #29802 (`2b36825`, merged 2026-10-01) measured the scale on Gemma 4 26B-A4B
+  (RTX 4090, greedy): 3.77 → 4.38 kept a block, 209 → 237 tok/s, and its converter writes √hidden for every
+  Gemma target. z-lab's `dflash/model.py` (`_raw_input_embeddings`) defaults to 1.0; we follow llama.cpp.
+  **`block_drafter::DrafterFigures::refusal_beside`** takes a stated scale or soft cap only where it is the
+  figure the target applies (`SplitModel::embedding_scale`, `final_logit_softcap`); a file stating neither
+  (the 26B-A4B's and 31B's, converted before the PR) is embedded as its target embeds. A scaled logit stays
+  refused. Test `a_drafter_runs_where_its_scales_are_its_targets_own` — red under the old rule (it refused the
+  12B's 61.9677).
+- **The soft cap** (30) is monotone and every pick is greedy, so it changes no guess; the loader takes it
+  only as the target's own.
+- **The head.** Every Gemma 4 file is weight-tied (no `output.weight`), so a split's first segment found no
+  head to borrow and the drafter was refused there. A tied head IS the token table the first segment holds:
+  the loader lends that `Arc` (`loader::shards`, `drafter_reads_the_table`, `drafter_head_bytes` = 0), as
+  its own tied head for a range ending the model already shares it, and llama.cpp's Gemma loader
+  duplicates `token_embd` as `output` where a file has none. `OutputHeadLent` keys on a file's
+  `output.weight`, so the table is never lent on as a later range's head. A tied model's drafter needs only
+  part 0 (`model::huggingface::block_drafter::head_part_for_the_drafter`).
+
+**Measured, whole on the processor** (Gemma 4 12B Q4_K_M from bartowski, Anbeeld's Q8_0 drafter, a debug
+test build of `a_block_drafters_guesses_write_the_reply_read_one_token_at_a_time`, greedy, 96 tokens, a
+block of 16; llama.cpp master `llama-speculative-simple --spec-type draft-dflash --spec-draft-n-max 15`,
+processor build, the same prompt text; one run each, `~/swarmllm-gate/deep/gemma4_dflash/`):
+
+| prompt | ours, kept a block | ours, every word read | llama.cpp, kept a block |
+|---|---|---|---|
+| raw story | 0.79 (42 over 53) | — | 0.79 (41 over 781/15) |
+| chat story (template, thinking off) | 0.85 (44 over 52) | 0.96 (47 over 49) | 0.78 (41 over 788/15) |
+| chat code | 2.16 (67 over 31) | — | 2.64 (74 over 420/15) |
+
+Every reply equals the one read one token at a time. Both implementations keep far less than z-lab's card
+(B300, thinking on: 4.3 MT-Bench, 6.1-8.6 code and maths), so the low figure is the pairing at these prompts
+(a Q4_K_M target, 96 tokens, thinking off), not this loader. On the processor a 16-wide check cost
+3.0-3.3 s against a 363-374 ms step (debug build), so the priced arm sets the block aside after one probe
+check per reply: 2.5-2.8 against 2.9-3.1 tok/s at 96 tokens. That is a fixed ~5 s a reply, not a cost a
+token. **Gemma's vocabulary is not in frequency order**: 19,226 of its 19,227 one-character tokens sit past
+id 32,768 (`,` 236764, `.` 236761; `▁the` 506), so the processor's hot rows (`mtp::DRAFT_HOT_ROWS`) miss
+every punctuation mark and digit the conversation has not used yet. Every word read kept 0.96 against 0.85
+on the chat story, one run each.
+
+**On a split** (`examples/split_rig.sh split`, the same 12B: A holds parts 0-3 = layers [0,13) and the drafter,
+B the other 35 layers, both on the processor, 130 ms over netns, 96 greedy tokens, ON then OFF in one dev
+build, one run each, `~/swarmllm-gate/deep/gemma4_dflash/rig_{1_on,2_off}`). A logged `The model's head is its
+token table, which this first segment holds` and `block drafter (#428) … head_mb=0 … attached=true`. A
+palindrome function: 69.9 against 77.3 s (1.11×, 42 of 81 guesses kept over 48 rounds). A search-tree class: 54.6
+against 59.5 s (1.09×, 54 of 85 over 35). The story: 65.0 against 58.3 s (0.90×; one round, 15 guessed, none kept,
+then set aside for the reply). The three replies are the same text in both arms. A part of this model was missing
+on the live node; `cut_part.py` rebuilt it from the same upload, BLAKE3 equal to the manifest's, into the rig's
+own models directory.
