@@ -1268,6 +1268,19 @@ impl NetworkManager {
         if self.relay_activated || !self.shared_state.config.network.auto_relay {
             return;
         }
+        // Offline mode is air-gapped — "no internet, mDNS only" — and a
+        // reservation dials the relay: libp2p-relay dials one it is not connected
+        // to itself. So none is asked for, as the bootstrap and discovery dials
+        // and the lookup of a lost peer skip it (pre-release review, 2026-11-16:
+        // every node offline with no public address dialled an anchor here).
+        if self
+            .shared_state
+            .credits
+            .offline_mode
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            return;
+        }
         // `network.enable_relay_client` is documented as "use relays when behind
         // a firewall" and was read NOWHERE — a node set to false relayed anyway.
         // Honour it here, which is the only place relaying is turned on, and say

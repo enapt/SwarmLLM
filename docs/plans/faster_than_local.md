@@ -837,6 +837,15 @@ share, a drafter on its card, and, when the head holds both ends, the flow (sinc
 ~1.1-1.2x of the default shape's; LEVEL with it since 2026-11-01's dead wait — `shape1101`, ABBA × 3,
 one binary: prose 6.69 against 6.88 tok/s, code 18.52 against 17.20).
 
+**A second far card, 2026-11-16: the US RTX 3080 Ti (`a661155f`, least round trip 308 ms, 2.4× the
+Australian link's).** Released v0.3.293 at both ends, this laptop's card idle, one sitting, arms alternating
+(`real_link.sh` `TAG=us293`, flowhalf: [0,24) and the drafter here, [24,48) and the head there; 160 greedy
+tokens). Code: the flow 26.85 / 27.16 tok/s against this laptop alone 16.03 / 17.19 (1.6×). Prose: 11.78 /
+11.73 against 13.45 / 13.57 (0.87×) — where TH↔AU at 126-133 ms ran prose 1.6× over local. A code reply's
+guesses land often enough to carry 308 ms; a prose reply's do not, so on this link prose is the drafter's
+first-choice rate against the round trip (§ 7, § 8) — the case the block drafter (#428) is for. Whether the
+router plans this shape for prose at that distance was not checked here (the rig forces the plan).
+
 ## 10. The head's own work binds a split that starts and finishes here (2026-10-30)
 
 **Where a reply's time goes**, read off the 10-29 rig logs (`DSD: a tree that flowed is complete`;

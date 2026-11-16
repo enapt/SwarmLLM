@@ -5783,7 +5783,12 @@ to be tried last (`relay_refused`); a granted reservation
 (`relay::client::Event::ReservationReqAccepted`, read by nothing before) resets
 both. Among relays equally connected the order is a hash of this node's id and
 the relay's (`relay::relay_preference`), so nodes spread over the anchors
-instead of filling the first. **Only the relay's ANSWER is a refusal**
+instead of filling the first — after a start: a node reserves on the first relay it REACHES (the
+reservation rides that connection, `connected` ranks first), so at start the places spread by which anchor
+answers first and the hash orders the rest (pre-release review, 2026-11-16). **No reservation in offline mode**
+(`try_activate_relay` returns first): a reservation dials the relay, and offline mode is air-gapped — the review
+found every offline node without a public address dialling an anchor here, a leak older than #464 that #464
+widened to every node. **Only the relay's ANSWER is a refusal**
 (`relay::relay_refused_us`, read off `ListenerClosed`'s reason): libp2p-relay 0.21.1
 closes the listener `Err(Error::Reservation(..))` when the relay answered with an
 error, and `Ok(())` when the request's channel was dropped — our dial to the relay
@@ -5863,7 +5868,10 @@ peers remembered (`lost_peers::LostPeers`). libp2p-kad 0.48 lists in the answer 
 REACHED, and the walk dials the target at the addresses its neighbours return — so an online peer is usually
 connected by the walk itself; the answer's public addresses are dialled too, read by the one reader both
 lookups share (`addresses_the_dht_found`: the target's own entries, public only, `dialable_from_here`). A
-connection established forgets the peer. Never offline, never a peer cut off for its release. (2) A
+connection established forgets the peer. Never offline, never a peer cut off for its release. Residual
+(review, 2026-11-16): a peer names its own addresses, so many throwaway identities, each naming a public one and
+leaving, can push a real lost peer out of the 256 before its lookup — a matter of priority, not load (four
+lookups a tick whatever arrives). (2) A
 peer-exchange answer is built by **`helpers::pex_answer`**: at most `PEX_ADDRESSES_PER_PEER` (2) a peer — its
 best as the registry ranks them, then its best over the OTHER transport where it has one (`a_peers_best_for_pex`:
 QUIC ranks first, so a dual-stack peer was named by two QUIC addresses and no TCP one, nothing for a receiver whose

@@ -468,6 +468,14 @@ mod tests {
             events.contains("crate::network::relay::relay_retry_gap(self.relay_refusals)"),
             "the retry gate no longer backs off after refusals"
         );
+        let activate = &events[events
+            .find("fn try_activate_relay(")
+            .expect("try_activate_relay moved")..];
+        let activate = &activate[..activate.find("\n    }\n").unwrap_or(activate.len())];
+        assert!(
+            activate.contains(".offline_mode"),
+            "a node in offline mode (air-gapped) asks a relay for a reservation again, which dials it"
+        );
         assert!(
             events.contains("if crate::network::relay::relay_refused_us(&reason) {"),
             "a relay that was only gone (restarting, or our dial lost) counts as a refusal again"

@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #468**). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #469**). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -86,6 +86,11 @@ the top track (`docs/plans/large_model_splits.md`).
    where no sensor is visible (D, 2026-11-15).
 3. **#1** — every Mac runs on the processor; no GPU backend is compiled for Apple Silicon (needs a
    Mac to verify on).
+4a. **#468** — offline mode ("air-gapped: no internet, mDNS only") still dials the internet once
+   a LAN peer is connected: peer exchange, Kademlia and the redial paths take the public addresses
+   that peer names (probed 2026-11-16: an offline test node dialled the anchor and a peer in Italy).
+   In every release; the relay reservation half is fixed for v0.3.294. **Next**: one gate at the
+   transport (go-libp2p's connection gater, `InterceptAddrDial`).
 4. **#220** — WATCH: a worker's card faulted once (illegal memory access, 2026-10-04) and the driver
    took 14 minutes to reset; the kernel is still unknown. Every planned run is done (memcheck clean
    over ~27 min on two boots, FECS shown with no SwarmLLM code at 48 h, the drafter-in-one-process
@@ -6341,6 +6346,32 @@ Credits are DORMANT — they gate nothing, and `credits_stay_dormant` fails the 
 starts. Read `docs/CREDITS_DESIGN.md` before touching them; the credit items below are
 preconditions for ever switching enforcement on, not work for now.
 
+#### #468 — Offline mode dials the internet once a LAN peer names a public address
+`P1` · privacy · **OPEN** — 2026-11-16 · evidence: probe `~/swarmllm-gate/deep/home_relay464/probe_offline.sh` (outputs `probe_offline_{before,after}.out` beside it) · history: the v0.3.294 pre-release review (the relay half)
+
+**Seen** (2026-11-16, two test nodes on this machine, main's build): node B with `pool.offline_mode = true`, mDNS
+off, one LAN bootstrap entry. B skipped its bootstrap and cache dials as designed ("Offline LAN mode — skipping
+bootstrap peers and peer cache"), but the live node on the same LAN dialled it in (it redials addresses earlier
+probes used), and within 5 s B had dialled the internet anchor (`/dns4/swarmllm.duckdns.org/...`) and a peer in
+Italy (`95.233.105.157`) — `PEX: dialed new peers count=3`, `is_dialer=true`. It also asked the LAN relay for a
+reservation (fixed for v0.3.294: `try_activate_relay` returns in offline mode, probed 2 activations → 0).
+
+**Why**: offline mode is enforced per dial SITE — the bootstrap, cache and discovery dials and (since v0.3.294) the
+lost-peer lookup and the relay reservation check it — while peer exchange (`dht.rs` `pex`), the connection-race
+redial, a chain's next hop, the relay-provider dials and Kademlia's own walks (which dial outside `dial_checked`
+and may add addresses at dial time) do not. A LAN peer that is online names public addresses in Identify and in
+peer-exchange answers, and those reach the dialers. `dial_checked` cannot be the gate: libp2p-swarm 0.47's
+`DialOpts::get_addresses` is crate-private, and behaviours extend addresses after it.
+
+**Fix**: one gate where every outbound connection is made — the transport. Prior art: go-libp2p's
+`ConnectionGater.InterceptAddrDial(peer, addr)`, asked for every address before a dial (rust-libp2p has no gater).
+Wrap the TCP and QUIC transports INSIDE the DNS layer (so the gate sees resolved IPs) with a `Transport` whose
+`dial` refuses, while `credits.offline_mode` is set, any address that is not private, loopback or link-local
+(`TransportError::MultiaddrNotSupported`), and treat a circuit by its relay hop. Needs TCP built through
+`with_other_transport` (noise, yamux via `metered_muxer`) instead of `with_tcp` — the `protocol_traffic` guards
+pin the builder's shape and must move with it. Decide what "LAN" admits (CGNAT `100.64/10` for Tailscale, IPv6
+ULA). Test with this probe: B must dial nothing public and still reach a LAN peer.
+
 #### #450 — A peer's gossiped demand is taken at its word, and now weighs whole copies too
 `P3` · security · **OPEN** — 2026-11-14 · history: #400 (the trade this widens), the security review of #400
 
@@ -6938,7 +6969,9 @@ grep `^| N |`).
   (`relay::relay_refused_us`): a relay that was gone — restarting at a deploy, or our dial to it lost — is asked again
   at the next tick (the pre-release review caught the first build counting it). A stale circuit close no longer clears
   the latch while a newer listener is tracked. Prior art: go-libp2p AutoRelay's per-candidate `WithBackoff` /
-  `WithMaxAttempts`. Residual: a reachable node still takes a place an unreachable one could need when the anchors
+  `WithMaxAttempts`. The pre-release review also found an offline node (air-gapped, "mDNS only") asking for a
+  reservation, which dials the relay — older than #464, widened by it; now none is asked for in offline mode.
+  At start a node reserves on the first relay it reaches, so the hash orders only the rest. Residual: a reachable node still takes a place an unreachable one could need when the anchors
   are nearly full — no relay tells a client how full it is; not built.
 - #466 — **A computer that met a directly reachable node through a relay stayed on the relay: the hole punch
   offered it only a LAN address.** DCUtR's `CONNECT` carries address CANDIDATES (what peers report seeing us at,
