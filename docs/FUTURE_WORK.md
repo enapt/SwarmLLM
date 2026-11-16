@@ -1232,8 +1232,8 @@ the same machines as `flowhalf`, half here, ran code 34.0-37.5 and prose 15.5-17
 are on main (§ Closed, 2026-11-13): a resident card/processor split no longer takes the full-coverage fast path, so
 under "Start and finish on this computer" (`dsdwall`) every request went to the split — code 25.3-28.7 tok/s
 against 13.4-15.3 run here; an unmeasured split starts from the drafter's prior (2.19 a round); and every 3rd, 6th,
-12th … request is priced at 8 a round with no cold load charged (bounded exploration). **Why the default shape (`flowall`, not under that setting) never split — (j1) and (j3) built 2026-11-13, on
-main (not in a release yet), § Closed**: (j1) the split could not be expressed — with `parallax_partial_ranges` off,
+12th … request is priced at 8 a round with no cold load charged (bounded exploration). **Why the default shape (`flowall`, not under that setting) never split — (j1) and (j3) built 2026-11-13, in
+v0.3.286-alpha, § Closed**: (j1) the split could not be expressed — with `parallax_partial_ranges` off,
 two computers holding the whole model offered one indivisible range each; (j3) this node's own whole run was priced
 from the static priors at one pass a token (~4.2 tok/s for the 14B's 22 card + 26 processor layers) while it ran
 11-15 with its drafter. Beside them each start's first split read `drafter_on_card=false` with the drafter on the
@@ -1283,8 +1283,8 @@ asked to load is owed its charge: `WorkerHandle::asked_to_load` is set before a 
 by the reader on `ModelLoadTimed`. One never asked is released at once, as v0.3.285 released every worker. It was
 never seen: the live node's unloads since .286 all came back within one poll. Prior art: Ollama's runner joins
 `s.loaded` only after its load, so its `waitForVRAMRecovery` never waits on one that allocated nothing.
-(j15) **A slice of a copy already loaded was priced as if the card started at the slice** (2026-11-15, on main,
-not in a release yet). The direction (user, 11-15: the cards across computers before one computer's card and
+(j15) **A slice of a copy already loaded was priced as if the card started at the slice** (2026-11-15, in
+v0.3.292-alpha). The direction (user, 11-15: the cards across computers before one computer's card and
 processor) asked whether this card could take the processor share of a 27B the Australian RTX 3060 runs whole
 (#451's field check: that hybrid ran 5.5-6.5 tok/s, its drafter's 3-3.6 tokens a round bought nothing).
 `real_link27d.sh TAG=c2h1115b` (v0.3.291 both ends, 14:55-15:10Z, Qwen3.8-27B Q4_K_M, arms hand/c2h/c2h/hand, 160
@@ -1415,7 +1415,7 @@ split wins. Also feed observed per-layer latency into `compute_segment_timeout` 
 the fixed 2 s/layer guess. Depends on #3. **With it off, the GREEDY fallback plans every split
 whose holders overlap** (whole ranges A 0-21 / peer 3-28 have no chain: 16 of 16 plans in
 2026-10-10's #10 rigs), so greedy's pricing is the pricing those splits get — it gained the
-cold-load charge that day. **On for one case since 2026-11-13, on main (not in a release yet)** (#3 (j1)):
+cold-load charge that day. **On for one case since 2026-11-13, in v0.3.286-alpha** (#3 (j1)):
 where this node holds every layer and its card runs only part of them
 (`scheduler::shares_what_its_card_cannot_hold`). With #449 the peer serves its share from its whole
 copy; on the real link the explored splits ran code 24.1 and 16.5 tok/s against 11.0-17.0 with it
@@ -5531,7 +5531,7 @@ output head + the 227 MB next-token block, `budget_left_mb=280`); the daemon gre
 one average layer (261 MB, headroom 144); the loader, reading 1,261 MB free against 1,336 MB of weights — the layer
 AND a second copy of the head — refused with `NO_KV_CACHE_ROOM_MARKER`, a permanent card failure: the worker was
 killed and the model pinned to the processor for 120 s; the retry ran at ~148 ms a round against ~15 on the card.
-**Fixed 2026-11-16 (on main, not in a release yet) — fix (c)**: a model process holds ONE copy of the head. The
+**Fixed 2026-11-16 (v0.3.293-alpha) — fix (c)**: a model process holds ONE copy of the head. The
 worker lends the head a loaded range holds to the next load (`split::OutputHeadLent::of`, in `ensure_model_loaded`
 before any covered range is dropped); a range ending the model uses it as its `output` and leaves its bytes out of
 the card's room, and a first segment borrowing it for its guesses uses a last range's (`split::lent_output_head`:
@@ -6913,7 +6913,7 @@ Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
 
-**Closed 2026-11-16 (on main, not in a release yet)** (#463; #458's double head — the entry keeps its residual)
+**Closed 2026-11-16 (v0.3.293-alpha)** (#463; #458's double head — the entry keeps its residual)
 - #458 (its seen cause) — **A computer running both ends of a split kept two copies of the model's output layer, and
   the second could push the whole model off the card.** Qwen3.8-27B under "Start and finish on this computer": the
   guess head beside the first segment and the range ending the model each held the 994 MB output head; on a
