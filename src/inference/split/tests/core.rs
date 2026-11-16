@@ -2214,3 +2214,58 @@ fn a_prompt_chunk_read_whole_on_the_card_gives_the_processors_answer() {
         assert_eq!(kept(&there), kept(&here), "chunk {i}, the cache it kept");
     }
 }
+
+/// A range ending the model serves from the output head its model process
+/// already holds — the very weight, never a second copy — and only where the
+/// lend IS the file's `output.weight` on the load's device (#458: a second
+/// 994 MB copy of a 27B's head refused a near-full card and pinned the model
+/// to the processor). Red with `SWARMLLM_SHARE_OUTPUT_HEAD=0`.
+#[test]
+fn a_range_ending_the_model_shares_the_output_head_its_process_holds() {
+    use candle_core::quantized::{gguf_file, GgmlDType};
+    let device = Device::Cpu;
+    let quantized = |rows: usize| {
+        let w = Tensor::randn(0f32, 0.02, (rows, 64), &device).unwrap();
+        QTensor::quantize(&w, GgmlDType::Q8_0).unwrap()
+    };
+    let head_of_file = |rows: usize| {
+        let mut buf = std::io::Cursor::new(Vec::new());
+        gguf_file::write(&mut buf, &[], &[("output.weight", &quantized(rows))]).unwrap();
+        buf.set_position(0);
+        let ct = gguf_file::Content::read(&mut buf).unwrap();
+        let info = &ct.tensor_infos["output.weight"];
+        gguf_file::TensorInfo {
+            ggml_dtype: info.ggml_dtype,
+            shape: info.shape.clone(),
+            offset: info.offset,
+        }
+    };
+    let info = head_of_file(64);
+
+    // Nothing lent: the file's head is read.
+    assert!(lent_output_head(&info, &device).is_none());
+
+    // A first segment holding the head for its guesses lends it ...
+    let mut first = make_test_split_model(1, 64);
+    let held = QMatMul::from_qtensor(quantized(64)).unwrap();
+    first.drafter_head = Some(held.clone());
+    {
+        let _lent = OutputHeadLent::of([&first]).expect("a held head is lent");
+        let shared =
+            lent_output_head(&info, &device).expect("the range ending the model borrows it");
+        assert!(std::sync::Arc::ptr_eq(
+            shared.quantized_weight().unwrap(),
+            held.quantized_weight().unwrap()
+        ));
+        // ... never as another tensor: a head of another shape is read.
+        assert!(lent_output_head(&head_of_file(96), &device).is_none());
+        // A processor-held head never moves a load: only a CARD lend hands the
+        // load the lender's device (the card half is checked on a card —
+        // `docs/invariants/memory.md` § "A model process holds one copy").
+        assert!(crate::inference::split::device_of_the_lent_head().is_none());
+    }
+    // The lend ends with its guard.
+    assert!(lent_output_head(&info, &device).is_none());
+    // A range holding no head lends nothing.
+    assert!(OutputHeadLent::of([&make_test_split_model(1, 64)]).is_none());
+}

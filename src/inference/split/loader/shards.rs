@@ -341,7 +341,21 @@ impl SplitModel {
             "DIAG: split load timed"
         );
         let mut model = model?;
-        if let Some(info) = drafter_head {
+        // The head a range ending the model already holds here, where this
+        // process loaded one first (#458): shared, it adds nothing to charge.
+        let lent = drafter_head
+            .as_ref()
+            .and_then(|info| super::super::lent_output_head(info, &model.device));
+        if let (Some(head), Some(info)) = (lent, drafter_head.as_ref()) {
+            tracing::info!(
+                layers = format!("[{layer_start}..{layer_end})"),
+                head_mb = crate::inference::split::tensor_byte_size(info) >> 20,
+                "The output head this model process already holds serves this first \
+                 segment's guesses too — not read a second time (#458)"
+            );
+            model.drafter_head = Some(head);
+            model.drafter_head_bytes = 0;
+        } else if let Some(info) = drafter_head {
             let bytes = crate::inference::split::tensor_byte_size(&info);
             match info
                 .read(&mut reader, tensor_data_offset, &model.device)

@@ -3221,6 +3221,85 @@ with the rung on), `a_worker_in_use_still_takes_a_wider_range_as_a_split`. A/B
 daemon still charges a dropped spawn range's base while a split stands beside a
 worker in use) and the retirement's own worse-placement guard (#461).
 
+## A model process holds one copy of the output head (2026-11-16, FUTURE_WORK #458)
+
+### What it replaced
+
+A split that starts and finishes here holds two ranges in one model process: the
+first segment, beside which the file's guess head (#425 (a)) or a block drafter
+(#428) keeps the model's output head (`SplitModel::drafter_head`), and the range
+ending the model, which loads `output.weight` as its own `output`. Each range is
+its own `SplitModel`, loaded on its own, so the process held the head twice. On
+the real link (`real_link27d.sh TAG=c2hfresh1115`, 2026-11-15, Qwen3.8-27B
+Q4_K_M, `[0..15)` + `[63..64)` here, `[15..63)` on the Australian RTX 3060) the
+daemon admitted `[0..15)` (4,997 MB), the worker kept the guess head beside it
+(994 MB of head + the 227 MB next-token block, `budget_left_mb=280`), and the
+daemon then grew the same worker by `[63..64)` at one average layer (261 MB,
+headroom 144). The loader read 1,261 MB free against 1,336 MB of weights — the
+layer and a SECOND copy of the head — refused the cache (`NO_KV_CACHE_ROOM_MARKER`),
+and that refusal is a permanent card failure: the worker that had run the prompt
+pass was killed and the whole model pinned to the processor for 120 s; the retry
+ran `[0..15)` there at ~148 ms a round against ~15 on the card.
+
+### The fix
+
+The worker lends the head a loaded range holds to the next load
+(`split::OutputHeadLent::of`, a scoped process-wide slot beside
+`split::placement_of`, taken in `model_worker::ensure_model_loaded` before any
+covered range is dropped, so a head a dropped range held stays for the new one).
+The loader asks `split::lent_output_head` at the two places it reads that
+tensor: a range ending the model uses the lent head as its `output` and leaves its
+bytes out of the card's room (they are already in the free memory it reads as
+used), and a first segment borrowing the head for its guesses uses a last range's
+(`drafter_head_bytes` 0, so the guess head and the block drafter are not charged
+it twice). Only the file's `output.weight` is ever taken — the lend must be
+quantized and of that tensor's type, shape and device — so a tied model's head
+(the token table) is never lent as one, a processor copy never serves a card load,
+and a tensor-parallel share (its own slice) neither lends nor borrows. Sharing is
+by `Arc` (`QMatMul` clones share their weight), so the head lives while any range
+serves from it; nothing mutates a head in place.
+
+Prior art: vLLM's EAGLE and MTP drafters load no head of their own and share the
+target's `lm_head` (`Llama4ForCausalLMEagle` skips its `lm_head` weights, "tied
+with target model"); llama.cpp's MTP reads the model's own `output`; in this
+repo a tied model's head already shares `token_embd` (`QMatMul::from_arc`). Here
+the sharing runs both ways inside one process.
+
+### On a card the borrower runs on the lender's device
+
+The first card build of the fix lent the head and the loader still read its own
+copy (`weight_mb=1336`, refused, pinned — `real_link_share458b`, arm 2,
+2026-11-16 06:04:07Z): `loader::load_device` built a new `CudaDevice` for every
+load, and vendored candle gives each its own `DeviceId` and its own stream
+(event tracking off — `cuda_backend/device.rs`, "one per segment when a process
+holds two"), so the device check refused the lend. Relaxing the check to "the
+same card" would have been the wrong fix: the head would be read on the
+borrower's stream with nothing ordering it against the lender's, and freed by
+whichever range dropped last on a stream the other's kernels were not ordered
+on — a silently wrong reply, not an error. Instead a load with a card head lent
+runs on the LENDER's device (`split::device_of_the_lent_head`, the first thing
+`load_device` asks): one stream, so every use is ordered, and the worker runs
+every range's work on its one loop. Prior art: llama.cpp keeps one CUDA backend
+(one stream) per device for every layer a model places there; vLLM's EAGLE
+drafter runs on the target's device and stream and reads its `lm_head` in place.
+The unit test cannot see this half (`Device::Cpu.same_device` is always true,
+gotcha #1118); it is checked by the log line on a card.
+
+### What a change must keep
+
+- One reading of "is this the file's head": `lent_output_head`. A new place that
+  reads `output.weight` asks it first.
+- The lend is taken BEFORE `subsumed_segment_keys` drops ranges, and lives until
+  the load returns.
+- A borrowing load runs on the lender's `Device` (its clone — same id, same
+  stream); the device check in `lent_output_head` stays exact.
+- A shared head is weighed once: never in a second range's room, never in
+  `drafter_head_bytes`.
+
+Test: `a_range_ending_the_model_shares_the_output_head_its_process_holds` (the
+very weight, `Arc::ptr_eq`; another shape is read; the lend ends with its guard;
+red with `SWARMLLM_SHARE_OUTPUT_HEAD=0`). A/B `SWARMLLM_SHARE_OUTPUT_HEAD=0`.
+
 ## A worker serves any run inside a range it loaded (2026-11-13, FUTURE_WORK #449)
 
 ### What it replaced

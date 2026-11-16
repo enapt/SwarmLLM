@@ -65,7 +65,9 @@ pub struct SplitModel {
     /// part holding the head is too.
     pub(super) drafter_head: Option<QMatMul>,
     /// What `drafter_head` holds, counted with the drafter when it is
-    /// attached ([`Self::attach_block_drafter`]); 0 without one.
+    /// attached ([`Self::attach_block_drafter`]); 0 without one, and 0 where
+    /// the head is the one a range ending the model already holds in this
+    /// process (`super::lent_output_head`, #458) — already on the device.
     pub(super) drafter_head_bytes: u64,
     /// The first rows of the head a block drafter reads (`output`, else
     /// `drafter_head`), where that head is on the processor and no guess head
@@ -323,6 +325,16 @@ fn note_prompt_chunk_sized(
 }
 
 impl SplitModel {
+    /// The output head this range holds — its own (`output`, a range ending
+    /// the model) or the one read for the guess head or block drafter beside a
+    /// first segment (`drafter_head`) — for the next range this process loads
+    /// to share ([`super::OutputHeadLent`], #458). The loader takes it only
+    /// for the file's `output.weight` ([`super::lent_output_head`]), so a tied
+    /// model's head (the token table) is never lent as one.
+    pub(crate) fn output_head_held(&self) -> Option<QMatMul> {
+        self.output.clone().or_else(|| self.drafter_head.clone())
+    }
+
     /// How many of this segment's layers work on the processor: held there,
     /// or held on the card with their routed experts kept in the machine's
     /// memory (#138 (3)), which the processor runs every decode step.

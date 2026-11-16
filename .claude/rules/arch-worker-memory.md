@@ -74,6 +74,12 @@ Whenever code waits for a subprocess, handle it dying instead (`spawn_worker` ra
 
 → `docs/invariants/memory.md` § "A worker that cannot grow gets the spawn's ladder (2026-09-27)"
 
+## A model process holds ONE copy of the output head (2026-11-16, #458)
+
+A first segment keeps the file's head for its guess head or block drafter (`drafter_head`); a range ending the model reads the same `output.weight`. **`split::OutputHeadLent::of`** (in `model_worker::ensure_model_loaded`, BEFORE a covered range is dropped, single-rank ranges only) lends the head a loaded range holds to the next load, and the loader takes it only through **`split::lent_output_head`** (the file's `output.weight`: quantized, same type, shape and device) — for a range ending the model (left out of the card's room too) and for a first segment's borrowed head (`drafter_head_bytes` 0). A second 994 MB copy of a 27B's head refused a near-full card and pinned the model to the processor. ⛔ **A borrowing load runs on the LENDER's device** (`split::device_of_the_lent_head`, asked first by `loader::load_device`): every load otherwise builds its own `CudaDevice` — its own id AND stream — so a head shared across two would be read and freed on two unordered streams (gotcha #1118); never relax the device check to "same card". A/B `SWARMLLM_SHARE_OUTPUT_HEAD=0`.
+
+→ `docs/invariants/memory.md` § "A model process holds one copy of the output head"
+
 ## A long prompt asks for the room back (2026-11-15, #454)
 
 A whole card placement its load fitted to a typical conversation (`fit_whole_placement_to_the_load`, recorded in `WorkerHandle::room_sized_for`) that refuses a generate's prompt as too long (`Shortfall::TooLong` only → `WorkerMsg::PromptRoomWanted`, gated at the sender) is retired and loaded again fitted to it: **`ModelProcessPool::make_room_for_a_longer_prompt`**, only where that load keeps MORE and no other request uses it (`WorkerHandle::in_use_beside`), under the spawn lock. The room is kept 30 min in `LongPrompts` and read ONLY by `whole_placement_kv`. `generate` asks again once before any token. Admission is never asked with the longer charge, so a remembered prompt never stops a model loading. **The load fitted to that prompt keeps the forward's buffers beneath the load's line too** (`SplitCard::for_one_long_prompt`; without it the card check's reload was refused again by 100 MB). A/B `SWARMLLM_LONG_PROMPT_RELOAD=0`.

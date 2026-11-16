@@ -1109,6 +1109,11 @@ pub(super) fn load_device(force_cpu: bool) -> Device {
     if force_cpu {
         return Device::Cpu;
     }
+    // A load borrowing a card-held head runs where the head lives — the
+    // lender's device and stream, already set up by its own load (#458).
+    if let Some(device) = super::device_of_the_lent_head() {
+        return device;
+    }
     let device = Device::cuda_if_available(0).unwrap_or(Device::Cpu);
     crate::inference::cuda_pool::keep_freed_memory(&device);
     crate::inference::cuda_pool::probe_once(&device);
@@ -1577,6 +1582,16 @@ impl SplitModel {
                 );
             }
         }
+        // A range ending the model serves from the output head this model
+        // process already holds on its device, where one is lent (#458) — and
+        // then the head is neither read again nor weighed again below.
+        let lent_head = is_last
+            .then(|| ct.tensor_infos.get("output.weight"))
+            .flatten()
+            .and_then(|info| {
+                super::lent_output_head(info, &device)
+                    .map(|head| (head, super::tensor_byte_size(info)))
+            });
         if device.is_cuda() {
             let rows_on_demand = ct
                 .tensor_infos
@@ -1605,7 +1620,9 @@ impl SplitModel {
                 layer_start + processor_run.start,
                 layer_start + processor_run.end,
             ))
-            .saturating_sub(experts_in_ram_bytes);
+            .saturating_sub(experts_in_ram_bytes)
+            // Already on the card, in the free memory read below as used.
+            .saturating_sub(lent_head.as_ref().map_or(0, |(_, bytes)| *bytes));
 
             // A missing nvidia-smi means "unknown", never "zero" — a budget
             // of zero would refuse every request, which is far worse than the
@@ -2031,7 +2048,15 @@ impl SplitModel {
             None
         };
 
-        let output = if is_last {
+        let output = if let Some((head, bytes)) = lent_head {
+            tracing::info!(
+                layers = format!("[{layer_start}..{layer_end})"),
+                head_mb = bytes >> 20,
+                "The output head this model process already holds serves this range too — \
+                 not read a second time (#458)"
+            );
+            Some(head)
+        } else if is_last {
             match ct.tensor(&mut file, "output.weight", &device) {
                 // An untied model ships its own head.
                 Ok(t) => Some(QMatMul::from_qtensor(t).map_err(SwarmError::internal)?),

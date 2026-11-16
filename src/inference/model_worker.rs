@@ -1380,6 +1380,25 @@ fn ensure_model_loaded(
         std::thread::sleep(std::time::Duration::from_secs(secs));
     }
 
+    // The output head a range already holds — a first segment's, read for its
+    // guess head or block drafter, or a last range's own — is lent to this
+    // load, so a range ending the model (or a first segment borrowing the
+    // head) shares that copy instead of reading the file's again (#458: a
+    // second 994 MB copy on a near-full card refused `[63..64)` of a 27B and
+    // pinned the model to the processor). Lent BEFORE any covered range is
+    // dropped below, and held until this load returns. A tensor-parallel
+    // share's head is its own slice, so only single-rank ranges lend or borrow.
+    let _head_lent = (tp_size == 1)
+        .then(|| {
+            crate::inference::split::OutputHeadLent::of(
+                models
+                    .iter()
+                    .filter(|((_, _, _, ts), _)| *ts == 1)
+                    .map(|(_, m)| m),
+            )
+        })
+        .flatten();
+
     // A range that SUBSUMES ranges we already hold makes them redundant, and
     // holding both means holding those layers' weights twice.
     //

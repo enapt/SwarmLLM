@@ -284,6 +284,103 @@ pub(crate) fn placement_of(layer_start: usize, layer_end: usize) -> RangePlaceme
         })
 }
 
+/// The output head this model process already holds, LENT for the load of
+/// one range (#458). A split's first segment keeps the file's head for the
+/// guess head or block drafter beside it (`SplitModel::drafter_head`), and a
+/// range ending the model reads the same `output.weight` — on Qwen3.8-27B a
+/// second 994 MB copy, which a near-full 8 GB card refused (`[63..64)`: 1,336
+/// MB of weights against 1,261 free), ending the worker that had run the
+/// prompt and pinning the whole model to the processor for the retry. Set by
+/// [`OutputHeadLent::of`] around a worker's load and asked by the loader
+/// ([`lent_output_head`]) at both places it reads that tensor: a range that
+/// ends the model, and a first segment's borrowed head.
+///
+/// Prior art: vLLM's EAGLE and MTP drafters load no head of their own and
+/// share the target's `lm_head` (`Llama4ForCausalLMEagle` skips its
+/// `lm_head` weights, "tied with target model"); llama.cpp's MTP reads the
+/// model's own `output`. Here the sharing runs both ways inside one process,
+/// as a tied model's head already shares `token_embd` (`QMatMul::from_arc`).
+static LENT_OUTPUT_HEAD: std::sync::Mutex<Option<QMatMul>> = std::sync::Mutex::new(None);
+
+/// Does a range share the output head its model process already holds
+/// (#458)? A/B `SWARMLLM_SHARE_OUTPUT_HEAD=0`: every range reads its own copy,
+/// as before.
+fn share_output_head_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("SWARMLLM_SHARE_OUTPUT_HEAD").as_deref() != Ok("0"))
+}
+
+fn lent_output_head_slot() -> std::sync::MutexGuard<'static, Option<QMatMul>> {
+    LENT_OUTPUT_HEAD
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// One lend of a held output head ([`LENT_OUTPUT_HEAD`]), for the load that
+/// follows it; dropped, the lend ends — so a range dropped later frees its
+/// head unless another range still serves from it.
+#[must_use = "the lend lasts only while this is held"]
+pub(crate) struct OutputHeadLent(());
+
+impl OutputHeadLent {
+    /// Lend the output head one of `held` — the single-rank ranges this
+    /// model process has loaded — holds, for the next load; `None` where none
+    /// holds one or sharing is off. Taken BEFORE the load drops any range it
+    /// covers, so a head a dropped range held stays for the new one.
+    pub(crate) fn of<'a>(held: impl IntoIterator<Item = &'a SplitModel>) -> Option<Self> {
+        if !share_output_head_on() {
+            return None;
+        }
+        let head = held.into_iter().find_map(SplitModel::output_head_held)?;
+        *lent_output_head_slot() = Some(head);
+        Some(Self(()))
+    }
+}
+
+impl Drop for OutputHeadLent {
+    fn drop(&mut self) {
+        *lent_output_head_slot() = None;
+    }
+}
+
+/// The card a load runs on while a card-held head is lent to it: the
+/// LENDER's device, the same `DeviceId` and stream, so the borrowed head is
+/// read on the stream that wrote it and freed on the stream that read it last.
+/// Each load otherwise builds a device of its own (`loader::load_device`), one
+/// per range — and vendored candle gives each its own stream, so a head shared
+/// across two would be used on two streams with nothing ordering them (event
+/// tracking is off: `cuda_backend/device.rs`), and [`lent_output_head`]'s
+/// device check refused every card lend (the real link, 2026-11-16: the fix's
+/// first card build still loaded `[63..64)` at 1,336 MB). Two ranges on one
+/// stream are ordered by it; the worker runs every range's work on its one
+/// loop. `None`: no card lend — the load builds its own, as before.
+///
+/// Prior art: llama.cpp keeps one CUDA backend (one stream) per device for
+/// every layer a model places there; vLLM's EAGLE drafter runs on the
+/// target's device and stream and reads its `lm_head` in place.
+pub(super) fn device_of_the_lent_head() -> Option<candle_core::Device> {
+    let lent = lent_output_head_slot().clone()?;
+    let device = lent.quantized_weight()?.device();
+    device.is_cuda().then_some(device)
+}
+
+/// The held output head a load on `device` uses for the file's
+/// `output.weight` (`info`) instead of reading it: the lent one, where it IS
+/// that tensor — quantized, of its type and shape, on that device. `None`:
+/// read the file's (nothing lent, a processor copy for a card load, or the
+/// lend describes another tensor).
+pub(super) fn lent_output_head(
+    info: &candle_core::quantized::gguf_file::TensorInfo,
+    device: &candle_core::Device,
+) -> Option<QMatMul> {
+    let lent = lent_output_head_slot().clone()?;
+    let weight = lent.quantized_weight()?;
+    (weight.dtype() == info.ggml_dtype
+        && weight.shape().dims() == info.shape.dims()
+        && weight.device().same_device(device))
+    .then_some(lent)
+}
+
 /// Read the CPU worker's KV-cache budget (None when 0 — unset).
 pub fn cpu_kv_budget_bytes() -> Option<u64> {
     match CPU_KV_BUDGET_BYTES.load(std::sync::atomic::Ordering::Relaxed) {

@@ -5523,30 +5523,44 @@ The balanced-split question that led here (#411 "Also": fewer layers on the head
 UNMEASURED: arm 1 (`[0..26)` here) read 19.6 / 44.9, and every later arm measured the slow copy.
 
 #### #458 — A range grown onto a card worker that its loader then refuses pins the WHOLE model to the processor
-`P2` · memory / admission · **OPEN** — 2026-11-15 · found on the real link (`real_link27d.sh`, `TAG=c2h1115b` and `c2hfresh1115`)
+`P3` · memory / admission · **PARTIAL — the double head FIXED (card-checked 2026-11-16); residual (1)-(2)** — 2026-11-15 · found on the real link (`real_link27d.sh`, `TAG=c2h1115b` and `c2hfresh1115`)
 
 **Seen** (both runs, this node's 8 GB card with ~2.8 GB held by other programs, Qwen3.8-27B, a split that starts and
-finishes here): the daemon admitted `[0..15)` to the card (4,997 MB, headroom 1,533); the worker loaded it and kept the
-file's guess head beside it (`keep_the_split_guess_head`: 994 MB of output head + the 227 MB next-token block, charged
-only to the worker's own cache budget, `budget_left_mb=280`). The daemon then grew the same worker by `[63..64)`
-(`charge_additional_segment`: 261 MB against its budget, headroom 144 MB, `on_gpu=true`); the loader, drawing its own
-line (85% of free memory, the range's weights counted WITH the output head an end loads), found no room for even a
-32 MB cache and refused with `NO_KV_CACHE_ROOM_MARKER` — classified a permanent card failure: the worker that had run
-the prompt pass on the card was killed and the model pinned to the processor for 120 s (doubling). The retry ran
-`[0..15)` on the processor: 148 ms a round against ~15 on the card, every round of both runs.
-**Why the ladder did not catch it**: a card growth is admitted by the daemon's budget (`admit_to_gpu`: free memory
-less its reserve), never by the loader's line — #364 drew that line for splits (`split_room_bytes`) but not here —
-and the growth counts layers only, never the output head a range ENDING the model loads (#342 charges a spawn's ends,
-not a growth's). And no rung places a range that ends the model on the processor beside a card worker: the head goes
-on the card (`split_for_card`), so `growth_split` answers "no layer fits".
-**What a fix must keep**: under "Start and finish on this computer" the last segment must be here, so turning the pin
-into a plain refusal turns a slow answer into a failed request. Candidates: (a) a card growth weighed by the loader's
-line and its ends' tables, so the split rung runs first; (b) the guess head (and a block drafter) beside a first
-segment leaves room for the plan's other local ranges, or gives its card memory back for them (it is worth ~2 tokens a
-round; a range on the processor costs ~130 ms a round here); (c) the last segment's output head shared with the guess
-head's copy rather than counted again. Not decisive for tonight's 27B: with `[0..15)` on the card the split prices
-~4.2 tok/s against the hand-off's 5.7-6.2 (FUTURE_WORK #3 (j15)). Evidence: `real_link_c2hfresh1115/H_1_c2h.log`
-15:20:47-15:21:03Z.
+finishes here): the daemon admitted `[0..15)` (4,997 MB); the worker kept the file's guess head beside it (994 MB of
+output head + the 227 MB next-token block, `budget_left_mb=280`); the daemon grew the same worker by `[63..64)` at
+one average layer (261 MB, headroom 144); the loader, reading 1,261 MB free against 1,336 MB of weights — the layer
+AND a second copy of the head — refused with `NO_KV_CACHE_ROOM_MARKER`, a permanent card failure: the worker was
+killed and the model pinned to the processor for 120 s; the retry ran at ~148 ms a round against ~15 on the card.
+**Fixed 2026-11-16 (on main, not in a release yet) — fix (c)**: a model process holds ONE copy of the head. The
+worker lends the head a loaded range holds to the next load (`split::OutputHeadLent::of`, in `ensure_model_loaded`
+before any covered range is dropped); a range ending the model uses it as its `output` and leaves its bytes out of
+the card's room, and a first segment borrowing it for its guesses uses a last range's (`split::lent_output_head`:
+only the file's `output.weight`, quantized, same type, shape and device). On a card the borrower runs on the
+LENDER's device (`split::device_of_the_lent_head`, asked first by `loader::load_device`): every load had built its
+own `CudaDevice`, with its own stream, so the fix's first card build refused every lend (gotcha #1118) — and "same
+card" would have read and freed the head on two unordered streams. **Measured** (`real_link27d.sh`
+`TAG=share458c`, 2026-11-16 06:14-06:38Z, this node `[0..13)` + `[63..64)` — two layers fewer than 11-15, so the
+daemon admits the growth on a card ~260 MB tighter than then — AU `aa3d1e66` `[13..63)`, 540-580 ms, one binary,
+A/B `SWARMLLM_SHARE_OUTPUT_HEAD=0`): **off** 2/2 arms refused at `[63..64)` (`weight_mb=1336`) and pinned, every
+request on the processor — first word of the warm-up 16-30 s, prose 1.44 / 2.76, code 1.58 / 3.49 tok/s; **on** 0/2
+refused, "The output head this model process already holds serves this range too" both arms, `[63..64)` loaded on
+the card at 320 MB on `DeviceId(2)` (the first segment's), prose 5.74 / 4.91, code 6.16 / 5.06 tok/s, first word 2.0
+s — level with the hand-off to AU in the same sitting (4.90 / 5.52). Replies coherent; they part from the processor
+arm's at 218-248 characters, a card's usual near-tie. Test
+`a_range_ending_the_model_shares_the_output_head_its_process_holds` (red with the switch off; it cannot see the
+device half — `Device::Cpu` always matches). Prior art: vLLM's EAGLE/MTP drafters share the target's `lm_head`
+(`Llama4ForCausalLMEagle` skips its own); llama.cpp's MTP reads `model.output`; one CUDA backend per device in
+llama.cpp, vLLM's drafter on the target's stream. Evidence: `docs/invariants/memory.md` § "A model process holds one
+copy of the output head".
+**Left (hypotheses, not seen since the fix):** (1) a worker holding NO head (the guess head not kept — on 11-16 at
+`[0..15)` it missed by 16 MB — and no block drafter) still grows an end range charged one average layer while its
+loader reads the head too; a charge that adds the ends' tables needs the worker to say whether it holds the head
+(the daemon cannot tell). (2) Any loader refusal of a growth is still fatal for the worker's other ranges; under
+"Start and finish on this computer" a plain refusal fails the request unless the re-plan frees the first segment's
+room (the loaded `[0..k)` stays — a view of it frees nothing, #449). Seen beside it, same day: at `[0..15)` the
+daemon's LIVE budget (5,182 MB, its worker's CUDA context counted as another program's) refused the growth before
+the loader ran, and the rig's pretended holdings left the re-plan no route — a rig shape, the swarm's AU holds every
+part.
 
 #### #454 — A long prompt on a split sized for a typical conversation is refused by megabytes, not reloaded with fewer card layers
 `P3` · memory / scheduling · **FIXED for a whole model (card-checked 2026-11-15); residual (2)-(3)** — 2026-11-15 · from a field report (AU, 12 GB card, Qwen2.5-14B at 47/48 on the card)
@@ -6899,7 +6913,15 @@ Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
 
-**Closed 2026-11-16 (on main, not in a release yet)** (#463)
+**Closed 2026-11-16 (on main, not in a release yet)** (#463; #458's double head — the entry keeps its residual)
+- #458 (its seen cause) — **A computer running both ends of a split kept two copies of the model's output layer, and
+  the second could push the whole model off the card.** Qwen3.8-27B under "Start and finish on this computer": the
+  guess head beside the first segment and the range ending the model each held the 994 MB output head; on a
+  near-full 8 GB card the second was refused, the worker killed and the model pinned to the processor. Now a model
+  process holds one copy (`split::OutputHeadLent`, `lent_output_head`) and on a card the borrowing range runs on
+  the lender's device and stream (`device_of_the_lent_head`). Real link, one binary: off 2/2 pinned, prose 1.4-2.8 /
+  code 1.6-3.5 tok/s; on 0/2, prose 4.9-5.7 / code 5.1-6.2 — level with the hand-off (4.9 / 5.5). A/B
+  `SWARMLLM_SHARE_OUTPUT_HEAD=0`. Residual in #458.
 - #463 — **Leaving the drafter room, a plan could send ONE layer to a slow third computer and come back.** The plan
   that leaves this node's drafter room (#275) ran whenever it routed: a first request after a start, room for 25 of
   the 26 layers held here, was planned `[0..24)` here, `[24..25)` on a computer 263 ms away, `[25..26)` here again,
