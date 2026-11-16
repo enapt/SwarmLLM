@@ -2247,6 +2247,16 @@ swarm's computers on 11-15 only Australia's i7-12700 has AVX-VNNI (its card does
 Next: build the Q4_K and Q8_0 row kernels behind the dispatch and an A/B switch, run the bit-identity
 tests under Intel SDE (`sde64 -adl`), and time it on a VNNI processor in the swarm through a
 `swarm_route` override with that node's model on its processor.
+**Narrowed 2026-11-16 — the k-quants do not take it** (read in `~/llama.cpp-ref`,
+`ggml/src/ggml-cpu/arch/x86/quants.c`): llama.cpp uses `dpbusd` ONLY inside `mul_sum_us8_pairs_float`, whose
+second step is a `madd` by ONES — the Q4_0, Q4_1, Q5_x and Q8_0 dots. `ggml_vec_dot_q4_K_q8_K` and
+`ggml_vec_dot_q6_K_q8_K` keep `maddubs` + `madd` under every x86 level, because their `madd` multiplies by each
+32-value sub-block's SCALE (`_mm256_madd_epi16(scale_l, p16l)`, `_mm256_cvtepi8_epi16(scale_0)`): fused, the
+scale would need an i32 multiply (`mullo_epi32`, two uops, 10-cycle latency) after `dpbusd`, no cheaper than the
+pair. Our Q4_K/Q6_K row kernels have the same shape (`dot_q6k_q8k_rows`). So the layers of a Q4_K_M file — the
+27B's and the 70B's that Australia's processor carries, the reason this looked worth more than P3 — would not
+move; what would is a Q8_0 drafter checked or drafting on a processor (the 0.5B/1.5B Q8_0 helpers) and a Q4_0
+guess head (Qwen 3.8 27B's `eh_proj`). Stays P3; the Q4_K line above is dropped from "Next".
 
 #### #453 — The decode-width re-check can pick a wider width that decodes slower over a whole reply
 `P2` · perf-local · **BUILT — awaiting a widening gate arm** — 2026-11-14 · evidence: release checks of v0.3.284 and v0.3.288 (`~/swarmllm-gate/v0.3.28{4,8}-alpha/out/speed.moe_*.node.log`); `docs/invariants/memory.md` § "A wider pick is proved in blocks before it is kept"
