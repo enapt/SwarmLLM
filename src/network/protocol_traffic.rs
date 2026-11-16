@@ -197,8 +197,9 @@ pub struct MeteredMuxUpgrade<U> {
     meter: Arc<ProtocolTrafficMeter>,
 }
 
-/// The form the swarm builder takes a multiplexer in (`with_tcp`,
-/// `with_relay_client`): `metered_muxer(libp2p::yamux::Config::default, meter)`.
+/// The form the swarm builder takes a multiplexer in (`with_relay_client`;
+/// `network::transport::swarm_transport` calls it for TCP):
+/// `metered_muxer(libp2p::yamux::Config::default, meter)`.
 pub fn metered_muxer<U>(
     make: impl FnOnce() -> U,
     meter: Arc<ProtocolTrafficMeter>,
@@ -552,28 +553,41 @@ mod tests {
         );
     }
 
-    /// The node's own swarm build meters every transport. The test below
-    /// builds its swarms by hand, so nothing else would notice the node's
-    /// build losing one — and an unmetered transport reads as rows that no
-    /// longer add up, not as a missing row.
+    /// The node's own swarm build meters every transport. TCP and QUIC are
+    /// built by `network::transport::swarm_transport`, which the test below
+    /// builds through too; relayed circuits are added in the manager, where
+    /// nothing else would notice them losing the meter — and an unmetered
+    /// transport reads as rows that no longer add up, not as a missing row.
     #[test]
     fn every_transport_the_node_builds_is_metered_by_protocol() {
         let build = include_str!("manager/mod.rs");
+        let base = include_str!("transport.rs");
         assert_eq!(
             build.matches("protocol_traffic::metered_muxer(").count(),
-            2,
-            "TCP and relayed circuits take the metered yamux"
+            1,
+            "relayed circuits take the metered yamux"
         );
         assert_eq!(
-            build
-                .matches("protocol_traffic::MeteredMuxer::new(")
-                .count(),
+            build.matches("transport::swarm_transport(").count(),
+            1,
+            "TCP and QUIC come from the one shared builder"
+        );
+        for unmetered in [".with_tcp(", ".with_quic()", ".with_dns()"] {
+            assert!(
+                !build.contains(unmetered),
+                "`{unmetered}` would add a transport outside `swarm_transport` — \
+                 unmetered, or outside offline mode's gate (#468)"
+            );
+        }
+        assert_eq!(
+            base.matches("protocol_traffic::metered_muxer(").count(),
+            1,
+            "TCP takes the metered yamux"
+        );
+        assert_eq!(
+            base.matches("protocol_traffic::MeteredMuxer::new(").count(),
             1,
             "QUIC's connection is wrapped where it is added"
-        );
-        assert!(
-            !build.contains(".with_quic()"),
-            "`with_quic()` adds QUIC unmetered"
         );
     }
 
@@ -594,14 +608,12 @@ mod tests {
         kad: libp2p::kad::Behaviour<libp2p::kad::store::MemoryStore>,
     }
 
-    /// A swarm built the way `network::manager` builds the node's: yamux
-    /// wrapped through the builder's multiplexer argument, QUIC wrapped where
-    /// it is added, `libp2p-metrics` over both.
+    /// A swarm on the node's own transport (`network::transport::swarm_transport`,
+    /// offline mode off), `libp2p-metrics` over it as the node has it.
     fn probe_swarm(
         meter: Arc<ProtocolTrafficMeter>,
         transport_meter: &crate::network::bandwidth::BandwidthMeter,
     ) -> libp2p::Swarm<Probe> {
-        use libp2p::core::Transport as _;
         let behaviour = |key: &libp2p::identity::Keypair| {
             let peer = key.public().to_peer_id();
             let mut kad = libp2p::kad::Behaviour::with_config(
@@ -618,24 +630,13 @@ mod tests {
                 kad,
             }
         };
-        let quic_meter = meter.clone();
         transport_meter.arm(|registry| {
             libp2p::SwarmBuilder::with_new_identity()
                 .with_tokio()
-                .with_tcp(
-                    libp2p::tcp::Config::default(),
-                    libp2p::noise::Config::new,
-                    metered_muxer(libp2p::yamux::Config::default, meter),
-                )
-                .expect("tcp")
                 .with_other_transport(|key| {
-                    libp2p::quic::tokio::Transport::new(libp2p::quic::Config::new(key)).map(
-                        move |(peer, connection), _| {
-                            (peer, MeteredMuxer::new(connection, quic_meter.clone()))
-                        },
-                    )
+                    crate::network::transport::swarm_transport(key, meter, || false)
                 })
-                .unwrap_or_else(|never| match never {})
+                .expect("transport")
                 .with_bandwidth_metrics(registry)
                 .with_behaviour(behaviour)
                 .expect("behaviour")

@@ -251,6 +251,23 @@ their answer through `addresses_the_dht_found` (public only). A peer-exchange an
 registry's own order, which named the same few peers in every answer. → `docs/invariants/network.md` § "A lost
 peer is looked up, and peer exchange names every peer in turn"
 
+## Offline mode dials nothing on the open internet — one gate, at the transport (2026-11-17, #468)
+
+**`network::transport::OfflineGate`** refuses, while `credits.offline_mode` is on (read at each dial), every dial
+of an address `pool::invite::multiaddr_is_internet_reachable` calls the internet — a public IP or any DNS name —
+before a byte is sent, whichever behaviour asked (peer exchange, Kademlia's walks, a redial, a chain's next hop, a
+relay hop). It sits OUTSIDE the resolver and INSIDE the relay client, in **`network::transport::swarm_transport`**,
+the one builder of the node's TCP + QUIC + DNS stack (the `protocol_traffic` known-answer test builds through it
+too). Never add a transport around it in the manager (`.with_tcp(`, `.with_quic()`, `.with_dns()` there fail
+`every_transport_the_node_builds_is_metered_by_protocol`), and never gate offline mode per dial site again — a site
+that did not ask was the leak. Refused with `OfflineRefusal`, never `MultiaddrNotSupported`. A connection ARRIVING
+from such an address is dropped as the transport hands it up, before noise; one open before the switch is closed by
+the liveness tick (`close_internet_connections_while_offline`, by the same predicate). A VPN or overlay range
+(Tailscale's 100.64/10, a private VPN range) counts as this computer's own network — never describe offline mode as
+"no packet crosses the internet". Prior art: go-libp2p's `ConnectionGater.InterceptAddrDial` / `InterceptAccept`.
+
+→ `docs/invariants/network.md` § "Offline mode dials nothing on the open internet"
+
 ## "Is this connection direct?" — `network::relay::addr_is_direct_transport`
 
 **`network::relay::addr_is_direct_transport`** is the single answer, for both layers that choose a connection: a real `/ip4`, `/ip6` or `/dns*` hop AND no circuit. `is_relay_circuit_addr` alone misses the listener's view; the vendored request-response inbound handler records the send-back address. `peer_direct_conns` is gated on it; any new "prefer direct" logic uses it (gotchas #356, #179). Keep the loop-stall tripwire in `NetworkManager::run`.

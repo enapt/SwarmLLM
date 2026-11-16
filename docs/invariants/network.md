@@ -5891,6 +5891,75 @@ a node at most four lookups a 30 s tick. Peer exchange's answer stays 20 address
 `a_peer_exchange_answer_names_many_peers_a_few_addresses_each`,
 `every_peer_is_named_by_some_answer_and_connected_peers_come_first` (red with the old order and no per-peer cap).
 
+## Offline mode dials nothing on the open internet (2026-11-17, FUTURE_WORK #468)
+
+**The rule.** `network::transport::OfflineGate` is the one place offline mode stops an outbound connection: while
+`credits.offline_mode` is on, a dial of an address `pool::invite::multiaddr_is_internet_reachable` calls the
+internet (a public IP, or any DNS name) fails at once with `OfflineRefusal`, before a byte is sent, whichever
+behaviour asked for it. The switch is read at each dial, so the dashboard's toggle applies to the next one.
+
+**What it replaced.** Offline mode ("air-gapped: no internet, mDNS only") was enforced per dial SITE: the bootstrap,
+cache and discovery dials, the lost-peer lookup and the relay reservation each checked the switch; peer exchange,
+the connection-race redial, a chain's next hop, the relay-provider dials and Kademlia's own walks did not — and a
+LAN peer names public addresses in Identify and in peer-exchange answers. Probed 2026-11-16
+(`~/swarmllm-gate/deep/offline468/probe468.sh`, main's build): the live node and the Proxmox node on this LAN
+dialled the offline test node B in, and B connected OUT to the internet anchor (212.132.104.177) and a peer in Italy
+(95.233.105.157), and had a SYN open to a third test node's declared public address (TEST-NET 203.0.113.7) in 27 of
+280 samples (`probe468_before.out`).
+
+**Why the transport, not a behaviour or `dial_checked`.** `dial_checked` cannot see a dial's addresses
+(`DialOpts::get_addresses` is crate-private in libp2p-swarm 0.47.1) and behaviours add theirs after it. A
+behaviour's `handle_pending_outbound_connection` sees only the dial's own addresses — Kademlia and Identify answer
+with their own tables (libp2p-swarm `lib.rs:458-469`, libp2p-kad 0.48 `behaviour.rs:2246-2258`), so a peer-only dial
+shows it an empty slice — and `handle_established_outbound_connection` runs after TCP, noise and yamux have talked to
+the far end. Prior art: go-libp2p's `ConnectionGater.InterceptAddrDial(peer, addr)`, asked for every address before
+it is dialled; rust-libp2p has no gater (`allow_block_list` and `connection_limits` judge peers and counts).
+
+**Where it sits.** OUTSIDE the name resolver: inside it the gate would see the resolved address after the lookup had
+left the machine, so a `/dns*` dial is refused offline (mDNS names a peer by its address). INSIDE the relay client: a
+circuit dial becomes a dial of its relay hop (libp2p-relay's client asks the swarm to dial it), which comes back
+through the gate. The builder cannot place it there through `with_tcp` / `with_dns` (each wraps what came before),
+so `swarm_transport` builds the stack by hand — TCP exactly as libp2p 0.56's `with_tcp` (`builder/phase/tcp.rs`:
+nodelay, `V1Lazy`, noise, the metered yamux), QUIC with BBR and its connection metered, `or_transport` in that order,
+the system resolver, the gate — handed to `with_other_transport`; the relay client and the bandwidth metrics wrap it
+as before. A refusal is `TransportError::Other` carrying `OfflineRefusal`, never `MultiaddrNotSupported`, which an
+`or_transport` passes to the next transport and the log reads as a missing protocol. It counts as a failed address:
+Kademlia forgets it, right for a computer that cannot reach it; once the switch is off, the discovery tick dials the
+bootstrap list again.
+
+**"The open internet"** is the predicate AutoNAT and the lost-peer lookup already share. Allowed: RFC 1918, loopback,
+link-local, CGNAT 100.64/10 (Tailscale), IPv6 `::1`, `fe80::/10`, `fc00::/7`. So the guarantee is "no address on the
+open internet", NOT "no packet crosses the internet": a VPN or overlay network this computer joined (a tailnet, a
+company VPN handing out 10/8) counts as its own network, and its tunnel carries the packets over the internet
+(security review, 2026-11-17) — a pool reached over Tailscale is a supported setup, so the ranges stay allowed and the
+words say so. Judged public, so refused offline (fail closed — the review checked each): a LAN peer's GLOBAL IPv6
+address (an IPv6-only LAN with global addresses needs its peers' v4 or ULA addresses), multicast, 240/4, 198.18/15,
+192.0.0/24, an IPv4-mapped IPv6 address, NAT64 `64:ff9b::/96`, 6to4, Teredo.
+
+**Arrivals and connections already open.** A connection ARRIVING from such an address (a port the router still
+forwards — offline mode leaves UPnP as booted — or a peer that knew our public address from before) is dropped in the
+gate's `poll` as the transport hands it up, before noise: after TCP's own handshake, or one QUIC round trip, as
+go-libp2p's `InterceptAccept` is placed. One open before the switch was turned on — it would go on carrying gossip,
+lookups, requests, and new relay circuits through an open relay connection (libp2p-relay dials only when it has no
+connection) — is closed by the liveness tick (`NetworkManager::close_internet_connections_while_offline`, same
+predicate, over `peer_remote_addrs`: one record a peer, its newest connection, so a peer whose newest connection is on
+this network keeps an older one to the open internet until it closes). Probed (`toggle_probe.sh`, a fresh node
+connected to the swarm, then a pool and offline mode switched on through the API): its Italian and German
+connections closed by the sweep within the tick, 0 connections to the open internet after, 52 dials and 2 arrivals
+refused in 45 s, the two computers on this LAN kept.
+
+**Cost.** One atomic load per dial; a refused dial sends nothing. An offline node beside online LAN peers refused ~2
+dials a second in the probe (debug log only) — the LAN peers keep naming the swarm's addresses.
+
+**What a change must keep.** Probed on the gated build (`probe468_after.out`): 0 of 283 samples with a SYN open to
+203.0.113.7, 205 refusals logged, no outbound connection to a public address, and B still reached the live node, the
+Proxmox node and the third node over this LAN. An online node on the new stack reached the anchor by its `/dns4` name
+(`dnscheck.sh`). Tests: `offline_mode_dials_nothing_on_the_open_internet`, `the_switch_is_read_at_every_dial`,
+`an_offline_node_reaches_this_network_and_refuses_the_internet` (all three red with the gate disabled), and
+`the_rows_add_up_to_the_transport_totals_on_tcp_and_quic`, now on `swarm_transport`;
+`offline_mode_drops_a_connection_arriving_from_the_open_internet` and
+`offline_mode_closes_the_peers_reached_over_the_open_internet` (each red with its mechanism disabled).
+
 ## ACK-Timeout Fast-Fail for rr Sends
 
 `SendDirectMessage` carries `delivery_request_id: Option<uuid::Uuid>`.

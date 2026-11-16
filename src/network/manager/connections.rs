@@ -1062,6 +1062,104 @@ impl NetworkManager {
     }
 }
 
+/// The connected peers offline mode closes: those whose connection's far end is
+/// on the open internet, by the dial gate's own predicate
+/// (`pool::invite::multiaddr_is_internet_reachable`). A circuit we dialled names
+/// its relay and counts as off this network; an inbound circuit's remote is a
+/// bare `/p2p/<source>`, judged by the connection to its relay, itself a peer.
+fn peers_off_this_network(
+    remotes: &std::collections::HashMap<libp2p::PeerId, super::PeerRemote>,
+) -> Vec<libp2p::PeerId> {
+    remotes
+        .iter()
+        .filter(|(_, remote)| crate::pool::invite::multiaddr_is_internet_reachable(&remote.addr))
+        .map(|(peer, _)| *peer)
+        .collect()
+}
+
+impl NetworkManager {
+    /// Offline mode closes the connections it would not have let open (#468).
+    /// The transport refuses every new one to or from the open internet
+    /// (`network::transport::OfflineGate`), but one opened before the switch was
+    /// turned on would go on carrying gossip, lookups, requests and new relay
+    /// circuits — so the liveness tick closes each peer whose connection is to
+    /// an address off this network, within a tick of the switch. One record a
+    /// peer (`peer_remote_addrs`, its newest connection): a peer whose newest is
+    /// on this network keeps an older one to the open internet until it closes.
+    pub(super) fn close_internet_connections_while_offline(&mut self) {
+        if !self
+            .shared_state
+            .credits
+            .offline_mode
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            return;
+        }
+        for peer in peers_off_this_network(&self.peer_remote_addrs) {
+            tracing::info!(
+                %peer,
+                "Offline mode: closed the connection to a computer on the open internet (#468)"
+            );
+            let _ = self.swarm.disconnect_peer_id(peer);
+        }
+    }
+}
+
+#[cfg(test)]
+mod offline_sweep_tests {
+    use super::peers_off_this_network;
+    use libp2p::core::ConnectedPoint;
+    use libp2p::PeerId;
+
+    /// The connections open when offline mode is turned on: one a peer on the
+    /// internet made to us, one we made to the anchor over QUIC, a circuit we
+    /// dialled, and one from the computer next to us. All but the last close.
+    #[test]
+    fn offline_mode_closes_the_peers_reached_over_the_open_internet() {
+        let names = crate::network::helpers::ConfiguredNames::of_bootstrap(
+            &crate::config::network::default_bootstrap_peers(),
+        );
+        let mut remotes = std::collections::HashMap::new();
+        let (from_far, to_far, by_circuit, next_door) = (
+            PeerId::random(),
+            PeerId::random(),
+            PeerId::random(),
+            PeerId::random(),
+        );
+        let listener = |from: &str| ConnectedPoint::Listener {
+            local_addr: "/ip4/0.0.0.0/tcp/8810".parse().unwrap(),
+            send_back_addr: from.parse().unwrap(),
+        };
+        let dialer = |to: String| ConnectedPoint::Dialer {
+            address: to.parse().unwrap(),
+            role_override: libp2p::core::Endpoint::Dialer,
+            port_use: libp2p::core::transport::PortUse::Reuse,
+        };
+        for (peer, endpoint) in [
+            (from_far, listener("/ip4/95.233.105.157/tcp/40000")),
+            (
+                to_far,
+                dialer("/ip4/212.132.104.177/udp/8800/quic-v1".into()),
+            ),
+            (
+                by_circuit,
+                dialer(format!(
+                    "/ip4/192.168.1.200/tcp/8810/p2p/{}/p2p-circuit/p2p/{by_circuit}",
+                    PeerId::random()
+                )),
+            ),
+            (next_door, listener("/ip4/192.168.1.200/tcp/51000")),
+        ] {
+            crate::network::manager::record_peer_remote(&mut remotes, peer, &endpoint, &names);
+        }
+        let mut closed = peers_off_this_network(&remotes);
+        closed.sort();
+        let mut expected = vec![from_far, to_far, by_circuit];
+        expected.sort();
+        assert_eq!(closed, expected);
+    }
+}
+
 #[cfg(test)]
 mod redial_address_tests {
     use super::{redial_addresses, redial_backoff_ms, MAX_REDIAL_ATTEMPTS};
