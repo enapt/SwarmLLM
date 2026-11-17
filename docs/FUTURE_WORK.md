@@ -5635,19 +5635,23 @@ between the two; here they would.
 `charge_segment_as_split` now steps aside for an idle worker whose spawn range the new range takes in, so the
 retirement the planner priced places it afresh (`docs/invariants/memory.md` § "A worker that cannot grow", real
 link 7.56 → 35.25 tok/s). **Left**: (3)
-no promotion under steady use; and the accounting itself — a worker IN USE still takes the
+no promotion under steady use; (4) an up-front "no" whose re-plan finds no route FAILS the request where the slow
+copy would have served it — a coordinator with no room (card or processor) for the refused layers; the real fix is
+PLACEMENT: put a widened range's processor run on the layers it GREW by, so the held ones stay on the card
+(`hybrid::processor_run` is card-first, so a tail node widened at its start loses its held layers to the processor),
+then the guard has nothing to refuse; and the accounting itself — a worker IN USE still takes the
 wider range as a split sized beside the dropped range, and the daemon keeps charging that range's base.
 
 **Built 2026-11-17 (contributor 1; on main, not in a release yet)**: `ModelProcessPool::replacement_keeps_the_card`,
-asked beside the fit by all three places a forward retires a worker (`grow_worker`'s last rung, `forward_would_load`,
-`forward_replaces_the_worker`): of the held layers a run covers, the replacement keeps on the card as many as the
+asked beside the fit by a peer's UP-FRONT weighing only (`forward_would_load` → `peer_load_refusal`; a refusal at the
+forward would bar this node from the re-plan, so an unasked forward is served as before): of the held layers a run covers, the replacement keeps on the card as many as the
 worker runs there now, or as a fresh spawn of just what it holds would, whichever is fewer (like with like: the
 planning estimate sits below what a load refits to, #365 — against the worker's count alone the #350 fixture's
 wider run, 12 more layers here for one card layer, was refused). Judged on any overlap, not only a run taking in
 every held range: the refusal's bisection probes narrower runs, and `[20..47)` would retire the same copy. A peer
 asked up front is told in the card's words ("would replace the copy this node runs with N layers on its graphics
 card by one running fewer there"), never "needs about 0 MB". Test
-`an_idle_card_worker_is_not_replaced_by_one_running_fewer_of_its_layers_on_the_card` (red with the A/B
+`a_peer_is_told_no_up_front_where_its_range_would_swap_a_card_copy_for_a_slower_one` (red with the A/B
 `SWARMLLM_REPLACEMENT_KEEPS_CARD=0`). Prior art: the design candidate's below, plus Ollama's `needsReload` (never
 re-places a loaded runner while it can serve). **Not verified on the real link** — it needs the far computer on a
 build carrying it. **The refusal's words, fixed the same night**: a worker IN USE (never replaced, #93) is refused

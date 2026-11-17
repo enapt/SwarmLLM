@@ -3240,9 +3240,8 @@ Australia's `[26..48)`, all 22 layers on its card, was retired for `[20..48)` an
 the fresh copy ran 10 of 28 there; every forward after, the old range's too as a
 slice of the new copy (#449), took ~1,000 ms instead of ~30 (19.6 / 44.9 →
 3.2-3.7 / 8.3 tok/s, bal292). Now `ModelProcessPool::replacement_keeps_the_card`,
-asked beside the fit by all three places a forward retires a worker
-(`grow_worker`'s last rung, `forward_would_load`, `forward_replaces_the_worker`),
-counts the held layers inside the run that the worker runs on the card now (each
+asked beside the fit by a peer's up-front weighing (`forward_would_load`, read by
+`peer_load_refusal`), counts the held layers inside the run that the worker runs on the card now (each
 range as placed, `processor_layers_of`) and refuses where a fresh spawn of the run
 (`held_layers_a_fresh_spawn_keeps_on_card`: the spawn's card rungs, the processor
 run where the loader puts it) would keep fewer of them there — fewer than now, or
@@ -3253,14 +3252,22 @@ refused, though it served 12 more layers here — the planning estimate sits bel
 what a load refits to (#365). It is judged on any overlap, not only a run taking in
 every held range: `peer_load_refusal`'s bisection probes narrower runs from the
 asked start, and `[20..47)` would have retired the same copy. A peer asked up front
-is told in the card's words, never system memory's "needs about 0 MB". Prior art:
+is told in the card's words, never system memory's "needs about 0 MB". **Only up
+front, never at the forward**: a first version also refused in `grow_worker` (and
+`forward_replaces_the_worker`, which predicts it, #350), but a forward refused there
+bars this node from the request's re-plan, and a forward arrives unasked exactly
+where the question was not weighed (the ask budget spent, a late answer, an older
+coordinator) — a slow copy beats a refused request, so that forward is served as
+before. Left: an up-front "no" whose re-plan finds no route fails the request where
+the slow copy would have served it (a coordinator with no room for the layers
+refused); the fix is placement, not refusal (FUTURE_WORK #461). Prior art:
 Ollama never re-places a loaded runner while it can serve (`server/sched.go`
 `needsReload`); Kubernetes' preemption never evicts for an equal or lower priority;
 the promotion path already had the rule (`promotion_keeps_what_it_holds`, #3 (j12)).
-Test: `an_idle_card_worker_is_not_replaced_by_one_running_fewer_of_its_layers_on_the_card`
+Test: `a_peer_is_told_no_up_front_where_its_range_would_swap_a_card_copy_for_a_slower_one`
 (red with the guard off; the partial-overlap case red under the first version, which
-judged only a run taking in every held range; its control, a card with room for the
-whole ask, allows it). A/B `SWARMLLM_REPLACEMENT_KEEPS_CARD=0`. Not yet checked on the
+judged only a run taking in every held range; its controls: a card with room for the
+whole ask allows it, and the unasked forward is replaced as before). A/B `SWARMLLM_REPLACEMENT_KEEPS_CARD=0`. Not yet checked on the
 real link: it needs the far computer on a build carrying it.
 
 ## A model process holds one copy of the output head (2026-11-16, FUTURE_WORK #458)

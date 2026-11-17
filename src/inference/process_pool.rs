@@ -8727,7 +8727,6 @@ impl ModelProcessPool {
         // the same (2026-10-25, #349).
         let fits_in_its_place = crate::inference::executor::without_starving_the_runtime(|| {
             self.a_fresh_spawn_fits_in_place_of_the_worker(model_id, segment, requester)
-                && self.replacement_keeps_the_card(model_id, segment, &handle)
         });
         if !fits_in_its_place {
             return Err(refused.error);
@@ -8795,6 +8794,11 @@ impl ModelProcessPool {
     /// the range. That error is the cheaper one: a refusal up front holds the
     /// peer to the layers that fit on the re-plan, where a refused forward
     /// bars it from the request (#349).
+    ///
+    /// For the same reason it alone asks [`Self::replacement_keeps_the_card`]:
+    /// a peer that asks is told no where the replacement would run fewer of
+    /// the worker's layers on the card, and plans around the copy here; a
+    /// forward that arrives unasked is served as before.
     fn forward_would_load(
         &self,
         model_id: &ModelId,
@@ -8833,17 +8837,25 @@ impl ModelProcessPool {
             && !h.in_use(self.conversation_window())
             && !self.growth_would_be_admitted(model_id, run, h, requester)
             && self.a_fresh_spawn_fits_in_place_of_the_worker(model_id, run, requester)
-            && self.replacement_keeps_the_card(model_id, run, h)
     }
 
     /// Would replacing `h` with a fresh spawn of `run` keep on the card the
     /// layers of `h` it goes on serving — of the layers `h` holds inside
     /// `run`, as many as `h` runs on the card now, or as a fresh spawn of just
-    /// what `h` holds would, whichever is fewer? Asked wherever a forward
-    /// would retire a worker for a range (`grow_worker`'s last rung,
-    /// [`Self::forward_would_load`], [`Self::forward_replaces_the_worker`]),
+    /// what `h` holds would, whichever is fewer? Asked by a peer's up-front
+    /// weighing ([`Self::forward_would_load`], [`Self::peer_load_refusal`]),
     /// beside [`Self::a_fresh_spawn_fits_in_place_of_the_worker`] (FUTURE_WORK
     /// #461, contributor 1).
+    ///
+    /// **Only up front, never at the forward.** A "no" there holds the peer
+    /// to `layers_that_fit` on its re-plan, which can route around the copy
+    /// here (its own processor, another holder). A forward refused by
+    /// `grow_worker` bars this node from the request's re-plan instead, and a
+    /// forward arrives unasked exactly where the question was not weighed —
+    /// the ask budget spent, the answer late, an older coordinator — so there
+    /// a slow copy beats a refused request, and the forward is served as it
+    /// was. [`Self::forward_replaces_the_worker`] predicts `grow_worker`, so it
+    /// does not ask either (#350).
     ///
     /// The far computer of a 14B split held `[26..48)` with all 22 layers on
     /// its card and answered a forward in ~30 ms; a forward for `[20..48)`
@@ -17754,11 +17766,13 @@ mod tests {
     /// had taken ~30 (2026-11-15). Here the worker holds the model's last
     /// three layers on a card with room for about three, and is asked for six
     /// that end the same: the replacement would load (its processor share
-    /// fits) with the processor run as the tail — the held layers. Kept, up
-    /// front and at the forward; the control: a card with room for all six
-    /// keeps every held layer there, and the replacement is allowed.
+    /// fits) with the processor run as the tail — the held layers. A peer
+    /// asking up front is told no; the control: a card with room for all six
+    /// keeps every held layer there, and the replacement is allowed. A forward
+    /// that arrives unasked is served as before — retired and replaced — since
+    /// a refusal there would bar this node from the request's re-plan.
     #[tokio::test]
-    async fn an_idle_card_worker_is_not_replaced_by_one_running_fewer_of_its_layers_on_the_card() {
+    async fn a_peer_is_told_no_up_front_where_its_range_would_swap_a_card_copy_for_a_slower_one() {
         let model = ModelId("seventy-b-shaped-keeps-card".into());
         let data_dir = header_only_seventy_b("keeps-card", &model, false);
         let p = ModelProcessPool::new(data_dir.clone());
@@ -17814,14 +17828,6 @@ mod tests {
             !message.contains("max_ram_mb"),
             "never in system memory's words: {message}"
         );
-        let refused = p
-            .grow_worker(&model, asked, h.clone(), Requester::Swarm, RunShape::Plain)
-            .await;
-        assert!(refused.is_err(), "at the forward: refused, not replaced");
-        assert!(
-            p.workers.get(&model).is_some_and(|w| Arc::ptr_eq(&w, &h)),
-            "the worker and its card layers are kept"
-        );
         // A run sharing only PART of the held range is judged on that part —
         // the narrower runs a refusal's `layers_that_fit` probes would
         // otherwise retire the same copy: `[2..7)` keeps `[5..7)` on the card
@@ -17846,6 +17852,19 @@ mod tests {
             Some(3)
         );
         assert!(p.replacement_keeps_the_card(&model, asked, &h));
+
+        // At the forward, unasked: served as before, never refused.
+        p.set_vram_budget_mb(held_mb + 1);
+        assert!(
+            p.forward_replaces_the_worker(&model, asked, &h, Requester::Swarm),
+            "the up-front admission's prediction of the forward"
+        );
+        let outcome = p
+            .grow_worker(&model, asked, h.clone(), Requester::Swarm, RunShape::Plain)
+            .await
+            .expect("a forward that arrives unasked is served as before");
+        assert!(matches!(outcome, Growth::Respawn));
+        assert!(p.workers.get(&model).is_none(), "retired for a fresh spawn");
         let _ = std::fs::remove_dir_all(&data_dir);
     }
 
