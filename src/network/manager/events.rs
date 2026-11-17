@@ -708,6 +708,28 @@ impl NetworkManager {
                             stats.nat_status = Some("Public".to_string());
                         }
                     }
+                    NatVerdict::Private
+                        if self
+                            .shared_state
+                            .publicly_reachable
+                            .load(std::sync::atomic::Ordering::Relaxed) =>
+                    {
+                        // This node is reachable at a confirmed address; the
+                        // probe failed for ANOTHER one — most often a port its
+                        // router chose for an outbound connection (udp/1031,
+                        // 1032, 1149: 9 a day here, 2026-11-16), which no router
+                        // opens to strangers. It says that address is not
+                        // reachable, never that this node is not: logged at
+                        // info as "activating relay", it read as a node behind
+                        // NAT in every pasted log. The dashboard already reads
+                        // `publicly_reachable` (`api::admin::nat_headline`), and
+                        // every node keeps a home relay anyway (#464).
+                        tracing::debug!(
+                            %tested_addr, %server, error = ?event.result.err(),
+                            "AutoNAT: another address of this node is not reachable \
+                             from outside; it is reachable at its confirmed address"
+                        );
+                    }
                     NatVerdict::Private => {
                         // Address is NOT reachable — we're behind NAT/CGNAT for it.
                         // Reserve a relay so peers can still reach us. (v2 fixes

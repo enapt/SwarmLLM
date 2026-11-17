@@ -2263,16 +2263,21 @@ dial through the DE anchor, then DCUtR to its own address — and both returned 
 them; so most likely both are off (another identity at the US household's address, on v0.3.277, connects every 10
 min and is cut off as two releases behind; its own dashboard tells its owner to update). Nothing found on our side
 keeps an ONLINE one away TODAY, because every node reserves on a bootstrap relay and the default list names one (the
-DE anchor), where our cache already holds their circuits. Three gaps remain for a swarm with more relays, or a peer
-that lost its circuit: (a) a lost peer is looked up only if it named a direct internet address (`lost_peers::
-worth_looking_up`), and Kademlia never stores a circuit address for an inbound peer (`identify.rs`), so a peer that
-reserved on ANOTHER relay is found only if it dials us — fix shape: for a lost relay-only peer, try
-`/p2p/<R>/p2p-circuit/p2p/<peer>` through every relay this node is connected to, rationed per tick; (b) the direct
-address DCUtR reached it at (US's `68.3.213.210/udp/8800`) is never kept, though its NAT kept the port; (c) ~~our
-relay server closes a circuit after `max_circuit_duration` (1 h), so a peer DCUtR could not upgrade is dropped and
-redialled hourly~~ — FIXED 2026-11-17 on main: no byte limit, a 30-day backstop, and a node that stops relaying ends
-its circuits (`docs/invariants/network.md` § "A relayed circuit lasts while both ends hold it"; 43 of 72 relayed
-connections here had ended at the hour). Prior art: go-libp2p's AutoRelay pushes a node's new circuit addresses to its connected peers by
+DE anchor), where our cache already holds their circuits. Three gaps were found for a swarm with more relays, or a peer
+that lost its circuit. **(a) OPEN, needed only once the bootstrap list names a second relay**: a lost peer is looked
+up only if it named a direct internet address (`lost_peers::worth_looking_up`), and Kademlia never stores a circuit
+address for an inbound peer (`identify.rs`), so a peer that reserved on ANOTHER relay is found only if it dials us.
+Today every node reserves on a BOOTSTRAP relay (`relay::relay_preference`) and the default list names one, the DE
+anchor, so a relay-only peer's circuit address is always one our cache holds (it advertises it at Identify). Fix
+shape when a second bootstrap relay is listed: for a lost relay-only peer, try `/p2p/<R>/p2p-circuit/p2p/<peer>`
+through every relay this node is connected to, rationed per tick. **(b) DECIDED, not doing**: keep the direct address
+DCUtR reached a peer at (US's `68.3.213.210/udp/8800`). That address answers only while the NAT mapping the punch
+made lives, and only to a simultaneous open; stored, it is dialled after a restart, when the mapping has gone, and a
+filtering NAT refuses a plain dial — the circuit + DCUtR path already brings the peer back in 1-7 s (US, measured
+before 11-16). go-libp2p keeps a connected address only 15 min past the disconnect (`RecentlyConnectedAddrTTL`) for
+the same reason. **(c) FIXED** 2026-11-17 on main: our relay server cut every circuit at 1 h (43 of 72 relayed
+connections here ended at the hour); no byte limit and a 30-day backstop now, and a node that stops relaying ends
+its circuits (`docs/invariants/network.md` § "A relayed circuit lasts while both ends hold it"). Prior art: go-libp2p's AutoRelay pushes a node's new circuit addresses to its connected peers by
 identify-push, which is how they reach the DHT; libp2p relay v2 reservations last 1 h by default.
 
 ### Speed on one computer
