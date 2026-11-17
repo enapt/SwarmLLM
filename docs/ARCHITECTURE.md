@@ -2880,16 +2880,17 @@ When a requested model isn't available locally or on the swarm, requests can opt
 ### Claude Subscription Provider (Optional, feature-gated)
 Routes Claude model requests through a locally-authenticated `claude` CLI subprocess, using the user's existing Pro/Max/Team/Enterprise subscription — no API key or per-token charges needed.
 
-- **Feature flag:** `--features claude-subscription` (compile-time opt-in, isolated for easy removal)
-- **How it works:** Spawns `claude -p --output-format stream-json` per request, parses NDJSON stdout, translates to OpenAI/Anthropic SSE or JSON responses
-- **Multi-turn:** Full conversation serialized per request using XML tags (`<system>`, `<previous_response>`) — stateless, no server-side session state required
-- **Routing priority:** Claude subscription (if enabled) > Anthropic API key > error. Configured via `providers.claude_subscription.enabled`
-- **Concurrency:** Semaphore-limited (default 3 concurrent subprocesses) to respect subscription rate limits
-- **Working directory:** Defaults to `/tmp` for clean context (no project hooks/CLAUDE.md). Configurable via `working_dir` for project-aware completions
-- **Admin API:** `GET /api/admin/claude-subscription/status` — CLI detection, version, subscription type, rate limit tier
-- **Dashboard:** Settings → Cloud Providers → Claude Subscription card with step-by-step setup guide, status detection, enable/disable toggle
+User guide: `docs/book/src/api/claude-subscription.md` (configuration, setup, removal).
 
-**Long-lived sessions** (`src/api/claude_session/`) — a persistent `claude` subprocess driven with `--input-format stream-json`, for interactive use where re-sending the whole conversation per turn would be wasteful. All five routes exist ONLY under `--features claude-subscription`; without it the router serves none of them.
+- **Feature flag:** `--features claude-subscription` (compile-time opt-in; part of the local `dev` alias set)
+- **How it works** (`src/api/claude_sub.rs`): one `claude --print --output-format stream-json|json` per request, the conversation serialized into the prompt (`<system>`, `<previous_response>`); NDJSON parsed and translated to OpenAI/Anthropic SSE or JSON. The session resume it attempts is FUTURE_WORK #471
+- **Routing priority:** Claude subscription (if enabled) > Anthropic API key > error (`providers.claude_subscription.enabled`)
+- **Concurrency:** a semaphore, `max_concurrent` (default 3) capped at 8
+- **Working directory:** the system temp directory (no project hooks/CLAUDE.md) unless `working_dir` is set
+- **Admin API:** `GET /api/admin/claude-subscription/status` — CLI detection, version, subscription type, rate limit tier (routed in every build; it reports the feature off without it)
+- **Dashboard:** Settings → Cloud Providers → Claude Subscription card
+
+**Long-lived sessions** (`src/api/claude_session/`) — a persistent `claude` subprocess driven with `--input-format stream-json` (permission prompts over stdio, the node's own `/mcp` wired in with `--mcp-config`). These routes exist ONLY under `--features claude-subscription`:
 
 - `GET    /api/claude-code/sessions` — List live sessions
 - `POST   /api/claude-code/session` — Start a session (spawns the subprocess)

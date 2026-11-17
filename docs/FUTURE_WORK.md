@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #470**). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #472**). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -5131,7 +5131,7 @@ match llama.cpp** (#715, `arch-inference.md`).
    choosing 4, MXFP4 only on the expert stacks — every dense weight is Q8_0, so the card's MXFP4 matmul
    can come last): two gaps beyond the above — `attn_output.bias` is read nowhere, and a reply's harmony
    channels (analysis / final) are not split the way `<think>` is. Eight steps, processor first and
-   card last, each checked against llama.cpp on a tiny random file: `memory/gptoss_map.md`.
+   card last, each checked against llama.cpp on a tiny random file: `memory/archive/gptoss_map.md`.
    **Step 1 in since 2026-11-02 — MXFP4 in the vendored candle**: type 39 read, quantised and
    multiplied on the processor (AVX2 in llama.cpp's order), giving llama.cpp's own answers bit for bit
    on fixed inputs (`examples/mxfp4_reference.c` runs its code; `mxfp4_tests` asserts the figures); the
@@ -6778,6 +6778,22 @@ A tester's node (RTX 3060 12 GB, v0.3.278, its own 14B run recovering every refu
 forward reruns, no pin) still loaded two peers' requests with `card_mb=0` earlier that day — qwen3.8-27b at 01:01Z and
 qwen3.6-27b at 01:42Z. The report carries no log around them, so whether a pin (`CpuPins`) or the admission placed
 them there is undetermined. Wanted: the node.log lines from a minute before each.
+
+#### #471 — A subscription reply that resumes its CLI session reads the conversation twice
+`P3` · claude-subscription · **OPEN** — 2026-11-17 · found checking `docs/book/src/api/claude-subscription.md` against the code
+
+`api/claude_sub.rs` keys the `claude` session a reply used by the conversation BEFORE its last message (`session_key`:
+blake3 of `messages[..n-1]` and the model), and resumes it (`--resume`) when that key comes back within `SESSION_TTL`
+(10 min). Every prompt still carries the whole serialized history (`extract_prompt`). A normal next turn never
+matches, because its earlier messages now include the reply. So the resume fires only when the same history comes
+back with a DIFFERENT last message, i.e. an edit or a regenerate. At that point the session already holds the replaced
+question and its answer: the model reads the question the caller took back, and the history twice. Two fixes are
+possible:
+- key a stored session by the conversation INCLUDING its reply, and on a resume send only what is new;
+- or drop the resume and always pass `--no-session-persistence`, which is the stateless behaviour the book describes.
+
+Prior art: the CLI's own `--resume`/`--continue` restore the session's history, so a caller sends only the new turn.
+Check the fix with one real subscription call before and after it; the CLI is installed on this machine.
 
 ### Ideas — researched, not scheduled
 

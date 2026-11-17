@@ -87,7 +87,8 @@
           {
             "type": "command",
             "command": "bash ${CLAUDE_PROJECT_DIR}/.claude/scripts/research-gate.sh",
-            "timeout": 15
+            "timeout": 15,
+            "onFailure": "continue"
           }
         ]
       },
@@ -97,12 +98,14 @@
           {
             "type": "command",
             "command": "bash ${CLAUDE_PROJECT_DIR}/.claude/scripts/commit-gate.sh",
-            "timeout": 180
+            "timeout": 180,
+            "onFailure": "continue"
           },
           {
             "type": "command",
             "command": "bash ${CLAUDE_PROJECT_DIR}/.claude/scripts/release-window-gate.sh",
-            "timeout": 30
+            "timeout": 30,
+            "onFailure": "continue"
           }
         ]
       }

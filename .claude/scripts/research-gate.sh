@@ -76,10 +76,10 @@ def deny(reason):
     sys.exit(0)
 
 # ---------------------------------------------------------------- target paths
-def rel(p):
+def rel(p, base=None):
     if not p:
         return None
-    p = os.path.abspath(os.path.join(ROOT, os.path.expanduser(p)))
+    p = os.path.abspath(os.path.join(base or ROOT, os.path.expanduser(p)))
     if not p.startswith(ROOT + os.sep):
         return None
     return os.path.relpath(p, ROOT)
@@ -89,6 +89,17 @@ if tool in ("Edit", "Write", "NotebookEdit"):
     targets = [rel(ti.get("file_path") or ti.get("notebook_path"))]
 elif tool == "Bash":
     cmd = ti.get("command", "") or ""
+    # Where this command's relative paths point: the shell's folder (the payload's
+    # `cwd` — a `cd` carries between Bash calls), or the folder a leading `cd`
+    # names. Code Mode sends a script's shell call made in a folder as
+    # `cd '<dir>' && <command>` (code.claude.com/docs/en/code-mode § Permission
+    # checks, Claude Code 2.1.323+); resolved at the repo root, its `sed -i x.rs`
+    # named a file that does not exist and was never gated.
+    here = d.get("cwd") if os.path.isabs(d.get("cwd") or "") else ROOT
+    lead = re.match(r"""\s*cd\s+(?:'([^']*)'|"([^"]*)"|([^\s;&|]+))\s*(?:&&|;)""", cmd)
+    if lead:
+        named = next(g for g in lead.groups() if g is not None)
+        here = os.path.abspath(os.path.join(here, os.path.expanduser(named)))
     # Only the mutation forms this repo's sessions actually use — but ALL of
     # them. `examples/research_gate_probe.py` plants one violation per form and
     # prints which are caught; run it after touching anything below, because a
@@ -130,7 +141,7 @@ elif tool == "Bash":
 
     for pat in pats:
         for m in re.finditer(pat, cmd):
-            targets.append(rel(m.group(1)))
+            targets.append(rel(m.group(1), here))
 
     # `git apply` names its targets inside the PATCH, not on the command line.
     # Read them out of it; an unreadable patch falls through and allows, like
@@ -138,7 +149,7 @@ elif tool == "Bash":
     m = re.search(r"\bgit\s+(?:apply|am)\b[^|;&]*?\s([A-Za-z0-9_./-]+\.[A-Za-z0-9]+)", cmd)
     if m:
         try:
-            with open(os.path.join(ROOT, m.group(1))) as fh:
+            with open(os.path.join(here, m.group(1))) as fh:
                 for line in fh:
                     if line.startswith("+++ b/"):
                         targets.append(rel(line[6:].strip()))

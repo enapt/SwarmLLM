@@ -94,6 +94,16 @@ inert for months looking healthy. After touching the gate's patterns run
 `python3 examples/research_gate_probe.py`: one planted violation per Bash
 mutation form plus a null control.
 
+**Under Code Mode** (measured 2026-11-17 on 2.1.326, in a scratch session): each
+call a script makes reaches the hooks as itself (`Bash`/`Read`/`Edit`,
+`tool_use_id` `repl_…`) and the transcript records it as its own `tool_use`; a
+Read made from code loads `arch-*.md`. So the three checks hold, with two
+differences. First, a shell call made in a folder arrives as
+`cd '<dir>' && …`, and the gate resolves its paths there (the probe's
+`cd` cases; before that, it missed them). Second, a hook that times out or
+fails REFUSES a call made from code, so every project hook sets
+`"onFailure": "continue"` to keep failing open.
+
 ## I do the mechanics. The user does what needs their hands. (2026-09-22)
 
 **The user has never run a git command on this project. Not one.** Every

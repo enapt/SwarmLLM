@@ -21,6 +21,8 @@ ANTHROPIC_BASE_URL=http://localhost:8800 ANTHROPIC_AUTH_TOKEN="$SWARMLLM_KEY" \
 
 The node accepts its key as `Authorization: Bearer <key>` or as `x-api-key: <key>`, which is what the Anthropic SDKs send.
 
+Claude Code's experimental **Code Mode** (`CLAUDE_CODE_EXPERIMENTAL_CODE_MODE=1`, v2.1.323+) does not run through SwarmLLM. It works only directly against Anthropic's API with Claude models, so with `ANTHROPIC_BASE_URL` and `ANTHROPIC_AUTH_TOKEN` set, Claude Code starts without it and the session makes one tool call at a time as usual.
+
 ## POST /v1/messages
 
 ### Request Body

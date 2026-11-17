@@ -240,30 +240,14 @@ Currently connected computers, with latency, trust, load and shard information.
 
 ### Claude Code
 
-**Option A: MCP tools** — access SwarmLLM's tools (research, batch, compare) alongside your normal model:
+**MCP tools** — keep Claude as your model and let it hand research, batches and comparisons to the swarm's models:
 
 ```bash
 claude mcp add --transport http swarmllm http://localhost:8800/mcp \
   --header "Authorization: Bearer YOUR_API_KEY"
 ```
 
-**Option B: Model backend** — use SwarmLLM as your inference backend (routes all requests through the swarm):
-
-```bash
-ANTHROPIC_BASE_URL=http://localhost:8800 ANTHROPIC_AUTH_TOKEN=YOUR_API_KEY \
-  claude --model qwen2.5-coder-7b
-```
-
-**Option C: Both** — use Claude for reasoning, SwarmLLM MCP for offloading research to cheap models:
-
-```bash
-# Add SwarmLLM as MCP server
-claude mcp add --transport http swarmllm http://localhost:8800/mcp \
-  --header "Authorization: Bearer YOUR_API_KEY"
-
-# Then use Claude normally — it can call research/batch/compare tools via MCP
-claude
-```
+**Model backend** — run Claude Code on the swarm's models instead: see [Anthropic Messages API § Claude Code Integration](anthropic.md#claude-code-integration).
 
 ### VS Code (Copilot Chat)
 

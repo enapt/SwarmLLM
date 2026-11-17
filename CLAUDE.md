@@ -1,10 +1,8 @@
 # SwarmLLM — Claude Code Instructions
 
-> **Start here**: `docs/ARCHITECTURE.md` — subsystems, source tree, protocols,
-> security model. Per-subsystem rules (`.claude/rules/arch-*.md`, indexed by
-> `architecture.md`) load when a file they govern is Read, Written or Edited — or shown by a
-> single-file `cat`/`head`/`sed -n`/`grep` (no pipe, no redirect; re-measured 2026-10-16). Hooks
-> check it (`.claude/rules/workflow.md` § "What the hooks enforce").
+> **Start here**: `docs/ARCHITECTURE.md` — subsystems, source tree, protocols, security model.
+> Per-subsystem rules (`.claude/rules/arch-*.md`, indexed by `architecture.md`) load when a file they
+> govern is read or edited; the hooks check it (`workflow.md` § "What the hooks enforce").
 
 ## Project Overview
 
@@ -35,12 +33,10 @@ Five carry contracts, not just versions:
   #798) AND jinja2's answers where minijinja's differ (`none is iterable`) are part of the contract.
 - **`serde_json` and `minijinja` are both built with `preserve_order`.** Drop
   either and every tool schema reaches the model alphabetised.
-- **`libp2p-gossipsub` is a DIRECT dep to enable its `metrics` feature** (the
-  facade's does not; drift from libp2p's pin builds two copies and the traffic
-  split reads as absent) **and VENDORED for two patches**: a peer reconnecting
-  beside an old connection is told our subscriptions again — without it a
-  restarted computer's gossip reached nobody (2026-11-05) — and upstream's PRUNE
-  fix (RUSTSEC-2026-0534, backported; `cargo audit` still names 0.49.5). Guarded.
+- **`libp2p-gossipsub` is a DIRECT dep for its `metrics` feature** (drift from libp2p's pin builds
+  two copies and the traffic split reads as absent) **and VENDORED for two patches**: a peer
+  reconnecting beside an old connection is re-told our subscriptions (a restarted computer's gossip
+  reached nobody, 2026-11-05), and upstream's PRUNE fix (RUSTSEC-2026-0534; `cargo audit` still names 0.49.5). Guarded.
 - **`rayon-core` is vendored for ONE patch**: idle workers spin 200 µs before they
   sleep (8-thread processor decode 172 → 123-127 ms, #137). A `rayon` needing a newer
   core leaves the `[patch]` unused with only a warning. Guarded.
@@ -50,26 +46,21 @@ Five carry contracts, not just versions:
 
 ## Coding Conventions
 
-- **Errors**: `thiserror` for `SwarmError` in `src/error.rs`; `anyhow` only in
-  `main.rs` and integration tests. **Never choose an error type at a call site**
-  — `classify_error` is the single answer; the variant → status contract is in
-  `.claude/rules/arch-errors.md`. Network: retry with backoff (3). Inference:
-  return immediately, never retry silently. Shard integrity: quarantine,
-  re-download, penalize trust.
+- **Errors**: `thiserror` for `SwarmError` in `src/error.rs`; `anyhow` only in `main.rs` and integration
+  tests. **Never choose an error type at a call site** — `classify_error` is the single answer
+  (`arch-errors.md`). Network: retry with backoff (3). Inference: return immediately, never retry
+  silently. Shard integrity: quarantine, re-download, penalize trust.
 - **Naming**: `PascalCase` types, `snake_case` fns. Newtypes —
   `NodeId([u8; 32])`, `ModelId(String)`, `ShardId { model_id, index }`; NodeId
   displays as its first 8 bytes hex.
-- **Serialization**: `serde_json` for the HTTP API (match OpenAI exactly) and
-  redb values; TOML for config; the network codec is JSON control messages plus
-  binary with a type-tag byte for tensor payloads.
-- **Async**: subsystems talk over `tokio::sync::mpsc`; SharedState uses `DashMap`
-  for concurrent reads and `RwLock` for single values; shutdown is a
-  `tokio::sync::watch`, awaited beside task exit in `daemon/mod.rs`'s `select!`.
-  **A DashMap guard never lives across `.await`** — its writer parks an OS
-  thread (#90's shape); `clippy.toml` fails the build on one.
-- **Logging**: `tracing`, structured spans carrying request_id / model_id /
-  peer_count, target `swarmllm::module::submodule`. `-v` debug, `-vv` +libp2p,
-  `-vvv` trace.
+- **Serialization**: `serde_json` for the HTTP API (match OpenAI exactly) and redb values; TOML for config;
+  the network codec is JSON control messages plus binary with a type-tag byte for tensor payloads.
+- **Async**: subsystems talk over `tokio::sync::mpsc`; SharedState uses `DashMap` for concurrent reads and
+  `RwLock` for single values; shutdown is a `tokio::sync::watch`, awaited beside task exit in `daemon/mod.rs`'s
+  `select!`. **A DashMap guard never lives across `.await`** — its writer parks an OS thread (#90's shape);
+  `clippy.toml` fails the build on one.
+- **Logging**: `tracing`, spans carrying request_id / model_id / peer_count, target
+  `swarmllm::module::submodule`. `-v` debug, `-vv` +libp2p, `-vvv` trace.
 
 ### Frontend
 - Vanilla HTML/CSS/JS, no framework or build step, embedded via `include_dir!` (rules: `arch-frontend.md`).
@@ -83,13 +74,11 @@ Five carry contracts, not just versions:
 
 ## Building and Testing
 
-**One feature set, through the aliases in `.cargo/config.toml`** — `cargo lint`,
-`cargo dev-test`, `cargo dev-build` all mean `--no-default-features --features
-dev,claude-subscription` (`cargo dev-run` too). Switching sets recompiles the crate, and a
-default-feature test build silently replaces the dev binary with one that embeds
-a stale frontend (gotchas #573/#578). No hook compiles after an edit: run
-`cargo lint` once when a change is complete. The pre-push hook adds a
-default-feature lint only when a push touches code only that set compiles.
+**One feature set, through the aliases in `.cargo/config.toml`** — `cargo lint` / `dev-test` /
+`dev-build` / `dev-run` all mean `--no-default-features --features dev,claude-subscription`. Switching
+sets recompiles the crate, and a default-feature test build silently replaces the dev binary with one
+embedding a stale frontend (#573/#578). No hook compiles after an edit: run `cargo lint` once a change is
+complete; the pre-push hook adds a default-feature lint only for code only that set compiles.
 
 ```bash
 cargo fmt && cargo lint               # MUST pass before push (CI lints default features too)
@@ -123,13 +112,11 @@ mmproj). Never edit a count without the run behind it (`completeness.md`).
 - Data dir: `~/.local/share/swarmllm/` (Linux), `~/Library/Application Support/swarmllm/` (macOS), `%APPDATA%\swarmllm\` (Windows)
 - **Credits are DORMANT — they gate nothing**, and `credits_stay_dormant` fails
   the build if one starts. **Read `docs/CREDITS_DESIGN.md` before touching them.**
-- **Encryption is two layers**: `network.enable_encryption` (DEFAULT TRUE) and
-  `inference.encrypted_pipeline` ("boomerang", DEFAULT FALSE). ⚠ **Boomerang is
-  STRUCTURAL, not cryptographic** — peers still see hidden states in plaintext,
-  ~81% invertible to text. **Never describe it as hiding data from the computing
-  node**; in the UI it is "Start and finish on this computer", never
-  "end-to-end", "encrypted pipeline" or "private". → `docs/ARCHITECTURE.md` §
-  Pipeline Privacy Model.
+- **Encryption is two layers**: `network.enable_encryption` (DEFAULT TRUE) and `inference.encrypted_pipeline`
+  ("boomerang", DEFAULT FALSE). ⚠ **Boomerang is STRUCTURAL, not cryptographic** — peers still see hidden
+  states in plaintext, ~81% invertible to text. **Never describe it as hiding data from the computing node**;
+  in the UI it is "Start and finish on this computer", never "end-to-end", "encrypted pipeline" or
+  "private". → `docs/ARCHITECTURE.md` § Pipeline Privacy Model.
 - **Private mode** restricts YOUR outbound inference to pool/LAN nodes only (the node still serves
   the swarm); `pool::scope::allowed_node_set()` gates everything. **`gossip_network_id` is NOT
   isolation** — only pool + `private_mode` + `private_mode_allow_lan = false` isolates (#352).
@@ -143,11 +130,10 @@ mmproj). Never edit a count without the run behind it (`completeness.md`).
   registry, disk manifest, header and parts all describe one upload (#776).
 - **A family in `supported_list` is a claim**: check it against a REAL file's
   header (#715).
-- **A far split is fast when a drafter's tree FLOWS from the far end**: 14B Thailand↔Australia (126-133 ms), a card
-  each end → prose 17.8-20.5, code 40-43 tok/s against 11.0-11.3 / 14.1-14.5 on this laptop alone (v0.3.275; the flow's
-  line is 110 ms since 2026-11-15, #411). A chain that starts and finishes here keeps the 300 ms line and streams below it (27-31
-  code, 12.0-12.8 prose on that link; `dsd_tree::FlowDraws`); a lopsided split saturates the far side. Coordinates only
-  PRICE a chain its head leads (#3 (a)) → `docs/plans/faster_than_local.md` § 9, `split_speculation.md`, `regional_pipelines.md`.
+- **A far split is fast when a drafter's tree FLOWS from the far end** (14B Thailand↔Australia, a card each end:
+  prose 17.8-20.5, code 40-43 tok/s against 11.0-11.3 / 14.1-14.5 alone; the flow's line is 110 ms, #411). A chain
+  that starts and finishes here keeps the 300 ms line (`dsd_tree::FlowDraws`); a lopsided split saturates the far
+  side; coordinates only PRICE a chain its head leads (#3 (a)) → `docs/plans/faster_than_local.md` § 9.
 - **Local GPU decode is bound by SUBMISSION COUNT**; ONE CUDA stream per device,
   decode and speculative checks submitted as CUDA graphs → `arch-inference.md`,
   `docs/plans/local_decode_submissions.md`.
@@ -158,29 +144,23 @@ mmproj). Never edit a count without the run behind it (`completeness.md`).
   2026-11-01): no open P0/P1 against work it carries, no follow-up it needs, never on a boot
   after a driver stop — never a signed draft waiting on a reboot. Otherwise every fix rolls
   into the next release (`memory/release_gate.md` step 0).
-- ⛔ **The release the user signs carries EVERY fix on main** (user, 2026-10-30 AND 2026-11-07 — broken
-  twice): plan back from the signing time, cut the tag from the LAST fix, and land NO product code
-  between the tag and the publish — `release-window-gate.sh` refuses it. A fix that must ship re-cuts
-  the release. Before asking for the signature, `git diff --stat <tag> origin/main -- src crates vendor
-  frontend` is empty, and so is `git status --short` over them. **Complete ALL tasks before the cut, and cut at
-  the time the user names, never early** (user, 2026-11-09, a third time: an early cut left six hours of speed-ups
-  behind the draft). Never name an unreleased version to the user ("on main, not in a release yet").
-- **Releases are SIGNED; CI leaves a DRAFT.** Read `memory/release_gate.md`
-  before a release (~2 h bump → publish since 2026-10-14). ⛔ A BUILD gate is not
-  a BEHAVIOUR gate (#683): `examples/release_gate.sh` runs on the DOWNLOADED
-  artifact, a rig shares the machine with NOTHING (#708), and a reply is judged
-  against llama.cpp (`examples/score_against_reference.py`), never by byte-equality.
-  It checks the build for regressions; a fix is verified when it lands, never by a gate step.
-- ⚠ **Windows code is tested ON Windows before it ships** (MinGW cross-build, run
-  natively from WSL — `memory/env_windows_test_node.md`); a reproduction must FAIL
-  on the broken build first. std's `Command` hands a Windows child every inheritable
-  handle (#769): an outliving process starts via `spawn_without_inherited_handles`
-  (`update_restart`); workers die with the daemon (job object, #153).
-- ⛔ **Six unclean shutdowns under load (09-26 → 10-07); #6 = a driver reset at 156 h uptime
-  wedged the host (#804): after any reset, no more card work that boot.** Every gate/rig/bench sources the safety kit
-  (`~/swarmllm-gate-common/safety.sh` — it stops at the first GPU-driver event, #790; no 4
-  simultaneous chats: concurrent requests ARE a stress test); ONE cargo build at a time (#684).
-  ⛔ **Do NOT ask for a go-ahead or a restart, and never refuse on uptime**
+- ⛔ **The release the user signs carries EVERY fix on main** (user, 2026-10-30 AND 2026-11-07): plan back from
+  the signing time, cut the tag from the LAST fix, and land NO product code between the tag and the publish —
+  `release-window-gate.sh` refuses it; a fix that must ship re-cuts the release. Before asking for the signature,
+  `git diff --stat <tag> origin/main -- src crates vendor frontend` and `git status --short` over them are empty.
+  **Complete ALL tasks before the cut, and cut at the time the user names, never early** (user, 2026-11-09, a third
+  time: an early cut left six hours of speed-ups behind). Never name an unreleased version ("on main, not in a release yet").
+- **Releases are SIGNED; CI leaves a DRAFT.** Read `memory/release_gate.md` before a release (~2 h bump → publish).
+  ⛔ A BUILD gate is not a BEHAVIOUR gate (#683): `examples/release_gate.sh` runs on the DOWNLOADED artifact, a rig
+  shares the machine with NOTHING (#708), a reply is judged against llama.cpp (`examples/score_against_reference.py`),
+  never by byte-equality. It checks for regressions; a fix is verified when it lands, never by a gate step.
+- ⚠ **Windows code is tested ON Windows before it ships** (MinGW cross-build, run natively from WSL —
+  `memory/env_windows_test_node.md`); a reproduction must FAIL on the broken build first. std's `Command` hands a
+  Windows child every inheritable handle (#769): an outliving process starts via `spawn_without_inherited_handles`.
+- ⛔ **Eight unclean shutdowns (09-26 → 11-15; a driver reset at 156 h wedged the host, #804): after any
+  reset, no more card work that boot.** Every gate/rig/bench sources the safety kit (`~/swarmllm-gate-common/safety.sh`
+  — it stops at the first GPU-driver event, #790; no 4 simultaneous chats: concurrent requests ARE a stress test);
+  ONE cargo build at a time (#684). ⛔ **Do NOT ask for a go-ahead or a restart, and never refuse on uptime**
   (user, 2026-10-02) — run it and log the uptime (#146).
 
 ## Subagents, models and usage (Max 5x plan) → evidence: `memory/model_routing.md`
@@ -189,6 +169,8 @@ mmproj). Never edit a count without the run behind it (`completeness.md`).
   that only read or search; 14 days to 10-10). Give bulky reading to a cheap agent with ONE question, keep the
   answer: `digest` (Haiku: logs, gate/CI output, diffs, run-and-report), `Explore` (code search). Read yourself
   only what you will edit; never poll from here. `/clear` at task boundaries; auto-compact is at 400K.
+- **Code Mode** (experimental; `CLAUDE_CODE_EXPERIMENTAL_CODE_MODE=1`, USER settings only) runs a turn's tool calls
+  as one script, so fewer turns re-read the context; it switches Claude in Chrome off. The hooks see every call inside it (`workflow.md`).
 - **The cheapest model that holds, named on every call** (`Explore`/`Plan` inherit Opus xhigh and skip CLAUDE.md, bare → sonnet):
   lookup, digest, run-and-report → haiku; search, web research, review, `root-cause`, architect, `Plan` →
   sonnet (`effort: high` where a miss costs a commit); i18n review (#793), cross-cutting design → opus; a
@@ -205,11 +187,10 @@ mmproj). Never edit a count without the run behind it (`completeness.md`).
 - `docs/ARCHITECTURE.md` — **primary reference**: subsystems, source tree, protocols, security model
 - `docs/invariants/` — the evidence behind each rule (7 topics). **Read the topic file before changing code a rule names.**
 - `docs/FUTURE_WORK.md` — open work, ranked (history: `FUTURE_WORK_ARCHIVE.md`). **A fix moves its item to § "Closed" in the SAME commit.** ⚠ Its SCOPE is a hypothesis (#654), line numbers drift (#645).
-- `docs/DIAGNOSTICS.md` (`DIAG:`, bench traps) · `docs/README.md` (every document, one page) · `docs/book/` ·
+- `docs/DIAGNOSTICS.md` (`DIAG:`, bench traps) · `docs/README.md` (every document) · `docs/book/` ·
   `.claude/sweep-log.jsonl` (every `/sweep` finding — **grep before re-reporting**)
-- `memory/` = `~/.claude/projects/-home-user-SwarmLLM/memory/` (not in the repo); `MEMORY.md` indexes it and
-  holds the live status — **read `open_cautions.md` and `next_up.md` at session start.** Dated notes
-  (round logs, audits, sweeps, old gates) are in `memory/archive/` — grep there, never read it whole.
+- `memory/` = `~/.claude/projects/-home-user-SwarmLLM/memory/` (not in the repo): `MEMORY.md` indexes it and holds
+  the live status — **read `open_cautions.md` and `next_up.md` at session start**; dated notes are in `memory/archive/` (grep, never read whole).
 
 ## Compact instructions
 

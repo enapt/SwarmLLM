@@ -33,6 +33,11 @@ import tempfile
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 GATE = os.path.join(ROOT, ".claude", "scripts", "research-gate.sh")
 TARGET = "/".join(["src", "network", "manager", "relay.rs"])
+# The same file named from a folder below the root: Code Mode sends a script's
+# shell call made in a folder as `cd '<dir>' && <command>`, and a Bash `cd`
+# carries between calls (the payload's `cwd`).
+TARGET_DIR = "/".join(["src", "network"])
+TARGET_LEAF = "/".join(["manager", "relay.rs"])
 
 # Must all be denied: a session that has not read the file or its rules cannot
 # mutate it through any of these.
@@ -57,6 +62,9 @@ MUST_CATCH = [
     ("git checkout --",       "git checkout -- {t}"),
     ("git restore --",        "git restore -- {t}"),
     ("patch < diff",          "patch {t} < /tmp/p.patch"),
+    ("Code Mode: cd '<dir>' &&", "cd '{d}' && sed -i 's/a/b/' {f}"),
+    ("cd <dir>; (unquoted)",  "cd {d}; rm {f}"),
+    ("shell already in <dir>", "echo x >> {f}", "{d}"),
 ]
 
 # Must NOT be denied — reading is never gated, and a gate that blocks reads is
@@ -68,17 +76,21 @@ MUST_ALLOW = [
     ("python read-only",      "python3 -c \"print(open('{t}').read())\""),
     ("outside the repo",      "echo hi > /tmp/foo.txt"),
     ("build output",          "echo hi > target/debug/x.txt"),
+    ("cd out of the repo",    "cd /tmp && echo x > {f}"),
 ]
 
 
-def run(cmd, transcript, tool="Bash", tool_input=None):
-    payload = json.dumps({
+def run(cmd, transcript, tool="Bash", tool_input=None, cwd=None):
+    payload = {
         "tool_name": tool,
         "tool_input": tool_input or {"command": cmd},
         "session_id": "PROBE-SESSION-NOT-IN-LOG",
         "prompt_id": "PROBE-PROMPT",
         "transcript_path": transcript,
-    })
+    }
+    if cwd:
+        payload["cwd"] = os.path.join(ROOT, cwd)
+    payload = json.dumps(payload)
     r = subprocess.run(
         ["bash", GATE], input=payload, capture_output=True, text=True,
         env={**os.environ, "CLAUDE_PROJECT_DIR": ROOT},
@@ -206,15 +218,17 @@ def main():
     failures = []
     try:
         print("must be DENIED (mutating a file whose rules never loaded):")
-        for desc, tmpl in MUST_CATCH:
-            caught = run(tmpl.format(t=TARGET), tf.name)
+        names = {"t": TARGET, "d": TARGET_DIR, "f": TARGET_LEAF}
+        for desc, tmpl, *cwd in MUST_CATCH:
+            caught = run(tmpl.format(**names), tf.name,
+                         cwd=cwd[0].format(**names) if cwd else None)
             print(f"  {'denied' if caught else 'NOT CAUGHT':<12} {desc}")
             if not caught:
                 failures.append(f"not caught: {desc}")
 
         print("\nmust be ALLOWED (reads, and paths the gate does not govern):")
         for desc, tmpl in MUST_ALLOW:
-            caught = run(tmpl.format(t=TARGET), tf.name)
+            caught = run(tmpl.format(**names), tf.name)
             print(f"  {'DENIED' if caught else 'allowed':<12} {desc}")
             if caught:
                 failures.append(f"wrongly denied: {desc}")

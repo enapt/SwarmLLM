@@ -14,7 +14,7 @@ Client Request (OpenAI or Anthropic format)
     → Provider resolution: model starts with "claude-"
       → Claude subscription enabled? → Spawn subprocess
       → Else: use Anthropic API key (existing behavior)
-    → claude -p --output-format stream-json --model <model> "<prompt>"
+    → claude --print --output-format stream-json|json --model <model> --no-session-persistence "<prompt>"
     → Parse NDJSON → Translate to API format → Return response
 ```
 
@@ -91,7 +91,7 @@ Multi-turn conversations work by serializing the full message history into the p
 - Assistant messages → `<previous_response>...</previous_response>`
 - User messages → bare text
 
-This is the same stateless approach used by OpenAI-compatible APIs — the client sends the full conversation every time, and the server doesn't maintain session state.
+As with any OpenAI-compatible API, the client sends the whole conversation every time.
 
 ### Long-lived sessions
 
@@ -104,6 +104,8 @@ For interactive use, where re-sending the whole conversation every turn would be
 - `POST /api/claude-code/session/{id}/message` — send a turn
 - `POST /api/claude-code/session/{id}/permission` — answer a tool-permission prompt the CLI raised
 
+These sessions never use Claude Code's experimental Code Mode, which runs only in an interactive terminal: with `CLAUDE_CODE_EXPERIMENTAL_CODE_MODE=1` in your own settings, `claude -p` still starts with its ordinary tools (checked on v2.1.326).
+
 ## Configuration
 
 All configuration is in the `providers.claude_subscription` section, manageable via the admin API or dashboard:
@@ -113,13 +115,13 @@ All configuration is in the `providers.claude_subscription` section, manageable 
 | `enabled` | `false` | Route Claude requests through the CLI |
 | `claude_binary` | `"claude"` | Path to the `claude` binary |
 | `default_model` | *(from request)* | Override model for all requests |
-| `max_concurrent` | `3` | Max concurrent subprocess invocations |
+| `max_concurrent` | `3` | Max concurrent subprocess invocations (at most 8, whatever is set) |
 | `timeout_secs` | `300` | Timeout per request (seconds) |
 | `working_dir` | *(system temp)* | Working directory for the subprocess |
 
 ### Working Directory
 
-By default, the subprocess runs in the system temp directory to avoid loading project-specific CLAUDE.md files, hooks, and MCP servers. Set `working_dir` to a project path if you want Claude to have project context for its responses.
+By default, the subprocess runs in the system temp directory, so it loads no project's CLAUDE.md, hooks or MCP servers. Set `working_dir` to a project path if you want Claude to have that project's context; an empty value or `none` means the default.
 
 ## Routing Priority
 
@@ -133,19 +135,15 @@ The subscription provider takes priority over the API key. Disable the subscript
 
 ## Rate Limits
 
-Subscription rate limits are per rolling 5-hour window (not per-second RPM like API keys). The concurrency limiter (default 3) prevents spawning too many concurrent processes. Community reports suggest ~3-5 parallel Opus sessions before degradation.
+Subscription rate limits are per rolling 5-hour window (not per-second RPM like API keys). The concurrency limiter (default 3, at most 8) stops the node spawning too many processes at once. Community reports suggest ~3-5 parallel Opus sessions before degradation.
 
 Rate limit info is returned in the NDJSON output and logged. The `GET /api/admin/claude-subscription/status` endpoint shows the current rate limit tier.
 
 ## Removal
 
-If this feature needs to be removed:
+The feature is compiled in only with `--features claude-subscription`. To remove it:
 
-```bash
-git rm src/api/claude_sub.rs
-# Remove "claude-subscription = []" from Cargo.toml
-grep -rn 'claude.subscription\|claude_sub' src/ frontend/
-# Remove the ~6 #[cfg] blocks found by grep
-```
-
-Single commit, clean removal. No deep dependencies on the rest of the codebase.
+- delete `src/api/claude_sub.rs` and `src/api/claude_session/`;
+- remove `claude-subscription = []` from `Cargo.toml`, and `claude-subscription` from the four aliases in `.cargo/config.toml`;
+- remove the `cfg(feature = "claude-subscription")` items, about 30 of them across 11 files under `src/api/`, `src/config/`, `src/daemon/` and `src/health/` (`grep -rn 'claude-subscription' src`);
+- remove the Claude Subscription card and the Claude Code sessions view from the frontend (`settings.js`, `data.js`, `claude-code.js`), along with their translation keys.
