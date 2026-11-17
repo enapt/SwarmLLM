@@ -5865,26 +5865,6 @@ estimator's own figure for each candidate range — then check that arm 6's `roo
 24 and the drafter lands on the card. First measurement: `segment_cost_curve` against
 `estimate_gpu_footprint_mb(14B, Some((0,12)), …)` on the real header.
 
-#### #377 — A peer's up-front refusal of a split's range quotes its machine memory where its card refused
-`P3` · errors / memory · **OPEN** — 2026-10-30 · history: #345, #349
-
-Rig `prose1030` arm 3 (2026-10-30 11:59Z, `~/swarmllm-gate/deep/fr/real_link_prose1030.out`): the
-AU peer (RTX 3060) was asked for [16,48) of Qwen2.5-14B a minute after it served [26,48) for
-the previous arm, and answered — the words a user reads in the 503:
-"qwen2.5-14b-instruct-q4-k-m needs about 0 MB of memory but this node's budget allows 30100 MB
-and 1055 MB is already in use. Raise `resources.max_ram_mb`, or free memory by unloading another
-model. Of layers 16..48 of the model, 3 would load here." The refusal itself was right — its
-worker was inside the conversation window (`WorkerHandle::in_use`), so `forward_would_load`
-could neither replace it nor grow it on a card already holding it — but every figure in the
-sentence is the MACHINE's (`peer_load_refusal` → `ram_refusal_words` with `needed_mb =
-fresh_spawn_machine_mb`, 0 for a run all on the card), and the advice names a setting that
-cannot help. What it takes: `forward_would_load` says which rung refused (the card's budget,
-a worker kept for a conversation, the machine's share), and the words name that one — the card's
-figures where the card refused, "a reply is still using this model here; try again shortly" for
-the conversation window — with a test on the advice, not the wording (`arch-errors.md`). Rig
-note, kept in the rig: a run whose arms ask one peer for DIFFERENT ranges meets this within the
-conversation window; give every arm of one run the same range there.
-
 #### #380 — A split's first token waits a round trip for its peers' memory answer before this node reads its own layers
 `P3` · perf-split / first token · **OPEN** — 2026-10-30 · history: #252 (b), #263
 
@@ -7163,6 +7143,20 @@ archive under the named heading. Reopen one only with the evidence its line name
 Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 19-28 were
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
+
+**Closed 2026-11-18 (on main, not in a release yet)** (#377)
+- #377 — **A peer's up-front refusal of a split's range quoted its machine memory where its card or a conversation
+  refused.** Rig `prose1030` arm 3 (2026-10-30): asked for [16,48) of Qwen2.5-14B a minute after serving [26,48), the AU
+  peer answered "needs about 0 MB of memory … Raise `resources.max_ram_mb`" — every figure the machine's, the advice a
+  setting that could not help. `peer_load_refusal` now names the rung that refused before it reaches the memory words:
+  a worker inside the conversation window says "do not fit beside the copy this node is running for a conversation
+  now, which is kept until that conversation ends; try again in about 2 minutes" (`CONVERSATION_GAP_SECS` rounded up
+  to minutes), and an idle all-card copy the wider range would put partly on the processor says so in its own words
+  (#461, `replacement_keeps_the_card`). Tests on the advice: `a_peer_with_a_worker_weighs_the_load_of_a_range_it_does_not_hold`
+  ("for a conversation now", "try again in about 2 minutes", never `max_ram_mb`) and
+  `a_peer_is_told_no_up_front_where_its_range_would_swap_a_card_copy_for_a_slower_one`. What is left in system memory's
+  words is a refusal by system memory alone: a fresh spawn's RAM admission (`fresh_spawn_machine_mb`) — a card short of
+  room places a spawn partly on the processor, it never refuses one.
 
 **Closed 2026-11-17 (v0.3.296-alpha)** (#472)
 - #472 — **After every restart, dead identities were dialled for an hour at addresses another computer now

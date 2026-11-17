@@ -9827,9 +9827,11 @@ impl ModelProcessPool {
             );
             let message = format!(
                 "Layers {start}..{end} of {} do not fit beside the copy this node is running \
-                 for a conversation now, which is kept until that conversation ends. Of layers \
-                 {start}..{end} of the model, {layers_that_fit} would load here.",
-                model_id.0
+                 for a conversation now, which is kept until that conversation ends; try again \
+                 in about {} minutes. Of layers {start}..{end} of the model, {layers_that_fit} \
+                 would load here.",
+                model_id.0,
+                CONVERSATION_GAP_SECS.div_ceil(60)
             );
             return Some((message, layers_that_fit));
         }
@@ -17704,6 +17706,11 @@ mod tests {
                 assert!(layers_that_fit < 4, "{layers_that_fit}");
                 // Told why: the copy in use, never a memory figure (#461).
                 assert!(message.contains("for a conversation now"), "{message}");
+                // The advice: when retrying helps (#377).
+                assert!(
+                    message.contains("try again in about 2 minutes"),
+                    "{message}"
+                );
                 assert!(!message.contains("max_ram_mb"), "{message}");
             }
             PeerPromptWeight::Fits => {
