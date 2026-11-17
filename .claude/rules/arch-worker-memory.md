@@ -84,6 +84,7 @@ Code waiting for a subprocess handles it dying instead (`spawn_worker` races `ch
 
 - A range taking in one charged in the worker's BASE (`takes_in_a_range_charged_in_its_base`) **skips the split rung while idle** (#461). A/B `SWARMLLM_GROWTH_OVER_BASE_RANGE=split`.
 - A worker in system memory skips the two card rungs, never the retirement; it retires only where the range would load in its place (`a_fresh_spawn_fits_in_place_of_the_worker`, #348/#349).
+- **A replacement keeps the card layers it goes on serving** (#461): **`replacement_keeps_the_card`**, asked beside that fit by all three retirement paths (`grow_worker`, `forward_would_load`, `forward_replaces_the_worker`) — of the held layers inside the run, no fewer on the card than now, or than a spawn of just what it holds would place (like with like). A/B `SWARMLLM_REPLACEMENT_KEEPS_CARD=0`.
 - **A range is loaded where it was charged**: `DaemonMsg::PlaceRange` (under `spawn_lock`, before any forward) and the loader asks `split::placement_of` — never `--gpu-layers` / `--cpu-moe-layers` alone.
 
 → `docs/invariants/memory.md` § "A worker that cannot grow gets the spawn's ladder (2026-09-27)"

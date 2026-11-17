@@ -5629,14 +5629,28 @@ reverse — and its post-verify keeps drafting while the target verifies (up to 
 between the two; here they would.
 
 #### #461 — A peer's split that asks a computer for a WIDER range replaces its all-card copy with a mostly-processor one, which then serves every narrower request too
-`P3` · memory / admission · **NARROWED** — 2026-11-15 (the growth half shipped in v0.3.292) · found on the real link (`real_link.sh` TAG=bal292, a forced split point) · related: #3 (j12), #3 (j13), #449, #458
+`P3` · memory / admission · **NARROWED** — 2026-11-15 (the growth half shipped in v0.3.292); contributor 1's guard built 2026-11-17 (on main, not in a release yet) · found on the real link (`real_link.sh` TAG=bal292, a forced split point) · related: #3 (j12), #3 (j13), #449, #458
 
 **Narrowed 2026-11-15 (v0.3.292)**: contributor 2 was the GROWTH ladder (below, "Contributor 2 found"), and
 `charge_segment_as_split` now steps aside for an idle worker whose spawn range the new range takes in, so the
 retirement the planner priced places it afresh (`docs/invariants/memory.md` § "A worker that cannot grow", real
-link 7.56 → 35.25 tok/s). **Left**: (1) the retirement's own guard against a worse placement (contributor 1); (3)
-no promotion under steady use; the refusal's words; and the accounting itself — a worker IN USE still takes the
+link 7.56 → 35.25 tok/s). **Left**: (3)
+no promotion under steady use; the refusal's words beyond the guard's own; and the accounting itself — a worker IN USE still takes the
 wider range as a split sized beside the dropped range, and the daemon keeps charging that range's base.
+
+**Built 2026-11-17 (contributor 1; on main, not in a release yet)**: `ModelProcessPool::replacement_keeps_the_card`,
+asked beside the fit by all three places a forward retires a worker (`grow_worker`'s last rung, `forward_would_load`,
+`forward_replaces_the_worker`): of the held layers a run covers, the replacement keeps on the card as many as the
+worker runs there now, or as a fresh spawn of just what it holds would, whichever is fewer (like with like: the
+planning estimate sits below what a load refits to, #365 — against the worker's count alone the #350 fixture's
+wider run, 12 more layers here for one card layer, was refused). Judged on any overlap, not only a run taking in
+every held range: the refusal's bisection probes narrower runs, and `[20..47)` would retire the same copy. A peer
+asked up front is told in the card's words ("would replace the copy this node runs with N layers on its graphics
+card by one running fewer there"), never "needs about 0 MB". Test
+`an_idle_card_worker_is_not_replaced_by_one_running_fewer_of_its_layers_on_the_card` (red with the A/B
+`SWARMLLM_REPLACEMENT_KEEPS_CARD=0`). Prior art: the design candidate's below, plus Ollama's `needsReload` (never
+re-places a loaded runner while it can serve). **Not verified on the real link** — it needs the far computer on a
+build carrying it; a card refusal for any OTHER reason still reads as system memory.
 
 **Seen** (the Australian 12 GB card, v0.3.291, the 14B; `real_link_bal292/peers_seen.jsonl`, its own advertised
 `resident` after each reply): it held `[26..48)` with all 22 layers on the card (3,390 MB of the card free beside
@@ -5687,7 +5701,7 @@ reading. **Smallest candidate**: the planner already priced this run as the idle
 widening the far computer's range on the real link. Not landed before v0.3.292: memory accounting on three paths
 (room, admission, departure), verified by a rig the night did not have time for.
 
-**Design candidate (2026-11-15, not built)**: the forward's retirement takes the rule promotion already has
+**Design candidate (2026-11-15; built 2026-11-17 above, with a like-for-like floor)**: the forward's retirement takes the rule promotion already has
 (`promotion_keeps_what_it_holds`, #3 (j12)): a replacement is admitted only if every layer the retired worker
 ran on the card stays on the card; otherwise the wider ask is refused with words naming the card ("would move N
 of the layers it serves to the processor"), and the asker plans the range already loaded. Prior art: searched

@@ -3231,7 +3231,37 @@ Tests: `a_range_taking_in_the_spawn_range_is_placed_afresh_not_beside_it` (red
 with the rung on), `a_worker_in_use_still_takes_a_wider_range_as_a_split`. A/B
 `SWARMLLM_GROWTH_OVER_BASE_RANGE=split`. Left open: the accounting itself (the
 daemon still charges a dropped spawn range's base while a split stands beside a
-worker in use) and the retirement's own worse-placement guard (#461).
+worker in use). The retirement's worse-placement guard follows.
+
+**A replacement keeps on the card the held layers it goes on serving**
+(2026-11-17, FUTURE_WORK #461 contributor 1). The retirement asked only whether
+the replacement would load at all (`a_fresh_spawn_fits_in_place_of_the_worker`).
+Australia's `[26..48)`, all 22 layers on its card, was retired for `[20..48)` and
+the fresh copy ran 10 of 28 there; every forward after, the old range's too as a
+slice of the new copy (#449), took ~1,000 ms instead of ~30 (19.6 / 44.9 →
+3.2-3.7 / 8.3 tok/s, bal292). Now `ModelProcessPool::replacement_keeps_the_card`,
+asked beside the fit by all three places a forward retires a worker
+(`grow_worker`'s last rung, `forward_would_load`, `forward_replaces_the_worker`),
+counts the held layers inside the run that the worker runs on the card now (each
+range as placed, `processor_layers_of`) and refuses where a fresh spawn of the run
+(`held_layers_a_fresh_spawn_keeps_on_card`: the spawn's card rungs, the processor
+run where the loader puts it) would keep fewer of them there — fewer than now, or
+than a fresh spawn of just the held hull would, whichever is fewer. That second
+figure compares like with like: against the worker's own count alone, the 70B
+fixture's `[0..25)` over `[0..13)` read 9 against 13 recorded (10 placed) and was
+refused, though it served 12 more layers here — the planning estimate sits below
+what a load refits to (#365). It is judged on any overlap, not only a run taking in
+every held range: `peer_load_refusal`'s bisection probes narrower runs from the
+asked start, and `[20..47)` would have retired the same copy. A peer asked up front
+is told in the card's words, never system memory's "needs about 0 MB". Prior art:
+Ollama never re-places a loaded runner while it can serve (`server/sched.go`
+`needsReload`); Kubernetes' preemption never evicts for an equal or lower priority;
+the promotion path already had the rule (`promotion_keeps_what_it_holds`, #3 (j12)).
+Test: `an_idle_card_worker_is_not_replaced_by_one_running_fewer_of_its_layers_on_the_card`
+(red with the guard off; the partial-overlap case red under the first version, which
+judged only a run taking in every held range; its control, a card with room for the
+whole ask, allows it). A/B `SWARMLLM_REPLACEMENT_KEEPS_CARD=0`. Not yet checked on the
+real link: it needs the far computer on a build carrying it.
 
 ## A model process holds one copy of the output head (2026-11-16, FUTURE_WORK #458)
 

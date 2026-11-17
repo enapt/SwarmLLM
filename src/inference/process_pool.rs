@@ -3721,6 +3721,17 @@ fn ram_refusal_words(model: &str, needed_mb: u64, budget_mb: u64, in_use_mb: u64
     )
 }
 
+/// The layers two ranges share — `[a.0..a.1)` ∩ `[b.0..b.1)`, counted.
+fn layers_shared(a: (u32, u32), b: (u32, u32)) -> u32 {
+    a.1.min(b.1).saturating_sub(a.0.max(b.0))
+}
+
+/// The run two ranges share, empty (start = end) where they share none.
+fn layers_common(a: (u32, u32), b: (u32, u32)) -> (u32, u32) {
+    let start = a.0.max(b.0);
+    (start, a.1.min(b.1).max(start))
+}
+
 /// How many layers of NEW memory running `range` would take on a worker that
 /// already holds `held`.
 ///
@@ -8716,6 +8727,7 @@ impl ModelProcessPool {
         // the same (2026-10-25, #349).
         let fits_in_its_place = crate::inference::executor::without_starving_the_runtime(|| {
             self.a_fresh_spawn_fits_in_place_of_the_worker(model_id, segment, requester)
+                && self.replacement_keeps_the_card(model_id, segment, &handle)
         });
         if !fits_in_its_place {
             return Err(refused.error);
@@ -8795,7 +8807,8 @@ impl ModelProcessPool {
             Some(h) => {
                 self.growth_would_be_admitted(model_id, run, h, requester)
                     || (!h.in_use(self.conversation_window())
-                        && self.a_fresh_spawn_fits_in_place_of_the_worker(model_id, run, requester))
+                        && self.a_fresh_spawn_fits_in_place_of_the_worker(model_id, run, requester)
+                        && self.replacement_keeps_the_card(model_id, run, h))
             }
             None => self.a_fresh_spawn_fits_in_place_of_the_worker(model_id, run, requester),
         }
@@ -8820,6 +8833,149 @@ impl ModelProcessPool {
             && !h.in_use(self.conversation_window())
             && !self.growth_would_be_admitted(model_id, run, h, requester)
             && self.a_fresh_spawn_fits_in_place_of_the_worker(model_id, run, requester)
+            && self.replacement_keeps_the_card(model_id, run, h)
+    }
+
+    /// Would replacing `h` with a fresh spawn of `run` keep on the card the
+    /// layers of `h` it goes on serving — of the layers `h` holds inside
+    /// `run`, as many as `h` runs on the card now, or as a fresh spawn of just
+    /// what `h` holds would, whichever is fewer? Asked wherever a forward
+    /// would retire a worker for a range (`grow_worker`'s last rung,
+    /// [`Self::forward_would_load`], [`Self::forward_replaces_the_worker`]),
+    /// beside [`Self::a_fresh_spawn_fits_in_place_of_the_worker`] (FUTURE_WORK
+    /// #461, contributor 1).
+    ///
+    /// The far computer of a 14B split held `[26..48)` with all 22 layers on
+    /// its card and answered a forward in ~30 ms; a forward for `[20..48)`
+    /// retired it and the fresh spawn ran 10 of 28 on the card — every forward
+    /// after took ~1,000 ms, the original `[26..48)` too, now a slice of the
+    /// slow copy (#449): 19.6 / 44.9 → 3.2-3.7 / 8.3 tokens a second for the
+    /// 30 minutes the run lasted (real link `TAG=bal292`, 2026-11-15). The fit
+    /// alone asked only whether the replacement loads at all.
+    ///
+    /// Judged on the held layers INSIDE `run`, not only for a run taking in all
+    /// of them: a refusal's `layers_that_fit` probes narrower runs from the
+    /// asked start (`peer_load_refusal`), and `[20..47)` would retire the same
+    /// copy. Layers of `h` outside `run` are the plan's to move. The second
+    /// figure compares like with like: against the worker's own count alone,
+    /// the planning estimate's distance from what a load placed (#365 refits
+    /// toward the card) refused a replacement serving 12 more layers here for
+    /// one card layer. The promotion path keeps the same rule
+    /// (`promotion_keeps_what_it_holds`, #3 (j12)); Ollama never re-places a
+    /// loaded runner while it can serve (`server/sched.go` `needsReload`). A
+    /// placement this node cannot price keeps nothing back. A/B
+    /// `SWARMLLM_REPLACEMENT_KEEPS_CARD=0` (read once).
+    fn replacement_keeps_the_card(
+        &self,
+        model_id: &ModelId,
+        run: (u32, u32),
+        h: &WorkerHandle,
+    ) -> bool {
+        static OFF: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        if *OFF.get_or_init(|| {
+            std::env::var("SWARMLLM_REPLACEMENT_KEEPS_CARD").is_ok_and(|v| v == "0")
+        }) {
+            return true;
+        }
+        if !h.holds_gpu_memory() {
+            return true;
+        }
+        let Ok(charges) = h.charged_segments.lock().map(|v| v.clone()) else {
+            return true;
+        };
+        // Of `run`, the layers the worker runs on the card now: each range as
+        // it was placed (`RangeCharge::split`), as `layers_on_card` counts.
+        let on_card_now: u32 = charges
+            .iter()
+            .map(|c| {
+                let on_the_processor = self.processor_layers_of(model_id, c.range, c.split);
+                layers_shared(c.range, run).saturating_sub(layers_shared(on_the_processor, run))
+            })
+            .sum();
+        if on_card_now == 0 {
+            return true;
+        }
+        let held: Vec<(u32, u32)> = charges.iter().map(|c| c.range).collect();
+        let hull = (
+            held.iter().map(|r| r.0).min().unwrap_or(run.0),
+            held.iter().map(|r| r.1).max().unwrap_or(run.1),
+        );
+        match (
+            self.held_layers_a_fresh_spawn_keeps_on_card(model_id, run, &held, run),
+            self.held_layers_a_fresh_spawn_keeps_on_card(model_id, hull, &held, run),
+        ) {
+            (Some(kept), Some(kept_in_place)) => kept >= on_card_now.min(kept_in_place),
+            _ => true,
+        }
+    }
+
+    /// The layers of `range` a placement `split` puts on the processor — the
+    /// loader's run for whole layers ([`CardSplit::processor_run`]); for
+    /// experts in RAM the first `in_ram`, counted the processor's as
+    /// [`CardSplit::card_share`] counts them; none for a range wholly on one
+    /// device.
+    fn processor_layers_of(
+        &self,
+        model_id: &ModelId,
+        range: (u32, u32),
+        split: Option<CardSplit>,
+    ) -> (u32, u32) {
+        match split {
+            Some(split @ CardSplit::Layers { .. }) => split
+                .processor_run(range, self.card_may_guess_in(model_id, range))
+                .unwrap_or((range.0, range.0)),
+            Some(CardSplit::ExpertsInRam { in_ram, .. }) => (
+                range.0,
+                range
+                    .0
+                    .saturating_add(u32::try_from(in_ram).unwrap_or(u32::MAX))
+                    .min(range.1),
+            ),
+            None => (range.0, range.0),
+        }
+    }
+
+    /// Of the `held` layers inside `within`, how many a fresh spawn of `spawn`
+    /// would place on the card — the card rungs of
+    /// [`Self::fresh_spawn_machine_mb`], charging nothing, with this model's
+    /// worker's card memory counted as free; the split's processor run where
+    /// the loader puts it ([`Self::processor_layers_of`]). `None` where the
+    /// spawn cannot be priced (no header).
+    fn held_layers_a_fresh_spawn_keeps_on_card(
+        &self,
+        model_id: &ModelId,
+        spawn: (u32, u32),
+        held: &[(u32, u32)],
+        within: (u32, u32),
+    ) -> Option<u32> {
+        let held_in = |span: (u32, u32)| {
+            held.iter()
+                .map(|&r| layers_shared(layers_common(r, within), span))
+                .sum::<u32>()
+        };
+        // A split is placed by each layer's own weights (#343): no header,
+        // no placement to price.
+        self.footprint_inputs(model_id, Some(spawn))?;
+        if !self.spawn_may_take_the_card(model_id) {
+            return Some(0);
+        }
+        let estimated = self.estimate_gpu_footprint_mb(model_id, Some(spawn), KvCharge::Typical);
+        if estimated == 0 {
+            return None;
+        }
+        let own_card_mb = self.vram_reserved_mb.get(model_id).map_or(0, |mb| *mb);
+        let budget = self
+            .split_budget_for_planning(model_id, self.split_for(model_id, &[spawn]))
+            .saturating_add(own_card_mb);
+        let on_the_processor =
+            match self.partial_gpu_layers(model_id, Some(spawn), estimated, budget) {
+                Some(split) => self.processor_layers_of(model_id, spawn, Some(split)),
+                None if budget.saturating_sub(self.vram_committed_mb()) >= estimated => {
+                    (spawn.0, spawn.0)
+                }
+                None => spawn,
+            };
+        Some(held_in(spawn).saturating_sub(held_in(on_the_processor)))
     }
 
     /// May `grow_worker` retire `handle`? Called under `spawn_lock`.
@@ -9609,6 +9765,37 @@ impl ModelProcessPool {
             }
         }
         let layers_that_fit = fitting - start;
+        // Refused only because the copy loaded here would be replaced by one
+        // running fewer of its layers on the card (#461): say so, never in
+        // system memory's words, which read "needs about 0 MB" for it.
+        if let Some(h) = worker.as_deref().filter(|h| {
+            !h.in_use(self.conversation_window())
+                && self.a_fresh_spawn_fits_in_place_of_the_worker(
+                    model_id,
+                    (start, end),
+                    Requester::Swarm,
+                )
+                && !self.replacement_keeps_the_card(model_id, (start, end), h)
+        }) {
+            tracing::info!(
+                model = %model_id,
+                layers = format!("[{start}..{end})"),
+                layers_that_fit,
+                card_layers_now = h.layers_on_card(),
+                "DIAG: a peer's split asks this node for a range whose load would replace \
+                 the copy here with one running fewer of its layers on the graphics card — \
+                 answering no before its prompt pass (#461)"
+            );
+            let message = format!(
+                "Loading layers {start}..{end} of {} here would replace the copy this node \
+                 runs with {} layers on its graphics card by one running fewer there, so it \
+                 is kept. Of layers {start}..{end} of the model, {layers_that_fit} would load \
+                 here.",
+                model_id.0,
+                h.layers_on_card()
+            );
+            return Some((message, layers_that_fit));
+        }
         let needed_mb = self.fresh_spawn_machine_mb(model_id, (start, end));
         let in_use = self.ram_committed_mb();
         let budget = self.ram_budget_now(Requester::Swarm).map_or(
@@ -17524,6 +17711,109 @@ mod tests {
             p.workers.get(&model).is_some_and(|w| Arc::ptr_eq(&w, &h)),
             "the worker and its layers are kept"
         );
+        let _ = std::fs::remove_dir_all(&data_dir);
+    }
+
+    /// **An idle card worker is not replaced by one running fewer of its
+    /// layers on the card** (#461, contributor 1). The far computer of a 14B
+    /// split held `[26..48)` all on its card; a forward for `[20..48)` retired
+    /// it, and the fresh spawn ran 10 of 28 there — every forward after it,
+    /// the old range's too as a slice of the new copy, took ~1,000 ms where it
+    /// had taken ~30 (2026-11-15). Here the worker holds the model's last
+    /// three layers on a card with room for about three, and is asked for six
+    /// that end the same: the replacement would load (its processor share
+    /// fits) with the processor run as the tail — the held layers. Kept, up
+    /// front and at the forward; the control: a card with room for all six
+    /// keeps every held layer there, and the replacement is allowed.
+    #[tokio::test]
+    async fn an_idle_card_worker_is_not_replaced_by_one_running_fewer_of_its_layers_on_the_card() {
+        let model = ModelId("seventy-b-shaped-keeps-card".into());
+        let data_dir = header_only_seventy_b("keeps-card", &model, false);
+        let p = ModelProcessPool::new(data_dir.clone());
+        p.test_card_in_play
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        p.set_gpu_layers(-1);
+        p.set_ram_budget_mb(1_000_000);
+        let (held, asked) = ((5, 8), (2, 8));
+        let held_mb = p.estimate_gpu_footprint_mb(&model, Some(held), KvCharge::Typical);
+        let asked_mb = p.estimate_gpu_footprint_mb(&model, Some(asked), KvCharge::Typical);
+        assert!(
+            held_mb > 0 && asked_mb > held_mb,
+            "fixture: priced from the header ({held_mb} / {asked_mb} MB)"
+        );
+        p.set_vram_budget_mb(held_mb + 1);
+        let h =
+            admit_and_insert_gpu_worker(&p, &model, held_mb, std::time::Duration::from_secs(3600))
+                .await;
+        // Its spawn's own range, recorded at zero exactly as `get_or_spawn` does.
+        h.record_charged_segment(held, 0);
+        assert_eq!(
+            h.layers_on_card(),
+            3,
+            "fixture: every held layer on the card"
+        );
+        assert!(
+            p.a_fresh_spawn_fits_in_place_of_the_worker(&model, asked, Requester::Swarm),
+            "fixture: the replacement would load — the fit alone would retire the worker"
+        );
+        let kept = p
+            .held_layers_a_fresh_spawn_keeps_on_card(&model, asked, &[held], asked)
+            .expect("priced from the header");
+        assert!(
+            kept < 3,
+            "fixture: the replacement's processor run takes held layers ({kept})"
+        );
+        assert_eq!(
+            p.held_layers_a_fresh_spawn_keeps_on_card(&model, held, &[held], asked),
+            Some(3),
+            "fixture: a spawn of just what it holds would keep all three there"
+        );
+
+        assert!(!p.replacement_keeps_the_card(&model, asked, &h));
+        assert!(
+            !p.forward_would_load(&model, asked, Some(&h), Requester::Swarm),
+            "up front: a peer is told no, and held to what would load"
+        );
+        let (message, _) = p
+            .peer_load_refusal(&model, &[asked])
+            .expect("the up-front answer is a refusal");
+        assert!(message.contains("graphics card"), "{message}");
+        assert!(
+            !message.contains("max_ram_mb"),
+            "never in system memory's words: {message}"
+        );
+        let refused = p
+            .grow_worker(&model, asked, h.clone(), Requester::Swarm, RunShape::Plain)
+            .await;
+        assert!(refused.is_err(), "at the forward: refused, not replaced");
+        assert!(
+            p.workers.get(&model).is_some_and(|w| Arc::ptr_eq(&w, &h)),
+            "the worker and its card layers are kept"
+        );
+        // A run sharing only PART of the held range is judged on that part —
+        // the narrower runs a refusal's `layers_that_fit` probes would
+        // otherwise retire the same copy: `[2..7)` keeps `[5..7)` on the card
+        // only if its own spawn does.
+        let partial = (2, 7);
+        let kept_of_partial = p
+            .held_layers_a_fresh_spawn_keeps_on_card(&model, partial, &[held], partial)
+            .expect("priced from the header");
+        assert!(
+            kept_of_partial < 2,
+            "fixture: [2..7)'s processor run takes held layers ({kept_of_partial})"
+        );
+        assert!(!p.replacement_keeps_the_card(&model, partial, &h));
+        // A range sharing no layer with it is weighed as before.
+        assert!(p.replacement_keeps_the_card(&model, (0, 3), &h));
+
+        // Control: a card with room for the whole ask keeps every held layer
+        // there, and the replacement may go ahead.
+        p.set_vram_budget_mb(asked_mb * 2);
+        assert_eq!(
+            p.held_layers_a_fresh_spawn_keeps_on_card(&model, asked, &[held], asked),
+            Some(3)
+        );
+        assert!(p.replacement_keeps_the_card(&model, asked, &h));
         let _ = std::fs::remove_dir_all(&data_dir);
     }
 
