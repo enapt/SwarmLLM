@@ -4395,7 +4395,13 @@ reproduce: what is left is inside this test's noise (its plain arm alone spans �
 narrow first block that keeps nothing (~250 ms) and one drafter pass in a 21 s reply. Code: plain 4.3-4.6 against
 priced **7.8-8.0 (1.74-1.81×)**, two runs, the block keeping 2.3-2.7 a round. ⚠ The test's arms run in a fixed order
 (gotcha #1126), so neither figure is an A/B; the code gain is far past the noise, the story's residual is not shown.
-**Still open: the card** (0.90× with the block never taking a round, card run 17) — `block_upkeep_map.md` item 2
+**The card, re-measured 2026-11-17: no loss shown.** `card428p.sh` run2 (Qwen3.5-4B Q4_K_M whole on the RTX 3070,
+z-lab's 4B DFlash Q8_0 beside it, the live node stopped, one release build, arms interleaved on/off/off/on/on/off, each a
+fresh start, one warm-up; `attached=true` in every ON arm's log, absent in every OFF one): story best 82.3 against 78.2 tok/s
+(1.05×), median 70.4 against 71.2 (0.99×) — inside the OFF arm's own spread (70.4-78.2); code 1.42× / 1.60× best
+(1.39× / 1.64× median), the hash-map explanation 1.14× best, 1.39× median. Card run 17's 0.90× (one run) does not
+reproduce. What is left of the prose cost, if anything, is under this rig's noise; it was
+`block_upkeep_map.md` item 2
 (a zeroed buffer and an un-fused add per kept layer in every captured step); count kernels with the drafter attached
 against `SWARMLLM_BLOCK_DRAFTER=0` before changing it. **Prior art**:
 DFlash § 5.5.4 (a drafter trained on blocks of 16 keeps its quality on smaller ones; wide blocks cost where the check
