@@ -2179,7 +2179,7 @@ and the pin; a second probe fetches it from the first; a .276 node shows no new 
 (32 MiB, checked at seal and open); a forward past it is DROPPED by `try_relay_tensor` ("relay tensor seal failed —
 dropping", returning on the first candidate), then sent over a libp2p circuit if one exists, else it fails "Peer not
 connected" — not refused out loud. Only the app-level relay is capped: a direct forward goes to 128 MiB
-(`MAX_ACTIVATION_SIZE`), a circuit carries 1 GiB (our relay server's `max_circuit_bytes`). With Q8_0 activation
+(`MAX_ACTIVATION_SIZE`), a circuit has no byte limit (our relay server's `max_circuit_bytes` 0 since #473 (c)). With Q8_0 activation
 compression (default) a forward is ~1 byte an element, so 32 MiB is ~6,000 positions of a 14B, ~3,800 of a 70B, and
 a prompt read in pieces (`prompt_chunks`, ≥ 512 positions, ≤ 16 pieces) reaches it per piece only past ~60-100k
 tokens; a whole pass (an older peer, a picture, a kept pass) reaches it sooner. Fix shape: cut a relayed body at the
@@ -2268,9 +2268,11 @@ that lost its circuit: (a) a lost peer is looked up only if it named a direct in
 worth_looking_up`), and Kademlia never stores a circuit address for an inbound peer (`identify.rs`), so a peer that
 reserved on ANOTHER relay is found only if it dials us — fix shape: for a lost relay-only peer, try
 `/p2p/<R>/p2p-circuit/p2p/<peer>` through every relay this node is connected to, rationed per tick; (b) the direct
-address DCUtR reached it at (US's `68.3.213.210/udp/8800`) is never kept, though its NAT kept the port; (c) our
+address DCUtR reached it at (US's `68.3.213.210/udp/8800`) is never kept, though its NAT kept the port; (c) ~~our
 relay server closes a circuit after `max_circuit_duration` (1 h), so a peer DCUtR could not upgrade is dropped and
-redialled hourly. Prior art: go-libp2p's AutoRelay pushes a node's new circuit addresses to its connected peers by
+redialled hourly~~ — FIXED 2026-11-17 on main: no byte limit, a 30-day backstop, and a node that stops relaying ends
+its circuits (`docs/invariants/network.md` § "A relayed circuit lasts while both ends hold it"; 43 of 72 relayed
+connections here had ended at the hour). Prior art: go-libp2p's AutoRelay pushes a node's new circuit addresses to its connected peers by
 identify-push, which is how they reach the DHT; libp2p relay v2 reservations last 1 h by default.
 
 ### Speed on one computer

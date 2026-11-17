@@ -2,9 +2,19 @@ use std::time::Duration;
 
 use libp2p::{Multiaddr, PeerId};
 
-/// Max wall-clock time a relayed circuit may stay open before the relay
-/// forcibly closes it. Matches `RELAY_RESERVATION_DURATION_SECS`.
-const RELAY_CIRCUIT_DURATION_SECS: u64 = 3600;
+/// How long a relayed circuit may stay open before this relay closes it: a
+/// BACKSTOP, never reached in use (#473 (c)). A circuit is this swarm's data
+/// path between two computers a hole punch could not join, so it lasts while
+/// both hold it: either end's connection closing ends it, and libp2p's idle
+/// timeout closes one nobody uses. At one hour it was the commonest way a
+/// relayed connection ended here — 43 of 72 closed 58-62 min after opening,
+/// 2026-11-03 → 11-16, on 13 of those 14 days, every gossip mesh, request and
+/// catch-up starting over. libp2p-relay 0.21.1 always arms this timer (0 would
+/// close a circuit at once) and refuses one past `u32::MAX` seconds.
+/// Prior art: the circuit v2 spec — a limit of 0 means none, and LIMITED relays
+/// exist for hole punching; go-libp2p's `WithInfiniteLimits` is the option for
+/// a relay that carries data.
+const RELAY_CIRCUIT_DURATION_SECS: u64 = 30 * 24 * 60 * 60;
 /// Max reservation TTL granted to a NAT'd peer before it must re-reserve.
 const RELAY_RESERVATION_DURATION_SECS: u64 = 3600;
 
@@ -30,9 +40,9 @@ impl Default for RelayServerConfig {
             // use — a *brief* bootstrap circuit (upstream defaults:
             // `max_circuit_duration` 2 min, `max_circuit_bytes` 128 KiB) held
             // only until DCUtR upgrades to direct. We use the circuit as a
-            // real data path and already raised those to 1 hour / 1 GB below,
-            // so each slot is occupied ~30x longer than upstream assumes.
-            // Keeping 16 alongside a 1-hour duration means a relay serving
+            // real data path, held while both ends hold it (below), so each
+            // slot is occupied far longer than upstream assumes.
+            // Keeping 16 alongside long circuits means a relay serving
             // more than 16 concurrent NAT'd pairs starts refusing circuits —
             // and a refused circuit doesn't degrade gracefully, it removes the
             // peer from `connected_node_ids` and therefore from scheduling
@@ -41,7 +51,12 @@ impl Default for RelayServerConfig {
             max_circuits: 128,
             max_circuit_duration: Duration::from_secs(RELAY_CIRCUIT_DURATION_SECS),
             reservation_duration: Duration::from_secs(RELAY_RESERVATION_DURATION_SECS),
-            max_circuit_bytes: 1 << 30, // 1 GB
+            // No limit (0: libp2p-relay 0.21.1 checks `> 0`, the spec's "no
+            // limit"). A cap bounds nothing — the two ends open another circuit
+            // at once — so 1 GiB only cut a busy pair mid-transfer: a part is
+            // ~500 MB. What this relay carries is bounded by `max_circuits`, the
+            // circuit rate limiters and whether it relays at all (below).
+            max_circuit_bytes: 0,
         }
     }
 }
@@ -63,8 +78,30 @@ pub type RelayGate = std::sync::Arc<dyn Fn() -> bool + Send + Sync>;
 /// already knew it. The server asks every rate limiter at every reservation and
 /// circuit request (`libp2p-relay` 0.21, `Behaviour::on_connection_handler_event`),
 /// and a refusal is `RESOURCE_LIMIT_EXCEEDED`, so the peer goes to another
-/// relay. A circuit already open runs out its own limits.
+/// relay. A circuit already open has no limit to run out (#473 (c)), so the
+/// liveness tick ends it ([`circuits_to_end`]).
 pub struct OnlyWhileRelaying(pub RelayGate);
+
+/// The peers whose connections end the circuits this node carries while it
+/// does not relay for others: each circuit's destination, the computer that
+/// reserved here, once — closing its connection ends its circuits and its
+/// reservation, so it reserves on another relay (ours refuses it now) and the
+/// pair meets there. Nothing while this node relays. libp2p-relay 0.21.1 has
+/// no call that closes a circuit, and reports each one a closed connection
+/// ended (`CircuitClosed`), so the list `active_relay_circuits` keeps is the
+/// one that is open.
+pub(crate) fn circuits_to_end(
+    relaying: bool,
+    circuits: impl IntoIterator<Item = (PeerId, PeerId)>,
+) -> Vec<PeerId> {
+    if relaying {
+        return Vec::new();
+    }
+    let mut ends: Vec<PeerId> = circuits.into_iter().map(|(_src, dst)| dst).collect();
+    ends.sort();
+    ends.dedup();
+    ends
+}
 
 impl libp2p::relay::RateLimiter for OnlyWhileRelaying {
     fn try_next(&mut self, _peer: PeerId, _addr: &Multiaddr, _now: std::time::Instant) -> bool {
@@ -369,7 +406,6 @@ mod tests {
     fn default_relay_config() {
         let config = RelayServerConfig::default();
         assert_eq!(config.max_reservations, 128);
-        assert_eq!(config.max_circuit_bytes, 1 << 30);
 
         // A granted reservation must be able to become an actual circuit.
         // libp2p's upstream default pairs 128 reservations with only 16
@@ -386,15 +422,31 @@ mod tests {
         );
     }
 
-    /// The long circuit duration is exactly why the circuit count had to rise;
-    /// pin the relationship so lowering one without the other is caught.
+    /// #473 (c): a circuit lasts while both ends hold it. Cut at an hour, it
+    /// was the commonest way a relayed connection ended; cut at 1 GiB, a busy
+    /// pair lost it mid-transfer. The backstop stays where libp2p-relay can
+    /// send it (`u32::MAX` seconds, else a panic building the STOP message) and
+    /// longer than any run between two releases.
     #[test]
-    fn circuit_duration_is_data_path_length_not_bootstrap() {
-        let config = RelayServerConfig::default();
-        assert!(
-            config.max_circuit_duration >= Duration::from_secs(600),
-            "circuits are a data path here, not a brief bootstrap hop"
-        );
+    fn a_circuit_is_not_cut_while_both_ends_hold_it() {
+        let config = build_relay_server_config(&RelayServerConfig::default());
+        assert_eq!(config.max_circuit_bytes, 0, "no byte limit");
+        assert!(config.max_circuit_duration >= Duration::from_secs(7 * 24 * 60 * 60));
+        assert!(config.max_circuit_duration.as_secs() <= u64::from(u32::MAX));
+    }
+
+    /// With no limit to run out, a node that stops relaying ends the circuits
+    /// it carries — by each destination, once — and none while it relays.
+    #[test]
+    fn a_node_that_stops_relaying_ends_its_circuits() {
+        let (a, b, c) = (PeerId::random(), PeerId::random(), PeerId::random());
+        let circuits = [(a, b), (c, b), (b, c)];
+        assert!(circuits_to_end(true, circuits).is_empty());
+        let mut ends = circuits_to_end(false, circuits);
+        ends.sort();
+        let mut want = vec![b, c];
+        want.sort();
+        assert_eq!(ends, want);
     }
 
     #[test]

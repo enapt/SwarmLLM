@@ -232,6 +232,14 @@ A computer that cannot be dialled comes back only by dialling the addresses it h
 
 → `docs/invariants/network.md` § "Every node keeps a home relay, reachable or not"
 
+## A relayed circuit lasts while both ends hold it (2026-11-17, #473 (c))
+
+Our relay server sets no byte limit (`max_circuit_bytes` 0) and only a 30-day backstop duration: the ends redial at
+once, so a limit bounds nothing and only cuts the pair — at 1 h it ended 43 of 72 relayed connections here. Because a
+circuit no longer runs out, a node that stops relaying ends the circuits it carries (`relay::circuits_to_end`, the
+discovery tick, by each destination's connection). Never add a total deadline a redial undoes.
+→ `docs/invariants/network.md` § "A relayed circuit lasts while both ends hold it"
+
 ## A hole punch offers our confirmed addresses, handed straight to DCUtR (2026-11-16, #466)
 
 DCUtR's `CONNECT` carries only address CANDIDATES, and libp2p-swarm drops a candidate that is already confirmed — so a

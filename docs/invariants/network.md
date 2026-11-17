@@ -5710,6 +5710,40 @@ server with a public address of its own needs no UPnP, and would otherwise be to
 does not have before AutoNAT confirmed it. A mapping is never advice — the next reachability check
 settles it. Test `the_verdict_names_what_stands_in_the_way`.
 
+## A relayed circuit lasts while both ends hold it (2026-11-17, FUTURE_WORK #473 (c))
+
+**What happened.** Our relay server cut every circuit at one hour and at 1 GiB
+(`network::relay::RelayServerConfig`, raised from libp2p's 2 min / 128 KiB when
+the circuit became a data path). The two ends redialled at once, so neither limit
+bounded what a relay carries; each only cut the pair. Measured from this node's
+own log (`DIAG: connection established` paired with `DIAG: connection closed` by
+connection id, circuits only, 2026-11-03 → 11-16): 43 of 72 relayed connections
+closed 58-62 min after opening, on 13 of those 14 days, across 8 peers — the
+commonest way one ended. Every cut restarts the gossip mesh, the catch-up and any
+request on it; the byte cap cut a pair moving parts (~500 MB each) on the second.
+
+**Now**: `max_circuit_bytes` 0 (libp2p-relay 0.21.1 checks `> 0`; the spec's "no
+limit") and `max_circuit_duration` 30 days — a backstop, because the crate always
+arms the timer (0 would close a circuit at once) and panics past `u32::MAX`
+seconds building the STOP message. A circuit ends when either end's connection
+does; libp2p's idle timeout closes one nobody uses. What a relay carries is still
+bounded by `max_circuits` (128), the circuit rate limiters and whether it relays
+at all — and because a circuit no longer runs out, **a node that stops relaying
+ends the ones it carries**: each discovery tick, `relay::circuits_to_end` names
+each open circuit's destination once (`active_relay_circuits`, which
+libp2p-relay keeps true: it reports `CircuitClosed` for every circuit a closed
+connection ended), and closing that connection ends its circuits and its
+reservation, so the pair meets on another relay. libp2p-relay has no call that
+closes one circuit.
+
+**What a change must keep**: no total deadline that a redial undoes; a limit
+here is a cut, not a bound. Prior art: the circuit v2 spec (a limit of 0 is none;
+LIMITED relays are for hole punching) and go-libp2p's `WithInfiniteLimits`, the
+option for a relay that carries data. rust-libp2p's client does not act on the
+limit it is told (`priv_client`: reported in events only). Tests
+`a_circuit_is_not_cut_while_both_ends_hold_it` (red with 1 h / 1 GiB),
+`a_node_that_stops_relaying_ends_its_circuits`.
+
 ## Every node keeps a home relay, reachable or not (2026-11-16, FUTURE_WORK #464)
 
 **Seen.** On 11-15 01:31Z the home router restarted and its UPnP service stopped
@@ -6399,10 +6433,11 @@ Wiring the hold into relaying found the relay switch did less than it said:
    refusal reaches the peer as `RESOURCE_LIMIT_EXCEEDED`, which its relay
    client treats as "try another relay".
 
-**Left as it is**: a circuit already open runs out its own limits (ours:
-1 h, 1 GB — `network::relay`), and the same for a split already running. A
-network switch drops both with the connection; only a link that turns metered
-in place (Windows "set as metered", or `pause`) leaves one to run out.
+**A circuit already open is ended** (2026-11-17, #473 (c)): it has no limit
+left to run out, so the discovery tick closes each circuit's destination's
+connection while this node does not relay (`relay::circuits_to_end`, below).
+A split already running is left to finish; a network switch drops it with the
+connection.
 
 ## A hot computer takes no new work for others (2026-11-11, FUTURE_WORK #440)
 

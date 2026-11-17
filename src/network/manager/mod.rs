@@ -1897,6 +1897,7 @@ impl NetworkManager {
                             discovery::stop_providing_relay_service(&mut self.swarm);
                             self.relay_provider_registered = false;
                         }
+                        self.end_circuits_while_not_relaying(relaying);
                         if self.count_connected_relays() < MIN_RELAY_CONNECTIONS {
                             self.pending_relay_provider_query =
                                 Some(discovery::query_relay_providers(&mut self.swarm));
@@ -2583,6 +2584,31 @@ impl NetworkManager {
             self.swarm.local_peer_id(),
             &local_addrs,
         )
+    }
+
+    /// A relayed circuit has no limit to run out (#473 (c)), so while this node
+    /// does not relay for others — its owner's setting, a metered connection, or
+    /// no longer reachable from the internet — the circuits it still carries
+    /// end here, each by its destination's connection (`relay::circuits_to_end`).
+    fn end_circuits_while_not_relaying(&mut self, relaying: bool) {
+        let circuits: Vec<(libp2p::PeerId, libp2p::PeerId)> = self
+            .shared_state
+            .active_relay_circuits
+            .iter()
+            .map(|entry| *entry.key())
+            .collect();
+        let ends = crate::network::relay::circuits_to_end(relaying, circuits.iter().copied());
+        if ends.is_empty() {
+            return;
+        }
+        tracing::info!(
+            circuits = circuits.len(),
+            peers = ends.len(),
+            "This node stopped relaying for others: ending the relayed connections it still carried"
+        );
+        for peer in ends {
+            let _ = self.swarm.disconnect_peer_id(peer);
+        }
     }
 
     /// Save the peer cache, off this loop: the commit waits for the disk
