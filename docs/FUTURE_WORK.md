@@ -4321,7 +4321,17 @@ and a split, then the line prices every round. One binary, `SWARMLLM_BLOCK_FIRST
 debug, 96 tokens, one run a side, replies identical: code **3.8 against 3.2 tok/s** (plain 3.4 / 3.5 in the same runs:
 1.12× against 0.91×), story 3.2 against 2.8 (0.91× against 0.85×). **Left**: a story still runs ~9% under plain on
 the processor — three unchecked shadow probes and the rows kept for the drafter each step; measure on a release build
-(a debug build's step is ~3x a release one's, so the balance differs) and on a card before deciding more. **Prior art**:
+(a debug build's step is ~3x a release one's, so the balance differs) and on a card before deciding more. **Release
+build, processor (2026-11-17, `~/swarmllm-gate/deep/upkeep428/`, live node stopped, 12B, 96 tokens, the same test)**:
+story plain 3.5-4.6 tok/s against priced 3.7-4.4 over five runs — best of five 0.96×, per-run ratios 0.86-1.14, median
+0.98×; the priced loop's own step 216-233 ms against the plain arm's 217-238 ms a token. The debug 0.91× does not
+reproduce: what is left is inside this test's noise (its plain arm alone spans ±13%), at most a few percent — a
+narrow first block that keeps nothing (~250 ms) and one drafter pass in a 21 s reply. Code: plain 4.3-4.6 against
+priced **7.8-8.0 (1.74-1.81×)**, two runs, the block keeping 2.3-2.7 a round. ⚠ The test's arms run in a fixed order
+(gotcha #1126), so neither figure is an A/B; the code gain is far past the noise, the story's residual is not shown.
+**Still open: the card** (0.90× with the block never taking a round, card run 17) — `block_upkeep_map.md` item 2
+(a zeroed buffer and an un-fused add per kept layer in every captured step); count kernels with the drafter attached
+against `SWARMLLM_BLOCK_DRAFTER=0` before changing it. **Prior art**:
 DFlash § 5.5.4 (a drafter trained on blocks of 16 keeps its quality on smaller ones; wide blocks cost where the check
 is compute-bound); llama.cpp's DFlash path cuts a block at its first unsure guess (`p_min`); HF's assistant schedule
 starts narrow. A Gemma model on a processor-only computer fetches the drafter (no guess head to prefer), so this is
