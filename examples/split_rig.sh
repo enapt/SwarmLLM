@@ -387,6 +387,12 @@
 #          the connection), A logged B's announce before the ask, and the ask is
 #          a 200. Control arm: ENV_B="SWARMLLM_HOLDINGS_CATCH_UP=0" — B sends
 #          none, A's first plan has no B, and the ask leans on its DHT wait.
+#   retract  gotcha #1132: holdings' topology, no ask. Once A has B's parts list,
+#          every part of MODEL is deleted from B's folder (B keeps its share
+#          model, so it still holds something). PASS = A logs "Peer retracted
+#          shards it no longer hosts" for B and MODEL within RETRACT_WAIT_S
+#          (default 150: B's next health round finds the files gone). Before
+#          the fix B's next list left MODEL out and A kept crediting B.
 #   givesway FUTURE_WORK #447: peerload's topology, but B's other model
 #          (BUSY_MODEL, default qwen2.5-coder-0.5b-instruct-q8-0 here) is served
 #          FOR A — A asks it, holds none of it, and hands it to B whole — and
@@ -491,7 +497,7 @@ rig_addr() {
 MODE="${1:?usage: split_rig.sh split|kill|failover|context|repeat|fetch|cache|remote|mixed|softunload <binary> [<binary for B>]}"
 BIN_A="${2:?binary}"
 BIN_B="${3:-$BIN_A}"
-case "$MODE" in split|reasoning|kill|failover|failover_mid|context|whole|continue|repeat|fetch|cache|handoffcache|splitcache|remote|mixed|disputed|spliced|disconnect|softunload|layerprice|keep|route|latekv|peerkv|peerload|refusepiece|refusechain|killchain|owntiming|holdings|givesway|slices) ;; *) echo "mode must be split, reasoning, kill, failover, failover_mid, context, whole, continue, repeat, fetch, cache, handoffcache, splitcache, remote, mixed, disputed, spliced, disconnect, softunload, layerprice, keep, route, latekv, peerkv, peerload, refusepiece, refusechain, killchain, owntiming, holdings, givesway or slices"; exit 2 ;; esac
+case "$MODE" in split|reasoning|kill|failover|failover_mid|context|whole|continue|repeat|fetch|cache|handoffcache|splitcache|remote|mixed|disputed|spliced|disconnect|softunload|layerprice|keep|route|latekv|peerkv|peerload|refusepiece|refusechain|killchain|owntiming|holdings|retract|givesway|slices) ;; *) echo "mode must be split, reasoning, kill, failover, failover_mid, context, whole, continue, repeat, fetch, cache, handoffcache, splitcache, remote, mixed, disputed, spliced, disconnect, softunload, layerprice, keep, route, latekv, peerkv, peerload, refusepiece, refusechain, killchain, owntiming, holdings, retract, givesway or slices"; exit 2 ;; esac
 # refusechain is remote's topology with one fault on C (#305).
 REFUSECHAIN=""; KILLCHAIN=""
 if [ "$MODE" = killchain ]; then
@@ -512,7 +518,7 @@ fi
 [ -x "$BIN_A" ] && [ -x "$BIN_B" ] || { echo "binary not executable"; exit 2; }
 if [ "$MODE" = reasoning ]; then
   MODEL="${MODEL:-qwen3-1.7b-q8-0}"
-elif [ "$MODE" = split ] || [ "$MODE" = mixed ] || [ "$MODE" = disputed ] || [ "$MODE" = spliced ] || [ "$MODE" = disconnect ] || [ "$MODE" = keep ] || [ "$MODE" = route ] || [ "$MODE" = owntiming ] || [ "$MODE" = holdings ] || [ "$MODE" = slices ]; then
+elif [ "$MODE" = split ] || [ "$MODE" = mixed ] || [ "$MODE" = disputed ] || [ "$MODE" = spliced ] || [ "$MODE" = disconnect ] || [ "$MODE" = keep ] || [ "$MODE" = route ] || [ "$MODE" = owntiming ] || [ "$MODE" = holdings ] || [ "$MODE" = retract ] || [ "$MODE" = slices ]; then
   MODEL="${MODEL:-tinyllama-1.1b-chat-v1.0.q4-k-m}"
 elif [ "$MODE" = cache ] || [ "$MODE" = handoffcache ]; then
   MODEL="${MODEL:-qwen2.5-0.5b-instruct-fp16}"
@@ -535,7 +541,7 @@ if [ "$MODE" = slices ]; then
   SHARDS_B="${SHARDS_B:-$(echo "$SHARDS" | paste -sd,)}"
   GPU_A="${GPU_A:-0}"; GPU_B="${GPU_B:-0}"
 fi
-if [ "$MODE" = split ] || [ "$MODE" = repeat ] || [ "$MODE" = disconnect ] || [ "$MODE" = keep ] || [ "$MODE" = route ] || [ "$MODE" = owntiming ] || [ "$MODE" = reasoning ] || [ "$MODE" = holdings ]; then
+if [ "$MODE" = split ] || [ "$MODE" = repeat ] || [ "$MODE" = disconnect ] || [ "$MODE" = keep ] || [ "$MODE" = route ] || [ "$MODE" = owntiming ] || [ "$MODE" = reasoning ] || [ "$MODE" = holdings ] || [ "$MODE" = retract ]; then
   SHARDS_A="${SHARDS_A:-0}"
   SHARDS_B="${SHARDS_B:-$(echo "$SHARDS" | grep -vxF -f <(echo "$SHARDS_A" | tr ',' '\n') | paste -sd,)}"
   # SHARDS_A=none: A holds the header only and B every part, so each request is
@@ -544,6 +550,7 @@ if [ "$MODE" = split ] || [ "$MODE" = repeat ] || [ "$MODE" = disconnect ] || [ 
   # Processor unless asked otherwise: the reference is scored on the processor.
   [ "$MODE" = repeat ] && { GPU_A="${GPU_A:-0}"; GPU_B="${GPU_B:-0}"; }
   [ "$MODE" = holdings ] && { GPU_A="${GPU_A:-0}"; GPU_B="${GPU_B:-0}"; }
+  [ "$MODE" = retract ] && { GPU_A="${GPU_A:-0}"; GPU_B="${GPU_B:-0}"; }
   [ "$MODE" = disconnect ] && { GPU_A="${GPU_A:-0}"; GPU_B="${GPU_B:-0}"; }
   [ "$MODE" = keep ] && { GPU_A="${GPU_A:-0}"; GPU_B="${GPU_B:-0}"; }
   [ "$MODE" = reasoning ] && { GPU_A="${GPU_A:-0}"; GPU_B="${GPU_B:-0}"; }
@@ -1147,6 +1154,35 @@ ok = (not b_first) if control else (b_first and announced > 0 and " 200" in stat
 print(f"holdings {'PASS' if ok else 'FAIL'}"
       f" ({'control arm: expected no B in the first plan' if control else 'catch-up arm'})")
 PY
+fi
+
+if [ "$MODE" = retract ]; then
+  B_ID=$(curl -s -m 5 -H "Authorization: Bearer $KA" localhost:8900/api/admin/peers | python3 -c 'import sys,json
+d=json.load(sys.stdin); p=d if isinstance(d,list) else d.get("peers",[]); print(p[0]["node_id"] if p else "")')
+  [ -n "$B_ID" ] || { echo "retract: cannot read B's node id from A's peer list"; exit 1; }
+  B16="${B_ID:0:16}"
+  for _ in $(seq 1 120); do
+    grep -a -q "Received shard announce from peer.*node_id=$B16" "$BASE/A/node.log" && break; sleep 1
+  done
+  grep -a -q "Received shard announce from peer.*node_id=$B16" "$BASE/A/node.log" \
+    || { echo "retract: A never received B's parts list"; exit 1; }
+  # Every part of MODEL leaves B's folder (the rig's links, never the source).
+  rm -f "$BASE/B/models/$MODEL"/shard_*.bin
+  T0=$(date +%s)
+  echo "retract: removed B's parts of $MODEL at $(date -u +%T); waiting up to ${RETRACT_WAIT_S:-150} s"
+  SEEN=""
+  for _ in $(seq 1 "${RETRACT_WAIT_S:-150}"); do
+    SEEN=$(grep -a "Peer retracted shards it no longer hosts" "$BASE/A/node.log" | grep -a "node_id=$B16" | grep -a "model=$MODEL" | tail -1)
+    [ -n "$SEEN" ] && break; sleep 1
+  done
+  echo "retract: B's own log: $(grep -a -c 'No longer claiming a shard to the swarm' "$BASE/B/node.log") vanished-part line(s)"
+  if [ -n "$SEEN" ]; then
+    echo "retract: A after $(( $(date +%s) - T0 )) s: ${SEEN:0:220}"
+    echo "retract: PASS"
+  else
+    echo "retract: FAIL — A logged no retraction of $MODEL by B in ${RETRACT_WAIT_S:-150} s"
+    exit 1
+  fi
 fi
 
 if [ "$MODE" = keep ]; then

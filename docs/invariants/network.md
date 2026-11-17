@@ -5351,7 +5351,10 @@ al., "Epidemic Algorithms for Replicated Database Maintenance" (PODC 1987) — a
 spreads only as a death certificate kept for a while; absence from a partial update
 says nothing. Tests `a_model_given_back_whole_is_retracted_on_peers` and
 `the_parts_list_a_newcomer_is_sent_is_this_rounds` (its last step), both red with
-the retractions left out of the list.
+the retractions left out of the list. **Run on two nodes** (`examples/split_rig.sh retract`, TinyLlama on the
+processor, B's parts deleted once A had its list; 2026-11-17 ~21:15Z): the released v0.3.296 FAILED — B logged
+"No longer claiming a shard", A heard nothing in 150 s — and the fixed build PASSED, A logging "Peer retracted
+shards it no longer hosts … dropped=1 retained=0" 22 s after the files went.
 
 ## A parts list longer than a receiver takes goes in pieces, each model whole (2026-11-02)
 
