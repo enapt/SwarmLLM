@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #474**). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #475**). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -6449,6 +6449,18 @@ nothing, the worker reads weights on `DaemonMsg::LoadRange`.
 
 ### Packaging, release and operations
 
+#### #474 — chrono is unmaintained (RUSTSEC-2026-0543), and every timestamp here is chrono's
+`P4` · build · **OPEN** — 2026-11-17 (the sweep's `cargo audit`: a warning, not a failure — informational, no patched version) · history: `SECURITY.md` row RUSTSEC-2026-0543
+
+Only our own two crates depend on it (`Cargo.lock`): ~550 uses over 88 files, almost all
+`Utc::now()`, `DateTime<Utc>` and `Duration`, and 26 `DateTime` fields in `swarmllm-types` —
+wire types, serialized by chrono's `serde` feature. No vulnerability is reported. The advisory names
+`jiff` and `time`. The work is not a find-and-replace: a field another node parses must keep chrono's
+exact RFC 3339 text (its fractional digits, `Z` versus `+00:00`), or an older peer fails to read the
+capability or message carrying it (`architecture.md` § "Additive Protocol Evolution"); the same holds for
+the redb values and HTTP bodies that hold one. Next: write a test that pins the serialized text of each
+`swarmllm-types` timestamp field, then move `swarmllm-types` first behind it.
+
 #### #241 — llama-cpp-2 is pinned at 0.1.157; 0.1.158 moved tokenisation onto the vocabulary
 `P4` · build · **OPEN** — 2026-10-08 · history: Dependabot PR #34 (its llama compile-check failed)
 
@@ -6695,15 +6707,16 @@ escrow release clamps only at 0. Cheap bound: clamp to the request's `max_tokens
 coordinator's own prompt-token count, and always take the completion count from tokens the
 coordinator received (`stream.emitted()`). Belongs with credits enforcement.
 
-#### #268 — Fourteen DNS advisories and a backported gossip fix wait on the libp2p 0.57 upgrade
-`P3` · security · **OPEN** — 2026-10-14 (the v0.3.237 gate's `cargo audit`) · history: `SECURITY.md` rows RUSTSEC-2026-0118/0119; 0487/0489/0490/0491 added 2026-11-11 (CI's audit failed on them); 0504/0505/0511/0512/0514 added 2026-11-12 (the same); 0530/0531/0532 and gossipsub's 0534 added 2026-11-13 (the release check's audit, run by hand — guard `every_ignored_advisory_is_explained_in_security_md` since)
+#### #268 — Seventeen DNS advisories and a backported gossip fix wait on the libp2p 0.57 upgrade
+`P3` · security · **OPEN** — 2026-10-14 (the v0.3.237 gate's `cargo audit`) · history: `SECURITY.md` rows RUSTSEC-2026-0118/0119; 0487/0489/0490/0491 added 2026-11-11 (CI's audit failed on them); 0504/0505/0511/0512/0514 added 2026-11-12 (the same); 0530/0531/0532 and gossipsub's 0534 added 2026-11-13 (the release check's audit, run by hand — guard `every_ignored_advisory_is_explained_in_security_md` since); 0549/0550/0551 added 2026-11-17 (CI's audit failed on them)
 
 `hickory-proto 0.25.2` (an NSEC3 proof loop, an O(n²) name-compression cost, ~18 MB reserved off a
 header's record counts per crafted packet, three panics parsing DNS TEXT the daemon never parses)
 reaches the daemon only through `libp2p-dns` (bootstrap multiaddrs at startup) and `libp2p-mdns`
 (link-local), which is why `SECURITY.md` accepts them. Five more (2026-11-12) are in DNSSEC validation, which
 hickory 0.25 compiles only with a `dnssec-*` feature no build of ours enables — not in the binary at all; three
-more of the same kind on 2026-11-13 (a delegation's NSEC/NSEC3 accepted as a denial). All fourteen are fixed
+more of the same kind on 2026-11-13 (a delegation's NSEC/NSEC3 accepted as a denial) and three on 2026-11-17 (an
+NSEC3 NODATA at a zone apex, an unsigned NSEC/NSEC3 in a denial, a record of another class marked secure). All seventeen are fixed
 in `hickory ≥ 0.26.2` / `hickory-net ≥ 0.26.2`. **gossipsub's RUSTSEC-2026-0534** (a PRUNE naming topics
 never joined kept a backoff for each, memory a peer could fill) is fixed in 0.50.1, which needs 0.57: its fix
 (PR #6707) is backported to `vendor/libp2p-gossipsub` and checked by the vendoring guard, so the upgrade
