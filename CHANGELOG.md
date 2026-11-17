@@ -1,5 +1,27 @@
 # Changelog
 
+## [0.3.295-alpha] — 2026-11-17
+
+**A computer in offline mode no longer connects to the internet when a computer on its network names public
+addresses.** Offline mode keeps a computer to its own network, but the setting was checked at each place a
+connection starts, and several did not check it: sharing peers' addresses, the network's own searches, reconnects
+and relays. Once a computer on the same network named public addresses, an offline computer dialled them — in a test,
+the internet anchor and a computer in Italy within seconds. Now one gate where every outbound connection is made
+refuses any public address or internet name while offline mode is on, before anything is sent, and turns away a
+connection arriving from one; connections to the internet that were open when offline mode was switched on close
+within 30 seconds. Computers on the same network still connect, and so do those on a VPN or Tailscale network this
+computer has joined (#468).
+
+**Gemma 4 models guess whole blocks of words ahead.** A Gemma 4 model now uses its DFlash helper — a small model
+that guesses several words at once for the big one to check in a single step — as Qwen 3.5 models already did. On a
+processor, a Gemma 4 12B wrote code 1.7-1.8 times as fast (7.8-8.0 words a second against 4.3-4.6); stories run as
+before. The first check of a reply now looks at only three guesses instead of the whole block, so a reply whose
+guesses rarely land no longer pays for one wide, wasted check at its start (#428).
+
+**A computer looks for a lost peer on time.** When a search for a lost peer could not run at its turn — one was still
+running, or the peer was cut off for running a release too old — its next search was put twice as far back, and it
+held up another lost peer's search that tick. It now keeps its turn and takes no other peer's (#465).
+
 ## [0.3.294-alpha] — 2026-11-17
 
 **A computer that others cannot connect to finds its way back after a peer changes address or restarts.** Many
