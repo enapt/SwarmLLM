@@ -2033,6 +2033,20 @@ check the answer echoes the initiator's), or skip a new exchange while one is pe
 #### #314 — The network event loop stalls 0.2-2.6 s, most often while this machine is busy
 `P3` · network · **NARROWED** — 2026-11-02 · history: the live node's log, 10-19; `docs/invariants/network.md` § "The network loop never waits for the disk"
 
+**2026-11-17 — near zero, and the rest is now named.** The live node's own count, per day
+(`grep -a "network event loop stalled"` over node.log): 10-31 10, 11-01 38, 11-02 26, then 1-6 a
+day; 8 from 11-15 to 11-17 08:30Z, six of them in one 3-minute window under a heavy rig load on
+11-16 13:12-13:15 (worst 372 ms, against 2.6 s on 10-19), none in the 42 h since. Five of the
+eight named only `inbound_cmd` or `swarm_event:Gossipsub`, and libp2p's own `Swarm::poll` was
+never timed (the arm's tripwire starts after it). Now: the stall line carries `command` (the
+`NetworkCommand` variant, `commands::command_name`) and `message` (the `SwarmMessage` kind a
+broadcast, direct send or received gossip carried), and every poll of the swarm is timed
+(`loop_stall::TimedNext`, tokio-metrics' `TaskMonitor::instrument` shape: `Instant` per poll, the
+slowest past 100 ms logged as `DIAG: network event loop stalled inside libp2p's own poll` with the
+event it produced). **Residual**: read those lines on the next release before moving any work off
+the loop — nothing named is slow yet. Prior art: tokio-metrics slow-poll counting; Tokio's rule
+that heavy synchronous work goes to `spawn_blocking`.
+
 The live node (v0.3.244, serving nothing) logged 65 `DIAG: network event loop stalled` lines on
 10-19 (190 ms-2.6 s: 43 in `swarm_event:RequestResponse`, 15 `Identify`, 7 `peer_cache_interval`),
 bunched while this machine's disk was busy. Sampled across a full `cargo dev-test`, 6 of 8 stalls

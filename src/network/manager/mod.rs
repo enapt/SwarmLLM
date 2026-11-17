@@ -789,6 +789,12 @@ pub struct NetworkManager {
     delayed_cmd_tx: mpsc::Sender<NetworkCommand>,
     delayed_cmd_rx: mpsc::Receiver<NetworkCommand>,
     releasing_delayed: bool,
+    /// What the running arm was handling — the stall line's `command` and
+    /// `message` ([`loop_stall::ArmDetail`]); cleared after every arm.
+    arm_detail: loop_stall::ArmDetail,
+    /// The slowest poll of the swarm past the warning time since the loop last
+    /// logged one ([`loop_stall::TimedNext`]).
+    slow_swarm_poll: Option<loop_stall::SlowPoll>,
     /// Hash verdicts for peer-served shards, computed on the blocking pool so
     /// a BLAKE3 pass over a whole shard never runs on this loop
     /// (`docs/FUTURE_WORK.md` #108). Its own channel rather than
@@ -1129,6 +1135,8 @@ impl NetworkManager {
             delayed_cmd_tx,
             delayed_cmd_rx,
             releasing_delayed: false,
+            arm_detail: loop_stall::ArmDetail::default(),
+            slow_swarm_poll: None,
             shard_verdict_tx,
             shard_verdict_rx,
             // Pre-allocate at the rate-limit cap so the Vec never grows past
@@ -2464,7 +2472,12 @@ impl NetworkManager {
                     }
                 }
                 // Swarm events from the network
-                event = self.swarm.select_next_some() => {
+                event = loop_stall::TimedNext::new(
+                    &mut self.swarm,
+                    &mut self.slow_swarm_poll,
+                    NETWORK_LOOP_STALL_WARN,
+                    crate::network::helpers::swarm_event_name,
+                ) => {
                     last_arm = crate::network::helpers::swarm_event_arm(&event).into();
                     arm_started = loop_stall::ArmStart::now();
                     self.handle_swarm_event(event).await;
@@ -2487,10 +2500,15 @@ impl NetworkManager {
             // arm's thread was doing, so a stall in an arm that only touches
             // memory names its cause too (`loop_stall`, #314).
             let took = arm_started.elapsed();
+            let detail = std::mem::take(&mut self.arm_detail);
             if took >= NETWORK_LOOP_STALL_WARN {
+                let command = detail.command.unwrap_or("-");
+                let message = detail.message.unwrap_or("-");
                 match arm_started.thread_spent() {
                     Some(spent) => tracing::warn!(
                         arm = %last_arm,
+                        command,
+                        message,
                         took_ms = took.as_millis() as u64,
                         on_cpu_ms = spent.on_cpu_ms,
                         off_cpu_ms = spent.off_cpu_ms,
@@ -2502,10 +2520,20 @@ impl NetworkManager {
                     ),
                     None => tracing::warn!(
                         arm = %last_arm,
+                        command,
+                        message,
                         took_ms = took.as_millis() as u64,
                         "DIAG: network event loop stalled — every latency this node measures includes this"
                     ),
                 }
+            }
+            // libp2p's own work, which the arms' tripwire starts too late to see.
+            if let Some(slow) = self.slow_swarm_poll.take() {
+                tracing::warn!(
+                    took_ms = slow.took.as_millis() as u64,
+                    produced = slow.produced.unwrap_or("nothing"),
+                    "DIAG: network event loop stalled inside libp2p's own poll — every latency this node measures includes this"
+                );
             }
         }
 

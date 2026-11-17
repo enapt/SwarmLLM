@@ -15,7 +15,99 @@
 //! code or memory a copy flooding the page cache pushed out. One syscall at
 //! each arm's start, a second only when the arm is slow.
 
+use std::future::Future;
+use std::pin::Pin;
+use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
+
+use futures::stream::{FusedStream, Stream, StreamExt};
+
+/// What a slow arm was handling, learned inside it: the command it ran and the
+/// message it carried. Five of the eight stalls logged 11-15 → 11-17 named only
+/// `inbound_cmd` or `swarm_event:Gossipsub` — the arm, not the work (#314).
+/// Set where the work is known (`handle_outbound_command`, the gossip receive),
+/// read only by the stall line, cleared after every arm.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) struct ArmDetail {
+    pub(super) command: Option<&'static str>,
+    pub(super) message: Option<&'static str>,
+}
+
+/// One poll of libp2p's swarm that took the loop's warning time or more.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct SlowPoll {
+    pub(super) took: Duration,
+    /// The event that poll produced — `None` where it produced none, which is
+    /// work for a behaviour or a connection that ended in nothing to hand up.
+    pub(super) produced: Option<&'static str>,
+}
+
+/// The swarm's next event, with each poll of it timed.
+///
+/// The arms' own tripwire starts when an arm begins, so the work libp2p does
+/// INSIDE `Swarm::poll` — gossipsub's heartbeat and message ids, Kademlia's
+/// queries, the connection handlers each behaviour polls — was never measured:
+/// a stall there read as nothing at all (#314, 2026-11-17). Each poll is timed
+/// with `Instant` alone (no counters: the swarm is polled far more often than an
+/// arm starts) and the slowest at or past `warn_at` is kept for the loop to log
+/// once the iteration ends — tokio-metrics' `TaskMonitor::instrument`, which
+/// times every poll of the future it wraps and counts the slow ones.
+///
+/// Otherwise it is `StreamExt::select_next_some`: an item is returned, and a
+/// stream that has ended never completes.
+pub(super) struct TimedNext<'a, S: Stream> {
+    stream: &'a mut S,
+    slowest: &'a mut Option<SlowPoll>,
+    warn_at: Duration,
+    name: fn(&S::Item) -> &'static str,
+}
+
+impl<'a, S: Stream> TimedNext<'a, S> {
+    pub(super) fn new(
+        stream: &'a mut S,
+        slowest: &'a mut Option<SlowPoll>,
+        warn_at: Duration,
+        name: fn(&S::Item) -> &'static str,
+    ) -> Self {
+        Self {
+            stream,
+            slowest,
+            warn_at,
+            name,
+        }
+    }
+}
+
+impl<S: Stream + FusedStream + Unpin> Future for TimedNext<'_, S> {
+    type Output = S::Item;
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<S::Item> {
+        let this = &mut *self;
+        if this.stream.is_terminated() {
+            return Poll::Pending;
+        }
+        let started = Instant::now();
+        let polled = this.stream.poll_next_unpin(cx);
+        let took = started.elapsed();
+        if took >= this.warn_at && this.slowest.is_none_or(|s| took > s.took) {
+            *this.slowest = Some(SlowPoll {
+                took,
+                produced: match &polled {
+                    Poll::Ready(Some(item)) => Some((this.name)(item)),
+                    _ => None,
+                },
+            });
+        }
+        match polled {
+            Poll::Ready(Some(item)) => Poll::Ready(item),
+            Poll::Ready(None) => {
+                cx.waker().wake_by_ref();
+                Poll::Pending
+            }
+            Poll::Pending => Poll::Pending,
+        }
+    }
+}
 
 /// When an arm began, and its thread's counters then.
 #[derive(Clone, Copy)]
@@ -123,6 +215,63 @@ impl Counters {
     #[cfg(not(target_os = "linux"))]
     fn of_this_thread() -> Option<Self> {
         None
+    }
+}
+
+#[cfg(test)]
+mod timed_next_tests {
+    use super::{SlowPoll, TimedNext};
+    use futures::stream::{FusedStream, Stream};
+    use std::pin::Pin;
+    use std::task::{Context, Poll};
+    use std::time::Duration;
+
+    /// A stream whose every poll takes `each` before it yields the next number.
+    struct Slow {
+        left: Vec<u32>,
+        each: Duration,
+    }
+    impl Stream for Slow {
+        type Item = u32;
+        fn poll_next(mut self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<Option<u32>> {
+            std::thread::sleep(self.each);
+            Poll::Ready(self.left.pop())
+        }
+    }
+    impl FusedStream for Slow {
+        fn is_terminated(&self) -> bool {
+            false
+        }
+    }
+    fn name(_: &u32) -> &'static str {
+        "Number"
+    }
+
+    /// The work libp2p does inside its own poll is what the arms' tripwire
+    /// could not see: a slow poll is kept, with the event it produced.
+    #[tokio::test]
+    async fn a_slow_poll_is_kept_with_what_it_produced() {
+        let mut stream = Slow {
+            left: vec![7],
+            each: Duration::from_millis(30),
+        };
+        let mut slowest = None;
+        let item = TimedNext::new(&mut stream, &mut slowest, Duration::from_millis(20), name).await;
+        assert_eq!(item, 7, "it hands the item on, as select_next_some does");
+        let kept = slowest.expect("a 30 ms poll is past a 20 ms warning");
+        assert!(kept.took >= Duration::from_millis(30));
+        assert_eq!(kept.produced, Some("Number"));
+    }
+
+    #[tokio::test]
+    async fn a_quick_poll_keeps_nothing() {
+        let mut stream = Slow {
+            left: vec![7],
+            each: Duration::ZERO,
+        };
+        let mut slowest: Option<SlowPoll> = None;
+        TimedNext::new(&mut stream, &mut slowest, Duration::from_millis(100), name).await;
+        assert_eq!(slowest, None);
     }
 }
 

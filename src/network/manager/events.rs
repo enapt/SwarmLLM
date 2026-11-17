@@ -147,6 +147,8 @@ impl NetworkManager {
 
                 match decoded {
                     Ok((sender_node_id, msg)) => {
+                        // The stall line names the kind (#314).
+                        self.arm_detail.message = Some(msg.kind_name());
                         // What this topic is actually made OF. Recorded here
                         // because this is the one place an inbound gossip
                         // message exists both as bytes and as a variant —

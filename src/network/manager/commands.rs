@@ -140,28 +140,12 @@ impl NetworkManager {
                 return;
             }
         }
-        let cmd_name = match &cmd {
-            NetworkCommand::Broadcast(_) => "Broadcast",
-            NetworkCommand::SendTensor { .. } => "SendTensor",
-            NetworkCommand::SendEncodedTensor { .. } => "SendEncodedTensor",
-            NetworkCommand::FailEncodedTensor { .. } => "FailEncodedTensor",
-            NetworkCommand::SendTensorResult { .. } => "SendTensorResult",
-            NetworkCommand::NoteHeldAsHop(_) => "NoteHeldAsHop",
-            NetworkCommand::ReportHopTimings { .. } => "ReportHopTimings",
-            NetworkCommand::SendStreamingToken { .. } => "SendStreamingToken",
-            NetworkCommand::SendShardRequest { .. } => "SendShardRequest",
-            NetworkCommand::ResumeShardAfterBusy { .. } => "ResumeShardAfterBusy",
-            NetworkCommand::SendAllReduceRequest { .. } => "SendAllReduceRequest",
-            NetworkCommand::SendAllReduceResponse { .. } => "SendAllReduceResponse",
-            NetworkCommand::SendRingChunk { .. } => "SendRingChunk",
-            NetworkCommand::SendDirectMessage { .. } => "SendDirectMessage",
-            NetworkCommand::DialAddress(_) => "DialAddress",
-            NetworkCommand::DialPeer { .. } => "DialPeer",
-            NetworkCommand::StartProviding(_) => "StartProviding",
-            NetworkCommand::StopProviding(_) => "StopProviding",
-            NetworkCommand::SendPrefixKvFetch { .. } => "SendPrefixKvFetch",
-            NetworkCommand::DeliverPrefixKvResponse { .. } => "DeliverPrefixKvResponse",
-            NetworkCommand::DeliverShardResponse { .. } => "DeliverShardResponse",
+        let cmd_name = command_name(&cmd);
+        self.arm_detail.command = Some(cmd_name);
+        self.arm_detail.message = match &cmd {
+            NetworkCommand::Broadcast(msg)
+            | NetworkCommand::SendDirectMessage { message: msg, .. } => Some(msg.kind_name()),
+            _ => None,
         };
         tracing::debug!(cmd = cmd_name, "DIAG: handling outbound command");
         match cmd {
@@ -640,6 +624,35 @@ pub(super) fn pieces_if_too_long(msg: &SwarmMessage) -> Option<Vec<swarmllm_type
         "DIAG: parts list sent in pieces every receiver takes"
     );
     Some(pieces)
+}
+
+/// A command's variant name — the debug line's and the loop's stall line's
+/// (`loop_stall::ArmDetail`). An exhaustive match: a new command is named, never
+/// reported as its neighbour.
+pub(super) fn command_name(cmd: &NetworkCommand) -> &'static str {
+    match cmd {
+        NetworkCommand::Broadcast(_) => "Broadcast",
+        NetworkCommand::SendTensor { .. } => "SendTensor",
+        NetworkCommand::SendEncodedTensor { .. } => "SendEncodedTensor",
+        NetworkCommand::FailEncodedTensor { .. } => "FailEncodedTensor",
+        NetworkCommand::SendTensorResult { .. } => "SendTensorResult",
+        NetworkCommand::NoteHeldAsHop(_) => "NoteHeldAsHop",
+        NetworkCommand::ReportHopTimings { .. } => "ReportHopTimings",
+        NetworkCommand::SendStreamingToken { .. } => "SendStreamingToken",
+        NetworkCommand::SendShardRequest { .. } => "SendShardRequest",
+        NetworkCommand::ResumeShardAfterBusy { .. } => "ResumeShardAfterBusy",
+        NetworkCommand::SendAllReduceRequest { .. } => "SendAllReduceRequest",
+        NetworkCommand::SendAllReduceResponse { .. } => "SendAllReduceResponse",
+        NetworkCommand::SendRingChunk { .. } => "SendRingChunk",
+        NetworkCommand::SendDirectMessage { .. } => "SendDirectMessage",
+        NetworkCommand::DialAddress(_) => "DialAddress",
+        NetworkCommand::DialPeer { .. } => "DialPeer",
+        NetworkCommand::StartProviding(_) => "StartProviding",
+        NetworkCommand::StopProviding(_) => "StopProviding",
+        NetworkCommand::SendPrefixKvFetch { .. } => "SendPrefixKvFetch",
+        NetworkCommand::DeliverPrefixKvResponse { .. } => "DeliverPrefixKvResponse",
+        NetworkCommand::DeliverShardResponse { .. } => "DeliverShardResponse",
+    }
 }
 
 #[cfg(test)]
