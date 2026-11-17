@@ -1985,7 +1985,10 @@ windows 20:34-21:12Z) gossip upload was **1.37-1.82 KB/s, 1.58 on average — be
 `gossip_recv_by_kind`): `NodeCapabilityUpdate` 90/h × 18.6 KB = **467 B/s**, `ShardAnnounce` 21/h × 17.1 KB = 98 B/s,
 `HealthPing` 841/h × 330 B = 77 B/s, `CreditGossip` 86/h × 582 B = 14 B/s, `PoolMessage` 24/h × 1.9 KB = 12 B/s, manifests 0 —
 so (2j)'s parts list out of the capability (~¾ of each) is the one lever worth building; `swarm/health`'s duplicate
-factor is 3.1 (2,632 copies received an hour for 841 unique) but at 330 B a ping it is ~1/6 of the capability's bytes. Over the 7.4 h average (rollout included): upload
+factor is 3.1 (2,632 copies received an hour for 841 unique) but at 330 B a ping it is ~1/6 of the capability's bytes. `CreditGossip`
+(this node publishes 13/h, 36 B/s sent) is the one message nothing acts on: credits are dormant and its only reader,
+the tier percentile, gates nothing since 2026-08-17 (`docs/CREDITS_DESIGN.md` §1.3, §4) — ~3% of idle gossip; stopping
+its publish is no wire change, but read CREDITS_DESIGN first. Over the 7.4 h average (rollout included): upload
 1.5 KB/s besides parts and gossip; `swarm/models` 3.3 KB/s: capability updates arrive at 96 an hour at 16.8 KB each (plain JSON), manifests 28 an hour at 53 KB, parts lists
 44 an hour at 16.5 KB, and the mesh sends each unique message ~3 times. `swarm/regions` published 840 times in 7.4 h
 (every 30 s broadcast tick re-sends demand, wishlist and pool availability unchanged, stamped anew) — only 122 B/s, and
