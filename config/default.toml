@@ -140,9 +140,6 @@ open_browser_on_start = true   # Open browser to dashboard/setup on launch (not 
                                  # container, where requests arrive from the router's
                                  # address rather than your device's.
 
-[model]
-shard_size_mb = 512            # Shard size in MB (64-2048, power of 2 recommended)
-
 [auto_manage]
 # enabled = true               # Auto-acquire shards from peers and HuggingFace (default: on)
 # max_storage_mb = 0           # 0 = a share of max_disk_mb by contribution level:

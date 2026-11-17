@@ -2030,6 +2030,21 @@ mod config_default_hygiene {
         }
     }
 
+    /// The sample config every release ships beside the binary
+    /// (`release.yml` copies `config/default.toml`) names only settings the
+    /// daemon reads: it kept `[model] shard_size_mb` for a day after the
+    /// setting was removed, so a copy of it warned on its first start.
+    #[test]
+    fn the_shipped_sample_config_names_no_setting_the_daemon_ignores() {
+        let sample = include_str!("../../config/default.toml");
+        assert!(
+            toml::from_str::<crate::config::Config>(sample).is_ok(),
+            "the sample must load"
+        );
+        let unknown = crate::config::unknown_config_keys(sample);
+        assert!(unknown.is_empty(), "ignored in the sample: {unknown:?}");
+    }
+
     /// Every `Option` setting that defaults to `None` was reported as "being
     /// IGNORED" while actually taking effect, because TOML cannot represent
     /// null so `Config::default()` serialized without the key. Observed live
