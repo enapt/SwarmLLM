@@ -4,7 +4,10 @@ use crate::error::SwarmError;
 use crate::types::{Blake3Hash, ModelManifest};
 
 /// The most parts a peer's manifest may name, and the highest part number +1
-/// (R105, #333). Real manifests have ≤ 256 parts (the 70B-class upper bound).
+/// (R105, #333). A part holds only whole layers (`shard_layout`), so a model's
+/// parts are about its size over the 512 MiB cut CAPPED at its layer count:
+/// a 397B is 61 parts, Llama 3.3 70B 79, a 405B at most ~127. Reaching 256 takes
+/// a model of ~256 layers (FUTURE_WORK #476, withdrawn).
 /// Refused past at the network door (`daemon::dispatch`); a part number past it
 /// would key heard hashes no forget could find.
 pub const MAX_SHARDS_PER_MANIFEST: usize = 256;

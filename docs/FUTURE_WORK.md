@@ -5180,36 +5180,6 @@ cannot tell an earlier attempt's range from a second range of this one without t
 
 ### Model families and platforms
 
-#### #476 — A model past 128 GiB cannot be listed in the swarm: every peer refuses a manifest of more than 256 parts
-`P2` · models, network · **OPEN** — 2026-11-17 · found sweeping every receiver bound for its sender (gotcha #1133)
-
-**What happens.** `model::manifest::MAX_SHARDS_PER_MANIFEST` (256) bounds a peer's manifest at the network door
-(`daemon::dispatch`, the `ModelManifest` arm: a part number ≥ 256 or more than 256 parts is refused WHOLE, with a WARN on
-the receiver only). Its comment calls 256 "the 70B-class upper bound", written when part size was configurable; every
-node now cuts at `model::canonical::CANONICAL_SHARD_SIZE_BYTES` (512 MiB, #1129), so 256 parts is **128 GiB (~137 GB)**.
-Past it: Llama 3.x 70B at F16/BF16 (~141 GB, ~263 parts), Qwen3-235B-A22B at Q4_K_M (~142 GB) and up, DeepSeek-V3 /
-Kimi-class files (400-600 GB, 750-1,100 parts), Llama 3.1 405B at any useful quant. A node holding one would gossip a
-manifest no peer takes, so no peer learns the model and the "a node never needs the whole model" design never reaches
-the models that need it most. The popular list (`memory/model_popularity_1108.md`: 27-35B, gpt-oss 120B at 63 GB, 70B
-at Q4-Q8) is under it today, so this is a ceiling, not a current failure; nothing in the logs has hit it (0 refusals,
-11-17).
-
-**What a fix has to keep** (it is a peer-input security bound, R105 / #333, so a security review goes with it):
-- The registry loop that forgets a model's heard hashes walks every part number below the bound
-  (`ModelRegistry::forget_a_model_nobody_holds`): a raised bound costs that loop linearly — fine at 1,024-2,048.
-- #333's per-model weight (1 MiB of stored JSON, `peer_models::weight_of`) and gossipsub's `max_transmit_size` (4 MiB,
-  `network::behaviour`): measure a real 750-part manifest's JSON (tensor tables are derived, not sent — §
-  "A manifest's tensor table is DERIVED data") before choosing the figure.
-- `MAX_HOSTED_SHARDS_IN_CAP` (1,024) and `MAX_SHARDS_PER_ANNOUNCE` (512, pieces) already carry more parts than this
-  bound; `MOST_PARTS_A_HOLDER` (4,096) is per key.
-- Additive evolution: an older node keeps refusing a long manifest (one release behind keeps contact), so a long
-  model is usable only among nodes that take it — say so in the CHANGELOG, no feature bit needed for a bound.
-- Check the ShardAnnounce path's own part-number bound (if any) and `layers_for_shard`-style arrays sized by part
-  count before raising.
-
-Prior art: llama.cpp's `gguf-split` writes `split.count` as a u16 (65,535 files); HuggingFace stores big GGUFs as
-~50 GB files — neither caps a model's size; our bound is our own, chosen when parts were configurable.
-
 #### #404 — IQ/TQ quantizations, split uploads and files in a repo folder cannot be hosted
 `P3` · models · **OPEN** — 2026-11-04 · field report 2026-11-03 (the model browser recommended an IQ2_XS inside a repo folder)
 
@@ -7209,7 +7179,14 @@ Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
 
-**Closed 2026-11-18 (on main, not in a release yet)** (#377, #471, #188)
+**Closed 2026-11-18 (on main, not in a release yet)** (#377, #471, #188, #476)
+- #476 — **WITHDRAWN the hour it was filed: the claim was wrong.** It said a manifest past `MAX_SHARDS_PER_MANIFEST`
+  (256 parts) meant any model past 128 GiB (256 × the 512 MiB cut) could not be listed. But a part holds only WHOLE
+  layers (`inference::shard_layout::compute_layer_shard_layouts`), so the count is about size ÷ 512 MiB CAPPED at the
+  layer count: on this node's disk the 397B (227.5 GiB, 60 layers) is 61 parts, a 122B (70.6 GiB, 48 layers) 49, Llama
+  3.3 70B (39.6 GiB, 80 layers) 79. A 405B has 126 layers. 256 parts needs a model of about 256 layers; none is near it.
+  Checked by reading three real manifests (`models/*/manifest.json`), not the arithmetic. `manifest.rs`'s comment on
+  the bound now says so.
 - #377 — **A peer's up-front refusal of a split's range quoted its machine memory where its card or a conversation
   refused.** Rig `prose1030` arm 3 (2026-10-30): asked for [16,48) of Qwen2.5-14B a minute after serving [26,48), the AU
   peer answered "needs about 0 MB of memory … Raise `resources.max_ram_mb`" — every figure the machine's, the advice a
