@@ -3338,7 +3338,10 @@ the loader's own test, `split::layer_is_recurrent`).
 layer keeping a cache of its own (`kv_layers`) — puts that one run early in the middle — from
 `round(0.1 · layers)`, clamped to `1..=on_card` (`hybrid::processor_run`,
 `PROCESSOR_RUN_STARTS_AT`) — so the card holds the model's first tenth AND its last layers. Any
-other segment keeps llama.cpp's card-first tail, and so do Qwen 3.5 (recurrent layers: a guess
+other segment keeps the card-first tail (not llama.cpp's order, as this line once said: its
+`n_gpu_layers` offloads the LAST layers — `i_gpu_start = n_layer + 1 - n_gpu_layers` in
+`llama-model.cpp`, every layer below it on the processor; corrected 2026-11-17, FUTURE_WORK
+#461 (4)), and so do Qwen 3.5 (recurrent layers: a guess
 cannot be taken back out of their state) and Gemma 4 E2B/E4B (shared layers read caches the
 skipped run would never write): the card refuses to guess for both (`card_guess_skips`), so a
 middle run bought them nothing and cost a layer or two of card — the first version moved them
@@ -3557,7 +3560,9 @@ configuration, clean) — cause unknown. The worker refuses a non-finite positio
 already here as `swift_decode_loop`), Draft & Verify, CLaSp (2505.24196), KNN-SSD (2505.16162);
 S3D (2405.20314) skips middle layers for low-memory cards and found the same shape — early and
 late layers matter most. None places a card/processor split so the CARD can draft while the
-processor is the bottleneck; llama.cpp, vLLM and ExLlama all offload card-first. ReplaceMe
+processor is the bottleneck; llama.cpp keeps a model's FIRST layers on the processor and its
+last ones and the head on the card (`llama-model.cpp` `i_gpu_start`; this line said
+"card-first" until 2026-11-17), and vLLM and ExLlama were recorded as card-first, unchecked. ReplaceMe
 (2505.02819) replaces a pruned block with one linear map fitted offline — the stand-in fits its
 map online, from the hidden states a split computes anyway, and keeps it across replies.
 

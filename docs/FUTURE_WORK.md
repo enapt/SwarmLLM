@@ -5638,7 +5638,11 @@ link 7.56 → 35.25 tok/s). **Left**: (3)
 no promotion under steady use; (4) an up-front "no" whose re-plan finds no route FAILS the request where the slow
 copy would have served it — a coordinator with no room (card or processor) for the refused layers; the real fix is
 PLACEMENT: put a widened range's processor run on the layers it GREW by, so the held ones stay on the card
-(`hybrid::processor_run` is card-first, so a tail node widened at its start loses its held layers to the processor),
+(`hybrid::processor_run` is card-first, so a tail node widened at its start loses its held layers to the processor;
+llama.cpp is processor-first — `i_gpu_start = n_layer + 1 - n_gpu_layers`, `llama-model.cpp` — so the card keeps the
+last layers and the head. For a segment that ENDS the model, processor-first also drops two host/card copies a step
+(today: entry up, card layers, down, processor run, up for the head; `executor::output_on_primary_device`) once the
+entry hidden state is placed on the first layer's device. Needs a card rig A/B in one binary),
 then the guard has nothing to refuse; and the accounting itself — a worker IN USE still takes the
 wider range as a split sized beside the dropped range, and the daemon keeps charging that range's base.
 
