@@ -6987,7 +6987,20 @@ Each has a reason it is not being built now. Pick one up only when its trigger a
   when room is wanted; reading a 20-50k-token agent prompt again takes minutes on a processor or a split. llm-d tiers
   it card → host → SSD (vLLM's OffloadingConnector, Mooncake, SGLang's HiCache; LMCache likewise) and reports first
   token −40% on 50k-token prompts with a networked file tier (Managed Lustre) against host RAM alone. Prior art: those
-  four — read their eviction order and write-back cost before designing; llm-d's prefix scorer is already cited for #3 (c)'s hand-off belief. Trigger: a
+  four — read their eviction order and write-back cost before designing; llm-d's prefix scorer is already cited for #3 (c)'s hand-off belief.
+  **Read 2026-11-17 (official docs, not their source):** vLLM's OffloadingConnector copies prompt blocks to RAM as they
+  are made (async DMA; `offload_prompt_only`; RAM evicts LRU/ARC; the `fs` tier is fed only through RAM, with no disk
+  cap or eviction of its own; files under `<model>_<digest of model, block size, parallelism, dtype>/`; its blog names
+  tiny blocks as the trap, and a copy competing with compute cost 6% at 0% hits). LMCache writes EVERY chunk (256
+  tokens, one file each) through an async queue, LRU on a GB cap (default 0 = off), reads block, `use_odirect`. SGLang
+  HiCache offers write-through / write-through-selective (by hit count) / write-back, and warns write-through needs spare
+  bandwidth; prefetch from 256 hit tokens, host → card layer by layer. llama.cpp has NO disk tier (`--cache-ram` is RAM;
+  `--slot-save-path` is a manual call that blocks its request). **None weighs a disk read against recomputing the
+  prompt, and none checks a file's content** — both are ours to add. Take: write-BACK (on eviction, off the serving path;
+  `make_room` already runs before the copy), a minimum length (the 8,192-token DIAG's line), a size-capped LRU directory
+  keyed by a digest of the upload (`model::canonical`), KV type and format version, a hash on read, temp name + rename,
+  and a restore taken only when prompt tokens × the measured prompt rate beat the file's bytes ÷ the measured disk rate.
+  Trigger: a
   field log showing long prompts read again after an eviction (count prefix-cache evictions of long entries and
   `PromptCacheMiss` first). **Countable from v0.3.297** (2026-11-17): `DIAG: prefix-cache let go of a long saved prompt`
   (≥ 8,192 tokens, with why) — before it a save's line only COUNTED what it let go (`evicted_before_copy`), never how

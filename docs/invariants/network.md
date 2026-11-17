@@ -5327,7 +5327,7 @@ and served nothing while spending ~2.6 Mbit/s.
 **What happened.** A receiver refuses a WHOLE `NodeCapabilityUpdate` whose `hosted_shards` passes
 `MAX_HOSTED_SHARDS_IN_CAP` (1,024) — `dispatch::capability_fits`, a memory bound from 2026-05 — and logs a WARN on its
 side only. The sender never cut its list to it: `HealthMonitor::broadcast_capabilities` put every held part in. A
-computer holding more than 1,024 parts (parts are up to 512 MB: about 540 GB) would have had every capability refused
+computer holding more than 1,024 parts (about 570 GB at this node's mix, 0.56 GB a part; a large model's parts hold whole layers and run bigger) would have had every capability refused
 by every peer — its release, features, room, loaded layers and coordinates unknown, or frozen at the last one taken —
 and could not see why. Nobody had crossed it: found 2026-11-17 reading peers' capabilities for #91, two of them (AU,
 Italy) at 535 and 543 parts, half way, with storage on automatic by default.
