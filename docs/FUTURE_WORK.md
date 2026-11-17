@@ -4304,7 +4304,7 @@ whole on the processor (12B Q4_K_M, greedy, 96 tokens): kept a block 0.79 / 0.85
 code) against llama.cpp `draft-dflash`'s 0.79 / 0.78 / 2.64 on the same text, every reply exact. **Prior art**:
 llama.cpp PR #29802 (`2b36825`) measured the Gemma scale (26B-A4B: 3.77 → 4.38 kept a block) and its converter writes
 it; z-lab's `_raw_input_embeddings` defaults to 1.0 and is not followed; llama.cpp's Gemma loader duplicates
-`token_embd` as `output`, which is the lend. **(a) Built 2026-11-16 (~21:45Z, branch `gemma4-drafter-428`)**: Gemma's
+`token_embd` as `output`, which is the lend. **(a) Built 2026-11-16 (~21:45Z, on main 2026-11-17)**: Gemma's
 vocabulary keeps its whole alphabet at the END (all 94 printable ASCII characters at 236,744-236,995), past the
 processor's 32,768 hot rows, which assume a byte-level vocabulary's order. A reply's guesses now read the alphabet past
 the hot rows from its start (`mtp::alphabet_past`: one-character ASCII and punctuation, 158 rows on Gemma 4, none on
@@ -4313,7 +4313,7 @@ the hot rows' guess cost (126 against 280 ms); the chat story 0.85 → 0.92 (eve
 the hot rows more than one in six, so it reads every word after 48 tokens either way. Replies exact. **Prior art**:
 FR-Spec (ACL 2025) drafts over a frequency-ranked vocabulary subset; Gemma's file states no frequencies (scores all
 -1000, merges start with runs of newlines), and the alphabet is the part every text needs. Ranks from this node's own
-replies were the other candidate, not needed for code. **(b) Narrowed 2026-11-16 (branch `gemma4-drafter-428`)**: the
+replies were the other candidate, not needed for code. **(b) Narrowed 2026-11-16 (on main 2026-11-17)**: the
 priced loop's FIRST check of a reply was the whole block (a 16-wide check ~10 steps on the processor) — a story that
 kept none ran under no drafter, and on code one wide check that kept little sank the acceptance and the block was
 declined 77 rounds. It is now `dsd_controller::first_block_guesses` (3, the guess head's first count) on one computer
