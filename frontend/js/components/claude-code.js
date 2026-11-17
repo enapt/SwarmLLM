@@ -1587,7 +1587,16 @@
           if (dot) {
             var state = cc.state || 'active';
             dot.style.background = state === 'active' ? 'var(--green)' : state === 'suspended' ? 'var(--orange)' : 'var(--red)';
-            dot.title = state;
+            // The daemon's SessionState word, in the reader's language; one
+            // this page does not know shows no tooltip, never the raw word.
+            var stateKey = {
+              creating: 'claude_code.state_creating',
+              active: 'claude_code.state_active',
+              idle: 'claude_code.state_idle',
+              suspended: 'claude_code.state_suspended',
+              expired: 'claude_code.state_expired',
+            }[state];
+            dot.title = stateKey ? I18n.t(stateKey) : '';
           }
           // MCP badge
           if (mcpBadge) mcpBadge.style.display = cc.mcp_connected ? '' : 'none';
