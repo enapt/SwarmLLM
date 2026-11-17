@@ -1,5 +1,36 @@
 # Changelog
 
+## [0.3.294-alpha] — 2026-11-17
+
+**A computer that others cannot connect to finds its way back after a peer changes address or restarts.** Many
+home computers can reach out to other computers but cannot be reached themselves. Such a computer returns to a peer
+only by dialling an address it already holds, and nothing told it a new one. When this laptop's router started
+forwarding its ports again and the node restarted, a computer in Australia that cannot be reached directly stayed
+away for over 98 minutes. Four changes close that gap:
+- Every node now keeps a place on a relay ("home relay") even when it can be reached directly, so a computer that
+  knows it only through the relay still gets in, and the connection then moves to a direct one (#464).
+- A reservation that failed before it started is now asked for again; before, a computer whose first try failed
+  stayed unreachable until it was restarted (#464).
+- When two computers meet through a relay, the one that can be reached directly now offers its public address for
+  the switch to a direct connection; before, it offered only its home network address, and the pair stayed on the
+  relay (#466).
+- A computer that loses a peer which had a public address now looks it up in the swarm's shared directory, a minute
+  after the loss and then less and less often for a day. And when a computer asks another for addresses of other
+  computers, the answer now names a different, fair selection each time, where before the same few were named every
+  time (#465).
+
+Seen on the live swarm: the Australian computer came back through the relay 2 minutes 12 seconds after a restart,
+and after the next restart it connected directly.
+
+**A relay that turns down a reservation is asked less often, and computers spread their places over the relays.**
+Since every node now keeps a place on a relay, a relay that was full or refusing would have been asked by every node
+every 30 seconds, and every node picked the first relay in its list. Now a refusal doubles the wait, up to
+10 minutes, and the next try asks another relay. A relay that was only restarting does not count as refusing: computers take their
+places back within half a minute of it returning. Computers take a place on the relay they reach first, and otherwise
+choose among relays in an order of their own instead of all trying the first one in their list, so the places
+spread out, leaving room for the computers that need one most. A computer in offline mode no longer asks a relay
+for a place at all (#467).
+
 ## [0.3.293-alpha] — 2026-11-16
 
 **A computer that starts and finishes a split keeps the large model on its graphics card.** With "Start and finish
