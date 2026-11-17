@@ -1976,9 +1976,13 @@ became usable (error under 0.5) on a sample that moved it less than the threshol
 routed around — until its first window filled (~16 min); now a change of usability is news to the start-up filter
 and to `capability_news` (`a_node_starting_up_is_published_usable_as_soon_as_it_is`: usable after 4 samples,
 published usable after 4, never within 31 without the fix).
-**Re-read 2026-11-17 (2l)** on v0.3.296 (the live node, 7.4 h up, 7 peers all on .296, idle but for parts served):
-upload 1.5 KB/s besides parts and gossip, **gossip 4.1 KB/s** — up from 2.1 on 10-31. `swarm/models` is 3.3 KB/s of
-it: capability updates arrive at 96 an hour at 16.8 KB each (plain JSON), manifests 28 an hour at 53 KB, parts lists
+**Re-read 2026-11-17 (2l)** on v0.3.296 (the live node, 7 peers all on .296, idle but for parts served). ⚠ **Corrected
+the same night**: the first reading, **gossip 4.1 KB/s** averaged over 11:49-19:24Z, was written up as "up from 2.1 on
+10-31" — but that window opened with the .296 rollout (every peer restarting into it and re-announcing), not steady
+state (`.claude/rules/diagnosis.md` rule 3). **At steady state** (restarted 19:24Z; uptime 71-109 min, four 9.5-minute
+windows 20:34-21:12Z) gossip upload was **1.37-1.82 KB/s, 1.58 on average — below 10-31's 2.1**, `swarm/models`
+0.95-1.44 of it, capability updates still arriving ~90 an hour. Over the 7.4 h average (rollout included): upload
+1.5 KB/s besides parts and gossip; `swarm/models` 3.3 KB/s: capability updates arrive at 96 an hour at 16.8 KB each (plain JSON), manifests 28 an hour at 53 KB, parts lists
 44 an hour at 16.5 KB, and the mesh sends each unique message ~3 times. `swarm/regions` published 840 times in 7.4 h
 (every 30 s broadcast tick re-sends demand, wishlist and pool availability unchanged, stamped anew) — only 122 B/s, and
 NOT changed: a receiver blends each demand message into its figure (0.8 old + 0.2 new), so the cadence is part of what
