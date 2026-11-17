@@ -115,6 +115,13 @@ pub(super) struct LastReached {
     /// reached minutes before).
     floor: Instant,
     by_peer: HashMap<PeerId, Instant>,
+    /// Peers out of reach for [`UNREACHABLE_FOR`] or longer whose time is no
+    /// longer kept: last reached that long before this run (the peer cache's
+    /// stamps, `peer_cache::load_reached`), or a time [`Self::prune`] dropped.
+    /// Counted from the start instead, every restart gave each dead identity a
+    /// fresh hour in Kademlia's table, and every peer's refresh walks handed it
+    /// round the swarm (#472: ~300 handshakes here in each hour after a release).
+    gone: std::collections::HashSet<PeerId>,
 }
 
 impl LastReached {
@@ -122,11 +129,57 @@ impl LastReached {
         Self {
             floor: started,
             by_peer: HashMap::new(),
+            gone: std::collections::HashSet::new(),
         }
+    }
+
+    /// Started at `started` (wall clock `started_wall`), with the times the peer
+    /// cache kept of when each peer was last reached (#472) — Bitcoin Core's
+    /// addrman keeps each address's last success in `peers.dat` across restarts
+    /// for the same reason. A time in the future (a clock set back) counts as
+    /// now; a peer the cache has no time for counts from the start, as before.
+    pub(super) fn seeded(
+        started: Instant,
+        started_wall: std::time::SystemTime,
+        stored: impl IntoIterator<Item = (PeerId, std::time::SystemTime)>,
+    ) -> Self {
+        let mut reached = Self::new(started);
+        for (peer, at) in stored {
+            let age = started_wall.duration_since(at).unwrap_or_default();
+            if age >= UNREACHABLE_FOR {
+                if reached.gone.len() < LAST_REACHED_PEERS {
+                    reached.gone.insert(peer);
+                }
+            } else if reached.by_peer.len() < LAST_REACHED_PEERS {
+                // An Instant before the start may not exist on a machine up
+                // less than `age`; the start is then the latest it can be.
+                let at = started.checked_sub(age).unwrap_or(started);
+                reached.by_peer.insert(peer, at);
+            }
+        }
+        reached
+    }
+
+    /// When each peer with a kept time was last reached, on the wall clock, for
+    /// the peer cache to store. A peer in [`Self::gone`] has none here; the
+    /// cache carries its stored time forward.
+    pub(super) fn stamps(
+        &self,
+        now: Instant,
+        now_wall: std::time::SystemTime,
+    ) -> Vec<(PeerId, std::time::SystemTime)> {
+        self.by_peer
+            .iter()
+            .filter_map(|(peer, at)| {
+                let at = now_wall.checked_sub(now.saturating_duration_since(*at))?;
+                Some((*peer, at))
+            })
+            .collect()
     }
 
     /// `peer` is connected now, or its last connection just closed.
     pub(super) fn reached(&mut self, peer: PeerId, now: Instant) {
+        self.gone.remove(&peer);
         if self.by_peer.len() >= LAST_REACHED_PEERS && !self.by_peer.contains_key(&peer) {
             self.prune(now);
             if self.by_peer.len() >= LAST_REACHED_PEERS {
@@ -145,16 +198,27 @@ impl LastReached {
     /// Whether `peer` has been out of reach for [`UNREACHABLE_FOR`]. The caller
     /// knows it is not connected now.
     pub(super) fn out_of_reach_long(&self, peer: &PeerId, now: Instant) -> bool {
-        let since = self.by_peer.get(peer).copied().unwrap_or(self.floor);
+        let since = match self.by_peer.get(peer) {
+            Some(at) => *at,
+            None if self.gone.contains(peer) => return true,
+            None => self.floor,
+        };
         now.saturating_duration_since(since) >= UNREACHABLE_FOR
     }
 
     /// Drop the times that no longer decide anything: one older than
-    /// [`UNREACHABLE_FOR`] reads the same as none (every kept time is at or
-    /// after the floor).
+    /// [`UNREACHABLE_FOR`] says only "out of reach", which [`Self::gone`] keeps
+    /// — read from the floor instead, a time seeded from before this run would
+    /// read fresh again until an hour after the start.
     pub(super) fn prune(&mut self, now: Instant) {
-        self.by_peer
-            .retain(|_, at| now.saturating_duration_since(*at) < UNREACHABLE_FOR);
+        let gone = &mut self.gone;
+        self.by_peer.retain(|peer, at| {
+            let keep = now.saturating_duration_since(*at) < UNREACHABLE_FOR;
+            if !keep && gone.len() < LAST_REACHED_PEERS {
+                gone.insert(*peer);
+            }
+            keep
+        });
     }
 }
 
@@ -256,5 +320,73 @@ mod tests {
         wrong.reached(&back);
         assert!(!wrong.names(&format!("{lan}/p2p/{back}")));
         assert!(wrong.names(&format!("{lan}/p2p/{other}")));
+    }
+
+    /// #472: a peer the cache last reached hours before this run is out of
+    /// reach at the start — it is not seeded into Kademlia's table and leaves it
+    /// on its next failed dial — where counted from the start it had a fresh
+    /// hour after every restart. One reached minutes before keeps the rest of
+    /// its hour; one the cache never dated counts from the start, as before.
+    #[test]
+    fn a_peer_last_reached_before_this_run_keeps_its_time() {
+        let started = Instant::now();
+        let wall = std::time::SystemTime::now();
+        let (long_gone, recent, undated) = (PeerId::random(), PeerId::random(), PeerId::random());
+        let reached = LastReached::seeded(
+            started,
+            wall,
+            [
+                (long_gone, wall - UNREACHABLE_FOR * 3),
+                (recent, wall - Duration::from_secs(10 * 60)),
+            ],
+        );
+        assert!(reached.out_of_reach_long(&long_gone, started));
+        assert!(!reached.out_of_reach_long(&recent, started));
+        assert!(reached.out_of_reach_long(&recent, started + Duration::from_secs(50 * 60)));
+        assert!(!reached.out_of_reach_long(&undated, started + Duration::from_secs(50 * 60)));
+    }
+
+    /// Pruning a seeded time never makes its peer fresh again, and a connection
+    /// ends a seeded verdict.
+    #[test]
+    fn a_pruned_or_reached_peer_reads_what_it_should() {
+        let started = Instant::now();
+        let wall = std::time::SystemTime::now();
+        let (aging, back) = (PeerId::random(), PeerId::random());
+        let mut reached = LastReached::seeded(
+            started,
+            wall,
+            [
+                (aging, wall - Duration::from_secs(50 * 60)),
+                (back, wall - UNREACHABLE_FOR * 5),
+            ],
+        );
+        let later = started + Duration::from_secs(15 * 60);
+        reached.prune(later);
+        assert!(
+            reached.out_of_reach_long(&aging, later),
+            "65 min unreached: read from the floor it would be 15 min"
+        );
+        reached.reached(back, later);
+        assert!(!reached.out_of_reach_long(&back, later + UNREACHABLE_FOR / 2));
+    }
+
+    /// The times handed to the cache are wall-clock times of the same instants.
+    #[test]
+    fn the_stamps_are_the_kept_times_on_the_wall_clock() {
+        let started = Instant::now();
+        let wall = std::time::SystemTime::now();
+        let peer = PeerId::random();
+        let mut reached = LastReached::new(started);
+        reached.reached(peer, started);
+        let stamps = reached.stamps(started + Duration::from_secs(600), wall);
+        assert_eq!(stamps.len(), 1);
+        let (stamped, at) = stamps[0];
+        assert_eq!(stamped, peer);
+        let off = wall.duration_since(at).unwrap_or_default().as_secs_f64();
+        assert!(
+            (off - 600.0).abs() < 1.0,
+            "reached 600 s before the wall reading, got {off}"
+        );
     }
 }

@@ -8,6 +8,21 @@ use std::sync::Arc;
 /// Database tree name for cached peer addresses.
 const TREE_PEER_CACHE: &str = "peer_cache";
 
+/// When each cached peer was last reached: its `PeerId` (base58) → seconds since
+/// the Unix epoch, decimal (#472). Kept beside the addresses so a restart knows
+/// which cached identities have been gone for hours (`stale_peers::LastReached::
+/// seeded`) and the cache can let a long-gone one go.
+const TREE_PEER_REACHED: &str = "peer_reached";
+
+/// A cached peer nobody has reached for this long leaves the cache. Bitcoin
+/// Core's addrman forgets an address not seen within its 30-day horizon
+/// (`IsTerrible`); this cache holds 200 addresses — about 27 peers — so a dead
+/// identity costs a place a live one could have, and a computer away longer
+/// still finds this node itself (it holds us in its own cache, and the
+/// bootstrap list). Before #472 an entry never left unless the 200 cut it.
+pub(crate) const CACHE_FORGETS_AFTER: std::time::Duration =
+    std::time::Duration::from_secs(14 * 24 * 60 * 60);
+
 /// Maximum number of peers to persist in the cache.
 const MAX_CACHED_PEERS: usize = 200;
 
@@ -232,12 +247,19 @@ impl CacheWriter {
     /// `forget` is the (peer, address) pairs another computer answered at
     /// (`manager::stale_peers::ProvenWrong`): merged back from the stored cache,
     /// they returned at every start (#413).
+    ///
+    /// `reached` is when peers were last reached, as the network loop knows it
+    /// (connected peers at `now`, the rest from `LastReached::stamps`); merged
+    /// with the stored times by [`entries_to_keep`], which also lets a peer
+    /// unreached for [`CACHE_FORGETS_AFTER`] go (#472).
     pub fn save(
         &self,
         db: &Database,
         connected: Vec<String>,
         local_peer_id: PeerId,
         forget: Vec<(PeerId, Multiaddr)>,
+        reached: Vec<(PeerId, std::time::SystemTime)>,
+        now: std::time::SystemTime,
     ) -> tokio::task::JoinHandle<()> {
         let number = self
             .issued
@@ -259,17 +281,124 @@ impl CacheWriter {
                     peer_and_address(entry).is_none_or(|pair| !forget.contains(&pair))
                 });
             }
+            let live: std::collections::HashSet<PeerId> = connected
+                .iter()
+                .filter_map(|entry| peer_and_address(entry).map(|(peer, _)| peer))
+                .collect();
             let merged = merge_for_save(connected, stored);
             // Storable, not dialable: keep a peer's LAN addresses even when this
             // node currently has no use for them. Whether they are worth
             // dialling is a question about where we are now, and that is asked
             // on read.
             let addrs = filter_storable(&merged, &local_peer_id);
+            let (addrs, times) = entries_to_keep(addrs, &live, load_reached(&db), reached, now);
             if !addrs.is_empty() {
                 save_peer_cache(&db, &addrs);
+                save_reached(&db, &times);
             }
             *last = number;
         })
+    }
+}
+
+/// What a save keeps, and when each kept peer was last reached (#472).
+///
+/// `addrs` is the merged cache, connected peers' entries first; an entry of a
+/// peer in `live` (connected now) stays first, in its order. A peer's time is the newest of
+/// what the disk held and what the loop says now; a cached peer with no time
+/// yet (a cache from before the times were kept) is given `now`, so it ages
+/// from the first save that saw it — late, never early. Past
+/// [`CACHE_FORGETS_AFTER`] without a reach its entries go. The departed are
+/// ordered most recently reached first, so the [`MAX_CACHED_PEERS`] cut drops
+/// the longest gone, not whoever happened to be stored last. An entry naming no
+/// peer (an invite code's bare address) is kept, after the peers.
+pub(crate) fn entries_to_keep(
+    addrs: Vec<String>,
+    live: &std::collections::HashSet<PeerId>,
+    stored: std::collections::HashMap<PeerId, std::time::SystemTime>,
+    reached: Vec<(PeerId, std::time::SystemTime)>,
+    now: std::time::SystemTime,
+) -> (Vec<String>, Vec<(PeerId, std::time::SystemTime)>) {
+    let mut times = stored;
+    for (peer, at) in reached {
+        let at = at.min(now);
+        let held = times.entry(peer).or_insert(at);
+        *held = (*held).max(at);
+    }
+    let gone_too_long = |at: std::time::SystemTime| {
+        now.duration_since(at)
+            .is_ok_and(|age| age >= CACHE_FORGETS_AFTER)
+    };
+    let mut kept_live = Vec::new();
+    let mut departed: Vec<(std::time::SystemTime, usize, String)> = Vec::new();
+    let mut bare = Vec::new();
+    for (index, entry) in addrs.into_iter().enumerate() {
+        match peer_and_address(&entry) {
+            Some((peer, _)) => {
+                let at = *times.entry(peer).or_insert(now);
+                if live.contains(&peer) {
+                    kept_live.push(entry);
+                } else if !gone_too_long(at) {
+                    departed.push((at, index, entry));
+                }
+            }
+            None => bare.push(entry),
+        }
+    }
+    // Most recently reached first; the stored order breaks a tie.
+    departed.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
+    let mut kept: Vec<String> = kept_live;
+    kept.extend(departed.into_iter().map(|(_, _, entry)| entry));
+    kept.extend(bare);
+    kept.truncate(MAX_CACHED_PEERS);
+    let named: std::collections::HashSet<PeerId> = kept
+        .iter()
+        .filter_map(|entry| peer_and_address(entry).map(|(peer, _)| peer))
+        .collect();
+    let times = times
+        .into_iter()
+        .filter(|(peer, _)| named.contains(peer))
+        .collect();
+    (kept, times)
+}
+
+/// When each cached peer was last reached, as the last save wrote it. An entry
+/// that does not parse is skipped: it reads as a peer with no time, which ages
+/// from the next save.
+pub fn load_reached(db: &Database) -> std::collections::HashMap<PeerId, std::time::SystemTime> {
+    let entries = match db.iter_raw(TREE_PEER_REACHED) {
+        Ok(e) => e,
+        Err(e) => {
+            tracing::warn!(error = %e, "Failed to read when cached peers were last reached");
+            return std::collections::HashMap::new();
+        }
+    };
+    entries
+        .into_iter()
+        .filter_map(|(key, value)| {
+            let peer: PeerId = std::str::from_utf8(&key).ok()?.parse().ok()?;
+            let secs: u64 = std::str::from_utf8(&value).ok()?.parse().ok()?;
+            Some((
+                peer,
+                std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs),
+            ))
+        })
+        .collect()
+}
+
+fn save_reached(db: &Database, times: &[(PeerId, std::time::SystemTime)]) {
+    let entries: Vec<(String, Vec<u8>)> = times
+        .iter()
+        .map(|(peer, at)| {
+            let secs = at
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            (peer.to_base58(), secs.to_string().into_bytes())
+        })
+        .collect();
+    if let Err(e) = db.replace_tree(TREE_PEER_REACHED, &entries) {
+        tracing::warn!(error = %e, "Failed to persist when cached peers were last reached");
     }
 }
 
@@ -329,7 +458,14 @@ mod tests {
         let writer = CacheWriter::default();
 
         writer
-            .save(&db, vec![older.clone()], me, Vec::new())
+            .save(
+                &db,
+                vec![older.clone()],
+                me,
+                Vec::new(),
+                Vec::new(),
+                std::time::SystemTime::now(),
+            )
             .await
             .unwrap();
         assert_eq!(
@@ -344,7 +480,14 @@ mod tests {
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
             + 1;
         writer
-            .save(&db, vec![newer.clone()], me, Vec::new())
+            .save(
+                &db,
+                vec![newer.clone()],
+                me,
+                Vec::new(),
+                Vec::new(),
+                std::time::SystemTime::now(),
+            )
             .await
             .unwrap();
         let late = CacheWriter {
@@ -356,6 +499,8 @@ mod tests {
             vec!["/ip4/3.3.3.3/udp/8800/quic-v1".into()],
             me,
             Vec::new(),
+            Vec::new(),
+            std::time::SystemTime::now(),
         )
         .await
         .unwrap();
@@ -705,5 +850,105 @@ mod tests {
         let loaded = load_peer_cache(&db);
 
         assert_eq!(loaded.len(), MAX_CACHED_PEERS);
+    }
+
+    fn entry(seed: u8, host: &str) -> String {
+        format!("/ip4/{host}/udp/8800/quic-v1/p2p/{}", pid(seed))
+    }
+
+    /// #472: a cached identity nobody reached for two weeks leaves the cache —
+    /// before, an entry left only when the 200 cut it, so a dead test node's key
+    /// was dialled and handed to Kademlia from every save for good. A peer
+    /// reached yesterday stays, and only kept peers keep a time.
+    #[test]
+    fn a_peer_unreached_for_two_weeks_leaves_the_cache() {
+        let now = std::time::SystemTime::now();
+        let day = std::time::Duration::from_secs(24 * 60 * 60);
+        let (live, recent, dead) = (
+            entry(2, "1.1.1.1"),
+            entry(3, "2.2.2.2"),
+            entry(4, "3.3.3.3"),
+        );
+        let stored =
+            std::collections::HashMap::from([(pid(3), now - day), (pid(4), now - day * 15)]);
+        let live_set = std::collections::HashSet::from([pid(2)]);
+        let (kept, times) = entries_to_keep(
+            vec![live.clone(), recent.clone(), dead.clone()],
+            &live_set,
+            stored,
+            vec![(pid(2), now)],
+            now,
+        );
+        assert_eq!(kept, vec![live, recent]);
+        let times: std::collections::HashMap<_, _> = times.into_iter().collect();
+        assert_eq!(times.len(), 2);
+        assert!(
+            !times.contains_key(&pid(4)),
+            "a forgotten peer's time goes with it"
+        );
+    }
+
+    /// A cache from before the times were kept: every entry is dated by the
+    /// first save that sees it, so it ages from then — late, never early.
+    #[test]
+    fn an_undated_cached_peer_is_kept_and_dated_now() {
+        let now = std::time::SystemTime::now();
+        let old = entry(5, "4.4.4.4");
+        let (kept, times) = entries_to_keep(
+            vec![old.clone()],
+            &std::collections::HashSet::new(),
+            std::collections::HashMap::new(),
+            Vec::new(),
+            now,
+        );
+        assert_eq!(kept, vec![old]);
+        assert_eq!(times, vec![(pid(5), now)]);
+    }
+
+    /// The departed are kept most recently reached first, so the 200 cut takes
+    /// the longest gone; a newer time from the loop beats the stored one.
+    #[test]
+    fn the_departed_are_kept_most_recently_reached_first() {
+        let now = std::time::SystemTime::now();
+        let hour = std::time::Duration::from_secs(60 * 60);
+        let (a, b) = (entry(6, "5.5.5.5"), entry(7, "6.6.6.6"));
+        let stored =
+            std::collections::HashMap::from([(pid(6), now - hour * 48), (pid(7), now - hour * 24)]);
+        let (kept, _) = entries_to_keep(
+            vec![a.clone(), b.clone()],
+            &std::collections::HashSet::new(),
+            stored.clone(),
+            Vec::new(),
+            now,
+        );
+        assert_eq!(kept, vec![b.clone(), a.clone()]);
+        let (kept, _) = entries_to_keep(
+            vec![a.clone(), b.clone()],
+            &std::collections::HashSet::new(),
+            stored,
+            vec![(pid(6), now - hour)],
+            now,
+        );
+        assert_eq!(kept, vec![a, b], "the loop's newer time for the first wins");
+    }
+
+    /// The times reach the disk and come back, to the second.
+    #[tokio::test]
+    async fn the_times_a_save_keeps_come_back_from_the_disk() {
+        let db = Database::open_temp().unwrap();
+        let now = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_800_000_000);
+        let reached_at = now - std::time::Duration::from_secs(3 * 60 * 60);
+        CacheWriter::default()
+            .save(
+                &db,
+                vec![entry(8, "7.7.7.7")],
+                pid(1),
+                Vec::new(),
+                vec![(pid(8), reached_at)],
+                now,
+            )
+            .await
+            .unwrap();
+        assert_eq!(load_reached(&db).get(&pid(8)), Some(&reached_at));
     }
 }

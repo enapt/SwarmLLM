@@ -1063,6 +1063,7 @@ impl NetworkManager {
         // download permits — 64 is headroom, not a limit anyone reaches.
         let (shard_verdict_tx, shard_verdict_rx) = mpsc::channel::<requests::ShardVerdict>(64);
 
+        let reached_before = crate::network::peer_cache::load_reached(&shared_state.db);
         Ok(Self {
             shared_state,
             peer_cache_writer: Default::default(),
@@ -1115,7 +1116,13 @@ impl NetworkManager {
             cut_off: HashMap::new(),
             held_until_identified: before_identify::HeldUntilIdentified::default(),
             proven_wrong: stale_peers::ProvenWrong::default(),
-            last_reached: stale_peers::LastReached::new(std::time::Instant::now()),
+            // Seeded from when the cache last reached each peer, so a restart
+            // gives no dead identity a fresh hour in Kademlia's table (#472).
+            last_reached: stale_peers::LastReached::seeded(
+                std::time::Instant::now(),
+                std::time::SystemTime::now(),
+                reached_before,
+            ),
             rr_failures: HashMap::new(),
             dht_query_rx,
             pending_provider_queries: HashMap::new(),
@@ -2620,11 +2627,18 @@ impl NetworkManager {
         // not live ones. `filter_storable` still runs over the union, so a bad
         // address is evicted on the next save exactly as before — merging keeps
         // stale-but-valid entries, it does not make the cache unpurgeable.
+        // When each peer was last reached (#472): the connected ones now, the
+        // rest as `last_reached` keeps them; the writer merges the stored times.
+        let (now, now_wall) = (std::time::Instant::now(), std::time::SystemTime::now());
+        let mut reached = self.last_reached.stamps(now, now_wall);
+        reached.extend(self.swarm.connected_peers().map(|peer| (*peer, now_wall)));
         self.peer_cache_writer.save(
             &self.shared_state.db,
             addrs,
             *self.swarm.local_peer_id(),
             self.proven_wrong.pairs(),
+            reached,
+            now_wall,
         )
     }
 }

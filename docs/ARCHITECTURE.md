@@ -410,6 +410,7 @@ SwarmLLM uses a 5-layer zero-config discovery stack. Each layer is independent �
 │                                                             │
 │  Layer 2: Persistent Peer Cache (redb)                       │
 │    Saves up to 200 peer multiaddrs every 5 min + shutdown   │
+│    + when each was last reached; gone 14 days → dropped     │
 │    Loads on startup → fastest reconnect path                │
 │    File: src/network/peer_cache.rs                          │
 │    Storing and dialling are separate questions (R148):      │
@@ -1941,7 +1942,7 @@ validates the trees in `CRITICAL_TREES` at startup and only reports.
 | config | the persisted config and the API key (`"api_key"`, 32-byte hex Bearer token) |
 | credits · credit_txns · credit_log · escrow | balance, signed transactions, the append-only log, escrow entries (credits are dormant) |
 | trust_scores · model_trust | per-node trust; per-model download trust |
-| peer_cache | known peer addresses (presence keys) |
+| peer_cache · peer_reached | known peer addresses (presence keys); when each cached peer was last reached (unix seconds, #472 — a restart keeps a long-gone identity out of Kademlia, and one unreached 14 days leaves the cache) |
 | nicknames · identity_prefs | gossiped `NicknameRecord`s; this node's own nickname |
 | model_meta | `ModelManifest` per model id — reloaded at startup, integrity-checked |
 | hf_sources · canonical_builds · origin_verified_hashes | each model's upload, the verified canonical choice (#151), hashes checked against the origin |

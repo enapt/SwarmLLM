@@ -2232,29 +2232,6 @@ demand gossip needs its shared slot keyed per sender first (gotcha #73), relayed
 memory as long as the wider window, pool notices each replay table checked against it; the owner's
 warning covers all three meanwhile.
 
-#### #472 — After every restart, dead identities are dialled for an hour at addresses another computer now holds
-`P3` · network · **CAUSE MEASURED, not built** — 2026-11-17 · history: the live node's log 01:30-06:31Z 11-17
-
-#413's residual. A peer leaves Kademlia's table once it has been out of reach for `stale_peers::UNREACHABLE_FOR`
-(1 h) **since its last connection closed, or since the node started**. So a restart makes every dead identity in
-the table fresh again for an hour. On 11-17 the Australian peer, the DE anchor and the Italian peer each opened
-bursts of connections here that closed 0.2-0.3 ms after the handshake: 187, 74 and 56 that day. All were inbound,
-from the peer's own listening port (TCP 8810, a normal swarm dial, not AutoNAT's fresh port), while it already
-held two QUIC connections here. They came 2-4 minutes in every 10 (`KAD_REFRESH_SECS`), each peer on its own
-phase, and stopped about an hour after its restart into v0.3.295: the Australian peer restarted at 05:16:44Z and
-its last burst ended at 06:13, and nothing has come since 06:31. The 11-17 01:3x restarts into v0.3.294 did the
-same. That is #413's shape seen from the side that answers: each peer's refresh walk dials an identity that once
-ran on this machine's ports (gotcha #1123's rig keys), finds this node there, fails `WrongPeerId` on its side
-and closes. (It is not the LAN box `96842635`: it is behind the same router with the same default ports, and its
-translated candidate `171.97.115.249:8810` is this node's UPnP port, but every one of these peers was connected
-to it, so none dials it.) **Cost**: one handshake each, to an innocent node, about 300 here in each such hour, after every
-release; a dead address that answers nothing holds a dial slot until timeout instead. Nothing
-a user sees. **Fix when picked up**: keep "last reached" with each cached peer and seed `LastReached` from it, so a
-restart neither re-seeds Kademlia with an identity unreached for over an hour nor gives it a fresh hour.
-Prior art: Bitcoin Core's addrman saves each address's last success, last try and attempts in `peers.dat` and
-drops it as `IsTerrible` across restarts; go-libp2p-kad-dht does not save its table at all and rebuilds it
-at every start, which this node's cache seeding was built to avoid.
-
 ### Speed on one computer
 
 Local GPU decode runs at ~97% of llama.cpp (`docs/plans/local_decode_submissions.md`); what
@@ -7081,6 +7058,20 @@ archive under the named heading. Reopen one only with the evidence its line name
 Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 19-28 were
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
+
+**Closed 2026-11-17 (on main, not in a release yet)** (#472)
+- #472 — **After every restart, dead identities were dialled for an hour at addresses another computer now
+  holds.** #413 counted a peer's time out of reach from its last close or the node's start, so a restart gave every
+  dead identity in the peer cache a fresh hour: seeded into Kademlia's table, handed round by every peer's refresh
+  walks. Measured 11-17 on the live node: ~460 connections a day opened here and closed 0.2 ms after the handshake,
+  in bursts for ~1 h after each peer's restart (one handshake each, ~1 MB a day, nothing a user felt). Now the
+  peer cache keeps when each cached peer was last reached (tree `peer_reached`) and the network manager starts from
+  it (`stale_peers::LastReached::seeded`): a peer last reached an hour or more before the start is out of reach at
+  once and is not seeded. A cached peer unreached for 14 days (`peer_cache::CACHE_FORGETS_AFTER`) leaves the cache,
+  and the departed are kept most recently reached first, so the 200-address cut takes the longest gone (an entry
+  left only when cut, before). Prior art: Bitcoin Core's addrman keeps each address's last success in `peers.dat`
+  and forgets one not seen in its 30-day horizon (`IsTerrible`); go-libp2p-kad-dht keeps no table across restarts.
+  Fixes a node's own seeding; the swarm stops handing the dead round as its nodes update.
 
 **Closed 2026-11-17 (v0.3.295-alpha)** (#468; #465's review edge)
 - #468 — **Offline mode dialled the internet once a computer on the same network named public addresses.** Offline

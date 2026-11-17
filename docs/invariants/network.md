@@ -811,6 +811,24 @@ node with an EMPTY cache dialled 33-48 of them 67-74 times in 90 s. Two gaps:
   supplies its addresses inside the swarm (`handle_pending_outbound_connection`, invisible to another behaviour)
   and the swarm builder wraps no transport but the bandwidth meter.
 
+- **A restart gave every dead identity a fresh hour** (#472, 2026-11-17). Counted from the node's start, a peer
+  last reached days before was "out of reach for under an hour" again after every restart: the cache seeded it into
+  Kademlia's table, and every peer's refresh walks handed it round. On 11-17 three peers each opened 56-187
+  connections here that closed 0.2 ms after the handshake, for ~1 h after each one's restart (~460 a day; each one
+  handshake, ~1 MB a day here, nothing a user felt). Now the cache keeps when each cached peer was last reached
+  (tree `peer_reached`, written with the addresses by `CacheWriter`, the connected peers at the save's time, the rest
+  from `LastReached::stamps`, the newest of disk and loop winning — `peer_cache::entries_to_keep`), and
+  `LastReached::seeded` starts from it: a peer last reached an hour or more before this run is out of reach at once
+  (`gone`), one reached minutes before keeps the rest of its hour, one with no time counts from the start as
+  before. `prune` moves a time past the hour into `gone`, never back to the floor (a seeded time would read fresh
+  again). **And the cache lets a peer go** once unreached for `peer_cache::CACHE_FORGETS_AFTER` (14 days; Bitcoin
+  Core's addrman forgets past its 30-day horizon, `IsTerrible`, from times it keeps in `peers.dat`) — before, an
+  entry left only when the 200 cut it — and orders the departed most recently reached first, so the cut takes the
+  longest gone. An entry from before the times were kept is dated by the first save that sees it (late, never
+  early). Tests: `a_peer_last_reached_before_this_run_keeps_its_time`, `a_pruned_or_reached_peer_reads_what_it_should`,
+  `a_peer_unreached_for_two_weeks_leaves_the_cache`, `the_departed_are_kept_most_recently_reached_first`. It fixes
+  a node's OWN seeding: the swarm stops handing the dead round as its nodes update.
+
 Re-count a fresh probe node's "Unexpected peer ID" a day after the release carrying #413: the swarm sheds the
 dead identities only as its nodes update.
 
