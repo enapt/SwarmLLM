@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #476**). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #477**). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -5179,6 +5179,36 @@ cannot tell an earlier attempt's range from a second range of this one without t
    re-arming the hold — now bounded by (4) too once the coordinator is gone, and the dispatcher aborts the handler.
 
 ### Model families and platforms
+
+#### #476 — A model past 128 GiB cannot be listed in the swarm: every peer refuses a manifest of more than 256 parts
+`P2` · models, network · **OPEN** — 2026-11-17 · found sweeping every receiver bound for its sender (gotcha #1133)
+
+**What happens.** `model::manifest::MAX_SHARDS_PER_MANIFEST` (256) bounds a peer's manifest at the network door
+(`daemon::dispatch`, the `ModelManifest` arm: a part number ≥ 256 or more than 256 parts is refused WHOLE, with a WARN on
+the receiver only). Its comment calls 256 "the 70B-class upper bound", written when part size was configurable; every
+node now cuts at `model::canonical::CANONICAL_SHARD_SIZE_BYTES` (512 MiB, #1129), so 256 parts is **128 GiB (~137 GB)**.
+Past it: Llama 3.x 70B at F16/BF16 (~141 GB, ~263 parts), Qwen3-235B-A22B at Q4_K_M (~142 GB) and up, DeepSeek-V3 /
+Kimi-class files (400-600 GB, 750-1,100 parts), Llama 3.1 405B at any useful quant. A node holding one would gossip a
+manifest no peer takes, so no peer learns the model and the "a node never needs the whole model" design never reaches
+the models that need it most. The popular list (`memory/model_popularity_1108.md`: 27-35B, gpt-oss 120B at 63 GB, 70B
+at Q4-Q8) is under it today, so this is a ceiling, not a current failure; nothing in the logs has hit it (0 refusals,
+11-17).
+
+**What a fix has to keep** (it is a peer-input security bound, R105 / #333, so a security review goes with it):
+- The registry loop that forgets a model's heard hashes walks every part number below the bound
+  (`ModelRegistry::forget_a_model_nobody_holds`): a raised bound costs that loop linearly — fine at 1,024-2,048.
+- #333's per-model weight (1 MiB of stored JSON, `peer_models::weight_of`) and gossipsub's `max_transmit_size` (4 MiB,
+  `network::behaviour`): measure a real 750-part manifest's JSON (tensor tables are derived, not sent — §
+  "A manifest's tensor table is DERIVED data") before choosing the figure.
+- `MAX_HOSTED_SHARDS_IN_CAP` (1,024) and `MAX_SHARDS_PER_ANNOUNCE` (512, pieces) already carry more parts than this
+  bound; `MOST_PARTS_A_HOLDER` (4,096) is per key.
+- Additive evolution: an older node keeps refusing a long manifest (one release behind keeps contact), so a long
+  model is usable only among nodes that take it — say so in the CHANGELOG, no feature bit needed for a bound.
+- Check the ShardAnnounce path's own part-number bound (if any) and `layers_for_shard`-style arrays sized by part
+  count before raising.
+
+Prior art: llama.cpp's `gguf-split` writes `split.count` as a u16 (65,535 files); HuggingFace stores big GGUFs as
+~50 GB files — neither caps a model's size; our bound is our own, chosen when parts were configurable.
 
 #### #404 — IQ/TQ quantizations, split uploads and files in a repo folder cannot be hosted
 `P3` · models · **OPEN** — 2026-11-04 · field report 2026-11-03 (the model browser recommended an IQ2_XS inside a repo folder)
