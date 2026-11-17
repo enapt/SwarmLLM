@@ -3360,7 +3360,7 @@ impl PipelineScheduler {
             local_node_id,
             num_layers,
             prompt_tokens,
-            self.shared_state.config.inference.parallax_partial_ranges,
+            self.shared_state.cfg().inference.parallax_partial_ranges,
         ) else {
             return;
         };
@@ -3952,7 +3952,7 @@ impl PipelineScheduler {
             // with parallax routing off, or nothing else to compare against,
             // the gate is still the whole decision.
             let search_will_decide = local_is_degraded
-                && self.shared_state.config.inference.parallax_routing
+                && self.shared_state.cfg().inference.parallax_routing
                 && candidates.len() > 1;
             pipeline_may_beat_local = search_will_decide;
             let delegate_to = if local_is_degraded {
@@ -4219,7 +4219,7 @@ impl PipelineScheduler {
                 cheapest_peer_cost_ms = ?passed_over.as_ref().map(|p| p.cost_ms),
                 cheapest_peer_unusable_because = ?passed_over.as_ref().and_then(|p| p.unusable_because),
                 local_runs_on_processor = pipeline_may_beat_local,
-                parallax_routing = self.shared_state.config.inference.parallax_routing,
+                parallax_routing = self.shared_state.cfg().inference.parallax_routing,
                 "Local node has full layer coverage — single local segment"
             );
             return Ok(Self::local_only_assignment(
@@ -4271,7 +4271,7 @@ impl PipelineScheduler {
                     prompt_tokens,
                 )
             };
-        let raw_segments = if self.shared_state.config.inference.parallax_routing {
+        let raw_segments = if self.shared_state.cfg().inference.parallax_routing {
             // Encryption forces the first and last segments onto this node,
             // so an encrypted distributed pipeline is multi-segment by
             // construction — there is no single-delegation alternative to
@@ -4290,7 +4290,7 @@ impl PipelineScheduler {
             // the choice was this node's card/processor run or the whole
             // hand-off — never the split between them that ran 34-37 tok/s on
             // code where the hand-off ran 17-18 (FUTURE_WORK #3 (j1)).
-            let partial = (self.shared_state.config.inference.parallax_partial_ranges
+            let partial = (self.shared_state.cfg().inference.parallax_partial_ranges
                 || encrypted
                 || card_short_split)
                 && !whole_only;
@@ -4837,7 +4837,7 @@ impl PipelineScheduler {
         // Skip TP when encrypted pipeline is active — no remote node should process
         // tensor data in encrypted mode (defeats the purpose of local-only embedding/sampling).
         let tp_groups =
-            if encrypted || whole_only || !self.shared_state.config.inference.tensor_parallel {
+            if encrypted || whole_only || !self.shared_state.cfg().inference.tensor_parallel {
                 vec![]
             } else {
                 self.detect_tp_groups(&segments, &candidates)
@@ -7219,7 +7219,7 @@ impl PipelineScheduler {
                     .get(&candidate.node_id)
                     .map(|p| (p.is_lan_peer, p.latency_ms))
                     .unwrap_or((false, None));
-                let tp_max_ms = self.shared_state.config.inference.tp_max_latency_ms;
+                let tp_max_ms = self.shared_state.cfg().inference.tp_max_latency_ms;
                 let low_latency = measured_latency.is_some_and(|ms| {
                     crate::network::manager::physical_rtt_ms(ms as f32) <= tp_max_ms as f32
                 });

@@ -649,7 +649,10 @@ pub async fn diagnostics(
     let _ = writeln!(
         out,
         "tensor_parallel: {}  gpu_layers: {}",
-        ss.config.inference.tensor_parallel, ss.config.inference.gpu_layers
+        // The planner reads `tensor_parallel` live; `gpu_layers` is fixed when
+        // the node starts (`daemon/mod.rs`), so each is printed as in force.
+        ss.cfg().inference.tensor_parallel,
+        ss.config.inference.gpu_layers
     );
     // Read the runtime atomic, not the startup-frozen config. Turning
     // auto-manage off is a live toggle (`PUT /api/admin/config`), so printing
