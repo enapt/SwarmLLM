@@ -164,6 +164,27 @@ impl StreamReassembler {
         ready
     }
 
+    /// Take in a done token: record its content-token total and return the
+    /// logprob to keep from it — only the FIRST done token's. A done token
+    /// that arrives while stragglers are awaited is read again by the next
+    /// one, and each repeat used to push one more entry: a list a peer could
+    /// grow without end by repeating its done, where content tokens stop at
+    /// `overruns` (sweep 2026-11-02). An honest server's done carries none.
+    ///
+    /// A repeat is a duplicate, never an error: a continued reply can go back
+    /// to the same peer under the same wire id, so the attempt before's late
+    /// done can arrive (`reply_stream_bound`). Prior art: QUIC fixes a
+    /// stream's final size once known and reads a repeated FIN as a duplicate
+    /// (RFC 9000 § 4.5).
+    pub(super) fn note_done(
+        &mut self,
+        tok: &swarmllm_types::StreamingToken,
+    ) -> Option<swarmllm_types::TokenLogProbEntry> {
+        let first = !self.done_seen();
+        self.mark_done(tok.token_id);
+        tok.logprob.clone().filter(|_| first)
+    }
+
     /// Record the done token's content-token total.
     pub(super) fn mark_done(&mut self, total: u32) {
         if total > 0 {
@@ -1727,6 +1748,12 @@ impl PipelineExecutor {
                             .unwrap_or_else(|| SwarmError::Inference(e.clone())));
                     }
                 };
+                // The done token says how many content tokens were sent. If any
+                // are still in flight, keep waiting rather than discarding
+                // them — stopping here is exactly the truncation this solves.
+                if let Some(lp) = stream.note_done(&tok) {
+                    token_logprobs.push(lp);
+                }
                 if let Some(usage) = tok.usage {
                     prompt_tokens = usage.prompt_tokens;
                     completion_tokens = usage.completion_tokens;
@@ -1735,13 +1762,6 @@ impl PipelineExecutor {
                 if let Some(ms) = tok.matched_stop_sequence.clone() {
                     matched_stop_seq = Some(ms);
                 }
-                if let Some(lp) = tok.logprob.clone() {
-                    token_logprobs.push(lp);
-                }
-                // The done token says how many content tokens were sent. If any
-                // are still in flight, keep waiting rather than discarding
-                // them — stopping here is exactly the truncation this solves.
-                stream.mark_done(tok.token_id);
                 if !stream.is_complete() {
                     tracing::debug!(
                         %request_id,
@@ -2647,6 +2667,31 @@ mod stream_reassembly_tests {
         assert_eq!(s.buffered(), 0);
         assert!(!s.has_hole());
         assert_eq!(s.emitted(), 2);
+    }
+
+    /// A done token repeated while stragglers are awaited adds nothing: each
+    /// repeat used to push its logprob, a list a peer could grow without end.
+    #[test]
+    fn a_repeated_done_token_keeps_no_more_logprobs() {
+        let done = |total: u32| StreamingToken {
+            finish_reason: Some(swarmllm_types::NetworkFinishReason::Stop),
+            logprob: Some(swarmllm_types::TokenLogProbEntry {
+                token: "x".into(),
+                logprob: -0.5,
+                top_logprobs: Vec::new(),
+            }),
+            ..content(total, "")
+        };
+        let mut s = StreamReassembler::new(16);
+        s.push_content(content(1, "b")); // 0 still in flight: the stream waits
+        assert!(s.note_done(&done(2)).is_some(), "the first done's is kept");
+        assert!(!s.is_complete());
+        for _ in 0..1_000 {
+            assert!(s.note_done(&done(2)).is_none(), "a repeat's never is");
+        }
+        assert!(!s.is_complete(), "a repeat changes nothing else either");
+        s.push_content(content(0, "a"));
+        assert!(s.is_complete());
     }
 
     #[test]
