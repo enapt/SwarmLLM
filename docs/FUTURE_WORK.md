@@ -2202,9 +2202,9 @@ receiver on the relayed path (each chunk sealed separately) when a dropped relay
 reported.
 
 #### #405 — Unconnected registry entries are bounded in all, not per delivering network
-`P4` · network · **PARTIAL** — 2026-11-17: the first-contact wait FIXED on main · history: #403's security review (`docs/invariants/network.md` § "A computer this node has not heard from is not judged allowed")
+`P4` · network · **PARTIAL** — 2026-11-17: the first-contact wait FIXED in v0.3.296-alpha · history: #403's security review (`docs/invariants/network.md` § "A computer this node has not heard from is not judged allowed")
 
-**Fixed 2026-11-17 on main: a computer reached only through a relay no longer waits for a gossip repeat before its
+**Fixed 2026-11-17 (v0.3.296-alpha): a computer reached only through a relay no longer waits for a gossip repeat before its
 first request runs.** A capability it gossiped before its first relayed body filed its entry was dropped (the
 `NodeCapabilityUpdate` arm installs into an existing entry only), so its requests were refused `NotHeardFrom` for
 up to its next 40-min `QuietRepeat`. The dispatcher now holds it (`swarm_use::HeardBeforeKnown`) and installs it
@@ -2271,7 +2271,7 @@ DCUtR reached a peer at (US's `68.3.213.210/udp/8800`). That address answers onl
 made lives, and only to a simultaneous open; stored, it is dialled after a restart, when the mapping has gone, and a
 filtering NAT refuses a plain dial — the circuit + DCUtR path already brings the peer back in 1-7 s (US, measured
 before 11-16). go-libp2p keeps a connected address only 15 min past the disconnect (`RecentlyConnectedAddrTTL`) for
-the same reason. **(c) FIXED** 2026-11-17 on main: our relay server cut every circuit at 1 h (43 of 72 relayed
+the same reason. **(c) FIXED** 2026-11-17 (v0.3.296-alpha): our relay server cut every circuit at 1 h (43 of 72 relayed
 connections here ended at the hour); no byte limit and a 30-day backstop now, and a node that stops relaying ends
 its circuits (`docs/invariants/network.md` § "A relayed circuit lasts while both ends hold it"). Prior art: go-libp2p's AutoRelay pushes a node's new circuit addresses to its connected peers by
 identify-push, which is how they reach the DHT; libp2p relay v2 reservations last 1 h by default.
@@ -7109,7 +7109,7 @@ Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
 
-**Closed 2026-11-17 (on main, not in a release yet)** (#472)
+**Closed 2026-11-17 (v0.3.296-alpha)** (#472)
 - #472 — **After every restart, dead identities were dialled for an hour at addresses another computer now
   holds.** #413 counted a peer's time out of reach from its last close or the node's start, so a restart gave every
   dead identity in the peer cache a fresh hour: seeded into Kademlia's table, handed round by every peer's refresh
