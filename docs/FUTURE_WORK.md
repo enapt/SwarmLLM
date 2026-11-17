@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #475**). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #476**). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -6556,6 +6556,24 @@ Likely shape: demand kept per PUBLISHER (the shared slot is per (model, region) 
 shape), a model's demand the median or a trimmed sum across publishers, each bounded by what one
 computer can serve. Prior art: libp2p-gossipsub's peer scoring (P4 invalid messages) bounds a
 publisher's weight; Bitcoin's addrman buckets a source's claims by its network.
+
+#### #475 — A full pool registry refuses every new pool, and nothing in it ever ages out
+`P4` · privacy · **OPEN** — 2026-11-18 · history: the 11-18 sweep (consistency reviewer, dropped at 40% and kept here), #443 (what reads the registry)
+
+`pool::manager::gossip::handle_pool_state_gossip` stores every verified `PoolState` in
+`credits.pool_registry` up to `MAX_POOL_REGISTRY` (1,000), then refuses any pool it does not
+already hold; the only removal is this node leaving its own pool (`pool/manager/mod.rs` ~941).
+The owner signature is checked, but a pool is a keypair its maker mints for free, so one peer
+can gossip 1,000 self-made pools and every later pool — a real one an owner set up afterwards —
+never reaches `pool::scope`'s cross-pool readers (`listed_pool_members`, `cross_pool_extras`)
+until this node restarts. Bounded in memory, so no exhaustion; the cost is the opt-in cross-pool
+features going blind to new pools, and a long-lived node keeping pools that ended weeks ago.
+Likely shape: #339's rule for holder lists — a newcomer takes only a STALE entry's place
+(last gossip older than a few gossip intervals), never one still gossiping; the count kept per
+publisher network (`NetGroup`) so one network cannot hold most slots. Not changed overnight
+before a release: pool isolation is the security reviewer's to read (CLAUDE.md § Subagents).
+Prior art: Bitcoin Core's addrman (`IsTerrible` entries are evicted first, a source's claims
+bucketed by its network); the Kademlia routing table's replace-the-stale-entry rule.
 
 #### #443 — "Another pool" costs whoever makes it three keys
 `P3` · privacy · **OPEN** (residual: which pools — the review's two fixes and the wording done 2026-11-12) — 2026-11-12 · history: #176 (the switches), the security review of `b7ea7c31` + `fba9b343`

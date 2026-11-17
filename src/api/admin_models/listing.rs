@@ -525,12 +525,10 @@ pub async fn list_models(State(state): State<AppState>) -> Json<Vec<serde_json::
         // Staleness check: verify model directory still exists on disk.
         // If files were deleted while the process is running, skip this entry
         // to avoid confusing the UI with a "loaded" model that can't run.
-        let loaded_model_dir = state
-            .config
-            .node
-            .data_dir
-            .join("models")
-            .join(crate::types::slugify_model_name(&info.name));
+        let loaded_model_dir = crate::model::shard::model_dir(
+            &state.config.node.data_dir,
+            &crate::types::slugify_model_name(&info.name),
+        );
         let dir_check = loaded_model_dir.clone();
         let has_shard_files = tokio::task::spawn_blocking(move || {
             dir_check.exists()

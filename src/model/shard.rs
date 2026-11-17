@@ -94,12 +94,18 @@ pub fn compute_first_last(
     (is_first, is_last)
 }
 
+/// This node's models directory under `data_dir` — the one place its name is
+/// spelled: where every model's directory ([`model_dir`]) lives, where
+/// `auto_manage::held_disk_bytes` counts what is held and `models_disk` reads
+/// the room left, so all of them always describe one directory on one disk.
+pub fn models_root(data_dir: &std::path::Path) -> std::path::PathBuf {
+    data_dir.join("models")
+}
+
 /// Get the directory path for a specific model under data_dir, with sanitization.
 /// Use this instead of manually joining `data_dir.join("models").join(id)`.
 pub fn model_dir(data_dir: &std::path::Path, model_id: &str) -> std::path::PathBuf {
-    data_dir
-        .join("models")
-        .join(sanitize_path_component(model_id))
+    models_root(data_dir).join(sanitize_path_component(model_id))
 }
 
 /// Manages shard files on disk — loading, verification, and storage.
@@ -335,7 +341,7 @@ impl ShardStore {
 
     /// Get the models directory path.
     pub fn models_dir(&self) -> PathBuf {
-        self.data_dir.join("models")
+        models_root(&self.data_dir)
     }
 
     /// Verify a shard's BLAKE3 hash matches the expected value.

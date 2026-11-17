@@ -471,11 +471,7 @@ pub fn disk_space_for(path: &std::path::Path) -> Option<DiskSpace> {
     filesystem_space(&resolved)
 }
 
-/// This node's models directory — where `held_disk_bytes` counts what is held
-/// and [`models_disk`] reads the room left, so the two always describe one disk.
-fn models_root(data_dir: &std::path::Path) -> std::path::PathBuf {
-    data_dir.join("models")
-}
+use crate::model::shard::models_root;
 
 /// **The disk this node's models are stored on** — the one answer for the
 /// storage budget ([`StorageReading::now`]), the dashboard's disk meter and the
