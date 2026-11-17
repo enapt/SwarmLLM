@@ -1,5 +1,35 @@
 # Changelog
 
+## [0.3.296-alpha] — 2026-11-17
+
+**A model downloaded from the dashboard loads as soon as its parts arrive.** A download fetches the model's header
+first and its parts after; in between, the storage sweep that clears a dropped model's leftover files read the model
+as abandoned and deleted the header it had just fetched — three seconds later, on this project's own computer. Every
+part then arrived and the model still refused to load ("unknown magic") until the computer was restarted. The sweep
+now leaves alone any model with a download under way, and any model's files for an hour after one was written.
+
+**A computer with no open port on its router keeps its connections.** Such a computer reaches the swarm through a
+relay, and the relay cut every relayed connection after one hour — 43 of the 72 relayed connections seen
+here ended at the hour mark — so it dropped its peers and reconnected, hourly. A relayed connection now lasts as long
+as both ends keep it. A computer that stops relaying for others closes the connections it was carrying, rather than
+leaving them to the old cut.
+
+**A computer reached only through a relay can use the swarm at once.** If it announced itself before its first
+relayed message arrived, the announcement was dropped, and its requests were turned away as coming from a computer
+not heard from until it repeated it — up to 40 minutes later. The announcement is now kept and applied when the
+computer reaches this one (#405).
+
+**A restart no longer dials long-gone computers for an hour.** After every restart, each computer remembered from
+before was given a fresh hour to be reached, so the swarm kept trying identities that had left — about 460 short-lived
+connections a day on one computer, to addresses another computer now holds. Each remembered computer now keeps the
+time it was last reached across restarts, one not reached for two weeks is forgotten, and the longest gone are the
+first to go when the list is full (#472).
+
+**Clearer logs for reports.** When a model is split between the graphics card and the processor, the log now names the
+card's budget and every model holding part of it. A pause in the network's work names what it was handling. A
+computer that is reachable from the internet no longer logs itself as "not reachable — activating relay" each time a
+check tests a port its router opened for an outgoing connection.
+
 ## [0.3.295-alpha] — 2026-11-17
 
 **A computer in offline mode no longer connects to the internet when a computer on its network names public
