@@ -14,11 +14,15 @@ Client Request (OpenAI or Anthropic format)
     → Provider resolution: model starts with "claude-"
       → Claude subscription enabled? → Spawn subprocess
       → Else: use Anthropic API key (existing behavior)
-    → claude --print --output-format stream-json|json --model <model> --no-session-persistence "<prompt>"
+    → claude --print --output-format stream-json|json --model <model> "<the whole conversation>"
+      or, for the next turn of a conversation this node answered:
+      claude --print … --resume <its session> --fork-session "<the new message>"
     → Parse NDJSON → Translate to API format → Return response
 ```
 
 Both the OpenAI (`/v1/chat/completions`) and Anthropic (`/v1/messages`) endpoints are supported, with streaming and non-streaming modes.
+
+**A conversation continues its session.** Each reply's `claude` session is kept for 10 minutes under the conversation it now holds. When the next request carries that conversation plus a new message, the node resumes the session, forked, and sends only the new message, so the earlier turns are read from Claude's prompt cache instead of being sent again: on Haiku a second turn wrote 102 tokens to the cache instead of 17,426 and read 31,722 instead of 14,328 (on the API a cache write is priced at about twelve times a cache read). A fork leaves the stored session as it was, so editing or regenerating the last message resumes the conversation before it. If the session cannot be resumed, the whole conversation is sent instead. The sessions are saved where the `claude` CLI saves its own, under `~/.claude/projects/`, and the CLI deletes them after `cleanupPeriodDays` (30 days by default).
 
 ## Setup
 

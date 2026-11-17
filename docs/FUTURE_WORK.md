@@ -6878,22 +6878,6 @@ forward reruns, no pin) still loaded two peers' requests with `card_mb=0` earlie
 qwen3.6-27b at 01:42Z. The report carries no log around them, so whether a pin (`CpuPins`) or the admission placed
 them there is undetermined. Wanted: the node.log lines from a minute before each.
 
-#### #471 — A subscription reply that resumes its CLI session reads the conversation twice
-`P3` · claude-subscription · **OPEN** — 2026-11-17 · found checking `docs/book/src/api/claude-subscription.md` against the code
-
-`api/claude_sub.rs` keys the `claude` session a reply used by the conversation BEFORE its last message (`session_key`:
-blake3 of `messages[..n-1]` and the model), and resumes it (`--resume`) when that key comes back within `SESSION_TTL`
-(10 min). Every prompt still carries the whole serialized history (`extract_prompt`). A normal next turn never
-matches, because its earlier messages now include the reply. So the resume fires only when the same history comes
-back with a DIFFERENT last message, i.e. an edit or a regenerate. At that point the session already holds the replaced
-question and its answer: the model reads the question the caller took back, and the history twice. Two fixes are
-possible:
-- key a stored session by the conversation INCLUDING its reply, and on a resume send only what is new;
-- or drop the resume and always pass `--no-session-persistence`, which is the stateless behaviour the book describes.
-
-Prior art: the CLI's own `--resume`/`--continue` restore the session's history, so a caller sends only the new turn.
-Check the fix with one real subscription call before and after it; the CLI is installed on this machine.
-
 ### Ideas — researched, not scheduled
 
 Each has a reason it is not being built now. Pick one up only when its trigger appears.
@@ -7144,7 +7128,7 @@ Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
 
-**Closed 2026-11-18 (on main, not in a release yet)** (#377)
+**Closed 2026-11-18 (on main, not in a release yet)** (#377, #471)
 - #377 — **A peer's up-front refusal of a split's range quoted its machine memory where its card or a conversation
   refused.** Rig `prose1030` arm 3 (2026-10-30): asked for [16,48) of Qwen2.5-14B a minute after serving [26,48), the AU
   peer answered "needs about 0 MB of memory … Raise `resources.max_ram_mb`" — every figure the machine's, the advice a
@@ -7157,6 +7141,24 @@ grep `^| N |`).
   `a_peer_is_told_no_up_front_where_its_range_would_swap_a_card_copy_for_a_slower_one`. What is left in system memory's
   words is a refusal by system memory alone: a fresh spawn's RAM admission (`fresh_spawn_machine_mb`) — a card short of
   room places a spawn partly on the processor, it never refuses one.
+- #471 — **A subscription reply's regenerate failed, and a next turn re-sent the whole conversation.**
+  `api/claude_sub.rs` keyed a `claude` session by the conversation BEFORE its last message and sent the whole history
+  every call; a next turn never matched, so the resume fired only on an edit or a regenerate — into a session holding
+  the question taken back. Worse than recorded: the first call ran with `--no-session-persistence`, so that resume
+  found nothing and the request FAILED ("No conversation found with session ID", reproduced 2026-11-18 on CLI 2.1.326).
+  Now `claude_sub::Conversation` (model, folder, system text, each message's role and text) keys each reply's session
+  by the conversation INCLUDING the reply (`remember_reply`, never after a failure); the next turn finds it by the
+  conversation before its last message, resumes it with `--fork-session` (the stored state never changes, so a
+  regenerate finds it again) and sends only that message. A resume the CLI refuses is caught before the caller reads
+  a line (`CliLines::resume_refused`: an error result before any turn, or no output) and the whole conversation is
+  sent instead. Measured on Haiku with the CLI directly: a second turn wrote 102 tokens to the prompt cache and read
+  31,722, against 17,426 written and 14,328 read for the whole history sent fresh. Checked through a scratch node
+  (OpenAI and Anthropic surfaces, streamed and not): T2 and its regenerate resumed T1's session, T3 resumed T2's fork
+  and counted 3 messages, and with T1's session file deleted T2 logged the fallback and answered right. Sessions are
+  now saved where the CLI saves its own (deleted after its `cleanupPeriodDays`); the book says so. Prior art: OpenAI's
+  Responses API `previous_response_id` (each reply an immutable state a request continues). Tests
+  `a_reply_is_found_by_the_callers_next_turn`, `an_edit_resumes_the_state_before_the_question_it_replaces`,
+  `a_refused_resume_is_seen_before_the_caller_reads`, `a_failed_call_is_never_remembered`.
 
 **Closed 2026-11-17 (v0.3.296-alpha)** (#472)
 - #472 — **After every restart, dead identities were dialled for an hour at addresses another computer now

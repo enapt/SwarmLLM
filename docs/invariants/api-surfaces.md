@@ -500,8 +500,9 @@ What a change here must keep:
   re-parsed, and `Value` equality is order-insensitive under `IndexMap`. Two
   things did change shape and are accepted: `json!` literals in API responses
   now serialise in literal order rather than alphabetical, and
-  `claude_sub::session_key` hashes a message's text so is now sensitive to a
-  client reordering keys between turns (a cache miss, nothing worse).
+  `claude_sub::session_key` hashed a message's JSON, so a client reordering keys
+  between turns missed its session (replaced 2026-11-18 by
+  `claude_sub::Conversation`, which reads each message's role and text, #471).
 - `a_tool_schema_reaches_the_model_unescaped` is the regression guard for the
   escaping half; it fails on an apostrophe alone.
 - All four tests were verified to fail with the filter registration removed.

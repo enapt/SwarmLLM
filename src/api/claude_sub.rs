@@ -128,8 +128,8 @@ fn acquire_permit(
 // Session management for multi-turn conversations
 // ---------------------------------------------------------------------------
 
-/// Maps an external conversation key to a Claude CLI session_id for multi-turn.
-/// Key format: "{model}:{hash_of_messages_prefix}" or caller-provided session ID.
+/// A conversation state ([`Conversation::key`]) → the CLI session holding
+/// it, so the caller's next turn resumes it (FUTURE_WORK #471).
 static SESSION_CACHE: LazyLock<dashmap::DashMap<String, SessionEntry>> =
     LazyLock::new(dashmap::DashMap::new);
 
@@ -198,32 +198,141 @@ fn put_session(key: String, session_id: String) {
     );
 }
 
-/// Build a session cache key from model + conversation history prefix.
-/// Only produces a key for multi-turn conversations (2+ messages).
-/// Single-turn requests return None — no session reuse.
-/// Uses BLAKE3 (cryptographic) to prevent collision-based session confusion.
+/// A conversation as a CLI session holds it (FUTURE_WORK #471): the model, the
+/// folder the CLI runs in (it finds a session under its folder), the system
+/// text, and each message's role and text as [`extract_prompt`] reads them —
+/// a message with no text is skipped there and here. Two requests can share a
+/// session exactly when these agree, whatever shape the client gave the
+/// content (a string or text parts) and whatever order its JSON keys came in.
 ///
-/// Each message is hashed with its keys SORTED. `serde_json` is built with
-/// `preserve_order` (so a tool schema reaches a model as its author wrote it),
-/// which means `to_string` would otherwise follow whatever order the client
-/// sent — and the same conversation would miss its session if the client
-/// reordered keys between turns. Sorting keeps the key what it was before that
-/// switch, so a session cached by the previous build is still found.
-fn session_key(model: &str, messages: &[serde_json::Value]) -> Option<String> {
-    if messages.len() < 2 {
-        return None;
+/// **Why sessions are kept by the state they HOLD.** The key was the
+/// conversation before its last message, stored for the session that answered
+/// it, and every call still sent the whole history. A normal next turn never
+/// matched (its earlier messages now include the reply), so the resume fired
+/// only on an edit or a regenerate — into a session holding the question the
+/// caller took back, with the history sent a second time. And the first call
+/// ran with `--no-session-persistence`, so that resume found nothing and the
+/// request failed ("No conversation found", checked 2026-11-18 on CLI
+/// 2.1.326). Now each reply stores the session under the conversation
+/// INCLUDING the reply; the next turn finds it by the conversation before its
+/// last message, forks it (`--fork-session`, so the stored state is never
+/// changed and a regenerate resumes the same one) and sends only that message.
+/// Measured on Haiku, a second turn wrote 102 tokens to the prompt cache and
+/// read 31,722, against 17,426 written and 14,328 read for the whole history
+/// sent fresh — cache writes cost about twelve times reads.
+///
+/// Prior art: OpenAI's Responses API `previous_response_id` — each reply is
+/// an immutable state and a request names the one it continues, so an edit
+/// branches instead of overwriting; the CLI's `--resume` + `--fork-session`
+/// is that model for a CLI session.
+#[derive(Clone, Debug, PartialEq)]
+struct Conversation {
+    model: String,
+    folder: std::path::PathBuf,
+    system: Option<String>,
+    turns: Vec<(String, String)>,
+}
+
+impl Conversation {
+    fn of(
+        model: &str,
+        folder: &std::path::Path,
+        system: Option<&str>,
+        messages: &[serde_json::Value],
+    ) -> Self {
+        let turns = messages
+            .iter()
+            .filter_map(|msg| {
+                let text = extract_content_text(msg);
+                let text = text.trim();
+                (!text.is_empty()).then(|| {
+                    let role = msg["role"].as_str().unwrap_or("user");
+                    (role.to_string(), text.to_string())
+                })
+            })
+            .collect();
+        Self {
+            model: model.to_string(),
+            folder: folder.to_path_buf(),
+            system: system.map(str::to_string),
+            turns,
+        }
     }
-    let mut hasher = blake3::Hasher::new();
-    for msg in &messages[..messages.len() - 1] {
-        let mut canonical = msg.clone();
-        canonical.sort_all_objects();
-        hasher.update(canonical.to_string().as_bytes());
+
+    /// The session cache's key: BLAKE3 (cryptographic, so two conversations
+    /// never share a session by collision) over every field, each
+    /// length-prefixed so no two conversations share an encoding.
+    fn key(&self) -> String {
+        fn field(hasher: &mut blake3::Hasher, text: &str) {
+            hasher.update(&(text.len() as u64).to_le_bytes());
+            hasher.update(text.as_bytes());
+        }
+        let mut hasher = blake3::Hasher::new();
+        field(&mut hasher, &self.model);
+        field(&mut hasher, &self.folder.to_string_lossy());
+        match &self.system {
+            Some(system) => {
+                field(&mut hasher, "1");
+                field(&mut hasher, system);
+            }
+            None => field(&mut hasher, "0"),
+        }
+        for (role, text) in &self.turns {
+            field(&mut hasher, role);
+            field(&mut hasher, text);
+        }
+        format!(
+            "claude_sub:{}:{}",
+            self.model,
+            &hasher.finalize().to_hex()[..32]
+        )
     }
-    hasher.update(model.as_bytes());
-    Some(format!(
-        "claude_sub:{model}:{}",
-        &hasher.finalize().to_hex()[..16]
-    ))
+
+    /// The conversation before its last message, and that message — only
+    /// where the last message is the caller's (not the system text, not an
+    /// assistant turn to continue) and something precedes it.
+    fn before_last(&self) -> Option<(Self, &str)> {
+        let ((role, text), before) = self.turns.split_last()?;
+        if before.is_empty() || role == "assistant" || role == "system" {
+            return None;
+        }
+        let before = Self {
+            model: self.model.clone(),
+            folder: self.folder.clone(),
+            system: self.system.clone(),
+            turns: before.to_vec(),
+        };
+        Some((before, text))
+    }
+
+    /// This conversation once `reply` answered it — what the CLI's session
+    /// holds after the call, and what the caller sends back next turn.
+    fn with_reply(&self, reply: &str) -> Self {
+        let mut next = self.clone();
+        let reply = reply.trim();
+        if !reply.is_empty() {
+            next.turns
+                .push(("assistant".to_string(), reply.to_string()));
+        }
+        next
+    }
+}
+
+/// After a reply, the conversation with it is the state the call's session
+/// holds: kept for the caller's next turn ([`Conversation`]). Never after a
+/// failure, whose session holds no reply.
+fn remember_reply(conversation: &Conversation, result: &serde_json::Value) {
+    if result["is_error"].as_bool() == Some(true) {
+        return;
+    }
+    if let (Some(reply), Some(sid)) = (result["result"].as_str(), result["session_id"].as_str()) {
+        put_session(conversation.with_reply(reply).key(), sid.to_string());
+    }
+}
+
+/// A stored session the CLI could not resume is never handed to it again.
+fn forget_session(key: &str) {
+    SESSION_CACHE.remove(key);
 }
 
 /// Periodic cleanup of expired sessions — called lazily from `put_session()`.
@@ -390,11 +499,13 @@ fn build_cli_args(
         args.push("--verbose".to_string());
         args.push("--include-partial-messages".to_string());
     }
+    // Every session is saved, so the caller's next turn can resume it; a
+    // resume forks, so the state it was stored as is never changed and a
+    // regenerate finds it again ([`Conversation`], #471).
     if let Some(sid) = session_id {
         args.push("--resume".to_string());
         args.push(sid.to_string());
-    } else {
-        args.push("--no-session-persistence".to_string());
+        args.push("--fork-session".to_string());
     }
     if let Some(sys) = system_prompt {
         if !sys.is_empty() {
@@ -515,15 +626,7 @@ async fn spawn_and_stream(
         "DIAG: claude_sub spawning subprocess"
     );
 
-    // Default to /tmp to avoid loading the current project's CLAUDE.md, hooks,
-    // MCP servers, and skills — we just want raw inference, not agent mode.
-    // Users can override via working_dir config to give Claude project context.
-    let cwd = config
-        .working_dir
-        .as_ref()
-        .filter(|d| !d.is_empty() && *d != "none")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(std::env::temp_dir);
+    let cwd = cli_folder(config);
 
     let mut child = Command::new(binary)
         .args(&args)
@@ -549,6 +652,71 @@ async fn spawn_and_stream(
     Ok((child, lines))
 }
 
+/// The folder the CLI runs in — the temp dir by default, so the current
+/// project's CLAUDE.md, hooks, MCP servers and skills stay out (raw inference,
+/// not agent mode); `working_dir` gives Claude a project's context. A session
+/// is saved under its folder, so it is part of [`Conversation`].
+fn cli_folder(config: &ClaudeSubscriptionConfig) -> std::path::PathBuf {
+    config
+        .working_dir
+        .as_ref()
+        .filter(|d| !d.is_empty() && *d != "none")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir)
+}
+
+/// The CLI's output lines, with any line read ahead of the caller handed out
+/// first ([`Self::resume_refused`]).
+struct CliLines {
+    ahead: std::collections::VecDeque<String>,
+    rest: tokio::io::Lines<tokio::io::BufReader<tokio::process::ChildStdout>>,
+}
+
+impl CliLines {
+    fn new(rest: tokio::io::Lines<tokio::io::BufReader<tokio::process::ChildStdout>>) -> Self {
+        Self {
+            ahead: std::collections::VecDeque::new(),
+            rest,
+        }
+    }
+
+    async fn next_line(&mut self) -> std::io::Result<Option<String>> {
+        match self.ahead.pop_front() {
+            Some(line) => Ok(Some(line)),
+            None => self.rest.next_line().await,
+        }
+    }
+
+    /// Did the CLI refuse the session it was told to resume? Reads ahead to
+    /// the first event past its start-up ones (`system`): a refusal is an
+    /// error result there before any turn ran (`--output-format stream-json`),
+    /// or no output at all (`json`, whose refusal goes to stderr) — "No
+    /// conversation found with session ID", 2026-11-18 on CLI 2.1.326. Every
+    /// line read is kept for the caller. A read error or the deadline is left
+    /// for the caller to meet.
+    async fn resume_refused(&mut self, deadline: tokio::time::Instant) -> bool {
+        loop {
+            match tokio::time::timeout_at(deadline, self.rest.next_line()).await {
+                Ok(Ok(Some(line))) => {
+                    let event = serde_json::from_str::<serde_json::Value>(line.trim()).ok();
+                    self.ahead.push_back(line);
+                    let Some(event) = event else { continue };
+                    match event["type"].as_str() {
+                        Some("system") => continue,
+                        Some("result") => {
+                            return event["is_error"].as_bool() == Some(true)
+                                && event["num_turns"].as_u64().unwrap_or(0) == 0;
+                        }
+                        _ => return false,
+                    }
+                }
+                Ok(Ok(None)) => return true,
+                Ok(Err(_)) | Err(_) => return false,
+            }
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // OpenAI-format proxy
 // ---------------------------------------------------------------------------
@@ -556,11 +724,15 @@ async fn spawn_and_stream(
 /// Common setup for proxy_via_subprocess_* functions.
 struct ProxySetup {
     child: tokio::process::Child,
-    lines: tokio::io::Lines<tokio::io::BufReader<tokio::process::ChildStdout>>,
+    lines: CliLines,
     model: String,
     stream: bool,
-    sess_key: Option<String>,
-    timeout: std::time::Duration,
+    /// The conversation this call answers; with the reply, the state its
+    /// session holds after ([`remember_reply`]).
+    conversation: Conversation,
+    /// The call's whole deadline, set before the CLI was started — a resume
+    /// it refused and the call that replaced it included.
+    deadline: tokio::time::Instant,
     _permit: tokio::sync::SemaphorePermit<'static>,
 }
 
@@ -577,31 +749,68 @@ async fn prepare_proxy(
     let stream = req["stream"].as_bool().unwrap_or(false);
     let messages: Vec<serde_json::Value> = req["messages"].as_array().cloned().unwrap_or_default();
 
-    let (prompt, system_prompt) = extract_prompt(&messages, system_override);
+    let deadline = tokio::time::Instant::now() + config.timeout();
 
-    let sess_key = session_key(model, &messages);
-    let cached_session = sess_key.as_ref().and_then(|k| get_session(k));
+    let (whole_prompt, system_prompt) = extract_prompt(&messages, system_override);
+    let conversation = Conversation::of(
+        model,
+        &cli_folder(config),
+        system_prompt.as_deref(),
+        &messages,
+    );
+    // A session holding the conversation up to its last message: forked, and
+    // handed that message alone ([`Conversation`], #471).
+    let resume = conversation.before_last().and_then(|(before, last)| {
+        let key = before.key();
+        get_session(&key).map(|sid| (key, sid, last.to_string()))
+    });
+    let prompt = resume
+        .as_ref()
+        .map_or(whole_prompt.as_str(), |(_, _, last)| last.as_str());
 
-    let (child, lines) = spawn_and_stream(
+    let (mut child, lines) = spawn_and_stream(
         config,
         model,
-        &prompt,
+        prompt,
         system_prompt.as_deref(),
-        cached_session.as_deref(),
+        resume.as_ref().map(|(_, sid, _)| sid.as_str()),
         stream,
     )
     .await?;
+    let mut lines = CliLines::new(lines);
 
-    // system_prompt already consumed by build_cli_args — not needed in result
-    let _ = system_prompt;
+    if let Some((key, sid, _)) = &resume {
+        if lines.resume_refused(deadline).await {
+            tracing::warn!(
+                model,
+                session_id = %sid,
+                "claude_sub: the CLI could not resume this conversation's session — \
+                 sending the whole conversation instead"
+            );
+            forget_session(key);
+            let _ = child.kill().await;
+            let _ = child.wait().await;
+            let (fresh, fresh_lines) = spawn_and_stream(
+                config,
+                model,
+                &whole_prompt,
+                system_prompt.as_deref(),
+                None,
+                stream,
+            )
+            .await?;
+            child = fresh;
+            lines = CliLines::new(fresh_lines);
+        }
+    }
 
     Ok(ProxySetup {
         child,
         lines,
         model: model.to_string(),
         stream,
-        sess_key,
-        timeout: config.timeout(),
+        conversation,
+        deadline,
         _permit: permit,
     })
 }
@@ -617,8 +826,8 @@ pub async fn proxy_via_subprocess_openai(
         model,
         stream,
 
-        sess_key,
-        timeout,
+        conversation,
+        deadline,
         _permit,
     } = prepare_proxy(config, req, None).await?;
 
@@ -629,10 +838,8 @@ pub async fn proxy_via_subprocess_openai(
         // Streaming: translate NDJSON → OpenAI SSE
         let model_owned = model.clone();
         let rid = request_id.clone();
-        let sk = sess_key.clone();
 
         let stream = async_stream::stream! {
-            let deadline = tokio::time::Instant::now() + timeout;
             loop {
                 let line_result = tokio::time::timeout_at(deadline, lines.next_line()).await;
                 match line_result {
@@ -681,10 +888,8 @@ pub async fn proxy_via_subprocess_openai(
                                 }
                             }
                             "result" => {
-                                // Cache session_id for multi-turn
-                                if let (Some(ref key), Some(sid)) = (&sk, parsed["session_id"].as_str()) {
-                                    put_session(key.clone(), sid.to_string());
-                                }
+                                // The state this session now holds, for the next turn (#471).
+                                remember_reply(&conversation, &parsed);
                                 // Usage info (optional — not all clients use it)
                                 let usage = &parsed["usage"];
                                 if !usage.is_null() {
@@ -733,14 +938,8 @@ pub async fn proxy_via_subprocess_openai(
         super::providers::build_sse_response(body)
     } else {
         // Non-streaming: collect full response
-        let result = collect_result(&mut lines, timeout, &mut child).await?;
-
-        // Cache session for multi-turn
-        if let (Some(key), Some(sid)) =
-            (sess_key, result.get("session_id").and_then(|v| v.as_str()))
-        {
-            put_session(key, sid.to_string());
-        }
+        let result = collect_result(&mut lines, deadline, &mut child).await?;
+        remember_reply(&conversation, &result);
 
         let content = result["result"].as_str().unwrap_or("");
         let usage = &result["usage"];
@@ -789,8 +988,8 @@ pub async fn proxy_via_subprocess_anthropic(
         model,
         stream,
 
-        sess_key,
-        timeout,
+        conversation,
+        deadline,
         _permit,
     } = prepare_proxy(config, req, req.get("system")).await?;
 
@@ -798,10 +997,8 @@ pub async fn proxy_via_subprocess_anthropic(
         // Streaming: translate NDJSON → Anthropic SSE
         // Claude CLI stream_events are already in Anthropic format — near pass-through
         let model_owned = model.to_string();
-        let sk = sess_key.clone();
 
         let stream = async_stream::stream! {
-            let deadline = tokio::time::Instant::now() + timeout;
 
             // Emit message_start event
             let msg_start = serde_json::json!({
@@ -868,9 +1065,7 @@ pub async fn proxy_via_subprocess_anthropic(
                                 }
                             }
                             "result" => {
-                                if let (Some(ref key), Some(sid)) = (&sk, parsed["session_id"].as_str()) {
-                                    put_session(key.clone(), sid.to_string());
-                                }
+                                remember_reply(&conversation, &parsed);
                                 break;
                             }
                             _ => {}
@@ -895,13 +1090,8 @@ pub async fn proxy_via_subprocess_anthropic(
         super::providers::build_sse_response(body)
     } else {
         // Non-streaming: collect and return Anthropic JSON
-        let result = collect_result(&mut lines, timeout, &mut child).await?;
-
-        if let (Some(key), Some(sid)) =
-            (sess_key, result.get("session_id").and_then(|v| v.as_str()))
-        {
-            put_session(key, sid.to_string());
-        }
+        let result = collect_result(&mut lines, deadline, &mut child).await?;
+        remember_reply(&conversation, &result);
 
         let content = result["result"].as_str().unwrap_or("");
         let usage = &result["usage"];
@@ -938,12 +1128,10 @@ pub async fn proxy_via_subprocess_anthropic(
 
 /// Collect the final `result` event from a non-streaming NDJSON response.
 async fn collect_result(
-    lines: &mut tokio::io::Lines<tokio::io::BufReader<tokio::process::ChildStdout>>,
-    timeout: std::time::Duration,
+    lines: &mut CliLines,
+    deadline: tokio::time::Instant,
     child: &mut tokio::process::Child,
 ) -> Result<serde_json::Value, ApiError> {
-    let deadline = tokio::time::Instant::now() + timeout;
-
     loop {
         let line_result = tokio::time::timeout_at(deadline, lines.next_line()).await;
         match line_result {
@@ -1062,9 +1250,11 @@ mod tests {
         assert!(args.contains(&"stream-json".to_string()));
         assert!(args.contains(&"--model".to_string()));
         assert!(args.contains(&"claude-sonnet-5".to_string()));
-        assert!(args.contains(&"--no-session-persistence".to_string()));
         assert!(args.contains(&"Hello".to_string()));
         assert!(!args.contains(&"--resume".to_string()));
+        assert!(!args.contains(&"--fork-session".to_string()));
+        // Saved, so the caller's next turn can resume it (#471).
+        assert!(!args.contains(&"--no-session-persistence".to_string()));
     }
 
     #[test]
@@ -1078,6 +1268,8 @@ mod tests {
         );
         assert!(args.contains(&"--resume".to_string()));
         assert!(args.contains(&"abc-123".to_string()));
+        // Forked: the stored state stays what it was, for a regenerate (#471).
+        assert!(args.contains(&"--fork-session".to_string()));
         assert!(args.contains(&"--system-prompt".to_string()));
         assert!(args.contains(&"Be helpful".to_string()));
         assert!(args.contains(&"json".to_string())); // non-streaming
@@ -1110,32 +1302,181 @@ mod tests {
         assert_eq!(system.unwrap(), "You are helpful");
     }
 
-    #[test]
-    fn test_session_key_stability() {
-        let msgs1 = vec![
-            serde_json::json!({"role": "user", "content": "Hi"}),
-            serde_json::json!({"role": "assistant", "content": "Hello"}),
-            serde_json::json!({"role": "user", "content": "New question"}),
-        ];
-        let msgs2 = vec![
-            serde_json::json!({"role": "user", "content": "Hi"}),
-            serde_json::json!({"role": "assistant", "content": "Hello"}),
-            serde_json::json!({"role": "user", "content": "Different question"}),
-        ];
-        let key1 = session_key("claude-sonnet-5", &msgs1);
-        let key2 = session_key("claude-sonnet-5", &msgs2);
-        // Same prefix (first 2 messages), different last message — same session key
-        assert_eq!(key1, key2);
-        // Both should be Some (multi-turn)
-        assert!(key1.is_some());
+    fn conversation(messages: &[serde_json::Value]) -> Conversation {
+        let (_, system) = extract_prompt(messages, None);
+        Conversation::of(
+            "claude-haiku-5-5",
+            std::path::Path::new("/tmp"),
+            system.as_deref(),
+            messages,
+        )
     }
 
+    /// #471: a reply is stored under the conversation INCLUDING it, and the
+    /// caller's next turn finds it by its messages before the new one —
+    /// whatever shape the client sends the reply back in.
     #[test]
-    fn test_session_key_single_turn_none() {
-        let msgs = vec![serde_json::json!({"role": "user", "content": "Hi"})];
-        let key = session_key("claude-sonnet-5", &msgs);
-        // Single-turn requests should NOT produce a session key
-        assert!(key.is_none());
+    fn a_reply_is_found_by_the_callers_next_turn() {
+        let first = conversation(&[serde_json::json!({"role": "user", "content": "Hi"})]);
+        let stored = first.with_reply("Hello").key();
+        // The reply back as text parts, padded, keys in another order.
+        let next = conversation(&[
+            serde_json::json!({"role": "user", "content": "Hi"}),
+            serde_json::json!({"content": [{"text": "Hello\n", "type": "text"}], "role": "assistant"}),
+            serde_json::json!({"role": "user", "content": "And now?"}),
+        ]);
+        let (before, last) = next.before_last().expect("the caller's own last message");
+        assert_eq!(before.key(), stored);
+        assert_eq!(last, "And now?");
+    }
+
+    /// #471: an edit or a regenerate of the last question resumes the state
+    /// before it — never one holding the question it replaces.
+    #[test]
+    fn an_edit_resumes_the_state_before_the_question_it_replaces() {
+        let history = [
+            serde_json::json!({"role": "user", "content": "Hi"}),
+            serde_json::json!({"role": "assistant", "content": "Hello"}),
+        ];
+        let asked = |q: &str| {
+            let mut messages = history.to_vec();
+            messages.push(serde_json::json!({"role": "user", "content": q}));
+            conversation(&messages)
+        };
+        let (one, two) = (asked("Question one"), asked("Question two"));
+        let (first, _) = one.before_last().unwrap();
+        let (edited, last) = two.before_last().unwrap();
+        assert_eq!(first.key(), edited.key());
+        assert_eq!(last, "Question two");
+        // The state after the first question was answered is another key.
+        let answered = asked("Question one").with_reply("An answer");
+        assert_ne!(answered.key(), edited.key());
+    }
+
+    /// A session is never shared across a model, a folder (the CLI finds a
+    /// session under its folder) or a system text.
+    #[test]
+    fn a_session_is_never_shared_across_model_folder_or_system() {
+        let messages = [serde_json::json!({"role": "user", "content": "Hi"})];
+        let folder = std::path::Path::new("/tmp");
+        let base = Conversation::of("claude-haiku-5-5", folder, None, &messages);
+        let others = [
+            Conversation::of("claude-sonnet-5-5", folder, None, &messages),
+            Conversation::of(
+                "claude-haiku-5-5",
+                std::path::Path::new("/srv"),
+                None,
+                &messages,
+            ),
+            Conversation::of("claude-haiku-5-5", folder, Some("Be brief"), &messages),
+            Conversation::of("claude-haiku-5-5", folder, Some(""), &messages),
+        ];
+        for other in &others {
+            assert_ne!(base.key(), other.key(), "{other:?}");
+        }
+    }
+
+    /// Only the caller's own last message is ever sent alone: an assistant
+    /// turn to continue, a system text, or a first message has no session
+    /// before it.
+    #[test]
+    fn only_the_callers_own_last_message_is_sent_alone() {
+        let lone = conversation(&[serde_json::json!({"role": "user", "content": "Hi"})]);
+        assert!(lone.before_last().is_none());
+        let continued = conversation(&[
+            serde_json::json!({"role": "user", "content": "Hi"}),
+            serde_json::json!({"role": "assistant", "content": "Hel"}),
+        ]);
+        assert!(continued.before_last().is_none());
+        let system_last = conversation(&[
+            serde_json::json!({"role": "user", "content": "Hi"}),
+            serde_json::json!({"role": "system", "content": "Be brief"}),
+        ]);
+        assert!(system_last.before_last().is_none());
+        // A message with no text is skipped, as `extract_prompt` skips it.
+        let tool_result = conversation(&[
+            serde_json::json!({"role": "user", "content": "Hi"}),
+            serde_json::json!({"role": "assistant", "content": "Hello"}),
+            serde_json::json!({"role": "user", "content": ""}),
+        ]);
+        assert!(tool_result.before_last().is_none());
+    }
+
+    /// A failed call stores nothing; a reply is stored for the next turn.
+    #[test]
+    fn a_failed_call_is_never_remembered() {
+        let asked = conversation(&[serde_json::json!({
+            "role": "user", "content": "a_failed_call_is_never_remembered"
+        })]);
+        let failed = serde_json::json!({
+            "type": "result", "is_error": true, "result": "boom", "session_id": "s-failed"
+        });
+        remember_reply(&asked, &failed);
+        assert_eq!(get_session(&asked.with_reply("boom").key()), None);
+        let answered = serde_json::json!({
+            "type": "result", "is_error": false, "result": "Fine", "session_id": "s-answered"
+        });
+        remember_reply(&asked, &answered);
+        assert_eq!(
+            get_session(&asked.with_reply("Fine").key()),
+            Some("s-answered".to_string())
+        );
+    }
+
+    #[cfg(unix)]
+    async fn lines_of(output: &str) -> (tokio::process::Child, CliLines) {
+        let mut child = tokio::process::Command::new("sh")
+            .arg("-c")
+            .arg("printf '%s' \"$0\"")
+            .arg(output)
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .expect("sh");
+        let stdout = child.stdout.take().unwrap();
+        (
+            child,
+            CliLines::new(tokio::io::BufReader::new(stdout).lines()),
+        )
+    }
+
+    /// #471: a refused resume is seen before the caller reads a line —
+    /// stream-json's error result ahead of any turn, or json's silence — and
+    /// every line read ahead still reaches the caller, in order.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_refused_resume_is_seen_before_the_caller_reads() {
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(20);
+        let refused = "{\"type\":\"system\",\"subtype\":\"init\"}\n\
+                       {\"type\":\"result\",\"is_error\":true,\"num_turns\":0}\n";
+        let (mut child, mut lines) = lines_of(refused).await;
+        assert!(lines.resume_refused(deadline).await);
+        let _ = child.wait().await;
+
+        let (mut child, mut lines) = lines_of("").await;
+        assert!(
+            lines.resume_refused(deadline).await,
+            "json's refusal: no output"
+        );
+        let _ = child.wait().await;
+
+        // A turn that ran and then failed is the caller's error, not a refusal.
+        let ran = "{\"type\":\"result\",\"is_error\":true,\"num_turns\":1}\n";
+        let (mut child, mut lines) = lines_of(ran).await;
+        assert!(!lines.resume_refused(deadline).await);
+        let _ = child.wait().await;
+
+        let answering = "{\"type\":\"system\",\"subtype\":\"init\"}\n\
+                         {\"type\":\"stream_event\",\"event\":{}}\n\
+                         {\"type\":\"result\",\"is_error\":false}\n";
+        let (mut child, mut lines) = lines_of(answering).await;
+        assert!(!lines.resume_refused(deadline).await);
+        let mut seen = Vec::new();
+        while let Some(line) = lines.next_line().await.unwrap() {
+            seen.push(line);
+        }
+        assert_eq!(seen.len(), 3);
+        assert!(seen[0].contains("init") && seen[1].contains("stream_event"));
+        let _ = child.wait().await;
     }
 
     #[test]
