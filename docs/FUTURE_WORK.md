@@ -1976,6 +1976,33 @@ became usable (error under 0.5) on a sample that moved it less than the threshol
 routed around — until its first window filled (~16 min); now a change of usability is news to the start-up filter
 and to `capability_news` (`a_node_starting_up_is_published_usable_as_soon_as_it_is`: usable after 4 samples,
 published usable after 4, never within 31 without the fix).
+**Re-read 2026-11-17 (2l)** on v0.3.296 (the live node, 7.4 h up, 7 peers all on .296, idle but for parts served):
+upload 1.5 KB/s besides parts and gossip, **gossip 4.1 KB/s** — up from 2.1 on 10-31. `swarm/models` is 3.3 KB/s of
+it: capability updates arrive at 96 an hour at 16.8 KB each (plain JSON), manifests 28 an hour at 53 KB, parts lists
+44 an hour at 16.5 KB, and the mesh sends each unique message ~3 times. `swarm/regions` published 840 times in 7.4 h
+(every 30 s broadcast tick re-sends demand, wishlist and pool availability unchanged, stamped anew) — only 122 B/s, and
+NOT changed: a receiver blends each demand message into its figure (0.8 old + 0.2 new), so the cadence is part of what
+the demand means; slow it only with the blend reworked. `HfSourceGossip` went direct 6,612 times (each digest carries
+one claim per held model) — 78 B/s, left. The live node at `-v` (19:24Z →) named the republishes: in minutes 12-56, 10 capability publishes (~14 an hour, the same as the fleet's average received): 4 `coord`, 4
+`heartbeat`, 2 `relay_reservations` (one relay-capable peer's io_error close and re-dial 5 s apart — 12 closes in the
+previous 7.6 h across all peers, rare). Each `coord` change brings a heartbeat 5 minutes later (`QuietRepeat` starts
+over at 300 s), so a heartbeat never backs off past 600 s and a change costs two whole capabilities. The coordinate
+moves were 5.4-16.8 ms against thresholds of 5.0-10.7 ms: 0.3 of the nearest neighbour's distance, and the nearest is
+the LAN node at 7-14 ms, so the 5 ms floor (`netcoord::UPDATE_MIN_MOVE_MS`) decides — noise on 135-300 ms links
+crosses it about every 10 minutes. As designed (a LAN neighbour needs that precision to be ranked), not a defect;
+the lever is the size of what each publish carries, below.
+**The parts list is ~3/4 of every capability** (2j, measured): 250 parts here ≈ 12.8 KB of JSON, 513-535 on two
+peers ≈ 28 KB, re-sent whole on every republish for any reason, beside the `ShardAnnounce` that already carries it.
+**Plan (2j), across two releases, no feature bit needed**: release N moves every reader of a peer's
+`cap.hosted_shards` to the parts its `ShardAnnounce` recorded — 18 sites in 10 files (`api/admin.rs` ×3,
+`dispatch/mod.rs` ×3 (two log fields, the `MAX_HOSTED_SHARDS_IN_CAP` bound), `health/monitor.rs` ×3, `swarm_use.rs` ×2
+(already the larger of the two counts), `resolver.rs` ×2, `unused.rs`, `state/mod.rs`, `openai/mod.rs`, `identity.rs`,
+`admin_models/listing.rs`); release N+1 sends it empty. A computer two releases behind is disconnected
+(`cut_off_for`), so none still reading it is ever sent the empty list. Prior art: Cassandra's gossiper versions each
+`ApplicationState` apart (generation, then a version per state) and a round sends only the states newer than the
+peer's digest — Scuttlebutt reconciliation (van Renesse et al., "Efficient Reconciliation and Flow Control for
+Anti-Entropy Protocols", 2008); Quickwit's chitchat is the same per key. Ours already has the split for parts
+(`ShardAnnounce` + digests); the capability should stop carrying them.
 
 #### #169 — Connection churn on multi-interface hosts: only the LAN dial is deterministic
 `P3` · network · **PARTIAL** — 2026-07-25 · history: archive § "Connection churn on multi-interface hosts — deterministic dialer partial", gotcha #353
