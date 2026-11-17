@@ -2189,6 +2189,12 @@ sender into sealed `RelayedTensor` frames (a new feature bit, checked at the sen
 enough to hole-punch); Petals moved hosting to directly reachable servers. Nobody ships bulk data through a relay;
 a better hole-punch rate (#466) outranks this.
 
+**Decided 2026-11-17: left until a forward is seen dropped.** Measured on the live node's info-level log, 10-31 →
+11-17 (306 MB): no `relay tensor seal failed` line — the warning this drop logs — so it has not happened here
+once. Each app-relayed frame is counted by kind (`RelayedTensor` in `network_traffic.direct_by_kind`,
+`/api/admin/stats` and the diagnostics report), so whether the app relay carries tensors at all is read there, not
+guessed; a peer on a circuit (the usual relayed path since #464) never reaches the cap.
+
 `crypto/relay_seal.rs` refuses above `MAX_RELAY_TENSOR_BYTES` (32 MiB). Only a pure
 application-relay path with an uncompressed, very long prompt reaches it; no case has been
 measured. Reuse `pipeline_stream::chunk_layer_forward` and the `pending_activation_chunks`
