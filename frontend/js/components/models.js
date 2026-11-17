@@ -295,7 +295,7 @@
       if (mobile) mobile.value = modelId;
       try { localStorage.setItem(App.CURRENT_MODEL_KEY, modelId); } catch (e) {}
 
-      var item = S._modelDropdownData.find(function(m) { return m.id === modelId; });
+      var item = U.dropdownModel(modelId);
       updateModelDropdownLabel(item ? item.name : modelId);
 
       var items = document.querySelectorAll('#model-dropdown-list .model-dropdown-item');

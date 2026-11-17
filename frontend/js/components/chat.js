@@ -242,12 +242,12 @@
         }
 
         // Model badge
-        var modelItem = s.model ? S._modelDropdownData.find(function(m) { return m.id === s.model; }) : null;
+        var modelItem = U.dropdownModel(s.model);
         var badgeEl = div.querySelector('.session-model-badge');
         if (s.model) {
           var source = U.getModelSource(s.model);
           var sourceLabel = source === 'local' ? I18n.t('chat.source_local') : source === 'subscription' ? I18n.t('dashboard.chip_subscription') : source === 'cloud' ? I18n.t('chat.source_cloud') : I18n.t('chat.source_network');
-          var _sibIconKey = (modelItem && modelItem.group && _ICON_MAP[modelItem.group]) ? modelItem.group : modelIconKey(s.model);
+          var _sibIconKey = modelIconKeyFor(s.model, modelItem && modelItem.group);
           var sibIconHtml = _sibIconKey ? providerIconHtml(_sibIconKey, 11) : '';
           badgeEl.removeAttribute('hidden');
           badgeEl.className = 'session-model-badge session-source-' + source;
@@ -331,9 +331,9 @@
       var headerSource = U.getModelSource(s.model || '');
       var badgeClass = 'chat-session-model source-' + headerSource + (available ? '' : ' unavailable');
       var badgeTitle = available ? s.model : I18n.t('chat.model_unavailable');
-      var headerModelItem = s.model ? S._modelDropdownData.find(function(m) { return m.id === s.model; }) : null;
+      var headerModelItem = U.dropdownModel(s.model);
       var isEncrypted = headerModelItem && headerModelItem.encrypted;
-      var _hdrIconKey = (headerModelItem && headerModelItem.group && _ICON_MAP[headerModelItem.group]) ? headerModelItem.group : modelIconKey(s.model || '');
+      var _hdrIconKey = modelIconKeyFor(s.model, headerModelItem && headerModelItem.group);
       var hdrIconHtml = _hdrIconKey ? providerIconHtml(_hdrIconKey, 12) : '';
       var countLabel = sessionCountLabel(s);
       var countClass = 'chat-session-count' + (s.messages.length === 0 ? ' is-new' : '');

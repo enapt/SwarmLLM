@@ -832,7 +832,9 @@
       // WS tick doesn't rewrite the DOM when the (static) version is unchanged.
       if (data.version) App.dashboard._setHeaderVersion(data.version);
       if (data.uptime_seconds !== undefined) {
-        document.getElementById('uptime').textContent = U.formatUptime(data.uptime_seconds);
+        // The whole phrase is translated — "Up" sat in the markup in English.
+        document.getElementById('uptime').textContent =
+          I18n.t('dashboard.peer_uptime', { time: U.formatUptime(data.uptime_seconds) });
       }
 
       // Helper: track stat history & render sparkline + trend arrow

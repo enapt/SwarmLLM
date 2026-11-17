@@ -95,8 +95,6 @@ var PROVIDER_SIGNUP_URLS = {
   moonshot:   'https://platform.moonshot.ai/console/api-keys',
 };
 
-// Ordered list of all supported cloud provider keys.
-
 // Prebuilt <img> HTML strings for each provider (16px, avoids repeated DOM creation).
 var _providerIconCache = {};
 
@@ -146,6 +144,14 @@ function modelIconKey(modelId) {
   if (m.startsWith('yi')) return 'yi';
   if (m.startsWith('vicuna') || m.startsWith('wizardlm')) return 'llama';
   return null;
+}
+
+// The icon key for a model: its dropdown `group` where that group has an icon
+// (a cloud provider, the subscription), else the family its id names. The ONE
+// rule — it was written out at four sites (session list, chat header, avatar,
+// empty state), each reading `_ICON_MAP` itself.
+function modelIconKeyFor(modelId, group) {
+  return (group && _ICON_MAP[group]) ? group : modelIconKey(modelId || '');
 }
 
 // Save a provider API key, then verify it with a 1-token request.
@@ -198,6 +204,7 @@ async function saveAndVerifyProviderKey(provider, key) {
     if (friendly.length > MAX_ERR) friendly = friendly.substring(0, MAX_ERR) + '…';
     return { ok: false, stage: 'test', message: friendly };
   } catch (e) {
-    return { ok: false, stage: 'network', message: e.message || '' };
+    // In the reader's language — the browser's own `e.message` is English.
+    return { ok: false, stage: 'network', message: App.utils.failureText(e) };
   }
 }

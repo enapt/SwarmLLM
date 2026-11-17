@@ -152,9 +152,16 @@
 
   function capitalize(s) { return s.charAt(0).toUpperCase() + s.slice(1); }
 
+  // The model picker's entry for `modelId` (its group, name, encrypted flag),
+  // or null — the one lookup; it was written out at seven sites.
+  function dropdownModel(modelId) {
+    if (!modelId) return null;
+    return S._modelDropdownData.find(function(m) { return m.id === modelId; }) || null;
+  }
+
   function getModelSource(modelId) {
     if (!modelId) return 'local';
-    var match = S._modelDropdownData.find(function(m) { return m.id === modelId; });
+    var match = dropdownModel(modelId);
     if (!match) return 'local';
     if (match.group === 'local') return 'local';
     if (match.group === 'swarm') return 'swarm';
@@ -248,10 +255,10 @@
       var modelId = opts.model || (_sess ? _sess.model : '') || S.currentModel || '';
       var source = getModelSource(modelId);
       div.classList.add('source-' + source);
-      var _avatarProvider = (modelId && S._modelDropdownData.find(function(m) { return m.id === modelId; }) || {}).group || null;
+      var _avatarProvider = (dropdownModel(modelId) || {}).group || null;
       // Claude Code sessions always use the CC icon
       if (_sess && _sess.claude_code) _avatarProvider = 'claude_subscription';
-      var _iconKey = (_avatarProvider && _ICON_MAP[_avatarProvider]) ? _avatarProvider : modelIconKey(modelId);
+      var _iconKey = modelIconKeyFor(modelId, _avatarProvider);
       if (_iconKey) div.classList.add('provider-' + _iconKey.replace(/_/g, '-'));
       var _iconUrl = _iconKey ? providerIconUrl(_iconKey) : null;
       if (_iconUrl) {
@@ -359,13 +366,13 @@
     var modelData = null;
     var item = null;
     if (S.currentModel) {
-      item = S._modelDropdownData.find(function(m) { return m.id === S.currentModel; });
+      item = dropdownModel(S.currentModel);
       modelName = item ? item.name : S.currentModel;
       modelData = (App.data.cache.models || []).find(function(m) { return m.id === S.currentModel; });
     }
 
     var title = modelName ? I18n.t('chat.title_with_model', { model: escapeHtml(modelName) }) : I18n.t('chat.empty_title');
-    var _emIconKey = S.currentModel ? ((item && item.group && _ICON_MAP[item.group]) ? item.group : modelIconKey(S.currentModel)) : null;
+    var _emIconKey = S.currentModel ? modelIconKeyFor(S.currentModel, item && item.group) : null;
     var _emIconUrl = _emIconKey ? providerIconUrl(_emIconKey) : null;
     var icon = _emIconUrl
       ? '<img src="' + _emIconUrl + '" width="48" height="48" alt="" style="opacity:0.55;border-radius:10px;">'
@@ -1443,6 +1450,7 @@
     formatEta: formatEta,
     timeAgo: timeAgo,
     getModelSource: getModelSource,
+    dropdownModel: dropdownModel,
     formatModelDisplayName: formatModelDisplayName,
     applyMessageGrouping: applyMessageGrouping,
     appendMessageToDOM: appendMessageToDOM,

@@ -18,7 +18,7 @@
     // Check if a model ID is a Claude subscription model
     isClaudeCodeModel: function(modelId) {
       if (!modelId) return false;
-      var match = S._modelDropdownData.find(function(m) { return m.id === modelId; });
+      var match = U.dropdownModel(modelId);
       return match && match.group === 'claude_subscription';
     },
 

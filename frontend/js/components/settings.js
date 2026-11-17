@@ -967,13 +967,12 @@
     },
 
     saveProviders: async function() {
-      var providerNames = ['anthropic', 'openai', 'deepseek', 'mistral', 'groq', 'nvidia_nim', 'cerebras', 'sambanova', 'fireworks', 'together', 'deepinfra', 'moonshot'];
+      // Every key box on the page, by id — a list typed here (as it was) lost
+      // the key of any provider card added to the markup but not to the list.
+      var inputs = App.settings._providerKeyInputs();
       var keys = {};
-      providerNames.forEach(function(name) {
-        var input = document.getElementById('provider-key-' + name);
-        if (input && input.value) {
-          keys[name + '_key'] = input.value;
-        }
+      inputs.forEach(function(input) {
+        if (input.value) keys[input.id.slice('provider-key-'.length) + '_key'] = input.value;
       });
       if (Object.keys(keys).length === 0) return;
       // `authFetch` resolves for a 401 or a 500 exactly as it does for a 200 —
@@ -990,10 +989,7 @@
           body: JSON.stringify(keys),
         },
         function() {
-          providerNames.forEach(function(name) {
-            var input = document.getElementById('provider-key-' + name);
-            if (input) input.value = '';
-          });
+          inputs.forEach(function(input) { input.value = ''; });
           App.settings.loadProviders();
           App.models.load();
           App.networkStatus.load();

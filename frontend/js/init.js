@@ -19,10 +19,6 @@
     ['hi','\u0939\u093f\u0928\u094d\u0926\u0940','IN'],['vi','Ti\u1ebfng Vi\u1ec7t','VN'],['id','Bahasa Indonesia','ID'],
     ['uk','\u0423\u043a\u0440\u0430\u0457\u043d\u0441\u044c\u043a\u0430','UA'],['cs','\u010ce\u0161tina','CZ']
   ];
-  function langFlagCode(lang) {
-    var entry = LANGS.find(function(l) { return l[0] === lang; });
-    return entry ? entry[2].toLowerCase() : null;
-  }
 
   // ========================================================================
   // Bind all UI event listeners
@@ -885,7 +881,7 @@
 
   function init() {
     if (typeof I18n !== 'undefined') {
-      I18n.init(['en','es','fr','de','pt','it','nl','ru','zh','ja','ko','ar','tr','pl','sv','th','hi','vi','id','uk','cs'], initAfterI18n);
+      I18n.init(LANGS.map(function(l) { return l[0]; }), initAfterI18n);
       return;
     }
     initAfterI18n();
