@@ -154,8 +154,9 @@ enum Commands {
     /// Starting and finishing here keeps your typed text and the reply's words
     /// on this machine; other computers still see the numbers in between, which
     /// can reveal much of them. It requires holding the first and last part of
-    /// the model. This downloads exactly those; the setting then turns on by
-    /// itself. Needs a running daemon.
+    /// the model. This downloads exactly those, and switches the setting on for
+    /// the model where both are already here; otherwise run it again once they
+    /// arrive (it says so). Needs a running daemon.
     Privacy {
         /// Model id to make private, e.g. llama-3.2-3b-instruct-q4-k-m.
         model: String,

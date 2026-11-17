@@ -1915,7 +1915,7 @@ long-running Tokio task, receiving commands via `mpsc` from the API server.
 ```
 ~/.local/share/swarmllm/
 ├── config.toml          # User configuration
-├── identity.key         # Ed25519 keypair (optionally encrypted)
+├── identity.key         # Ed25519 secret key: 32 raw bytes, owner-only (0600)
 ├── db.redb              # redb database (migrated from sled db/ directory)
 ├── dashboard_open       # present while a dashboard is connected; the next start waits for it to reconnect (#267)
 └── models/
@@ -1939,7 +1939,10 @@ validates the trees in `CRITICAL_TREES` at startup and only reports.
 
 | Tree | Holds |
 |---|---|
-| config | the persisted config and the API key (`"api_key"`, 32-byte hex Bearer token) |
+| config | the API key (`"api_key"`, 32-byte hex Bearer token) and the `--shards` range remembered across restarts (`"shard_range"`) — the configuration itself is `config.toml`, not here |
+| model_auto_manage_policies | the owner's auto-manage policy per model id (`api/admin_models/lifecycle.rs`) |
+| encrypted_pipeline_models | the owner's "Start and finish on this computer" choice per model id (`bool`; absent = the default) |
+| metrics | the hourly performance buckets the dashboard charts, kept across restarts (`"perf_hourly"`, `daemon/state/perf_history.rs`) |
 | credits · credit_txns · credit_log · escrow | balance, signed transactions, the append-only log, escrow entries (credits are dormant) |
 | trust_scores · model_trust | per-node trust; per-model download trust |
 | peer_cache · peer_reached | known peer addresses (presence keys); when each cached peer was last reached (unix seconds, #472 — a restart keeps a long-gone identity out of Kademlia, and one unreached 14 days leaves the cache) |
@@ -3065,7 +3068,7 @@ User guide: `docs/book/src/api/claude-subscription.md` (configuration, setup, re
 - `GET/PUT /api/admin/models/{id}/keep-on-this-computer` — Per-model "Keep on this computer": `{enabled}` in; `keep_on_this_computer` + `whole_model_here` out (#251)
 - `POST   /api/admin/rescan-shards` — Hot-reload shard files from disk without restart
 - `GET/PUT /api/admin/pools/{id}/rates` — Get/set credit rate configuration for a pool
-- `GET    /metrics` — Prometheus/OpenMetrics endpoint (no auth)
+- `GET    /metrics` — Prometheus/OpenMetrics endpoint: no key from this machine, the Bearer key from anywhere else — and from this machine too when `api.metrics_auth_required = true` (`api/middleware.rs`)
 - `GET    /health/ready` — Readiness probe with subsystem status (no auth)
 
 ### Static

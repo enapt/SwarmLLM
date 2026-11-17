@@ -19,11 +19,14 @@ SwarmLLM runs AI models on your own computer and, when a model is too big for on
 > **Start and finish on this computer** (the button above the chat box) keeps
 > the first and last steps on your computer, so no other computer is handed
 > your words as text.
-> It switches itself on for any model where you hold the first and last parts.
+> It is off until you switch it on, and it needs the model's first and last
+> parts on your disk: **Get the missing parts** on the model's card in the
+> Dashboard (or `swarmllm privacy <model>`) fetches them. It switches on straight
+> away when you already hold both; otherwise switch it on once they arrive.
 > It is an extra layer, **not** a guarantee: the helpers still compute on
 > numbers that published attacks turn back into most of your text. It also
-> makes replies slower (a few seconds extra on a short reply) and needs those
-> two parts on your disk. Details: [Security & Encryption](./architecture/security.md).
+> makes replies slower (a few seconds extra on a short reply). Details:
+> [Security & Encryption](./architecture/security.md).
 
 This guide walks you through installation, downloading your first model, and chatting.
 

@@ -28,11 +28,13 @@ above. Which parts a node holds is read from the `models/` directory, not stored
 
 | Tree | Key | Value |
 |---|---|---|
-| config | `"config"` | Config |
 | config | `"api_key"` | Bearer token string |
+| config | `"shard_range"` | `(start, end)` — the `--shards` choice, remembered across restarts (the configuration itself is `config.toml`) |
 | credits | `"balance"` | CreditBalance |
 | credit_txns | `{uuid}` | CreditTransaction |
+| credit_log | `"seq"`, `e{seq}` | the append-only credit log (credits are dormant) |
 | peer_cache | `{multiaddr}` | () presence key |
+| peer_reached | — | when each cached peer was last reached (unix seconds); one unreached for 14 days leaves the cache |
 | model_meta | `{model_id}` | ModelManifest |
 | kv_sessions | `{session_id}` | KV-cache metadata |
 | nicknames | `{node_id_hex}` | NicknameRecord |
@@ -52,6 +54,16 @@ above. Which parts a node holds is read from the `models/` directory, not stored
 | responses | `{response_id}` | stored `/v1/responses` records (30-day TTL) |
 | network | — | whether a remote computer has ever dialled this node in, kept across restarts |
 | update | — | update-check bookkeeping |
+| model_auto_manage_policies | `{model_id}` | the owner's auto-manage policy for that model |
+| encrypted_pipeline_models | `{model_id}` | bool — the owner's "Start and finish on this computer" choice (absent = the default) |
+| kept_on_this_computer | — | the models the owner keeps on this computer |
+| manifests_heard | — | manifest versions the swarm was told, so a restart does not announce them again |
+| lifetime | — | what this node has served for others since it first started |
+| peer_exchange | `"tabs"` | per computer, the requests each ran for the other (the peer list's give and take) |
+| hf_popular | `"snapshot"` | the last reading of what people run outside the swarm |
+| model_use | `{model_id}` | when this node first held a part and when it last served a request |
+| measured_here | — | figures this node measured about itself: model-load rate, replica targets, recent reply lengths and split rounds |
+| metrics | `"perf_hourly"` | hourly performance buckets the dashboard charts |
 
 ## Model Acquisition Pipeline
 
