@@ -433,10 +433,10 @@ pub(crate) async fn fetch_provider_models_inner(
     // Anthropic has no /models endpoint — use static list
     if config.anthropic.is_some() {
         for (id, name) in [
-            ("claude-opus-4-8", "Claude Opus 4.8"),
-            ("claude-sonnet-5", "Claude Sonnet 5"),
-            ("claude-haiku-4-5-20251001", "Claude Haiku 4.5"),
-            ("claude-fable-5", "Claude Fable 5"),
+            ("claude-opus-5-5", "Claude Opus 5.5"),
+            ("claude-sonnet-5-5", "Claude Sonnet 5.5"),
+            ("claude-haiku-5-5", "Claude Haiku 5.5"),
+            ("claude-fable-5-2", "Claude Fable 5.2"),
         ] {
             models.push(serde_json::json!({
                 "id": id, "name": name, "provider": "anthropic"
@@ -484,10 +484,10 @@ pub(crate) async fn fetch_provider_models_inner(
             // format it (`U.contextLength`), and a "1M" string read as no
             // context at all there.
             for (id, name, ctx) in [
-                ("claude-opus-4-8", "Claude Opus 4.8", 1_000_000u64),
-                ("claude-sonnet-5", "Claude Sonnet 5", 1_000_000),
-                ("claude-haiku-4-5-20251001", "Claude Haiku 4.5", 200_000),
-                ("claude-fable-5", "Claude Fable 5", 1_000_000),
+                ("claude-opus-5-5", "Claude Opus 5.5", 1_000_000u64),
+                ("claude-sonnet-5-5", "Claude Sonnet 5.5", 1_000_000),
+                ("claude-haiku-5-5", "Claude Haiku 5.5", 1_000_000),
+                ("claude-fable-5-2", "Claude Fable 5.2", 1_000_000),
             ] {
                 // Don't duplicate if already present from Anthropic API key
                 if !models
@@ -657,11 +657,7 @@ async fn probe_provider_health(state: &AppState) -> Vec<serde_json::Value> {
 
     let candidates: &[(&str, Option<&crate::config::ProviderEntry>, &str)] = &[
         ("openai", config.openai.as_ref(), "gpt-4o-mini"),
-        (
-            "anthropic",
-            config.anthropic.as_ref(),
-            "claude-haiku-4-5-20251001",
-        ),
+        ("anthropic", config.anthropic.as_ref(), "claude-haiku-5-5"),
         ("deepseek", config.deepseek.as_ref(), "deepseek-v4-flash"),
         ("mistral", config.mistral.as_ref(), "mistral-small-latest"),
         ("groq", config.groq.as_ref(), "llama-3.1-8b-instant"),

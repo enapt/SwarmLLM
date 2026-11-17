@@ -1182,8 +1182,8 @@ mod tests {
 
         // Bare family aliases expand — Claude Code 2.1 sends `sonnet` by
         // default, and the cloud paths used to forward it verbatim.
-        assert_eq!(route_model("sonnet"), ("claude-sonnet-5", true));
-        assert_eq!(route_model("anthropic:opus"), ("claude-opus-4-8", true));
+        assert_eq!(route_model("sonnet"), ("claude-sonnet-5-5", true));
+        assert_eq!(route_model("anthropic:opus"), ("claude-opus-5-5", true));
     }
 }
 

@@ -571,7 +571,7 @@ async fn prepare_proxy(
 ) -> Result<ProxySetup, ApiError> {
     let permit = acquire_permit(config)?;
 
-    let model = req["model"].as_str().unwrap_or("claude-sonnet-5");
+    let model = req["model"].as_str().unwrap_or("claude-sonnet-5-5");
     let model = config.default_model.as_deref().unwrap_or(model);
     validate_model_name(model)?;
     let stream = req["stream"].as_bool().unwrap_or(false);

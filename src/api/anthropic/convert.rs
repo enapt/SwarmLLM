@@ -288,19 +288,19 @@ pub(super) fn map_finish_reason_with_match(
 /// full IDs.
 ///
 /// Claude Code + the official SDK often send the full model ID (e.g.
-/// `claude-opus-4-8`), but users / `.claude/settings.json` configs
+/// `claude-opus-5-5`), but users / `.claude/settings.json` configs
 /// sometimes use the shorthand — and Claude Code 2.1's default is now the
-/// bare `sonnet` alias (Sonnet 5). Without alias expansion the router
+/// bare `sonnet` alias (the current Sonnet). Without alias expansion the router
 /// at mod.rs:241 (`.starts_with("claude")`) drops the bare alias to the
 /// non-Claude path, which then fails to find a provider. Keep the bump point
 /// here — if/when Anthropic ships new aliases we only edit this table.
 pub(super) fn resolve_model(model: &str) -> &str {
     let stripped = crate::api::strip_provider_prefix(model);
     match stripped {
-        "opus" => "claude-opus-4-8",
-        "sonnet" => "claude-sonnet-5",
-        "haiku" => "claude-haiku-4-5",
-        "fable" => "claude-fable-5",
+        "opus" => "claude-opus-5-5",
+        "sonnet" => "claude-sonnet-5-5",
+        "haiku" => "claude-haiku-5-5",
+        "fable" => "claude-fable-5-2",
         _ => stripped,
     }
 }

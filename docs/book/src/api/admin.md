@@ -348,7 +348,7 @@ Status values: `up`, `rate_limited`, `overloaded`, `timeout`, `unreachable`, `er
 ### POST /api/admin/provider-model-status
 Probe availability and latency for a list of specific cloud model IDs (up to 20 per request). Checks each model with a light `GET {provider}/models/{id}` — no tokens are generated and no inference quota is used — with a 5 s timeout. Anthropic models are skipped (no cloud proxy probing). Needs the API key, like every admin endpoint.
 
-Request body: `{ "models": ["gpt-5.4", "claude-sonnet-5", "deepseek-v4-flash"] }`
+Request body: `{ "models": ["gpt-5.4", "claude-sonnet-5-5", "deepseek-v4-flash"] }`
 
 Response:
 ```json
