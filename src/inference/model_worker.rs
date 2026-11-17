@@ -12491,16 +12491,18 @@ async fn handle_daemon_msg(
         }
         DaemonMsg::ExportPrefixSnapshot {
             request_id,
-            model_id,
+            // This process serves ONE model: the daemon sends the export to
+            // that model's worker (`ModelProcessPool::fetch_local_snapshot`
+            // → `get_existing`), so the id narrows nothing here.
+            model_id: _,
             block_hash,
         } => {
-            // Item 8 Phase 2b: serving-side handler. The daemon received an
-            // inbound PrefixKvFetch from a peer; look up the hash in our
+            // Serving side of a peer's `PrefixKvFetch`: look up the hash in our
             // local PrefixCache (the `model_key` depends on the model's
             // layer range, which we can't know without loading — but the
             // cache is keyed by the kv_model_key the SplitModel already
             // uses, so we iterate every loaded model's key to find it).
-            let payload = export_snapshot_for_hash(models, prefix_cache, &model_id, &block_hash);
+            let payload = export_snapshot_for_hash(models, prefix_cache, &block_hash);
             let present = payload.is_some();
             let payload_slice: &[u8] = payload.as_deref().unwrap_or(&[]);
             let _ = send_worker(
@@ -12535,16 +12537,14 @@ async fn handle_daemon_msg(
     false
 }
 
-/// Item 8 Phase 2b: find a cached prefix snapshot matching `block_hash`
-/// across every loaded model's `kv_model_key`. `kv_model_key` is layer-range
-/// scoped (format `{start}-{end}-{block_count}`), NOT model-id scoped, so
-/// we try every loaded key and return the first hit. The incoming
-/// `model_id` arrives for future trust / rate-limiting but doesn't narrow
-/// the cache bucket today.
+/// Find a cached prefix snapshot matching `block_hash` across every loaded
+/// range's `kv_model_key`. `kv_model_key` is layer-range scoped (format
+/// `{start}-{end}-{block_count}`), so we try every loaded key and return the
+/// first hit — every range loaded in this process is of the one model the
+/// daemon routed the export to.
 fn export_snapshot_for_hash(
     models: &HashMap<(usize, usize, usize, usize), SplitModel>,
     prefix_cache: &Arc<PrefixCache>,
-    _model_id: &crate::types::ModelId,
     block_hash: &[u8; 32],
 ) -> Option<Vec<u8>> {
     for model in models.values() {

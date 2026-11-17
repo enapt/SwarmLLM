@@ -37,8 +37,8 @@
 //!
 //! # Edge cases
 //!
-//! - Match position must be strictly less than `context.len() - n` (so the
-//!   match isn't the search needle itself).
+//! - A match ending at the very end of `searchable` is skipped (its
+//!   continuation would be the needle itself).
 //! - If the match is at the very tail (its trailing tokens are partial
 //!   inside the searchable region), the candidate is truncated.
 //! - Empty context returns empty draft.

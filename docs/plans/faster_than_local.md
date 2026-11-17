@@ -1269,7 +1269,7 @@ Since #357 (b) and the tiled tree kernels, the 14B half and half to Australia (1
 computer: this one is the slower side, ~40 ms a forward against the far end's ~30, and a reply's rate is its tokens a
 forward over that (0.80 / 41 ms ≈ 19.5 prose, 1.76 / 40 ms ≈ 44 code — measured 19.4 and 43.8). Every shape knob was
 measured against the default on the real link and lost (4 or 16 rows a level, 2 or 4 levels; `docs/invariants/
-scheduling.md` § "Rows and levels, a third time"), and both of this computer's steps already run at llama.cpp's speed
+scheduling.md` § "A tree that flows" (*Rows and levels, a third time*)), and both of this computer's steps already run at llama.cpp's speed
 on this card (its 26 layers ~1.0 ms a layer against ~0.93 scaled; a drafter level ~4.5 ms against ~4.1). So what is
 left is not a kernel and not a shape:
 

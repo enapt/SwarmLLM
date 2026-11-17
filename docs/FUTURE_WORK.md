@@ -2806,7 +2806,7 @@ Not checked: vLLM, SGLang, TensorRT-LLM, SpecInfer, PipeInfer's ablations, Petal
 **Also** (moved from #369 (b) via #388, passive): a balance term for a cards-only chain whose reply
 flows, once a placement that saturates one side is seen on a real chain — today `plan_chain` fills
 each machine to its ceiling in turn, and a flow is priced by `split_rounds::round_trips_waited` (#3 (d)).
-**Seen on the real link 2026-11-15** (`docs/invariants/scheduling.md` § "Rows and levels, a third time"):
+**Seen on the real link 2026-11-15** (`docs/invariants/scheduling.md` § "A tree that flows" (*Rows and levels, a third time*)):
 the 14B split [0, 26) here + [26, 48) in Australia, flowing, never waits for the far end — this node is
 the slower side at ~40 ms a forward (drafting ~14 + its 26 layers ~26, ~1.0 ms a layer at 24 rows)
 against the far end's ~30 (22 layers, ~1.36 ms a layer). The drafter's share is the head's alone and
@@ -5547,7 +5547,7 @@ StarCoder2, inert while refused).
 ### Memory and admission
 
 #### #462 — A flowing split drafts, then runs this node's layers, one after the other: overlap them
-`P3` · perf-split · **OPEN** (measured: worth ~2-3 ms a forward on one card, behind #411's balance) — 2026-11-15 · evidence: `docs/invariants/scheduling.md` § "Rows and levels, a third time", `examples/two_device_overlap_bench.rs`
+`P3` · perf-split · **OPEN** (measured: worth ~2-3 ms a forward on one card, behind #411's balance) — 2026-11-15 · evidence: `docs/invariants/scheduling.md` § "A tree that flows" (*Rows and levels, a third time*), `examples/two_device_overlap_bench.rs`
 
 **Seen** (the 14B half and half to Australia, 8 × 3 flow, server-timed, 2026-11-15): the flow never waits for the far
 computer, and this node's time is exactly its two steps in series — `flowed_ms` = `drafting_ms` + `near_ms` to within

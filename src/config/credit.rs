@@ -12,10 +12,11 @@ use serde::{Deserialize, Serialize};
 /// All values are in credits per unit of work.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CreditRateConfig {
-    /// Credits earned per layer per token for serving inference.
+    /// Credits earned per token for serving inference (no layer factor:
+    /// `CreditLedger` multiplies by tokens alone).
     #[serde(default = "default_rate_inference_serve")]
     pub inference_serve: i64,
-    /// Credits spent per layer per token for consuming inference.
+    /// Credits spent per token for consuming inference.
     #[serde(default = "default_rate_inference_consume")]
     pub inference_consume: i64,
     /// Credits earned per GB per hour for hosting shards.

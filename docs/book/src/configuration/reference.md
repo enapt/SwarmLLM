@@ -122,7 +122,7 @@ value it booted with.
 |---|---|---|---|
 | `continuous_batching` | boolean | `true` | Coalesce concurrent decode requests for the same model into one fused worker forward. 1.34–1.55× on GPU at batch 2–8; neutral-to-loss on CPU, where the worker falls back to sequential |
 | `max_concurrent_decode_batch` | integer | `8` | Maximum decode slots fused into one batch |
-| `batch_collection_ms` | integer | `5` | How long the scheduler waits for more arrivals after the first request lands in an empty batch. WSL2 timer resolution is ~15 ms, so smaller values dispatch immediately there |
+| `batch_collection_ms` | integer | `5` | The longest (in ms) the batch scheduler waits for the decode steps of OTHER requests on the same model; it stops as soon as each has arrived. A request decoding alone is dispatched at once. `0` turns the wait off |
 | `prefill_chunk_tokens` | integer | `128` | Sarathi-style chunked prefill size. Each `Prefilling` slot advances by this many prompt tokens per decode tick, bounding how long one admission can stall active decodes |
 | `batched_prefill_forward` | boolean | `true` | Fuse concurrent same-shape prefill chunks into one forward. Set `false` to isolate this from continuous batching in A/B benchmarks |
 

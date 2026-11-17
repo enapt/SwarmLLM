@@ -50,16 +50,16 @@ const BUFFER_BYTES: usize = 256 * 1024 * 1024;
 ///
 /// Every source of error here is additive — a scheduler preemption, another
 /// process, a page fault — so the minimum is the least contaminated estimate.
-/// The same reasoning as the `bench` helper in `inference::layers`.
+/// The same reasoning as `bench_one` in `inference::layers`' decode bench.
 const PASSES: usize = 3;
 
 /// What to assume when the measurement could not be taken at all.
 ///
-/// **Deliberately modest, and not a typical machine's bandwidth.** The only way
-/// [`measured_gbps`] returns `None` is `try_reserve_exact` failing on a 256 MB
-/// buffer, so the node reaching this is memory-starved — which is not a node to
-/// advertise as capable. A caller that wants "something rather than nothing"
-/// wants something *small*.
+/// **Deliberately modest, and not a typical machine's bandwidth.**
+/// [`measured_gbps`] returns `None` when the 256 MB buffer cannot be allocated
+/// (the node is memory-starved) or the reading fell outside 1-2000 GB/s (the
+/// measurement was disturbed) — either way not a node to advertise as capable.
+/// A caller that wants "something rather than nothing" wants something *small*.
 ///
 /// It was 50.0, chosen when a processor was priced at 15% of its roofline and
 /// so produced 1.70 tok/s. Correcting that efficiency to the measured 0.75
@@ -79,8 +79,9 @@ static BEST: Mutex<Option<Option<f32>>> = Mutex::new(None);
 /// measuring on the first call.
 ///
 /// `None` when the buffer could not be allocated — a machine short enough of
-/// memory for that is not one to be handing extra work to, and the caller falls
-/// back to the previous assumption rather than advertising a wrong figure.
+/// memory for that is not one to be handing extra work to — or when the reading
+/// was disturbed out of any real range; the caller falls back to the previous
+/// assumption rather than advertising a wrong figure.
 pub fn measured_gbps() -> Option<f32> {
     let mut best = BEST.lock().unwrap_or_else(|e| e.into_inner());
     match *best {
