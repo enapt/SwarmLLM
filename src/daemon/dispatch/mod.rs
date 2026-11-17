@@ -1124,6 +1124,8 @@ pub(crate) async fn dispatch_network_messages(
     let mut cleanup_interval =
         tokio::time::interval(std::time::Duration::from_secs(FORWARD_COUNTS_CLEANUP_SECS));
     cleanup_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    // Capabilities gossiped by computers with no entry here yet (#405).
+    let mut heard_before_known = crate::daemon::state::swarm_use::HeardBeforeKnown::default();
     loop {
         tokio::select! {
                     _ = shutdown_rx.changed() => {
@@ -1148,6 +1150,13 @@ pub(crate) async fn dispatch_network_messages(
                                 // to emit one, which is exactly the 45 minutes
                                 // in `docs/FUTURE_WORK.md` #90.
                                 shared_state.metrics.note_dispatch(msg.kind_name());
+                                if let Some(sender) = authenticated_sender.as_ref() {
+                                    install_capability_heard_before_known(
+                                        shared_state,
+                                        &mut heard_before_known,
+                                        sender,
+                                    );
+                                }
                                 match msg {
                                     // LayerResult: route to pending pipeline executor via oneshot channel
                                     SwarmMessage::LayerResult(ref result) => {
@@ -2418,6 +2427,12 @@ pub(crate) async fn dispatch_network_messages(
                                                     crate::api::admin::capability_as_kept(cap.clone()),
                                                 );
                                                 peer.last_seen = chrono::Utc::now();
+                                                heard_before_known.forget(&cap.node_id);
+                                            } else {
+                                                // No entry yet: held until the
+                                                // computer is filed (#405).
+                                                heard_before_known
+                                                    .hold(cap.clone(), std::time::Instant::now());
                                             }
                                         }
                                         // A newer version on enough peers brings
@@ -3690,6 +3705,40 @@ pub(crate) async fn dispatch_network_messages(
     }
 }
 
+/// Install the capability `heard_before_known` holds for `sender` (#405) when
+/// its registry entry has none and it is NOT connected here — a relayed
+/// origin's blank entry, filed since the capability was gossiped. A connected
+/// computer sends its own at Identify, and a held recording installed first
+/// would have that refused as older (security review 2026-11-17), so its held
+/// copy is dropped; an entry that already has one drops it too.
+fn install_capability_heard_before_known(
+    shared_state: &SharedState,
+    heard_before_known: &mut crate::daemon::state::swarm_use::HeardBeforeKnown,
+    sender: &crate::types::NodeId,
+) {
+    if !heard_before_known.holds(sender) {
+        return;
+    }
+    if shared_state.connected_node_ids.contains(sender) {
+        heard_before_known.forget(sender);
+        return;
+    }
+    let Some(mut entry) = shared_state.peer_registry.get_mut(sender) else {
+        return;
+    };
+    let held = heard_before_known.take(sender, std::time::Instant::now());
+    if entry.capability.is_none() {
+        if let Some(cap) = held {
+            tracing::debug!(
+                peer = %sender,
+                version = %cap.version,
+                "Installed the capability a computer gossiped before this node knew it (#405)"
+            );
+            entry.capability = Some(crate::api::admin::capability_as_kept(cap));
+        }
+    }
+}
+
 /// Is a peer's capability within what this node takes? Its lists are capped
 /// before anything iterates them: each `observed_latencies` entry is merged
 /// into a shared map (`merge_peer_segment_latency`), so an uncapped list is
@@ -4746,5 +4795,122 @@ mod nickname_clock_tests {
             &forged
         ));
         assert!(!state.nickname_registry.contains_key(named.node_id()));
+    }
+}
+
+#[cfg(test)]
+mod heard_before_known_tests {
+    use super::*;
+    use crate::identity::Identity;
+
+    fn test_state() -> Arc<SharedState> {
+        let (state, _, _) = SharedState::new(
+            crate::config::Config::default(),
+            Identity::generate(),
+            crate::storage::db::Database::open_temp().unwrap(),
+            Arc::new(tokio::sync::Mutex::new(
+                crate::inference::executor::ModelExecutor::new(),
+            )),
+            None,
+        );
+        state
+    }
+
+    fn blank_entry(node: &crate::types::NodeId) -> crate::types::PeerInfo {
+        crate::types::PeerInfo {
+            node_id: node.clone(),
+            addresses: vec![],
+            capability: None,
+            last_seen: chrono::Utc::now(),
+            latency_ms: None,
+            trust_score: 0.5,
+            peer_id_bytes: None,
+            ack_srtt_ms: None,
+            active_request_count: 0,
+            first_seen: 0,
+            verified_transaction_count: 0,
+            is_lan_peer: false,
+            goodput_bytes_per_sec: None,
+            goodput_samples: 0,
+        }
+    }
+
+    fn gossiped(node: &crate::types::NodeId) -> crate::types::NodeCapability {
+        serde_json::from_value(serde_json::json!({
+            "node_id": node.0.to_vec(),
+            "ram_total_mb": 0,
+            "ram_available_mb": 0,
+            "disk_available_mb": 0,
+            "bandwidth_mbps": 0.0,
+            "hosted_shards": [],
+            "max_contribution": "Moderate",
+            "uptime_seconds": 0,
+            "version": "0.3.295-alpha",
+            "issued_at_ms": 5,
+        }))
+        .expect("a capability as a peer sends it")
+    }
+
+    /// #405: a computer reached only through a relay gossiped its capability
+    /// before its first relayed body filed it with a BLANK entry; the next
+    /// message it sends finds that capability installed — before, the
+    /// dispatcher had dropped it and refused the computer's requests as "not
+    /// heard from" until its next quiet repeat, up to 40 min. An entry that
+    /// already has a capability keeps its own.
+    #[test]
+    fn a_capability_gossiped_before_its_computer_was_filed_is_installed_with_it() {
+        let state = test_state();
+        let mut held = crate::daemon::state::swarm_use::HeardBeforeKnown::default();
+        let origin = crate::types::NodeId([9u8; 32]);
+        held.hold(gossiped(&origin), std::time::Instant::now());
+        install_capability_heard_before_known(&state, &mut held, &origin);
+        assert!(
+            state.peer_registry.get(&origin).is_none(),
+            "nothing is filed by it"
+        );
+        state
+            .peer_registry
+            .insert(origin.clone(), blank_entry(&origin));
+        install_capability_heard_before_known(&state, &mut held, &origin);
+        let installed = state
+            .peer_registry
+            .get(&origin)
+            .and_then(|p| p.capability.as_ref().map(|c| c.version.clone()));
+        assert_eq!(installed.as_deref(), Some("0.3.295-alpha"));
+        assert!(!held.holds(&origin));
+
+        let other = crate::types::NodeId([8u8; 32]);
+        let mut own = blank_entry(&other);
+        let mut newer = gossiped(&other);
+        newer.version = "0.3.296-alpha".into();
+        own.capability = Some(newer);
+        state.peer_registry.insert(other.clone(), own);
+        held.hold(gossiped(&other), std::time::Instant::now());
+        install_capability_heard_before_known(&state, &mut held, &other);
+        let kept = state
+            .peer_registry
+            .get(&other)
+            .and_then(|p| p.capability.as_ref().map(|c| c.version.clone()));
+        assert_eq!(
+            kept.as_deref(),
+            Some("0.3.296-alpha"),
+            "its own capability stays"
+        );
+        assert!(!held.holds(&other), "and the held copy is dropped");
+
+        // A CONNECTED computer's blank entry is left to its own Identify
+        // catch-up: a held recording installed first would get that refused.
+        let connected = crate::types::NodeId([6u8; 32]);
+        state
+            .peer_registry
+            .insert(connected.clone(), blank_entry(&connected));
+        state.connected_node_ids.insert(connected.clone());
+        held.hold(gossiped(&connected), std::time::Instant::now());
+        install_capability_heard_before_known(&state, &mut held, &connected);
+        assert!(state
+            .peer_registry
+            .get(&connected)
+            .is_some_and(|p| p.capability.is_none()));
+        assert!(!held.holds(&connected));
     }
 }

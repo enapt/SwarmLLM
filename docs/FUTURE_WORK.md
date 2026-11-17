@@ -2195,34 +2195,24 @@ measured. Reuse `pipeline_stream::chunk_layer_forward` and the `pending_activati
 receiver on the relayed path (each chunk sealed separately) when a dropped relayed forward is
 reported.
 
-#### #405 — A computer that reaches this node only through a relay waits for a gossip repeat before its first request runs
-`P4` · network · **OPEN** — 2026-11-04 · history: #403's security review (`docs/invariants/network.md` § "A computer this node has not heard from is not judged allowed")
+#### #405 — Unconnected registry entries are bounded in all, not per delivering network
+`P4` · network · **PARTIAL** — 2026-11-17: the first-contact wait FIXED on main · history: #403's security review (`docs/invariants/network.md` § "A computer this node has not heard from is not judged allowed")
 
-**Re-verified 2026-11-17 on main** (a read of the code). Narrower than its title: a peer on a libp2p circuit is
-CONNECTED and caught up at Identify like any other; only an origin this node is not connected to at all is
-`NotHeardFrom` (`swarm_use.rs` `unheard()`). `ensure_relayed_origin_known` files it with `capability: None`, the
-`NodeCapabilityUpdate` arm installs only into an existing entry (`get_mut`), so a capability gossiped before the entry
-existed was dropped, and `NodeCapabilityUpdate` is not relay-eligible, so it cannot follow the request. Fix shape:
-the coordinator relays its own signed capability on its first relayed send (a feature bit at the sender; installed
-only when the proven origin is the capability's `node_id`; rationed per origin and per `NetGroup`, #299).
+**Fixed 2026-11-17 on main: a computer reached only through a relay no longer waits for a gossip repeat before its
+first request runs.** A capability it gossiped before its first relayed body filed its entry was dropped (the
+`NodeCapabilityUpdate` arm installs into an existing entry only), so its requests were refused `NotHeardFrom` for
+up to its next 40-min `QuietRepeat`. The dispatcher now holds it (`swarm_use::HeardBeforeKnown`) and installs it
+when the computer next sends — no wire change, so the relay-eligible capability once planned here is not needed;
+it also puts a relayed chain hop's `JUDGES_THE_COORDINATOR` bit on record at once. Security-reviewed before it
+landed; two defects found and fixed (evidence § above). Prior art: #415's `before_identify`, which holds a catch-up
+that lands before its Identify.
 
-Since #403 a relayed origin with no capability on record is refused `NotHeardFrom` (a re-plan, no
-penalty). A capability it gossiped BEFORE its first relayed body here found no registry entry and
-was dropped (dispatch's `NodeCapabilityUpdate` arm installs into an existing entry only), so the
-first request it can have run here waits for its next `QuietRepeat` (5, 10, 20, then 40 min) or a
-change. Honest cases are rare (a coordinator's own registry drops a peer with its connection, so it
-plans through a relay only across a drop or for a relay-tier peer), and no field report names it.
-The cure: on the first `NotHeardFrom` for a relayed origin, ask it for its capability over the same
-relay — `NodeCapabilityUpdate` made relay-eligible behind a new feature bit (an older target cannot
-decode the kind), signed like every relayed kind, rate-limited per origin. With it, bound the
-unconnected registry entries per delivering `NetGroup` (#299's rule for the replay memory): the
-blank-first eviction #403 added stops a stranger minting origins, but not one that also gossips a
-capability for each key it mints. The same cure covers a chain hop this node hears only through a
-relay (v0.3.272's pre-release security review, LOW): a later hop takes the hop before's word for an
-unheard coordinator only where that hop's capability on record advertises
-`features::JUDGES_THE_COORDINATOR` (`layer_forward::swarm_use_of_forward`), and a relayed hop's
-entry is blank until its capability lands — a relayed body proves only the relay bits
-(`record_relay_proven_features`). Wait for a report of a relay-tier peer being refused.
+**Residual (OPEN).** `MAX_UNCONNECTED_REGISTERED` bounds the unconnected entries in all, blank ones evicted first
+(#403), so a stranger minting keys that ALSO gossips a capability for each competes with honest relayed origins on
+`last_seen`, at one gossip publish per key that every node hears. #299's answer for the replay memory is a bound per
+delivering `NetGroup`; for relayed origins the delivering network is the relay's, the DE anchor for every honest one
+today, so that bucket alone does not separate them — a design is needed first. No report or log names it. Wait for
+one, or for a second bootstrap relay (#473 (a)).
 
 #### #416 — A computer whose clock runs fast is not heard: the checks besides gossip's
 `P2` · network · **NARROWED** — 2026-11-06 · history: the live node's log 12:23-13:25Z 11-06 (`773a3e85`, 33 s fast)

@@ -374,6 +374,124 @@ fn version_may_replace(held: Option<&str>, incoming: &str) -> bool {
     held.is_none_or(|held| !crate::update::is_newer_version(incoming, held))
 }
 
+/// The most computers whose capability [`HeardBeforeKnown`] holds.
+pub(crate) const MOST_HEARD_BEFORE_KNOWN: usize = 64;
+/// How long a held capability stays usable: past the longest quiet repeat (40
+/// min, `health::monitor::QuietRepeat`), by when a newer one has been gossiped.
+pub(crate) const HEARD_BEFORE_KNOWN_FOR: std::time::Duration =
+    std::time::Duration::from_secs(60 * 60);
+/// The most one held capability may weigh (its JSON), and all of them: a frame
+/// can be gossipsub's whole 4 MiB (`capability_fits` counts list entries, not
+/// the names in them), so 64 minted keys held 256 MiB (security review
+/// 2026-11-17). `before_identify`'s bounds for the same message.
+pub(crate) const HEARD_BEFORE_KNOWN_ONE_BYTES: usize = 1 << 20;
+pub(crate) const HEARD_BEFORE_KNOWN_ALL_BYTES: usize = 8 << 20;
+
+/// Capabilities gossiped by computers this node had no entry for (#405).
+///
+/// A capability is installed only into a computer's registry entry, and a
+/// computer this node is not connected to has none until its first relayed body
+/// files it (`ensure_relayed_origin_known`, a BLANK entry) — so the capability
+/// it had already gossiped was dropped, and its requests were refused as
+/// [`SwarmUse::NotHeardFrom`] until its next quiet repeat, up to 40 min. The
+/// dispatcher holds the newest per computer here and installs it when that
+/// computer next sends from an entry with no capability — before that message
+/// is judged. It is exactly what the repeat would install, only sooner: the
+/// author's own signed gossip (the installer's sender check), newest frame
+/// first by [`capability_may_replace`], so a recording cannot displace a newer
+/// frame. Bounded by count and by bytes, aged out at every hold, oldest arrival
+/// out first; a key flood only pushes held ones out — the wait before this.
+/// Installed only for a computer NOT connected here (the dispatcher's
+/// `install_capability_heard_before_known`): a connected one sends its own at
+/// Identify, and a held recording installed first would have its own direct
+/// frame refused as older (security review 2026-11-17). Prior art: #415's
+/// `before_identify`, which holds a catch-up that lands before its Identify.
+#[derive(Default)]
+pub(crate) struct HeardBeforeKnown {
+    by_node: std::collections::HashMap<NodeId, Held>,
+    bytes: usize,
+}
+
+struct Held {
+    cap: crate::types::NodeCapability,
+    at: std::time::Instant,
+    bytes: usize,
+}
+
+impl HeardBeforeKnown {
+    pub(crate) fn holds(&self, node: &NodeId) -> bool {
+        self.by_node.contains_key(node)
+    }
+
+    /// Hold `cap`, gossiped by a computer with no registry entry here.
+    pub(crate) fn hold(&mut self, cap: crate::types::NodeCapability, now: std::time::Instant) {
+        let bytes = serde_json::to_vec(&cap).map_or(usize::MAX, |b| b.len());
+        if bytes > HEARD_BEFORE_KNOWN_ONE_BYTES {
+            return;
+        }
+        let aged: Vec<NodeId> = self
+            .by_node
+            .iter()
+            .filter(|(_, h)| now.saturating_duration_since(h.at) >= HEARD_BEFORE_KNOWN_FOR)
+            .map(|(node, _)| node.clone())
+            .collect();
+        for node in aged {
+            self.forget(&node);
+        }
+        if let Some(held) = self.by_node.get(&cap.node_id) {
+            if !capability_may_replace(
+                Some(&held.cap),
+                &cap,
+                crate::types::MessageTransport::Gossip,
+            ) {
+                return;
+            }
+            self.forget(&cap.node_id.clone());
+        }
+        while self.by_node.len() >= MOST_HEARD_BEFORE_KNOWN
+            || self.bytes + bytes > HEARD_BEFORE_KNOWN_ALL_BYTES
+        {
+            let Some(oldest) = self
+                .by_node
+                .iter()
+                .min_by_key(|(_, h)| h.at)
+                .map(|(node, _)| node.clone())
+            else {
+                break;
+            };
+            self.forget(&oldest);
+        }
+        self.bytes += bytes;
+        self.by_node.insert(
+            cap.node_id.clone(),
+            Held {
+                cap,
+                at: now,
+                bytes,
+            },
+        );
+    }
+
+    /// Stop holding `node`'s capability.
+    pub(crate) fn forget(&mut self, node: &NodeId) {
+        if let Some(held) = self.by_node.remove(node) {
+            self.bytes -= held.bytes;
+        }
+    }
+
+    /// The capability held for `node`, if heard within [`HEARD_BEFORE_KNOWN_FOR`];
+    /// it is no longer held either way.
+    pub(crate) fn take(
+        &mut self,
+        node: &NodeId,
+        now: std::time::Instant,
+    ) -> Option<crate::types::NodeCapability> {
+        let held = self.by_node.remove(node)?;
+        self.bytes -= held.bytes;
+        (now.saturating_duration_since(held.at) < HEARD_BEFORE_KNOWN_FOR).then_some(held.cap)
+    }
+}
+
 /// The one rule, on plain facts.
 pub fn verdict(parts_held: usize, running: &str, releases: &ReleasesKnown) -> SwarmUse {
     if let Some(behind) = too_far_behind(running, releases) {
@@ -995,6 +1113,85 @@ mod tests {
         assert!(version_may_replace(held, "0.3.271-alpha"));
         assert!(version_may_replace(held, "0.3.272-alpha"));
         assert!(version_may_replace(None, "0.3.270-alpha"));
+    }
+
+    fn heard(node: u8, issued_at_ms: u64) -> crate::types::NodeCapability {
+        serde_json::from_value(serde_json::json!({
+            "node_id": vec![node; 32],
+            "ram_total_mb": 0,
+            "ram_available_mb": 0,
+            "disk_available_mb": 0,
+            "bandwidth_mbps": 0.0,
+            "hosted_shards": [],
+            "max_contribution": "Moderate",
+            "uptime_seconds": 0,
+            "version": "0.3.295-alpha",
+            "issued_at_ms": issued_at_ms,
+        }))
+        .expect("a capability as a peer sends it")
+    }
+
+    /// #405: the newest frame per computer is held, a recording never displaces
+    /// it, and a held one is handed out once, within the hour.
+    #[test]
+    fn a_capability_heard_before_its_computer_is_known_is_held_newest_first() {
+        let now = std::time::Instant::now();
+        let mut held = HeardBeforeKnown::default();
+        held.hold(heard(1, 2_000), now);
+        held.hold(heard(1, 1_000), now);
+        let node = heard(1, 0).node_id;
+        assert_eq!(held.take(&node, now).map(|c| c.issued_at_ms), Some(2_000));
+        assert!(held.take(&node, now).is_none(), "handed out once");
+        held.hold(heard(1, 3_000), now);
+        assert!(
+            held.take(&node, now + HEARD_BEFORE_KNOWN_FOR).is_none(),
+            "an hour old"
+        );
+    }
+
+    /// Bounded by count, the oldest arrival out.
+    #[test]
+    fn the_capabilities_held_are_bounded_oldest_out() {
+        let start = std::time::Instant::now();
+        let mut held = HeardBeforeKnown::default();
+        for n in 0..=MOST_HEARD_BEFORE_KNOWN {
+            held.hold(
+                heard(n as u8, 1),
+                start + std::time::Duration::from_millis(n as u64),
+            );
+        }
+        assert_eq!(held.by_node.len(), MOST_HEARD_BEFORE_KNOWN);
+        assert!(
+            held.take(&heard(0, 0).node_id, start).is_none(),
+            "the oldest went"
+        );
+        assert!(held.take(&heard(1, 0).node_id, start).is_some());
+    }
+
+    /// Bounded by bytes too, and aged out whenever one is held — a minted key
+    /// never sends again, so waiting for its `take` kept it for good (security
+    /// review 2026-11-17).
+    #[test]
+    fn the_capabilities_held_are_bounded_by_bytes_and_age() {
+        let start = std::time::Instant::now();
+        let mut held = HeardBeforeKnown::default();
+        let mut big = heard(1, 1);
+        big.hosted_shards = (0..20)
+            .map(|i| crate::types::ShardId {
+                model_id: crate::types::ModelId("m".repeat(60_000) + &i.to_string()),
+                index: i,
+            })
+            .collect();
+        held.hold(big, start);
+        assert!(held.by_node.is_empty(), "past the bound for one");
+        held.hold(heard(2, 1), start);
+        held.hold(heard(3, 1), start + HEARD_BEFORE_KNOWN_FOR);
+        assert!(
+            !held.holds(&heard(2, 0).node_id),
+            "aged out by the next hold"
+        );
+        assert!(held.holds(&heard(3, 0).node_id));
+        assert_eq!(held.bytes, serde_json::to_vec(&heard(3, 1)).unwrap().len());
     }
 
     /// #402: a capability of the version held arriving on gossip is installed

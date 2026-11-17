@@ -6975,12 +6975,33 @@ heard.
   does not authenticate — the rule above). No wire change: the bit is the only negotiation. Test
   `a_chained_pass_naming_an_unheard_coordinator_takes_the_judging_hops_word` (red with the helper
   back to `swarm_use_of_peer(judged_as(..))`).
-- **First contact over a relay waits for a repeat** (review, LOW — accepted). A capability gossiped
-  before the origin's first body here found no entry and was dropped, so the wait is the origin's
-  next `QuietRepeat` (5, 10, 20, then 40 min) or a change; each request meanwhile is a re-plan
-  elsewhere. The blank entry survives the 90 s stale sweep only because the origin's gossiped
-  `HealthPing` / `ShardAnnounce` refresh `last_seen` on an existing entry. The cure — the origin's
-  capability carried over the relay, behind a feature bit — is FUTURE_WORK #405.
+- **First contact over a relay no longer waits for a repeat** (review, LOW — FIXED 2026-11-17, #405).
+  A capability gossiped before the origin's first body here found no entry and was dropped, so the
+  wait was the origin's next `QuietRepeat` (5, 10, 20, then 40 min) or a change, each request
+  meanwhile a re-plan elsewhere. Now the dispatcher holds it (`swarm_use::HeardBeforeKnown`) and,
+  at the top of the next message from that computer, installs it into the blank entry
+  `ensure_relayed_origin_known` filed — before that message is judged
+  (`install_capability_heard_before_known`). No wire change: it installs exactly what the next
+  repeat would, the author's own signed gossip after the arm's sender check and `capability_fits`,
+  `capability_as_kept` at install, and a held frame is replaced only by one
+  `capability_may_replace` takes on gossip, so a recording never displaces a newer one. The same
+  holds for a chain hop this node hears only through a relay: its `JUDGES_THE_COORDINATOR` bit is
+  on record as soon as its entry is filed, if it gossiped first. Its pre-commit security review
+  (2026-11-17) found two defects, both fixed before it landed: (a) the table was bounded by count
+  only and aged only at `take`, which a minted key never reaches — 64 frames of gossipsub's 4 MiB
+  (`capability_fits` counts list entries, not the names in them) held 256 MiB for good; now 1 MiB
+  each, 8 MiB in all, `before_identify`'s bounds, and aged out at every hold; (b) installed for a
+  CONNECTED computer it reached back past a restart: a recorded frame of a newer release, replayed
+  after an honest peer rolled back, was installed ahead of the peer's own Identify catch-up, which
+  `capability_may_replace` then refused as older for the connection's life; now a connected
+  computer's held copy is dropped. Kept: on a relay-only computer the table still lets a replay of
+  its newer-release frame land first after a rollback — what a replay arriving after its entry
+  existed could already do (an older version is never installed over a newer one, #402), only an
+  hour further back. Tests `a_capability_gossiped_before_its_computer_was_filed_is_installed_with_it`
+  (red with the install switched off, and with the connected check off),
+  `a_capability_heard_before_its_computer_is_known_is_held_newest_first`,
+  `the_capabilities_held_are_bounded_oldest_out`, `the_capabilities_held_are_bounded_by_bytes_and_age`
+  (red with the age-out at hold off).
 - **A pool device is read through `is_pool_member`** (review, LOW — kept). It answers "no" while
   the pool state is being written (`try_read`), so a pool device that is not connected here can be
   refused `NotHeardFrom` for the length of that write — a re-plan. `cut_off_for` treats a busy
