@@ -7763,3 +7763,22 @@ of the fix removed.
 ## Moved from arch-scheduling.md (rules-file trim)
 
 **Moved from `arch-scheduling.md` § "A peer advertises the memory it will HONOUR, not the memory it has" (rules-file trim):** **It is asked FOR a model** (REQUIRED `model_id`, #447): the stated room plus what the peer's idle workers of OTHER models give way (`ResidentModelLayers::gives_way`, summed by `NodeCapability::given_way_for`) — on the card, beside it (`processor_beside_card(model_id)`) and in `card_free_for_mb(model_id)`; never the model's own worker. **A card node's machine memory is offered BESIDE its card (2026-10-25)**: `machine_room_beside_card_mb` + `processor_tokens_per_sec_7b`, read only through **`NodeCapability::processor_beside_card`**, added to the card's bound by `scheduler::layers_beside_card` and recorded as `NodeCandidate::card_layers` — for a warm peer, the layers its card RUNS (`ResidentModelLayers::card_layers` ← **`WorkerHandle::layers_on_card`**, range by range as each was placed, the one figure this node's `card_share_for_planning` reads too — a worker holding PART of a model too big for the card, all of it on the card, reads `(its card layers + the card's room for more, the model's)`, never "one device": read so, the layers its card held were priced at the processor's speed after the first split here, 2026-11-13 — and never its held layers alone: growth lands on the card, and read so the first split's 4 layers here priced every later one off the card, #3 (j11)), never every layer it holds, and never more than its whole card holds (an older peer's word; #361). A MEASURED decode figure is that blend already, so its prompt is divided by the range's per-device ratio (`parallax::prompt_speedup_over`), never the card's 40 alone (#430 (a): a 27B's prompt priced 21 s, read for 10 min). **A machine's back-to-back segments are ONE run there** (`merge_contiguous`): each is priced with the run before it ahead on the card, **`parallax::layers_ahead_in_run`** → `vertex_cost_as`'s REQUIRED `ahead`, in the search's DP and `chain_cost_terms` alike — priced per piece, a 14B cut in three read 45 of its 48 layers on a 23-layer card and undercut every split (2026-10-29). **A chain that is ONE machine from layer 0 to the last is its whole-model vertex, never pieces** (`route_over`, every pass, where that vertex is offered): each piece was charged a split's rounds, the vertex every pass, and this node's 14B in two pieces undercut "Start and finish"'s route abroad at 0.78 of its own whole price (2026-11-14). 
+
+## A range that runs partly on a card is priced per device
+
+(Written 2026-11-17: `arch-scheduling.md` had pointed here since 2026-10-25, and the section did not exist. Source:
+commit `25bc290b0` and the issues the rule names.)
+
+**What it replaced.** A computer with a graphics card offered a split only its card's memory, so a busy 12 GB card
+offered room for two layers of a 70B while 24 GB of the machine's own memory sat unused, and the split could not be
+planned. And the planner priced a node's whole range at ONE blended speed: holding the first 17 layers of a 70B, 12 of
+which fit its card, this computer was priced as if it ran all 80 mostly on its processor, and a slower computer in
+another country was given those layers.
+
+**The rule.** A card node states the memory beside its card and its processor's speed
+(`NodeCapability::processor_beside_card`: `machine_room_beside_card_mb`, `processor_tokens_per_sec_7b`; both optional,
+so an older computer is planned as before), and a range is priced on the device each layer runs on
+(`NodeCandidate::layers_by_device`): its first `card_layers` at the card's speed, the rest at the processor's. For a
+warm peer `card_layers` is what its card RUNS (`ResidentModelLayers::card_layers` ← `WorkerHandle::layers_on_card`,
+#3 (j11)), never every layer it holds and never more than its card (#361). A measured decode figure is already that
+blend, so its prompt figure is divided by the per-device ratio (`parallax::prompt_speedup_over`, #430 (a)).
