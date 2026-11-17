@@ -819,15 +819,8 @@
       var err = data.error;
       var msg = typeof err === 'string' ? err
         : (typeof err.message === 'string' && err.message) ? err.message : fallback;
-      var hint = err.hint;
-      var key = err.hint_key;
-      if (typeof key === 'string' && key.length > 0) {
-        var lookup = 'error_hint.' + key;
-        var translated = I18n.t(lookup);
-        // I18n.t returns the key itself when it has no entry.
-        if (translated && translated !== lookup) hint = translated;
-      }
-      if (typeof hint === 'string' && hint.length > 0 && typeof msg === 'string') {
+      var hint = errorHint(err);
+      if (hint && typeof msg === 'string') {
         return msg + ' — ' + hint;
       }
       return msg;
@@ -860,6 +853,38 @@
   // sites (Responses tab, chat retry, Claude Code session, diagnostics copy).
   function reasonText(e) {
     return (e && e.name === 'Error' && e.message) ? e.message : failureText(e);
+  }
+
+  // The reader's-language text for an error's `hint_key`, or '' where this
+  // locale has none. The ONE place the `error_hint.` prefix is applied: the
+  // daemon sends a bare key (`holders_declined`), and the chat bubble's own
+  // copy looked it up without the prefix, so every chat error hint showed in
+  // English in all 21 languages.
+  function translatedHint(key) {
+    if (typeof key !== 'string' || key.length === 0) return '';
+    var lookup = 'error_hint.' + key;
+    var translated = I18n.t(lookup);
+    // I18n.t returns the key itself when it has no entry.
+    return (translated && translated !== lookup) ? translated : '';
+  }
+
+  // An error object's hint (`{message, hint, hint_key}`): translated where the
+  // locale has it, else the English the daemon sent, else ''.
+  function errorHint(err) {
+    if (!err || typeof err !== 'object') return '';
+    return translatedHint(err.hint_key) || (typeof err.hint === 'string' ? err.hint : '');
+  }
+
+  // A cloud model's context window in tokens, or 0. Providers name it
+  // differently (OpenRouter `context_length`, Groq `context_window`, vLLM
+  // `max_model_len`) and `/api/admin/provider-models` passes them through
+  // under `meta`; read only at the top level, the Compare tab never found one.
+  function contextLength(model) {
+    if (!model) return 0;
+    var m = model.meta || {};
+    var v = m.context_length || m.context_window || m.max_model_len || model.context_length;
+    var n = Number(v);
+    return (isFinite(n) && n > 0) ? n : 0;
   }
 
   // Usage: var msg = await App.utils.getApiErrorMessage(resp, 'Action failed');
@@ -1471,6 +1496,9 @@
     extractErrorMessage: extractErrorMessage,
     failureText: failureText,
     reasonText: reasonText,
+    translatedHint: translatedHint,
+    errorHint: errorHint,
+    contextLength: contextLength,
     capitalize: capitalize,
     apiAction: apiAction,
     submitCodeForm: submitCodeForm,

@@ -236,7 +236,8 @@
             var metaParts = [];
             var m = item.meta;
             if (m.owned_by) metaParts.push(m.owned_by);
-            if (m.context_length || m.context_window) metaParts.push(I18n.t('models.context_abbr', { n: (m.context_length || m.context_window).toLocaleString() }));
+            var ctxLen = U.contextLength(item);
+            if (ctxLen) metaParts.push(I18n.t('models.context_abbr', { n: ctxLen.toLocaleString() }));
             if (m.max_tokens) metaParts.push(I18n.t('models.max_tokens_label', { n: m.max_tokens.toLocaleString() }));
             if (m.pricing) {
               var p = m.pricing;

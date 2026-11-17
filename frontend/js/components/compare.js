@@ -61,7 +61,7 @@
         cloudModels.forEach(function(m) {
           var mid = m.id;
           if (!App.compare.models.some(function(x) { return x.id === mid; })) {
-            var ctx = m.context_length || m.context_window || m.max_model_len || 0;
+            var ctx = U.contextLength(m);
             App.compare.models.push({ id: mid, type: 'cloud', context: ctx });
           }
         });

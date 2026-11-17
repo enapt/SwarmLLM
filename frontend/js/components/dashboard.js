@@ -343,14 +343,7 @@
     // English, so it is only the fallback when a hint key is missing.
     _showNoRouteReason: function(matrix, reason) {
       if (!matrix || !reason) return;
-      var text = '';
-      var key = reason.hint_key;
-      if (typeof key === 'string' && key.length > 0) {
-        var lookup = 'error_hint.' + key;
-        var translated = I18n.t(lookup);
-        if (translated && translated !== lookup) text = translated;
-      }
-      if (!text) text = U.extractErrorMessage({ error: reason }, '');
+      var text = U.translatedHint(reason.hint_key) || U.extractErrorMessage({ error: reason }, '');
       if (!text) return;
       var el = document.createElement('div');
       el.className = 'shard-matrix-empty shard-matrix-noroute';
@@ -1874,10 +1867,7 @@
       }
 
       // --- Shared helpers for cloud + subscription card rendering ---
-      function getCtxLen(cm) {
-        if (!cm.meta) return cm.context_length || 0;
-        return cm.meta.context_length || cm.meta.context_window || cm.meta.max_model_len || cm.context_length || 0;
-      }
+      function getCtxLen(cm) { return U.contextLength(cm); }
       var _nonChatPattern = /dall-e|tts|whisper|embed|moderation|davinci-\d|babbage-\d|text-embedding|audio/i;
       function sortCloudModels(models, sortBy) {
         var sorted = models.slice();
@@ -1907,7 +1897,7 @@
       }
       function renderCloudRow(cm) {
         var ctx = getCtxLen(cm);
-        var ctxStr = ctx > 0 ? (ctx >= 1000 ? Math.round(ctx / 1000) + 'K' : ctx.toString()) : '';
+        var ctxStr = ctx > 0 ? (ctx >= 1000000 ? (Math.round(ctx / 100000) / 10) + 'M' : ctx >= 1000 ? Math.round(ctx / 1000) + 'K' : ctx.toString()) : '';
         var pingHtml = App.providerHealth.modelBadgeHtml(cm.id);
         return '<div class="cloud-model-row" data-select-cloud="' + U.escapeHtml(cm.id) + '" title="' + U.escapeHtml(cm.id) + '">' +
           '<span class="cloud-model-row-name">' + U.escapeHtml(cm.name || cm.id) + '</span>' +

@@ -1104,16 +1104,10 @@
     /// all — raw text from a proxy, say.
     _renderErrorInto: function(live, err, fallbackText) {
         var msg = (err && (err.message || err.detail)) || fallbackText || I18n.t('chat.no_response');
-        // `hint_key` is the translated form and `hint` the English prose the
-        // daemon always sends; prefer the reader's own language when the key
-        // resolves, exactly as `getApiErrorMessage` does elsewhere.
-        var hint = '';
-        if (err && err.hint_key) {
-          var translated = I18n.t(err.hint_key);
-          hint = (translated && translated !== err.hint_key) ? translated : (err.hint || '');
-        } else if (err && err.hint) {
-          hint = err.hint;
-        }
+        // The reader's own language where the locale has the hint, else the
+        // English the daemon sent — through the one helper, which owns the
+        // `error_hint.` prefix this copy once left off.
+        var hint = U.errorHint(err);
         var hintHtml = hint ? '<div class="chat-error-hint">' + U.escapeHtml(hint) + '</div>' : '';
         var errHtml = U.escapeHtml(msg) + hintHtml +
           '<div class="chat-error-actions"><button class="btn btn-sm" data-retry-chat="1">' +

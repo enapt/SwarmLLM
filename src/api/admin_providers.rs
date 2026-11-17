@@ -480,11 +480,14 @@ pub(crate) async fn fetch_provider_models_inner(
     if let Some(ref sub_config) = config.claude_subscription {
         if sub_config.enabled {
             let provider_label = "claude_subscription";
+            // Context in TOKENS, a number like every provider's: the pickers
+            // format it (`U.contextLength`), and a "1M" string read as no
+            // context at all there.
             for (id, name, ctx) in [
-                ("claude-opus-4-8", "Claude Opus 4.8", "1M"),
-                ("claude-sonnet-5", "Claude Sonnet 5", "1M"),
-                ("claude-haiku-4-5-20251001", "Claude Haiku 4.5", "200K"),
-                ("claude-fable-5", "Claude Fable 5", "1M"),
+                ("claude-opus-4-8", "Claude Opus 4.8", 1_000_000u64),
+                ("claude-sonnet-5", "Claude Sonnet 5", 1_000_000),
+                ("claude-haiku-4-5-20251001", "Claude Haiku 4.5", 200_000),
+                ("claude-fable-5", "Claude Fable 5", 1_000_000),
             ] {
                 // Don't duplicate if already present from Anthropic API key
                 if !models
