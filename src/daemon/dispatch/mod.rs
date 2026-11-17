@@ -3944,18 +3944,21 @@ mod capability_fits_tests {
             MAX_BLOCKS_PER_ANNOUNCE,
             "every receiver takes it"
         );
-        let deepest = announced.iter().map(|b| b.token_count).max().unwrap();
         for p in 0..3u8 {
-            let kept: Vec<u32> = blocks
-                .iter()
+            let mut kept: Vec<u32> = (0..500)
+                .map(|d| block(p, d))
                 .filter(|b| announced.contains(b))
-                .filter(|b| (0..500).any(|d| block(p, d) == **b))
                 .map(|b| b.token_count)
                 .collect();
-            assert!(kept.contains(&64), "prompt {p}'s opening is announced");
+            kept.sort_unstable();
+            let unbroken: Vec<u32> = (1..=kept.len() as u32).map(|d| d * 64).collect();
+            assert_eq!(
+                kept, unbroken,
+                "prompt {p} keeps an unbroken run from its start"
+            );
             assert!(
-                kept.iter().all(|&t| t <= deepest) && kept.len() >= 340,
-                "each prompt keeps a run from its start: {} blocks",
+                kept.len() >= 340,
+                "prompt {p} keeps its share: {} blocks",
                 kept.len()
             );
         }
