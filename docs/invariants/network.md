@@ -5355,6 +5355,10 @@ the retractions left out of the list. **Run on two nodes** (`examples/split_rig.
 processor, B's parts deleted once A had its list; 2026-11-17 ~21:15Z): the released v0.3.296 FAILED — B logged
 "No longer claiming a shard", A heard nothing in 150 s — and the fixed build PASSED, A logging "Peer retracted
 shards it no longer hosts … dropped=1 retained=0" 22 s after the files went.
+A RESTART needs no retraction (the release review asked, 2026-11-17): the set starts empty after one, but every
+peer that saw the node's last connection close already dropped ALL its claims (`remove_peer_from_all_shards`,
+`network/manager/connections.rs`), so the newcomer list after the restart rebuilds them from what is held — unless the
+node was in an active split with that peer, when the stale-peer sweep clears them a little later.
 
 ## A parts list longer than a receiver takes goes in pieces, each model whole (2026-11-02)
 
