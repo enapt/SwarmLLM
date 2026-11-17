@@ -2451,6 +2451,17 @@ fn user_settable_config_is_read_live_not_from_the_boot_snapshot() {
         // relay decision read the boot snapshot until 2026-10-15, so turning
         // donation off showed "off" and changed nothing until a restart.
         ".config.network.relay_forwarding",
+        // ...and the routing switches and dashboard-trust settings
+        // reference.md says apply without a restart. Tensor parallelism and
+        // the parallax router read the boot snapshot until 2026-11-17 (the
+        // scheduler's seven sites), overlay trust and `/metrics` auth until
+        // the same day — so switching overlay trust OFF, the escape hatch for
+        // a shared tailnet, kept handing the key out until a restart.
+        ".config.inference.tensor_parallel",
+        ".config.inference.tp_max_latency_ms",
+        ".config.inference.parallax_",
+        ".config.api.dashboard_trust_",
+        ".config.api.metrics_auth_required",
     ];
 
     // Startup-only readers: each builds something that cannot be rebuilt live

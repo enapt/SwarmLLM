@@ -492,8 +492,10 @@ pub async fn auth_middleware(
     // disclosure): when `api.metrics_auth_required` is set, /metrics
     // is NOT exempt even on loopback — Prometheus scrapers must send
     // a Bearer token. Default false preserves the existing convention
-    // (and the dashboard's loopback scrape).
-    if state.shared_state.config.api.metrics_auth_required && path == "/metrics" {
+    // (and the dashboard's loopback scrape). Read LIVE: a user who turns it
+    // on has decided the figures are not for everyone on this machine, and
+    // that holds from the save (reference.md says so).
+    if state.shared_state.cfg().api.metrics_auth_required && path == "/metrics" {
         // Skip the loopback-exempt branch — fall through to Bearer check.
     } else if is_exempt_request(&path, &method, origin.is_this_machine()) {
         // Exempt frontend routes, health, read-only dashboard endpoints (loopback-gated)

@@ -241,7 +241,10 @@ async fn classify_address(state: &SharedState, ip: IpAddr) -> DashboardTrust {
     // readable (a sandboxed service cannot open it), and is narrowed to
     // Tailscale-specific evidence for the reason described on
     // `node_is_on_overlay`.
-    if is_overlay_ip(ip) && state.config.api.dashboard_trust_overlay {
+    // Live, like `dashboard_trust_lan` below: switching it off is the escape
+    // hatch for a tailnet shared with people who should not be admins, and it
+    // has to hold from the moment it is saved, not from the next restart.
+    if is_overlay_ip(ip) && state.cfg().api.dashboard_trust_overlay {
         match crate::api::tailscale::whois(ip).await {
             crate::api::tailscale::WhoIs::Member => return DashboardTrust::Overlay,
             crate::api::tailscale::WhoIs::NotAMember => {
@@ -520,6 +523,34 @@ mod tests {
             classify_address(&state, v4("100.101.102.103")).await,
             DashboardTrust::Untrusted
         );
+    }
+
+    /// Switching overlay trust off in Settings holds at once: the read is the
+    /// LIVE config, so a node already handing its key to the tailnet stops on
+    /// the save, not at the next restart.
+    #[tokio::test]
+    async fn switching_overlay_trust_off_applies_without_a_restart() {
+        let state = test_state(crate::config::Config::default());
+        // The Tailscale-specific evidence the test above uses for a yes.
+        state.listen_multiaddrs.store(std::sync::Arc::new(vec![
+            "/ip4/100.64.0.7/tcp/8810".into(),
+            "/ip6/fd7a:115c:a1e0::1234/tcp/8810".into(),
+        ]));
+        let tailnet_peer = v4("100.101.102.103");
+        assert_eq!(
+            classify_address(&state, tailnet_peer).await,
+            DashboardTrust::Overlay
+        );
+
+        let mut off = (**state.cfg()).clone();
+        off.api.dashboard_trust_overlay = false;
+        state.apply_live_config(off);
+        assert_eq!(
+            classify_address(&state, tailnet_peer).await,
+            DashboardTrust::Untrusted
+        );
+        // The boot snapshot still says on — the change is the live read.
+        assert!(state.config.api.dashboard_trust_overlay);
     }
 
     /// `#[derive(Default)]` ignores `#[serde(default = "...")]`, and a fresh
