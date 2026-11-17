@@ -683,8 +683,33 @@ pub const FOREIGN_POOL_CATALOG_MAX_AGE_MS: u64 = 2 * 60 * 60 * 1000;
 use swarmllm_types::MAX_SHARDS_PER_ANNOUNCE;
 /// SEC: Cap blocks per PrefixCacheAnnounce. A 7B model at 64-token blocks
 /// tops out at ~120 blocks per 8K prompt; 1024 leaves headroom for larger
-/// contexts without unbounded growth.
-const MAX_BLOCKS_PER_ANNOUNCE: usize = 1024;
+/// contexts without unbounded growth. A longer announce is refused WHOLE, so
+/// the one sender holds to it ([`blocks_for_the_announce`]).
+pub(crate) const MAX_BLOCKS_PER_ANNOUNCE: usize = 1024;
+
+/// The saved-prompt blocks an announce carries, held to
+/// [`MAX_BLOCKS_PER_ANNOUNCE`]. Nothing cut it before (2026-11-17): the
+/// announce is every saved prompt's blocks for the model (up to 16 prompts),
+/// so one 70k-token agent prompt at 64-token blocks — or sixteen of 4k — and
+/// every peer refused each announce whole, keeping the last set it took.
+/// Blocks are a chained prefix (`PrefixBlockEntry`) matched longest-first,
+/// so the SHALLOWEST are kept: every saved prompt's opening stays findable,
+/// and a cut only shortens how far a match reaches. Within the bound the list
+/// is returned as it is.
+pub(crate) fn blocks_for_the_announce(
+    mut blocks: Vec<crate::types::PrefixBlockEntry>,
+) -> Vec<crate::types::PrefixBlockEntry> {
+    if blocks.len() <= MAX_BLOCKS_PER_ANNOUNCE {
+        return blocks;
+    }
+    blocks.sort_by(|a, b| {
+        a.token_count
+            .cmp(&b.token_count)
+            .then_with(|| a.block_hash.cmp(&b.block_hash))
+    });
+    blocks.truncate(MAX_BLOCKS_PER_ANNOUNCE);
+    blocks
+}
 /// Take a peer's nickname record if it may be taken, and say whether it was:
 /// sent by the computer it names (`authenticated_sender`), passing its own
 /// [`NicknameRecordExt::verify`] — the ONE check of its stamp (at most 24 h old,
@@ -3845,7 +3870,10 @@ mod vision;
 
 #[cfg(test)]
 mod capability_fits_tests {
-    use super::{capability_fits, parts_for_the_capability, MAX_HOSTED_SHARDS_IN_CAP};
+    use super::{
+        blocks_for_the_announce, capability_fits, parts_for_the_capability,
+        MAX_BLOCKS_PER_ANNOUNCE, MAX_HOSTED_SHARDS_IN_CAP,
+    };
 
     fn resident(ranges: usize) -> swarmllm_types::ResidentModelLayers {
         swarmllm_types::ResidentModelLayers {
@@ -3891,6 +3919,51 @@ mod capability_fits_tests {
         assert!(!capability_fits(&cap), "too many ranges across entries");
         cap.resident_layers = vec![resident(0); 257];
         assert!(!capability_fits(&cap), "too many entries");
+    }
+
+    /// A node whose saved prompts hold more blocks than an announce may carry
+    /// sends one every receiver takes, keeping each prompt's OPENING (its
+    /// shallowest blocks, matched longest-prefix first); within the bound the
+    /// list goes as it is. Red with `blocks_for_the_announce` returning its
+    /// input: 1,500 blocks, over the receiver's 1,024.
+    #[test]
+    fn saved_prompts_past_an_announces_bound_are_announced_by_their_openings() {
+        let block = |prompt: u8, depth: u32| crate::types::PrefixBlockEntry {
+            block_hash: *blake3::hash(&[&[prompt][..], &depth.to_le_bytes()].concat()).as_bytes(),
+            token_count: (depth + 1) * 64,
+        };
+        // Three saved prompts of 500 blocks each (32,000 tokens), distinct chains.
+        let blocks: Vec<_> = (0..3u8)
+            .flat_map(|p| (0..500).map(move |d| block(p, d)))
+            .collect();
+        assert!(blocks.len() > MAX_BLOCKS_PER_ANNOUNCE);
+        let announced = blocks_for_the_announce(blocks.clone());
+        assert_eq!(
+            announced.len(),
+            MAX_BLOCKS_PER_ANNOUNCE,
+            "every receiver takes it"
+        );
+        let deepest = announced.iter().map(|b| b.token_count).max().unwrap();
+        for p in 0..3u8 {
+            let kept: Vec<u32> = blocks
+                .iter()
+                .filter(|b| announced.contains(b))
+                .filter(|b| (0..500).any(|d| block(p, d) == **b))
+                .map(|b| b.token_count)
+                .collect();
+            assert!(kept.contains(&64), "prompt {p}'s opening is announced");
+            assert!(
+                kept.iter().all(|&t| t <= deepest) && kept.len() >= 340,
+                "each prompt keeps a run from its start: {} blocks",
+                kept.len()
+            );
+        }
+        let few: Vec<_> = (0..100).map(|d| block(7, 99 - d)).collect();
+        assert_eq!(
+            blocks_for_the_announce(few.clone()),
+            few,
+            "within the bound: as it is"
+        );
     }
 
     /// A computer holding more parts than a capability may list sends a

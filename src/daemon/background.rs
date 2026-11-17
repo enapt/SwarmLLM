@@ -1060,7 +1060,9 @@ pub(super) fn spawn_prefix_announce_forwarder(
                     let announce = crate::types::PrefixCacheAnnounce {
                         node_id: our_id.clone(),
                         model_id: event.model_id,
-                        blocks: event.blocks,
+                        // Held to what every receiver takes; the loopback
+                        // index above keeps the whole list.
+                        blocks: crate::daemon::dispatch::blocks_for_the_announce(event.blocks),
                         timestamp: chrono::Utc::now(),
                     };
                     let cmd = NetworkCommand::Broadcast(SwarmMessage::PrefixCacheAnnounce(announce));

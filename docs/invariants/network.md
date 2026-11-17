@@ -5343,6 +5343,17 @@ variable list to the receiver's bound rather than having the whole message refus
 `a_computer_holding_more_parts_than_a_capability_lists_is_still_heard`, red (1,102 parts) without it. #91 (2j) removes
 the list from the capability altogether; until then this keeps a large holder heard.
 
+**The same cliff on the saved-prompt announce, closed the same night.** `PrefixCacheAnnounce` is refused whole past
+`MAX_BLOCKS_PER_ANNOUNCE` (1,024) and carries every saved prompt's blocks for the model (up to 16 prompts): one
+70k-token agent prompt at 64-token blocks, or sixteen of 4k, and every peer kept the last set it took. Found by
+sweeping every receiver bound in dispatch for its sender (an agent's table, each row checked against the code; the
+rest are cut at the sender or structurally small — wishlist 64 by a separate equal constant, pool models by a shared
+one, digests and pulls TRUNCATED by the receiver, a prompt-admission ask's 16 ranges bounded by the plan).
+`dispatch::blocks_for_the_announce` keeps the SHALLOWEST blocks (the chain is matched longest-prefix first, so every
+saved prompt's opening stays findable — llm-d's prefix scorer and vLLM's KV events index the same chained hashes);
+the loopback index keeps the whole list. Opt-in (`share_prefix_cache_with_peers`, default off). Test
+`saved_prompts_past_an_announces_bound_are_announced_by_their_openings`, red (1,500 blocks) without it.
+
 ## A model this node stopped holding is retracted by name, not by silence (2026-11-17)
 
 **What happened.** A receiver drops our parts of a model only when a `ShardAnnounce`
