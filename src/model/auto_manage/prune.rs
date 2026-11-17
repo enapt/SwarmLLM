@@ -1527,7 +1527,6 @@ impl AutoShardManager {
         let registry = &self.shared_state.model_registry;
         let local_node_id = self.shared_state.identity.node_id().clone();
         let data_dir = self.shared_state.config.node.data_dir.clone();
-        let claims = self.shared_state.models.shard_download_claims.clone();
 
         let held_per_model = {
             let mut counts: std::collections::HashMap<crate::types::ModelId, usize> =
@@ -1546,9 +1545,17 @@ impl AutoShardManager {
             }
             let dir = crate::model::shard::model_dir(&data_dir, &manifest.id.0);
             let model_id = manifest.id.clone();
-            let claims = claims.clone();
+            // Claims alone miss a download before its first part, when it has
+            // fetched the header it will load from (2026-11-17).
+            let download_under_way = self.shared_state.models.model_download_under_way(&model_id);
             let freed = tokio::task::spawn_blocking(move || {
-                crate::model::shard::cleanup_orphaned_model_files(&dir, &model_id, held, &claims)
+                crate::model::shard::cleanup_orphaned_model_files(
+                    &dir,
+                    &model_id,
+                    held,
+                    download_under_way,
+                    std::time::SystemTime::now(),
+                )
             })
             .await
             .unwrap_or(0);
@@ -3838,5 +3845,60 @@ mod kept_by_tests {
         assert!(due_when_changed_or_every(&last, ("a", 26), every));
         assert!(!due_when_changed_or_every(&last, ("a", 26), every));
         assert!(due_when_changed_or_every(&last, ("a", 26), Duration::ZERO));
+    }
+}
+
+#[cfg(test)]
+mod reclaim_orphaned_files_tests {
+    use super::super::test_support::{make_test_manager, register_manifest_with_shards};
+    use crate::model::acquisition::AcquisitionStatus;
+    use crate::model::shard::{model_dir, DERIVED_FILES_KEPT_FOR, HEADER_FILENAME};
+    use std::time::{Duration, SystemTime};
+
+    /// The live node's 2026-11-17 07:33 shape: a download has fetched the
+    /// header and registered itself, and claimed no part yet (it claims each
+    /// as its fetch starts). Holding nothing and claiming nothing, the model
+    /// read as orphaned, and the sweep took the header the download's parts
+    /// would load from. The header is dated past the age guard here, so only
+    /// the registered download can keep it.
+    #[tokio::test]
+    async fn a_download_before_its_first_part_keeps_its_header() {
+        let (state, manager) = make_test_manager();
+        let mid = register_manifest_with_shards(&state, "qwen-qwen3.5-4b-q4-k-m", 4, &[(0, 4)]);
+        let dir = model_dir(&state.config.node.data_dir, &mid.0);
+        std::fs::create_dir_all(&dir).unwrap();
+        let header = dir.join(HEADER_FILENAME);
+        std::fs::write(&header, vec![7u8; 4096]).unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&header)
+            .unwrap()
+            .set_modified(SystemTime::now() - DERIVED_FILES_KEPT_FOR - Duration::from_secs(60))
+            .unwrap();
+        let status = AcquisitionStatus::new_downloading(
+            mid.clone(),
+            1,
+            4096,
+            "huggingface",
+            "user",
+            "test".to_string(),
+        );
+        let _ = state.models.begin_download(mid.clone(), status);
+        assert!(
+            !state.models.model_has_live_shard_download(&mid),
+            "precondition: no part is claimed yet"
+        );
+
+        manager.reclaim_orphaned_model_files().await;
+        assert!(
+            header.exists(),
+            "the download's header was taken from under it"
+        );
+
+        // Control: with the download gone the same header IS reclaimed, so the
+        // assertion above is the download's doing, not a sweep that never ran.
+        assert!(state.remove_acquisition_if_idle(&mid));
+        manager.reclaim_orphaned_model_files().await;
+        assert!(!header.exists());
     }
 }

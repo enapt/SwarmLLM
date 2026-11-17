@@ -700,6 +700,13 @@ impl ShardStore {
     }
 }
 
+/// How long a model's derived files are left alone after one of them was
+/// written, whatever the model holds — see [`cleanup_orphaned_model_files`].
+/// An hour covers a writer that registers no download, between its header and
+/// its first part; it delays giving back a cancelled download's files by no more
+/// than that.
+pub const DERIVED_FILES_KEPT_FOR: std::time::Duration = std::time::Duration::from_secs(60 * 60);
+
 /// Remove the derived files a model leaves behind once none of its parts are
 /// held any more, and report the bytes reclaimed.
 ///
@@ -717,24 +724,38 @@ impl ShardStore {
 /// at startup, so for any model whose shard 0 comes back it costs nothing; the
 /// header is ~6 MB and re-fetched on the next attempt.
 ///
-/// **Three conditions, all required, because this deletes files.** The registry
+/// **Four conditions, all required, because this deletes files.** The registry
 /// must record no held shard for the model (`held_shards == 0`, which includes
 /// the `MMPROJ_SHARD_INDEX` sentinel, so a node holding only a vision encoder is
 /// skipped); no `shard_NNN.bin` may remain on disk (a file present but
-/// unregistered means the model is mid-adoption, not gone); and no shard of it
-/// may hold a download claim. `manifest.json` and `hf_source.json` are kept —
-/// they are what the model IS, they are tiny, and deleting them unlists a model
-/// the user may still want.
+/// unregistered means the model is mid-adoption, not gone); no download of it
+/// may be under way (`download_under_way`, from
+/// `ModelMgmt::model_download_under_way` — a part being written, or a download
+/// registered and not finished); and no derived file of it may have been written
+/// within [`DERIVED_FILES_KEPT_FOR`]. `manifest.json` and `hf_source.json` are
+/// kept — they are what the model IS, they are tiny, and deleting them unlists a
+/// model the user may still want.
+///
+/// **The last two close the gap BEFORE a download's first part.** A download
+/// fetches the header and the side files first, and claims a part only when its
+/// fetch starts — so with nothing held and nothing claimed yet, a sweep in
+/// between took the header it had just fetched (2026-11-17 07:33:03 → 07:33:06 on
+/// the live node, a dashboard download of Qwen3.5-4B). The download ended
+/// "Final manifest regeneration failed", and the model, all six parts landed,
+/// would not load until a restart fetched the header again. The age is the
+/// guard for a writer that registers nothing (the download pass learning a
+/// header for its plans), as `git gc` runs `git prune --expire 2.weeks.ago` because
+/// a writer creates objects before the refs that name them; Gitaly pruned with
+/// `now` and lost objects that way ("housekeeping: Don't prune recent objects").
+/// A file whose age cannot be read counts as new.
 pub fn cleanup_orphaned_model_files(
     dir: &std::path::Path,
     model_id: &ModelId,
     held_shards: usize,
-    claims: &dashmap::DashSet<crate::types::ShardId>,
+    download_under_way: bool,
+    now: std::time::SystemTime,
 ) -> u64 {
-    if held_shards > 0 || !dir.exists() {
-        return 0;
-    }
-    if claims.iter().any(|c| c.model_id == *model_id) {
+    if held_shards > 0 || download_under_way || !dir.exists() {
         return 0;
     }
     let Ok(files) = std::fs::read_dir(dir) else {
@@ -756,6 +777,15 @@ pub fn cleanup_orphaned_model_files(
             || name == crate::inference::split::TIED_OUTPUT_FILENAME
             || name == crate::inference::split::ROPE_FREQS_FILENAME
         {
+            // A derived file written just now means a writer is at work in this
+            // directory: leave all of it, as a shard file does.
+            let written = file.metadata().and_then(|m| m.modified()).ok();
+            let old_enough = written
+                .and_then(|t| now.duration_since(t).ok())
+                .is_some_and(|age| age >= DERIVED_FILES_KEPT_FOR);
+            if !old_enough {
+                return 0;
+            }
             derived.push(path);
         }
     }
@@ -872,12 +902,21 @@ fn claim_index_from_tmp_name(name: &str) -> Option<u32> {
 
 #[cfg(test)]
 mod orphaned_model_file_tests {
-    use super::{cleanup_orphaned_model_files, HEADER_FILENAME, MANIFEST_FILENAME};
+    use super::{
+        cleanup_orphaned_model_files, DERIVED_FILES_KEPT_FOR, HEADER_FILENAME, MANIFEST_FILENAME,
+    };
     use crate::inference::split::TIED_OUTPUT_FILENAME;
-    use crate::types::{ModelId, ShardId};
+    use crate::types::ModelId;
+    use std::time::{Duration, SystemTime};
 
     fn model_id() -> ModelId {
         ModelId("llama-3.2-1b-instruct-q8-0".into())
+    }
+
+    /// A sweep run long enough after the fixture's files were written that
+    /// their age protects nothing.
+    fn later() -> SystemTime {
+        SystemTime::now() + DERIVED_FILES_KEPT_FOR + Duration::from_secs(60)
     }
 
     /// Writes a directory in the shape a cancelled download leaves: the derived
@@ -897,9 +936,8 @@ mod orphaned_model_file_tests {
     #[test]
     fn a_model_with_no_parts_left_gives_its_derived_files_back() {
         let dir = orphaned_dir();
-        let claims = dashmap::DashSet::new();
 
-        let freed = cleanup_orphaned_model_files(dir.path(), &model_id(), 0, &claims);
+        let freed = cleanup_orphaned_model_files(dir.path(), &model_id(), 0, false, later());
 
         assert_eq!(freed, 4096 + 8192, "both derived files are reclaimed");
         assert!(!dir.path().join(HEADER_FILENAME).exists());
@@ -916,9 +954,8 @@ mod orphaned_model_file_tests {
     #[test]
     fn a_model_still_holding_a_part_keeps_everything() {
         let dir = orphaned_dir();
-        let claims = dashmap::DashSet::new();
 
-        let freed = cleanup_orphaned_model_files(dir.path(), &model_id(), 1, &claims);
+        let freed = cleanup_orphaned_model_files(dir.path(), &model_id(), 1, false, later());
 
         assert_eq!(freed, 0);
         assert!(dir.path().join(TIED_OUTPUT_FILENAME).exists());
@@ -931,47 +968,61 @@ mod orphaned_model_file_tests {
     fn a_shard_file_on_disk_stops_the_sweep_even_if_the_registry_says_zero() {
         let dir = orphaned_dir();
         std::fs::write(dir.path().join("shard_000.bin"), b"bytes").unwrap();
-        let claims = dashmap::DashSet::new();
 
-        let freed = cleanup_orphaned_model_files(dir.path(), &model_id(), 0, &claims);
+        let freed = cleanup_orphaned_model_files(dir.path(), &model_id(), 0, false, later());
 
         assert_eq!(freed, 0);
         assert!(dir.path().join(HEADER_FILENAME).exists());
         assert!(dir.path().join(TIED_OUTPUT_FILENAME).exists());
     }
 
-    /// Guard three: a download is in flight. Taking the header out from under a
+    /// Guard three: a download is under way. Taking the header out from under a
     /// running acquisition is the same class of mistake as sweeping a `.tmp`
     /// somebody is appending to.
     #[test]
-    fn a_download_in_flight_stops_the_sweep() {
+    fn a_download_under_way_stops_the_sweep() {
         let dir = orphaned_dir();
-        let claims = dashmap::DashSet::new();
-        claims.insert(ShardId {
-            model_id: model_id(),
-            index: 0,
-        });
 
-        let freed = cleanup_orphaned_model_files(dir.path(), &model_id(), 0, &claims);
+        let freed = cleanup_orphaned_model_files(dir.path(), &model_id(), 0, true, later());
 
         assert_eq!(freed, 0);
         assert!(dir.path().join(HEADER_FILENAME).exists());
     }
 
-    /// A claim on a DIFFERENT model must not protect this one, or one active
-    /// download would freeze the sweep for the whole node.
+    /// Guard four (2026-11-17): a header written moments ago is kept though
+    /// nothing is registered — the writer that fetched it may claim nothing
+    /// before its first part, which is how the live node's sweep took a
+    /// download's header three seconds after it landed.
     #[test]
-    fn another_models_download_does_not_protect_this_one() {
+    fn a_derived_file_written_just_now_is_kept_with_nothing_registered() {
         let dir = orphaned_dir();
-        let claims = dashmap::DashSet::new();
-        claims.insert(ShardId {
-            model_id: ModelId("some-other-model".into()),
-            index: 0,
-        });
 
-        let freed = cleanup_orphaned_model_files(dir.path(), &model_id(), 0, &claims);
+        let freed =
+            cleanup_orphaned_model_files(dir.path(), &model_id(), 0, false, SystemTime::now());
 
-        assert_eq!(freed, 4096 + 8192);
+        assert_eq!(freed, 0, "the files were written moments ago");
+        assert!(dir.path().join(HEADER_FILENAME).exists());
+        assert!(dir.path().join(TIED_OUTPUT_FILENAME).exists());
+    }
+
+    /// One new file holds the whole directory: an old tied weight beside a
+    /// header fetched just now is a download starting over, not an orphan.
+    #[test]
+    fn one_new_derived_file_keeps_the_old_ones_too() {
+        let dir = orphaned_dir();
+        let old = SystemTime::now() - DERIVED_FILES_KEPT_FOR - Duration::from_secs(60);
+        std::fs::File::options()
+            .write(true)
+            .open(dir.path().join(TIED_OUTPUT_FILENAME))
+            .unwrap()
+            .set_modified(old)
+            .unwrap();
+
+        let freed =
+            cleanup_orphaned_model_files(dir.path(), &model_id(), 0, false, SystemTime::now());
+
+        assert_eq!(freed, 0);
+        assert!(dir.path().join(TIED_OUTPUT_FILENAME).exists());
     }
 }
 

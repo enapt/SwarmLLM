@@ -2478,13 +2478,25 @@ leftovers reclaimable on the next cycle.
 
 ### What a change must keep
 
-- **Three guards on the deletion, all required**, each verified by removing it
+- **Four guards on the deletion, all required**, each verified by removing it
   and watching its test go red: the registry records no held part (which
   includes the `MMPROJ_SHARD_INDEX` sentinel, so a node holding only a vision
   encoder is skipped); no `shard_NNN.bin` remains on disk (a file present but
-  unregistered means mid-adoption, not gone); no shard of the model holds a
-  download claim. `manifest.json` and `hf_source.json` are kept — they are what
-  the model IS.
+  unregistered means mid-adoption, not gone); no download of the model is under
+  way (`ModelMgmt::model_download_under_way` — a claim, OR a registered download
+  not yet finished); and no derived file of it is younger than
+  `shard::DERIVED_FILES_KEPT_FOR` (1 h). `manifest.json` and `hf_source.json` are
+  kept — they are what the model IS.
+- **Claims alone are not "a download is running"** (2026-11-17, gotcha #1128). A
+  download fetches the header and side files BEFORE it claims its first part, so a
+  sweep reading only claims took a dashboard download's header three seconds after
+  it landed; the six parts arrived and the model would not load until a restart
+  fetched the header again. The registered download covers the owner's and the
+  automatic downloads; the age covers a writer that registers nothing (the
+  download pass learning a header for its plans) — `git gc`'s `prune --expire`
+  grace exists because a writer creates objects before the refs that name them.
+  Tests: `a_download_before_its_first_part_keeps_its_header`,
+  `a_derived_file_written_just_now_is_kept_with_nothing_registered`.
 - **Losing the derived files is cheap where it is not free.**
   `tied_output_weight.bin` (and every other sidecar in
   `GgufTensorMeta::sidecar_tensors`) is extracted from `shard_000.bin` by
