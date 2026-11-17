@@ -1981,7 +1981,11 @@ the same night**: the first reading, **gossip 4.1 KB/s** averaged over 11:49-19:
 10-31" — but that window opened with the .296 rollout (every peer restarting into it and re-announcing), not steady
 state (`.claude/rules/diagnosis.md` rule 3). **At steady state** (restarted 19:24Z; uptime 71-109 min, four 9.5-minute
 windows 20:34-21:12Z) gossip upload was **1.37-1.82 KB/s, 1.58 on average — below 10-31's 2.1**, `swarm/models`
-0.95-1.44 of it, capability updates still arriving ~90 an hour. Over the 7.4 h average (rollout included): upload
+0.95-1.44 of it, capability updates still arriving ~90 an hour. **Received, by kind, at steady state** (same windows,
+`gossip_recv_by_kind`): `NodeCapabilityUpdate` 90/h × 18.6 KB = **467 B/s**, `ShardAnnounce` 21/h × 17.1 KB = 98 B/s,
+`HealthPing` 841/h × 330 B = 77 B/s, `CreditGossip` 86/h × 582 B = 14 B/s, `PoolMessage` 24/h × 1.9 KB = 12 B/s, manifests 0 —
+so (2j)'s parts list out of the capability (~¾ of each) is the one lever worth building; `swarm/health`'s duplicate
+factor is 3.1 (2,632 copies received an hour for 841 unique) but at 330 B a ping it is ~1/6 of the capability's bytes. Over the 7.4 h average (rollout included): upload
 1.5 KB/s besides parts and gossip; `swarm/models` 3.3 KB/s: capability updates arrive at 96 an hour at 16.8 KB each (plain JSON), manifests 28 an hour at 53 KB, parts lists
 44 an hour at 16.5 KB, and the mesh sends each unique message ~3 times. `swarm/regions` published 840 times in 7.4 h
 (every 30 s broadcast tick re-sends demand, wishlist and pool availability unchanged, stamped anew) — only 122 B/s, and
