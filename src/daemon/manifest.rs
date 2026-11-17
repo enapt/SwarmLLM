@@ -61,8 +61,9 @@ pub fn generate_and_register_local_manifest(
         .unwrap_or(info.size_bytes);
 
     // Split model into shards for torrent-style distribution.
-    // Shard size is configurable via [model].shard_size_mb (default 512MB).
-    let shard_size: u64 = shared_state.config.model.shard_size_bytes();
+    // Cut at the upload's own size (`model::canonical`, #151): a node that
+    // cut its own way would hold parts no other node has.
+    let shard_size: u64 = crate::model::canonical::canonical_shard_size_bytes();
     let node_id = shared_state.identity.node_id().clone();
 
     // Extract model metadata from GGUF header (num_layers, architecture, etc.)
@@ -268,9 +269,8 @@ pub(super) fn regenerate_manifest_from_header(
     model_id: &crate::types::ModelId,
     model_dir: &std::path::Path,
     meta: &crate::inference::split::GgufTensorMeta,
-    config: &crate::config::Config,
 ) -> Option<crate::types::ModelManifest> {
-    let shard_size = config.model.shard_size_bytes();
+    let shard_size = crate::model::canonical::canonical_shard_size_bytes();
 
     // Compute total GGUF file size from tensor metadata (header + all tensor data).
     // This is the REAL total, even when we only have a subset of shards locally.

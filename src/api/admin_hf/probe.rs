@@ -22,7 +22,8 @@ pub async fn hf_probe(
 
     validate_hf_inputs(&repo_id, &filename)?;
 
-    let shard_size = state.config.model.shard_size_bytes();
+    // The upload's own cut (`model::canonical`), never a per-node size.
+    let shard_size = crate::model::canonical::canonical_shard_size_bytes();
     match crate::model::huggingface::probe_gguf_file(&repo_id, &filename, shard_size).await {
         Ok(info) => {
             // Cache probe result so the frontend can look up HF source later

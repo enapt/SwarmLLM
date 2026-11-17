@@ -447,7 +447,7 @@ impl AutoShardManager {
 
                     // Probe to get shard layouts, then download the specific shard.
                     // Cut at the canonical size, as every manifest of this upload
-                    // is — this node's own `shard_size_mb` would cut other parts.
+                    // is — any other size would cut other parts.
                     let probe_result = crate::model::huggingface::probe_gguf_file(
                         &repo_id,
                         &filename,

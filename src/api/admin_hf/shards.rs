@@ -350,27 +350,27 @@ pub async fn hf_download_shards(
         .with_detail_str(&repo_id)
         .with_toast("info", 4000),
     );
-    let configured_shard_size = state.shared_state.config.model.shard_size_bytes();
-    let info =
-        crate::model::huggingface::probe_gguf_file(&repo_id, &filename, configured_shard_size)
-            .await
-            .map_err(|e| {
-                // Consult the same predicate the status does, BEFORE choosing a
-                // level: a mistyped repo name is the caller's to fix, and
-                // recording their typo as `ERROR` tells an operator this node
-                // is broken. This site already knew the difference one line
-                // further down and logged first anyway.
-                if crate::model::huggingface::probe_failure_is_user_fixable(&e) {
-                    tracing::info!(error = %e, "HuggingFace probe: not a file this node can use");
-                } else {
-                    tracing::warn!(error = %e, "HuggingFace probe failed");
-                }
-                // The same answer as `hf/probe` gives, from the one mapping:
-                // this endpoint once answered a typo `502 Bad Gateway` with
-                // the cloud-provider hint ("Try again") while probe.rs had
-                // learned to tell the two apart.
-                super::probe_failure_error(&e)
-            })?;
+    // Cut as every manifest of this upload is (`model::canonical`, #151).
+    let shard_size = crate::model::canonical::canonical_shard_size_bytes();
+    let info = crate::model::huggingface::probe_gguf_file(&repo_id, &filename, shard_size)
+        .await
+        .map_err(|e| {
+            // Consult the same predicate the status does, BEFORE choosing a
+            // level: a mistyped repo name is the caller's to fix, and
+            // recording their typo as `ERROR` tells an operator this node
+            // is broken. This site already knew the difference one line
+            // further down and logged first anyway.
+            if crate::model::huggingface::probe_failure_is_user_fixable(&e) {
+                tracing::info!(error = %e, "HuggingFace probe: not a file this node can use");
+            } else {
+                tracing::warn!(error = %e, "HuggingFace probe failed");
+            }
+            // The same answer as `hf/probe` gives, from the one mapping:
+            // this endpoint once answered a typo `502 Bad Gateway` with
+            // the cloud-provider hint ("Try again") while probe.rs had
+            // learned to tell the two apart.
+            super::probe_failure_error(&e)
+        })?;
 
     // Never mix two uploads in one model directory. A node holding parts of
     // another upload switches them by itself (`auto_manage::canonical`).

@@ -4510,7 +4510,12 @@ task that runs whether or not auto-manage is on — repair, like
   versions that rank two uploads differently move the swarm back and forth.
   Never reorder; inserting a publisher is safe.
 - Every canonical layout is cut at the DEFAULT shard size
-  (`canonical_shard_size_bytes`), never at a node's `model.shard_size_mb`.
+  (`canonical_shard_size_bytes`). There is no per-node size: `model.shard_size_mb`
+  was removed on 2026-11-17, when five cuts were found still reading it — the
+  dashboard's download, the probe, the popular-model registration and both disk
+  manifest builders — while the two that cut against the swarm used the
+  canonical size. A node set to 256 MB produced parts no other holder had, and
+  the heal then deleted them (one invariant, N paths; gotcha #1129).
 - A claim must name the model (`origin_names_model`): a file whose name gives
   another id is never a candidate, or one gossip message could move a model's
   holders onto any file.

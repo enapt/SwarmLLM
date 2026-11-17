@@ -483,7 +483,7 @@ pub(crate) async fn register_without_parts(
     let info = super::probe_gguf_file(
         &source.repo_id,
         &source.filename,
-        state.config.model.shard_size_bytes(),
+        crate::model::canonical::canonical_shard_size_bytes(),
     )
     .await
     .map_err(|e| {

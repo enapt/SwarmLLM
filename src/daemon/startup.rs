@@ -186,7 +186,7 @@ pub(super) async fn restore_persistent_state(
                                 model = %model_id,
                                 "Regenerating missing manifest from GGUF header"
                             );
-                            if regenerate_manifest_from_header(&model_id, &model_dir, &meta, config)
+                            if regenerate_manifest_from_header(&model_id, &model_dir, &meta)
                                 .is_some()
                             {
                                 shared_state.gguf_meta.insert(model_id, meta);
@@ -327,12 +327,9 @@ pub(super) async fn restore_persistent_state(
                                 model = %model_id,
                                 "Regenerating manifest from GGUF header + shard files"
                             );
-                            if let Some(manifest) = regenerate_manifest_from_header(
-                                model_id,
-                                &model_dir,
-                                &meta,
-                                &shared_state.config,
-                            ) {
+                            if let Some(manifest) =
+                                regenerate_manifest_from_header(model_id, &model_dir, &meta)
+                            {
                                 shared_state
                                     .model_registry
                                     .register_manifest(manifest.clone());
@@ -552,9 +549,7 @@ pub(super) async fn restore_persistent_state(
                                 let manifest_path =
                                     model_dir.join(crate::model::shard::MANIFEST_FILENAME);
                                 if !manifest_path.exists() {
-                                    regenerate_manifest_from_header(
-                                        &mid, &model_dir, &meta, config,
-                                    );
+                                    regenerate_manifest_from_header(&mid, &model_dir, &meta);
                                 }
                                 // The shard-0 tensors a node without shard 0
                                 // still needs; each one already on disk is

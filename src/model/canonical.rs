@@ -178,12 +178,17 @@ impl Holding {
     }
 }
 
-/// Every canonical layout is cut at the DEFAULT shard size, never at this
-/// node's `model.shard_size_mb`: a node configured differently would otherwise
-/// cut the same file into other parts, and parts are what the swarm trades.
+/// Every canonical layout is cut at this one size, on every node: a node that
+/// cut the same file its own way would hold other parts, and parts are what
+/// the swarm trades. (It was a per-node setting, `model.shard_size_mb`, until
+/// 2026-11-17 — five cuts read it while two read this; gotcha #1129.)
 pub fn canonical_shard_size_bytes() -> u64 {
-    crate::config::ModelConfig::default().shard_size_bytes()
+    CANONICAL_SHARD_SIZE_BYTES
 }
+
+/// 512 MiB: the size every node has always cut at by default, so every
+/// manifest already in the swarm agrees with it.
+pub const CANONICAL_SHARD_SIZE_BYTES: u64 = 512 * 1024 * 1024;
 
 /// The upload the swarm uses for one model, as this node verified it against
 /// HuggingFace: where it is, and its shape — what any manifest describing it

@@ -180,7 +180,7 @@ pub struct CreditLedger {
     /// millionths of a credit.
     ///
     /// Hosting pays `rate * size_gb * hours` and the result was truncated to an
-    /// integer **per shard**. With the shipped defaults — `shard_size_mb = 512`
+    /// integer **per shard**. With the shipped defaults — 512 MB shards
     /// and `shard_hosting = 1` — that is `1 * 0.5 * 1.0 = 0.5`, which truncates
     /// to **zero**. Every shard smaller than 1 GB therefore earned nothing, on
     /// every node, for ever, while spending worked normally: a node that hosted
@@ -1780,7 +1780,7 @@ mod hosting_accrual_tests {
         amount
     }
 
-    /// The reported defect, with the shipped defaults: `shard_size_mb = 512`
+    /// The reported defect, with the shipped defaults: 512 MB shards
     /// and `shard_hosting = 1`. Paid per shard, `1 * 0.5 * 1.0` truncated to
     /// zero — on every node, for ever.
     #[test]

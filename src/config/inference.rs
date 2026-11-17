@@ -4,12 +4,11 @@
 //! caches, batching, speculative decoding, SWIFT, parallax routing,
 //! distributed pipeline knobs, encryption, etc.) — plus the related
 //! `AutoManageConfig` + `ModelAutoManagePolicy` (background shard
-//! acquisition / pruning), `ModelConfig` (shard_size_mb +
-//! shard_size_bytes/validate methods), and the public network-retry +
-//! shard-size bound constants used by HF download / admin validation.
+//! acquisition / pruning), and the public network-retry constants used by
+//! HF download. (A model's part size is not a setting: every node cuts an
+//! upload the same way, `model::canonical::CANONICAL_SHARD_SIZE_BYTES`.)
 
 use super::default_true;
-use crate::error::SwarmError;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -954,59 +953,8 @@ fn default_auto_manage_interval() -> u32 {
     5
 }
 
-/// Configuration for model storage and sharding.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct ModelConfig {
-    /// Size of each shard in megabytes when splitting a model for distribution.
-    /// Must be between 64 and 2048 (inclusive). Default: 512.
-    /// Changing this only affects newly created shards — existing shards keep their original size.
-    #[serde(default = "default_shard_size_mb")]
-    pub shard_size_mb: u64,
-}
-
-impl Default for ModelConfig {
-    fn default() -> Self {
-        Self {
-            shard_size_mb: default_shard_size_mb(),
-        }
-    }
-}
-
-fn default_shard_size_mb() -> u64 {
-    512
-}
-
 /// Network retry backoff delays in seconds (3 attempts: 5s, 30s, 120s).
 pub const NETWORK_RETRY_DELAYS: [u64; 3] = [5, 30, 120];
-
-/// Minimum allowed shard size in MB.
-pub const SHARD_SIZE_MIN_MB: u64 = 64;
-/// Maximum allowed shard size in MB.
-pub const SHARD_SIZE_MAX_MB: u64 = 2048;
-
-impl ModelConfig {
-    /// Return the configured shard size in bytes.
-    pub fn shard_size_bytes(&self) -> u64 {
-        self.shard_size_mb * 1024 * 1024
-    }
-
-    /// Validate and clamp shard_size_mb to allowed range.
-    pub fn validate(&self) -> Result<(), SwarmError> {
-        if self.shard_size_mb < SHARD_SIZE_MIN_MB || self.shard_size_mb > SHARD_SIZE_MAX_MB {
-            return Err(SwarmError::Config(format!(
-                "shard_size_mb must be between {} and {} (got {})",
-                SHARD_SIZE_MIN_MB, SHARD_SIZE_MAX_MB, self.shard_size_mb
-            )));
-        }
-        if !self.shard_size_mb.is_power_of_two() {
-            tracing::warn!(
-                shard_size_mb = self.shard_size_mb,
-                "shard_size_mb is not a power of 2 — this may cause suboptimal alignment"
-            );
-        }
-        Ok(())
-    }
-}
 
 fn default_session_timeout() -> u64 {
     600

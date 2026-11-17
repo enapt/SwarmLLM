@@ -315,14 +315,15 @@ pub(crate) fn derive_tensor_entries(
     None
 }
 
-/// The shard size every node ships with, and therefore the count the publisher
-/// most likely asked for. Only a starting guess — the search below does not
-/// depend on the publisher having used it.
-const DEFAULT_SHARD_SIZE_BYTES: u64 = 512 * 1024 * 1024;
+/// The size every node cuts an upload at, and therefore the count the
+/// publisher asked for. Only a starting guess — the search below does not
+/// depend on the publisher having used it (a manifest from before the size
+/// was fixed may not have).
+const DEFAULT_SHARD_SIZE_BYTES: u64 = crate::model::canonical::CANONICAL_SHARD_SIZE_BYTES;
 
-/// Upper bound on the searched shard count. `shard_size_mb` is clamped to a
-/// documented range, so a real model cannot need more; the bound exists so a
-/// malformed manifest arriving over gossip cannot turn this into a CPU sink.
+/// Upper bound on the searched shard count, from when a node could cut at
+/// 64-2048 MB; the bound exists so a malformed manifest arriving over gossip
+/// cannot turn this into a CPU sink.
 const SHARD_SIZE_SEARCH_MAX: u32 = 64;
 
 #[cfg(test)]

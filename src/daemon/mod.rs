@@ -91,7 +91,6 @@ impl Daemon {
             auto_manage_enabled = self.config.auto_manage.enabled,
             auto_manage_interval = %auto_interval,
             max_concurrent_requests = self.config.inference.max_concurrent_requests,
-            shard_size_mb = self.config.model.shard_size_mb,
             log_level = %self.config.logging.level,
             max_peers = self.config.network.max_peers,
             session_timeout_secs = self.config.inference.session_timeout_seconds,

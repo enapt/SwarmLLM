@@ -8,11 +8,11 @@ mean anything next to each other.
 
 ## The three tiers
 
-| Tier | Model | Download | `shard_size_mb` | Shards | What it is for |
-|---|---|---|---|---|---|
-| **Smoke** | TinyLlama-1.1B-Chat v1.0 Q4_K_M | 638 MB | 512 (default) | 2 | "Is this node routing at all" |
-| **Standard** | Llama-3.2-3B-Instruct Q4_K_M | 1925 MB | 512 (default) | 4 | Performance + networking. The default choice. |
-| **Stress** | Meta-Llama-3.1-8B-Instruct Q4_K_M | 4692 MB | 512 (default) | ~10 | VRAM pressure, deep pipelines, OOM paths |
+| Tier | Model | Download | Shards | What it is for |
+|---|---|---|---|---|
+| **Smoke** | TinyLlama-1.1B-Chat v1.0 Q4_K_M | 638 MB | 2 | "Is this node routing at all" |
+| **Standard** | Llama-3.2-3B-Instruct Q4_K_M | 1925 MB | 4 | Performance + networking. The default choice. |
+| **Stress** | Meta-Llama-3.1-8B-Instruct Q4_K_M | 4692 MB | ~10 | VRAM pressure, deep pipelines, OOM paths |
 
 ```
 Smoke     TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF
@@ -59,18 +59,18 @@ four. So:
 Eight shards across two nodes is two segments and one hop — identical to two
 shards across two nodes.
 
-`shard_count = ceil(total_size / shard_size_mb)` (`huggingface/probe.rs`), and
-`model.shard_size_mb` is configurable (64 MB minimum, 512 default), so depth is
-tunable independently of model size:
+Every node cuts a model the same way — layer-aligned parts of about 512 MB
+(`model::canonical::CANONICAL_SHARD_SIZE_BYTES`) — because a part is only
+useful if every other holder of the model has the same one (#151). Until
+2026-11-17 the size was a per-node setting, `model.shard_size_mb`; two nodes
+that downloaded the same model at different sizes produced different
+manifests for the same weights, and the canonical heal then deleted one side's
+parts. A finer split for a test is set by WHICH parts each node holds
+(`3node_sharded_setup.sh` gives each node a contiguous run), not by cutting
+the model into more of them.
 
-| `shard_size_mb` | Shards for Llama-3.2-3B (1925 MB) |
-|---|---|
-| 512 (default) | 4 |
-| 256 | 8 |
-| 128 | 16 |
-
-**The default is still the right choice, for two reasons that only show up
-under auto-manage.**
+Finer parts were never free anyway, for two reasons that show up under
+auto-manage.
 
 *Fragmentation.* Contiguous runs merge, but non-contiguous ones do not. Nothing
 in acquisition scoring prefers contiguity — `model/auto_manage/scoring.rs` ranks
@@ -84,22 +84,6 @@ an entry in each announce. A receiver takes at most `MAX_SHARDS_PER_ANNOUNCE`
 (512) parts a message, so a node holding more sends its list in pieces (since
 v0.3.270; before that its whole list was dropped, gotcha #1027) — more parts mean
 more messages, not a ceiling.
-
-Lower `shard_size_mb` when you are placing shards **deliberately** — the
-`3node_sharded_setup.sh` split assigns contiguous halves by hand, so
-fragmentation cannot occur and finer granularity is pure benefit. Leave it at
-the default when auto-manage is deciding placement.
-
-## Pitfall: everyone must agree on `shard_size_mb`
-
-Shard layout is decided by whichever node first probes the model, and travels
-with the manifest. Two nodes that independently download the same model with
-different `shard_size_mb` values produce **different manifests for the same
-weights**, and their shards will not interoperate.
-
-If you do change it for a deliberate split, set it on every node *before* the
-first download, or let one node acquire the model and allow the manifest to
-propagate.
 
 ## Running a comparable test
 

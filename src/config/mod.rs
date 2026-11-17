@@ -83,8 +83,6 @@ pub struct Config {
     #[serde(default)]
     pub auto_manage: AutoManageConfig,
     #[serde(default)]
-    pub model: ModelConfig,
-    #[serde(default)]
     pub identity: IdentityConfig,
     #[serde(default)]
     pub providers: ProvidersConfig,
@@ -365,8 +363,7 @@ mod node;
 pub use node::*;
 
 /// Inference / auto-shard-management / model-storage config:
-/// InferenceConfig, AutoManageConfig + ModelAutoManagePolicy,
-/// ModelConfig + shard-size constants.
+/// InferenceConfig, AutoManageConfig + ModelAutoManagePolicy.
 mod inference;
 pub use inference::*;
 
@@ -845,7 +842,6 @@ impl Config {
         }
 
         // Validate model/shard config
-        self.model.validate()?;
 
         Ok(())
     }
@@ -1219,57 +1215,6 @@ api_key = "test-key-abc"
         // Empty string yields no peers.
         assert!(parse_bootstrap_peers_env("").is_empty());
         assert!(parse_bootstrap_peers_env("   \n  ").is_empty());
-    }
-
-    #[test]
-    fn default_shard_size_mb() {
-        let config = Config::default();
-        assert_eq!(config.model.shard_size_mb, 512);
-        assert_eq!(config.model.shard_size_bytes(), 512 * 1024 * 1024);
-    }
-
-    #[test]
-    fn parse_custom_shard_size() {
-        let toml_str = r#"
-[model]
-shard_size_mb = 256
-"#;
-        let config: Config = toml::from_str(toml_str).unwrap();
-        assert_eq!(config.model.shard_size_mb, 256);
-        assert_eq!(config.model.shard_size_bytes(), 256 * 1024 * 1024);
-    }
-
-    #[test]
-    fn shard_size_validation_rejects_too_small() {
-        let model_config = ModelConfig { shard_size_mb: 32 };
-        assert!(model_config.validate().is_err());
-    }
-
-    #[test]
-    fn shard_size_validation_rejects_too_large() {
-        let model_config = ModelConfig {
-            shard_size_mb: 4096,
-        };
-        assert!(model_config.validate().is_err());
-    }
-
-    #[test]
-    fn shard_size_validation_accepts_valid() {
-        let model_config = ModelConfig { shard_size_mb: 512 };
-        assert!(model_config.validate().is_ok());
-        let model_config = ModelConfig { shard_size_mb: 64 };
-        assert!(model_config.validate().is_ok());
-        let model_config = ModelConfig {
-            shard_size_mb: 2048,
-        };
-        assert!(model_config.validate().is_ok());
-    }
-
-    #[test]
-    fn shard_size_non_power_of_two_warns_but_passes() {
-        let model_config = ModelConfig { shard_size_mb: 300 };
-        // Should succeed (only a warning, not an error)
-        assert!(model_config.validate().is_ok());
     }
 
     #[test]

@@ -32,7 +32,7 @@ pub struct ReferenceModel {
     pub filename: &'static str,
     /// Approximate download size. Shown before the user commits to it.
     pub size_mb: u64,
-    /// Shard count at the default `shard_size_mb` of 512.
+    /// Shard count at the canonical 512 MB cut.
     pub shards: u32,
 }
 

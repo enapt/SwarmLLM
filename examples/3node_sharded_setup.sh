@@ -89,8 +89,8 @@ rig_share /tmp/swarm_bench_a
 
 # Nodes B and C: split the shard list in half, B taking the earlier layers.
 # Done by enumeration rather than naming shard_000/shard_001 so the script
-# works for any shard count — a Standard-tier model at shard_size_mb=256 has
-# eight shards, not two.
+# works for any shard count — the Standard-tier model has four shards, the
+# Stress tier about ten.
 SHARDS=($(ls -1 "$SRC_MODEL"/shard_*.bin 2>/dev/null | sort))
 if [ ${#SHARDS[@]} -lt 2 ]; then
     echo "Need at least 2 shards to force a distributed pipeline, found ${#SHARDS[@]}" >&2

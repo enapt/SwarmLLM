@@ -224,12 +224,6 @@ the access key, and with it admin and inference. That is the intended bargain fo
 a tailnet — devices you authorised — which is why the LAN case stays opt-in. See
 [Tailscale / WAN](../operations/tailscale-wan.md).
 
-## `[model]` — Model Storage
-
-| Option | Type | Default | Description |
-|---|---|---|---|
-| `shard_size_mb` | integer | `512` | Shard size in MB. Range: 64-2048 |
-
 ## `[auto_manage]` — Automatic Shard Management
 
 | Option | Type | Default | Description |

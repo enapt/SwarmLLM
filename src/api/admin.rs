@@ -661,11 +661,10 @@ pub async fn diagnostics(
     // when trying to work out why shards are moving on their own.
     let _ = writeln!(
         out,
-        "auto_manage: {}  shard_size_mb: {}",
+        "auto_manage: {}",
         ss.models
             .auto_manage_enabled
             .load(std::sync::atomic::Ordering::Relaxed),
-        ss.config.model.shard_size_mb
     );
     // The storage arithmetic auto-manage decides by. A tester holding 18 GB
     // against a 50 GB setting read "no remaining storage budget" every cycle
@@ -1736,7 +1735,6 @@ pub async fn get_config(State(state): State<AppState>) -> Json<serde_json::Value
         "auto_manage_shards": state.shared_state.models.auto_manage_enabled.load(std::sync::atomic::Ordering::Relaxed),
         "auto_manage_max_storage_mb": config.auto_manage.max_storage_mb,
         "auto_manage_on_metered": config.auto_manage.on_metered_connection,
-        "shard_size_mb": config.model.shard_size_mb,
         "max_batch_size": config.inference.max_batch_size,
         "batch_timeout_ms": config.inference.batch_timeout_ms,
         // R137: surface the runtime values (not the startup-frozen config)
@@ -2000,19 +1998,6 @@ pub async fn update_config(
         // download, and by `metered_hold_now` at once for peers' requests;
         // `make_config_live` wakes the pass so a pause lifted takes effect now.
         config.auto_manage.on_metered_connection = metered;
-    }
-    if let Some(shard_size) = body.shard_size_mb {
-        if !(crate::config::SHARD_SIZE_MIN_MB..=crate::config::SHARD_SIZE_MAX_MB)
-            .contains(&shard_size)
-        {
-            return Err(ApiError(crate::error::SwarmError::Validation(format!(
-                "shard_size_mb must be between {} and {} (got {})",
-                crate::config::SHARD_SIZE_MIN_MB,
-                crate::config::SHARD_SIZE_MAX_MB,
-                shard_size
-            ))));
-        }
-        config.model.shard_size_mb = shard_size;
     }
     if let Some(allow) = body.allow_cross_pool_inference {
         // Goes live with the whole config at the end of this handler;
@@ -2396,7 +2381,6 @@ pub struct ConfigUpdate {
     pub auto_manage_max_storage_mb: Option<u64>,
     /// `auto` / `pause` / `allow` — `AutoManageConfig::on_metered_connection`.
     pub auto_manage_on_metered: Option<crate::config::MeteredConnection>,
-    pub shard_size_mb: Option<u64>,
     pub max_batch_size: Option<u32>,
     pub batch_timeout_ms: Option<u64>,
     /// R137: hot-reloadable cross-pool inference fallback toggle.

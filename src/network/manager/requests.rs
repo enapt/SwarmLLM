@@ -742,9 +742,10 @@ impl NetworkManager {
                         self.ask_again_after_busy(shard_id, peer, retry_after_ms);
                         return;
                     }
-                    // Cap total_size to prevent unbounded download loops from malicious peers
-                    let max_shard_bytes =
-                        self.shared_state.cfg().model.shard_size_mb * 1024 * 1024 * 2;
+                    // Cap total_size to prevent unbounded download loops from malicious
+                    // peers: twice the size every upload is cut at, room for a
+                    // layer-aligned part longer than the target.
+                    let max_shard_bytes = crate::model::canonical::CANONICAL_SHARD_SIZE_BYTES * 2;
                     if data.total_size > max_shard_bytes {
                         tracing::warn!(
                             %peer,

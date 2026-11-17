@@ -2431,7 +2431,6 @@ fn user_settable_config_is_read_live_not_from_the_boot_snapshot() {
         ".config.auto_manage.max_storage_mb",
         ".config.auto_manage.prune_enabled",
         ".config.node.contribution",
-        ".config.model.shard_size_mb",
         // ...and the three `inference` fields the Settings panel exposes. The
         // rest of that section (gpu_layers, shard_range) is config-file/CLI
         // only, so reading the boot value there is CORRECT — `shard_range` in
