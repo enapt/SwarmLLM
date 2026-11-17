@@ -107,13 +107,26 @@ impl LostPeers {
     /// overdue first; each chosen is scheduled again at twice its gap (at most
     /// [`MOST_BETWEEN_LOOKUPS`]). A peer lost longer than [`LOOK_UP_FOR`], or
     /// connected (`connected`), is forgotten.
-    pub(super) fn due(&mut self, now: Instant, connected: impl Fn(&PeerId) -> bool) -> Vec<PeerId> {
+    ///
+    /// A peer that cannot be looked up this tick (`waits`: cut off for its
+    /// release, or a lookup of it still running) is passed over: it takes none
+    /// of the tick's lookups and keeps its turn. Chosen and then skipped by the
+    /// caller, it lost a turn, its gap doubled with no lookup made, and a peer
+    /// that was due waited a tick (review of #465, 2026-11-17). Prior art:
+    /// gRPC's connection backoff (`doc/connection-backoff.md`) multiplies the
+    /// backoff once per failed ATTEMPT, never for a turn that made none.
+    pub(super) fn due(
+        &mut self,
+        now: Instant,
+        connected: impl Fn(&PeerId) -> bool,
+        waits: impl Fn(&PeerId) -> bool,
+    ) -> Vec<PeerId> {
         self.lost
             .retain(|p, l| now.saturating_duration_since(l.since) < LOOK_UP_FOR && !connected(p));
         let mut due: Vec<(Instant, PeerId)> = self
             .lost
             .iter()
-            .filter(|(_, l)| l.next <= now)
+            .filter(|(p, l)| l.next <= now && !waits(p))
             .map(|(p, l)| (l.next, *p))
             .collect();
         due.sort();
@@ -155,14 +168,19 @@ mod tests {
         let t0 = Instant::now();
         lost.note_dialable(p, t0);
         lost.note_lost(p, t0);
-        assert!(lost.due(t0, |_| false).is_empty(), "the redial goes first");
-        assert!(lost.due(t0 + Duration::from_secs(59), |_| false).is_empty());
+        assert!(
+            lost.due(t0, |_| false, |_| false).is_empty(),
+            "the redial goes first"
+        );
+        assert!(lost
+            .due(t0 + Duration::from_secs(59), |_| false, |_| false)
+            .is_empty());
         let mut at = t0 + FIRST_LOOKUP_AFTER;
         let mut gaps = Vec::new();
         let mut last = at;
         for _ in 0..12 {
             // Step a tick at a time until it is due.
-            while lost.due(at, |_| false).is_empty() {
+            while lost.due(at, |_| false, |_| false).is_empty() {
                 at += Duration::from_secs(30);
             }
             gaps.push(at.saturating_duration_since(last).as_secs());
@@ -182,7 +200,9 @@ mod tests {
         );
         // Losing it again does not start the schedule over.
         lost.note_lost(p, at);
-        assert!(lost.due(at + FIRST_LOOKUP_AFTER, |_| false).is_empty());
+        assert!(lost
+            .due(at + FIRST_LOOKUP_AFTER, |_| false, |_| false)
+            .is_empty());
     }
 
     #[test]
@@ -195,11 +215,11 @@ mod tests {
             lost.note_lost(p, t0);
         }
         lost.note_found(&a);
-        let due = lost.due(t0 + FIRST_LOOKUP_AFTER, |p| *p == b);
+        let due = lost.due(t0 + FIRST_LOOKUP_AFTER, |p| *p == b, |_| false);
         assert_eq!(due, vec![c], "found and connected peers are not looked up");
         assert_eq!(lost.len(), 1);
         assert!(
-            lost.due(t0 + LOOK_UP_FOR, |_| false).is_empty(),
+            lost.due(t0 + LOOK_UP_FOR, |_| false, |_| false).is_empty(),
             "a day lost: forgotten"
         );
         assert_eq!(lost.len(), 0);
@@ -216,7 +236,36 @@ mod tests {
         }
         assert_eq!(lost.len(), MOST_LOST_PEERS);
         let at = t0 + FIRST_LOOKUP_AFTER + Duration::from_secs(1);
-        assert_eq!(lost.due(at, |_| false).len(), LOOKUPS_A_TICK);
+        assert_eq!(lost.due(at, |_| false, |_| false).len(), LOOKUPS_A_TICK);
+    }
+
+    #[test]
+    fn a_peer_passed_over_keeps_its_turn_and_takes_no_lookup() {
+        // Review of #465 (2026-11-17): a peer cut off for its release, or one
+        // whose lookup was still running, was chosen, scheduled again at twice
+        // its gap and then skipped — its turn lost, and one of the tick's
+        // lookups taken from a peer that was due.
+        let mut lost = LostPeers::default();
+        let t0 = Instant::now();
+        let waiting = PeerId::random();
+        lost.note_dialable(waiting, t0);
+        lost.note_lost(waiting, t0); // the longest overdue
+        for i in 0..LOOKUPS_A_TICK {
+            let p = PeerId::random();
+            lost.note_dialable(p, t0);
+            lost.note_lost(p, t0 + Duration::from_millis(1 + i as u64));
+        }
+        let at = t0 + FIRST_LOOKUP_AFTER + Duration::from_secs(1);
+        let due = lost.due(at, |_| false, |p| *p == waiting);
+        assert!(!due.contains(&waiting));
+        assert_eq!(
+            due.len(),
+            LOOKUPS_A_TICK,
+            "the passed-over peer took no lookup"
+        );
+        // Its wait over, it is looked up at the next tick, not a doubled gap later.
+        let next_tick = at + Duration::from_secs(30);
+        assert_eq!(lost.due(next_tick, |_| false, |_| false), vec![waiting]);
     }
 
     #[test]
@@ -232,7 +281,11 @@ mod tests {
         lost.note_found(&p); // the moment's reconnect …
         lost.note_lost(p, t0 + Duration::from_secs(4)); // … and the close after it
         lost.note_lost(never, t0); // never named a direct internet address
-        let due = lost.due(t0 + Duration::from_secs(4) + FIRST_LOOKUP_AFTER, |_| false);
+        let due = lost.due(
+            t0 + Duration::from_secs(4) + FIRST_LOOKUP_AFTER,
+            |_| false,
+            |_| false,
+        );
         assert_eq!(due, vec![p]);
     }
 

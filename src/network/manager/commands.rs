@@ -70,7 +70,7 @@ impl NetworkManager {
     /// address its neighbours hold now, and the answer's public addresses are
     /// dialled too (`events.rs`). Run on the liveness tick; never in offline
     /// mode, never for a peer cut off for its release, at most one lookup a
-    /// peer in flight.
+    /// peer in flight — such a peer keeps its turn (`LostPeers::due`'s `waits`).
     pub(super) fn look_up_lost_peers(&mut self) {
         if self
             .shared_state
@@ -81,14 +81,13 @@ impl NetworkManager {
             return;
         }
         let now = std::time::Instant::now();
-        let swarm = &self.swarm;
-        let due = self.lost_peers.due(now, |p| swarm.is_connected(p));
+        let (swarm, cut_off, in_flight) = (&self.swarm, &self.cut_off, &self.lost_peer_lookups);
+        let due = self.lost_peers.due(
+            now,
+            |p| swarm.is_connected(p),
+            |p| cut_off.contains_key(p) || in_flight.values().any(|q| q == p),
+        );
         for peer_id in due {
-            if self.cut_off.contains_key(&peer_id)
-                || self.lost_peer_lookups.values().any(|p| p == &peer_id)
-            {
-                continue;
-            }
             let query = self
                 .swarm
                 .behaviour_mut()

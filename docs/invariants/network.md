@@ -5868,7 +5868,10 @@ peers remembered (`lost_peers::LostPeers`). libp2p-kad 0.48 lists in the answer 
 REACHED, and the walk dials the target at the addresses its neighbours return — so an online peer is usually
 connected by the walk itself; the answer's public addresses are dialled too, read by the one reader both
 lookups share (`addresses_the_dht_found`: the target's own entries, public only, `dialable_from_here`). A
-connection established forgets the peer. Never offline, never a peer cut off for its release. Residual
+connection established forgets the peer. Never offline, never a peer cut off for its release — such a peer, and one
+whose lookup is still running, is passed over by `LostPeers::due`'s REQUIRED `waits` and keeps its turn: chosen and
+then skipped by the caller, its gap doubled with no lookup made and it took one of the tick's four (v0.3.294 review,
+2026-11-17; gRPC's connection backoff likewise grows only per attempt). Residual
 (review, 2026-11-16): a peer names its own addresses, so many throwaway identities, each naming a public one and
 leaving, can push a real lost peer out of the 256 before its lookup — a matter of priority, not load (four
 lookups a tick whatever arrives). (2) A

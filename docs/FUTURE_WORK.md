@@ -6958,7 +6958,7 @@ Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
 
-**Closed 2026-11-17 (on main, for the next release)** (#468)
+**Closed 2026-11-17 (on main, for the next release)** (#468; #465's review edge)
 - #468 — **Offline mode dialled the internet once a computer on the same network named public addresses.** Offline
   mode ("air-gapped: no internet, mDNS only") was checked at each dial site, and peer exchange, Kademlia's walks, the
   redials, a chain's next hop and the relay-provider dials did not check it: probed 2026-11-16, an offline test node
@@ -6966,15 +6966,27 @@ grep `^| N |`).
   on the transport (`network::transport::OfflineGate`, in the one builder `swarm_transport`) refuses every dial of a
   public address or a DNS name while offline mode is on, before a byte is sent, whichever behaviour asked, and drops a
   connection arriving from one before its handshake; the liveness tick closes one open before the switch was turned on
-  (`close_internet_connections_while_offline`). The switch is read at each dial. Prior art: go-libp2p's
+  (`close_internet_connections_while_offline`). The switch is read at each dial. A lost-peer lookup (#465) already
+  running when the switch is turned on dials the addresses its answer names through `dial_checked`, which asks
+  nothing of offline mode — the answer keeps only public ones (`addresses_the_dht_found`) and the gate refuses each
+  (the v0.3.294 review's edge, closed by this gate with Kademlia's and peer exchange's). Prior art: go-libp2p's
   `ConnectionGater.InterceptAddrDial` and `InterceptAccept`. **Probed** (`~/swarmllm-gate/deep/offline468/`):
   main's build had a SYN open to a declared public address in 27 of 280 samples and connected to two internet peers;
   the gated build 0 of 283, 205 refusals, no outbound public connection, the LAN peers reached; switched on while
-  connected, its two internet connections closed within the tick and none reopened. A VPN or overlay range (Tailscale)
+  connected, its two internet connections closed within the tick and none reopened. **Re-probed on the landed build**
+  (v0.3.294 + the gate, 2026-11-17): 0 of 289 samples, 210 refusals (the first this machine's own public address,
+  which C had passed on), the LAN peers reached; switched on while connected to five peers, its three internet
+  connections closed within the tick, 67 dials refused, none opened again. A VPN or overlay range (Tailscale)
   counts as this computer's own network. Residual: a peer whose NEWEST connection is on this network keeps an older
   one to the open internet until it closes (one record a peer).
+- #465's review edge (v0.3.294 review, low) — **a lost peer that could not be looked up that tick lost its turn.**
+  `LostPeers::due` chose up to four peers and doubled each one's gap; the caller then skipped a peer cut off for its
+  release or one whose lookup was still running — no lookup made, the gap doubled anyway, and a peer that was due
+  waited a tick behind it. Now `due` takes the REQUIRED `waits` predicate: such a peer is passed over, keeps its turn
+  and takes none of the tick's four (test `a_peer_passed_over_keeps_its_turn_and_takes_no_lookup`, red with the
+  predicate ignored). Prior art: gRPC's connection backoff multiplies the backoff once per failed attempt.
 
-**Closed 2026-11-16 (on main, for the next release)** (#464, #465, #466, #467)
+**Closed 2026-11-16 (v0.3.294-alpha)** (#464, #465, #466, #467)
 - #465 — **A computer that lost a peer never looked up the peer's new address, and peer exchange named the same few
   peers in every answer.** A node that lost a peer redialled the addresses it held and its discovery tick dialled the
   same ones; Kademlia never looked a lost peer up, identify pushes no new address, and a peer-exchange answer took
