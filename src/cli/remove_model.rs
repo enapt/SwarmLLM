@@ -38,23 +38,12 @@ pub async fn remove_model(
         }
     }
 
-    let client = super::daemon_client();
     let url = format!("{}/api/admin/models/{model}", super::daemon_base(port));
-    let resp = match client.delete(&url).bearer_auth(&api_key).send().await {
-        Ok(r) => r,
-        Err(_) => super::exit_daemon_unreachable(port),
-    };
-
-    let status = resp.status();
-    super::exit_if_api_key_rejected(status, data_dir, port);
-    let body: serde_json::Value = resp.json().await.unwrap_or(serde_json::Value::Null);
+    let request = super::daemon_client().delete(&url);
+    let (status, body) = super::admin_call(request, &api_key, data_dir, port).await;
 
     if !status.is_success() {
-        let msg = body
-            .get("error")
-            .and_then(|e| e.get("message"))
-            .and_then(|m| m.as_str())
-            .unwrap_or("request failed");
+        let msg = super::api_error_message(&body);
         // 503 here is the active-pipeline guard, which is a "try again", not a
         // failure the user needs to debug — say which it is.
         if status.as_u16() == 503 {

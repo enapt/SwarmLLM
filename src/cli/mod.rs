@@ -34,8 +34,20 @@ pub(crate) fn daemon_base(port: u16) -> String {
 /// checked on one path and the key sent on another (the pre-release review,
 /// 2026-10-20).
 pub(crate) fn daemon_client_builder() -> reqwest::ClientBuilder {
-    reqwest::Client::builder().no_proxy()
+    reqwest::Client::builder()
+        .no_proxy()
+        .connect_timeout(DAEMON_CONNECT_TIMEOUT)
 }
+
+/// How long a command waits to CONNECT to the daemon on this computer's own
+/// loopback address — the connect alone, never the reply (a chat or a bench
+/// runs for minutes). The kernel completes a loopback handshake in well under
+/// a millisecond however busy the daemon is, so this bounds only a connect
+/// nothing will ever answer: where a closed port is not refused (WSL2's
+/// mirrored network drops the attempt), `swarmllm unload` with no node
+/// running took 31 s to say so (2026-11-18). Prior art: reqwest's own
+/// `connect_timeout`, which bounds the connect phase apart from the request.
+const DAEMON_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
 
 /// [`daemon_client_builder`], built. As `reqwest::Client::new`, it fails only
 /// where no HTTP client can be built at all.
@@ -301,6 +313,35 @@ pub(crate) fn exit_if_api_key_rejected(
     if status == reqwest::StatusCode::UNAUTHORIZED {
         exit_api_key_rejected(data_dir, port);
     }
+}
+
+/// Send an authenticated admin request to this node and read its JSON reply.
+/// An unreachable daemon or a rejected key ends the command here, each in its
+/// own words, so the caller interprets only the daemon's answer — `Null` where
+/// the body is not JSON.
+pub(crate) async fn admin_call(
+    request: reqwest::RequestBuilder,
+    api_key: &str,
+    data_dir: &std::path::Path,
+    port: u16,
+) -> (reqwest::StatusCode, serde_json::Value) {
+    let resp = match request.bearer_auth(api_key).send().await {
+        Ok(r) => r,
+        Err(_) => exit_daemon_unreachable(port),
+    };
+    let status = resp.status();
+    exit_if_api_key_rejected(status, data_dir, port);
+    let body = resp.json().await.unwrap_or(serde_json::Value::Null);
+    (status, body)
+}
+
+/// The daemon's own words for a failed request: the API's
+/// `{"error": {"message": …}}` envelope, else "request failed".
+pub(crate) fn api_error_message(body: &serde_json::Value) -> &str {
+    body.get("error")
+        .and_then(|e| e.get("message"))
+        .and_then(|m| m.as_str())
+        .unwrap_or("request failed")
 }
 
 /// Whether a daemon response body is an authentication failure.

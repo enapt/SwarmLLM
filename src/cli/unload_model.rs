@@ -19,26 +19,15 @@ pub async fn unload_model(
     let api_key = access.api_key.clone().unwrap_or_default();
     super::bail_if_no_api_key(&api_key, data_dir)?;
 
-    let client = super::daemon_client();
     let url = format!(
         "{}/api/admin/models/{model}/unload",
         super::daemon_base(port)
     );
-    let resp = match client.post(&url).bearer_auth(&api_key).send().await {
-        Ok(r) => r,
-        Err(_) => super::exit_daemon_unreachable(port),
-    };
-
-    let status = resp.status();
-    super::exit_if_api_key_rejected(status, data_dir, port);
-    let body: serde_json::Value = resp.json().await.unwrap_or(serde_json::Value::Null);
+    let request = super::daemon_client().post(&url);
+    let (status, body) = super::admin_call(request, &api_key, data_dir, port).await;
 
     if !status.is_success() {
-        let msg = body
-            .get("error")
-            .and_then(|e| e.get("message"))
-            .and_then(|m| m.as_str())
-            .unwrap_or("request failed");
+        let msg = super::api_error_message(&body);
         if status.as_u16() == 404 {
             anyhow::bail!(
                 "No model called {model} on this node. `swarmllm status` lists what is here."
