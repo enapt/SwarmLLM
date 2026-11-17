@@ -4087,7 +4087,7 @@ if the excess holds there, it is a per-piece cost the price should carry for pie
 (`docs/invariants/scheduling.md` § "A prompt read in pieces is priced piece by piece").
 
 #### #428 — Every popular model guesses 4-5 tokens a round trip: a DFlash drafter at the split's far end
-`P1` · perf-split · **OPEN** (stage 1 built and measured: the reply is exact, acceptance matches llama.cpp's; stage 3 built and measured on the rig — a split over 130 ms, processors: code 1.6-1.8×, a story 1.10-1.15×, the same replies; on a card, whole: code 1.4-1.6×, a story 0.89-0.92× — (c2) done, the block's first rounds on prose, (c3); stage 6 built: the drafter fetched by a pin; stage 4 built for Gemma 4 (12B, 26B-A4B, 31B): its scales taken as the target's own, a tied head lent from the token table, acceptance level with llama.cpp's; next: the field model, Qwen3.6-35B-A3B) — 2026-11-16 · history: #427 (the measurement), #425 (the guess head), #411 (the flow)
+`P1` · perf-split · **OPEN** (stage 1 built and measured: the reply is exact, acceptance matches llama.cpp's; stage 3 built and measured on the rig — a split over 130 ms, processors: code 1.6-1.8×, a story 1.10-1.15×, the same replies; on a card, whole: code 1.4-1.6×, a story 0.89-0.92× — (c2) done, the block's first rounds on prose, (c3); stage 6 built: the drafter fetched by a pin; stage 4 built for Gemma 4 (12B, 26B-A4B, 31B; shipped in v0.3.295-alpha — 12B processor code 1.74-1.81× on a release build): its scales taken as the target's own, a tied head lent from the token table, acceptance level with llama.cpp's; next: the field model, Qwen3.6-35B-A3B) — 2026-11-17 · history: #427 (the measurement), #425 (the guess head), #411 (the flow)
 
 **What a user gets today** (#427's table, 2026-11-08 01:00-01:30Z, live node, one ask at a time): every split of
 the popular models decodes ONE token a round trip — Gemma 4 31B here↔Australia 1.7-1.9 tok/s, Gemma 4 26B-A4B
@@ -4293,7 +4293,7 @@ digest (`verifyBlob`); #422 fetches a vision encoder by its origin's listed SHA-
 loader's own checks (`dflash` arch, width, target layers) plus the set-aside (`Delivered`) are what stand behind a
 wrong or weak pairing.
 
-**Stage 4 — built 2026-11-16 for Gemma 4** (`split::block_drafter::DrafterFigures`, `loader::shards`
+**Stage 4 — built 2026-11-16 for Gemma 4, shipped in v0.3.295-alpha** (`split::block_drafter::DrafterFigures`, `loader::shards`
 `drafter_reads_the_table`; `docs/invariants/inference.md` § "Gemma 4: its scales are the target's own"). z-lab's
 three Gemma 4 drafters are the Qwen shape, so no new tensor was needed. Three things stood in the way. The loader
 refused the 12B's `dflash.embedding_scale` (√3840), which is the scale the target's own lookup applies; it now takes
@@ -4304,7 +4304,7 @@ whole on the processor (12B Q4_K_M, greedy, 96 tokens): kept a block 0.79 / 0.85
 code) against llama.cpp `draft-dflash`'s 0.79 / 0.78 / 2.64 on the same text, every reply exact. **Prior art**:
 llama.cpp PR #29802 (`2b36825`) measured the Gemma scale (26B-A4B: 3.77 → 4.38 kept a block) and its converter writes
 it; z-lab's `_raw_input_embeddings` defaults to 1.0 and is not followed; llama.cpp's Gemma loader duplicates
-`token_embd` as `output`, which is the lend. **(a) Built 2026-11-16 (~21:45Z, on main 2026-11-17)**: Gemma's
+`token_embd` as `output`, which is the lend. **(a) Built 2026-11-16 (~21:45Z; shipped in v0.3.295-alpha)**: Gemma's
 vocabulary keeps its whole alphabet at the END (all 94 printable ASCII characters at 236,744-236,995), past the
 processor's 32,768 hot rows, which assume a byte-level vocabulary's order. A reply's guesses now read the alphabet past
 the hot rows from its start (`mtp::alphabet_past`: one-character ASCII and punctuation, 158 rows on Gemma 4, none on
@@ -4313,7 +4313,7 @@ the hot rows' guess cost (126 against 280 ms); the chat story 0.85 → 0.92 (eve
 the hot rows more than one in six, so it reads every word after 48 tokens either way. Replies exact. **Prior art**:
 FR-Spec (ACL 2025) drafts over a frequency-ranked vocabulary subset; Gemma's file states no frequencies (scores all
 -1000, merges start with runs of newlines), and the alphabet is the part every text needs. Ranks from this node's own
-replies were the other candidate, not needed for code. **(b) Narrowed 2026-11-16 (on main 2026-11-17)**: the
+replies were the other candidate, not needed for code. **(b) Narrowed 2026-11-16 (shipped in v0.3.295-alpha)**: the
 priced loop's FIRST check of a reply was the whole block (a 16-wide check ~10 steps on the processor) — a story that
 kept none ran under no drafter, and on code one wide check that kept little sank the acceptance and the block was
 declined 77 rounds. It is now `dsd_controller::first_block_guesses` (3, the guess head's first count) on one computer
@@ -7018,7 +7018,7 @@ Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
 
-**Closed 2026-11-17 (on main, for the next release)** (#468; #465's review edge)
+**Closed 2026-11-17 (v0.3.295-alpha)** (#468; #465's review edge)
 - #468 — **Offline mode dialled the internet once a computer on the same network named public addresses.** Offline
   mode ("air-gapped: no internet, mDNS only") was checked at each dial site, and peer exchange, Kademlia's walks, the
   redials, a chain's next hop and the relay-provider dials did not check it: probed 2026-11-16, an offline test node
