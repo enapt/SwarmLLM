@@ -7146,8 +7146,12 @@ grep `^| N |`).
   sent instead. Measured on Haiku with the CLI directly: a second turn wrote 102 tokens to the prompt cache and read
   31,722, against 17,426 written and 14,328 read for the whole history sent fresh. Checked through a scratch node
   (OpenAI and Anthropic surfaces, streamed and not): T2 and its regenerate resumed T1's session, T3 resumed T2's fork
-  and counted 3 messages, and with T1's session file deleted T2 logged the fallback and answered right. Sessions are
-  now saved where the CLI saves its own (deleted after its `cleanupPeriodDays`); the book says so. Prior art: OpenAI's
+  and counted 3 messages, and with T1's session file deleted T2 logged the fallback and answered right. Every session
+  is now SAVED (~370-410 KB each: the CLI's request record, and a fork copies the conversation — ~11 GB at 1,000 calls
+  a day over the CLI's 30-day cleanup), so the node deletes each one it was handed once its state leaves the 10-minute
+  cache or its call failed (`delete_session_files`: `<CLAUDE_CONFIG_DIR or ~/.claude>/projects/*/<uuid>.jsonl` and
+  `<uuid>/`; a non-UUID id names no path). A resumed stream's read-ahead stops at the session's `init`, so its headers
+  wait for the CLI to start (3.4 s of a 6.3 s reply), never for the model. Prior art: OpenAI's
   Responses API `previous_response_id` (each reply an immutable state a request continues). Tests
   `a_reply_is_found_by_the_callers_next_turn`, `an_edit_resumes_the_state_before_the_question_it_replaces`,
   `a_refused_resume_is_seen_before_the_caller_reads`, `a_failed_call_is_never_remembered`.

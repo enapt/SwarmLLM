@@ -154,7 +154,7 @@ fn get_session(key: &str) -> Option<String> {
             return Some(entry.session_id.clone());
         }
         drop(entry);
-        SESSION_CACHE.remove(key);
+        forget_session(key);
     }
     None
 }
@@ -186,7 +186,7 @@ fn put_session(key: String, session_id: String) {
             .collect();
         oldest.sort_by_key(|(_, t)| *t);
         for (k, _) in oldest.iter().take(oldest.len() / 2) {
-            SESSION_CACHE.remove(k);
+            forget_session(k);
         }
     }
     SESSION_CACHE.insert(
@@ -323,6 +323,9 @@ impl Conversation {
 /// failure, whose session holds no reply.
 fn remember_reply(conversation: &Conversation, result: &serde_json::Value) {
     if result["is_error"].as_bool() == Some(true) {
+        if let Some(sid) = result["session_id"].as_str() {
+            delete_session_files(sid);
+        }
         return;
     }
     if let (Some(reply), Some(sid)) = (result["result"].as_str(), result["session_id"].as_str()) {
@@ -330,14 +333,87 @@ fn remember_reply(conversation: &Conversation, result: &serde_json::Value) {
     }
 }
 
-/// A stored session the CLI could not resume is never handed to it again.
+/// A stored state nothing here will resume again — expired, evicted, or
+/// refused by the CLI: out of the cache, and its session's files deleted.
 fn forget_session(key: &str) {
-    SESSION_CACHE.remove(key);
+    if let Some((_, entry)) = SESSION_CACHE.remove(key) {
+        delete_session_files(&entry.session_id);
+    }
 }
 
-/// Periodic cleanup of expired sessions — called lazily from `put_session()`.
+/// The CLI's files for `session_id`, deleted once nothing here will resume it
+/// (FUTURE_WORK #471): its state left [`SESSION_CACHE`], or its call failed.
+/// Every call's session is saved so a next turn can resume it, and each file
+/// is ~370-410 KB (the CLI keeps its whole request beside the conversation,
+/// and a fork copies the conversation; measured 2026-11-18 on CLI 2.1.326) —
+/// at 1,000 calls a day ~11 GB over the CLI's own 30-day cleanup, where
+/// `--no-session-persistence` wrote nothing. So at most [`SESSION_TTL`]'s
+/// worth stays. Only ids this node was handed for its own calls are deleted,
+/// never a session its owner started.
+fn delete_session_files(session_id: &str) {
+    if let Some(config) = cli_config_dir() {
+        delete_session_files_in(&config, session_id);
+    }
+}
+
+/// The CLI's own folder: `CLAUDE_CONFIG_DIR`, else `~/.claude`. The CLI runs
+/// as this process's child, with its environment, so it is the same one.
+fn cli_config_dir() -> Option<std::path::PathBuf> {
+    std::env::var_os("CLAUDE_CONFIG_DIR")
+        .filter(|dir| !dir.is_empty())
+        .map(std::path::PathBuf::from)
+        .or_else(|| dirs::home_dir().map(|home| home.join(".claude")))
+}
+
+/// [`delete_session_files`] under `config`: `projects/<folder>/<id>.jsonl` and
+/// the `<id>/` folder beside it, where the CLI saves a session. Every project
+/// folder is searched, so how the CLI names one never matters. An id that is
+/// not a UUID names no path — it came off the CLI's output. Returns how many
+/// entries it removed.
+fn delete_session_files_in(config: &std::path::Path, session_id: &str) -> usize {
+    let is_uuid = session_id.len() == 36
+        && session_id
+            .chars()
+            .all(|c| c.is_ascii_hexdigit() || c == '-');
+    if !is_uuid {
+        return 0;
+    }
+    let Ok(projects) = std::fs::read_dir(config.join("projects")) else {
+        return 0;
+    };
+    let mut removed = 0;
+    for project in projects.flatten() {
+        let dir = project.path();
+        if std::fs::remove_file(dir.join(format!("{session_id}.jsonl"))).is_ok() {
+            removed += 1;
+        }
+        let beside = dir.join(session_id);
+        if beside.is_dir() && std::fs::remove_dir_all(&beside).is_ok() {
+            removed += 1;
+        }
+    }
+    removed
+}
+
+/// Cleanup of expired sessions, their files included — called lazily from
+/// `put_session()` and at the start of every call.
 fn cleanup_expired_sessions() {
-    SESSION_CACHE.retain(|_, entry| entry.last_used.elapsed() < SESSION_TTL);
+    for sid in take_expired_sessions() {
+        delete_session_files(&sid);
+    }
+}
+
+/// The expired entries, out of the cache: their session ids.
+fn take_expired_sessions() -> Vec<String> {
+    let mut expired = Vec::new();
+    SESSION_CACHE.retain(|_, entry| {
+        let fresh = entry.last_used.elapsed() < SESSION_TTL;
+        if !fresh {
+            expired.push(entry.session_id.clone());
+        }
+        fresh
+    });
+    expired
 }
 
 /// Extract total input tokens from a CLI usage JSON object, summing base +
@@ -687,13 +763,15 @@ impl CliLines {
         }
     }
 
-    /// Did the CLI refuse the session it was told to resume? Reads ahead to
-    /// the first event past its start-up ones (`system`): a refusal is an
-    /// error result there before any turn ran (`--output-format stream-json`),
-    /// or no output at all (`json`, whose refusal goes to stderr) — "No
-    /// conversation found with session ID", 2026-11-18 on CLI 2.1.326. Every
-    /// line read is kept for the caller. A read error or the deadline is left
-    /// for the caller to meet.
+    /// Did the CLI refuse the session it was told to resume? A refusal is an
+    /// error result before any turn ran, ahead of every other event
+    /// (`--output-format stream-json`; its start-up hooks never begin), or no
+    /// output at all (`json`, whose refusal goes to stderr) — "No conversation
+    /// found with session ID", 2026-11-18 on CLI 2.1.326. Reads ahead only to
+    /// the session's `init` (it loaded) or the first event past the hooks',
+    /// so a resumed stream's headers wait for the CLI to start, never for the
+    /// model's first token. Every line read is kept for the caller; a read
+    /// error or the deadline is left for the caller to meet.
     async fn resume_refused(&mut self, deadline: tokio::time::Instant) -> bool {
         loop {
             match tokio::time::timeout_at(deadline, self.rest.next_line()).await {
@@ -702,7 +780,7 @@ impl CliLines {
                     self.ahead.push_back(line);
                     let Some(event) = event else { continue };
                     match event["type"].as_str() {
-                        Some("system") => continue,
+                        Some("system") if event["subtype"].as_str() != Some("init") => continue,
                         Some("result") => {
                             return event["is_error"].as_bool() == Some(true)
                                 && event["num_turns"].as_u64().unwrap_or(0) == 0;
@@ -750,6 +828,7 @@ async fn prepare_proxy(
     let messages: Vec<serde_json::Value> = req["messages"].as_array().cloned().unwrap_or_default();
 
     let deadline = tokio::time::Instant::now() + config.timeout();
+    cleanup_expired_sessions();
 
     let (whole_prompt, system_prompt) = extract_prompt(&messages, system_override);
     let conversation = Conversation::of(
@@ -1423,6 +1502,80 @@ mod tests {
         );
     }
 
+    /// #471: a session's files go once nothing here will resume it — only
+    /// that session's, in whichever project folder the CLI saved it.
+    #[test]
+    fn a_sessions_files_are_deleted_and_no_other_session_is() {
+        let config = tempfile::tempdir().unwrap();
+        let ours = "0b3e8a52-41c7-4a5f-9d6e-1f2a3b4c5d6e";
+        let theirs = "7c1d2e3f-4a5b-4c6d-8e9f-0a1b2c3d4e5f";
+        let tmp = config.path().join("projects").join("-tmp");
+        let other = config.path().join("projects").join("-home-owner-project");
+        for dir in [&tmp, &other] {
+            std::fs::create_dir_all(dir).unwrap();
+        }
+        std::fs::write(tmp.join(format!("{ours}.jsonl")), "{}").unwrap();
+        std::fs::create_dir_all(tmp.join(ours).join("tool-results")).unwrap();
+        std::fs::write(tmp.join(format!("{theirs}.jsonl")), "{}").unwrap();
+        std::fs::write(other.join(format!("{theirs}.jsonl")), "{}").unwrap();
+        assert_eq!(delete_session_files_in(config.path(), ours), 2);
+        assert!(!tmp.join(format!("{ours}.jsonl")).exists());
+        assert!(!tmp.join(ours).exists());
+        assert!(tmp.join(format!("{theirs}.jsonl")).exists());
+        assert!(other.join(format!("{theirs}.jsonl")).exists());
+    }
+
+    /// An id off the CLI's output that is not a UUID names no path.
+    #[test]
+    fn a_session_id_that_is_not_a_uuid_deletes_nothing() {
+        let config = tempfile::tempdir().unwrap();
+        let tmp = config.path().join("projects").join("-tmp");
+        std::fs::create_dir_all(&tmp).unwrap();
+        std::fs::write(tmp.join("evil.jsonl"), "{}").unwrap();
+        std::fs::write(config.path().join("projects").join("x.jsonl"), "{}").unwrap();
+        for id in ["evil", "../x", "", "../../../../../../../../../../../../x"] {
+            assert_eq!(delete_session_files_in(config.path(), id), 0, "{id}");
+        }
+        assert!(tmp.join("evil.jsonl").exists());
+        assert!(config.path().join("projects").join("x.jsonl").exists());
+    }
+
+    /// An expired state leaves the cache with its session named for deletion;
+    /// a fresh one stays.
+    #[test]
+    fn an_expired_state_is_taken_out_with_its_session() {
+        let Some(long_ago) =
+            std::time::Instant::now().checked_sub(SESSION_TTL + std::time::Duration::from_secs(1))
+        else {
+            return; // a clock younger than the TTL: nothing can have expired
+        };
+        SESSION_CACHE.insert(
+            "an_expired_state_is_taken_out:old".into(),
+            SessionEntry {
+                session_id: "expired-session-of-this-test".into(),
+                last_used: long_ago,
+            },
+        );
+        put_session(
+            "an_expired_state_is_taken_out:new".into(),
+            "fresh-session-of-this-test".into(),
+        );
+        // `put_session` ran the cleanup: the old one is gone, the new one kept.
+        assert!(!SESSION_CACHE.contains_key("an_expired_state_is_taken_out:old"));
+        assert_eq!(
+            get_session("an_expired_state_is_taken_out:new"),
+            Some("fresh-session-of-this-test".to_string())
+        );
+        SESSION_CACHE.insert(
+            "an_expired_state_is_taken_out:old".into(),
+            SessionEntry {
+                session_id: "expired-session-of-this-test".into(),
+                last_used: long_ago,
+            },
+        );
+        assert!(take_expired_sessions().contains(&"expired-session-of-this-test".to_string()));
+    }
+
     #[cfg(unix)]
     async fn lines_of(output: &str) -> (tokio::process::Child, CliLines) {
         let mut child = tokio::process::Command::new("sh")
@@ -1446,7 +1599,9 @@ mod tests {
     #[tokio::test]
     async fn a_refused_resume_is_seen_before_the_caller_reads() {
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(20);
-        let refused = "{\"type\":\"system\",\"subtype\":\"init\"}\n\
+        // As CLI 2.1.326 refuses: the error result ahead of everything (a
+        // hook event before it is still skipped).
+        let refused = "{\"type\":\"system\",\"subtype\":\"hook_started\"}\n\
                        {\"type\":\"result\",\"is_error\":true,\"num_turns\":0}\n";
         let (mut child, mut lines) = lines_of(refused).await;
         assert!(lines.resume_refused(deadline).await);
@@ -1465,17 +1620,20 @@ mod tests {
         assert!(!lines.resume_refused(deadline).await);
         let _ = child.wait().await;
 
-        let answering = "{\"type\":\"system\",\"subtype\":\"init\"}\n\
+        let answering = "{\"type\":\"system\",\"subtype\":\"hook_started\"}\n\
+                         {\"type\":\"system\",\"subtype\":\"init\"}\n\
                          {\"type\":\"stream_event\",\"event\":{}}\n\
                          {\"type\":\"result\",\"is_error\":false}\n";
         let (mut child, mut lines) = lines_of(answering).await;
         assert!(!lines.resume_refused(deadline).await);
+        // It stopped at the session's `init`, never waiting for the model.
+        assert_eq!(lines.ahead.len(), 2);
         let mut seen = Vec::new();
         while let Some(line) = lines.next_line().await.unwrap() {
             seen.push(line);
         }
-        assert_eq!(seen.len(), 3);
-        assert!(seen[0].contains("init") && seen[1].contains("stream_event"));
+        assert_eq!(seen.len(), 4);
+        assert!(seen[1].contains("init") && seen[2].contains("stream_event"));
         let _ = child.wait().await;
     }
 
