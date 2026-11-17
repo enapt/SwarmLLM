@@ -327,14 +327,45 @@ pub(crate) fn unknown_config_keys(contents: &str) -> Vec<String> {
     unknown
 }
 
+/// Settings this daemon no longer has, each with why: a config that still
+/// names one is told the setting is gone, never to check a spelling that was
+/// right (2026-11-17: `[model] shard_size_mb` read back as "Unknown setting …
+/// key=model … Check the spelling"). A config is written with only what
+/// differs from the defaults, so the files that still carry one are exactly
+/// those whose owner chose it.
+///
+/// Prior art: rustc keeps removed lints in a table with a reason each
+/// (`LintStore::register_removed(name, reason)`, the `RemovedLint` diagnostic)
+/// and answers `lint x has been removed: <reason>`, never "unknown lint".
+const RETIRED_SETTINGS: &[(&str, &str)] = &[(
+    "model",
+    "`[model] shard_size_mb` is no longer a setting and is IGNORED: every computer now \
+     cuts a model into the same parts, so a size of your own only made parts no other \
+     computer holds. Delete the [model] section from config.toml",
+)];
+
+/// Why an unrecognised key does nothing, where it names a retired setting
+/// ([`RETIRED_SETTINGS`]) or a key inside one.
+fn retired_setting(key: &str) -> Option<&'static str> {
+    RETIRED_SETTINGS.iter().find_map(|(retired, why)| {
+        let inside = key
+            .strip_prefix(retired)
+            .is_some_and(|rest| rest.starts_with('.'));
+        (key == *retired || inside).then_some(*why)
+    })
+}
+
 /// Log every unrecognised key in `contents`.
 pub(crate) fn warn_unknown_keys_in(contents: &str) {
     for key in unknown_config_keys(contents) {
-        tracing::warn!(
-            %key,
-            "Unknown setting in config file — it is being IGNORED. Check the \
-             spelling and which section it belongs under"
-        );
+        match retired_setting(&key) {
+            Some(why) => tracing::warn!(%key, "{why}"),
+            None => tracing::warn!(
+                %key,
+                "Unknown setting in config file — it is being IGNORED. Check the \
+                 spelling and which section it belongs under"
+            ),
+        }
     }
 }
 
@@ -1978,6 +2009,25 @@ mod config_default_hygiene {
             none_expected.is_empty(),
             "a valid config must not warn: {none_expected:?}"
         );
+    }
+
+    /// A retired setting is told it is gone and why — never to check a
+    /// spelling that was right. `[model] shard_size_mb` comes back as the
+    /// whole section, since `[model]` itself is gone.
+    #[test]
+    fn a_retired_setting_is_told_why_not_to_check_its_spelling() {
+        let unknown = crate::config::unknown_config_keys("[model]\nshard_size_mb = 256\n");
+        assert_eq!(unknown, vec!["model".to_string()]);
+        for key in ["model", "model.shard_size_mb"] {
+            let why = super::retired_setting(key).expect(key);
+            assert!(
+                why.contains("same parts") && !why.contains("spelling"),
+                "{why}"
+            );
+        }
+        for key in ["models", "node.model", "modelx.a"] {
+            assert_eq!(super::retired_setting(key), None, "{key}");
+        }
     }
 
     /// Every `Option` setting that defaults to `None` was reported as "being
