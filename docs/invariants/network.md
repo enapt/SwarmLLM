@@ -5322,6 +5322,37 @@ and served nothing while spending ~2.6 Mbit/s.
   advertising `features::MANIFEST_DIGESTS` is told the versions and pulls only
   what it lacks — § "Announce, then pull" below.
 
+## A model this node stopped holding is retracted by name, not by silence (2026-11-17)
+
+**What happened.** A receiver drops our parts of a model only when a `ShardAnnounce`
+names the model in `complete_for_models` (the 2026-07-22 fix, before which every
+retraction was a no-op). The health round named only models with a part still here
+(`held_models`), so the round that lost a model's LAST part — prune giving a model
+back, its folder deleted, its last part quarantined — said nothing about it, and a
+round holding nothing sent nothing at all. A connected holder's first-hand claim never
+ages out (`ModelRegistry::age_out_holders` skips it), so every connected peer kept
+crediting us with the model until we disconnected — planning layers on parts that
+were gone, and never treating the model as held by nobody (#452's "stays usable and
+listed, fetched when asked" never woke). The code's own comment said the round
+"actually removes the claim from peers"; it did, except for the last part. Prune,
+the vanished-file check and a quarantine all lean on the round; the API delete and
+the canonical heal send their own retraction and were never affected. Found
+2026-11-17 by mapping the readers of `cap.hosted_shards` for #91 (2j), not in the
+field — pruning v2 (live 11-16) had given nothing back here yet.
+
+**The rule.** `health::monitor::shard_announce_round` remembers each model the last
+SENT list named that is no longer held (`retracted_models`) and names it complete
+with no parts in every list for `RETRACTION_REPEATED_FOR` (1 h: the change and the
+5/10/20-minute repeats, so one lost gossip message does not keep the claim); a model
+held again leaves the set. A node holding nothing still hands a newcomer nothing.
+No wire change: receivers already read "complete, none listed" as "none held", and
+`ShardAnnounce::into_pieces` places such a model in any piece. Prior art: Demers et
+al., "Epidemic Algorithms for Replicated Database Maintenance" (PODC 1987) — a delete
+spreads only as a death certificate kept for a while; absence from a partial update
+says nothing. Tests `a_model_given_back_whole_is_retracted_on_peers` and
+`the_parts_list_a_newcomer_is_sent_is_this_rounds` (its last step), both red with
+the retractions left out of the list.
+
 ## A parts list longer than a receiver takes goes in pieces, each model whole (2026-11-02)
 
 **What happened.** Every node drops a `ShardAnnounce` listing more than 512 parts

@@ -29,6 +29,11 @@ pub struct HealthMonitor {
     /// (`ModelRegistry::model_is_withheld`), so the DHT is told when one stops
     /// or starts being offered.
     last_withheld_models: std::collections::HashSet<crate::types::ModelId>,
+    /// Models a parts list named that this node no longer holds any part of,
+    /// and since when: each stays in `complete_for_models` with no parts for
+    /// [`RETRACTION_REPEATED_FOR`], so peers drop our claim (see
+    /// `shard_announce_round`).
+    retracted_models: std::collections::HashMap<crate::types::ModelId, std::time::Instant>,
     /// When the parts list last went on gossip, how many broadcast rounds ago,
     /// and how long an unchanged one waits after it ([`QuietRepeat`]).
     parts_sent: Option<(std::time::Instant, u64, QuietRepeat)>,
@@ -313,6 +318,15 @@ const CAPABILITY_REPEAT: &str = "heartbeat";
 fn parts_repeat_due(rounds_since: u64, since_sent: Duration, repeat: QuietRepeat) -> bool {
     rounds_since >= FULL_REANNOUNCE_EVERY_TICKS && repeat.due(since_sent)
 }
+
+/// How long a model this node stopped holding stays in its parts list as
+/// "complete, none held" — the change that drops it and the repeats after it
+/// (5, 10 and 20 minutes on), so one lost gossip message does not leave the
+/// claim standing. A delete spreads only as a death certificate kept a while
+/// (Demers et al., "Epidemic Algorithms for Replicated Database Maintenance",
+/// 1987): leaving the model out says nothing, and a connected holder's claim
+/// never ages out (`ModelRegistry::age_out_holders`).
+const RETRACTION_REPEATED_FOR: Duration = Duration::from_secs(60 * 60);
 
 /// How far a memory figure (free card memory, the RAM budget, free RAM where a
 /// peer reads it) must move from what was last PUBLISHED before it is news.
@@ -708,6 +722,7 @@ impl HealthMonitor {
             shutdown_rx,
             last_announced_shards: std::collections::HashSet::new(),
             last_withheld_models: std::collections::HashSet::new(),
+            retracted_models: std::collections::HashMap::new(),
             parts_sent: None,
             last_announced_manifests: std::collections::HashMap::new(),
             manifest_announce_counter: 0,
@@ -1698,7 +1713,24 @@ impl HealthMonitor {
         held_models: &std::collections::HashSet<crate::types::ModelId>,
         at: std::time::Instant,
     ) -> Option<crate::types::ShardAnnounce> {
-        if held_models.is_empty() {
+        // A model the last list named with no part here now — given back by
+        // prune, its folder gone, its last part quarantined — is retracted:
+        // named complete with none of its parts for `RETRACTION_REPEATED_FOR`.
+        // `complete_for_models` below lists only models still held, so its
+        // last parts stayed credited to us on every connected peer, which
+        // planned work on them and never asked anyone else to fetch them.
+        for (shard, _, _) in &self.last_announced_shards {
+            if !held_models.contains(&shard.model_id) {
+                self.retracted_models
+                    .entry(shard.model_id.clone())
+                    .or_insert(at);
+            }
+        }
+        self.retracted_models.retain(|model, since| {
+            !held_models.contains(model)
+                && at.saturating_duration_since(*since) < RETRACTION_REPEATED_FOR
+        });
+        if held_models.is_empty() && self.retracted_models.is_empty() {
             self.shared_state.models.own_shard_announce.store(None);
             return None;
         }
@@ -1731,18 +1763,26 @@ impl HealthMonitor {
         // set and receivers merged it, keeping the deleted shards.
         //
         // Every model this node HOLDS, offered or not: a withheld one
-        // goes out with none of its parts, which retracts them.
-        let complete_for_models: Vec<crate::types::ModelId> = held_models.iter().cloned().collect();
+        // goes out with none of its parts, which retracts them. And every
+        // model it stopped holding, while retracted (above).
+        let complete_for_models: Vec<crate::types::ModelId> = held_models
+            .iter()
+            .chain(self.retracted_models.keys())
+            .cloned()
+            .collect();
         let announce = crate::model::manifest::shard_announce(
             registry,
             node_id,
             hosted_shards,
             complete_for_models,
         );
+        // A node holding nothing hands a newcomer nothing; one still holding
+        // parts hands it this list, retractions included — a newcomer has no
+        // claim of ours to drop, so they cost it a few names.
         self.shared_state
             .models
             .own_shard_announce
-            .store(Some(std::sync::Arc::new(announce.clone())));
+            .store((!held_models.is_empty()).then(|| std::sync::Arc::new(announce.clone())));
         let repeat = match self.parts_sent {
             // The first list of this run always goes — an all-withheld one too,
             // which retracts what peers recorded before a restart.
@@ -3849,17 +3889,86 @@ pub(crate) mod tests {
             "a change replaces the kept list at once"
         );
 
-        assert!(monitor
+        let retraction = monitor
             .shard_announce_round(
                 node,
                 Vec::new(),
                 &Default::default(),
-                t0 + PING_INTERVAL * 3
+                t0 + PING_INTERVAL * 3,
             )
-            .is_none());
+            .expect("giving up the last part tells the swarm, or peers keep crediting it");
+        assert!(retraction.shards.is_empty());
+        assert_eq!(retraction.complete_for_models, vec![model.clone()]);
         assert!(
             state.models.own_shard_announce.load_full().is_none(),
             "a node holding nothing hands a newcomer nothing"
+        );
+    }
+
+    /// A model whose last part goes is named "complete, none held" — in the
+    /// change and in every list for `RETRACTION_REPEATED_FOR` after it — never
+    /// left out. Left out, it stayed credited to us on every connected peer
+    /// (a connected holder's claim never ages out), so their plans counted
+    /// parts that were gone and nobody fetched the model when asked (found
+    /// 2026-11-17: pruning v2 gives whole models back).
+    #[tokio::test]
+    async fn a_model_given_back_whole_is_retracted_on_peers() {
+        let (state, mut monitor, _rx) = monitor_for_test();
+        let node = state.identity.node_id().clone();
+        let kept = crate::types::ModelId("kept".into());
+        let gone = crate::types::ModelId("gone".into());
+        let part = |model: &crate::types::ModelId, index| crate::types::ShardId {
+            model_id: model.clone(),
+            index,
+        };
+        let both: std::collections::HashSet<_> = [kept.clone(), gone.clone()].into();
+        let only_kept: std::collections::HashSet<_> = [kept.clone()].into();
+        let t0 = std::time::Instant::now();
+        assert!(monitor
+            .shard_announce_round(
+                node.clone(),
+                vec![part(&kept, 0), part(&gone, 0)],
+                &both,
+                t0
+            )
+            .is_some());
+
+        let given_back = t0 + PING_INTERVAL;
+        let after = monitor
+            .shard_announce_round(node.clone(), vec![part(&kept, 0)], &only_kept, given_back)
+            .expect("a model's last part going is a change");
+        assert!(after.shards.iter().all(|s| s.model_id == kept));
+        assert!(
+            after.complete_for_models.contains(&gone),
+            "the model given back is named with none of its parts: {:?}",
+            after.complete_for_models
+        );
+
+        let inside = monitor
+            .shard_announce_round(
+                node.clone(),
+                vec![part(&kept, 0), part(&kept, 1)],
+                &only_kept,
+                given_back + RETRACTION_REPEATED_FOR / 2,
+            )
+            .expect("a change");
+        assert!(
+            inside.complete_for_models.contains(&gone),
+            "a later list repeats the retraction, so one lost message does not keep the claim"
+        );
+
+        let past = monitor
+            .shard_announce_round(
+                node,
+                vec![part(&kept, 1)],
+                &only_kept,
+                given_back + RETRACTION_REPEATED_FOR,
+            )
+            .expect("a change");
+        assert_eq!(
+            past.complete_for_models,
+            vec![kept],
+            "after the window only what is held is named"
         );
     }
 
