@@ -2331,6 +2331,25 @@ for both), `each_tail_of_a_split_is_measured_and_explored_apart` and the per-tai
 
 **Moved from `arch-scheduling.md` § "A split is priced for the rounds it takes (2026-10-19, #3 (d))" (rules-file trim):** **Before four splits of a model have run, one a drafter would guess for starts from a PRIOR** (#3 (j), 2026-11-13): `split_rounds::YieldPrior::Drafter` — one 64-token pseudo-reply at Leviathan's 2.19 a round (`AcceptanceEstimate::new`'s α, `GAMMA_STEP`), in the same ratio of sums as the splits that have run, dropped at `BEFORE_TRUSTED` (the trusted figure stays measured only); chosen ONLY by **`pipeline::split_yield_prior`** (a drafter may guess — the predicate `request_may_guess_ahead` shares — AND `drafter_to_leave_room_for` names one held; or the file's own guess head would, beside a first segment from layer 0 here — **`pipeline::split_guess_head_here`**, 2026-11-15: Qwen 3.5's families take no separate drafter, and their splits were priced at a round a token), carried by `PromptPlan::with_guessing_ahead(may, prior)`, the two always set together; a REQUIRED argument of `SplitRounds::tokens_per_round`. Priced as one, the 14B's real link planned peer-first, which ran 0.7-0.9x here-first.
 
+**Each kind of reply is priced by its own splits (2026-11-17, FUTURE_WORK #469).** A guess-check split's yield is its
+drafter's agreement, which differs by kind far more than a whole run's speed: Qwen2.5-14B, this laptop ↔ a US RTX 3080
+Ti at a 308 ms least round trip, the flow (2026-11-16) — code 26.9-27.2 tok/s split against 16.0-17.2 here alone,
+prose 11.7-11.8 against 13.5-13.6. One figure across kinds priced a prose reply near code's yield after code-heavy use.
+**`pipeline::reply_kind` is the one scoring** (Structured / Code / Prose / Unsure, from the request alone), asked by
+the router (`PromptPlan::with_guessing_ahead`'s REQUIRED `kind`) and by `note_split_rounds` — so a kind's figure
+describes the requests it prices, and a misjudged request is learned under the kind it was PREDICTED as. Every split
+is recorded under its tail's every-kind key (what Unsure and an exploration read, unchanged in meaning, so a record
+from before restores) AND `<tail key>\u{1f}<kind>`; `SplitRounds::tokens_per_round`'s `kind` is REQUIRED; a kind's own
+splits are trusted at `BEFORE_TRUSTED`, and before then join the every-kind figure counted as `KIND_PRIOR_TOKENS` (16,
+a quarter of a prior reply: one 160-token prose split at 1.3 beside a code blend near 5.9 prices the next prose reply
+at 1.3-1.5). The tail stays the bandit's arm: an `Explore` request reads the tail's figure whatever its kind.
+`recent_by_model::MAX_MODELS` rose 256 → 1,024 keys (eight a model). Prior art: SmartSpec/TurboSpec (arXiv 2406.14066)
+steer by ONE global acceptance average — the weakness this fixes; BanditSpec (2505.15141) keeps means per request;
+acceptance differs by task type (2604.14682). No published system plans per request from a predicted kind. Tests:
+`each_kind_of_reply_is_priced_by_its_own_splits`, `one_split_of_a_kind_outweighs_the_blend_it_starts_beside`,
+`a_requests_kind_of_reply_is_read_from_what_it_asks`, the scheduler's
+`a_split_whose_rounds_carry_three_tokens_is_priced_for_a_third_of_the_rounds` (each red with the kind read off).
+
 ## An unmeasured peer is charged one round trip a pass (2026-10-29, #3 (h))
 
 `parallax::vertex_cost_as` prices a peer with no measured figure from priors:

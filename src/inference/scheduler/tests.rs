@@ -1,6 +1,6 @@
 use super::*;
 use crate::config::Config;
-use crate::daemon::state::split_rounds::YieldPrior;
+use crate::daemon::state::split_rounds::{ReplyKind, YieldPrior};
 use crate::identity::Identity;
 use crate::inference::executor::ModelExecutor;
 use crate::storage::db::Database;
@@ -5973,6 +5973,7 @@ fn the_next_turn_of_a_split_goes_to_the_peer_holding_its_opening() {
                     handed_off: Vec::new(),
                     may_guess_ahead: false,
                     yield_prior: YieldPrior::None.into(),
+                    reply_kind: ReplyKind::Unsure,
                 },
                 crate::types::KeepAsked::Unasked,
             )
@@ -7559,7 +7560,7 @@ fn a_split_whose_rounds_carry_three_tokens_is_priced_for_a_third_of_the_rounds()
     };
     let plan = || cached_prefix::PromptPlan::from(Some(14_000)).with_reply_of_at_most(2_048);
 
-    let unmeasured = priced(plan().with_guessing_ahead(true, YieldPrior::None));
+    let unmeasured = priced(plan().with_guessing_ahead(true, YieldPrior::None, ReplyKind::Unsure));
     assert_eq!(
         unmeasured.assumed_tokens_per_round, None,
         "control: nothing measured, no drafter — one round a token"
@@ -7567,7 +7568,7 @@ fn a_split_whose_rounds_carry_three_tokens_is_priced_for_a_third_of_the_rounds()
     // #3 (j), 2026-11-13: where a drafter would guess for it, the split no
     // split of the model has run for is priced from the drafter's prior — 2.19
     // a round — and its compute with it, so it can win a plan and be measured.
-    let cold = priced(plan().with_guessing_ahead(true, YieldPrior::Drafter));
+    let cold = priced(plan().with_guessing_ahead(true, YieldPrior::Drafter, ReplyKind::Unsure));
     let prior = cold
         .assumed_tokens_per_round
         .expect("a split with a drafter is priced from the prior");
@@ -7587,7 +7588,7 @@ fn a_split_whose_rounds_carry_three_tokens_is_priced_for_a_third_of_the_rounds()
     // the explored yield, and with the routes compared as they run once
     // loaded — no load charged to the one request that would make it.
     assert!(c.cold_load_ms > 0, "control: the split loads layers here");
-    let explored = priced(plan().with_guessing_ahead(true, YieldPrior::Explore));
+    let explored = priced(plan().with_guessing_ahead(true, YieldPrior::Explore, ReplyKind::Unsure));
     let optimistic = explored
         .assumed_tokens_per_round
         .expect("an explored split is priced from the optimistic prior");
@@ -7608,16 +7609,17 @@ fn a_split_whose_rounds_carry_three_tokens_is_priced_for_a_third_of_the_rounds()
             state
                 .metrics
                 .split_rounds
-                .record("split-14b", tail, 300, 100);
+                .record("split-14b", tail, ReplyKind::Unsure, 300, 100);
         }
     }
     assert_eq!(
-        priced(plan().with_guessing_ahead(true, YieldPrior::Drafter)).assumed_tokens_per_round,
+        priced(plan().with_guessing_ahead(true, YieldPrior::Drafter, ReplyKind::Unsure))
+            .assumed_tokens_per_round,
         Some(3.0),
         "the model's own splits, once trusted, replace the prior"
     );
     let plain = priced(plan());
-    let guessing = priced(plan().with_guessing_ahead(true, YieldPrior::None));
+    let guessing = priced(plan().with_guessing_ahead(true, YieldPrior::None, ReplyKind::Unsure));
     // Each plan books the route, so the queue term grows; the rest is fixed.
     let per_token = |t: &crate::inference::trace::TraceSnapshot| {
         t.predicted_terms
@@ -7656,6 +7658,27 @@ fn a_split_whose_rounds_carry_three_tokens_is_priced_for_a_third_of_the_rounds()
         p.prefill_ms, g.prefill_ms,
         "the prompt is read once whatever the rounds"
     );
+
+    // #469: each kind of reply is priced by its own splits. Code splits at 6 a
+    // round and prose ones at 1.25 (the 14B over a 308 ms link, 2026-11-16:
+    // code ran far faster split than alone, prose slower) — a prose plan reads
+    // prose's figure, not the blend code pulled up; a plan that cannot tell
+    // reads the blend.
+    for _ in 0..crate::daemon::state::recent_by_model::BEFORE_TRUSTED {
+        for tail in crate::daemon::state::split_rounds::SplitTail::BOTH {
+            let rounds = &state.metrics.split_rounds;
+            rounds.record("split-14b", tail, ReplyKind::Code, 600, 100);
+            rounds.record("split-14b", tail, ReplyKind::Prose, 125, 100);
+        }
+    }
+    let per_round = |kind| {
+        priced(plan().with_guessing_ahead(true, YieldPrior::None, kind)).assumed_tokens_per_round
+    };
+    assert_eq!(per_round(ReplyKind::Prose), Some(1.25));
+    assert_eq!(per_round(ReplyKind::Code), Some(6.0));
+    // Every kind together, the earlier 300/100 splits too: 4,100 / 1,200.
+    let blend = per_round(ReplyKind::Unsure).unwrap();
+    assert!((blend - 4_100.0 / 1_200.0).abs() < 1e-3, "{blend}");
 }
 
 /// `DELEGATE_MIN_TRUST` decides who may be handed a user's prompt in cleartext;

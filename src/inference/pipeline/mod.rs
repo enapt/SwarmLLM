@@ -1609,6 +1609,129 @@ pub(crate) fn request_may_guess_ahead(
         && !request_disqualifies_fast_paths(request)
 }
 
+/// The kind of reply `request` is likely to get (`split_rounds::ReplyKind`,
+/// FUTURE_WORK #469) — the ONE scoring, asked where the plan is priced
+/// (`PromptPlan::with_guessing_ahead`) and where the split is recorded
+/// (`PipelineExecutor::note_split_rounds`), so a kind's figure describes the
+/// requests it prices. Read from the request alone, before any plan:
+/// - tools offered, or a reply held to JSON → `Structured`;
+/// - a code fence in the last user turn, or in the last reply where the user
+///   turn is a short follow-up ([`FOLLOW_UP_MOST_CHARS`]), or at least two
+///   marks of code in the last user turn ([`CODE_WORDS`], [`CODE_MARKS`]) →
+///   `Code`;
+/// - any other last user turn of [`PROSE_LEAST_CHARS`] or more → `Prose`;
+/// - else `Unsure` (every kind's figure, as before #469).
+///
+/// It need not be right, only steady: a misjudged request is recorded under
+/// the kind it was predicted as and priced so next time. The drafter's own
+/// confidence over the prompt would say more, but is not known before
+/// planning.
+pub(crate) fn reply_kind(
+    request: &crate::types::InferenceRequest,
+) -> crate::daemon::state::split_rounds::ReplyKind {
+    use crate::daemon::state::split_rounds::ReplyKind;
+    use crate::types::Role;
+    if request
+        .tools
+        .as_ref()
+        .is_some_and(|tools| !tools.is_empty())
+        || request.sampling_params.reply_grammar.is_some()
+    {
+        return ReplyKind::Structured;
+    }
+    let last_of = |is: fn(&Role) -> bool| {
+        request
+            .messages
+            .iter()
+            .rev()
+            .find(|m| is(&m.role))
+            .map(|m| m.content.as_str())
+    };
+    let Some(asked) = last_of(|r| matches!(r, Role::User)) else {
+        return ReplyKind::Unsure;
+    };
+    let fenced = |text: &str| text.contains("```");
+    // A short follow-up ("go on", "and the tests?") carries on as the last
+    // reply did; a question of its own is read by itself.
+    let follows_code = asked.trim().chars().count() < FOLLOW_UP_MOST_CHARS
+        && last_of(|r| matches!(r, Role::Assistant)).is_some_and(fenced);
+    if fenced(asked) || follows_code || code_marks(asked) >= 2 {
+        ReplyKind::Code
+    } else if asked.trim().chars().count() >= PROSE_LEAST_CHARS {
+        ReplyKind::Prose
+    } else {
+        ReplyKind::Unsure
+    }
+}
+
+/// The shortest last user turn [`reply_kind`] reads as asking for prose: a
+/// "continue" or an "ok" says too little.
+const PROSE_LEAST_CHARS: usize = 12;
+
+/// The longest last user turn [`reply_kind`] reads as a follow-up to the
+/// reply before it.
+const FOLLOW_UP_MOST_CHARS: usize = 40;
+
+/// Words that mark a request for code, matched whole and in lower case.
+const CODE_WORDS: &[&str] = &[
+    "code",
+    "coding",
+    "function",
+    "functions",
+    "method",
+    "class",
+    "struct",
+    "enum",
+    "variable",
+    "script",
+    "program",
+    "programming",
+    "implement",
+    "refactor",
+    "compile",
+    "compiler",
+    "debug",
+    "bug",
+    "regex",
+    "snippet",
+    "algorithm",
+    "api",
+    "python",
+    "rust",
+    "javascript",
+    "typescript",
+    "java",
+    "c++",
+    "c#",
+    "golang",
+    "kotlin",
+    "swift",
+    "bash",
+    "shell",
+    "sql",
+    "html",
+    "css",
+    "json",
+    "yaml",
+];
+
+/// Marks of code itself, matched anywhere.
+const CODE_MARKS: &[&str] = &[
+    "def ", "fn ", "#include", "=>", "();", "};", "</", "!=", "==", "::",
+];
+
+/// How many distinct marks of code `text` carries: whole words from
+/// [`CODE_WORDS`], substrings from [`CODE_MARKS`].
+fn code_marks(text: &str) -> usize {
+    let lower = text.to_lowercase();
+    let words: std::collections::HashSet<&str> = lower
+        .split(|c: char| !(c.is_alphanumeric() || c == '+' || c == '#' || c == '_'))
+        .filter(|w| !w.is_empty())
+        .collect();
+    CODE_WORDS.iter().filter(|w| words.contains(*w)).count()
+        + CODE_MARKS.iter().filter(|m| text.contains(*m)).count()
+}
+
 /// May a drafter's guesses be checked on a split of `model_id` driven from
 /// here — speculation across computers on, and a model that can take a
 /// refused guess back (`speculation_can_roll_back`)? Whether one is HELD is
@@ -2111,6 +2234,9 @@ impl PipelineExecutor {
                 &last.node_id,
                 self.shared_state.identity.node_id(),
             ),
+            // The kind the plan was priced for (#469): the same scoring of
+            // the same request.
+            reply_kind(&self.request),
             out.completion_tokens,
             rounds.saturating_add(1),
         );
@@ -2248,6 +2374,90 @@ mod tests {
             keep: Default::default(),
             requested_by: Default::default(),
         }
+    }
+
+    /// #469: the kind a request's split is priced and recorded by, from the
+    /// request alone.
+    #[test]
+    fn a_requests_kind_of_reply_is_read_from_what_it_asks() {
+        use crate::daemon::state::split_rounds::ReplyKind::{Code, Prose, Structured, Unsure};
+        let state = make_test_state();
+        let turn = |role: Role, content: &str| ChatMessage {
+            role,
+            content: content.into(),
+            images: vec![],
+            tool: Default::default(),
+        };
+        let asking = |turns: Vec<ChatMessage>| {
+            let mut r = make_test_request(&state);
+            r.messages = turns;
+            reply_kind(&r)
+        };
+        let user = |content: &str| asking(vec![turn(Role::User, content)]);
+        for (asked, kind) in [
+            ("Write a Python function that reverses a linked list.", Code),
+            (
+                "Why does this panic?\n```rust\nlet v: Vec<u8> = vec![];\nv[0];\n```",
+                Code,
+            ),
+            ("Fix the bug in my SQL query please", Code),
+            ("if (a == b) { return x::y(); }", Code),
+            (
+                "Tell me a story about a lighthouse keeper and her cat.",
+                Prose,
+            ),
+            (
+                "What is the capital of France, and why is it famous?",
+                Prose,
+            ),
+            // One mark of code is not enough: "class" alone is ordinary English.
+            ("Which class of ship sailed furthest in the 1800s?", Prose),
+            ("continue", Unsure),
+            ("ok", Unsure),
+        ] {
+            assert_eq!(user(asked), kind, "{asked:?}");
+        }
+        // The last USER turn decides — not the system prompt, not an old turn…
+        assert_eq!(
+            asking(vec![
+                turn(Role::System, "You are a Rust and Python coding assistant."),
+                turn(Role::User, "Write a poem about autumn leaves falling."),
+            ]),
+            Prose
+        );
+        // …but a "go on" after a fenced reply carries on with code.
+        assert_eq!(
+            asking(vec![
+                turn(Role::User, "Show me quicksort."),
+                turn(Role::Assistant, "```python\ndef quicksort(xs):\n```"),
+                turn(Role::User, "go on"),
+            ]),
+            Code
+        );
+        // A question of its own after it is read by itself.
+        assert_eq!(
+            asking(vec![
+                turn(Role::User, "Show me quicksort."),
+                turn(Role::Assistant, "```python\ndef quicksort(xs):\n```"),
+                turn(
+                    Role::User,
+                    "Thanks! Now tell me about the history of the Roman empire."
+                ),
+            ]),
+            Prose
+        );
+        assert_eq!(asking(vec![]), Unsure);
+        // Tools offered: the reply is held to a call's shape.
+        let mut with_tools = make_test_request(&state);
+        with_tools.messages = vec![turn(Role::User, "Tell me a story about a lighthouse.")];
+        with_tools.tools = Some(vec![serde_json::json!({"type": "function"})]);
+        assert_eq!(reply_kind(&with_tools), Structured);
+        with_tools.tools = Some(vec![]);
+        assert_eq!(
+            reply_kind(&with_tools),
+            Prose,
+            "an empty tool list offers none"
+        );
     }
 
     /// `model_loaded` is global — "a model is loaded", not "this one". Both
@@ -4355,6 +4565,7 @@ mod tests {
                 .tokens_per_round(
                     "test",
                     tail,
+                    crate::daemon::state::split_rounds::ReplyKind::Unsure,
                     crate::daemon::state::split_rounds::YieldPrior::None,
                 )
                 .map(|y| y.tokens_per_round)

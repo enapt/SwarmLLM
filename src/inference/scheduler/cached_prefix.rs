@@ -113,6 +113,11 @@ pub struct PromptPlan {
     /// of the split (#3 (j5)): set with [`Self::may_guess_ahead`], never apart
     /// from it. `None` (no prior) where no request is behind the plan.
     pub(crate) yield_prior: crate::daemon::state::split_rounds::YieldPriors,
+    /// The kind of reply the request is likely to get (`pipeline::reply_kind`,
+    /// #469), whose own splits price its split's rounds: set with
+    /// [`Self::may_guess_ahead`], never apart from it. `Unsure` (every kind's
+    /// figure) where no request is behind the plan.
+    pub(crate) reply_kind: crate::daemon::state::split_rounds::ReplyKind,
 }
 
 impl PromptPlan {
@@ -157,14 +162,18 @@ impl PromptPlan {
     /// (`pipeline::request_may_guess_ahead`), whose split is priced from
     /// `prior` until its model's own splits are trusted
     /// (`pipeline::split_yield_prior`, #3 (j)) — the two together, so neither
-    /// is set without the other. Set where [`Self::with_reply_of_at_most`] is.
+    /// is set without the other — nor the `kind` of reply it is priced for
+    /// (`pipeline::reply_kind`, #469). Set where
+    /// [`Self::with_reply_of_at_most`] is.
     pub(crate) fn with_guessing_ahead(
         mut self,
         may: bool,
         prior: impl Into<crate::daemon::state::split_rounds::YieldPriors>,
+        kind: crate::daemon::state::split_rounds::ReplyKind,
     ) -> Self {
         self.may_guess_ahead = may;
         self.yield_prior = prior.into();
+        self.reply_kind = kind;
         self
     }
 }
@@ -285,6 +294,7 @@ pub(crate) fn plan_prompt(state: &SharedState, request: &InferenceRequest) -> Op
         yield_prior: crate::daemon::state::split_rounds::YieldPriors::both(
             crate::daemon::state::split_rounds::YieldPrior::None,
         ),
+        reply_kind: crate::daemon::state::split_rounds::ReplyKind::Unsure,
         handed_off: if crate::inference::pipeline::remote_generate::request_may_be_handed_off(
             state, request,
         ) {

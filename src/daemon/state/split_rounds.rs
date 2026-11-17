@@ -96,6 +96,19 @@
 //! as UCB starts (Auer et al. 2002), since an estimate pooled over two arms
 //! hides the better one.
 //!
+//! **And each kind of reply is priced by its own splits** ([`ReplyKind`],
+//! FUTURE_WORK #469, 2026-11-17). A guess-check split's yield is its drafter's
+//! agreement, and that differs by kind far more than a whole run's speed: the
+//! 14B over a 308 ms link ran code at 26.9-27.2 tok/s split against 16.0-17.2
+//! here alone, prose at 11.7-11.8 against 13.5-13.6 (2026-11-16) — one figure
+//! across both priced a prose reply near code after code-heavy use, onto a
+//! split slower than local. Every split is recorded under its tail's figure of
+//! every kind (unchanged: exploration and an `Unsure` request read it) AND its
+//! predicted kind's (`pipeline::reply_kind`, the one scoring, asked at plan
+//! and at record time); a kind's splits are trusted at [`BEFORE_TRUSTED`],
+//! and before then join the every-kind figure counted as
+//! [`KIND_PRIOR_TOKENS`]. A kind is not explored apart — the tail is the arm.
+//!
 //! [`BEFORE_TRUSTED`]: super::recent_by_model::BEFORE_TRUSTED
 
 use super::recent_by_model::RecentByModel;
@@ -141,7 +154,72 @@ impl SplitTail {
             Self::Far => format!("{model}\u{1f}far"),
         }
     }
+
+    /// The key one KIND of reply's figures are kept under (#469); `None` for
+    /// [`ReplyKind::Unsure`], which reads the tail's figure of every kind.
+    fn kind_key(self, model: &str, kind: ReplyKind) -> Option<String> {
+        kind.word()
+            .map(|word| format!("{}\u{1f}{word}", self.key(model)))
+    }
 }
+
+/// What kind of reply a request is likely to get — the kind its split yields
+/// a round by (FUTURE_WORK #469). Scored from the request before planning by
+/// ONE function (`pipeline::reply_kind`), at plan time AND where the split is
+/// recorded, so a figure describes the requests it prices: the key is the
+/// PREDICTED kind, and a misjudged request is learned under the kind it was
+/// predicted as, the kind its next sibling will be priced as.
+///
+/// Why: a guess-check split's yield is mostly its drafter's agreement, and
+/// that differs by kind far more than a whole run's speed does — the 14B over
+/// a 308 ms link (a US RTX 3080 Ti, the flow, 2026-11-16) ran code at 26.9-27.2
+/// tok/s against 16.0-17.2 here alone, and prose at 11.7-11.8 against
+/// 13.5-13.6. One figure across kinds priced prose near code after code-heavy
+/// use, so a prose reply could be planned onto a split slower than local.
+/// Prior art: SmartSpec/TurboSpec (arXiv 2406.14066) steers by one global
+/// acceptance average — our weakness; BanditSpec (2505.15141) keeps means per
+/// request; acceptance differs by task type (2604.14682: chat high, math low).
+/// No published system plans per request from a predicted kind.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum ReplyKind {
+    /// Code: the request shows or asks for it.
+    Code,
+    /// Plain writing.
+    Prose,
+    /// Held to a shape: tools offered, or a reply held to JSON.
+    Structured,
+    /// Too little to tell: priced from every kind's splits together, as
+    /// before #469.
+    #[default]
+    Unsure,
+}
+
+impl ReplyKind {
+    /// The word its figures are kept under; `None` for [`Self::Unsure`].
+    fn word(self) -> Option<&'static str> {
+        match self {
+            Self::Unsure => None,
+            kind => Some(kind.as_str()),
+        }
+    }
+
+    /// Its name in a log line.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Code => "code",
+            Self::Prose => "prose",
+            Self::Structured => "structured",
+            Self::Unsure => "unsure",
+        }
+    }
+}
+
+/// The tokens the tail's figure of every kind counts for beside a kind's own
+/// splits until they are trusted (#469): a quarter of a prior reply
+/// ([`PRIOR_REPLY_TOKENS`]), so one finished split of the kind already
+/// outweighs it — the kind's first prose reply is what prices the next, not
+/// the code replies around it.
+pub const KIND_PRIOR_TOKENS: f64 = 16.0;
 
 /// The rounds a reply whose forwards overlap waited: its decode time over the
 /// least time any of its forwards took to be answered, at most the forwards it
@@ -321,6 +399,19 @@ pub enum YieldFrom {
     PriorAndSplits,
     /// This node's own recent splits, nothing else.
     Splits,
+    /// This node's own recent splits of the request's KIND of reply (#469).
+    KindSplits,
+    /// The kind's few splits beside every kind's figure at
+    /// [`KIND_PRIOR_TOKENS`] (#469).
+    KindAndModel,
+}
+
+impl YieldFrom {
+    /// Is the figure this node's own splits alone — of the model, or of its
+    /// kind of reply?
+    pub fn measured(self) -> bool {
+        matches!(self, Self::Splits | Self::KindSplits)
+    }
 }
 
 /// What a round of a model's split is expected to yield, and from what.
@@ -340,11 +431,17 @@ impl Default for SplitRounds {
 }
 
 impl SplitRounds {
-    /// A split of `model` this node drove, its last segment at `tail`,
-    /// produced `tokens` in `rounds`, the prompt pass included. Either at zero
-    /// tells nothing and is not recorded.
-    pub fn record(&self, model: &str, tail: SplitTail, tokens: u32, rounds: u32) {
+    /// A split of `model` this node drove, its last segment at `tail`, for a
+    /// request predicted to get a `kind` of reply, produced `tokens` in
+    /// `rounds`, the prompt pass included. Either at zero tells nothing and is
+    /// not recorded. Kept under the tail's figure of every kind (what an
+    /// [`ReplyKind::Unsure`] request and an exploration read, unchanged in
+    /// meaning, so a record from before #469 still restores) AND the kind's.
+    pub fn record(&self, model: &str, tail: SplitTail, kind: ReplyKind, tokens: u32, rounds: u32) {
         if usable(&(tokens, rounds)) {
+            if let Some(key) = tail.kind_key(model, kind) {
+                self.recent.push(&key, (tokens, rounds));
+            }
             // A split of the tail the next exploration would try has measured
             // it: the count to that exploration starts again. A split of the
             // OTHER tail measures nothing about it — counted so, a model whose
@@ -451,21 +548,54 @@ impl SplitRounds {
     /// yielded nothing (a stream's chunk sent on guesses that were then
     /// refused) overlapped another, and must not price a split above the one
     /// round a token it was priced at before.
+    ///
+    /// For a request predicted to get a `kind` of reply (#469): the kind's own
+    /// splits once trusted; before then its splits beside the tail's figure
+    /// of every kind counted as [`KIND_PRIOR_TOKENS`]; with none of the kind,
+    /// the tail's figure as it is. An exploration's optimism stays on the
+    /// tail's figure — a kind is not explored apart.
     pub fn tokens_per_round(
+        &self,
+        model: &str,
+        tail: SplitTail,
+        kind: ReplyKind,
+        prior: YieldPrior,
+    ) -> Option<SplitYield> {
+        let every_kind = self.tokens_per_round_of_every_kind(model, tail, prior)?;
+        if prior == YieldPrior::Explore {
+            return Some(every_kind);
+        }
+        let Some(key) = tail.kind_key(model, kind) else {
+            return Some(every_kind);
+        };
+        if let Some((tokens, rounds)) = self.recent.with_trusted(&key, sums) {
+            return Some(SplitYield {
+                tokens_per_round: at_least_one(tokens as f64, rounds as f64),
+                from: YieldFrom::KindSplits,
+            });
+        }
+        let Some((tokens, rounds)) = self.recent.with_any(&key, sums) else {
+            return Some(every_kind);
+        };
+        let prior_rounds = KIND_PRIOR_TOKENS / f64::from(every_kind.tokens_per_round);
+        Some(SplitYield {
+            tokens_per_round: at_least_one(
+                KIND_PRIOR_TOKENS + tokens as f64,
+                prior_rounds + rounds as f64,
+            ),
+            from: YieldFrom::KindAndModel,
+        })
+    }
+
+    /// [`Self::tokens_per_round`] over every kind of reply: the tail's own
+    /// splits once trusted, else the prior beside them.
+    fn tokens_per_round_of_every_kind(
         &self,
         model: &str,
         tail: SplitTail,
         prior: YieldPrior,
     ) -> Option<SplitYield> {
         let model = &tail.key(model);
-        let sums = |recent: &std::collections::VecDeque<(u32, u32)>| {
-            recent
-                .iter()
-                .fold((0u64, 0u64), |(t, r), &(tokens, rounds)| {
-                    (t + u64::from(tokens), r + u64::from(rounds))
-                })
-        };
-        let at_least_one = |tokens: f64, rounds: f64| (tokens / rounds.max(1.0)).max(1.0) as f32;
         if let Some((tokens, rounds)) = self.recent.with_trusted(model, sums) {
             return Some(SplitYield {
                 tokens_per_round: at_least_one(tokens as f64, rounds as f64),
@@ -503,16 +633,32 @@ fn usable(&(tokens, rounds): &(u32, u32)) -> bool {
     tokens > 0 && rounds > 0
 }
 
+/// The tokens and rounds of `recent` splits, summed: a ratio of sums, never a
+/// mean of ratios (module doc).
+fn sums(recent: &std::collections::VecDeque<(u32, u32)>) -> (u64, u64) {
+    recent
+        .iter()
+        .fold((0u64, 0u64), |(t, r), &(tokens, rounds)| {
+            (t + u64::from(tokens), r + u64::from(rounds))
+        })
+}
+
+/// Tokens over rounds, never below one a round (`tokens_per_round`).
+fn at_least_one(tokens: f64, rounds: f64) -> f32 {
+    (tokens / rounds.max(1.0)).max(1.0) as f32
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::daemon::state::recent_by_model::{BEFORE_TRUSTED, RECENT};
+    use ReplyKind::Unsure;
     use SplitTail::{Far, Here};
 
     /// The figure with no prior: measured, or `None`.
     fn measured(rounds: &SplitRounds, model: &str) -> Option<f32> {
         rounds
-            .tokens_per_round(model, Here, YieldPrior::None)
+            .tokens_per_round(model, Here, Unsure, YieldPrior::None)
             .map(|y| y.tokens_per_round)
     }
 
@@ -522,17 +668,17 @@ mod tests {
     fn a_models_splits_yield_their_tokens_over_their_rounds() {
         let rounds = SplitRounds::default();
         for _ in 0..BEFORE_TRUSTED - 1 {
-            rounds.record("m", Here, 300, 100);
+            rounds.record("m", Here, Unsure, 300, 100);
         }
         assert_eq!(measured(&rounds, "m"), None, "too few to trust");
         // A two-token reply in two rounds (the prompt pass and one step).
-        rounds.record("m", Here, 2, 2);
+        rounds.record("m", Here, Unsure, 2, 2);
         let each = measured(&rounds, "m").expect("trusted");
         assert!((each - 902.0 / 302.0).abs() < 1e-4, "{each}");
         assert_eq!(measured(&rounds, "other"), None);
         // Nothing to learn from an empty reply or an uncounted one.
-        rounds.record("m", Here, 0, 5);
-        rounds.record("m", Here, 5, 0);
+        rounds.record("m", Here, Unsure, 0, 5);
+        rounds.record("m", Here, Unsure, 5, 0);
         assert!((measured(&rounds, "m").unwrap() - each).abs() < 1e-6);
     }
 
@@ -542,8 +688,8 @@ mod tests {
     fn a_round_is_never_priced_at_less_than_a_token() {
         let rounds = SplitRounds::default();
         for _ in 0..BEFORE_TRUSTED {
-            rounds.record("plain", Here, 40, 40);
-            rounds.record("wasted", Here, 10, 14);
+            rounds.record("plain", Here, Unsure, 40, 40);
+            rounds.record("wasted", Here, Unsure, 10, 14);
         }
         assert_eq!(measured(&rounds, "plain"), Some(1.0));
         assert_eq!(measured(&rounds, "wasted"), Some(1.0));
@@ -583,7 +729,7 @@ mod tests {
     fn a_split_with_a_drafter_starts_from_the_prior_until_its_own_are_trusted() {
         let rounds = SplitRounds::default();
         let cold = rounds
-            .tokens_per_round("m", Here, YieldPrior::Drafter)
+            .tokens_per_round("m", Here, Unsure, YieldPrior::Drafter)
             .expect("a prior");
         assert!((cold.tokens_per_round - 2.19).abs() < 0.005, "{cold:?}");
         assert_eq!(cold.from, YieldFrom::Prior);
@@ -595,9 +741,9 @@ mod tests {
 
         // A first split that kept 4 a round pulls it up, one that kept ~1 down.
         let prior_rounds = PRIOR_REPLY_TOKENS / f64::from(cold.tokens_per_round);
-        rounds.record("good", Here, 160, 40);
+        rounds.record("good", Here, Unsure, 160, 40);
         let good = rounds
-            .tokens_per_round("good", Here, YieldPrior::Drafter)
+            .tokens_per_round("good", Here, Unsure, YieldPrior::Drafter)
             .unwrap();
         assert_eq!(good.from, YieldFrom::PriorAndSplits);
         let expect = (PRIOR_REPLY_TOKENS + 160.0) / (prior_rounds + 40.0);
@@ -606,9 +752,9 @@ mod tests {
             "{good:?}"
         );
         assert!(good.tokens_per_round > cold.tokens_per_round);
-        rounds.record("poor", Here, 120, 118);
+        rounds.record("poor", Here, Unsure, 120, 118);
         let poor = rounds
-            .tokens_per_round("poor", Here, YieldPrior::Drafter)
+            .tokens_per_round("poor", Here, Unsure, YieldPrior::Drafter)
             .unwrap();
         assert!(poor.tokens_per_round < cold.tokens_per_round, "{poor:?}");
         assert!(poor.tokens_per_round >= 1.0);
@@ -620,10 +766,10 @@ mod tests {
 
         // Trusted: the splits alone, the prior gone.
         for _ in 1..BEFORE_TRUSTED {
-            rounds.record("good", Here, 160, 40);
+            rounds.record("good", Here, Unsure, 160, 40);
         }
         let trusted = rounds
-            .tokens_per_round("good", Here, YieldPrior::Drafter)
+            .tokens_per_round("good", Here, Unsure, YieldPrior::Drafter)
             .unwrap();
         assert_eq!(trusted.from, YieldFrom::Splits);
         assert_eq!(trusted.tokens_per_round, 4.0);
@@ -656,7 +802,7 @@ mod tests {
         );
 
         // Priced at the optimistic yield, beside nothing measured.
-        let explored = rounds.tokens_per_round("m", Here, X).unwrap();
+        let explored = rounds.tokens_per_round("m", Here, Unsure, X).unwrap();
         assert!((f64::from(explored.tokens_per_round) - EXPLORED_TOKENS_A_ROUND).abs() < 1e-4);
 
         // A re-plan of the same request is answered the same, and moves nothing.
@@ -680,34 +826,34 @@ mod tests {
         let ran = SplitRounds::default();
         ran.prior_for_request("m", uuid::Uuid::new_v4(), D);
         ran.prior_for_request("m", uuid::Uuid::new_v4(), D);
-        ran.record("m", Here, 160, 40);
+        ran.record("m", Here, Unsure, 160, 40);
         // The tail with fewer splits is the one explored, on time.
         assert_eq!(ran.prior_for_request("m", uuid::Uuid::new_v4(), D), xf);
-        ran.record("m", Here, 160, 40);
-        ran.record("m", Here, 160, 40);
+        ran.record("m", Here, Unsure, 160, 40);
+        ran.record("m", Here, Unsure, 160, 40);
         // (The wait has doubled to six, and splits here-last never move it.)
         for _ in 0..5 {
             assert_eq!(ran.prior_for_request("m", uuid::Uuid::new_v4(), D), dd);
-            ran.record("m", Here, 160, 40);
+            ran.record("m", Here, Unsure, 160, 40);
         }
         assert_eq!(ran.prior_for_request("m", uuid::Uuid::new_v4(), D), xf);
         // A split of the tail it would explore does start it again.
-        ran.record("m", Far, 160, 40);
+        ran.record("m", Far, Unsure, 160, 40);
         for _ in 0..11 {
             assert_eq!(ran.prior_for_request("m", uuid::Uuid::new_v4(), D), dd);
         }
         assert_eq!(ran.prior_for_request("m", uuid::Uuid::new_v4(), D), xf);
         // The tail with fewer splits is the one explored, Here too.
         let other = SplitRounds::default();
-        other.record("m", Far, 160, 40);
+        other.record("m", Far, Unsure, 160, 40);
         assert_eq!(other.prior_for_request("m", uuid::Uuid::new_v4(), D), dd);
         assert_eq!(other.prior_for_request("m", uuid::Uuid::new_v4(), D), dd);
         assert_eq!(other.prior_for_request("m", uuid::Uuid::new_v4(), D), xh);
 
         // Both trusted: no prior, nothing explored.
         for _ in 1..BEFORE_TRUSTED {
-            ran.record("m", Here, 160, 40);
-            ran.record("m", Far, 160, 40);
+            ran.record("m", Here, Unsure, 160, 40);
+            ran.record("m", Far, Unsure, 160, 40);
         }
         for _ in 0..2 * MOST_EXPLORE_AFTER {
             assert_eq!(ran.prior_for_request("m", uuid::Uuid::new_v4(), D), dd);
@@ -746,14 +892,14 @@ mod tests {
     fn each_tail_of_a_split_is_measured_and_explored_apart() {
         let rounds = SplitRounds::default();
         for _ in 0..BEFORE_TRUSTED {
-            rounds.record("m", Here, 160, 40);
+            rounds.record("m", Here, Unsure, 160, 40);
         }
         let here = rounds
-            .tokens_per_round("m", Here, YieldPrior::Drafter)
+            .tokens_per_round("m", Here, Unsure, YieldPrior::Drafter)
             .unwrap();
         assert_eq!((here.tokens_per_round, here.from), (4.0, YieldFrom::Splits));
         let far = rounds
-            .tokens_per_round("m", Far, YieldPrior::Drafter)
+            .tokens_per_round("m", Far, Unsure, YieldPrior::Drafter)
             .unwrap();
         assert_eq!(far.from, YieldFrom::Prior, "the other tail has not run");
         assert!((far.tokens_per_round - 2.19).abs() < 0.005, "{far:?}");
@@ -789,7 +935,7 @@ mod tests {
             if p.here == YieldPrior::Explore {
                 aimed.push(Here);
                 // The explored split here-last runs and is measured.
-                rounds.record("m", Here, 160, 40);
+                rounds.record("m", Here, Unsure, 160, 40);
             }
         }
         assert_eq!(aimed[..2], [Far, Here], "{aimed:?}");
@@ -802,14 +948,14 @@ mod tests {
         // A far aim that DID come to something is not passed on: with two
         // splits here-last already, the far tail stays the one with fewer.
         let far = SplitRounds::default();
-        far.record("m", Here, 160, 40);
-        far.record("m", Here, 160, 40);
+        far.record("m", Here, Unsure, 160, 40);
+        far.record("m", Here, Unsure, 160, 40);
         let mut aims = Vec::new();
         for _ in 0..40 {
             let p = far.prior_for_request("m", uuid::Uuid::new_v4(), YieldPrior::Drafter);
             if p.far == YieldPrior::Explore {
                 aims.push(Far);
-                far.record("m", Far, 160, 40);
+                far.record("m", Far, Unsure, 160, 40);
             }
             if p.here == YieldPrior::Explore {
                 aims.push(Here);
@@ -822,11 +968,88 @@ mod tests {
     fn only_the_most_recent_splits_count() {
         let rounds = SplitRounds::default();
         for _ in 0..RECENT {
-            rounds.record("m", Here, 400, 100);
+            rounds.record("m", Here, Unsure, 400, 100);
         }
         for _ in 0..RECENT {
-            rounds.record("m", Here, 60, 60);
+            rounds.record("m", Here, Unsure, 60, 60);
         }
         assert_eq!(measured(&rounds, "m"), Some(1.0));
+    }
+
+    /// #469: after code-heavy use, a prose request is priced at what prose
+    /// splits yielded, not at the blend the code replies pulled up — and a
+    /// request that cannot be told keeps the blend.
+    #[test]
+    fn each_kind_of_reply_is_priced_by_its_own_splits() {
+        use ReplyKind::{Code, Prose};
+        let rounds = SplitRounds::default();
+        let read = |kind| {
+            rounds
+                .tokens_per_round("m", Here, kind, YieldPrior::None)
+                .map(|y| (y.tokens_per_round, y.from))
+        };
+        for _ in 0..8 {
+            rounds.record("m", Here, Code, 600, 100);
+        }
+        for _ in 0..4 {
+            rounds.record("m", Here, Prose, 130, 100);
+        }
+        assert_eq!(read(Code), Some((6.0, YieldFrom::KindSplits)));
+        assert_eq!(read(Prose), Some((1.3, YieldFrom::KindSplits)));
+        // Every kind together, as before #469: (8×600 + 4×130) / 1200.
+        let (blend, from) = read(Unsure).unwrap();
+        assert!((blend - 5320.0 / 1200.0).abs() < 1e-4, "{blend}");
+        assert_eq!(from, YieldFrom::Splits);
+        // A kind with no split of its own reads the blend.
+        assert_eq!(
+            read(ReplyKind::Structured),
+            Some((blend, YieldFrom::Splits))
+        );
+        // The other tail is its own figure, of every kind and of each.
+        assert_eq!(
+            rounds.tokens_per_round("m", Far, Prose, YieldPrior::None),
+            None
+        );
+    }
+
+    /// A kind's FIRST split already outweighs the blend it starts beside
+    /// ([`KIND_PRIOR_TOKENS`]): one prose reply after eight code ones prices
+    /// the next prose reply near its own yield, not near code's.
+    #[test]
+    fn one_split_of_a_kind_outweighs_the_blend_it_starts_beside() {
+        use ReplyKind::{Code, Prose};
+        let rounds = SplitRounds::default();
+        for _ in 0..8 {
+            rounds.record("m", Here, Code, 600, 100);
+        }
+        rounds.record("m", Here, Prose, 160, 123);
+        let y = rounds
+            .tokens_per_round("m", Here, Prose, YieldPrior::None)
+            .unwrap();
+        assert_eq!(y.from, YieldFrom::KindAndModel);
+        assert!(
+            (1.3..1.5).contains(&y.tokens_per_round),
+            "one prose split at 1.3 beside a code blend near 5.9: {}",
+            y.tokens_per_round
+        );
+    }
+
+    /// An exploration's optimism is never undone by a kind's figure: the arm
+    /// it pulls is the tail's.
+    #[test]
+    fn an_explored_request_is_priced_at_the_tails_optimism_whatever_its_kind() {
+        let rounds = SplitRounds::default();
+        rounds.record("m", Here, ReplyKind::Prose, 130, 100);
+        let y = rounds
+            .tokens_per_round("m", Here, ReplyKind::Prose, YieldPrior::Explore)
+            .unwrap();
+        assert_eq!(y.from, YieldFrom::PriorAndSplits);
+        // The explored pseudo-reply (64 tokens at 8 a round) beside the one
+        // split — the tail's figure, never the prose split's own.
+        assert!(
+            (y.tokens_per_round - 194.0 / 108.0).abs() < 1e-3,
+            "{}",
+            y.tokens_per_round
+        );
     }
 }

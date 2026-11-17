@@ -41,9 +41,11 @@ pub const RECENT: usize = 32;
 /// prior. Below it one reply would decide the next route.
 pub const BEFORE_TRUSTED: usize = 4;
 
-/// At most this many models are tracked — a model id reaches here only from a
-/// request that completed, but the map is bounded anyway.
-const MAX_MODELS: usize = 256;
+/// At most this many keys are tracked — a model id reaches here only from a
+/// request that completed, but the map is bounded anyway. A split's figures
+/// are kept under up to eight keys a model (two tails, each of every kind and
+/// of three kinds, #469), so 1,024 keeps 128 models' splits.
+const MAX_MODELS: usize = 1024;
 
 /// The redb tree, shared with the other figures this node measured
 /// (`load_rate`, `auto_manage::target_hold`).

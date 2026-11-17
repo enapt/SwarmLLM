@@ -5027,20 +5027,34 @@ impl PipelineScheduler {
         // ahead (FUTURE_WORK #3 (d)) — from the drafter's prior until the
         // model's own splits are trusted (#3 (j)), per tail of the split: here
         // or on another computer, which decides whether its guesses can flow
-        // (#3 (j5)).
+        // (#3 (j5)) — and per kind of reply the request is likely to get
+        // (#469): a prose reply is priced by prose splits, not a blend that
+        // code replies pulled up.
         let split_yield = |tail: crate::daemon::state::split_rounds::SplitTail| {
             let prior = prompt.yield_prior.of(tail);
             let split_yield = if prompt.may_guess_ahead {
-                self.shared_state
-                    .metrics
-                    .split_rounds
-                    .tokens_per_round(&manifest.id.0, tail, prior)
+                self.shared_state.metrics.split_rounds.tokens_per_round(
+                    &manifest.id.0,
+                    tail,
+                    prompt.reply_kind,
+                    prior,
+                )
             } else {
                 None
             };
             if let Some(y) = split_yield
-                .filter(|y| y.from != crate::daemon::state::split_rounds::YieldFrom::Splits)
+                .filter(|y| y.from == crate::daemon::state::split_rounds::YieldFrom::KindAndModel)
             {
+                route_info!(purpose,
+                    model = %manifest.id,
+                    tail = ?tail,
+                    reply_kind = ?prompt.reply_kind,
+                    split_tokens_per_round = y.tokens_per_round,
+                    split_yield_from = ?y.from,
+                    "DIAG: a split of this model is priced from the few splits of this kind of \
+                     reply beside every kind's figure (split_rounds::ReplyKind)"
+                );
+            } else if let Some(y) = split_yield.filter(|y| !y.from.measured()) {
                 if prior == crate::daemon::state::split_rounds::YieldPrior::Explore {
                     route_info!(purpose,
                         model = %manifest.id,

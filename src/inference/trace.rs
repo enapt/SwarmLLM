@@ -255,6 +255,9 @@ struct TraceInner {
     /// The tokens a round of a split this prediction divided those passes by
     /// (`split_rounds`, FUTURE_WORK #3 (d)); `None` = one round a token.
     assumed_tokens_per_round: Option<f32>,
+    /// The kind of reply that figure was the splits of (`pipeline::reply_kind`,
+    /// #469); `None` where the plan did not ask.
+    assumed_reply_kind: Option<&'static str>,
     predicted_terms: Option<PredictedTerms>,
     route: Route,
     segments: Vec<SegmentTrace>,
@@ -648,6 +651,13 @@ impl RequestTrace {
         g.predicted_terms = Some(terms);
     }
 
+    /// The kind of reply this request's split is priced for (#469), as its
+    /// figures are kept (`split_rounds::ReplyKind`); written where the router
+    /// plans it, beside the price's own guess-ahead inputs.
+    pub fn note_reply_kind(&self, kind: crate::daemon::state::split_rounds::ReplyKind) {
+        self.lock().assumed_reply_kind = Some(kind.as_str());
+    }
+
     /// One round of a split's decode left for the first segment — a plain
     /// step or a guess check. Called where each leaves
     /// (`forward_through_segments` past the prompt pass,
@@ -817,6 +827,7 @@ impl RequestTrace {
             predicted_ms: g.predicted_ms,
             assumed_forward_passes: g.assumed_forward_passes,
             assumed_tokens_per_round: g.assumed_tokens_per_round,
+            assumed_reply_kind: g.assumed_reply_kind,
             decode_rounds: self.decode_rounds.load(Ordering::Relaxed),
             predicted_terms: g.predicted_terms,
             ttft_ms,
@@ -900,6 +911,9 @@ pub struct TraceSnapshot {
     /// where the price assumed one round a token (FUTURE_WORK #3 (d)).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub assumed_tokens_per_round: Option<f32>,
+    /// The kind of reply whose splits that figure came from (#469).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub assumed_reply_kind: Option<&'static str>,
     /// Rounds the decode of a split this node drove sent through its first
     /// segment, every attempt; 0 where none ran here. Beside `tokens`, the
     /// tokens a round actually yielded — what the line above assumed.
@@ -1032,6 +1046,9 @@ impl TraceSnapshot {
             }
             if let Some(t) = self.assumed_tokens_per_round {
                 let _ = write!(s, " assumed_tokens_per_round={t:.2}");
+                if let Some(kind) = self.assumed_reply_kind {
+                    let _ = write!(s, " reply_kind={kind}");
+                }
             }
             if let Some(t) = self.predicted_terms {
                 let _ = write!(

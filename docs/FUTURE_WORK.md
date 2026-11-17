@@ -3715,7 +3715,23 @@ Designs: `docs/plans/large_model_splits.md` (the target, the bound and the build
 (placement by distance, #192), `docs/plans/faster_than_local.md` (the ranked list).
 
 #### #469 — A split's yield is one figure for every kind of reply, so a prose reply can be planned onto a split slower than local
-`P2` · perf-split · **OPEN** — 2026-11-16 · evidence: `faster_than_local.md` § 9 ("A second far card") · history: #3 (j), #428
+`P2` · perf-split · **PARTIAL** (per-kind split yield built; this node's whole run per kind, mid-reply switching and per-conversation priors open) — 2026-11-17 · evidence: `faster_than_local.md` § 9 ("A second far card") · history: #3 (j), #428
+
+**Built (2026-11-17, transfer (a) below):** `pipeline::reply_kind` scores a request from itself — tools or a reply held
+to JSON → Structured; a code fence in the last user turn (or in the last reply, for a follow-up under 40 characters),
+or two marks of code in it → Code; any other turn of 12 characters or more → Prose; else Unsure — asked by the router
+at plan time (`PromptPlan::with_guessing_ahead`'s REQUIRED `kind`) and by `note_split_rounds` at record time, the same
+scoring of the same request. `SplitRounds::record` keeps each split under its tail's every-kind figure (unchanged:
+exploration and Unsure read it; `ROUNDS_COUNTED_AS` stays 2) AND its kind's; `tokens_per_round` (kind REQUIRED) reads
+the kind's own once four are trusted, before then its splits beside the every-kind figure counted as 16 tokens
+(`KIND_PRIOR_TOKENS`). An exploration stays on the tail. The trace line prints `reply_kind=` beside
+`assumed_tokens_per_round`; a DIAG names a kind priced from few splits. Tests:
+`each_kind_of_reply_is_priced_by_its_own_splits`, `one_split_of_a_kind_outweighs_the_blend_it_starts_beside` (both red
+with the kind read off), `a_requests_kind_of_reply_is_read_from_what_it_asks`, and the scheduler's
+`a_split_whose_rounds_carry_three_tokens_…` (a prose plan reads 1.25 where code reads 6; red with it off). **Residual**:
+verify on a live plan (the trace lines of a code and a prose request after code-heavy use); this node's own whole run
+is still ONE EMA across kinds (`note_own_whole_run`) — a 20% gap on the US measurement beside the split's 2.3x, so the
+decision there no longer turns on it; (b) and (2) below.
 
 **Seen** (2026-11-16, Qwen2.5-14B, this laptop ↔ a US RTX 3080 Ti at a 308 ms least round trip, the flow, released
 v0.3.293 both ends): code 26.9-27.2 tok/s against this laptop alone 16.0-17.2; prose 11.7-11.8 against 13.5-13.6.

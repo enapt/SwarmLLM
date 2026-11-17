@@ -884,6 +884,12 @@ pub(super) async fn execute_request(
     // with it.
     let may_guess_ahead =
         crate::inference::pipeline::request_may_guess_ahead(&shared_state, &request);
+    // The kind of reply a split is priced for (#469) — and the trace says so
+    // beside the figure it read.
+    let reply_kind = crate::inference::pipeline::reply_kind(&request);
+    if may_guess_ahead {
+        trace.note_reply_kind(reply_kind);
+    }
     let prompt_plan =
         crate::inference::scheduler::cached_prefix::plan_prompt_off_thread(&shared_state, &request)
             .await
@@ -925,6 +931,9 @@ pub(super) async fn execute_request(
                         crate::daemon::state::split_rounds::YieldPrior::None,
                     )
                 },
+                // Priced by the splits of its kind of reply (#469): the same
+                // scoring the split is recorded under.
+                reply_kind,
             );
     if prompt_plan.cached_locally > 0 {
         tracing::info!(
