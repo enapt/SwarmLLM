@@ -8451,3 +8451,16 @@ absent, which neither reports.
 **Tests.** `how_a_reply_was_guessed_is_additive_on_the_wire` (types crate: absent
 when unknown, an older reader parses it, an unknown word is `Unknown`);
 `a_reply_guessed_far_away_is_described_in_the_requesters_log` (`remote_generate`).
+
+## Moved from arch-network.md (trimmed rule detail and field evidence)
+
+Sentences cut from the rules file when it was shortened (2026-11-17); the rule itself stays there.
+
+- **The network loop never waits for the disk.** Guards `the_cache_writer_keeps_the_newest_snapshot` (the cache writer keeps the newest snapshot) and `a_commit_does_not_hold_the_task_its_worker_just_woke`. 84 of 89 loop stalls were the model-header parse at a start (`refused_model` / `gguf_meta_for`), hence `refused_model_if_learned`; `TrustManager::decay_all` committed per peer inside `iter_mut`, holding a registry entry across the write. The log append is not a stall (measured 2026-10-20); `loop_stall::TimedNext` times libp2p's own work (2026-11-17).
+- **A hand-off's prompt read is reported.** `daemon::state::prompt_progress::ProgressTargets` holds at most 256 targets; a fixed first-token wait was a minimum prompt speed nobody chose. A report is a share of the pass's own read because the positions a prompt cache held are other people's prompts' openings (`what_the_cache_held_is_never_reported`).
+- **A stream of verifies.** `StreamRun::lateness` averages the last 16 arrival errors; `forward_streams::Order::stood_on` skips the stale line after a spare ran whatever the tail-skip switch says. Drafting a chunk with no confidence floor: +18% TH-AU without it held a round trip (`held_by`); a narrow tail was a new card graph late in a worker's life (10-59 s stalls, #883).
+- **Gossip.** `HealthMonitor::catch_up_new_connections` runs at most one a second, the moment a peer's own capability arrives; a per-peer memory that outlived the connection left a restarted node blind to the swarm's models for up to 2 h, and waiting for the round left a computer that had just started answering "not found" for 30-240 s (2026-11-12). `RegionShardSummary` was a third of an idle node's gossip and read by nothing. 200 cached addresses were 26 peers, and the 100+ tier doubled every message's copies (#91 (1b)). A 565-part holder was invisible to the whole swarm for 6 h before `pieces_if_too_long`.
+- **Network coordinates.** An orbit crossed a fixed 5 ms threshold on 16 of 18 broadcasts, so the capability's coordinate moves through `UpdateFilter`. The smoothed cost read 2.5-5 s on a 20 ms link through a first request, hence `round_trip_ms` for cost and the windowed minimum for distance.
+- **Offline mode.** `protocol_traffic` is the known-answer test that builds the node's transport through `swarm_transport`; a dial site that did not ask was the leak.
+- **A request reaches only the nodes its scope names.** Guard `a_requests_keep_instruction_is_never_replaced_by_none` (a path that writes `KeepAsked::Unasked` must be listed in `KEEP_UNASKED_IS_THE_ANSWER`).
+- **A peer's question is weighed.** The first design's two HIGH findings were a wait keyed by the asker's request id and weighing under it: a request id is known to every machine on a route, so anything keyed or held by it is a peer's lever on a live request.

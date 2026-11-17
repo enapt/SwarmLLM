@@ -83,6 +83,8 @@ direction across both pairings.
 the RTX 3070 here; no second card was available. Treat their magnitudes as
 one machine's numbers until a second one confirms them.
 
+**Moved from `arch-inference.md` (trimmed 2026-11-17):** A 2-token forward once cost 7.8x a 1-token one because every CPU decode fast path was gated on `q_len == 1` exactly (#369). `layers::grouping_applies` + `grouped_gqa_attention` read K/V at stored width for any query length that fits one pass; the mask is TILED. Expanding K/V with `repeat_kv` doubled attention for every prompt chunk past a 5,461-long cache on a 24-head model (+20% on a 6.9K prompt once removed); the vendored flash kernel is bottom-right causal (#368).
+
 ## Local speculative decoding — `inference::model_worker::ngram_spec_eligible`
 
 The single answer to "may this request be speculated?", consulted by BOTH the
@@ -189,6 +191,8 @@ Three things a change here must keep:
 - **A miss is not free** (gotcha #371): the forward the draft provokes costs
   even when nothing is accepted, which is what `SpecBackoff` exists for. Measure
   the workload speculation CANNOT help, not just the one it can.
+
+**Moved from `arch-inference.md` (trimmed 2026-11-17):** Two copies of `ngram_spec_eligible` would eventually disagree, silently: the gate diverts a request off the batched path and the loop then declines to speculate it, so it loses batching and gains nothing. `IpcGenerate::others_in_flight` is the daemon's count (the worker cannot see its queue); `spec_payoff_justifies_diverting` exists because the diverted loop holds the worker for the whole reply (gotcha #373).
 
 ## A prompt's length in tokens is a POSITION, not a statistic
 
@@ -388,6 +392,8 @@ small Q2_K/Q3_K expert shapes (768 × 2048) are dispatch-bound at m = 2-3 either
 (0.15 ms a call against 0.04 at m = 1) — a mixture-of-experts check goes through
 `matmul_many` instead.
 
+**Moved from `arch-inference.md` (trimmed 2026-11-17):** A 2-3 row tail is a speculative check's whole call; `avx.rs::rows_of_a_32_value_format` unpacks the column by the one-row kernel's own function. Q5_0/Q4_1/Q5_1 AVX2 one-row kernels are llama.cpp's; upstream ran the scalar loop. A scalar `f16::to_f32` in a loop carrying a vector accumulator compiles to a `vpinsrw` that merges into whatever register the allocator picks - the accumulator, measured, ~15 cycles a block (gotcha #920).
+
 ### The 32-value formats run on AVX2, one row and several, and a scale never waits on the accumulator (2026-10-20, #323)
 
 **What was wrong — three things, found profiling the drafter's tree step (#134).** A tree step
@@ -518,6 +524,8 @@ on a full wake (`IdleState::wake_fully`), never on a partial one (a spurious wak
 to the sleepy protocol, as upstream). Re-measure with `SWARMLLM_RAYON_SPIN_US=0` as the A/B before
 changing the default; 8 threads still do not beat 4 on this box (llama.cpp's 8 do: 110 against 119),
 which is #137's residual.
+
+**Moved from `arch-inference.md` (trimmed 2026-11-17):** Spinning means a token's small regions pay no wake per worker (8-thread decode 172 -> 123-127 ms, #137). `in_phase_pool`: from the caller every parallel op is a cross-thread handoff (3B 111 -> 82 ms/token).
 
 ## `inference::decode_attn::gqa_decode_attention_cpu`
 
@@ -979,6 +987,10 @@ instrument, not the clock (§ "A decode token is bound by GPU submission COUNT")
 launch count and nothing else); a contiguous result (the KV cache writes K with `slice_set`); the
 preconditions in `fusable`, checked rather than assumed.
 
+**Moved from `arch-inference.md` (trimmed 2026-11-17):** On a card `inference::partial_rope` is llama.cpp's shape: the kernel copies the unrotated channels; bit-identical to `partial_rope_composed`.
+
+**Moved from `arch-inference.md` (trimmed 2026-11-17):** `inference::heads_first` (2026-10-23) is TensorRT-LLM's `addFusedQKVBiasTranspose`, bit-identical to the composition.
+
 ## A RoPE layout is read off llama.cpp, per architecture (2026-09-24, FUTURE_WORK #96)
 
 **`ModelArch::use_rope_contiguous` is llama.cpp's `llama_model_rope_type`, arch
@@ -1021,6 +1033,8 @@ for word.
   contiguous kernel directly. It is `rope_i` now. Llama-4 and DeepSeek-2 are
   matched to llama.cpp (and to HF, which rotates complex pairs for both) but
   **NOT run here**: no such model is on the fleet.
+
+**Moved from `arch-inference.md` (trimmed 2026-11-17):** GLM-4, Llama-4 and DeepSeek-2 are NORM and were contiguous here - GLM-4 wrote broken code on every long reply while conformance passed, and four tests asserted the wrong answer because they were written against the function (#96).
 
 ## A special token is what the vocabulary says it is — and a prompt gets ONE BOS (2026-09-24, FUTURE_WORK #97)
 
@@ -1392,6 +1406,8 @@ prompt figure (0.95× of .289's): that one-forward hypothesis is rejected.
 `a_lone_requests_prompt_pass_is_cut_where_the_budget_says_a_forward_ends` (the widest forward a 293-position pass
 reads, against `widest_prompt_forward`'s 128; red with the pass read whole).
 
+**Moved from `arch-inference.md` (trimmed 2026-11-17):** One 15,288-token forward held 1,672 MiB of gate and up products beside the weights and cache, and an 8 GB card spilled 3 GB into system memory (WDDM lends, never refuses - gotcha #1044): first word 100-133 s -> 15-17 s once cut.
+
 ## `inference::split::token_embedding::rows_on_demand_eligible`
 
 (2026-08-18) — the
@@ -1508,6 +1524,8 @@ Tests: `header_cache_tests::*` (each guard switched off turns its own test red:
 the stamp, the racy rule, the ahead-of-the-clock case, the hit itself),
 `a_models_header_is_parsed_once_for_every_estimate_a_plan_asks` (15 estimates,
 one parse, each answer equal to a fresh parse's).
+
+**Moved from `arch-inference.md` (trimmed 2026-11-17):** A 70B plan parsed its 7.8 MB header 73 times (#360).
 
 ## `inference::split::GgufTensorMeta::tied_output_location`
 
@@ -2247,6 +2265,8 @@ submissions per layer, not faster arithmetic.
 → `docs/invariants/inference.md` · technique in `docs/DIAGNOSTICS.md` § "Where a
 decode token actually goes"
 
+**Moved from `arch-inference.md` (trimmed 2026-11-17):** GPU decode is bound by submission COUNT, not bandwidth. The copy stream of `CudaDevice::clone_htod_beside` (#138 (1d)) touches only its copy RING: the device's stream waits for each copy, copies the region card-to-card into a buffer of its own pool, and the ring rewrites a region only after that read. Never hand the copy stream a buffer candle frees: a pool reuses another stream's free only after a SYNCHRONIZE (gotcha #836, 768 MB for 48 x 16 MB). `residual_norm::norm_block` (2026-10-22): candle and llama.cpp use 32 threads below 1024 columns; 1024 threads from 512 columns cost 15 us a 0.5B's norm against 3.
+
 ## Top-k shrinks the candidate set before anything else runs (2026-09-24)
 
 `inference::sampling::sample_among_top_k` is the sampler whenever top-k is on —
@@ -2775,6 +2795,8 @@ reply across its two runs. Test
 three fused slices at 1, 31, 32 and 100 tokens bit-identical to the plain path;
 the marking; red when `on_the_card` hands every weight the first copy).
 
+**Moved from `arch-inference.md` (trimmed 2026-11-17):** At 128 rows every weight crosses four times as often, so a split reads at least 512 a forward. The link, not pinned memory, bounds the copy here (pageable 6.5 of 6.7 GB/s); a 14B split 20/28 read 888 tokens in 36.8 s and reads them in 6.5-7.0 s. A stage keeping the stacks for the forward measured no gain once primed - the pool reuses a layer's freed stacks. The pool is grown ONCE before the forward by the prediction plus the cache's real bytes, the claim through `kv_bytes_a_forward_adds` (the one figure the head-room claim reads); under WSL2 a growth after pageable copies stalls seconds with uptime, and a prompt with its experts in RAM read 24 s a chunk without it (#292, gotcha #883). `prompt_card_for` is the one token rule; `USED_MEM_HIGH` is read BEFORE the profile's report resets it.
+
 ### A split's processor-held layers read a prompt whole on the card (2026-10-13, #138 (1c))
 
 **What it replaced.** After (1b) every processor-held projection crossed to the
@@ -3230,6 +3252,8 @@ which was ~3 syncs and ~k+5 launches per token per layer on a card.
 
 → `docs/invariants/inference.md` § "A mixture-of-experts layer keeps its experts quantized"
 
+**Moved from `arch-inference.md` (trimmed 2026-11-17):** Off the card, routing is one host copy (`topk_host`) and ONE `index_add` for the layer. Card kernels: one-row kernel <= 8 tokens, tensor-core kernel for a prompt, which needs the vendored candle-kernels barrier. On the processor one region is llama.cpp's `mul_mat_id` shape: a task is 64 rows of one expert's weight x all of that expert's tokens; `MOE_PAIRS_PER_REGION` pairs a region. `MoeFfn::forward` refuses a dense-beside-experts layer, and tensor parallelism does too. gpt-oss's `swiglu_oai` is ONE card launch because candle's scalar `minimum`/`clamp` copy their scalar host -> device, which a CUDA graph capture refuses. At decisive attention llama.cpp's processor and card builds disagree with each other as much as with us; the decisive file is soft attention with every expert used (`N_EXPERT_USED=8`).
+
 ## A card/processor split is placed in every per-layer loop (2026-09-25)
 
 When a model does not fit the card whole, `ModelProcessPool::partial_gpu_layers`
@@ -3570,6 +3594,8 @@ map online, from the hidden states a split computes anyway, and keeps it across 
 - `test-split --gpu-layers N` on a whole model now places the run in the middle; the loader logs
   `processor_from`/`processor_to`.
 
+**Moved from `arch-inference.md` (trimmed 2026-11-17):** A forward reports only the processor layers it RUNS - a guess reported as a processor token chose ONE thread (gotcha #983). Card-first, a guess agreed 0-14%; from a tenth in, 50-91% (`examples/skip_agreement_probe.rs`); a 14B split decoded 1.35-1.73x against the tail with the checks on every core (`cpu_pools::check_pool`). A third of the 14B on the card: 1.11-1.35x over guessing with nothing in the gap; at the default placement (26 of 48) 1.05-1.21x. Fitting at the reply's end cost a back-to-back request's first token ~0.2 s, hence `refit_stale_priors` runs while the worker has nothing waiting. A prompt fitted before its first token raised the 1,759-token prompt's first token 0.6-0.8 s. The carry (`STAND_IN_CARRY`) raised tokens kept a round 0.72 -> 0.90 on the 14B's 33 of 48, never worse on four; error feedback, no prior art found. `SkipBridge::Recall` has a `prior` term; the stand-in's ridge inverse uses Newton-Schulz, GEMMs only; the resident prior keeps its last `PRIOR_ROWS` positions.
+
 ## A chain that starts and finishes here guesses through a stand-in for its far run (2026-10-29, #366 (4))
 
 **What it is.** A boomerang chain ("Start and finish on this computer") runs the model's first
@@ -3649,6 +3675,8 @@ the control's 4-10, worst rank 2, gap 0.13-0.40 (`fr/real_link/score/score.out`)
 **What a change must keep.** The guess cuts both caches back on every exit; learning reads only
 committed positions; a request learning one is never batched; nothing here may need the far
 layers' weights or a new wire message.
+
+**Moved from `arch-inference.md` (trimmed 2026-11-17):** `FarRuns::keep` pairs the first segment's output and the last segment's input at the same positions, only below where a later forward shows them kept (`kept_pairs`). A request learning one is never batched because a batch skips `handle_forward`'s capture; its reply joins the model's prior at release. Replies part from one-at-a-time only at near-ties (a check's width moves a card's row).
 
 ## One prefix-cache snapshot is sized by bytes, and keeps the opening (2026-09-26)
 
@@ -3790,6 +3818,8 @@ reserve, not this bug, but it is the regime where counting the replaced turn as 
 kept. Tests (red with the old order): `the_room_is_planned_with_what_the_save_replaces`,
 `a_prompt_already_saved_asks_for_no_room`, `a_planned_eviction_is_made_in_the_home_the_copy_goes_to`,
 `a_snapshot_the_card_cannot_hold_whole_goes_to_host_memory` (its eviction travels with the home).
+
+**Moved from `arch-inference.md` (trimmed 2026-11-17):** The fixed 8,192-token ceiling it replaced refused most agent prompts outright. A slid snapshot cannot keep an opening short of `serves_from`, so charging every position kept nothing: the charge is `(budget + slid_away) / per_position`. `contiguous()` hands back the live buffer for a one-KV-head view, which a window's in-place slide then rewrites (gotcha #874). `Entry::kept_here` is an empty manifest, so never announced or exported. The end-of-pass snapshot is copied once the reply is done (2026-10-28; llama.cpp saves at slot reuse): copying between the prompt pass and the first token cost 0.5-0.9 s of a 14B split's 1,800-token prompt and the first token gained only 0.12 s at the median, as the next pass ran 0.25 s slower - open. Not where a cache slides (the opening may be gone by then) nor a recurrent model (saved inside the pass). It is taken however the reply ends while the worker survives - an error, a cancel landing inside a step, a failed batched tick (`prompt_outlives`, asked by all three) - and a request arriving back to back waits for the rest of the copy. Making room first (`PrefixCache::make_room`, llama.cpp's `server_prompt_cache::alloc` order): a copy beside the old entries faults fresh pages - 255 ms per 569 MB with memory free, 0.6-0.8 s under a full page cache, 43 ms into held memory. The room planner (`RoomPlan`) is handed the replaced entries' bytes per memory (`LetGo`) and counts them as its own.
 
 ## A blocked GQA attention call is grouped per block, never expanded (2026-09-26)
 
@@ -4070,6 +4100,8 @@ larger share.
 but folds a row's chunks in chunk order through `merge_into`. The path choice may read the
 pool; nothing that changes a bit may.
 
+**Moved from `arch-inference.md` (trimmed 2026-11-17):** A prompt-cache hit runs the last prompt token as a decode step, so two arithmetics gave a different greedy reply on every repeat. `prefill_attn::gqa_prefill_attention_cpu` runs before any matmul path; the `[rows, kv_len]` matrix is never written. Each (block, chunk) of a split-keys check is a job, then each row's chunks are folded in chunk order - the same partials, the same bits; only the PATH reads the pool. Sizes stay constants.
+
 ## A model's RoPE frequency factors are applied — and reach a node without shard 0 (2026-09-27, #124)
 
 **The defect.** Llama 3.1/3.2 GGUFs carry `rope_freqs.weight`: 64 per-pair
@@ -4279,6 +4311,8 @@ above the vector kernel's rows now goes to llama.cpp's CURRENT MMQ — § "A car
 rows with llama.cpp's int8 tensor-core MMQ" below. The cuBLAS rule above (and its f16 accumulate
 and f32 marks) still answers where that kernel does not run: a card below 7.5, a type it does not
 cover, `SWARMLLM_QMATMUL_MMQ=dp4a`, or after a failed launch.
+
+**Moved from `arch-inference.md` (trimmed 2026-11-17):** Where MMQ does not run, >= 64 activation rows go to `mul_mat_via_f16_cublas` (tensor cores) instead of the old dp4a MMQ; decode never reaches it. f16 accumulation has been the default since 2026-10-09 (#147), judged at 4K tokens on eight families.
 
 ## A card multiplies several rows with llama.cpp's int8 tensor-core MMQ (2026-10-21, #325)
 
@@ -4555,6 +4589,8 @@ moved, so occupancy and tile size are NOT what holds those products at half the 
 table could keep the 6-9% at 4-16 rows (unbuilt). Next on it: the stall reasons of
 `mul_mat_q<Q4_K, 24>` under ncu (this box needs GPU counters enabled in Windows).
 
+**Moved from `arch-inference.md` (trimmed 2026-11-17):** `mmq_few_rows_line(dtype)` (2026-10-22): a k-quant from 4 rows, Q8_0 and the 32-value formats from 7, a weight of >= 2 MiB; read by `mmq_takes_few_rows` and the card tests alike. cuBLAS / dp4a run below only where `swarm_mmq_available()` is false. A probe answers no for a card with no image. Machine code runs only within its major version, so a release built at 80 had no image of the MoE, MMQ and flash libraries on a Hopper/Blackwell card and their launches failed WITHOUT A WORD (flash's `run_mha` now returns its status); check the PTX path with `CUDA_FORCE_PTX_JIT=1` in a harness (candle cannot open a device under it). 12.0 machine code is never added to MMQ, whose host side would configure a 12.1 card for Blackwell under the floor's PTX.
+
 ## A decode step can go to the card as one CUDA graph (2026-09-29; on by default since v0.3.213)
 
 **What.** (Written when it was opt-in via `SWARMLLM_CUDA_OWN_STREAM=1 SWARMLLM_CUDA_GRAPH=1`; both are now on unless set to `0`.) It sends a one-position forward
@@ -4699,6 +4735,8 @@ flash then read them, and a split's checks drifted to llama.cpp's 2nd choice (#7
 
 → `docs/invariants/inference.md` § "A decode step can go to the card as one CUDA graph"
 
+**Moved from `arch-inference.md` (trimmed 2026-11-17):** A group that allocates memory a LATER group reads: the driver remaps or waits for it at every launch - Gemma 4 E2B's per-layer inputs, built in the first group, made its 17 launches cost 5.8 ms a step (0.7 once built before the capture; 61 -> 93 tok/s). `SsmState` keeps two pairs on a card, a step writes the pair it did not read, and the swap is host bookkeeping a refused capture undoes. `SplitModel::slot_keeps_no_cache` marks a slot its layer keeps empty by design (it holds). MLA and the per-expert card path stay out of capture. A cast inside a capture changes the graph's shape when a conversation is fed both u32 and other ids (#233). A TOPOLOGY refusal names no node: the debug census (`node_census`) of the group before and after does. flash-attn's zeroed `softmax_lse` rebuilt every speculative check on a card (#221).
+
 ## A decoded token's attention on a card is one kernel (2026-09-29)
 
 **What.** `decode_attn::gqa_decode_attention_cuda` + `kernels/decode_attn.cu`: one query position,
@@ -4818,6 +4856,8 @@ ALONE take 16.9 ms — llama.cpp's whole token is 17.4, with the same Q4_K kerne
 
 → `docs/invariants/inference.md` § "A decoded token's attention on a card is one kernel"
 
+**Moved from `arch-inference.md` (trimmed 2026-11-17):** The kernels must be the same at every cache length (`decode_attn::combine_every_length`: one chunk is merged too, bit-identical): otherwise every graph group is rebuilt at once as the cache grows (790 ms in one Gemma 3 4B step at position 64). `decode_attn::chunk_for` (the smallest of 16/32/64 keeping <= 256 blocks and <= 64 chunks) makes the chunk a kernel ARGUMENT, so a growing cache only updates a captured step - never a second kernel per chunk.
+
 ## A card keeps its KV cache as f16 (2026-10-09, FUTURE_WORK #194)
 
 **What.** On a card, a layer's KV cache is f16 BHSD and nothing else — `KvStorage::F16`, the "half
@@ -4915,6 +4955,8 @@ kernel takes every one-position call, or each token widens the history. The flas
 cache in place: a `.contiguous()` there is the O(history)-per-chunk copy the mirror existed to
 remove. A/B: `SWARMLLM_KV_F16=0` (old layout; the node also stops advertising bit 19),
 `SWARMLLM_KV_WRITE=compose`.
+
+**Moved from `arch-inference.md` (trimmed 2026-11-17):** `KvAttention` is a REQUIRED argument of `layers::kv_storage`: MLA is f32 everywhere, and two estimates priced it as the half cache when the rule was asked without it. F16 alone applies on a card where both kernels read it in place - flash (a transposed BHSD view, no copy) and the decode kernel (`decode_attn::card_kernel_covers`); elsewhere the old layout.
 
 ## A decode step's graph is recorded in groups, launched as it is recorded (2026-09-30)
 
@@ -5022,6 +5064,8 @@ one computer the step is priced on its own"). A new width meets its first captur
 
 → `docs/invariants/inference.md` § "A speculative check is captured too"
 
+**Moved from `arch-inference.md` (trimmed 2026-11-17):** A one-off forward (first of its shape, instantiates a graph, or refused) costs 240-300 ms on a Qwen3.5-4B check against 16-30 ms replayed, 0.3-8 s under WSL2; each is said at debug (`cuda_graph::one_off`). The idle worker's warm-up covers a whole model on a card or a split's FIRST segment: every chain width widest first, then every tree row count 8..1 where a tree's rows are captured (vLLM's and SGLang's start-up capture); a width first met inside a reply stalled it 5.5-6.9 s (#357, #428), a tree level's or a first segment's chunk's first graph 289-958 ms on a fuller card (#357 (b)).
+
 ## A tree level on a card: one tree kernel, captured as a graph (2026-10-22, #134 (b))
 
 **What it replaced.** A tree's rows were read on standard attention on every node: the half
@@ -5111,6 +5155,8 @@ tests); `a_tree_call_the_kernel_cannot_take_without_a_mask_fails` (`decode_attn`
 row cap and a one-row call the scope does not describe, both with no mask — red with the first
 version's check, at the one-row call); `a_trees_visibility_reaches_its_last_row` (`draft_tree`); the pool scope carries the
 visibility (`cpu_pools`); a tree shape's graph state is untouched by a chain's rest (`cuda_graph`).
+
+**Moved from `arch-inference.md` (trimmed 2026-11-17):** Rows are rotated at `base + depth` (`layers::RowPositions`): it is SET for every job a pool runs, `None` included, by `cpu_pools::with_the_callers_scope`, because a pool thread waiting in a tree's forward runs other forwards, which read its positions. The rows' rope tables are uploaded and gathered ONCE per forward and table, never per layer (`layers::TreeRows` / `tree_rope_rows`, a job's own cache never carried; A/B `SWARMLLM_TREE_ROPE=per-call`). `RowScores::followers`, `coupled_guess_on_the_card` and `tree_rank::draw_each_row_on_the_card` are the three paths into the sampled-row draw. Tests: `split/tests/draft_trees.rs` check that each row equals its own path read fresh and that a chain over the same rows must differ.
 
 ## A tree's rows are read TILED over the half cache (2026-10-22, #134 (b))
 
@@ -5209,6 +5255,8 @@ attention"); `a_tree_call_the_kernel_cannot_take_without_a_mask_fails` (the per-
 f32 cache; the half cache's 9 rows are the tiled kernel's); `a_captured_tree_level_reads_as_the_ordinary_one`
 (the captured drafter level, now tiled).
 
+**Moved from `arch-inference.md` (trimmed 2026-11-17):** `decode_attn::tree_tiles` -> `tree_attn_tiled_f16kv_d128/_d256` (2026-10-22): a block stages one KV head's chunk and serves a tile of rows x query heads; shared memory stays under 48 KB so a capture may hold it; it writes the per-row kernel's partials and one combine. Over an f32 cache <= 8 rows go one block a row (`TREE_KERNEL_MOST_ROWS` = `cuda_graph::MAX_POSITIONS`) because it re-reads the cache per ROW (gotcha #934).
+
 ## A tree's context is read by flash attention, in runs (2026-10-23, #134 (b))
 
 **What it replaced.** The tiled kernel above read a tree's whole history: the confirmed context
@@ -5301,6 +5349,8 @@ every half-cache shape with base ≥ runs, against the matmul path over the same
 (abs < 2e-3, rel < 2e-2; worst 1.1e-3 over 52 arms), the entry point's own choice included;
 `tree_context_on_flash_timing` (`#[ignore]`, the op by run count).
 
+**Moved from `arch-inference.md` (trimmed 2026-11-17):** 2026-10-23, `decode_attn::past_runs`: every row sees the positions before the tree's base whole, so FA2 reads them non-causally in `auto_past_runs` runs - FlashInfer's cascade, merged by log-sum-exp in the one combine - from `PAST_FLASH_FROM` work; the run count never depends on the context's length because a captured check's allocations must not move.
+
 ## A tree level's rows are ranked on the card in two launches (2026-10-22, #134 (b))
 
 **What it replaced.** After each level the drafter ranks its rows — each row's log-sum-exp and its
@@ -5357,6 +5407,8 @@ vocabulary, the 65-row seed, Gemma's 262K, a tiny vocabulary, tied scores, suppr
 finite scores — ids equal the host's ranking, log-probabilities within 1e-4 of an f64 sum, since the
 host's one f32 sum over a vocabulary drops every term below half its last bit; NaN, +inf and nothing
 finite → `NotFinite`; nine followers → `NotTaken`) — red with `SWARMLLM_TREE_TOPK=composed`.
+
+**Moved from `arch-inference.md` (trimmed 2026-11-17):** `tree_rank::ranked_on_the_card` -> `kernels/tree_rank.cu`: each row's log-sum-exp and top 8, one read back - the composition's eight argmax launches gave a row one block each. A sampled row's coupled draw reads only the request's `top_k` (`sampling::coupled_draw_reads_only_top_k`), so the card ranks those with raw scores (`tree_rank::top_k_on_the_card`, radix select, k <= 64) (2026-10-23).
 
 ## A sampled row is ranked on the card too — its draw reads only the request's top k (2026-10-23)
 
@@ -5580,6 +5632,8 @@ updated, 43-108 ms), the drafter 554 of 555; 12/12 replies, 0 driver events. Req
 (first) and 31.4-32.7 s, against 50-124 s and 32.6-64.5 s on 10-04 — which also ran with ~9 GB less
 free RAM, so the time difference is not attributed to this alone.
 
+**Moved from `arch-inference.md` (trimmed 2026-11-17):** A rebuild costs 10-100 ms against the ~3 ms a graph saves (2026-10-05), but only where the card's timeline says the rest pays: a churning shape's steps are timed (`DecodeGraph::begin_step` -> a REQUIRED `StepBegun` for `capture` / `note_uncaptured`) and `Churn::weighed` declines or ends a rest a graph still wins (a 0.5B drafter: ~6 ms rebuild vs ~9 ms saved a step, #233).
+
 ## A rest is weighed on the card's timeline, and a step's ids are one type (2026-10-08, #233)
 
 **What was seen.** Guess-and-check across a split on one card (the gate's step 12h: Qwen2.5-Coder-7B
@@ -5739,6 +5793,8 @@ re-deriving the layout. The Display of `MixedModelCopy` must keep the word "shar
 (the peer-facing translation depends on it, pinned by the tests above), and a new
 path that returns a worker's error to another node translates this refusal too.
 
+**Moved from `arch-inference.md` (trimmed 2026-11-17):** A mismatch never fails on its own - each read lands shifted inside its entry and the model answers garbage (#156). Compare per entry, never by re-deriving the layout (older tables must load).
+
 ## A context that will not fit is shrunk, not refused
 
 `inference::executor::context_retry_ladder` is the answer to "what context size
@@ -5870,6 +5926,8 @@ run before pushing such a change is CI's own:
 `CARGO_TARGET_DIR=~/swarm-target-cuda CUDA_COMPUTE_CAP=80 cargo check --locked
 --features candle-cuda --all-targets` with `nvcc` on `PATH`.
 
+**Moved from `arch-inference.md` (trimmed 2026-11-17):** `cargo check` with default features compiles NO `cfg`-gated path; only the cache-warm workflow sees the GPU paths. The unresolved-link doc failure recurred on 2026-10-22 (`tree_rank`, gotcha #832). A card build's `SplitModel` is `Send` but not `Sync` because its decode graphs hold raw CUDA handles; the processor build passed while every card build failed (gotcha #912). `cargo check --locked --features candle-cuda --all-targets` runs with `CARGO_TARGET_DIR=~/swarm-target-cuda CUDA_COMPUTE_CAP=80`. The 19 CUTLASS kernels sit outside `target/` so rust-cache cannot hit them: "cache hit" is not "the slow thing was cached".
+
 ## A recurrent state is taken back into its last check by replaying the rows it kept
 
 (2026-10-06, FUTURE_WORK #117; the worker's n-gram since 2026-10-25, #228 (5); the replay the
@@ -5990,6 +6048,8 @@ bar stays identical ids.
 
 A recurrent drafter, MTP and the split's chain stream, trees and flows wait on a checkpoint replayed
 across steps (FUTURE_WORK #228 (5)).
+
+**Moved from `arch-inference.md` (trimmed 2026-11-17):** Qwen 3.5's DeltaNet layers keep a recurrent state per request, and a rejected guess would leave its tokens in it. `SsmRows` holds the convolution's inputs, normalised q and k, v, g and beta; the replay runs only the convolution window and the delta rule through the ONE kernel choice a step makes, so the state lands bit for bit where the step passed. A wider step (a prompt pass) keeps none; a request past the kept rows fails loudly. On a card a check's row moves with the check's WIDTH (the matmul kernel changes at 4 rows), never with what comes after it (`a_checks_row_reads_nothing_after_it`), so a card's guessed reply may part from one at a time only where the card cannot decide - a near tie, or a token its own prompt pass does not pick either (where llama.cpp's card build parts from its processor build too). `a_check_rewound_into_its_middle_is_where_its_kept_rows_lead` is bit for bit both ways a step and a replay write; `a_guessed_reply_is_the_reply_read_one_token_at_a_time` uses a real file; a check of 9-11+ rows parts Qwen3.5-4B's story at a near tie (#426).
 
 ## A file's own guess head (2026-11-07, FUTURE_WORK #425)
 
@@ -6277,6 +6337,8 @@ head sit in one worker (~417 MB on the 35B-A3B). (4) The coordinator cannot see
 whether the segment's parts hold the head; the first ask's refusal holds it off
 instead.
 
+**Moved from `arch-inference.md` (trimmed 2026-11-17):** The block is placed as the last layer is: a card-held MoE block keeps its experts in RAM where the segment has a processor side to charge them to, on the card where it is wholly there (llama.cpp's placement). Position p pairs token p with the state at p-1; a draft runs the waiting rows plus `(next token, last state)` in one forward, then one row a guess fed its own output (llama.cpp's `draft-mtp`), and cuts its own rows before the check; the head's own steps touch no recurrent state. A model with a head records the row copy in EVERY captured step, so asking does not change the graph; any other capture runs uncaptured. Beside a split's first segment (#425 (a), 2026-11-09) the head has its own output norm `trunk_norm` and logits through the borrowed `drafter_head`, fed through the block drafter's rows path. `HeadChain` grows `MtpGuesses::real_len` one head step at a time from the worker's idle hook while no message waits, once the check has left the first segment and until anything for the request comes back (`note_forward`); a served chain is rebuilt from the trunk's rows in the next wait, a fresh draft cuts it. FR-Spec (#425 (b)): a byte-pair tokenizer's ids are its merges, most frequent first; `mtp::head_rows` copies the bytes so each word scores exactly as the whole head scores it; the alphabet past the hot rows is one-character ASCII and punctuation, never a new word (Gemma 4 keeps all of it past id 236,743). A card reads the whole head (measured twice and not kept: a whole model 11-07, beside a split's first segment 11-09).
+
 ## Qwen 3.5's prompt is saved short of its end, and restored whole (2026-10-18, FUTURE_WORK #228 (8))
 
 **What it replaced.** `PrefixCache::insert_from_kv` skipped any request holding SSM state
@@ -6555,6 +6617,8 @@ tok/s with stalls of 1 s or more out, two runs a side):
 
 A story with the block drafter stays under plain steps (0.8-0.9×): plain steps
 gained as much.
+
+**Moved from `arch-inference.md` (trimmed 2026-11-17):** `delta_rule_cpu` runs a task per sequence and value head with the state updated in place; `delta_rule_cuda` is llama.cpp's `gated_delta_net_cuda`. q and k are normalised as one tensor. The card convolution + SiLU (`ssm_conv_silu_f32_k4`) writes q | k, v and the next window straight into the step's buffers (12-14 launches a layer before); a taken-back check's replay (`cuda::replay`: `conv_window_replay_f32` + `delta_rule_replay_f32_d*`, the step's own body with its outputs off) is two launches (seven before); a replay must land where the step passed. Gates: with f32 `ssm_alpha` / `ssm_beta` and <= 8 rows the projections too (`ssm_gates_project_f32_r*`), else `ssm_gates_f32` after the matmuls, bit for bit; written as the two blocks `[2, b, seq, nv]` (`Gates::stacked`); a check's rows are its rows one at a time.
 
 ## Qwen3-Next: value heads grouped by key head, put in the kernels' order at load (2026-11-01, FUTURE_WORK #390)
 
@@ -7072,6 +7136,8 @@ hostable file before them (`admin_hf::search::recommended_file`: Q4_K_M, the sma
 a card reads, then an IQ4). The card kernels are #404 (1a): the vendored MMQ headers already carry
 llama.cpp's IQ4 dot products; no instance file and no candle mat-vec or dequantise exists yet.
 
+**Moved from `arch-inference.md` (trimmed 2026-11-17):** Candle's card path would dequantise IQ4_NL / IQ4_XS in host memory per product, so such a model stays on the processor (`READABLE_IQ_TYPES`, #404).
+
 ## The popular models of 2026-11-02, checked against llama.cpp master on the processor and the card
 
 **Which.** The HuggingFace reading of 2026-11-01 15:29Z (`HfWatcher`): Qwen3.8-27B, Qwen3.6-35B-A3B,
@@ -7298,6 +7364,8 @@ over 40 positions, whole, in pieces and split at layer 3; 0.334 with the window 
 
 The cache keeping only the window came after (#281, next section).
 
+**Moved from `arch-inference.md` (trimmed 2026-11-17):** Phi-3's window is off in llama.cpp, so off here. Gemma 2's 27B is 46 layers and uses `1/sqrt(n_embd/n_head)`; the 9B does not, though its ratio also differs. A slid snapshot never leaves the node because the wire format means "from position 0". `LayerKv::slide_beyond` grows no wider than `positions_kept_for_window` plus one quantum; a rewind past `serves_from` fails loudly, never answering from lost keys; a snapshot is found only for a prefix its window answers.
+
 ## A windowed layer's cache keeps its window (2026-10-16, FUTURE_WORK #281)
 
 Until #281 the window was cut from the KEYS a query read, not from memory: every
@@ -7521,6 +7589,8 @@ each layer's shape — 5x more at 32K; under 5,183 positions the two agree; a mi
 same either way; no layout = the old flat figure) and
 `windows_are_advertised_only_where_the_charge_holds`.
 
+**Moved from `arch-inference.md` (trimmed 2026-11-17):** `kv_budget::KvGrowth` is built per layer by the loader; a windowed cache costs at most `most_positions_a_window_holds` - its keep plus the widest forward, so a forward wider than a quantum widens it. `kv_budget::KvLayout` -> `KvPrice` in `VramFootprintInputs::kv` serves admission, the cost curve and the card/processor split, each reader asking `KvPrice::reading` with its worker's prompt reader. `kv_budget::windows_advertised`: windows attended, caches slide, prompt chunk 1..=`COPIED_CHUNK_MAX_TOKENS` - the width it is then charged at.
+
 ## A family's attention scale is read, not assumed (2026-10-15, FUTURE_WORK #279)
 
 Every attention here scaled its scores by `1/sqrt(head_dim)`. llama.cpp does that for most
@@ -7633,6 +7703,8 @@ Tests: `gemma3_global_layers_scale_and_windowed_layers_turn_at_their_own_base`,
 `windowed_layers_take_their_own_rope_tables` (red with `rope_for` ignoring the windowed
 tables), `gemma3_windows_five_layers_in_six_only_when_the_file_names_a_window`,
 `only_gemma3_27b_scales_its_queries_by_the_model_width`.
+
+**Moved from `arch-inference.md` (trimmed 2026-11-17):** YaRN's ramp + lift (#280); windowed layers' own base/scale (Gemma 3: base 10,000, unscaled).
 
 ## A file's RoPE scaling is read for every family (2026-10-16, FUTURE_WORK #280)
 
@@ -8463,6 +8535,8 @@ of five). The first build after this recompiles every kernel once; on this lapto
 scripts at 4 nvcc threads each OOM'd the 10 GB build slice — `-j 1` with `CUDAFORGE_THREADS=3`
 took 36 min.
 
+**Moved from `arch-inference.md` (trimmed 2026-11-17):** The vendored flash kernel's 512-wide block on sm86 attended WRONGLY at every shape (32 rows on 4 warps; Gemma 4's global layers, gotcha #868). Both kernel build scripts `.watch()` every header: cudaforge rebuilt an object only when its `.cu` changed, so a header patch never compiled.
+
 ## The output head is one place, and owes every row what the file says (2026-10-16, #282)
 
 A model file can list tokens never to be sampled — `tokenizer.ggml.suppress_tokens`; Gemma 4's 12B
@@ -8492,6 +8566,8 @@ bias). Not covered: the `llama` feature's legacy executor (a whole file named in
 Guards: `a_suppressed_token_is_out_of_reach_on_every_forward_path` (single, every position of a
 check, a batch of two; red with the row off), `a_files_suppressed_tokens_become_one_row_of_the_heads_width`.
 
+**Moved from `arch-inference.md` (trimmed 2026-11-17):** `SplitModel::embed_tokens` widens the f16 table's rows to the f32 the layers read (a processor's norm refuses f16, a card's does not), then Gemma's scale; three paths looked up for themselves and failed every request on a processor (gotchas #241, #901). The 27B's last part is head-only, so the parts a reply finishes on can be two (#408).
+
 ## A greedy pick is the first of equal maxima, on the card too (2026-10-24, v0.3.251)
 
 **What it replaced.** The sweep of 2026-10-24 made the host's three greedy copies one
@@ -8517,6 +8593,8 @@ between 3,000 and 151,000 — candle's card `argmax` read 1024 for the first; `g
 77,000 and 3,000, the host's answers, on the card and off it. Guards:
 `no_reply_is_picked_by_candles_argmax` (red with the old call planted back, line 2337) and its
 self-test `the_argmax_guard_sees_every_form_and_skips_tests_and_comments`.
+
+**Moved from `arch-inference.md` (trimmed 2026-11-17):** Candle's card `argmax` kernel breaks a tie by thread order; the drafter's guesses are listed in the guard `no_reply_is_picked_by_candles_argmax`.
 
 ## A part past the model's last layer serves the run that ends it (2026-11-02, #398)
 
@@ -9116,3 +9194,6 @@ against 59.5 s (1.09×, 54 of 85 over 35). The story: 65.0 against 58.3 s (0.90�
 then set aside for the reply). The three replies are the same text in both arms. A part of this model was missing
 on the live node; `cut_part.py` rebuilt it from the same upload, BLAKE3 equal to the manifest's, into the rig's
 own models directory.
+
+**Moved from `arch-inference.md` (trimmed 2026-11-17):** Weights AND cache are charged as one figure: weighed apart, #451's drafter was put on a card that then refused it; loaded first, a 27B's 1.85 GB drafter ran a 12 GB card out of memory on every load - hence one figure, `block_drafter::charged`. `fits_beside_one_conversation` is vLLM's rule (a quarter refused it on a 16 GB machine's first segment). Scales: llama.cpp PR #29802 measured sqrt(hidden) keeping more; an unstated scale is the target's. `target_layers` stores id + 1; llama.cpp reads that layer's INPUT. On the processor the whole head read for every block row was most of a draft (Qwen3.5-4B: 155-172 -> 76-99 ms at 15 guesses); a whole model there attaches no drafter because the head writes faster and the drafter's 0.4-1.85 GB stays free. A drafter's `fc` read paid whole for one row in a round the block sat out, hence context rows are made at the next draft. z-lab's causal rule kept 6.47 against 5.98 a block on code, 1.44 against 1.30 on a story, over one fixed reply. On a card a split's card-held first segment attaches one too (2026-11-08 night: Qwen3.5-9B, first part on an RTX 3070, rest on a processor, 130 ms - code 1.7-1.9x, a class 2.2-2.4x, a story 1.4-1.5x; replies part at near ties as a card's checks do). Count is priced as one computer's: its own step (a one-token round over the split). #451 (ON since 2026-11-14): Qwen3.5-9B at 25/32 card layers, code 30.4 against 20.9 tok/s, prose and a story no slower; the output crosses to the card's head per draft; `drafter_home` needs a KNOWN processor-side budget and no borrowed head. Where no load attaches it, a computer fetches none and gives back one on disk.
+

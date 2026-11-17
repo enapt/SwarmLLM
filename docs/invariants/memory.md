@@ -6129,3 +6129,63 @@ while the host read 15,991 / 12,423. The live node's own scope has no limit and 
   (`memory/open_cautions.md` 10-09 17:40Z).
 - Process RSS (`api::process_memory::resident_bytes`) is a different question — what a process
   holds, not what the machine allows — and stays where it is.
+
+## Moved from arch-worker-memory.md (trim of 2026-11-17)
+
+Detail the rules file no longer carries, kept here so the evidence stays greppable. Each entry names the rules-file heading it belongs to.
+
+### A budget is charged by whatever owns the resource
+- A split fills the share its LOAD takes: `hybrid::split_room_bytes` reads `kv_budget::weights_and_caches_room`, never the budget less the forward reserve alone — which gave a 12 GB card's 70B 9,912 MB where the load allowed 9,676 (#364).
+- A spawn's split is sized by what its worker READS (#365): `hybrid::SplitCard::read_by_the_load` is the reading, `SplitCard::room` what a plan or a growth uses (never more than the reading — 670 MB short on the 8 GB card).
+- A whole placement is sized for the spawn's cache, not the full context (llama.cpp `common/fit.cpp`: context first, then layers).
+- A first run's `machine_charge` is asked by the spawn, `fresh_run_layers_for_planning` and the card bound alike (#296); token table and head are paid first on the main device, a fresh run is weighed at BOTH ends.
+
+### A reply between two forwards is not idle
+- A reply stamped at its START alone read idle as it ended when it ran longer than the window; `ResponseGuard::used_until_now` is set only by `register_response`.
+- `PassParties` is the authenticated sender and the named coordinator. The sender, and a coordinator that is the sender, count as seen from the pass's arrival (`seen_at_arrival`); a coordinator a later hop never had on record proves nothing (`a_party_left`). The release is `ModelProcessPool::release_abandoned_prompt_passes` → `release_request_kv`, from the idle tick before the unload. "Still in the swarm" is in practice the CONNECTED set (a registry entry goes with its last connection, but a relayed origin's or one in this node's pipelines also counts); a live pair's connection never idles out because every connected computer answers each `HealthPing` with a direct `HealthPong`, and a closed one is redialled.
+- A prompt pass is kept from the idle unload only, never `in_use`: `in_use`'s two minutes would let a peer's silent cache refuse the owner's request for memory.
+
+### A worker that cannot grow gets the spawn's ladder, not a refusal
+- Skipping the split rung while idle (#461): sized on the room beside a range the worker drops before loading, a 14B's `[0..26)` went 4 of 26 layers on the card (7.6 against 35 tok/s); the retirement the planner priced places it afresh.
+
+### A model process holds ONE copy of the output head
+- A second 994 MB copy of a 27B's head refused a near-full card and pinned the model to the processor. Every load otherwise builds its own `CudaDevice` — its own id AND stream.
+
+### A long prompt asks for the room back
+- The load fitted to that prompt keeps the forward's buffers beneath the load's line too (`SplitCard::for_one_long_prompt`); without it the card check's reload was refused again by 100 MB.
+
+### A worker serves any run inside a range it loaded
+- `WorkerHandle::serves_segment(segment, RunShape)` is exact, or contained while `elastic_spans_on()` for a `RunShape::Plain` run; a tensor-parallel share holds other weights, so it is charged and loaded as itself.
+
+### A split's stored prompt lives in the worker's prefix cache
+- `PrefixCache::plan_chain_insert` promises its blocks in the answer and `finish_chain_insert` copies after `send_worker` (#433); copying between the prompt pass and the first token ran each segment's copy of the whole conversation in series (prompt pass -9-22% on the rig's turns that store). A copy that then fails stores nothing; the next turn misses and is read from 0.
+
+### A split's local segments are admitted together, before the first forward
+- A worker the forward will replace is not admitted on (#350): the admission marked it in use for the request and the forward's own retirement then kept it — a 70B's [0..28) refused beside an idle worker it could have replaced.
+- A peer's "go ahead" loading is bounded by `dispatch::prompt_admission::may_load_ahead` (inside the model by `layer_range_is_valid`, every part held here, at most 2 ranges, none overlapping — security review 2026-10-25), so a cold split's machines load side by side.
+- `peer_load_refusal` weighs by `forward_would_load`: a fresh spawn by the spawn's rungs (`fresh_spawn_machine_mb`, on a card through `machine_mb_beside_card`), a live worker by its growth (`growth_would_be_admitted`), else, idle, a fresh spawn in its place; a "go ahead" there let the first forward's refusal bar the peer.
+
+### A model loaded for another model's request is a guest
+- `GuestFit`'s `.admitted()` is the yes/no of `guest_fit` (`Refused` / `OnCard` / `InSystemMemory`); the drafter choice reads it (#373).
+- `local_layers_leaving` weighs the first range as its spawn charges it, token table included (#376): the middle segment's line was 23 MB generous and the drafter went to the processor at half speed. On the card (field report v0.3.280) a 3B drafter took a 14B's 1,946 MB and the 14B refused 54 prompts; `room_a_guest_leaves_per_card_layer_mb` per added layer is what the planner leaves (#3 (j10): cut to the estimate alone, the guest's own check refused the card the plan had promised it).
+- Requester guesses reach a guest through `requester_guesses::start` and `dsd.rs`, which record the target a split wants a drafter for.
+
+### A hot computer's own work is slowed, never refused
+- A card paused every 16 ms boosted its clock into the gaps and drew 87% of its cool power at half the work, 71% when slept in pieces of `PAUSE_PIECE` (A/B `SWARMLLM_PACE_PAUSE_FROM_MS=2`). Fewer threads were measured to change nothing (2026-08).
+
+### A card's memory pool keeps what the worker frees
+- A steady chat's driver free fell 721 → 64 MB without `cuda_pool::hold_driver_margin`. A forced refusal ended the worker and pinned the model without `ask_again_after_a_refusal`; 132 of 132 were granted with it. WSL2's driver never refuses, hence the fault switch `SWARMLLM_FAULT_CARD_OOM`.
+- A failure before the first layer (the masks, a picture's spans, a staged tree) gives the caches back UNTOUCHED. Read as 0 positions, a first chunk refused before its first layer ran again on the taken-out lists and panicked the worker (gotcha #1047).
+
+### A cache is charged to the memory it lives in
+- A 14B's admission evicted 991 MB for a card that got 408 back, then refused (#1105): `bytes_in(SnapshotHome::BesideLive)` sums both memories of a split.
+
+### nvidia-smi is asked through one bounded helper
+- A bare `Command::new("nvidia-smi")` waits as long as the driver does — 14 min during one card reset. 2-6 s of `nvidia-smi` parked the network manager in a Tokio worker's unstealable LIFO slot (#244).
+
+### A conversation that is over gives its room to one that is not
+- `KvCacheStore::note_forward_ran` (both forward paths) holds a cache whose prompt pass ran here until its first step; at 600 s a split's first segment was swept while two peers read the prompt.
+- A peer's question was once weighed against that request's own caches, and a re-plan (same request id) refused a peer for its earlier attempt's cache.
+
+### A retired card worker's memory is waited for
+- A worker charged at its spawn and retired before its first message holds its context alone; waited for at its charge it held the spawn lock 5 s (hence `asked_to_load`). Our cache fills lazily, Ollama's is allocated up front, so the wait ends on a settled rise (a quarter risen, two steady readings).
