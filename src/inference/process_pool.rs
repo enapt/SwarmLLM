@@ -9796,6 +9796,31 @@ impl ModelProcessPool {
             );
             return Some((message, layers_that_fit));
         }
+        // A worker in use is never replaced (#93), so the range was weighed
+        // beside what it holds alone: say that, never system memory's words,
+        // which read "needs about 0 MB" for a copy placed on the card — the
+        // words a far computer gave for `[23..48)` beside its busy `[26..48)`
+        // (2026-11-15, #461).
+        if let Some(h) = worker
+            .as_deref()
+            .filter(|h| h.in_use(self.conversation_window()))
+        {
+            tracing::info!(
+                model = %model_id,
+                layers = format!("[{start}..{end})"),
+                layers_that_fit,
+                card_layers_now = h.layers_on_card(),
+                "DIAG: a peer's split asks this node for a range that does not fit beside the copy \
+                 a conversation is using here — answering no before its prompt pass"
+            );
+            let message = format!(
+                "Layers {start}..{end} of {} do not fit beside the copy this node is running \
+                 for a conversation now, which is kept until that conversation ends. Of layers \
+                 {start}..{end} of the model, {layers_that_fit} would load here.",
+                model_id.0
+            );
+            return Some((message, layers_that_fit));
+        }
         let needed_mb = self.fresh_spawn_machine_mb(model_id, (start, end));
         let in_use = self.ram_committed_mb();
         let budget = self.ram_budget_now(Requester::Swarm).map_or(
@@ -17660,8 +17685,15 @@ mod tests {
             .await
         {
             PeerPromptWeight::DoesNotFit {
-                layers_that_fit, ..
-            } => assert!(layers_that_fit < 4, "{layers_that_fit}"),
+                layers_that_fit,
+                message,
+                ..
+            } => {
+                assert!(layers_that_fit < 4, "{layers_that_fit}");
+                // Told why: the copy in use, never a memory figure (#461).
+                assert!(message.contains("for a conversation now"), "{message}");
+                assert!(!message.contains("max_ram_mb"), "{message}");
+            }
             PeerPromptWeight::Fits => {
                 panic!("a busy worker's growth beyond its memory was answered go ahead")
             }

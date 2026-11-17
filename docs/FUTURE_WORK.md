@@ -5635,7 +5635,7 @@ between the two; here they would.
 `charge_segment_as_split` now steps aside for an idle worker whose spawn range the new range takes in, so the
 retirement the planner priced places it afresh (`docs/invariants/memory.md` § "A worker that cannot grow", real
 link 7.56 → 35.25 tok/s). **Left**: (3)
-no promotion under steady use; the refusal's words beyond the guard's own; and the accounting itself — a worker IN USE still takes the
+no promotion under steady use; and the accounting itself — a worker IN USE still takes the
 wider range as a split sized beside the dropped range, and the daemon keeps charging that range's base.
 
 **Built 2026-11-17 (contributor 1; on main, not in a release yet)**: `ModelProcessPool::replacement_keeps_the_card`,
@@ -5650,7 +5650,11 @@ card by one running fewer there"), never "needs about 0 MB". Test
 `an_idle_card_worker_is_not_replaced_by_one_running_fewer_of_its_layers_on_the_card` (red with the A/B
 `SWARMLLM_REPLACEMENT_KEEPS_CARD=0`). Prior art: the design candidate's below, plus Ollama's `needsReload` (never
 re-places a loaded runner while it can serve). **Not verified on the real link** — it needs the far computer on a
-build carrying it; a card refusal for any OTHER reason still reads as system memory.
+build carrying it. **The refusal's words, fixed the same night**: a worker IN USE (never replaced, #93) is refused
+as "do not fit beside the copy this node is running for a conversation now" — the `[23..48)` case below — so no
+refusal reads "needs about 0 MB"; system memory's words remain only where system memory decided (no worker, or an
+idle one whose replacement would not fit). Test: `a_peer_with_a_worker_weighs_the_load_of_a_range_it_does_not_hold`
+(red with the branch off).
 
 **Seen** (the Australian 12 GB card, v0.3.291, the 14B; `real_link_bal292/peers_seen.jsonl`, its own advertised
 `resident` after each reply): it held `[26..48)` with all 22 layers on the card (3,390 MB of the card free beside
@@ -5675,7 +5679,7 @@ minutes never let it.
 3. **No promotion under steady use** — the copy is promoted only once idle, so the computer serves every user
    from the slow copy until traffic stops (`idle_unload_secs`, 5 min, then a fresh load).
 
-**And the refusal said the wrong thing**: `[23..48)` was answered "qwen2.5-14b-instruct-q4-k-m needs about 0 MB of
+**And the refusal said the wrong thing** (FIXED 2026-11-17, above): `[23..48)` was answered "qwen2.5-14b-instruct-q4-k-m needs about 0 MB of
 memory but this node's budget allows 34440 MB and 0 MB is already in use. Raise `resources.max_ram_mb` … Of layers
 23..48 of the model, 13 would load here" — `peer_load_refusal` words every refusal as system memory
 (`ram_refusal_words` with `fresh_spawn_machine_mb`, 0 for a card placement), where this one was the card (or a
