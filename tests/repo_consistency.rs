@@ -4854,6 +4854,23 @@ fn credits_stay_dormant() {
          not only the ones a browser reaches.\n{}",
         cli_offenders.join("\n")
     );
+
+    // 6. And the MCP `node_info` tool hands an agent no balance (decided
+    //    2026-11-18, FUTURE_WORK #188): an agent reasons about what it is
+    //    given, and may repeat it to its user.
+    let tools = std::fs::read_to_string(root.join("src/api/mcp/tools.rs")).expect("read mcp tools");
+    let node_info = fn_body(&tools, "async fn tool_node_info(").expect("tool_node_info");
+    for figure in ["credit", "\"tier\"", "balance"] {
+        assert!(
+            !node_info.to_lowercase().contains(figure)
+                || node_info
+                    .lines()
+                    .filter(|l| l.to_lowercase().contains(figure))
+                    .all(|l| l.trim_start().starts_with("//")),
+            "MCP node_info publishes a credit figure ({figure}) — credits are dormant \
+             (docs/CREDITS_DESIGN.md § 4)"
+        );
+    }
 }
 
 /// The CLI half of the guard above must actually be able to fire, on the shape

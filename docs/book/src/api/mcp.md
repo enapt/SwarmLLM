@@ -201,7 +201,7 @@ Offload a task to the most appropriate model based on a tier preference. Tiers: 
 
 ### `node_info`
 
-Get detailed information about the SwarmLLM node: loaded models, connected peers, the ledger credit figure (credits are dormant and gate nothing), available cloud providers, and network status.
+Get information about the SwarmLLM node: its version, the models it holds and serves, connected peers, request counts, and how many cloud models each provider offers, with a sample of ten. The `models` tool lists every model.
 
 ```json
 {

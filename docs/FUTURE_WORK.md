@@ -6320,14 +6320,6 @@ this server cannot produce; llama.cpp's server emits one before the text under
 client sends back (Claude Code does), then emit one for a request that enabled thinking, from the
 same `InferenceOutput::reasoning`, streamed as `thinking_delta`.
 
-#### #188 — MCP `node_info` repeats the whole cloud-model catalogue the `models` tool also returns
-`P3` · api · **OPEN** — 2026-08-12 · history: archive § "MCP `node_info` duplicates the whole cloud-model catalogue"
-
-~2,300 tokens per orientation (~8.5k in a session) for MCP clients. Replace the list with the
-count, a ~10-item `cloud_models_sample` and a pointer to the `models` tool, keeping an empty
-list distinguishable from an absent one (a provider key that never loaded). `docs/CREDITS_DESIGN.md`
-also wants `node_info`'s credit balance decided — do both in one pass.
-
 #### #203 — A streaming client cannot read time-to-first-token or time-per-token
 `P4` · observability · **PARTIAL** — 2026-07-26 · history: archive § "Observability: routing, performance and per-node attribution"
 
@@ -7128,7 +7120,7 @@ Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
 
-**Closed 2026-11-18 (on main, not in a release yet)** (#377, #471)
+**Closed 2026-11-18 (on main, not in a release yet)** (#377, #471, #188)
 - #377 — **A peer's up-front refusal of a split's range quoted its machine memory where its card or a conversation
   refused.** Rig `prose1030` arm 3 (2026-10-30): asked for [16,48) of Qwen2.5-14B a minute after serving [26,48), the AU
   peer answered "needs about 0 MB of memory … Raise `resources.max_ram_mb`" — every figure the machine's, the advice a
@@ -7159,6 +7151,15 @@ grep `^| N |`).
   Responses API `previous_response_id` (each reply an immutable state a request continues). Tests
   `a_reply_is_found_by_the_callers_next_turn`, `an_edit_resumes_the_state_before_the_question_it_replaces`,
   `a_refused_resume_is_seen_before_the_caller_reads`, `a_failed_call_is_never_remembered`.
+- #188 — **MCP `node_info` repeated the whole cloud-model catalogue the `models` tool also returns** (~2,300 tokens
+  per orientation, ~8.5k a session). It now carries the count (`cloud_models_available`, as before) and
+  `cloud_models` = each provider's count, a sample of up to 10 ids taken in turn from each provider, and a pointer to
+  the `models` tool (`mcp::tools::cloud_models_summary`; empty, never absent, with no provider key). Under 700 bytes
+  for a 253-model catalogue (`node_info_shows_every_provider_and_a_sample_never_the_catalogue`). The credit balance it
+  also carried was DECIDED with it, as `docs/CREDITS_DESIGN.md` asked: removed — credits are dormant and an agent
+  reasons about what it is handed; `credits_stay_dormant` § 6 fails with a planted `"credits"` field (checked). The
+  tool's description stopped promising VRAM/disk usage and network status, which it never reported. Prior art:
+  Anthropic's "Writing effective tools for agents" (cap what a response repeats, name the tool with the rest).
 
 **Closed 2026-11-17 (v0.3.296-alpha)** (#472)
 - #472 — **After every restart, dead identities were dialled for an hour at addresses another computer now

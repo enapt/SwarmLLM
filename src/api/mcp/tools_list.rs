@@ -226,7 +226,7 @@ pub(super) fn handle_tools_list(id: Option<Value>) -> JsonRpcResponse {
                 },
                 {
                     "name": "node_info",
-                    "description": "Get detailed information about this SwarmLLM node: loaded models, connected peers, VRAM/disk usage, credit balance, available cloud providers, and network status.",
+                    "description": "Get information about this SwarmLLM node: its version, the models it holds and serves, connected peers, request counts, and how many cloud models each provider offers (the `models` tool lists every model).",
                     "annotations": {
                         "title": "Node Information",
                         "readOnlyHint": true,

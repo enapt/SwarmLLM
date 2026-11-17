@@ -968,15 +968,14 @@ async fn tool_node_info(state: &AppState, id: Option<Value>) -> JsonRpcResponse 
         }));
     }
 
-    // Cloud providers
-    let mut cloud_models: Vec<String> = state
-        .shared_state
-        .metrics
-        .provider_model_map
-        .iter()
-        .map(|e| e.key().clone())
-        .collect();
-    cloud_models.sort();
+    let (cloud_count, cloud) = cloud_models_summary(
+        state
+            .shared_state
+            .metrics
+            .provider_model_map
+            .iter()
+            .map(|e| (e.value().clone(), e.key().clone())),
+    );
 
     // Node stats
     let stats = state.shared_state.metrics.node_stats.read().await;
@@ -990,29 +989,129 @@ async fn tool_node_info(state: &AppState, id: Option<Value>) -> JsonRpcResponse 
     });
     drop(stats);
 
-    // Credit balance
-    let credit_balance = state.shared_state.credits.credit_balance.read().await;
-    let credits = crate::api::credit_summary_json(&credit_balance);
-    drop(credit_balance);
-
+    // No credit balance: credits are dormant (docs/CREDITS_DESIGN.md), and an
+    // agent handed the figure may reason about it or repeat it to its user
+    // (decided 2026-11-18, FUTURE_WORK #188).
     let node_info = json!({
         "version": env!("CARGO_PKG_VERSION"),
         "loaded_model": loaded_model,
         "registry_models": registry_models,
-        "cloud_models_available": cloud_models.len(),
-        "cloud_models": cloud_models,
+        "cloud_models_available": cloud_count,
+        "cloud_models": cloud,
         "peers": {
             "count": peer_count,
             "details": peers_summary,
         },
         "stats": node_stats,
-        "credits": credits,
     });
 
     tool_text_result(
         id,
         serde_json::to_string_pretty(&node_info).unwrap_or_default(),
     )
+}
+
+/// How many cloud model ids `node_info` shows ([`cloud_models_summary`]).
+const CLOUD_MODELS_SAMPLE: usize = 10;
+
+/// What `node_info` says about the cloud catalogue (FUTURE_WORK #188): the
+/// count, each provider's count and a sample of up to [`CLOUD_MODELS_SAMPLE`]
+/// ids taken in turn from each provider, so every provider shows — never the
+/// whole list, which the `models` tool returns and which `node_info` repeated
+/// on every orientation (~2,300 tokens, ~8.5k in a session). With no provider
+/// key loaded the providers and the sample are empty, never absent.
+///
+/// Prior art: Anthropic's "Writing effective tools for agents" — a tool
+/// returns high-signal context, caps what it repeats, and says which tool
+/// gives the rest.
+fn cloud_models_summary(models: impl Iterator<Item = (String, String)>) -> (usize, Value) {
+    let mut by_provider: std::collections::BTreeMap<String, Vec<String>> =
+        std::collections::BTreeMap::new();
+    for (provider, model) in models {
+        by_provider.entry(provider).or_default().push(model);
+    }
+    for ids in by_provider.values_mut() {
+        ids.sort();
+    }
+    let mut sample = Vec::new();
+    for depth in 0.. {
+        let before = sample.len();
+        for ids in by_provider.values() {
+            if let Some(id) = ids
+                .get(depth)
+                .filter(|_| sample.len() < CLOUD_MODELS_SAMPLE)
+            {
+                sample.push(id.clone());
+            }
+        }
+        if sample.len() == before || sample.len() == CLOUD_MODELS_SAMPLE {
+            break;
+        }
+    }
+    let count = by_provider.values().map(Vec::len).sum();
+    let summary = json!({
+        "by_provider": by_provider
+            .iter()
+            .map(|(provider, ids)| (provider.clone(), json!(ids.len())))
+            .collect::<serde_json::Map<_, _>>(),
+        "sample": sample,
+        "full_list": "the `models` tool lists every model; cloud ones have source \"cloud\"",
+    });
+    (count, summary)
+}
+
+#[cfg(test)]
+mod cloud_summary_tests {
+    use super::{cloud_models_summary, CLOUD_MODELS_SAMPLE};
+
+    fn catalogue(sizes: &[(&str, usize)]) -> Vec<(String, String)> {
+        sizes
+            .iter()
+            .flat_map(|(provider, n)| {
+                (0..*n).map(move |i| (provider.to_string(), format!("{provider}-model-{i:03}")))
+            })
+            .collect()
+    }
+
+    /// #188: node_info names every provider and a few ids, never the whole
+    /// catalogue — and it stays short however big the catalogue grows.
+    #[test]
+    fn node_info_shows_every_provider_and_a_sample_never_the_catalogue() {
+        let models = catalogue(&[("openai", 240), ("anthropic", 12), ("groq", 1)]);
+        let (count, summary) = cloud_models_summary(models.into_iter());
+        assert_eq!(count, 253);
+        assert_eq!(summary["by_provider"]["openai"], 240);
+        assert_eq!(summary["by_provider"]["groq"], 1);
+        let sample = summary["sample"].as_array().unwrap();
+        assert_eq!(sample.len(), CLOUD_MODELS_SAMPLE);
+        for provider in ["openai", "anthropic", "groq"] {
+            assert!(
+                sample
+                    .iter()
+                    .any(|id| id.as_str().unwrap().starts_with(provider)),
+                "{provider} is missing from {sample:?}"
+            );
+        }
+        let bytes = serde_json::to_string(&summary).unwrap().len();
+        assert!(bytes < 700, "{bytes} bytes: {summary}");
+    }
+
+    /// No provider key loaded: zero, with the fields still there.
+    #[test]
+    fn no_provider_key_reads_as_zero_not_absent() {
+        let (count, summary) = cloud_models_summary(std::iter::empty());
+        assert_eq!(count, 0);
+        assert_eq!(summary["sample"], serde_json::json!([]));
+        assert_eq!(summary["by_provider"], serde_json::json!({}));
+    }
+
+    /// A catalogue smaller than the sample is shown whole.
+    #[test]
+    fn a_small_catalogue_is_shown_whole() {
+        let (count, summary) = cloud_models_summary(catalogue(&[("a", 2), ("b", 3)]).into_iter());
+        assert_eq!(count, 5);
+        assert_eq!(summary["sample"].as_array().unwrap().len(), 5);
+    }
 }
 
 #[cfg(test)]

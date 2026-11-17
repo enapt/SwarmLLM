@@ -282,14 +282,17 @@ printing and left the section in the report the CLI prints (gotcha #569 — one
 builder is not one surface). That is now removed and pinned by
 `credits_stay_dormant`, verified by planting it back.
 
-Four surfaces still publish a dormant balance, and each needs a decision rather
-than a patch, because they have consumers outside this repo:
+Three surfaces still publish a dormant balance, and each needs a decision rather
+than a patch, because they have consumers outside this repo. A fourth, the MCP
+`node_info` tool, was DECIDED on 2026-11-18 and no longer reports one: its
+reader is an LLM agent, which reasons about what it is handed and may repeat it
+to its user, and no code parses the field (FUTURE_WORK #188; guarded by
+`credits_stay_dormant` § 6).
 
 | Surface | Where | Note |
 |---|---|---|
 | `GET /v1/status` | `api/admin.rs`, `credit_summary_json` + `tier_name` | The tier is a constant, so it reports the same word to everyone |
 | WebSocket `stats_update` | `api/websocket.rs` | Reaches every dashboard client on a 2 s tick |
-| MCP `node_info` | `api/mcp/tools.rs` | Reports a balance to an LLM agent, which may then reason about it |
 | Python SDK | `python/README.md` documents `credits.balance` / `credits.tier`; its tests assert a `"Gold"` tier | The SDK **advertises** the figure, so removing the field is a breaking change for its users |
 
 None of them gates anything — that is the point of dormancy — but the doc's own
