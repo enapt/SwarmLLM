@@ -762,9 +762,6 @@ impl InferenceRouter {
                     let params = self.config_watch_rx.borrow().clone();
                     let new_max = params.max_concurrent_requests as usize;
                     let new_batch = (params.max_batch_size as usize).max(1);
-                    // Batching waits this long for a second request before
-                    // giving up and running alone, so it is the setting a user
-                    // reaches for when replies feel laggy — it has to move.
                     // Idle-session lifetime. Every expiry check reads the value
                     // live, so a shortened timeout starts reclaiming existing
                     // sessions rather than only future ones.
@@ -778,6 +775,9 @@ impl InferenceRouter {
                         );
                         self.kv_cache.set_ttl(new_session_ttl);
                     }
+                    // Batching waits this long for a second request before
+                    // giving up and running alone, so it is the setting a user
+                    // reaches for when replies feel laggy — it has to move.
                     let new_timeout = std::time::Duration::from_millis(params.batch_timeout_ms);
                     if new_timeout != self.batch_timeout {
                         tracing::info!(
@@ -1073,7 +1073,7 @@ impl InferenceRouter {
     }
 
     /// Log network messages routed to the inference router.
-    /// Actual dispatch (LayerForward, pipeline execution) is handled in `dispatch.rs`.
+    /// Actual dispatch (LayerForward, pipeline execution) is handled in `daemon/dispatch/`.
     async fn handle_network_message(&mut self, msg: SwarmMessage) {
         match msg {
             SwarmMessage::LayerResult(result) => {

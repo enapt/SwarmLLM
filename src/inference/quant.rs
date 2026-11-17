@@ -91,13 +91,9 @@ pub fn dequantize_q8_0(bytes: &[u8], num_elements: usize) -> Result<Vec<f32>, St
     Ok(out)
 }
 
-/// Number of bytes needed to encode `n` f32 values as Q8_0.
-pub fn q8_0_byte_len(n: usize) -> usize {
-    n.div_ceil(GROUP_SIZE) * BLOCK_BYTES
-}
-
-/// `q8_0_byte_len` for a count that came off the wire: `None` rather than a
-/// wrapped product when the multiply overflows. A wrapped length would be
+/// Number of bytes needed to encode `n` f32 values as Q8_0 — `None` rather
+/// than a wrapped product when the multiply overflows, since `n` may come off
+/// the wire. A wrapped length would be
 /// SMALLER than the truth, so a caller sizing a payload check with it would
 /// accept a buffer far too short and then read past what it validated.
 pub fn q8_0_byte_len_checked(n: usize) -> Option<usize> {
@@ -244,7 +240,7 @@ mod tests {
             })
             .collect();
         let bytes = quantize_q8_0(&vals);
-        assert_eq!(bytes.len(), q8_0_byte_len(n));
+        assert_eq!(Some(bytes.len()), q8_0_byte_len_checked(n));
         let recovered = dequantize_q8_0(&bytes, n).unwrap();
 
         // Compression ratio

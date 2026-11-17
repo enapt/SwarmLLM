@@ -1408,8 +1408,8 @@ impl PipelineExecutor {
         let mut hole_since: Option<std::time::Instant> = None;
 
         loop {
-            // Honor external cancel — same pattern as execute_distributed
-            // line 174. Without this, a cancelled request keeps draining
+            // Honor external cancel — same pattern as execute_distributed's
+            // per-token check. Without this, a cancelled request keeps draining
             // tokens until INTER_TOKEN_TIMEOUT (60s) per gap.
             if self.request.is_cancelled() {
                 tracing::info!(

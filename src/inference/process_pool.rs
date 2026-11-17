@@ -11986,7 +11986,9 @@ impl ModelProcessPool {
                     };
                     return crate::inference::cancel::unless_cancelled(wait, cancel.as_ref()).await;
                 }
-                // If the scheduler channel is closed, fall through to direct.
+                // A closed channel means the batch scheduler has stopped (its
+                // loop exits only at shutdown or once the pool's sender is
+                // dropped); the step is refused rather than run outside it.
                 return Err(SwarmError::Internal(
                     "batch scheduler channel closed".into(),
                 ));

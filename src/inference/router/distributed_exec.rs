@@ -382,7 +382,6 @@ pub(super) async fn execute_distributed_batch(
     }
 }
 
-/// Execute a single inference request — either locally or via distributed pipeline.
 /// How long to wait for the DHT provider results we just asked for before
 /// giving up on assembling a pipeline.
 ///
@@ -619,6 +618,7 @@ fn lora_local_assignment(
     })
 }
 
+/// Execute a single inference request — either locally or via distributed pipeline.
 pub(super) async fn execute_request(
     shared_state: Arc<SharedState>,
     network_tx: mpsc::Sender<NetworkCommand>,

@@ -75,7 +75,7 @@ pub(super) async fn execute_local_batch(
         // cancelled request still runs full generation under the executor
         // mutex — blocking every later request in the batch (and any new
         // request, since the mutex is held end-to-end). Same cancel
-        // contract as execute_distributed line 174. Falls through to the
+        // contract as execute_distributed's per-token check. Falls through to the
         // standard finalize path with an empty-content "stop" output.
         let output = if request.is_cancelled() {
             tracing::info!(

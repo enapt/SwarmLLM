@@ -751,7 +751,7 @@ impl PipelineExecutor {
         // Spec round loop.
         while !streamed && finish_reason.is_empty() && (generated.len() as u32) < max_tokens {
             // Honor external cancel between rounds — same pattern as
-            // execute_distributed line 174 / speculative.rs.
+            // execute_distributed's per-token check / speculative.rs.
             if self.request.is_cancelled() {
                 tracing::info!(
                     %request_id,

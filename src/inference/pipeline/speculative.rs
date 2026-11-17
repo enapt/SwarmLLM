@@ -319,7 +319,7 @@ impl PipelineExecutor {
         // Speculative round loop.
         while finish_reason.is_empty() && (generated.len() as u32) < max_tokens {
             // Honor external cancel between rounds — same pattern as
-            // execute_distributed line 174. Each spec round emits γ+1
+            // execute_distributed's per-token check. Each spec round emits γ+1
             // tokens, so worst-case observation latency is one round.
             if self.request.is_cancelled() {
                 tracing::info!(
