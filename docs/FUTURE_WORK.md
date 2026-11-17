@@ -4244,6 +4244,17 @@ not displace the layers**: the worker loads the layers first (`model_worker` `lo
 its own device, system memory beside processor-held layers, or not attached). Open: why ~1.3 GB held by others cost 5-8
 of the 9B's layers on a 12 GB card — needs that node's "placing part of it on the processor" line (`short_by_mb`,
 `cache_tokens`) and its "block drafter (#428)" line (`in_system_memory`).
+**Checked 2026-11-17 against the same node's v0.3.288 nightly**: ~1.3 GB held by other programs CANNOT split this 9B
+by the code. That card idle gave a budget of 10,203 MB (`budget_mb`, v0.3.288; 9,856 on v0.3.284) and the 9B's estimate
+is 5,856 MB; the spawn splits only where budget − committed < estimate (`split_against`), so 1.3 GB more leaves ~3 GB to
+spare. A 24-of-32 plan needs ~4.3 GB more held at that moment — by other programs (the 11-11 report's game-streaming
+client held 2.4-2.9 GB) or by this node's own charged models — and the split line named only `estimated_mb`, so the
+report could not say which. Prior art: Ollama logs free, overhead and available at each placement (`server/sched.go`)
+and evicts idle runners before it offloads part of a model; llama.cpp's `--fit` keeps 1,024 MiB per device. All three
+lines that place a model short of the card now carry `budget_mb`, `other_programs_mb` (the budget's shortfall from an
+idle card's) and `held_by` (every model charged on the card, `ModelProcessPool::card_charges_for_log`) — the next report
+says whose memory it was. Nothing else is changed until it does: idle models' card memory is already reclaimed first
+(`free_vram_for_admission`, `free_vram_for_split`).
 **Correction, 2026-11-17 (the same peer's v0.3.284 and v0.3.288 nightly extracts)**: the line above read the drop to
 55 tok/s on v0.3.288 as a nearly full card, and it was NOT. On v0.3.288 (11-14) the 9B loaded whole — 32 of 32 layers,
 the drafter on the card (`in_system_memory=false`, `budget_left_mb=2177`), 10,915 MB free against 10,568 on v0.3.284 —

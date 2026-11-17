@@ -6216,6 +6216,47 @@ impl ModelProcessPool {
         self.vram_reserved_mb.get(model_id).map_or(0, |v| *v)
     }
 
+    /// Every model charged on the card now, largest first, as `model=MB`
+    /// (`nothing` when none is) — what a log line placing a model short of the
+    /// card says held the rest of it.
+    ///
+    /// **The split's line named only the model's estimate** (field report
+    /// v0.3.293, 2026-11-17, FUTURE_WORK #428): a 12 GB card's 9B was placed 24
+    /// of 32 layers on the card, and the budget's own arithmetic (10,203 MB on
+    /// that card idle, against an estimate of 5,856) needed ~4.3 GB held beyond
+    /// the ~1.3 GB the report put on other programs — memory nothing in the log
+    /// could place as theirs or this node's. Ollama logs the free memory, its
+    /// overhead and what is left at each placement (`server/sched.go`).
+    fn card_charges_for_log(&self) -> String {
+        let mut charges: Vec<(String, u64)> = self
+            .vram_reserved_mb
+            .iter()
+            .filter(|e| *e.value() > 0)
+            .map(|e| (e.key().0.clone(), *e.value()))
+            .collect();
+        if charges.is_empty() {
+            return "nothing".to_string();
+        }
+        charges.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        charges
+            .iter()
+            .map(|(model, mb)| format!("{model}={mb}"))
+            .collect::<Vec<_>>()
+            .join(",")
+    }
+
+    /// The graphics memory other programs held when `budget_mb` was read: the
+    /// budget's shortfall from the one an idle card gives
+    /// (`vram::vram_budget_ceiling`, no card reading). `None` without a
+    /// ceiling to read. Under a configured `max_gpu_vram_mb` both are capped,
+    /// so it reads low there — never high.
+    fn other_programs_card_mb(&self, budget_mb: u64) -> Option<u64> {
+        self.vram_ceiling_source
+            .get()
+            .and_then(|source| source())
+            .map(|ceiling| ceiling.saturating_sub(budget_mb))
+    }
+
     /// What `model_id`'s workers are charged, card and system memory together
     /// — what unloading it gives back. A card/processor split is charged to
     /// both, a model not loaded to neither.
@@ -8093,6 +8134,7 @@ impl ModelProcessPool {
             load_reads_free_mb = read_mb,
             card_mb,
             machine_mb,
+            held_by = %self.card_charges_for_log(),
             "Its load reads more free graphics memory than the first plan assumed — placing \
              more of the model on the card"
         );
@@ -8242,6 +8284,9 @@ impl ModelProcessPool {
             ?placement,
             card_mb,
             machine_mb,
+            budget_mb,
+            other_programs_mb = ?self.other_programs_card_mb(budget_mb),
+            held_by = %self.card_charges_for_log(),
             "The whole model would leave its card too little room for a conversation — placing \
              part of it on the processor before it loads"
         );
@@ -10795,6 +10840,10 @@ impl ModelProcessPool {
                                 processor_from = from,
                                 processor_to = to,
                                 estimated_mb = estimated,
+                                budget_mb = budget,
+                                other_programs_mb = ?self.other_programs_card_mb(budget),
+                                committed_mb = self.vram_committed_mb(),
+                                held_by = %self.card_charges_for_log(),
                                 "Model does not fit the card whole — placing {on_card} of \
                                  {total} layers there and layers {from}..{to} on the processor"
                             )
@@ -10804,6 +10853,10 @@ impl ModelProcessPool {
                             expert_layers_in_ram = in_ram,
                             total_layers = total,
                             estimated_mb = estimated,
+                            budget_mb = budget,
+                            other_programs_mb = ?self.other_programs_card_mb(budget),
+                            committed_mb = self.vram_committed_mb(),
+                            held_by = %self.card_charges_for_log(),
                             "Model does not fit the card whole — placing all {total} layers \
                              there and keeping the routed experts of the first {in_ram} in the \
                              machine's memory"
@@ -14497,6 +14550,24 @@ mod tests {
 
     fn test_pool() -> ModelProcessPool {
         ModelProcessPool::new(std::path::PathBuf::from("/tmp/swarmllm-test-pool"))
+    }
+
+    /// **A line placing a model short of the card says what held the rest**
+    /// (FUTURE_WORK #428's field note, 2026-11-17): every charged model,
+    /// largest first, and the other programs' memory as the budget's shortfall
+    /// from an idle card's.
+    #[test]
+    fn a_split_line_names_what_held_the_card() {
+        let p = test_pool();
+        assert_eq!(p.card_charges_for_log(), "nothing");
+        assert_eq!(p.other_programs_card_mb(9_000), None);
+        add_reserved(&p.vram_reserved_mb, &ModelId("small".into()), 900);
+        add_reserved(&p.vram_reserved_mb, &ModelId("large".into()), 3_100);
+        add_reserved(&p.vram_reserved_mb, &ModelId("gone".into()), 0);
+        assert_eq!(p.card_charges_for_log(), "large=3100,small=900");
+        p.set_vram_ceiling_source(Box::new(|| Some(11_428)));
+        assert_eq!(p.other_programs_card_mb(10_128), Some(1_300));
+        assert_eq!(p.other_programs_card_mb(12_000), Some(0));
     }
 
     /// Build a real `WorkerHandle` over a loopback socket pair, so the
