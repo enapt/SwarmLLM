@@ -4244,6 +4244,16 @@ not displace the layers**: the worker loads the layers first (`model_worker` `lo
 its own device, system memory beside processor-held layers, or not attached). Open: why ~1.3 GB held by others cost 5-8
 of the 9B's layers on a 12 GB card — needs that node's "placing part of it on the processor" line (`short_by_mb`,
 `cache_tokens`) and its "block drafter (#428)" line (`in_system_memory`).
+**Correction, 2026-11-17 (the same peer's v0.3.284 and v0.3.288 nightly extracts)**: the line above read the drop to
+55 tok/s on v0.3.288 as a nearly full card, and it was NOT. On v0.3.288 (11-14) the 9B loaded whole — 32 of 32 layers,
+the drafter on the card (`in_system_memory=false`, `budget_left_mb=2177`), 10,915 MB free against 10,568 on v0.3.284 —
+and every request after the first decoded at an identical 17.9 ms a token (55.3, 55.3, 55.4): the plain path. On
+v0.3.284 (11-13, the same card) the two code requests ran 141.5 and 125.3 guessing, the prose one 54.7. That is the
+payoff gate v0.3.290 lifted for a request alone on its worker (`1ec0f8dfd`: a run of poorly paying replies kept the
+next ~25 requests of a script, code included, on the plain path); the 126-145 on v0.3.293 is that fix on this node.
+Two causes, two releases: v0.3.288's plain path (fixed in v0.3.290) and the nearly full card on v0.3.293 (16-54 tok/s,
+its 5-8 lost layers still open above). Neither extract carries a "placing part of it on the processor" line — the
+model fitted both times.
 **Tried and dropped 2026-11-08 night: a card's chain check carrying the whole block (16) in one graph** instead of 8
 (`cuda_graph::MAX_CHAIN_POSITIONS`, A/B against the same binary capped at 8; card run 19, three runs a side, idle box,
 every width 9-16 captured and recorded while idle): the palindrome 167-188 tok/s against 180-184 at 8, a BST class
