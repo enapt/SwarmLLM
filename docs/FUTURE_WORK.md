@@ -4241,6 +4241,14 @@ the least), or let the head go first on a reply whose prompt asks for prose.
 32-42, against a flat 51 for both on v0.3.278 without it; the speed over the whole block the same (36.2). The prose
 shape is this residual's, larger, but the other program on the card confounds it; re-measure on an idle card before
 reading a number off it.
+**Field, 2026-11-17 (the Australian peer's report on v0.3.293, RTX 3060 12 GB)**: on a clear card the 9B loaded whole
+and code ran 126-145 tok/s, as before v0.3.288; with other programs holding ~1.3 GB of the card it planned 24 of 32
+layers on the card, 27 at load, and ran 16-54 — the drop reported on 11-11 was a nearly full card. **The drafter did
+not displace the layers**: the worker loads the layers first (`model_worker` `load_model_range`, then
+`attach_block_drafter`) and the drafter takes only the room they leave (`try_attach_block_drafter` → `drafter_home`:
+its own device, system memory beside processor-held layers, or not attached). Open: why ~1.3 GB held by others cost 5-8
+of the 9B's layers on a 12 GB card — needs that node's "placing part of it on the processor" line (`short_by_mb`,
+`cache_tokens`) and its "block drafter (#428)" line (`in_system_memory`).
 **Tried and dropped 2026-11-08 night: a card's chain check carrying the whole block (16) in one graph** instead of 8
 (`cuda_graph::MAX_CHAIN_POSITIONS`, A/B against the same binary capped at 8; card run 19, three runs a side, idle box,
 every width 9-16 captured and recorded while idle): the palindrome 167-188 tok/s against 180-184 at 8, a BST class
@@ -6802,6 +6810,15 @@ Each has a reason it is not being built now. Pick one up only when its trigger a
   Not bit-identical to the one-row dot unless the scale arithmetic is reproduced row for row. A
   check must stay rank-identical to a one-position step, so judge it against llama.cpp, never by
   bytes.
+- **#470 — Keep a saved prompt on disk when memory needs its room (a third tier)** (2026-11-17, from llm-d 1.0's
+  announcement, asked about on Discord). A saved prompt (`PrefixCache`) lives on the card or in host RAM and is dropped
+  when room is wanted; reading a 20-50k-token agent prompt again takes minutes on a processor or a split. llm-d tiers
+  it card → host → SSD (vLLM's OffloadingConnector, Mooncake, SGLang's HiCache; LMCache likewise) and reports first
+  token −40% on 50k-token prompts with a networked file tier (Managed Lustre) against host RAM alone. Prior art: those
+  four — read their eviction order and write-back cost before designing; llm-d's prefix scorer is already cited for #3 (c)'s hand-off belief. Trigger: a
+  field log showing long prompts read again after an eviction (count prefix-cache evictions of long entries and
+  `PromptCacheMiss` first). Not llm-d's prefill/decode split or wide expert parallelism: both move gigabytes between
+  machines a step, datacenter links only.
 - **#211 — Runtime AVX2 dispatch in vendored candle** (archive § "CPU nodes ship with the fast
   quantized kernels compiled out"). Since 2026-08-06 every x86 asset is `x86-64-v3` with a
   `-baseline` sibling the updater picks (`update::host_asset_name`); one binary would mean
