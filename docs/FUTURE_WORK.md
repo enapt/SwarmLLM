@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #473**). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #474**). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -2175,6 +2175,20 @@ and the pin; a second probe fetches it from the first; a .276 node shows no new 
 #### #168 — A relayed tensor forward over 32 MB is refused instead of chunked
 `P4` · network · **OPEN** — 2026-07-24 · history: archive § "Tensor-relay large-forward chunking (post-plan follow-on, deferred)"
 
+**Re-verified 2026-11-17 on main** (a read of the code, not a run). The cap is `relay_seal::MAX_RELAY_TENSOR_BYTES`
+(32 MiB, checked at seal and open); a forward past it is DROPPED by `try_relay_tensor` ("relay tensor seal failed —
+dropping", returning on the first candidate), then sent over a libp2p circuit if one exists, else it fails "Peer not
+connected" — not refused out loud. Only the app-level relay is capped: a direct forward goes to 128 MiB
+(`MAX_ACTIVATION_SIZE`), a circuit carries 1 GiB (our relay server's `max_circuit_bytes`). With Q8_0 activation
+compression (default) a forward is ~1 byte an element, so 32 MiB is ~6,000 positions of a 14B, ~3,800 of a 70B, and
+a prompt read in pieces (`prompt_chunks`, ≥ 512 positions, ≤ 16 pieces) reaches it per piece only past ~60-100k
+tokens; a whole pass (an older peer, a picture, a kept pass) reaches it sooner. Fix shape: cut a relayed body at the
+sender into sealed `RelayedTensor` frames (a new feature bit, checked at the sender; reassembly bounded like
+`StreamReassembler`, reusing `chunk_layer_forward`), or keep each piece of a relayed segment's prompt under the cap
+(no wire change). Prior art: go-libp2p treats a relayed connection as LIMITED (relay v2 defaults 2 min, 128 KiB —
+enough to hole-punch); Petals moved hosting to directly reachable servers. Nobody ships bulk data through a relay;
+a better hole-punch rate (#466) outranks this.
+
 `crypto/relay_seal.rs` refuses above `MAX_RELAY_TENSOR_BYTES` (32 MiB). Only a pure
 application-relay path with an uncompressed, very long prompt reaches it; no case has been
 measured. Reuse `pipeline_stream::chunk_layer_forward` and the `pending_activation_chunks`
@@ -2183,6 +2197,14 @@ reported.
 
 #### #405 — A computer that reaches this node only through a relay waits for a gossip repeat before its first request runs
 `P4` · network · **OPEN** — 2026-11-04 · history: #403's security review (`docs/invariants/network.md` § "A computer this node has not heard from is not judged allowed")
+
+**Re-verified 2026-11-17 on main** (a read of the code). Narrower than its title: a peer on a libp2p circuit is
+CONNECTED and caught up at Identify like any other; only an origin this node is not connected to at all is
+`NotHeardFrom` (`swarm_use.rs` `unheard()`). `ensure_relayed_origin_known` files it with `capability: None`, the
+`NodeCapabilityUpdate` arm installs only into an existing entry (`get_mut`), so a capability gossiped before the entry
+existed was dropped, and `NodeCapabilityUpdate` is not relay-eligible, so it cannot follow the request. Fix shape:
+the coordinator relays its own signed capability on its first relayed send (a feature bit at the sender; installed
+only when the proven origin is the capability's `node_id`; rationed per origin and per `NetGroup`, #299).
 
 Since #403 a relayed origin with no capability on record is refused `NotHeardFrom` (a re-plan, no
 penalty). A capability it gossiped BEFORE its first relayed body here found no registry entry and
@@ -2231,6 +2253,25 @@ A node with update checks off reads no clock and is told nothing. **Next**: none
 demand gossip needs its shared slot keyed per sender first (gotcha #73), relayed messages a replay
 memory as long as the wider window, pool notices each replay table checked against it; the owner's
 warning covers all three meanwhile.
+
+#### #473 — A computer reached only by relay is looked for only through relays this node already holds a circuit through
+`P4` · network · **OPEN** — 2026-11-17 · history: the US and India peers away since 11-16 (next_up "Peers away")
+
+Two computers with no public address (US `a661155f`, India `bdd389de`) have not come back since 11-16. Read
+2026-11-17 from this node's logs: before then the US one returned within 1-7 s of each of our restarts — a circuit
+dial through the DE anchor, then DCUtR to its own address — and both returned only after OUR restarts, never between
+them; so most likely both are off (another identity at the US household's address, on v0.3.277, connects every 10
+min and is cut off as two releases behind; its own dashboard tells its owner to update). Nothing found on our side
+keeps an ONLINE one away TODAY, because every node reserves on a bootstrap relay and the default list names one (the
+DE anchor), where our cache already holds their circuits. Three gaps remain for a swarm with more relays, or a peer
+that lost its circuit: (a) a lost peer is looked up only if it named a direct internet address (`lost_peers::
+worth_looking_up`), and Kademlia never stores a circuit address for an inbound peer (`identify.rs`), so a peer that
+reserved on ANOTHER relay is found only if it dials us — fix shape: for a lost relay-only peer, try
+`/p2p/<R>/p2p-circuit/p2p/<peer>` through every relay this node is connected to, rationed per tick; (b) the direct
+address DCUtR reached it at (US's `68.3.213.210/udp/8800`) is never kept, though its NAT kept the port; (c) our
+relay server closes a circuit after `max_circuit_duration` (1 h), so a peer DCUtR could not upgrade is dropped and
+redialled hourly. Prior art: go-libp2p's AutoRelay pushes a node's new circuit addresses to its connected peers by
+identify-push, which is how they reach the DHT; libp2p relay v2 reservations last 1 h by default.
 
 ### Speed on one computer
 
