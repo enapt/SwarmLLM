@@ -672,12 +672,24 @@ impl ModelRegistry {
         // contradicting hash never even registers as a change — otherwise the
         // re-check fires against a reference we have already disproved.
         let mut overridden = 0usize;
+        // A BLANK hash is a part this manifest's author does not hold — "not
+        // known", as `merge_known_shard_hashes` reads it — not a claim. Filling
+        // it from the origin is the unknown → known step, not a contradiction:
+        // counted apart and never warned about. Warning on it named THIS node
+        // as the publisher of 1,151 "contradicting" hashes in two days
+        // (2026-11-15 → 17, Qwen3.8-27B parts 10-29, every claim all zeros) —
+        // its own manifest, blank for parts it had given back, read beside the
+        // origin hashes it kept for them.
+        let mut filled = 0usize;
         for shard in manifest.shards.iter_mut() {
             if let Some(known) = self.origin_verified_hash(&ShardId {
                 model_id: manifest.id.clone(),
                 index: shard.index,
             }) {
-                if shard.hash != known {
+                if shard.hash == [0u8; 32] {
+                    filled += 1;
+                    shard.hash = known;
+                } else if shard.hash != known {
                     overridden += 1;
                     // `publisher` is the nearest thing to attribution available
                     // here: `register_manifest` is the funnel EVERY adoption path
@@ -740,7 +752,14 @@ impl ModelRegistry {
         // live on two distinct peers for one model, whose layers then could not
         // be routed at all. `load_from_dir` re-derives this hash too, so the
         // inconsistency also survived a restart through the DB.
-        if recovered > 0 || contested > 0 || overridden > 0 {
+        if filled > 0 {
+            tracing::debug!(
+                model = %manifest.id,
+                filled,
+                "Filled shard hashes this manifest left blank from the ones we took from the origin"
+            );
+        }
+        if recovered > 0 || contested > 0 || overridden > 0 || filled > 0 {
             manifest.manifest_hash = manifest.compute_hash();
         }
 
@@ -2762,6 +2781,66 @@ mod tests {
         stored.verify_hash_strict().expect(
             "a manifest we corrected must still hash to its own content — we \
              re-gossip this object, and a peer will refuse it otherwise",
+        );
+    }
+
+    /// A blank hash beside an origin hash is filled, not reported as a
+    /// contradiction — and a real contradiction still is. Before, this node's
+    /// own manifest (blank for parts it had given back) produced 1,151
+    /// "contradicts the one we took from the model's origin" warnings in two
+    /// days, each naming this node as the publisher.
+    #[test]
+    fn a_blank_hash_is_filled_from_the_origin_without_a_contradiction_warning() {
+        use crate::model::manifest::ModelManifestExt;
+        #[derive(Clone, Default)]
+        struct Captured(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+        impl std::io::Write for Captured {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let registered = |model: &str, claimed: [u8; 32]| {
+            let registry = ModelRegistry::with_local_node(NodeId([1u8; 32]));
+            let origin = [0x59u8; 32];
+            registry.record_origin_verified_hash(
+                ShardId {
+                    model_id: ModelId(model.into()),
+                    index: 3,
+                },
+                origin,
+            );
+            let mut from_disk = test_manifest(model, "M");
+            from_disk.shards = vec![test_shard(3, claimed)];
+            from_disk.manifest_hash = from_disk.compute_hash();
+            let log = Captured::default();
+            let writer = log.clone();
+            let subscriber = tracing_subscriber::fmt()
+                .with_ansi(false)
+                .with_max_level(tracing::Level::WARN)
+                .with_writer(move || writer.clone())
+                .finish();
+            tracing::subscriber::with_default(subscriber, || {
+                registry.register_manifest(from_disk);
+            });
+            let stored = registry.get_manifest(&ModelId(model.into())).unwrap();
+            assert_eq!(stored.shards[0].hash, origin, "the origin hash is taken");
+            stored
+                .verify_hash_strict()
+                .expect("the stored manifest hashes to its own content");
+            let text = String::from_utf8(log.0.lock().unwrap().clone()).unwrap();
+            text.contains("contradicts the one we took")
+        };
+        assert!(
+            !registered("blank-beside-origin", [0u8; 32]),
+            "a blank hash is unknown, not a contradiction"
+        );
+        assert!(
+            registered("contradicting-origin", [0xabu8; 32]),
+            "a hash that disagrees with the origin's is still reported"
         );
     }
 
