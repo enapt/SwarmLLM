@@ -3739,6 +3739,61 @@ fn install_capability_heard_before_known(
     }
 }
 
+/// The most parts a capability may list: past it every receiver drops the
+/// WHOLE capability ([`capability_fits`]), so the sender holds its copy to it
+/// ([`parts_for_the_capability`]).
+pub(crate) const MAX_HOSTED_SHARDS_IN_CAP: usize = 1024;
+
+/// The parts list a capability carries, held to [`MAX_HOSTED_SHARDS_IN_CAP`].
+/// Nothing cut it before (2026-11-17): a computer holding more than 1,024
+/// parts — about 540 GB of them; two peers held 535 and 543 that day — would
+/// have had every capability it sent refused by every peer, its features,
+/// release, room and loaded layers unknown or stale everywhere, with a WARN
+/// only on the receivers. The whole list still reaches peers in the parts
+/// list (`ShardAnnounce`, sent in pieces); this is only the capability's copy.
+/// Every model keeps a part first — most readers ask whether a peer holds any
+/// part of a model — then each model's next part in turn, ordered by model id
+/// and part number so the same holdings always give the same list (a reordered
+/// list would be news to `capability_news`). A list within the bound is
+/// returned as it is.
+pub(crate) fn parts_for_the_capability(
+    held: &[crate::types::ShardId],
+) -> Vec<crate::types::ShardId> {
+    if held.len() <= MAX_HOSTED_SHARDS_IN_CAP {
+        return held.to_vec();
+    }
+    let mut by_model: std::collections::BTreeMap<&str, Vec<&crate::types::ShardId>> =
+        std::collections::BTreeMap::new();
+    for shard in held {
+        by_model
+            .entry(shard.model_id.0.as_str())
+            .or_default()
+            .push(shard);
+    }
+    for parts in by_model.values_mut() {
+        parts.sort_by_key(|s| s.index);
+        parts.dedup_by_key(|s| s.index);
+    }
+    let mut listed = Vec::with_capacity(MAX_HOSTED_SHARDS_IN_CAP);
+    for rank in 0.. {
+        let mut any_at_rank = false;
+        for parts in by_model.values() {
+            let Some(shard) = parts.get(rank) else {
+                continue;
+            };
+            if listed.len() == MAX_HOSTED_SHARDS_IN_CAP {
+                return listed;
+            }
+            any_at_rank = true;
+            listed.push((*shard).clone());
+        }
+        if !any_at_rank {
+            break;
+        }
+    }
+    listed
+}
+
 /// Is a peer's capability within what this node takes? Its lists are capped
 /// before anything iterates them: each `observed_latencies` entry is merged
 /// into a shared map (`merge_peer_segment_latency`), so an uncapped list is
@@ -3760,7 +3815,6 @@ fn install_capability_heard_before_known(
 /// `ModelServed::MOST_ENTRIES` and each id to `MAX_MODEL_ID_BYTES`.
 pub(crate) fn capability_fits(cap: &crate::types::NodeCapability) -> bool {
     const MAX_OBSERVED_LATENCIES: usize = 256;
-    const MAX_HOSTED_SHARDS_IN_CAP: usize = 1024;
     const MAX_RESIDENT_MODELS_IN_CAP: usize = 256;
     const MAX_RESIDENT_RANGES_IN_CAP: usize = 1024;
     cap.observed_latencies.len() <= MAX_OBSERVED_LATENCIES
@@ -3791,7 +3845,7 @@ mod vision;
 
 #[cfg(test)]
 mod capability_fits_tests {
-    use super::capability_fits;
+    use super::{capability_fits, parts_for_the_capability, MAX_HOSTED_SHARDS_IN_CAP};
 
     fn resident(ranges: usize) -> swarmllm_types::ResidentModelLayers {
         swarmllm_types::ResidentModelLayers {
@@ -3837,6 +3891,68 @@ mod capability_fits_tests {
         assert!(!capability_fits(&cap), "too many ranges across entries");
         cap.resident_layers = vec![resident(0); 257];
         assert!(!capability_fits(&cap), "too many entries");
+    }
+
+    /// A computer holding more parts than a capability may list sends a
+    /// capability every receiver takes, naming every model it holds, the same
+    /// list whatever order its holdings come in; within the bound the list
+    /// is sent as it is. Red with `parts_for_the_capability` returning its
+    /// input: 1,102 parts, refused by `capability_fits`.
+    #[test]
+    fn a_computer_holding_more_parts_than_a_capability_lists_is_still_heard() {
+        let part = |model: &str, index: u32| crate::types::ShardId {
+            model_id: crate::types::ModelId(model.into()),
+            index,
+        };
+        let mut held: Vec<crate::types::ShardId> = (0..600)
+            .map(|i| part("big", i))
+            .chain((0..500).map(|i| part("mid", i)))
+            .chain((0..2).map(|i| part("small", i)))
+            .collect();
+        let mut cap: crate::types::NodeCapability = serde_json::from_value(serde_json::json!({
+            "node_id": vec![0u8; 32],
+            "gpu": null,
+            "ram_total_mb": 8192u64,
+            "ram_available_mb": 4096u64,
+            "disk_available_mb": 100000u64,
+            "bandwidth_mbps": 100.0f32,
+            "hosted_shards": [],
+            "max_contribution": "Moderate",
+            "uptime_seconds": 100u64,
+            "version": "0.3.297-alpha"
+        }))
+        .expect("a bare capability");
+        cap.hosted_shards = held.clone();
+        assert!(!capability_fits(&cap), "the whole list is refused");
+
+        let listed = parts_for_the_capability(&held);
+        assert_eq!(listed.len(), MAX_HOSTED_SHARDS_IN_CAP);
+        cap.hosted_shards = listed.clone();
+        assert!(capability_fits(&cap), "every receiver takes it");
+        for model in ["big", "mid", "small"] {
+            assert!(
+                listed.iter().any(|s| s.model_id.0 == model),
+                "{model} is still named"
+            );
+        }
+        assert_eq!(
+            listed.iter().filter(|s| s.model_id.0 == "small").count(),
+            2,
+            "a small model is listed whole"
+        );
+        held.reverse();
+        assert_eq!(
+            parts_for_the_capability(&held),
+            listed,
+            "the same holdings give the same list"
+        );
+
+        let few: Vec<_> = (0..40).map(|i| part("mid", 39 - i)).collect();
+        assert_eq!(
+            parts_for_the_capability(&few),
+            few,
+            "within the bound: as it is"
+        );
     }
 
     /// The models a peer says it holds and serves (#452) are looked up by

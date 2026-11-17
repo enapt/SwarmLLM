@@ -5322,6 +5322,27 @@ and served nothing while spending ~2.6 Mbit/s.
   advertising `features::MANIFEST_DIGESTS` is told the versions and pulls only
   what it lacks — § "Announce, then pull" below.
 
+## A capability lists no more parts than every receiver takes (2026-11-17)
+
+**What happened.** A receiver refuses a WHOLE `NodeCapabilityUpdate` whose `hosted_shards` passes
+`MAX_HOSTED_SHARDS_IN_CAP` (1,024) — `dispatch::capability_fits`, a memory bound from 2026-05 — and logs a WARN on its
+side only. The sender never cut its list to it: `HealthMonitor::broadcast_capabilities` put every held part in. A
+computer holding more than 1,024 parts (parts are up to 512 MB: about 540 GB) would have had every capability refused
+by every peer — its release, features, room, loaded layers and coordinates unknown, or frozen at the last one taken —
+and could not see why. Nobody had crossed it: found 2026-11-17 reading peers' capabilities for #91, two of them (AU,
+Italy) at 535 and 543 parts, half way, with storage on automatic by default.
+
+**The rule.** `dispatch::parts_for_the_capability` holds the capability's copy to the one constant the receiver
+checks (`MAX_HOSTED_SHARDS_IN_CAP`, now module-level). Every model keeps a part first — most readers of a peer's
+list ask whether it holds ANY part of a model (`resolver`, `reject_if_unknown_model_at`, `auto_manage::unused`'s
+`in_its_parts`, `status`) — then each model's next part in turn, ordered by model id and part number so the same
+holdings give the same list (`capability_news` would read a reordering as news). Within the bound the list is sent as
+it is. The full list still reaches peers in the parts list (`ShardAnnounce`, in pieces). Prior art: a sender holds a
+variable list to the receiver's bound rather than having the whole message refused (gossipsub refuses a publish past
+`max_transmit_size`; IPFS Bitswap splits a wantlist by message size). Test
+`a_computer_holding_more_parts_than_a_capability_lists_is_still_heard`, red (1,102 parts) without it. #91 (2j) removes
+the list from the capability altogether; until then this keeps a large holder heard.
+
 ## A model this node stopped holding is retracted by name, not by silence (2026-11-17)
 
 **What happened.** A receiver drops our parts of a model only when a `ShardAnnounce`

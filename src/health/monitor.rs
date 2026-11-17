@@ -1553,7 +1553,9 @@ impl HealthMonitor {
             ),
             disk_available_mb,
             bandwidth_mbps: 0.0,
-            hosted_shards: hosted_shards.clone(),
+            // Held to what every receiver takes; the whole list goes in the
+            // parts list below (`dispatch::parts_for_the_capability`).
+            hosted_shards: crate::daemon::dispatch::parts_for_the_capability(&hosted_shards),
             // From the runtime mirror: this is what we tell the swarm we are
             // willing to do, so a level the user changed an hour ago must not
             // keep being advertised as the one we booted with.
