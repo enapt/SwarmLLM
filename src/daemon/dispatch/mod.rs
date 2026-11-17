@@ -662,8 +662,9 @@ const MAX_PENDING_TP_PARTIALS: usize = 512;
 const MAX_DEMAND_ENTRIES: usize = 10_000;
 /// R130: Cap entries per WishlistAnnouncement. Caps the wire size AND the
 /// per-publisher slice of `state.models.foreign_wishlist`. 64 keeps the
-/// headline (a swarm normally has dozens of models, not hundreds).
-const MAX_WISHLIST_ANNOUNCE_ENTRIES: usize = 64;
+/// headline (a swarm normally has dozens of models, not hundreds). The one
+/// sender (`HealthMonitor`'s wishlist round) takes its top entries by it.
+pub(crate) const MAX_WISHLIST_ANNOUNCE_ENTRIES: usize = 64;
 /// R134: Cap entries per PoolModelAvailability gossip. Senders rank by
 /// recent local-host activity; receivers reject announcements over this
 /// cap. 128 is comfortable headroom over typical pool catalog sizes.

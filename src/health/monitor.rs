@@ -2439,7 +2439,8 @@ impl HealthMonitor {
         // demand, which counts the owner's own requests (#389 (a)). Ranked and
         // capped by it too, so a model does not make the list for being the
         // owner's.
-        const ANNOUNCE_CAP: usize = 64;
+        // What every receiver takes (`dispatch`): one constant, both sides.
+        const ANNOUNCE_CAP: usize = crate::daemon::dispatch::MAX_WISHLIST_ANNOUNCE_ENTRIES;
         let mut ranked: Vec<&crate::model::auto_manage::wishlist::WishlistEntry> = snapshot
             .entries
             .iter()
