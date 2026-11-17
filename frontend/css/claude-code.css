@@ -83,8 +83,6 @@
 .diff-ctx-line { background: transparent; }
 .diff-ctx-line .diff-code { color: var(--text-secondary); }
 .diff-hunk-row td { padding: 3px 8px; color: var(--accent); opacity: 0.7; background: rgba(59,130,246,0.05); font-size: var(--fs-xs); border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); }
-/* Legacy class compat */
-.cc-diff-output { margin: 0; padding: 6px 8px; background: var(--bg-tertiary); border-radius: var(--radius); font-size: var(--fs-sm); font-family: var(--font-mono); overflow-x: auto; max-height: 400px; overflow-y: auto; line-height: 1.5; }
 .diff-add { color: var(--green-text); background: rgba(61,220,132,0.08); display: block; }
 .diff-del { color: #ef4444; background: rgba(239,68,68,0.08); display: block; }
 .diff-hunk { color: var(--accent); opacity: 0.7; display: block; }

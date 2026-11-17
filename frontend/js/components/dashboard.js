@@ -20,7 +20,6 @@
   // Shard rendering helpers live in App.dashboardShards (dashboard-shards.js).
   // Alias to local names for tight call-site rewrites.
   var DS = App.dashboardShards;
-  var MMPROJ_SHARD_INDEX = DS.MMPROJ_SHARD_INDEX;
   var _buildProgressBar    = DS.buildProgressBar;
   var _shardState          = DS.shardState;
   var _shardWhereText      = DS.shardWhereText;
@@ -32,7 +31,6 @@
   var _buildCoverageRibbon = DS.buildCoverageRibbon;
 
   App.dashboard = {
-    _peersExpanded: false,
     _lastPeers: [],
 
     // Swap all expanded model cards' right-column bodies between list and matrix.
@@ -158,7 +156,9 @@
             }));
             rowReload();
           } else if (data.status === 'use_hf') {
-            App.hf.downloadShards({ repo_id: data.repo_id, filename: data.filename, shards: [shardIndex], model_id: modelId }).then(function(r) {
+            // Returned, so a failure to reach the node lands in the `.catch`
+            // below with a banner rather than as an unhandled rejection.
+            return App.hf.downloadShards({ repo_id: data.repo_id, filename: data.filename, shards: [shardIndex], model_id: modelId }).then(function(r) {
               if (r.ok) {
                 App.ui.showBanner('success', I18n.t('shard.downloading_hf', { idx: shardIndex + 1 }));
                 rowReload();
@@ -2328,11 +2328,9 @@
     renderPeers: function(peers) {
       var list = document.getElementById('peers-list');
       var summary = document.getElementById('peers-summary');
-      var overflow = document.getElementById('peers-overflow');
       var pLoading = document.getElementById('peers-loading');
       if (pLoading) pLoading.remove();
       if (!list) return;
-      if (overflow) overflow.style.display = 'none';
 
       // Skip the full <table> rebuild when none of the rendered fields
       // changed. peer_list bursts on swarm churn (multiple per second) —
@@ -2704,7 +2702,6 @@
         } else if (!isComplete && (status.state === 'failed' || (typeof status.state === 'object' && status.state && status.state.failed)) && !S.activeAcquisitions[modelId]._failFired) {
           S.activeAcquisitions[modelId]._failFired = true;
           _removeDownloadBar(modelId);
-          var reason = (typeof status.state === 'object' && status.state.failed) ? (status.state.failed.reason || '') : '';
           // Toast handled by backend activity_event (shard_download_failed / hf_download_failed)
           setTimeout(function() { delete S.activeAcquisitions[modelId]; }, 5000);
         }
@@ -2749,9 +2746,6 @@
       // `label` and `rightText` are text: buildProgressBar escapes them.
       wrapper.innerHTML = _buildProgressBar({ safeId: safeId, pct: U.dlPct(status), label: I18n.t('dashboard.downloading_data'), rightText: U.formatDlStatus(status), cancelBtn: cancelBtn });
       progressEl.innerHTML = wrapper.firstChild.innerHTML;
-
-      var oldPanel = document.getElementById('acq-panel-' + safeId);
-      if (oldPanel) oldPanel.remove();
     }
   };
 })();

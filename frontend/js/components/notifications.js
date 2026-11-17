@@ -729,38 +729,11 @@
 
     updateBadges: function() {
       App.providerHealth.updateHealthBar();
-      function applyCardBadge(badge, h) {
-        var statusIcon, statusClass;
-        if (h.status === 'up') {
-          statusIcon = h.latency_ms + 'ms';
-          statusClass = _healthLatencyTier(h.latency_ms);
-        } else if (h.status === 'rate_limited') { statusIcon = I18n.t('provider.rate_limited'); statusClass = 'health-warn'; }
-        else if (h.status === 'timeout') { statusIcon = I18n.t('provider.timeout'); statusClass = 'health-down'; }
-        else if (h.status === 'auth_error') { statusIcon = I18n.t('provider.auth_error'); statusClass = 'health-down'; }
-        else if (h.status === 'overloaded') { statusIcon = I18n.t('provider.overloaded'); statusClass = 'health-warn'; }
-        else { statusIcon = I18n.t('provider.error'); statusClass = 'health-down'; }
-        badge.className = 'provider-health-badge ' + statusClass;
-        badge.textContent = statusIcon;
-        badge.title = _statusLabel(h.status) + (h.detail ? ': ' + h.detail : '') + ' (' + h.latency_ms + 'ms)';
-      }
+      // A provider's card shows health per model row (`updateModelBadges`). A
+      // card-level badge here looked for a `.model-header` the cards no longer
+      // have (they use `.cloud-card-header`) and never appeared, so it is gone.
       Object.keys(S.providerHealth).forEach(function(p) {
         var h = S.providerHealth[p];
-        // Card badge
-        var badge = document.getElementById('health-badge-' + p);
-        if (!badge) {
-          var card = document.querySelector('.cloud-model[data-provider="' + U.cssSafeAttr(p) + '"]');
-          if (card) {
-            var header = card.querySelector('.model-header');
-            if (header) {
-              badge = document.createElement('span');
-              badge.id = 'health-badge-' + p;
-              badge.className = 'provider-health-badge';
-              header.querySelector('span:last-child').appendChild(badge);
-            }
-          }
-        }
-        if (badge) applyCardBadge(badge, h);
-
         // Dropdown group badge
         var groupEl = document.querySelector('.model-dropdown-group[data-group="' + p + '"]');
         if (!groupEl) return;

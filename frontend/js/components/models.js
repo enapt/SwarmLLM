@@ -30,10 +30,12 @@
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
       });
-      var data = await resp.json();
+      // A gateway's HTML error page is not JSON: read as a refusal with no
+      // body rather than thrown, so every caller's `r.ok` branch reports it.
+      var data = await resp.json().catch(function () { return {}; });
       var errorMsg = null;
       if (!resp.ok) {
-        errorMsg = (data.error && data.error.message) || I18n.t('shard.download_failed', { error: '' });
+        errorMsg = U.extractErrorMessage(data, I18n.t('shard.download_failed', { error: '' }));
       }
       return { ok: resp.ok, data: data, errorMsg: errorMsg };
     }

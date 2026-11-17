@@ -195,15 +195,6 @@
       App.setup.reopen();
     });
 
-    on('btn-show-all-peers', 'click', function() {
-      App.dashboard._peersExpanded = !App.dashboard._peersExpanded;
-      if (App.dashboard._lastPeers && App.dashboard._lastPeers.length > 0) {
-        App.dashboard.renderPeers(App.dashboard._lastPeers);
-      } else {
-        App.dashboard.loadNetworkData();
-      }
-    });
-
     // Provider test buttons
     document.querySelectorAll('[data-test-provider]').forEach(function(btn) {
       btn.addEventListener('click', function() {

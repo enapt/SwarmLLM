@@ -101,7 +101,7 @@
         return data;
       } catch (e) {
         App.notifications.showToast(
-          I18n.t('claude_code.session_failed') + ': ' + (e.message || ''),
+          I18n.t('claude_code.session_failed') + ': ' + U.reasonText(e),
           'error', 5000
         );
         throw e;
@@ -1479,9 +1479,6 @@
       body.className = 'cc-expand-body';
       if (isDiff) {
         body.innerHTML = App.claudeCode._renderDiffOutput(content);
-        // Remove max-height limit in modal
-        var diffPre = body.querySelector('.cc-diff-output');
-        if (diffPre) diffPre.style.maxHeight = 'none';
       } else {
         var pre = document.createElement('pre');
         pre.textContent = content;

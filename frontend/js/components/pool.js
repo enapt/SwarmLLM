@@ -488,9 +488,12 @@
       try {
         var resp = await App.authFetch('/api/pool/contribution', _jsonOpts('PUT', { node_id: nodeId, level: level }));
         var data = await resp.json();
-        _hasError(data);
+        // A slider left where it was dragged claims the node agreed — put it
+        // back to what the pool really has.
+        if (_hasError(data)) this.load();
       } catch (e) {
         App.notifications.showToast(I18n.t('pool.failed_generic', { error: U.failureText(e) }), 'error');
+        this.load();
       }
     },
 
@@ -656,9 +659,10 @@
       try {
         var resp = await App.authFetch('/api/pool/private-mode', _jsonOpts('PUT', { enabled: enabled }));
         if (!resp.ok) {
-          var err = await resp.json().catch(function () { return {}; });
+          // Through the shared reader, so the refusal's translated hint
+          // (`hint_key`) is shown, not only its English message.
           App.notifications.showToast(
-            (err.error && err.error.message) || I18n.t('pool.private_mode_error'),
+            await U.getApiErrorMessage(resp, I18n.t('pool.private_mode_error')),
             'error'
           );
           return;

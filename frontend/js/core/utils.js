@@ -853,6 +853,15 @@
     return I18n.t('common.request_failed');
   }
 
+  // What to tell the reader about a caught failure: the daemon's OWN reason
+  // where our code threw it as a plain Error
+  // (`throw new Error(await getApiErrorMessage(resp))`), else `failureText` —
+  // never the browser's English. The one rule; it was written out at four
+  // sites (Responses tab, chat retry, Claude Code session, diagnostics copy).
+  function reasonText(e) {
+    return (e && e.name === 'Error' && e.message) ? e.message : failureText(e);
+  }
+
   // Usage: var msg = await App.utils.getApiErrorMessage(resp, 'Action failed');
   async function getApiErrorMessage(resp, fallback) {
     var msg = fallback || I18n.t('common.request_failed');
@@ -1461,6 +1470,7 @@
     updateChatDownloadProgress: updateChatDownloadProgress,
     extractErrorMessage: extractErrorMessage,
     failureText: failureText,
+    reasonText: reasonText,
     capitalize: capitalize,
     apiAction: apiAction,
     submitCodeForm: submitCodeForm,

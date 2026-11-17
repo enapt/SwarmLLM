@@ -184,7 +184,12 @@
     copyDiagnostics: function () {
       return App
         .authFetch('/api/admin/diagnostics')
-        .then(function (r) { return r.text(); })
+        // A refused request's body is an error, not the report: copied, the
+        // reader was told "copied" and pasted a 401 into their bug report.
+        .then(function (r) {
+          if (!r.ok) return U.getApiErrorMessage(r).then(function (m) { throw new Error(m); });
+          return r.text();
+        })
         .then(function (text) {
           if (navigator.clipboard && window.isSecureContext) {
             return navigator.clipboard.writeText(text).then(function () {
@@ -195,7 +200,9 @@
         })
         .catch(function (e) {
           App.notifications.showToast(
-            I18n.t('reference.copy_failed', { error: U.extractErrorMessage(e) }),
+            // `extractErrorMessage` reads a response BODY; handed this thrown
+            // Error it returned undefined and the toast showed "{error}".
+            I18n.t('reference.copy_failed', { error: U.reasonText(e) }),
             'error'
           );
         });

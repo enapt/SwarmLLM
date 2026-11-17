@@ -89,17 +89,7 @@
 
     // Flash a session sidebar item to indicate new activity
     flashSession: function(sessionId) {
-      var el = document.querySelector('.session-item[data-session-id="' + sessionId + '"]');
-      if (!el) {
-        // Session items may not have data-session-id; find by position
-        var list = document.getElementById('session-list');
-        if (!list) return;
-        var items = list.querySelectorAll('.session-item');
-        var sorted = Object.values(S.sessions).sort(function(a, b) { return b.created - a.created; });
-        for (var i = 0; i < sorted.length && i < items.length; i++) {
-          if (sorted[i].id === sessionId) { el = items[i]; break; }
-        }
-      }
+      var el = document.querySelector('.session-item[data-session-id="' + U.cssSafeAttr(sessionId) + '"]');
       if (!el) return;
       // Flash animation
       el.classList.remove('cc-new-response');
@@ -154,19 +144,8 @@
       S.currentSessionId = id;
       localStorage.setItem(App.ACTIVE_SESSION_KEY, id);
       // Clear unseen indicator for this session
-      var items = document.querySelectorAll('.session-item.cc-unseen');
-      items.forEach(function(el) {
-        // Find matching item and clear
-        var sorted = Object.values(S.sessions).sort(function(a, b) { return b.created - a.created; });
-        var list = document.getElementById('session-list');
-        if (!list) return;
-        var allItems = list.querySelectorAll('.session-item');
-        for (var i = 0; i < sorted.length && i < allItems.length; i++) {
-          if (sorted[i].id === id && allItems[i] === el) {
-            el.classList.remove('cc-unseen');
-          }
-        }
-      });
+      var seen = document.querySelector('.session-item[data-session-id="' + U.cssSafeAttr(id) + '"]');
+      if (seen) seen.classList.remove('cc-unseen');
 
       var s = S.sessions[id];
       if (s.model) {
@@ -226,6 +205,9 @@
       var tmpl = document.getElementById('tmpl-session-item');
       sorted.forEach(function(s) {
         var div = tmpl.content.cloneNode(true).firstElementChild;
+        // Found by id (`flashSession`, `switchSession`), never by position in
+        // the list — matching an index against a separately sorted copy.
+        div.setAttribute('data-session-id', s.id);
         if (s.id === S.currentSessionId) div.classList.add('active');
         div.onclick = function() { App.chat.switchSession(s.id); if (S.activeTab !== 'chat') App.ui.switchTab('chat'); };
 
@@ -654,9 +636,7 @@
             App.chat.flashSession(session.id);
           }
         } catch (e) {
-          // An `Error` we threw carries the daemon's reason; anything else is
-          // the browser's own English ("Failed to fetch").
-          contentEl.textContent = (e && e.name === 'Error' && e.message) ? e.message : U.failureText(e);
+          contentEl.textContent = U.reasonText(e);
           contentEl.classList.add('chat-error');
           if (assistantAvatarEl) { assistantAvatarEl.classList.remove('avatar-thinking', 'avatar-streaming'); assistantAvatarEl.classList.add('avatar-error'); }
         }

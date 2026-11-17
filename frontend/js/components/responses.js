@@ -14,13 +14,6 @@
 (function() {
   var U = App.utils;
 
-  // What went wrong, in the reader's language: the daemon's own reason for a
-  // refusal (thrown below as a plain Error from `getApiErrorMessage`), else
-  // `U.failureText` — never the browser's English "TypeError: Failed to fetch".
-  function errorText(e) {
-    return (e && e.name === 'Error' && e.message) ? e.message : U.failureText(e);
-  }
-
   App.responses = {
     _records: [],
     _statusFilter: 'all',
@@ -89,7 +82,7 @@
         this.render();
       } catch (e) {
         body.innerHTML = '<tr><td colspan="6" class="text-center text-muted">' +
-          U.escapeHtml(I18n.t('responses.load_error', { error: errorText(e) })) + '</td></tr>';
+          U.escapeHtml(I18n.t('responses.load_error', { error: U.reasonText(e) })) + '</td></tr>';
       }
     },
 
@@ -196,7 +189,7 @@
         var json = await resp.json();
         detail.innerHTML = '<pre class="responses-detail-pre">' + U.escapeHtml(JSON.stringify(json, null, 2)) + '</pre>';
       } catch (e) {
-        detail.textContent = I18n.t('responses.retrieve_error', { error: errorText(e) });
+        detail.textContent = I18n.t('responses.retrieve_error', { error: U.reasonText(e) });
       }
     },
 
@@ -207,7 +200,7 @@
         App.notifications.showToast(I18n.t(successKey, { id: id }), 'info', 3000);
         this.load();
       } catch (e) {
-        App.notifications.showToast(I18n.t(errorKey, { error: errorText(e) }), 'error', 4000);
+        App.notifications.showToast(I18n.t(errorKey, { error: U.reasonText(e) }), 'error', 4000);
       }
     },
 
