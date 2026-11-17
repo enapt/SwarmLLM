@@ -6982,7 +6982,10 @@ Each has a reason it is not being built now. Pick one up only when its trigger a
   token −40% on 50k-token prompts with a networked file tier (Managed Lustre) against host RAM alone. Prior art: those
   four — read their eviction order and write-back cost before designing; llm-d's prefix scorer is already cited for #3 (c)'s hand-off belief. Trigger: a
   field log showing long prompts read again after an eviction (count prefix-cache evictions of long entries and
-  `PromptCacheMiss` first). Not llm-d's prefill/decode split or wide expert parallelism: both move gigabytes between
+  `PromptCacheMiss` first). **Countable from v0.3.297** (2026-11-17): `DIAG: prefix-cache let go of a long saved prompt`
+  (≥ 8,192 tokens, with why) — before it a save's line only COUNTED what it let go (`evicted_before_copy`), never how
+  long, so a log could not show the trigger either way. This node's log 10-31 → 11-17: 1,212 saves (916 letting
+  something go, lengths unknown), 1,200 hits, 24 room releases, 1 miss. Not llm-d's prefill/decode split or wide expert parallelism: both move gigabytes between
   machines a step, datacenter links only.
 - **#211 — Runtime AVX2 dispatch in vendored candle** (archive § "CPU nodes ship with the fast
   quantized kernels compiled out"). Since 2026-08-06 every x86 asset is `x86-64-v3` with a

@@ -1071,7 +1071,7 @@ impl PrefixCache {
             last_hit: AtomicU64::new(tick),
             kept_here,
         });
-        self.evict_over_caps(bucket);
+        self.evict_over_caps(model_key, bucket);
 
         let entry_count = bucket.len();
         // Compute the full post-insert manifest for this model so the caller
@@ -1185,7 +1185,7 @@ impl PrefixCache {
         let after_copy = *AFTER_COPY
             .get_or_init(|| std::env::var("SWARMLLM_SNAPSHOT_ROOM").as_deref() == Ok("after-copy"));
         // Dropped once the lock is released: freeing 0.5 GB is not instant.
-        let (gone, room_made) = {
+        let (gone, room_made, over_caps) = {
             let Ok(mut inner) = self.inner.write() else {
                 return RoomMade::default();
             };
@@ -1217,6 +1217,7 @@ impl PrefixCache {
                 .iter()
                 .map(|e| room.counted(&e.snapshot) as u64)
                 .sum();
+            let over_caps = gone.len();
             if room.evict_bytes > freed_in_home {
                 gone.extend(take_least_recently_hit(
                     &mut inner,
@@ -1229,8 +1230,19 @@ impl PrefixCache {
                 evicted: gone.len() - replaced,
                 replaced_kept_here,
             };
-            (gone, room_made)
+            (gone, room_made, over_caps)
         };
+        // A replaced entry is the save itself, kept longer: never named.
+        note_long_prompts_let_go(
+            Some(model_key),
+            "over the cache's caps",
+            &gone[room_made.replaced..over_caps],
+        );
+        note_long_prompts_let_go(
+            Some(model_key),
+            "memory planned for the copy",
+            &gone[over_caps..],
+        );
         drop(gone);
         room_made
     }
@@ -1242,11 +1254,12 @@ impl PrefixCache {
     /// sized by their prompt, so staying under sixteen of them says nothing
     /// about how much is being held. Token-keyed and chain-keyed entries share
     /// both caps — one budget for one memory (gotcha #440).
-    fn evict_over_caps(&self, bucket: &mut Vec<Entry>) {
+    fn evict_over_caps(&self, model_key: &str, bucket: &mut Vec<Entry>) {
+        let mut gone: Vec<Entry> = Vec::new();
         if bucket.len() > self.max_entries {
             bucket.sort_by_key(|e| e.last_hit.load(Ordering::Relaxed));
             let drop_count = bucket.len() - self.max_entries;
-            bucket.drain(..drop_count);
+            gone.extend(bucket.drain(..drop_count));
         }
         if self.max_bytes > 0 {
             let mut total: usize = bucket.iter().map(|e| e.snapshot.bytes()).sum();
@@ -1261,9 +1274,11 @@ impl PrefixCache {
                 while total > self.max_bytes && bucket.len() > 1 {
                     let dropped = bucket.remove(0);
                     total = total.saturating_sub(dropped.snapshot.bytes());
+                    gone.push(dropped);
                 }
             }
         }
+        note_long_prompts_let_go(Some(model_key), "over the cache's caps", &gone);
     }
 
     /// Positions `0..want` of a split's prompt, as this segment stored them on
@@ -1499,7 +1514,7 @@ impl PrefixCache {
             // kept here has no segment on another computer to store one for.
             kept_here: false,
         });
-        self.evict_over_caps(bucket);
+        self.evict_over_caps(model_key, bucket);
         // Held only if the eviction kept it.
         let kept = bucket
             .iter()
@@ -1871,6 +1886,7 @@ impl PrefixCache {
         // The entries go once the lock is released: freeing 0.5 GB is not
         // instant.
         drop(inner);
+        note_long_prompts_let_go(None, "memory asked for room", &gone);
         drop(gone);
         freed
     }
@@ -1950,6 +1966,38 @@ impl HeldCache {
             at
         }
     }
+}
+
+/// A saved prompt at least this long is named when the cache lets it go:
+/// reading it again takes minutes on a processor or a split, and how often
+/// that happens is FUTURE_WORK #470's trigger (a disk tier for saved
+/// prompts). Shorter ones go silently — cheap to read again, and any request
+/// may let one go. llama.cpp's server logs every eviction of its prompt cache
+/// (`server_prompt_cache`, `tools/server/server-task.cpp`); ours counted
+/// them (`evicted_before_copy` on each save's line) but never said how long
+/// they were — 916 of 1,212 saves on one node let something go, unknown which.
+const LONG_SAVED_PROMPT_TOKENS: usize = 8192;
+
+/// One DIAG line for the long saved prompts in `gone` (#470): how many, the
+/// longest, and why they went. `for_model` is the model whose save asked for
+/// the room (`None`: memory asked); a planned eviction may take another
+/// model's prompt.
+fn note_long_prompts_let_go(for_model: Option<&str>, why: &'static str, gone: &[Entry]) {
+    let mut long = gone
+        .iter()
+        .map(|e| e.snapshot.token_count)
+        .filter(|&tokens| tokens >= LONG_SAVED_PROMPT_TOKENS);
+    let Some(first) = long.next() else {
+        return;
+    };
+    let (count, longest_tokens) = long.fold((1usize, first), |(n, most), t| (n + 1, most.max(t)));
+    tracing::info!(
+        for_model = for_model.unwrap_or("-"),
+        why,
+        count,
+        longest_tokens,
+        "DIAG: prefix-cache let go of a long saved prompt"
+    );
 }
 
 /// Takes the least recently hit entries kept in `home`, across every model,
@@ -4183,6 +4231,76 @@ mod tests {
         }
 
         assert_eq!(pc.entry_count("m"), 2);
+    }
+
+    /// A long saved prompt the cache lets go is named, with why (FUTURE_WORK
+    /// #470's trigger: before, only a room request's release was logged); a
+    /// short one goes silently. Red with `note_long_prompts_let_go` returning
+    /// at once.
+    #[test]
+    fn a_long_saved_prompt_let_go_is_named_and_a_short_one_is_not() {
+        #[derive(Clone, Default)]
+        struct Captured(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+        impl std::io::Write for Captured {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        // One entry at most: the second save lets the first go.
+        let let_go = |first_len: usize| {
+            let pc = PrefixCache::new(true, 1, 0, 4, 2 * LONG_SAVED_PROMPT_TOKENS, 0);
+            let kv_store = KvCacheStore::new(std::time::Duration::from_secs(600));
+            let log = Captured::default();
+            let writer = log.clone();
+            let subscriber = tracing_subscriber::fmt()
+                .with_ansi(false)
+                .with_max_level(tracing::Level::INFO)
+                .with_writer(move || writer.clone())
+                .finish();
+            tracing::subscriber::with_default(subscriber, || {
+                make_fake_kv(&kv_store, "m", "first", 2, first_len);
+                let first: Vec<u32> = (0..first_len as u32).collect();
+                pc.insert_from_kv(
+                    "m",
+                    "first",
+                    &kv_store,
+                    &first,
+                    ANYWHERE,
+                    KeepAsked::Unasked,
+                );
+                assert_eq!(pc.entry_count("m"), 1, "the first prompt is saved");
+                make_fake_kv(&kv_store, "m", "second", 2, 10);
+                let second: Vec<u32> = (100_000..100_010).collect();
+                pc.insert_from_kv(
+                    "m",
+                    "second",
+                    &kv_store,
+                    &second,
+                    ANYWHERE,
+                    KeepAsked::Unasked,
+                );
+            });
+            assert_eq!(pc.entry_count("m"), 1, "the second save let the first go");
+            let text = String::from_utf8(log.0.lock().unwrap().clone()).unwrap();
+            text
+        };
+        let long = let_go(LONG_SAVED_PROMPT_TOKENS + 64);
+        assert!(
+            long.contains("DIAG: prefix-cache let go of a long saved prompt")
+                && long.contains("over the cache's caps")
+                && long.contains("for_model=\"m\"")
+                && long.contains("count=1"),
+            "a long prompt let go is named: {long}"
+        );
+        let short = let_go(1000);
+        assert!(
+            !short.contains("let go of a long saved prompt"),
+            "a short prompt goes silently: {short}"
+        );
     }
 
     /// The bound that actually expresses memory. Counting entries says nothing
