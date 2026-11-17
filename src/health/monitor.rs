@@ -2613,13 +2613,15 @@ impl HealthMonitor {
             }
         }
 
-        // active_relay_circuits: remove entries older than 1 hour (abnormally terminated)
-        const RELAY_CIRCUIT_TTL_SECS: u64 = 3600;
+        // active_relay_circuits: only a record whose close was never reported —
+        // a circuit can be open for days (#473 (c)).
         let stale_relay: Vec<_> = self
             .shared_state
             .active_relay_circuits
             .iter()
-            .filter(|entry| entry.value().elapsed().as_secs() > RELAY_CIRCUIT_TTL_SECS)
+            .filter(|entry| {
+                crate::network::relay::relay_circuit_record_is_stale(entry.value().elapsed())
+            })
             .map(|entry| *entry.key())
             .collect();
         if !stale_relay.is_empty() {

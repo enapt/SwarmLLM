@@ -15,6 +15,20 @@ use libp2p::{Multiaddr, PeerId};
 /// exist for hole punching; go-libp2p's `WithInfiniteLimits` is the option for
 /// a relay that carries data.
 const RELAY_CIRCUIT_DURATION_SECS: u64 = 30 * 24 * 60 * 60;
+/// Whether a circuit this node has recorded as open for `open_for` can only be
+/// one whose close was never reported — the health tick's sweep of
+/// `active_relay_circuits`. Never a live one: libp2p-relay 0.21.1 reports every
+/// accepted circuit's end (`CircuitClosed`, from the circuit's own end and from
+/// `on_connection_closed`), so only a circuit older than the longest one
+/// [`RELAY_CIRCUIT_DURATION_SECS`] allows, an hour past it, is stale. The sweep
+/// once dropped any entry past one hour — right while circuits were cut there,
+/// and since #473 (c) it dropped every long circuit while it was still open:
+/// [`circuits_to_end`] missed it and its relay seconds went uncounted
+/// (pre-release review of v0.3.296).
+pub(crate) fn relay_circuit_record_is_stale(open_for: Duration) -> bool {
+    open_for > Duration::from_secs(RELAY_CIRCUIT_DURATION_SECS + 3600)
+}
+
 /// Max reservation TTL granted to a NAT'd peer before it must re-reserve.
 const RELAY_RESERVATION_DURATION_SECS: u64 = 3600;
 
@@ -447,6 +461,20 @@ mod tests {
         let mut want = vec![b, c];
         want.sort();
         assert_eq!(ends, want);
+    }
+
+    /// A circuit open for hours, or for days, is still recorded as open; only
+    /// one past the 30-day backstop is a record whose close went unreported.
+    #[test]
+    fn a_long_open_circuit_stays_on_the_record() {
+        let hour = Duration::from_secs(3600);
+        assert!(!relay_circuit_record_is_stale(2 * hour));
+        assert!(!relay_circuit_record_is_stale(Duration::from_secs(
+            RELAY_CIRCUIT_DURATION_SECS
+        )));
+        assert!(relay_circuit_record_is_stale(Duration::from_secs(
+            RELAY_CIRCUIT_DURATION_SECS + 2 * 3600
+        )));
     }
 
     #[test]

@@ -5734,7 +5734,13 @@ each open circuit's destination once (`active_relay_circuits`, which
 libp2p-relay keeps true: it reports `CircuitClosed` for every circuit a closed
 connection ended), and closing that connection ends its circuits and its
 reservation, so the pair meets on another relay. libp2p-relay has no call that
-closes one circuit.
+closes one circuit. **The health tick's sweep of that map drops only a record
+older than the 30-day backstop plus an hour** (`relay::relay_circuit_record_is_stale`):
+it dropped every entry past ONE hour — right while circuits were cut there — so
+after #473 (c) a circuit open longer was off the record while still open, missed
+by `circuits_to_end` and its relay seconds uncounted (pre-release review of
+v0.3.296, caught before it shipped). Test `a_long_open_circuit_stays_on_the_record`
+(red with the hour back).
 
 **What a change must keep**: no total deadline that a redial undoes; a limit
 here is a cut, not a bound. Prior art: the circuit v2 spec (a limit of 0 is none;
