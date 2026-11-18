@@ -834,6 +834,25 @@ impl AutoShardManager {
                     .note_shard_verified(&sid, &checked_against);
             }
             if let Ok(Err(e)) = result {
+                if crate::model::shard::judged_nothing(&e) {
+                    // The part changed while it was read (a repair renamed a
+                    // good copy over it, prune gave it back): the hash is of
+                    // bytes no longer there, so nothing is quarantined,
+                    // disputed or struck from what this node announces. It
+                    // stays queued, like a part whose download is in flight,
+                    // and the next pass judges what stands there then (#477).
+                    tracing::info!(
+                        model = %sid.model_id,
+                        shard = sid.index,
+                        error = %e,
+                        "A part queued for a re-check changed while it was read — checked again at the next pass"
+                    );
+                    self.shared_state
+                        .models
+                        .shards_pending_verification
+                        .insert(sid.clone());
+                    continue;
+                }
                 if policy == crate::model::shard::OnMismatch::KeepBytes {
                     // Kept, and deliberately NOT marked for repair — see the
                     // matching arm in `daemon::background`: that set's drain

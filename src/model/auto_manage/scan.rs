@@ -318,6 +318,19 @@ pub async fn rescan_local_shards(
                 &shared.parts_checked(),
                 crate::model::shard::Reread::IfChanged,
             ) {
+                if crate::model::shard::judged_nothing(&e) {
+                    // The part changed while it was read: not judged, not
+                    // registered either — the next rescan reads what stands
+                    // there then (#477). No repair, dispute or red toast for
+                    // bytes no longer on disk.
+                    tracing::info!(
+                        model = %model_id_str,
+                        shard = shard_info.index,
+                        error = %e,
+                        "Rescan: a part changed while it was read — checked again at the next rescan"
+                    );
+                    continue;
+                }
                 let kept = policy == crate::model::shard::OnMismatch::KeepBytes;
                 tracing::warn!(
                     model = %model_id_str,

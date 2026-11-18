@@ -11664,6 +11664,117 @@ fn a_peers_parts_are_read_from_its_parts_lists_never_its_capability() {
     );
 }
 
+/// Every `verify_shard(` call in `text` that checks bytes already HELD
+/// (`Reread::IfChanged` / `IfChangedPaced`) and acts on its failure without
+/// its function asking `shard::judged_nothing`, as 1-indexed lines. A mismatch
+/// on a part that changed while it was read judges nothing (#477): a
+/// quarantine, dispute or re-fetch on it acts on bytes no longer there, and
+/// the pending-verification pass and the rescan did exactly that while only
+/// the background pass asked (v0.3.298 review). A call answered only as
+/// `.is_ok()` / `.is_err()` asks a question ("may this download be skipped",
+/// "is it still missing") whose "no" fetches, never destroys or disputes.
+fn held_part_checks_that_judge_a_changed_part(text: &str) -> Vec<usize> {
+    let bodies = fn_bodies(text);
+    let tests = cfg_test_spans(text);
+    let bytes = text.as_bytes();
+    let mut out = Vec::new();
+    let mut from = 0usize;
+    while let Some(rel) = text[from..].find("verify_shard(") {
+        let at = from + rel;
+        from = at + 1;
+        let line_start = text[..at].rfind('\n').map_or(0, |i| i + 1);
+        let joined = at > 0 && (bytes[at - 1].is_ascii_alphanumeric() || bytes[at - 1] == b'_');
+        if joined
+            || tests.iter().any(|(s, e)| *s < at && at < *e)
+            || text[line_start..at].contains("//")
+            || text[line_start..at].trim_end().ends_with("fn")
+        {
+            continue;
+        }
+        // The call's own arguments, to its matching `)`.
+        let open = at + "verify_shard".len();
+        let mut depth = 0i32;
+        let mut close = None;
+        for (k, &b) in bytes.iter().enumerate().skip(open) {
+            match b {
+                b'(' => depth += 1,
+                b')' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        close = Some(k);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let Some(close) = close else { continue };
+        if !text[open..close].contains("Reread::IfChanged") {
+            continue;
+        }
+        let after = text[close + 1..].trim_start();
+        if after.starts_with(".is_ok()") || after.starts_with(".is_err()") {
+            continue;
+        }
+        let asks = bodies
+            .iter()
+            .filter(|(s, e)| *s < at && at < *e)
+            .min_by_key(|(s, e)| e - s)
+            .is_some_and(|&(s, e)| text[s..e].contains("judged_nothing("));
+        if !asks {
+            out.push(text[..at].matches('\n').count() + 1);
+        }
+    }
+    out
+}
+
+/// #477: every check of a part already held that acts on a failure asks
+/// `shard::judged_nothing` first, so a part replaced or given back while it
+/// was read is checked again later — never quarantined, disputed, struck from
+/// what this node announces or re-fetched on a hash of bytes no longer there.
+#[test]
+fn no_check_of_a_held_part_judges_one_that_changed_while_it_was_read() {
+    let planted = "fn pass(s: &Store) {\n    if let Err(e) = s\n        .verify_shard(\n            &m,\n            &i,\n            policy,\n            &checks,\n            crate::model::shard::Reread::IfChangedPaced(&pace),\n        )\n    {\n        quarantine(e);\n    }\n}\n";
+    assert_eq!(
+        held_part_checks_that_judge_a_changed_part(planted),
+        vec![3],
+        "the scan cannot see a wrapped check of a held part that skips the question"
+    );
+    let asked = planted.replace(
+        "    {\n        quarantine(e);",
+        "    {\n        if judged_nothing(&e) {\n            return;\n        }\n        quarantine(e);",
+    );
+    assert!(held_part_checks_that_judge_a_changed_part(&asked).is_empty());
+    let question = "fn still_here(s: &Store) -> bool {\n    s.verify_shard(&m, &i, KeepBytes, &c, Reread::IfChanged)\n        .is_ok()\n}\n";
+    assert!(held_part_checks_that_judge_a_changed_part(question).is_empty());
+    let gate = planted.replace("Reread::IfChangedPaced(&pace)", "Reread::Always");
+    assert!(held_part_checks_that_judge_a_changed_part(&gate).is_empty());
+    let root = repo_root();
+    let mut offenders = Vec::new();
+    for path in rust_files_under(&root.join("src")) {
+        if module_file_is_test_only(&path) {
+            continue;
+        }
+        let rel = path
+            .strip_prefix(&root)
+            .unwrap_or(&path)
+            .display()
+            .to_string()
+            .replace('\\', "/");
+        let text = std::fs::read_to_string(&path).expect("read source");
+        for line in held_part_checks_that_judge_a_changed_part(&text) {
+            offenders.push(format!("{rel}:{line}"));
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "a check of a held part acts on its failure without asking \
+         `crate::model::shard::judged_nothing(&e)` first — a part that changed while it was \
+         read (a repair's replacement, a give-back) is not judged, it is checked again at the \
+         next pass (#477): {offenders:?}"
+    );
+}
+
 /// Every site in `text` that builds an `InferenceOutput` carrying content
 /// without its enclosing function calling `finalize_reply_text`, as 1-indexed
 /// line numbers. Separated from the test so the planted-violation self-test

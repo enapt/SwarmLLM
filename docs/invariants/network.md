@@ -1575,8 +1575,12 @@ keeps inode and mtime). The pass runs at start and every 6 h and reads only what
 - A mismatch is acted on only if the part's stamp is the same after the read as before it. A paced read takes a
   minute at the busy pace, long enough for a repair to rename a good copy over the bad one; quarantining on the old
   inode's hash would throw the good copy away (`a_part_replaced_while_it_is_read_is_not_judged_on_the_old_bytes`,
-  red without the check). `shard::judged_nothing` names that error and a stopped read; the pass skips both. GNU
-  tar's "file changed as we read it" is the same stat-before, stat-after.
+  red without the check). `shard::judged_nothing` names that error and a stopped read; EVERY check of a held part
+  skips both. At first only the background pass asked: the pending-verification pass (`verify_pending_shards`)
+  struck an intact replacement from what the node announced and the rescan showed a red "failed hash verification"
+  toast for it (v0.3.298's pre-release review); `no_check_of_a_held_part_judges_one_that_changed_while_it_was_read`
+  now fails on a held-part check that acts on a failure without asking, and was red on exactly those two. GNU tar's
+  "file changed as we read it" is the same stat-before, stat-after.
 - The busy judgement compares only reads at a spinning disk's speed (`QUICKER_THAN_A_SPINNING_DISK`, 10 ms a 4 MiB
   read). Judged against a cached part, a laptop disk's own ~85 ms inner-track reads tripped any fixed floor
   (`reads_quicker_than_a_spinning_disk_never_set_the_speed_to_beat`, red with cached reads let in).
