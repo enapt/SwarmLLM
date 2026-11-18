@@ -223,13 +223,41 @@ impl PartsChecked {
     /// `stamp_now` reads it (`None` = gone) — a part given back, deleted or
     /// replaced. Run after each background pass, so the tree holds at most
     /// one row per part on disk. How many went.
+    ///
+    /// Every file is read BEFORE the write transaction: redb takes one writer
+    /// at a time and blocks the rest, so a stat inside it held every other
+    /// writer of the database for the whole sweep — a stat per held part
+    /// (443 on a field node's busy hard disk), every 6 h. Prior art:
+    /// optimistic concurrency control (Kung & Robinson 1981) reads first and
+    /// only validates inside; LMDB, single-writer like redb, says keep write
+    /// transactions short. Nothing looking stale opens no transaction at all.
     pub fn forget_stale(&self, stamp_now: impl Fn(&ModelId, u32) -> Option<FileStamp>) -> usize {
-        // Judged inside the removing transaction: a record a check rewrote
-        // after a snapshot would be judged on its OLD stamp and lost.
+        let looked_stale: std::collections::HashSet<(String, u32)> =
+            match self.db.get_all_json::<CheckedPart>(PARTS_CHECKED_TREE) {
+                Ok(rows) => rows
+                    .into_iter()
+                    .filter(|(_, rec)| {
+                        stamp_now(&ModelId(rec.model_id.clone()), rec.index) != Some(rec.stamp)
+                    })
+                    .map(|(_, rec)| (rec.model_id, rec.index))
+                    .collect(),
+                Err(e) => {
+                    tracing::debug!(error = %e, "Could not read the part-check records");
+                    return 0;
+                }
+            };
+        if looked_stale.is_empty() {
+            return 0;
+        }
+        // A row that looked stale is judged AGAIN inside the removing
+        // transaction: a record a check rewrote after the read above would be
+        // judged on its OLD stamp and lost. One that went stale since is
+        // left for the next sweep — it vouches only for the file it stamped.
         match self
             .db
             .remove_json_where::<CheckedPart>(PARTS_CHECKED_TREE, |_, rec| {
-                stamp_now(&ModelId(rec.model_id.clone()), rec.index) != Some(rec.stamp)
+                looked_stale.contains(&(rec.model_id.clone(), rec.index))
+                    && stamp_now(&ModelId(rec.model_id.clone()), rec.index) != Some(rec.stamp)
             }) {
             Ok(n) => n,
             Err(e) => {
@@ -389,5 +417,65 @@ mod tests {
         assert_eq!(gone, 1);
         assert_eq!(checks.len(), 1);
         assert!(checks.vouches_for(&ModelId("kept".into()), 0, &hash, &stamp.unwrap()));
+    }
+
+    /// The sweep reads the files while no write transaction is open, so
+    /// another writer of the database is not held for the stats — and a
+    /// record rewritten between the read and the removal is still kept. Red
+    /// with the stats back inside the transaction: the writer below waits
+    /// out the first stat.
+    #[test]
+    fn a_sweep_holds_no_other_writer_while_it_reads_the_files() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let dir = tempfile::tempdir().unwrap();
+        let path = part(dir.path(), b"x");
+        let stamp = FileStamp::of(&path).unwrap();
+        let checks = PartsChecked::for_tests();
+        let hash = *blake3::hash(b"x").as_bytes();
+        let m = ModelId("m".into());
+        for index in 0..3 {
+            checks.note_checked(&m, index, &hash, Some(stamp));
+        }
+        let (probed, writer_waited) = (AtomicBool::new(false), AtomicBool::new(false));
+        let db = checks.db.clone();
+        let gone = checks.forget_stale(|_, index| {
+            if !probed.swap(true, Ordering::SeqCst) {
+                let (db, (tx, rx)) = (db.clone(), std::sync::mpsc::channel());
+                std::thread::spawn(move || {
+                    let _ = db.put_json("parts_checked_test_other", "k", &1u32);
+                    let _ = tx.send(());
+                });
+                let waited = rx.recv_timeout(std::time::Duration::from_secs(2)).is_err();
+                writer_waited.store(waited, Ordering::SeqCst);
+            }
+            // Part 1 is gone from disk; parts 0 and 2 are as stamped.
+            (index != 1).then_some(stamp)
+        });
+        assert!(
+            !writer_waited.load(Ordering::SeqCst),
+            "another writer waited out a stat"
+        );
+        assert_eq!(gone, 1);
+        assert!(checks.vouches_for(&m, 0, &hash, &stamp));
+        assert!(!checks.vouches_for(&m, 1, &hash, &stamp));
+
+        // Part 2 replaced on disk: it looks stale on the read, and a check
+        // records the new file before the removal — judged again inside the
+        // transaction, as it is now, and kept.
+        let other_dir = tempfile::tempdir().unwrap();
+        let fresh = FileStamp::of(&part(other_dir.path(), b"y")).unwrap();
+        assert_ne!(fresh, stamp);
+        let rechecked = AtomicBool::new(false);
+        let gone = checks.forget_stale(|_, index| {
+            if index != 2 {
+                return Some(stamp);
+            }
+            if !rechecked.swap(true, Ordering::SeqCst) {
+                checks.note_checked(&m, 2, &hash, Some(fresh));
+            }
+            Some(fresh)
+        });
+        assert_eq!(gone, 0, "the rewritten record is judged as it is now");
+        assert!(checks.vouches_for(&m, 2, &hash, &fresh));
     }
 }

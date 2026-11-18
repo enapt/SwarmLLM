@@ -1585,7 +1585,17 @@ keeps inode and mtime). The pass runs at start and every 6 h and reads only what
   read). Judged against a cached part, a laptop disk's own ~85 ms inner-track reads tripped any fixed floor
   (`reads_quicker_than_a_spinning_disk_never_set_the_speed_to_beat`, red with cached reads let in).
 - Stale records are judged INSIDE the removing transaction (`Database::remove_json_where`): a snapshot judged first
-  lost a record a check rewrote in between.
+  lost a record a check rewrote in between. **But the files are stat'ed BEFORE it** (2026-11-18, the .298
+  pre-release review's point): redb takes one writer at a time and blocks the rest, and the sweep stat'ed every held
+  part inside its write transaction — 443 on the field report's hard disk, every 6 h, every other writer of the
+  database held for it. `PartsChecked::forget_stale` now reads every record and stats its file with no transaction
+  open, opens none when nothing looks stale (the usual sweep), and inside re-judges only the rows that looked stale,
+  with a fresh stat — so the race fix holds (a row rewritten in between is judged as it is now; one gone stale since
+  waits for the next sweep, vouching only for the file it stamped). Optimistic concurrency control's read-then-validate
+  (Kung & Robinson 1981); LMDB, single-writer too, says keep write transactions short. Test
+  `a_sweep_holds_no_other_writer_while_it_reads_the_files` (a writer started during the first stat waited it out, 2 s,
+  with the stats inside; and the rewritten-row half). The hold on a hard disk is unmeasured here (this machine's parts
+  are on a solid-state disk and in the page cache).
 - A record says nothing about the swarm: it never clears a dispute by itself. The pass calls `note_shard_verified`
   for a recorded part exactly as for a read one — the record IS a pass of these bytes against this hash.
 
