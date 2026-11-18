@@ -601,8 +601,19 @@ pub fn describe_missing_layers(from: u32, to_exclusive: u32) -> String {
 /// Shared so the error and anything else stating the figure agree; `None` is
 /// "one of them did not say", which still leaves the plan's verdict — no route
 /// fitted what they did offer — true to state.
+///
+/// **Room for every layer is not a route.** The figure counts each layer once,
+/// on one computer holding it with room (`scheduler::layers_carried`), so it
+/// can reach the whole model while no chain does: a 35B-A3B's holders held
+/// pieces only a seven-hop chain crossing two continents could join, and the
+/// refusal read "room for about 40 of its 40 layers" beside "not enough
+/// memory" (2026-11-18). That case says where the room falls short instead.
 pub fn describe_offered_room(offered_layers: Option<u32>, num_layers: u32) -> String {
     match offered_layers {
+        Some(layers) if layers >= num_layers => format!(
+            "the computers holding it have room for all {num_layers} of its layers between them, \
+             but not in pieces one chain of them can run in turn"
+        ),
         Some(layers) => format!(
             "the computers holding it have room for about {layers} of its {num_layers} layers \
              between them"
@@ -1820,6 +1831,22 @@ mod tests {
         ] {
             assert_eq!(failure_log_level(&err), FailureLevel::Error, "{err}");
         }
+    }
+
+    /// Room for every layer that no chain lines up is told as that — never as
+    /// "room for about 40 of its 40 layers" beside "not enough memory" (the
+    /// 35B-A3B's re-plan, 2026-11-18) — and a real shortfall keeps its figure.
+    #[test]
+    fn room_for_every_layer_is_not_told_as_a_shortfall_figure() {
+        let whole = describe_offered_room(Some(40), 40);
+        assert!(!whole.contains("about 40 of its 40"), "{whole}");
+        assert!(whole.contains("room for all 40 of its layers"), "{whole}");
+        assert!(whole.contains("one chain"), "{whole}");
+        let short = describe_offered_room(Some(17), 48);
+        assert!(
+            short.contains("room for about 17 of its 48 layers"),
+            "{short}"
+        );
     }
 
     /// A peer going quiet is real and worth seeing, but it is not this node
