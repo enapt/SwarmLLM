@@ -208,6 +208,8 @@ swarmllm/
 │                 release_shapes.sh, family_conformance.sh, reply_ab.sh, split_rig.sh, stream_bench.py;
 │                 readme_speeds.py — the README's one-computer speeds, written from a release
 │                 check's speed.jsonl in the next bump commit (completeness.md § "README speeds");
+│                 heat_rule_replay.py — the heat guard's processor rule replayed over a recorded
+│                 temperature log: how often it would hold, under what load (#440 (D)'s calibration);
 │                 pair_speeds_by_reply.py — two arms' speeds per prompt, grouped by the reply each
 │                 arm actually wrote (a near-tie the batch shape flips makes two arms of one
 │                 prompt compare different texts, #411);

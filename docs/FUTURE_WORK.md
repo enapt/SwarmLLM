@@ -461,7 +461,8 @@ Microsoft WDDM/TDR docs, Apple developer docs; issue trackers of Ollama, LM Stud
   processor A/B that ended cleanly, so the line as it stands would hold on nearly every long processor job.~~ Not so:
   the rule needs five minutes with NO reading under 93 °C (the 11-12 clock restart), and 60 of 90 is not that.
   **Calibrated 2026-11-18** by replaying `PROCESSOR_HOT_C` / `PROCESSOR_HOT_FOR` / `PROCESSOR_COOL_C` / `COOL_FOR`
-  over this laptop's zone (`night1106-win.csv`, 313 h, 11-05 → 11-18, one reading a 30 s round): **14 holds, 2.4 h
+  over this laptop's zone (`examples/heat_rule_replay.py` on `night1106-win.csv`, 313 h, 11-05 → 11-18, one reading a
+  30 s round): **14 holds, 2.4 h
   in all**, each under a rig, a gate or a long processor run (Windows busy 12-87% in the five minutes before), never
   idle; 8.9 h of that period had the processor 40% busy or more. At one reading a minute it would be 19 holds, 3.3 h
   (fewer readings under the line restart the clock less), so the reader keeps the round. The last replayed hold
