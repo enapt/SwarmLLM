@@ -2077,6 +2077,23 @@ largest gossip term is now `ShardAnnounce` (26/h × 21.3 KB = 157 B/s), then `He
 received. Taken an hour after a restart, inside the window where the doubling repeat (2i) is still short: a later read
 at steady state can only be lower. Nothing left of (2j).
 
+**(2m) Demand gossip republished every 30 s for hours — read 2026-11-18 22:22-22:32Z, NOT built.** The live node
+(v0.3.299, idle, up 82-92 min, 6 peers on .299, no parts moving): **in 10.3, out 7.4 MB/h** (`/metrics`, total less
+parts; inside .279's README range). `swarm/regions` is now the largest gossip topic, 4.6 MB/h in and 2.2 out, and is
+ALL `ModelDemandGossip`: 4,026 delivered in ~95 min (~42 a minute, 3.0 on 10-16), each received ~3 times
+(`recv_msgs_unfiltered` 12,164), ~413 B — ~290 B/s delivered, against all gossip ~324 B/s at 18:00Z the same day.
+**Why**: `HealthMonitor::broadcast_region_demand` sends one message per model whose own decayed rate is ≥ 0.01, every
+gossip round (30 s at ≤ 10 peers); the rate decays ×0.85 a 10-minute tick (`EMA_DECAY_WEIGHT`), so a model asked ONCE
+is republished every 30 s for ~4.7 h (~560 messages per node and model). The evening's tier run (#427, ~10 models
+through AU and the Italian peers) left ~21 (node, model) pairs live; a real swarm's normal use is the same shape.
+**Constraint for a fix**: the receiver blends 0.8 old + 0.2 per DELIVERED message (`dispatch` § ModelDemandGossip), so
+the send cadence is part of the receiver's averaging time — sending less often must make the blend time-aware
+(α = 1 − e^(−Δt/τ), the irregular-sampling EMA), or the demand map lags. Shape to weigh: send a model's rate when it
+moved ≥ 10% since its last send, else every 10 min (the decay tick), with the receiver weighing by elapsed time; and
+a publish line nearer what auto-manage reads as demand than 0.01. Saves ~4 MB/h each way on an idle node after a
+busy evening. Prior art to look up before building: Cassandra/Akka gossip of slowly changing load (send on change +
+heartbeat), irregular-interval EMA.
+
 #### #169 — Connection churn on multi-interface hosts: only the LAN dial is deterministic
 `P3` · network · **PARTIAL** — 2026-07-25 · history: archive § "Connection churn on multi-interface hosts — deterministic dialer partial", gotcha #353
 
