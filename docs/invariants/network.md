@@ -5407,7 +5407,7 @@ variable list to the receiver's bound rather than having the whole message refus
 `a_computer_holding_more_parts_than_a_capability_lists_is_still_heard`, red (1,102 parts) without it. #91 (2j) removes
 the list from the capability altogether; until then this keeps a large holder heard.
 
-**Superseded by #91 (2j)'s second release** (on main 2026-11-18, not in a release yet): a capability sends no parts
+**Superseded by #91 (2j)'s second release** (shipped in v0.3.299, 2026-11-18): a capability sends no parts
 (`types::PartsNotListed`, § "A peer's parts are read from its parts lists"), so `parts_for_the_capability` and its test
 went. The receiver's bound stays — a v0.3.297 or v0.3.298 sender still lists up to 1,024 — now on the COUNT decoded
 (`PartsNotListed::arrived`), the list itself never kept; test `a_peers_capability_parts_list_is_only_counted`.
@@ -5548,7 +5548,7 @@ good, and a mistyped model name would wait out every connected empty computer's 
 on the same ≤ 40-minute ladder); the readers that see such peers — the pool forward, the listings — skip it until its
 list arrives, which a fallback and a display can afford.
 
-**Release N+1 (on main 2026-11-18, not in a release yet): the list cannot be filled or read.**
+**Release N+1 (shipped in v0.3.299, 2026-11-18): the list cannot be filled or read.**
 `NodeCapability::hosted_shards` is a `types::PartsNotListed`: it serializes as `[]` whatever it holds, and decoding
 COUNTS what a v0.3.298 sender lists (`serde::de::IgnoredAny`, nothing allocated) for `capability_fits`'s bound —
 `arrived()` is its one accessor. So the wrong call is unrepresentable rather than guarded: no sender can put parts

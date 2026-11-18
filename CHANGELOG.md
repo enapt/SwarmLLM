@@ -1,5 +1,44 @@
 # Changelog
 
+## [0.3.299-alpha] — 2026-11-18
+
+**A computer asked for more layers of a split keeps the ones it ran on its graphics card.** When a computer serving
+the far end of a split was asked for a wider range that started earlier — say layers 20-48 where it had held 26-48,
+all on its graphics card — the new copy filled the card from the range's first layer and moved the layers it had been
+running there to the processor. Since v0.3.297 such a request was refused instead, and a computer with no room of its
+own for those layers then found no route at all. A part of a model that does not start it now runs its first layers on
+the processor and its last layers and the model's output on the card, the order llama.cpp uses, so the layers already
+on the card stay there. Checked on a graphics card with a two-computer split of Qwen2.5-Coder-7B: every reply was the
+model's own as llama.cpp judges it, at the same speed in either order. The part that starts a model, and a whole model,
+are placed as before; `SWARMLLM_PROCESSOR_RUN_FIRST=0` restores the old order (#461).
+
+**Status announcements are about four times smaller.** Every computer repeated the list of model parts it holds inside
+each status announcement, beside the parts list it sends anyway. That copy was about three quarters of each
+announcement, and announcements were most of the swarm's background traffic (467 of about 670 bytes a second that a
+computer received while idle). Since v0.3.298 every computer reads the parts list instead, so the copy is gone; an
+announcement now carries an empty list, which a v0.3.298 computer still reads. A computer older than v0.3.298 still
+reads the copy: it is two releases behind, and is disconnected once this release is out (#91).
+
+**Updates arrive within minutes of a release even when peers heard of it early.** When two computers in the swarm run
+a newer version, the others check GitHub early instead of waiting for their hourly check. That early check happened
+only once per version: two test computers ran v0.3.298 before it was published, every computer they reached checked
+early and found nothing yet, and after the publish those computers waited up to an hour while a fresh one updated in
+under a minute. An early check that finds nothing now stays armed and runs again when peers next report the version,
+at most every 10, then 20, then 40 minutes; GitHub alone still decides what is installed. Computers running this
+release get the next one this way.
+
+**The 6-hourly check of model parts no longer holds up the computer's other saves.** Every 6 hours a computer forgets
+its records of parts it gave back, deleted or replaced. It looked up each held part's file on disk while holding its
+database, so every other save on the computer — its peer list, its measurements, the next part check — waited for all
+of it: 443 lookups on one tester's hard disk. The lookups now run with nothing held, and a sweep that finds nothing to
+forget, the usual case, takes no hold at all.
+
+**Correction: the README's speeds on one computer were too high since v0.3.291.** Those figures come from asking each
+model about the same document several times, and a model reuses words from your earlier replies, so from v0.3.290's
+check on each timed reply mostly copied the one before it. The 7B on the graphics card showed 189-197 tokens a second; writing
+a new reply, it is 67-70. Every figure in that table is now timed with the earlier replies left out. Nothing in the
+program changed; across computers, the figures were measured with a question of their own and stand.
+
 ## [0.3.298-alpha] — 2026-11-18
 
 **A restart no longer reads every model part from disk.** Each start read every part this computer holds, in full and

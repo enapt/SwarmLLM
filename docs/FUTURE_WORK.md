@@ -2029,7 +2029,7 @@ ask only CONNECTED computers, and a connecting computer sends its parts list str
 same direct path (`network/manager/identify.rs`, #359), so the gap is the two messages' flight; and a computer
 holding nothing sends no list, so the record could never be set for it — "unknown" would last for good, and a
 mistyped model name would wait out every connected empty computer's 3-minute catch-up.
-**Release N+1 DONE on main 2026-11-18 (not in a release yet): a capability carries no parts.**
+**Release N+1 SHIPPED in v0.3.299 (2026-11-18): a capability carries no parts.**
 `NodeCapability::hosted_shards` is a `types::PartsNotListed`: serialized `[]` whatever it holds (the key stays — a
 v0.3.298 node requires it), decoded to a COUNT only (`serde::de::IgnoredAny`, nothing allocated; `arrived()`, read only
 by `capability_fits`'s bound for a v0.3.297/.298 sender). No sender can fill it and no reader can take parts from it —
@@ -5702,7 +5702,7 @@ reverse — and its post-verify keeps drafting while the target verifies (up to 
 between the two; here they would.
 
 #### #461 — A peer's split that asks a computer for a WIDER range replaces its all-card copy with a mostly-processor one, which then serves every narrower request too
-`P3` · memory / admission · **NARROWED** — 2026-11-15 (the growth half shipped in v0.3.292); contributor 1's guard built 2026-11-17 (shipped in v0.3.297-alpha); residual (4)'s placement built 2026-11-18 (on main, not in a release yet) · found on the real link (`real_link.sh` TAG=bal292, a forced split point) · related: #3 (j12), #3 (j13), #449, #458
+`P3` · memory / admission · **NARROWED** — 2026-11-15 (the growth half shipped in v0.3.292); contributor 1's guard built 2026-11-17 (shipped in v0.3.297-alpha); residual (4)'s placement built 2026-11-18 (shipped in v0.3.299) · found on the real link (`real_link.sh` TAG=bal292, a forced split point) · related: #3 (j12), #3 (j13), #449, #458
 
 **Narrowed 2026-11-15 (v0.3.292)**: contributor 2 was the GROWTH ladder (below, "Contributor 2 found"), and
 `charge_segment_as_split` now steps aside for an idle worker whose spawn range the new range takes in, so the
@@ -5718,7 +5718,7 @@ entry on the first layer's device copies it once (a middle segment 4 → 2); a s
 one binary. And the accounting itself — a worker IN USE still takes the
 wider range as a split sized beside the dropped range, and the daemon keeps charging that range's base.
 
-**Built 2026-11-18 (residual (4), the placement; on main, not in a release yet)**: a range that does not start the
+**Built 2026-11-18 (residual (4), the placement; shipped in v0.3.299)**: a range that does not start the
 model gives the processor its FIRST layers and the card its last and the head (`hybrid::RunPlace::Start`, chosen by
 `hybrid::run_place`; a first segment keeps the card-first tail, a whole model that guesses its middle run), read alike
 by the loader, the pool's charges and the planner (`NodeCandidate::processor_run_first`; a peer by
@@ -7281,7 +7281,10 @@ grep `^| N |`).
   v0.3.298's pre-release review: a part that changed WHILE read was skipped by the background pass only — the
   re-check after a hash change and the rescan still acted on it (`2b66cbcc0`: every held-part check asks
   `shard::judged_nothing`, guard `no_check_of_a_held_part_judges_one_that_changed_while_it_was_read`). On Windows
-  (no inode, size + mtime) a restart read 0 of 638 MiB and a touched part alone was read again (304 MiB).
+  (no inode, size + mtime) a restart read 0 of 638 MiB and a touched part alone was read again (304 MiB). **Seen on
+  the swarm** (this repo's node on v0.3.298, 250 parts on a solid-state disk): its first start read every part once
+  (`verified=173 recorded=77 read_mib=90041 took_s=2866`, at the pace), and the two restarts after it read none
+  (`verified=0 recorded=250 read_mib=0 took_s=0`, 2026-11-18 12:22Z and 12:29Z).
 
 **Closed 2026-11-18 (shipped in v0.3.297-alpha; #476 withdrawn)** (#377, #471, #188, #476)
 - #476 — **WITHDRAWN the hour it was filed: the claim was wrong.** It said a manifest past `MAX_SHARDS_PER_MANIFEST`

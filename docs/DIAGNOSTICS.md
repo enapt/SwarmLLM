@@ -2686,6 +2686,19 @@ records the hash as origin-verified, so no peer's claim can displace it.
 
 ## Benchmarks
 
+### A repeated ask times a COPY, not writing (2026-11-18)
+
+A model run whole here copies from the owner's earlier replies (#337, `owner_replies`; whole models since v0.3.268),
+and a benchmark that asks the same thing twice gets the same reply back, so its second reply is a copy of its first
+(on the card from v0.3.290's check on; what made the card take the copy then is not traced):
+`--unique` changes the PROMPT, never the reply. The release check's speed step timed exactly that from v0.3.290 to
+v0.3.298: the 7B on the card "wrote" 105-205 tok/s against 54-57 for a reply written new (v0.3.290's own check,
+the previous build 54 beside it), the spread being how much of the copy each run took — the card "dips" of the
+.293-.298 gates ("cand_2's warm sample 120 vs ~200") were that spread, not the machine. The tell: a step under the
+time the card needs to read the weights once (a 4.4 GB 7B: ~17 ms a token on this card; the copies ran 5-10 ms). Time
+writing with `SWARMLLM_FLOW_COPY_STORE=0` on the node (the gate's step 7 and `rebench.sh` since 2026-11-18), or ask
+a question no earlier reply answers; read a copy rig's figures as a copy's.
+
 ### One model's decode rate on this machine, against llama.cpp (2026-10-19)
 
 `swarmllm test-split --gpu-layers 99 --model <file.gguf> --max-tokens 160 --prompt "…"`

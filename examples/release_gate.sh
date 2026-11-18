@@ -145,7 +145,14 @@ if [ "${SPEED:-1}" != 0 ]; then
     # off: an older binary than the latest PUBLISHED release installs it over its own file
     # (offline_mode does not stop that), so its later arms run the new build (gotcha #982).
     printf '[auto_manage]\nenabled = false\nprune_enabled = false\n\n[network]\nbootstrap_peers = []\ndisable_default_bootstrap = true\nenable_mdns = false\ngossip_network_id = "swarmllm-gate-speed"\n\n[pool]\nprivate_mode = true\nprivate_mode_allow_lan = false\noffline_mode = true\n\n[updates]\nmode = "off"\n\n[ui]\nopen_browser_on_start = false\n%b\n' "$4" > "$D/config.toml"
-    SWARMLLM_NODE_DATA_DIR="$D" "$1" run -p 8825 > "$D/node.log" 2>&1 &
+    # The store of the owner's earlier replies OFF (#337): every ask here is the same document,
+    # and the reply is the same text whatever --unique does to the prompt, so from v0.3.290 each
+    # timed reply COPIED the one before it — the 7B on the card "wrote" 105-205 tok/s against 54
+    # for a reply written new (v0.3.290's own check: prev 54, cand 108-180), the spread being how
+    # much of the copy a run accepted. A new question has no earlier answer to copy, so this times
+    # writing. Prior art: llama-bench's text-generation test runs no lookup; vLLM's and SGLang's
+    # serving benchmarks send distinct requests, as a cache that has seen the answer is not timing.
+    SWARMLLM_FLOW_COPY_STORE=0 SWARMLLM_NODE_DATA_DIR="$D" "$1" run -p 8825 > "$D/node.log" 2>&1 &
     local P=$!
     for _ in $(seq 1 90); do [ -f "$D/api_key" ] && curl -s -m 3 localhost:8825/health > /dev/null && break; sleep 2; done
     # Unbuffered, line by line: a safety kit names the step from this file's last "== " line, and

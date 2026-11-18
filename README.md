@@ -149,25 +149,24 @@ idea, applied to running AI instead of sharing files.)
 
 ## How fast is it?
 
-<!-- speeds:begin, reviewed for 0.3.298-alpha. Refreshed at every release: .claude/rules/completeness.md § "README speeds" -->
+<!-- speeds:begin, reviewed for 0.3.299-alpha. Refreshed at every release: .claude/rules/completeness.md § "README speeds" -->
 Speed is in **tokens a second**: a token is a word or part of one, and most
 people read about 5 a second. The figures are from the project's test laptop,
 with an 8 GB NVIDIA RTX 3070 graphics card and an 8-core AMD Ryzen 7 5800H
 processor, on its own or teamed up with volunteers' computers.
 
 <!-- release-check:begin -->
-<!-- from the v0.3.296 release check, timed on the downloaded release -->
+<!-- from the v0.3.298 release check's speed step, timed again on the published release with the machine idle, the check's own figures set aside -->
 **On one computer.** Each model reads a 1,800-token document and writes 128
 tokens about it.
 
 | Model | Runs on | Writing (tokens a second) | Reading (tokens a second) |
 |---|---|---|---|
-| Qwen2.5 Coder 7B | the graphics card | 189–197 | 1,720–1,760 |
-| Qwen2.5 14B | card and processor (too big for the card) | 12.5–19.4 | 590–600 |
-| Qwen3 30B-A3B (2-bit) | card and processor (a mixture of experts, too big for the card) | 28–30 | 230 |
-| Llama 3.2 3B | the processor only | 25–31 | 70–80 |
+| Qwen2.5 Coder 7B | the graphics card | 67–70 | 1,730–1,740 |
+| Qwen2.5 14B | card and processor (too big for the card) | 12.4–13.9 | 250–380 |
+| Qwen3 30B-A3B (2-bit) | card and processor (a mixture of experts, too big for the card) | 26.7–27.3 | 230 |
+| Llama 3.2 3B | the processor only | 17.5–17.9 | 80 |
 <!-- release-check:end -->
-<!-- release-check:skipped v0.3.297 — every arm of its speed step ran slow on the machine, both builds alike: the 7B on the card wrote 134–176 against 189–197 at the v0.3.296 check, while v0.3.297 matched or beat v0.3.296 inside that same step (A/B/B/A); its gate took 86 min against 42 -->
 
 **Across computers.** The same laptop, in Thailand, asking a volunteer's
 computer in Australia with a 12 GB RTX 3060 card, about 115-135 ms there and back
@@ -412,7 +411,7 @@ SwarmLLM is built by a human developer working with Claude Code, an AI
 programming assistant: the human sets the direction, tests and reviews, and
 Claude writes the code. We say so openly so you can judge the project on its
 merits. Every change is checked by thousands of automated tests
-(4739 lib tests + 80 integration tests) before it ships, and regular
+(4746 lib tests + 80 integration tests) before it ships, and regular
 automated audits are logged in the repository. Scrutiny and contributions are
 welcome.
 
