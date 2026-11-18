@@ -4602,13 +4602,14 @@ With the first measure's stand-in loss on code (77-96% of a true round), S = 16 
 ~65% on prose. **The price decides it, not the yield**: a spare is checked only after the near segment has run its
 rows, so the near side must run its layers over S × 16 extra rows every round and send each spare's boundary rows —
 16 × 4,096 × 2 bytes = 128 KB a spare at f16, **2 MB a round for S = 16** (0.8 s at 20 Mbit/s), 512 KB for S = 4.
-#437's tree reaches a comparable gain inside ONE check (DDTree-64 τ 6.82 → 8.49-9.69 on a 27B, 64 rows, no extra
-round's bytes), so #437 comes first; a spare is worth building after it only for a split with bandwidth to spare,
-at S ≤ 4, where it adds ~20-30%. (The stage-1 fixed-reply test reads code 6.96 a block / story 1.00 today against
+#437's tree, measured on the same texts the same day, reads code 9.96 / prose 3.50 at 64 nodes inside ONE check (no
+extra round's bytes) against the spares' S = 16 upper bounds 12.68 / 3.94: on prose the tree takes most of a spare's
+gain for a fraction of its bytes, so #437 comes first; on code spares add more (+42% against +12%) where the link has
+bandwidth to spare, and the two compose (a spare can itself be a tree). (The stage-1 fixed-reply test reads code 6.96 a block / story 1.00 today against
 6.47 / 1.44 on 11-08: code holds; the story's figure is one prose reply's.)
 
 #### #437 — A split checks a TREE from the block drafter, and the recurrent layers walk it
-`P2` · perf-split · **OPEN** (researched 2026-11-08, not built) · history: #428, #134 (trees for small drafters)
+`P2` · perf-split · **OPEN** (researched 2026-11-08; first measure 2026-11-19, not built) · history: #428, #134 (trees for small drafters)
 A block drafter's one forward gives a distribution at every position; DDTree (arXiv 2604.12989) builds a tree from
 those marginals best-first (a node's score the sum of its path's log-probabilities, budget B, parents before children,
 each row seeing its parent's row and itself) and checks it in one forward: on Qwen3.6-27B a chain of 16 keeps τ 6.82,
@@ -4620,6 +4621,19 @@ TreeWY 2608.20961 (a vLLM fork) does the same with a WY form; Twig/Bole 2608.016
 parent pointers; SpecLA 2607.16673; STree 2505.14969 for Mamba-2. Take: the ancestor mask over the delta rule (our one
 kernel, `qwen35::delta_rule_into`, gains a parent-pointer mode), the accepted path replayed by the existing replay
 (`SsmState::rewind_to` already replays kept rows). Build after #428's field model runs on two real peers.
+**First measure DONE 2026-11-19** (processor, Qwen3.5-9B Q4_K_M + its DFlash drafter, block 15, one fixed 256-token
+greedy reply each — the #436 probes' text; the ignored test `a_block_drafters_tree_from_its_marginals`): DDTree's tree
+built best-first from the drafter's own scores (`BlockDrafter::draft_scores`), a check keeping the deepest path the
+reply follows plus the bonus word, each arm walking the reply by its own checks. Tokens a check:
+- **story** (prose): chain of 15 **2.39** (102 checks); tree of 16 **3.25 (+36%)** — one row more than the chain's
+  check; 32: 3.36; 64: 3.50 (+46%); 128: 3.89 (+63%).
+- **code**: chain 8.93 (27 checks); tree of 16: 8.31; 32: 10.04 (+12%); 64: 9.96; 128: 10.33 (+16%).
+Keeping the chain whole and spending the rest best-first (SpecExec / Sequoia) reads the same within noise (code ±~0.5
+over 24-29 checks: the chain plus ONE node read 8.61, which only the walk's own course can do). So the tree is the
+prose lever a split lacks (#469's fix order (1)): at the chain's own check width it keeps a third more where a block
+drafter keeps least. Both families that carry a block drafter are refused a tree today
+(`SplitModel::draft_tree_refusal`): Qwen 3.5/3.6 for its recurrent layers (the build above), Gemma 4 for its sliding
+windows (a window keeps keys by position) — the window's refusal is the second half of the build.
 
 #### #318 — A large model split across machines is too slow to use
 `P2` · perf-split · **OPEN** — 2026-10-20 · plan: `docs/plans/large_model_splits.md` · draws on #134, #145, #148, #149, #192

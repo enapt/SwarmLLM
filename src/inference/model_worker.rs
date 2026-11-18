@@ -14404,6 +14404,199 @@ mod local_speculation_tests {
         assert!(rounds.iter().any(|r| r.0 > 0), "no guess kept");
     }
 
+    /// #437's first measure: what a TREE of a block drafter's guesses keeps a
+    /// check against its chain, over one fixed text (as
+    /// [`a_block_drafters_spare_over_stood_in_far_rows`]). The tree is
+    /// DDTree's (arXiv 2604.12989), built best-first from the block's
+    /// per-position scores alone: a node's score the sum of its path's
+    /// log-probabilities, its children the next row's words in rank order,
+    /// the best `budget` nodes taken (a child never outscores its parent, so
+    /// they close under prefixes). A check keeps the deepest path the reply
+    /// follows, then its bonus word; each arm walks the reply by its own
+    /// checks. Budgets `SWARMLLM_TREE_TEST_BUDGETS` (default
+    /// `16,32,64,128`; a check reads the budget plus the anchor's row), and
+    /// each budget past the block's guesses again as the chain whole plus
+    /// the rest best-first (SpecExec and Sequoia keep the top path). Prints
+    /// tokens a check per arm; asserts the chain kept something.
+    /// `cargo dev-test --lib tree_from_its_marginals -- --ignored --nocapture`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[ignore = "needs a GGUF in SWARMLLM_GUESS_TEST_GGUF and a drafter beside it"]
+    async fn a_block_drafters_tree_from_its_marginals() {
+        /// The words of each row a tree may branch on, best first.
+        const WIDEST: usize = 64;
+        struct Score(f32);
+        impl PartialEq for Score {
+            fn eq(&self, other: &Self) -> bool {
+                self.0.total_cmp(&other.0).is_eq()
+            }
+        }
+        impl Eq for Score {}
+        impl PartialOrd for Score {
+            fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+                Some(self.cmp(other))
+            }
+        }
+        impl Ord for Score {
+            fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+                self.0.total_cmp(&other.0)
+            }
+        }
+        let budgets: Vec<usize> = std::env::var("SWARMLLM_TREE_TEST_BUDGETS")
+            .ok()
+            .map(|s| s.split(',').filter_map(|n| n.trim().parse().ok()).collect())
+            .unwrap_or_else(|| vec![16, 32, 64, 128]);
+        let Some(mut model) = guess_test_model() else {
+            return;
+        };
+        if std::env::var("SWARMLLM_GUESS_TEST_DRAFTER_DIR").is_err() {
+            eprintln!("SWARMLLM_GUESS_TEST_DRAFTER_DIR not set — skipped");
+            return;
+        }
+        let (prompt, text, caught) = spare_test_text(&mut model, &[]);
+        let drafter = model.block_drafter().unwrap();
+        let block = drafter.block_size() - 1;
+        let kept: Vec<candle_core::Tensor> = drafter
+            .target_layers()
+            .iter()
+            .map(|l| caught[l].clone())
+            .collect();
+        let rows = drafter.context_rows(&kept).unwrap();
+        // Each anchor's rows, best `WIDEST` words first, as (word, log p).
+        let mut ranked: std::collections::HashMap<usize, Vec<Vec<(u32, f32)>>> =
+            std::collections::HashMap::new();
+        let mut ranked_at = |p: usize| -> Vec<Vec<(u32, f32)>> {
+            ranked
+                .entry(p)
+                .or_insert_with(|| {
+                    let mut cache = crate::inference::split::BlockCache::default();
+                    let scores: Vec<Vec<f32>> = drafter
+                        .draft_scores(
+                            &model,
+                            &mut cache,
+                            Some(&rows.narrow(1, 0, p).unwrap()),
+                            text[p],
+                            block,
+                            p + block + 1,
+                        )
+                        .and_then(|s| {
+                            s.to_dtype(candle_core::DType::F32)
+                                .and_then(|s| s.squeeze(0))
+                                .and_then(|s| s.to_vec2())
+                                .map_err(SwarmError::internal)
+                        })
+                        .unwrap();
+                    scores
+                        .iter()
+                        .map(|r| {
+                            let most = r.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+                            let sum: f64 = r.iter().map(|&x| f64::from(x - most).exp()).sum();
+                            let norm = most + sum.ln() as f32;
+                            let mut ids: Vec<usize> = (0..r.len()).collect();
+                            ids.select_nth_unstable_by(WIDEST, |&a, &b| r[b].total_cmp(&r[a]));
+                            ids.truncate(WIDEST);
+                            // The first of equal maxima first, as the pick.
+                            ids.sort_by(|&a, &b| r[b].total_cmp(&r[a]).then(a.cmp(&b)));
+                            ids.iter().map(|&t| (t as u32, r[t] - norm)).collect()
+                        })
+                        .collect()
+                })
+                .clone()
+        };
+        // How many of the reply's next words a tree of `budget` nodes keeps
+        // at `p` — `chained`: the chain's nodes first, the rest best-first —
+        // or (`None`) the chain of the rows' picks alone.
+        let mut kept_at = |p: usize, arm: Option<(usize, bool)>| -> usize {
+            let rows = ranked_at(p);
+            let truth = &text[p + 1..];
+            let Some((budget, chained)) = arm else {
+                return rows
+                    .iter()
+                    .zip(truth)
+                    .take_while(|(row, t)| row[0].0 == **t)
+                    .count();
+            };
+            const ROOT: usize = usize::MAX;
+            // (parent, depth, word, score), best first.
+            let mut nodes: Vec<(usize, usize, u32, f32)> = Vec::new();
+            // (score, parent, depth, rank in its row).
+            let mut frontier = std::collections::BinaryHeap::new();
+            if chained {
+                let mut score = 0.0;
+                for (depth, row) in rows.iter().enumerate() {
+                    let parent = depth.checked_sub(1).unwrap_or(ROOT);
+                    frontier.push((Score(score + row[1].1), parent, depth, 1));
+                    score += row[0].1;
+                    nodes.push((parent, depth, row[0].0, score));
+                }
+            } else {
+                frontier.push((Score(rows[0][0].1), ROOT, 0usize, 0usize));
+            }
+            while nodes.len() < budget {
+                let Some((Score(score), parent, depth, rank)) = frontier.pop() else {
+                    break;
+                };
+                let at = nodes.len();
+                nodes.push((parent, depth, rows[depth][rank].0, score));
+                let parent_score = score - rows[depth][rank].1;
+                if rank + 1 < rows[depth].len() {
+                    let sibling = parent_score + rows[depth][rank + 1].1;
+                    frontier.push((Score(sibling), parent, depth, rank + 1));
+                }
+                if depth + 1 < rows.len() {
+                    frontier.push((Score(score + rows[depth + 1][0].1), at, depth + 1, 0));
+                }
+            }
+            let (mut at, mut depth) = (ROOT, 0);
+            while depth < truth.len().min(rows.len()) {
+                match nodes
+                    .iter()
+                    .position(|n| n.0 == at && n.1 == depth && n.2 == truth[depth])
+                {
+                    Some(next) => {
+                        at = next;
+                        depth += 1;
+                    }
+                    None => break,
+                }
+            }
+            depth
+        };
+        let arms: Vec<Option<(usize, bool)>> = std::iter::once(None)
+            .chain(budgets.iter().map(|&b| Some((b, false))))
+            .chain(
+                budgets
+                    .iter()
+                    .filter(|&&b| b > block)
+                    .map(|&b| Some((b, true))),
+            )
+            .collect();
+        let mut line = Vec::new();
+        let mut chain_kept = 0;
+        for arm in arms {
+            let (mut p, mut checks, mut tokens) = (prompt.len(), 0usize, 0usize);
+            while p + block + 1 < text.len() {
+                let k = kept_at(p, arm);
+                checks += 1;
+                tokens += k + 1;
+                p += k + 1;
+            }
+            if arm.is_none() {
+                chain_kept = tokens - checks;
+            }
+            line.push(format!(
+                "{}: {:.2} tokens a check over {checks} checks",
+                match arm {
+                    None => format!("chain of {block}"),
+                    Some((b, false)) => format!("tree of {b}"),
+                    Some((b, true)) => format!("the chain + {} more", b - block),
+                },
+                tokens as f64 / checks.max(1) as f64
+            ));
+        }
+        eprintln!("{}", line.join("; "));
+        assert!(chain_kept > 0, "the chain kept nothing");
+    }
+
     /// A record to copy: a reply held to JSON that repeats it is mostly guessed.
     const GUESS_TEST_JSON: &str = "A record as JSON: {\"name\": \"Ada Lovelace\", \"born\": 1815, \
          \"city\": \"London\", \"field\": \"mathematics\", \"known for\": \"the first program\"}\n\
