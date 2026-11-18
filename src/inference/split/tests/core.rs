@@ -1858,6 +1858,102 @@ fn a_chunked_prompt_pass_keeps_the_same_last_rows_as_the_whole_pass() {
     assert!(none.is_empty(), "nothing kept unasked");
 }
 
+/// A card/processor split's first prompt (the .298 and .299 gates' 14B): its
+/// processor layers read a chunk of 32 or more ON THE CARD (#138 (1c)) and a
+/// shorter one on the processor, so a prompt cut 512 + 8 kept a processor
+/// layer's rows on the card from the first chunk and on the processor from the
+/// second, and joining them failed the reply — "device mismatch in cat, lhs:
+/// Cuda, rhs: Cpu". Every row a forward keeps is on the model's own device,
+/// whichever device ran the layer. Needs a card; returns without one.
+#[test]
+fn a_splits_kept_rows_are_on_the_models_device_whichever_device_ran_the_chunk() {
+    use crate::inference::layers::{
+        let_processor_layers_read_prompts_on, PROMPT_ON_CARD_MIN_TOKENS,
+    };
+    let Ok(card) = Device::new_cuda(0) else {
+        return;
+    };
+    let hidden_dim = 128;
+    let tail = 8;
+    assert!(tail < PROMPT_ON_CARD_MIN_TOKENS);
+    let mut model = make_test_split_model_with_window(3, hidden_dim, 1024);
+    // Every layer held by the processor, each given the card for prompts.
+    model.layer_devices = vec![Device::Cpu; 3];
+    let_processor_layers_read_prompts_on(&mut model.layers, &card, true, true);
+    assert!(model.reads_prompts_on_card());
+    let first = crate::inference::prefill_pacer::prompt_chunk_ceiling(1, model.prompt_reader(0));
+    assert_eq!(first, crate::inference::prefill_pacer::CARD_CHUNK_TOKENS);
+    let input = Tensor::randn(0f32, 1.0, (1, first + tail, hidden_dim), &Device::Cpu).unwrap();
+    let layers: std::collections::HashSet<usize> = [1usize, 2].into_iter().collect();
+    let capture = Capture {
+        layers: &layers,
+        last: 12,
+    };
+    let kv_store = KvCacheStore::new(std::time::Duration::from_secs(600));
+    let (out, kept) = model
+        .forward_prompt_in_chunks_keeping(
+            &input,
+            0,
+            &kv_store,
+            "split",
+            None,
+            false,
+            1,
+            Some(capture),
+        )
+        .expect("a prompt cut 512 + 8 on a card/processor split");
+    assert!(out.device().is_cpu());
+    // The same pass with no card anywhere: the rows a reader is handed.
+    let mut alone = make_test_split_model_with_window(3, hidden_dim, 1024);
+    let (_, want) = alone
+        .forward_prompt_in_chunks_keeping(
+            &input,
+            0,
+            &kv_store,
+            "alone",
+            None,
+            false,
+            0,
+            Some(capture),
+        )
+        .unwrap();
+    // The first chunk's products ran on the card (int8 MMQ, f16), so the rows
+    // are the processor's only to the card's precision (0.08 at most on
+    // 2026-11-18); what a wrong join breaks is their ORDER — each kept row is
+    // nearest the reference row at its own position.
+    let distance = |a: &[f32], b: &[f32]| -> f32 {
+        a.iter()
+            .zip(b)
+            .map(|(x, y)| (x - y) * (x - y))
+            .sum::<f32>()
+            .sqrt()
+    };
+    for layer in [1usize, 2] {
+        let rows = &kept[&layer];
+        assert!(
+            rows.device().is_cpu(),
+            "layer {layer}'s rows are off the model's device"
+        );
+        assert_eq!(rows.dims(), &[1, 12, hidden_dim], "layer {layer}");
+        let got = rows.squeeze(0).unwrap().to_vec2::<f32>().unwrap();
+        let reference = want[&layer].squeeze(0).unwrap().to_vec2::<f32>().unwrap();
+        for (i, row) in got.iter().enumerate() {
+            let own = distance(row, &reference[i]);
+            let size = distance(&reference[i], &vec![0.0; hidden_dim]);
+            assert!(
+                own < 0.05 * size,
+                "layer {layer} row {i}: {own} off a row of {size}"
+            );
+            for (j, other) in reference.iter().enumerate().filter(|&(j, _)| j != i) {
+                assert!(
+                    own < distance(row, other),
+                    "layer {layer}: kept row {i} is nearer the reference's row {j}"
+                );
+            }
+        }
+    }
+}
+
 /// The reason the chunks exist: a request cancelled while its prompt pass is
 /// running stops at the next chunk boundary instead of finishing the prompt.
 /// Control: the same pass with the oracle saying "not cancelled" completes.

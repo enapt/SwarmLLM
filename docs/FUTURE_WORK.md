@@ -7246,6 +7246,25 @@ Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
 
+**Closed 2026-11-18, on main** (#478)
+- #478 — `P1` — **A card/processor split's first request could fail "device mismatch in cat, lhs: Cuda, rhs: Cpu".**
+  Seen in the v0.3.298 and v0.3.299 release gates' split warm-ups (Qwen2.5-14B whole, 27 layers on the card, the
+  processor holding 5..26, the card guessing), never in an earlier gate or the live log. A processor-held layer reads
+  a prompt chunk of 32 positions or more ON THE CARD (#138 (1c)) and a shorter one on the processor; a first prompt
+  is cut 512, then to the card's room, then the rest, and a rest under 32 (8 and 6 in the two failures; 237, 73, 39
+  and 38 in the four passes) ran the processor layers on the processor. The card's stand-in keeps the rows of the
+  processor run's last layer (`RunStandIn`'s `window()`), so the prompt pass kept that layer's rows on the card from
+  the first chunks and on the processor from the last, and `forward_prompt_in_chunks_keeping` joined them with
+  `Tensor::cat`. **Now** every row a forward keeps is on the model's own device: `Capture::kept_on(hidden, home)`
+  takes the device as a REQUIRED argument at all four sites (the single forward, the chunked join twice, the captured
+  step) and copies only a row that is elsewhere — a stand-in and a block drafter take rows to that device anyway, and
+  a split is never graph-captured, so the copy moves earlier and is never added. Prior art: llama.cpp asks its
+  scheduler which backend computed a kept hidden state and copies it to ONE buffer from there (`llama-context.cpp`,
+  `ggml_backend_sched_get_tensor_backend` → `ggml_backend_tensor_get_async` into `embd`). Test
+  `a_splits_kept_rows_are_on_the_models_device_whichever_device_ran_the_chunk` (card only: three processor layers
+  given the card, a 520-token prompt cut 512 + 8, rows of two of them kept) — red before the fix with the gate's
+  exact error, `device mismatch in cat, lhs: Cuda { gpu_id: 0 }, rhs: Cpu`.
+
 **Closed 2026-11-18, shipped in v0.3.298** (#477)
 - #477 — **A restart read every held part whole, flat out.** Field report (a Mac mini, 443 parts on a mechanical
   disk): 10-15 minutes of saturated reads after every start, the computer close to unusable. The cause was

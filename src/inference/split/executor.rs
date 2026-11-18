@@ -143,8 +143,8 @@ pub(crate) fn take_widest_forward() -> usize {
 }
 
 /// The hidden states a forward keeps ([`SplitModel::forward_keeping`]): after
-/// each layer in `layers`, its last `last` positions — copied where that is
-/// fewer than the forward read, so a prompt pass does not hold a
+/// each layer in `layers`, its last `last` positions, on the model's own device
+/// ([`Capture::kept_on`]) — copied where that is fewer than the forward read, so a prompt pass does not hold a
 /// prompt-wide buffer per layer to the end of the forward (37 MB on the card
 /// for a 14B's 1,800-token prompt) when a stand-in keeps 256 rows
 /// (`stand_in::RunStandIn`).
@@ -155,14 +155,36 @@ pub struct Capture<'a> {
 }
 
 impl Capture<'_> {
-    fn kept_of(&self, hidden: &Tensor) -> Result<Tensor, SwarmError> {
+    /// `hidden`'s last `last` positions, on `home` — the model's own device
+    /// (`SplitModel::device`), REQUIRED so no site keeps rows where its layer
+    /// happened to run. A card/processor split's processor layer reads a chunk
+    /// of 32 positions or more ON THE CARD (#138 (1c)) and a shorter one on the
+    /// processor, so a first prompt cut 512 + room + 8 kept one layer's rows on
+    /// both, and joining them failed the reply: "device mismatch in cat, lhs:
+    /// Cuda, rhs: Cpu" (FUTURE_WORK #478, the v0.3.298 and v0.3.299 gates).
+    /// Prior art: llama.cpp asks the scheduler which backend computed a kept
+    /// hidden state and copies it to ONE buffer from there
+    /// (`llama-context.cpp`: `ggml_backend_sched_get_tensor_backend`, then
+    /// `ggml_backend_tensor_get_async` into `embd`). A row already on `home` is
+    /// not copied; a stand-in and a block drafter take their rows to their own
+    /// device too, so on a split (never graph-captured) this moves a copy
+    /// earlier, never adds one.
+    fn kept_on(&self, hidden: &Tensor, home: &Device) -> Result<Tensor, SwarmError> {
         let positions = hidden.dim(1).map_err(SwarmError::internal)?;
-        if self.last >= positions {
-            return Ok(hidden.clone());
+        let kept = if self.last >= positions {
+            hidden.clone()
+        } else {
+            hidden
+                .narrow(1, positions - self.last, self.last)
+                .and_then(|t| t.force_contiguous())
+                .map_err(SwarmError::internal)?
+        };
+        if kept.device().same_device(home) {
+            return Ok(kept);
         }
-        hidden
-            .narrow(1, positions - self.last, self.last)
-            .and_then(|t| t.force_contiguous())
+        // A view's upload carries its whole buffer: contiguous first.
+        kept.force_contiguous()
+            .and_then(|t| t.to_device(home))
             .map_err(SwarmError::internal)
     }
 }
@@ -845,7 +867,7 @@ impl SplitModel {
                 pieces.push(rows);
                 if let (Some(capture), true) = (capture.as_ref(), pieces.len() > 1) {
                     let joined = Tensor::cat(pieces, 1).map_err(SwarmError::internal)?;
-                    *pieces = vec![capture.kept_of(&joined)?];
+                    *pieces = vec![capture.kept_on(&joined, &self.device)?];
                 }
             }
             if last_segment {
@@ -860,7 +882,7 @@ impl SplitModel {
         if let Some(capture) = capture {
             for (layer, pieces) in kept {
                 let rows = Tensor::cat(&pieces, 1).map_err(SwarmError::internal)?;
-                caught.insert(layer, capture.kept_of(&rows)?);
+                caught.insert(layer, capture.kept_on(&rows, &self.device)?);
             }
         }
         let out = if outputs.len() == 1 {
@@ -1692,7 +1714,7 @@ impl SplitModel {
             if let Some(capture) = capture_layers {
                 for (layer, kept) in kept_rows {
                     if capture.layers.contains(&layer) {
-                        caught.insert(layer, capture.kept_of(&kept)?);
+                        caught.insert(layer, capture.kept_on(&kept, &self.device)?);
                     }
                 }
             }
@@ -2343,7 +2365,7 @@ impl SplitModel {
                         // A captured layer needs the value itself, so its closing
                         // add is taken here rather than fused forward.
                         let taken = hidden.into_tensor().map_err(SwarmError::internal)?;
-                        captured.insert(abs_layer, capture.kept_of(&taken)?);
+                        captured.insert(abs_layer, capture.kept_on(&taken, &self.device)?);
                         hidden = Residual::Ready(taken);
                     }
                 }

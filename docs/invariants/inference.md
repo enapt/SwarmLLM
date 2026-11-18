@@ -2869,6 +2869,27 @@ through the executor bit-identical to the plain path; the layer run directly,
 its output and its kept cache, because the executor's fallback would hide an
 error; the gate at 31 tokens and with an adapter).
 
+**A kept row goes to the model's device** (2026-11-18, #478). *What it
+replaced*: `Capture::kept_of` kept a row where its layer had run. With (1c) a
+processor-held layer runs a chunk of 32 or more on the card and a shorter one
+on the processor, so one prompt pass cut 512, then the card's room, then a rest
+under 32 kept the stand-in's rows (`RunStandIn`'s `window()`, the processor
+run's last layer) on BOTH devices, and `forward_prompt_in_chunks_keeping`'s
+`Tensor::cat` refused them: "device mismatch in cat, lhs: Cuda, rhs: Cpu" —
+the first split reply of the v0.3.298 and v0.3.299 gates' 14B warm-ups (rests
+of 8 and 6; the four passing warm-ups' rests were 237, 73, 39 and 38). *Now*:
+`Capture::kept_on(hidden, home)` takes the device as a REQUIRED argument at all
+four sites (single forward, both arms of the chunked join, the captured step),
+`&self.device` at each, and copies only a row that is elsewhere (contiguous
+first). Every consumer — the stand-in, a block drafter — took rows to that
+device anyway, and a split is never graph-captured, so the copy moves earlier
+and none is added. Prior art: llama.cpp asks its scheduler which backend
+computed a kept hidden state (`ggml_backend_sched_get_tensor_backend`) and
+copies it into one host buffer from there (`llama-context.cpp`, `embd`). Test
+`a_splits_kept_rows_are_on_the_models_device_whichever_device_ran_the_chunk`
+(card only; three processor layers given the card, 520 positions cut 512 + 8,
+two layers' rows kept): red on v0.3.299's code with the gate's exact error.
+
 ### A split's prompt copies run beside the card's work, through a ring (2026-10-13, #138 (1d))
 
 **What it replaced.** After (1c) a processor-held layer's weights still crossed
