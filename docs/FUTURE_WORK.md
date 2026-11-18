@@ -4112,15 +4112,17 @@ another meets exactly this.
 
 **Fixed 2026-11-18 — the advice.** A holder whose capability lists a worker of ANOTHER model with no `gives_way`
 (`NodeCapability::room_held_by_other_models`, the one reading beside `given_way_for`) is a `NodeCandidate` with
-`room_held_by_other_models`, and its `HolderRoom` says so ("… while it runs another model"). `report_after_a_replan`
+`room_held_by_other_models`, carried into its `HolderRoom`. `report_after_a_replan`
 reports a shortfall at such a holder (`HolderRoom::short_while_busy`) as the holders declining — "busy running other
 models and short of memory for now. Try again in a few minutes, or pick another model", already in all 21 languages —
 never as `SwarmShortOfMemory`, whose "trying again won't help" stays for a shortfall no other model explains. This
 node's own room is its loader's answer (#125) and is not read this way. Tests
 `a_shortfall_at_a_holder_running_another_model_is_the_holders_declining` (red with `short_while_busy` off; its control:
-the same shortfall with no other model there is still `SwarmShortOfMemory`), `a_busy_holders_room_says_it_runs_another_model`,
-`room_held_by_another_models_busy_worker_is_named_and_only_that` (types crate), and the busy holder named in
-`the_room_the_holders_offer_is_counted_once_each_and_capped_by_what_they_hold`.
+the same shortfall with no other model there is still `SwarmShortOfMemory`),
+`room_held_by_another_models_busy_worker_is_named_and_only_that` (types crate), and the busy holder marked in
+`the_room_the_holders_offer_is_counted_once_each_and_capped_by_what_they_hold`. The refusal does not NAME the busy
+holder: the holders-declined message quotes the last refusal, and a shortfall at the holders' ceilings
+(`scheduler::short_of_memory`, what they could ever hold) is one no other model explains, so it is not worded as one.
 
 **Residual — wait, then plan again.** Prior art: Ollama's scheduler (`server/sched.go`) queues a request whose model
 cannot fit while another runner is busy, and unloads that runner once its requests finish (`findRunnerToUnload`,

@@ -763,25 +763,6 @@ fn a_shortfall_at_a_holder_running_another_model_is_the_holders_declining() {
     );
 }
 
-/// The room a busy holder offered is named as such (#479).
-#[test]
-fn a_busy_holders_room_says_it_runs_another_model() {
-    let text = crate::error::describe_room_by_holder(
-        Some(73),
-        80,
-        &[crate::error::HolderRoom {
-            holder: "aa3d1e660b736e6f".into(),
-            holds: 80,
-            room: Some(34),
-            room_held_by_other_models: true,
-        }],
-    );
-    assert!(
-        text.contains("aa3d1e660b736e6f has room for 34 of the 80 layers it holds while it runs another model"),
-        "{text}"
-    );
-}
-
 /// **A re-plan's "short of memory" describes the re-plan, not the swarm**
 /// (2026-10-22). A peer refused a 42-token prompt up front (`layers_that_fit`
 /// 0, a busy moment); the re-plan held it to 0 layers, the planner found no

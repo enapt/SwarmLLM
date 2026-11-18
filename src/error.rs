@@ -682,10 +682,6 @@ pub fn describe_room_by_holder(
         .iter()
         .take(HOLDERS_NAMED)
         .map(|h| match h.room {
-            Some(room) if room < h.holds && h.room_held_by_other_models => format!(
-                "{} has room for {room} of the {} layers it holds while it runs another model",
-                h.holder, h.holds
-            ),
             Some(room) if room < h.holds => format!(
                 "{} has room for {room} of the {} layers it holds",
                 h.holder, h.holds
