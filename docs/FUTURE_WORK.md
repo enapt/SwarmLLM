@@ -6749,6 +6749,20 @@ nothing, the worker reads weights on `DaemonMsg::LoadRange`.
    native NVMe machine, where deeper queues may pay. The processor's own first touch of its weights
    (~0.6 s for the 8B) stays. A load through the mmap path (one whole GGUF, a thread per layer)
    keeps (3a)'s pageable staging per thread.
+4. **HYPOTHESIS (2026-11-18, not built): a large model's idle unload costs minutes, not seconds.** The tier run's
+   70B (#427, #3 (j16)): the Australian RTX 3060's segment `[22..80)` waited ~180 s to read its layers before the
+   first token (210 s in all) — the same 5-minute idle unload that costs the 8B 5 s costs a far 70B part three
+   minutes, and the hand-off's caller sees only the wait. **Prior art** (searched 2026-11-18): Ollama keeps a model
+   5 min (ours); LM Studio keeps a model it loaded on demand 60 min by default (`ttl`, and auto-evict keeps one
+   such model); KServe ModelMesh evicts least-recently-used models only WHEN MEMORY FILLS, never on a timer. Here
+   the pressure half exists since #447 — an idle worker gives its memory to another model's work after 30 s — so the
+   timed unload's remaining job is the owner's OTHER programs (a game wanting the card), which no swarm demand
+   shows. Shape to measure before building: keep an idle worker past `idle_unload_secs` in proportion to its
+   measured reload (`LoadRate` × its bytes; the 8B's 5 s keeps today's 5 min), bounded (LM Studio's 60 min), and
+   unload it at once when ANOTHER program's card use grows past the margin (free memory below what our own charges
+   leave — `vram::live_headroom_mb` against `vram_committed_mb`). First measure: how often a model's first
+   question after an unload waited over 60 s for its load, in this node's and the peers' `layers_from=disk` /
+   `load_ms` lines.
 
 ### Packaging, release and operations
 
