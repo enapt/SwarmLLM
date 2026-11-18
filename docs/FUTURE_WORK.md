@@ -2040,8 +2040,12 @@ TinyLlama's 2 parts, on the published v0.3.298 and then on this build. The live 
 times, six reads each: 2 parts, `tinyllama-1.1b-chat-v1.0.q4-k-m`, swarm use `allowed`. A v0.3.298 observer at `-v`
 logged the probe's capabilities arriving with `hosted_shards=0` (3 of 3) and the live node's with 250 (the control),
 and read the probe as 2 parts, the same model, `allowed`.
-**Left (P3)**: read the saving once the swarm runs it — capability bytes received at steady state
-(`gossip_recv_by_kind`), against 11-17's `NodeCapabilityUpdate` 90/h × 18.6 KB = 467 B/s.
+**Read 2026-11-18 18:00-18:18Z** (the live node on v0.3.299 since 17:03Z, all 6 peers on .299, uptime 54-72 min,
+`gossip_recv_by_kind` two `/api/admin/stats` samples 1,090 s apart): `NodeCapabilityUpdate` 46/h × 4.05 KB = **52 B/s**
+received, against 11-17's 90/h × 18.6 KB = 467 B/s — ~9x less, each capability ~4.6x smaller and half as many. The
+largest gossip term is now `ShardAnnounce` (26/h × 21.3 KB = 157 B/s), then `HealthPing` 66 B/s; all gossip ~324 B/s
+received. Taken an hour after a restart, inside the window where the doubling repeat (2i) is still short: a later read
+at steady state can only be lower. Nothing left of (2j).
 
 #### #169 — Connection churn on multi-interface hosts: only the LAN dial is deterministic
 `P3` · network · **PARTIAL** — 2026-07-25 · history: archive § "Connection churn on multi-interface hosts — deterministic dialer partial", gotcha #353
