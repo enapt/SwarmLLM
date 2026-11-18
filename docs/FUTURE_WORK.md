@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #477**). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #478**). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -32,6 +32,9 @@ Status is **OPEN** (nothing material done) or **PARTIAL** (part shipped; the ent
 residual).
 
 ## ▶ PRIORITIES — read this first
+
+**New 2026-11-18, after v0.3.297: #477 (P1, field report) — a restart re-reads every held part flat out
+(10-15 min on an HDD with 443 parts); cause mapped in the entry. First in line.**
 
 Re-ranked 2026-11-04 after v0.3.271 (released 2026-11-04). Since the 2026-10-31 ranking
 (v0.3.265): v0.3.268 (0.3.267 folded in, never published) shipped gpt-oss on the processor (#390
@@ -5667,7 +5670,7 @@ reverse — and its post-verify keeps drafting while the target verifies (up to 
 between the two; here they would.
 
 #### #461 — A peer's split that asks a computer for a WIDER range replaces its all-card copy with a mostly-processor one, which then serves every narrower request too
-`P3` · memory / admission · **NARROWED** — 2026-11-15 (the growth half shipped in v0.3.292); contributor 1's guard built 2026-11-17 (on main, not in a release yet) · found on the real link (`real_link.sh` TAG=bal292, a forced split point) · related: #3 (j12), #3 (j13), #449, #458
+`P3` · memory / admission · **NARROWED** — 2026-11-15 (the growth half shipped in v0.3.292); contributor 1's guard built 2026-11-17 (shipped in v0.3.297-alpha) · found on the real link (`real_link.sh` TAG=bal292, a forced split point) · related: #3 (j12), #3 (j13), #449, #458
 
 **Narrowed 2026-11-15 (v0.3.292)**: contributor 2 was the GROWTH ladder (below, "Contributor 2 found"), and
 `charge_segment_as_split` now steps aside for an idle worker whose spawn range the new range takes in, so the
@@ -5684,7 +5687,7 @@ entry hidden state is placed on the first layer's device. Needs a card rig A/B i
 then the guard has nothing to refuse; and the accounting itself — a worker IN USE still takes the
 wider range as a split sized beside the dropped range, and the daemon keeps charging that range's base.
 
-**Built 2026-11-17 (contributor 1; on main, not in a release yet)**: `ModelProcessPool::replacement_keeps_the_card`,
+**Built 2026-11-17 (contributor 1; shipped in v0.3.297-alpha)**: `ModelProcessPool::replacement_keeps_the_card`,
 asked beside the fit by a peer's UP-FRONT weighing only (`forward_would_load` → `peer_load_refusal`; a refusal at the
 forward would bar this node from the re-plan, so an unasked forward is served as before): of the held layers a run covers, the replacement keeps on the card as many as the
 worker runs there now, or as a fresh spawn of just what it holds would, whichever is fewer (like with like: the
@@ -6367,6 +6370,36 @@ dashboard's final usage event has them. If a client asks: an extra field in the 
 chunk, without breaking the OpenAI/Anthropic wire shapes.
 
 ### Dashboard and first-hour experience
+
+#### #477 — A restart re-reads every held part, flat out, for minutes
+`P1` · first hour, storage · **OPEN** — 2026-11-18 · field report (Discord, a Mac mini node): 443 parts, a mechanical
+disk saturated for 10-15 min after each start, the computer close to unusable meanwhile
+
+**Cause (mapped 2026-11-18, the call site checked):** `daemon::background::spawn_shard_verification` (started from
+`daemon/mod.rs`, 2 s after boot) BLAKE3-hashes EVERY part this node is registered as holding — `store.verify_shard`
+on the blocking pool, one file after another, whole file, 64 KB reads (`model::shard::hash_file_blake3`). On every
+start, unconditionally: the only skips are a part not registered here, a missing file, or an all-zero manifest hash.
+Registration at boot checks SIZE only (`daemon/startup.rs`, `quarantine_shard_if_size_mismatch`), so every right-sized
+part enters the sweep. **Nothing records a part as already checked** — `ModelRegistry::origin_verified` (redb
+`origin_verified_hashes`) holds the ORIGIN's expected hash, not "these bytes were checked", and the sweep does not ask
+it — and **nothing paces it**: no rate, no pause while the node serves, no lower I/O priority. Other whole-part reads
+are not startup-wide: the auto-manage rescan skips registered parts; `verify_pending_shards` only parts whose
+manifest hash changed; the canonical heal's byte check reads 64 KB (`part_is_from`).
+
+**Prior art.** libtorrent's resume data (`fastresume`): per file size + modification time; a full recheck only on a
+mismatch or a missing record; checking is queued (one torrent at a time). Transmission: "verify local data" is
+manual. ZFS / Btrfs: integrity is a SCHEDULED scrub, rate-limited and idle-priority — never a boot-time full read.
+IPFS: no re-hash at start.
+
+**Fix outline (to design against the code, not taken as given):** (1) a redb tree of parts CHECKED here — (size,
+mtime, the hash the bytes matched, when) — written by every successful check and by a finished download
+(`settle_finished_download`); (2) the startup sweep hashes only a part with no record, a different size or mtime, or a
+record whose hash is not the manifest's hash NOW (a changed expectation still re-checks — #224's rule); (3) what it does
+hash goes one at a time, paused while a request is being served, at a bounded rate; (4) bit rot stays covered by a
+slow background scrub (e.g. every part once a week, paced), not by the boot. Keep: a quarantined or disputed part is
+never written as checked (`note_shard_disputed`); a record names the bytes, so a part replaced on disk (a repair, a
+heal) clears or rewrites it. Measure on a disk with hundreds of parts: the startup read before vs after (iostat /
+`/proc/<pid>/io` `read_bytes`), and that a part edited on disk is still caught at the next start.
 
 #### #439 — The relay hint says "turn on UPnP" where a router found late refused the ports
 `P3` · ux · **OPEN** — 2026-11-09 · history: the pre-release review of `7b2229f5` (the relay hint)
@@ -7192,7 +7225,7 @@ Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
 
-**Closed 2026-11-18 (on main, not in a release yet)** (#377, #471, #188, #476)
+**Closed 2026-11-18 (shipped in v0.3.297-alpha; #476 withdrawn)** (#377, #471, #188, #476)
 - #476 — **WITHDRAWN the hour it was filed: the claim was wrong.** It said a manifest past `MAX_SHARDS_PER_MANIFEST`
   (256 parts) meant any model past 128 GiB (256 × the 512 MiB cut) could not be listed. But a part holds only WHOLE
   layers (`inference::shard_layout::compute_layer_shard_layouts`), so the count is about size ÷ 512 MiB CAPPED at the
