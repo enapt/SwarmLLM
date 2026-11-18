@@ -1,5 +1,79 @@
 # Changelog
 
+## [0.3.297-alpha] — 2026-11-18
+
+**A split is chosen by the kind of reply you ask for.** When a model is split across computers and one of them guesses
+ahead, code gains far more from the guessing than prose does: the 14B over a 308 ms link ran code at 27 tokens a second
+split against 16-17 alone, but prose at 11.7 split against 13.5 alone. The planner priced every split of a model from
+one figure for all kinds, so after code-heavy use a prose request could be sent to a split slower than running it on
+your own computer. Each request is now scored once from what it asks — code, prose, or structured output (tools or
+JSON) — and a split is priced by how splits of that kind actually ran, so prose stays local where local is faster and
+code still takes the split where the split is faster (#469).
+
+**A computer serving part of a split keeps its fast copy.** A computer running its share of a model wholly on its
+graphics card could be asked by the next plan for a slightly wider share; it then reloaded the model to take the wider
+share, even when the new copy fit far fewer layers on the card. On the test link the far computer's 22 layers on the
+card became 10 of 28, every step went from about 30 ms to about a second, and the split fell from 19.6 / 44.9 to
+3.2-3.7 / 8.3 tokens a second (prose / code) for as long as it kept being asked. Asked for the wider share before a
+reply starts, a computer now says no where the new copy would keep fewer of those layers on the card, and the asking
+computer plans around the fast copy (#461). A computer that cannot take a wider share because a conversation is using its
+copy now says exactly that, and when to try again, instead of "needs about 0 MB of memory … raise
+`resources.max_ram_mb`" (#377).
+
+**Claude subscription: regenerating works, and long conversations cost less** (a build with `--features
+claude-subscription`; the release downloads do not include it). Editing or regenerating the last message of a conversation within ten minutes failed with "No conversation found with session ID". And every next turn sent the
+whole conversation again, so none of it came from Claude's prompt cache. Each reply's session is now kept under the
+conversation it holds; the next turn continues it and sends only the new message, so on Haiku a second turn wrote 102
+tokens to the prompt cache instead of 17,426. These sessions are saved where the `claude` CLI saves its own, and the
+node deletes each one it created ten minutes after its last use (#471).
+
+**Every computer cuts a model into the same parts.** Five ways of adding a model — the dashboard's "Download parts",
+the check before it, the popular-model list and both ways a model already on disk is described — cut it at the
+computer's own `model.shard_size_mb` setting, where the swarm trades parts of one fixed size. A computer set to
+anything but the default therefore made parts no one else had, and then deleted and fetched them again. Every path now
+cuts at the one size, and the setting is gone: an old config that still names it is told the setting is gone and why, not to check its spelling.
+
+**Settings that apply at once.** Four routing settings (`tensor_parallel`, `tp_max_latency_ms`, `parallax_routing`,
+`parallax_partial_ranges`), the number of guesses checked per round on a one-peer split, turning off dashboard trust
+over Tailscale, and requiring a key for `/metrics` all took effect only after a restart; each now applies as soon as the
+settings are saved or reloaded. Turning off Tailscale trust matters most: it is how you stop handing the dashboard's
+key to a shared tailnet, and it kept doing so until the restart.
+
+**The dashboard in your language.** A failed chat reply's hint, the header's "Up …" line, and several error messages
+showed in English in every language; they are now translated. A failure shows the node's own reason rather than the
+browser's ("Failed to fetch"), "Copy diagnostics" no longer reports success after copying an error page, a refused
+change of how much this computer shares puts the slider back, a part download refused behind a proxy is reported as a
+failure, the Claude Code sessions list marks the session that actually has a new reply and its status dot names the session's
+state in your language, and the Compare tab shows a
+cloud model's context window.
+
+**Current Claude models.** The model pickers for an Anthropic key and for a Claude subscription now list Opus 5.5,
+Sonnet 5.5, Haiku 5.5 and Fable 5.2, each with its 1M-token context; the short names `opus`, `sonnet`, `haiku` and
+`fable` follow. A request naming an older model by its full id is passed through unchanged.
+
+**Shorter node status for agents.** An agent connected over MCP usually asks `node_info` first, and the reply listed
+every cloud model the node's provider keys offer — about 2,300 tokens each time, all of it also in the `models` tool's
+reply. It now gives the count, each provider's count and ten example ids, and points to `models` for the full list. It
+no longer reports the credit figure, which gates nothing (#188).
+
+**Quieter logs.** A computer that had given back parts of a model logged one "contradicts the one we took from the
+model's origin" warning per part each time the model was registered — 1,151 false alarms in two days on one computer.
+A blank hash now reads as "not known" and is filled from the origin silently. When the prompt cache lets go of a saved prompt of 8,192 tokens or more, the log now says so, with how
+long it was and why (its limits, room for a new save, or memory asked for) — so a long agent conversation read again
+from the start can be traced to its cause (#470).
+
+**Smaller fixes.** A computer holding more than 1,024 model parts (about 540 GB) would have been ignored by every other computer — each of them refused its whole status message, which listed every part — so its release, features and free room went unseen; it now lists at most that many there (every model it holds still named), and the full list still goes out separately. No computer had reached it; two were half way. A computer that shares its saved prompts with peers (off by default) sent a list of them that peers refused whole once its saved prompts passed about 65,000 tokens — one long agent prompt was enough — so peers stopped learning what it had saved; it now sends the opening of every saved prompt, within the limit. A computer that no longer holds any part of a model — given back because nobody ran it, or its
+folder deleted — now tells the computers connected to it; before, they kept counting it as a holder of that model until
+it disconnected, so plans could count on parts that were gone and nobody else fetched the model when it was asked for. A computer that kept repeating its end-of-reply message while a reply it served waited for its
+last words could grow that reply's record without limit; only the first is kept now. The sample settings file
+that comes with every download no longer sets the shard-size setting removed in this release, so a copy of it
+starts without a warning. A terminal command such as `swarmllm unload` with no node running now says so within
+seconds instead of after half a minute, where the computer drops a connection to a closed port rather than
+refusing it (WSL2 does).
+
+**Dependencies.** `zip` 9.0.5 (RUSTSEC-2026-0548; the affected reader is never called here); three new DNSSEC
+advisories in the DNS library and `chrono`'s maintenance notice are recorded with their reasons.
+
 ## [0.3.296-alpha] — 2026-11-17
 
 **A model downloaded from the dashboard loads as soon as its parts arrive.** A download fetches the model's header
