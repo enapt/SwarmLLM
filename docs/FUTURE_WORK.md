@@ -2091,8 +2091,12 @@ the send cadence is part of the receiver's averaging time — sending less often
 (α = 1 − e^(−Δt/τ), the irregular-sampling EMA), or the demand map lags. Shape to weigh: send a model's rate when it
 moved ≥ 10% since its last send, else every 10 min (the decay tick), with the receiver weighing by elapsed time; and
 a publish line nearer what auto-manage reads as demand than 0.01. Saves ~4 MB/h each way on an idle node after a
-busy evening. Prior art to look up before building: Cassandra/Akka gossip of slowly changing load (send on change +
-heartbeat), irregular-interval EMA.
+busy evening. **Prior art (looked up 2026-11-18)**: the irregular-interval EMA is standard — weight 1 − e^(−Δt/τ)
+(a time constant) or 1 − 2^(−Δt/h) (a half-life, Polars' `ewm_mean_by`, Vector's Rust `TimeEwma`), and weights then
+compound by elapsed time alone, whatever the cadence; mixing the two forms skews τ by ln 2. Cassandra's gossip sends
+per-endpoint state with a VERSION and exchanges digests (SYN digests → ACK newer state → ACK2), so a stable cluster
+moves little data a round — the shape (2) already gave manifests (`ManifestDigest` / `ManifestPull`) and the one a
+demand fix should reuse before inventing a third: a version per (publisher, model) rate, a change ≥ 10% bumps it.
 
 #### #169 — Connection churn on multi-interface hosts: only the LAN dial is deterministic
 `P3` · network · **PARTIAL** — 2026-07-25 · history: archive § "Connection churn on multi-interface hosts — deterministic dialer partial", gotcha #353
