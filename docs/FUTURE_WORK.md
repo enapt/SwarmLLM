@@ -33,8 +33,8 @@ residual).
 
 ## ▶ PRIORITIES — read this first
 
-**2026-11-18, after v0.3.297: #477 (P1, field report) — a restart re-read every held part flat out — is FIXED on
-main (§ Closed); it ships in the next release.**
+**2026-11-18: #477 (P1, field report) — a restart re-read every held part flat out — SHIPPED in v0.3.298 (§ Closed),
+checked on Windows too.**
 
 Re-ranked 2026-11-04 after v0.3.271 (released 2026-11-04). Since the 2026-10-31 ranking
 (v0.3.265): v0.3.268 (0.3.267 folded in, never published) shipped gpt-oss on the processor (#390
@@ -2017,7 +2017,7 @@ peers ≈ 28 KB, re-sent whole on every republish for any reason, beside the `Sh
 peer's digest — Scuttlebutt reconciliation (van Renesse et al., "Efficient Reconciliation and Flow Control for
 Anti-Entropy Protocols", 2008); Quickwit's chitchat is the same per key. Ours already has the split for parts
 (`ShardAnnounce` + digests); the capability should stop carrying them.
-**Release N's half landed on main 2026-11-18** (on main, not in a release yet): every reader of a peer's parts asks
+**Release N's half SHIPPED in v0.3.298** (2026-11-18), so N+1 — the capability's list sent empty — may land now, for the release after it: every reader of a peer's parts asks
 the registry its parts lists fill — `ModelRegistry::holds_part_of` and `models_held_by` (new), `parts_credited_to`. The
 model listing's second, capability-fed writer is gone (its parts carried no build tags); `swarm_use` counts the
 registry alone. Guard `a_peers_parts_are_read_from_its_parts_lists_never_its_capability` (allowed: `health/monitor.rs`
@@ -2326,7 +2326,7 @@ DCUtR reached a peer at (US's `68.3.213.210/udp/8800`). That address answers onl
 made lives, and only to a simultaneous open; stored, it is dialled after a restart, when the mapping has gone, and a
 filtering NAT refuses a plain dial — the circuit + DCUtR path already brings the peer back in 1-7 s (US, measured
 before 11-16). go-libp2p keeps a connected address only 15 min past the disconnect (`RecentlyConnectedAddrTTL`) for
-the same reason. **(c) FIXED on main 2026-11-18 — v0.3.296's fix never took effect**: our relay server cut every circuit at 1 h (43 of
+the same reason. **(c) FIXED in v0.3.298 (2026-11-18) — v0.3.296's fix never took effect**: our relay server cut every circuit at 1 h (43 of
 72 relayed connections here ended at the hour). .296 set no byte limit and a 30-day backstop in
 `RelayServerConfig::default()`, but the one place a node builds its relay replaced the duration with the setting
 `relay_max_circuit_duration_secs`, default 3600 — and its test read the struct's default, not that path. Seen in the
@@ -7216,7 +7216,7 @@ Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
 
-**Closed 2026-11-18 (on main, not in a release yet)** (#477)
+**Closed 2026-11-18, shipped in v0.3.298** (#477)
 - #477 — **A restart read every held part whole, flat out.** Field report (a Mac mini, 443 parts on a mechanical
   disk): 10-15 minutes of saturated reads after every start, the computer close to unusable. The cause was
   `daemon::background::spawn_shard_verification`: 2 s after boot it BLAKE3-hashed every registered part, one after
@@ -7248,6 +7248,10 @@ grep `^| N |`).
   here, and Linux honours `ioprio` under some schedulers only. The report's third idea, peers' word about our parts,
   cannot vouch for THIS disk's bytes; a peer that downloads from us already hashes what it gets. Parts cut from a
   local GGUF are hashed while the manifest is built and not recorded, so they are read once at the next start.
+  v0.3.298's pre-release review: a part that changed WHILE read was skipped by the background pass only — the
+  re-check after a hash change and the rescan still acted on it (`2b66cbcc0`: every held-part check asks
+  `shard::judged_nothing`, guard `no_check_of_a_held_part_judges_one_that_changed_while_it_was_read`). On Windows
+  (no inode, size + mtime) a restart read 0 of 638 MiB and a touched part alone was read again (304 MiB).
 
 **Closed 2026-11-18 (shipped in v0.3.297-alpha; #476 withdrawn)** (#377, #471, #188, #476)
 - #476 — **WITHDRAWN the hour it was filed: the claim was wrong.** It said a manifest past `MAX_SHARDS_PER_MANIFEST`
