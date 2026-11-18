@@ -4633,7 +4633,9 @@ over 24-29 checks: the chain plus ONE node read 8.61, which only the walk's own 
 prose lever a split lacks (#469's fix order (1)): at the chain's own check width it keeps a third more where a block
 drafter keeps least. Both families that carry a block drafter are refused a tree today
 (`SplitModel::draft_tree_refusal`): Qwen 3.5/3.6 for its recurrent layers (the build above), Gemma 4 for its sliding
-windows (a window keeps keys by position) — the window's refusal is the second half of the build.
+windows (a window keeps keys by position) — the window's refusal is the second half of the build. Beside #428's prior
+art (a) — SGLang's trees on Qwen3-Next gain ~6% over a chain, so "a strong draft, not a tree" — this measures the tree
+OF a strong draft: from a block drafter's marginals the tree adds a third on prose at the chain's own width.
 
 #### #318 — A large model split across machines is too slow to use
 `P2` · perf-split · **OPEN** — 2026-10-20 · plan: `docs/plans/large_model_splits.md` · draws on #134, #145, #148, #149, #192
