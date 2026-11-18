@@ -4119,8 +4119,13 @@ never as `SwarmShortOfMemory`, whose "trying again won't help" stays for a short
 node's own room is its loader's answer (#125) and is not read this way. Tests
 `a_shortfall_at_a_holder_running_another_model_is_the_holders_declining` (red with `short_while_busy` off; its control:
 the same shortfall with no other model there is still `SwarmShortOfMemory`),
-`room_held_by_another_models_busy_worker_is_named_and_only_that` (types crate), and the busy holder marked in
-`the_room_the_holders_offer_is_counted_once_each_and_capped_by_what_they_hold`. The refusal does not NAME the busy
+`room_held_by_another_models_busy_worker_is_named_and_only_that` (types crate),
+`a_peer_running_another_model_is_a_candidate_whose_room_may_come_back` (the flag copied from a registered peer's
+capability; red with it forced off), and the busy holder marked in
+`the_room_the_holders_offer_is_counted_once_each_and_capped_by_what_they_hold`. Known limit (pre-release review,
+~60% confidence, not measured): a drafter's worker never gives way (`ModelProcessPool::gives_way` skips one guessing
+for another model) and is listed among the resident layers like any worker, so a holder short of room while it holds
+only a drafter reads as the holders' moment too; the capability does not say which workers are drafters. The refusal does not NAME the busy
 holder: the holders-declined message quotes the last refusal, and a shortfall at the holders' ceilings
 (`scheduler::short_of_memory`, what they could ever hold) is one no other model explains, so it is not worded as one.
 

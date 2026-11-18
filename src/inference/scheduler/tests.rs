@@ -730,6 +730,102 @@ fn a_head_that_declined_to_lead_is_not_priced_as_leading_the_model() {
     assert!(leads(), "a split it leads forgets the decline");
 }
 
+/// **A peer running another model that has not given its memory back is a
+/// candidate whose room may come back** (#479): the flag is copied from the
+/// peer's own capability as the plan reads it, and only while that worker gives
+/// no way — the router then reports a shortfall there as the holders' moment.
+#[test]
+fn a_peer_running_another_model_is_a_candidate_whose_room_may_come_back() {
+    let state = make_shared_state();
+    let local_id = state.identity.node_id().clone();
+    let holder = NodeId([0xab; 32]);
+    let model = ModelId("seventy".into());
+    let manifest = make_manifest(
+        "seventy",
+        80,
+        vec![ShardInfo {
+            index: 0,
+            layer_range: (0, 80),
+            size_bytes: 1 << 30,
+            hash: [0u8; 32],
+            tensors: vec![],
+        }],
+    );
+    state.model_registry.register_manifest(manifest);
+    state.model_registry.record_shard_holder(
+        ShardId {
+            model_id: model.clone(),
+            index: 0,
+        },
+        holder.clone(),
+    );
+    let install = |gives_way: Option<swarmllm_types::GivesWay>| {
+        let mut cap = capability_with_gpu(Some(1_000));
+        cap.node_id = holder.clone();
+        cap.resident_layers = vec![swarmllm_types::ResidentModelLayers {
+            model_id: "thirty-a3b".into(),
+            layers: 48,
+            ranges: Vec::new(),
+            decode_us_per_layer: None,
+            card_layers: Some(30),
+            gives_way,
+            card_free_at_load_mb: None,
+        }];
+        state.peer_registry.insert(
+            holder.clone(),
+            PeerInfo {
+                node_id: holder.clone(),
+                addresses: vec![],
+                capability: Some(cap),
+                last_seen: chrono::Utc::now(),
+                latency_ms: Some(190),
+                trust_score: 0.8,
+                peer_id_bytes: None,
+                ack_srtt_ms: None,
+                active_request_count: 0,
+                first_seen: 0,
+                verified_transaction_count: 0,
+                is_lan_peer: false,
+                goodput_bytes_per_sec: None,
+                goodput_samples: 0,
+            },
+        );
+    };
+    state.connected_node_ids.insert(holder.clone());
+    let manifest = state.model_registry.get_manifest(&model).unwrap();
+    let busy = || {
+        let prompt: cached_prefix::PromptPlan = None.into();
+        PipelineScheduler::new(state.clone())
+            .gather_candidates(
+                &manifest,
+                &local_id,
+                uuid::Uuid::new_v4(),
+                prompt,
+                super::Purpose::Route,
+                &|| false,
+                crate::types::KeepAsked::Unasked,
+            )
+            .into_iter()
+            .find(|c| c.node_id == holder)
+            .expect("fixture: the holder is a candidate")
+            .room_held_by_other_models
+    };
+
+    install(None);
+    assert!(
+        busy(),
+        "another model's worker that gives no way: room that may come back"
+    );
+    install(Some(swarmllm_types::GivesWay {
+        card_mb: 9_000,
+        machine_mb: 0,
+    }));
+    assert!(
+        !busy(),
+        "once it gives way, its memory is room already, not a moment"
+    );
+}
+
 /// **A run inside a range a peer has LOADED is charged no load where the peer
 /// serves slices** (FUTURE_WORK #449, `features::SERVES_SLICES`): it runs that
 /// run on the weights it holds (`split::view`). An older peer reads the run
