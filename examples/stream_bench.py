@@ -33,7 +33,29 @@ ap.add_argument("--json-out", default=None)
 # last reply leaves: work a node does once a reply is sent (a prompt's
 # snapshot, 2026-10-28) lands on the next request only back to back.
 ap.add_argument("--gap", type=float, default=0.0)
+# Seconds idle ONCE, after the warm-up, as a person reads a model's first
+# answer: a card's worker records its CUDA graphs only while it has nothing to
+# do, and a reply makes none before that (FUTURE_WORK #357 (d)), so timed
+# questions sent back to back from the warm-up on run every step uncaptured.
+ap.add_argument("--settle", type=float, default=0.0)
+# With a node log, --settle is a CAP: wait only until the log says the card's
+# recording is done (or could not be), counted from the warm-up's start.
+ap.add_argument("--settle-log", default=None)
+ap.add_argument(
+    "--settle-pattern",
+    default="check widths recorded before any reply needs them|card check widths: not recorded ahead",
+)
 args = ap.parse_args()
+
+
+def settled_count():
+    import re
+
+    try:
+        with open(args.settle_log, errors="replace") as f:
+            return len(re.findall(args.settle_pattern, f.read()))
+    except (OSError, TypeError):
+        return 0
 if args.prompt_file:
     args.prompt = open(args.prompt_file).read()
 
@@ -141,6 +163,18 @@ results = []
 for i in range(-args.warmup, args.reps):
     if args.gap > 0 and i > -args.warmup:
         time.sleep(args.gap)
+    if args.settle_log and i == -args.warmup:
+        settled_before = settled_count()
+    if args.settle > 0 and args.warmup > 0 and i == 0:
+        if args.settle_log:
+            began = time.time()
+            while settled_count() <= settled_before and time.time() - began < args.settle:
+                time.sleep(0.5)
+            waited = time.time() - began
+            seen = settled_count() > settled_before
+            print(f"  settle: {'recording done' if seen else 'no recording seen'} after {waited:.1f} s", flush=True)
+        else:
+            time.sleep(args.settle)
     r = one(i)
     tag = "warmup" if i < 0 else f"rep {i+1}"
     if "error" in r and r["error"] and "rep" not in r:

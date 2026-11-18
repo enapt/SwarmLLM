@@ -2700,6 +2700,18 @@ while a summary written new, which still copies phrases from its own document as
 writing with `SWARMLLM_FLOW_COPY_STORE=0` on the node (the gate's step 7 and `rebench.sh` since 2026-11-18), or ask
 a question no earlier reply answers; read a copy rig's figures as a copy's.
 
+### Asked back to back, a card times UNCAPTURED steps (2026-11-18)
+
+Since #357 (d) a reply makes no CUDA graph before the worker's idle recording has run, and a worker asked back to
+back is never idle — so a bench that sends each question as the last reply ends times every step the ordinary way
+(the 7B on the card 60-64 tok/s against 67-70 with graphs), and the old build's 3-8x slow replies (a graph made
+mid-reply, 4.9-9.8 s under WSL2) are gone from it. To time what a person gets, let the recording run after the
+warm-up: `stream_bench.py --settle <cap> --settle-log <node.log>` waits until the log says "check widths recorded
+before any reply needs them" (a whole model's 16 graphs: 1.1-4.9 s after one warm-up, ~21 s after a burst), at most
+`<cap>`. The gate's step 7, `rebench.sh` and `placement_ab.sh` do so for the card placement only. The tell of a run
+that never recorded: the worker's `-v` log says `a reply makes no graph: the idle recording will` and no
+`check widths recorded` line comes before the timed reps.
+
 ### One model's decode rate on this machine, against llama.cpp (2026-10-19)
 
 `swarmllm test-split --gpu-layers 99 --model <file.gguf> --max-tokens 160 --prompt "…"`

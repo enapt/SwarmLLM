@@ -8,6 +8,7 @@
 #                       (default: the newest v*-alpha tag that is not HEAD's)
 #   env SPEED=0         skip the speed comparison
 #   env SPEED_REPS=n    timed asks per speed arm (default 2; four arms a placement)
+#   env SPEED_SETTLE_CAP=s  the card arms' longest wait for the graph recording (default 60)
 # Exit: 0 = no FAIL. REVIEW lines need a reader: $OUT/summary.txt lists every verdict.
 # Run it with NO other SwarmLLM process on the machine (a rig shares the machine with
 # nothing, #708) and, on a machine that has one, under its safety kit.
@@ -158,8 +159,14 @@ if [ "${SPEED:-1}" != 0 ]; then
     # Unbuffered, line by line: a safety kit names the step from this file's last "== " line, and
     # buffered, the arm's header arrived only when the arm ENDED — the .241 gate's driver stop blamed
     # "split/cand" for an event inside the next arm (gotcha #887). Each arm's node log is kept.
+    # A whole model on the card waits after its warm-up until its worker has recorded its CUDA
+    # graphs (at most 60 s): a reply makes none before that recording (#357 (d)), so asked back
+    # to back from the warm-up on, every timed step ran uncaptured, ~8% under what a person
+    # reading the first answer gets. A split and the processor capture nothing and do not wait.
+    local settle=()
+    [ "${2%%/*}" = card ] && settle=(--settle "${SPEED_SETTLE_CAP:-60}" --settle-log "$D/node.log")
     SWARMLLM_API_KEY_FILE="$D/api_key" python3 -u "$HERE/stream_bench.py" "$3" --port 8825 --unique --reps "${SPEED_REPS:-2}" --warmup 1 \
-      --max-tokens 128 --prompt-file "$PROMPT_FILE" --label "$2" --json-out "$OUT/speed.jsonl" 2>&1 | grep --line-buffered -v '^    text'
+      "${settle[@]}" --max-tokens 128 --prompt-file "$PROMPT_FILE" --label "$2" --json-out "$OUT/speed.jsonl" 2>&1 | grep --line-buffered -v '^    text'
     kill $P; wait $P 2>/dev/null; cp "$D/node.log" "$OUT/speed.${2//\//_}.node.log"; rm -f "$D/models"; rm -rf "$D"; settle
   }
   : > "$OUT/speed.jsonl"

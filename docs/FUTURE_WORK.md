@@ -3016,8 +3016,14 @@ recording will come, a shape with no graph runs the ordinary way — about the O
 — and every reply after the first idle moment replays its graphs. Prior art: vLLM captures every size before serving and
 pads a batch to a captured size rather than capture mid-serving; SGLang records at start-up; llama.cpp captures after
 two matching calls, inside the request. A/B `SWARMLLM_CUDA_GRAPH_MADE=in-replies`; test
-`a_reply_before_the_idle_recording_makes_no_graph` (red under the A/B). **Left**: the recording itself meets the same
-stalls (4.1 s for one tree graph above), so a question arriving mid-capture waits for it; a worker NEVER idle (a client
+`a_reply_before_the_idle_recording_makes_no_graph` (red under the A/B). **Measured** (a CUDA build of main against
+itself with the A/B, `v0.3.299-alpha-ab-card-1649`, back to back): new 51.7-64.9 tok/s over 14 replies, its first reply
+after the load 61-63 (old 35-37); old 10.9, 15.4, 17.6, 21.1 among 65-69. Mechanism: the new arms' replies made no
+graph (one "left to the recording" line per chain width); all 16 were made by the recording after the burst. **Left**:
+(e) that recording's FIRST capture after the burst took 18-20 s in both arms (width 8; the 15 others then took 1.4 s;
+`nvidia-smi` did not answer meanwhile), so a question arriving then waits for it — the stall now falls where nobody
+is waiting, mostly, not gone. The lever named above: a graph's buffers from a pool kept OUTSIDE the capture (PyTorch's
+private graph pool, llama.cpp's own buffers), so instantiation maps nothing new; (f) a worker NEVER idle (a client
 asking back to back for hours) runs every reply uncaptured — ~8% slower than graphs, never 3-8x.
 
 #### #451 — A block drafter in system memory beside a card that has no room for it: ON — field-checked, no gain on a hybrid
