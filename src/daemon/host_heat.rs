@@ -35,7 +35,8 @@
 //! to half speed while the hold lasts ([`SharedState::host_heat_hold_now`] →
 //! `ModelProcessPool::pace_steps` → `inference::pace`, #440 step 4), and
 //! serving the model pieces it holds goes on. The owner is told once per
-//! change, in their words. ⚠ Under WSL2 no processor sensor is visible
+//! change, in their words. Under WSL2 the processor is read as Windows'
+//! thermal zone (#440 stage D); inside a container nothing is visible
 //! (`inference::thermal`), so there only the card can start a hold.
 //!
 //! **Work already running for other computers stops too** once the hold has
@@ -53,8 +54,9 @@
 //!
 //! The processor is read by its package sensor, and on Windows — where that
 //! sensor needs an administrator — by the ACPI thermal zone
-//! (`inference::thermal::read_thermal_zone_c`, #440 stage B); a computer with
-//! neither is guarded by its card alone.
+//! (`inference::thermal::read_thermal_zone_c`, #440 stage B — asked of Windows
+//! from a WSL2 node, stage D); a computer with neither is guarded by its card
+//! alone.
 //!
 //! `SWARMLLM_HEAT_GUARD=0` turns the hold off (rigs and gates, whose safety
 //! kit guards the test machine); `SWARMLLM_FAULT_HOST_HEAT` fakes a reading.

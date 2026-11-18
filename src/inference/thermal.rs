@@ -177,6 +177,14 @@ pub fn read_package_temp_c() -> Option<f32> {
 /// this is the heat guard's reading only — the processor warning
 /// ([`poll_and_report`]) stays on the package sensor it was tuned for.
 ///
+/// **Under WSL2 the same zones are asked of Windows** (#440 stage D): the Linux
+/// kernel there shows no processor sensor (hwmon holds only `AC1`/`BAT1`), so a
+/// WSL2 node's guard watched the card alone — on 2026-11-18 a 70B on this
+/// laptop's processor held the zone at 93 °C or more for five minutes with no
+/// heat line in the node's log. See `wsl_zone`. `None` inside a container
+/// (Docker Desktop's backend is WSL2's kernel, but a container cannot start a
+/// Windows program).
+///
 /// Prior art: windows_exporter's `thermalzone` collector (v0.30.0
 /// `thermalzone.go`: `High Precision Temperature / 10 - 273.15`, fallback
 /// `Temperature` in whole kelvin) and Netdata's (`Temperature - 273.15`) read
@@ -202,7 +210,11 @@ pub fn read_thermal_zone_c() -> Option<f32> {
             )?)
         })
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "linux")]
+    {
+        wsl_zone::latest_c()
+    }
+    #[cfg(not(any(windows, target_os = "linux")))]
     {
         None
     }
@@ -211,14 +223,14 @@ pub fn read_thermal_zone_c() -> Option<f32> {
 /// A zone colder than this or hotter than [`ZONE_MOST_C`] is not believed: a
 /// zone the firmware never fills reads 0 K (−273 °C), and nothing still running
 /// reads 125 °C.
-#[cfg(any(windows, test))]
+#[cfg(any(windows, target_os = "linux", test))]
 const ZONE_LEAST_C: f64 = 5.0;
-#[cfg(any(windows, test))]
+#[cfg(any(windows, target_os = "linux", test))]
 const ZONE_MOST_C: f64 = 125.0;
 
 /// The hottest believable zone, in °C, from readings in kelvin. Pure, so the
 /// rule is tested off Windows.
-#[cfg(any(windows, test))]
+#[cfg(any(windows, target_os = "linux", test))]
 fn hottest_zone_c(kelvin: impl IntoIterator<Item = f64>) -> Option<f32> {
     kelvin
         .into_iter()
@@ -323,6 +335,213 @@ mod windows_zone {
                 .map(|item| unsafe { item.FmtValue.Anonymous.doubleValue })
                 .collect(),
         )
+    }
+}
+
+/// One line of [`wsl_zone`]'s reader — every zone's `HighPrecisionTemperature`
+/// (tenths of a kelvin), a `|`, then every zone's `Temperature` (whole kelvin):
+/// `3402 | 340`, or `3402 3110 | 340 311` with two zones. The same rule as the
+/// Windows build's: the precise counter where it is believed, else the whole
+/// one; nothing believable is `None`, never "cool".
+#[cfg(any(target_os = "linux", test))]
+fn zone_c_from_windows_line(line: &str) -> Option<f32> {
+    let (precise, whole) = line.split_once('|')?;
+    let numbers = |part: &str| -> Vec<f64> {
+        part.split_whitespace()
+            .filter_map(|n| n.parse::<f64>().ok())
+            .collect()
+    };
+    hottest_zone_c(
+        numbers(precise)
+            .into_iter()
+            .map(|decikelvin| decikelvin / 10.0),
+    )
+    .or_else(|| hottest_zone_c(numbers(whole)))
+}
+
+/// Windows' thermal zones read from a WSL2 node (#440 stage D), through the
+/// Windows PowerShell every Windows install carries — the program
+/// `daemon::metered` already asks the same way from WSL2.
+///
+/// **One long-lived reader, not a program a reading**: a fresh `powershell.exe`
+/// cost this laptop 250-344 ms of processor time a reading, one already running
+/// 14 ms (measured 2026-11-18 from WSL2) — at the guard's 30 s round, ~1% of a
+/// core forever against ~0.05%. It prints a line every `READ_EVERY_SECS` and
+/// ends itself after `READS_A_RUN` (one silent for `STUCK_AFTER` is ended);
+/// the next ask starts another, at most one a `START_AT_MOST_EVERY`. It also
+/// ends when this process does: its next line meets a closed pipe and Windows
+/// ends it (checked 2026-11-18). The WMI
+/// class `Win32_PerfFormattedData_Counters_ThermalZoneInformation` is the
+/// counter set the Windows build reads through PDH, open to an ordinary user,
+/// and its names are not translated (PDH's are, hence `PdhAddEnglishCounterW`
+/// there).
+///
+/// Prior art: windows_exporter's `thermalzone` collector and Citrix uberAgent's
+/// processor-temperature guide read this class (`Temperature` in kelvin); no
+/// WSL-side reader was found (searched 2026-11-18) — the safety kit here reads
+/// the zone through `powershell.exe` from WSL2 the same way.
+///
+/// **Calibration** (FUTURE_WORK #440 (D)): the guard's processor rule replayed
+/// over 313 h of this laptop's zone at the guard's 30 s round would have held
+/// 14 times, 2.4 h in all, every one under a rig, a gate or a long processor
+/// run — never on an idle machine.
+#[cfg(target_os = "linux")]
+mod wsl_zone {
+    use std::io::BufRead as _;
+    use std::sync::{Mutex, OnceLock};
+    use std::time::{Duration, Instant};
+
+    /// How often the reader prints the zones — twice per guard round, so a
+    /// round always finds one under [`FRESH_FOR`].
+    const READ_EVERY_SECS: u32 = 15;
+    /// Lines a reader prints before it ends itself: an hour, so a reader whose
+    /// end was missed is gone within one.
+    const READS_A_RUN: u32 = 240;
+    /// A line older than this is not a reading: the reader stalled or ended.
+    const FRESH_FOR: Duration = Duration::from_secs(60);
+    /// At most one start a minute, whatever the reader does — a reader that
+    /// dies at once costs a start a minute, never a loop.
+    const START_AT_MOST_EVERY: Duration = Duration::from_secs(60);
+    /// A reader that has printed nothing for this long is stuck (a WMI call
+    /// that never returns, the pipe still open): it is ended, and another
+    /// started. Twelve missed lines.
+    const STUCK_AFTER: Duration = Duration::from_secs(180);
+
+    struct Reader {
+        /// The hottest believable zone of the last line that had one, and when.
+        latest: Option<(Instant, f32)>,
+        /// When the reader last printed any line, believable or not — or
+        /// started. A machine whose firmware feeds no zone prints ` | ` and is
+        /// alive, not stuck.
+        heard: Option<Instant>,
+        /// The reader, kept here so an ended one is reaped and a stuck one
+        /// ended; its pipe belongs to the thread that reads it.
+        child: Option<std::process::Child>,
+        started: Option<Instant>,
+    }
+
+    static READER: Mutex<Reader> = Mutex::new(Reader {
+        latest: None,
+        heard: None,
+        child: None,
+        started: None,
+    });
+
+    fn reader() -> std::sync::MutexGuard<'static, Reader> {
+        READER.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// A WSL2 host, not a container on Docker Desktop's backend (which reads
+    /// the same kernel but cannot start a Windows program). Asked once.
+    fn asks_windows() -> bool {
+        static ASKS: OnceLock<bool> = OnceLock::new();
+        *ASKS.get_or_init(|| {
+            crate::config::network::is_wsl2() && !crate::config::network::running_in_container()
+        })
+    }
+
+    /// The hottest zone the reader last printed, if it printed one within
+    /// [`FRESH_FOR`]. Reaps a reader that ended, ends one that is stuck, and
+    /// starts one when none runs; the first ask after a start is `None` (its
+    /// first line is a second or two away). Never waits on Windows.
+    pub(super) fn latest_c() -> Option<f32> {
+        if !asks_windows() {
+            return None;
+        }
+        let mut guard = reader();
+        let r = &mut *guard;
+        if let Some(child) = r.child.as_mut() {
+            let ended = !matches!(child.try_wait(), Ok(None));
+            let stuck = r.heard.is_some_and(|at| at.elapsed() >= STUCK_AFTER);
+            if ended || stuck {
+                if !ended {
+                    let _ = child.kill();
+                }
+                let _ = child.wait();
+                r.child = None;
+            }
+        }
+        if r.child.is_none()
+            && r.started
+                .is_none_or(|at| at.elapsed() >= START_AT_MOST_EVERY)
+        {
+            let now = Instant::now();
+            r.started = Some(now);
+            r.heard = Some(now);
+            r.child = start();
+        }
+        r.latest
+            .filter(|(at, _)| at.elapsed() < FRESH_FOR)
+            .map(|(_, c)| c)
+    }
+
+    /// Start a reader and the thread that reads its lines.
+    fn start() -> Option<std::process::Child> {
+        let script = format!(
+            "for ($i = 0; $i -lt {READS_A_RUN}; $i++) {{ \
+             $z = Get-CimInstance Win32_PerfFormattedData_Counters_ThermalZoneInformation \
+             -ErrorAction SilentlyContinue; \
+             \"$($z.HighPrecisionTemperature) | $($z.Temperature)\"; \
+             Start-Sleep -Seconds {READ_EVERY_SECS} }}"
+        );
+        let mut child = std::process::Command::new("powershell.exe")
+            .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .ok()?;
+        let reading = child.stdout.take().map(|out| {
+            move || {
+                for line in std::io::BufReader::new(out).lines() {
+                    let Ok(line) = line else { break };
+                    let c = super::zone_c_from_windows_line(line.trim_end_matches('\r'));
+                    let now = Instant::now();
+                    let mut r = reader();
+                    r.heard = Some(now);
+                    if let Some(c) = c {
+                        r.latest = Some((now, c));
+                    }
+                }
+            }
+        });
+        let read = reading.is_some_and(|reading| {
+            std::thread::Builder::new()
+                .name("windows-heat".into())
+                .spawn(reading)
+                .is_ok()
+        });
+        if !read {
+            let _ = child.kill();
+            let _ = child.wait();
+            return None;
+        }
+        Some(child)
+    }
+
+    /// The real reading on THIS machine: `--ignored`, run on a WSL2 host.
+    #[cfg(test)]
+    mod tests {
+        /// A WSL2 node reads Windows' zone within a few seconds of first
+        /// asking — the mechanism, not the parser (#440 stage D).
+        #[test]
+        #[ignore = "needs a WSL2 host whose firmware feeds a thermal zone"]
+        fn a_wsl2_node_reads_the_windows_thermal_zone() {
+            assert!(super::asks_windows(), "not a WSL2 host outside a container");
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+            let read = loop {
+                if let Some(c) = super::latest_c() {
+                    break Some(c);
+                }
+                if std::time::Instant::now() > deadline {
+                    break None;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(250));
+            };
+            let c = read.expect("no zone reading within 20 s");
+            assert!((5.0..=125.0).contains(&c), "{c} °C");
+            eprintln!("Windows thermal zone from WSL2: {c} °C");
+        }
     }
 }
 
@@ -446,11 +665,37 @@ mod tests {
         assert_eq!(hottest_zone_c(std::iter::empty()), None);
     }
 
-    /// Off Windows there is nothing to read; the guard keeps its package sensor.
+    /// Off Windows, and off a WSL2 host, there is nothing to read; the guard
+    /// keeps its package sensor. (On a WSL2 host the zone is Windows' —
+    /// `wsl_zone`'s ignored test reads it.)
     #[cfg(not(windows))]
     #[test]
     fn off_windows_the_zone_reads_nothing() {
+        if crate::config::network::is_wsl2() && !crate::config::network::running_in_container() {
+            return;
+        }
         assert_eq!(read_thermal_zone_c(), None);
+    }
+
+    /// The line the WSL2 reader prints reads as the Windows build's PDH read
+    /// does: the precise counter's hottest believable zone, else the whole
+    /// kelvin one; nothing believable is no reading (#440 stage D).
+    #[test]
+    fn a_zone_line_from_windows_reads_as_its_hottest_believable_zone() {
+        // This laptop, 2026-11-18: 3402 tenths of a kelvin = 67.05 °C.
+        let c = zone_c_from_windows_line("3402 | 340").expect("a real zone");
+        assert!((c - 67.05).abs() < 0.01, "{c}");
+        // Two zones: the hotter.
+        let c = zone_c_from_windows_line("3110 3662 | 311 366").expect("two zones");
+        assert!((c - 93.05).abs() < 0.01, "{c}");
+        // No precise counter (an older Windows): the whole kelvin one.
+        let c = zone_c_from_windows_line(" | 340").expect("whole kelvin");
+        assert!((c - 66.85).abs() < 0.01, "{c}");
+        // A zone the firmware never fills, no class at all, or not a reading.
+        assert_eq!(zone_c_from_windows_line("0 | 0"), None);
+        assert_eq!(zone_c_from_windows_line(" | "), None);
+        assert_eq!(zone_c_from_windows_line(""), None);
+        assert_eq!(zone_c_from_windows_line("WARNING: something"), None);
     }
 }
 

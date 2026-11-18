@@ -85,8 +85,8 @@ the top track (`docs/plans/large_model_splits.md`).
    on into a thermal lock-up. "swarmllm cant be locking up peoples systems like that. it discourages
    use." PARTIAL: a hot computer takes no new work for others and, if the heat lasts, stops what it was
    running for them; the owner's own chats run at half speed until it cools. The Windows processor is
-   read since stage B. Next: macOS (C, needs a Mac), and the processor under WSL2 / Docker Desktop,
-   where no sensor is visible (D, 2026-11-15).
+   read since stage B, and from a WSL2 node since stage D (2026-11-18). Next: macOS (C, needs a Mac);
+   a container on Docker Desktop still sees no processor sensor.
 3. **#1** — every Mac runs on the processor; no GPU backend is compiled for Apple Silicon (needs a
    Mac to verify on).
 4. **#220** — WATCH: a worker's card faulted once (illegal memory access, 2026-10-04) and the driver
@@ -401,7 +401,7 @@ plants another build's manifest on a peer-only node.
 ### Reliability and failover
 
 #### #440 — A node's work can drive the computer it runs on into a thermal lock-up, and nothing watches the card
-`P1` · reliability · **PARTIAL** (stages A and B done, C and D open) — 2026-11-11 · history: gotcha #1081 (the lock-up); archive § "Thermal throttling had no measurable effect" (2026-08-10)
+`P1` · reliability · **PARTIAL** (stages A, B and D done; C open) — 2026-11-11 · history: gotcha #1081 (the lock-up); archive § "Thermal throttling had no measurable effect" (2026-08-10)
 
 The user, 2026-11-11, after this laptop hard-froze under sustained card load: "swarmllm cant be locking up
 peoples systems like that. it discourages use. i understand we run tests unhindered though". That freeze came
@@ -452,13 +452,31 @@ Microsoft WDDM/TDR docs, Apple developer docs; issue trackers of Ollama, LM Stud
 - **(A)** card, driver and steps 2-6, on every OS with an NVIDIA card;
 - **(B)** the Windows processor through the PDH counter `\Thermal Zone Information(*)\Temperature`, which needs no admin. It is a firmware zone, not the package, so it is coarse and lags; smooth it.
 - **(C)** macOS `thermalState`.
-- **(D, open, found 2026-11-15)** the processor under **WSL2** — and so under Docker Desktop on Windows, which runs
-  there. The Linux build reads hwmon, where WSL2 shows only `AC1`/`BAT1`, and the ACPI read is `cfg(windows)`: no
+- **(D, DONE 2026-11-18 for a WSL2 host; a Docker Desktop container still reads nothing)** the processor under
+  **WSL2** — and so under Docker Desktop on Windows, which runs there. The Linux build reads hwmon, where WSL2 shows only `AC1`/`BAT1`, and the ACPI read is `cfg(windows)`: no
   processor reading at all, so only the card can start a hold. On this laptop a processor-only A/B held the zone at
   93-95.9 °C for most of an hour with no heat line in any node log (gotcha #1109). The reading exists on the Windows
   side (the safety kit reads that PDH counter through `powershell.exe`); a WSL2 build would have to ask Windows for it.
-  ⚠ Calibrate before acting on it: here the zone sat ≥ 93 °C (`PROCESSOR_HOT_C`) for 60 of 90 samples of an 18-minute
-  processor A/B that ended cleanly, so the line as it stands would hold on nearly every long processor job.
+  ~~⚠ Calibrate before acting on it: here the zone sat ≥ 93 °C (`PROCESSOR_HOT_C`) for 60 of 90 samples of an 18-minute
+  processor A/B that ended cleanly, so the line as it stands would hold on nearly every long processor job.~~ Not so:
+  the rule needs five minutes with NO reading under 93 °C (the 11-12 clock restart), and 60 of 90 is not that.
+  **Calibrated 2026-11-18** by replaying `PROCESSOR_HOT_C` / `PROCESSOR_HOT_FOR` / `PROCESSOR_COOL_C` / `COOL_FOR`
+  over this laptop's zone (`night1106-win.csv`, 313 h, 11-05 → 11-18, one reading a 30 s round): **14 holds, 2.4 h
+  in all**, each under a rig, a gate or a long processor run (Windows busy 12-87% in the five minutes before), never
+  idle; 8.9 h of that period had the processor 40% busy or more. At one reading a minute it would be 19 holds, 3.3 h
+  (fewer readings under the line restart the clock less), so the reader keeps the round. The last replayed hold
+  starts at 20:58:20Z on 11-18 — the safety kit's own heat stop of the live node, 6 s later (same rule): the node,
+  blind to it, had kept serving.
+  **Built** (`inference::thermal::wsl_zone`): on a WSL2 host (`config::network::is_wsl2` and not
+  `running_in_container`) `read_thermal_zone_c` returns the hottest zone one long-lived `powershell.exe` prints every
+  15 s from `Win32_PerfFormattedData_Counters_ThermalZoneInformation` (the PDH set stage B reads, untranslated
+  names), believed for 60 s. A fresh `powershell.exe` cost 250-344 ms of processor a reading here, a running one
+  14 ms — so one reader, ending itself after an hour and restarted at most once a minute; it ends with the node (its
+  next line meets a closed pipe; checked: no `powershell.exe` left 20 s after the test process exited). Tests
+  `a_zone_line_from_windows_reads_as_its_hottest_believable_zone`; `a_wsl2_node_reads_the_windows_thermal_zone`
+  (`#[ignore]`, run on this WSL2 host: 73.05 °C in 0.76 s; red with the WSL branch off). Prior art: windows_exporter's
+  `thermalzone` collector and Citrix uberAgent's guide read this class; no WSL-side reader found (searched
+  2026-11-18); `daemon::metered` already asks Windows through `powershell.exe` from WSL2.
 
 **Done (2026-11-11, steps 1, 2, 5, 6 of stage A — `daemon::host_heat`):**
 - The reading and the stop/start rule as designed (card at its target 120 s, hardware protection or a stuck

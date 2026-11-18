@@ -6808,7 +6808,13 @@ refusal under load would fail a pass half read). The guard counts
 
 **What it does not do yet** (#440's next steps): the owner's own requests are
 not slowed (step 4); the processor reading is Linux's (Windows needs the
-`\Thermal Zone Information` counter, stage B).
+`\Thermal Zone Information` counter, stage B). *(Both since built: step 4 paces
+the owner, stage B reads the zone on Windows, and stage D (2026-11-18) asks
+Windows for the same zone from a WSL2 node — one long-lived `powershell.exe`,
+`inference::thermal::wsl_zone` — where the kernel shows no processor sensor.
+The processor rule replayed over 313 h of this laptop's zone would have held
+14 times, 2.4 h, each under a rig, gate or long processor run: FUTURE_WORK
+#440 (D).)*
 
 **Tests.** The pure tracker's (`daemon::host_heat::tests`: the lock-up's own
 readings hold after 120 s, a release check's burst never does, the two lines,
