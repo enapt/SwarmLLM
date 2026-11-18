@@ -2073,8 +2073,10 @@ impl ModelRegistry {
         removed
     }
 
-    /// How many parts the registry credits to `node_id` — this node's own
-    /// count for `SharedState::swarm_use_here`, without copying the set.
+    /// How many parts the registry credits to `node_id`, without copying the
+    /// set — this node's own count for `SharedState::swarm_use_here`, and a
+    /// peer's wherever its parts are counted (#91 (2j): never its
+    /// capability's `hosted_shards`, which a later release sends empty).
     pub fn parts_credited_to(&self, node_id: &NodeId) -> usize {
         self.node_shards.get(node_id).map_or(0, |s| s.len())
     }
@@ -2085,6 +2087,30 @@ impl ModelRegistry {
             .get(node_id)
             .map(|s| s.iter().cloned().collect())
             .unwrap_or_default()
+    }
+
+    /// Whether `node_id` holds a part of `model_id`, as its parts lists
+    /// (`ShardAnnounce`) and finished downloads recorded — every upload, as
+    /// its capability's own parts list said until #91 (2j). A connected peer
+    /// sends its list beside its capability on every connection (#359), so
+    /// this is as fresh as the capability was. Copies nothing.
+    pub fn holds_part_of(&self, node_id: &NodeId, model_id: &ModelId) -> bool {
+        self.node_shards
+            .get(node_id)
+            .is_some_and(|parts| parts.iter().any(|p| &p.model_id == model_id))
+    }
+
+    /// The models `node_id` holds a part of ([`Self::holds_part_of`]), sorted
+    /// by id, each once.
+    pub fn models_held_by(&self, node_id: &NodeId) -> Vec<ModelId> {
+        let mut models: Vec<ModelId> = self
+            .node_shards
+            .get(node_id)
+            .map(|parts| parts.iter().map(|p| p.model_id.clone()).collect())
+            .unwrap_or_default();
+        models.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+        models.dedup();
+        models
     }
 
     /// Iterate over all tracked shard entries (shard_id, holders).

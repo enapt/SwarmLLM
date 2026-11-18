@@ -2017,6 +2017,20 @@ peers ≈ 28 KB, re-sent whole on every republish for any reason, beside the `Sh
 peer's digest — Scuttlebutt reconciliation (van Renesse et al., "Efficient Reconciliation and Flow Control for
 Anti-Entropy Protocols", 2008); Quickwit's chitchat is the same per key. Ours already has the split for parts
 (`ShardAnnounce` + digests); the capability should stop carrying them.
+**Release N's half landed on main 2026-11-18** (on main, not in a release yet): every reader of a peer's parts asks
+the registry its parts lists fill — `ModelRegistry::holds_part_of` and `models_held_by` (new), `parts_credited_to`. The
+model listing's second, capability-fed writer is gone (its parts carried no build tags); `swarm_use` counts the
+registry alone. Guard `a_peers_parts_are_read_from_its_parts_lists_never_its_capability` (allowed: `health/monitor.rs`
+building our own; `.hosted_shards.len()` in `dispatch/mod.rs`, two log fields and the size bound). Planting a read
+showed `cfg_test_spans` had masked the production item after each of seven `#[cfg(test)] mod x;` declarations from
+every guard reading `production_code` — fixed and self-tested. The map's "parts heard from" record (the
+unknown-model check and `unused::swarm_use` reading a missing list as UNKNOWN, not "holds none") was dropped: both
+ask only CONNECTED computers, and a connecting computer sends its parts list straight after its capability over the
+same direct path (`network/manager/identify.rs`, #359), so the gap is the two messages' flight; and a computer
+holding nothing sends no list, so the record could never be set for it — "unknown" would last for good, and a
+mistyped model name would wait out every connected empty computer's 3-minute catch-up. **Left: release N+1 sends the
+capability's list empty** (`dispatch::parts_for_the_capability`) once the release carrying this is published; a
+computer before that release still reads the list, and only two releases behind is it cut off (`cut_off_for`).
 
 #### #169 — Connection churn on multi-interface hosts: only the LAN dial is deterministic
 `P3` · network · **PARTIAL** — 2026-07-25 · history: archive § "Connection churn on multi-interface hosts — deterministic dialer partial", gotcha #353

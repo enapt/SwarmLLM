@@ -96,28 +96,16 @@ pub fn serialize_peer_to_json(
     let timeout = chrono::Duration::seconds(PEER_HEALTHY_TIMEOUT_SECS);
     let now = chrono::Utc::now();
     let healthy = now.signed_duration_since(peer.last_seen) < timeout;
-    let hosted_shards_count = peer
-        .capability
-        .as_ref()
-        .map(|c| c.hosted_shards.len())
-        .unwrap_or(0);
-    let hosted_models: Vec<String> = peer
-        .capability
-        .as_ref()
-        .map(|c| {
-            let mut models: Vec<String> = c
-                .hosted_shards
-                .iter()
-                .map(|s| s.model_id.0.clone())
-                // A peer on an older build still gossips a backup-copy name in
-                // its capability; never surface it in this peer's hosted_models.
-                .filter(|id| !crate::model::manifest::is_backup_artifact_id(id))
-                .collect();
-            models.sort_unstable();
-            models.dedup();
-            models
-        })
-        .unwrap_or_default();
+    // What the peer's parts lists recorded (#91 (2j)), never its capability's
+    // `hosted_shards`, which a later release sends empty. The announce arm
+    // never records a backup-copy name, so none reaches `hosted_models`.
+    let hosted_shards_count = state.model_registry.parts_credited_to(&peer.node_id);
+    let hosted_models: Vec<String> = state
+        .model_registry
+        .models_held_by(&peer.node_id)
+        .into_iter()
+        .map(|m| m.0)
+        .collect();
     let nickname = state
         .nickname_registry
         .get(&peer.node_id)
@@ -2713,26 +2701,14 @@ pub async fn network_map(State(state): State<AppState>) -> Json<serde_json::Valu
     // Aggregate peer regions from capabilities (`map_region_of`).
     for peer in state.shared_state.peer_registry.iter() {
         let region_code = map_region_of(peer.value(), &self_region);
-        let hosted_shards = peer
-            .value()
-            .capability
-            .as_ref()
-            .map_or(&[][..], |c| &c.hosted_shards[..]);
         let entry = regions
             .entry(region_code)
             .or_insert_with(|| (0, HashMap::new()));
         entry.0 += 1;
-        // Count distinct models this peer hosts (a peer on an older build still
-        // gossips a backup-copy name in its capability — keep it out of the
-        // swarm-wide region aggregation too).
-        let mut peer_models = std::collections::HashSet::new();
-        for shard in hosted_shards {
-            if !crate::model::manifest::is_backup_artifact_id(&shard.model_id.0) {
-                peer_models.insert(shard.model_id.0.clone());
-            }
-        }
-        for model_id in peer_models {
-            *entry.1.entry(model_id).or_insert(0) += 1;
+        // The distinct models this peer hosts, as its parts lists recorded
+        // (#91 (2j)) — no backup-copy name ever reaches the registry.
+        for model_id in state.shared_state.model_registry.models_held_by(peer.key()) {
+            *entry.1.entry(model_id.0).or_insert(0) += 1;
         }
     }
 

@@ -758,12 +758,11 @@ impl SharedState {
             return SwarmUse::Allowed;
         }
         match peer.capability.as_ref() {
-            // The more of the two figures it has given: a replayed capability
-            // listing fewer parts cannot outvote its announcements.
+            // Its parts as its parts lists recorded (#91 (2j)) — sent beside
+            // its capability on every connection (#359), and the only figure
+            // once a later release sends the capability's own list empty.
             Some(c) => verdict(
-                c.hosted_shards
-                    .len()
-                    .max(self.model_registry.parts_credited_to(&peer.node_id)),
+                self.model_registry.parts_credited_to(&peer.node_id),
                 &c.version,
                 &self.releases_known(),
             ),

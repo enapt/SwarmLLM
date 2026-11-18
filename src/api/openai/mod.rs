@@ -1033,15 +1033,21 @@ pub async fn status(State(state): State<AppState>) -> Json<serde_json::Value> {
     let model_name = info.as_ref().map(|i| i.name.clone()).unwrap_or_default();
     drop(info);
 
-    // Count network-available models from peers
-    let mut network_models = Vec::new();
-    for entry in state.shared_state.peer_registry.iter() {
-        if let Some(ref cap) = entry.value().capability {
-            for shard in &cap.hosted_shards {
-                network_models.push(shard.model_id.0.clone());
-            }
-        }
-    }
+    // Count network-available models from peers, as their parts lists
+    // recorded (#91 (2j)) — never a capability's `hosted_shards`, which a
+    // later release sends empty. The peers are collected first: no guard of
+    // the peer registry is held while the model registry is read.
+    let peers: Vec<crate::types::NodeId> = state
+        .shared_state
+        .peer_registry
+        .iter()
+        .map(|entry| entry.key().clone())
+        .collect();
+    let mut network_models: Vec<String> = peers
+        .iter()
+        .flat_map(|peer| state.shared_state.model_registry.models_held_by(peer))
+        .map(|model| model.0)
+        .collect();
     network_models.sort();
     network_models.dedup();
 

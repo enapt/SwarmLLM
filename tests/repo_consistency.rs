@@ -11476,21 +11476,35 @@ fn cfg_test_spans(src: &str) -> Vec<(usize, usize)> {
     while let Some(rel) = src[i..].find("#[cfg(test)]") {
         let at = i + rel;
         i = at + 12;
-        // First brace after the attribute opens the guarded item's body.
+        // First brace after the attribute opens the guarded item's body — unless
+        // a `;` ends the item first: `#[cfg(test)] mod tests;` declares a test
+        // FILE and has no body here, so it is its own span. Taking the next
+        // brace instead masked the next production item after each of seven
+        // such declarations (2026-11-18). Brackets count with parentheses, so
+        // the `;` in `-> [u8; 32] {` is never taken for the item's end.
         let mut j = at;
-        let mut parens = 0i32;
+        let mut depth = 0i32;
         let mut start = None;
+        let mut declaration_end = None;
         while j < bytes.len() {
             match bytes[j] {
-                b'(' => parens += 1,
-                b')' => parens -= 1,
-                b'{' if parens <= 0 => {
+                b'(' | b'[' => depth += 1,
+                b')' | b']' => depth -= 1,
+                b'{' if depth <= 0 => {
                     start = Some(j);
+                    break;
+                }
+                b';' if depth <= 0 => {
+                    declaration_end = Some(j);
                     break;
                 }
                 _ => {}
             }
             j += 1;
+        }
+        if let Some(end) = declaration_end {
+            out.push((at, end));
+            continue;
         }
         let Some(start) = start else { continue };
         if let Some(end) = closing_brace(bytes, start) {
@@ -11567,6 +11581,87 @@ fn a_module_file_declared_for_tests_only_is_a_fixture() {
     assert!(!module_file_is_test_only(
         &repo_root().join("src/api/openai/streaming.rs")
     ));
+}
+
+/// A `#[cfg(test)] mod tests;` declares a test FILE and masks only itself —
+/// never the production item after it (seven such declarations each hid the
+/// next item from every guard reading `production_code`, 2026-11-18).
+#[test]
+fn a_test_module_declared_without_a_body_masks_nothing_after_it() {
+    let src =
+        "#[cfg(test)]\nmod tests;\n\npub fn served(cap: &Cap) -> usize {\n    cap.parts.len()\n}\n";
+    let prod = production_code(src);
+    assert!(prod.contains("cap.parts.len()"), "{prod}");
+    assert!(!prod.contains("mod tests"), "{prod}");
+    // A body still masks to its closing brace, a `;` inside brackets in its
+    // signature notwithstanding.
+    let src = "#[cfg(test)]\nfn key() -> [u8; 32] {\n    secret()\n}\nfn kept() {}\n";
+    let prod = production_code(src);
+    assert!(
+        !prod.contains("secret()") && prod.contains("fn kept"),
+        "{prod}"
+    );
+}
+
+/// #91 (2j): a peer's parts are read from the registry its `ShardAnnounce`
+/// fills (`ModelRegistry::holds_part_of`, `models_held_by`,
+/// `parts_credited_to`), never from its capability's `hosted_shards` — the
+/// release after the one that moved every reader sends that list EMPTY, and a
+/// reader left on it would read every peer of that release as holding
+/// nothing. Allowed: building this node's own capability (`health/monitor.rs`)
+/// and the SIZE of what arrives (`.hosted_shards.len()` in
+/// `daemon/dispatch/mod.rs`: the bound on a capability and two log fields).
+#[test]
+fn a_peers_parts_are_read_from_its_parts_lists_never_its_capability() {
+    let root = repo_root();
+    let reads = |stmt: &str| stmt.contains(".hosted_shards");
+    let allowed = |rel: &str, stmt: &str| {
+        rel == "src/health/monitor.rs"
+            || (rel == "src/daemon/dispatch/mod.rs"
+                && !stmt
+                    .replace(".hosted_shards.len()", "")
+                    .contains(".hosted_shards"))
+    };
+    // The scan sees a read rustfmt wrapped, skips one behind a test module
+    // declared above it, and lets dispatch read only the size.
+    let planted = "#[cfg(test)]\nmod tests;\nfn holds(cap: &Cap, m: &M) -> bool {\n    cap\n        .hosted_shards\n        .iter()\n        .any(|s| s.model_id == *m)\n}\n";
+    assert!(
+        statements(&production_code(planted))
+            .iter()
+            .any(|(_, s)| reads(s) && !allowed("src/api/admin.rs", s)),
+        "the scan cannot see a wrapped read of a peer's parts list"
+    );
+    let size = "fn fits(cap: &Cap) -> bool {\n    cap.hosted_shards.len() <= MAX\n}\n";
+    assert!(statements(size)
+        .iter()
+        .all(|(_, s)| allowed("src/daemon/dispatch/mod.rs", s)));
+    assert!(!statements(planted)
+        .iter()
+        .all(|(_, s)| !reads(s) || allowed("src/daemon/dispatch/mod.rs", s)));
+    let mut offenders = Vec::new();
+    for path in rust_files_under(&root.join("src")) {
+        if module_file_is_test_only(&path) {
+            continue;
+        }
+        let rel = path
+            .strip_prefix(&root)
+            .unwrap_or(&path)
+            .display()
+            .to_string()
+            .replace('\\', "/");
+        let text = std::fs::read_to_string(&path).expect("read source");
+        for (line, stmt) in statements(&production_code(&text)) {
+            if reads(&stmt) && !allowed(&rel, &stmt) {
+                offenders.push(format!("{rel}:{line}"));
+            }
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "a peer's parts read from its capability's `hosted_shards` (#91 (2j)) — read \
+         `ModelRegistry::holds_part_of` / `models_held_by` / `parts_credited_to`, which its \
+         parts lists fill; a later release sends the capability's list empty: {offenders:?}"
+    );
 }
 
 /// Every site in `text` that builds an `InferenceOutput` carrying content

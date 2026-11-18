@@ -80,8 +80,10 @@ pub(super) fn find_peer_with_model(
             continue;
         }
         let peer = entry.value();
-        if let Some(ref cap) = peer.capability {
-            let has_model = cap.hosted_shards.iter().any(|s| s.model_id.0 == model);
+        if peer.capability.is_some() {
+            // Its parts as its parts lists recorded (#91 (2j)), never the
+            // capability's `hosted_shards`, which a later release sends empty.
+            let has_model = shared.model_registry.holds_part_of(entry.key(), &model_id);
             if has_model {
                 if let Some(url) = peer_http_url(peer) {
                     // No route override applies yet (the router records one),
@@ -736,10 +738,9 @@ mod tests {
                     ram_model_budget_mb: None,
                     disk_available_mb: 0,
                     bandwidth_mbps: 0.0,
-                    hosted_shards: vec![ShardId {
-                        model_id: ModelId(model.into()),
-                        index: 0,
-                    }],
+                    // What a release after #91 (2j) sends: the parts go in its
+                    // parts list (recorded below), never the capability.
+                    hosted_shards: vec![],
                     max_contribution: crate::types::ContributionLevel::Moderate,
                     uptime_seconds: 0,
                     version: String::new(),
@@ -776,6 +777,13 @@ mod tests {
                 goodput_bytes_per_sec: None,
                 goodput_samples: 0,
             },
+        );
+        state.model_registry.record_shard_holder(
+            ShardId {
+                model_id: ModelId(model.into()),
+                index: 0,
+            },
+            peer.clone(),
         );
         state
     }

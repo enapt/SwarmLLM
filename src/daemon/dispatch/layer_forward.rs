@@ -1949,9 +1949,11 @@ mod tests {
         state
     }
 
-    /// A registry entry whose capability advertises `features` and lists
-    /// `parts` parts.
+    /// A registry entry whose capability advertises `features`, its `parts`
+    /// parts recorded as its parts list would record them (#91 (2j): a
+    /// capability's own list is not read).
     fn entry_saying(
+        state: &SharedState,
         node: &crate::types::NodeId,
         features: u64,
         parts: u32,
@@ -1967,12 +1969,7 @@ mod tests {
             ram_model_budget_mb: None,
             disk_available_mb: 0,
             bandwidth_mbps: 0.0,
-            hosted_shards: (0..parts)
-                .map(|index| crate::types::ShardId {
-                    model_id: crate::types::ModelId("m".into()),
-                    index,
-                })
-                .collect(),
+            hosted_shards: vec![],
             max_contribution: crate::types::ContributionLevel::Moderate,
             uptime_seconds: 0,
             version: env!("CARGO_PKG_VERSION").into(),
@@ -1997,6 +1994,15 @@ mod tests {
             machine_room_beside_card_mb: None,
             processor_tokens_per_sec_7b: None,
         };
+        for index in 0..parts {
+            state.model_registry.record_shard_holder(
+                crate::types::ShardId {
+                    model_id: crate::types::ModelId("m".into()),
+                    index,
+                },
+                node.clone(),
+            );
+        }
         crate::types::PeerInfo {
             node_id: node.clone(),
             addresses: vec![],
@@ -2031,12 +2037,13 @@ mod tests {
         let coordinator = NodeId([0xC0; 32]);
         let judging_hop = NodeId([0x11; 32]);
         let older_hop = NodeId([0x12; 32]);
-        state
-            .peer_registry
-            .insert(judging_hop.clone(), entry_saying(&judging_hop, ALL, 0));
+        state.peer_registry.insert(
+            judging_hop.clone(),
+            entry_saying(&state, &judging_hop, ALL, 0),
+        );
         state.peer_registry.insert(
             older_hop.clone(),
-            entry_saying(&older_hop, ALL & !JUDGES_THE_COORDINATOR, 0),
+            entry_saying(&state, &older_hop, ALL & !JUDGES_THE_COORDINATOR, 0),
         );
         assert_eq!(
             swarm_use_of_forward(&state, Some(coordinator.0), &judging_hop),
@@ -2065,17 +2072,19 @@ mod tests {
             "a forward naming its own sender is unchained"
         );
         // A coordinator on record as refused stays refused, whoever chained it.
-        state
-            .peer_registry
-            .insert(coordinator.clone(), entry_saying(&coordinator, ALL, 0));
+        state.peer_registry.insert(
+            coordinator.clone(),
+            entry_saying(&state, &coordinator, ALL, 0),
+        );
         assert_eq!(
             swarm_use_of_forward(&state, Some(coordinator.0), &judging_hop),
             SwarmUse::TooFewParts { held: 0 }
         );
         // And one on record as allowed is allowed from any hop.
-        state
-            .peer_registry
-            .insert(coordinator.clone(), entry_saying(&coordinator, 0, 2));
+        state.peer_registry.insert(
+            coordinator.clone(),
+            entry_saying(&state, &coordinator, 0, 2),
+        );
         assert!(swarm_use_of_forward(&state, Some(coordinator.0), &older_hop).is_allowed());
     }
 

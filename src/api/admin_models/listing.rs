@@ -187,45 +187,11 @@ pub async fn list_models(State(state): State<AppState>) -> Json<Vec<serde_json::
         }
     }
 
-    // Also gather peer node_ids that host each model from capability data
-    for entry in state.shared_state.peer_registry.iter() {
-        let peer = entry.value();
-        if let Some(ref cap) = peer.capability {
-            for shard in &cap.hosted_shards {
-                let model_name = shard.model_id.0.clone();
-                let peer_id = format!("{}", peer.node_id);
-                // A capability announcement carries no build tag, so it must
-                // not re-admit a peer the per-shard gossip has already told us
-                // is serving a different build — that would undo the filter
-                // above for every peer that announces both ways.
-                if model_peers_other_build
-                    .get(&model_name)
-                    .is_some_and(|s| s.contains(&peer_id))
-                {
-                    continue;
-                }
-                // The completeness half must follow the SAME admissions as the
-                // count, or a peer admitted here and absent there reads as
-                // holding nothing. This is the second of the two writers, and
-                // the pair of them is what made the original count mean "any
-                // part" without anywhere saying so.
-                model_all_parts
-                    .entry(model_name.clone())
-                    .or_default()
-                    .insert(shard.index);
-                model_peer_parts
-                    .entry(model_name.clone())
-                    .or_default()
-                    .entry(peer_id.clone())
-                    .or_default()
-                    .insert(shard.index);
-                model_peers.entry(model_name).or_default().insert(peer_id);
-            }
-        }
-    }
+    // That walk is the ONE writer (#91 (2j)): a peer's capability carried a
+    // second copy of its parts, without build tags, until a later release sent
+    // it empty — the parts its parts lists recorded are what is listed here.
 
-    // Derived AFTER both writers have run, so neither path can produce a peer
-    // the other has not been able to contribute parts for.
+    // Derived after the walk, from the same admissions as the count beside it.
     let model_peers_complete = complete_holders(&model_peer_parts, &model_all_parts);
 
     // Helper: count local and global shard availability for a manifest

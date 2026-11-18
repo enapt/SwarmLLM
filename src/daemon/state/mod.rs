@@ -4302,18 +4302,13 @@ impl SharedState {
         // Collected first: never one map's guard held while taking another's.
         let connected: Vec<crate::types::NodeId> =
             self.connected_node_ids.iter().map(|n| n.clone()).collect();
+        // Whether it holds a part is read from its parts lists (#91 (2j)): a
+        // connecting peer sends its list right behind its capability (#359),
+        // and one holding nothing sends none — so no list is "holds nothing",
+        // never a reason to make a mistyped name wait.
         let awaited = connected.iter().any(|node| {
-            if !self.models.manifest_sync.catching_up(node, now) {
-                return false;
-            }
-            self.peer_registry
-                .get(node)
-                .and_then(|p| {
-                    p.capability
-                        .as_ref()
-                        .map(|c| c.hosted_shards.iter().any(|s| &s.model_id == model_id))
-                })
-                .unwrap_or(false)
+            self.models.manifest_sync.catching_up(node, now)
+                && self.model_registry.holds_part_of(node, model_id)
         });
         self.model_registry
             .reject_if_unknown_model(model_id, awaited)

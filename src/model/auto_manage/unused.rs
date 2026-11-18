@@ -760,17 +760,21 @@ impl AutoShardManager {
     /// What the connected computers say of `model_id`'s use (#452): each one's
     /// advertised entry (`NodeCapability::models_served`); one that advertises
     /// none — or whose list is full and stops short of the model — is weighed
-    /// only if it holds a part: by its capability's parts, or the registry's
-    /// where no capability has been heard. A computer saying it held the model
-    /// unserved is weighed only while it holds a part ([`Word::Says`]).
+    /// only if it holds a part, as its parts lists recorded
+    /// (`ModelRegistry::holds_part_of`, #91 (2j): never its capability's
+    /// `hosted_shards`, which a later release sends empty — read as "holds
+    /// nothing" it would give back a model a silent holder keeps). A
+    /// connected computer sends its list beside its capability on every
+    /// connection (#359). A computer saying it held the model unserved is
+    /// weighed only while it holds a part ([`Word::Says`]).
     fn swarm_use(&self, model_id: &ModelId, now: i64, window: i64) -> SwarmUse {
         /// What one connected computer's capability says, read under its
         /// registry guard: its entry, or that its list is full without one, or
-        /// that it advertises none — each with whether its parts name the model.
+        /// that it advertises none.
         enum Heard {
-            Lists(Option<ModelServed>, bool),
-            ListsNoMore(bool),
-            Silent(bool),
+            Lists(Option<ModelServed>),
+            ListsNoMore,
+            Silent,
             Nothing,
         }
         let state = &self.shared_state;
@@ -783,7 +787,6 @@ impl AutoShardManager {
             .map(|n| n.key().clone())
             .filter(|n| *n != me)
             .collect();
-        let mut registry_holders: Option<std::collections::HashSet<NodeId>> = None;
         let mut words = Vec::with_capacity(connected.len());
         for node in connected {
             let heard = state
@@ -791,67 +794,29 @@ impl AutoShardManager {
                 .get(&node)
                 .and_then(|peer| {
                     let cap = peer.capability.as_ref()?;
-                    let in_its_parts = cap.hosted_shards.iter().any(|s| s.model_id == *model_id);
                     Some(match &cap.models_served {
                         Some(list) => match list
                             .binary_search_by(|m| m.model_id.as_str().cmp(model_id.0.as_str()))
                         {
-                            Ok(i) => Heard::Lists(Some(list[i].clone()), in_its_parts),
-                            Err(_) if list.len() >= ModelServed::MOST_ENTRIES => {
-                                Heard::ListsNoMore(in_its_parts)
-                            }
-                            Err(_) => Heard::Lists(None, in_its_parts),
+                            Ok(i) => Heard::Lists(Some(list[i].clone())),
+                            Err(_) if list.len() >= ModelServed::MOST_ENTRIES => Heard::ListsNoMore,
+                            Err(_) => Heard::Lists(None),
                         },
-                        None => Heard::Silent(in_its_parts),
+                        None => Heard::Silent,
                     })
                 })
                 .unwrap_or(Heard::Nothing);
             // The registry is read with no peer guard held.
-            let mut registry_names = || {
-                registry_holders
-                    .get_or_insert_with(|| self.registry_holders_of(model_id))
-                    .contains(&node)
-            };
+            let holds = state.model_registry.holds_part_of(&node, model_id);
             words.push(match heard {
-                Heard::Lists(entry, in_its_parts) => Word::Says {
-                    entry,
-                    holds: in_its_parts || registry_names(),
-                },
+                Heard::Lists(entry) => Word::Says { entry, holds },
                 // A list cut at its cap (`models_served` lists held models
                 // first, by id) cannot say this one went unserved (security
                 // review 2026-11-14).
-                Heard::ListsNoMore(in_its_parts) => Word::Silent {
-                    holds: in_its_parts || registry_names(),
-                },
-                Heard::Silent(in_its_parts) => Word::Silent {
-                    holds: in_its_parts,
-                },
-                Heard::Nothing => Word::Silent {
-                    holds: registry_names(),
-                },
+                Heard::ListsNoMore | Heard::Silent | Heard::Nothing => Word::Silent { holds },
             });
         }
         swarm_use_of(words, now, window)
-    }
-
-    /// Every computer the registry names as holding a part of `model_id`.
-    fn registry_holders_of(&self, model_id: &ModelId) -> std::collections::HashSet<NodeId> {
-        let registry = &self.shared_state.model_registry;
-        registry
-            .get_manifest(model_id)
-            .map(|manifest| {
-                manifest
-                    .shards
-                    .iter()
-                    .flat_map(|s| {
-                        registry.shard_holders(&crate::types::ShardId {
-                            model_id: model_id.clone(),
-                            index: s.index,
-                        })
-                    })
-                    .collect()
-            })
-            .unwrap_or_default()
     }
 
     /// Why `model_id` is or is not one nobody runs (#389 (d), #452). Never a

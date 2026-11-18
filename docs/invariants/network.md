@@ -5504,6 +5504,38 @@ went in the first piece, and a short parts list was never cut however many it
 named. Bitcoin Core bounds its inventory lists the same way, at the message
 (`MAX_INV_SZ`). Test `a_long_list_of_models_retracted_whole_goes_in_pieces_a_receiver_takes`.
 
+## A peer's parts are read from its parts lists, never its capability (2026-11-18, #91 (2j))
+
+**What it replaced.** A capability carried its node's whole parts list beside the `ShardAnnounce` that already carried
+it, re-sent whole on every republish for any reason: ~3/4 of each capability (250 parts ≈ 12.8 KB of JSON; 513-535 on
+two peers ≈ 28 KB), and capabilities were 467 of ~670 B/s of gossip received at steady state (FUTURE_WORK #91 (2l),
+2026-11-17). Ten sites in eight files read a peer's parts from it: the peer list's count and models, the map's
+region totals, the leaderboard's parts count, the "may use the swarm" count (already the larger of it and the
+registry's), the forward to a pool member holding the model, the unknown-model wait, `/v1/status`'s network models,
+the "nobody runs it" judgement and the model listing — whose capability half was a second writer without build tags.
+
+**The two releases.** Release N moves every reader to the registry; release N+1 sends the list empty. No feature bit:
+a computer two releases behind is disconnected (`cut_off_for`), so none still reading the list is ever sent it empty.
+Prior art: Cassandra's gossiper versions each `ApplicationState` apart and a round sends only states newer than the
+peer's digest (Scuttlebutt reconciliation, van Renesse et al. 2008); ours already had the parts split out.
+
+**Why absence is "holds none", not "unknown".** The plan first carried a per-node "parts heard from" record so the two
+readers where a wrong "not held" costs most — the unknown-model wait and `unused::swarm_use` — could read a missing
+list as unknown. Both ask only CONNECTED computers, and a connecting computer sends its parts list straight after its
+capability over the same direct path (`network/manager/identify.rs`, #359), so the gap is the two messages' flight. A
+computer holding nothing sends no list at all, so the record could never be set for it: "unknown" would last for
+good, and a mistyped model name would wait out every connected empty computer's 3-minute catch-up
+(`manifest_sync::CATCH_UP_WITHIN`). A peer known only by gossip can have its capability before its list (both repeat
+on the same ≤ 40-minute ladder); the readers that see such peers — the pool forward, the listings — skip it until its
+list arrives, which a fallback and a display can afford.
+
+**The guard** scans production code under `src/` (test modules masked) for `.hosted_shards`, statement by statement,
+allowing `health/monitor.rs` (building this node's own) and `.hosted_shards.len()` in `daemon/dispatch/mod.rs` (two
+log fields and `MAX_HOSTED_SHARDS_IN_CAP`). Writing it found `cfg_test_spans` taking a bodyless
+`#[cfg(test)] mod tests;` as opening at the NEXT brace, masking the production item after each of seven such
+declarations from every guard that reads `production_code`; `a_test_module_declared_without_a_body_masks_nothing_after_it`
+pins the fix (red with it switched off).
+
 ## A counter named for an outcome may only be counting the attempt
 
 GossipSub's `sent` / `sent_bytes` count **attempts, once per recipient**:

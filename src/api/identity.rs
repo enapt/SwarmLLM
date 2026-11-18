@@ -182,7 +182,12 @@ fn is_leaderboard_eligible(first_seen: u64, verified_tx_count: u32, peer_count: 
 /// being guessed, because a node that predates a field must not be shown a
 /// fabricated value (the 2026-07-21 report chased an invented `+2500` balance
 /// that was never a ledger figure).
-fn capability_summary(cap: Option<&crate::types::NodeCapability>) -> serde_json::Value {
+/// `parts_held`: the parts the registry credits the node with (#91 (2j): never
+/// its capability's `hosted_shards`, which a later release sends empty).
+fn capability_summary(
+    cap: Option<&crate::types::NodeCapability>,
+    parts_held: usize,
+) -> serde_json::Value {
     let Some(c) = cap else {
         return serde_json::json!({ "known": false });
     };
@@ -201,7 +206,7 @@ fn capability_summary(cap: Option<&crate::types::NodeCapability>) -> serde_json:
         "est_tokens_per_sec_7b": c.est_tokens_per_sec_7b,
         "uptime_seconds": c.uptime_seconds,
         "version": c.version,
-        "shards_hosted": c.hosted_shards.len(),
+        "shards_hosted": parts_held,
         "relay_capable": c.relay_capable,
     })
 }
@@ -237,7 +242,10 @@ pub async fn leaderboard(
         "trust_score": 1.0,
         "eligible": true,
         "is_self": true,
-        "capability": capability_summary(state.shared_state.local_capability.load().as_deref()),
+        "capability": capability_summary(
+            state.shared_state.local_capability.load().as_deref(),
+            state.shared_state.model_registry.parts_credited_to(self_id),
+        ),
     }));
 
     // Add known peers — use gossiped credit balances when available
@@ -272,7 +280,10 @@ pub async fn leaderboard(
             "trust_score": peer.trust_score,
             "eligible": true,
             "is_self": false,
-            "capability": capability_summary(peer.capability.as_ref()),
+            "capability": capability_summary(
+                peer.capability.as_ref(),
+                state.shared_state.model_registry.parts_credited_to(&peer.node_id),
+            ),
         }));
     }
 

@@ -459,6 +459,12 @@ Every node drops a `ShardAnnounce` past **`swarmllm_types::MAX_SHARDS_PER_ANNOUN
 
 → `docs/invariants/network.md` § "A parts list longer than a receiver takes goes in pieces"
 
+## A peer's parts are read from its parts lists, never its capability (2026-11-18, #91 (2j))
+
+What a peer holds is asked of the registry its `ShardAnnounce` fills — **`ModelRegistry::holds_part_of`**, **`models_held_by`**, **`parts_credited_to`** — never `NodeCapability::hosted_shards`, which the release after the one moving every reader sends EMPTY. Absence means "holds none": a connecting peer sends its list straight after its capability (#359), and one holding nothing sends no list. Guard: `a_peers_parts_are_read_from_its_parts_lists_never_its_capability`.
+
+→ `docs/invariants/network.md` § "A peer's parts are read from its parts lists"
+
 ## A peer's clock may run minutes fast; gossip's gate allows 5 (2026-11-06, #416)
 
 `network::manager::events::gossip_out_of_time` gates timed gossip (health pings, parts lists, credit gossip): at most `GOSSIP_MAX_AGE_SECS` (300) old and `GOSSIP_AHEAD_SECS` (300) ahead — credit gossip the ledger's `CLOCK_SKEW_TOLERANCE_SECS` (30) — one-sided (gotcha #44). A kind joins the gate only if kept per sender; the other timed checks are weighed one by one (FUTURE_WORK #416) — never one shared constant raised for all. The owner is told at 20 s off GitHub's `Date` (+ `Age`) header (`update::note_clock`, `CLOCK_OFF_TELL_SECS`), never by peers' stamps. A nickname's stamp is checked ONLY by `NicknameRecordExt::verify` (5 min ahead, 24 h old); a new record is stamped after the previous one (`new_signed`'s REQUIRED `after`).
