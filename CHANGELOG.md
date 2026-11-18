@@ -1,5 +1,31 @@
 # Changelog
 
+## [0.3.298-alpha] — 2026-11-18
+
+**A restart no longer reads every model part from disk.** Each start read every part this computer holds, in full and
+as fast as the disk allowed, to check it was intact: on a hard disk holding 443 parts that took 10-15 minutes, at every
+restart (#477). A part that passes a check is now recorded with its size, when its file last changed and which file it
+is, and a start reads again only the parts whose file changed since, or whose last check is 30 days old; the same check
+runs every 6 hours while the node runs. On a test computer holding 4.7 GB of parts, a start read 13.5 MB of them
+instead of 4.7 GB. What is read is read at about 33 MB a second, and slower while the disk is answering slowly, so the
+computer stays usable while it runs. The first start after this update has no records yet and reads every part once,
+at that pace.
+
+**Computers reached through a relay keep their connections — correcting v0.3.296.** A computer with no public internet
+address reaches the swarm through a relay, and that relay ended every such connection after one hour; the computer
+then reconnected and its gossip, its catch-up and any request on that connection started over. v0.3.296 said it had
+ended that cut; it had not. The new limit was set where the relay's defaults live, but the one place a computer builds
+its relay replaced it with the setting `relay_max_circuit_duration_secs`, which still said one hour, and the test
+checked the default rather than what a computer runs. Seen on the swarm today: a relayed connection closed exactly
+60 minutes after it opened. The relay is now built in one place that no setting can override, and the setting is gone:
+a config that still names it is told it is ignored and why. A relay keeps cutting at the hour until it runs this
+release (#473).
+
+**Groundwork for smaller announcements.** Every computer repeats the list of parts it holds inside each status
+announcement, beside the parts list it sends anyway. That copy is about three quarters of each announcement, and
+announcements are most of the swarm's background traffic. Everything that reads what another computer holds now reads
+its parts list, so the release after this one can stop sending the copy (#91). Nothing you see changes.
+
 ## [0.3.297-alpha] — 2026-11-18
 
 **A split is chosen by the kind of reply you ask for.** When a model is split across computers and one of them guesses
