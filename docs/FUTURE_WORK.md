@@ -3023,7 +3023,18 @@ graph (one "left to the recording" line per chain width); all 16 were made by th
 (e) that recording's FIRST capture after the burst took 18-20 s in both arms (width 8; the 15 others then took 1.4 s;
 `nvidia-smi` did not answer meanwhile), so a question arriving then waits for it — the stall now falls where nobody
 is waiting, mostly, not gone. The lever named above: a graph's buffers from a pool kept OUTSIDE the capture (PyTorch's
-private graph pool, llama.cpp's own buffers), so instantiation maps nothing new; (f) a worker NEVER idle (a client
+private graph pool, llama.cpp's own buffers), so instantiation maps nothing new. What the code does now (read
+2026-11-18, not measured): every candle allocation reaches cudarc's `CudaStream::alloc` → `cuMemAllocAsync` on the
+device's default pool (`vendor/candle/candle-core/src/cuda_backend/device.rs` `alloc`/`alloc_zeros`), so inside a
+capture each becomes a graph memory node (`cuda_graph.rs`'s own header says so), instantiated with flags 0
+(`cuGraphInstantiateWithFlags(.., 0)`) and kept mapped until `trim_idle_graph_memory`'s `cuDeviceGraphMemTrim`. A
+graph's memory is mapped at its first launch, from a pool separate from the one `cuda_pool::keep_freed_memory` keeps
+warm — the hypothesis to test first (on the card, a CUDA build): time instantiate and first launch apart in the slow
+capture, and see whether the width-8 graph's first launch is the 18-20 s. If so, the arena goes at the one choke
+point, `CudaDevice::alloc`/`alloc_zeros` while the stream is capturing (where `ask_again_after_a_refusal` already
+asks), bump-allocating from a buffer made before the capture whose frees are no-ops; the bypasses to cover or refuse
+are cuDNN's workspace (`cudnn.rs`, direct `alloc_zeros`), the MoE kernels' own `cudaMallocAsync`
+(`moe_wmma_gguf.cu`, `moe_gguf.cu`) and the ggml MMQ copy's `cudaMalloc`/pool (`ggml_mmq/.../common.cuh`); (f) a worker NEVER idle (a client
 asking back to back for hours) runs every reply uncaptured — ~8% slower than graphs, never 3-8x.
 
 #### #451 — A block drafter in system memory beside a card that has no room for it: ON — field-checked, no gain on a hybrid
