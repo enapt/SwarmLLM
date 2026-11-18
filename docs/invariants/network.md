@@ -5518,7 +5518,7 @@ region totals, the leaderboard's parts count, the "may use the swarm" count (alr
 registry's), the forward to a pool member holding the model, the unknown-model wait, `/v1/status`'s network models,
 the "nobody runs it" judgement and the model listing — whose capability half was a second writer without build tags.
 
-**The two releases.** Release N moves every reader to the registry; release N+1 sends the list empty. No feature bit:
+**The two releases.** Release N (v0.3.298) moves every reader to the registry; release N+1 sends the list empty. No feature bit:
 a computer two releases behind is disconnected (`cut_off_for`), so none still reading the list is ever sent it empty.
 Prior art: Cassandra's gossiper versions each `ApplicationState` apart and a round sends only states newer than the
 peer's digest (Scuttlebutt reconciliation, van Renesse et al. 2008); ours already had the parts split out.
