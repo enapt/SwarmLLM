@@ -96,8 +96,8 @@ pub fn serialize_peer_to_json(
     let timeout = chrono::Duration::seconds(PEER_HEALTHY_TIMEOUT_SECS);
     let now = chrono::Utc::now();
     let healthy = now.signed_duration_since(peer.last_seen) < timeout;
-    // What the peer's parts lists recorded (#91 (2j)), never its capability's
-    // `hosted_shards`, which a later release sends empty. The announce arm
+    // What the peer's parts lists recorded (#91 (2j)) — its capability carries
+    // none (`PartsNotListed`). The announce arm
     // never records a backup-copy name, so none reaches `hosted_models`.
     let hosted_shards_count = state.model_registry.parts_credited_to(&peer.node_id);
     let hosted_models: Vec<String> = state

@@ -341,7 +341,7 @@ mod tests {
                     ram_model_budget_mb: None,
                     disk_available_mb: 100_000,
                     bandwidth_mbps: 100.0,
-                    hosted_shards: vec![],
+                    hosted_shards: Default::default(),
                     max_contribution: crate::types::ContributionLevel::Moderate,
                     uptime_seconds: 3600,
                     version: "0.1.0".into(),

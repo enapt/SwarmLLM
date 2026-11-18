@@ -1969,7 +1969,7 @@ mod tests {
             ram_model_budget_mb: None,
             disk_available_mb: 0,
             bandwidth_mbps: 0.0,
-            hosted_shards: vec![],
+            hosted_shards: Default::default(),
             max_contribution: crate::types::ContributionLevel::Moderate,
             uptime_seconds: 0,
             version: env!("CARGO_PKG_VERSION").into(),

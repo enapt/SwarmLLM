@@ -2,7 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::ids::{NodeId, ShardId};
+use crate::ids::NodeId;
 use crate::pool::ContributionMode;
 
 /// Wire-protocol epoch. Bumped ONLY on a genuinely breaking change to the
@@ -527,6 +527,67 @@ pub mod features {
     }
 }
 
+/// The parts list a capability carried until #91 (2j): sent EMPTY, and its
+/// contents never kept.
+///
+/// What a peer holds is read from its parts lists (`ShardAnnounce`, the
+/// registry they fill) — the capability's copy was ~3/4 of every capability
+/// (250 parts ≈ 12.8 KB of JSON), re-sent whole on every republish for any
+/// reason, beside the parts list that already carried it. v0.3.298 moved
+/// every reader off it; a computer before that release still reads it, and is
+/// two releases behind (cut off, `cut_off_for`) by the time this ships.
+///
+/// The key stays on the wire: a v0.3.298 node requires it (its field has no
+/// `#[serde(default)]`). What arrives from such a node is COUNTED, never
+/// allocated, so a receiver can still refuse an oversized capability
+/// (`capability_fits`) — and nothing can be read from it, which is the point:
+/// a reader left on it would see every peer as holding nothing.
+/// Prior art: Cassandra's gossiper sends each application state apart and only
+/// what is newer than the peer's digest (Scuttlebutt reconciliation) — one
+/// state, one message; ours keeps parts in the parts list alone.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PartsNotListed {
+    arrived: usize,
+}
+
+impl PartsNotListed {
+    /// How many entries the SENDER's list had: 0 from any node of this
+    /// release on, up to 1,024 from a v0.3.298 one. Only for a size bound.
+    pub fn arrived(&self) -> usize {
+        self.arrived
+    }
+}
+
+impl Serialize for PartsNotListed {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeSeq;
+        serializer.serialize_seq(Some(0))?.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for PartsNotListed {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct Count;
+        impl<'de> serde::de::Visitor<'de> for Count {
+            type Value = PartsNotListed;
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("a list")
+            }
+            fn visit_seq<A: serde::de::SeqAccess<'de>>(
+                self,
+                mut seq: A,
+            ) -> Result<Self::Value, A::Error> {
+                let mut arrived = 0usize;
+                while seq.next_element::<serde::de::IgnoredAny>()?.is_some() {
+                    arrived = arrived.saturating_add(1);
+                }
+                Ok(PartsNotListed { arrived })
+            }
+        }
+        deserializer.deserialize_seq(Count)
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct NodeCapability {
     pub node_id: NodeId,
@@ -578,7 +639,11 @@ pub struct NodeCapability {
     pub ram_model_budget_mb: Option<u64>,
     pub disk_available_mb: u64,
     pub bandwidth_mbps: f32,
-    pub hosted_shards: Vec<ShardId>,
+    /// Always sent empty, never read ([`PartsNotListed`]): a peer's parts
+    /// come from its parts lists. `default` so a later release may leave the
+    /// key off once no v0.3.298 node, which requires it, can connect.
+    #[serde(default)]
+    pub hosted_shards: PartsNotListed,
     pub max_contribution: ContributionLevel,
     pub uptime_seconds: u64,
     pub version: String,
@@ -658,7 +723,7 @@ pub struct NodeCapability {
     /// Advertised so the dashboard can label it, because an anchor is otherwise
     /// indistinguishable from an ordinary peer that happens to hold nothing —
     /// which is exactly what a struggling node looks like. Deliberately NOT
-    /// inferred from `relay_capable && hosted_shards.is_empty()`: an ordinary
+    /// inferred from relaying on and holding no parts: an ordinary
     /// node that has relaying on and has not acquired a shard yet matches that
     /// too, and mislabelling it "anchor" would be worse than no label.
     ///
@@ -705,8 +770,8 @@ pub struct NodeCapability {
     /// no carrier's lease, no chain segment it lacks —
     /// `auto_manage::coverage::fetches_parts`); saying so falsely only takes
     /// it out of that share. Never a routing or admission input: whether a
-    /// computer may use the swarm is judged on the parts it HOLDS
-    /// (`hosted_shards`), which a setting cannot fake for a released build
+    /// computer may use the swarm is judged on the parts it HOLDS (its
+    /// parts lists), which a setting cannot fake for a released build
     /// (`daemon::state::swarm_use`). `None` = an older build, which says
     /// nothing (`#[serde(default)]`, the additive rule) and is handed parts
     /// as before.
@@ -746,7 +811,7 @@ pub struct NodeCapability {
 
     /// Layers of each model this node currently has LOADED, by model id.
     ///
-    /// `hosted_shards` says what is on disk; this says what is in memory right
+    /// Its parts lists say what is on disk; this says what is in memory right
     /// now and therefore already paid for. The distinction decides how a peer's
     /// spare capacity is priced: a node already serving a model has paid for the
     /// weights it is holding, and charging it for them again routes around the
@@ -1409,6 +1474,30 @@ mod version_compat_tests {
             "uptime_seconds": 100u64,
             "version": "0.3.16-alpha"
         })
+    }
+
+    /// #91 (2j): a capability goes out with its parts list empty however it
+    /// arrived — the key kept, since a v0.3.298 node requires it — and a v0.3.298
+    /// peer's list is counted, never kept; one with no key at all still parses.
+    #[test]
+    fn a_capability_sends_no_parts_and_keeps_none_it_was_sent() {
+        let mut v = base_fields();
+        v["hosted_shards"] = serde_json::json!([
+            {"model_id": "llama", "index": 0},
+            {"model_id": "llama", "index": 1},
+            {"model_id": "qwen", "index": 4},
+        ]);
+        let cap: NodeCapability = serde_json::from_value(v).unwrap();
+        assert_eq!(cap.hosted_shards.arrived(), 3, "counted for the size bound");
+        let out = serde_json::to_value(&cap).unwrap();
+        assert_eq!(out["hosted_shards"], serde_json::json!([]), "sent empty");
+        let again: NodeCapability = serde_json::from_value(out).unwrap();
+        assert_eq!(again.hosted_shards.arrived(), 0);
+
+        let mut v = base_fields();
+        v.as_object_mut().unwrap().remove("hosted_shards");
+        let cap: NodeCapability = serde_json::from_value(v).unwrap();
+        assert_eq!(cap.hosted_shards, PartsNotListed::default());
     }
 
     /// A node that predates `ram_model_budget_mb` states no budget, and a

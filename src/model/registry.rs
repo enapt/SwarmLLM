@@ -2075,8 +2075,8 @@ impl ModelRegistry {
 
     /// How many parts the registry credits to `node_id`, without copying the
     /// set — this node's own count for `SharedState::swarm_use_here`, and a
-    /// peer's wherever its parts are counted (#91 (2j): never its
-    /// capability's `hosted_shards`, which a later release sends empty).
+    /// peer's wherever its parts are counted (#91 (2j): its capability
+    /// carries none).
     pub fn parts_credited_to(&self, node_id: &NodeId) -> usize {
         self.node_shards.get(node_id).map_or(0, |s| s.len())
     }

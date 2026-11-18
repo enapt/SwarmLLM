@@ -761,9 +761,8 @@ impl AutoShardManager {
     /// advertised entry (`NodeCapability::models_served`); one that advertises
     /// none — or whose list is full and stops short of the model — is weighed
     /// only if it holds a part, as its parts lists recorded
-    /// (`ModelRegistry::holds_part_of`, #91 (2j): never its capability's
-    /// `hosted_shards`, which a later release sends empty — read as "holds
-    /// nothing" it would give back a model a silent holder keeps). A
+    /// (`ModelRegistry::holds_part_of`, #91 (2j): its capability carries
+    /// none). A
     /// connected computer sends its list beside its capability on every
     /// connection (#359). A computer saying it held the model unserved is
     /// weighed only while it holds a part ([`Word::Says`]).

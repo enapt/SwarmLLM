@@ -182,8 +182,8 @@ fn is_leaderboard_eligible(first_seen: u64, verified_tx_count: u32, peer_count: 
 /// being guessed, because a node that predates a field must not be shown a
 /// fabricated value (the 2026-07-21 report chased an invented `+2500` balance
 /// that was never a ledger figure).
-/// `parts_held`: the parts the registry credits the node with (#91 (2j): never
-/// its capability's `hosted_shards`, which a later release sends empty).
+/// `parts_held`: the parts the registry credits the node with (#91 (2j): its
+/// capability carries none).
 fn capability_summary(
     cap: Option<&crate::types::NodeCapability>,
     parts_held: usize,

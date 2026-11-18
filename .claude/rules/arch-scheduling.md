@@ -204,7 +204,7 @@ State scoped to one attempt (e.g. `engine_drafter::draft_key`) is keyed by the a
 
 ## What a peer HOLDS on disk and what it has LOADED are different facts
 
-`hosted_shards` is disk, `resident_layers` memory. **`inference::scheduler::PeerResidency` is the single reading**: `Layers(n)`, `Cold`, `WarmAmountUnknown` — silence is never "holding nothing".
+A peer's parts lists (`ShardAnnounce`) are disk, `resident_layers` memory. **`inference::scheduler::PeerResidency` is the single reading**: `Layers(n)`, `Cold`, `WarmAmountUnknown` — silence is never "holding nothing".
 
 → `docs/invariants/scheduling.md` § "What a peer HOLDS on disk and what it has LOADED are different facts"
 

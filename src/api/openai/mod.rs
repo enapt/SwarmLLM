@@ -1034,9 +1034,9 @@ pub async fn status(State(state): State<AppState>) -> Json<serde_json::Value> {
     drop(info);
 
     // Count network-available models from peers, as their parts lists
-    // recorded (#91 (2j)) — never a capability's `hosted_shards`, which a
-    // later release sends empty. The peers are collected first: no guard of
-    // the peer registry is held while the model registry is read.
+    // recorded (#91 (2j); a capability carries none). The peers are collected
+    // first: no guard of the peer registry is held while the model registry
+    // is read.
     let peers: Vec<crate::types::NodeId> = state
         .shared_state
         .peer_registry

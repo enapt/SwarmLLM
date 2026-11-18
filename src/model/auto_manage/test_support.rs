@@ -149,7 +149,7 @@ pub(super) fn capability(ceiling_mb: Option<u64>, disk_mb: u64) -> NodeCapabilit
         ram_model_budget_mb: None,
         disk_available_mb: disk_mb,
         bandwidth_mbps: 0.0,
-        hosted_shards: vec![],
+        hosted_shards: Default::default(),
         max_contribution: crate::types::ContributionLevel::Moderate,
         uptime_seconds: 0,
         version: String::new(),

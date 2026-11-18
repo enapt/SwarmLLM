@@ -54,7 +54,7 @@ pub use network::{
 };
 pub use node::{
     features, ContributionLevel, CpuInfo, GivesWay, GpuInfo, LatencyObservation, ModelServed,
-    NodeCapability, NodeStats, PeerExchangeResponse, PeerInfo, ResidentLayerRange,
+    NodeCapability, NodeStats, PartsNotListed, PeerExchangeResponse, PeerInfo, ResidentLayerRange,
     ResidentModelLayers, StorageLimitKind, StorageRoom, PROTOCOL_VERSION,
 };
 pub use pool::{

@@ -1175,12 +1175,7 @@ mod tests {
         let start = std::time::Instant::now();
         let mut held = HeardBeforeKnown::default();
         let mut big = heard(1, 1);
-        big.hosted_shards = (0..20)
-            .map(|i| crate::types::ShardId {
-                model_id: crate::types::ModelId("m".repeat(60_000) + &i.to_string()),
-                index: i,
-            })
-            .collect();
+        big.region = Some("m".repeat(1_200_000));
         held.hold(big, start);
         assert!(held.by_node.is_empty(), "past the bound for one");
         held.hold(heard(2, 1), start);

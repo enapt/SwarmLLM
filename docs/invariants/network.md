@@ -5397,6 +5397,11 @@ variable list to the receiver's bound rather than having the whole message refus
 `a_computer_holding_more_parts_than_a_capability_lists_is_still_heard`, red (1,102 parts) without it. #91 (2j) removes
 the list from the capability altogether; until then this keeps a large holder heard.
 
+**Superseded by #91 (2j)'s second release** (on main 2026-11-18, not in a release yet): a capability sends no parts
+(`types::PartsNotListed`, § "A peer's parts are read from its parts lists"), so `parts_for_the_capability` and its test
+went. The receiver's bound stays — a v0.3.297 or v0.3.298 sender still lists up to 1,024 — now on the COUNT decoded
+(`PartsNotListed::arrived`), the list itself never kept; test `a_peers_capability_parts_list_is_only_counted`.
+
 **The same cliff on the saved-prompt announce, closed the same night.** `PrefixCacheAnnounce` is refused whole past
 `MAX_BLOCKS_PER_ANNOUNCE` (1,024) and carries every saved prompt's blocks for the model (up to 16 prompts): one
 70k-token agent prompt at 64-token blocks, or sixteen of 4k, and every peer kept the last set it took. Found by
@@ -5533,9 +5538,22 @@ good, and a mistyped model name would wait out every connected empty computer's 
 on the same ≤ 40-minute ladder); the readers that see such peers — the pool forward, the listings — skip it until its
 list arrives, which a fallback and a display can afford.
 
+**Release N+1 (on main 2026-11-18, not in a release yet): the list cannot be filled or read.**
+`NodeCapability::hosted_shards` is a `types::PartsNotListed`: it serializes as `[]` whatever it holds, and decoding
+COUNTS what a v0.3.298 sender lists (`serde::de::IgnoredAny`, nothing allocated) for `capability_fits`'s bound —
+`arrived()` is its one accessor. So the wrong call is unrepresentable rather than guarded: no sender can put parts
+in, no reader can take them out, and a capability re-serialized here (`HeardBeforeKnown`'s byte count, the network
+manager's held catch-up) no longer carries a peer's list either. The key stays on the wire because v0.3.298's field
+has no `#[serde(default)]`; ours does, so a later release may drop the key once no v0.3.298 node can connect (18
+bytes; not worth an entry). Our own capability also stops being news when a part arrives or goes
+(`capability_news` compares the whole serialized capability): the parts list carries that change alone — a part no
+longer republishes the capability by itself, though the disk and storage figures still do past their 1 GB deadband. Tests
+`a_capability_sends_no_parts_and_keeps_none_it_was_sent` (types crate) and `a_peers_capability_parts_list_is_only_counted`.
+
 **The guard** scans production code under `src/` (test modules masked) for `.hosted_shards`, statement by statement,
-allowing `health/monitor.rs` (building this node's own) and `.hosted_shards.len()` in `daemon/dispatch/mod.rs` (two
-log fields and `MAX_HOSTED_SHARDS_IN_CAP`). Writing it found `cfg_test_spans` taking a bodyless
+allowing only `.hosted_shards.arrived()` in `daemon/dispatch/mod.rs` (`capability_fits` and its WARN) — a count read
+as "holds parts" would call every peer of N+1 empty. Release N allowed `health/monitor.rs` and `.len()` in dispatch
+(two log fields and `MAX_HOSTED_SHARDS_IN_CAP`). Writing it found `cfg_test_spans` taking a bodyless
 `#[cfg(test)] mod tests;` as opening at the NEXT brace, masking the production item after each of seven such
 declarations from every guard that reads `production_code`; `a_test_module_declared_without_a_body_masks_nothing_after_it`
 pins the fix (red with it switched off).
@@ -7812,7 +7830,7 @@ since 10-16 ((2h) held), but upload had DOUBLED, 2410 → 4921 B/s, all of it go
 `swarm/models` (2908 B/s sent there, 0.6 messages a minute of it our own). The first copies
 received: `NodeCapabilityUpdate` 2.1 a minute at ~11.6 KB, `ShardAnnounce` 1.2 a minute at
 ~12.7 KB, each forwarded ~4 times. Both had grown with what peers hold — two hold ~300 parts,
-and a capability carries its whole `hosted_shards` list, as the parts list does. The capability
+and a capability carried its whole `hosted_shards` list then, as the parts list does. The capability
 repeated every `CAPABILITY_HEARTBEAT` (5 min) and the parts list every
 `FULL_REANNOUNCE_EVERY_TICKS` rounds (5 min on a swarm this size): 7 peers' fixed repeats are
 1.4 a minute of each, so nearly every parts list received and two thirds of the capabilities

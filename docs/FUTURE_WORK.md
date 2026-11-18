@@ -2028,9 +2028,20 @@ unknown-model check and `unused::swarm_use` reading a missing list as UNKNOWN, n
 ask only CONNECTED computers, and a connecting computer sends its parts list straight after its capability over the
 same direct path (`network/manager/identify.rs`, #359), so the gap is the two messages' flight; and a computer
 holding nothing sends no list, so the record could never be set for it — "unknown" would last for good, and a
-mistyped model name would wait out every connected empty computer's 3-minute catch-up. **Left: release N+1 sends the
-capability's list empty** (`dispatch::parts_for_the_capability`) once the release carrying this is published; a
-computer before that release still reads the list, and only two releases behind is it cut off (`cut_off_for`).
+mistyped model name would wait out every connected empty computer's 3-minute catch-up.
+**Release N+1 DONE on main 2026-11-18 (not in a release yet): a capability carries no parts.**
+`NodeCapability::hosted_shards` is a `types::PartsNotListed`: serialized `[]` whatever it holds (the key stays — a
+v0.3.298 node requires it), decoded to a COUNT only (`serde::de::IgnoredAny`, nothing allocated; `arrived()`, read only
+by `capability_fits`'s bound for a v0.3.297/.298 sender). No sender can fill it and no reader can take parts from it —
+the wrong call unrepresentable rather than guarded; `parts_for_the_capability` went, the guard now allows only
+`.hosted_shards.arrived()` in dispatch. A part arriving or going no longer republishes the capability by itself.
+Checked on the real swarm (2026-11-18 10:41-10:54Z, `~/swarmllm-gate/n1probe/run.sh`): one probe identity holding
+TinyLlama's 2 parts, on the published v0.3.298 and then on this build. The live node (v0.3.298) read the same row both
+times, six reads each: 2 parts, `tinyllama-1.1b-chat-v1.0.q4-k-m`, swarm use `allowed`. A v0.3.298 observer at `-v`
+logged the probe's capabilities arriving with `hosted_shards=0` (3 of 3) and the live node's with 250 (the control),
+and read the probe as 2 parts, the same model, `allowed`.
+**Left (P3)**: read the saving once the swarm runs it — capability bytes received at steady state
+(`gossip_recv_by_kind`), against 11-17's `NodeCapabilityUpdate` 90/h × 18.6 KB = 467 B/s.
 
 #### #169 — Connection churn on multi-interface hosts: only the LAN dial is deterministic
 `P3` · network · **PARTIAL** — 2026-07-25 · history: archive § "Connection churn on multi-interface hosts — deterministic dialer partial", gotcha #353

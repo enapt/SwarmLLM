@@ -375,9 +375,9 @@ did not say no.
 
 **Or a holder nobody can SEE (before v0.3.270).** A node announcing more than 512 parts had its
 whole list dropped by every receiver (`WARN ShardAnnounce exceeds shard limit — dropping`, gotcha
-#1027): it was online and held the range, and the swarm credited it with nothing new. Compare a
-peer's `hosted_shards` in `/api/admin/peers` with what this node credits it in the registry; a gap
-is this. From v0.3.270 the sender cuts a long list into pieces of 512, each model whole —
+#1027): it was online and held the range, and the swarm credited it with nothing new. Compare the
+parts a peer holds (its own `/api/admin/stats`) with its `hosted_shards` in this node's
+`/api/admin/peers` — the registry's count since v0.3.298; a gap is this. From v0.3.270 the sender cuts a long list into pieces of 512, each model whole —
 `DEBUG DIAG: parts list sent in pieces every receiver takes` (`parts=`, `pieces=`) on the sender.
 
 ## "Why is this route so slow?" — what prompt privacy adds (#165)

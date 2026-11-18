@@ -414,9 +414,6 @@ fn capability_news(
     now: &crate::types::NodeCapability,
 ) -> Vec<String> {
     fn as_sets(mut cap: crate::types::NodeCapability) -> crate::types::NodeCapability {
-        cap.hosted_shards.sort_by(|a, b| {
-            (a.model_id.0.as_str(), a.index).cmp(&(b.model_id.0.as_str(), b.index))
-        });
         cap.relay_reservations.sort_by_key(|n| n.0);
         cap.resident_layers
             .sort_by(|a, b| a.model_id.cmp(&b.model_id));
@@ -1553,9 +1550,9 @@ impl HealthMonitor {
             ),
             disk_available_mb,
             bandwidth_mbps: 0.0,
-            // Held to what every receiver takes; the whole list goes in the
-            // parts list below (`dispatch::parts_for_the_capability`).
-            hosted_shards: crate::daemon::dispatch::parts_for_the_capability(&hosted_shards),
+            // Sent empty (#91 (2j)): the parts go in the parts list below,
+            // which every reader asks; the capability's copy was ~3/4 of it.
+            hosted_shards: crate::types::PartsNotListed::default(),
             // From the runtime mirror: this is what we tell the swarm we are
             // willing to do, so a level the user changed an hour ago must not
             // keep being advertised as the one we booted with.
@@ -3233,16 +3230,7 @@ pub(crate) mod tests {
             ram_model_budget_mb: Some(6_000),
             disk_available_mb: 900_000,
             bandwidth_mbps: 0.0,
-            hosted_shards: vec![
-                crate::types::ShardId {
-                    model_id: crate::types::ModelId("llama-3.2-3b".into()),
-                    index: 0,
-                },
-                crate::types::ShardId {
-                    model_id: crate::types::ModelId("llama-3.2-3b".into()),
-                    index: 1,
-                },
-            ],
+            hosted_shards: Default::default(),
             max_contribution: crate::types::ContributionLevel::Moderate,
             uptime_seconds: 600,
             version: "0.3.233-alpha".into(),
@@ -3294,7 +3282,6 @@ pub(crate) mod tests {
         now.observed_latencies[0].ms_per_layer = 1.7;
         now.coord.as_mut().unwrap().x += 1.5;
         now.coord.as_mut().unwrap().error = 0.28;
-        now.hosted_shards.reverse();
         now.relay_reservations.reverse();
         assert!(
             capability_news(&sent, &now).is_empty(),
@@ -3445,12 +3432,6 @@ pub(crate) mod tests {
             (
                 "it stopped serving",
                 Box::new(|c| c.can_serve_inference = false),
-            ),
-            (
-                "it lost a part",
-                Box::new(|c| {
-                    c.hosted_shards.pop();
-                }),
             ),
             (
                 "a model loaded",

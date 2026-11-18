@@ -81,8 +81,8 @@ pub(super) fn find_peer_with_model(
         }
         let peer = entry.value();
         if peer.capability.is_some() {
-            // Its parts as its parts lists recorded (#91 (2j)), never the
-            // capability's `hosted_shards`, which a later release sends empty.
+            // Its parts as its parts lists recorded (#91 (2j)) — the
+            // capability carries none.
             let has_model = shared.model_registry.holds_part_of(entry.key(), &model_id);
             if has_model {
                 if let Some(url) = peer_http_url(peer) {
@@ -738,9 +738,9 @@ mod tests {
                     ram_model_budget_mb: None,
                     disk_available_mb: 0,
                     bandwidth_mbps: 0.0,
-                    // What a release after #91 (2j) sends: the parts go in its
-                    // parts list (recorded below), never the capability.
-                    hosted_shards: vec![],
+                    // The parts go in its parts list (recorded below), never
+                    // the capability (#91 (2j)).
+                    hosted_shards: Default::default(),
                     max_contribution: crate::types::ContributionLevel::Moderate,
                     uptime_seconds: 0,
                     version: String::new(),

@@ -2388,7 +2388,7 @@ pub(crate) async fn dispatch_network_messages(
                                             tracing::warn!(
                                                 node_id = %cap.node_id,
                                                 obs = cap.observed_latencies.len(),
-                                                hosted = cap.hosted_shards.len(),
+                                                hosted = cap.hosted_shards.arrived(),
                                                 resident = cap.resident_layers.len(),
                                                 "NodeCapabilityUpdate: payload exceeds caps — dropping"
                                             );
@@ -2396,7 +2396,6 @@ pub(crate) async fn dispatch_network_messages(
                                         }
                                         tracing::debug!(
                                             node_id = %cap.node_id,
-                                            hosted_shards = cap.hosted_shards.len(),
                                             observed_latencies = cap.observed_latencies.len(),
                                             "Received capability update from peer"
                                         );
@@ -3765,67 +3764,18 @@ fn install_capability_heard_before_known(
     }
 }
 
-/// The most parts a capability may list: past it every receiver drops the
-/// WHOLE capability ([`capability_fits`]), so the sender holds its copy to it
-/// ([`parts_for_the_capability`]).
+/// The most parts a capability may list. A node of this release sends none
+/// (`types::PartsNotListed`, #91 (2j)); a v0.3.297 or v0.3.298 node held its
+/// copy to this bound, and past it [`capability_fits`] drops the WHOLE
+/// capability.
 pub(crate) const MAX_HOSTED_SHARDS_IN_CAP: usize = 1024;
-
-/// The parts list a capability carries, held to [`MAX_HOSTED_SHARDS_IN_CAP`].
-/// Nothing cut it before (2026-11-17): a computer holding more than 1,024
-/// parts — about 540 GB of them; two peers held 535 and 543 that day — would
-/// have had every capability it sent refused by every peer, its features,
-/// release, room and loaded layers unknown or stale everywhere, with a WARN
-/// only on the receivers. The whole list still reaches peers in the parts
-/// list (`ShardAnnounce`, sent in pieces); this is only the capability's copy.
-/// Every model keeps a part first — most readers ask whether a peer holds any
-/// part of a model — then each model's next part in turn, ordered by model id
-/// and part number so the same holdings always give the same list (a reordered
-/// list would be news to `capability_news`). A list within the bound is
-/// returned as it is.
-pub(crate) fn parts_for_the_capability(
-    held: &[crate::types::ShardId],
-) -> Vec<crate::types::ShardId> {
-    if held.len() <= MAX_HOSTED_SHARDS_IN_CAP {
-        return held.to_vec();
-    }
-    let mut by_model: std::collections::BTreeMap<&str, Vec<&crate::types::ShardId>> =
-        std::collections::BTreeMap::new();
-    for shard in held {
-        by_model
-            .entry(shard.model_id.0.as_str())
-            .or_default()
-            .push(shard);
-    }
-    for parts in by_model.values_mut() {
-        parts.sort_by_key(|s| s.index);
-        parts.dedup_by_key(|s| s.index);
-    }
-    let mut listed = Vec::with_capacity(MAX_HOSTED_SHARDS_IN_CAP);
-    for rank in 0.. {
-        let mut any_at_rank = false;
-        for parts in by_model.values() {
-            let Some(shard) = parts.get(rank) else {
-                continue;
-            };
-            if listed.len() == MAX_HOSTED_SHARDS_IN_CAP {
-                return listed;
-            }
-            any_at_rank = true;
-            listed.push((*shard).clone());
-        }
-        if !any_at_rank {
-            break;
-        }
-    }
-    listed
-}
 
 /// Is a peer's capability within what this node takes? Its lists are capped
 /// before anything iterates them: each `observed_latencies` entry is merged
 /// into a shared map (`merge_peer_segment_latency`), so an uncapped list is
 /// memory growth from one message — the ShardAnnounce / PrefixCacheAnnounce
-/// pattern (512 / 1024). `hosted_shards` is bounded by the one capability
-/// slot per peer, but a 100k-entry list would still cost the decode. Asked by
+/// pattern (512 / 1024). `hosted_shards` is only counted as it is decoded,
+/// never kept, but a 100k-entry list would still cost the decode. Asked by
 /// the dispatcher's `NodeCapabilityUpdate` arm, and by the network manager
 /// before it holds one that arrived ahead of its sender's Identify
 /// (`network::manager::before_identify`).
@@ -3844,7 +3794,7 @@ pub(crate) fn capability_fits(cap: &crate::types::NodeCapability) -> bool {
     const MAX_RESIDENT_MODELS_IN_CAP: usize = 256;
     const MAX_RESIDENT_RANGES_IN_CAP: usize = 1024;
     cap.observed_latencies.len() <= MAX_OBSERVED_LATENCIES
-        && cap.hosted_shards.len() <= MAX_HOSTED_SHARDS_IN_CAP
+        && cap.hosted_shards.arrived() <= MAX_HOSTED_SHARDS_IN_CAP
         && cap.resident_layers.len() <= MAX_RESIDENT_MODELS_IN_CAP
         && cap
             .resident_layers
@@ -3872,8 +3822,7 @@ mod vision;
 #[cfg(test)]
 mod capability_fits_tests {
     use super::{
-        blocks_for_the_announce, capability_fits, parts_for_the_capability,
-        MAX_BLOCKS_PER_ANNOUNCE, MAX_HOSTED_SHARDS_IN_CAP,
+        blocks_for_the_announce, capability_fits, MAX_BLOCKS_PER_ANNOUNCE, MAX_HOSTED_SHARDS_IN_CAP,
     };
 
     fn resident(ranges: usize) -> swarmllm_types::ResidentModelLayers {
@@ -3970,66 +3919,38 @@ mod capability_fits_tests {
         );
     }
 
-    /// A computer holding more parts than a capability may list sends a
-    /// capability every receiver takes, naming every model it holds, the same
-    /// list whatever order its holdings come in; within the bound the list
-    /// is sent as it is. Red with `parts_for_the_capability` returning its
-    /// input: 1,102 parts, refused by `capability_fits`.
+    /// #91 (2j): the parts list a v0.3.298 peer still puts in its capability
+    /// is counted against the bound it held itself to — 1,024 taken, one more
+    /// refused — and kept by nobody: what this node passes on (the capability
+    /// it holds, re-serialized) lists none.
     #[test]
-    fn a_computer_holding_more_parts_than_a_capability_lists_is_still_heard() {
-        let part = |model: &str, index: u32| crate::types::ShardId {
-            model_id: crate::types::ModelId(model.into()),
-            index,
+    fn a_peers_capability_parts_list_is_only_counted() {
+        let with_parts = |n: u32| -> crate::types::NodeCapability {
+            serde_json::from_value(serde_json::json!({
+                "node_id": vec![0u8; 32],
+                "gpu": null,
+                "ram_total_mb": 8192u64,
+                "ram_available_mb": 4096u64,
+                "disk_available_mb": 100000u64,
+                "bandwidth_mbps": 100.0f32,
+                "hosted_shards": (0..n)
+                    .map(|i| serde_json::json!({"model_id": "big", "index": i}))
+                    .collect::<Vec<_>>(),
+                "max_contribution": "Moderate",
+                "uptime_seconds": 100u64,
+                "version": "0.3.298-alpha"
+            }))
+            .expect("a v0.3.298 capability")
         };
-        let mut held: Vec<crate::types::ShardId> = (0..600)
-            .map(|i| part("big", i))
-            .chain((0..500).map(|i| part("mid", i)))
-            .chain((0..2).map(|i| part("small", i)))
-            .collect();
-        let mut cap: crate::types::NodeCapability = serde_json::from_value(serde_json::json!({
-            "node_id": vec![0u8; 32],
-            "gpu": null,
-            "ram_total_mb": 8192u64,
-            "ram_available_mb": 4096u64,
-            "disk_available_mb": 100000u64,
-            "bandwidth_mbps": 100.0f32,
-            "hosted_shards": [],
-            "max_contribution": "Moderate",
-            "uptime_seconds": 100u64,
-            "version": "0.3.297-alpha"
-        }))
-        .expect("a bare capability");
-        cap.hosted_shards = held.clone();
-        assert!(!capability_fits(&cap), "the whole list is refused");
-
-        let listed = parts_for_the_capability(&held);
-        assert_eq!(listed.len(), MAX_HOSTED_SHARDS_IN_CAP);
-        cap.hosted_shards = listed.clone();
-        assert!(capability_fits(&cap), "every receiver takes it");
-        for model in ["big", "mid", "small"] {
-            assert!(
-                listed.iter().any(|s| s.model_id.0 == model),
-                "{model} is still named"
-            );
-        }
-        assert_eq!(
-            listed.iter().filter(|s| s.model_id.0 == "small").count(),
-            2,
-            "a small model is listed whole"
+        let at_bound = with_parts(MAX_HOSTED_SHARDS_IN_CAP as u32);
+        assert_eq!(at_bound.hosted_shards.arrived(), MAX_HOSTED_SHARDS_IN_CAP);
+        assert!(capability_fits(&at_bound), "what a v0.3.298 node sends");
+        assert!(
+            !capability_fits(&with_parts(MAX_HOSTED_SHARDS_IN_CAP as u32 + 1)),
+            "past the bound the whole capability is refused"
         );
-        held.reverse();
-        assert_eq!(
-            parts_for_the_capability(&held),
-            listed,
-            "the same holdings give the same list"
-        );
-
-        let few: Vec<_> = (0..40).map(|i| part("mid", 39 - i)).collect();
-        assert_eq!(
-            parts_for_the_capability(&few),
-            few,
-            "within the bound: as it is"
-        );
+        let passed_on = serde_json::to_value(&at_bound).expect("serializes");
+        assert_eq!(passed_on["hosted_shards"], serde_json::json!([]));
     }
 
     /// The models a peer says it holds and serves (#452) are looked up by

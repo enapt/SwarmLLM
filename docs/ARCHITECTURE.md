@@ -649,8 +649,8 @@ without ever being able to read them.
   dropped as unattributed.
 - **What a node advertises about its memory, and the distinction that matters.**
   A peer's parts lists (`ShardAnnounce`, recorded in `ModelRegistry`) say what
-  is on DISK — never its capability's `hosted_shards`, which a later release
-  sends empty (#91 (2j)) — and `NodeCapability` carries
+  is on DISK — its capability carries no parts (`PartsNotListed`, #91 (2j))
+  — and `NodeCapability` carries
   `resident_layers` (how many layers of each model are LOADED right now, summed
   from each live worker's charged segments). They answer different questions and
   a router needs both. A peer already running a model has paid for the weights it

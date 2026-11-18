@@ -11605,39 +11605,39 @@ fn a_test_module_declared_without_a_body_masks_nothing_after_it() {
 
 /// #91 (2j): a peer's parts are read from the registry its `ShardAnnounce`
 /// fills (`ModelRegistry::holds_part_of`, `models_held_by`,
-/// `parts_credited_to`), never from its capability's `hosted_shards` — the
-/// release after the one that moved every reader sends that list EMPTY, and a
-/// reader left on it would read every peer of that release as holding
-/// nothing. Allowed: building this node's own capability (`health/monitor.rs`)
-/// and the SIZE of what arrives (`.hosted_shards.len()` in
-/// `daemon/dispatch/mod.rs`: the bound on a capability and two log fields).
+/// `parts_credited_to`), never from its capability. Its `hosted_shards` is a
+/// `PartsNotListed` — sent empty, its contents never kept — so the compiler
+/// refuses a read of the parts; what is left is the COUNT that arrived from a
+/// v0.3.298 node, and only the size bound may ask it
+/// (`.hosted_shards.arrived()` in `daemon/dispatch/mod.rs`: `capability_fits`
+/// and its WARN). Read as "holds parts" it would call every peer of this
+/// release empty.
 #[test]
 fn a_peers_parts_are_read_from_its_parts_lists_never_its_capability() {
     let root = repo_root();
     let reads = |stmt: &str| stmt.contains(".hosted_shards");
     let allowed = |rel: &str, stmt: &str| {
-        rel == "src/health/monitor.rs"
-            || (rel == "src/daemon/dispatch/mod.rs"
-                && !stmt
-                    .replace(".hosted_shards.len()", "")
-                    .contains(".hosted_shards"))
+        rel == "src/daemon/dispatch/mod.rs"
+            && !stmt
+                .replace(".hosted_shards.arrived()", "")
+                .contains(".hosted_shards")
     };
     // The scan sees a read rustfmt wrapped, skips one behind a test module
-    // declared above it, and lets dispatch read only the size.
-    let planted = "#[cfg(test)]\nmod tests;\nfn holds(cap: &Cap, m: &M) -> bool {\n    cap\n        .hosted_shards\n        .iter()\n        .any(|s| s.model_id == *m)\n}\n";
+    // declared above it, and lets dispatch read only the count.
+    let planted = "#[cfg(test)]\nmod tests;\nfn holds(cap: &Cap) -> bool {\n    cap\n        .hosted_shards\n        .arrived()\n        > 0\n}\n";
     assert!(
         statements(&production_code(planted))
             .iter()
             .any(|(_, s)| reads(s) && !allowed("src/api/admin.rs", s)),
-        "the scan cannot see a wrapped read of a peer's parts list"
+        "the scan cannot see a wrapped read of a peer's parts count"
     );
-    let size = "fn fits(cap: &Cap) -> bool {\n    cap.hosted_shards.len() <= MAX\n}\n";
+    let size = "fn fits(cap: &Cap) -> bool {\n    cap.hosted_shards.arrived() <= MAX\n}\n";
     assert!(statements(size)
         .iter()
         .all(|(_, s)| allowed("src/daemon/dispatch/mod.rs", s)));
-    assert!(!statements(planted)
+    assert!(!statements(size)
         .iter()
-        .all(|(_, s)| !reads(s) || allowed("src/daemon/dispatch/mod.rs", s)));
+        .all(|(_, s)| !reads(s) || allowed("src/health/monitor.rs", s)));
     let mut offenders = Vec::new();
     for path in rust_files_under(&root.join("src")) {
         if module_file_is_test_only(&path) {
@@ -11660,7 +11660,7 @@ fn a_peers_parts_are_read_from_its_parts_lists_never_its_capability() {
         offenders.is_empty(),
         "a peer's parts read from its capability's `hosted_shards` (#91 (2j)) — read \
          `ModelRegistry::holds_part_of` / `models_held_by` / `parts_credited_to`, which its \
-         parts lists fill; a later release sends the capability's list empty: {offenders:?}"
+         parts lists fill; a capability carries none: {offenders:?}"
     );
 }
 
