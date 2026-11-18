@@ -236,6 +236,10 @@ const RECENT_REQUEST_PENALTY: f64 = 1.5;
 const KEPT_FOR_ITS_COUNT: &str = "not more copies than the target";
 const KEPT_FOR_ITS_REGION: &str = "the last close holder in this region";
 const KEPT_WHOLE_HERE: &str = "this computer holds the whole model, or completes it";
+/// A copy of a model its owner downloaded (`ModelTrustInfo::pinned_by_user`):
+/// kept at every pressure, never offered for room — and, where it keeps most
+/// parts, what the over-budget notice names ([`over_budget_notice`]).
+const KEPT_PINNED: &str = "the user pinned the model";
 /// A copy a part of a model nobody ran lately keeps on the swarm
 /// (`unused::Verdict::Cooled`, `coverage::COOLED_COPIES`) — given back only
 /// for room a part asks for.
@@ -276,6 +280,12 @@ impl KeptBy {
         if parts > 0 {
             *self.0.entry(why.to_string()).or_default() += parts;
         }
+    }
+
+    /// Whether `why` kept more than half of the parts counted.
+    pub(super) fn kept_most_by(&self, why: &str) -> bool {
+        let all: usize = self.0.values().sum();
+        self.0.get(why).is_some_and(|parts| parts * 2 > all)
     }
 
     /// `rule (parts); rule (parts)`, the rule that kept the most first.
@@ -380,17 +390,35 @@ const SATURATION_FACTOR_SEVERE: f64 = 2.0;
 /// ([`super::StorageLimit`]). The one fixed text said "raise the limit" to an
 /// owner whose budget the disk itself had set, where no setting frees a byte,
 /// and the log said "raise max_disk_mb" to one who had set `max_storage_mb`.
+///
+/// **And by what keeps the parts** (FUTURE_WORK #432 (2)): where the owner's
+/// own downloads kept most of them (`owners_own`, [`KeptBy::kept_most_by`]
+/// [`KEPT_PINNED`]), the toast says so — "nothing can be removed without
+/// leaving the network short of a model" was then untrue: nothing the network
+/// needs was at stake, only what the owner chose (this node, 2026-11-18: 153 of
+/// 250 parts kept by the owner's pins, the hourly toast blaming the network).
 fn over_budget_notice(
     limited_by: &super::StorageLimit,
+    owners_own: bool,
 ) -> (&'static str, &'static str, &'static str) {
     use super::StorageLimit::*;
     if let FreeDisk { .. } = limited_by {
+        let remedy = "free space on the disk (settings cannot), or delete a model yourself to \
+                      choose which one goes";
+        if owners_own {
+            return (
+                "storage_disk_full_own_models",
+                "This computer's disk is nearly full, and most of the parts SwarmLLM holds on it \
+                 belong to models you downloaded yourself, which it never removes on its own. \
+                 Free up space on the disk, or remove a model you no longer need.",
+                remedy,
+            );
+        }
         return (
             "storage_disk_full",
             "This computer's disk is nearly full, and nothing can be removed without leaving \
              the network short of a model. Free up space on the disk, or remove a model yourself.",
-            "free space on the disk (settings cannot), or delete a model yourself to choose \
-             which one goes",
+            remedy,
         );
     }
     let remedy = match limited_by {
@@ -406,6 +434,15 @@ fn over_budget_notice(
             "set a storage limit, or delete a model yourself to choose which one goes"
         }
     };
+    if owners_own {
+        return (
+            "storage_over_budget_own_models",
+            "Storage is over your configured limit, and most of the parts it holds belong to \
+             models you downloaded yourself, which SwarmLLM never removes on its own. Raise the \
+             limit, or remove a model you no longer need.",
+            remedy,
+        );
+    }
     (
         "storage_over_budget",
         "Storage is over your configured limit, but nothing can be removed without leaving \
@@ -1056,7 +1093,8 @@ impl AutoShardManager {
             // fires: over budget they are reclaimed with no grace period
             // (`daemon::background::spawn_failed_download_reclaim`).
             let (budget, held_bytes, _) = super::storage_budget_now(&self.shared_state);
-            let (kind, toast, remedy) = over_budget_notice(&budget.limited_by);
+            let (kind, toast, remedy) =
+                over_budget_notice(&budget.limited_by, kept.kept_most_by(KEPT_PINNED));
             tracing::warn!(
                 disk_pressure = format!("{disk_pressure:.2}"),
                 held_mb = held_bytes / (1024 * 1024),
@@ -2123,7 +2161,7 @@ impl AutoShardManager {
             .get(&shard_id.model_id)
             .is_some_and(|t| t.pinned_by_user)
         {
-            return Some("the user pinned the model");
+            return Some(KEPT_PINNED);
         }
         // The room this computer ADVERTISES (`RoomAsk::advertised`) reads
         // nothing that follows this owner's own requests (#389 (a); security
@@ -2809,6 +2847,7 @@ mod tests {
 
     use super::{
         card_room_to_give_back, effective_idle_secs, over_budget_notice, privacy_holds_shard,
+        KeptBy, KEPT_AS_THE_FIRST_COOLED_COPY, KEPT_FOR_ITS_COUNT, KEPT_PINNED,
     };
     use crate::types::ModelId;
 
@@ -2830,7 +2869,7 @@ mod tests {
             free_mb: 900,
             reserve_mb: 2_000,
         };
-        let (kind, toast, remedy) = over_budget_notice(&disk);
+        let (kind, toast, remedy) = over_budget_notice(&disk, false);
         assert_eq!(kind, "storage_disk_full");
         assert!(toast.contains("Free up space") && !toast.contains("Raise the limit"));
         assert!(remedy.starts_with("free space on the disk"));
@@ -2839,15 +2878,74 @@ mod tests {
         let explicit = StorageLimit::Explicit {
             max_storage_mb: 50_000,
         };
-        let (kind, toast, remedy) = over_budget_notice(&explicit);
+        let (kind, toast, remedy) = over_budget_notice(&explicit, false);
         assert_eq!(kind, "storage_over_budget");
         assert!(remedy.contains("max_storage_mb") && !remedy.contains("max_disk_mb"));
         assert_eq!(en[format!("activity.{kind}")].as_str(), Some(toast));
 
-        let (_, _, remedy) = over_budget_notice(&StorageLimit::MaxDisk {
-            max_disk_mb: 20_000,
-        });
+        let (_, _, remedy) = over_budget_notice(
+            &StorageLimit::MaxDisk {
+                max_disk_mb: 20_000,
+            },
+            false,
+        );
         assert!(remedy.contains("max_disk_mb"));
+    }
+
+    /// Where the owner's own downloads kept most of the parts, the notice
+    /// says so, never that the network would be left short (#432 (2): this
+    /// node's hourly toast blamed the network while its owner's pins kept 153
+    /// of 250 parts) — with the same advice on what set the budget, and its
+    /// own key translated.
+    #[test]
+    fn a_storage_full_of_the_owners_downloads_is_told_as_that() {
+        use crate::model::auto_manage::StorageLimit;
+        let en: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/frontend/i18n/en.json"
+            ))
+            .unwrap(),
+        )
+        .unwrap();
+        let mut kept = KeptBy::default();
+        kept.note_parts(KEPT_PINNED, 153);
+        kept.note_parts(KEPT_AS_THE_FIRST_COOLED_COPY, 55);
+        kept.note_parts("this copy carries the model", 37);
+        kept.note_parts("prompt privacy needs this end", 5);
+        assert!(kept.kept_most_by(KEPT_PINNED));
+        assert!(!kept.kept_most_by(KEPT_AS_THE_FIRST_COOLED_COPY));
+        // Half is not most.
+        let mut even = KeptBy::default();
+        even.note_parts(KEPT_PINNED, 10);
+        even.note_parts(KEPT_FOR_ITS_COUNT, 10);
+        assert!(!even.kept_most_by(KEPT_PINNED));
+        assert!(!KeptBy::default().kept_most_by(KEPT_PINNED));
+
+        for (limit, expected, remedy_names) in [
+            (
+                StorageLimit::Explicit {
+                    max_storage_mb: 100_000,
+                },
+                "storage_over_budget_own_models",
+                "max_storage_mb",
+            ),
+            (
+                StorageLimit::FreeDisk {
+                    free_mb: 900,
+                    reserve_mb: 2_000,
+                },
+                "storage_disk_full_own_models",
+                "free space on the disk",
+            ),
+        ] {
+            let (kind, toast, remedy) = over_budget_notice(&limit, kept.kept_most_by(KEPT_PINNED));
+            assert_eq!(kind, expected);
+            assert!(toast.contains("models you downloaded yourself"), "{toast}");
+            assert!(!toast.contains("short of a model"), "{toast}");
+            assert!(remedy.contains(remedy_names), "{remedy}");
+            assert_eq!(en[format!("activity.{kind}")].as_str(), Some(toast));
+        }
     }
 
     /// The field report (2026-10-12, RTX 3060 12 GB): a 14B's first load put

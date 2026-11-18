@@ -6377,7 +6377,7 @@ stall per layer; TP off by default), and `VisionEncodeResponse` has no error fie
 image-encode refusal stays silent.
 
 #### #432 — A full node whose every part is kept cannot say which rule keeps them
-`P2` · auto-manage · **OPEN** — 2026-11-08 · history: #371, #401 (room for a wanted part), #389 (d), field report 2026-11-08
+`P2` · auto-manage · **PARTIAL** ((1) and (2) done; (3) open) — 2026-11-08 · history: #371, #401 (room for a wanted part), #389 (d), field report 2026-11-08
 
 A tester's node held 450.3 of 450 GB (≈45 models, most of them whole: a 70B, Gemma 4 31B, Qwen3.6-35B-A3B,
 Qwen3.8-27B, …), and a wanted qwen3.5-2b-q8-0 part asked for 764 MB every ~10 min and got none (`candidates=0`,
@@ -6388,9 +6388,15 @@ reading, sonnet agent): the owner's pins (`download-shards` pins a model — kep
 room, never given back as unused, and the toast would then be WRONG: nothing the network needs is at stake); the
 replica target at urgent pressure (floored at `min_replicas` 2, so a part needs 3 live holders to be shed); or the room
 path's own exclusions (`not_spare_for_room` refuses any copy of a model held whole here, at any pressure). Done: the diagnostics report prints the last prune pass's `kept` summary under the storage line
-(`state.models.parts_kept_by`). **To do**: (2) once a report
-names the rule, the toast says the true reason — pins: "the models you downloaded fill your limit" — with keys in all
-21 languages; (3) only then decide whether a node holding many whole models should give one up for a wanted part.
+(`state.models.parts_kept_by`). **(2) Done 2026-11-19**: where the owner's pins kept more than half the parts
+(`prune::KeptBy::kept_most_by(KEPT_PINNED)`), the over-budget toast says most of the parts belong to models the owner
+downloaded, which SwarmLLM never removes on its own — `activity.storage_over_budget_own_models` /
+`storage_disk_full_own_models`, all 21 languages, a native review of the 40 strings (8 corrected, gotcha #793's rule).
+Seen on this node 11-18: 153 of 250 parts kept by pins while the hourly toast blamed the network. Prior art: macOS
+Storage settings and Windows Storage Sense break a full disk down by what fills it before advising; Ollama never
+deletes a pulled model itself. Test `a_storage_full_of_the_owners_downloads_is_told_as_that` (red with the branches
+off). The 6-hourly "a part wants a place here" toast already says the owner's downloads are kept. **To do**: (3)
+decide whether a node holding many whole models should give one up for a wanted part.
 
 ### API surface
 
