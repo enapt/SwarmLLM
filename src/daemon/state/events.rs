@@ -77,6 +77,12 @@ impl EventBus {
         }
     }
 
+    /// A check the nudge brought forward found nothing: arm it again
+    /// (`update::PeerVersionWatch::rearm`).
+    pub fn rearm_update_nudge(&self) {
+        self.peer_versions.lock().rearm();
+    }
+
     /// Remove stale `model_loaded` history entries for a model (e.g., after load/unload/delete).
     pub fn clear_model_load_history(&self, model_id: &str) {
         let mut history = self.activity_history.lock();

@@ -605,12 +605,38 @@ impl PeerVersionWatch {
         self.nudged_for = Some(advertised.to_string());
         Some(advertised.to_string())
     }
+
+    /// The check a nudge brought forward did not find the version (GitHub had
+    /// not published it yet, or the check failed): the next corroborating
+    /// observation nudges again. How soon the check then comes is the update
+    /// loop's `nudged_check_spacing`, never this.
+    pub fn rearm(&mut self) {
+        self.nudged_for = None;
+    }
 }
 
 /// Shortest gap between two checks brought forward by peer gossip. The
-/// periodic poll is hourly; a nudge may pull ONE check inside that hour, not
-/// turn every capability update into a GitHub request.
+/// periodic poll is hourly; a nudge pulls a check inside that hour — one, or a
+/// few at doubling gaps while its checks find nothing (`nudged_check_spacing`) —
+/// never one per capability update.
 const NUDGED_CHECK_MIN_SPACING: std::time::Duration = std::time::Duration::from_secs(10 * 60);
+
+/// How far a nudge brings a check forward, after `empty` nudged checks in a row
+/// that did not find what the peers advertise: 10, then 20, then 40 minutes.
+///
+/// A nudge used to be spent for good once its check ran (`nudged_for`). On
+/// 2026-11-18 two test nodes running v0.3.298 before it was published spent it on
+/// every peer they reached; after the publish no peer was nudged again, and each
+/// waited for its hourly poll (up to an hour) where a fresh node updated in 43 s.
+/// So a check that does not find the version re-arms the nudge
+/// (`PeerVersionWatch::rearm`): level-triggered, the way a Kubernetes controller
+/// acts on the state as it stands rather than on an event it may have missed,
+/// with the hourly poll as the resync behind it. The spacing doubles so that two
+/// peers advertising a version nobody published cost a node a few GitHub
+/// requests an hour, not six.
+fn nudged_check_spacing(empty: u32) -> std::time::Duration {
+    NUDGED_CHECK_MIN_SPACING * 2u32.pow(empty.min(2))
+}
 
 /// Upper bound of the random delay before a nudged check. The motivating case
 /// is every node seeing the anchor jump at once, which is precisely a
@@ -1646,6 +1672,10 @@ impl UpdateChecker {
             }
         }
 
+        // Whether the check about to run was brought forward by peers, and how
+        // many such checks in a row found nothing (`nudged_check_spacing`).
+        let mut nudged = false;
+        let mut empty_nudged_checks = 0u32;
         loop {
             // Both of these are re-read every pass: a settings change has to
             // reach a task that sleeps for hours at a time.
@@ -1671,8 +1701,10 @@ impl UpdateChecker {
                 Err(e) => tracing::debug!("star count refresh failed: {e}"),
             }
 
+            let mut found_an_update = false;
             match self.check_for_update().await {
                 Ok(Some(info)) => {
+                    found_an_update = true;
                     tracing::info!(
                         current = %info.current_version,
                         latest = %info.latest_version,
@@ -1759,12 +1791,26 @@ impl UpdateChecker {
                 }
             }
 
+            // A check peers brought forward that found nothing leaves the nudge
+            // armed for the next time they say it (`nudged_check_spacing`).
+            if nudged {
+                if found_an_update {
+                    empty_nudged_checks = 0;
+                } else {
+                    empty_nudged_checks = empty_nudged_checks.saturating_add(1);
+                    if let Some(s) = self.shared.as_ref() {
+                        s.events.rearm_update_nudge();
+                    }
+                }
+            }
+            nudged = false;
+
             // Wait for the next check interval, a corroborated peer-version
             // nudge, or shutdown. The nudge only brings the next GitHub check
             // forward — it names nothing and fetches nothing (see
             // `PeerVersionWatch`) — jittered so a whole swarm noticing one
             // release does not poll GitHub in the same second, and no closer
-            // than `NUDGED_CHECK_MIN_SPACING` to the previous check.
+            // than `nudged_check_spacing` to the previous check.
             let checked_at = std::time::Instant::now();
             let nudge = self.shared.as_ref().map(|s| &s.events.update_nudge);
             tokio::select! {
@@ -1776,7 +1822,8 @@ impl UpdateChecker {
                     }
                 } => {
                     let since = checked_at.elapsed();
-                    let wait = NUDGED_CHECK_MIN_SPACING
+                    nudged = true;
+                    let wait = nudged_check_spacing(empty_nudged_checks)
                         .saturating_sub(since)
                         .saturating_add(std::time::Duration::from_secs(
                             rand::random::<u64>() % (NUDGED_CHECK_MAX_JITTER_SECS + 1),
@@ -3528,6 +3575,48 @@ mod pending_restart_tests {
         // The same version does not nudge again on the next gossip round.
         assert_eq!(w.observe(a, "0.3.153-alpha", current), None);
         assert_eq!(w.observe(b, "0.3.153-alpha", current), None);
+    }
+
+    /// A nudge spent before the release was published — its check found nothing
+    /// — comes back once re-armed: the next peer saying the version nudges
+    /// again (v0.3.298: peers spent it on draft-build test nodes and then waited
+    /// for their hourly poll).
+    #[test]
+    fn a_nudge_whose_check_found_nothing_is_armed_again() {
+        use super::PeerVersionWatch;
+        use crate::types::NodeId;
+        let mut w = PeerVersionWatch::default();
+        let (a, b) = (NodeId([1u8; 32]), NodeId([2u8; 32]));
+        let current = "0.3.297-alpha";
+        assert_eq!(w.observe(a.clone(), "0.3.298-alpha", current), None);
+        assert_eq!(
+            w.observe(b.clone(), "0.3.298-alpha", current),
+            Some("0.3.298-alpha".to_string())
+        );
+        assert_eq!(
+            w.observe(a.clone(), "0.3.298-alpha", current),
+            None,
+            "spent"
+        );
+        w.rearm();
+        assert_eq!(
+            w.observe(a, "0.3.298-alpha", current),
+            Some("0.3.298-alpha".to_string()),
+            "a re-armed nudge fires on the next peer that says it"
+        );
+        assert_eq!(w.observe(b, "0.3.298-alpha", current), None);
+    }
+
+    /// A re-armed nudge comes no faster than 10, 20, then 40 minutes after the
+    /// check before it, however many empty checks in a row.
+    #[test]
+    fn a_re_armed_nudge_waits_longer_each_time_it_finds_nothing() {
+        use super::nudged_check_spacing;
+        let min = |m: u64| std::time::Duration::from_secs(m * 60);
+        assert_eq!(nudged_check_spacing(0), min(10));
+        assert_eq!(nudged_check_spacing(1), min(20));
+        assert_eq!(nudged_check_spacing(2), min(40));
+        assert_eq!(nudged_check_spacing(u32::MAX), min(40));
     }
 
     /// Nothing behind or level with us counts, and neither does a jump no real

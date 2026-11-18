@@ -519,7 +519,7 @@ Each names the ONE place a decision is made; a second implementation is this cod
 - **`NodeCapability.cpu`** — a processor described like a graphics card.
 - **`PeerInfo::ack_srtt_ms` is what routing prices a peer by** — capped at `ACK_SRTT_ROUTING_CAP_MS`. **`PeerInfo::round_trip_ms`** is the one COST reading (it, else the ping) for routing and a wait; a DISTANCE is the windowed minimum (`metrics.network_coord_samples` → `LatencyFilter::min`: the coordinate, near chains, `trees_wanted`) — the smoothed cost read 2.5-5 s on a 20 ms link through a first request.
 - **`mem_bandwidth::remeasure_keeping_the_best`** — may rise, never fall.
-- **A peer's advertised version may bring the update check FORWARD and may do nothing else** — `update::PeerVersionWatch`.
+- **A peer's advertised version may bring the update check FORWARD and may do nothing else** — `update::PeerVersionWatch`; a nudged check that finds nothing re-arms it (`rearm`, spacing `nudged_check_spacing` 10/20/40 min).
 - **`update::SelfUpdateBlocker` — "this node cannot update itself" carries WHY** — `key()` / `advice()`.
 - **`ModelRegistry::manifests_to_gossip`** — which manifests to re-broadcast.
 - **`model::manifest::merge_known_shard_hashes`** — a hash goes unknown → known, never back.
