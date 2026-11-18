@@ -14026,73 +14026,13 @@ mod local_speculation_tests {
             eprintln!("SWARMLLM_GUESS_TEST_DRAFTER_DIR not set — skipped");
             return;
         }
-        let asked = std::env::var("SWARMLLM_GUESS_TEST_PROMPT").ok();
-        let prompt = model.encode_ids(asked.as_deref().unwrap_or(GUESS_TEST_STORY));
-        let steps: usize = std::env::var("SWARMLLM_SPARE_TEST_STEPS")
-            .ok()
-            .and_then(|n| n.parse().ok())
-            .unwrap_or(256);
         let splits: Vec<usize> = std::env::var("SWARMLLM_SPARE_TEST_SPLITS")
             .ok()
             .map(|s| s.split(',').filter_map(|n| n.trim().parse().ok()).collect())
             .unwrap_or_else(|| vec![8, 16, 24]);
-        let kv = crate::inference::split::KvCacheStore::new(std::time::Duration::from_secs(600));
-        let mut text = prompt.clone();
-        let started = std::time::Instant::now();
-        let mut logits = model
-            .forward(
-                &model.tensor_from_ids(&prompt).unwrap(),
-                0,
-                &kv,
-                "spare-plain",
-            )
-            .unwrap();
-        for _ in 0..steps {
-            let row: Vec<f32> = logits
-                .flatten_all()
-                .and_then(|l| l.to_dtype(candle_core::DType::F32))
-                .and_then(|l| l.to_vec1())
-                .unwrap();
-            let next = crate::inference::sampling::argmax(&row);
-            logits = model
-                .forward(
-                    &model.token_tensor(next).unwrap(),
-                    text.len(),
-                    &kv,
-                    "spare-plain",
-                )
-                .unwrap();
-            text.push(next);
-        }
-        eprintln!(
-            "{} prompt + {steps} reply tokens written in {:.0} s",
-            prompt.len(),
-            started.elapsed().as_secs_f64()
-        );
-        let targets: Vec<usize> = model
-            .block_drafter()
-            .expect("the drafter was not attached")
-            .target_layers()
-            .to_vec();
-        let layers: std::collections::HashSet<usize> = targets
-            .iter()
-            .copied()
-            .chain(splits.iter().map(|a| a - 1))
-            .collect();
-        let input = model.tensor_from_ids(&text).unwrap();
-        let (_, caught) = model
-            .forward_keeping(
-                &input,
-                0,
-                &kv,
-                "spare-whole",
-                crate::inference::split::Capture {
-                    layers: &layers,
-                    last: text.len(),
-                },
-                false,
-            )
-            .unwrap();
+        let boundaries: Vec<usize> = splits.iter().filter(|&&a| a > 0).map(|a| a - 1).collect();
+        let (prompt, text, caught) = spare_test_text(&mut model, &boundaries);
+        let targets: Vec<usize> = model.block_drafter().unwrap().target_layers().to_vec();
         let drafter = model.block_drafter().unwrap();
         let block = drafter.block_size() - 1;
         // A fresh cache a draft, every row through `fc` again: the arms
@@ -14237,6 +14177,231 @@ mod local_speculation_tests {
             );
         }
         assert!(true_kept > 0, "no guess kept with every row true");
+    }
+
+    /// The fixed text the #436 probes read: the prompt
+    /// (`SWARMLLM_GUESS_TEST_PROMPT`, else the story), its reply written one
+    /// token at a time (`SWARMLLM_SPARE_TEST_STEPS`, default 256), and the
+    /// whole text read once keeping every row of the drafter's target
+    /// layers and of `also` — `(prompt, text, rows by layer)`.
+    fn spare_test_text(
+        model: &mut SplitModel,
+        also: &[usize],
+    ) -> (
+        Vec<u32>,
+        Vec<u32>,
+        std::collections::HashMap<usize, candle_core::Tensor>,
+    ) {
+        let asked = std::env::var("SWARMLLM_GUESS_TEST_PROMPT").ok();
+        let prompt = model.encode_ids(asked.as_deref().unwrap_or(GUESS_TEST_STORY));
+        let steps: usize = std::env::var("SWARMLLM_SPARE_TEST_STEPS")
+            .ok()
+            .and_then(|n| n.parse().ok())
+            .unwrap_or(256);
+        let kv = crate::inference::split::KvCacheStore::new(std::time::Duration::from_secs(600));
+        let mut text = prompt.clone();
+        let started = std::time::Instant::now();
+        let mut logits = model
+            .forward(
+                &model.tensor_from_ids(&prompt).unwrap(),
+                0,
+                &kv,
+                "spare-plain",
+            )
+            .unwrap();
+        for _ in 0..steps {
+            let row: Vec<f32> = logits
+                .flatten_all()
+                .and_then(|l| l.to_dtype(candle_core::DType::F32))
+                .and_then(|l| l.to_vec1())
+                .unwrap();
+            let next = crate::inference::sampling::argmax(&row);
+            logits = model
+                .forward(
+                    &model.token_tensor(next).unwrap(),
+                    text.len(),
+                    &kv,
+                    "spare-plain",
+                )
+                .unwrap();
+            text.push(next);
+        }
+        eprintln!(
+            "{} prompt + {steps} reply tokens written in {:.0} s",
+            prompt.len(),
+            started.elapsed().as_secs_f64()
+        );
+        let layers: std::collections::HashSet<usize> = model
+            .block_drafter()
+            .expect("the drafter was not attached")
+            .target_layers()
+            .iter()
+            .chain(also)
+            .copied()
+            .collect();
+        let input = model.tensor_from_ids(&text).unwrap();
+        let (_, caught) = model
+            .forward_keeping(
+                &input,
+                0,
+                &kv,
+                "spare-whole",
+                crate::inference::split::Capture {
+                    layers: &layers,
+                    last: text.len(),
+                },
+                false,
+            )
+            .unwrap();
+        (prompt, text, caught)
+    }
+
+    /// #436's second measure: how often a split could guess the OUTCOME of
+    /// a check still away — how many of the block's guesses it keeps, and
+    /// the target's word after the last kept one — ranking outcomes as
+    /// SSD/Saguaro does (arXiv 2603.03251): `j` guesses kept then the word
+    /// `t`, scored `Σ_{i ≤ j} log p_i(g_i) + log p_{j+1}(t)` by the
+    /// drafter's own scores, over the 8 words after each row's pick (the
+    /// pick itself would have been kept). A whole block kept puts the next
+    /// word past the drafter's rows: it takes a place in the ranking and is
+    /// never a hit. Prints the share of rounds whose outcome is among the
+    /// best 1 / 4 / 16 / 64, and the tokens a round trip carries now and
+    /// would carry with that many spares, each keeping what the next round
+    /// keeps with every row true (the first measure's 77-96% on code
+    /// scales that down). Text and env as
+    /// [`a_block_drafters_spare_over_stood_in_far_rows`];
+    /// `cargo dev-test --lib spares_outcome -- --ignored --nocapture`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[ignore = "needs a GGUF in SWARMLLM_GUESS_TEST_GGUF and a drafter beside it"]
+    async fn a_spares_outcome_ranked_by_the_drafters_scores() {
+        const ALTERNATIVES: usize = 8;
+        const PLACES: [usize; 4] = [1, 4, 16, 64];
+        let Some(mut model) = guess_test_model() else {
+            return;
+        };
+        if std::env::var("SWARMLLM_GUESS_TEST_DRAFTER_DIR").is_err() {
+            eprintln!("SWARMLLM_GUESS_TEST_DRAFTER_DIR not set — skipped");
+            return;
+        }
+        let (prompt, text, caught) = spare_test_text(&mut model, &[]);
+        let drafter = model.block_drafter().unwrap();
+        let block = drafter.block_size() - 1;
+        let kept: Vec<candle_core::Tensor> = drafter
+            .target_layers()
+            .iter()
+            .map(|l| caught[l].clone())
+            .collect();
+        let rows = drafter.context_rows(&kept).unwrap();
+        // (kept, the true outcome's place among the ranked ones, if any).
+        let mut rounds: Vec<(usize, Option<usize>)> = Vec::new();
+        let mut p = prompt.len();
+        while p + block + 1 < text.len() {
+            let mut cache = crate::inference::split::BlockCache::default();
+            let scores: Vec<Vec<f32>> = drafter
+                .draft_scores(
+                    &model,
+                    &mut cache,
+                    Some(&rows.narrow(1, 0, p).unwrap()),
+                    text[p],
+                    block,
+                    p + block + 1,
+                )
+                .and_then(|s| {
+                    s.to_dtype(candle_core::DType::F32)
+                        .and_then(|s| s.squeeze(0))
+                        .and_then(|s| s.to_vec2())
+                        .map_err(SwarmError::internal)
+                })
+                .unwrap();
+            let picks: Vec<u32> = scores
+                .iter()
+                .map(|r| crate::inference::sampling::argmax(r))
+                .collect();
+            if rounds.is_empty() {
+                // The scored forward is the one `draft` reads.
+                let mut cache = crate::inference::split::BlockCache::default();
+                let drafted = drafter
+                    .draft(
+                        &model,
+                        &mut cache,
+                        Some(&rows.narrow(1, 0, p).unwrap()),
+                        text[p],
+                        block,
+                        p + block + 1,
+                        false,
+                        crate::inference::split::GuessOver::Everything,
+                    )
+                    .unwrap();
+                assert_eq!(drafted, picks, "the scored draft is not the draft");
+            }
+            let log_p: Vec<Vec<f32>> = scores
+                .iter()
+                .map(|r| {
+                    let most = r.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+                    let sum: f64 = r.iter().map(|&x| f64::from(x - most).exp()).sum();
+                    let norm = most + sum.ln() as f32;
+                    r.iter().map(|&x| x - norm).collect()
+                })
+                .collect();
+            let mut outcomes: Vec<(f32, usize, Option<u32>)> = Vec::new();
+            let mut opening = 0.0f32;
+            for (j, row) in log_p.iter().enumerate() {
+                let mut ids: Vec<usize> = (0..row.len()).collect();
+                ids.select_nth_unstable_by(ALTERNATIVES, |&a, &b| row[b].total_cmp(&row[a]));
+                for &t in &ids[..=ALTERNATIVES] {
+                    if t as u32 != picks[j] {
+                        outcomes.push((opening + row[t], j, Some(t as u32)));
+                    }
+                }
+                opening += row[picks[j] as usize];
+            }
+            outcomes.push((opening, block, None));
+            let k = picks
+                .iter()
+                .zip(&text[p + 1..])
+                .take_while(|(a, b)| a == b)
+                .count();
+            let truth = (k < block).then(|| text[p + k + 1]);
+            let place = outcomes
+                .iter()
+                .find(|o| truth.is_some() && o.1 == k && o.2 == truth)
+                .map(|hit| outcomes.iter().filter(|o| o.0 > hit.0).count() + 1);
+            rounds.push((k, place));
+            p += k + 1;
+        }
+        let n = rounds.len().max(1) as f64;
+        let now: f64 = rounds.iter().map(|r| (r.0 + 1) as f64).sum::<f64>() / n;
+        let whole = rounds.iter().filter(|r| r.0 == block).count();
+        let mut line = Vec::new();
+        for places in PLACES {
+            let hit = |r: &(usize, Option<usize>)| r.1.is_some_and(|at| at <= places);
+            let hits = rounds.iter().filter(|r| hit(r)).count();
+            // A hit carries the next round in the same round trip, which
+            // then starts after it.
+            let (mut at, mut trips, mut tokens) = (0, 0usize, 0usize);
+            while at < rounds.len() {
+                tokens += rounds[at].0 + 1;
+                trips += 1;
+                if hit(&rounds[at]) && at + 1 < rounds.len() {
+                    tokens += rounds[at + 1].0 + 1;
+                    at += 2;
+                } else {
+                    at += 1;
+                }
+            }
+            let with = tokens as f64 / trips.max(1) as f64;
+            line.push(format!(
+                "best {places}: {:.0}% of rounds, {with:.2} tokens a round trip",
+                100.0 * hits as f64 / n
+            ));
+        }
+        eprintln!(
+            "block of {block}: {} rounds, {now:.2} tokens a round trip now, the whole block kept in {whole}; {}; \
+             (kept, place) {rounds:?}",
+            rounds.len(),
+            line.join("; ")
+        );
+        assert!(rounds.iter().any(|r| r.0 > 0), "no guess kept");
     }
 
     /// A record to copy: a reply held to JSON that repeats it is mostly guessed.

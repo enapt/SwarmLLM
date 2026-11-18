@@ -770,6 +770,107 @@ impl BlockDrafter {
         if guesses == 0 {
             return Ok(Vec::new());
         }
+        let out = self.block_rows(
+            target,
+            cache,
+            context,
+            anchor,
+            guesses,
+            kv_reserve,
+            for_the_owner,
+        )?;
+        // On the processor the guesses read the hot rows and the
+        // conversation's own words (#425 (b), FR-Spec), where the model's
+        // head keeps them: there the head read for every row was most of a
+        // draft (247 ms at 15 guesses on a 9B). The check reads every word,
+        // so the reply is the same; only a guess past them is lost.
+        if matches!(over, super::GuessOver::HotAnd(_)) && target.mtp_hot_rows().is_some() {
+            return target.mtp_guesses(&out, over);
+        }
+        let logits = self.block_logits(target, &out)?;
+        // On a card the guesses are picked there, so only their ids cross
+        // to the host (llama.cpp samples a draft on the device too): the
+        // ONE greedy pick, the first of equal maxima. A score that is not
+        // finite stops the drafter for the reply.
+        #[cfg(feature = "candle-cuda")]
+        if logits.device().is_cuda() {
+            let rows = logits.squeeze(0).map_err(err("logits"))?;
+            return crate::inference::tree_rank::greedy_picks(&rows)
+                .map_err(err("guesses picked on the card"))?
+                .ok_or_else(|| {
+                    SwarmError::Internal("block drafter: a guess's scores are not finite".into())
+                });
+        }
+        let rows: Vec<Vec<f32>> = logits
+            .to_dtype(DType::F32)
+            .and_then(|l| l.squeeze(0))
+            .and_then(|l| l.to_vec2())
+            .map_err(err("logits"))?;
+        Ok(rows
+            .iter()
+            .map(|row| crate::inference::sampling::argmax(row))
+            .collect())
+    }
+
+    /// Every word's score at each of a block's guesses, `[1, guesses,
+    /// vocabulary]`, from the same forward and head [`Self::draft`] reads
+    /// with every word — for a probe that ranks the outcomes a check could
+    /// reach (#436), never a reply.
+    #[cfg(test)]
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn draft_scores(
+        &self,
+        target: &SplitModel,
+        cache: &mut BlockCache,
+        context: Option<&Tensor>,
+        anchor: u32,
+        guesses: usize,
+        kv_reserve: usize,
+    ) -> Result<Tensor, SwarmError> {
+        let guesses = guesses.min(self.block_size - 1);
+        let out = self.block_rows(target, cache, context, anchor, guesses, kv_reserve, false)?;
+        self.block_logits(target, &out)
+    }
+
+    /// The target's head over a block's rows: moved beside it first where
+    /// the drafter sits elsewhere (system memory beside a card's head hands
+    /// it the rows, a few hundred KB — llama.cpp's copy between backends);
+    /// a split's first segment reads the head it borrowed.
+    fn block_logits(&self, target: &SplitModel, out: &Tensor) -> Result<Tensor, SwarmError> {
+        let err = |what: &'static str| {
+            move |e: candle_core::Error| SwarmError::Internal(format!("block drafter {what}: {e}"))
+        };
+        let out = if out.device().same_device(target.device()) {
+            out.clone()
+        } else {
+            out.to_device(target.device())
+                .map_err(err("block to the output head"))?
+        };
+        match (&target.output, &target.drafter_head) {
+            (None, Some(head)) => head.forward(&out).map_err(err("output head")),
+            _ => target.logits_from(&out),
+        }
+    }
+
+    /// The block's forward: `context` into the cache's next positions, then
+    /// `[anchor, mask × guesses]` through every layer and the output norm —
+    /// the guesses' rows `[1, guesses, hidden]`, before any head reads
+    /// them. The block's own keys are cut from the cache whatever the
+    /// forward did; the context rows stay.
+    #[allow(clippy::too_many_arguments)]
+    fn block_rows(
+        &self,
+        target: &SplitModel,
+        cache: &mut BlockCache,
+        context: Option<&Tensor>,
+        anchor: u32,
+        guesses: usize,
+        kv_reserve: usize,
+        for_the_owner: bool,
+    ) -> Result<Tensor, SwarmError> {
+        let err = |what: &'static str| {
+            move |e: candle_core::Error| SwarmError::Internal(format!("block drafter {what}: {e}"))
+        };
         let n_ctx = context
             .map_or(Ok(0), |c| c.dim(1))
             .map_err(err("context"))?;
@@ -820,50 +921,7 @@ impl BlockDrafter {
             kv.truncate(start);
         }
         cache.len = start;
-        let out = out?;
-        // On the processor the guesses read the hot rows and the
-        // conversation's own words (#425 (b), FR-Spec), where the model's
-        // head keeps them: there the head read for every row was most of a
-        // draft (247 ms at 15 guesses on a 9B). The check reads every word,
-        // so the reply is the same; only a guess past them is lost.
-        if matches!(over, super::GuessOver::HotAnd(_)) && target.mtp_hot_rows().is_some() {
-            return target.mtp_guesses(&out, over);
-        }
-        // A drafter in system memory beside a card's head hands it the
-        // block's rows (guesses x hidden, a few hundred KB) — llama.cpp's
-        // copy between backends.
-        let out = if out.device().same_device(target.device()) {
-            out
-        } else {
-            out.to_device(target.device())
-                .map_err(err("block to the output head"))?
-        };
-        let logits = match (&target.output, &target.drafter_head) {
-            (None, Some(head)) => head.forward(&out).map_err(err("output head"))?,
-            _ => target.logits_from(&out)?,
-        };
-        // On a card the guesses are picked there, so only their ids cross
-        // to the host (llama.cpp samples a draft on the device too): the
-        // ONE greedy pick, the first of equal maxima. A score that is not
-        // finite stops the drafter for the reply.
-        #[cfg(feature = "candle-cuda")]
-        if logits.device().is_cuda() {
-            let rows = logits.squeeze(0).map_err(err("logits"))?;
-            return crate::inference::tree_rank::greedy_picks(&rows)
-                .map_err(err("guesses picked on the card"))?
-                .ok_or_else(|| {
-                    SwarmError::Internal("block drafter: a guess's scores are not finite".into())
-                });
-        }
-        let rows: Vec<Vec<f32>> = logits
-            .to_dtype(DType::F32)
-            .and_then(|l| l.squeeze(0))
-            .and_then(|l| l.to_vec2())
-            .map_err(err("logits"))?;
-        Ok(rows
-            .iter()
-            .map(|row| crate::inference::sampling::argmax(row))
-            .collect())
+        out
     }
 }
 

@@ -4565,7 +4565,7 @@ none pushes a feature-fusing drafter's first linear layer across the boundary. M
 (the field's residential peers): the rows' bytes per round against the round trip, from `served_us` and the payload size.
 
 #### #436 — A block drafter's spare: the next block drafted before the check returns, from features this side can make
-`P2` · perf-split · **OPEN** (designed 2026-11-08; first measure 2026-11-19, not built) · history: #428, #134 (b) (the flow), #366 (4) (a far run's stand-in)
+`P2` · perf-split · **OPEN** (designed 2026-11-08; both measures 2026-11-19: after #437, not built) · history: #428, #134 (b) (the flow), #366 (4) (a far run's stand-in)
 Over a long link a split checks once a round trip; a small drafter's tree already FLOWS (#134 (b)) and streams
 spares, but a block drafter needs the target's features at the positions it conditions on, and the far segment's
 layers' rows for block n arrive only with check n's answer. This side can make them: its OWN target layers' rows for
@@ -4589,10 +4589,23 @@ those rows replaced by the boundary rows (no map). Kept a round, near side holdi
   1.29 — the map buys nothing on prose (43-72% unexplained), where a block drafter does not pay anyway.
 So imputed features are not the bottleneck where block drafting pays: given the outcome, a spare keeps 77-96% of a
 true round on code. **The outcome is**: kept counts are bimodal (code: 0-3 or 12-15 a round; the whole block kept 3
-rounds of 26), and the bonus token after a rejection is by definition not the drafter's top guess. **Next measure**:
-the hit rate of SSD's fan-out — a spare per likely kept count with the bonus from the drafter's next choices at the
-rejected position (needs `draft` to hand back each row's top few, not only its pick); the yield a round trip is then
-(k + 1) + hit × (k_spare + 1). Build only if that hit rate on code is high enough to beat a round's cost.
+rounds of 26), and the bonus token after a rejection is by definition not the drafter's top guess. **Second measure
+DONE 2026-11-19** (`a_spares_outcome_ranked_by_the_drafters_scores`, the same text and setup; the scores come from
+`BlockDrafter::draft_scores`, test-only, the forward `draft` reads — asserted equal picks): outcomes ranked as SSD
+does, `j` kept then the word `t`, scored `Σ_{i ≤ j} log p_i(g_i) + log p_{j+1}(t)` over the 8 words after each
+row's pick; a whole block kept puts the next word past the drafter's rows and never hits. Tokens a round trip with
+spares for the best S outcomes, each keeping what the next round keeps with every row true (an upper bound):
+- **code** (27 rounds): 8.93 now; S = 1 / 4 / 16 / 64 → 9.64 / **10.95** / **12.68** / 13.39 (the outcome among them in
+  7 / 30 / 44 / 52% of rounds; the whole block kept in 3, which no spare covers).
+- **story** (102 rounds): 2.39 now → 2.84 / 3.21 / 3.94 / 4.00 (18 / 37 / 62 / 71%).
+With the first measure's stand-in loss on code (77-96% of a true round), S = 16 adds ~30-40% a round trip on code and
+~65% on prose. **The price decides it, not the yield**: a spare is checked only after the near segment has run its
+rows, so the near side must run its layers over S × 16 extra rows every round and send each spare's boundary rows —
+16 × 4,096 × 2 bytes = 128 KB a spare at f16, **2 MB a round for S = 16** (0.8 s at 20 Mbit/s), 512 KB for S = 4.
+#437's tree reaches a comparable gain inside ONE check (DDTree-64 τ 6.82 → 8.49-9.69 on a 27B, 64 rows, no extra
+round's bytes), so #437 comes first; a spare is worth building after it only for a split with bandwidth to spare,
+at S ≤ 4, where it adds ~20-30%. (The stage-1 fixed-reply test reads code 6.96 a block / story 1.00 today against
+6.47 / 1.44 on 11-08: code holds; the story's figure is one prose reply's.)
 
 #### #437 — A split checks a TREE from the block drafter, and the recurrent layers walk it
 `P2` · perf-split · **OPEN** (researched 2026-11-08, not built) · history: #428, #134 (trees for small drafters)
