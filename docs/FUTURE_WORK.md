@@ -4380,7 +4380,10 @@ machine); each layer's rows are joined contiguous (`fc` refused the strided join
 computer's — its own step, a one-token round over the split (`dsd_controller::Step::OverTheChecksRoute`), its own line
 from checks only, probes after declines. Priced from the loop's one fit it chose 15 or nothing: the story ran at
 0.56× (85-86 s, 810 of 810 guesses at 15) where it now guesses ~2.6 a round. **Left in stage 3**: the draft priced
-as a line in its guesses (it reads `guesses + 1` rows: 68-77 ms at ~2.6, 247 at 15; priced as the recent median);
+as a line in its guesses (it reads `guesses + 1` rows: 68-77 ms at ~2.6, 247 at 15; priced as the recent median) —
+weighed 2026-11-18 on the rig's figures (check 238 + 64 ms a position through the 302 ms step, draft 21 + 14.1 a row):
+the flat median settles code (α 0.9) at 8 guesses where the line's best is 6, 1.5% slower, and the story (α 0.52) at 2
+where 1 is best, ~1%: the rate is flat near its peak, so the line is low value, left until a figure says otherwise;
 the borrowed head duplicates the tail's in an A → B → A split (share it — the tail is this node's own worker); the
 head charged to the planner's budget; (3b)/(3c) above; drafting on the fastest computer of the chain, a card peer,
 where the coordinator's processor is the slow part (a draft's rows already cross the wire); the DSD and flow paths;
@@ -4565,7 +4568,7 @@ none pushes a feature-fusing drafter's first linear layer across the boundary. M
 (the field's residential peers): the rows' bytes per round against the round trip, from `served_us` and the payload size.
 
 #### #436 — A block drafter's spare: the next block drafted before the check returns, from features this side can make
-`P2` · perf-split · **OPEN** (designed 2026-11-08; both measures 2026-11-19: after #437, not built) · history: #428, #134 (b) (the flow), #366 (4) (a far run's stand-in)
+`P2` · perf-split · **OPEN** (designed 2026-11-08; both measures 2026-11-18: after #437, not built) · history: #428, #134 (b) (the flow), #366 (4) (a far run's stand-in)
 Over a long link a split checks once a round trip; a small drafter's tree already FLOWS (#134 (b)) and streams
 spares, but a block drafter needs the target's features at the positions it conditions on, and the far segment's
 layers' rows for block n arrive only with check n's answer. This side can make them: its OWN target layers' rows for
@@ -4577,7 +4580,7 @@ reaches — up to two blocks' tokens per round trip. Prior art: SSD/Saguaro 2603
 likely (accepted, bonus) outcomes during verification — with a drafter that reads no target features; DPara
 2609.27396 drafts in parallel from feature-less anchors after fine-tuning; SPD 2605.30852 measured ~5% acceptance lost
 when its drafter fused pre-step (earlier) features. **Not found** (searched 2026-11-08): a FEATURE-conditioned drafter
-drafting past the verified frontier from imputed far-stage features. **First measure DONE 2026-11-19** (processor,
+drafting past the verified frontier from imputed far-stage features. **First measure DONE 2026-11-18** (processor,
 Qwen3.5-9B Q4_K_M + its DFlash drafter, block 15, one fixed 256-token greedy reply each; the ignored test
 `a_block_drafters_spare_over_stood_in_far_rows`, `SWARMLLM_BLOCK_DRAFTER=processor`): the drafter's own rounds walk the
 reply and at each next anchor the block is drafted with every row true, with the far target layers' rows of the last
@@ -4590,7 +4593,7 @@ those rows replaced by the boundary rows (no map). Kept a round, near side holdi
 So imputed features are not the bottleneck where block drafting pays: given the outcome, a spare keeps 77-96% of a
 true round on code. **The outcome is**: kept counts are bimodal (code: 0-3 or 12-15 a round; the whole block kept 3
 rounds of 26), and the bonus token after a rejection is by definition not the drafter's top guess. **Second measure
-DONE 2026-11-19** (`a_spares_outcome_ranked_by_the_drafters_scores`, the same text and setup; the scores come from
+DONE 2026-11-18** (`a_spares_outcome_ranked_by_the_drafters_scores`, the same text and setup; the scores come from
 `BlockDrafter::draft_scores`, test-only, the forward `draft` reads — asserted equal picks): outcomes ranked as SSD
 does, `j` kept then the word `t`, scored `Σ_{i ≤ j} log p_i(g_i) + log p_{j+1}(t)` over the 8 words after each
 row's pick; a whole block kept puts the next word past the drafter's rows and never hits. Tokens a round trip with
@@ -4609,7 +4612,7 @@ bandwidth to spare, and the two compose (a spare can itself be a tree). (The sta
 6.47 / 1.44 on 11-08: code holds; the story's figure is one prose reply's.)
 
 #### #437 — A split checks a TREE from the block drafter, and the recurrent layers walk it
-`P2` · perf-split · **OPEN** (researched 2026-11-08; first measure 2026-11-19, not built) · history: #428, #134 (trees for small drafters)
+`P2` · perf-split · **OPEN** (researched 2026-11-08; first measure 2026-11-18, not built) · history: #428, #134 (trees for small drafters)
 A block drafter's one forward gives a distribution at every position; DDTree (arXiv 2604.12989) builds a tree from
 those marginals best-first (a node's score the sum of its path's log-probabilities, budget B, parents before children,
 each row seeing its parent's row and itself) and checks it in one forward: on Qwen3.6-27B a chain of 16 keeps τ 6.82,
@@ -4621,7 +4624,7 @@ TreeWY 2608.20961 (a vLLM fork) does the same with a WY form; Twig/Bole 2608.016
 parent pointers; SpecLA 2607.16673; STree 2505.14969 for Mamba-2. Take: the ancestor mask over the delta rule (our one
 kernel, `qwen35::delta_rule_into`, gains a parent-pointer mode), the accepted path replayed by the existing replay
 (`SsmState::rewind_to` already replays kept rows). Build after #428's field model runs on two real peers.
-**First measure DONE 2026-11-19** (processor, Qwen3.5-9B Q4_K_M + its DFlash drafter, block 15, one fixed 256-token
+**First measure DONE 2026-11-18** (processor, Qwen3.5-9B Q4_K_M + its DFlash drafter, block 15, one fixed 256-token
 greedy reply each — the #436 probes' text; the ignored test `a_block_drafters_tree_from_its_marginals`): DDTree's tree
 built best-first from the drafter's own scores (`BlockDrafter::draft_scores`), a check keeping the deepest path the
 reply follows plus the bonus word, each arm walking the reply by its own checks. Tokens a check:
@@ -4636,6 +4639,14 @@ drafter keeps least. Both families that carry a block drafter are refused a tree
 windows (a window keeps keys by position) — the window's refusal is the second half of the build. Beside #428's prior
 art (a) — SGLang's trees on Qwen3-Next gain ~6% over a chain, so "a strong draft, not a tree" — this measures the tree
 OF a strong draft: from a block drafter's marginals the tree adds a third on prose at the chain's own width.
+**Prior art for the window half** (2026-11-18, a sonnet read of main/master): vLLM REMOVED tree attention (PR #42121,
+2026-05: "no plans to support it"); llama.cpp verifies chains only, its window mask is by POSITION (`is_masked_swa`)
+and its windowed cache holds `n_swa + n_ubatch` cells — one micro-batch is the only rewind room; SGLang applies EAGLE's
+tree mask beside the window in its Triton extend kernel but cuts the window by a row's SLOT, not its depth (a deep row
+sees less than its position allows — read, not run), and EAGLE on a windowed target crashes there (#22679; Gemma 4
+goes through a separate MTP worker). Take: cut each row's window at its DEPTH position (`layers::RowPositions` already
+carry base + depth), keep the cache's `WINDOW_REWIND_POSITIONS` (64) ≥ the tree's depth so a rejected branch rolls
+back, slide only after the verdict; on a card the tree kernel (`gqa_tree_attention_cuda`) needs the window too.
 
 #### #318 — A large model split across machines is too slow to use
 `P2` · perf-split · **OPEN** — 2026-10-20 · plan: `docs/plans/large_model_splits.md` · draws on #134, #145, #148, #149, #192
@@ -6435,7 +6446,7 @@ reading, sonnet agent): the owner's pins (`download-shards` pins a model — kep
 room, never given back as unused, and the toast would then be WRONG: nothing the network needs is at stake); the
 replica target at urgent pressure (floored at `min_replicas` 2, so a part needs 3 live holders to be shed); or the room
 path's own exclusions (`not_spare_for_room` refuses any copy of a model held whole here, at any pressure). Done: the diagnostics report prints the last prune pass's `kept` summary under the storage line
-(`state.models.parts_kept_by`). **(2) Done 2026-11-19**: where the owner's pins kept more than half the parts
+(`state.models.parts_kept_by`). **(2) Done 2026-11-18**: where the owner's pins kept more than half the parts
 (`prune::KeptBy::kept_most_by(KEPT_PINNED)`), the over-budget toast says most of the parts belong to models the owner
 downloaded, which SwarmLLM never removes on its own — `activity.storage_over_budget_own_models` /
 `storage_disk_full_own_models`, all 21 languages, a native review of the 40 strings (8 corrected, gotcha #793's rule).
