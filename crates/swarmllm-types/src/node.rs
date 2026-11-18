@@ -476,9 +476,21 @@ pub mod features {
     /// [`HOW_SERVED`] reads.
     pub const HOW_SERVED_WHY: u64 = 1 << 44;
 
+    /// Splits a range that does not start the model between its card and its
+    /// processor with the processor taking the range's FIRST layers and the
+    /// card the rest (#461 (4), llama.cpp's order); a range starting the
+    /// model keeps the card-first tail. A coordinator prices which of a
+    /// range's layers run on such a peer's card by it
+    /// (`scheduler::NodeCandidate::layers_by_device`); a peer without it
+    /// fills its card from the range's first layer. NOT in [`ALL`]:
+    /// advertised only where the node's setting places it so
+    /// (`SWARMLLM_PROCESSOR_RUN_FIRST`, on by default).
+    pub const PROCESSOR_RUN_FIRST: u64 = 1 << 45;
+
     /// The full feature set THIS build implements. Advertised by every node,
-    /// with [`KV_HALF_ON_CARD`], [`KV_WINDOW_SLIDES`], [`REQUESTER_GUESSES`]
-    /// and [`SERVES_SLICES`] beside it where they apply.
+    /// with [`KV_HALF_ON_CARD`], [`KV_WINDOW_SLIDES`], [`REQUESTER_GUESSES`],
+    /// [`SERVES_SLICES`] and [`PROCESSOR_RUN_FIRST`] beside it where they
+    /// apply.
     pub const ALL: u64 = RELAY
         | TENSOR_RELAY
         | PIPELINE_CHAIN

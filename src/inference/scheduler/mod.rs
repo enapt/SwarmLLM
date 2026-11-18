@@ -330,6 +330,14 @@ struct NodeCandidate {
     /// priced at 7.1 tokens a second against a computer in another country's
     /// 15.4, and was left out of the chain (2026-10-25).
     card_layers: Option<u32>,
+    /// Its loader gives the processor the FIRST layers of a run that does not
+    /// start the model, the card the run's end (#461 (4),
+    /// `hybrid::RunPlace::Start`): this node by its own switch
+    /// (`hybrid::processor_run_first`), a peer by its word
+    /// (`features::PROCESSOR_RUN_FIRST`). `false` fills the card from the
+    /// run's first layer, as every build before it. Read only through
+    /// [`Self::layers_by_device`].
+    processor_run_first: bool,
     /// The processor's speed for the layers past [`Self::card_layers`], in the
     /// units of `est_tokens_per_sec` (which is then the card's). 0 = unknown.
     processor_tokens_per_sec: f32,
@@ -595,8 +603,10 @@ impl NodeCandidate {
     }
 
     /// The layers of `range` this candidate runs on its card and on its
-    /// processor beside it: the first [`Self::card_layers`] on the card. Every
-    /// layer on the one device it has where it splits nothing.
+    /// processor beside it: [`Self::card_layers`] of the run on the card — its
+    /// first, or its last where the candidate places a run that does not start
+    /// the model processor-first ([`Self::processor_run_first`]). Every layer
+    /// on the one device it has where it splits nothing.
     ///
     /// `ahead`: layers of the SAME run this candidate is handed before `range`
     /// — a chain's segments on one machine back to back are one range to its
@@ -628,15 +638,35 @@ impl NodeCandidate {
         let run = (range.0.saturating_sub(ahead), range.1);
         let from_the_start = *FROM_THE_START
             .get_or_init(|| std::env::var("SWARMLLM_SLICE_PLACEMENT").is_ok_and(|v| v == "start"));
+        // The layers a load of `loaded` puts on the card: its first `card`,
+        // or its last where the processor takes a far run's first layers.
+        let card_part = |loaded: (u32, u32)| {
+            if self.processor_run_first && loaded.0 > 0 {
+                (loaded.1.saturating_sub(card).max(loaded.0), loaded.1)
+            } else {
+                (loaded.0, loaded.0.saturating_add(card).min(loaded.1))
+            }
+        };
+        let on_card_of = |loaded: (u32, u32)| {
+            let held = card_part(loaded);
+            held.1.min(range.1).saturating_sub(held.0.max(range.0))
+        };
         if let Some(copy) = self
             .held_ranges
             .iter()
             .find(|held| !from_the_start && held.covers_without_a_load(run))
         {
-            let card_ends = copy.range.0.saturating_add(card).min(copy.range.1);
-            let on_card = card_ends.saturating_sub(range.0).min(width);
+            let on_card = on_card_of(copy.range).min(width);
             return (on_card, width - on_card);
         }
+        // A fresh load: counted from the run's first layer whichever end its
+        // card takes. A run is priced piece by piece (`ahead`) and a piece does
+        // not know where the run ends, so it cannot say which of its layers a
+        // processor-first load leaves on the processor — but a run holds
+        // `min(width, card)` on its card in either order, and a token's time
+        // only sums its layers (`split_tokens_per_sec`), so the counts price
+        // it exactly. Only a copy already loaded, whose end is known, is
+        // placed by its order (above).
         let on_card = width.min(card.saturating_sub(ahead));
         (on_card, width - on_card)
     }
@@ -6035,6 +6065,23 @@ impl PipelineScheduler {
                     chains_forwards: self.shared_state.peer_supports_pipeline_chain(&node_id),
                 }
             };
+            // Which of a run's layers its card holds (#461 (4)): ours by our
+            // own switch, a peer's by its word.
+            let processor_run_first = if is_local {
+                crate::inference::split::hybrid::processor_run_first()
+            } else {
+                self.shared_state
+                    .peer_registry
+                    .get(&node_id)
+                    .is_some_and(|p| {
+                        p.capability.as_ref().is_some_and(|c| {
+                            swarmllm_types::features::supports(
+                                c.features,
+                                swarmllm_types::features::PROCESSOR_RUN_FIRST,
+                            )
+                        })
+                    })
+            };
             candidates.push(
                 NodeCandidate {
                     // Measured on real forwards to this peer, like `ack_srtt_ms`
@@ -6105,6 +6152,7 @@ impl PipelineScheduler {
                     split_tokens_per_round_far_tail,
                     fresh_run_layers,
                     card_layers,
+                    processor_run_first,
                     processor_tokens_per_sec,
                     prompt_fit_counts_caches,
                     prompt_memory_refused: peer_prompt_fit.is_some()

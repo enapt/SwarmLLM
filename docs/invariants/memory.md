@@ -3269,6 +3269,12 @@ Test: `a_peer_is_told_no_up_front_where_its_range_would_swap_a_card_copy_for_a_s
 judged only a run taking in every held range; its controls: a card with room for the
 whole ask allows it, and the unasked forward is replaced as before). A/B `SWARMLLM_REPLACEMENT_KEEPS_CARD=0`. Not yet checked on the
 real link: it needs the far computer on a build carrying it.
+**The placement half (2026-11-18, #461 (4))**: a far range's processor now takes its FIRST layers
+(`hybrid::RunPlace::Start`, `inference.md` § "A far range's processor run is its FIRST layers"), so the field
+case's shape — a far range widened at its START — keeps its held layers on the card wherever the card has room
+for them, and the guard has nothing to refuse there (`a_far_range_widened_at_its_start_keeps_its_held_layers_on_the_card`).
+It still refuses a range widened at its END (`[2..5)` asked as `[2..8)`: the processor-first run is the held
+layers) and a card too short for the held layers beside a split's own costs — the guard test's fixture now.
 
 ## A model process holds one copy of the output head (2026-11-16, FUTURE_WORK #458)
 

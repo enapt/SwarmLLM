@@ -7801,3 +7801,18 @@ so an older computer is planned as before), and a range is priced on the device 
 warm peer `card_layers` is what its card RUNS (`ResidentModelLayers::card_layers` ← `WorkerHandle::layers_on_card`,
 #3 (j11)), never every layer it holds and never more than its card (#361). A measured decode figure is already that
 blend, so its prompt figure is divided by the per-device ratio (`parallax::prompt_speedup_over`, #430 (a)).
+
+**A copy loaded processor-first is priced where its card layers are** (2026-11-18, #461 (4)). A far range's
+processor now takes the range's FIRST layers (`hybrid::RunPlace::Start`, `inference.md`), so a held copy `[20..48)`
+with 22 on its card holds `[26..48)` there, and a slice `[30..48)` of it runs all on the card — card-first it read
+12 of 18. `NodeCandidate::processor_run_first` says which order a candidate loads in (this node by its switch, a peer
+by `features::PROCESSOR_RUN_FIRST`), and `layers_by_device` places a HELD copy's card layers by it; a copy starting
+the model fills its card from layer 0 either way. A FRESH run keeps the card-first count: the planner prices a
+machine's run piece by piece (`ahead`, `parallax::layers_ahead_in_run`), and a piece does not know where its run
+ends, so it cannot say which of its layers a processor-first load leaves on the processor. A first version placed
+every piece as the run's end, and a 32-layer model held whole with 12 on its card was priced as running 20 there
+(`a_card_short_of_the_whole_model_shares_the_rest_with_a_peers_card` failed: this node kept 20 layers, 8 of them
+on its processor). A run holds `min(width, card)` on its card in either order and a token's time only sums its
+layers (`split_tokens_per_sec`), so the counts price a fresh run exactly. Test
+`a_copy_loaded_processor_first_is_priced_where_its_card_layers_are`.
+

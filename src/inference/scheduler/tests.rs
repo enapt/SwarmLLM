@@ -1292,6 +1292,7 @@ fn simple_candidate(byte: u8, ranges: Vec<(u32, u32)>) -> NodeCandidate {
         stated_ms_per_layer: None,
         fresh_run_layers: None,
         card_layers: None,
+        processor_run_first: false,
         processor_tokens_per_sec: 0.0,
         range_weights: None,
         prompt_memory_refused: false,
@@ -1758,6 +1759,7 @@ fn greedy_assign_multi_range_candidate() {
             stated_ms_per_layer: None,
             fresh_run_layers: None,
             card_layers: None,
+            processor_run_first: false,
             processor_tokens_per_sec: 0.0,
             range_weights: None,
             prompt_memory_refused: false,
@@ -1808,6 +1810,7 @@ fn greedy_assign_multi_range_candidate() {
             stated_ms_per_layer: None,
             fresh_run_layers: None,
             card_layers: None,
+            processor_run_first: false,
             processor_tokens_per_sec: 0.0,
             range_weights: None,
             prompt_memory_refused: false,
@@ -2868,6 +2871,7 @@ fn cost_cand(
         stated_ms_per_layer: None,
         fresh_run_layers: None,
         card_layers: None,
+        processor_run_first: false,
         processor_tokens_per_sec: 0.0,
         range_weights: None,
         prompt_memory_refused: false,
@@ -4285,6 +4289,7 @@ fn one_node_is_not_made_standby_for_more_layers_than_it_can_run() {
         stated_ms_per_layer: None,
         fresh_run_layers: None,
         card_layers: None,
+        processor_run_first: false,
         processor_tokens_per_sec: 0.0,
         range_weights: None,
         prompt_memory_refused: false,
@@ -4398,6 +4403,7 @@ fn a_node_with_room_still_stands_in_for_every_segment() {
         stated_ms_per_layer: None,
         fresh_run_layers: None,
         card_layers: None,
+        processor_run_first: false,
         processor_tokens_per_sec: 0.0,
         range_weights: None,
         prompt_memory_refused: false,
@@ -4511,6 +4517,7 @@ fn a_standby_is_chosen_by_cost_not_by_ping() {
         stated_ms_per_layer: None,
         fresh_run_layers: None,
         card_layers: None,
+        processor_run_first: false,
         processor_tokens_per_sec: 0.0,
         range_weights: None,
         prompt_memory_refused: false,
@@ -8756,6 +8763,63 @@ fn a_slice_of_a_loaded_copy_is_priced_where_the_copys_layers_are() {
         fresh.layers_by_device((15, 63), 20),
         (6, 42),
         "a fresh run's second piece takes the card's rest, as before"
+    );
+}
+
+/// **A copy loaded processor-first is priced where its card layers are**
+/// (#461 (4)): a holder that gives a far range's processor its FIRST layers
+/// (`features::PROCESSOR_RUN_FIRST`; this node by `hybrid::processor_run_first`)
+/// keeps `[26..48)` of a loaded `[20..48)` on its card, so a slice is priced
+/// by its share of THOSE; a copy starting the model still fills its card from
+/// layer 0. A fresh run counts its card share the same in either order: a
+/// piece of a run cannot know where the run ends, and the run's total holds.
+#[test]
+fn a_copy_loaded_processor_first_is_priced_where_its_card_layers_are() {
+    let candidate = |range: (u32, u32), first: bool| {
+        let mut c = simple_candidate(0xA5, vec![range]);
+        c.card_layers = Some(22);
+        c.processor_run_first = first;
+        c.held_ranges = vec![crate::inference::process_pool::HeldRange {
+            range,
+            releasable_layers: 0,
+            serves_slices: true,
+        }];
+        c
+    };
+    let far = candidate((20, 48), true);
+    assert_eq!(
+        far.layers_by_device((20, 48), 0),
+        (22, 6),
+        "the copy itself"
+    );
+    assert_eq!(
+        far.layers_by_device((30, 48), 0),
+        (18, 0),
+        "inside its card"
+    );
+    assert_eq!(
+        far.layers_by_device((20, 30), 0),
+        (4, 6),
+        "its processor run and four more"
+    );
+    assert_eq!(
+        candidate((20, 48), false).layers_by_device((30, 48), 0),
+        (12, 6),
+        "the same copy loaded card-first holds [20..42) there"
+    );
+    assert_eq!(
+        candidate((0, 48), true).layers_by_device((10, 30), 0),
+        (12, 8),
+        "a copy starting the model keeps its card from layer 0"
+    );
+    let mut fresh = simple_candidate(0xA6, vec![(0, 48)]);
+    fresh.card_layers = Some(22);
+    fresh.processor_run_first = true;
+    assert_eq!(fresh.layers_by_device((20, 48), 0), (22, 6), "a fresh run");
+    assert_eq!(
+        fresh.layers_by_device((30, 48), 10),
+        (12, 6),
+        "its second piece: the run's total on the card, counted from its start"
     );
 }
 

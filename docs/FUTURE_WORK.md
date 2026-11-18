@@ -5702,7 +5702,7 @@ reverse — and its post-verify keeps drafting while the target verifies (up to 
 between the two; here they would.
 
 #### #461 — A peer's split that asks a computer for a WIDER range replaces its all-card copy with a mostly-processor one, which then serves every narrower request too
-`P3` · memory / admission · **NARROWED** — 2026-11-15 (the growth half shipped in v0.3.292); contributor 1's guard built 2026-11-17 (shipped in v0.3.297-alpha) · found on the real link (`real_link.sh` TAG=bal292, a forced split point) · related: #3 (j12), #3 (j13), #449, #458
+`P3` · memory / admission · **NARROWED** — 2026-11-15 (the growth half shipped in v0.3.292); contributor 1's guard built 2026-11-17 (shipped in v0.3.297-alpha); residual (4)'s placement built 2026-11-18 (on main, not in a release yet) · found on the real link (`real_link.sh` TAG=bal292, a forced split point) · related: #3 (j12), #3 (j13), #449, #458
 
 **Narrowed 2026-11-15 (v0.3.292)**: contributor 2 was the GROWTH ladder (below, "Contributor 2 found"), and
 `charge_segment_as_split` now steps aside for an idle worker whose spawn range the new range takes in, so the
@@ -5710,14 +5710,33 @@ retirement the planner priced places it afresh (`docs/invariants/memory.md` § "
 link 7.56 → 35.25 tok/s). **Left**: (3)
 no promotion under steady use; (4) an up-front "no" whose re-plan finds no route FAILS the request where the slow
 copy would have served it — a coordinator with no room (card or processor) for the refused layers; the real fix is
-PLACEMENT: put a widened range's processor run on the layers it GREW by, so the held ones stay on the card
-(`hybrid::processor_run` is card-first, so a tail node widened at its start loses its held layers to the processor;
-llama.cpp is processor-first — `i_gpu_start = n_layer + 1 - n_gpu_layers`, `llama-model.cpp` — so the card keeps the
-last layers and the head. For a segment that ENDS the model, processor-first also drops two host/card copies a step
-(today: entry up, card layers, down, processor run, up for the head; `executor::output_on_primary_device`) once the
-entry hidden state is placed on the first layer's device. Needs a card rig A/B in one binary),
-then the guard has nothing to refuse; and the accounting itself — a worker IN USE still takes the
+PLACEMENT (built 2026-11-18, below), and what is left of it: a range widened at its END still loses its held layers
+(the processor takes the range's first layers, which are then the held ones) and is still refused up front; and the
+COPIES — a far segment ending the model still enters on its main device (`input.to_device(&self.device)`, masks built
+there), so a step copies the hidden state up, down to the processor run and up again where llama.cpp's order with the
+entry on the first layer's device copies it once (a middle segment 4 → 2); a separate change, measured on its own in
+one binary. And the accounting itself — a worker IN USE still takes the
 wider range as a split sized beside the dropped range, and the daemon keeps charging that range's base.
+
+**Built 2026-11-18 (residual (4), the placement; on main, not in a release yet)**: a range that does not start the
+model gives the processor its FIRST layers and the card its last and the head (`hybrid::RunPlace::Start`, chosen by
+`hybrid::run_place`; a first segment keeps the card-first tail, a whole model that guesses its middle run), read alike
+by the loader, the pool's charges and the planner (`NodeCandidate::processor_run_first`; a peer by
+`features::PROCESSOR_RUN_FIRST`, bit 45, not in `ALL`). So the field shape — `[26..48)` asked as `[20..48)` — keeps the
+held layers on the card wherever the card has room for them, and `replacement_keeps_the_card` has nothing to refuse
+there. Prior art: llama.cpp offloads the LAST `n_gpu_layers` (`i_gpu_start = max(n_layer + 1 - n_gpu_layers, 0)`,
+`src/llama-model.cpp`), Ollama inherits it; kept for a first segment is our tail (its card holds the token table).
+A/B `SWARMLLM_PROCESSOR_RUN_FIRST=0`. Tests `a_far_range_widened_at_its_start_keeps_its_held_layers_on_the_card` (red
+with the A/B: `Some(0)` of 3 held layers kept), `a_copy_loaded_processor_first_is_priced_where_its_card_layers_are`,
+`a_far_segments_processor_run_is_its_first_layers`, `a_far_segments_card_is_charged_its_last_layers`. **Checked on the
+card** (2026-11-18, one CUDA build, arms A/B/B/A, `~/swarmllm-gate/deep/p461b`): a two-node split of
+Qwen2.5-Coder-7B, A `[0..6)` on its processor, B `[6..28)` with a 2,500 MB card cap (`SWARMLLM_SPLIT_READS_CARD=0` both
+arms) — 11 layers on B's card. B's loader put the processor on `6..17` (new) against `17..28` (the A/B); every reply
+200 over the two-segment route and each order's replies the same in both its arms; all the MODEL's by llama.cpp
+(`score_against_reference.py`: worst rank 2, largest gap 0.051 new / 0.124 old, 116-119 of 120 at rank 1); time level —
+120-token replies after the first 11.9-12.4 s new, 11.7-13.0 s old, the first (n-gram path) 18.2-19.0 vs 18.3-18.7 s
+(the card shared with another program at ~940 MiB, 9 %: indicative). Not yet seen on the real link: it needs the far
+computer on a release carrying it.
 
 **Built 2026-11-17 (contributor 1; shipped in v0.3.297-alpha)**: `ModelProcessPool::replacement_keeps_the_card`,
 asked beside the fit by a peer's UP-FRONT weighing only (`forward_would_load` → `peer_load_refusal`; a refusal at the

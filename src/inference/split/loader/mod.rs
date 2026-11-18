@@ -1487,21 +1487,22 @@ impl SplitModel {
             segment_layer_count,
         );
         // Which of them the processor holds: one run of offsets into the
-        // segment — the tail, or for a whole model whose card could guess
-        // (`hybrid::card_may_guess`) a run early in the middle, so its card
-        // keeps both ends and can guess without the run
-        // (`hybrid::processor_run`, the pool's own answer for the same count).
-        // Empty where the card holds every layer, or on the processor.
+        // segment (`hybrid::processor_run`, the pool's own answer for the same
+        // count) — where `hybrid::run_place` puts it: the first layers of a
+        // segment that does not start the model (#461 (4)), the tail of one
+        // that does, or for a whole model whose card could guess a run early
+        // in the middle, so its card keeps both ends and can guess without
+        // it. Empty where the card holds every layer, or on the processor.
         //
         // How many of those card-held layers, from the start, keep their
         // routed experts in the machine's memory (#138 (3)) — on a card, for
         // an architecture whose split has been checked, never more than the
         // card holds. The SAME count the placement below acts on and the card
         // budget takes those experts' bytes off by. They are counted from the
-        // segment's FIRST layers, which a middle run would partly take, so a
-        // load keeping experts in RAM keeps the tail: the pool never asks for
-        // both (`CardSplit::ExpertsInRam` holds every layer on the card); only
-        // `test-split --gpu-layers N --cpu-moe-layers M` by hand does.
+        // segment's FIRST layers, which a middle or a first run would take,
+        // so a load keeping experts in RAM keeps the tail: the pool never asks
+        // for both (`CardSplit::ExpertsInRam` holds every layer on the card);
+        // only `test-split --gpu-layers N --cpu-moe-layers M` by hand does.
         let experts_in_ram_layers = match cpu_expert_layers {
             Some(n) if hybrid_ok && device.is_cuda() => n.min(device_layers),
             _ => 0,
@@ -1509,14 +1510,17 @@ impl SplitModel {
         let processor_run = super::hybrid::processor_run(
             segment_layer_count,
             device_layers,
-            experts_in_ram_layers == 0
-                && super::hybrid::card_may_guess(
+            if experts_in_ram_layers == 0 {
+                super::hybrid::run_place(
                     &ct,
                     layer_start,
                     layer_start + segment_layer_count,
                     is_first,
                     is_last,
-                ),
+                )
+            } else {
+                super::hybrid::RunPlace::Tail
+            },
         );
         let experts_in_ram_bytes = crate::inference::split::routed_expert_bytes(
             &ct,

@@ -3599,6 +3599,32 @@ map online, from the hidden states a split computes anyway, and keeps it across 
 - `test-split --gpu-layers N` on a whole model now places the run in the middle; the loader logs
   `processor_from`/`processor_to`.
 
+**A far range's processor run is its FIRST layers** (2026-11-18, FUTURE_WORK #461 (4)). Card-first, a range
+that does not start the model kept its processor run at its END — so a far computer holding `[26..48)` of a 14B all
+on its card, asked for `[20..48)`, would have placed `[20..30)` on the card and moved every layer it held to the
+processor; `replacement_keeps_the_card` (#461, `memory.md`) refused that up front, and a coordinator with no room for
+the refused layers then had no route. Now `hybrid::run_place` names three places (`RunPlace`): the whole model's
+middle where its card could guess (`MiddleForGuessing`, above), a first segment's tail (`Tail`: the card holds layer 0
+and the token table, the one segment that holds them), and for every other range its START (`Start`): the processor
+takes `[0, len - on_card)`, the card the range's last layers and, on a range ending the model, its head — so a range
+widened at its start keeps the layers it held on the card wherever the card has room for them. The same answer
+reaches the loader (`LayerPlacement::split`), the pool's charges (`LayerBytes::run_place` → `ram_charged_share`,
+`card_share_of_split_mb`, `plan_gpu_layers`) and the planner (`NodeCandidate::processor_run_first`: this node by
+`hybrid::processor_run_first`, a peer by `features::PROCESSOR_RUN_FIRST`, bit 45, a statement NOT in `ALL`, like
+`SERVES_SLICES`). Prior art: llama.cpp offloads a model's LAST `n_gpu_layers` (`i_gpu_start = max(n_layer + 1 -
+n_gpu_layers, 0)`, `src/llama-model.cpp`; the input layer always on the processor, the output layer on the card), and
+Ollama inherits it. We keep the tail for a first segment, whose card holds the token table, and the middle for a whole
+model that guesses. Tests: `a_far_segments_processor_run_is_its_first_layers`,
+`a_far_segments_card_is_charged_its_last_layers`, `a_far_range_widened_at_its_start_keeps_its_held_layers_on_the_card`
+(red with `SWARMLLM_PROCESSOR_RUN_FIRST=0`: `Some(0)` of 3). On the card (2026-11-18, one binary, A/B/B/A): a
+two-node split of Qwen2.5-Coder-7B whose far segment `[6..28)` ran 11 layers on a capped card placed the processor
+on `6..17` (against `17..28` with the A/B); every reply the model's by llama.cpp (worst rank 2, gap <= 0.124 either
+order) and the time level (warm 120-token replies 11.9-12.4 s against 11.7-13.0 s; the card shared, indicative) —
+the order moves which layers the card keeps, not the step's cost. NOT taken yet: a segment's input still enters on its
+main device (`input.to_device(&self.device)`, the masks built there), so a far segment ending the model copies its
+hidden state up, down to the processor run and up again — llama.cpp's order with the entry on the first layer's
+device would copy it once. A separate change, measured on its own (#461's residual).
+
 **Moved from `arch-inference.md` (trimmed 2026-11-17):** A forward reports only the processor layers it RUNS - a guess reported as a processor token chose ONE thread (gotcha #983). Card-first, a guess agreed 0-14%; from a tenth in, 50-91% (`examples/skip_agreement_probe.rs`); a 14B split decoded 1.35-1.73x against the tail with the checks on every core (`cpu_pools::check_pool`). A third of the 14B on the card: 1.11-1.35x over guessing with nothing in the gap; at the default placement (26 of 48) 1.05-1.21x. Fitting at the reply's end cost a back-to-back request's first token ~0.2 s, hence `refit_stale_priors` runs while the worker has nothing waiting. A prompt fitted before its first token raised the 1,759-token prompt's first token 0.6-0.8 s. The carry (`STAND_IN_CARRY`) raised tokens kept a round 0.72 -> 0.90 on the 14B's 33 of 48, never worse on four; error feedback, no prior art found. `SkipBridge::Recall` has a `prior` term; the stand-in's ridge inverse uses Newton-Schulz, GEMMs only; the resident prior keeps its last `PRIOR_ROWS` positions.
 
 ## A chain that starts and finishes here guesses through a stand-in for its far run (2026-10-29, #366 (4))

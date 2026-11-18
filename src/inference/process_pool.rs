@@ -3134,8 +3134,8 @@ struct RangeCharge {
 
 impl RangeCharge {
     /// Layers of this range on the card, for a worker charged to the card:
-    /// the first `on_card` of a split (the loader's order, `--gpu-layers`
-    /// counted within the range), else all of them.
+    /// a split's `on_card` (`--gpu-layers` counted within the range; which
+    /// ones, `hybrid::processor_run`), else all of them.
     fn layers_on_card(&self) -> u32 {
         let width = self.range.1.saturating_sub(self.range.0);
         self.split.map_or(width, |split| {
@@ -3224,9 +3224,10 @@ enum RamShare {
 
 /// What a spawn charges to the machine's memory: the whole `segment` when it
 /// lands there (`charges_ram`), a whole-layer split's processor-held run
-/// ([`CardSplit::processor_run`]: the tail, or a whole model's run early in
-/// the middle), the experts a split keeps in RAM, and nothing for a model
-/// wholly on the card.
+/// ([`CardSplit::processor_run`]: where `place` puts it — a far segment's
+/// first layers, a first segment's tail, a whole model's run early in the
+/// middle), the experts a split keeps in RAM, and nothing for a model wholly
+/// on the card.
 ///
 /// **A split's processor share was charged to nothing** (#264): its weights,
 /// their conversation cache and the worker process sat outside
@@ -3239,15 +3240,15 @@ fn ram_charged_share(
     charge_ram: bool,
     segment: (u32, u32),
     split: Option<CardSplit>,
-    card_may_guess: bool,
+    place: crate::inference::split::hybrid::RunPlace,
 ) -> Option<RamShare> {
     if charge_ram {
         return Some(RamShare::Layers(segment));
     }
     match split? {
-        split @ CardSplit::Layers { .. } => split
-            .processor_run(segment, card_may_guess)
-            .map(RamShare::Layers),
+        split @ CardSplit::Layers { .. } => {
+            split.processor_run(segment, place).map(RamShare::Layers)
+        }
         CardSplit::ExpertsInRam { in_ram, .. } => {
             (in_ram > 0).then_some(RamShare::Experts { layers: in_ram })
         }
@@ -3897,14 +3898,14 @@ pub struct WorkerSummary {
 ///
 /// `layer_weights[i]` is layer `i` of the segment's own tensors
 /// ([`LayerBytes::weights`]); the card holds every layer outside the
-/// processor's run (`hybrid::processor_run`, `card_may_guess` deciding where that
-/// run sits), so each is charged what it weighs, never the segment's average
+/// processor's run (`hybrid::processor_run`, `place` deciding where that run
+/// sits), so each is charged what it weighs, never the segment's average
 /// (#343).
 fn split_for_card(
     inputs: &crate::model::auto_manage::vram::VramFootprintInputs,
     layer_weights: &[u64],
     card: crate::inference::split::hybrid::SplitCard,
-    card_may_guess: bool,
+    place: crate::inference::split::hybrid::RunPlace,
 ) -> Option<(usize, usize)> {
     let layers = inputs.segment_layers as usize;
     if !inputs.splits_across_devices || layers == 0 || layer_weights.len() != layers {
@@ -3927,7 +3928,7 @@ fn split_for_card(
         crate::inference::split::hybrid::split_room_bytes(card).saturating_sub(up_front),
         layer_weights,
         card_kv_bytes_of_split(inputs),
-        card_may_guess,
+        place,
     );
     (n > 0).then_some((n, layers))
 }
@@ -3944,11 +3945,12 @@ pub(crate) struct LayerBytes {
     /// a dense model — what keeping experts in RAM is weighed by
     /// ([`experts_in_ram_for_card`]).
     pub experts: Vec<u64>,
-    /// The segment's card could guess without its processor run
-    /// (`hybrid::card_may_guess`: the whole model, every layer keeping its own
-    /// cache), so a split puts that run early in the middle
-    /// (`hybrid::processor_run`).
-    pub card_may_guess: bool,
+    /// Where a split puts its processor run (`hybrid::run_place`, the
+    /// loader's own reading of the header): a far segment's first layers
+    /// (#461 (4)), a first segment's tail, or — the whole model, every layer
+    /// keeping its own cache, so its card could guess without the run —
+    /// early in the middle (`hybrid::processor_run`).
+    pub run_place: crate::inference::split::hybrid::RunPlace,
 }
 
 /// `bytes` spread evenly over `layers` layers — a segment's weights where no
@@ -4064,14 +4066,17 @@ impl CardSplit {
     /// The layers of `segment` (absolute) a whole-layer split puts on the
     /// processor: `hybrid::processor_run` of its count — the loader's own
     /// answer, given the same facts — or `None` for none / experts in RAM.
-    /// `card_may_guess`: `segment`'s card could guess without the run
-    /// ([`LayerBytes::card_may_guess`]).
-    fn processor_run(self, segment: (u32, u32), card_may_guess: bool) -> Option<(u32, u32)> {
+    /// `place`: where `segment`'s run sits ([`LayerBytes::run_place`]).
+    fn processor_run(
+        self,
+        segment: (u32, u32),
+        place: crate::inference::split::hybrid::RunPlace,
+    ) -> Option<(u32, u32)> {
         let Self::Layers { on_card, .. } = self else {
             return None;
         };
         let len = segment.1.saturating_sub(segment.0) as usize;
-        let run = crate::inference::split::hybrid::processor_run(len, on_card, card_may_guess);
+        let run = crate::inference::split::hybrid::processor_run(len, on_card, place);
         let at = |offset: usize| {
             segment
                 .0
@@ -4165,7 +4170,7 @@ fn card_split(
     if let Some(in_ram) = experts_in_ram_for_card(inputs, &layers.experts, card) {
         return Some(CardSplit::ExpertsInRam { in_ram, total });
     }
-    split_for_card(inputs, &layers.weights, card, layers.card_may_guess)
+    split_for_card(inputs, &layers.weights, card, layers.run_place)
         .map(|(on_card, total)| CardSplit::Layers { on_card, total })
 }
 
@@ -4774,7 +4779,7 @@ pub struct ModelProcessPool {
     pub(crate) test_expert_bytes: DashMap<ModelId, Vec<u64>>,
     /// Test models whose layers do not all keep a cache of their own (Gemma 4
     /// E2B's shared layers, Qwen 3.5's recurrent ones) — what
-    /// `hybrid::card_may_guess` would read off the header.
+    /// `hybrid::run_place` would read off the header.
     #[cfg(test)]
     pub(crate) test_layers_share_caches: dashmap::DashSet<ModelId>,
     /// A test's stand-in for a usable graphics card (`card_in_play`), which a
@@ -5331,7 +5336,7 @@ impl ModelProcessPool {
             .saturating_sub(self.vram_committed_mb());
         let share = match split {
             CardSplit::Layers { on_card, .. } => {
-                match split.processor_run(segment, self.card_may_guess_in(model_id, segment)) {
+                match split.processor_run(segment, self.run_place_in(model_id, segment)) {
                     // A run inside the segment: everything but it — both ends,
                     // their tables, the process — is the card's.
                     Some(run) if run.1 < segment.1 => {
@@ -5373,9 +5378,18 @@ impl ModelProcessPool {
     /// it puts its processor run in the middle ([`CardSplit::processor_run`])?
     /// From the same read of the header as its footprint; `false` where that
     /// cannot be read.
-    fn card_may_guess_in(&self, model_id: &ModelId, segment: (u32, u32)) -> bool {
-        self.segment_geometry(model_id, Some(segment))
-            .is_some_and(|(_, layers)| layers.card_may_guess)
+    /// Where a split of `segment` puts its processor run
+    /// ([`LayerBytes::run_place`]); unread, by the segment's start alone — the
+    /// loader reads the rest off the same header.
+    fn run_place_in(
+        &self,
+        model_id: &ModelId,
+        segment: (u32, u32),
+    ) -> crate::inference::split::hybrid::RunPlace {
+        self.segment_geometry(model_id, Some(segment)).map_or_else(
+            || crate::inference::split::hybrid::RunPlace::of(segment.0 == 0, false, false),
+            |(_, layers)| layers.run_place,
+        )
     }
 
     /// The routed experts of `segment`'s first `in_ram` layers, in MB rounded
@@ -5460,7 +5474,7 @@ impl ModelProcessPool {
             charge_ram,
             segment,
             split,
-            self.card_may_guess_in(model_id, segment),
+            self.run_place_in(model_id, segment),
         );
         let share_mb = match share {
             // A split's processor run, less the output head the card holds.
@@ -5862,12 +5876,14 @@ impl ModelProcessPool {
                 LayerBytes {
                     weights,
                     experts,
-                    // The header's `hybrid::card_may_guess`, with the
+                    // The header's `hybrid::run_place`, with the
                     // fixture's own word for a model whose layers do not all
                     // keep their own cache.
-                    card_may_guess: first == 0
-                        && end >= all_layers
-                        && !self.test_layers_share_caches.contains(model_id),
+                    run_place: crate::inference::split::hybrid::RunPlace::of(
+                        first == 0,
+                        end >= all_layers,
+                        !self.test_layers_share_caches.contains(model_id),
+                    ),
                 },
             ));
         }
@@ -6083,7 +6099,7 @@ impl ModelProcessPool {
             LayerBytes {
                 weights: layer_weights,
                 experts: expert_bytes,
-                card_may_guess: crate::inference::split::hybrid::card_may_guess(
+                run_place: crate::inference::split::hybrid::run_place(
                     ct,
                     first_layer,
                     segment_end,
@@ -8934,7 +8950,7 @@ impl ModelProcessPool {
     ) -> (u32, u32) {
         match split {
             Some(split @ CardSplit::Layers { .. }) => split
-                .processor_run(range, self.card_may_guess_in(model_id, range))
+                .processor_run(range, self.run_place_in(model_id, range))
                 .unwrap_or((range.0, range.0)),
             Some(CardSplit::ExpertsInRam { in_ram, .. }) => (
                 range.0,
@@ -11057,7 +11073,7 @@ impl ModelProcessPool {
                     match split {
                         CardSplit::Layers { on_card, total } => {
                             let (from, to) = split
-                                .processor_run(segment, self.card_may_guess_in(model_id, segment))
+                                .processor_run(segment, self.run_place_in(model_id, segment))
                                 .unwrap_or((segment.1, segment.1));
                             tracing::info!(
                                 model = %model_id,
@@ -17770,14 +17786,17 @@ mod tests {
     /// split held `[26..48)` all on its card; a forward for `[20..48)` retired
     /// it, and the fresh spawn ran 10 of 28 there — every forward after it,
     /// the old range's too as a slice of the new copy, took ~1,000 ms where it
-    /// had taken ~30 (2026-11-15). Here the worker holds the model's last
-    /// three layers on a card with room for about three, and is asked for six
-    /// that end the same: the replacement would load (its processor share
-    /// fits) with the processor run as the tail — the held layers. A peer
-    /// asking up front is told no; the control: a card with room for all six
-    /// keeps every held layer there, and the replacement is allowed. A forward
-    /// that arrives unasked is served as before — retired and replaced — since
-    /// a refusal there would bar this node from the request's re-plan.
+    /// had taken ~30 (2026-11-15). A far range's processor now takes its FIRST
+    /// layers (#461 (4), `a_far_range_widened_at_its_start_keeps_its_held_layers_on_the_card`),
+    /// so what still loses the card is a range widened at its END: here the
+    /// worker holds three middle layers `[2..5)` on a card with room for about
+    /// three and is asked for `[2..8)`. The replacement would load (its
+    /// processor share fits) with the processor run as its first layers — the
+    /// held ones. A peer asking up front is told no; the control: a card with
+    /// room for all six keeps every held layer there, and the replacement is
+    /// allowed. A forward that arrives unasked is served as before — retired
+    /// and replaced — since a refusal there would bar this node from the
+    /// request's re-plan.
     #[tokio::test]
     async fn a_peer_is_told_no_up_front_where_its_range_would_swap_a_card_copy_for_a_slower_one() {
         let model = ModelId("seventy-b-shaped-keeps-card".into());
@@ -17787,7 +17806,7 @@ mod tests {
             .store(true, std::sync::atomic::Ordering::Relaxed);
         p.set_gpu_layers(-1);
         p.set_ram_budget_mb(1_000_000);
-        let (held, asked) = ((5, 8), (2, 8));
+        let (held, asked) = ((2, 5), (2, 8));
         let held_mb = p.estimate_gpu_footprint_mb(&model, Some(held), KvCharge::Typical);
         let asked_mb = p.estimate_gpu_footprint_mb(&model, Some(asked), KvCharge::Typical);
         assert!(
@@ -17837,19 +17856,19 @@ mod tests {
         );
         // A run sharing only PART of the held range is judged on that part —
         // the narrower runs a refusal's `layers_that_fit` probes would
-        // otherwise retire the same copy: `[2..7)` keeps `[5..7)` on the card
+        // otherwise retire the same copy: `[3..7)` keeps `[3..5)` on the card
         // only if its own spawn does.
-        let partial = (2, 7);
+        let partial = (3, 7);
         let kept_of_partial = p
             .held_layers_a_fresh_spawn_keeps_on_card(&model, partial, &[held], partial)
             .expect("priced from the header");
         assert!(
             kept_of_partial < 2,
-            "fixture: [2..7)'s processor run takes held layers ({kept_of_partial})"
+            "fixture: [3..7)'s processor run takes held layers ({kept_of_partial})"
         );
         assert!(!p.replacement_keeps_the_card(&model, partial, &h));
         // A range sharing no layer with it is weighed as before.
-        assert!(p.replacement_keeps_the_card(&model, (0, 3), &h));
+        assert!(p.replacement_keeps_the_card(&model, (5, 8), &h));
 
         // Control: a card with room for the whole ask keeps every held layer
         // there, and the replacement may go ahead.
@@ -17872,6 +17891,55 @@ mod tests {
             .expect("a forward that arrives unasked is served as before");
         assert!(matches!(outcome, Growth::Respawn));
         assert!(p.workers.get(&model).is_none(), "retired for a fresh spawn");
+        let _ = std::fs::remove_dir_all(&data_dir);
+    }
+
+    /// **A far range widened at its START keeps the layers it held on the
+    /// card** (#461 (4)) — the field case's own shape: the worker holds the
+    /// model's last three layers on a card with room for about four, and is
+    /// asked for six that end the same. A fresh split of `[2..8)` gives its
+    /// processor the FIRST layers (llama.cpp's order: the card takes a
+    /// range's last), so the held `[5..8)` stay on the card and the
+    /// replacement is allowed — where the card-first split ran `[2..6)` there
+    /// and moved every held layer to the processor
+    /// (`SWARMLLM_PROCESSOR_RUN_FIRST=0` turns this test red).
+    #[tokio::test]
+    async fn a_far_range_widened_at_its_start_keeps_its_held_layers_on_the_card() {
+        let model = ModelId("seventy-b-shaped-far-start".into());
+        let data_dir = header_only_seventy_b("far-start", &model, false);
+        let p = ModelProcessPool::new(data_dir.clone());
+        p.test_card_in_play
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        p.set_gpu_layers(-1);
+        p.set_ram_budget_mb(1_000_000);
+        let (held, asked) = ((5, 8), (2, 8));
+        let held_mb = p.estimate_gpu_footprint_mb(&model, Some(held), KvCharge::Typical);
+        let room_mb = p.estimate_gpu_footprint_mb(&model, Some((4, 8)), KvCharge::Typical) + 1;
+        let asked_mb = p.estimate_gpu_footprint_mb(&model, Some(asked), KvCharge::Typical);
+        assert!(
+            held_mb < room_mb && room_mb < asked_mb,
+            "fixture: the held range fits whole, the ask does not ({held_mb} / {room_mb} / {asked_mb} MB)"
+        );
+        p.set_vram_budget_mb(room_mb);
+        let h =
+            admit_and_insert_gpu_worker(&p, &model, held_mb, std::time::Duration::from_secs(3600))
+                .await;
+        h.record_charged_segment(held, 0);
+        assert_eq!(
+            h.layers_on_card(),
+            3,
+            "fixture: every held layer on the card"
+        );
+        assert_eq!(
+            p.held_layers_a_fresh_spawn_keeps_on_card(&model, asked, &[held], asked),
+            Some(3),
+            "the replacement's card takes the range's end — every held layer"
+        );
+        assert!(p.replacement_keeps_the_card(&model, asked, &h));
+        assert!(
+            p.forward_would_load(&model, asked, Some(&h), Requester::Swarm),
+            "up front: a peer is told yes"
+        );
         let _ = std::fs::remove_dir_all(&data_dir);
     }
 
@@ -20406,7 +20474,12 @@ mod tests {
         // Room for the table and five layers, and not a sixth.
         let room = FORWARD_BUFFER_RESERVE_BYTES + 300 * MIB + 5 * 100 * MIB + 50 * MIB;
         assert_eq!(
-            split_for_card(&with_table, &[100 * MIB; 10], SplitCard::room(room), false),
+            split_for_card(
+                &with_table,
+                &[100 * MIB; 10],
+                SplitCard::room(room),
+                crate::inference::split::hybrid::RunPlace::Tail
+            ),
             Some((5, 10))
         );
         let spread = crate::model::auto_manage::vram::VramFootprintInputs {
@@ -20414,7 +20487,12 @@ mod tests {
             ..with_table
         };
         assert_eq!(
-            split_for_card(&spread, &[130 * MIB; 10], SplitCard::room(room), false),
+            split_for_card(
+                &spread,
+                &[130 * MIB; 10],
+                SplitCard::room(room),
+                crate::inference::split::hybrid::RunPlace::Tail
+            ),
             Some((6, 10))
         );
     }
@@ -20450,8 +20528,13 @@ mod tests {
             ..seventy_b_inputs()
         };
         let room = 10_890 * MIB;
-        let (on_card, total) =
-            split_for_card(&inputs, &weights, SplitCard::room(room), false).expect("it splits");
+        let (on_card, total) = split_for_card(
+            &inputs,
+            &weights,
+            SplitCard::room(room),
+            crate::inference::split::hybrid::RunPlace::Tail,
+        )
+        .expect("it splits");
         assert_eq!(total, 80);
         let card_weights = ends + weights[..on_card].iter().sum::<u64>();
         // What a card layer's cache costs at 8,192 tokens, kept as this build
@@ -20515,27 +20598,41 @@ mod tests {
             + 2 * kv_per_layer
             - 1;
         assert_eq!(
-            split_for_card(&inputs, &layers.weights, SplitCard::room(room), false),
+            split_for_card(
+                &inputs,
+                &layers.weights,
+                SplitCard::room(room),
+                crate::inference::split::hybrid::RunPlace::Tail
+            ),
             Some((1, 8))
         );
         // The control: the same room, the layers priced at their average.
         let averaged = spread_over_layers(inputs.card_weight_bytes() - inputs.head_bytes, 8);
         assert_eq!(
-            split_for_card(&inputs, &averaged, SplitCard::room(room), false),
+            split_for_card(
+                &inputs,
+                &averaged,
+                SplitCard::room(room),
+                crate::inference::split::hybrid::RunPlace::Tail
+            ),
             Some((2, 8))
         );
         // And one more byte is room for the second.
         assert_eq!(
-            split_for_card(&inputs, &layers.weights, SplitCard::room(room + 1), false),
+            split_for_card(
+                &inputs,
+                &layers.weights,
+                SplitCard::room(room + 1),
+                crate::inference::split::hybrid::RunPlace::Tail
+            ),
             Some((2, 8))
         );
         let _ = std::fs::remove_dir_all(&data_dir);
     }
 
-    /// **A split's processor run that ends the model leaves its output head to
-    /// the card** (#342): the loader loads it with the segment's main device,
-    /// so the card's share carries it and the machine's does not — each budget
-    /// is charged what lands in it.
+    /// **A split's output head is charged to the card** (#342): the loader
+    /// loads it with the segment's main device, so the card's share carries it
+    /// and the machine's does not — each budget is charged what lands in it.
     #[test]
     fn a_split_charges_its_output_head_to_the_card() {
         let model = ModelId("seventy-b-shaped-head".into());
@@ -20547,16 +20644,23 @@ mod tests {
             on_card: 2,
             total: 4,
         };
-        // The last four layers: two on the card, two (and the head) beside.
+        // The last four layers, the processor first (#461 (4)): two on the
+        // processor, short of the model's end, so carrying no head; two and
+        // the head on the card — the card part's own figure, which ends the
+        // model, rounded once from the segment's (within a MB).
         let segment = (4, 8);
-        assert_eq!(
-            p.card_share_of_split_mb(&model, segment, split),
-            p.estimate_gpu_footprint_mb(&model, Some((4, 6)), KvCharge::Typical) + head_mb
+        let card = p.card_share_of_split_mb(&model, segment, split);
+        let card_part = p.estimate_gpu_footprint_mb(&model, Some((6, 8)), KvCharge::Typical);
+        assert!(card.abs_diff(card_part) <= 1, "{card} MB vs {card_part} MB");
+        assert!(
+            card > p.estimate_gpu_footprint_mb(&model, Some((4, 6)), KvCharge::Typical)
+                + head_mb / 2,
+            "the head is the card's: {card} MB"
         );
         assert_eq!(
             p.machine_charge(&model, segment, false, Some(split), KvCharge::Typical)
                 .share_mb,
-            p.estimate_cpu_footprint_mb(&model, Some((6, 8)), KvCharge::Typical) - head_mb
+            p.estimate_cpu_footprint_mb(&model, Some((4, 6)), KvCharge::Typical)
         );
         // The first four: the token table is in the card's run already, and
         // the processor's run ends short of the model, so carries no head.
@@ -20604,10 +20708,15 @@ mod tests {
                 .share_mb,
             p.estimate_cpu_footprint_mb(&tied, Some((1, 8)), KvCharge::Typical) - table_mb
         );
-        // Its last four: the card's run holds no table, so the head is beside.
-        assert_eq!(
-            p.card_share_of_split_mb(&tied, segment, split),
-            p.estimate_gpu_footprint_mb(&tied, Some((4, 6)), KvCharge::Typical) + table_mb
+        // Its last four, the processor first (#461 (4)): the card's two end
+        // the model and so hold its head — the token table again, tied.
+        let card = p.card_share_of_split_mb(&tied, segment, split);
+        let card_part = p.estimate_gpu_footprint_mb(&tied, Some((6, 8)), KvCharge::Typical);
+        assert!(card.abs_diff(card_part) <= 1, "{card} MB vs {card_part} MB");
+        assert!(
+            card > p.estimate_gpu_footprint_mb(&tied, Some((4, 6)), KvCharge::Typical)
+                + table_mb / 2,
+            "the tied head is the card's: {card} MB"
         );
         let _ = std::fs::remove_dir_all(&data_dir);
     }
@@ -21340,7 +21449,7 @@ mod admission_tests {
             &splittable,
             &alike(&splittable),
             SplitCard::room(three_gb),
-            false,
+            crate::inference::split::hybrid::RunPlace::Tail,
         )
         .expect("Qwen2 splits");
         assert!(n > 0 && n < total, "{n} of {total}");
@@ -21354,7 +21463,7 @@ mod admission_tests {
                 &unsplittable,
                 &alike(&unsplittable),
                 SplitCard::room(three_gb),
-                false
+                crate::inference::split::hybrid::RunPlace::Tail
             ),
             None
         );
@@ -21366,8 +21475,13 @@ mod admission_tests {
                 ..splittable
             };
             assert!(
-                split_for_card(&splits, &alike(&splits), SplitCard::room(three_gb), false)
-                    .is_some(),
+                split_for_card(
+                    &splits,
+                    &alike(&splits),
+                    SplitCard::room(three_gb),
+                    crate::inference::split::hybrid::RunPlace::Tail
+                )
+                .is_some(),
                 "{arch}"
             );
         }
@@ -21383,13 +21497,18 @@ mod admission_tests {
                 .share(qwen35.segment_layers / 4, qwen35.segment_layers),
             ..qwen35
         };
-        let (all_kv, _) =
-            split_for_card(&qwen35, &alike(&qwen35), SplitCard::room(three_gb), false).unwrap();
+        let (all_kv, _) = split_for_card(
+            &qwen35,
+            &alike(&qwen35),
+            SplitCard::room(three_gb),
+            crate::inference::split::hybrid::RunPlace::Tail,
+        )
+        .unwrap();
         let (some_kv, _) = split_for_card(
             &quarter_kv,
             &alike(&quarter_kv),
             SplitCard::room(three_gb),
-            false,
+            crate::inference::split::hybrid::RunPlace::Tail,
         )
         .unwrap();
         assert!(some_kv > all_kv, "{some_kv} layers vs {all_kv}");
@@ -21440,7 +21559,7 @@ mod admission_tests {
         let layers = |experts: &[u64]| LayerBytes {
             weights: alike(&moe),
             experts: experts.to_vec(),
-            card_may_guess: true,
+            run_place: crate::inference::split::hybrid::RunPlace::MiddleForGuessing,
         };
         let Some(CardSplit::ExpertsInRam { in_ram, total }) =
             card_split(&moe, &layers(&experts), SplitCard::room(room))
@@ -21538,7 +21657,12 @@ mod admission_tests {
             "the card: the whole segment less the experts the machine holds"
         );
         assert_eq!(
-            ram_charged_share(false, segment, Some(split), false),
+            ram_charged_share(
+                false,
+                segment,
+                Some(split),
+                crate::inference::split::hybrid::RunPlace::Tail
+            ),
             Some(RamShare::Experts { layers: in_ram })
         );
         assert_eq!(
@@ -23173,17 +23297,32 @@ mod admission_tests {
         let layers = |on_card, total| Some(CardSplit::Layers { on_card, total });
         // A split of 0..28 with 10 on the card keeps 10..28 on the processor.
         assert_eq!(
-            ram_charged_share(false, (0, 28), layers(10, 28), false),
+            ram_charged_share(
+                false,
+                (0, 28),
+                layers(10, 28),
+                crate::inference::split::hybrid::RunPlace::Tail
+            ),
             Some(RamShare::Layers((10, 28)))
         );
         assert_eq!(
-            ram_charged_share(false, (8, 40), layers(12, 32), false),
+            ram_charged_share(
+                false,
+                (8, 40),
+                layers(12, 32),
+                crate::inference::split::hybrid::RunPlace::Tail
+            ),
             Some(RamShare::Layers((20, 40)))
         );
         // A whole model's run sits early in the middle (`hybrid::processor_run`):
         // 48 layers, 27 on the card, keep 5..26 on the processor.
         assert_eq!(
-            ram_charged_share(false, (0, 48), layers(27, 48), true),
+            ram_charged_share(
+                false,
+                (0, 48),
+                layers(27, 48),
+                crate::inference::split::hybrid::RunPlace::MiddleForGuessing
+            ),
             Some(RamShare::Layers((5, 26)))
         );
         // Experts kept in RAM charge the machine for those experts alone.
@@ -23195,17 +23334,30 @@ mod admission_tests {
                     in_ram: 23,
                     total: 48
                 }),
-                true,
+                crate::inference::split::hybrid::RunPlace::MiddleForGuessing,
             ),
             Some(RamShare::Experts { layers: 23 })
         );
         // A placement wholly on the processor is charged its whole segment;
         // one wholly on the card, nothing.
         assert_eq!(
-            ram_charged_share(true, (0, 28), None, false),
+            ram_charged_share(
+                true,
+                (0, 28),
+                None,
+                crate::inference::split::hybrid::RunPlace::Tail
+            ),
             Some(RamShare::Layers((0, 28)))
         );
-        assert_eq!(ram_charged_share(false, (0, 28), None, false), None);
+        assert_eq!(
+            ram_charged_share(
+                false,
+                (0, 28),
+                None,
+                crate::inference::split::hybrid::RunPlace::Tail
+            ),
+            None
+        );
         // The split's two charges: its card share against the card, its
         // processor share against the machine.
         assert_eq!(

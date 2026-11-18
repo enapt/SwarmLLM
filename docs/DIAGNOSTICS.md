@@ -895,8 +895,10 @@ grep "local n-gram speculation complete" node.log | grep -o "card rounds.*"
 `kept / guessed` is the card's agreement with the whole model; `guess` is one guess's card time,
 which the count charges (`next` is the count it would choose now — 0 means guessing on the card
 does not pay at this agreement). No `card rounds` at all: the model is not a whole model split
-between card and processor, its run sits at the tail (the loader's `Hybrid placement` line names
-`processor_from`/`processor_to`; from 0.1 of the depth on a whole model), it keeps recurrent state
+between card and processor, its run sits at the tail of a segment starting the model or at the START of
+any other (#461 (4); the loader's `Hybrid placement` line names `processor_from`/`processor_to`: from 0.1 of the
+depth on a whole model, the segment's own first layer on a far one — `SWARMLLM_PROCESSOR_RUN_FIRST=0` puts a far
+one's back at its tail), it keeps recurrent state
 (Qwen 3.5) or lets layers share caches (Gemma 4 E2B/E4B — `hybrid::card_may_guess`), or
 `SWARMLLM_CARD_GUESSES=0`. `SWARMLLM_PROCESSOR_RUN=tail` restores the card-first placement, under
 which the card cannot guess.

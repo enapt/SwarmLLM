@@ -391,6 +391,9 @@ fn advertised_features(shared: &SharedState) -> u64 {
     if crate::inference::split::view::elastic_spans_on() {
         bits |= features::SERVES_SLICES;
     }
+    if crate::inference::split::hybrid::processor_run_first() {
+        bits |= features::PROCESSOR_RUN_FIRST;
+    }
     bits
 }
 
