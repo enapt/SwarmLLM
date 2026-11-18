@@ -70,7 +70,6 @@ value it booted with.
 | `enable_relay_client` | boolean | `true` | Let THIS node hold a place on someone else's relay: its only way in when it is not directly reachable, and a fallback address when it is, so a computer that knows it only by that address can still reach it (the connection then goes direct). Turning it off leaves the node able to reach others but generally unreachable from the internet. The opposite role — relaying for others — is `enable_relay` |
 | `max_peers` | integer | *(from `contribution`)* | Max simultaneous peer connections. Unset it follows `[node] contribution` — minimal `150`, moderate `300`, maximum `500`. An explicit value wins in either direction. |
 | `auto_relay` | boolean | `true` | Hold that place automatically, from startup |
-| `relay_max_circuit_duration_secs` | integer | `3600` | Max relay circuit duration |
 | `relay_max_circuits` | integer | `128` | Max relay circuits to serve |
 | `enable_encryption` | boolean | `true` | Encrypt tensor forwards and control messages between computers. Protects against anyone watching the network; the receiving computer decrypts in order to do the work, so this is not end-to-end |
 | `enable_autonat` | boolean | `true` | NAT detection. Disable on WSL2 to reduce noise |

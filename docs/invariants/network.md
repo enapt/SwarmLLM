@@ -5907,6 +5907,23 @@ limit it is told (`priv_client`: reported in events only). Tests
 `a_circuit_is_not_cut_while_both_ends_hold_it` (red with 1 h / 1 GiB),
 `a_node_that_stops_relaying_ends_its_circuits`.
 
+**Why v0.3.296's change did not take (found 2026-11-18).** It set the backstop in
+`RelayServerConfig::default()`, and its test built the relay from that default. The
+one place a node built its relay (`NetworkManager::new`) wrote
+`max_circuit_duration` from the setting `relay_max_circuit_duration_secs`, whose
+default was still 3600 — so every node from .296 on cut at the hour as before.
+Seen in the field: a circuit to the Italy peer through the anchor (on .297) opened
+04:45:23.247 and closed 05:45:23.032, `io_error` (libp2p-relay's timer ends the
+copy with `TimedOut`, `copy_future.rs`). Now `relay::server_config_for` builds the
+relay from the network settings and is the only builder; the limits are private
+fields, so no caller can set them; the setting is retired (`config::RETIRED_SETTINGS`
+— a config naming it is told it is ignored, never to check its spelling), which also
+removes a crash: libp2p-relay `expect`s the duration to fit `u32` seconds when it
+answers a circuit request (`inbound_hop.rs`). Test
+`the_relay_a_node_runs_never_cuts_a_circuit_at_an_hour` builds from
+`NetworkConfig::default()` — red with the setting read, green without. **A fix to a
+struct's default is checked on the value the RUNNING path builds** (gotcha #1134).
+
 ## Every node keeps a home relay, reachable or not (2026-11-16, FUTURE_WORK #464)
 
 **Seen.** On 11-15 01:31Z the home router restarted and its UPnP service stopped

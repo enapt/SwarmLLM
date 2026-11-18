@@ -244,7 +244,7 @@ Every node reserves once it reaches a bootstrap relay (`relay::HOME_RELAY`) and 
 
 ## A relayed circuit lasts while both ends hold it (2026-11-17, #473 (c))
 
-Our relay server sets no byte limit (`max_circuit_bytes` 0) and only a 30-day backstop duration: the ends redial at once, so a limit only cuts the pair. A node that stops relaying ends the circuits it carries (`relay::circuits_to_end`, the discovery tick). Never add a total deadline a redial undoes.
+Our relay server sets no byte limit (`max_circuit_bytes` 0) and only a 30-day backstop duration: the ends redial at once, so a limit only cuts the pair. **`relay::server_config_for` is the one builder**; the limits are private to `relay.rs` and no setting reaches them (`relay_max_circuit_duration_secs` retired — it undid .296's fix on every node). A node that stops relaying ends the circuits it carries (`relay::circuits_to_end`, the discovery tick). Never add a total deadline a redial undoes.
 
 → `docs/invariants/network.md` § "A relayed circuit lasts while both ends hold it"
 

@@ -40,10 +40,12 @@ const RELAY_RESERVATION_DURATION_SECS: u64 = 3600;
 pub struct RelayServerConfig {
     pub max_reservations: usize,
     pub max_circuits: usize,
-    pub max_circuit_duration: Duration,
+    /// [`RELAY_CIRCUIT_DURATION_SECS`] — private: no caller may cut a circuit
+    /// sooner (#473 (c)).
+    max_circuit_duration: Duration,
     /// NET-M5: Reservation duration is independently configurable from circuit duration.
-    pub reservation_duration: Duration,
-    pub max_circuit_bytes: u64,
+    reservation_duration: Duration,
+    max_circuit_bytes: u64,
 }
 
 impl Default for RelayServerConfig {
@@ -123,9 +125,23 @@ impl libp2p::relay::RateLimiter for OnlyWhileRelaying {
     }
 }
 
-/// Build a relay server configuration for libp2p.
+/// The relay server this node runs, from its network settings: `None` when
+/// relaying is off. The ONE place the node builds it — the circuit limits come
+/// from [`RelayServerConfig::default`] alone.
 ///
-/// Returns `None` if relay serving is disabled.
+/// No setting reaches the circuit's limits (#473 (c)): an owner's
+/// `relay_max_circuit_duration_secs` replaced the 30-day backstop with its
+/// default hour on every node from v0.3.296 to v0.3.297, and a value past
+/// `u32::MAX` seconds panics libp2p-relay at the first circuit — the setting is
+/// retired (`config::RETIRED_SETTINGS`) and the limits are private here.
+pub fn server_config_for(network: &crate::config::NetworkConfig) -> Option<RelayServerConfig> {
+    network.enable_relay.then(|| RelayServerConfig {
+        max_circuits: network.relay_max_circuits,
+        ..Default::default()
+    })
+}
+
+/// Build a relay server configuration for libp2p.
 pub fn build_relay_server_config(config: &RelayServerConfig) -> libp2p::relay::Config {
     libp2p::relay::Config {
         max_reservations: config.max_reservations,
@@ -447,6 +463,26 @@ mod tests {
         assert_eq!(config.max_circuit_bytes, 0, "no byte limit");
         assert!(config.max_circuit_duration >= Duration::from_secs(7 * 24 * 60 * 60));
         assert!(config.max_circuit_duration.as_secs() <= u64::from(u32::MAX));
+    }
+
+    /// #473 (c) as a node RUNS it: the relay built from the default settings
+    /// (`server_config_for`, what the network manager builds) — never the
+    /// struct's default alone, which the setting it read replaced with one hour
+    /// on every node from v0.3.296 (a circuit through the .297 anchor ended at
+    /// 60:00, 2026-11-18).
+    #[test]
+    fn the_relay_a_node_runs_never_cuts_a_circuit_at_an_hour() {
+        let mut network = crate::config::NetworkConfig {
+            enable_relay: true,
+            ..Default::default()
+        };
+        let config =
+            build_relay_server_config(&server_config_for(&network).expect("relaying is on"));
+        assert!(config.max_circuit_duration >= Duration::from_secs(7 * 24 * 60 * 60));
+        assert!(config.max_circuit_duration.as_secs() <= u64::from(u32::MAX));
+        assert_eq!(config.max_circuit_bytes, 0, "no byte limit");
+        network.enable_relay = false;
+        assert!(server_config_for(&network).is_none());
     }
 
     /// With no limit to run out, a node that stops relaying ends the circuits

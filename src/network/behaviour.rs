@@ -592,11 +592,9 @@ mod tests {
         let keypair = Keypair::generate_ed25519();
         let (relay_transport, relay_behaviour) = relay::client::new(keypair.public().to_peer_id());
         drop(relay_transport);
-        let relay_cfg = RelayServerConfig {
-            max_reservations: 64,
-            max_circuits: 8,
-            ..Default::default()
-        };
+        let mut relay_cfg = RelayServerConfig::default();
+        relay_cfg.max_reservations = 64;
+        relay_cfg.max_circuits = 8;
         let result = build_behaviour(
             &keypair,
             relay_behaviour,

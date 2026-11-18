@@ -337,12 +337,21 @@ pub(crate) fn unknown_config_keys(contents: &str) -> Vec<String> {
 /// Prior art: rustc keeps removed lints in a table with a reason each
 /// (`LintStore::register_removed(name, reason)`, the `RemovedLint` diagnostic)
 /// and answers `lint x has been removed: <reason>`, never "unknown lint".
-const RETIRED_SETTINGS: &[(&str, &str)] = &[(
-    "model",
-    "`[model] shard_size_mb` is no longer a setting and is IGNORED: every computer now \
-     cuts a model into the same parts, so a size of your own only made parts no other \
-     computer holds. Delete the [model] section from config.toml",
-)];
+const RETIRED_SETTINGS: &[(&str, &str)] = &[
+    (
+        "model",
+        "`[model] shard_size_mb` is no longer a setting and is IGNORED: every computer now \
+         cuts a model into the same parts, so a size of your own only made parts no other \
+         computer holds. Delete the [model] section from config.toml",
+    ),
+    (
+        "network.relay_max_circuit_duration_secs",
+        "`[network] relay_max_circuit_duration_secs` is no longer a setting and is IGNORED: \
+         a connection this computer relays now lasts while both computers keep it, because a \
+         time limit only cut them apart and they connected again at once. Delete the line \
+         from config.toml",
+    ),
+];
 
 /// Why an unrecognised key does nothing, where it names a retired setting
 /// ([`RETIRED_SETTINGS`]) or a key inside one.
@@ -2028,6 +2037,20 @@ mod config_default_hygiene {
         for key in ["models", "node.model", "modelx.a"] {
             assert_eq!(super::retired_setting(key), None, "{key}");
         }
+        // A retired key inside a table that stays (#473 (c)).
+        let unknown = crate::config::unknown_config_keys(
+            "[network]\nrelay_max_circuit_duration_secs = 3600\n",
+        );
+        assert_eq!(
+            unknown,
+            vec!["network.relay_max_circuit_duration_secs".to_string()]
+        );
+        let why = super::retired_setting(&unknown[0]).expect("retired");
+        assert!(
+            why.contains("IGNORED") && !why.contains("spelling"),
+            "{why}"
+        );
+        assert_eq!(super::retired_setting("network.relay_max_circuits"), None);
     }
 
     /// The sample config every release ships beside the binary

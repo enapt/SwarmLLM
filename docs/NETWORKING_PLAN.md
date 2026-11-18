@@ -147,8 +147,9 @@ v0.3.16, directly connected):
   (`network/behaviour.rs`), but never fires/succeeds here — and per research it
   **cannot** succeed for symmetric NAT / CGNAT, which is common in 2026.
 - **The relay is connectivity-only.** libp2p circuit-relay-v2
-  (`network/relay.rs`) has `max_circuit_bytes = 1 GB`, `max_circuit_duration =
-  1 h`, and is designed as a *brief bootstrap* before DCUtR upgrades to direct.
+  (`network/relay.rs`) had `max_circuit_bytes = 1 GB`, `max_circuit_duration =
+  1 h` when this was written (since #473 (c): no byte limit, a 30-day backstop,
+  no setting), and is designed as a *brief bootstrap* before DCUtR upgrades to direct.
   It carries the connection + GossipSub, but the bidirectional
   `request_response` inference path over it is unreliable (reverse-substream +
   the "prefer a fresh direct dial that then can't round-trip" behaviour).

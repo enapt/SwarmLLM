@@ -16,7 +16,6 @@ use crate::model::shard::ShardStore;
 use crate::network::behaviour::{self, SwarmBehaviour};
 use crate::network::discovery;
 use crate::network::protocol::{SwarmRequest, SwarmResponse};
-use crate::network::relay::RelayServerConfig;
 use crate::network::transport;
 use crate::types::{NetworkCommand, SwarmMessage};
 
@@ -887,18 +886,8 @@ impl NetworkManager {
 
         tracing::info!(%peer_id, "Initializing network");
 
-        // Build relay server config if relay serving is enabled
-        let relay_server_config = if config.network.enable_relay {
-            Some(RelayServerConfig {
-                max_circuits: config.network.relay_max_circuits,
-                max_circuit_duration: std::time::Duration::from_secs(
-                    config.network.relay_max_circuit_duration_secs,
-                ),
-                ..Default::default()
-            })
-        } else {
-            None
-        };
+        // The relay server, if this node relays (`relay::server_config_for`).
+        let relay_server_config = crate::network::relay::server_config_for(&config.network);
 
         let keypair_for_behaviour = keypair.clone();
         let relay_cfg = relay_server_config;

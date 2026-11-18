@@ -59,9 +59,6 @@ pub struct NetworkConfig {
     /// wins, in either direction.
     #[serde(default)]
     pub max_peers: Option<u32>,
-    /// Maximum duration for a single relay circuit in seconds.
-    #[serde(default = "default_relay_circuit_duration")]
-    pub relay_max_circuit_duration_secs: u64,
     /// Maximum number of relay circuits this node will serve simultaneously.
     #[serde(default = "default_relay_max_circuits")]
     pub relay_max_circuits: usize,
@@ -486,10 +483,6 @@ fn default_tensor_compress_threshold() -> usize {
     1024
 }
 
-fn default_relay_circuit_duration() -> u64 {
-    3600
-}
-
 /// 3 leaves room for a relayed + direct connection during a DCUtR upgrade, plus
 /// one transport variant (a peer reachable over both TCP and QUIC), while still
 /// bounding runaway parallel connections. Never set below 2 — see
@@ -500,8 +493,9 @@ fn default_max_connections_per_peer() -> u32 {
 
 fn default_relay_max_circuits() -> usize {
     // See `network::relay::RelayServerConfig::default` — libp2p's 16 assumes a
-    // 2-minute bootstrap circuit; ours are a 1-hour data path, so a slot is
-    // held ~30x longer and 16 is exhausted by a small swarm.
+    // 2-minute bootstrap circuit; ours are a data path held while both ends
+    // hold it (#473 (c)), so a slot is held far longer and 16 is exhausted by a
+    // small swarm.
     128
 }
 
@@ -514,7 +508,6 @@ impl Default for NetworkConfig {
             enable_relay: true,
             enable_relay_client: true,
             max_peers: None,
-            relay_max_circuit_duration_secs: default_relay_circuit_duration(),
             relay_max_circuits: default_relay_max_circuits(),
             auto_relay: true,
             relay_forwarding: false,

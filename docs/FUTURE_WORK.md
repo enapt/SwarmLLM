@@ -2326,9 +2326,16 @@ DCUtR reached a peer at (US's `68.3.213.210/udp/8800`). That address answers onl
 made lives, and only to a simultaneous open; stored, it is dialled after a restart, when the mapping has gone, and a
 filtering NAT refuses a plain dial — the circuit + DCUtR path already brings the peer back in 1-7 s (US, measured
 before 11-16). go-libp2p keeps a connected address only 15 min past the disconnect (`RecentlyConnectedAddrTTL`) for
-the same reason. **(c) FIXED** 2026-11-17 (v0.3.296-alpha): our relay server cut every circuit at 1 h (43 of 72 relayed
-connections here ended at the hour); no byte limit and a 30-day backstop now, and a node that stops relaying ends
-its circuits (`docs/invariants/network.md` § "A relayed circuit lasts while both ends hold it"). Prior art: go-libp2p's AutoRelay pushes a node's new circuit addresses to its connected peers by
+the same reason. **(c) FIXED on main 2026-11-18 — v0.3.296's fix never took effect**: our relay server cut every circuit at 1 h (43 of
+72 relayed connections here ended at the hour). .296 set no byte limit and a 30-day backstop in
+`RelayServerConfig::default()`, but the one place a node builds its relay replaced the duration with the setting
+`relay_max_circuit_duration_secs`, default 3600 — and its test read the struct's default, not that path. Seen in the
+field 11-18: a circuit to the Italy peer through the anchor (on .297) ended at 60:00.0. Now the relay is built only by
+`relay::server_config_for` (tested on the default settings, red with the setting read), the limits are private to
+`relay.rs` and the setting is retired (`config::RETIRED_SETTINGS`; a value past `u32::MAX` s also panicked
+libp2p-relay). A node that stops relaying ends its circuits (`docs/invariants/network.md` § "A relayed circuit
+lasts while both ends hold it"). **Field check once the anchor runs the release carrying this**: a relayed
+connection outlives 62 min (`circuit_lives.py`). Prior art: go-libp2p's AutoRelay pushes a node's new circuit addresses to its connected peers by
 identify-push, which is how they reach the DHT; libp2p relay v2 reservations last 1 h by default.
 
 ### Speed on one computer
