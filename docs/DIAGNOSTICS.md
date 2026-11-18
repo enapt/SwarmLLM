@@ -2695,7 +2695,8 @@ and a benchmark that asks the same thing twice gets the same reply back, so its 
 v0.3.298: the 7B on the card "wrote" 105-205 tok/s against 54-57 for a reply written new (v0.3.290's own check,
 the previous build 54 beside it), the spread being how much of the copy each run took — the card "dips" of the
 .293-.298 gates ("cand_2's warm sample 120 vs ~200") were that spread, not the machine. The tell: a step under the
-time the card needs to read the weights once (a 4.4 GB 7B: ~17 ms a token on this card; the copies ran 5-10 ms). Time
+time the card needs to read the weights once (a 4.4 GB 7B: ~17 ms a token on this card): the copies ran 5-10 ms,
+while a summary written new, which still copies phrases from its own document as any user's would, ran ~14-15. Time
 writing with `SWARMLLM_FLOW_COPY_STORE=0` on the node (the gate's step 7 and `rebench.sh` since 2026-11-18), or ask
 a question no earlier reply answers; read a copy rig's figures as a copy's.
 
