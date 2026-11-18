@@ -1425,11 +1425,7 @@ impl SplitModel {
     /// is read ([`Self::mask_is_read`]); there only the step is named.
     pub(crate) fn widths_to_record(&mut self) -> Vec<crate::inference::cuda_graph::StepShape> {
         use crate::inference::cuda_graph::{DecodeGraphSlot, MAX_POSITIONS};
-        if !crate::inference::cuda_graph::record_widths_ahead()
-            || !self.device.is_cuda()
-            || !self.is_first()
-            || self.draft_tree.is_some()
-        {
+        if !self.widths_recorded_ahead() || self.draft_tree.is_some() {
             return Vec::new();
         }
         self.settle_decode_graph();
@@ -1447,6 +1443,17 @@ impl SplitModel {
             }
             _ => Vec::new(),
         }
+    }
+
+    /// Whether an idle worker records this model's step shapes ahead
+    /// ([`Self::widths_to_record`]): a card's whole model or first segment,
+    /// unless `SWARMLLM_CUDA_GRAPH_WARM=0`. Where it does, a reply leaves a
+    /// shape's first graph to that recording
+    /// ([`crate::inference::cuda_graph::DecodeGraph::may_make_graph`]).
+    fn widths_recorded_ahead(&self) -> bool {
+        crate::inference::cuda_graph::record_widths_ahead()
+            && self.device.is_cuda()
+            && self.is_first()
     }
 
     /// The layers (absolute) whose output EVERY captured step of this model
@@ -1518,8 +1525,13 @@ impl SplitModel {
             });
         let not_ready = template.is_some() && !caches_ready;
         let ready = template.filter(|_| caches_ready);
+        // A shape with no graph yet is left to the idle recording, never made
+        // inside a reply (FUTURE_WORK #357 (d)).
+        let left_to_the_recording = ready.is_some()
+            && !graph.declines(shape)
+            && !graph.may_make_graph(shape, self.widths_recorded_ahead());
         let template = match ready {
-            Some(t) if !graph.declines(shape) => t,
+            Some(t) if !graph.declines(shape) && !left_to_the_recording => t,
             ready => {
                 let (out, caught) = self.forward_inner_body(
                     input,
@@ -1536,6 +1548,9 @@ impl SplitModel {
                 graph.note_uncaptured(all_positions, shape, &out, began, ready.is_some());
                 if not_ready {
                     graph.note_not_ready(shape, all_positions);
+                }
+                if left_to_the_recording {
+                    graph.note_left_to_the_recording(shape);
                 }
                 return Ok((out, caught));
             }

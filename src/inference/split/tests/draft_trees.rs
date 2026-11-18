@@ -229,7 +229,12 @@ fn a_captured_tree_level_reads_as_the_ordinary_one() {
     model.decode_graph = DecodeGraphSlot::Off;
     let ordinary = run(&mut model, "op-by-op");
     model.decode_graph = DecodeGraphSlot::Unchecked;
+    // Its graphs made as the idle recording makes them: a reply leaves a
+    // shape's first graph to it (#357 (d)).
+    let _ = model.widths_to_record();
+    model.set_recording_widths(true);
     let captured = run(&mut model, "captured");
+    model.set_recording_widths(false);
     let DecodeGraphSlot::On(graph) = &model.decode_graph else {
         panic!("the card model's decode steps were not to be captured");
     };
@@ -392,6 +397,65 @@ fn a_reply_after_the_idle_recording_makes_no_graph() {
     assert!(
         (1..=MAX_POSITIONS).all(|r| widths.contains(&StepShape::tree(r))),
         "a whole model whose trees are captured names every tree row count: {widths:?}"
+    );
+}
+
+/// A reply BEFORE the idle recording makes no graph (#357 (d)): a worker asked
+/// back to back, or for its first reply after a load, is never idle, and each
+/// graph its replies made cost up to 9.8 s under WSL2 — the 7B's v0.3.299
+/// card A/B, a third of its replies 3-8x slow. A shape with no graph
+/// runs the ordinary way and is left to the recording; once that has run, the
+/// reply's next steps update its graph in place. Red under
+/// `SWARMLLM_CUDA_GRAPH_MADE=in-replies` (the step's second forward makes it).
+///
+/// ⚠ Gated as above.
+#[cfg(feature = "candle-cuda")]
+#[test]
+fn a_reply_before_the_idle_recording_makes_no_graph() {
+    let card = match Device::new_cuda(0) {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("SKIPPED reply before the recording: no CUDA device ({e})");
+            return;
+        }
+    };
+    let mut model = whole_model_on(&card);
+    let kv = KvCacheStore::new(std::time::Duration::from_secs(60));
+    let prompt = model.tensor_from_ids(&PROMPT).unwrap();
+    model.forward(&prompt, 0, &kv, "reply").unwrap();
+    let mut at = PROMPT.len();
+    // The first step learns the output's shape; before #357 (d) the second
+    // made the graph, inside the reply.
+    for id in 0..4u32 {
+        let step = model.tensor_from_ids(&[40 + id]).unwrap();
+        reply_forward(&mut model, &kv, &step, at, false);
+        at += 1;
+    }
+    let step = StepShape::chain(1);
+    assert!(
+        !model.has_step_graph(step),
+        "a reply made the step's graph before the idle recording"
+    );
+    let widths = model.widths_to_record();
+    assert!(
+        widths.contains(&step),
+        "the recording names the step: {widths:?}"
+    );
+    let finished =
+        crate::inference::model_worker::record_check_widths(&mut model, &kv, &widths, &|| true)
+            .unwrap();
+    assert!(finished, "nothing asked the recording to stop");
+    assert!(model.has_step_graph(step), "the recording made no graph");
+    let before = model.one_off_forwards();
+    for id in 0..3u32 {
+        let next = model.tensor_from_ids(&[50 + id]).unwrap();
+        reply_forward(&mut model, &kv, &next, at, false);
+        at += 1;
+    }
+    assert_eq!(
+        model.one_off_forwards() - before,
+        0,
+        "the reply's steps after the recording did not update its graph"
     );
 }
 

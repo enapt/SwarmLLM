@@ -9051,6 +9051,29 @@ start-up for every capture size, largest first; SGLang records target and
 draft graphs once at start-up; an adaptive-length verifier records one verify
 graph per length up front (arXiv 2605.00342) — FUTURE_WORK #425 (b).
 
+**A reply makes no graph before the recording** (2026-11-18, #357 (d)). *What
+it replaced*: a shape with no graph was made at its second sighting inside
+whatever reply met it, so a worker asked back to back — never idle, the
+recording waiting for the burst's end — made every graph in its replies. The
+v0.3.299 binary against itself with `SWARMLLM_CUDA_GRAPH=0` (the 7B on the RTX
+3070, `v0.3.299-alpha-ab-card-1620`, 6 reps an arm, each question sent as the
+last reply ended, Windows up 53 h): ON 23.5, 67.6, 66.7, 69.6, 9.9, 66.6 and
+65.5, 67.2, 10.0, 20.5, 70.4 tok/s; OFF 59.5-64.0 and 54.6-65.4. Every slow
+reply made a chain width's graph (4.9-9.8 s), no fast one made any; the
+recording ran after the last rep (2.7-4.6 s). *Now*:
+`DecodeGraph::may_make_graph(shape, recorded_ahead)` — a graph it has, or the
+recording running (`set_recording`), done (`widths_recorded`), or not coming
+(`SplitModel::widths_recorded_ahead` false: off a card, a later segment,
+`SWARMLLM_CUDA_GRAPH_WARM=0`) — is asked at the one capture site; otherwise
+the step runs the ordinary way and is counted (`left_to_the_recording`, not a
+one-off: it costs what an ordinary step does). The recorder is the only maker
+before it is done: `record_check_widths` sets the flag around its forwards. An
+interrupted recording sets nothing, so replies still make none until the next
+idle moment finishes it. *Must keep*: a shape that already has its graph is
+updated in a reply as before; a failed recording (`Err`) lets replies make
+graphs again. A/B `SWARMLLM_CUDA_GRAPH_MADE=in-replies`; test
+`a_reply_before_the_idle_recording_makes_no_graph`.
+
 **What a round costs beyond a step**, and the two parts made smaller: § "Qwen 3.5's delta rule is ONE op per layer" › "Its convolution, and a taken-back check, on a card".
 
 

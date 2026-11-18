@@ -6387,6 +6387,9 @@ pub(crate) fn record_check_widths(
             model.forward(input, at, kv_store, &request).map(|_| ())
         }
     };
+    // The one place a graph is made before the recording is done
+    // (`cuda_graph::DecodeGraph::may_make_graph`, #357 (d)).
+    model.set_recording_widths(true);
     let mut run = || -> Result<bool, SwarmError> {
         let prompt = model.tensor_from_ids(&[0; PROMPT])?;
         model.forward(&prompt, 0, kv_store, &request)?;
@@ -6420,6 +6423,7 @@ pub(crate) fn record_check_widths(
         Ok(true)
     };
     let outcome = run();
+    model.set_recording_widths(false);
     kv_store.clear_request(&key, &request);
     outcome
 }

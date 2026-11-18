@@ -815,6 +815,15 @@ impl SplitModel {
         }
     }
 
+    /// The idle recording of this model's step shapes begins (`true`) or ends:
+    /// while it runs, its forwards may make graphs a reply's would leave to it
+    /// (`cuda_graph::DecodeGraph::may_make_graph`).
+    pub(crate) fn set_recording_widths(&mut self, on: bool) {
+        if let crate::inference::cuda_graph::DecodeGraphSlot::On(graph) = &mut self.decode_graph {
+            graph.set_recording(on);
+        }
+    }
+
     /// The card this model uses, if any: its primary device, or the card half
     /// of a card/processor split.
     pub(crate) fn card(&self) -> Option<&Device> {

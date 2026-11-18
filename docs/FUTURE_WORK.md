@@ -2962,7 +2962,7 @@ microbatch "before we figure out how to deal with speculative decoding". Still u
 and exo source, DeepSpeed/Megatron micro-batching.
 
 #### #357 — A card's first graph of a new shape, late in a worker's life, can stall one forward 10-59 s
-`P3` · perf-local · **PARTIAL** (a whole model on a card records its check widths while idle, 2026-11-08; a split's first segment and every tree row count too, 2026-11-15) — 2026-10-26 · evidence: `faster_than_local.md` § 8.6; gotcha #883; `docs/invariants/inference.md` § "A card records its check widths while the worker is idle"
+`P3` · perf-local · **PARTIAL** (a whole model on a card records its check widths while idle, 2026-11-08; a split's first segment and every tree row count too, 2026-11-15; a reply makes no graph before that recording, 2026-11-18, (d)) — 2026-10-26 · evidence: `faster_than_local.md` § 8.6; gotcha #883; `docs/invariants/inference.md` § "A card records its check widths while the worker is idle"
 
 Four of 16 split replies on 2026-10-26 (this PC, Windows up 84 h) each lost 10-59 s to ONE
 forward on the card: the worker's first CUDA graph of a 2-row chunk (`decode graph … instantiated`
@@ -3003,6 +3003,22 @@ gives the time); (b) a LATER segment of a split records nothing (its rows come f
 first segment and every tree row count are recorded since 2026-11-15 (on the 14B Thailand↔Australia split each first
 graph of a tree level or chunk took 289-958 ms inside a reply on a card 2.8 GB fuller, v0.3.286); (c) gaps of 1.6-8.5 s
 OUTSIDE any forward, in both arms of those runs alike — the 10-26 ones' other half (ending at a card memory reading).
+**(d) A worker asked back to back is never idle, so its replies made every graph — on main 2026-11-18**: about a third of
+the 7B's card replies in the .298/.299 release checks decoded 3-8x slow (8 of 24 in `v0.3.299-alpha-ab-card-1515`, 3 of 8
+in step 7). The v0.3.299 binary against itself with `SWARMLLM_CUDA_GRAPH=0` (`v0.3.299-alpha-ab-card-1620`, `-v`, 6 reps
+an arm, each next question sent as the reply ends, Windows up 53 h): graphs ON 23.5, 67.6, 66.7, 69.6, **9.9**, 66.6 and
+65.5, 67.2, **10.0, 20.5**, 70.4 tok/s (decode); OFF 59.5-64.0 and 54.6-65.4, none slow. Every slow reply, and none of the
+fast ones, made a chain width's graph mid-reply (widths 7, 6 / 6, 7, 3: 4.9-9.8 s each); the warm-ups made widths 1, 8, 4,
+2, 3, 5 (0.1-1.3 s each, decode 24.7 / 42.1). The idle recording ran only after the last rep (2.7-4.6 s, its first tree
+graph 4.1 s). **Now** a reply makes no graph before that recording (`cuda_graph::DecodeGraph::may_make_graph`, asked at
+the one capture site; only `record_check_widths`'s forwards make one, `SplitModel::set_recording_widths`): where the
+recording will come, a shape with no graph runs the ordinary way — about the OFF arm's 60-64 against the ON arm's 67-70
+— and every reply after the first idle moment replays its graphs. Prior art: vLLM captures every size before serving and
+pads a batch to a captured size rather than capture mid-serving; SGLang records at start-up; llama.cpp captures after
+two matching calls, inside the request. A/B `SWARMLLM_CUDA_GRAPH_MADE=in-replies`; test
+`a_reply_before_the_idle_recording_makes_no_graph` (red under the A/B). **Left**: the recording itself meets the same
+stalls (4.1 s for one tree graph above), so a question arriving mid-capture waits for it; a worker NEVER idle (a client
+asking back to back for hours) runs every reply uncaptured — ~8% slower than graphs, never 3-8x.
 
 #### #451 — A block drafter in system memory beside a card that has no room for it: ON — field-checked, no gain on a hybrid
 `P2` · perf-local · **ON (measured)** — 2026-11-15 · models between (27B/35B on a 12 GB card)

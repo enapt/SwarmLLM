@@ -247,6 +247,14 @@ pub(crate) fn record_widths_ahead() -> bool {
     *ON.get_or_init(|| std::env::var("SWARMLLM_CUDA_GRAPH_WARM").as_deref() != Ok("0"))
 }
 
+/// The A/B of [`DecodeGraph::may_make_graph`]: `SWARMLLM_CUDA_GRAPH_MADE=in-replies`
+/// lets a reply make a shape's graph before the idle recording has, as before
+/// FUTURE_WORK #357 (d).
+fn graphs_made_in_replies() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("SWARMLLM_CUDA_GRAPH_MADE").as_deref() == Ok("in-replies"))
+}
+
 /// The refusal that is the forward's own failure, not the capture's.
 pub(crate) const FORWARD_FAILED: &str = "the forward failed inside the capture";
 
@@ -498,6 +506,9 @@ struct Stats {
     rested: u64,
     /// Rests the shape's measured costs declined, or ended early.
     rests_declined: u64,
+    /// Ordinary steps of a shape with no graph yet, which a reply left to the
+    /// idle recording ([`DecodeGraph::may_make_graph`]).
+    left_to_the_recording: u64,
     update_refusals_seen: Vec<String>,
     /// Host time from the start of a capture to its launch, summed over the
     /// launched ones. The card waits for all of it — a graph starts nothing
@@ -550,6 +561,11 @@ pub(crate) struct DecodeGraph {
     /// the worker had nothing to do, or tried and could not be
     /// (`model_worker::warm_check_widths`): none is tried again for this load.
     widths_recorded: bool,
+    /// True while that recording runs ([`Self::set_recording`]): its forwards
+    /// are the only ones that make a graph before it is done.
+    recording: bool,
+    /// Shapes a reply has left to the recording, each said once.
+    left_shapes: std::collections::HashSet<StepShape>,
     /// Times steps on the card (`cuda::StepClock`); made at the first step, never
     /// again once the driver would not make its events.
     #[cfg(feature = "candle-cuda")]
@@ -624,6 +640,48 @@ impl DecodeGraph {
 
     pub(crate) fn note_widths_recorded(&mut self) {
         self.widths_recorded = true;
+    }
+
+    /// Whether a forward of `shape` may capture now — for a shape with no
+    /// graph, MAKE one (FUTURE_WORK #357 (d)). A graph it has is updated in
+    /// place. A new one is made only by the idle recording
+    /// (`model_worker::record_check_widths`, while [`Self::set_recording`]),
+    /// after it, or where none will come (`recorded_ahead` false: off a card,
+    /// a split's later segment, `SWARMLLM_CUDA_GRAPH_WARM=0`). Before it a
+    /// reply runs such a shape the ordinary way: a worker asked back to back,
+    /// or for its first reply after a load, is never idle, so its replies made
+    /// every graph, and under WSL2 making one cost 0.1-9.8 s (the 7B on the
+    /// RTX 3070, v0.3.299: every reply that made a chain width's graph decoded
+    /// at 10-24 tok/s against 67-70, #357 (d)), where an ordinary step is only
+    /// ~8% slower than its graph (60-64 tok/s). Prior art: vLLM captures every size before it
+    /// serves and pads a batch up to a captured size rather than capture
+    /// mid-serving; SGLang records target and draft graphs at start-up.
+    /// A/B `SWARMLLM_CUDA_GRAPH_MADE=in-replies`.
+    pub(crate) fn may_make_graph(&self, shape: StepShape, recorded_ahead: bool) -> bool {
+        self.has_graph(shape)
+            || self.recording
+            || self.widths_recorded
+            || !recorded_ahead
+            || graphs_made_in_replies()
+    }
+
+    /// The idle recording begins (`true`) or ends.
+    pub(crate) fn set_recording(&mut self, on: bool) {
+        self.recording = on;
+    }
+
+    /// A reply's forward of `shape`, run the ordinary way to leave its graph to
+    /// the idle recording ([`Self::may_make_graph`]). Not a one-off: it costs
+    /// what an ordinary forward does, and a price may learn from it.
+    pub(crate) fn note_left_to_the_recording(&mut self, shape: StepShape) {
+        self.stats.left_to_the_recording += 1;
+        if self.left_shapes.insert(shape) {
+            one_off(
+                shape,
+                None,
+                "a reply makes no graph: the idle recording will",
+            );
+        }
     }
 
     /// A step of a shape that has its graph, run the ordinary way because it
@@ -1006,6 +1064,7 @@ impl DecodeGraph {
             rested = s.rested,
             rests_declined = s.rests_declined,
             uncaptured = s.uncaptured,
+            left_to_the_recording = s.left_to_the_recording,
             not_ready = s.not_ready,
             refused = s.refused,
             "DIAG: decode graph"
