@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #478**). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #480**). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -4066,6 +4066,69 @@ the Gemma 4 31B failed only at the re-plan cap (#446). But the DENSE models AU r
 and the 70B was refused: the planner saw AU's card with room for 3 of the 14B's layers (`card_layers=Some(3)
 max_hostable_layers=Some(19) held_ranges=[]`) after AU had served ten models in turn — its card and memory held
 by the earlier models' idle workers (#447).
+
+**Measured again 2026-11-18 19:42-20:58Z** (v0.3.299, the same models, order and shape; THIS node PROCESSOR-ONLY — a
+driver reset at 17:01Z kept its card off that boot — so every "here" below ran on its processor; records
+`~/swarmllm-gate/tier427/1118a/{run.log,asks.jsonl}`, the safety kit's driver watch 152 polls, 0 events).
+
+| Model | Route | Reply tok/s | ~4.1K prompt: first token (prompt tok/s) / reply |
+|---|---|---|---|
+| Qwen3.8-27B | AU whole | 6.4-6.6 | 63 s (66) / 4.2 — 11-12: 413 s (10.1) |
+| Qwen3.6-27B | AU whole (the warm-up here ↔ IT ↔ AU, 1.4) | 6.2 | 67 s (61) / 4.4 — 11-12: 424 s (9.7) |
+| Qwen3.6-35B-A3B | split IT ↔ AU ↔ here (11-12: AU whole; AU holds 17 of its 41 parts now) | 1.3-1.9 | 76 s (54) / 1.3 |
+| Ornith-1.5-35B-A3B | split IT ↔ AU (11-12: AU whole) | 3.4-3.5 | 41 s (100) / 2.8 |
+| Gemma 4 31B | split here ↔ IT ↔ AU ↔ here | 0.8-1.8 | 294 s (15) / 0.8 — 11-12: failed (#446) |
+| Gemma 4 26B-A4B | split here ↔ AU ↔ here | 0.9-4.5 | 31 s (138) / 2.5 |
+| Gemma 4 12B | split here ↔ AU; the long one IT ↔ AU | 2.6-2.7 | 346 s (12) / 1.3 |
+| gpt-oss-20b MXFP4 / Q4_K_M | split IT ↔ here / AU ↔ IT | 1.1-1.4 / 1.6-5.1 | 111 s (36) / 1.3 · 205 s (20) / 1.5 |
+| Qwen3-14B | AU whole | 27.4-31.8 | 10.9 s (372) / 17.8 — 11-12: 3.8-4.6, 199 s |
+| Qwen2.5-14B | AU whole (11-12: here, on the card) | 23.0-25.5 | 10.8 s (381) / 14.3 |
+| Qwen3-30B-A3B-2507 | AU whole (11-12: split IT ↔ AU, 3.0-3.4) | 29.5-30.3 | 18 s (225) / 24.3 |
+| Llama 3.3 70B | split IT ↔ here ↔ AU | 1.1 (first token 210 s, a 53-token prompt) | the warm-up **refused** in 53 s, "room for about 73 of its 80 layers … trying again won't help" (#479); the long one cut 6 min in by the safety kit's heat stop of THIS node (zone ≥ 93 °C for 5 min, 95.9 °C), the stream closing with no error |
+
+What it says:
+- **#447 holds**: after ten models in a row AU still ran the dense 14Bs whole at 23-32 tok/s (11-12: 3.8-4.6) and
+  the 30B-A3B whole (11-12: a 3.0-3.4 split). Its 27Bs read a 4.1K prompt in ~65 s against 413-432 s; AU's side is
+  not visible from here, so that cause is not traced.
+- **The two 35B-A3B MoE models ran as splits at 1.3-3.5 tok/s** where 11-12 ran them whole on AU at 31-40: AU holds 17
+  of the Qwen3.6-35B-A3B's 41 parts now; Ornith's split is not traced.
+- **Every split through this node ran on its processor** (0.8-5 tok/s): what a computer with no card gets while it
+  holds part of the model; the Gemma 4 31B's chain came through it twice.
+- **The 70B's first ask was refused as too big for the swarm, and the next ran** (#479, fixed the same night): AU's
+  priced room for it went from 28 layers (card 2) to 80 (card 23) in the 69 s between the two asks — the previous
+  model's worker there had not given its memory back yet.
+
+#### #479 — A model refused as too big for the swarm a minute before it ran
+`P2` · inference-routing · **PARTIAL** (the advice fixed 2026-11-18; residual: wait for the room and plan again) — 2026-11-18 · history: #427 (measured), #447, #218
+
+The 11-18 tier run asked Llama 3.3 70B 19 s after its Australian holder (`aa3d1e66`) had served Qwen3-30B-A3B. Every
+holder refused or was short ("room for about 73 of its 80 layers … aa3d1e66 has room for 34 of the 80 layers it
+holds"), and the caller was told "This model needs more memory than the computers holding it can set aside, so trying
+again won't help. Pick a smaller model…". The next ask, 69 s later, ran: AU's priced room for the 70B had gone from 28
+layers (card 2) to 80 (card 23). AU's worker of the other model had not given its memory back yet: a worker counts as
+room for another model only once idle 30 s (`GIVES_WAY_AFTER_IDLE_SECS`, one capability round, #447), and outside a
+held conversation, so for that time its capability lists it with no `gives_way`. A user trying one model after
+another meets exactly this.
+
+**Fixed 2026-11-18 — the advice.** A holder whose capability lists a worker of ANOTHER model with no `gives_way`
+(`NodeCapability::room_held_by_other_models`, the one reading beside `given_way_for`) is a `NodeCandidate` with
+`room_held_by_other_models`, and its `HolderRoom` says so ("… while it runs another model"). `report_after_a_replan`
+reports a shortfall at such a holder (`HolderRoom::short_while_busy`) as the holders declining — "busy running other
+models and short of memory for now. Try again in a few minutes, or pick another model", already in all 21 languages —
+never as `SwarmShortOfMemory`, whose "trying again won't help" stays for a shortfall no other model explains. This
+node's own room is its loader's answer (#125) and is not read this way. Tests
+`a_shortfall_at_a_holder_running_another_model_is_the_holders_declining` (red with `short_while_busy` off; its control:
+the same shortfall with no other model there is still `SwarmShortOfMemory`), `a_busy_holders_room_says_it_runs_another_model`,
+`room_held_by_another_models_busy_worker_is_named_and_only_that` (types crate), and the busy holder named in
+`the_room_the_holders_offer_is_counted_once_each_and_capped_by_what_they_hold`.
+
+**Residual — wait, then plan again.** Prior art: Ollama's scheduler (`server/sched.go`) queues a request whose model
+cannot fit while another runner is busy, and unloads that runner once its requests finish (`findRunnerToUnload`,
+then waits for the driver's free memory to recover) rather than refusing; ModelMesh queues too. The swarm's analogue
+is to hold such a refusal for the busy holders' next capability (≤ 30 s idle + one 30 s round) and plan once more,
+only where `short_while_busy` names a holder and nothing has reached the reader. Not built: the wait costs a genuine
+refusal (another model in steady use) up to a minute, and the room a busy worker holds is not stated (stating its
+idle age would tell peers when this computer's owner last used each model — the MEDIUM the #447 review dropped).
 
 #### #430 — A long prompt read on ONE computer that cannot read it fast: no first token in 10 minutes
 `P2` · perf-split · **OPEN** (residual: pieces timed between two machines; (a)'s ratio and (c) fixed 2026-11-11, the hand-off's prompt floor, the wait sized from it, the progress frames that make it an inactivity wait and a led split's frames built 2026-11-12) — 2026-11-08 · history: #427 (measured), #171 (a prompt pass read in pieces)

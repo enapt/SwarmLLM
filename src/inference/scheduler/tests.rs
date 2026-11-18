@@ -1293,6 +1293,7 @@ fn simple_candidate(byte: u8, ranges: Vec<(u32, u32)>) -> NodeCandidate {
         fresh_run_layers: None,
         card_layers: None,
         processor_run_first: false,
+        room_held_by_other_models: false,
         processor_tokens_per_sec: 0.0,
         range_weights: None,
         prompt_memory_refused: false,
@@ -1511,6 +1512,18 @@ fn the_room_the_holders_offer_is_counted_once_each_and_capped_by_what_they_hold(
     let mut holders = qwen3_30b_holders();
     holders[2].max_hostable_layers_at_face_value = None;
     assert_eq!(super::rooms_offered(&holders, &elsewhere).0, None);
+
+    // A holder whose memory another model's worker holds is named so (#479),
+    // and only that holder: the router reads it to tell a moment from a size.
+    let mut holders = qwen3_30b_holders();
+    holders[1].room_held_by_other_models = true;
+    let (_, rooms) = super::rooms_offered(&holders, &elsewhere);
+    let busy: Vec<&str> = rooms
+        .iter()
+        .filter(|r| r.room_held_by_other_models)
+        .map(|r| r.holder.as_str())
+        .collect();
+    assert_eq!(busy, vec![holders[1].node_id.to_string().as_str()]);
 }
 
 /// **This node's room is beside what its worker holds** (FUTURE_WORK #350):
@@ -1760,6 +1773,7 @@ fn greedy_assign_multi_range_candidate() {
             fresh_run_layers: None,
             card_layers: None,
             processor_run_first: false,
+            room_held_by_other_models: false,
             processor_tokens_per_sec: 0.0,
             range_weights: None,
             prompt_memory_refused: false,
@@ -1811,6 +1825,7 @@ fn greedy_assign_multi_range_candidate() {
             fresh_run_layers: None,
             card_layers: None,
             processor_run_first: false,
+            room_held_by_other_models: false,
             processor_tokens_per_sec: 0.0,
             range_weights: None,
             prompt_memory_refused: false,
@@ -2872,6 +2887,7 @@ fn cost_cand(
         fresh_run_layers: None,
         card_layers: None,
         processor_run_first: false,
+        room_held_by_other_models: false,
         processor_tokens_per_sec: 0.0,
         range_weights: None,
         prompt_memory_refused: false,
@@ -4290,6 +4306,7 @@ fn one_node_is_not_made_standby_for_more_layers_than_it_can_run() {
         fresh_run_layers: None,
         card_layers: None,
         processor_run_first: false,
+        room_held_by_other_models: false,
         processor_tokens_per_sec: 0.0,
         range_weights: None,
         prompt_memory_refused: false,
@@ -4404,6 +4421,7 @@ fn a_node_with_room_still_stands_in_for_every_segment() {
         fresh_run_layers: None,
         card_layers: None,
         processor_run_first: false,
+        room_held_by_other_models: false,
         processor_tokens_per_sec: 0.0,
         range_weights: None,
         prompt_memory_refused: false,
@@ -4518,6 +4536,7 @@ fn a_standby_is_chosen_by_cost_not_by_ping() {
         fresh_run_layers: None,
         card_layers: None,
         processor_run_first: false,
+        room_held_by_other_models: false,
         processor_tokens_per_sec: 0.0,
         range_weights: None,
         prompt_memory_refused: false,

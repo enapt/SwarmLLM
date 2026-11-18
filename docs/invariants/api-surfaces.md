@@ -2653,6 +2653,17 @@ successfully — the advice could not work, and following it looped. Split into
 `LocalOnly` → 403 `permission_error` (gotcha #309). Ask of any shared variant:
 *would the two situations get the same next step?* If not, they are two variants.
 
+**A shortfall is the swarm's SIZE only where nothing else explains it** (#479,
+2026-11-18). `SwarmShortOfMemory` tells the caller retrying cannot help. A 70B was
+told so 19 s after its biggest holder had served another model, whose worker had
+not given its memory back yet (a worker is offered as room for another model only
+once idle 30 s, #447); the next ask, 69 s later, planned 80 layers there and ran.
+That holder's capability had said so — the other model resident, no `gives_way` —
+so `report_after_a_replan` reads it (`HolderRoom::short_while_busy`) and reports
+`HoldersDeclined`, whose advice is to try again shortly. The alternative, a flag
+on `SwarmShortOfMemory` choosing its hint, is the two-causes-one-variant shape the
+paragraph above forbids.
+
 Two follow-ups a new `SwarmError` variant must not skip:
 
 - **`failure_is_penalty_worthy`** (`router/distributed_exec.rs`) defaults to

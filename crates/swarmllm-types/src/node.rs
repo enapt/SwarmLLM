@@ -1119,8 +1119,8 @@ pub struct ResidentModelLayers {
     /// What this model's worker would give back were ANOTHER model's work to
     /// need the room — `Some` only while it is idle as this node's own
     /// admission would reclaim it (no reply or held conversation, idle past
-    /// the advertised floor, not a drafter, last used by a peer rather than
-    /// this computer's owner). A peer planning a DIFFERENT model counts it as
+    /// the advertised floor, not a drafter — whoever used it last does not
+    /// enter into it, security review 2026-11-12). A peer planning a DIFFERENT model counts it as
     /// room ([`NodeCapability::memory_for_model_layers_mb`]); the model's own
     /// layers are its `ranges` (#447: a computer that had served ten models in
     /// turn was offered room for 3 of a 14B's 40 layers on its card and 5 of a
@@ -1130,7 +1130,8 @@ pub struct ResidentModelLayers {
     /// loud. `None` from an older node and from a worker in use — read past by
     /// older nodes, as `ranges` is. Prior art (FUTURE_WORK #447): Ollama evicts
     /// one idle runner and re-reads the driver; ModelMesh keeps a recently used
-    /// model from being displaced — hence the idle floor and the owner rule.
+    /// model from being displaced — hence the idle floor. `None` beside a
+    /// worker's layers is room that may come back ([`NodeCapability::room_held_by_other_models`], #479).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gives_way: Option<GivesWay>,
     /// The graphics card's free memory, in MB, as this model's worker READ it
@@ -1247,6 +1248,19 @@ impl NodeCapability {
                 card_mb: sum.card_mb.saturating_add(g.card_mb),
                 machine_mb: sum.machine_mb.saturating_add(g.machine_mb),
             })
+    }
+
+    /// Does a worker of a model OTHER than `model_id` hold memory here that it
+    /// does not give way yet — in use, holding a conversation, or idle under
+    /// the advertised floor (`gives_way` is `None`)? Room this node may have
+    /// again shortly, so a refusal short of it is the node's moment, not its
+    /// size (FUTURE_WORK #479: a 70B refused "room for 28 of 80 layers" on a
+    /// computer that had served another model 19 s before, and planned 80 there
+    /// 69 s later). The other half of [`Self::given_way_for`]'s reading.
+    pub fn room_held_by_other_models(&self, model_id: &str) -> bool {
+        self.resident_layers
+            .iter()
+            .any(|r| r.model_id != model_id && r.layers > 0 && r.gives_way.is_none())
     }
 
     /// Do this node's model layers run on its graphics card?
@@ -1677,6 +1691,42 @@ mod version_compat_tests {
         cap.ram_model_budget_mb = Some(4096);
         assert_eq!(cap.memory_for_model_layers_mb("other"), 4096 + 500);
         assert_eq!(cap.memory_for_model_layers_mb("idle-a"), 4096);
+    }
+
+    /// **A worker of ANOTHER model that does not give way yet is room this node
+    /// may have again; the planned model's own, an idle one, or an empty entry
+    /// is not** (#479). The other half of the `gives_way` reading above.
+    #[test]
+    fn room_held_by_another_models_busy_worker_is_named_and_only_that() {
+        let mut cap: NodeCapability = serde_json::from_value(base_fields()).unwrap();
+        let resident =
+            |model: &str, layers: u32, gives_way: Option<GivesWay>| ResidentModelLayers {
+                model_id: model.into(),
+                layers,
+                ranges: Vec::new(),
+                decode_us_per_layer: None,
+                card_layers: None,
+                gives_way,
+                card_free_at_load_mb: None,
+            };
+        // Nothing resident (also what an older build states): nothing held.
+        assert!(!cap.room_held_by_other_models("planned"));
+        let idle = Some(GivesWay {
+            card_mb: 3000,
+            machine_mb: 0,
+        });
+        cap.resident_layers = vec![resident("planned", 10, None), resident("idle", 10, idle)];
+        assert!(
+            !cap.room_held_by_other_models("planned"),
+            "the planned model's own worker is held layers, an idle one is room already"
+        );
+        cap.resident_layers.push(resident("empty", 0, None));
+        assert!(
+            !cap.room_held_by_other_models("planned"),
+            "an entry with no layers holds nothing"
+        );
+        cap.resident_layers.push(resident("busy", 10, None));
+        assert!(cap.room_held_by_other_models("planned"));
     }
 
     /// A card is where models run only when the node says so by stating NO

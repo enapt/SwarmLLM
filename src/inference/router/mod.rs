@@ -294,7 +294,9 @@ fn refusal_in_the_holders_words(err: &SwarmError) -> String {
 /// and its coverage walk said the peer "has gone". Where the refused plan had
 /// gone past the memory the holders OFFER (`offered`), the swarm has no room
 /// for this model and retrying will not find any: `SwarmShortOfMemory`, with
-/// their figure. Otherwise the holders were there and declined, usually for
+/// their figure — unless a holder short of room is running another model that
+/// has not given its memory back yet (`HolderRoom::short_while_busy`, #479),
+/// which is a moment, not a size. Otherwise the holders were there and declined, usually for
 /// memory they will have again: `HoldersDeclined`, in the last one's words —
 /// the re-plan's own `SwarmShortOfMemory` included, which weighs the refusing
 /// holder at what fit that one prompt. A re-plan that failed some OTHER way
@@ -347,8 +349,18 @@ pub(crate) fn report_after_a_replan(
     }
     // Offers that add up to the whole model say the room exists and no route
     // lined it up — not that the swarm lacks it — so that refusal is reported
-    // as the holders declining, which a later attempt may get past.
-    let short = offered.filter(|o| o.layers.is_none_or(|layers| layers < o.num_layers));
+    // as the holders declining, which a later attempt may get past. So is a
+    // shortfall at a holder whose memory another model's worker holds and does
+    // not give way yet (#479): a 70B was refused "room for about 73 of its 80
+    // layers … trying again won't help" 19 s after that holder served another
+    // model, and the next ask, 69 s later, planned 80 layers there and ran.
+    let short = offered.filter(|o| {
+        o.layers.is_none_or(|layers| layers < o.num_layers)
+            && !o
+                .holders
+                .iter()
+                .any(crate::error::HolderRoom::short_while_busy)
+    });
     match short {
         Some(o) => SwarmError::SwarmShortOfMemory {
             model_id: model_id.to_string(),

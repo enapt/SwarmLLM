@@ -338,6 +338,12 @@ struct NodeCandidate {
     /// run's first layer, as every build before it. Read only through
     /// [`Self::layers_by_device`].
     processor_run_first: bool,
+    /// A worker of ANOTHER model holds memory on this peer that it does not
+    /// give way yet (`NodeCapability::room_held_by_other_models`): room it may
+    /// have again shortly, so a refusal short of this peer's room is reported
+    /// as the holders' moment, not their size (#479, `OfferedMemory`). `false`
+    /// for this node, whose room is its own loader's answer (#125).
+    room_held_by_other_models: bool,
     /// The processor's speed for the layers past [`Self::card_layers`], in the
     /// units of `est_tokens_per_sec` (which is then the card's). 0 = unknown.
     processor_tokens_per_sec: f32,
@@ -1625,6 +1631,7 @@ fn rooms_offered_at(
     let mut held: HashMap<&NodeId, Vec<(u32, u32)>> = HashMap::new();
     // `None` once any of the node's candidates did not say.
     let mut offered: HashMap<&NodeId, Option<u32>> = HashMap::new();
+    let mut busy: std::collections::HashSet<&NodeId> = std::collections::HashSet::new();
     for c in candidates {
         let is_local = &c.node_id == local_node_id;
         let o = figure(c).map(|o| {
@@ -1647,6 +1654,9 @@ fn rooms_offered_at(
             .extend(c.available_ranges.iter().copied());
         let best = offered.entry(&c.node_id).or_insert(Some(0));
         *best = best.zip(o).map(|(b, o)| b.max(o));
+        if c.room_held_by_other_models {
+            busy.insert(&c.node_id);
+        }
     }
     let holders = order
         .iter()
@@ -1660,6 +1670,7 @@ fn rooms_offered_at(
                 },
                 holds,
                 room: offered[node].map(|room| room.min(holds)),
+                room_held_by_other_models: busy.contains(node),
             }
         })
         .collect();
@@ -6082,6 +6093,18 @@ impl PipelineScheduler {
                         })
                     })
             };
+            // Room a peer may have again (#479): read off its capability by
+            // the one reading, beside `gives_way`'s.
+            let room_held_by_other_models = !is_local
+                && self
+                    .shared_state
+                    .peer_registry
+                    .get(&node_id)
+                    .is_some_and(|p| {
+                        p.capability
+                            .as_ref()
+                            .is_some_and(|c| c.room_held_by_other_models(&manifest.id.0))
+                    });
             candidates.push(
                 NodeCandidate {
                     // Measured on real forwards to this peer, like `ack_srtt_ms`
@@ -6153,6 +6176,7 @@ impl PipelineScheduler {
                     fresh_run_layers,
                     card_layers,
                     processor_run_first,
+                    room_held_by_other_models,
                     processor_tokens_per_sec,
                     prompt_fit_counts_caches,
                     prompt_memory_refused: peer_prompt_fit.is_some()

@@ -336,7 +336,9 @@ pub enum SwarmError {
     ///
     /// Its own variant, not `ModelIncompleteInSwarm`, because the advice is the
     /// opposite: nothing is missing and nobody left, and retrying will not help
-    /// until a computer with more room holds the model. Seen on Qwen3-30B-A3B
+    /// until a computer with more room holds the model. (A holder short of room
+    /// while another model's worker holds its memory is a moment, not a size:
+    /// that refusal is `HoldersDeclined`, `HolderRoom::short_while_busy`, #479.) Seen on Qwen3-30B-A3B
     /// (18.7 GB): its four holders offered room for 17 of its 48 layers, and
     /// the caller was told "the peer that held that piece has gone".
     #[error("Not enough memory in the swarm for {model_id}: {room}")]
@@ -634,6 +636,20 @@ pub struct HolderRoom {
     pub holds: u32,
     /// Layers it has room for; `None` where it did not say.
     pub room: Option<u32>,
+    /// A worker of another model holds memory there that it does not give way
+    /// yet (`NodeCandidate::room_held_by_other_models`, #479): room it may have
+    /// again shortly.
+    pub room_held_by_other_models: bool,
+}
+
+impl HolderRoom {
+    /// Short of room for what it holds (or silent about it) WHILE another
+    /// model's worker holds memory there — the holder's moment, not its size
+    /// (#479). `router::report_after_a_replan` reports such a refusal as the
+    /// holders declining, whose advice is to try again shortly.
+    pub fn short_while_busy(&self) -> bool {
+        self.room_held_by_other_models && self.room.is_none_or(|room| room < self.holds)
+    }
 }
 
 /// The holders [`describe_room_by_holder`] names before it says "and N more".
@@ -666,6 +682,10 @@ pub fn describe_room_by_holder(
         .iter()
         .take(HOLDERS_NAMED)
         .map(|h| match h.room {
+            Some(room) if room < h.holds && h.room_held_by_other_models => format!(
+                "{} has room for {room} of the {} layers it holds while it runs another model",
+                h.holder, h.holds
+            ),
             Some(room) if room < h.holds => format!(
                 "{} has room for {room} of the {} layers it holds",
                 h.holder, h.holds

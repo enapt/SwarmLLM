@@ -694,6 +694,94 @@ fn a_refused_plan_past_the_holders_offers_is_a_swarm_short_of_memory() {
     );
 }
 
+/// **A shortfall at a holder running another model is the holders' moment, not
+/// the swarm's size** (#479, the 2026-11-18 tier run): a 70B was refused "room
+/// for about 73 of its 80 layers … trying again won't help" 19 s after its
+/// Australian holder had served another model; the next ask, 69 s later,
+/// planned 80 layers there and ran. That holder's worker of the other model
+/// had not given its memory back yet, and its capability said so.
+#[test]
+fn a_shortfall_at_a_holder_running_another_model_is_the_holders_declining() {
+    use crate::error::{HolderRoom, SwarmError};
+    let holder = |name: &str, holds: u32, room: u32, busy: bool| HolderRoom {
+        holder: name.into(),
+        holds,
+        room: Some(room),
+        room_held_by_other_models: busy,
+    };
+    let refused = || {
+        SwarmError::ServiceUnavailable(
+            "22 layers 0..22 of m need about 11858 MB more than this node has left".into(),
+        )
+    };
+    let exhausted = || {
+        SwarmError::SegmentFailoverExhausted(
+            "Segment 0 failed with no standby available (last failure: Worker: Service \
+             unavailable: 22 layers 0..22 of m need about 11858 MB more than this node has left)"
+                .into(),
+        )
+    };
+    let offered = |busy: bool| crate::daemon::state::OfferedMemory {
+        layers: Some(73),
+        num_layers: 80,
+        holders: vec![
+            holder("aa3d1e660b736e6f", 80, 34, busy),
+            holder("99aafc41184e0fd4", 39, 16, false),
+        ],
+    };
+
+    let reported = super::report_after_a_replan(refused(), exhausted(), "m", Some(offered(true)));
+    let SwarmError::HoldersDeclined { reason, .. } = &reported else {
+        panic!("got {reported}");
+    };
+    assert!(
+        reason.contains("11858 MB"),
+        "in the holder's words: {reason}"
+    );
+    let (key, hint) = crate::error::error_hint_with_key(&reported).expect("a hint");
+    assert_eq!(key, "holders_declined");
+    assert!(!hint.contains("won't help"), "{hint}");
+
+    // The control: the same shortfall with no other model there IS the
+    // swarm's size, and the advice still says retrying cannot help.
+    let reported = super::report_after_a_replan(refused(), exhausted(), "m", Some(offered(false)));
+    assert!(
+        matches!(reported, SwarmError::SwarmShortOfMemory { .. }),
+        "got {reported}"
+    );
+    let (key, _) = crate::error::error_hint_with_key(&reported).expect("a hint");
+    assert_eq!(key, "swarm_short_of_memory");
+
+    // A busy holder that had room for all it holds is not why the plan was
+    // short: the swarm's shortfall stands.
+    let mut roomy = offered(false);
+    roomy.holders.push(holder("225e6fe7", 28, 28, true));
+    let reported = super::report_after_a_replan(refused(), exhausted(), "m", Some(roomy));
+    assert!(
+        matches!(reported, SwarmError::SwarmShortOfMemory { .. }),
+        "got {reported}"
+    );
+}
+
+/// The room a busy holder offered is named as such (#479).
+#[test]
+fn a_busy_holders_room_says_it_runs_another_model() {
+    let text = crate::error::describe_room_by_holder(
+        Some(73),
+        80,
+        &[crate::error::HolderRoom {
+            holder: "aa3d1e660b736e6f".into(),
+            holds: 80,
+            room: Some(34),
+            room_held_by_other_models: true,
+        }],
+    );
+    assert!(
+        text.contains("aa3d1e660b736e6f has room for 34 of the 80 layers it holds while it runs another model"),
+        "{text}"
+    );
+}
+
 /// **A re-plan's "short of memory" describes the re-plan, not the swarm**
 /// (2026-10-22). A peer refused a 42-token prompt up front (`layers_that_fit`
 /// 0, a busy moment); the re-plan held it to 0 layers, the planner found no
