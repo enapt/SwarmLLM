@@ -13995,6 +13995,250 @@ mod local_speculation_tests {
         assert!(kept_total > 0, "no guess kept at any position");
     }
 
+    /// #436's first measure: what a block drafter keeps when the rows a
+    /// split's FAR segment sends back with a check's answer are not back yet
+    /// — its target layers past the split stood in for by a ridge map from
+    /// the near side's boundary rows (`RunStandIn::for_far_run`, fitted on
+    /// the positions already committed, as a split's would be). One fixed
+    /// text (gotcha #811): the reply written one token at a time
+    /// (`SWARMLLM_SPARE_TEST_STEPS`, default 256), read once whole, and
+    /// walked by the drafter's own rounds (anchor, kept guesses, next
+    /// anchor). At each next anchor the block is drafted three ways: every
+    /// row true (the round a split drafts today, after the answer); the far
+    /// rows of the last round's positions stood in (the SPARE, drafted while
+    /// the check is away); those rows replaced by the boundary rows
+    /// themselves (the null, no map). The spare is drafted for the outcome
+    /// the check reached, so this is its acceptance GIVEN that outcome was
+    /// guessed — the ceiling of what a spare adds. Splits at
+    /// `SWARMLLM_SPARE_TEST_SPLITS` (default `8,16,24`: the near side holds
+    /// layers `[0, a)`). Prints; asserts only that the true rows kept
+    /// something. The file, drafter and prompt as
+    /// [`a_block_drafters_acceptance_over_a_fixed_reply`];
+    /// `cargo dev-test --lib spare_over_stood_in -- --ignored --nocapture`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[ignore = "needs a GGUF in SWARMLLM_GUESS_TEST_GGUF and a drafter beside it"]
+    async fn a_block_drafters_spare_over_stood_in_far_rows() {
+        use candle_core::Tensor;
+        let Some(mut model) = guess_test_model() else {
+            return;
+        };
+        if std::env::var("SWARMLLM_GUESS_TEST_DRAFTER_DIR").is_err() {
+            eprintln!("SWARMLLM_GUESS_TEST_DRAFTER_DIR not set — skipped");
+            return;
+        }
+        let asked = std::env::var("SWARMLLM_GUESS_TEST_PROMPT").ok();
+        let prompt = model.encode_ids(asked.as_deref().unwrap_or(GUESS_TEST_STORY));
+        let steps: usize = std::env::var("SWARMLLM_SPARE_TEST_STEPS")
+            .ok()
+            .and_then(|n| n.parse().ok())
+            .unwrap_or(256);
+        let splits: Vec<usize> = std::env::var("SWARMLLM_SPARE_TEST_SPLITS")
+            .ok()
+            .map(|s| s.split(',').filter_map(|n| n.trim().parse().ok()).collect())
+            .unwrap_or_else(|| vec![8, 16, 24]);
+        let kv = crate::inference::split::KvCacheStore::new(std::time::Duration::from_secs(600));
+        let mut text = prompt.clone();
+        let started = std::time::Instant::now();
+        let mut logits = model
+            .forward(
+                &model.tensor_from_ids(&prompt).unwrap(),
+                0,
+                &kv,
+                "spare-plain",
+            )
+            .unwrap();
+        for _ in 0..steps {
+            let row: Vec<f32> = logits
+                .flatten_all()
+                .and_then(|l| l.to_dtype(candle_core::DType::F32))
+                .and_then(|l| l.to_vec1())
+                .unwrap();
+            let next = crate::inference::sampling::argmax(&row);
+            logits = model
+                .forward(
+                    &model.token_tensor(next).unwrap(),
+                    text.len(),
+                    &kv,
+                    "spare-plain",
+                )
+                .unwrap();
+            text.push(next);
+        }
+        eprintln!(
+            "{} prompt + {steps} reply tokens written in {:.0} s",
+            prompt.len(),
+            started.elapsed().as_secs_f64()
+        );
+        let targets: Vec<usize> = model
+            .block_drafter()
+            .expect("the drafter was not attached")
+            .target_layers()
+            .to_vec();
+        let layers: std::collections::HashSet<usize> = targets
+            .iter()
+            .copied()
+            .chain(splits.iter().map(|a| a - 1))
+            .collect();
+        let input = model.tensor_from_ids(&text).unwrap();
+        let (_, caught) = model
+            .forward_keeping(
+                &input,
+                0,
+                &kv,
+                "spare-whole",
+                crate::inference::split::Capture {
+                    layers: &layers,
+                    last: text.len(),
+                },
+                false,
+            )
+            .unwrap();
+        let drafter = model.block_drafter().unwrap();
+        let block = drafter.block_size() - 1;
+        // A fresh cache a draft, every row through `fc` again: the arms
+        // differ only in the rows they are handed.
+        let kept_by = |kept: Vec<Tensor>, p: usize| -> usize {
+            let rows = drafter.context_rows(&kept).unwrap();
+            let mut cache = crate::inference::split::BlockCache::default();
+            let guesses = drafter
+                .draft(
+                    &model,
+                    &mut cache,
+                    Some(&rows),
+                    text[p],
+                    block,
+                    p + block + 1,
+                    false,
+                    crate::inference::split::GuessOver::Everything,
+                )
+                .unwrap();
+            guesses
+                .iter()
+                .zip(&text[p + 1..])
+                .take_while(|(a, b)| a == b)
+                .count()
+        };
+        let true_rows = |p: usize| -> Vec<Tensor> {
+            targets
+                .iter()
+                .map(|l| caught[l].narrow(1, 0, p).unwrap())
+                .collect()
+        };
+        // The rounds a split drafts today, every row true: (anchor, kept).
+        let mut rounds = Vec::new();
+        let mut p = prompt.len();
+        while p + block < text.len() {
+            let k = kept_by(true_rows(p), p);
+            rounds.push((p, k));
+            p += k + 1;
+        }
+        let true_kept: usize = rounds.iter().map(|r| r.1).sum();
+        eprintln!(
+            "block of {block}, target layers {targets:?}: {} rounds, kept {:.2} a round with every row true",
+            rounds.len(),
+            true_kept as f64 / rounds.len().max(1) as f64
+        );
+        for &a in &splits {
+            let far: Vec<usize> = targets.iter().copied().filter(|&l| l >= a).collect();
+            if far.is_empty() || a == 0 {
+                eprintln!("split at {a}: no target layer past it");
+                continue;
+            }
+            let boundary = &caught[&(a - 1)];
+            let mut maps: Vec<crate::inference::split::RunStandIn> = far
+                .iter()
+                .map(|&l| {
+                    crate::inference::split::RunStandIn::for_far_run(a, l + 1, model.device())
+                        .unwrap()
+                })
+                .collect();
+            let mut learned = 0;
+            let (mut n, mut kept_true, mut kept_spare, mut kept_null) = (0, 0, 0, 0);
+            let mut unexplained = vec![0.0f64; far.len()];
+            let mut by_round = Vec::new();
+            for w in rounds.windows(2) {
+                let ((p, k), (next, k_true)) = (w[0], w[1]);
+                assert_eq!(next, p + k + 1);
+                // What the split knows when it sends check `p`: every far
+                // row before it, from the answers that came back.
+                for (map, &l) in maps.iter_mut().zip(&far) {
+                    map.learn_pairs(
+                        &boundary.narrow(1, learned, p - learned).unwrap(),
+                        &caught[&l].narrow(1, learned, p - learned).unwrap(),
+                    )
+                    .unwrap();
+                    map.refresh().unwrap();
+                }
+                learned = p;
+                let span = boundary.narrow(1, p, next - p).unwrap();
+                let Some(stood) = maps
+                    .iter()
+                    .map(|m| m.bridge().map(|b| b.apply(&span).unwrap()))
+                    .collect::<Option<Vec<Tensor>>>()
+                else {
+                    continue;
+                };
+                let with_far = |far_rows: &dyn Fn(usize) -> Tensor| -> Vec<Tensor> {
+                    targets
+                        .iter()
+                        .map(|&l| {
+                            let tail = if l >= a {
+                                far_rows(l)
+                            } else {
+                                caught[&l].narrow(1, p, next - p).unwrap()
+                            };
+                            Tensor::cat(&[caught[&l].narrow(1, 0, p).unwrap(), tail], 1).unwrap()
+                        })
+                        .collect()
+                };
+                let index_of = |l: usize| far.iter().position(|&f| f == l).unwrap();
+                let k_spare = kept_by(with_far(&|l| stood[index_of(l)].clone()), next);
+                let k_null = kept_by(with_far(&|_| span.clone()), next);
+                // How much of the run's change at these positions the map
+                // missed: |stood − true|² over |true − boundary|².
+                for (i, &l) in far.iter().enumerate() {
+                    let truth = caught[&l].narrow(1, p, next - p).unwrap();
+                    let miss = (&stood[i] - &truth)
+                        .and_then(|d| d.sqr())
+                        .and_then(|d| d.sum_all())
+                        .and_then(|d| d.to_dtype(candle_core::DType::F64))
+                        .and_then(|d| d.to_scalar::<f64>())
+                        .unwrap();
+                    let change = (&truth - &span)
+                        .and_then(|d| d.sqr())
+                        .and_then(|d| d.sum_all())
+                        .and_then(|d| d.to_dtype(candle_core::DType::F64))
+                        .and_then(|d| d.to_scalar::<f64>())
+                        .unwrap();
+                    unexplained[i] += miss / change.max(f64::MIN_POSITIVE);
+                }
+                n += 1;
+                kept_true += k_true;
+                kept_spare += k_spare;
+                kept_null += k_null;
+                by_round.push((k_true, k_spare, k_null));
+            }
+            let per = |x: usize| x as f64 / n.max(1) as f64;
+            let unexplained: Vec<String> = far
+                .iter()
+                .zip(&unexplained)
+                .map(|(l, u)| format!("{l}: {:.2}", u / n.max(1) as f64))
+                .collect();
+            eprintln!(
+                "split at {a} ({} of {} target layers far): {n} spares, kept a round — true {:.2}, \
+                 stood in {:.2}, boundary rows {:.2}; the map leaves unexplained [{}]; \
+                 (true, stood in, boundary) {by_round:?}",
+                far.len(),
+                targets.len(),
+                per(kept_true),
+                per(kept_spare),
+                per(kept_null),
+                unexplained.join(", ")
+            );
+        }
+        assert!(true_kept > 0, "no guess kept with every row true");
+    }
+
     /// A record to copy: a reply held to JSON that repeats it is mostly guessed.
     const GUESS_TEST_JSON: &str = "A record as JSON: {\"name\": \"Ada Lovelace\", \"born\": 1815, \
          \"city\": \"London\", \"field\": \"mathematics\", \"known for\": \"the first program\"}\n\

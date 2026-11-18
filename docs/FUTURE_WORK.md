@@ -4565,7 +4565,7 @@ none pushes a feature-fusing drafter's first linear layer across the boundary. M
 (the field's residential peers): the rows' bytes per round against the round trip, from `served_us` and the payload size.
 
 #### #436 — A block drafter's spare: the next block drafted before the check returns, from features this side can make
-`P2` · perf-split · **OPEN** (designed 2026-11-08, not built) · history: #428, #134 (b) (the flow), #366 (4) (a far run's stand-in)
+`P2` · perf-split · **OPEN** (designed 2026-11-08; first measure 2026-11-19, not built) · history: #428, #134 (b) (the flow), #366 (4) (a far run's stand-in)
 Over a long link a split checks once a round trip; a small drafter's tree already FLOWS (#134 (b)) and streams
 spares, but a block drafter needs the target's features at the positions it conditions on, and the far segment's
 layers' rows for block n arrive only with check n's answer. This side can make them: its OWN target layers' rows for
@@ -4577,8 +4577,22 @@ reaches — up to two blocks' tokens per round trip. Prior art: SSD/Saguaro 2603
 likely (accepted, bonus) outcomes during verification — with a drafter that reads no target features; DPara
 2609.27396 drafts in parallel from feature-less anchors after fine-tuning; SPD 2605.30852 measured ~5% acceptance lost
 when its drafter fused pre-step (earlier) features. **Not found** (searched 2026-11-08): a FEATURE-conditioned drafter
-drafting past the verified frontier from imputed far-stage features. First measure: the block's acceptance with its
-far layers' rows replaced by the ridge map's, offline over a reply (`examples/` probe beside `skip_agreement_probe.rs`).
+drafting past the verified frontier from imputed far-stage features. **First measure DONE 2026-11-19** (processor,
+Qwen3.5-9B Q4_K_M + its DFlash drafter, block 15, one fixed 256-token greedy reply each; the ignored test
+`a_block_drafters_spare_over_stood_in_far_rows`, `SWARMLLM_BLOCK_DRAFTER=processor`): the drafter's own rounds walk the
+reply and at each next anchor the block is drafted with every row true, with the far target layers' rows of the last
+round's positions stood in (`RunStandIn::for_far_run` per far layer, fitted on the committed positions), and with
+those rows replaced by the boundary rows (no map). Kept a round, near side holding `[0, a)` for a = 8 / 16 / 24:
+- **code** (`GUESS_TEST_CODE`, 26 spares): true 8.19; stood in **6.31 / 7.00 / 7.85** (77 / 85 / 96%); boundary rows
+  4.73 / 6.04 / 8.00. The map leaves 26-50% of each far layer's change unexplained.
+- **story** (`GUESS_TEST_STORY`, 101 spares): true 1.37; stood in 0.74 / 0.98 / 1.23; boundary rows 0.86 / 0.98 /
+  1.29 — the map buys nothing on prose (43-72% unexplained), where a block drafter does not pay anyway.
+So imputed features are not the bottleneck where block drafting pays: given the outcome, a spare keeps 77-96% of a
+true round on code. **The outcome is**: kept counts are bimodal (code: 0-3 or 12-15 a round; the whole block kept 3
+rounds of 26), and the bonus token after a rejection is by definition not the drafter's top guess. **Next measure**:
+the hit rate of SSD's fan-out — a spare per likely kept count with the bonus from the drafter's next choices at the
+rejected position (needs `draft` to hand back each row's top few, not only its pick); the yield a round trip is then
+(k + 1) + hit × (k_spare + 1). Build only if that hit rate on code is high enough to beat a round's cost.
 
 #### #437 — A split checks a TREE from the block drafter, and the recurrent layers walk it
 `P2` · perf-split · **OPEN** (researched 2026-11-08, not built) · history: #428, #134 (trees for small drafters)
