@@ -311,7 +311,13 @@ pub async fn rescan_local_shards(
             // Bytes already on this node's disk, so a mismatch only justifies
             // destroying them against an ORIGIN-backed hash — see
             // `ModelRegistry::mismatch_policy`.
-            } else if let Err(e) = shard_store.verify_shard(&model_id, shard_info, policy) {
+            } else if let Err(e) = shard_store.verify_shard(
+                &model_id,
+                shard_info,
+                policy,
+                &shared.parts_checked(),
+                crate::model::shard::Reread::IfChanged,
+            ) {
                 let kept = policy == crate::model::shard::OnMismatch::KeepBytes;
                 tracing::warn!(
                     model = %model_id_str,

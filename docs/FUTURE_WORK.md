@@ -33,8 +33,8 @@ residual).
 
 ## ▶ PRIORITIES — read this first
 
-**New 2026-11-18, after v0.3.297: #477 (P1, field report) — a restart re-reads every held part flat out
-(10-15 min on an HDD with 443 parts); cause mapped in the entry. First in line.**
+**2026-11-18, after v0.3.297: #477 (P1, field report) — a restart re-read every held part flat out — is FIXED on
+main (§ Closed); it ships in the next release.**
 
 Re-ranked 2026-11-04 after v0.3.271 (released 2026-11-04). Since the 2026-10-31 ranking
 (v0.3.265): v0.3.268 (0.3.267 folded in, never published) shipped gpt-oss on the processor (#390
@@ -6371,36 +6371,6 @@ chunk, without breaking the OpenAI/Anthropic wire shapes.
 
 ### Dashboard and first-hour experience
 
-#### #477 — A restart re-reads every held part, flat out, for minutes
-`P1` · first hour, storage · **OPEN** — 2026-11-18 · field report (Discord, a Mac mini node): 443 parts, a mechanical
-disk saturated for 10-15 min after each start, the computer close to unusable meanwhile
-
-**Cause (mapped 2026-11-18, the call site checked):** `daemon::background::spawn_shard_verification` (started from
-`daemon/mod.rs`, 2 s after boot) BLAKE3-hashes EVERY part this node is registered as holding — `store.verify_shard`
-on the blocking pool, one file after another, whole file, 64 KB reads (`model::shard::hash_file_blake3`). On every
-start, unconditionally: the only skips are a part not registered here, a missing file, or an all-zero manifest hash.
-Registration at boot checks SIZE only (`daemon/startup.rs`, `quarantine_shard_if_size_mismatch`), so every right-sized
-part enters the sweep. **Nothing records a part as already checked** — `ModelRegistry::origin_verified` (redb
-`origin_verified_hashes`) holds the ORIGIN's expected hash, not "these bytes were checked", and the sweep does not ask
-it — and **nothing paces it**: no rate, no pause while the node serves, no lower I/O priority. Other whole-part reads
-are not startup-wide: the auto-manage rescan skips registered parts; `verify_pending_shards` only parts whose
-manifest hash changed; the canonical heal's byte check reads 64 KB (`part_is_from`).
-
-**Prior art.** libtorrent's resume data (`fastresume`): per file size + modification time; a full recheck only on a
-mismatch or a missing record; checking is queued (one torrent at a time). Transmission: "verify local data" is
-manual. ZFS / Btrfs: integrity is a SCHEDULED scrub, rate-limited and idle-priority — never a boot-time full read.
-IPFS: no re-hash at start.
-
-**Fix outline (to design against the code, not taken as given):** (1) a redb tree of parts CHECKED here — (size,
-mtime, the hash the bytes matched, when) — written by every successful check and by a finished download
-(`settle_finished_download`); (2) the startup sweep hashes only a part with no record, a different size or mtime, or a
-record whose hash is not the manifest's hash NOW (a changed expectation still re-checks — #224's rule); (3) what it does
-hash goes one at a time, paused while a request is being served, at a bounded rate; (4) bit rot stays covered by a
-slow background scrub (e.g. every part once a week, paced), not by the boot. Keep: a quarantined or disputed part is
-never written as checked (`note_shard_disputed`); a record names the bytes, so a part replaced on disk (a repair, a
-heal) clears or rewrites it. Measure on a disk with hundreds of parts: the startup read before vs after (iostat /
-`/proc/<pid>/io` `read_bytes`), and that a part edited on disk is still caught at the next start.
-
 #### #439 — The relay hint says "turn on UPnP" where a router found late refused the ports
 `P3` · ux · **OPEN** — 2026-11-09 · history: the pre-release review of `7b2229f5` (the relay hint)
 
@@ -7224,6 +7194,39 @@ archive under the named heading. Reopen one only with the evidence its line name
 Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 19-28 were
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
+
+**Closed 2026-11-18 (on main, not in a release yet)** (#477)
+- #477 — **A restart read every held part whole, flat out.** Field report (a Mac mini, 443 parts on a mechanical
+  disk): 10-15 minutes of saturated reads after every start, the computer close to unusable. The cause was
+  `daemon::background::spawn_shard_verification`: 2 s after boot it BLAKE3-hashed every registered part, one after
+  another, at full speed, and nothing recorded a part as already checked. **Now** a check that passes is recorded
+  (`model::parts_checked`, redb tree `parts_checked`): the part's size, modification time and file identity (device
+  + inode on Unix), the hash it matched, when. `ShardStore::verify_shard` takes the record store and a REQUIRED
+  `Reread`: `Always` for bytes that just arrived (both download accept gates), `IfChanged` for a question about bytes
+  already here (still missing? good enough to skip a download? a rescan, a changed manifest hash), `IfChangedPaced`
+  for the background pass. A record answers only for the same bytes (stamp equal, taken before AND after the hash —
+  git's "racy clean"), the same expected hash (#224: a changed expectation reads again), within `RECHECK_EVERY` (30
+  days — btrfsmaintenance's and Debian md `checkarray`'s monthly scrub). A HuggingFace part kept by
+  `accept_origin_part` is recorded from its read-back hash (`DownloadedPart::stamp`). The pass runs at start and every
+  6 h, reads only what is due, at most 32 MiB/s and an eighth of that while its own 4 MiB reads come back over three
+  times slower than the quickest recent one (md's `speed_limit_min` idea, judged by our own read times; a read
+  quicker than any spinning disk's — the page cache, a solid-state disk — never sets the speed to beat:
+  `model::read_pace`), and a shutdown stops it mid-part. A part that changed while it was read (a minute at the busy
+  pace) is judged at the next pass, never quarantined or disputed on the hash of bytes no longer there (GNU tar's
+  "file changed as we read it": a stat before and after). **Measured** (probe node beside the live node,
+  qwen2.5-coder-7b's 8 parts hard-linked, one copied; daemon `/proc/<pid>/io`): the old behaviour in the same binary
+  (`SWARMLLM_PARTS_CHECKED=0 SWARMLLM_PART_CHECK_PACE=0`) read 4.69 GB at start (`rchar`; 3.93 GB from disk); with
+  records 13.5 MB (`recorded=8 read_mib=0 took_s=0`), ~350x less. A first pass with nothing recorded (what the first
+  start after updating does) read the 4,460 MiB in 141-143 s, the cap's 31 MiB/s. One part damaged in place (1 MiB,
+  `dd conv=notrunc`): the next start read that part alone (710 MiB, 22 s) and reported it, the other 7 on their
+  records. A stop mid-part: the task ended at the drain's first look, nothing counted as failed. **Residual, not
+  open work:** the busy-disk slowdown never fired here, rightly — this machine's disk reads 4 MiB in ~1.5 ms with
+  or without eight competing direct readers (p50 1.4-1.6 ms, max 10.7) — so on a mechanical disk it is verified by
+  its unit tests only; the summary line's `busy_reads` will say in a field log. Not used: the OS's own background I/O
+  priority (`IOPOL_THROTTLE`, `THREAD_MODE_BACKGROUND_BEGIN`, Linux `ioprio`) — three platform paths, two untestable
+  here, and Linux honours `ioprio` under some schedulers only. The report's third idea, peers' word about our parts,
+  cannot vouch for THIS disk's bytes; a peer that downloads from us already hashes what it gets. Parts cut from a
+  local GGUF are hashed while the manifest is built and not recorded, so they are read once at the next start.
 
 **Closed 2026-11-18 (shipped in v0.3.297-alpha; #476 withdrawn)** (#377, #471, #188, #476)
 - #476 — **WITHDRAWN the hour it was filed: the claim was wrong.** It said a manifest past `MAX_SHARDS_PER_MANIFEST`

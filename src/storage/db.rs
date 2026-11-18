@@ -618,6 +618,43 @@ impl Database {
         })
     }
 
+    /// Remove every row of a named tree that `stale` judges, judged and
+    /// removed inside ONE write transaction — so a row another thread
+    /// rewrote after a reader looked is judged as it is now, never removed on
+    /// the older reading (`parts_checked::PartsChecked::forget_stale`). A row
+    /// that does not parse as `T` is left alone. How many were removed.
+    pub fn remove_json_where<T: serde::de::DeserializeOwned>(
+        &self,
+        tree_name: &str,
+        stale: impl Fn(&str, &T) -> bool,
+    ) -> Result<usize, SwarmError> {
+        let start = tree_range_start(tree_name);
+        let end = tree_range_end(tree_name);
+        self.with_write_table(tree_name, |table| {
+            let mut doomed = Vec::new();
+            {
+                let range = table
+                    .range(start.as_slice()..end.as_slice())
+                    .map_err(|e| SwarmError::Database(e.to_string()))?;
+                for entry in range {
+                    let (key, val) = entry.map_err(|e| SwarmError::Database(e.to_string()))?;
+                    let subkey = extract_subkey(key.value())
+                        .and_then(|b| std::str::from_utf8(b).ok())
+                        .unwrap_or("");
+                    if serde_json::from_slice::<T>(val.value()).is_ok_and(|v| stale(subkey, &v)) {
+                        doomed.push(key.value().to_vec());
+                    }
+                }
+            }
+            for k in &doomed {
+                table
+                    .remove(k.as_slice())
+                    .map_err(|e| SwarmError::Database(e.to_string()))?;
+            }
+            Ok(doomed.len())
+        })
+    }
+
     /// Collect every key in `table` falling within `[start, end)`.
     /// Used by mutating routines that need a snapshot of keys to remove
     /// before iterating mutably — redb forbids `remove` during an open

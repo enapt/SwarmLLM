@@ -5311,6 +5311,13 @@ impl SharedState {
         crate::model::shard::ShardStore::new(&self.config.node.data_dir)
     }
 
+    /// The records of which held parts this node has checked, and against
+    /// what (#477) — what `ShardStore::verify_shard` writes on a pass and
+    /// reads under `Reread::IfChanged`.
+    pub fn parts_checked(&self) -> crate::model::parts_checked::PartsChecked {
+        crate::model::parts_checked::PartsChecked::new(self.db.clone())
+    }
+
     /// The single answer to "which peer should this node fetch a shard from?".
     ///
     /// Excludes the local node, applies the pool / private-mode scope

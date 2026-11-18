@@ -14,6 +14,8 @@ paths:
   - "vendor/quinn-proto/src/**"
   - "src/model/huggingface/**"
   - "src/model/shard.rs"
+  - "src/model/parts_checked.rs"
+  - "src/model/read_pace.rs"
   - "src/model/lora.rs"
   - "src/identity/**"
   - "src/model/mod.rs"
@@ -69,6 +71,12 @@ One writer per `shard_NNN.bin.tmp`: `ModelMgmt::claim_shard_download` (RAII), `S
 Nothing records a peer — or this node — as holding a shard until its BLAKE3 check passed. `daemon::dispatch::progress_claims_the_peer_holds_it` is the one reading of a `ShardDownloadProgress` (needs `DownloadState::Complete`; a percentage never asserts holding, `IN_FLIGHT_MAX_PCT`; #78, #184). `SharedState::parts_servable_here` is the one answer to which parts can be served: credited, no download under way, file EXACTLY its manifest size (`shard::shard_file_is_whole`, never "within 10%", #334 (1)); its base `SharedState::parts_landed_here` is what acquisition reconciles against every 10 s (#420). A download credits only what it FETCHED (`settle_finished_download`; `manifest::generate_manifest_from_header` credits none, #423) and an explicit one asks first (`admin_hf::shards::parts_already_here`, #393).
 
 → `docs/invariants/network.md` § "A holder claim means VERIFIED, not transferred"
+
+## A held part is read again only when it changed (2026-11-18, #477)
+
+`ShardStore::verify_shard` takes the record store (`model::parts_checked::PartsChecked`, `SharedState::parts_checked`) and a REQUIRED `Reread`: `Always` at an accept gate (bytes that just arrived), `IfChanged` / `IfChangedPaced` (the background pass) for bytes already held. A record — written ONLY by a passing `verify_shard` and `accept_origin_part`, its tree private to the module — answers only for the same file (size, mtime, device + inode, equal before AND after the hash), the same expected hash (#224), within `RECHECK_EVERY` (30 days). A mismatch, dispute or quarantine is never recorded, and a mismatch on a part that changed WHILE it was read judges nothing (`shard::judged_nothing` — the pass skips it, never quarantines). The background pass reads through `read_pace::hash_file_paced` (32 MiB/s, an eighth while the disk answers slow; page-cache and solid-state reads never set the speed to beat) and stops mid-part at shutdown. A/B `SWARMLLM_PARTS_CHECKED=0`, `SWARMLLM_PART_CHECK_PACE=0`.
+
+→ `docs/invariants/network.md` § "A held part is read again only when it changed"
 
 ## The activity list reports a TRANSITION; the log may report every message
 

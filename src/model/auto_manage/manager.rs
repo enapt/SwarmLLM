@@ -813,11 +813,18 @@ impl AutoShardManager {
                 .model_registry
                 .mismatch_policy(&sid, &info.hash);
             let checked_against = info.hash;
+            let checks = self.shared_state.parts_checked();
             let result = tokio::task::spawn_blocking(move || {
-                crate::model::shard::ShardStore::new(&dir).verify_shard(&mid, &info, policy)
+                crate::model::shard::ShardStore::new(&dir).verify_shard(
+                    &mid,
+                    &info,
+                    policy,
+                    &checks,
+                    crate::model::shard::Reread::IfChanged,
+                )
             })
             .await;
-            if let Ok(Ok(())) = result {
+            if let Ok(Ok(_)) = result {
                 // Agrees with the hash read above, so any earlier disagreement
                 // about these bytes is over — if the manifest still names that
                 // hash (`note_shard_verified`, #224). On EVERY success rather

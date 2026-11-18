@@ -240,6 +240,12 @@ impl SharedState {
                     "DIAG: two downloads of this part from HuggingFace agree, though the computers that checked theirs hold other bytes — keeping it"
                 );
                 self.record_origin_part_hash(shard_id, part.hash);
+                self.parts_checked().note_checked(
+                    &shard_id.model_id,
+                    shard_id.index,
+                    &part.hash,
+                    part.stamp,
+                );
                 true
             }
             OriginPartVerdict::Corroborated | OriginPartVerdict::NothingToCompare => {
@@ -252,6 +258,12 @@ impl SharedState {
                 );
                 self.models.uncorroborated_origin_parts.remove(shard_id);
                 self.record_origin_part_hash(shard_id, part.hash);
+                self.parts_checked().note_checked(
+                    &shard_id.model_id,
+                    shard_id.index,
+                    &part.hash,
+                    part.stamp,
+                );
                 true
             }
         }
@@ -627,12 +639,17 @@ mod tests {
                 crate::model::huggingface::DownloadedPart {
                     path: path.clone(),
                     hash: hash(bytes),
+                    stamp: crate::model::parts_checked::FileStamp::of(&path),
                 },
             )
         };
 
         assert!(!arrive(bad), "the first wrong download is not kept");
         assert!(!path.exists(), "and its file is gone, to be fetched again");
+        assert!(
+            state.parts_checked().is_empty(),
+            "nor recorded as checked (#477)"
+        );
         assert_eq!(state.model_registry.origin_verified_hash(&sid()), None);
         assert!(
             !arrive(worse),
@@ -670,6 +687,15 @@ mod tests {
             !state.origin_part_downloaded_twice(&sid()),
             "nothing left in doubt"
         );
+        assert!(
+            state.parts_checked().vouches_for(
+                &sid().model_id,
+                sid().index,
+                &hash(good),
+                &crate::model::parts_checked::FileStamp::of(&path).unwrap()
+            ),
+            "a part kept is recorded as checked, so a start does not read it again (#477)"
+        );
     }
 
     /// With no holder that checked its copy, an origin download is kept as it
@@ -687,6 +713,7 @@ mod tests {
             crate::model::huggingface::DownloadedPart {
                 path: path.clone(),
                 hash,
+                stamp: None,
             },
         ));
         assert!(path.exists());

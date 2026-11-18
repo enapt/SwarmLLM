@@ -145,6 +145,10 @@ pub struct DownloadedPart {
     /// BLAKE3 of the bytes as they arrived — equal to the file's, checked
     /// after the file was synced to disk.
     pub hash: [u8; 32],
+    /// The file's stamp when that read-back began, if it was still the same
+    /// file once renamed into place — what `accept_origin_part` records as
+    /// checked (#477), so the next start does not read the part again.
+    pub stamp: Option<crate::model::parts_checked::FileStamp>,
 }
 
 /// Download a layer-aligned shard from HuggingFace.
@@ -645,6 +649,7 @@ pub async fn download_shard(
 
     // The file must hold exactly the bytes that arrived.
     let sent: [u8; 32] = *as_sent.finalize().as_bytes();
+    let stamp_before = crate::model::parts_checked::FileStamp::of(&tmp_path);
     let on_disk = {
         let path = tmp_path.clone();
         tokio::task::spawn_blocking(move || crate::model::shard::hash_file_blake3(&path))
@@ -673,6 +678,12 @@ pub async fn download_shard(
     // Remove the R138 layout sidecar — the .bin file is the new source
     // of truth; the sidecar only existed to guard partial-resume.
     let _ = tokio::fs::remove_file(&layout_path).await;
+    // A rename keeps the file — its inode and modification time — so the
+    // stamp read before the hash still describes the bytes now in place.
+    let stamp = crate::model::parts_checked::FileStamp::unchanged(
+        stamp_before,
+        crate::model::parts_checked::FileStamp::of(&dest_path),
+    );
 
     tracing::info!(
         shard = shard_index,
@@ -684,6 +695,7 @@ pub async fn download_shard(
     Ok(DownloadedPart {
         path: dest_path,
         hash: sent,
+        stamp,
     })
 }
 

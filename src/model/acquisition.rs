@@ -516,6 +516,8 @@ impl AcquisitionManager {
                             &sid.model_id,
                             info,
                             crate::model::shard::OnMismatch::KeepBytes,
+                            &self.shared_state.parts_checked(),
+                            crate::model::shard::Reread::IfChanged,
                         )
                         .is_err(),
                     None => true,
@@ -885,8 +887,10 @@ impl AcquisitionManager {
                         &model_id,
                         &info,
                         crate::model::shard::OnMismatch::Quarantine,
+                        &self.shared_state.parts_checked(),
+                        crate::model::shard::Reread::Always,
                     ) {
-                        Ok(()) => {
+                        Ok(_) => {
                             job.status.downloaded_shards += 1;
                             job.status.verified_shards += 1;
                             if let Some(sp) = job.status.shard_progress.get_mut(&shard_index) {

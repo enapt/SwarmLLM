@@ -201,10 +201,24 @@ fn sweep_expired_quarantine(models_dir: &std::path::Path, retention_secs: u64) -
 /// out of this event: a node keeping bytes the swarm disagrees with announced
 /// "Verified 20 shards" and nothing else. Same mistake, one field later.
 ///
+/// A part taken on its record (#477) was not read, so it is not counted
+/// "verified" either: it is said as what it is — unchanged since its check.
+///
 /// Pure, so the truth table is pinned by
 /// `a_verification_pass_that_found_a_disagreement_does_not_call_itself_clean`.
-fn verification_summary(verified: u32, quarantined: u32, disputed: u32, unchecked: u32) -> String {
-    let mut out = format!("Verified {verified} shards");
+fn verification_summary(counts: PartCheckCounts) -> String {
+    let PartCheckCounts {
+        verified,
+        recorded,
+        quarantined,
+        disputed,
+        unchecked,
+    } = counts;
+    let mut out = match (verified, recorded) {
+        (_, 0) => format!("Verified {verified} shards"),
+        (0, _) => format!("{recorded} shards unchanged since their last check"),
+        _ => format!("Verified {verified} shards; {recorded} unchanged since their last check"),
+    };
     if quarantined > 0 {
         out.push_str(&format!(" ({quarantined} quarantined)"));
     }
@@ -380,8 +394,44 @@ fn fault_sweep_hold() -> Option<std::time::Duration> {
     })
 }
 
+/// How often the running node looks again for held parts due a check
+/// (#477). A part's check stands `parts_checked::RECHECK_EVERY` (30 days), so
+/// a node that runs for weeks re-reads each part about monthly, a few at a
+/// time, at the background pace — it used to re-read them only at a restart,
+/// all of them, flat out.
+const PART_CHECK_PASS_EVERY: std::time::Duration = std::time::Duration::from_secs(6 * 3600);
+
+/// What one pass over the held parts found. A count that is not "verified"
+/// must reach the summary the user reads (`verification_summary`).
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct PartCheckCounts {
+    /// Read and hashed now, and matched.
+    verified: u32,
+    /// Not read: a record says these very bytes matched this very hash within
+    /// `RECHECK_EVERY` (#477).
+    recorded: u32,
+    quarantined: u32,
+    /// Read, did NOT match an unbacked hash, kept.
+    disputed: u32,
+    /// No hash to check against yet.
+    unchecked: u32,
+}
+
+impl PartCheckCounts {
+    fn found_a_problem(&self) -> bool {
+        self.quarantined > 0 || self.disputed > 0
+    }
+}
+
 /// BLAKE3 hash check runs after API is up so the dashboard is responsive
 /// immediately. Bad shards are quarantined.
+///
+/// A pass at start and every [`PART_CHECK_PASS_EVERY`] after it; each READS
+/// only a part with no record of a check of its current bytes against its
+/// current hash, or one whose check is older than `RECHECK_EVERY`
+/// (`Reread::IfChangedPaced`), at the background pace (`model::read_pace`).
+/// Every start used to hash every held part, flat out: 443 parts saturated a
+/// mechanical disk for 10-15 minutes (field report, 2026-11-18, #477).
 pub(super) fn spawn_shard_verification(
     tasks: &mut BackgroundTasks,
     shared_state: Arc<SharedState>,
@@ -394,217 +444,335 @@ pub(super) fn spawn_shard_verification(
             _ = shutdown_rx.changed() => { return "shard_verification_aborted"; }
             _ = tokio::time::sleep(std::time::Duration::from_secs(2)) => {}
         }
-        let shard_store = crate::model::shard::ShardStore::new(&data_dir);
-        let mut verified = 0u32;
-        let mut quarantined = 0u32;
-        let mut unchecked = 0u32;
-        // Held bytes that disagree with an unbacked hash. Counted apart from
-        // `quarantined` because nothing was destroyed and apart from
-        // `unchecked` because the check DID run — reporting either would
-        // describe work that did not happen.
-        let mut disputed = 0u32;
-        // Read once: every part below is hashed against the hash this read
-        // gave it, however long the hashing takes — which is why a pass is
-        // judged against the hash the manifest names by then
-        // (`note_shard_verified`, #224).
-        let manifests = shared_state.model_registry.models();
+        // Set at shutdown; a read in progress stops at its next piece rather
+        // than holding the drain for the rest of a part.
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let pace = Arc::new(crate::model::read_pace::ReadPace::background(stop.clone()));
+        let mut at_start = true;
+        loop {
+            let pass = check_held_parts(
+                &shared_state,
+                &data_dir,
+                &pace,
+                &stop,
+                &mut shutdown_rx,
+                at_start,
+            )
+            .await;
+            if pass.is_none() {
+                return "shard_verification_aborted";
+            }
+            at_start = false;
+            tokio::select! {
+                _ = shutdown_rx.changed() => { return "shard_verification"; }
+                _ = tokio::time::sleep(PART_CHECK_PASS_EVERY) => {}
+            }
+        }
+    });
+}
+
+/// One pass over every part this node holds; `None` when shutdown stopped it.
+async fn check_held_parts(
+    shared_state: &Arc<SharedState>,
+    data_dir: &std::path::Path,
+    pace: &Arc<crate::model::read_pace::ReadPace>,
+    stop: &Arc<std::sync::atomic::AtomicBool>,
+    shutdown_rx: &mut watch::Receiver<bool>,
+    at_start: bool,
+) -> Option<PartCheckCounts> {
+    let began = std::time::Instant::now();
+    let shard_store = crate::model::shard::ShardStore::new(data_dir);
+    let checks = shared_state.parts_checked();
+    let mut counts = PartCheckCounts::default();
+    // The pace lives as long as the task; this pass reports what it adds.
+    let (read_before, busy_before) = (pace.bytes_read(), pace.busy_reads());
+    // Read once: every part below is hashed against the hash this read
+    // gave it, however long the hashing takes — which is why a pass is
+    // judged against the hash the manifest names by then
+    // (`note_shard_verified`, #224).
+    let manifests = shared_state.model_registry.models();
+    if at_start {
         if let Some(hold) = fault_sweep_hold() {
             tokio::select! {
-                _ = shutdown_rx.changed() => { return "shard_verification_aborted"; }
+                _ = shutdown_rx.changed() => { return None; }
                 _ = tokio::time::sleep(hold) => {}
             }
         }
-        for manifest in manifests {
-            for shard_info in &manifest.shards {
-                // Only verify shards we registered (i.e., we are a holder)
-                let sid = crate::types::ShardId {
-                    model_id: manifest.id.clone(),
-                    index: shard_info.index,
-                };
-                if !shared_state
-                    .model_registry
-                    .shard_holders(&sid)
-                    .contains(shared_state.identity.node_id())
-                {
-                    continue;
+    }
+    for manifest in manifests {
+        for shard_info in &manifest.shards {
+            // Only verify shards we registered (i.e., we are a holder)
+            let sid = crate::types::ShardId {
+                model_id: manifest.id.clone(),
+                index: shard_info.index,
+            };
+            if !shared_state
+                .model_registry
+                .shard_holders(&sid)
+                .contains(shared_state.identity.node_id())
+            {
+                continue;
+            }
+            let shard_path = shard_store.shard_path(&manifest.id, shard_info.index);
+            if !shard_path.exists() {
+                continue;
+            }
+            // A shard we hold no hash for is UNCHECKED, not verified.
+            //
+            // Counting it as verified is what kept this failure mode
+            // invisible: on 2026-08-24 this pass twice reported "all shards
+            // OK verified=21" over a set including five freshly downloaded
+            // shards it had never hashed — one of which was corrupt and
+            // surfaced hours later, after a restart, once a manifest
+            // carrying the real hash arrived. A verifier that reports work
+            // it did not do is worse than none, because it reads as
+            // assurance.
+            //
+            // There is nothing to quarantine here: the bytes may be
+            // perfectly good and we simply have nothing to compare them
+            // against. So it is counted separately, reported, and re-checked
+            // on a later pass once the hash is known — which is what
+            // `manifest::merge_known_shard_hashes` now makes possible, by
+            // stopping a placeholder overwriting a hash we already held.
+            if shard_info.hash == [0u8; 32] {
+                counts.unchecked += 1;
+                continue;
+            }
+            // These are bytes we ALREADY HOLD, so a mismatch is only
+            // grounds to destroy them when the hash we checked against came
+            // from the model's origin — see `ModelRegistry::mismatch_policy`.
+            let policy = shared_state
+                .model_registry
+                .mismatch_policy(&sid, &shard_info.hash);
+            // Read the part in a blocking thread, at the background pace,
+            // unless a record says these bytes already passed (#477).
+            let mid = manifest.id.clone();
+            let si = shard_info.clone();
+            let store = crate::model::shard::ShardStore::new(data_dir);
+            let job = {
+                let (pace, checks) = (pace.clone(), checks.clone());
+                tokio::task::spawn_blocking(move || {
+                    store.verify_shard(
+                        &mid,
+                        &si,
+                        policy,
+                        &checks,
+                        crate::model::shard::Reread::IfChangedPaced(&pace),
+                    )
+                })
+            };
+            let result = tokio::select! {
+                r = job => r,
+                _ = shutdown_rx.changed() => {
+                    stop.store(true, std::sync::atomic::Ordering::Release);
+                    return None;
                 }
-                let shard_path = shard_store.shard_path(&manifest.id, shard_info.index);
-                if !shard_path.exists() {
-                    continue;
+            };
+            match result {
+                Ok(Err(e)) if crate::model::shard::judged_nothing(&e) => {
+                    // The part changed while it was read (a repair replaced
+                    // it, prune gave it back): the hash is of bytes no longer
+                    // there, so nothing is quarantined, disputed or counted.
+                    tracing::info!(
+                        model = %manifest.id,
+                        shard = shard_info.index,
+                        error = %e,
+                        "A held part changed while it was checked — it is checked again at the next pass"
+                    );
                 }
-                // A shard we hold no hash for is UNCHECKED, not verified.
-                //
-                // Counting it as verified is what kept this failure mode
-                // invisible: on 2026-08-24 this pass twice reported "all shards
-                // OK verified=21" over a set including five freshly downloaded
-                // shards it had never hashed — one of which was corrupt and
-                // surfaced hours later, after a restart, once a manifest
-                // carrying the real hash arrived. A verifier that reports work
-                // it did not do is worse than none, because it reads as
-                // assurance.
-                //
-                // There is nothing to quarantine here: the bytes may be
-                // perfectly good and we simply have nothing to compare them
-                // against. So it is counted separately, reported, and re-checked
-                // on a later pass once the hash is known — which is what
-                // `manifest::merge_known_shard_hashes` now makes possible, by
-                // stopping a placeholder overwriting a hash we already held.
-                if shard_info.hash == [0u8; 32] {
-                    unchecked += 1;
-                    continue;
+                Ok(Ok(how)) => {
+                    match how {
+                        crate::model::shard::Checked::Read => counts.verified += 1,
+                        crate::model::shard::Checked::Recorded => counts.recorded += 1,
+                    }
+                    // These bytes agree with the hash this sweep read when
+                    // it began — which gossip may have replaced while it
+                    // hashed, so they are judged against the manifest as it
+                    // is NOW: a dispute the newer hash recorded stays
+                    // (#224). On EVERY success rather than only where a
+                    // dispute is known — a clear that has to be predicted
+                    // is a clear that gets forgotten. A record answers the
+                    // same: it is a pass of these very bytes against this
+                    // very hash.
+                    shared_state.note_shard_verified(&sid, &shard_info.hash);
                 }
-                // These are bytes we ALREADY HOLD, so a mismatch is only
-                // grounds to destroy them when the hash we checked against came
-                // from the model's origin — see `ModelRegistry::mismatch_policy`.
-                let policy = shared_state
-                    .model_registry
-                    .mismatch_policy(&sid, &shard_info.hash);
-                // Run BLAKE3 verification in a blocking thread
-                let mid = manifest.id.clone();
-                let si = shard_info.clone();
-                let store = crate::model::shard::ShardStore::new(&data_dir);
-                let result =
-                    tokio::task::spawn_blocking(move || store.verify_shard(&mid, &si, policy))
-                        .await;
-                match result {
-                    Ok(Ok(())) => {
-                        verified += 1;
-                        // These bytes agree with the hash this sweep read when
-                        // it began — which gossip may have replaced while it
-                        // hashed, so they are judged against the manifest as it
-                        // is NOW: a dispute the newer hash recorded stays
-                        // (#224). On EVERY success rather than only where a
-                        // dispute is known — a clear that has to be predicted
-                        // is a clear that gets forgotten.
-                        shared_state.note_shard_verified(&sid, &shard_info.hash);
-                    }
-                    Ok(Err(e)) if policy == crate::model::shard::OnMismatch::KeepBytes => {
-                        // Unproven, not corrupt. Keep the bytes AND keep
-                        // advertising them: de-advertising on a stranger's
-                        // claim is the same mistake as deleting on it, and a
-                        // peer that downloads from us hashes what it gets.
-                        //
-                        // Deliberately NOT `mark_shard_for_repair`. That set is
-                        // drained by `complete_pending_shard_fetches`, whose
-                        // FIRST action is to treat a shard whose file is on
-                        // disk as already repaired and clear the mark — so for
-                        // a shard we are keeping by definition, marking it
-                        // fetches nothing and only churns the set. Settling the
-                        // disagreement automatically is real work and is not
-                        // done here; see `docs/FUTURE_WORK.md` § "A disputed
-                        // shard is kept but the disagreement is never settled".
-                        tracing::warn!(
-                            model = %manifest.id,
-                            shard = shard_info.index,
-                            error = %e,
-                            "A shard we hold disagrees with the hash the swarm reports — \
-                             keeping our bytes, because that hash has no origin backing \
-                             and deleting on it is how a last copy is lost"
-                        );
-                        // Recorded, not just counted. `disputed` below is a
-                        // local that dies with this task, and the open question
-                        // about this whole path is how often it fires in the
-                        // FIELD — which needs the dashboard and the diagnostics
-                        // report to be able to say so.
-                        shared_state.note_shard_disputed(&sid, &e);
-                        disputed += 1;
-                    }
-                    Ok(Err(e)) => {
-                        tracing::warn!(
-                            model = %manifest.id,
-                            shard = shard_info.index,
-                            error = %e,
-                            "Background shard verification failed — quarantined"
-                        );
-                        shared_state
-                            .model_registry
-                            .remove_shard_holder(&sid, shared_state.identity.node_id());
-                        // Removing the bad bytes is only half of it — ask for a
-                        // good copy, or the model stays permanently short of a
-                        // shard on any node that is not auto-managing.
-                        shared_state.mark_shard_for_repair(&sid);
-                        // Quarantined is not disputed: the bytes were destroyed
-                        // against origin-backed evidence and a replacement is
-                        // queued, so there is nothing left to disagree about.
-                        shared_state.clear_shard_dispute(&sid);
-                        shared_state.emit_activity(
-                            crate::daemon::state::ActivityEvent::new(
-                                "model",
-                                "shard_verify_failed",
-                                format!(
-                                    "Part {} of {} failed verification — quarantined",
-                                    crate::types::ShardId::display_index_short(shard_info.index),
-                                    manifest.name
-                                ),
-                            )
-                            .with_model(manifest.id.0.clone())
-                            .with_model_name(manifest.name.clone())
-                            .with_detail_num(shard_info.index as i64)
-                            .with_detail_str(format!("{e}"))
-                            .with_toast("warning", 5000),
-                        );
-                        quarantined += 1;
-                    }
-                    Err(_) => {
-                        // JoinError — spawn_blocking panicked
-                        quarantined += 1;
-                    }
+                Ok(Err(e)) if policy == crate::model::shard::OnMismatch::KeepBytes => {
+                    // Unproven, not corrupt. Keep the bytes AND keep
+                    // advertising them: de-advertising on a stranger's
+                    // claim is the same mistake as deleting on it, and a
+                    // peer that downloads from us hashes what it gets.
+                    //
+                    // Deliberately NOT `mark_shard_for_repair`. That set is
+                    // drained by `complete_pending_shard_fetches`, whose
+                    // FIRST action is to treat a shard whose file is on
+                    // disk as already repaired and clear the mark — so for
+                    // a shard we are keeping by definition, marking it
+                    // fetches nothing and only churns the set. Settling the
+                    // disagreement automatically is real work and is not
+                    // done here; see `docs/FUTURE_WORK.md` § "A disputed
+                    // shard is kept but the disagreement is never settled".
+                    tracing::warn!(
+                        model = %manifest.id,
+                        shard = shard_info.index,
+                        error = %e,
+                        "A shard we hold disagrees with the hash the swarm reports — \
+                         keeping our bytes, because that hash has no origin backing \
+                         and deleting on it is how a last copy is lost"
+                    );
+                    // Recorded, not just counted. `disputed` below is a
+                    // local that dies with this task, and the open question
+                    // about this whole path is how often it fires in the
+                    // FIELD — which needs the dashboard and the diagnostics
+                    // report to be able to say so.
+                    shared_state.note_shard_disputed(&sid, &e);
+                    counts.disputed += 1;
+                }
+                Ok(Err(e)) => {
+                    tracing::warn!(
+                        model = %manifest.id,
+                        shard = shard_info.index,
+                        error = %e,
+                        "Background shard verification failed — quarantined"
+                    );
+                    shared_state
+                        .model_registry
+                        .remove_shard_holder(&sid, shared_state.identity.node_id());
+                    // Removing the bad bytes is only half of it — ask for a
+                    // good copy, or the model stays permanently short of a
+                    // shard on any node that is not auto-managing.
+                    shared_state.mark_shard_for_repair(&sid);
+                    // Quarantined is not disputed: the bytes were destroyed
+                    // against origin-backed evidence and a replacement is
+                    // queued, so there is nothing left to disagree about.
+                    shared_state.clear_shard_dispute(&sid);
+                    shared_state.emit_activity(
+                        crate::daemon::state::ActivityEvent::new(
+                            "model",
+                            "shard_verify_failed",
+                            format!(
+                                "Part {} of {} failed verification — quarantined",
+                                crate::types::ShardId::display_index_short(shard_info.index),
+                                manifest.name
+                            ),
+                        )
+                        .with_model(manifest.id.0.clone())
+                        .with_model_name(manifest.name.clone())
+                        .with_detail_num(shard_info.index as i64)
+                        .with_detail_str(format!("{e}"))
+                        .with_toast("warning", 5000),
+                    );
+                    counts.quarantined += 1;
+                }
+                Err(_) => {
+                    // JoinError — spawn_blocking panicked
+                    counts.quarantined += 1;
                 }
             }
         }
+    }
 
-        if quarantined > 0 {
-            tracing::warn!(
-                verified,
-                quarantined,
-                unchecked,
-                disputed,
-                "Background shard verification complete — some shards quarantined"
-            );
-        } else if disputed > 0 {
-            // Said out loud rather than folded into either neighbouring case:
-            // these bytes were checked and did NOT match, so calling them
-            // verified would be a false assurance — and they are still here,
-            // so calling them quarantined would be a false alarm.
-            tracing::warn!(
-                verified,
-                disputed,
-                unchecked,
-                "Background shard verification complete — some shards disagree with \
-                 an unbacked hash and were kept; the model's origin will settle it"
-            );
-        } else if unchecked > 0 {
-            // Deliberately NOT "all shards OK": some were never hashed. Said
-            // plainly so the gap is visible while it lasts, rather than being
-            // rounded up into the success line.
-            tracing::info!(
-                verified,
-                unchecked,
-                "Background shard verification complete — some shards have no \
-                 hash to check against yet"
-            );
-        } else {
-            tracing::info!(
-                verified,
-                "Background shard verification complete — all shards OK"
-            );
-        }
-        // The event the USER sees, and it must not round a disagreement up into
-        // "verified". The log line 40 lines above is careful to say these bytes
-        // were checked and did NOT match; this said "Verified 20 shards" over
-        // the same pass, which is the exact failure the `unchecked` comment
-        // further up warns about — a verifier reporting work it did not do
-        // reads as assurance — one field later.
-        shared_state.emit_activity(
-            crate::daemon::state::ActivityEvent::new(
-                "system",
-                "shard_verified",
-                verification_summary(verified, quarantined, disputed, unchecked),
-            )
-            .with_detail_num(verified as i64),
+    // A record of a part given back, deleted or replaced since says nothing
+    // any more; the tree keeps one row per part on disk.
+    let forgotten = {
+        let (checks, store) = (
+            checks.clone(),
+            crate::model::shard::ShardStore::new(data_dir),
         );
-        "shard_verification"
-    });
+        tokio::task::spawn_blocking(move || {
+            checks.forget_stale(|m, i| {
+                crate::model::parts_checked::FileStamp::of(&store.shard_path(m, i))
+            })
+        })
+        .await
+        .unwrap_or(0)
+    };
+    let PartCheckCounts {
+        verified,
+        recorded,
+        quarantined,
+        disputed,
+        unchecked,
+    } = counts;
+    let read_mib = pace.bytes_read().saturating_sub(read_before) / (1024 * 1024);
+    let took_s = began.elapsed().as_secs();
+    let busy_reads = pace.busy_reads().saturating_sub(busy_before);
+    if !at_start && verified == 0 && !counts.found_a_problem() {
+        // A pass that read nothing and found nothing is no news.
+        tracing::debug!(
+            recorded,
+            unchecked,
+            forgotten,
+            "Held parts checked again — every part unchanged since its last check"
+        );
+        return Some(counts);
+    }
+    if quarantined > 0 {
+        tracing::warn!(
+            verified,
+            recorded,
+            read_mib,
+            took_s,
+            busy_reads,
+            quarantined,
+            unchecked,
+            disputed,
+            "Background shard verification complete — some shards quarantined"
+        );
+    } else if disputed > 0 {
+        // Said out loud rather than folded into either neighbouring case:
+        // these bytes were checked and did NOT match, so calling them
+        // verified would be a false assurance — and they are still here,
+        // so calling them quarantined would be a false alarm.
+        tracing::warn!(
+            verified,
+            recorded,
+            read_mib,
+            took_s,
+            busy_reads,
+            disputed,
+            unchecked,
+            "Background shard verification complete — some shards disagree with \
+                 an unbacked hash and were kept; the model's origin will settle it"
+        );
+    } else if unchecked > 0 {
+        // Deliberately NOT "all shards OK": some were never hashed. Said
+        // plainly so the gap is visible while it lasts, rather than being
+        // rounded up into the success line.
+        tracing::info!(
+            verified,
+            recorded,
+            read_mib,
+            took_s,
+            busy_reads,
+            unchecked,
+            "Background shard verification complete — some shards have no \
+                 hash to check against yet"
+        );
+    } else {
+        tracing::info!(
+            verified,
+            recorded,
+            read_mib,
+            took_s,
+            busy_reads,
+            "Background shard verification complete — all shards OK"
+        );
+    }
+    // The event the USER sees, and it must not round a disagreement up into
+    // "verified". The log line 40 lines above is careful to say these bytes
+    // were checked and did NOT match; this said "Verified 20 shards" over
+    // the same pass, which is the exact failure the `unchecked` comment
+    // further up warns about — a verifier reporting work it did not do
+    // reads as assurance — one field later.
+    shared_state.emit_activity(
+        crate::daemon::state::ActivityEvent::new(
+            "system",
+            "shard_verified",
+            verification_summary(counts),
+        )
+        .with_detail_num(verified as i64),
+    );
+    Some(counts)
 }
 
 /// How long the country lookup waits before asking again after `failures`
@@ -2016,7 +2184,22 @@ mod quarantine_sweep_tests {
 
 #[cfg(test)]
 mod verification_summary_tests {
-    use super::verification_summary;
+    use super::PartCheckCounts;
+
+    fn verification_summary(
+        verified: u32,
+        quarantined: u32,
+        disputed: u32,
+        unchecked: u32,
+    ) -> String {
+        super::verification_summary(PartCheckCounts {
+            verified,
+            recorded: 0,
+            quarantined,
+            disputed,
+            unchecked,
+        })
+    }
 
     /// **A pass that found a disagreement must not announce itself as a clean
     /// verification.** The sweep counts four outcomes and this event carried
@@ -2052,6 +2235,29 @@ mod verification_summary_tests {
     fn a_clean_verification_pass_stays_clean() {
         let s = verification_summary(20, 0, 0, 0);
         assert_eq!(s, "Verified 20 shards");
+    }
+
+    /// #477: a part taken on its record was not read, and the line says so
+    /// rather than counting it "verified" — and a disagreement found beside
+    /// it still shows.
+    #[test]
+    fn parts_taken_on_their_record_are_not_called_verified() {
+        let only = super::verification_summary(PartCheckCounts {
+            recorded: 443,
+            ..Default::default()
+        });
+        assert_eq!(only, "443 shards unchanged since their last check");
+        let both = super::verification_summary(PartCheckCounts {
+            verified: 3,
+            recorded: 440,
+            disputed: 1,
+            ..Default::default()
+        });
+        assert!(
+            both.starts_with("Verified 3 shards; 440 unchanged"),
+            "{both}"
+        );
+        assert!(both.contains("disagree"), "{both}");
     }
 }
 

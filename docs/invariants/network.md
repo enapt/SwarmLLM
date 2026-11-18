@@ -1547,6 +1547,56 @@ hash of"; a piece requested elsewhere is in flight, not had. Test
 
 → `docs/invariants/network.md`
 
+## A held part is read again only when it changed (2026-11-18, #477)
+
+**What it replaced.** `daemon::background::spawn_shard_verification` hashed EVERY registered part, whole, flat out,
+2 s after every start; nothing recorded a part as checked. A field report (a Mac mini, 443 parts on a mechanical
+disk) had 10-15 minutes of saturated reads after each start. Registration at start checks sizes only, so the pass
+never gated serving — it was a bit-rot detector paid for at every boot.
+
+**The rule.** A passing check records (size, mtime, device + inode, hash, when) in the private `parts_checked`
+tree; `verify_shard`'s REQUIRED `Reread` decides whether a record answers. Accept gates (`requests.rs`'s peer
+download, `acquisition.rs`'s download) read `Always`; questions about bytes held here and the background pass take
+the record. A HuggingFace part kept by `accept_origin_part` is recorded from the read-back hash its download made
+(`DownloadedPart::stamp`: the tmp file's stamp before the hash, equal to the final file's after the rename — a rename
+keeps inode and mtime). The pass runs at start and every 6 h and reads only what is due.
+
+**What a change must keep.**
+- The stamp is compared WHOLE and taken before and after the hash: a file changed while it was read is not recorded
+  (git's racy-clean problem). Every writer here writes beside a part and renames over it — a new inode — so a
+  replaced part is never vouched for even where the clock's tick hides the new mtime
+  (`a_part_replaced_by_a_rename_is_another_file_whatever_its_time`).
+- A record names the hash its bytes MATCHED; a caller checking against another hash (gossip replaced the manifest's,
+  #224) reads again (`a_record_of_another_hash_does_not_answer_a_new_expectation`).
+- Only passes are recorded (`a_part_that_fails_its_check_is_never_recorded`); a damaged part is read again at the
+  next start because its mtime moved (`a_part_checked_once_is_not_read_again_until_it_changes` — goes red with the
+  record's answer switched off).
+- `RECHECK_EVERY` (30 days) is what still catches a disk damaging bytes it never rewrote; no stamp can.
+- A mismatch is acted on only if the part's stamp is the same after the read as before it. A paced read takes a
+  minute at the busy pace, long enough for a repair to rename a good copy over the bad one; quarantining on the old
+  inode's hash would throw the good copy away (`a_part_replaced_while_it_is_read_is_not_judged_on_the_old_bytes`,
+  red without the check). `shard::judged_nothing` names that error and a stopped read; the pass skips both. GNU
+  tar's "file changed as we read it" is the same stat-before, stat-after.
+- The busy judgement compares only reads at a spinning disk's speed (`QUICKER_THAN_A_SPINNING_DISK`, 10 ms a 4 MiB
+  read). Judged against a cached part, a laptop disk's own ~85 ms inner-track reads tripped any fixed floor
+  (`reads_quicker_than_a_spinning_disk_never_set_the_speed_to_beat`, red with cached reads let in).
+- Stale records are judged INSIDE the removing transaction (`Database::remove_json_where`): a snapshot judged first
+  lost a record a check rewrote in between.
+- A record says nothing about the swarm: it never clears a dispute by itself. The pass calls `note_shard_verified`
+  for a recorded part exactly as for a read one — the record IS a pass of these bytes against this hash.
+
+**Measured** (2026-11-18, a probe beside the live node, qwen2.5-coder-7b's 8 parts): old behaviour in the same binary
+4.69 GB read at start, with records 13.5 MB; a first pass at the cap 4,460 MiB in 141-143 s; a part damaged in place
+read again alone (710 MiB) and reported. The busy-disk slowdown never fires on this machine's disk (4 MiB in
+~1.5 ms with or without eight direct readers beside it), so on a mechanical disk it is unit-tested only
+(`read_pace::tests`) — `busy_reads` on the summary line will show it in a field log.
+
+**Prior art.** libtorrent's resume data (size + mtime per file, a recheck only on a mismatch); git's index (stat data
+→ blob hash, racy-clean entries re-hashed; `core.trustctime` is why ctime is left out); btrfsmaintenance's and
+Debian md `checkarray`'s MONTHLY scrub (the period); Linux md resync's `speed_limit_min`/`speed_limit_max`, dropping to
+the minimum while the array sees other I/O (the busy-disk pace). Not taken: the OSes' background I/O priorities
+(`IOPOL_THROTTLE`, `THREAD_MODE_BACKGROUND_BEGIN`, Linux `ioprio`) — three platform paths, two untestable here.
+
 ## Destroying a shard we hold needs better evidence than a stranger's claim
 
 **Rule:** `.claude/rules/arch-network.md` § "Destroying a shard we hold needs

@@ -507,6 +507,30 @@ few minutes from a peer on that release is a new cause: grep
 that peer's own log for `Pruning over-replicated shard` and the
 `AutoShardManager: requesting shard download` lines between them.
 
+## "The disk is busy for minutes after every start" — the held-parts check (#477)
+
+Since #477 a start re-reads a held part only when it changed, when the hash it is checked against
+changed, or when its last check is 30 days old (`model::parts_checked`). Every pass logs one line:
+
+```
+grep -a "Background shard verification complete\|unchanged since their last check" node.log
+```
+
+- `recorded=N` — parts taken on their record, NOT read. `verified=N` — read and matched now.
+- `read_mib` / `took_s` — what the pass read and how long it took; at most 32 MiB/s
+  (`read_pace::BACKGROUND_READ_BYTES_PER_SEC`), so ~0.5 GiB a part ≈ 16 s.
+- `busy_reads` — 4 MiB reads that came back over three times slower than the quickest recent one
+  (a read under 10 ms — the page cache, a solid-state disk — is never the one compared with); each
+  drops the pace to 4 MiB/s for 5 s. Always 0 on a solid-state disk (2026-11-18, NVMe: 1.4-1.6 ms
+  per 4 MiB with eight readers beside it).
+- A first start after updating to a release with #477 reads everything once (there are no records
+  yet), at that pace; later starts read ~nothing. A start that still reads everything: check that the
+  part files keep their modification time and inode (a backup tool or a copy that restores files
+  makes them new files), and that `SWARMLLM_PARTS_CHECKED=0` is not set.
+- After the start pass, a pass runs every 6 h and logs at `debug` when it read nothing.
+- A/B in one binary: `SWARMLLM_PARTS_CHECKED=0` (trust no record) and `SWARMLLM_PART_CHECK_PACE=0`
+  (flat out) together are the old behaviour. Measure with `/proc/<daemon pid>/io` `rchar`.
+
 ## "Why hasn't this node fixed its copy?" — the copy repair's own account (#217)
 
 From v0.3.225, `swarmllm diagnostics` has a `-- copy repair --` section:

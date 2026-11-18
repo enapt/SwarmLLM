@@ -203,6 +203,8 @@ impl AutoShardManager {
                                 &candidate.model_id,
                                 shard_info,
                                 crate::model::shard::OnMismatch::KeepBytes,
+                                &self.shared_state.parts_checked(),
+                                crate::model::shard::Reread::IfChanged,
                             )
                             .is_ok()
                     } else {

@@ -1230,6 +1230,7 @@ impl NetworkManager {
                                     .shard_store
                                     .shard_path(&shard_id.model_id, shard_id.index);
                                 let synced = path.clone();
+                                let checks = self.shared_state.parts_checked();
                                 tokio::spawn(async move {
                                     let outcome = tokio::task::spawn_blocking(move || {
                                         // The disk's word first: a write-back
@@ -1251,11 +1252,15 @@ impl NetworkManager {
                                         // nothing else holds them, so bytes that
                                         // are not what was asked for are
                                         // discarded rather than kept.
-                                        store.verify_shard(
-                                            &model_id,
-                                            &info,
-                                            crate::model::shard::OnMismatch::Quarantine,
-                                        )
+                                        store
+                                            .verify_shard(
+                                                &model_id,
+                                                &info,
+                                                crate::model::shard::OnMismatch::Quarantine,
+                                                &checks,
+                                                crate::model::shard::Reread::Always,
+                                            )
+                                            .map(|_| ())
                                     })
                                     .await
                                     .unwrap_or_else(|e| {

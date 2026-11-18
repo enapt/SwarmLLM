@@ -246,6 +246,40 @@ pub enum OnMismatch {
     KeepBytes,
 }
 
+/// Whether a check reads the bytes again where a record says they were
+/// checked (FUTURE_WORK #477, `model::parts_checked`). A required parameter:
+/// the accept gate for bytes that just arrived and a re-check of bytes held
+/// for weeks want different answers, and either default is wrong for one.
+#[derive(Clone, Copy)]
+pub enum Reread<'a> {
+    /// Hash the bytes whatever a record says — they have just arrived.
+    Always,
+    /// Take a record of a check of these very bytes against this very hash
+    /// (`PartsChecked::vouches_for`); otherwise hash them now, flat out —
+    /// someone is waiting on the answer.
+    IfChanged,
+    /// The same, but a hash runs at the background pace — the periodic check
+    /// of what this node holds, which nobody waits on.
+    IfChangedPaced(&'a crate::model::read_pace::ReadPace),
+}
+
+/// How a passing [`ShardStore::verify_shard`] knew.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Checked {
+    /// The bytes were read and hashed now.
+    Read,
+    /// A record of an earlier check of these same, unchanged bytes.
+    Recorded,
+}
+
+/// Whether a [`ShardStore::verify_shard`] error judged NOTHING about the bytes:
+/// the background read was stopped, or the part changed while it was read.
+/// Never grounds to quarantine, dispute or re-fetch — the part is checked again
+/// at the next pass.
+pub fn judged_nothing(e: &SwarmError) -> bool {
+    matches!(e, SwarmError::Io(io) if io.kind() == std::io::ErrorKind::Interrupted)
+}
+
 impl ShardStore {
     pub fn new(data_dir: &Path) -> Self {
         Self {
@@ -347,12 +381,18 @@ impl ShardStore {
     /// Verify a shard's BLAKE3 hash matches the expected value.
     /// Network-received and on-disk shards must always have a real (non-zero) hash
     /// in the manifest; zero-hash manifests are rejected as placeholders.
+    ///
+    /// A pass is recorded in `checks` (when the file was the same file after
+    /// the hash as before it), and `reread` says whether such a record of
+    /// these very bytes answers instead of a read (#477).
     pub fn verify_shard(
         &self,
         model_id: &ModelId,
         info: &ShardInfo,
         on_mismatch: OnMismatch,
-    ) -> Result<(), SwarmError> {
+        checks: &crate::model::parts_checked::PartsChecked,
+        reread: Reread<'_>,
+    ) -> Result<Checked, SwarmError> {
         let path = self.shard_path(model_id, info.index);
         if !path.exists() {
             return Err(SwarmError::ShardNotFound(crate::types::ShardId {
@@ -401,9 +441,51 @@ impl ShardStore {
             });
         }
 
-        let actual = hash_file_blake3(&path)?;
+        let before = crate::model::parts_checked::FileStamp::of(&path);
+        let pace = match reread {
+            Reread::Always => None,
+            Reread::IfChanged | Reread::IfChangedPaced(_) => {
+                if before.is_some_and(|stamp| {
+                    checks.vouches_for(model_id, info.index, &info.hash, &stamp)
+                }) {
+                    return Ok(Checked::Recorded);
+                }
+                match reread {
+                    Reread::IfChangedPaced(pace) => Some(pace),
+                    _ => None,
+                }
+            }
+        };
+        let actual = match pace {
+            Some(pace) => crate::model::read_pace::hash_file_paced(&path, pace)?,
+            None => hash_file_blake3(&path)?,
+        };
 
         if actual != info.hash {
+            // A hash of bytes that changed while they were read says nothing
+            // of what stands there NOW — a repair's good replacement, or
+            // nothing at all — and quarantining or disputing on it would act
+            // on the wrong file. A paced read takes a minute at the busy pace
+            // where a flat-out one took a second (#477). GNU tar's "file
+            // changed as we read it" is the same check: a stat before, a stat
+            // after. Judged at the next pass instead.
+            if before.is_some()
+                && crate::model::parts_checked::FileStamp::unchanged(
+                    before,
+                    crate::model::parts_checked::FileStamp::of(&path),
+                )
+                .is_none()
+            {
+                tracing::info!(
+                    model = %model_id,
+                    shard = info.index,
+                    "DIAG: verify_shard — the part changed while it was read; not judged"
+                );
+                return Err(SwarmError::Io(std::io::Error::new(
+                    std::io::ErrorKind::Interrupted,
+                    "the part changed while it was read",
+                )));
+            }
             tracing::info!(
                 model = %model_id,
                 shard = info.index,
@@ -444,7 +526,14 @@ impl ShardStore {
             });
         }
 
-        Ok(())
+        let after = crate::model::parts_checked::FileStamp::of(&path);
+        checks.note_checked(
+            model_id,
+            info.index,
+            &actual,
+            crate::model::parts_checked::FileStamp::unchanged(before, after),
+        );
+        Ok(Checked::Read)
     }
 
     /// Scan the models directory and return all locally available, verified shards.
@@ -1153,7 +1242,13 @@ mod tests {
 
         // Verify should succeed
         assert!(store
-            .verify_shard(&model_id, &info, OnMismatch::Quarantine)
+            .verify_shard(
+                &model_id,
+                &info,
+                OnMismatch::Quarantine,
+                &checks(),
+                Reread::Always
+            )
             .is_ok());
     }
 
@@ -1176,7 +1271,13 @@ mod tests {
         };
 
         assert!(store
-            .verify_shard(&model_id, &info, OnMismatch::Quarantine)
+            .verify_shard(
+                &model_id,
+                &info,
+                OnMismatch::Quarantine,
+                &checks(),
+                Reread::Always
+            )
             .is_err());
 
         // Verify file was quarantined
@@ -1216,7 +1317,13 @@ mod tests {
         // The disagreement is still reported — keeping the bytes is not the
         // same as pretending they matched.
         assert!(matches!(
-            store.verify_shard(&model_id, &info, OnMismatch::KeepBytes),
+            store.verify_shard(
+                &model_id,
+                &info,
+                OnMismatch::KeepBytes,
+                &checks(),
+                Reread::Always
+            ),
             Err(SwarmError::ShardIntegrity { .. })
         ));
 
@@ -1365,7 +1472,13 @@ mod tests {
             hash: wrong_hash,
             tensors: vec![],
         };
-        match store.verify_shard(&model_id, &info, OnMismatch::Quarantine) {
+        match store.verify_shard(
+            &model_id,
+            &info,
+            OnMismatch::Quarantine,
+            &checks(),
+            Reread::Always,
+        ) {
             Err(SwarmError::ShardIntegrity { .. }) => {}
             other => panic!("expected ShardIntegrity, got {other:?}"),
         }
@@ -1391,7 +1504,13 @@ mod tests {
             hash: blake3::hash(b"whatever the full content would be").into(),
             tensors: vec![],
         };
-        match store.verify_shard(&model_id, &info, OnMismatch::Quarantine) {
+        match store.verify_shard(
+            &model_id,
+            &info,
+            OnMismatch::Quarantine,
+            &checks(),
+            Reread::Always,
+        ) {
             Err(SwarmError::ShardIncomplete {
                 expected_bytes,
                 actual_bytes,
@@ -1423,10 +1542,177 @@ mod tests {
         };
         assert!(
             store
-                .verify_shard(&model_id, &info, OnMismatch::Quarantine)
+                .verify_shard(
+                    &model_id,
+                    &info,
+                    OnMismatch::Quarantine,
+                    &checks(),
+                    Reread::Always
+                )
                 .is_ok(),
             "a zero declared size must fall through to the hash check"
         );
+    }
+
+    fn checks() -> crate::model::parts_checked::PartsChecked {
+        crate::model::parts_checked::PartsChecked::for_tests()
+    }
+
+    fn held_part(data: &[u8]) -> (tempfile::TempDir, ShardStore, ModelId, ShardInfo) {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ShardStore::new(dir.path());
+        let model_id = ModelId("test".into());
+        store.write_chunk(&model_id, 0, 0, data).unwrap();
+        store.finalize_shard(&model_id, 0).unwrap();
+        let info = ShardInfo {
+            index: 0,
+            layer_range: (0, 1),
+            size_bytes: data.len() as u64,
+            hash: blake3::hash(data).into(),
+            tensors: vec![],
+        };
+        (dir, store, model_id, info)
+    }
+
+    /// #477: a start used to hash every held part whole. A part checked once
+    /// is taken on its record until it changes; the accept gate still reads.
+    #[test]
+    fn a_part_checked_once_is_not_read_again_until_it_changes() {
+        let (_dir, store, model_id, info) = held_part(b"bytes of a held part");
+        let checks = checks();
+        let verify =
+            |reread| store.verify_shard(&model_id, &info, OnMismatch::KeepBytes, &checks, reread);
+        assert_eq!(verify(Reread::IfChanged).unwrap(), Checked::Read);
+        assert_eq!(verify(Reread::IfChanged).unwrap(), Checked::Recorded);
+        assert_eq!(verify(Reread::Always).unwrap(), Checked::Read);
+        // Damaged in place, same size — the modification time moves (set a
+        // second on, as a coarse clock could otherwise hide it).
+        let path = store.shard_path(&model_id, 0);
+        std::fs::write(&path, b"BYTES OF A HELD PART").unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(std::time::SystemTime::now() + std::time::Duration::from_secs(1))
+            .unwrap();
+        assert!(matches!(
+            verify(Reread::IfChanged),
+            Err(SwarmError::ShardIntegrity { .. })
+        ));
+    }
+
+    #[test]
+    fn a_part_that_fails_its_check_is_never_recorded() {
+        let (_dir, store, model_id, mut info) = held_part(b"bytes of a held part");
+        info.hash = [0xAB; 32];
+        let checks = checks();
+        for _ in 0..2 {
+            assert!(matches!(
+                store.verify_shard(
+                    &model_id,
+                    &info,
+                    OnMismatch::KeepBytes,
+                    &checks,
+                    Reread::IfChanged
+                ),
+                Err(SwarmError::ShardIntegrity { .. })
+            ));
+        }
+        assert!(checks.is_empty());
+    }
+
+    #[test]
+    fn a_record_of_another_hash_does_not_answer_a_new_expectation() {
+        // The bytes passed against one hash; the manifest now names another
+        // (#224): the part is read again, and fails.
+        let (_dir, store, model_id, info) = held_part(b"bytes of a held part");
+        let checks = checks();
+        store
+            .verify_shard(
+                &model_id,
+                &info,
+                OnMismatch::KeepBytes,
+                &checks,
+                Reread::IfChanged,
+            )
+            .unwrap();
+        let mut renamed = info.clone();
+        renamed.hash = [0xCD; 32];
+        assert!(store
+            .verify_shard(
+                &model_id,
+                &renamed,
+                OnMismatch::KeepBytes,
+                &checks,
+                Reread::IfChanged
+            )
+            .is_err());
+    }
+
+    #[test]
+    fn the_background_pace_reads_and_records_like_any_check() {
+        let (_dir, store, model_id, info) = held_part(&vec![7u8; 3 * 1024 * 1024 + 5]);
+        let checks = checks();
+        let pace = crate::model::read_pace::ReadPace::with_rate(
+            0,
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        );
+        let verify = || {
+            store.verify_shard(
+                &model_id,
+                &info,
+                OnMismatch::KeepBytes,
+                &checks,
+                Reread::IfChangedPaced(&pace),
+            )
+        };
+        assert_eq!(verify().unwrap(), Checked::Read);
+        assert_eq!(verify().unwrap(), Checked::Recorded);
+    }
+
+    /// A part replaced while the background pass read it — a repair's good
+    /// copy renamed over a bad one — is judged on NOTHING: the hash is of the
+    /// old file, and quarantining on it would throw the good copy away.
+    #[cfg(unix)]
+    #[test]
+    fn a_part_replaced_while_it_is_read_is_not_judged_on_the_old_bytes() {
+        let chunk = crate::model::read_pace::CHUNK_BYTES;
+        let good = vec![1u8; 2 * chunk];
+        let (_dir, store, model_id, mut info) = held_part(&vec![9u8; 2 * chunk]);
+        info.hash = blake3::hash(&good).into();
+        let path = store.shard_path(&model_id, 0);
+        // A chunk a second: the read sits in its first sleep while the
+        // replacement lands.
+        let pace = crate::model::read_pace::ReadPace::with_rate(
+            chunk as u64,
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        );
+        let replacer = {
+            let (path, good) = (path.clone(), good.clone());
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(300));
+                let tmp = path.with_extension("bin.tmp");
+                std::fs::write(&tmp, &good).unwrap();
+                std::fs::rename(&tmp, &path).unwrap();
+            })
+        };
+        let err = store
+            .verify_shard(
+                &model_id,
+                &info,
+                OnMismatch::Quarantine,
+                &checks(),
+                Reread::IfChangedPaced(&pace),
+            )
+            .unwrap_err();
+        replacer.join().unwrap();
+        assert!(judged_nothing(&err), "{err:?}");
+        assert_eq!(
+            hash_file_blake3(&path).unwrap(),
+            info.hash,
+            "the good copy stays"
+        );
+        assert!(!path.with_extension("bin.quarantine").exists());
     }
 }
 
