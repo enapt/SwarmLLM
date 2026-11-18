@@ -1314,6 +1314,16 @@ no separate drafter, so their splits were priced at a round a token). Where the 
 went: this node's last range was refused by the loader after the daemon admitted it, the refusal pinned the whole model
 to the processor and the retry ran `[0..15)` there at ~148 ms a round (#458).
 
+(j16) **A forward that waited behind its peer's own load ahead reads `layers_from=loaded load_ms=0`** (2026-11-18,
+not built). The tier run's 70B (`695c6dc7`): AU's segment `[22..80)` of a 53-token prompt answered after
+`served_ms=183690 worker_ms=183688 load_ms=0 layers_from="loaded"`, its next steps 0.73 s each — so ~180 s of that
+was reading ~30 GB, not running the prompt. The plan's up-front KV ask (`asked=1 answered=1`) let AU load the range
+ahead (`load_ahead_for_a_peer`, after its answer); the forward queued behind that `LoadRange`, found the range held and
+reported it loaded. Nothing prices it (`HowServed` is logged only); the time is in `worker_ms`, the reason nowhere — a
+reader takes it for compute. Next, if a load ahead's time matters to a diagnosis: the worker reports the first forward
+after a load ahead as that load (its disk reason, its `load_us`), with the daemon's wait-behind-load measured apart —
+a change to what an existing variant means on the wire, so `features::HOW_SERVED_WHY`'s readers are checked first.
+
 `scheduler/parallax.rs` charges a remote hop a flat `ASSUMED_FORWARD_PASSES = 64.0`. The error
 grows with reply length — 1.0 at 8 tokens, 2.4-3.3 at 120-239 — and biases every delegation
 decision since v0.3.164, silently. The structural claim is settled; **do not tune the
