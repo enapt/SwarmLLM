@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #482**). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #483**). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -895,8 +895,25 @@ frame, then add a receipt ACK or a per-frame read deadline mirroring request-res
 
 ### Routing and placement
 
+#### #482 — A restart forgets every peer's measured speed, and the first replies after it take routes through the slowest peers
+`P1` · speed · **OPEN** — 2026-11-19 · history: none
+
+Every figure the planner learns about a peer (`PeerSpeed`, `ModelSpeed`, delegated runs, hop reports, split
+rounds) lives in memory only, so a restart — every auto-update restarts every node within minutes — plans from
+priors again. **Measured 2026-11-19 on the live node's identity, the same six popular models, the same asks
+(`~/swarmllm-gate/tier_1119{n,p,m}`)**: v0.3.300 after hours up (`n`) ran Qwen3.8-27B whole in Australia at 4.6-5.3
+tok/s and Gemma 4 31B at 2.0-2.1; the SAME binary restarted (`p`, 20:19Z) split the 27B four ways through a
+processor in Italy 390-400 ms away, **1.25 tok/s after five attempts**, and Gemma 4 31B five ways (here, Australia,
+Proxmox, Italy, here); main restarted (`m`) did no better on Gemma 4 31B (0.9-1.1 tok/s, four ways) and 3.3-3.5 on
+the 27B. Every candidate read `observed_*=None` in the plan. Prior art (#91 (2k)'s, read 2026-11-01): Ledlie,
+Gardner and Seltzer advise beginning "where it left off"; Serf persisted its coordinates and stopped
+(hashicorp/serf#489-#490) after a stale one stuck "essentially forever" (#487) — so a restore validates, keeps a
+figure only with its age and sample count, and lets a fresh measurement replace it at once. Next: which figures
+to keep (per peer and model: warm decode, delegated runs, prompt rates; never a failure streak), where (redb
+beside the trust table), how old a figure may be, and a rig that restarts the node between two identical runs.
+
 #### #481 — A peer that holds a popular model whole was passed over for a split through it 8x slower
-`P1` · routing · **PARTIAL: (1), (3a), (5) fixed on main 2026-11-19; (4) diagnosable; (2), (3b) open** — 2026-11-19 · history: #3 (j3), #3 (j4), #469, #10, #458
+`P1` · routing · **PARTIAL: (1), (3a) fixed on main 2026-11-19; (5) partly (every request answered, an 8 GB card's tail still on the processor); (4) diagnosable; (2), (3b), (3c) open** — 2026-11-19 · history: #3 (j3), #3 (j4), #469, #10, #458
 
 > Seen on the live node 2026-11-19 14:54-15:00Z (v0.3.300, overnight tier run `~/swarmllm-gate/tier_1119n`):
 > Qwen3.6-35B-A3B, the Australian RTX 3060 `aa3d1e66` (132 ms) holds it whole and ran it whole at 35-36 tok/s
