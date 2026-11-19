@@ -973,7 +973,13 @@ a rig that restarts the node between two identical runs (`tier_1119p` against `t
 > processor layers — and a hand-off nothing ever times while that prior keeps it unchosen. So the yield fix lands with
 > one of: an occasional hand-off priced optimistically so it gets timed (the split side's `prior_for_request`
 > exploration, mirrored; the delegated figure then takes over), or a prior that charges a card-held MoE layer's
-> system-memory experts by the experts a token reads. Measured on this rig (`tier_1119r`) before it ships.
+> system-memory experts by the experts a token reads. Measured on this rig (`tier_1119r`) before it ships. Prior art
+> for the second (searched 2026-11-19): Fiddler (Kamahori et al. 2024, arXiv 2402.07033) keeps attention and the other
+> non-expert weights on the card and prices an expert in system memory at decode as the processor reading its weights
+> once a token (one token per expert in a single-batch step); llama.cpp's `--n-cpu-moe` and kTransformers are
+> "layer-wise" hybrids of that shape (DALI, arXiv 2602.03495) — so a card-held MoE layer's prior is its card part
+> plus the ACTIVE experts' bytes over the processor's bandwidth (`mem_bandwidth::measured_gbps`), not a whole
+> processor layer.
 >
 > (2) **Measured and set aside 2026-11-19 evening — the load was not what passed Australia's whole run over.**
 > Australia's split worker held [14,40) (again [12,40), then [8,40)), so its whole run carried `cold_load_ms` (19,820 of
