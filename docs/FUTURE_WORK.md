@@ -966,8 +966,14 @@ a rig that restarts the node between two identical runs (`tier_1119p` against `t
 > at 55.7 ms a token (7,134 ms over 128 passes) while it STATES 0.59-0.61 ms a layer (~24 ms a token) and delivered 28-36
 > — and Italy's processor (385 ms away, never measured) prices at 46.6 from its prior, under Australia. Priced honestly
 > at a token a round, the split would then lose to Italy's PROCESSOR, not Australia's card: tonight's (3c) trap again
-> (an honest term exposing a mispriced one). So the yield fix lands WITH the floor read off the peer's stated figure
-> where it has one, and is measured on this rig (`tier_1119r`) before it ships.
+> (an honest term exposing a mispriced one). ⚠ The floor may NOT be the peer's stated figure: a self-report only ever
+> prices a peer SLOWER (`NodeCandidate::prior_ms_per_layer` takes the larger, #3 (f) — "a peer that wants work can
+> only state a speed it was always able to state"). What overprices Australia is the PRIOR itself — 1.39 ms a layer for
+> a whole run that delivers ~0.7, a MoE whose experts sit in system memory (an A3B reads ~3B of them a token) priced as
+> processor layers — and a hand-off nothing ever times while that prior keeps it unchosen. So the yield fix lands with
+> one of: an occasional hand-off priced optimistically so it gets timed (the split side's `prior_for_request`
+> exploration, mirrored; the delegated figure then takes over), or a prior that charges a card-held MoE layer's
+> system-memory experts by the experts a token reads. Measured on this rig (`tier_1119r`) before it ships.
 >
 > (2) **Measured and set aside 2026-11-19 evening — the load was not what passed Australia's whole run over.**
 > Australia's split worker held [14,40) (again [12,40), then [8,40)), so its whole run carried `cold_load_ms` (19,820 of
