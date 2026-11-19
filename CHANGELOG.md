@@ -24,12 +24,6 @@ every 30 seconds for hours after a single request, although the figure only chan
 sends a model's figure when it is new, has moved by a tenth, or 10 minutes have passed: about 20 times fewer
 messages, carrying the same information. Computers on the previous release are read as before (#91).
 
-**For testers: Qwen 3.5 and 3.6 splits can check a tree of their helper's guesses (off by default).** Where one of
-these models is split and this computer holds its block helper (the DFlash drafter), `SWARMLLM_BLOCK_TREE=1` sends
-the helper's guesses as a small tree (the likeliest word and its strongest alternatives at each position, at most 32)
-instead of a single line. It is off because on two graphics cards it wrote code 21-68% slower than a single line,
-though a story came out 12-30% faster; on two processors both were about 5% faster (#437).
-
 **A computer that holds a large model whole is used whole, not as half of a slower split.** After one split
 through a far computer, this computer priced a whole hand-off to it from the split's step time, which is mostly
 the trip there and back on every token — a hand-off pays that trip once per reply. On Qwen3.6-35B-A3B with the
@@ -44,12 +38,14 @@ for it.** These models take their guesses from a block drafter loaded beside the
 filled this computer's graphics card with layers and left the drafter no room, so it was never loaded — while the
 plan was still priced as if it guessed 2.3 words a round. On Qwen3.6-35B-A3B the reply took 159 rounds for 160 words
 and arrived four times later than predicted. The plan now keeps the drafter's room, and a plan that leaves none is
-priced as one that guesses nothing (#481).
+priced as one that guesses nothing: with the other part in Australia, the same split then wrote 10-16 words a
+second where it wrote 4.6-5.6 (#481).
 
 **A split of a Qwen 3.5, 3.6 or 3.8 model writes prose faster.** The small model that guesses ahead for such a split
 now sends a branching set of guesses when the reply is read as prose, and its single line of guesses for code: on two
 graphics cards the branching guesses wrote prose 12-38% faster and code 21-68% slower than the line, so each kind of
-reply now gets the one that is faster for it (#437).
+reply now gets the one that is faster for it. `SWARMLLM_BLOCK_TREE=1` or `=0` sends the branching guesses or the
+line for every reply (#437).
 
 **A split that starts and finishes on this computer no longer fails when its first part fills the graphics card.**
 With Qwen3.8-27B planned as this computer's first 21 layers and its last one, the first part's load found a little
