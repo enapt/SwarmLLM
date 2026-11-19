@@ -840,8 +840,9 @@ impl PipelineExecutor {
         // advertises what that needs (`ModelArch::block_tree_features`) and
         // the tail walks it. Its rounds are DSD's (`dsd_tree::TreeRounds`):
         // the check priced row by row, the kept path's tokens past the rows
-        // in place read again by the next check, whatever it guesses. A/B
-        // `SWARMLLM_BLOCK_TREE=0`.
+        // in place read again by the next check, whatever it guesses. Off
+        // unless `SWARMLLM_BLOCK_TREE=1` (`block_draft::block_trees_on`: on a
+        // card it wrote code slower than the chain).
         let mut trees = block
             .as_ref()
             .filter(|b| b.block.is_some() && super::block_draft::block_trees_on())

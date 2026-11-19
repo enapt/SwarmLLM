@@ -30,11 +30,19 @@ pub(crate) const PROMPT_WINDOW: u32 = 64;
 pub(crate) const BLOCK_TREE_MOST_ROWS: usize = crate::inference::layers::SsmState::MOST_ROWS_KEPT;
 
 /// May a reply whose family reads trees check one grown from the block
-/// drafter's marginals (#437)? On by default; `SWARMLLM_BLOCK_TREE=0` checks
-/// the block's chain alone, the A/B inside one binary. Read once.
+/// drafter's marginals (#437)? OFF by default: `SWARMLLM_BLOCK_TREE=1` turns it
+/// on, the A/B inside one binary. Read once.
+///
+/// Off because a split on the CARD wrote code 21-68% slower with it (Qwen3.5-4B
+/// over two card nodes 130 ms apart, 2026-11-19, `~/rig428/scripts/card437.sh`:
+/// a tree round ~260 ms against the chain's ~190 — a check that reads a mask is
+/// never captured — and fewer tokens kept a round on code), though prose came
+/// out 12-30% faster and two processor nodes gained ~5% on both
+/// (`docs/invariants/inference.md` § "A recurrent layer reads a tree…"). What
+/// would turn it back on is FUTURE_WORK #437's residual.
 pub(crate) fn block_trees_on() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var("SWARMLLM_BLOCK_TREE").as_deref() != Ok("0"))
+    *ON.get_or_init(|| std::env::var("SWARMLLM_BLOCK_TREE").as_deref() == Ok("1"))
 }
 
 /// What a reply that drafts by block asks of its segments, and the rows they

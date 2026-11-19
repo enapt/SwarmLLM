@@ -4843,7 +4843,7 @@ bandwidth to spare, and the two compose (a spare can itself be a tree). (The sta
 6.47 / 1.44 on 11-08: code holds; the story's figure is one prose reply's.)
 
 #### #437 — A split checks a TREE from the block drafter, and the recurrent layers walk it
-`P2` · perf-split · **OPEN** (researched 2026-11-08; first measure 2026-11-18, not built) · history: #428, #134 (trees for small drafters)
+`P2` · perf-split · **OPEN** (built 2026-11-19 and ships OFF: on the card it wrote code slower) · history: #428, #134 (trees for small drafters)
 A block drafter's one forward gives a distribution at every position; DDTree (arXiv 2604.12989) builds a tree from
 those marginals best-first (a node's score the sum of its path's log-probabilities, budget B, parents before children,
 each row seeing its parent's row and itself) and checks it in one forward: on Qwen3.6-27B a chain of 16 keeps τ 6.82,
@@ -4899,14 +4899,19 @@ processor, red with the parents ignored. **Stages B and C BUILT the same day**: 
 (`BlockDrafter::draft_ranked`) grow the tree (`GrownTree::from_marginals`, the block's own picks the trunk, the rest
 best-first, ≤ 32 rows); the n-gram loop sends it through DSD's `TreeRounds` (priced rows, the kept path's tail read again
 by the next check, whatever it guesses); only to peers advertising `features::BLOCK_TREES` (bit 46); the drafter
-reads only the kept path's rows (the tail gathers them, the coordinator gathers the segments' before it). A/B
-`SWARMLLM_BLOCK_TREE=0` (`docs/invariants/inference.md` § "A recurrent layer reads a tree…", **The coordinator half**).
+reads only the kept path's rows (the tail gathers them, the coordinator gathers the segments' before it). Off
+unless `SWARMLLM_BLOCK_TREE=1` (`docs/invariants/inference.md` § "A recurrent layer reads a tree…", **The coordinator half**).
 **Stage D on the processor rig** (2026-11-19, `~/rig428/scripts/rig437.sh`: Qwen3.5-4B over two processor nodes at
 130 ms, one binary): the tree drafted one level past the chain's count (default; `SWARMLLM_BLOCK_TREE_DEPTH=block` the
 whole block) wrote code ~5% and a story ~6% faster than the chain (decode 17.3 vs 18.2 s, 29.1 vs 31.1 s, best of two),
 one code reply even; the whole block drafted 2-4x slower and lost on prose. The first run found the worker caught no
-rows for ANY tree (an old gate, gotcha #1144). Left: the card rig (a card's draft and rows cost little, where a wider
-tree should pay), then the field (here [0,8) ↔ AU, `~/swarmllm-gate/field428_1119/run.sh` pattern).
+rows for ANY tree (an old gate, gotcha #1144). **Stage D on the CARD rig (2026-11-19, `~/rig428/scripts/card437.sh`,
+both nodes on the RTX 3070): code 21-68% SLOWER, prose 12-30% faster** (decode s, two arms: palindrome 5.48 / 4.10
+against the chain's 3.26 / 3.39, binary tree 5.05 / 5.65 against 4.01 / 4.05, story 13.94 / 13.86 against 15.77 /
+19.63): a tree round ~260 ms against ~190, its check uncaptured (it reads a mask), and fewer kept a round on code.
+So it SHIPS OFF (`block_draft::block_trees_on`, `SWARMLLM_BLOCK_TREE=1` turns it on). Left: (1) capture the tree
+check on the card, or (2) grow a tree only for a reply predicted to be prose (`pipeline::reply_kind`, #469) — each
+on the card rig first; then the field (here [0,8) ↔ AU, `~/swarmllm-gate/field428_1119/run.sh` pattern).
 
 #### #318 — A large model split across machines is too slow to use
 `P2` · perf-split · **OPEN** — 2026-10-20 · plan: `docs/plans/large_model_splits.md` · draws on #134, #145, #148, #149, #192

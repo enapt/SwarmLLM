@@ -6208,7 +6208,7 @@ block drafter guesses, and it now sends that drafter's guesses as a TREE:
 [0,15)+[29,32)+head with the block drafter ↔ [15,29), two processor nodes on 8 cores each, 130 ms
 apart; 160 greedy tokens; the loop's decode seconds, two arms each, one binary):
 
-| reply | tree, +1 level (default) | tree, whole block | chain (`SWARMLLM_BLOCK_TREE=0`) |
+| reply | tree, +1 level (`SWARMLLM_BLOCK_TREE=1`) | tree, whole block | chain (the default) |
 |---|---|---|---|
 | palindrome function | 17.9 / 17.3 | 15.2 / 19.1 | 18.8 / 18.2 |
 | binary search tree | 18.4 / 18.4 | 20.2 / 18.5 | 18.6 / 18.1 |
@@ -6220,6 +6220,23 @@ loses to plain steps (set aside at token 88 on pass 2). Replies split at near-ti
 arms, the two chain arms included (#313: the processor's matmuls are not invariant to the check's
 width) — every split a coherent word choice. On the processor the gain is small; a card's draft
 and check cost little per row, which is where a wider tree is expected to pay (stage D, card).
+
+**On the CARD it ships OFF** (2026-11-19, `~/rig428/scripts/card437.sh` — the same split, both nodes on the
+RTX 3070, all layers, 130 ms apart, one binary built from `a0db0c281`; out `~/swarmllm-gate/card437_1119/`):
+
+| reply | tree, +1 level | chain |
+|---|---|---|
+| palindrome function | 5.48 / 4.10 | 3.26 / 3.39 |
+| binary search tree | 5.05 / 5.65 | 4.01 / 4.05 |
+| lighthouse story | 13.94 / 13.86 | 15.77 / 19.63 |
+
+Code 21-68% SLOWER, prose 12-30% faster. A tree round took ~260 ms against the chain's ~190 (the check step
+169-189 ms against 150-159: a forward that reads a mask is never captured, § above) and on code kept fewer a
+round (6.4-8.1 against 8.3; 17-21 rounds against 17). Every arm wrote the same opening of each reply; both nodes
+`device=Cuda`. Code is where a split pays most and card to card is the field's shape, so
+`block_draft::block_trees_on` is off unless `SWARMLLM_BLOCK_TREE=1`. What would turn it back on: a captured tree
+check on the card, or the tree chosen per kind of reply (`pipeline::reply_kind`, #469) — prose only — each
+measured on this rig first (FUTURE_WORK #437).
 
 Tests: `a_tree_checks_rows_are_cut_to_its_kept_path`, `a_walked_trees_rows_are_its_kept_paths_in_order`,
 the rows half of `the_walk_follows_the_branch_that_carries_each_pick` (each red with its gather
