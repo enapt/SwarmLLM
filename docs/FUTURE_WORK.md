@@ -944,7 +944,10 @@ beside the trust table), how old a figure may be, and a rig that restarts the no
 > `GenerateDone`); `WorkerHandle` and `HeldRange` carry nothing of it. So: the worker reports its guesser state once
 > loaded, the pool keeps it beside the held range, and a plan whose first segment that worker serves prices
 > `YieldPrior::None` — which also ends the optimistic exploration (`SplitRounds::prior_for_request` explores only from
-> `YieldPrior::Drafter`). Prior art: not yet searched.
+> `YieldPrior::Drafter`). Prior art: SmartSpec (Liu et al. 2024, arXiv 2406.14066) predicts a step's accepted length
+> from the acceptance rate of the speculation that is RUNNING and prices none as plain decode ("goodput would
+> automatically turn off speculation") — we take the same order: what the worker holds first, a prior only for what
+> it could hold.
 >
 > (2) **Measured and set aside 2026-11-19 evening — the load was not what passed Australia's whole run over.**
 > Australia's split worker held [14,40) (again [12,40), then [8,40)), so its whole run carried `cold_load_ms` (19,820 of
