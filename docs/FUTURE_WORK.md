@@ -978,7 +978,15 @@ frame, then add a receipt ACK or a per-frame read deadline mirroring request-res
 > the live budget read it as another program's (`compute_vram_budget`: used − committed), and the growth was refused
 > with no route — 4 of 4 failed (split27_1119t 18:44Z), so it was set aside (`docs/invariants/memory.md` § "The tail's
 > growth is priced at the mean layer"). Next: reconcile a worker's charge to what it holds on the card (its pool's
-> in-use, reported after a load and a prompt pass), then ship the honest price.
+> in-use, reported after a load and a prompt pass), then ship the honest price. **And a hold set by the up-front admission alone is
+> not released** (read in the pre-release review, 2026-11-19, not reproduced): `admit_prompt`'s `Admitted` arm notes
+> the conversation (`note_conversation`) but no pass range, and nothing between attempts clears it (only the request's
+> end, `distributed_exec`'s `release_request_kv`, or a peer's `CancelInference`). Where attempt 1 was admitted here and
+> a peer refused before any forward ran here, attempt 2's pass finds no `pass_ranges` entry, keeps the hold, and a
+> growth only a retirement could make is refused — one more re-plan, fewer layers here (in .300 the same hold read as
+> "busy with a conversation"). Recording the admitted ranges up front would bring back #93 (the same attempt's
+> `[63,64)` forward would release the hold of its `[0,21)`): the fix needs the ATTEMPT told apart (a re-plan keeps its
+> id, #448), e.g. an attempt number on the forward.
 
 #### #452 — Full computers keep parts of models the swarm never runs, so the models people use find no room
 `P1` · placement · **BUILT, field check (a) as designed on the two computers we can read (2026-11-19); other computers open** — 2026-11-14 · history: #389 (d), #400, #401, #246
