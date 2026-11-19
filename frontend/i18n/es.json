@@ -916,6 +916,7 @@
   "placement.hybrid_detail": "El resto se ejecuta en el procesador, por eso este modelo es más lento que uno que está por completo en la tarjeta. Libera memoria gráfica para mover más partes allí.",
   "placement.not_enough_vram": "Necesita más memoria gráfica de la que había libre al iniciarse. Volverá a usar la tarjeta gráfica cuando se libere memoria.",
   "placement.on_cpu": "Ejecutándose en el procesador",
+  "placement.others_on_card": "Otros programas usaban {size} de la tarjeta gráfica cuando se cargó; cerrar los que no estés usando, como juegos, videollamadas o aplicaciones de chat, le deja más espacio allí.",
   "placement.tip": "Los modelos van más rápido en una tarjeta gráfica. Esto explica por qué este no lo hace.",
   "placement.weight_format": "Este modelo está guardado en un formato (IQ4) que esta versión aún no puede ejecutar rápido en la tarjeta gráfica, así que lo ejecuta el procesador.",
   "pool.add_device_header": "Añadir otro dispositivo",

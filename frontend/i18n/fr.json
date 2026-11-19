@@ -916,6 +916,7 @@
   "placement.hybrid_detail": "Le reste s'exécute sur le processeur, c'est pourquoi ce modèle est plus lent qu'un modèle entièrement sur la carte. Libérez de la mémoire graphique pour en déplacer davantage.",
   "placement.not_enough_vram": "Il lui faut plus de mémoire graphique qu'il n'y en avait de libre au démarrage. Il réutilisera la carte graphique dès que de la mémoire se libérera.",
   "placement.on_cpu": "S'exécute sur le processeur",
+  "placement.others_on_card": "D'autres programmes utilisaient {size} de la carte graphique lors de son chargement ; fermer ceux dont vous ne vous servez pas, comme les jeux, les appels vidéo ou les messageries, lui laisse plus de place.",
   "placement.tip": "Les modèles sont plus rapides sur une carte graphique. Voici pourquoi celui-ci ne l'est pas.",
   "placement.weight_format": "Ce modèle est enregistré dans un format (IQ4) que cette version ne sait pas encore exécuter rapidement sur la carte graphique : c'est donc le processeur qui l'exécute.",
   "pool.add_device_header": "Ajouter un autre appareil",

@@ -916,6 +916,7 @@
   "placement.hybrid_detail": "Reszta działa na procesorze, dlatego ten model jest wolniejszy od modelu w całości na karcie. Zwolnij pamięć graficzną, aby przenieść tam więcej.",
   "placement.not_enough_vram": "Potrzebuje więcej pamięci karty graficznej niż było wolne przy starcie. Gdy pamięć się zwolni, karta zostanie użyta ponownie.",
   "placement.on_cpu": "Działa na procesorze",
+  "placement.others_on_card": "Gdy się wczytywał, inne programy zajmowały {size} karty graficznej; zamknięcie nieużywanych, np. gier, rozmów wideo czy komunikatorów, da mu tam więcej miejsca.",
   "placement.tip": "Modele działają szybciej na karcie graficznej. Tu jest powód, dla którego ten nie działa.",
   "placement.weight_format": "Ten model jest zapisany w formacie (IQ4), którego ta wersja nie potrafi jeszcze szybko uruchamiać na karcie graficznej, więc uruchamia go procesor.",
   "pool.add_device_header": "Dodaj kolejne urządzenie",

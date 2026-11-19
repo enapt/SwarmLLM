@@ -762,6 +762,14 @@ pub async fn list_models(State(state): State<AppState>) -> Json<Vec<serde_json::
                     crate::inference::process_pool::CardSplit::Layers { .. } => None,
                 })),
             );
+            // What other programs held of the card when this model was placed
+            // short of it — the half of "free up graphics memory" its owner
+            // cannot see from here (field report 2026-11-19: a chat program's
+            // 630 MB cost a 14B 13 of its 48 card layers, found by hand).
+            obj.insert(
+                "card_held_by_other_programs_mb".to_string(),
+                serde_json::json!(pool.others_on_card_when_placed_mb(&model_id)),
+            );
             obj.insert("num_layers".to_string(), serde_json::json!(m.num_layers));
             // A model every computer gave back because nobody ran it (#452):
             // no part of it is anywhere in reach, and the dashboard lists it,

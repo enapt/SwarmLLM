@@ -916,6 +916,7 @@
   "placement.hybrid_detail": "De rest draait op de processor, daarom is dit model trager dan een model dat volledig op de kaart staat. Maak grafisch geheugen vrij om er meer naartoe te verplaatsen.",
   "placement.not_enough_vram": "Het heeft meer grafisch geheugen nodig dan er bij de start vrij was. Zodra er geheugen vrijkomt, wordt de grafische kaart weer gebruikt.",
   "placement.on_cpu": "Draait op de processor",
+  "placement.others_on_card": "Andere programma's gebruikten {size} van de grafische kaart toen het werd geladen; programma's sluiten die je niet gebruikt, zoals games, videogesprekken of chat-apps, geeft het daar meer ruimte.",
   "placement.tip": "Modellen zijn sneller op een grafische kaart. Dit legt uit waarom deze dat niet is.",
   "placement.weight_format": "Dit model is opgeslagen in een formaat (IQ4) dat deze versie nog niet snel op de grafische kaart kan uitvoeren, dus de processor voert het uit.",
   "pool.add_device_header": "Nog een apparaat toevoegen",

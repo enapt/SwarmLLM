@@ -916,6 +916,7 @@
   "placement.hybrid_detail": "其余部分在处理器上运行，因此这个模型比完全在显卡上的模型慢。释放显存可以把更多部分移到显卡上。",
   "placement.not_enough_vram": "它需要的显存超过了启动时的可用量。显存释放后会重新使用显卡。",
   "placement.on_cpu": "正在处理器上运行",
+  "placement.others_on_card": "加载时其他程序占用了 {size} 显存；关闭不用的程序（如游戏、视频通话或聊天软件）可以为它腾出更多空间。",
   "placement.tip": "模型在显卡上运行更快。这里说明这个模型为什么没有。",
   "placement.weight_format": "此模型保存为 IQ4 格式，此版本尚无法在显卡上快速运行这种格式，因此由处理器运行。",
   "pool.add_device_header": "添加另一台设备",

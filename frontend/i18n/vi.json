@@ -916,6 +916,7 @@
   "placement.hybrid_detail": "Phần còn lại chạy trên bộ xử lý, vì vậy mô hình này chậm hơn mô hình nằm hoàn toàn trên card. Giải phóng bộ nhớ đồ họa để chuyển thêm phần lên đó.",
   "placement.not_enough_vram": "Nó cần nhiều bộ nhớ đồ họa hơn mức còn trống lúc khởi động. Nó sẽ dùng lại card đồ họa ngay khi có bộ nhớ trống.",
   "placement.on_cpu": "Đang chạy trên bộ xử lý",
+  "placement.others_on_card": "Khi tải, các chương trình khác đang dùng {size} của card đồ họa; đóng những chương trình bạn không dùng, như trò chơi, cuộc gọi video hay ứng dụng trò chuyện, sẽ dành thêm chỗ cho nó ở đó.",
   "placement.tip": "Mô hình chạy nhanh hơn trên card đồ họa. Đây là lý do mô hình này thì không.",
   "placement.weight_format": "Mô hình này được lưu ở định dạng (IQ4) mà bản dựng này chưa chạy nhanh được trên card đồ họa, nên bộ xử lý chạy nó.",
   "pool.add_device_header": "Thêm thiết bị khác",

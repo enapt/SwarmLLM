@@ -916,6 +916,7 @@
   "placement.hybrid_detail": "Geri kalanı işlemcide çalışır; bu yüzden bu model tamamı ekran kartında olan bir modelden daha yavaştır. Daha fazlasını oraya taşımak için grafik belleği boşaltın.",
   "placement.not_enough_vram": "Başlatıldığında boşta olandan daha fazla ekran belleği gerekiyor. Bellek boşaldığında ekran kartı yeniden kullanılacak.",
   "placement.on_cpu": "İşlemcide çalışıyor",
+  "placement.others_on_card": "Yüklendiğinde diğer programlar ekran kartının {size} kadarını kullanıyordu; kullanmadığınız oyun, görüntülü görüşme veya sohbet uygulaması gibi programları kapatmak ona orada daha fazla yer açar.",
   "placement.tip": "Modeller ekran kartında daha hızlıdır. Bunun neden öyle olmadığı burada yazıyor.",
   "placement.weight_format": "Bu model, bu sürümün ekran kartında henüz hızlı çalıştıramadığı bir biçimde (IQ4) kayıtlı, bu yüzden işlemci çalıştırıyor.",
   "pool.add_device_header": "Başka bir cihaz ekle",

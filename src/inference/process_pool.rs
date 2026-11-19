@@ -1298,6 +1298,18 @@ struct WorkerHandle {
     /// #322) — what promotion must see the card gain before it moves the
     /// model whole again ([`should_return_to_gpu`]).
     split_by_the_load: Option<SplitByTheLoad>,
+    /// The graphics memory OTHER programs held when this worker was placed
+    /// short of the card — a card/processor split, or the processor for want
+    /// of graphics memory — in MB: [`ModelProcessPool::other_programs_card_mb`]
+    /// of the budget that placement weighed. `None` for a worker wholly on the
+    /// card, and where no idle card's budget is known to read it against.
+    ///
+    /// Shown to the owner beside the placement, because nothing else says
+    /// it: a chat program holding 630 MB of a 12 GB card cost a 14B 13 of
+    /// its 48 card layers (15.3 tok/s against 26.1), and its owner found the
+    /// program by hand (field report 2026-11-19). The figure is the moment
+    /// of placement, not now: it says why the model is where it is.
+    others_on_card_when_placed_mb: Option<u64>,
     /// The conversation a WHOLE card placement was fitted to keep room for by
     /// its load's own reading ([`ModelProcessPool::fit_whole_placement_to_the_load`]);
     /// `None` for every other placement — a split admitted short of the room
@@ -8302,6 +8314,7 @@ impl ModelProcessPool {
             short_by_mb: short_by.div_ceil(MIB),
             budget_at_split_mb: budget_mb,
         });
+        handle.others_on_card_when_placed_mb = self.other_programs_card_mb(budget_mb);
         let placement = sized.placement();
         tracing::info!(
             model = %model_id,
@@ -11031,6 +11044,9 @@ impl ModelProcessPool {
         // The card budget a split below is sized against, kept so the split
         // can be sized again by its worker's own reading of the card (#365).
         let mut split_budget: Option<u64> = None;
+        // What other programs held of the card when this placement fell short
+        // of it, for the owner (`WorkerHandle::others_on_card_when_placed_mb`).
+        let mut others_on_card_mb: Option<u64> = None;
         if !going_to_cpu {
             // Demoting to the CPU is the last resort, not the first answer:
             // reclaim the card from models nothing is using, then ask again —
@@ -11106,6 +11122,7 @@ impl ModelProcessPool {
                     }
                     card_split = Some(split);
                     split_budget = Some(budget);
+                    others_on_card_mb = self.other_programs_card_mb(budget);
                     // The card holds its share, so the card budget is charged
                     // for it. It was charged nothing: the share
                     // then read as ANOTHER program's memory, which overran a
@@ -11146,6 +11163,12 @@ impl ModelProcessPool {
             if !admitted {
                 going_to_cpu = true;
                 placed_on_cpu_because = Some(CpuReason::NotEnoughVram);
+                if !guest {
+                    others_on_card_mb = self.other_programs_card_mb(
+                        self.vram_budget_mb
+                            .load(std::sync::atomic::Ordering::Relaxed),
+                    );
+                }
                 // **Deliberately NOT a pin.** A refusal here is arithmetic
                 // against the budget as it stands right now, and re-taking it
                 // on the next spawn costs one header read — whereas a pin
@@ -11367,6 +11390,7 @@ impl ModelProcessPool {
                 mut handle,
                 card_free_bytes,
             }) => {
+                handle.others_on_card_when_placed_mb = others_on_card_mb;
                 // A split is sized again by the free memory its worker's load
                 // will read, before the load (#365) — `charge_ram` never
                 // splits, so a split's charges are the card's and its share.
@@ -12076,6 +12100,7 @@ impl ModelProcessPool {
             // says so through `placed_on_cpu_because: None` alone.
             card_split: card_split.filter(|_| placed_on_cpu_because.is_none()),
             split_by_the_load: None,
+            others_on_card_when_placed_mb: None,
             room_sized_for: None,
             card_free_at_load_mb: None,
             context_fits,
@@ -14127,6 +14152,16 @@ impl ModelProcessPool {
     /// says so, instead of showing `fits_on_gpu: true` and nothing else.
     pub fn card_split_of(&self, model_id: &ModelId) -> Option<CardSplit> {
         self.workers.get(model_id).and_then(|h| h.card_split)
+    }
+
+    /// The graphics memory other programs held when `model_id`'s resident
+    /// worker was placed short of the card, in MB
+    /// ([`WorkerHandle::others_on_card_when_placed_mb`]); `None` with no
+    /// worker, one wholly on the card, or no idle card's budget to read it by.
+    pub fn others_on_card_when_placed_mb(&self, model_id: &ModelId) -> Option<u64> {
+        self.workers
+            .get(model_id)
+            .and_then(|h| h.others_on_card_when_placed_mb)
     }
 
     /// Models with at least one request in flight *right now*.
@@ -19155,6 +19190,7 @@ mod tests {
             gpu_estimate_mb: 0,
             card_split,
             split_by_the_load: None,
+            others_on_card_when_placed_mb: None,
             room_sized_for: None,
             card_free_at_load_mb: None,
             context_fits: Arc::new(std::sync::atomic::AtomicU32::new(0)),
@@ -22748,6 +22784,31 @@ mod admission_tests {
                 "{name}"
             );
             p.after_worker_gone_charge(&m, DepartedWorker::from(&h), "test");
+        }
+    }
+
+    /// **A model placed short of the card keeps what other programs held of
+    /// it then, for the owner** (field report 2026-11-19: a chat program's
+    /// 630 MB cost a 14B 13 of its 48 card layers, found by hand). The 14B
+    /// split by its load's reading carries the budget's shortfall from an idle
+    /// card's — here 11,700 − 10,500 — and the models page reads it through
+    /// the pool; the control, the same model kept whole, carries none.
+    #[tokio::test]
+    async fn a_model_placed_short_of_the_card_says_what_other_programs_held() {
+        for (name, read_mb, expected) in [
+            ("fourteen-b-others-split", 10_400, Some(1_200)),
+            ("fourteen-b-others-whole", 12_000, None),
+        ] {
+            let (p, m, mut h, _worker_end, charged) = fourteen_b_spawned_whole(name, 100_000).await;
+            p.set_vram_ceiling_source(Box::new(|| Some(11_700)));
+            p.fit_whole_placement_to_the_load(&m, (0, 48), &mut h, whole_refit(read_mb), charged)
+                .await;
+            assert_eq!(h.others_on_card_when_placed_mb, expected, "{name}");
+            let h = std::sync::Arc::new(h);
+            p.workers.insert(m.clone(), h.clone());
+            assert_eq!(p.others_on_card_when_placed_mb(&m), expected, "{name}");
+            p.workers.remove(&m);
+            p.after_worker_gone_charge(&m, DepartedWorker::from(&*h), "test");
         }
     }
 

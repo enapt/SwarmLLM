@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #480**). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #481**). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -4208,6 +4208,42 @@ only where `short_while_busy` names a holder and nothing has reached the reader.
 refusal (another model in steady use) up to a minute, and the room a busy worker holds is not stated (stating its
 idle age would tell peers when this computer's owner last used each model — the MEDIUM the #447 review dropped).
 
+#### #480 — A split segment's one-token forwards run ~9x slower than the card reads them
+`P2` · inference-split-speed · **OPEN** (cause UNDETERMINED) — 2026-11-19 · history: field report 2026-11-19 (the AU operator)
+
+The AU operator's 14B shared (this node [0,12) on its card, theirs [12,48)) ran 3.3 tok/s, and they read this node's
+part of a step at 55 ms. Our log agrees: 1,068 `LayerForward processed via worker subprocess` lines for
+`qwen2.5-14b-instruct-q4-k-m` `layer_start=0 layer_end=12` between 00:23 and 00:29Z, `elapsed_ms` min 6, p25 53,
+median 55, p75 59, max 2,552. 1,018 of them carried under 10 KB of activations, about one token. Twelve layers of a
+Q4 14B are ~2.1 GB, ~6 ms at this card's measured 363 GB/s, which is the minimum. So a step usually costs ~9x what the
+card needs. At ~1 s per step for the link, that is 50 of every ~300 ms of our part.
+
+**Hypothesis: the card's clocks drop between a far split's steps.** The work comes in short bursts ~250 ms apart.
+nvidia-smi between asks read P5 with the memory clock at 810 MHz against 6,001 at P0, and 6,001/810 = 7.4 fits the
+ratio. **Not shown yet:** (1) a one-kernel probe on the same card (`warmprobe`, a 512 MB read every 250 ms, 11-19
+~05:50Z, the live node idle beside it) ran most reads at full speed (median 1.48 ms). The slow ones (4-16 of 40 per
+run) cost a fixed ~35 ms (p75 34.7 four runs out of four) and up to 210 ms: a clock SWITCH stall, not a slow steady
+state, and the real forwards' tight 53-59 ms band reads more like a steady state; (2) no heat-pace line in that window,
+so #440's pacing does not explain it, as far as an info-level log shows; (3) the forward is ~100 small kernels or one
+graph, the probe ONE kernel, so the governor may treat them differently.
+
+**A host keep-alive is ruled out.** The same probe with a 1 MB read every 2 ms, 1 ms, 500 µs, 200 µs or 100 µs
+between the reads stalled 1, 2, 16, 13 and 1 of 40. The two cold controls stalled 5 and 4, and the first matrix's cold
+run at least 10. The arms differ less than runs of one arm do. Only the 100 µs arm stayed at P0 throughout: a host
+thread launching 10,000 times a second, a processor core on a laptop that already paces for heat.
+Prior art: NVIDIA's forum ("Avoiding performance mode slowdown", forums.developer.nvidia.com/t/54181): clocks held only
+with work at least every ~50 µs, and the canonical fix is `nvidia-smi -lgc`/`-lmc`, which needs admin (out of reach
+for a user's install). TensorRT's measurement docs: clocks float by default, dropping at idle. No inference server
+found that keeps a card warm between steps. vLLM/llama.cpp never have a far peer's 250 ms gap between their steps.
+
+**Next, to settle the cause before building:** a real-link run (`real_link.sh`, live node stopped) of a split with our
+segment on the card, with nvidia-smi at 50 ms (pstate, clocks.mem) beside the per-forward `elapsed_ms`. If the slow
+forwards sit at P5/P3 and the fast ones at P0, the clocks are it. The candidates then are a GPU-side bounded spin
+(WDDM's 2 s TDR bounds any one kernel, and ONE stream per device means it must yield to the step) and fewer, larger
+steps (#411's flow already gathers tokens per round trip). If they do not split by P-state, the cost is elsewhere in
+the step (the worker's IPC, the idle loop's work, the graph's launch), and the dispatcher's `elapsed_ms` should be
+split into the worker's own compute and its wait.
+
 #### #430 — A long prompt read on ONE computer that cannot read it fast: no first token in 10 minutes
 `P2` · perf-split · **OPEN** (residual: pieces timed between two machines; (a)'s ratio and (c) fixed 2026-11-11, the hand-off's prompt floor, the wait sized from it, the progress frames that make it an inactivity wait and a led split's frames built 2026-11-12) — 2026-11-08 · history: #427 (measured), #171 (a prompt pass read in pieces)
 
@@ -4593,6 +4629,17 @@ next ~25 requests of a script, code included, on the plain path); the 126-145 on
 Two causes, two releases: v0.3.288's plain path (fixed in v0.3.290) and the nearly full card on v0.3.293 (16-54 tok/s,
 its 5-8 lost layers still open above). Neither extract carries a "placing part of it on the processor" line — the
 model fitted both times.
+**Field, 2026-11-19 (the same peer, v0.3.296 → .299)**: its 18 Nov slowdown was another program — a chat app held 630 MB
+of the card, so the 14B got 35 of 48 layers (15.3 tok/s) and the 9B ran 78; with it closed (1.6 GB in use before), v0.3.298
+ran the 14B at 26.1 and the 9B at 100.5, every check passing. So the lost layers were other programs' share again, and
+nothing in the placement reads wrong. What was missing is that its owner found the program by hand: the placement line
+said "free up graphics memory" and never whose. **Now a model placed short of the card keeps what other programs held of
+it at that moment** (`WorkerHandle::others_on_card_when_placed_mb` ← `other_programs_card_mb` of the budget the split, the
+whole placement's refit or the processor fallback weighed; the models API's `card_held_by_other_programs_mb`), and the
+line says it from 256 MB (`placement.others_on_card`, 21 languages). Prior art: Ollama and LM Studio weigh a model
+against free graphics memory and name no other program's share (searched 2026-11-19); their users are sent to nvidia-smi
+or Task Manager. Test `a_model_placed_short_of_the_card_says_what_other_programs_held` (the refit's split carries the
+figure, the model kept whole carries none).
 **Tried and dropped 2026-11-08 night: a card's chain check carrying the whole block (16) in one graph** instead of 8
 (`cuda_graph::MAX_CHAIN_POSITIONS`, A/B against the same binary capped at 8; card run 19, three runs a side, idle box,
 every width 9-16 captured and recorded while idle): the palindrome 167-188 tok/s against 180-184 at 8, a BST class

@@ -1506,6 +1506,15 @@
         // tester spent a session on exactly this question (2026-08-10).
         var placementSectionHtml = '';
         var cpuReason = m.cpu_placement_reason;
+        // What OTHER programs held of the card when this model was placed
+        // short of it (`card_held_by_other_programs_mb`), said only where it
+        // is enough to matter: "free up graphics memory" told the owner what,
+        // never whose — a chat program's 630 MB cost a 14B 13 of its 48 card
+        // layers and its owner found it by hand (field report 2026-11-19).
+        var othersOnCard = (typeof m.card_held_by_other_programs_mb === 'number' &&
+                            m.card_held_by_other_programs_mb >= 256)
+          ? ' ' + I18n.t('placement.others_on_card', { size: U.formatSize(m.card_held_by_other_programs_mb) })
+          : '';
         // A HYBRID split: part of the model on the card, the rest on the
         // processor. Reported by the daemon from the worker it actually spawned
         // (`gpu_layers_on_card`); until this existed the only trace of the
@@ -1522,7 +1531,7 @@
               '<span class="mce-line-icon">🖥</span>' +
               '<span class="mce-line-text"><b>' +
                 U.escapeHtml(I18n.t('placement.experts_in_ram', { total: m.num_layers, in_ram: m.expert_layers_in_ram })) +
-              '</b> — ' + U.escapeHtml(I18n.t('placement.experts_in_ram_detail', { in_ram: m.expert_layers_in_ram })) + '</span>' +
+              '</b> — ' + U.escapeHtml(I18n.t('placement.experts_in_ram_detail', { in_ram: m.expert_layers_in_ram }) + othersOnCard) + '</span>' +
             '</div>';
         } else if (!cpuReason && hostedShards > 0 && typeof m.gpu_layers_on_card === 'number' && m.num_layers > 0) {
           placementSectionHtml =
@@ -1530,7 +1539,7 @@
               '<span class="mce-line-icon">🖥</span>' +
               '<span class="mce-line-text"><b>' +
                 U.escapeHtml(I18n.t('placement.hybrid', { on: m.gpu_layers_on_card, total: m.num_layers })) +
-              '</b> — ' + U.escapeHtml(I18n.t('placement.hybrid_detail')) + '</span>' +
+              '</b> — ' + U.escapeHtml(I18n.t('placement.hybrid_detail') + othersOnCard) + '</span>' +
             '</div>';
         }
         if (cpuReason && hostedShards > 0) {
@@ -1557,7 +1566,7 @@
               '<div class="mce-line ' + r.mod + '" title="' + U.escapeHtml(I18n.t('placement.tip')) + '">' +
                 '<span class="mce-line-icon">🖥</span>' +
                 '<span class="mce-line-text"><b>' + U.escapeHtml(I18n.t('placement.on_cpu')) + '</b> — ' +
-                  U.escapeHtml(I18n.t(r.key)) + '</span>' +
+                  U.escapeHtml(I18n.t(r.key) + (cpuReason === 'not_enough_vram' ? othersOnCard : '')) + '</span>' +
               '</div>';
           }
         }

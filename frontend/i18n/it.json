@@ -916,6 +916,7 @@
   "placement.hybrid_detail": "Il resto viene eseguito sul processore: per questo il modello è più lento di uno interamente sulla scheda. Libera memoria grafica per spostarne di più lì.",
   "placement.not_enough_vram": "Richiede più memoria grafica di quanta ne fosse libera all'avvio. Tornerà a usare la scheda grafica non appena si libererà memoria.",
   "placement.on_cpu": "In esecuzione sul processore",
+  "placement.others_on_card": "Altri programmi usavano {size} della scheda grafica quando è stato caricato; chiudere quelli che non usi, come giochi, videochiamate o app di chat, gli lascia più spazio lì.",
   "placement.tip": "I modelli sono più veloci su una scheda grafica. Qui trovi perché questo non lo è.",
   "placement.weight_format": "Questo modello è salvato in un formato (IQ4) che questa versione non sa ancora eseguire velocemente sulla scheda grafica, quindi lo esegue il processore.",
   "pool.add_device_header": "Aggiungi un altro dispositivo",

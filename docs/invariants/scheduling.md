@@ -1573,6 +1573,16 @@ respects the peers' own numbers exists. Pinned by
 null control — making `PeersAtFaceValue` return `None` — hands a peer
 advertising 9 layers all 48.
 
+**Still a rescue, read 2026-11-19.** A field report asked whether a peer whose budget is
+under one segment's size should be planned at all: a 70B without this node was planned
+layers 0-21 on a peer that refused (11.9 GB against 7.3), the re-plan asked the requester
+itself for 34-80, and both asks failed — 0 of 2, in 25 s and 4 s, no hang. Our own log
+answers it: 21 lines "routing up to what each could ever hold" since 11-10; of the newest
+10, six requests finished (a 70B across Italy, here and Australia among them), three were
+refused "not enough memory in the swarm" (the slowest after 53 s), one left no outcome.
+Each refusal is asked up front (#252 (b)) and costs seconds; dropping the rung would cost
+the six. Kept.
+
 **Never past what a peer could EVER hold** (v0.3.230, a tester's report of
 2026-10-07 on v0.3.229). #025's rescue never needed "held to nothing": a peer's
 CURRENT figure can sit below what its admission will grant because it is stale,

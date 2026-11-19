@@ -916,6 +916,7 @@
   "placement.hybrid_detail": "Resten körs på processorn, vilket är varför modellen är långsammare än en som ligger helt på kortet. Frigör grafikminne för att flytta mer av den dit.",
   "placement.not_enough_vram": "Den behöver mer grafikminne än vad som var ledigt vid start. Den använder grafikkortet igen så snart minne frigörs.",
   "placement.on_cpu": "Körs på processorn",
+  "placement.others_on_card": "Andra program använde {size} av grafikkortet när den lästes in; stänger du dem du inte använder, som spel, videosamtal eller chattappar, får den mer plats där.",
   "placement.tip": "Modeller går snabbare på ett grafikkort. Här står varför den här inte gör det.",
   "placement.weight_format": "Den här modellen är sparad i ett format (IQ4) som den här versionen ännu inte kan köra snabbt på grafikkortet, så processorn kör den.",
   "pool.add_device_header": "Lägg till en annan enhet",

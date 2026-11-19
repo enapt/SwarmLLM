@@ -916,6 +916,7 @@
   "placement.hybrid_detail": "Zbytek běží na procesoru, proto je tento model pomalejší než model celý na kartě. Uvolněte grafickou paměť, aby se tam přesunulo více.",
   "placement.not_enough_vram": "Potřebuje víc grafické paměti, než bylo při startu volné. Jakmile se paměť uvolní, grafická karta se použije znovu.",
   "placement.on_cpu": "Běží na procesoru",
+  "placement.others_on_card": "Při načítání zabíraly jiné programy {size} grafické karty; zavřením těch, které nepoužíváte, například her, videohovorů nebo chatovacích aplikací, mu tam uvolníte více místa.",
   "placement.tip": "Na grafické kartě jsou modely rychlejší. Tady je důvod, proč tenhle není.",
   "placement.weight_format": "Tento model je uložen ve formátu (IQ4), který tato verze zatím neumí na grafické kartě spouštět rychle, takže jej spouští procesor.",
   "pool.add_device_header": "Přidat další zařízení",
