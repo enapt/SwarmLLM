@@ -2250,7 +2250,8 @@ lost-peer lookups (#465): this node started ~1 an hour (`DIAG: looking a lost pe
 libp2p-kad 0.48 bootstraps whenever a NEW peer enters a table under k (20) entries (`bootstrap_on_low_peers`, 500 ms
 throttle), and every table here is under k (answers list ~6 peers) — so each peer a node newly inserts, or re-inserts
 after taking it out (`cut_off_peer` and `leave_the_table_if_out_of_reach` drop entries), costs every node an answer
-to ~5 lookups. Next: count, per node, the bootstraps that were not the periodic one (`kad::Event::OutboundQueryProgressed`
+to ~5 lookups. The README now states the measured figure ("up to about 15 MB an hour each way", seven computers
+connected) until this is fixed. Next: count, per node, the bootstraps that were not the periodic one (`kad::Event::OutboundQueryProgressed`
 for `Bootstrap`), then why `swarm/models` is forwarded at that rate.
 
 #### #169 — Connection churn on multi-interface hosts: only the LAN dial is deterministic

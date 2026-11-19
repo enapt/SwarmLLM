@@ -320,13 +320,13 @@ packages install it as a background service, which starts with the computer
 once you enable it.
 
 **How much internet does it use?** Left running with nothing to do, connected
-to six other computers, **under 10 MB an hour each way** — what keeps it in
+to seven other computers, **up to about 15 MB an hour each way** — what keeps it in
 touch with the swarm. It uses more while it shares model parts or works for
 others, and nothing while it is closed. In Settings you can cap how fast it
 shares parts, and on a connection your computer marks as metered (like a
 phone's hotspot) it pauses its own downloads and its work for others — or you
 can tell it to pause them always.
-<!-- idle traffic measured on v0.3.279: total less parts, inference and relay, 10-min samples 15-85 min after a start, six computers connected: in 7.4-11.4, out 6.4-8.4 MB/h, 9.1 / 7.3 overall -->
+<!-- idle traffic measured on v0.3.300: total less parts, inference and relay, 10-min samples 15-45 min after a start: in 6.9-9.8, out 5.3-15.2 MB/h; and on main 2026-11-19 over 18.9 min ~30 min after a start: in 14.0, out 11.3 MB/h; seven computers connected. Over half the upload is forwarding other computers' gossip and answering their DHT lookups (FUTURE_WORK #91 (2n)) -->
 
 **How much disk space?** SwarmLLM keeps what it stores within a disk limit —
 50 GB by default — which you can change in Settings. Whatever the limit, it
