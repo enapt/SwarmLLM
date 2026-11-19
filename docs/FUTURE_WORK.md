@@ -4747,6 +4747,29 @@ drafter ↔ B [13,48), processors, 130 ms, dev build, one run each) the lend fir
 the same text: palindrome 1.11×, search tree 1.09×, story 0.90× (one block checked, none kept, then set aside),
 which is (b)'s cost on a split. (c) The 26B-A4B (MoE, dense branch beside) and 31B, on a card.
 
+**Field, 2026-11-19 07:56-08:07Z — the split's drafter over a REAL link, both ends v0.3.300** (Qwen3.6-35B-A3B Q4_K_M,
+this node's RTX 3070 [0,8) + head ↔ the Australian peer's card [8,40), 126 ms; drafter `qwen36-35b-a3b-dflash-Q8_0.gguf`,
+fetched by stage 6 at 07:53Z; thinking off; one ask at a time, safety kit, 0 driver events;
+`~/swarmllm-gate/field428_1119/`). The mechanism fired on every reply: `block drafter (#428) … attached=true` on the card
+(1,172 MB, 386 MB of budget left; it reads target layers 1-37, so the far end's rows arrive over `SENDS_BLOCK_ROWS`), and
+`ngram-only: complete … block_drafter=true`, never set aside:
+
+| reply (160 tokens) | tok/s | block rounds | guessed → kept | copied from an earlier reply |
+|---|---|---|---|---|
+| code 1 | 13.8 | 33 | 210 → 118 (56%) | 0 |
+| prose 1 | 7.8 | 67 | 193 → 57 (30%) | 23 (the warm ask's prompt) |
+| code 2 | 16.2 | 6 | 29 → 20 | 96 (code 1's reply) |
+| prose 2 | 9.0 | 54 | 151 → 60 (40%) | 28 |
+
+A plain step cost 160-181 ms, so the split writes ~5.5-6.2 tok/s one token at a time: the drafter is worth ~2.2× on code
+and ~1.3× on prose (where the reply copier's share is taken out). The check cost 1.1-1.3 plain steps (`block_check_fit`
+184-228 ms against `block_step_ms` 166-174). **The planner did not pick this route on its own, and was right**: given the
+choice it handed the WHOLE model to the Australian peer, which wrote 35-36 tok/s alone. The forced route here was
+`pretend_local_holds "0-7"` + `pretend_peer_holds {aa3d1e66: "8-40"}` + the other whole holder excluded. Reps 2 measure
+the owner's reply copier more than the drafter (`earlier_kept`). The README method runs with `SWARMLLM_FLOW_COPY_STORE=0`
+for this reason. **What it settles for #437**: prose keeps ~1 guess a round across a real split (0.85-1.1), so a TREE of
+guesses (#437) is the prose lever here, as on the rig.
+
 #### #435 — A split's far end sends the block drafter one row a position, not one per layer it reads
 `P2` · perf-split · **OPEN** (designed 2026-11-08, not built) · history: #428 stage 3 (the rows come back)
 A DFlash drafter beside the coordinator reads the target's outputs at ~5 layers spread through depth
