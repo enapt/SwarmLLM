@@ -947,7 +947,11 @@ beside the trust table), how old a figure may be, and a rig that restarts the no
 > `YieldPrior::Drafter`). Prior art: SmartSpec (Liu et al. 2024, arXiv 2406.14066) predicts a step's accepted length
 > from the acceptance rate of the speculation that is RUNNING and prices none as plain decode ("goodput would
 > automatically turn off speculation") — we take the same order: what the worker holds first, a prior only for what
-> it could hold.
+> it could hold. A cheaper first step, no new worker message (a new one is gated like `DAEMON_READS_CONTEXT_FITS`, since
+> a worker can be older than its daemon): the coordinator already learns it per reply — `ngram_only_spec.rs` ~1002
+> warns "a guesser beside the first segment stopped for this reply" (`no block drafter or guess head beside this
+> segment`); record that against the worker serving the first segment, forgotten when that worker is retired or
+> regrown, and price the next plan through it at a token a round. One mispriced reply after a load instead of all.
 >
 > (2) **Measured and set aside 2026-11-19 evening — the load was not what passed Australia's whole run over.**
 > Australia's split worker held [14,40) (again [12,40), then [8,40)), so its whole run carried `cold_load_ms` (19,820 of
