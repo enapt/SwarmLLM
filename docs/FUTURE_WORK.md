@@ -1004,7 +1004,16 @@ beside the trust table), how old a figure may be, and a rig that restarts the no
 > the live budget read it as another program's (`compute_vram_budget`: used − committed), and the growth was refused
 > with no route — 4 of 4 failed (split27_1119t 18:44Z), so it was set aside (`docs/invariants/memory.md` § "The tail's
 > growth is priced at the mean layer"). Next: reconcile a worker's charge to what it holds on the card (its pool's
-> in-use, reported after a load and a prompt pass), then ship the honest price. **And a hold set by the up-front admission alone is
+> in-use, reported after a load and a prompt pass), then ship the honest price. **Why the ladder cannot place the tail
+> elsewhere** (traced 2026-11-19): the refusal is `charge_additional_segment`'s first rung (`process_pool.rs` ~8156-8194);
+> the split rung (`charge_segment_as_split`) runs next but `split_for_card` puts the output head on the card whatever
+> the layers do (~4003, #342), so a one-layer range ending the model fits the card or nothing, and the last rung (retire)
+> never runs mid-request. llama.cpp does the same for ONE model (`dev_output = get_layer_buft_list(n_layer_all)`: the
+> head is the last "layer", on the card whenever any layer is) — ours is a SECOND range beside a first that fills the
+> card. A second way, cheaper on the card: load such a tail on the PROCESSOR, borrowing the head the first segment
+> already keeps there for its guess head (#458 — a borrowing load runs on the lender's device; UNVERIFIED that this
+> processor copy is one `OutputHeadLent` lends): one layer plus a
+> processor head, ~20 ms a token measured for that head (#425 (b)), against a 300 ms round. **And a hold set by the up-front admission alone is
 > not released** (read in the pre-release review, 2026-11-19, not reproduced): `admit_prompt`'s `Admitted` arm notes
 > the conversation (`note_conversation`) but no pass range, and nothing between attempts clears it (only the request's
 > end, `distributed_exec`'s `release_request_kv`, or a peer's `CancelInference`). Where attempt 1 was admitted here and
