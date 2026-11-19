@@ -4208,41 +4208,40 @@ only where `short_while_busy` names a holder and nothing has reached the reader.
 refusal (another model in steady use) up to a minute, and the room a busy worker holds is not stated (stating its
 idle age would tell peers when this computer's owner last used each model — the MEDIUM the #447 review dropped).
 
-#### #480 — A split segment's one-token forwards run ~9x slower than the card reads them
-`P2` · inference-split-speed · **OPEN** (cause UNDETERMINED) — 2026-11-19 · history: field report 2026-11-19 (the AU operator)
+#### #480 — A segment serving ONE token a step for a peer that leads runs at its card's idle clocks
+`P3` · inference-split-speed · **OPEN — cause CAUSED, fix deliberately NOT built** — 2026-11-19 · history: the
+mechanism was measured on 2026-11-07 (§ PRIORITIES, the 70B check: P5 128 ms vs P0 26 ms; DIAGNOSTICS § "The card's
+clocks, forward by forward") — this entry adds the shape where it costs most; field report 2026-11-19 (the AU operator)
 
-The AU operator's 14B shared (this node [0,12) on its card, theirs [12,48)) ran 3.3 tok/s, and they read this node's
-part of a step at 55 ms. Our log agrees: 1,068 `LayerForward processed via worker subprocess` lines for
-`qwen2.5-14b-instruct-q4-k-m` `layer_start=0 layer_end=12` between 00:23 and 00:29Z, `elapsed_ms` min 6, p25 53,
-median 55, p75 59, max 2,552. 1,018 of them carried under 10 KB of activations, about one token. Twelve layers of a
-Q4 14B are ~2.1 GB, ~6 ms at this card's measured 363 GB/s, which is the minimum. So a step usually costs ~9x what the
-card needs. At ~1 s per step for the link, that is 50 of every ~300 ms of our part.
+**The report.** The AU operator's 14B shared (this node [0,12) on its card, theirs [12,48) leading) ran 3.3 tok/s;
+they read this node's part of a step at 55 ms. Our log: 1,018 one-token forwards (`processing LayerForward locally`
+`estimated_tokens=1`), 00:23-00:29Z, `elapsed_ms` min 6, median 54, p90 128, all 12 layers on the card
+(`vram_after_load_mb=2378`) — ~6 ms of weights at this card's 363 GB/s. Ruled out: contention with their 70B (1,065 of
+the slow forwards ran after it stopped), a processor placement, heat pacing (no pace line).
 
-**Hypothesis: the card's clocks drop between a far split's steps.** The work comes in short bursts ~250 ms apart.
-nvidia-smi between asks read P5 with the memory clock at 810 MHz against 6,001 at P0, and 6,001/810 = 7.4 fits the
-ratio. **Not shown yet:** (1) a one-kernel probe on the same card (`warmprobe`, a 512 MB read every 250 ms, 11-19
-~05:50Z, the live node idle beside it) ran most reads at full speed (median 1.48 ms). The slow ones (4-16 of 40 per
-run) cost a fixed ~35 ms (p75 34.7 four runs out of four) and up to 210 ms: a clock SWITCH stall, not a slow steady
-state, and the real forwards' tight 53-59 ms band reads more like a steady state; (2) no heat-pace line in that window,
-so #440's pacing does not explain it, as far as an info-level log shows; (3) the forward is ~100 small kernels or one
-graph, the probe ONE kernel, so the governor may treat them differently.
+**Reproduced here alone, and removed** (`~/swarmllm-gate/deep/fr/serve480.sh`: `split_rig.sh split`, B = parts 0-3 on
+the card serving A, which leads with parts 4-15 on its processor; nvidia-smi at 100 ms beside B's `elapsed_ms`, 246
+one-token forwards each arm). Plain: P0 / 6,001 MHz median 9 ms (n 83), P3 24 (n 90), P5 / 810 MHz 79 (n 60), P8 128;
+p75 72, max 225. With a one-block spin kernel holding P0 (2 ms of the global timer, relaunched every ~100 µs, a
+separate process; `SPIN_US=2000`): every sample P0, every forward 17-24 ms — the tail gone, the floor raised from 9 to
+~19 by switching between two processes' contexts. End to end the two asks decoded 28.3 / 31.6 s plain, 28.4 / 29.6 s
+held: A's processor part dominates. The boomerang over the real link (`real_link.sh` `TAG=hold480`, ABBA, AU 125 ms)
+decoded at P0 in 92-100% of samples and a held card changed nothing (prose 5.70 vs 5.63, code 6.23 vs 6.33 tok/s), as
+11-07 found for the 14B's flow. New about keep-alives: a LIGHT one parks the card — a 1 MB read every 100 µs-2 ms (~28%
+utilisation) held P5 / 810 MHz; a spin at 50-91% held P0 at ~45 W against ~20 idle (11-07's 200 µs every 10 ms: +13 W).
 
-**A host keep-alive is ruled out.** The same probe with a 1 MB read every 2 ms, 1 ms, 500 µs, 200 µs or 100 µs
-between the reads stalled 1, 2, 16, 13 and 1 of 40. The two cold controls stalled 5 and 4, and the first matrix's cold
-run at least 10. The arms differ less than runs of one arm do. Only the 100 µs arm stayed at P0 throughout: a host
-thread launching 10,000 times a second, a processor core on a laptop that already paces for heat.
-Prior art: NVIDIA's forum ("Avoiding performance mode slowdown", forums.developer.nvidia.com/t/54181): clocks held only
-with work at least every ~50 µs, and the canonical fix is `nvidia-smi -lgc`/`-lmc`, which needs admin (out of reach
-for a user's install). TensorRT's measurement docs: clocks float by default, dropping at idle. No inference server
-found that keeps a card warm between steps. vLLM/llama.cpp never have a far peer's 250 ms gap between their steps.
-
-**Next, to settle the cause before building:** a real-link run (`real_link.sh`, live node stopped) of a split with our
-segment on the card, with nvidia-smi at 50 ms (pstate, clocks.mem) beside the per-forward `elapsed_ms`. If the slow
-forwards sit at P5/P3 and the fast ones at P0, the clocks are it. The candidates then are a GPU-side bounded spin
-(WDDM's 2 s TDR bounds any one kernel, and ONE stream per device means it must yield to the step) and fewer, larger
-steps (#411's flow already gathers tokens per round trip). If they do not split by P-state, the cost is elsewhere in
-the step (the worker's IPC, the idle loop's work, the graph's launch), and the dispatcher's `elapsed_ms` should be
-split into the worker's own compute and its wait.
+**Not built (2026-11-19, as on 11-07).** Only a segment that idles between one-token steps suffers, and there the
+measured gain was 0-6% end to end; for the operator's shape (55 → 9-19 ms of a ~300 ms step) an estimated 12-15%, for
+13-25 W on a serving card that is often a laptop pacing for heat (#440), for as long as the split is live. In the worker
+it needs a second CUDA stream (against `arch-inference.md`'s one-stream rule) or a flag-polled spin on the work stream
+under WDDM's 2 s TDR. The shapes that make splits fast (flows, the stream) keep the card at P0 already. **Build it if**
+a split whose speed is set by such a segment (not its link) is measured losing over 25%: an in-context spin on the
+worker's stream that exits on a host-mapped flag when a forward arrives, only while a split is live and
+`pace::work_ahead_may_run`, behind an env A/B, judged by the segment's `elapsed_ms` by P-state as above.
+Prior art: NVIDIA's forum names the symptom ("first batch after idle is much slower", forums.developer.nvidia.com/t/369077;
+"Avoiding performance mode slowdown", /t/54181) and offers only `nvidia-smi` clock locks (admin; a GeForce may not pin
+P0, /t/41182). No distributed-inference project found that holds a serving card's clocks (Petals, exo, llama.cpp RPC,
+searched 2026-11-19).
 
 #### #430 — A long prompt read on ONE computer that cannot read it fast: no first token in 10 minutes
 `P2` · perf-split · **OPEN** (residual: pieces timed between two machines; (a)'s ratio and (c) fixed 2026-11-11, the hand-off's prompt floor, the wait sized from it, the progress frames that make it an inactivity wait and a led split's frames built 2026-11-12) — 2026-11-08 · history: #427 (measured), #171 (a prompt pass read in pieces)

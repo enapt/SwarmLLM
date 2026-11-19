@@ -2447,6 +2447,14 @@ The forward's own time is the worker's `DIAG: worker forward answered` line's `r
 holds P0 for an A/B: a 1-block kernel spinning 200 µs every 10 ms (+13 W here; 20 µs or every 50-100 ms
 slipped to P5 a fifth of the time). The 70B parse is in `~/swarmllm-70b/ab70shape.sh`'s outputs.
 
+A keep-alive that READS memory does not hold P0: a 1 MB read every 100 µs to 2 ms (~28% utilisation) parks
+the card at P5 / 810 MHz — the governor reads light, steady work as P5's job (2026-11-19). Spin, don't read
+(`~/swarmllm-gate-common/keepwarm/warmprobe … <spin_us>`). A serving peer's forward has its own line:
+`LayerForward processed via worker subprocess` `elapsed_ms` (info), its size in the `processing LayerForward
+locally` line's `estimated_tokens` just before. To reproduce a far computer leading a split through this card
+without the far computer: `~/swarmllm-gate/deep/fr/serve480.sh` (B serves [0,12) on the card, A leads on its
+processor; `SPIN_US=2000` holds P0) — FUTURE_WORK #480.
+
 ## Where a model's load goes (`DIAG: split load timed`, 2026-11-07, #424 step 3)
 
 Every load from part files logs `DIAG: split load timed` (INFO, the worker's log): `load_ms` the range's
